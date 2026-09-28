@@ -18,7 +18,7 @@ inline std::uint64_t calls(const ps::ExecutionResult& result,
 }
 inline ps::ExecutionContextConfig config(ps::ExecutionMode mode,
                                          bool cache = true) {
-  ps::ExecutionContextConfig result{2, mode == ps::ExecutionMode::MetalFp32, 16,
+  ps::ExecutionContextConfig result{2, mode == ps::ExecutionMode::NativeGpu, 16,
                                     1024 * 1024, cache ? 256U * 1024U : 0U};
   return result;
 }
@@ -29,7 +29,7 @@ inline bool cache_edits(const std::shared_ptr<ps::OperationRegistry>& registry,
   s3::Scene scene(registry, mode);
   ps::ExecutionContext execution(registry, config(mode));
   auto first = s3::take(execution.execute(scene.freeze(execution, 2)));
-  if (mode == ps::ExecutionMode::MetalFp32 && !execution.gpu_enabled()) {
+  if (mode == ps::ExecutionMode::NativeGpu && !execution.gpu_enabled()) {
     s3::Frame image(s3::Scene::height, s3::Scene::width);
     image.blit(first.values.at("result"));
     image.check(scene.oracle(2));
@@ -46,7 +46,7 @@ inline bool cache_edits(const std::shared_ptr<ps::OperationRegistry>& registry,
               "warm workflow performed work");
   auto gain = s3::take(execution.execute(scene.freeze(execution, 3)));
   s3::require(calls(gain, 10) == 0, "gain edit recomputed blur");
-  if (mode == ps::ExecutionMode::MetalFp32 && execution.gpu_enabled()) {
+  if (mode == ps::ExecutionMode::NativeGpu && execution.gpu_enabled()) {
     s3::require(first.diagnostics.native_dispatch_count > 0,
                 "cold chain performed no Metal work");
     s3::require(gain.diagnostics.native_upload_hits > 0,
@@ -64,7 +64,7 @@ inline bool cache_edits(const std::shared_ptr<ps::OperationRegistry>& registry,
   scene.edit_unrelated_branch();
   auto unrelated = s3::take(execution.execute(scene.freeze(execution, 3)));
   s3::require(calls(unrelated) == 0, "unrelated branch invalidated results");
-  if (mode == ps::ExecutionMode::MetalFp32 && execution.gpu_enabled()) {
+  if (mode == ps::ExecutionMode::NativeGpu && execution.gpu_enabled()) {
     auto tiny = s3::take(execution.execute(scene.freeze(execution, 1e-10F)));
     auto repeated =
         s3::take(execution.execute(scene.freeze(execution, 1e-10F)));
@@ -155,7 +155,7 @@ inline bool preview_export(
             << " preview_tiles=" << app.preview_tiles
             << " native_dispatches=" << app.native_dispatches
             << " rejected=" << app.rejected << " quality=full oracle=passed\n";
-  if (mode == ps::ExecutionMode::MetalFp32 && execution.gpu_enabled())
+  if (mode == ps::ExecutionMode::NativeGpu && execution.gpu_enabled())
     s3::require(app.native_dispatches > 0,
                 "preview/export performed no Metal work");
   return execution.gpu_enabled();

@@ -5,7 +5,7 @@ kind: primitive
 category: 05-filter
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_subset
 parent_id: FIL-04
 function: gaussian_filter
 proposed_operation_keys:
@@ -46,6 +46,34 @@ Use the Cartesian product of nonzero 1D taps; the kernel is derived static contr
 
 Complexity uses P=HW samples, C independent planes, A taps, and T iterations where applicable; arbitrary-precision limb cost is additional and is not a measured benchmark. Follow FILTER admission, work/memory/stage accounting, cancellation, failure, and owner-lifetime rules. Failure publishes no partial Value or CompleteBundle. Do not spill implicitly, lower precision silently, or fall back to retired implementations.
 
+## Registered execution forms
+
+`filter.gaussian_baked64_v1_strict_cpu_whole` implements the mathematical profile
+above using explicit Whole execution. It demands and computes the complete input
+and output domains; any input change invalidates the complete output group.
+Static parameters are `sigma_x`, `sigma_y`, `radius_x`, `radius_y`, `x_axis`,
+`y_axis`, `boundary` and `cval`, all mandatory with the types and domains inherited
+above. The runtime supports Float32/Float64, rank 2..8 and host-controlled CPU
+ranges with one-worker reference execution. Coefficients are generated under
+runtime budgets; all range workers share their immutable owner.
+
+`filter.gaussian_baked64_v1_strict_cpu_tiled` implements the Regional rule with
+budgeted coefficient preparation, exact per-observation support and single-threaded
+tile callbacks. Dirty propagation follows the retained association transpose.
+Only requested output samples are computed.
+
+`filter.gaussian_baked64_v1_strict_gpu` uses Whole demand and the same baked64
+mathematics. It selects MSL/Metal or SPIR-V/Vulkan from the active GPU service and
+has no CPU fallback. Host execution certifies coefficients; the device evaluates
+and rounds every output sample using exact integer arithmetic. A dispatch handles
+up to 64 output samples and 16 taps per sample; a submission may group two ordered
+dispatches, so each lane processes at most 32 taps between submission drains.
+Cancellation stops later submissions and publication while retaining all owners
+until completion. FreeBSD Intel UHD 770 passed the independent 94-workflow,
+707-output-bit MPFR/Fraction/IEEE comparison and focused Vulkan test. NVIDIA and
+Linux Gaussian Vulkan execution remain untested. See the [current implementation](../gaussian-implementation.md)
+and [public workflow](../../../../examples/gaussian_workflow/README.md).
+
 ## Oracle, fixtures, and acceptance
 
 Verify exact preservation of constants and impulse reflection. Compare Float32 and Float64 results with a baked64 rational oracle. Do not assert that two truncated blurs equal one blur with sigma `sqrt(s1²+s2²)`.
@@ -58,7 +86,8 @@ Fixture coverage identifiers: `gaussian_constant`, `straight_alpha_zero_hidden_c
 
 ## Backend and registration
 
-The proposed keys are `filter.gaussian_filter_strict`, `filter.gaussian_filter_accelerated_apple_silicon`, `filter.gaussian_filter_accelerated_x86_64`. They remain unregistered and unimplemented. Accelerated variants must satisfy NUM's final FP32-scaled four-ULP requirement and fallback rules without accumulating a separate budget per tap, axis, stage, or iteration. Threshold, ordering, boundary, copy, and output-support choices that must be exact cannot change approximately. Float64 accelerated paths retain Float64 input/output and exponent range; they do not first convert to Float32. Performance and CPU/ISA differential acceptance are not established here.
+The proposed keys are `filter.gaussian_filter_strict`, `filter.gaussian_filter_accelerated_apple_silicon`, `filter.gaussian_filter_accelerated_x86_64`. Those proposed base/accelerated keys remain unregistered. The separately named
+strict CPU Whole, CPU tiled and native GPU forms are registered as described above. Accelerated variants must satisfy NUM's final FP32-scaled four-ULP requirement and fallback rules without accumulating a separate budget per tap, axis, stage, or iteration. Threshold, ordering, boundary, copy, and output-support choices that must be exact cannot change approximately. Float64 accelerated paths retain Float64 input/output and exponent range; they do not first convert to Float32. Performance and CPU/ISA differential acceptance are not established here.
 
 ## Conceptual DAG (not an existing API)
 

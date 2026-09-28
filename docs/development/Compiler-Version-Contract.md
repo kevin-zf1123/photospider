@@ -15,6 +15,38 @@ Internal semantic/optimized/plan representations are not public serialization
 formats. The package does not promise that an internal IR from another build
 can be decoded or executed. The daemon never places internal IR on local IPC.
 
+## Current source and package state (0.28.0)
+
+The current source tree uses operation DSO ABI v11. Plugins export
+`ps_operation_plugin_get_api_v11`; the loader rejects ABI 10 before reading the
+table, and the operation record/result family uses `_v11` names. The v11 GPU
+service reports Metal or Vulkan and its minimum buffer-offset alignment. A GPU
+dispatch identifies MSL or SPIR-V, with mismatched backend and code format
+reported as `BackendUnavailable`. Provider ABI 1, planar C extension v3,
+OperationTraits 20, WorkflowDocument schema 3, semantic/physical domains v18,
+outer plan-cache-key v15 and optimizer v5 remain unchanged. Package version
+0.28.0 remains current; ABI 11 is the operation interface in this source tree.
+The current C++ placement selector is `ExecutionMode::NativeGpu` (`2`), with
+`CpuExact` (`1`) unchanged. `NativeGpu` allows traits-declared native placement;
+the active context chooses Metal or Vulkan, and the operation/profile defines
+numerical behavior. The enum value remains 2, so the canonical plan digest bytes
+and plan identity are unchanged by the enumerator rename; no version domain
+changes for this rename.
+The public `BufferAllocator` layout changes for requested-byte leases, so installed C++ consumers must rebuild even though package 0.28.0 remains current. Plugins must match the public headers for their selected C ABI.
+
+The Vulkan backend source is selected through the optional, default-off
+`PHOTOSPIDER_ENABLE_VULKAN` build option. Its native core tests pass on an NVIDIA
+GeForce RTX 3090 and Intel UHD Graphics 770. Standard structural planar scratch
+and generic Value GPU callbacks use requested-byte quotas while the execution
+root charges actual backing capacity; Vulkan UBO constants use a separate host
+command allocator. Generic Value `ExecutionRun` steps reclaim pending disk writes
+and memory cache before nonblocking per-allocation admission; CPU execution keeps
+its complete reservation. Dependency GPU workspace admission is integrated.
+Perlin, Gaussian and PixelOE have public MSL/Metal and SPIR-V/Vulkan
+implementations; their numerical profiles and platform evidence remain
+operation-specific. Other GPU entries must be checked against their registered
+implementation and configured device.
+
 Package 0.20.0 removes 13 legacy format/color registry keys, including
 `numeric.cast` and `numeric.encode_range`; see the
 [retirement record](../built-in_ops/02-format-color/op_specs/FMT_legacy_retirement.md).
@@ -50,21 +82,9 @@ request. V1-v3 tensor facets and old override bytes reject. The v4 codec keeps
 the 4096-byte facet bound and canonical little-endian representation. Workflow
 document, operation C ABI and provider C ABI versions do not change.
 
-Package 0.24.0 adds the independently versioned planar C operation extension v1,
-loaded through the existing operation ABI v9 module entry. The public C++ planar
-invocation gains accounted scratch and resolved output metadata; installed C++
-consumers must rebuild. Base operation/provider ABI, WorkflowDocument, TDM4 and
-OperationTraits17 remain unchanged. The independent PixelOE plugin and workflow
-are built with `find_package(Photospider 0.24)` and exercise the new boundary.
-
-Package 0.27.0 provides the combined FMT-04/05, FMT-09, FMT-10 and FMT-11
-C++ interface. `PlanarOperationInvocation` includes exact mapped inputs,
-validation-only invocation, numeric reporting and the synchronous borrowed
-`consume_work` service. `OperationDefinition` includes mapped validation;
-`OperationTraits` includes exact planar dependency capability. Public
-`TensorDescription`, `TensorInterpretation` and metadata records include model
-coordinates. Rebuild the kernel, native C++ plugins and installed consumers
-together. Mixing objects compiled against any source branch is unsupported.
+Package 0.28.0 exposes synchronous host-managed CPU ranges in C++ Whole Value and planar invocations, plus planar C extension v3. Planar plugins export `ps_operation_plugin_get_planar_api_v3`; the loader rejects planar v1/v2 modules with no compatibility shim. The extension adds CPU_STAGES execution and the coordinator-owned `cpu_tiles` stage service. Structural planar callback scratch uses `limited_requested()` to cap aggregate live requested bytes; the root still charges each backing allocation at actual capacity. Invocation-level Vulkan uniform-buffer constants use the host command allocator and stay outside that plugin scratch quota. Base operation ABI v11 and provider ABI v1 stay independently versioned. Kernel, C++ consumers and planar plugins must rebuild together. The package retains the combined
+FMT-04/05, FMT-09, FMT-10 and FMT-11 interfaces, exact mapped inputs, validation-only
+invocation, numeric reporting, model coordinates and sticky work admission.
 
 `consume_work` returns `const Status&`, borrowed until the next checkpoint or
 callback return; copy a failure before retaining it. `ResourceBudget::try_consume`
@@ -72,26 +92,33 @@ admits all work dimensions atomically and leaves the caller's failure object
 unchanged on success. Both normal and exact planar callbacks receive sticky work
 admission and numeric reporting services, including without a managed root.
 
-`SameMinorVersion` accepts 0.27 requests no newer than the installed version and
-rejects 0.23 through 0.26. Standalone examples and PixelOE request 0.27. Shared
-libraries use VERSION 0.27.0 and SOVERSION 0.27. Rebuild previously unversioned
+`SameMinorVersion` accepts 0.28 requests no newer than the installed version and
+rejects earlier minor versions. Standalone examples and PixelOE request 0.28. Shared
+libraries use VERSION 0.28.0 and SOVERSION 0.28. Rebuild previously unversioned
 binary consumers in a clean installation prefix; static consumers must relink.
 
 Tensor-description encoding uses canonical TDM4/TDM5 selection as specified in
 [Tensor Semantic Metadata](../kernel-architecture/Tensor-Semantic-Metadata.md).
-OperationTraits is 18; operation C ABI9, planar C extension v1, provider ABI1
-and WorkflowDocument schema3 remain separate compatibility axes.
+The current implementation uses OperationTraits 20, semantic-graph-ir-v18 and
+physical-plan-v18. The outer plan-cache-key-v15 and optimizer-v5-canonical-noop
+remain unchanged. Operation C ABI11, planar C extension v3, provider ABI1 and
+WorkflowDocument schema3 remain separate compatibility axes.
+
+Operation C ABI 11 includes explicit GPU groups, releasable generation-checked
+tokens, MSL/SPIR-V code selection and a backend-reported buffer-offset alignment.
+The loader checks ABI 11 before reading its table; ABI 10 tables reject. Planar v3
+includes backend, native GPU, sticky work and CPU staged tile services. Earlier
+version entries in this document retain the versions recorded at their delivery.
 
 ## Digests
 
-The planar preparation and mapped-movement extension changes C++ layouts in
-package 0.24.0; rebuild the kernel, native C++ plugins and installed consumers
-together. OperationTraits is now **18**. Semantic and physical domains are
-`semantic-graph-ir-v16` and `physical-plan-v16`. The unchanged outer
-`plan-cache-key-v15` includes the new physical digest; the optimizer remains
-`optimizer-v5-canonical-noop`. C operation ABI **9**, provider ABI **1**,
-WorkflowDocument schema **3** remain unchanged; tensor facets use TDM4/TDM5. Historical package
-sections below describe their versions at delivery.
+The planar preparation and mapped-movement extension changed C++ layouts in
+package 0.24.0. The current implementation uses OperationTraits **20** and the
+semantic and physical domains `semantic-graph-ir-v18` and `physical-plan-v18`. The unchanged outer `plan-cache-key-v15` includes the new
+physical digest; the optimizer remains `optimizer-v5-canonical-noop`. C operation
+ABI **11**, planar extension **v3**, provider ABI **1**, and WorkflowDocument
+schema **3** remain independent axes; tensor facets use TDM4/TDM5. Historical
+package sections below retain their versions at delivery.
 
 `DataMovementKind::BitwiseMapped` is an explicit exact-bit value relation,
 independent of dependency read needs. Its kind and view policy enter canonical
@@ -176,7 +203,8 @@ different physical identities even when their merged producer demand agrees.
 ## S4 native contracts
 
 Package 0.6.0 and operation ABI/traits 6 add synchronous pure C host GPU services,
-native-backed CPU-accessible storage and explicit CpuExact/MetalFp32 planning.
+native-backed CPU-accessible storage and explicit CpuExact/MetalFp32 planning
+(`MetalFp32` was the original spelling of the placement selector).
 Operation ABI 5 and package 0.5 are rejected. C++17, schema 2, provider ABI 1 and
 daemon IPC v3 remain. Semantic encoding uses semantic-graph-ir-v6; physical and
 plan-cache domains use v6 and include numeric mode and explicit access records.

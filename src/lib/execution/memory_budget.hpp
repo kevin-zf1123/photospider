@@ -50,6 +50,7 @@ class MemoryBudget final : public std::enable_shared_from_this<MemoryBudget> {
     std::lock_guard<std::mutex> lock(mutex_);
     return maximum_ - reserved_;
   }
+  bool can_allocate(std::uint64_t bytes, bool shared) const;
   const std::shared_ptr<ResourceBudget>& resources() const noexcept {
     return resources_;
   }
@@ -103,26 +104,30 @@ class MemoryReservation final
     };
     auto self = shared_from_this();
     auto local = std::make_shared<Local>();
-    return BufferAllocator(
-        [self, local, limit](std::uint64_t bytes) {
-          auto lease = std::make_shared<Lease>();
-          lease->local = local;
-          {
-            std::lock_guard<std::mutex> lock(local->mutex);
-            if (bytes > limit - local->used)
-              return Result<std::shared_ptr<void>>(
-                  Status::failure(ErrorCode::ResourceExhausted,
-                                  "invocation exceeds declared workspace"));
-            local->used += bytes;
-            lease->bytes = bytes;
-          }
-          auto allocation = self->allocate(bytes);
-          if (!allocation.ok())
-            return Result<std::shared_ptr<void>>(allocation.status());
-          lease->allocation = allocation.take_value();
-          return Result<std::shared_ptr<void>>(std::move(lease));
-        },
-        budget_);
+    const auto reserve = [self, local, limit](bool shared) {
+      return BufferAllocator::Reserve(
+          [self, local, limit, shared](std::uint64_t bytes) {
+            auto lease = std::make_shared<Lease>();
+            lease->local = local;
+            {
+              std::lock_guard<std::mutex> lock(local->mutex);
+              if (bytes > limit - local->used)
+                return Result<std::shared_ptr<void>>(
+                    Status::failure(ErrorCode::ResourceExhausted,
+                                    "invocation exceeds declared workspace"));
+              local->used += bytes;
+              lease->bytes = bytes;
+            }
+            auto allocation = self->allocate(bytes, shared);
+            if (!allocation.ok())
+              return Result<std::shared_ptr<void>>(allocation.status());
+            lease->allocation = allocation.take_value();
+            return Result<std::shared_ptr<void>>(std::move(lease));
+          });
+    };
+    BufferAllocator result(reserve(false), budget_);
+    result.native_shared_reserve_ = reserve(true);
+    return result;
   }
   void seal() {
     std::lock_guard<std::mutex> lock(budget_->mutex_);
@@ -149,6 +154,19 @@ class MemoryReservation final
   const std::shared_ptr<ResourceBudget>& resources() const noexcept {
     return budget_->resources();
   }
+  /** @brief Nonblocking root admission sharing this Run's observations. */
+  BufferAllocator on_demand_allocator(
+      std::function<Result<std::shared_ptr<MemoryReservation>>(std::uint64_t)>
+          admission) {
+    return budget_->on_demand_allocator(observation_, std::move(admission));
+  }
+  Result<std::shared_ptr<MemoryReservation>> reserve_incremental(
+      std::uint64_t bytes) {
+    return budget_->reserve(bytes, {}, observation_);
+  }
+  std::pair<std::uint64_t, std::uint64_t> observed_peaks() const {
+    return budget_->peaks(observation_);
+  }
 
  private:
   friend class MemoryBudget;
@@ -156,10 +174,17 @@ class MemoryReservation final
     std::shared_ptr<MemoryReservation> owner;
     ResourceLease metadata_lease;
     std::uint64_t bytes = 0;
+    bool shared = false;
     ~Allocation() {
       if (!owner || bytes == 0)
         return;
       std::lock_guard<std::mutex> lock(owner->budget_->mutex_);
+      if (shared && owner->resource_lease_.valid()) {
+        ResourceCapacity native;
+        native[ResourceKind::Device] = bytes;
+        native[ResourceKind::Shared] = bytes;
+        (void)owner->resource_lease_.shrink(native);
+      }
       owner->used_ -= bytes;
       owner->budget_->live_ -= bytes;
       owner->observation_->live -= bytes;
@@ -178,7 +203,8 @@ class MemoryReservation final
   };
   MemoryReservation(std::shared_ptr<MemoryBudget> budget, std::uint64_t bytes)
       : budget_(std::move(budget)), capacity_(bytes), planned_(bytes) {}
-  Result<std::shared_ptr<void>> allocate(std::uint64_t bytes) {
+  Result<std::shared_ptr<void>> allocate(std::uint64_t bytes,
+                                         bool shared = false) {
     // Allocate lease metadata before locking; failure cannot leak accounting.
     ResourceLease metadata;
     if (budget_->resources_) {
@@ -197,12 +223,18 @@ class MemoryReservation final
       return Result<std::shared_ptr<void>>(
           Status::failure(ErrorCode::ResourceExhausted,
                           "operation exceeds reserved working set"));
+    if (shared && resource_lease_.valid()) {
+      auto status = resource_lease_.add_shared_payload(bytes);
+      if (!status.ok())
+        return Result<std::shared_ptr<void>>(status);
+    }
     used_ += bytes;
     budget_->live_ += bytes;
     observation_->live += bytes;
     observation_->peak = std::max(observation_->peak, observation_->live);
     peak_ = std::max(peak_, used_);
     lease->bytes = bytes;
+    lease->shared = shared;
     return Result<std::shared_ptr<void>>(std::move(lease));
   }
   std::shared_ptr<MemoryBudget> budget_;
@@ -253,30 +285,58 @@ class ScopedMemoryAdmission final {
   std::shared_ptr<State> state_;
 };
 
+inline bool MemoryBudget::can_allocate(std::uint64_t bytes, bool shared) const {
+  if (bytes > available())
+    return false;
+  if (!resources_)
+    return true;
+  const auto metadata = sizeof(MemoryReservation) + sizeof(MemoryObservation) +
+                        sizeof(MemoryReservation::Allocation) +
+                        sizeof(CpuStorage) +
+                        2 * ResourceBudget::lease_metadata_bytes();
+  if (bytes > UINT64_MAX - metadata)
+    return false;
+  auto need = ResourceCapacity::host(bytes + metadata, metadata);
+  need[ResourceKind::Payload] = bytes;
+  if (shared) {
+    need[ResourceKind::Device] = bytes;
+    need[ResourceKind::Shared] = bytes;
+  }
+  const auto remaining = resources_->available_capacity();
+  for (std::size_t i = 0; i < need.values.size(); ++i)
+    if (need.values[i] > remaining.values[i])
+      return false;
+  return true;
+}
+
 inline BufferAllocator MemoryBudget::on_demand_allocator(
     std::shared_ptr<MemoryObservation> observation,
     std::function<Result<std::shared_ptr<MemoryReservation>>(std::uint64_t)>
         admission) {
   auto self = shared_from_this();
-  return BufferAllocator(
-      [self, observation = std::move(observation),
-       admission = std::move(admission)](
-          std::uint64_t bytes) -> Result<std::shared_ptr<void>> {
-        auto admitted = admission ? admission(bytes)
-                                  : self->reserve(bytes, {}, observation);
-        if (!admitted.ok()) {
-          auto status = admitted.status();
-          if (status.code == ErrorCode::ResourceExhausted &&
-              status.reason == FailureReason::None)
-            status.reason = FailureReason::CapacityLimit;
-          return Result<std::shared_ptr<void>>(status);
-        }
-        auto reservation = admitted.take_value();
-        auto allocation = reservation->allocate(bytes);
-        reservation->seal();
-        return allocation;
-      },
-      self);
+  const auto reserve = [self, observation = std::move(observation),
+                        admission = std::move(admission)](bool shared) {
+    return BufferAllocator::Reserve(
+        [self, observation, admission,
+         shared](std::uint64_t bytes) -> Result<std::shared_ptr<void>> {
+          auto admitted = admission ? admission(bytes)
+                                    : self->reserve(bytes, {}, observation);
+          if (!admitted.ok()) {
+            auto status = admitted.status();
+            if (status.code == ErrorCode::ResourceExhausted &&
+                status.reason == FailureReason::None)
+              status.reason = FailureReason::CapacityLimit;
+            return Result<std::shared_ptr<void>>(status);
+          }
+          auto reservation = admitted.take_value();
+          auto allocation = reservation->allocate(bytes, shared);
+          reservation->seal();
+          return allocation;
+        });
+  };
+  BufferAllocator result(reserve(false), self);
+  result.native_shared_reserve_ = reserve(true);
+  return result;
 }
 
 inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(

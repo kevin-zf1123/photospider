@@ -17,13 +17,13 @@ owner；增长必须计算旧新容量共存，只有存储释放或尚未提交
 cleanup 保护额度不能用于普通阶段。admission 不等待其他持有者，容量不足返回 ResourceExhausted / CapacityLimit。
 
 lease 对象容量自动计费，buffer、file 和 window owner 申报其 C++ 对象容量。
-根启动、未管理的 allocator control block/header、标准库私有分配、线程栈、驱动、OS page cache
-及未接入 lease 的既有执行 metadata 均在此模型之外。ResourceAllocator 在分配前
-准入申请块和显式对齐 header；取消 state/control storage 及展平 source 列表使用该
+固定 root/device 启动状态、线程栈、驱动状态和 OS page cache 在此模型之外。
+标准库、Objective-C 和驱动私有分配仍在模型之外，除非由显式 managed allocator
+持有。ResourceAllocator 在分配前准入申请块和显式对齐 header；取消 state/control storage 及展平 source 列表使用该
 allocator。返回的 allocator-aware diagnostics 独立于 payload 持有容量。
 ResourceAllocationKind::Payload 将STL计算数据元素同时计入Payload，显式header仍为
 Metadata；复制、rebind、active-scope复制均保留该角色。不能据此认证进程 RSS 或原生
-设备分配器开销。live 表示仍持有的已批准容量，含未使用 reservation；peak 是该
+设备不透明分配器开销。live 表示仍持有的已批准容量，含未使用 reservation；peak 是该
 计数的实测峰值，不是完整输入类别的证明上界。保证限定为此模型的 WithinBudgetOrFail。
 
 `reference(storage)` 按完整 caller allocation capacity 计入 Referenced 子限额，
@@ -41,6 +41,39 @@ Run 根收费，包括 start 失败和 GPU discovery normalization。FootprintLi
 callback 均在提交前预扣一个根 stage，根计数跨 Run 累计。Queue 统计等待 worker 的
 callback，在 callback 入口前释放；其封装 metadata 持续计费到 callback 退出。
 这些限制在关闭 cache 时同样生效。
+
+## 原生 GPU metadata
+
+`ExecutionContext` 先创建 `MemoryBudget`，再创建可选原生 device，并将同一个显式
+`ResourceBudget` root 传给 device。未设置 `managed_resources` 时，device 使用 null
+root 和普通 allocator；它不会继承调用线程的 thread-local allocation scope。`Invocation`
+也显式接收 device metadata account，因为它在进入 callback allocation scope 前构造。
+
+启用 root 后，原生 GPU 动态分配通过 `ResourceAllocator` 计费：pipeline key 与 map
+node、native-buffer owner、allocation-address lookup node，以及 invocation view
+vector 已分配的容量和临时 SPIR-V module word 存储。Vulkan pipeline wrapper 和
+control block 也使用该 allocator；
+Metal pipeline 对象属于 Objective-C 对象，其内部存储仍不透明。allocator 计入申请块字节、对齐
+header 和一个 Entries 槽；`ResourceLease` 自身的 managed overhead 另行计入。native
+buffer 存储按已准入的实际容量独立收费。Host、Metadata、Shared、Device 和 Payload
+是相互重叠的预算维度，不能将它们当作独立物理分配相加。
+
+原生 pipeline cache 最多保留 64 项。已提交 batch 使用固定 32 个 command 槽持有
+pipeline 引用，每个 command 最多有 31 个 storage binding。Invocation 自己最多保留
+1024 个 view token。allocation-address map 持有的是弱 `CpuStorage` 引用，不拥有
+native buffer。这些上限限制对应结构；线程栈与固定 bootstrap 对象仍在 managed
+metadata 计数之外。Metal 和 Vulkan 串行执行 device queue 操作，并使用独立 cache
+mutex 保护 pipeline map。清空 cache 会释放计费的 key 和 map node。Vulkan wrapper
+metadata 在 batch pin 持有期间继续计费；Metal native pipeline 对象是不透明资源，
+其原生寿命不属于 managed metadata 计费。
+
+managed native metadata 分配有一次有界恢复重试。首次尝试使用 failure sink 为 null
+的嵌套 resource scope。失败后 device 清理原生 pipeline cache，并在调用方原始 scope
+中重试一次；最终分配失败会保留该 scope 的 sticky failure。metadata reclaim 只清理
+原生 pipeline cache。GPU payload admission 使用独立路径：先释放可回收的 pending
+disk 和 result-cache owner，必要时清理原生 pipeline cache，再执行 root 原子预留。
+unmanaged device 直接使用显式 null root，不执行 managed cache-clear 重试。
+
 
 ## 临时 backing
 

@@ -146,18 +146,17 @@ int main() {
   auto negative_zero = signed_zero_compiler.compile(negative_zero_graph);
   PS_CHECK(positive_zero.ok());
   PS_CHECK(negative_zero.ok());
-  // Canonical framing v16 with semantic OperationTraits v18 and movement
-  // fields.
-  PS_CHECK(positive_zero.value().semantic.digest().value == "b1586c491d42f45f");
+  // Canonical framing v18 with OperationTraits v20 and CPU execution model.
+  PS_CHECK(positive_zero.value().semantic.digest().value == "aeb3f892c2049ee7");
   PS_CHECK(positive_zero.value().optimized.digest().value ==
-           "0fde913682f1a931");
-  PS_CHECK(positive_zero.value().plan.digest().value == "32328bccf894ef02");
-  PS_CHECK(positive_zero.value().plan.cache_key().value == "dd8bce11d31b7c92");
-  PS_CHECK(negative_zero.value().semantic.digest().value == "c6576141b2004fdf");
+           "c8f64b567031345d");
+  PS_CHECK(positive_zero.value().plan.digest().value == "aa824f5a74bad50e");
+  PS_CHECK(positive_zero.value().plan.cache_key().value == "d4cd61fe8d68016a");
+  PS_CHECK(negative_zero.value().semantic.digest().value == "fb46b6f5482cda67");
   PS_CHECK(negative_zero.value().optimized.digest().value ==
-           "7f62e2bf6b6cb759");
-  PS_CHECK(negative_zero.value().plan.digest().value == "337f8de7a806b929");
-  PS_CHECK(negative_zero.value().plan.cache_key().value == "ac07cbd40e83ebe8");
+           "cfa5029c07ceb52d");
+  PS_CHECK(negative_zero.value().plan.digest().value == "25d88d27741545e6");
+  PS_CHECK(negative_zero.value().plan.cache_key().value == "448fc58547277c67");
   PS_CHECK(positive_zero.value().semantic.digest().value !=
            negative_zero.value().semantic.digest().value);
   PS_CHECK(positive_zero.value().optimized.digest().value !=
@@ -212,7 +211,7 @@ int main() {
   PS_CHECK(stale_result.status().code == ErrorCode::Stale);
 
   PlanningOptions gpu_options;
-  gpu_options.execution_mode = ps::ExecutionMode::MetalFp32;
+  gpu_options.execution_mode = ps::ExecutionMode::NativeGpu;
   auto gpu_compiled = compiler.compile(first, gpu_options);
   PS_CHECK(gpu_compiled.ok());
   PS_CHECK(gpu_compiled.value().plan.steps().front().backend == Backend::Cpu);

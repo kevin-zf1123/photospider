@@ -31,11 +31,15 @@
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
 #include "data/whole_input_view.hpp"
+#include "execution/callback_queue_timing.hpp"
+#include "execution/cpu_range.hpp"
+#include "execution/cpu_tiles.hpp"
 #include "execution/dependency_checkpoints.hpp"
 #include "execution/dependency_content.hpp"
 #include "execution/dependency_flights.hpp"
 #include "execution/dependency_records.hpp"
 #include "execution/disk_cache.hpp"
+#include "execution/execution_timing.hpp"
 #include "execution/memory_budget.hpp"
 #include "execution/native_gpu.hpp"
 #include "execution/result_cache.hpp"
@@ -72,143 +76,7 @@ class NullDiagnosticException final : public std::exception {
 };
 #endif
 
-/**
- * @brief ExecutionContext-wide nonblocking waiting-callback admission owner.
- *
- * Every successful acquisition represents one callback accepted by a CPU or
- * GPU queue but not yet popped by a worker. Move-only leases release exactly
- * once on worker start, enqueue rollback, exception unwinding, or queue drop.
- */
-class WaitingAdmission final {
- public:
-  /**
-   * @brief Move-only exact-release token for one waiting callback.
-   *
-   * @note A default or moved-from token owns no admission and is safe to drop.
-   */
-  class Lease final {
-   public:
-    /**
-     * @brief Constructs an empty non-owning token.
-     * @throws Nothing.
-     */
-    Lease() noexcept = default;
-
-    /**
-     * @brief Transfers one waiting-callback admission.
-     * @param other Source token left empty.
-     * @throws Nothing.
-     */
-    Lease(Lease&& other) noexcept
-        : owner_(std::exchange(other.owner_, nullptr)) {}
-
-    /**
-     * @brief Releases current ownership before accepting another token.
-     * @param other Source token left empty.
-     * @return This token.
-     * @throws Nothing.
-     */
-    Lease& operator=(Lease&& other) noexcept {
-      if (this != &other) {
-        release();
-        owner_ = std::exchange(other.owner_, nullptr);
-      }
-      return *this;
-    }
-
-    /**
-     * @brief Releases the owned waiting admission exactly once.
-     * @throws Nothing under the ExecutionContext lifetime contract.
-     */
-    ~Lease() noexcept { release(); }
-
-    /**
-     * @brief Forbids duplicating exact-release ownership.
-     * @param other Source token that cannot be copied.
-     * @throws Nothing; the operation is deleted.
-     */
-    Lease(const Lease& other) = delete;
-    /**
-     * @brief Forbids assigning duplicate exact-release ownership.
-     * @param other Source token that cannot be assigned.
-     * @return No value; the operation is deleted.
-     * @throws Nothing; the operation is deleted.
-     */
-    Lease& operator=(const Lease& other) = delete;
-
-    /**
-     * @brief Releases ownership early when a worker begins the callback.
-     * @return No value.
-     * @throws Nothing under the ExecutionContext lifetime contract.
-     * @note Repeated calls are idempotent.
-     */
-    void release() noexcept {
-      if (owner_) {
-        owner_->release();
-        owner_ = nullptr;
-      }
-    }
-
-   private:
-    friend class WaitingAdmission;
-
-    /**
-     * @brief Constructs one owning token.
-     * @param owner Context-wide admission owner.
-     * @throws Nothing.
-     */
-    explicit Lease(WaitingAdmission* owner) noexcept : owner_(owner) {}
-
-    /** @brief Admission owner receiving release, or null. */
-    WaitingAdmission* owner_ = nullptr;
-  };
-
-  /**
-   * @brief Constructs a positive shared waiting-callback limit.
-   * @param capacity Maximum aggregate callbacks waiting across all lanes.
-   * @throws std::invalid_argument If capacity is zero.
-   */
-  explicit WaitingAdmission(std::uint32_t capacity) : capacity_(capacity) {
-    if (capacity == 0U) {
-      throw std::invalid_argument("maximum queued tasks must be positive");
-    }
-  }
-
-  /**
-   * @brief Attempts immediate aggregate waiting admission.
-   * @return Owning token, or empty when the context-wide limit is full.
-   * @throws std::system_error If mutex acquisition fails.
-   * @note The comparison precedes increment, preventing unsigned overflow.
-   */
-  [[nodiscard]] std::optional<Lease> try_acquire() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (waiting_ >= capacity_) {
-      return std::nullopt;
-    }
-    ++waiting_;
-    return Lease(this);
-  }
-
- private:
-  /**
-   * @brief Releases one previously acquired waiting admission.
-   * @return No value.
-   * @throws Nothing under the move-only token invariant.
-   */
-  void release() noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (waiting_ != 0U) {
-      --waiting_;
-    }
-  }
-
-  /** @brief Serializes aggregate waiting count. */
-  std::mutex mutex_;
-  /** @brief Fixed positive aggregate limit. */
-  const std::size_t capacity_;
-  /** @brief Callbacks currently queued but not started. */
-  std::size_t waiting_ = 0U;
-};
+using execution_internal::WaitingAdmission;
 
 /**
  * @brief Move-only backend-queue entry with shared admission ownership.
@@ -225,6 +93,7 @@ struct QueuedCallback final {
   std::function<void()> retired = {};
   /** @brief Shared envelope lease; only its waiting slot retires at entry. */
   ResourceLease managed_queue;
+  std::chrono::steady_clock::time_point published_at{};
 };
 
 /**
@@ -250,7 +119,11 @@ class ThreadPool final {
    * @throws std::bad_alloc If worker or queue storage allocation fails.
    * @note Partially created workers are stopped and joined before rethrow.
    */
-  ThreadPool(std::uint32_t worker_count, Backend backend) : backend_(backend) {
+  ThreadPool(std::uint32_t worker_count, Backend backend,
+             WaitingAdmission& admission, bool collect_timing)
+      : ranges_(mutex_, ready_, worker_count, admission),
+        backend_(backend),
+        timing_(collect_timing) {
     if (worker_count == 0U) {
       throw std::invalid_argument("thread-pool worker count must be positive");
     }
@@ -299,6 +172,9 @@ class ThreadPool final {
    * worker; false or exception destroys the parameter and rolls admission back.
    */
   [[nodiscard]] bool submit(QueuedCallback callback) {
+    const auto begin = timing_.enabled()
+                           ? std::chrono::steady_clock::now()
+                           : std::chrono::steady_clock::time_point{};
     std::lock_guard<std::mutex> lock(mutex_);
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
     const execution_testing::CallbackSubmitAction test_action =
@@ -318,12 +194,25 @@ class ThreadPool final {
       return false;
     }
     callbacks_.push_back(std::move(callback));
+    if (timing_.enabled()) {
+      const auto published = std::chrono::steady_clock::now();
+      callbacks_.back().published_at = published;
+      timing_.published(begin, published, callbacks_.size());
+    }
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
     execution_testing::notify_callback_queued(backend_);
 #endif
     ready_.notify_one();
     return true;
   }
+
+ public:
+  CallbackQueueStatistics statistics() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return timing_.statistics();
+  }
+  bool timing_enabled() const noexcept { return timing_.enabled(); }
+  execution_internal::CpuRangeQueue& ranges() noexcept { return ranges_; }
 
  private:
   /**
@@ -332,16 +221,38 @@ class ThreadPool final {
    * @note Submitted callbacks are required to fence their own exceptions.
    */
   void worker_loop() noexcept {
+    execution_internal::in_kernel_worker = true;
     for (;;) {
       QueuedCallback callback;
+      execution_internal::CpuRangeQueue::Claim range;
       {
         std::unique_lock<std::mutex> lock(mutex_);
-        ready_.wait(lock, [this] { return stopping_ || !callbacks_.empty(); });
+        ready_.wait(lock, [this] {
+          return stopping_ || !callbacks_.empty() || ranges_.ready_locked();
+        });
         if (stopping_) {
           return;
         }
-        callback = std::move(callbacks_.front());
-        callbacks_.pop_front();
+        if (prefer_range_ || callbacks_.empty()) {
+          range = ranges_.take_locked();
+          if (range.job)
+            prefer_range_ = false;
+        }
+        if (!range.job) {
+          // Cancellation can remove range eligibility after the wait predicate.
+          if (callbacks_.empty())
+            continue;
+          callback = std::move(callbacks_.front());
+          callbacks_.pop_front();
+          if (timing_.enabled())
+            timing_.started(callback.published_at,
+                            std::chrono::steady_clock::now());
+          prefer_range_ = true;
+        }
+      }
+      if (range.job) {
+        ranges_.execute(range);
+        continue;
       }
       callback.admission.release();
       if (callback.managed_queue.valid()) {
@@ -389,12 +300,15 @@ class ThreadPool final {
   std::mutex mutex_;
   /** @brief Wakes workers for callbacks or shutdown. */
   std::condition_variable ready_;
+  execution_internal::CpuRangeQueue ranges_;
+  bool prefer_range_ = true;
   /** @brief Deterministic FIFO governed by shared waiting admission. */
   std::deque<QueuedCallback> callbacks_;
   /** @brief Owned fixed worker set. */
   std::vector<std::thread> workers_;
   /** @brief Exact local backend lane served by this pool. */
   [[maybe_unused]] const Backend backend_;
+  execution_internal::CallbackQueueMeter timing_;
   /** @brief Monotonic stop flag guarded by `mutex_`. */
   bool stopping_ = false;
 };
@@ -563,6 +477,28 @@ Result<std::uint64_t> region_bytes(const ValueDescriptor& descriptor,
         ErrorCode::ResourceExhausted, "regional byte count overflows"));
   return Result<std::uint64_t>(count.value() * width);
 }
+// Tile observation axes while keeping every indivisible tuple component.
+std::vector<std::uint64_t> cpu_tile_geometry(const OperationMetadata& output,
+                                             std::uint64_t width,
+                                             std::uint64_t height) {
+  const auto rank = output.descriptor.shape.size();
+  std::vector<std::uint64_t> geometry(rank, 1);
+  auto observations = rank;
+  if (output.atomic_trailing_axes) {
+    observations -= output.atomic_trailing_axes;
+    for (auto axis = observations; axis < rank; ++axis)
+      geometry[axis] = output.descriptor.shape[axis];
+  } else if (const auto channels = input_internal::tuple_channel_axis(
+                 output.descriptor, output.facets)) {
+    geometry[*channels] = output.descriptor.shape[*channels];
+    observations = *channels;
+  }
+  if (observations)
+    geometry[observations - 1] = width;
+  if (observations > 1)
+    geometry[observations - 2] = height;
+  return geometry;
+}
 /** @brief Copies only logical coverage into a packed destination with global
  * origin. */
 Status copy_region(ValueView source, MutableValue* destination,
@@ -621,6 +557,8 @@ Status copy_region(ValueView source, MutableValue* destination,
 Result<Value> transfer_value(const Value& source,
                              const BufferAllocator& allocator,
                              bool compact = false) {
+  execution_testing::ExecutionTiming timing(
+      execution_testing::TimingKind::ValueMaterialization);
   if (compact) {
     auto allocated =
         MutableValue::allocate(source.descriptor(), source.region(), allocator);
@@ -630,16 +568,23 @@ Result<Value> transfer_value(const Value& source,
     auto status = copy_region(ValueView(source), &output, source.region());
     if (!status.ok())
       return Result<Value>(status);
-    return std::move(output).publish(source.facets(), source.resources());
+    auto published =
+        std::move(output).publish(source.facets(), source.resources());
+    if (published.ok())
+      timing.success(published.value().bytes().size());
+    return published;
   }
   auto allocated = allocator.allocate(source.bytes().size());
   if (!allocated.ok())
     return Result<Value>(allocated.status());
   auto buffer = allocated.take_value();
   std::memcpy(buffer.data(), source.bytes().data(), source.bytes().size());
-  return Value::from_storage(source.descriptor(), source.region(),
-                             source.layout(), std::move(buffer).freeze(),
-                             source.facets(), source.resources());
+  auto published = Value::from_storage(
+      source.descriptor(), source.region(), source.layout(),
+      std::move(buffer).freeze(), source.facets(), source.resources());
+  if (published.ok())
+    timing.success(published.value().bytes().size());
+  return published;
 }
 
 /**
@@ -676,15 +621,15 @@ Status validate_input_demand(const Value& value, const Region& demand) {
 
 /** @brief Creates production native resources; scheduler fixtures use fake
  * lanes. */
-std::shared_ptr<gpu_internal::Device> execution_device(bool enabled) {
+std::shared_ptr<gpu_internal::Device> execution_device(
+    bool enabled, const std::shared_ptr<ResourceBudget>& budget) {
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
-  // The noninstalled scheduler test kernel controls callback completion without
-  // requiring hardware. Native tests and installed consumers use the product.
-  static_cast<void>(enabled);
-  return {};
-#else
-  return enabled ? gpu_internal::Device::create() : nullptr;
+  // Scheduler fixtures default to hardware-independent lanes. Native lifetime
+  // and cancellation fixtures explicitly opt into the production device.
+  if (!execution_testing::use_native_device())
+    return {};
 #endif
+  return enabled ? gpu_internal::Device::create(budget) : nullptr;
 }
 /** @brief Keys a Run-local upload by retained allocation and complete view. */
 std::string upload_view_key(const Value& value) {
@@ -873,15 +818,6 @@ struct ExecutionContext::Impl final {
   Impl(std::shared_ptr<OperationRegistry> operations,
        ExecutionContextConfig requested)
       : cpu_worker_count(resolve_cpu_workers(requested.cpu_workers)),
-        native_device(execution_device(requested.gpu_enabled)),
-#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
-        gpu_available(requested.gpu_enabled),
-#else
-        gpu_available(native_device && native_device->available()),
-#endif
-        maximum_waiting_callbacks(requested.maximum_queued_tasks),
-        maximum_live_bytes(requested.maximum_live_bytes),
-        operation_registry(std::move(operations)),
         budget(std::make_shared<MemoryBudget>(
             requested.maximum_live_bytes,
             requested.managed_resources
@@ -893,8 +829,20 @@ struct ExecutionContext::Impl final {
                     return std::make_shared<ResourceBudget>(std::move(limits));
                   }()
                 : nullptr)),
+        native_device(execution_device(requested.gpu_enabled, budget->resources())),
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+        gpu_available(execution_testing::use_native_device()
+                          ? native_device && native_device->available()
+                          : requested.gpu_enabled),
+#else
+        gpu_available(native_device && native_device->available()),
+#endif
+        maximum_waiting_callbacks(requested.maximum_queued_tasks),
+        maximum_live_bytes(requested.maximum_live_bytes),
+        operation_registry(std::move(operations)),
         waiting_admission(maximum_waiting_callbacks),
-        cpu_pool(cpu_worker_count, Backend::Cpu) {
+        cpu_pool(cpu_worker_count, Backend::Cpu, waiting_admission,
+                 requested.collect_scheduler_timing) {
     if (!operation_registry || !operation_registry->frozen()) {
       throw std::invalid_argument(
           "ExecutionContext requires a frozen operation registry");
@@ -935,12 +883,16 @@ struct ExecutionContext::Impl final {
           maximum_waiting_callbacks,
           requested.maximum_dependency_cache_metadata);
     if (gpu_available) {
-      gpu_pool = std::make_unique<ThreadPool>(1U, Backend::Gpu);
+      gpu_pool =
+          std::make_unique<ThreadPool>(1U, Backend::Gpu, waiting_admission,
+                                       requested.collect_scheduler_timing);
     }
   }
 
   /** @brief Fixed resolved CPU worker count. */
   const std::uint32_t cpu_worker_count;
+  /** @brief Shared exact modeled-byte capacity, retained beyond the device. */
+  std::shared_ptr<MemoryBudget> budget;
   std::shared_ptr<gpu_internal::Device> native_device;
   /** @brief Fixed optional GPU-lane availability. */
   const bool gpu_available;
@@ -949,8 +901,6 @@ struct ExecutionContext::Impl final {
   const std::uint64_t maximum_live_bytes;
   /** @brief Frozen operation registry retained beyond all callbacks. */
   std::shared_ptr<OperationRegistry> operation_registry;
-  /** @brief Shared exact modeled-byte capacity. */
-  std::shared_ptr<MemoryBudget> budget;
   struct ForeignPlanarAdmission final {
     PlanarImage owner;
     std::shared_ptr<void> pin;
@@ -1228,6 +1178,40 @@ std::vector<bool> required_steps(const ExecutionPlan& plan,
  * stores itself in global state.
  */
 class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
+  struct StageActivity {
+    std::atomic<std::uint32_t> active{0}, peak{0};
+    void enter() {
+      const auto count = active.fetch_add(1) + 1;
+      auto prior = peak.load();
+      while (prior < count && !peak.compare_exchange_weak(prior, count)) {
+      }
+    }
+  };
+  inline static thread_local StageActivity* coordinator_activity = nullptr;
+  template <class T>
+  struct StageCompletion {
+    ResourceLease lease;
+    std::promise<Result<T>> promise;
+    std::future<Result<T>> future{promise.get_future()};
+    Result<T> result{Status{ErrorCode::Internal, {}}};
+    std::function<Result<T>()> work;
+  };
+  struct PendingPoll {
+    std::shared_ptr<StageCompletion<DependencyProgress>> stage;
+    std::shared_ptr<MemoryReservation> reservation;
+    std::shared_ptr<std::uint64_t> duration =
+        std::make_shared<std::uint64_t>(0);
+    NumericDiagnostics before;
+    ~PendingPoll() {
+      // Also protects exceptional coordinator exits before a yielded frame is
+      // inserted in the normal drain window. No session owner retires early.
+      if (stage && stage->future.valid())
+        stage->future.wait();
+      if (reservation)
+        reservation->seal();
+    }
+  };
+
  public:
   /** @brief Drives unresolved dependency records on the calling coordinator.
    * @note Uses the context's existing worker/admission/allocator owners. No
@@ -1253,6 +1237,38 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       execution_internal::SharedResults* shared_results = nullptr,
       bool atom_outcomes = false) {
     const auto started = std::chrono::steady_clock::now();
+    ErrorCode coordinator_metadata_failure = ErrorCode::Ok;
+    std::optional<ResourceAllocationScope> coordinator_resources;
+    // Frozen cache/flight paths install their own optional-retention scopes;
+    // keep their best-effort allocation failures outside this sticky fence.
+    if (budget->resources() && !flights && !dependency_cache && !checkpoints)
+      coordinator_resources.emplace(*budget->resources(),
+                                    &coordinator_metadata_failure);
+    const bool async_tiles =
+        sink && !requested && !fragment_outputs && !flights &&
+        !dependency_cache && !checkpoints && !atom_outcomes &&
+        !plan.structured_network() &&
+        std::all_of(
+            plan.steps().begin(), plan.steps().end(), [](const PlanStep& step) {
+              const auto& output = step.traits.outputs[0];
+              return step.backend == Backend::Cpu &&
+                     !step.traits.joint_contract && step.traits.deterministic &&
+                     step.traits.side_effect_free &&
+                     output.dependency_version == 1 &&
+                     (output.static_dependency_pieces ||
+                      output.regional_atomic) &&
+                     output.observation_kind == ObservationKind::Atomic &&
+                     !output.preserve_output_views;
+            });
+    StageActivity activity;
+    struct ActivityScope {
+      StageActivity* previous = coordinator_activity;
+      explicit ActivityScope(StageActivity* current) {
+        coordinator_activity = current;
+      }
+      ~ActivityScope() { coordinator_activity = previous; }
+    } activity_scope(async_tiles ? &activity : nullptr);
+    std::atomic<bool> async_abort{false};
     auto combined_cancellation =
         budget->resources()
             ? CancellationToken::combine(
@@ -1347,7 +1363,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     const auto reserve = [&](std::uint64_t bytes) {
       if (reclaim)
         reclaim(bytes);
-      if (bytes > budget->available())
+      if (native_device && !budget->can_allocate(bytes, true))
+        native_device->clear_pipeline_cache();
+      if (!budget->can_allocate(bytes, static_cast<bool>(native_device)))
         for (const auto& scope : checkpoint_scopes)
           if (scope.second)
             scope.second->clear();
@@ -1357,11 +1375,19 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     };
     execution_internal::ScopedMemoryAdmission on_demand_admission(reserve);
     std::uint64_t work = options.maximum_dependency_work;
+    std::mutex work_mutex;
+    const auto remaining_work = [&] {
+      std::lock_guard<std::mutex> lock(work_mutex);
+      return work;
+    };
     std::uint64_t cache_work = options.maximum_dependency_cache_work;
     const auto cache_epoch = dependency_cache ? dependency_cache->epoch() : 0;
     const auto consume = [&](std::uint64_t count = 1) -> Status {
+      if (async_abort.load(std::memory_order_relaxed))
+        return Status{ErrorCode::Cancelled, "tile batch aborted"};
       if (stop() != ErrorCode::Ok)
         return Status{stop(), {}};
+      std::lock_guard<std::mutex> lock(work_mutex);
       if (count > work)
         return Status::failure(ErrorCode::ResourceExhausted,
                                "dependency Run work limit");
@@ -1418,11 +1444,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       PlanInput target;
       Footprint outputs;
       bool unit = false, terminal_allowed = false;
-      std::vector<Footprint> parts;
+      ResourceVector<Footprint> parts;
       std::size_t next = 0;
       std::vector<Value> values;
       std::vector<ValueFragments> ready;
       std::shared_ptr<DependencySession> session;
+      std::shared_ptr<PendingPoll> pending_poll;
       std::optional<execution_internal::DependencyRecords::Checkpoint>
           attempt_records;
       std::optional<ValueFragments> complete;
@@ -1447,6 +1474,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     // This explicit stack is a deterministic ready order. Parent frames in
     // Waiting retain state and actual input owners, but no active reservation.
     std::vector<Frame> frames;
+    std::vector<Frame>* resume_frames = nullptr;
+    bool yielded = false;
     CancellationToken evaluation_token = cancellation;
     bool evaluation_shared = false;
     std::vector<const std::vector<Frame>*> parked_frames;
@@ -1788,19 +1817,13 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       }
       for (const auto& region : named.second.boxes()) {
         const auto rank = region.rank();
-        std::vector<std::uint64_t> geometry(rank, 1), cursor;
-        const auto channels = input_internal::tuple_channel_axis(
-            step.output_descriptor, step.output_facets);
-        if (channels) {
-          geometry[*channels] = step.output_descriptor.shape[*channels];
-          geometry[*channels - 1] = plan.tile_width();
-          if (*channels > 1)
-            geometry[*channels - 2] = plan.tile_height();
-        } else {
-          geometry[rank - 1] = plan.tile_width();
-          if (rank > 1)
-            geometry[rank - 2] = plan.tile_height();
-        }
+        const auto geometry =
+            cpu_tile_geometry({step.output_descriptor,
+                               step.output_facets,
+                               {},
+                               step.traits.outputs[0].atomic_trailing_axes},
+                              plan.tile_width(), plan.tile_height());
+        std::vector<std::uint64_t> cursor;
         for (const auto& dimension : region.dimensions())
           cursor.push_back(dimension.offset);
         for (;;) {
@@ -1904,6 +1927,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     evaluate = [&](PlanInput target, const Footprint& samples, bool unit,
                    bool terminal_allowed,
                    bool allow_joint) -> Result<Evaluation> {
+      auto* const resumed = std::exchange(resume_frames, nullptr);
       // Nested input evaluation shares the Run's work/owners, with independent
       // ancestor failure routing. No callback worker evaluates upstream work.
       auto inherited = active_token();
@@ -1970,7 +1994,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       // Keep frames and their flight leases alive while reporting coordinator
       // allocation failure; RestoreFrames retires them after this fence.
       try {
-        frames.emplace_back(target, samples, unit, terminal_allowed);
+        if (resumed && !resumed->empty())
+          frames.swap(*resumed);
+        else
+          frames.emplace_back(target, samples, unit, terminal_allowed);
         std::optional<ValueFragments> returned;
         std::optional<QualityReport> returned_quality;
         bool returned_taint = false;
@@ -2252,6 +2279,62 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
             return fail(
                 Status::failure(ErrorCode::InvalidArgument,
                                 "dependency producer has non-atomic ancestry"));
+          // Regional Atomic programs permit independent output regions. Bound
+          // each actual poll even when a downstream Whole consumer requests a
+          // large region, rather than computing a full image and slicing it
+          // later.
+          if (frame.state == Frame::State::Initial && !frame.unit &&
+              frame.backend == Backend::Cpu &&
+              (step.traits.outputs[0].static_dependency_pieces ||
+               step.traits.outputs[0].regional_atomic)) {
+            const auto rank = output.descriptor.shape.size();
+            const auto geometry = cpu_tile_geometry(output, plan.tile_width(),
+                                                    plan.tile_height());
+            bool split = frame.outputs.boxes().size() > 1;
+            for (const auto& box : frame.outputs.boxes())
+              for (std::size_t axis = 0; axis < rank; ++axis)
+                split |= box.dimensions()[axis].extent > geometry[axis];
+            if (split) {
+              for (const auto& box : frame.outputs.boxes()) {
+                std::vector<std::uint64_t> cursor;
+                for (const auto& d : box.dimensions())
+                  cursor.push_back(d.offset);
+                for (;;) {
+                  auto charged = consume(rank + 1);
+                  if (!charged.ok())
+                    return fail(charged);
+                  if (frame.parts.size() >= limits.maximum_boxes)
+                    return fail(Status{ErrorCode::ResourceExhausted,
+                                       "CPU tile set limit"});
+                  std::vector<RegionDimension> dimensions;
+                  for (std::size_t axis = 0; axis < rank; ++axis) {
+                    const auto& d = box.dimensions()[axis];
+                    dimensions.push_back(
+                        {cursor[axis],
+                         std::min(geometry[axis],
+                                  d.offset + d.extent - cursor[axis])});
+                  }
+                  auto tile = Footprint::from_regions(
+                      output.descriptor.shape, {Region(dimensions)}, limits);
+                  if (!tile.ok())
+                    return fail(tile.status());
+                  frame.parts.push_back(tile.take_value());
+                  std::size_t axis = rank;
+                  while (axis) {
+                    --axis;
+                    cursor[axis] += dimensions[axis].extent;
+                    if (cursor[axis] < box.dimensions()[axis].offset +
+                                           box.dimensions()[axis].extent)
+                      break;
+                    cursor[axis] = box.dimensions()[axis].offset;
+                  }
+                  if (!axis && cursor[0] == box.dimensions()[0].offset)
+                    break;
+                }
+              }
+              frame.state = Frame::State::Expand;
+            }
+          }
           if (frame.state == Frame::State::Initial && !frame.unit &&
               !terminal && !step.traits.outputs[0].static_dependency_pieces &&
               !step.traits.outputs[0].regional_atomic) {
@@ -2288,7 +2371,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     frame.parts.push_back(samples.take_value());
                     return Status::success();
                   },
-                  work, active_token());
+                  remaining_work(), active_token());
               if (!status.ok())
                 return fail(status);
             }
@@ -2514,7 +2597,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               if (flights)
                 request.limits.sets.cancellation = request.cancellation;
               request.limits.maximum_work =
-                  std::min(request.limits.maximum_work, work);
+                  std::min(request.limits.maximum_work, remaining_work());
               auto reserved =
                   reserve(std::min(step.traits.outputs[0].continuation_bytes,
                                    options.dependencies.maximum_state_bytes));
@@ -2626,18 +2709,6 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
               return fail(Status::failure(ErrorCode::ResourceExhausted,
                                           "dependency output bytes overflow"));
             auto output_bytes = elements.value() * width;
-            if (frame.backend == Backend::Gpu) {
-              output_bytes = 0;
-              for (const auto& box : frame.outputs.boxes()) {
-                const auto bytes = gpu_internal::allocation_capacity(
-                    box.element_count().value() * width);
-                if (!bytes || bytes > UINT64_MAX - output_bytes)
-                  return fail(
-                      Status::failure(ErrorCode::ResourceExhausted,
-                                      "native output capacity overflow"));
-                output_bytes += bytes;
-              }
-            }
             auto capacity = checked_add(
                 std::max(
                     step.traits.estimated_bytes,
@@ -2660,9 +2731,6 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 if (!count.ok() || count.value() > UINT64_MAX / input_width)
                   return fail(Status{ErrorCode::ResourceExhausted, {}});
                 auto packed_bytes = count.value() * input_width;
-                if (frame.backend == Backend::Gpu)
-                  packed_bytes =
-                      gpu_internal::allocation_capacity(packed_bytes);
                 if (!packed_bytes ||
                     packed_bytes > UINT64_MAX - capacity.value())
                   return fail(Status{ErrorCode::ResourceExhausted,
@@ -2680,233 +2748,283 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 capacity = Result<std::uint64_t>(capacity.value() +
                                                  count.value() * scale);
             }
-            const bool on_demand = step.traits.outputs[0].preserve_output_views;
+            const bool on_demand = frame.backend == Backend::Gpu ||
+                                   step.traits.outputs[0].preserve_output_views;
             std::shared_ptr<MemoryReservation> reservation;
-            if (!on_demand) {
+            if (frame.pending_poll) {
+              reservation = frame.pending_poll->reservation;
+            } else if (!on_demand) {
               auto reserved = reserve(capacity.value());
               if (!reserved.ok())
                 return fail(reserved.status());
               reservation = reserved.take_value();
             }
             Seal seal{std::move(reservation)};
-            const auto stage_allocator =
+            auto stage_allocator =
                 on_demand ? budget->on_demand_allocator(
                                 observation, on_demand_admission.callback())
                           : seal.reservation->allocator();
+            // DependencySession enforces its actual-capacity phase contract.
+            // Legacy Value callbacks instead bound logical output and scratch.
+            if (frame.backend == Backend::Gpu && !frame.session)
+              stage_allocator =
+                  stage_allocator.limited_requested(capacity.value());
             std::uint64_t callback_us = 0;
             gpu_internal::Statistics native_stats;
             const bool dependency_attempt = static_cast<bool>(frame.session);
             if (frame.session) {
               auto reported_numeric = frame.session->numeric_diagnostics();
-              auto progress = dependency_stage<DependencyProgress>(
-                  frame.backend == Backend::Gpu ? gpu_pool : pool, admission,
-                  [&] {
-                    if (stop() != ErrorCode::Ok)
-                      return Result<DependencyProgress>(Status{stop(), {}});
-                    const auto callback_started =
-                        std::chrono::steady_clock::now();
-                    DependencyCheckpointServices services;
-                    if (shareable[step_index] && !frame.fallback_taint &&
-                        step.traits.outputs[0].observation_kind ==
-                            ObservationKind::Atomic) {
-                      auto& scope = checkpoint_scopes[step_index];
-                      if (!scope) {
-                        if (checkpoints) {
-                          auto all = Footprint::none(
+              Result<DependencyProgress> progress(
+                  Status{ErrorCode::Internal, {}});
+              if (resumed) {
+                if (!frame.pending_poll) {
+                  auto pending = std::make_shared<PendingPoll>();
+                  pending->reservation = std::move(seal.reservation);
+                  pending->before = reported_numeric;
+                  const auto session = frame.session;
+                  const auto timing = pending->duration;
+                  auto submitted = submit_dependency_stage<DependencyProgress>(
+                      pool, admission,
+                      [session, stage_allocator, timing, &plan, cancellation,
+                       &async_abort] {
+                        const auto stopped = binding_stop(plan, cancellation);
+                        if (stopped != ErrorCode::Ok)
+                          return Result<DependencyProgress>(
+                              Status{stopped, {}});
+                        if (async_abort.load(std::memory_order_relaxed))
+                          return Result<DependencyProgress>(Status{
+                              ErrorCode::Cancelled, "tile batch aborted"});
+                        const auto began = std::chrono::steady_clock::now();
+                        auto result = session->poll(stage_allocator);
+                        *timing = duration_us(began);
+                        return result;
+                      },
+                      budget->resources().get());
+                  if (!submitted.ok())
+                    return fail(submitted.status());
+                  pending->stage = submitted.take_value();
+                  frame.pending_poll = std::move(pending);
+                  resumed->swap(frames);
+                  yielded = true;
+                  return Result<Evaluation>(Status{ErrorCode::Internal, {}});
+                }
+                auto pending = std::move(frame.pending_poll);
+                progress = pending->stage->future.get();
+                callback_us = *pending->duration;
+                reported_numeric = pending->before;
+                // seal now owns the reservation until result ownership checks
+                // finish; no callback is still using it after future.get().
+                pending->reservation.reset();
+              } else {
+                progress = dependency_stage<DependencyProgress>(
+                    frame.backend == Backend::Gpu ? gpu_pool : pool, admission,
+                    [&] {
+                      if (stop() != ErrorCode::Ok)
+                        return Result<DependencyProgress>(Status{stop(), {}});
+                      const auto callback_started =
+                          std::chrono::steady_clock::now();
+                      DependencyCheckpointServices services;
+                      if (shareable[step_index] && !frame.fallback_taint &&
+                          step.traits.outputs[0].observation_kind ==
+                              ObservationKind::Atomic) {
+                        auto& scope = checkpoint_scopes[step_index];
+                        if (!scope) {
+                          if (checkpoints) {
+                            auto all = Footprint::none(
+                                step.output_descriptor.shape, limits);
+                            if (!all.ok())
+                              return Result<DependencyProgress>(all.status());
+                            scope = checkpoints->acquire(
+                                observation_key(step_index, all.value()),
+                                limits.maximum_boxes);
+                          } else {
+                            scope = std::make_shared<
+                                execution_internal::CheckpointScope>(
+                                limits.maximum_boxes);
+                          }
+                        }
+                        if (scope) {
+                          auto empty = Footprint::none(
                               step.output_descriptor.shape, limits);
-                          if (!all.ok())
-                            return Result<DependencyProgress>(all.status());
-                          scope = checkpoints->acquire(
-                              observation_key(step_index, all.value()),
-                              limits.maximum_boxes);
-                        } else {
-                          scope = std::make_shared<
-                              execution_internal::CheckpointScope>(
-                              limits.maximum_boxes);
+                          if (!empty.ok())
+                            return Result<DependencyProgress>(empty.status());
+                          services.identity =
+                              observation_key(step_index, empty.value());
+                          services.find = [&, scope](std::uint32_t phase,
+                                                     std::uint64_t before)
+                              -> Result<std::optional<DependencyCheckpoint>> {
+                            auto found = scope->find(phase, before);
+                            if (!found)
+                              return Result<
+                                  std::optional<DependencyCheckpoint>>(
+                                  std::optional<DependencyCheckpoint>{});
+                            auto charged = consume(found->weight);
+                            if (!charged.ok())
+                              return Result<
+                                  std::optional<DependencyCheckpoint>>(charged);
+                            for (const auto& upstream : found->upstream) {
+                              auto status = records.import(upstream);
+                              if (!status.ok())
+                                return Result<
+                                    std::optional<DependencyCheckpoint>>(
+                                    status);
+                              const auto id = records.observation_identity(
+                                  upstream->step, upstream->samples);
+                              if (frame.upstream_ids.insert(id).second)
+                                frame.upstream.push_back(upstream);
+                            }
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+                            execution_testing::notify_checkpoint_borrowed();
+#endif
+                            return Result<std::optional<DependencyCheckpoint>>(
+                                found->checkpoint);
+                          };
+                          services.publish = [&,
+                                              scope](const DependencyCheckpoint&
+                                                         checkpoint) {
+                            std::uint64_t weight =
+                                checkpoint.metadata_entries() +
+                                frame.upstream.size();
+                            if (weight > cache_work)
+                              return Status::success();
+                            cache_work -= weight;
+                            for (const auto& upstream : frame.upstream) {
+                              auto proof =
+                                  execution_internal::dependency_cache_proof(
+                                      plan, upstream, limits.maximum_boxes,
+                                      &cache_work,
+                                      &diagnostics
+                                           .dependency_cache_records_visited,
+                                      limits);
+                              if (!proof.ok() ||
+                                  proof.value().metadata_entries >
+                                      limits.maximum_boxes -
+                                          std::min(weight,
+                                                   limits.maximum_boxes))
+                                return Status::success();
+                              weight += proof.value().metadata_entries;
+                            }
+                            if (scope->put(
+                                    {checkpoint, frame.upstream, weight})) {
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+                              execution_testing::notify_checkpoint_published();
+#endif
+                            }
+                            return Status::success();
+                          };
                         }
                       }
-                      if (scope) {
-                        auto empty = Footprint::none(
-                            step.output_descriptor.shape, limits);
-                        if (!empty.ok())
-                          return Result<DependencyProgress>(empty.status());
-                        services.identity =
-                            observation_key(step_index, empty.value());
-                        services.find = [&, scope](std::uint32_t phase,
-                                                   std::uint64_t before)
-                            -> Result<std::optional<DependencyCheckpoint>> {
-                          auto found = scope->find(phase, before);
-                          if (!found)
-                            return Result<std::optional<DependencyCheckpoint>>(
-                                std::optional<DependencyCheckpoint>{});
-                          auto charged = consume(found->weight);
-                          if (!charged.ok())
-                            return Result<std::optional<DependencyCheckpoint>>(
-                                charged);
-                          for (const auto& upstream : found->upstream) {
-                            auto status = records.import(upstream);
-                            if (!status.ok())
-                              return Result<
-                                  std::optional<DependencyCheckpoint>>(status);
-                            const auto id = records.observation_identity(
-                                upstream->step, upstream->samples);
-                            if (frame.upstream_ids.insert(id).second)
-                              frame.upstream.push_back(upstream);
+                      DependencyBlockServices blocks;
+                      if (dependency_cache && shareable[step_index] &&
+                          !frame.fallback_taint && step.traits.cacheable) {
+                        blocks.consume_work = [&](std::uint64_t cost) {
+                          if (cost > cache_work) {
+                            cache_work = 0;
+                            return false;
                           }
-#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
-                          execution_testing::notify_checkpoint_borrowed();
-#endif
-                          return Result<std::optional<DependencyCheckpoint>>(
-                              found->checkpoint);
+                          cache_work -= cost;
+                          return true;
                         };
-                        services.publish = [&,
-                                            scope](const DependencyCheckpoint&
-                                                       checkpoint) {
-                          std::uint64_t weight = checkpoint.metadata_entries() +
-                                                 frame.upstream.size();
-                          if (weight > cache_work)
-                            return Status::success();
-                          cache_work -= weight;
-                          for (const auto& upstream : frame.upstream) {
-                            auto proof =
-                                execution_internal::dependency_cache_proof(
-                                    plan, upstream, limits.maximum_boxes,
-                                    &cache_work,
-                                    &diagnostics
-                                         .dependency_cache_records_visited,
-                                    limits);
-                            if (!proof.ok() ||
-                                proof.value().metadata_entries >
-                                    limits.maximum_boxes -
-                                        std::min(weight, limits.maximum_boxes))
-                              return Status::success();
-                            weight += proof.value().metadata_entries;
-                          }
-                          if (scope->put(
-                                  {checkpoint, frame.upstream, weight})) {
-#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
-                            execution_testing::notify_checkpoint_published();
-#endif
-                          }
+                        blocks.find = [&](const std::string& key) {
+                          auto value = dependency_cache->get("g4-block/" + key,
+                                                             cache_epoch);
+                          if (value.valid())
+                            ++diagnostics.block_cache_hits;
+                          else
+                            ++diagnostics.block_cache_misses;
+                          return Result<Value>(std::move(value));
+                        };
+                        blocks.publish = [&](const std::string& key,
+                                             const Value& value) {
+                          dependency_cache->put(
+                              "g4-block/" + key, value, cache_epoch,
+                              native_device &&
+                                  native_device->owns(*value.storage()));
                           return Status::success();
                         };
                       }
-                    }
-                    DependencyBlockServices blocks;
-                    if (dependency_cache && shareable[step_index] &&
-                        !frame.fallback_taint && step.traits.cacheable) {
-                      blocks.consume_work = [&](std::uint64_t cost) {
-                        if (cost > cache_work) {
-                          cache_work = 0;
-                          return false;
-                        }
-                        cache_work -= cost;
-                        return true;
-                      };
-                      blocks.find = [&](const std::string& key) {
-                        auto value = dependency_cache->get("g4-block/" + key,
-                                                           cache_epoch);
-                        if (value.valid())
-                          ++diagnostics.block_cache_hits;
-                        else
-                          ++diagnostics.block_cache_misses;
-                        return Result<Value>(std::move(value));
-                      };
-                      blocks.publish = [&](const std::string& key,
-                                           const Value& value) {
-                        dependency_cache->put(
-                            "g4-block/" + key, value, cache_epoch,
-                            native_device &&
-                                native_device->owns(*value.storage()));
-                        return Status::success();
-                      };
-                    }
-                    auto allocator = stage_allocator;
-                    DependencyGpuServices gpu;
-                    std::optional<gpu_internal::Invocation> native;
-                    if (frame.backend == Backend::Gpu) {
-                      allocator = native_device->allocator(allocator);
-                      native.emplace(native_device, active_token());
-                      gpu.allocation_capacity =
-                          gpu_internal::allocation_capacity;
-                      gpu.allocate_discovery = [&](std::uint64_t bytes) {
-                        const auto capacity =
-                            gpu_internal::allocation_capacity(bytes);
-                        if (!capacity)
-                          return Result<MutableBuffer>(
-                              Status{ErrorCode::ResourceExhausted,
-                                     "GPU discovery capacity overflow"});
-                        auto admitted = reserve(capacity);
-                        if (!admitted.ok())
-                          return Result<MutableBuffer>(admitted.status());
-                        Seal discovery_seal{admitted.take_value()};
-                        return native_device
-                            ->allocator(discovery_seal.reservation->allocator())
-                            .allocate(bytes);
-                      };
-                      gpu.materialize = [&](const FragmentAtlasPlan& plan,
-                                            const ValueFragments& input,
-                                            const FootprintLimits& bounds) {
-                        const auto payload = gpu_internal::allocation_capacity(
-                            plan.payload_allocation_bytes());
-                        const auto directory =
-                            gpu_internal::allocation_capacity(
-                                plan.directory_allocation_bytes());
-                        if (!payload || !directory ||
-                            directory > UINT64_MAX - payload)
-                          return Result<FragmentAtlas>(Status::failure(
-                              ErrorCode::ResourceExhausted,
-                              "native atlas capacity overflow"));
-                        auto admitted = reserve(payload + directory);
-                        if (!admitted.ok())
-                          return Result<FragmentAtlas>(admitted.status());
-                        Seal atlas_seal{admitted.take_value()};
-                        auto packed = plan.materialize(
-                            input,
-                            native_device->allocator(
-                                atlas_seal.reservation->allocator()),
-                            bounds);
-                        if (packed.ok()) {
-                          diagnostics.transfer_count += 2;
-                          diagnostics.transfer_bytes +=
-                              plan.payload_allocation_bytes() +
-                              plan.directory_allocation_bytes();
-                        }
-                        return packed;
-                      };
-                      gpu.buffer = [&](const std::uint8_t* bytes,
-                                       std::uint64_t size, bool writable) {
-                        std::uint64_t token = 0;
-                        const auto* api = native->service();
-                        api->buffer(api->context, bytes, size, writable,
-                                    &token);
-                        return native->status().ok()
-                                   ? Result<std::uint64_t>(token)
-                                   : Result<std::uint64_t>(native->status());
-                      };
-                      gpu.execute = [&](const ps_gpu_dispatch_v9* commands,
-                                        std::uint32_t count) {
-                        const auto* api = native->service();
-                        api->execute(api->context, commands, count);
-                        return native->status();
-                      };
-                    }
-                    auto result =
-                        frame.session->poll(allocator, services, blocks, gpu);
-                    if (native) {
-                      const auto& stats = native->statistics();
-                      native_stats = stats;
-                      diagnostics.native_dispatch_count += stats.dispatches;
-                      diagnostics.native_submission_count += stats.submissions;
-                      diagnostics.native_compute_us += stats.device_us;
-                      diagnostics.native_constant_bytes += stats.constant_bytes;
-                      if (result.ok() && !native->status().ok())
-                        result = Result<DependencyProgress>(native->status());
-                    }
-                    callback_us = duration_us(callback_started);
-                    return result;
-                  },
-                  pump, budget->resources().get());
+                      auto allocator = stage_allocator;
+                      DependencyGpuServices gpu;
+                      Status capacity_status;
+                      std::optional<gpu_internal::Invocation> native;
+                      if (frame.backend == Backend::Gpu) {
+                        allocator = native_device->allocator(allocator);
+                        auto root_allocator = native_device->allocator(
+                            budget->on_demand_allocator(
+                                observation, on_demand_admission.callback()));
+                        native.emplace(native_device, active_token(),
+                                       root_allocator);
+                        gpu.allocation_capacity = [&](std::uint64_t bytes) {
+                          auto capacity =
+                              native_device->allocation_capacity(bytes);
+                          if (!capacity.ok()) {
+                            if (capacity_status.ok())
+                              capacity_status = capacity.status();
+                            return std::uint64_t{0};
+                          }
+                          return capacity.value();
+                        };
+                        gpu.allocate_discovery =
+                            [root_allocator](std::uint64_t bytes) {
+                              return root_allocator.allocate(bytes);
+                            };
+                        gpu.materialize = [&, root_allocator](
+                                              const FragmentAtlasPlan& plan,
+                                              const ValueFragments& input,
+                                              const FootprintLimits& bounds) {
+                          execution_testing::ExecutionTiming timing(
+                              execution_testing::TimingKind::
+                                  AtlasMaterialization);
+                          auto packed =
+                              plan.materialize(input, root_allocator, bounds);
+                          if (packed.ok()) {
+                            timing.success(plan.payload_allocation_bytes() +
+                                           plan.directory_allocation_bytes());
+                            diagnostics.transfer_count += 2;
+                            diagnostics.transfer_bytes +=
+                                plan.payload_allocation_bytes() +
+                                plan.directory_allocation_bytes();
+                          }
+                          return packed;
+                        };
+                        gpu.buffer = [&](const std::uint8_t* bytes,
+                                         std::uint64_t size, bool writable) {
+                          std::uint64_t token = 0;
+                          const auto* api = native->service();
+                          api->buffer(api->context, bytes, size, writable,
+                                      &token);
+                          return native->status().ok()
+                                     ? Result<std::uint64_t>(token)
+                                     : Result<std::uint64_t>(native->status());
+                        };
+                        gpu.execute = [&](const ps_gpu_dispatch_v11* commands,
+                                          std::uint32_t count) {
+                          const auto* api = native->service();
+                          api->execute(api->context, commands, count);
+                          return native->status();
+                        };
+                      }
+                      auto result =
+                          frame.session->poll(allocator, services, blocks, gpu);
+                      if (!capacity_status.ok())
+                        result = Result<DependencyProgress>(capacity_status);
+                      if (native) {
+                        const auto& stats = native->statistics();
+                        native_stats = stats;
+                        diagnostics.native_dispatch_count += stats.dispatches;
+                        diagnostics.native_submission_count +=
+                            stats.submissions;
+                        diagnostics.native_compute_us += stats.device_us;
+                        diagnostics.native_constant_bytes +=
+                            stats.constant_bytes;
+                        if (result.ok() && !native->status().ok())
+                          result = Result<DependencyProgress>(native->status());
+                      }
+                      callback_us = duration_us(callback_started);
+                      return result;
+                    },
+                    pump, budget->resources().get());
+              }
               diagnostics.operation_timings.push_back(OperationTiming{
                   step.result_ref(), frame.backend, callback_us,
                   progress.status().code, 1,
@@ -2991,7 +3109,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     std::optional<gpu_internal::Invocation> native;
                     if (frame.backend == Backend::Gpu) {
                       allocator = native_device->allocator(allocator);
-                      native.emplace(native_device, active_token());
+                      native.emplace(
+                          native_device, active_token(),
+                          native_device->allocator(budget->on_demand_allocator(
+                              observation, on_demand_admission.callback())));
                     }
                     std::vector<Value> inputs;
                     std::vector<Region> demands;
@@ -3018,10 +3139,18 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                               FailureReason::InvalidDomain,
                               {FailureOrigin::Domain, FailureScope::Run}});
                       }
-                      auto dense = original
-                                       ? Result<Value>(std::move(*original))
-                                       : frame.ready[port].collect(
-                                             box, allocator, limits);
+                      auto dense = [&] {
+                        execution_testing::ExecutionTiming timing(
+                            execution_testing::TimingKind::NativeGather,
+                            native && !original);
+                        auto value = original
+                                         ? Result<Value>(std::move(*original))
+                                         : frame.ready[port].collect(
+                                               box, allocator, limits);
+                        if (value.ok())
+                          timing.success(value.value().bytes().size());
+                        return value;
+                      }();
                       if (!dense.ok())
                         return Result<Value>(dense.status());
                       if (native) {
@@ -3036,6 +3165,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                         inputs,        demands,        step.parameters,
                         frame.backend, active_token(), frame.outputs.boxes()[0],
                         allocator};
+                    execution_internal::CpuRangeScope cpu_range(
+                        pool->ranges(), call.cancellation,
+                        budget->resources() ? &*budget->resources() : nullptr,
+                        [&plan] { return plan.current(); });
+                    if (frame.backend == Backend::Cpu &&
+                        step.traits.outputs[0].region_rule ==
+                            OperationRegionRule::Whole)
+                      call.cpu_parallel = cpu_range.service();
                     call.output_index = step.output_index;
                     call.prepared = step.prepared;
                     call.resources = resources;
@@ -3047,6 +3184,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                     const auto callback_started =
                         std::chrono::steady_clock::now();
                     auto computed = invoke(step.operation, call);
+                    if (!cpu_range.status().ok())
+                      computed = Result<Value>(cpu_range.status());
                     if (native) {
                       native_stats = native->statistics();
                       diagnostics.native_dispatch_count +=
@@ -3095,7 +3234,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
                 return fail(value.status());
               }
               status =
-                  records.append_legacy(step_index, frame.outputs, frame.parts);
+                  records.append_legacy(step_index, frame.outputs,
+                                        frame.parts.data(), frame.parts.size());
               if (!status.ok())
                 return fail(status);
               auto fragments = ValueFragments::create(
@@ -3452,7 +3592,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           request.limits = options.dependencies;
           request.limits.sets.cancellation = request.cancellation;
           request.limits.maximum_work =
-              std::min(request.limits.maximum_work, work);
+              std::min(request.limits.maximum_work, remaining_work());
           requests.push_back(std::move(request));
         }
         auto started =
@@ -3838,12 +3978,83 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       }
       return Status::success();
     };
+    struct TileState {
+      std::size_t query = 0;
+      std::vector<Frame> frames;
+      std::optional<Result<Evaluation>> result;
+    };
+    ResourceLease tile_metadata;
+    std::deque<TileState> tile_window;
+    struct DrainTiles {
+      std::atomic<bool>& abort;
+      std::deque<TileState>& tiles;
+      ~DrainTiles() {
+        abort.store(true, std::memory_order_relaxed);
+        // PendingPoll destructors wait for retirement before sealing storage.
+        tiles.clear();
+      }
+    } drain_tiles{async_abort, tile_window};
+    const auto parallelism = std::max<std::uint32_t>(
+        1, std::min(pool->ranges().workers(), options.maximum_parallelism
+                                                  ? options.maximum_parallelism
+                                                  : pool->ranges().workers()));
+    if (async_tiles && budget->resources()) {
+      auto metadata = ResourceCapacity::host(
+          parallelism * (sizeof(TileState) +
+                         2 * (plan.steps().size() + 2) * sizeof(Frame) + 512));
+      metadata[ResourceKind::Metadata] = metadata[ResourceKind::Host];
+      auto lease = budget->resources()->reserve(metadata);
+      if (!lease.ok())
+        return fail(lease.status());
+      tile_metadata = lease.take_value();
+    }
+    std::size_t next_tile = 0;
     // Result/certificate assembly runs on the coordinator, outside the worker
     // callback fence. The captured frame owners remain alive in this scope.
     try {
       for (const auto& named : queries) {
-        auto evaluated = evaluate(PlanStepInput{named.step}, named.samples,
-                                  false, !named.boundary, true);
+        Result<Evaluation> evaluated(Status{ErrorCode::Internal, {}});
+        if (async_tiles) {
+          while (tile_window.empty() || !tile_window.front().result) {
+            while (tile_window.size() < parallelism &&
+                   next_tile < queries.size())
+              tile_window.push_back(TileState{next_tile++, {}, {}});
+            bool advanced = false;
+            for (auto& tile : tile_window) {
+              if (tile.result)
+                continue;
+              if (!tile.frames.empty() && tile.frames.back().pending_poll &&
+                  tile.frames.back().pending_poll->stage->future.wait_for(
+                      std::chrono::seconds(0)) != std::future_status::ready)
+                continue;
+              const auto& query = queries[tile.query];
+              resume_frames = &tile.frames;
+              yielded = false;
+              auto current = evaluate(PlanStepInput{query.step}, query.samples,
+                                      false, !query.boundary, false);
+              advanced = true;
+              if (!yielded) {
+                if (!current.ok())
+                  return fail(current.status());
+                tile.result.emplace(std::move(current));
+              }
+            }
+            if (!advanced && !tile_window.front().result) {
+              for (auto& tile : tile_window) {
+                if (!tile.frames.empty() && tile.frames.back().pending_poll) {
+                  tile.frames.back().pending_poll->stage->future.wait_for(
+                      std::chrono::milliseconds(2));
+                  break;
+                }
+              }
+            }
+          }
+          evaluated = std::move(*tile_window.front().result);
+          tile_window.pop_front();
+        } else {
+          evaluated = evaluate(PlanStepInput{named.step}, named.samples, false,
+                               !named.boundary, true);
+        }
         if (atom_outcomes && !named.boundary) {
           const auto& step = plan.steps()[named.step];
           DependencyQuery query;
@@ -3910,19 +4121,12 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           return fail(recorded);
         if (fragment_outputs) {
           const auto& descriptor = returned->descriptor();
-          std::vector<std::uint64_t> geometry(descriptor.shape.size(), 1);
-          const auto channels = input_internal::tuple_channel_axis(
-              descriptor, returned->facets());
-          if (channels) {
-            geometry[*channels] = descriptor.shape[*channels];
-            geometry[*channels - 1] = plan.tile_width();
-            if (*channels > 1)
-              geometry[*channels - 2] = plan.tile_height();
-          } else {
-            geometry.back() = plan.tile_width();
-            if (geometry.size() > 1)
-              geometry[geometry.size() - 2] = plan.tile_height();
-          }
+          const auto geometry = cpu_tile_geometry(
+              {descriptor,
+               returned->facets(),
+               {},
+               plan.steps()[named.step].traits.outputs[0].atomic_trailing_axes},
+              plan.tile_width(), plan.tile_height());
           auto tiles = named.samples.tile_cover(geometry, limits);
           if (!tiles.ok())
             return fail(tiles.status());
@@ -3990,6 +4194,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       diagnostics.peak_live_bytes = peaks.first;
       diagnostics.planned_peak_bytes = peaks.second;
       diagnostics.execute_us = duration_us(started);
+      if (async_tiles)
+        diagnostics.peak_active_tasks = activity.peak.load();
       diagnostics.dependency_cache_work =
           options.maximum_dependency_cache_work - cache_work;
       result.dependencies = std::move(records).finish();
@@ -3999,6 +4205,10 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         diagnostics.managed_resources = budget->resources()->statistics();
       if (stop() != ErrorCode::Ok)
         return fail(Status{stop(), {}});
+      if (coordinator_metadata_failure != ErrorCode::Ok)
+        return fail(
+            Status{coordinator_metadata_failure,
+                   "dependency coordinator metadata allocation failed"});
       return Result<ExecutionResult>(std::move(result));
     } catch (const std::bad_alloc&) {
       return fail(Status{ErrorCode::ResourceExhausted,
@@ -4009,19 +4219,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   }
 
  private:
-  /** @brief Runs exactly one ready stage and drains its callback ownership. */
+  /** @brief Admits one ready stage; readiness is signalled after retirement. */
   template <class T>
-  static Result<T> dependency_stage(ThreadPool* pool,
-                                    WaitingAdmission* admission,
-                                    std::function<Result<T>()> work,
-                                    const std::function<void()>& pump = {},
-                                    const ResourceBudget* resources = nullptr) {
-    struct Completion {
-      ResourceLease lease;
-      std::promise<Result<T>> promise;
-      Result<T> result{Status{ErrorCode::Internal, {}}};
-      std::function<Result<T>()> work;
-    };
+  static Result<std::shared_ptr<StageCompletion<T>>> submit_dependency_stage(
+      ThreadPool* pool, WaitingAdmission* admission,
+      std::function<Result<T>()> work,
+      const ResourceBudget* resources = nullptr) {
+    using Completion = StageCompletion<T>;
+    using Answer = Result<std::shared_ptr<Completion>>;
     ResourceLease lease;
     if (resources) {
       auto capacity =
@@ -4030,24 +4235,35 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       capacity[ResourceKind::Entries] = 1;
       auto admitted = resources->reserve(capacity);
       if (!admitted.ok())
-        return Result<T>(admitted.status());
+        return Answer(admitted.status());
       lease = admitted.take_value();
     }
     auto completion = std::make_shared<Completion>();
     completion->lease = std::move(lease);
     completion->work = std::move(work);
-    auto future = completion->promise.get_future();
     auto slot = admission->try_acquire();
     if (!slot)
-      return Result<T>(Status::failure(ErrorCode::ResourceExhausted,
-                                       "dependency waiting queue exhausted"));
+      return Answer(Status::failure(ErrorCode::ResourceExhausted,
+                                    "dependency waiting queue exhausted"));
     if (resources) {
       auto issued = resources->consume({0, 0, 0, 1});
       if (!issued.ok())
-        return Result<T>(issued);
+        return Answer(issued);
     }
+    auto* const activity = coordinator_activity;
     QueuedCallback callback{
-        [completion, resources] {
+        [completion, resources, activity] {
+          struct Active {
+            StageActivity* value;
+            explicit Active(StageActivity* p) : value(p) {
+              if (value)
+                value->enter();
+            }
+            ~Active() {
+              if (value)
+                value->active.fetch_sub(1);
+            }
+          } active(activity);
           // The callable's owners retire before the completion notification.
           auto work = std::move(completion->work);
           try {
@@ -4082,15 +4298,29 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         },
         completion->lease};
     if (!pool->submit(std::move(callback)))
-      return Result<T>(Status::failure(ErrorCode::ResourceExhausted,
-                                       "dependency callback queue stopped"));
+      return Answer(Status::failure(ErrorCode::ResourceExhausted,
+                                    "dependency callback queue stopped"));
+    return Answer(std::move(completion));
+  }
+  /** @brief Synchronous wrapper retains the existing stage behavior. */
+  template <class T>
+  static Result<T> dependency_stage(ThreadPool* pool,
+                                    WaitingAdmission* admission,
+                                    std::function<Result<T>()> work,
+                                    const std::function<void()>& pump = {},
+                                    const ResourceBudget* resources = nullptr) {
+    auto submitted =
+        submit_dependency_stage<T>(pool, admission, std::move(work), resources);
+    if (!submitted.ok())
+      return Result<T>(submitted.status());
+    auto completion = submitted.take_value();
     if (pump) {
-      while (future.wait_for(std::chrono::milliseconds(2)) !=
+      while (completion->future.wait_for(std::chrono::milliseconds(2)) !=
              std::future_status::ready)
         pump();
       pump();
     }
-    return future.get();
+    return completion->future.get();
   }
 
  public:
@@ -4100,6 +4330,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    * @param gpu_pool Optional GPU callback pool with context lifetime.
    * @param waiting_admission Context-wide waiting-callback owner.
    * @param reservation Complete accounted working-set owner.
+   * @param incremental_allocator Gated nonblocking admission for native steps
+   * and their CPU retries; retains root accounting and Run observations.
    * @param invoke Callback entry retaining registry ownership and currentness.
    * @param plan Immutable validated physical plan.
    * @param cancellation Cooperative caller token.
@@ -4112,6 +4344,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       ThreadPool* cpu_pool, ThreadPool* gpu_pool,
       WaitingAdmission* waiting_admission,
       std::shared_ptr<MemoryReservation> reservation,
+      BufferAllocator incremental_allocator,
       std::function<Result<Value>(const std::string&,
                                   const OperationInvocation&)>
           invoke,
@@ -4127,6 +4360,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         gpu_pool_(gpu_pool),
         waiting_admission_(waiting_admission),
         reservation_(std::move(reservation)),
+        incremental_allocator_(std::move(incremental_allocator)),
         invoke_(std::move(invoke)),
         plan_(plan),
         resources_(std::move(resources)),
@@ -4246,6 +4480,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       observe_external_stop_locked();
       while (!failure_.has_value() && in_flight_ < maximum_parallelism_ &&
              !ready_.empty()) {
+        execution_testing::ExecutionTiming timing(
+            execution_testing::TimingKind::ReadyDispatch);
         const std::size_t step_index = ready_.top();
         ready_.pop();
         const Backend backend = plan_->steps()[step_index].backend;
@@ -4259,6 +4495,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
         execution_testing::notify_post_submit_observation();
 #endif
+        if (!failure_)
+          timing.success(0);
       }
 
       if ((failure_.has_value() || completed_count_ == values_.size()) &&
@@ -4293,6 +4531,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           ErrorCode::Stale, "execution plan became stale before publication"));
     }
 
+    execution_testing::ExecutionTiming assembly_timing(
+        execution_testing::TimingKind::FinalAssembly);
     ExecutionResult result;
     for (const auto& output : plan_->outputs()) {
       auto view =
@@ -4303,8 +4543,9 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         ++diagnostics_.host_access_count;
       result.values.emplace(output.first, view.take_value());
     }
-    diagnostics_.peak_live_bytes = reservation_->peak();
-    diagnostics_.planned_peak_bytes = reservation_->planned();
+    const auto peaks = reservation_->observed_peaks();
+    diagnostics_.peak_live_bytes = peaks.first;
+    diagnostics_.planned_peak_bytes = peaks.second;
     diagnostics_.retained_input_bytes = retained_input_bytes_;
     result.diagnostics = std::move(diagnostics_);
     result.diagnostics.plan_digest = plan_->digest().value;
@@ -4325,6 +4566,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           ErrorCode::Stale,
           "execution plan became stale before final result publication"));
     }
+    assembly_timing.success(0);
     return Result<ExecutionResult>(std::move(result));
   }
 
@@ -4621,8 +4863,14 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         }
       }
 
-      auto allocator = reservation_->allocator();
-      auto callback_allocator = reservation_->allocator(step.planned_bytes);
+      // A planned native step, including its CPU retry, obtains capacity
+      // without waiting while another attempt's owners may still be live.
+      const bool incremental = native_device_ && step.backend == Backend::Gpu;
+      auto allocator =
+          incremental ? incremental_allocator_ : reservation_->allocator();
+      auto callback_allocator =
+          incremental ? allocator.limited_requested(step.planned_bytes)
+                      : reservation_->allocator(step.planned_bytes);
       if (native_device_ && backend == Backend::Gpu) {
         allocator = native_device_->allocator(allocator);
         callback_allocator = native_device_->allocator(callback_allocator);
@@ -4685,9 +4933,15 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
           // Missing planned uploads are permitted only for a predecessor that
           // was planned on GPU and actually fell back before this invocation.
           if (action != plan_->physical_steps().end()) {
+            auto resolved =
+                native_device_->allocation_capacity(action->packed_bytes);
+            if (!resolved.ok()) {
+              finish_failure(resolved.status());
+              return;
+            }
             if (transferred.value().bytes().size() != action->packed_bytes ||
-                transferred.value().storage()->capacity() >
-                    action->allocation_bytes) {
+                action->allocation_bytes != action->packed_bytes ||
+                transferred.value().storage()->capacity() > resolved.value()) {
               finish_failure(Status::failure(
                   ErrorCode::Internal,
                   "native upload contradicts physical access bounds"));
@@ -4769,13 +5023,38 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
         }
       }
       call.resources = resources_;
+      execution_internal::CpuRangeScope cpu_range(
+          cpu_pool_->ranges(), cancellation_,
+          reservation_->resources() ? &*reservation_->resources() : nullptr,
+          [this] { return plan_->current(); });
+      if (backend == Backend::Cpu &&
+          step.traits.outputs[0].region_rule == OperationRegionRule::Whole)
+        call.cpu_parallel = cpu_range.service();
       if (native_device_ && backend == Backend::Gpu) {
-        native.emplace(native_device_, cancellation_);
+        native.emplace(native_device_, cancellation_, allocator);
         call.gpu = native->service();
       }
-      Result<Value> invocation_result = invoke_(step.operation, call);
+      ErrorCode callback_metadata_failure = ErrorCode::Ok;
+      Result<Value> invocation_result = [&] {
+        std::optional<ResourceAllocationScope> scope;
+        if (const auto& resources = reservation_->resources())
+          scope.emplace(*resources, &callback_metadata_failure);
+        return invoke_(step.operation, call);
+      }();
+      if (!cpu_range.status().ok())
+        invocation_result = Result<Value>(cpu_range.status());
       if (native && !native->status().ok())
         invocation_result = Result<Value>(native->status());
+      if (callback_metadata_failure != ErrorCode::Ok &&
+          invocation_result.status().detail.origin != FailureOrigin::Protocol &&
+          invocation_result.status().code != ErrorCode::ResourceExhausted &&
+          invocation_result.status().code != ErrorCode::Cancelled &&
+          invocation_result.status().code != ErrorCode::Stale)
+        invocation_result = Result<Value>(
+            Status{callback_metadata_failure,
+                   "callback metadata allocation failed",
+                   FailureReason::CapacityLimit,
+                   {FailureOrigin::Resource, FailureScope::Unspecified}});
       if (native && invocation_result.ok() &&
           native->statistics().dispatches == 0)
         invocation_result = Result<Value>(
@@ -4796,9 +5075,11 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       bool should_fallback = false;
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        diagnostics_.operation_timings.push_back(
-            OperationTiming{step.result_ref(), backend, elapsed,
-                            invocation_result.status().code});
+        diagnostics_.operation_timings.push_back(OperationTiming{
+            step.result_ref(), backend, elapsed,
+            invocation_result.status().code, 1,
+            invocation_result.ok() ? call.output_region.element_count().value()
+                                   : 0});
         if (native) {
           diagnostics_.native_dispatch_count += native->statistics().dispatches;
           diagnostics_.native_submission_count +=
@@ -4876,6 +5157,8 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
    */
   void finish_attempt(std::size_t step_index, Backend backend,
                       Result<Value> result) {
+    execution_testing::ExecutionTiming timing(
+        execution_testing::TimingKind::CompletionPublication);
     std::lock_guard<std::mutex> lock(mutex_);
     if (!result.ok()) {
       Status failure = result.status();
@@ -4959,6 +5242,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
     }
     --in_flight_;
     state_changed_.notify_all();
+    timing.success(0);
   }
 
   /**
@@ -5081,6 +5365,7 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
   WaitingAdmission* waiting_admission_;
   /** @brief Shared local byte ledger with longer context lifetime. */
   std::shared_ptr<MemoryReservation> reservation_;
+  BufferAllocator incremental_allocator_;
   /** @brief Run callback entry retaining registry ownership and currentness. */
   std::function<Result<Value>(const std::string&, const OperationInvocation&)>
       invoke_;
@@ -5177,6 +5462,16 @@ void ExecutionContext::clear_result_cache() {
   impl_->dependency_checkpoints->clear();
   if (impl_->cache)
     impl_->cache->clear();
+}
+SchedulerStatistics ExecutionContext::scheduler_statistics() const {
+  SchedulerStatistics result;
+  result.enabled = impl_->cpu_pool.timing_enabled();
+  if (result.enabled) {
+    result.cpu = impl_->cpu_pool.statistics();
+    if (impl_->gpu_pool)
+      result.gpu = impl_->gpu_pool->statistics();
+  }
+  return result;
 }
 ResultCacheStatistics ExecutionContext::cache_statistics() const {
   auto result =
@@ -5497,10 +5792,13 @@ Result<DemandResult> ExecutionContext::execute_fragments(
         frozen.plan_, validated.take_value(), combined.value(), options,
         nullptr,
         [this](std::uint64_t bytes) {
-          if (impl_->disk && impl_->budget->available() < bytes)
+          if (impl_->disk &&
+              !impl_->budget->can_allocate(
+                  bytes, static_cast<bool>(impl_->native_device)))
             impl_->disk->drop_pending();
           if (impl_->cache)
-            impl_->cache->reclaim_for(bytes);
+            impl_->cache->reclaim_for(bytes,
+                                      static_cast<bool>(impl_->native_device));
         },
         &query, &result.values, frozen.execution_identity_,
         impl_->dependency_flights.get(), impl_->cache.get(),
@@ -5871,7 +6169,7 @@ bool planar_required(const ExecutionPlan& plan) {
 
 Result<ExecutionResult> ExecutionContext::execute_planar(
     const ExecutionPlan& plan, ExecutionBindings bindings,
-    const CancellationToken& cancellation, const ExecutionOptions&) {
+    const CancellationToken& cancellation, const ExecutionOptions& options) {
   const auto started = std::chrono::steady_clock::now();
   const auto elapsed_us = [](std::chrono::steady_clock::time_point begin) {
     return static_cast<std::uint64_t>(
@@ -5894,7 +6192,8 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
           plan.tile_plan(named.first, plan.output_regions().at(named.first));
       if (!isolated.ok())
         return Result<ExecutionResult>(isolated.status());
-      auto run = execute_planar(isolated.value(), bindings, cancellation, {});
+      auto run =
+          execute_planar(isolated.value(), bindings, cancellation, options);
       if (!run.ok())
         return run;
       auto child = run.take_value();
@@ -5915,6 +6214,15 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
       total.source_read_bytes += part.source_read_bytes;
       total.result_copy_bytes += part.result_copy_bytes;
       total.tile_count += part.tile_count;
+      total.transfer_count += part.transfer_count;
+      total.transfer_bytes += part.transfer_bytes;
+      total.native_dispatch_count += part.native_dispatch_count;
+      total.native_submission_count += part.native_submission_count;
+      total.cpu_stage_count += part.cpu_stage_count;
+      total.cpu_tile_callback_count += part.cpu_tile_callback_count;
+      total.native_compute_us += part.native_compute_us;
+      total.native_constant_bytes += part.native_constant_bytes;
+      total.host_access_count += part.host_access_count;
       total.retained_input_bytes =
           std::max(total.retained_input_bytes, part.retained_input_bytes);
       total.peak_live_bytes =
@@ -5946,11 +6254,18 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
       },
       impl_->budget);
   // All plugin planar entry points, including validation-only mapped
-  // operations, share context-wide waiting admission and the CPU worker lane.
+  // operations, share context-wide waiting admission and their selected lane.
   // Waiting for retirement keeps references captured by body alive.
   const auto dispatch_planar_callback =
-      [&](const std::function<Status()>& body,
-          std::uint64_t* callback_us) -> Status {
+      [&](const std::function<Status()>& body, std::uint64_t* callback_us,
+          Backend backend = Backend::Cpu) -> Status {
+    auto* pool =
+        backend == Backend::Gpu ? impl_->gpu_pool.get() : &impl_->cpu_pool;
+    if (!pool ||
+        (backend == Backend::Gpu &&
+         (!impl_->native_device || !impl_->native_device->available())))
+      return Status{ErrorCode::BackendUnavailable,
+                    "native planar GPU unavailable"};
     struct Completion final {
       Status status{ErrorCode::Internal, "planar callback did not run"};
       std::mutex mutex;
@@ -6007,7 +6322,7 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
           completion->changed.notify_one();
         },
         completion->lease};
-    if (!impl_->cpu_pool.submit(std::move(callback)))
+    if (!pool->submit(std::move(callback)))
       return Status::failure(ErrorCode::ResourceExhausted,
                              "planar callback queue stopped");
     std::unique_lock<std::mutex> completion_lock(completion->mutex);
@@ -6021,11 +6336,22 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
       *callback_us = completion->callback_us;
     return status;
   };
-  const auto run_planar_callback = [&](const std::function<Status()>& body,
-                                       std::uint64_t* callback_us) -> Status {
+  const auto run_planar_callback =
+      [&](const std::function<Status()>& body, std::uint64_t* callback_us,
+          Backend backend = Backend::Cpu, bool coordinator = false) -> Status {
     Status status;
     try {
-      status = dispatch_planar_callback(body, callback_us);
+      if (coordinator) {
+        if (execution_internal::in_kernel_worker)
+          return Status{ErrorCode::InvalidArgument,
+                        "nested CPU stage coordinator"};
+        const auto begin = std::chrono::steady_clock::now();
+        status = body();
+        if (callback_us)
+          *callback_us = elapsed_us(begin);
+      } else {
+        status = dispatch_planar_callback(body, callback_us, backend);
+      }
     } catch (const std::bad_alloc&) {
       status = Status{ErrorCode::ResourceExhausted, {}};
     } catch (...) {
@@ -6046,10 +6372,20 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
           structural_image_facets(step.output_descriptor,
                                   step.output_facets)) &&
          !step.traits.planar_storage_capable) ||
-        step.output_result_schema || step.backend != Backend::Cpu)
+        step.output_result_schema ||
+        (step.backend == Backend::Gpu &&
+         (!step.traits.planar_storage_capable ||
+          step.traits.outputs[0].region_rule != OperationRegionRule::Whole ||
+          step.traits.allows_cpu_fallback)))
       return Result<ExecutionResult>(Status::failure(
           ErrorCode::TypeMismatch,
           "image operation has not migrated to planar storage"));
+  for (const auto& step : plan.steps())
+    if (step.backend == Backend::Gpu &&
+        (!impl_->native_device || !impl_->native_device->available() ||
+         !impl_->gpu_pool))
+      return Result<ExecutionResult>(Status{ErrorCode::BackendUnavailable,
+                                            "native planar GPU unavailable"});
   if (bindings.inputs.size() != plan.input_declarations().size())
     return Result<ExecutionResult>(Status::failure(
         ErrorCode::InvalidArgument, "planar binding count mismatch"));
@@ -7220,6 +7556,9 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
     auto image = output.take_value();
     std::uint64_t callback_us = 0;
     NumericDiagnostics numeric;
+    gpu_internal::Statistics native_statistics;
+    std::uint64_t cpu_stages = 0, cpu_tiles = 0;
+    std::uint32_t tile_peak = 0;
     auto status = run_planar_callback(
         [&] {
           // Worker threads do not inherit the caller's metadata scope.
@@ -7230,12 +7569,74 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
           std::optional<ResourceAllocationScope> scope;
           if (resources)
             scope.emplace(*resources, &metadata_failure);
+          std::optional<execution_internal::CpuRangeScope> cpu_range;
+          std::optional<execution_internal::CpuTileScope> tile_scope;
+          std::optional<gpu_internal::Invocation> native;
+          execution_internal::ScopedMemoryAdmission admission(
+              [this, observation,
+               native_backend =
+                   step.backend == Backend::Gpu](std::uint64_t bytes) {
+                if (native_backend) {
+                  if (impl_->disk && !impl_->budget->can_allocate(bytes, true))
+                    impl_->disk->drop_pending();
+                  if (impl_->cache)
+                    impl_->cache->reclaim_for(bytes, true);
+                  if (!impl_->budget->can_allocate(bytes, true))
+                    impl_->native_device->clear_pipeline_cache();
+                }
+                return impl_->budget->reserve(bytes, {}, observation);
+              });
+          auto allocator = impl_->budget->on_demand_allocator(
+              observation, admission.callback());
+          if (step.backend == Backend::Gpu) {
+            allocator = impl_->native_device->allocator(allocator);
+            native.emplace(impl_->native_device, cancellation, allocator);
+          } else if (step.traits.cpu_staged_tiles) {
+            tile_scope.emplace(impl_->cpu_pool.ranges(), cancellation,
+                               resources ? &*resources : nullptr,
+                               options.maximum_parallelism
+                                   ? options.maximum_parallelism
+                                   : impl_->cpu_worker_count,
+                               [&plan] { return plan.current(); });
+          } else {
+            cpu_range.emplace(impl_->cpu_pool.ranges(), cancellation,
+                              resources ? &*resources : nullptr,
+                              [&plan] { return plan.current(); });
+          }
+          const auto completion_status = [&](bool successful) -> Status {
+            if (tile_scope && !tile_scope->status().ok())
+              return tile_scope->status();
+            if (cpu_range && !cpu_range->status().ok())
+              return cpu_range->status();
+            if (native) {
+              if (!native->status().ok())
+                return native->status();
+              if (successful && !native->statistics().dispatches)
+                return Status{ErrorCode::OperationFailed,
+                              "GPU planar callback performed no native work"};
+            }
+            return Status::success();
+          };
+          const auto* parallel =
+              cpu_range && step.traits.outputs[0].region_rule ==
+                               OperationRegionRule::Whole
+                  ? cpu_range->service()
+                  : nullptr;
           auto callback_status = impl_->operation_registry->invoke_planar(
               step.operation, windows, step.input_demands, step.parameters,
-              step.output_demand, image, cancellation,
-              impl_->budget->on_demand_allocator(observation), step.prepared,
+              step.output_demand, image, cancellation, allocator, step.prepared,
               [&plan] { return plan.current(); }, &numeric,
-              resources ? &*resources : nullptr, &metadata_failure);
+              resources ? &*resources : nullptr, &metadata_failure, parallel,
+              completion_status, step.backend,
+              native ? native->service() : nullptr,
+              tile_scope ? tile_scope->service() : nullptr);
+          if (tile_scope) {
+            cpu_stages = tile_scope->stages();
+            cpu_tiles = tile_scope->tiles();
+            tile_peak = tile_scope->peak();
+          }
+          if (native)
+            native_statistics = native->statistics();
           if (metadata_failure != ErrorCode::Ok &&
               callback_status.detail.origin != FailureOrigin::Protocol &&
               callback_status.code != ErrorCode::ResourceExhausted &&
@@ -7248,10 +7649,14 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
                        {FailureOrigin::Resource, FailureScope::Unspecified}};
           return callback_status;
         },
-        &callback_us);
+        &callback_us, step.backend, step.traits.cpu_staged_tiles);
     OperationTiming timing;
     timing.output = step.result_ref();
-    timing.backend = Backend::Cpu;
+    timing.backend = step.backend;
+    timing.native_compute_us = native_statistics.device_us;
+    timing.native_dispatch_count = native_statistics.dispatches;
+    timing.cpu_stage_count = cpu_stages;
+    timing.cpu_tile_callback_count = cpu_tiles;
     timing.duration_us = callback_us;
     timing.numeric = numeric;
     timing.outcome = status.code;
@@ -7259,11 +7664,18 @@ Result<ExecutionResult> ExecutionContext::execute_planar(
     if (count.ok())
       timing.computed_elements = count.value();
     diagnostics.operation_timings.push_back(std::move(timing));
+    diagnostics.native_dispatch_count += native_statistics.dispatches;
+    diagnostics.native_submission_count += native_statistics.submissions;
+    diagnostics.native_compute_us += native_statistics.device_us;
+    diagnostics.native_constant_bytes += native_statistics.constant_bytes;
+    diagnostics.cpu_stage_count += cpu_stages;
+    diagnostics.cpu_tile_callback_count += cpu_tiles;
     if (!status.ok())
       return Result<ExecutionResult>(status);
     produced[index] = std::move(image);
-    diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
-    diagnostics.peak_active_tasks = 1;
+    diagnostics.selected_backends[step.result_ref()] = step.backend;
+    diagnostics.peak_active_tasks =
+        std::max(diagnostics.peak_active_tasks, std::max(1U, tile_peak));
   }
   ExecutionResult result;
   for (const auto& named_output : plan.outputs()) {
@@ -7411,7 +7823,10 @@ Result<ExecutionResult> ExecutionContext::execute(
   try {
     std::uint64_t working_bytes = 0;
     for (const auto& step : plan.steps()) {
-      auto sum = checked_add(working_bytes, step.planned_bytes);
+      auto sum = checked_add(
+          working_bytes, impl_->native_device && step.backend == Backend::Gpu
+                             ? 0
+                             : step.planned_bytes);
       if (!sum.ok())
         return Result<ExecutionResult>(sum.status());
       working_bytes = sum.value();
@@ -7420,7 +7835,8 @@ Result<ExecutionResult> ExecutionContext::execute(
         const auto backend = producer
                                  ? plan.steps()[producer->step_index].backend
                                  : Backend::Cpu;
-        if (backend != Backend::Cpu || step.backend != Backend::Cpu) {
+        if (!impl_->native_device &&
+            (backend != Backend::Cpu || step.backend != Backend::Cpu)) {
           const auto& descriptor =
               producer
                   ? plan.steps()[producer->step_index].output_descriptor
@@ -7430,8 +7846,7 @@ Result<ExecutionResult> ExecutionContext::execute(
           auto dense = input_internal::dense_metadata(descriptor);
           if (!dense.ok())
             return Result<ExecutionResult>(dense.status());
-          sum = checked_add(working_bytes, gpu_internal::allocation_capacity(
-                                               dense.value().bytes));
+          sum = checked_add(working_bytes, dense.value().bytes);
           if (!sum.ok())
             return Result<ExecutionResult>(sum.status());
           working_bytes = sum.value();
@@ -7457,9 +7872,20 @@ Result<ExecutionResult> ExecutionContext::execute(
       std::shared_ptr<MemoryReservation> reservation;
       ~Seal() { reservation->seal(); }
     } seal{reservation};
+    execution_internal::ScopedMemoryAdmission incremental_admission(
+        [this, reservation](std::uint64_t bytes) {
+          if (impl_->disk && !impl_->budget->can_allocate(bytes, true))
+            impl_->disk->drop_pending();
+          if (impl_->cache)
+            impl_->cache->reclaim_for(bytes, true);
+          if (impl_->native_device && !impl_->budget->can_allocate(bytes, true))
+            impl_->native_device->clear_pipeline_cache();
+          return reservation->reserve_incremental(bytes);
+        });
     auto coordinator = std::make_shared<ExecutionRun>(
         &impl_->cpu_pool, impl_->gpu_pool.get(), &impl_->waiting_admission,
         reservation,
+        reservation->on_demand_allocator(incremental_admission.callback()),
         [operations = impl_->operation_registry, &plan](
             const std::string& key, const OperationInvocation& invocation) {
           return operations->invoke_current(key, invocation,
@@ -7571,10 +7997,13 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           },
           plan, std::move(snapshot), cancellation, options, sink,
           [this](std::uint64_t bytes) {
-            if (impl_->disk && impl_->budget->available() < bytes)
+            if (impl_->disk &&
+                !impl_->budget->can_allocate(
+                    bytes, static_cast<bool>(impl_->native_device)))
               impl_->disk->drop_pending();
             if (impl_->cache)
-              impl_->cache->reclaim_for(bytes);
+              impl_->cache->reclaim_for(
+                  bytes, static_cast<bool>(impl_->native_device));
           },
           requested, nullptr, snapshot_identity, nullptr, nullptr, nullptr,
           &impl_->shared_results, atom_outcomes);
@@ -7751,7 +8180,10 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         const auto& step = tile.steps()[i];
         if (!required[i] || tile_cached.count(step.result_ref()))
           continue;
-        auto sum = checked_add(working, step.planned_bytes);
+        auto sum = checked_add(
+            working, impl_->native_device && step.backend == Backend::Gpu
+                         ? 0
+                         : step.planned_bytes);
         if (!sum.ok())
           return Result<ExecutionResult>(sum.status());
         working = sum.value();
@@ -7780,7 +8212,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           const auto backend = producer
                                    ? tile.steps()[producer->step_index].backend
                                    : Backend::Cpu;
-          if (backend != Backend::Cpu || step.backend != Backend::Cpu) {
+          if (!impl_->native_device &&
+              (backend != Backend::Cpu || step.backend != Backend::Cpu)) {
             const auto& descriptor =
                 producer
                     ? tile.steps()[producer->step_index].output_descriptor
@@ -7791,8 +8224,7 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
             auto bytes = region_bytes(descriptor, step.input_demands[port]);
             if (!bytes.ok())
               return Result<ExecutionResult>(bytes.status());
-            sum = checked_add(working,
-                              gpu_internal::allocation_capacity(bytes.value()));
+            sum = checked_add(working, bytes.value());
             if (!sum.ok())
               return Result<ExecutionResult>(sum.status());
             working = sum.value();
@@ -7943,9 +8375,22 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           return Result<ExecutionResult>(published.status());
         values[i] = published.take_value();
       }
+      execution_internal::ScopedMemoryAdmission incremental_admission(
+          [this, reservation = seal.reservation](std::uint64_t bytes) {
+            if (impl_->disk && !impl_->budget->can_allocate(bytes, true))
+              impl_->disk->drop_pending();
+            if (impl_->cache)
+              impl_->cache->reclaim_for(bytes, true);
+            if (impl_->native_device &&
+                !impl_->budget->can_allocate(bytes, true))
+              impl_->native_device->clear_pipeline_cache();
+            return reservation->reserve_incremental(bytes);
+          });
       auto coordinator = std::make_shared<ExecutionRun>(
           &impl_->cpu_pool, impl_->gpu_pool.get(), &impl_->waiting_admission,
           seal.reservation,
+          seal.reservation->on_demand_allocator(
+              incremental_admission.callback()),
           [operations = impl_->operation_registry, &tile](
               const std::string& key, const OperationInvocation& invocation) {
             return operations->invoke_current(

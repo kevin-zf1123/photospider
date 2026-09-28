@@ -1,11 +1,16 @@
 # 图形、坐标、渐变与噪声生成
 
-本页按功能整理当前已接受的目标规格；各新成员尚未实现。具体英文规格记录端口、
+本页按功能整理当前已接受的目标规格。Perlin2002 strict CPU Whole、CPU tiled 和
+原生 GPU 形式已注册；GPU 形式按内核构建使用 Metal 或 Vulkan，且不提供 CPU
+fallback。Vulkan Perlin 已在 FreeBSD Intel UHD 770 实机验证，NVIDIA 与 Linux
+仍未验证。Gaussian 与 PixelOE Vulkan 尚未交付。具体英文规格记录端口、
 参数、数学定义与依赖规则，继承 01-numeric 与 02-format-color。
 [共享契约](op_specs/GEN_common_contract.md)、[oracle 覆盖说明](oracle-coverage.md)、
 [oracle 使用说明](../../../oracle/ops/generation/README.md)与
 [研究来源及采用边界](research-sources.md)分别说明公共语义、可运行参考及证据范围。
 具体 schema、随机映射或后端细节中仍标明未完成的部分，需要在注册成员前明确并验证。
+
+当前 Perlin 注册、参数与验证见 [Perlin 实现说明](perlin-implementation.md)。
 
 ## 图形与坐标
 
@@ -38,7 +43,7 @@ Gaussian表示分布，white/blue表示频谱，Perlin/Voronoi表示构造。将
 | [NOI-01 white uniform](op_specs/NOI-01_uniform_contract.md) | shape/seed→field | seed、stream/channel 显式；浮点映射依最终成员定义 | Philox4x64-10；核心已知答案、均值.5、方差1/12和相关性；成员：[NOI-01A](op_specs/NOI-01A_uniform_philox.md) |
 | [NOI-02 white Gaussian](op_specs/NOI-02_gaussian_contract.md) | shape/seed→signed field | μ、σ 显式；具名 Box–Muller；不clip | log(0)保护，signed field；均值/方差、分布尾部；成员：[NOI-02A](op_specs/NOI-02A_gaussian_box_muller.md) |
 | [NOI-03 correlated noise](op_specs/NOI-03_correlated_contract.md) | white field+filter→field | correlation length px、边界与方差归一 | H/W；与white频谱不同；成员：[NOI-03A](op_specs/NOI-03A_correlate_kernel.md)、[NOI-03B](op_specs/NOI-03B_correlated_gaussian.md) |
-| [NOI-04 Perlin](op_specs/NOI-04_gradient_noise_contract.md) | coordinates+seed→field | cell size必填，算法版本固定、gradient/fade/hash明确 | O(P)，E；格点连续性和周期，输出范围按版本；成员：[NOI-04A](op_specs/NOI-04A_perlin2002_3d.md)、[NOI-04B](op_specs/NOI-04B_gradient2d_philox.md) |
+| [NOI-04 Perlin](op_specs/NOI-04_gradient_noise_contract.md) | coordinates→field | NOI-04A 固定 permutation、无 seed；坐标缩放由上游完成；NOI-04B 独立使用 Philox | O(P)，E；格点连续性和周期，输出范围按版本；成员：[NOI-04A](op_specs/NOI-04A_perlin2002_3d.md)、[NOI-04B](op_specs/NOI-04B_gradient2d_philox.md) |
 | [NOI-05 cellular/Voronoi](op_specs/NOI-05_cellular_contract.md) | coords+feature process→F1/F2/ID | L2 距离；每 cell 点数与随机寻址显式 | 最近点搜索；F2-F1不是精确边界距离；成员：[NOI-05A](op_specs/NOI-05A_cellular2d_l2.md)、[NOI-05B](op_specs/NOI-05B_nearest_point_distances.md) |
 | [NOI-06 fractal](op_specs/NOI-06_fractal_contract.md) | base noise→field | octaves、lacunarity、gain 显式；fBm/turbulence/ridged分别具名 | O(P·octaves)；按采样足迹截断 octave；不声称严格带限；成员：[NOI-06A](op_specs/NOI-06A_fbm_sum.md)、[NOI-06B](op_specs/NOI-06B_turbulence_sum.md)、[NOI-06C](op_specs/NOI-06C_ridged_sum.md)、[NOI-06D](op_specs/NOI-06D_footprint_fbm.md) |
 | [NOI-07 blue noise](op_specs/NOI-07_blue_noise_contract.md) | rank tile/volume+coords→field/points | 通用 rank lookup 与具名 blue/STBN 资源分离 | PSD低频抑制、周期重复；生成点集不等于像素mask；成员：[NOI-07A](op_specs/NOI-07A_blue_rank_tile.md)、[NOI-07B](op_specs/NOI-07B_blue_threshold_points.md) |

@@ -23,6 +23,7 @@ Cancellation 是 cooperative，不是 preemption。Running callback 可以晚返
 First-failure selector 不分配内存，并在 failure diagnostic construction 本身失败时继续复用，
 因此已经观察到的 stop 不会被降级为 queue、admission 或 backend failure。
 
-GPU selection 在显式 MetalFp32 下选择原生 Metal。单 GPU lane 包含取消在内均在
-退役前排空提交。Trait 允许发布前 CPU 回退；已提交设备执行错误终止 Run。分别报告
-尝试、实际 dispatch/复制和缓存复用。
+`ExecutionMode::NativeGpu` 允许放置 traits 声明了原生实现的算子。ExecutionContext
+选择已配置的 Metal 或 Vulkan 设备；算术由算子 profile 定义。单 GPU lane 包含取消在内，
+均在回调退役前排空已提交命令。Trait 允许无输出发布的 CPU 回退；已提交设备执行错误会
+终止 Run。Raw diagnostics 分别记录尝试、实际 dispatch/复制和缓存复用。

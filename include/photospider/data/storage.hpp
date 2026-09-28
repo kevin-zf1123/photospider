@@ -13,6 +13,10 @@ namespace ps {
 namespace gpu_internal {
 class Device;
 }
+namespace execution_internal {
+class MemoryBudget;
+class MemoryReservation;
+}  // namespace execution_internal
 
 /** @brief Borrowed immutable bytes; lifetime is bounded by the storage owner.
  */
@@ -75,6 +79,7 @@ class PHOTOSPIDER_API CpuStorage final {
   CpuStorage() = default;
   // Declaration order makes bytes retire before their accounting lease.
   std::shared_ptr<void> lease_;
+  std::shared_ptr<void> requested_lease_;
   // Native resources retire before their reservation, including after teardown.
   std::shared_ptr<void> native_owner_;
   std::shared_ptr<const void> native_domain_;
@@ -153,6 +158,15 @@ class PHOTOSPIDER_API BufferAllocator final {
    */
   BufferAllocator limited(std::uint64_t maximum_bytes,
                           FailureObserver failure = {}) const;
+  /** @brief Limits aggregate live requested bytes, retaining actual-capacity
+   * root accounting and any enclosing capacity sublimits.
+   * @note A native allocation charges its requested size here and its actual
+   * backing capacity to the parent. Copies and native allocator conversions
+   * share this quota. The last storage owner releases it. Failure notifications
+   * and allocation provenance follow the same rules as limited().
+   */
+  BufferAllocator limited_requested(std::uint64_t maximum_bytes,
+                                    FailureObserver failure = {}) const;
   /** @brief Checks allocation provenance for a scoped allocator or descendant.
    * @note Unscoped allocators return false. Scope identity is process-local and
    * grants no content/cache identity. Safe after the original allocator
@@ -167,10 +181,19 @@ class PHOTOSPIDER_API BufferAllocator final {
 
  private:
   friend class gpu_internal::Device;
+  friend class ResourceBudget;
+  friend class execution_internal::MemoryBudget;
+  friend class execution_internal::MemoryReservation;
+  BufferAllocator limited_impl(std::uint64_t maximum_bytes,
+                               FailureObserver failure, bool requested) const;
   std::function<Result<MutableBuffer>(std::uint64_t, const Reserve&,
                                       std::shared_ptr<const void>)>
       native_allocate_;
   Reserve reserve_;
+  // Alternate root accounting for a host-visible native allocation. Scoped
+  // allocators wrap both policies with the same live-byte counter.
+  Reserve native_shared_reserve_;
+  Reserve requested_reserve_;
   std::shared_ptr<const void> domain_;
   std::vector<std::shared_ptr<const void>> allocation_scopes_;
   FailureObserver failure_;

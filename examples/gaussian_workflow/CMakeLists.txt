@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.21)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  project(PhotospiderGaussianWorkflow LANGUAGES CXX)
+  find_package(Photospider 0.28 CONFIG REQUIRED COMPONENTS kernel)
+endif()
+add_executable(photospider_gaussian_workflow main.cpp)
+target_link_libraries(photospider_gaussian_workflow PRIVATE Photospider::kernel)
+target_compile_features(photospider_gaussian_workflow PRIVATE cxx_std_17)

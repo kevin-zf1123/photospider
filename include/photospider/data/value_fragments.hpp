@@ -74,6 +74,18 @@ class PHOTOSPIDER_API ValueFragments final {
    */
   Status read(const std::vector<std::uint64_t>& coordinate, void* destination,
               std::size_t size) const;
+  /** @brief Authorized scalar read with bounded lookup work and cancellation.
+   * Checks limits before each authorization box, fragment candidate and final
+   * address/copy. Charges at most 2+4*rank+(boxes+fragments)*(rank+1) units;
+   * maximum_work applies to this read, consume_work can enforce a shared
+   * budget. Failure leaves destination unchanged. The limits and callback are
+   * borrowed only for this synchronous call. No payload allocation or upstream
+   * execution occurs. Status categories match read(), plus
+   * ResourceExhausted/Cancelled or the original consume_work failure. Callback
+   * exceptions propagate.
+   */
+  Status read(const std::vector<std::uint64_t>& coordinate, void* destination,
+              std::size_t size, const FootprintLimits& limits) const;
   /** @brief Restricts owners and authorization together; outside coverage
    * fails.
    */

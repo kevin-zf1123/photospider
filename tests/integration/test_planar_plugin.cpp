@@ -6,6 +6,8 @@
 int main() {
   using namespace ps;  // NOLINT(build/namespaces)
   auto registry = std::make_shared<OperationRegistry>();
+  PS_CHECK(registry->load_plugin(PS_OLD_PLANAR_FIXTURE).code ==
+           ErrorCode::InvalidArgument);
   PS_CHECK(registry->load_plugin(PS_BAD_PLANAR_FIXTURE).code ==
            ErrorCode::InvalidArgument);
   PS_CHECK(registry->load_plugin(PS_PROJECTED_PLANAR_FIXTURE).code ==
@@ -27,7 +29,7 @@ int main() {
   bindings.inputs.push_back(
       {"image", {}, {}, {}, std::make_shared<const PlanarImage>(image)});
   ExecutionContext execution(registry, {1, false, 8, 4 * 1024 * 1024});
-  for (std::int64_t test = 0; test <= 8; ++test) {
+  for (std::int64_t test = 0; test <= 11; ++test) {
     document.nodes = {{1,
                        "test.planar_plugin",
                        {WorkflowInputReference{1}},
@@ -40,9 +42,9 @@ int main() {
     }
     PS_CHECK(plan.ok());
     auto result = execution.execute(plan.value().plan, bindings);
-    if (test == 5) {
+    if (test == 5 || test == 10) {
       PS_CHECK(result.status().code == ErrorCode::ResourceExhausted);
-    } else if (test == 6 || test == 8) {
+    } else if (test == 6 || test == 8 || test == 11) {
       PS_CHECK(result.status().code == ErrorCode::InvalidArgument);
     } else if (test == 7) {
       PS_CHECK(result.status().code == ErrorCode::Cancelled);

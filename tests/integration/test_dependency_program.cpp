@@ -652,7 +652,7 @@ int service_and_identity_regressions() {
   identity_services.buffer = [](const std::uint8_t*, std::uint64_t, bool) {
     return Result<std::uint64_t>(Status{ErrorCode::BackendUnavailable, {}});
   };
-  identity_services.execute = [](const ps_gpu_dispatch_v9*, std::uint32_t) {
+  identity_services.execute = [](const ps_gpu_dispatch_v11*, std::uint32_t) {
     return Status{ErrorCode::BackendUnavailable, {}};
   };
   auto gpu = drive(left.start_dependency("probe", request).take_value(), {},
@@ -1364,14 +1364,15 @@ int dependency_record_rollback() {
   GraphContext graph(doc);
   auto plan = Compiler(registry).compile(graph).take_value().plan;
   execution_internal::DependencyRecords records(plan, "snapshot", {});
-  PS_CHECK(records.append_legacy(0, point(0), {point(0)}).ok());
+  const auto input0 = point(0), input1 = point(1);
+  PS_CHECK(records.append_legacy(0, point(0), &input0, 1).ok());
   PS_CHECK(records.output("a", 0, point(0)).ok());
   std::uint64_t work = 1024;
   auto checkpoint = records.checkpoint(&work).take_value();
   const auto after_checkpoint = work;
-  PS_CHECK(records.append_legacy(0, point(1), {point(1)}).ok());
+  PS_CHECK(records.append_legacy(0, point(1), &input1, 1).ok());
   auto shared_ancestor = records.capture(0, point(1), {}).take_value();
-  PS_CHECK(records.append_legacy(1, point(1), {point(1)}).ok());
+  PS_CHECK(records.append_legacy(1, point(1), &input1, 1).ok());
   auto shared_child =
       records.capture(1, point(1), {shared_ancestor}).take_value();
   PS_CHECK(records.rollback(checkpoint, &work).ok() && work < after_checkpoint);

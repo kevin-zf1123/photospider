@@ -56,7 +56,7 @@ class DependencyRecords final {
   const Status& status() const noexcept { return failure_; }
   Status append(std::size_t step, const DependencyResult& result);
   Status append_legacy(std::size_t step, const Footprint& outputs,
-                       const std::vector<Footprint>& inputs);
+                       const Footprint* inputs, std::size_t input_count);
   Status append_empty(std::size_t step, const Footprint& outputs);
   /** @brief Covered rows before a speculative backend attempt; no pixel owners.
    * @note Copies only bounded coverage, not nested dependency manifests.

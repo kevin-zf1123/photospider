@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     GraphContext graph(document(0));
     PlanningOptions options;
     options.execution_mode =
-        gpu ? ExecutionMode::MetalFp32 : ExecutionMode::CpuExact;
+        gpu ? ExecutionMode::NativeGpu : ExecutionMode::CpuExact;
     auto compiled = Compiler(registry).compile(graph, options);
     if (check(compiled.ok(), "C workflow compile failed"))
       return 1;

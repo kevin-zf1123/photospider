@@ -97,13 +97,14 @@ void moments(Context& c, const Array& src, const Array& stats, uint32_t slot) {
   } while (chunks > 1);
 }
 Array blur(Context& c, const Array& src, const Array& add, uint32_t r,
-           const Options& o) {
-  auto out = c.image(src.height, src.width);
+           const Options& o, Array out = {}, Array temporary = {}) {
+  if (!out.data)
+    out = c.image(src.height, src.width);
   auto g = grid(src);
   uint32_t reflect = src.height > r && src.width > r;
   if (o.colorfix_blur == "exact" && o.blur_impl == "lowrank") {
     auto taps = constant(c, "lr" + std::to_string(r));
-    auto tmp = c.image(src.height, src.width);
+    auto tmp = temporary.data ? temporary : c.image(src.height, src.width);
     uint32_t k = 2 * r + 1, rank = std::min(o.blur_rank, k);
     for (uint32_t comp = 0; comp < rank; ++comp) {
       c.dispatch(("lr_rows_r" + std::to_string(r)).c_str(),
@@ -131,7 +132,7 @@ Array blur(Context& c, const Array& src, const Array& add, uint32_t r,
     }
   } else if (o.colorfix_blur == "separable") {
     auto taps = constant(c, "sep" + std::to_string(r));
-    auto tmp = c.image(src.height, src.width);
+    auto tmp = temporary.data ? temporary : c.image(src.height, src.width);
     c.dispatch("blur_rows", g,
                {{"src", src},
                 {"dst", tmp},
@@ -191,8 +192,22 @@ Array match(Context& c, const Array& src, const Array& target,
           {"diff", diff},
           {"pixels", src.height * src.width},
           {"hw", src.height * src.width}});
-  for (uint32_t r = 2; r <= 32; r *= 2) {
-    diff = blur(c, diff, r == 32 ? inp : Array{}, r, o);
+  if (c.gpu_enabled()) {
+    // Every pass completes synchronously. Each writes its entire destination,
+    // so alternating owners preserve source bits without repeated allocation
+    // or zeroing. Row scratch is fully overwritten before each column pass.
+    auto next = c.image(src.height, src.width);
+    auto temporary =
+        (o.colorfix_blur == "separable" || o.blur_impl == "lowrank")
+            ? c.image(src.height, src.width)
+            : Array{};
+    for (uint32_t r = 2; r <= 32; r *= 2) {
+      next = blur(c, diff, r == 32 ? inp : Array{}, r, o, next, temporary);
+      std::swap(diff, next);
+    }
+  } else {
+    for (uint32_t r = 2; r <= 32; r *= 2)
+      diff = blur(c, diff, r == 32 ? inp : Array{}, r, o);
   }
   return diff;
 }
@@ -391,6 +406,8 @@ Array lanczos(Context& c, Array src, uint32_t h, uint32_t w) {
     if (n == m) {
       continue;
     }
+    if (c.gpu_enabled())
+      c.charge(4096 + uint64_t{m} * 8192);
     auto offsets = c.empty(m + 1),
          indices = c.empty(static_cast<uint64_t>(m) * 7),
          weights = c.empty(static_cast<uint64_t>(m) * 7);
@@ -473,14 +490,21 @@ Array downscale(Context& c, const Array& img, const Options& o) {
                   {"out_w", w}});
     }
   } else if (o.mode == "k_centroid") {
-    auto cent = c.empty(static_cast<uint64_t>(n) * 8), item = c.empty(n),
-         diff = c.empty(4);
+    auto cent = c.empty(static_cast<uint64_t>(n) * 8),
+         item = c.gpu_enabled() ? Array{} : c.empty(n), diff = c.empty(4);
     Arguments args{{"img", img},         {"cent", cent}, {"height", img.height},
                    {"width", img.width}, {"p", p},       {"out_h", h},
                    {"out_w", w}};
     c.dispatch("kc_init", {w, h, 1}, args);
     for (uint32_t i = 0; i < 4; ++i) {
       auto a = args;
+      if (c.gpu_enabled()) {
+        admit_arguments(a.items.size() + 2);
+        a.items.insert({{"diff_bits", diff}, {"it", i}});
+        c.dispatch("kc_iter_max", {w, h, 1}, a);
+        continue;
+      }
+      admit_arguments(a.items.size() + 3);
       a.items.insert({{"item_diff", item}, {"diff", diff}, {"it", i}});
       c.dispatch("kc_iter", {w, h, 1}, a);
       uint32_t chunks = (n + 1023) / 1024;
@@ -497,6 +521,7 @@ Array downscale(Context& c, const Array& img, const Options& o) {
           "diff_final", {1, 1, 1},
           {{"part", part}, {"diff", diff}, {"it", i}, {"chunks", chunks}});
     }
+    admit_arguments(args.items.size() + 1);
     args.items.emplace("dst", out);
     c.dispatch("kc_final", {w, h, 1}, args);
   } else if (o.mode == "lanczos") {
@@ -681,7 +706,7 @@ Array quantize(Context& c, const Array& img, const Array& weights,
   } else if (o.dither_mode == "error_diffusion") {
     auto work = c.image(img.height, img.width),
          err = c.empty(static_cast<uint64_t>(9) * img.width);
-    std::memcpy(work.data, img.data, img.count * 4);
+    c.copy(img, work);
     for (uint32_t y = 0; y + 2 < img.height; y += 2) {
       c.dispatch("ed_errors", {img.width, 3, 1},
                  {{"img", work},

@@ -101,7 +101,7 @@ int run(unsigned mode, Backend backend, ErrorCode expected,
     return Result<std::uint64_t>(
         Status{ErrorCode::InvalidArgument, "mock buffer failure"});
   };
-  gpu.execute = [](const ps_gpu_dispatch_v9*, std::uint32_t) {
+  gpu.execute = [](const ps_gpu_dispatch_v11*, std::uint32_t) {
     return Status{ErrorCode::OperationFailed, "mock execute failure"};
   };
   if (mode == 6)

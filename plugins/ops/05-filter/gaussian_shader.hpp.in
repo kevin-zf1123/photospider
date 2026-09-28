@@ -1,0 +1,4 @@
+#pragma once
+namespace ps::plugin_internal::filter_ops {
+inline constexpr char kGaussianShader[] = R"PSMSL(@PHOTOSPIDER_GAUSSIAN_MSL@)PSMSL";
+}

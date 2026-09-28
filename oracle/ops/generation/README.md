@@ -87,3 +87,51 @@ KAT, not by running this oracle and calling the result independent. The same cas
 also appear in fixtures.json; these are two validation paths, not 28 independent
 fixtures. Fixed-seed crosschecks provide additional finite coverage. Provenance:
 [SOURCES](SOURCES.md).
+
+## Actual Perlin runtime comparison
+
+`check_perlin_runtime.py` sends raw IEEE coordinates to a native runner and
+compares its returned bits with `rng.perlin2002_fraction` plus independent exact
+IEEE rounding. It covers 1566 input/output combinations including Float32/64,
+negative coordinates, subnormals, huge finite values and deterministic random
+coordinates. Its default seed and case construction are fixed in the script.
+
+```sh
+cmake --build build/kernel-dev --target test_perlin_exact test_perlin_workflow -j 8
+python3 oracle/ops/generation/check_perlin_runtime.py \
+  --runner build/kernel-dev/test_perlin_exact
+python3 oracle/ops/generation/check_perlin_runtime.py \
+  --runner build/kernel-dev/test_perlin_workflow
+python3 oracle/ops/generation/check_perlin_runtime.py \
+  --runner build/kernel-dev/test_perlin_workflow --tiled
+```
+
+The first runner exercises the C++ integer calculator. The second compiles and
+executes actual public CPU Whole workflows, or CPU tiled with `--tiled`.
+Each mode checks the same 1566 cases independently. GPU is not exercised.
+Worker, layout, ROI and resource behavior is checked separately by
+`test_perlin_workflow`, `test_perlin_tiled` and `test_cpu_tiles`; finite oracle
+coverage is not exhaustive correctness proof.
+
+## Native strict Perlin GPU comparison
+
+`test_perlin_gpu --stdin` shares one native execution context across requests,
+executes the registered GPU-only Whole form, and verifies nonzero native dispatch
+counts and absence of fallback before emitting each output's raw bits. It accepts
+the same input protocol as the Whole/tiled runners.
+
+```sh
+python3 oracle/ops/generation/check_perlin_runtime.py --runner build/kernel-dev/test_perlin_gpu
+```
+
+Build the kernel with `-DPHOTOSPIDER_ENABLE_VULKAN=ON` to select its Vulkan backend;
+the same GPU runner then reports whether the native Vulkan dispatch succeeded. The
+FreeBSD Intel UHD 770 run matched all 1,566 recorded cases. NVIDIA and Linux remain
+untested, and the checker does not measure speed.
+
+The checker independently computes the full polynomial with Fraction and rounds
+to the requested IEEE dtype. Unsupported devices make the runner fail/skip, never
+substitute a CPU result. Both native Metal and Vulkan paths are exercised by this
+runner. The Vulkan runner passes all 1566 comparisons on FreeBSD Intel UHD 770;
+the Perlin Vulkan path remains untested on NVIDIA and Linux hardware. These
+finite oracle checks do not measure performance or prove the full input domain.

@@ -2,12 +2,23 @@
 
 #include <algorithm>
 #include <charconv>
+#if defined(__FreeBSD__)
+#include <locale.h>
+#include <xlocale.h>
+
+#include <cerrno>
+#include <cstdlib>
+#include <new>
+
+#endif
 #include <cmath>
 #include <cstring>
 #include <string>
 #include <system_error>
 #include <utility>
 #include <vector>
+
+#include "data/input_validation.hpp"
 
 namespace ps::expression_internal {
 namespace {
@@ -246,12 +257,42 @@ class Parser {
         return false;
     }
     Node node{Kind::Literal};
+    input_internal::Float32Environment environment;
+    if (!environment.active())
+      return false;
+#if defined(__FreeBSD__)
+    // FreeBSD's base libc++ has integral from_chars but no floating overload.
+    // Keep decimal grammar, C locale and nearest-even conversion independent
+    // of the embedding process locale/fenv. Nonzero subnormals are valid.
+    struct DecimalLocale {
+      locale_t value;
+      DecimalLocale() : value(newlocale(LC_NUMERIC_MASK, "C", nullptr)) {
+        if (!value)
+          throw std::bad_alloc();
+      }
+      ~DecimalLocale() {
+        if (value)
+          freelocale(value);
+      }
+    };
+    static const DecimalLocale locale;
+    const auto text = source_.substr(begin, position_ - begin);
+    char* end = nullptr;
+    const int saved_errno = errno;
+    errno = 0;
+    node.number = strtod_l(text.c_str(), &end, locale.value);
+    const int error = errno;
+    errno = saved_errno;
+    return end == text.c_str() + text.size() && std::isfinite(node.number) &&
+           !(error == ERANGE && node.number == 0) && append(node);
+#else
     const auto parsed =
         std::from_chars(source_.data() + begin, source_.data() + position_,
                         node.number, std::chars_format::general);
     return parsed.ec == std::errc{} &&
            parsed.ptr == source_.data() + position_ &&
            std::isfinite(node.number) && append(node);
+#endif
   }
   bool coefficient() {
     spaces();

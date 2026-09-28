@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.27.0
+  VERSION 0.28.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -43,6 +43,13 @@ endif()
 option(PHOTOSPIDER_ENABLE_METAL "Build the optional Apple Silicon Metal backend" ${APPLE})
 if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
   enable_language(OBJCXX)
+endif()
+option(PHOTOSPIDER_ENABLE_VULKAN "Build the native Vulkan compute backend" OFF)
+if(PHOTOSPIDER_ENABLE_VULKAN)
+  if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
+    message(FATAL_ERROR "Select one native GPU backend per kernel build")
+  endif()
+  find_package(Vulkan REQUIRED)
 endif()
 
 option(PHOTOSPIDER_ENABLE_ASAN "Enable AddressSanitizer for local validation" OFF)
@@ -139,7 +146,25 @@ if(PHOTOSPIDER_FMT10_EXACT_KERNEL STREQUAL "REFERENCE")
     COMPILE_DEFINITIONS PHOTOSPIDER_FMT10_REFERENCE_EXACT)
 endif()
 
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/gpu/integer.metal"
+  "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/03-generation/perlin.metal"
+  "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/05-filter/gaussian.metal")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/gpu/integer.metal" PHOTOSPIDER_INTEGER_MSL)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/03-generation/perlin.metal" PHOTOSPIDER_PERLIN_MSL)
+set(PHOTOSPIDER_PERLIN_MSL "${PHOTOSPIDER_INTEGER_MSL}\n${PHOTOSPIDER_PERLIN_MSL}")
+configure_file(plugins/ops/03-generation/perlin_shader.hpp.in
+  generated/perlin_shader.hpp @ONLY)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/05-filter/gaussian.metal" PHOTOSPIDER_GAUSSIAN_MSL)
+set(PHOTOSPIDER_GAUSSIAN_MSL "${PHOTOSPIDER_INTEGER_MSL}\n${PHOTOSPIDER_GAUSSIAN_MSL}")
+configure_file(plugins/ops/05-filter/gaussian_shader.hpp.in
+  generated/gaussian_shader.hpp @ONLY)
+
 set(PHOTOSPIDER_OPERATION_SOURCES
+  plugins/ops/05-filter/gaussian.cpp
+  plugins/ops/05-filter/gaussian_gpu.cpp
+  plugins/ops/03-generation/perlin.cpp
+  plugins/ops/03-generation/perlin_gpu.cpp
   plugins/ops/00-foundation/core_constant.cpp
   plugins/ops/00-foundation/core_delay.cpp
   plugins/ops/00-foundation/core_gpu_fallback_probe.cpp
@@ -297,6 +322,9 @@ if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
   set_source_files_properties(src/lib/execution/native_gpu_metal.mm PROPERTIES
     COMPILE_OPTIONS "-fobjc-arc")
 endif()
+if(PHOTOSPIDER_ENABLE_VULKAN)
+  list(APPEND PHOTOSPIDER_KERNEL_SOURCES src/lib/execution/native_gpu_vulkan.cpp)
+endif()
 # S1 binary32 contracts require nearest rounding and gradual underflow at runtime.
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   set_source_files_properties(${PHOTOSPIDER_OPERATION_SOURCES}
@@ -435,7 +463,7 @@ function(photospider_configure_kernel_target target)
     ${target}
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib ${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib ${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG> ${CMAKE_CURRENT_BINARY_DIR}/generated
       ${CMAKE_CURRENT_BINARY_DIR}/plugins/ops/rgba32f)
   target_link_libraries(
     ${target} PUBLIC Threads::Threads PRIVATE ${CMAKE_DL_LIBS})
@@ -452,6 +480,10 @@ function(photospider_configure_kernel_target target)
     target_compile_definitions(${target} PRIVATE PHOTOSPIDER_HAS_METAL)
     target_link_libraries(${target} PRIVATE "-framework Metal" "-framework Foundation")
     set_target_properties(${target} PROPERTIES OBJCXX_STANDARD 17 OBJCXX_STANDARD_REQUIRED ON)
+  endif()
+  if(PHOTOSPIDER_ENABLE_VULKAN)
+    target_compile_definitions(${target} PRIVATE PHOTOSPIDER_HAS_VULKAN)
+    target_link_libraries(${target} PRIVATE Vulkan::Vulkan)
   endif()
 
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -553,6 +585,9 @@ add_subdirectory(examples/channel_assembly_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_editing_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_editing EXCLUDE_FROM_ALL)
 add_subdirectory(examples/metadata_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/dynamic_scheduler EXCLUDE_FROM_ALL)
+add_subdirectory(examples/perlin_workflow EXCLUDE_FROM_ALL)
+add_subdirectory(examples/gaussian_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/model_conversion_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/alpha_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/metadata_workflow EXCLUDE_FROM_ALL)
@@ -696,18 +731,20 @@ if(BUILD_TESTING)
   add_dependencies(test_multi_output_execution multi_output_fixture)
   photospider_add_test(test_semantic_contract Photospider::kernel tests/unit/test_semantic_contract.cpp)
   photospider_add_test(test_planar_plugin photospider_test_kernel tests/integration/test_planar_plugin.cpp)
-  foreach(_variant planar bad_planar projected_planar)
+  foreach(_variant planar bad_planar projected_planar old_planar)
     add_library(${_variant}_fixture MODULE tests/fixtures/planar_operation_fixture.c)
     target_link_libraries(${_variant}_fixture PRIVATE Photospider::operation_sdk)
     set_target_properties(${_variant}_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
   endforeach()
   target_compile_definitions(bad_planar_fixture PRIVATE PS_BAD_PLANAR)
   target_compile_definitions(projected_planar_fixture PRIVATE PS_PROJECT_PLANAR)
+  target_compile_definitions(old_planar_fixture PRIVATE PS_OLD_PLANAR)
   target_compile_definitions(test_planar_plugin PRIVATE
+    PS_OLD_PLANAR_FIXTURE="$<TARGET_FILE:old_planar_fixture>"
     PS_PLANAR_FIXTURE="$<TARGET_FILE:planar_fixture>"
     PS_BAD_PLANAR_FIXTURE="$<TARGET_FILE:bad_planar_fixture>"
     PS_PROJECTED_PLANAR_FIXTURE="$<TARGET_FILE:projected_planar_fixture>")
-  add_dependencies(test_planar_plugin planar_fixture bad_planar_fixture projected_planar_fixture)
+  add_dependencies(test_planar_plugin planar_fixture bad_planar_fixture projected_planar_fixture old_planar_fixture)
   add_library(operation_contract_fixture MODULE tests/fixtures/operation_contract_fixture.c)
   target_link_libraries(operation_contract_fixture PRIVATE Photospider::operation_sdk)
   set_target_properties(operation_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -864,8 +901,18 @@ if(BUILD_TESTING)
   photospider_add_test(test_planar_image_workflow Photospider::kernel tests/integration/test_planar_image_workflow.cpp)
   photospider_add_test(test_planar_import Photospider::kernel tests/unit/test_planar_import.cpp)
   target_include_directories(test_input_snapshot PRIVATE src/lib)
+  photospider_add_test(test_scheduler_timing Photospider::kernel tests/integration/test_scheduler_timing.cpp)
+  target_include_directories(test_scheduler_timing PRIVATE src/lib)
   photospider_add_test(test_native_execution Photospider::kernel tests/integration/test_native_execution.cpp)
   set_tests_properties(test_native_execution PROPERTIES SKIP_RETURN_CODE 77)
+  add_executable(test_disk_pending tests/integration/test_disk_pending.cpp)
+  target_link_libraries(test_disk_pending PRIVATE Photospider::kernel)
+  target_include_directories(test_disk_pending PRIVATE src/lib tests)
+  add_test(NAME test_disk_pending COMMAND test_disk_pending ${CMAKE_CURRENT_BINARY_DIR}/disk-pending-test)
+  set_tests_properties(test_disk_pending PROPERTIES TIMEOUT 30)
+  photospider_add_test(test_native_dependency photospider_test_kernel tests/integration/test_native_dependency.cpp)
+  target_include_directories(test_native_dependency PRIVATE src/lib)
+  set_tests_properties(test_native_dependency PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_dependency_gpu Photospider::kernel tests/unit/test_dependency_gpu.cpp)
   photospider_add_test(test_gpu_sync_fallback Photospider::kernel examples/g4_gpu_workflow/sync_main.cpp)
   set_tests_properties(test_gpu_sync_fallback PROPERTIES SKIP_RETURN_CODE 77)
@@ -891,9 +938,25 @@ if(BUILD_TESTING)
   photospider_add_test(test_fragment_atlas_gpu photospider_test_kernel tests/unit/test_fragment_atlas_gpu.cpp)
   target_include_directories(test_fragment_atlas_gpu PRIVATE src/lib)
   set_tests_properties(test_fragment_atlas_gpu PROPERTIES SKIP_RETURN_CODE 77)
+  add_library(planar_gpu_fixture MODULE tests/fixtures/planar_gpu_fixture.c)
+  target_link_libraries(planar_gpu_fixture PRIVATE Photospider::operation_sdk)
+  target_compile_definitions(planar_gpu_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+  set_target_properties(planar_gpu_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  photospider_add_test(test_planar_gpu photospider_test_kernel tests/integration/test_planar_gpu.cpp)
+  target_include_directories(test_planar_gpu PRIVATE src/lib)
+  target_compile_definitions(test_planar_gpu PRIVATE
+    PS_PLANAR_FIXTURE="$<TARGET_FILE:planar_fixture>"
+    PS_PLANAR_GPU_FIXTURE="$<TARGET_FILE:planar_gpu_fixture>")
+  add_dependencies(test_planar_gpu planar_fixture planar_gpu_fixture)
+  set_tests_properties(test_planar_gpu PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_native_gpu photospider_test_kernel tests/unit/test_native_gpu.cpp)
+  photospider_add_test(test_pipeline_key Photospider::kernel tests/unit/test_pipeline_key.cpp)
+  target_include_directories(test_pipeline_key PRIVATE src/lib)
   target_include_directories(test_native_gpu PRIVATE src/lib)
   set_tests_properties(test_native_gpu PROPERTIES SKIP_RETURN_CODE 77)
+  photospider_add_test(test_vulkan_gpu photospider_test_kernel tests/unit/test_vulkan_gpu.cpp)
+  target_include_directories(test_vulkan_gpu PRIVATE src/lib)
+  set_tests_properties(test_vulkan_gpu PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_memory_liveness photospider_test_kernel tests/integration/test_memory_liveness.cpp)
   target_include_directories(test_memory_liveness PRIVATE src/lib)
   photospider_add_test(test_representations Photospider::kernel tests/unit/test_representations.cpp)
@@ -927,6 +990,28 @@ if(BUILD_TESTING)
   photospider_add_test(test_resources Photospider::kernel tests/unit/test_resources.cpp)
   photospider_add_test(test_resource_internals photospider_test_kernel tests/unit/test_resource_internals.cpp)
   target_include_directories(test_resource_internals PRIVATE src/lib)
+  photospider_add_test(test_expression_literals Photospider::kernel tests/unit/test_expression_literals.cpp)
+  target_include_directories(test_expression_literals PRIVATE src/lib)
+  photospider_add_test(test_prepared_workspace Photospider::kernel tests/integration/test_prepared_workspace.cpp)
+  photospider_add_test(test_gaussian_tiled Photospider::kernel tests/integration/test_gaussian_tiled.cpp)
+  photospider_add_test(test_gaussian_gpu photospider_test_kernel tests/integration/test_gaussian_gpu.cpp)
+  target_include_directories(test_gaussian_gpu PRIVATE src/lib)
+  set_tests_properties(test_gaussian_gpu PROPERTIES SKIP_RETURN_CODE 77)
+  photospider_add_test(test_gaussian_workflow Photospider::kernel tests/integration/test_gaussian_workflow.cpp)
+  photospider_add_test(test_gaussian_exact Photospider::kernel tests/unit/test_gaussian_exact.cpp)
+  target_include_directories(test_gaussian_exact PRIVATE plugins/ops src/lib)
+  photospider_add_test(test_gaussian_coefficients Photospider::kernel tests/unit/test_gaussian_coefficients.cpp)
+  target_include_directories(test_gaussian_coefficients PRIVATE plugins/ops src/lib)
+  photospider_add_test(test_perlin_exact Photospider::kernel tests/unit/test_perlin_exact.cpp)
+  target_include_directories(test_perlin_exact PRIVATE plugins/ops src/lib)
+  photospider_add_test(test_perlin_workflow Photospider::kernel tests/integration/test_perlin_workflow.cpp)
+  photospider_add_test(test_perlin_tiled Photospider::kernel tests/integration/test_perlin_tiled.cpp)
+  photospider_add_test(test_backend_admission Photospider::kernel tests/integration/test_backend_admission.cpp)
+  photospider_add_test(test_perlin_gpu Photospider::kernel tests/integration/test_perlin_gpu.cpp)
+  set_tests_properties(test_perlin_gpu PROPERTIES SKIP_RETURN_CODE 77)
+  photospider_add_test(test_cpu_tiles Photospider::kernel tests/integration/test_cpu_tiles.cpp)
+  photospider_add_test(test_cpu_parallel Photospider::kernel tests/integration/test_cpu_parallel.cpp)
+  photospider_add_test(test_cpu_stages Photospider::kernel tests/integration/test_cpu_stages.cpp)
   photospider_add_test(test_managed_dispatch Photospider::kernel tests/integration/test_managed_dispatch.cpp)
   photospider_add_test(test_storage Photospider::kernel tests/unit/test_storage.cpp)
   photospider_add_test(test_value Photospider::kernel tests/unit/test_value.cpp)

@@ -1,0 +1,4 @@
+#pragma once
+namespace ps::plugin_internal::generation_ops {
+inline constexpr char kPerlinShader[] = R"PSMSL(@PHOTOSPIDER_PERLIN_MSL@)PSMSL";
+}

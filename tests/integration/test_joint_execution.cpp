@@ -557,7 +557,7 @@ int fallback_ancestry() {
   doc.outputs = {{"left", 2, "left"}, {"right", 2, "right"}};
   GraphContext graph(doc);
   PlanningOptions options;
-  options.execution_mode = ExecutionMode::MetalFp32;
+  options.execution_mode = ExecutionMode::NativeGpu;
   auto compiled = Compiler(registry).compile(graph, options);
   PS_CHECK(compiled.ok());
   ExecutionContext execution(registry, {2, false, 32, 4096, 1024});

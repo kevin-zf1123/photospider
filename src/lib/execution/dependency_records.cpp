@@ -611,13 +611,14 @@ Status DependencyRecords::append(std::size_t index,
 }
 Status DependencyRecords::append_legacy(std::size_t index,
                                         const Footprint& outputs,
-                                        const std::vector<Footprint>& inputs) {
+                                        const Footprint* inputs,
+                                        std::size_t input_count) {
   const auto& step = plan_->steps().at(index);
-  if (inputs.size() != step.inputs.size())
+  if (input_count != step.inputs.size() || (input_count && !inputs))
     return invalid("incomplete legacy dependency ports");
   std::vector<DependencyNeed> needs;
   std::vector<std::vector<std::uint64_t>> shapes;
-  for (std::uint32_t port = 0; port < inputs.size(); ++port) {
+  for (std::uint32_t port = 0; port < input_count; ++port) {
     shapes.push_back(metadata(*plan_, step.inputs[port]).descriptor.shape);
     const auto& included = step.traits.outputs[0].input_indices;
     if (included &&

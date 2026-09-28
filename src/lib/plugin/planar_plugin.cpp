@@ -1,14 +1,17 @@
 #include "plugin/planar_plugin.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "data/input_validation.hpp"
+#include "execution/cpu_range_context.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -35,18 +38,18 @@ Status result(int code, const char* message) {
   }
   return Status::failure(kind, message[0] ? message : "planar plugin failure");
 }
-using Facets = std::vector<ps_operation_facet_view_v9>;
-ps_planar_metadata_v1 metadata(const ValueDescriptor& d,
+using Facets = std::vector<ps_operation_facet_view_v11>;
+ps_planar_metadata_v3 metadata(const ValueDescriptor& d,
                                const std::vector<ValueFacet>& facets,
                                const PlanarImageLayout& layout,
                                Facets* storage) {
   for (const auto& f : facets) {
-    storage->push_back({sizeof(ps_operation_facet_view_v9), f.key.data(),
+    storage->push_back({sizeof(ps_operation_facet_view_v11), f.key.data(),
                         static_cast<uint32_t>(f.key.size()), f.version,
                         f.payload.data(),
                         static_cast<uint32_t>(f.payload.size())});
   }
-  ps_planar_metadata_v1 out{};
+  ps_planar_metadata_v3 out{};
   out.struct_size = sizeof(out);
   out.element_type = static_cast<uint32_t>(d.element_type);
   out.rank = static_cast<uint32_t>(d.shape.size());
@@ -60,26 +63,26 @@ ps_planar_metadata_v1 metadata(const ValueDescriptor& d,
   out.row_pitch_bytes = layout.row_pitch_bytes;
   return out;
 }
-std::vector<ps_operation_parameter_value_v9> parameters(
+std::vector<ps_operation_parameter_value_v11> parameters(
     const std::map<std::string, ParameterValue>& source) {
-  std::vector<ps_operation_parameter_value_v9> out;
+  std::vector<ps_operation_parameter_value_v11> out;
   for (const auto& [key, value] : source) {
-    ps_operation_parameter_value_v9 p{};
+    ps_operation_parameter_value_v11 p{};
     p.struct_size = sizeof(p);
     p.key = key.data();
     p.key_size = key.size();
     if (auto* v = std::get_if<std::int64_t>(&value)) {
-      p.type = PS_OPERATION_PARAMETER_INT64_V9;
+      p.type = PS_OPERATION_PARAMETER_INT64_V11;
       p.int64_value = *v;
     } else if (auto* v = std::get_if<double>(&value)) {
-      p.type = PS_OPERATION_PARAMETER_FLOAT64_V9;
+      p.type = PS_OPERATION_PARAMETER_FLOAT64_V11;
       p.float64_value = *v;
     } else if (auto* v = std::get_if<bool>(&value)) {
-      p.type = PS_OPERATION_PARAMETER_BOOL_V9;
+      p.type = PS_OPERATION_PARAMETER_BOOL_V11;
       p.bool_value = *v;
     } else {
       const auto& text = std::get<std::string>(value);
-      p.type = PS_OPERATION_PARAMETER_STRING_V9;
+      p.type = PS_OPERATION_PARAMETER_STRING_V11;
       p.string_value = text.data();
       p.string_size = text.size();
     }
@@ -88,6 +91,10 @@ std::vector<ps_operation_parameter_value_v9> parameters(
   return out;
 }
 struct Services {
+  explicit Services(const PlanarOperationInvocation& invocation)
+      : call(invocation) {}
+  const std::thread::id owner = std::this_thread::get_id();
+  std::atomic<bool> thread_violation{false};
   const PlanarOperationInvocation& call;
   Status failure = Status::success();
   std::map<uint8_t*, MutableBuffer> scratch;
@@ -99,6 +106,11 @@ struct Services {
   }
   template <class F>
   int guard(F fn) noexcept {
+    if (std::this_thread::get_id() != owner ||
+        execution_internal::in_cpu_range) {
+      thread_violation.store(true);
+      return 0;
+    }
     try {
       return fn();
     } catch (const std::bad_alloc&) {
@@ -144,7 +156,7 @@ int write_row(void* p, const uint64_t* at, uint32_t rank, uint8_t** bytes,
 uint8_t* allocate(void* p, uint64_t bytes) noexcept {
   auto& s = *static_cast<Services*>(p);
   uint8_t* pointer = nullptr;
-  s.guard([&] {
+  const int accepted = s.guard([&] {
     if (s.scratch.size() >= 4096 || bytes == 0) {
       return s.fail(
           Status{ErrorCode::ResourceExhausted, "planar scratch slots"});
@@ -158,7 +170,7 @@ uint8_t* allocate(void* p, uint64_t bytes) noexcept {
     s.scratch.emplace(pointer, std::move(owned));
     return 1;
   });
-  return s.failure.ok() ? pointer : nullptr;
+  return accepted && s.failure.ok() ? pointer : nullptr;
 }
 int release(void* p, uint8_t* pointer) noexcept {
   auto& s = *static_cast<Services*>(p);
@@ -173,13 +185,23 @@ int release(void* p, uint8_t* pointer) noexcept {
 int cancelled(void* p) noexcept {
   return static_cast<Services*>(p)->call.cancellation.cancelled();
 }
+int consume_work(void* p, uint64_t units) noexcept {
+  auto& s = *static_cast<Services*>(p);
+  return s.guard([&] {
+    const auto& status = s.call.consume_work(units);
+    return status.ok() ? 1 : s.fail(status);
+  });
+}
 }  // namespace
 Status prepare_planar_plugin(OperationDefinition* definition,
-                             const ps_planar_operation_v1& entry, void* user,
+                             const ps_planar_operation_v3& entry, void* user,
                              std::shared_ptr<void> library) {
   auto& t = definition->traits;
   if (entry.struct_size != sizeof(entry) || !entry.infer || !entry.execute ||
-      t.outputs.size() != 1 || t.supports_gpu || t.input_count == 0 ||
+      entry.execution_model > PS_PLANAR_EXECUTION_CPU_STAGES_V3 ||
+      (entry.execution_model == PS_PLANAR_EXECUTION_CPU_STAGES_V3 &&
+       (!t.supports_cpu || t.supports_gpu)) ||
+      t.outputs.size() != 1 || t.allows_cpu_fallback || t.input_count == 0 ||
       t.outputs[0].region_rule != OperationRegionRule::Whole ||
       t.outputs[0].dependency_version || t.repeated_maximum ||
       t.outputs[0].input_indices ||
@@ -196,6 +218,8 @@ Status prepare_planar_plugin(OperationDefinition* definition,
     }
   }
   t.planar_storage_capable = true;
+  t.cpu_staged_tiles =
+      entry.execution_model == PS_PLANAR_EXECUTION_CPU_STAGES_V3;
   t.requires_metadata_specialization = true;
   t.outputs[0].requires_dense_output = false;
   t.outputs[0].planar_layout = PlanarImageLayout{};
@@ -204,7 +228,7 @@ Status prepare_planar_plugin(OperationDefinition* definition,
                              const auto& params)
       -> Result<std::vector<OperationOutputSpecialization>> {
     std::vector<Facets> facets(inputs.size());
-    std::vector<ps_planar_metadata_v1> views;
+    std::vector<ps_planar_metadata_v3> views;
     for (size_t i = 0; i < inputs.size(); ++i) {
       if (!inputs[i].planar_layout) {
         return Result<std::vector<OperationOutputSpecialization>>(Status{
@@ -214,7 +238,7 @@ Status prepare_planar_plugin(OperationDefinition* definition,
                                *inputs[i].planar_layout, &facets[i]));
     }
     auto pp = parameters(params);
-    ps_planar_metadata_v1 output{};
+    ps_planar_metadata_v3 output{};
     output.struct_size = sizeof(output);
     char diagnostic[512]{};
     input_internal::Float32Environment environment;
@@ -234,7 +258,7 @@ Status prepare_planar_plugin(OperationDefinition* definition,
         output.rank > 3 || output.order > 1 || output.facet_count > 64 ||
         ((output.facet_count == 0) != (output.facets == nullptr)) ||
         (output.facets && reinterpret_cast<uintptr_t>(output.facets) %
-                              alignof(ps_operation_facet_view_v9)) ||
+                              alignof(ps_operation_facet_view_v11)) ||
         output.element_type < 1 || output.element_type > 7) {
       return Result<std::vector<OperationOutputSpecialization>>(
           Status{ErrorCode::TypeMismatch, "invalid planar output metadata"});
@@ -277,7 +301,7 @@ Status prepare_planar_plugin(OperationDefinition* definition,
   definition->planar_callback = [entry, user, library](
                                     const PlanarOperationInvocation& call) {
     std::vector<Facets> facets(call.inputs.size());
-    std::vector<ps_planar_metadata_v1> views;
+    std::vector<ps_planar_metadata_v3> views;
     for (size_t i = 0; i < call.inputs.size(); ++i) {
       const auto& in = call.inputs[i];
       const auto& c = in.config();
@@ -292,14 +316,26 @@ Status prepare_planar_plugin(OperationDefinition* definition,
     auto output = metadata(resolved.descriptor, resolved.facets,
                            *resolved.planar_layout, &output_facets);
     char diagnostic[512]{};
-    Services state{call, Status::success(), {}};
-    const ps_planar_services_v1 services{sizeof(services), &state,   read_row,
-                                         write_row,        allocate, release,
-                                         cancelled};
+    Services state{call};
+    const ps_planar_services_v3 services{sizeof(services),
+                                         &state,
+                                         read_row,
+                                         write_row,
+                                         allocate,
+                                         release,
+                                         cancelled,
+                                         call.cpu_parallel,
+                                         static_cast<uint32_t>(call.backend),
+                                         call.gpu,
+                                         consume_work,
+                                         call.cpu_tiles};
     const int code =
         entry.execute(user, views.data(), views.size(), pp.data(), pp.size(),
                       &output, &services, diagnostic, sizeof(diagnostic));
     diagnostic[sizeof(diagnostic) - 1] = 0;
+    if (state.thread_violation.load())
+      return Status{ErrorCode::InvalidArgument,
+                    "planar service thread violation"};
     if (!state.failure.ok()) {
       return state.failure;
     }

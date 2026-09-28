@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -51,14 +52,28 @@ int main(int argc, char** argv) try {
   std::string metadata_mode;
   std::string input_file, output_file, operation = "pixeloe.pixelize";
   int repeat = 1, warmup = 0;
+  uint32_t workers = 1;
   uint64_t budget = 8ULL << 30;
-  bool roi = false;
+  uint64_t work_budget = UINT64_MAX;
+  int64_t cancel_after_us = -1;
+  bool roi = false, gpu = false, tiled = false, vulkan = false;
   bool altered_rounding = false;
   for (int i = 4; i < argc; ++i) {
     std::string a = argv[i];
     auto split = a.find('=');
     auto key = a.substr(0, split), val = a.substr(split + 1);
-    if (key == "input") {
+    if (key == "backend") {
+      if (val != "cpu" && val != "gpu" && val != "vulkan" && val != "cpu_tiled")
+        throw std::runtime_error(
+            "backend must be cpu, cpu_tiled, gpu or vulkan");
+      vulkan = val == "vulkan";
+      gpu = val == "gpu" || vulkan;
+      tiled = val == "cpu_tiled";
+    } else if (key == "workers") {
+      workers = std::stoul(val);
+      if (!workers || workers > 64)
+        throw std::runtime_error("workers must be 1..64");
+    } else if (key == "input") {
       input_file = val;
     } else if (key == "output") {
       output_file = val;
@@ -70,6 +85,10 @@ int main(int argc, char** argv) try {
       warmup = std::stoi(val);
     } else if (key == "budget") {
       budget = std::stoull(val);
+    } else if (key == "work_budget") {
+      work_budget = std::stoull(val);
+    } else if (key == "cancel_after_us") {
+      cancel_after_us = std::stoll(val);
     } else if (key == "roi") {
       roi = val == "true";
     } else if (key == "rounding") {
@@ -89,6 +108,10 @@ int main(int argc, char** argv) try {
       }
     }
   }
+  if (!w || !h || w > UINT32_MAX || h > UINT32_MAX ||
+      w > (UINT32_MAX / 12) / h || repeat <= 0 || warmup < 0 ||
+      cancel_after_us < -1)
+    throw std::runtime_error("invalid workflow dimensions or run counts");
   std::vector<float> samples(h * w * 3);
   if (!input_file.empty()) {
     std::ifstream in(input_file, std::ios::binary);
@@ -175,10 +198,19 @@ int main(int argc, char** argv) try {
        {},
        facets,
        ps::PlanarImageLayout{ps::ImagePlaneOrder::Tiled, 0, 1, 2, 0, {}}}};
+  if (gpu && (operation == "pixeloe.pixelize" ||
+              operation == "pixeloe.expanded" || operation == "pixeloe.weight"))
+    operation += vulkan ? "_vulkan_native_fp32" : "_metal_native_fp32";
+  if (tiled &&
+      (operation == "pixeloe.pixelize" || operation == "pixeloe.expanded" ||
+       operation == "pixeloe.weight"))
+    operation += "_cpu_tiled";
   document.nodes = {{1, operation, {ps::WorkflowInputReference{1}}, params}};
   document.outputs = {{"result", 1, "values"}};
   ps::GraphContext graph(document);
   ps::PlanningOptions planning;
+  planning.execution_mode =
+      gpu ? ps::ExecutionMode::NativeGpu : ps::ExecutionMode::CpuExact;
   if (roi) {
     planning.output_regions = {
         {"result", ps::Region({{1, 3}, {2, 4}, {0, 3}})}};
@@ -187,12 +219,21 @@ int main(int argc, char** argv) try {
   if (!plan.ok()) {
     throw std::runtime_error("compile: " + plan.status().message);
   }
-  ps::ExecutionContext execution(registry, {1, false, 8, budget});
+  ps::ExecutionContextConfig execution_config{workers, gpu, 8, budget};
+  execution_config.managed_resources = ps::ResourceLimits{};
+  execution_config.managed_resources->capacity[ps::ResourceKind::Host] = budget;
+  execution_config.managed_resources->capacity[ps::ResourceKind::Shared] =
+      budget;
+  execution_config.managed_resources->capacity[ps::ResourceKind::Device] =
+      budget;
+  execution_config.managed_resources->maximum_work = work_budget;
+  ps::ExecutionContext execution(registry, execution_config);
   ps::ExecutionBindings bindings;
   bindings.inputs.push_back(
       {"image", {}, {}, {}, std::make_shared<const ps::PlanarImage>(image)});
   std::vector<double> ms;
   uint64_t peak = 0;
+  ps::ExecutionDiagnostics diagnostics;
   std::vector<float> result;
   for (int i = -warmup; i < repeat; ++i) {
     auto start = std::chrono::steady_clock::now();
@@ -203,22 +244,57 @@ int main(int argc, char** argv) try {
       feclearexcept(FE_ALL_EXCEPT);
       feraiseexcept(FE_DIVBYZERO);
     }
-    auto run = execution.execute(plan.value().plan, bindings);
+    ps::CancellationSource cancellation;
+    std::thread timer;
+    if (i >= 0 && cancel_after_us == 0)
+      cancellation.cancel();
+    if (i >= 0 && cancel_after_us > 0) {
+      timer = std::thread([&] {
+        std::this_thread::sleep_for(std::chrono::microseconds(cancel_after_us));
+        cancellation.cancel();
+      });
+    }
+    struct JoinTimer {
+      std::thread& timer;
+      ~JoinTimer() {
+        if (timer.joinable())
+          timer.join();
+      }
+    } join_timer{timer};
+    auto run =
+        execution.execute(plan.value().plan, bindings, cancellation.token());
+    const auto returned = std::chrono::steady_clock::now();
+    if (timer.joinable())
+      timer.join();
     if (altered_rounding && (fegetround() != FE_DOWNWARD ||
                              fetestexcept(FE_ALL_EXCEPT) != FE_DIVBYZERO)) {
       throw std::runtime_error("caller FP environment changed");
     }
     fesetenv(&prior);
-    double elapsed = std::chrono::duration<double, std::milli>(
-                         std::chrono::steady_clock::now() - start)
-                         .count();
+    double elapsed =
+        std::chrono::duration<double, std::milli>(returned - start).count();
     if (!run.ok()) {
+      const auto stats = execution.resource_budget().value().statistics();
+      std::cerr << "error_code=" << static_cast<int>(run.status().code)
+                << " elapsed_ms=" << elapsed
+                << " live_payload=" << stats.live[ps::ResourceKind::Payload]
+                << " issued_work=" << stats.issued.work << "\n";
       throw std::runtime_error("execute: " + run.status().message);
     }
     if (i >= 0) {
       ms.push_back(elapsed);
     }
-    peak = std::max(peak, run.value().diagnostics.peak_live_bytes);
+    diagnostics = run.value().diagnostics;
+    if (tiled &&
+        (!diagnostics.cpu_stage_count || !diagnostics.cpu_tile_callback_count ||
+         diagnostics.native_dispatch_count))
+      throw std::runtime_error(
+          "PixelOE CPU tiled requires actual host tile callbacks");
+    if (gpu && (!diagnostics.native_dispatch_count ||
+                !diagnostics.fallback_reasons.empty()))
+      throw std::runtime_error(
+          "PixelOE GPU requires native dispatch without fallback");
+    peak = std::max(peak, diagnostics.peak_live_bytes);
     if (i == repeat - 1) {
       const auto& out = run.value().images.at("result");
       auto region = roi ? ps::Region({{1, 3}, {2, 4}, {0, 3}})
@@ -243,10 +319,20 @@ int main(int argc, char** argv) try {
     }
     sum += v;
   }
-  std::cout << "median_ms=" << ms[ms.size() / 2] << " p95_ms="
+  std::cout << "workers=" << workers << " median_ms=" << ms[ms.size() / 2]
+            << " p95_ms="
             << ms[std::min(ms.size() - 1,
                            static_cast<size_t>(std::ceil(ms.size() * .95) - 1))]
-            << " peak_bytes=" << peak << " checksum=" << sum << "\n";
+            << " peak_bytes=" << peak << " checksum=" << sum << " backend="
+            << (gpu     ? (vulkan ? "vulkan_native_fp32" : "metal_native_fp32")
+                : tiled ? "cpu_tiled"
+                        : "cpu")
+            << " cpu_stages=" << diagnostics.cpu_stage_count
+            << " cpu_tiles=" << diagnostics.cpu_tile_callback_count
+            << " peak_active_tasks=" << diagnostics.peak_active_tasks
+            << " native_dispatches=" << diagnostics.native_dispatch_count
+            << " native_submissions=" << diagnostics.native_submission_count
+            << " native_us=" << diagnostics.native_compute_us << "\n";
   return 0;
 } catch (const std::exception& e) {
   std::cerr << e.what() << "\n";

@@ -84,8 +84,8 @@ WorkflowDocument/compile/execute identity 示例与可检查的 signed/HDR/负�
 
 ## S4 原生驻留
 
-MetalFp32 结果键增加数值模式、计划后端、编译实现身份和 context 设备代次。
-回退结果及后继不写预期原生结果键；冻结 registry 保持 C 模块实现所有权。
+`NativeGpu` 结果键增加选址模式、所选 backend、operation key 与 copied traits，以及
+native device/build identity。回退结果及后继不写预期原生结果键；冻结 registry 保持 C 模块实现所有权。
 CPU 精确缓存与原生近似结果隔离；设备失效停止原生键并清理条目。
 
 完成的原生输入副本共用有界 LRU，按实际需求样本、描述符、facet、Region 和设备
@@ -96,7 +96,8 @@ native_retained_bytes 是 retained_bytes 内唯一原生 owner 容量，native_u
 记录避免的上传。活跃读者、缓存、输入副本保持原始预算 lease。clear/eviction 只
 移除资格；共享工作保留独立/最后订阅取消，follower 不重复计数 producer 的原生工作。
 
-本实现磁盘读写仅允许 CpuExact，即使 Metal 请求回退也不写磁盘。CPU 磁盘行为保持。
+本实现磁盘读写仅允许 `CpuExact`；`NativeGpu` 计划即使回退到 CPU 也不读写磁盘。CPU
+磁盘行为保持。
 原生源码和 shader 输入进入实现身份，生成头留在构建目录。test_native_cache 及 C
 插件版本验证复用、编辑、模式/回退隔离、取消、clear race 和保留容量。
 

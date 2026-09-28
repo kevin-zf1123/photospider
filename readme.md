@@ -9,9 +9,9 @@ reset is governed by
 
 The installed `Photospider::kernel` target provides:
 
-- schema-2 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
+- schema-3 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
 - typed semantic IR and optimized IR;
-- operation ABI v9 semantic traits with closed typed parameter schemas,
+- operation ABI v11 semantic traits with closed typed parameter schemas,
   optimization, and Region-demand-aware local physical planning;
 - CPU-required and GPU-optional local execution;
 - eight signed/HDR Float32 image-v2/mask operations with composable bounded scalars;
@@ -49,12 +49,14 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-CPU exact execution is the default. Explicit `MetalFp32` planning and
-`ExecutionContextConfig::gpu_enabled` enable one optional Apple Silicon Metal
-queue with completion-safe shared buffers and trait-permitted CPU fallback.
-Apple builds use Metal/Foundation privately; set `PHOTOSPIDER_ENABLE_METAL=OFF`
-for the CPU configuration. See the [S4 workflow guide](docs/kernel-architecture/S4-Workflow.md)
-for the current native-support boundary and active validation entry points.
+CPU exact execution is the default. `ExecutionMode::NativeGpu` grants native
+placement to operations whose traits declare a GPU implementation;
+`ExecutionContextConfig::gpu_enabled` enables the context's configured Metal or
+Vulkan backend. The mode selects placement, while each operation/profile defines
+its numerical behavior, and traits govern CPU fallback. Apple builds use
+Metal/Foundation privately; set `PHOTOSPIDER_ENABLE_METAL=OFF` for the CPU
+configuration. See the [native GPU workflow guide](docs/kernel-architecture/S4-Workflow.md)
+for the supported-operation boundary and validation entry points.
 
 ## Install and consume
 
@@ -63,7 +65,7 @@ cmake --install build --prefix /desired/photospider-prefix
 ```
 
 ```cmake
-find_package(Photospider 0.7 CONFIG REQUIRED COMPONENTS kernel)
+find_package(Photospider 0.28 CONFIG REQUIRED COMPONENTS kernel)
 target_link_libraries(app PRIVATE Photospider::kernel)
 ```
 
@@ -86,7 +88,7 @@ repository owns local
 IPC v3 and ephemeral Session/Job orchestration. The daemon has no private
 kernel include, copied compiler/planner implementation, internal-IR wire
 format, remote endpoint, or plugin path method. Its existing 0.6 consumer has not
-been migrated to this breaking 0.7 package; migration remains separate work.
+been migrated to the current breaking 0.28 package; migration remains separate work.
 
 ## Composable workflows
 

@@ -21,17 +21,18 @@ by ordinary stages. Admission never waits on retained owners: insufficient
 capacity returns `ResourceExhausted` with `CapacityLimit`.
 
 Lease object capacity is charged automatically, while managed buffer and
-file/window owners charge their declared C++ object capacity. Root bootstrap,
-unmanaged allocator control blocks/headers, standard-library private allocations,
-thread stacks, driver state and OS page cache are outside this accounting
-model. Legacy execution metadata without a resource lease remains outside the
-model. `ResourceAllocator` admits its requested block and explicit alignment
-header before allocating; cancellation state/control storage and its flattened
-source list use that allocator. Retained allocator-aware diagnostics own their
-capacity independently of result payloads. `ResourceAllocationKind::Payload`
-marks STL computation data: its element block also counts toward Payload, while
-the explicit header remains Metadata. Copy, rebind and active-scope copying
-preserve that role. This API does not certify process RSS or native-device allocator overhead.
+file/window owners charge their declared C++ object capacity. Fixed root and
+device bootstrap state, thread stacks, driver state and OS page cache are outside
+this accounting model. Standard-library, Objective-C and driver-private
+allocations remain outside unless an explicit managed allocator owns them.
+`ResourceAllocator` admits its requested block and explicit alignment header
+before allocating; cancellation state/control storage and its flattened source
+list use that allocator. Retained allocator-aware diagnostics own their capacity
+independently of result payloads. `ResourceAllocationKind::Payload` marks STL
+computation data: its element block also counts toward Payload, while the
+explicit header remains Metadata. Copy, rebind and active-scope copying preserve
+that role. This API does not certify process RSS or opaque native-device
+allocator overhead.
 The counter `live` means live admitted capacity, including unused reservations;
 `peak` is an observed peak of that counter, not a proved input-class bound.
 The guarantee is `WithinBudgetOrFail` for the declared capacity model.
@@ -57,6 +58,49 @@ and structured callback also precharges one root stage before submission. The
 root stage count is cumulative across Runs. Queue counts callbacks waiting for
 a worker and is released before callback entry; envelope metadata remains
 charged through callback retirement. These limits apply with the cache disabled.
+
+## Native GPU metadata
+
+`ExecutionContext` creates its `MemoryBudget` before its optional native device
+and passes the device the same explicit `ResourceBudget` root. Omitting
+`managed_resources` creates an unmanaged device with a null root; the device
+uses ordinary allocation and never inherits a caller's thread-local allocation
+scope. `Invocation` receives the device metadata account explicitly, since the
+invocation is constructed before callback allocation scopes are entered.
+
+With a managed root, native GPU dynamic allocations use `ResourceAllocator`:
+pipeline keys and map nodes, native-buffer owners, allocation-address lookup
+nodes, allocated invocation-view vector capacity and temporary SPIR-V module
+word storage. Vulkan pipeline wrappers and control blocks use this allocator;
+Metal pipeline objects are Objective-C
+objects whose internal storage remains opaque. The allocator charges requested block bytes, its alignment header,
+and an Entries slot; `ResourceLease` accounting adds its own managed overhead.
+Native buffer storage is charged separately using its admitted actual capacity.
+Host, Metadata, Shared, Device and Payload are overlapping budget dimensions,
+not separate physical allocations to sum.
+
+The native pipeline cache holds at most 64 entries. A submitted batch retains
+pipeline references in a fixed array of 32 command slots, with up to 31 storage
+bindings per command. An invocation independently retains at most 1024 view
+tokens. The allocation-address map holds weak `CpuStorage` references, so it
+does not own native buffers. These limits bound the corresponding structures;
+thread stacks and fixed bootstrap objects remain outside the managed metadata
+counter. Metal and Vulkan serialize device queue operations and protect the
+pipeline map with a separate cache mutex. Cache clearing releases its charged
+keys and map nodes. Vulkan wrapper metadata remains charged while a batch pin
+owns it; Metal's native pipeline objects are opaque and their native lifetime
+is not a managed metadata charge.
+
+For managed native metadata, allocation gets one bounded recovery attempt. The
+first attempt uses a nested resource scope whose failure sink is null. If it
+fails, the device clears the native pipeline cache and retries once in the
+caller's original scope, preserving that scope's sticky failure on a terminal
+allocation error. This metadata reclaim clears only the native pipeline cache.
+GPU payload admission has a separate path: it releases eligible pending disk
+and result-cache owners, clears the native pipeline cache when needed, then
+performs the atomic root reservation. Unmanaged devices use their explicit null
+root directly and do not run the managed cache-clear retry.
+
 
 ## Temporary backing
 

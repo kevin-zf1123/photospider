@@ -92,7 +92,7 @@ int main(int argc, char** argv) {
       s3::require(status.ok(), status.message);
       s3::require(registry->freeze().ok(), "registry freeze failed");
     }
-    const auto mode = backend == "metal" ? ps::ExecutionMode::MetalFp32
+    const auto mode = backend == "metal" ? ps::ExecutionMode::NativeGpu
                                          : ps::ExecutionMode::CpuExact;
     bool native = false;
     if (scenario == "cache-edits") {
@@ -141,7 +141,7 @@ int main(int argc, char** argv) {
         ps::ExecutionContext disabled(registry);
         std::uint64_t fallbacks = 0;
         const auto dispatches = s4_fixture::all_operations(
-            disabled, registry, ps::ExecutionMode::MetalFp32, &fallbacks);
+            disabled, registry, ps::ExecutionMode::NativeGpu, &fallbacks);
         s3::require(dispatches == 0 && fallbacks > 0,
                     "disabled device must report real CPU fallbacks");
         std::cout

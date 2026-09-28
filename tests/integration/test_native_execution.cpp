@@ -4,10 +4,13 @@
 #include <memory>
 #include <utility>
 
+#include "fixtures/native_scale_spirv.h"
+#include "photospider/execution/resource_allocator.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
 namespace {
+std::uint64_t native_capacity = 0;
 /** @brief A real independently registered GPU operation with exact CPU oracle.
  */
 ps::Result<ps::Value> scale(const ps::OperationInvocation& call) {
@@ -33,20 +36,26 @@ ps::Result<ps::Value> scale(const ps::OperationInvocation& call) {
     if (!api)
       return ps::Result<ps::Value>(ps::Status::failure(
           ps::ErrorCode::BackendUnavailable, "no native service"));
+    native_capacity = call.inputs[0].storage()->capacity();
     std::uint64_t input = 0, result = 0;
     if (api->buffer(api->context, call.inputs[0].bytes().data(),
                     call.inputs[0].bytes().size(), 0, &input) ||
         api->buffer(api->context, output.data(), output.size(), 1, &result))
       return ps::Result<ps::Value>(ps::Status::failure(
           ps::ErrorCode::OperationFailed, "native binding failed"));
-    ps_gpu_buffer_binding_v9 buffers[] = {
-        {sizeof(ps_gpu_buffer_binding_v9), 0, input, 0,
+    ps_gpu_buffer_binding_v11 buffers[] = {
+        {sizeof(ps_gpu_buffer_binding_v11), 0, input, 0,
          call.inputs[0].bytes().size(), 0},
-        {sizeof(ps_gpu_buffer_binding_v9), 1, result, 0, output.size(), 1}};
-    ps_gpu_dispatch_v9 command{};
+        {sizeof(ps_gpu_buffer_binding_v11), 1, result, 0, output.size(), 1}};
+    ps_gpu_dispatch_v11 command{};
     command.struct_size = sizeof(command);
     command.source = source;
     command.source_size = sizeof(source) - 1;
+    if (api->backend == PS_GPU_BACKEND_VULKAN_V11) {
+      command.source = reinterpret_cast<const char*>(kNativeScaleSpirv);
+      command.source_size = sizeof(kNativeScaleSpirv);
+      command.code_format = PS_GPU_CODE_SPIRV_V11;
+    }
     command.entry = "scale";
     command.entry_size = 5;
     command.buffers = buffers;
@@ -58,6 +67,75 @@ ps::Result<ps::Value> scale(const ps::OperationInvocation& call) {
           ps::ErrorCode::OperationFailed, "native execution failed"));
   }
   return std::move(output).publish(call.inputs[0].facets());
+}
+int sticky_resource_before_fallback(const ps::Value& input) {
+  for (bool exhaust : {false, true}) {
+    auto registry = std::make_shared<ps::OperationRegistry>();
+    unsigned cpu_calls = 0;
+    ps::OperationDefinition operation;
+    operation.key = "native.failure";
+    operation.traits.input_count = 1;
+    operation.traits.input_schema.resize(1);
+    operation.traits.supports_gpu = true;
+    operation.traits.allows_cpu_fallback = true;
+    operation.traits.outputs[0].output_element_type = ps::ElementType::Float32;
+    operation.traits.outputs[0].shape_rule =
+        ps::OperationShapeRule::PreserveFirstInput;
+    operation.callback = [&](const ps::OperationInvocation& call) {
+      if (call.backend == ps::Backend::Cpu) {
+        ++cpu_calls;
+        return ps::Result<ps::Value>(call.inputs[0]);
+      }
+      const auto* root = ps::resource_internal::metadata_budget();
+      if (!root || !call.gpu)
+        return ps::Result<ps::Value>(
+            ps::Status{ps::ErrorCode::Internal, "missing GPU callback root"});
+      if (exhaust)
+        static_cast<void>(root->consume({1048577}));
+      const char source[] =
+          "#include <metal_stdlib>\nusing namespace metal;\n"
+          "kernel void present(uint i [[thread_position_in_grid]]) {}";
+      ps_gpu_dispatch_v11 command{};
+      command.struct_size = sizeof(command);
+      command.source = source;
+      command.source_size = sizeof(source) - 1;
+      command.entry = "missing";
+      command.entry_size = 7;
+      command.grid[0] = command.grid[1] = command.grid[2] = 1;
+      static_cast<void>(call.gpu->execute(call.gpu->context, &command, 1));
+      return ps::Result<ps::Value>(
+          ps::Status{ps::ErrorCode::OperationFailed, "missing entry"});
+    };
+    PS_CHECK(registry->register_operation(std::move(operation)).ok());
+    PS_CHECK(registry->freeze().ok());
+    ps::WorkflowDocument document;
+    document.inputs = {
+        {1, "input", input.descriptor(), input.region(), input.layout(), {}}};
+    document.nodes = {
+        {1, "native.failure", {ps::WorkflowInputReference{1}}, {}}};
+    document.outputs = {{"output", 1, "value"}};
+    ps::GraphContext graph(document);
+    ps::PlanningOptions planning;
+    planning.execution_mode = ps::ExecutionMode::NativeGpu;
+    auto compiled = ps::Compiler(registry).compile(graph, planning);
+    PS_CHECK(compiled.ok());
+    ps::ExecutionContextConfig config;
+    config.gpu_enabled = true;
+    config.managed_resources = ps::ResourceLimits{};
+    config.managed_resources->maximum_work = 1048576;
+    ps::ExecutionContext context(registry, config);
+    PS_CHECK(context.gpu_enabled());
+    auto result = context.execute(compiled.value().plan, {{{"input", input}}});
+    if (exhaust) {
+      PS_CHECK(!result.ok() &&
+               result.status().code == ps::ErrorCode::ResourceExhausted);
+      PS_CHECK(cpu_calls == 0);
+    } else {
+      PS_CHECK(result.ok() && cpu_calls == 1);
+      PS_CHECK(result.value().diagnostics.fallback_reasons.size() == 1);
+    }
+  }
+  return 0;
 }
 }  // namespace
 
@@ -104,7 +182,7 @@ int main() {
   document.outputs = {{"result", 3, "value"}};
   ps::GraphContext graph(document);
   ps::PlanningOptions options;
-  options.execution_mode = ps::ExecutionMode::MetalFp32;
+  options.execution_mode = ps::ExecutionMode::NativeGpu;
   auto compiled = ps::Compiler(registry).compile(graph, options);
   PS_CHECK(compiled.ok());
   auto buffer = ps::BufferAllocator().allocate(16).take_value();
@@ -123,6 +201,7 @@ int main() {
   ps::ExecutionContextConfig config;
   config.gpu_enabled = true;
   config.cpu_workers = 2;
+  config.collect_scheduler_timing = true;
   ps::Value retained;
   {
     ps::ExecutionContext execution(registry, config);
@@ -134,6 +213,13 @@ int main() {
     if (!result.ok())
       std::cerr << result.status().message << '\n';
     PS_CHECK(result.ok());
+    const auto queue = execution.scheduler_statistics();
+    PS_CHECK(queue.enabled && !queue.cpu.saturated && !queue.gpu.saturated);
+    PS_CHECK(queue.gpu.accepted_callbacks == 2 &&
+             queue.gpu.started_callbacks == 2);
+    PS_CHECK(queue.cpu.accepted_callbacks == 1 &&
+             queue.cpu.started_callbacks == 1);
+    PS_CHECK(queue.gpu.submission_ns > 0 && queue.gpu.queue_wait_ns > 0);
     const auto& d = result.value().diagnostics;
     PS_CHECK(d.native_dispatch_count == 2 && d.native_submission_count == 2);
     PS_CHECK(d.transfer_count == 1 && d.transfer_bytes == 16);
@@ -161,14 +247,47 @@ int main() {
   ps::GraphContext bounded_graph(document);
   auto bounded_plan = ps::Compiler(registry).compile(bounded_graph, options);
   PS_CHECK(bounded_plan.ok());
-  config.maximum_live_bytes = 48;
-  config.result_cache_bytes = 16;
+  config.maximum_live_bytes = native_capacity * 3;
+  config.result_cache_bytes = native_capacity;
   ps::ExecutionContext bounded(registry, config);
   for (int repeat = 0; repeat < 3; ++repeat) {
     auto result = bounded.execute(bounded_plan.value().plan, bindings);
     PS_CHECK(result.ok());
     PS_CHECK(result.value().diagnostics.native_dispatch_count == 1);
-    PS_CHECK(bounded.cache_statistics().retained_bytes == 16);
+    PS_CHECK(bounded.cache_statistics().retained_bytes == native_capacity);
+  }
+  // Distinct uploads must evict optional native cache before actual admission,
+  // including when only a Device or Shared sublimit is tight.
+  for (auto kind : {ps::ResourceKind::Payload, ps::ResourceKind::Device,
+                    ps::ResourceKind::Shared}) {
+    auto tight = config;
+    tight.maximum_live_bytes =
+        kind == ps::ResourceKind::Payload ? native_capacity * 2 : 4096;
+    tight.result_cache_bytes = native_capacity * 2;
+    tight.managed_resources = ps::ResourceLimits{};
+    tight.managed_resources->capacity[kind] = native_capacity * 2;
+    ps::ExecutionContext context(registry, tight);
+    for (int repeat = 0; repeat < 4; ++repeat) {
+      auto bytes = ps::BufferAllocator().allocate(16).take_value();
+      const float first = static_cast<float>(repeat + 1) / 8;
+      std::memcpy(bytes.data(), &first, sizeof(first));
+      auto changed =
+          ps::Value::from_storage(value.descriptor(), value.region(),
+                                  value.layout(), std::move(bytes).freeze())
+              .take_value();
+      auto result =
+          context.execute(bounded_plan.value().plan, {{{"input", changed}}});
+      if (!result.ok())
+        std::cerr << result.status().message << '\n';
+      PS_CHECK(result.ok());
+      PS_CHECK(result.value().diagnostics.native_dispatch_count == 1);
+      float actual = 0;
+      std::memcpy(&actual, result.value().values.at("result").bytes().data(),
+                  sizeof(actual));
+      PS_CHECK(actual == first * .5F);
+      const auto stats = context.resource_budget().value().statistics();
+      PS_CHECK(stats.peak[kind] <= native_capacity * 2);
+    }
   }
   // One uploaded allocation can back two Values with distinct semantic facets.
   auto first = ps::Value::from_storage(value.descriptor(), value.region(),
@@ -257,6 +376,7 @@ int main() {
            5);
   PS_CHECK(ranks_result.value().values.at("second").descriptor().shape.size() ==
            4);
+  PS_CHECK(sticky_resource_before_fallback(value) == 0);
   std::cout << "native chain: dispatches=2 uploads=1 bytes=16 host_access=1 "
                "oracle=passed\n";
   return 0;

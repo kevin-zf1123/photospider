@@ -697,7 +697,7 @@ int shared_fallback() {
   doc.outputs = {{"y", 2, "value"}};
   GraphContext graph(doc);
   PlanningOptions planning;
-  planning.execution_mode = ExecutionMode::MetalFp32;
+  planning.execution_mode = ExecutionMode::NativeGpu;
   auto plan = Compiler(registry).compile(graph, planning).take_value().plan;
   ExecutionContext context(registry, {2, false, 8, 4096, 128});
   auto demand =

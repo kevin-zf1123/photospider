@@ -13,7 +13,8 @@ namespace ps::plugin_internal::numeric_ops {
 template <std::size_t Words>
 Status multiply_fixed(const FixedInteger<Words>& a,
                       const FixedInteger<Words>& b, FixedInteger<Words>* output,
-                      const execution_internal::WorkConsumer& consume) {
+                      const execution_internal::WorkConsumer& consume,
+                      unsigned checkpoint_words = 0) {
   const auto& status = consume(4 * Words);
   if (!status.ok())
     return status;
@@ -26,6 +27,13 @@ Status multiply_fixed(const FixedInteger<Words>& a,
       return status;
     unsigned __int128 carry = 0;
     for (int j = 0; j < b_size; ++j) {
+      // Optional in-row cancellation polling does not change prepaid work.
+      if (checkpoint_words && j &&
+          static_cast<unsigned>(j) % checkpoint_words == 0) {
+        const auto& checkpoint = consume(0);
+        if (!checkpoint.ok())
+          return checkpoint;
+      }
       const auto slot = static_cast<std::size_t>(i + j);
       if (slot >= Words)
         return Status{ErrorCode::ResourceExhausted, "fixed product capacity",

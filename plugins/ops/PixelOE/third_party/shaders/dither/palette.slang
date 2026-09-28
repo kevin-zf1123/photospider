@@ -41,6 +41,8 @@ public uint nearest(float3 v, StructuredBuffer<float> pal, uint b, uint K)
 // reflect padding of one column index (F.pad mode="reflect", pad 1)
 public int reflect_col(int x, int width)
 {
+    if (width == 1)
+        return 0;
     if (x < 0)
         return -x;
     if (x >= width)

@@ -113,9 +113,10 @@ signed/HDR/negative-zero sample payloads. See [ADR 0018](../adr/0018-local-resul
 
 ## S4 native retention
 
-MetalFp32 result keys additionally separate the numeric mode, planned backend,
-compiled implementation fingerprint and context device generation. A fallback
-result and its descendants never populate the expected native result keys.
+`NativeGpu` result keys additionally separate the placement mode, selected
+backend, operation key and copied traits, plus the native device/build identity.
+A fallback result and its descendants never populate the expected native
+result keys.
 The current frozen registry fixes C-module implementation ownership for the
 context. CPU exact results cannot be replaced by approximately computed native
 results. Loss of the device disables native keys and clears retained entries.
@@ -135,9 +136,9 @@ Native shared computations keep the independent/last-subscriber cancellation
 rules. Shared followers report shared work without counting the producer's
 native dispatches and transfers a second time.
 
-Disk read and write are restricted to CpuExact execution in this implementation,
-including when an explicitly Metal plan falls back to CPU. CPU disk behavior
-otherwise remains unchanged. Native implementations and generated shader inputs
+Disk read and write are restricted to `CpuExact` execution in this
+implementation, including when a `NativeGpu` plan falls back to CPU. CPU disk
+behavior otherwise remains unchanged. Native implementations and generated shader inputs
 participate in maintained build identity; generated build headers are not source
 assets. `test_native_cache` and its C-module variant cover reuse, edits, numeric
 mode/fallback isolation, cancellation, clear races and bounded retained capacity.

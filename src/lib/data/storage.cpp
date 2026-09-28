@@ -51,6 +51,15 @@ bool BufferAllocator::owns(const CpuStorage& storage) const noexcept {
 }
 BufferAllocator BufferAllocator::limited(std::uint64_t maximum_bytes,
                                          FailureObserver failure) const {
+  return limited_impl(maximum_bytes, std::move(failure), false);
+}
+BufferAllocator BufferAllocator::limited_requested(
+    std::uint64_t maximum_bytes, FailureObserver failure) const {
+  return limited_impl(maximum_bytes, std::move(failure), true);
+}
+BufferAllocator BufferAllocator::limited_impl(std::uint64_t maximum_bytes,
+                                              FailureObserver failure,
+                                              bool requested) const {
   try {
     struct State {
       std::mutex mutex;
@@ -68,31 +77,38 @@ BufferAllocator BufferAllocator::limited(std::uint64_t maximum_bytes,
       }
     };
     auto state = std::make_shared<State>();
-    BufferAllocator result(
-        [parent = reserve_, state, maximum_bytes](std::uint64_t bytes) {
-          auto lease = std::make_shared<Lease>();
-          lease->state = state;
-          {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            if (bytes > maximum_bytes - state->live)
-              return Result<std::shared_ptr<void>>(
-                  Status{ErrorCode::ResourceExhausted,
-                         "allocator live sublimit exceeded",
-                         FailureReason::CapacityLimit});
-            state->live += bytes;
-            lease->bytes = bytes;
-          }
-          if (parent) {
-            auto reserved = parent(bytes);
-            if (!reserved.ok())
-              return Result<std::shared_ptr<void>>(reserved.status());
-            lease->parent = reserved.take_value();
-          }
-          return Result<std::shared_ptr<void>>(std::move(lease));
-        },
-        domain_);
-    result.native_allocate_ = native_allocate_;
-    result.allocation_scopes_ = allocation_scopes_;
+    const auto limited_reserve = [state, maximum_bytes](Reserve parent) {
+      return Reserve([parent = std::move(parent), state,
+                      maximum_bytes](std::uint64_t bytes) {
+        auto lease = std::make_shared<Lease>();
+        lease->state = state;
+        {
+          std::lock_guard<std::mutex> lock(state->mutex);
+          if (bytes > maximum_bytes - state->live)
+            return Result<std::shared_ptr<void>>(
+                Status{ErrorCode::ResourceExhausted,
+                       "allocator live sublimit exceeded",
+                       FailureReason::CapacityLimit});
+          state->live += bytes;
+          lease->bytes = bytes;
+        }
+        if (parent) {
+          auto reserved = parent(bytes);
+          if (!reserved.ok())
+            return Result<std::shared_ptr<void>>(reserved.status());
+          lease->parent = reserved.take_value();
+        }
+        return Result<std::shared_ptr<void>>(std::move(lease));
+      });
+    };
+    auto result = *this;
+    if (requested) {
+      result.requested_reserve_ = limited_reserve(requested_reserve_);
+    } else {
+      result.reserve_ = limited_reserve(reserve_);
+      result.native_shared_reserve_ = limited_reserve(
+          native_shared_reserve_ ? native_shared_reserve_ : reserve_);
+    }
     result.allocation_scopes_.push_back(state);
     result.failure_ = [parent = failure_, observer = failure](ErrorCode code) {
       if (parent) {
@@ -144,11 +160,19 @@ Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
     return Result<MutableBuffer>(std::move(status));
   };
   try {
+    std::shared_ptr<void> requested_lease;
+    if (requested_reserve_) {
+      auto reserved = requested_reserve_(size);
+      if (!reserved.ok())
+        return reject(reserved.status());
+      requested_lease = reserved.take_value();
+    }
     if (native_allocate_) {
       auto result = native_allocate_(size, reserve_, domain_);
       if (!result.ok())
         return reject(result.status());
       result.value().storage_->allocation_scopes_ = allocation_scopes_;
+      result.value().storage_->requested_lease_ = std::move(requested_lease);
       return result;
     }
     if (size == 0 || size > static_cast<std::uint64_t>(INT64_MAX) ||
@@ -161,6 +185,7 @@ Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
     result.storage_ = std::shared_ptr<CpuStorage>(new CpuStorage());
     result.storage_->domain_ = domain_;
     result.storage_->allocation_scopes_ = allocation_scopes_;
+    result.storage_->requested_lease_ = std::move(requested_lease);
     if (reserve_) {
       auto lease = reserve_(size);
       if (!lease.ok())

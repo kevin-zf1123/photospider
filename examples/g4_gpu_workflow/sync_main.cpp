@@ -58,12 +58,12 @@ Result<Value> increment(const OperationInvocation& call, bool can_fail) {
         api->buffer(api->context, output.data(), output.size(), 1,
                     &destination))
       return Result<Value>(Status{ErrorCode::OperationFailed, "native buffer"});
-    ps_gpu_buffer_binding_v9 bindings[] = {
-        {sizeof(ps_gpu_buffer_binding_v9), 0, source, 0,
+    ps_gpu_buffer_binding_v11 bindings[] = {
+        {sizeof(ps_gpu_buffer_binding_v11), 0, source, 0,
          call.inputs[0].bytes().size(), 0},
-        {sizeof(ps_gpu_buffer_binding_v9), 1, destination, 0, output.size(),
+        {sizeof(ps_gpu_buffer_binding_v11), 1, destination, 0, output.size(),
          1}};
-    ps_gpu_dispatch_v9 command{};
+    ps_gpu_dispatch_v11 command{};
     command.struct_size = sizeof(command);
     command.source = shader;
     command.source_size = sizeof(shader) - 1;
@@ -222,7 +222,7 @@ int fallback_records(const ExecutionBindings& bindings) {
     }
     GraphContext graph(doc);
     PlanningOptions planning;
-    planning.execution_mode = ExecutionMode::MetalFp32;
+    planning.execution_mode = ExecutionMode::NativeGpu;
     auto plan = Compiler(registry).compile(graph, planning).take_value().plan;
     ExecutionContext context(registry, {1, true, 8, 1 << 20, 0});
     auto frozen = context.freeze(plan, bindings).take_value();
@@ -328,7 +328,7 @@ int main() {
   }
   ExecutionBindings bindings{{{"x", std::move(memory).publish().take_value()}}};
   PlanningOptions planning;
-  planning.execution_mode = ExecutionMode::MetalFp32;
+  planning.execution_mode = ExecutionMode::NativeGpu;
   for (bool enabled : {false, true}) {
     ExecutionContextConfig config;
     config.cpu_workers = 1;

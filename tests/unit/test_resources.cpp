@@ -79,6 +79,27 @@ int concurrent_work() {
   }
   return 0;
 }
+int available_capacity() {
+  ResourceLimits l;
+  l.capacity.values.fill(4096);
+  l.cleanup.values.fill(16);
+  ResourceBudget root(l);
+  const auto empty = root.available_capacity();
+  for (auto bytes : empty.values)
+    PS_CHECK(bytes == 4080);
+  ErrorCode failure = ErrorCode::Ok;
+  ResourceAllocationScope scope(root, &failure);
+  {
+    auto lease = root.reserve(ResourceCapacity::host(64, 16)).take_value();
+    const auto available = root.available_capacity();
+    const auto live = root.statistics().live;
+    for (std::size_t i = 0; i < live.values.size(); ++i)
+      PS_CHECK(available.values[i] + live.values[i] == empty.values[i]);
+    PS_CHECK(failure == ErrorCode::Ok);
+  }
+  PS_CHECK(root.available_capacity().values == empty.values);
+  return 0;
+}
 int ledger() {
   const auto overhead = ResourceBudget::lease_metadata_bytes();
   auto l = limits(overhead + 20);
@@ -640,6 +661,7 @@ int mixed_certificate_roots() {
 }
 }  // namespace
 int main() {
+  PS_CHECK(available_capacity() == 0);
   PS_CHECK(ledger() == 0);
   PS_CHECK(concurrent_work() == 0);
   PS_CHECK(execution_owner() == 0);

@@ -13,7 +13,15 @@ p.add_argument('--upstream',type=Path,required=True)
 p.add_argument('--runner',type=Path,required=True)
 p.add_argument('--plugin',type=Path,required=True)
 p.add_argument('--out',type=Path,required=True)
+p.add_argument('--workers',type=int,default=1)
+p.add_argument('--case',action='append',default=[],help='Run only the named behavior cases')
+p.add_argument('--backend',choices=['cpu','cpu_tiled','gpu','vulkan'],default='cpu')
+p.add_argument('--existing-results',action='store_true',help='Validate supplied native outputs without executing runner')
+p.add_argument('--compare-runner',type=Path)
+p.add_argument('--compare-plugin',type=Path)
+p.add_argument('--compare-workers',type=int)
 a=p.parse_args();a.out.mkdir(parents=True,exist_ok=True)
+if bool(a.compare_runner)!=bool(a.compare_plugin): p.error('comparison needs runner and plugin')
 sys.path.insert(0,str(a.upstream/'src'))
 from pixeloe.torch.pixelize import pixelize
 from pixeloe.torch.outline import outline_expansion
@@ -58,22 +66,41 @@ x=rng.uniform(.02,.98,(25,31,3)).astype(np.float32)
 infile=a.out/'input.f32';x.tofile(infile)
 t=torch.from_numpy(x).permute(2,0,1)[None]
 records=[]
-def run(name,opts,oracle=True,tol=1e-5):
+def run(name,opts,oracle=True,tol=1e-5,expected_tensor=None):
+    if a.case and name not in a.case: return
     outfile=a.out/(name+'.f32')
-    cli=[str(a.runner),str(a.plugin),'31','25','input='+str(infile),'output='+str(outfile)]
+    cli=[str(a.runner),str(a.plugin),'31','25','input='+str(infile),'output='+str(outfile),'workers='+str(a.workers),'backend='+a.backend]
     cli += [f'{k}={str(v).lower() if isinstance(v,bool) else v}' for k,v in opts.items()]
-    r=subprocess.run(cli,text=True,capture_output=True)
-    if r.returncode: raise RuntimeError(name+': '+r.stderr)
+    entry={'name':name,'options':opts,'backend':a.backend}
+    if a.existing_results:
+        entry.update(existing_result=str(outfile),workflow='native output replay; no runner invoked')
+    else:
+        r=subprocess.run(cli,text=True,capture_output=True)
+        if r.returncode: raise RuntimeError(name+': '+r.stderr)
+        entry.update(command=cli,workflow=r.stdout.strip())
     actual=np.fromfile(outfile,np.float32)
-    entry={'name':name,'workflow':r.stdout.strip(),'finite':bool(np.isfinite(actual).all())}
+    entry['finite']=bool(np.isfinite(actual).all())
+    if not actual.size or not entry['finite']: raise AssertionError(name+': empty or nonfinite output')
+    if a.compare_runner:
+        comparison=a.out/(name+'-comparison.f32')
+        other=[str(a.compare_runner),str(a.compare_plugin),'31','25','input='+str(infile),'output='+str(comparison)]
+        if a.compare_workers is not None: other += ['workers='+str(a.compare_workers)]
+        other += [f'{k}={str(v).lower() if isinstance(v,bool) else v}' for k,v in opts.items()]
+        compared=subprocess.run(other,text=True,capture_output=True)
+        if compared.returncode: raise RuntimeError(name+': comparison '+compared.stderr)
+        entry['comparison_command']=other
+        entry['comparison_bitwise_equal']=outfile.read_bytes()==comparison.read_bytes()
+        if not entry['comparison_bitwise_equal']: raise AssertionError(name+': worker/baseline bit mismatch')
     if oracle:
-        args={k:v for k,v in opts.items() if k not in ('blur_impl','colorfix_blur','blur_rank','local_stats','stat_padding')}
+        args={k:v for k,v in opts.items() if k not in ('blur_impl','colorfix_blur','blur_rank','local_stats','stat_padding','operation')}
         if opts.get('local_stats')=='sliding':
             outline_module.local_stat=lambda tensor,kernel,stride,stat:independent_sliding(tensor,kernel,stride,stat,opts.get('stat_padding','zero'))
         if opts.get('colorfix_blur')=='separable' or opts.get('blur_impl','lowrank')=='lowrank':
             pixel_module.match_color=lambda source,target:independent_match(source,target,opts)
-        expected=pixelize(t,backend='torch',**args).detach().permute(0,2,3,1).numpy().reshape(-1)
+        expected=(pixelize(t,backend='torch',**args) if expected_tensor is None else expected_tensor).detach().permute(0,2,3,1).numpy().reshape(-1)
         pixel_module.match_color=original_match;outline_module.local_stat=original_stat
+        if actual.shape != expected.shape or not np.isfinite(expected).all():
+            raise AssertionError(name+': oracle shape/finite mismatch')
         error=float(np.max(np.abs(actual-expected)))
         entry.update(max_abs=error,tolerance=tol,passed=error<=tol)
         if error>tol:
@@ -97,6 +124,14 @@ run('color_exact',{'blur_impl':'direct'},tol=1e-5)
 for mode in ['kmeans','weighted-kmeans','repeat-kmeans']:
     for dither in ['none','ordered','error_diffusion']:
         run('quant_'+mode+'_'+dither,{'do_quant':True,'quant_mode':mode,'dither_mode':dither,'blur_impl':'direct','num_colors':8},tol=1e-5)
-for opts in [dict(local_stats='sliding'),dict(local_stats='sliding',stat_padding='replicate'),dict(colorfix_blur='separable'),dict(blur_impl='sym'),dict(blur_impl='tiled'),dict(blur_rank=2)]:
-    run('option_'+str(len(records)),opts)
+for index,opts in enumerate([dict(local_stats='sliding'),dict(local_stats='sliding',stat_padding='replicate'),dict(colorfix_blur='separable'),dict(blur_impl='sym'),dict(blur_impl='tiled'),dict(blur_rank=2)],start=34):
+    run('option_'+str(index),opts)
+# Public expanded/weight ports terminate before downscaling and quantization.
+# The independent upstream implementation returns both images before that stage.
+padded=F.pad(t,(2,3,2,3),mode='replicate')  # 25x31 -> 30x36 for pixel_size=6
+expanded,weight=outline_expansion(padded,3,3,6)
+run('port_expanded',{'operation':'pixeloe.expanded','do_color_match':False},expected_tensor=expanded)
+run('port_weight',{'operation':'pixeloe.weight','do_color_match':False},expected_tensor=weight)
+if a.case and set(a.case) != {entry['name'] for entry in records}:
+    raise ValueError('Unknown requested behavior case')
 (a.out/'validation.json').write_text(json.dumps(records,indent=2)+'\n')

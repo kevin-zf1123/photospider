@@ -1,465 +1,277 @@
 # Compiler and Local Execution
 
-## Compile stages
+## Executive summary
 
-`Compiler::analyze` checks a current `GraphSnapshot`, bounded document counts
-and text, unique node/output ids, references, ports, operation availability,
-input counts, each operation's closed required typed parameter schema,
-deterministic acyclic topology, static output dtype/shape/facet inference and
-bounded repeated-input expansion through the shared operation contract. Unknown, missing, or wrong-type parameters fail before
-IR publication; built-ins do not synthesize defaults. Analysis publishes
-immutable `SemanticGraphIR` in node-id-tiebroken
-topological order plus `SemanticGraphDigest`.
+The kernel turns a workflow and its input descriptions into an executable plan. It separates reusable planning from the data supplied for each execution. This keeps validation, scheduling, and result ownership consistent across repeated and concurrent requests.
 
-Fixed inference validates a logical nonzero rank-1..8 descriptor and does not
-require its dense element or byte product to fit. A C++ embedding operation may
-materialize that descriptor as a valid strided or zero-stride broadcast Value;
-the plan uses the declared `estimated_bytes` for a non-densely-representable
-output, with at least one element of capacity. Actual allocations must fit
-the declared bound; no dense allocation is inferred for that case. Explicit `Region::element_count()` remains
-checked and may still return overflow for the same multi-dimensional logical
-shape. A stride-free C DSO Fixed descriptor is separately required to be
-densely representable at load: its checked uint64 contiguous products must
-produce total bytes `B > 0`, with `B - 1 <= INT64_MAX` and `B <= SIZE_MAX`.
-This DSO-only address/allocation boundary does not constrain a C++ broadcast
-descriptor.
+## Mental model and intuition
 
-Each schema-valid Float64 parameter enters canonical stage identity using the
-exact copied IEEE-754 binary64 bits in fixed little-endian order. Signed zero
-is preserved, so sign-sensitive callbacks cannot share semantic, optimized,
-plan, or cache-key identity. The compiler introduces no finite-only rule and
-does not normalize NaN payloads or infinities.
+```mermaid
+flowchart LR
+    Document[Workflow and input descriptions] --> Validate[Validate and lower]
+    Validate --> Optimize[Optimize]
+    Optimize --> Plan[Physical plan]
+    Plan --> Run[Execute with current bindings]
+    Bindings[Immutable input bindings] --> Run
+    Run --> Result[Owned results and diagnostics]
+```
 
-`Compiler::optimize` is an explicit conservative no-op in this baseline. It
-copies the semantic nodes into a distinct `OptimizedGraphIR` and produces a
-domain-separated `OptimizedGraphDigest`.
+## Formal contracts and invariants
 
-`Compiler::plan` copies dependency-ordered steps, selects CPU or a declared
-optional local GPU backend, records estimated bytes, and propagates optional
-named output Regions backward into per-step output/input demands using Whole,
-elementwise-exact, or clipped Halo rules. It produces
-`ExecutionPlan`, `ExecutionPlanDigest`, and `PlanCacheKey`. No stage contains a
-callback pointer, native device, or daemon object. A node or step may retain an
-immutable `PreparedOperation` owner for a registered static program; the owner
-keeps the definition lease alive and is released after dependent plan/Run
-owners. Preparation state is not runtime mutable state and does not enter
-semantic or cache identity.
-Each stage also carries a private runtime-only weak identity for the exact
-frozen operation registry; it is excluded from digests and serialization.
+The current source uses OperationTraits 20, `semantic-graph-ir-v18` and `physical-plan-v18`. The outer `plan-cache-key-v15` and `optimizer-v5-canonical-noop` remain unchanged; package 0.28.0, operation C ABI 11 and planar C extension v3 remain the current package/API versions.
 
-## Static operation preparation
+### Compile stages
 
-`OperationDefinition::prepare_static` is the public pure preparation hook for
-deterministic operations such as NUM-01. `OperationRegistry::prepare_operation`
-validates complete static input metadata and parameters, including exact copied
-IEEE-754 parameter bits, then invokes the hook once outside registry
-synchronization. The returned `OperationPreparation` owns resolved output
-metadata and optional immutable state in `PreparedOperation`; it contains no
-Value payloads, Run data, I/O state or private mutable cache.
+`Compiler::analyze` checks a current `GraphSnapshot`, bounded document counts and text, unique node/output ids, references, ports, operation availability, input counts, each operation's closed required typed parameter schema, deterministic acyclic topology, static output dtype/shape/facet inference and bounded repeated-input expansion through the shared operation contract. Unknown, missing, or wrong-type parameters fail before IR publication; built-ins do not synthesize defaults. Analysis publishes immutable `SemanticGraphIR` in node-id-tiebroken topological order plus `SemanticGraphDigest`.
 
-Compiler nodes and plan steps retain the prepared owner across their executions.
-Direct requests may pass an existing matching handle; otherwise each direct
-preflight prepares once. A joint request prepares once for its compatible
-members. Matching identity alone does not share state between separate calls.
-Request-owned inputs and the query passed to a continuation retain
-their existing ownership boundary: a request owns its copied record, while a
-`DependencyQuery` is borrowed and cannot be retained. Preparation and plan
-storage use ordinary host allocations outside per-Atom runtime scratch
-admission; there is no separate enforced preparation budget. Operations bound
-their static source/program size. Continuation state remains subject to runtime
-limits. No global preparation cache or dynamic preparation state is
-introduced. A session destroys its continuation before its prepared owner. A prepared
-owner destroys its program before releasing the definition/library lease. The
-external registry owner may be released earlier without invalidating these leases.
+Fixed inference validates a logical nonzero rank-1..8 descriptor and does not require its dense element or byte product to fit. A C++ embedding operation may materialize that descriptor as a valid strided or zero-stride broadcast Value; the plan uses the declared `estimated_bytes` for a non-densely-representable output, with at least one element of capacity. Actual allocations must fit the declared bound; no dense allocation is inferred for that case.
 
-## Execution
+Explicit `Region::element_count()` remains checked and may still return overflow for the same multi-dimensional logical shape. A stride-free C DSO Fixed descriptor is separately required to be densely representable at load: its checked uint64 contiguous products must produce total bytes `B > 0`, with `B - 1 <= INT64_MAX` and `B <= SIZE_MAX`. This DSO-only address/allocation boundary does not constrain a C++ broadcast descriptor.
 
-`ExecutionContext` owns a fixed CPU pool, an optional one-worker GPU callback
-lane, one deterministic FIFO per lane, a frozen operation registry, and a
-shared controlled-buffer budget. Both FIFOs share the single nonblocking
-`maximum_queued_tasks` admission for callbacks that have not started. A worker
-releases the move-only admission token before entering the callback, so running
-callbacks do not occupy the waiting bound; rejection, exception, and shutdown
-drop paths release it exactly once. `execute` creates one private
-`ExecutionRun` with deterministic ready-step ordering and a caller-selected
-maximum parallelism.
+Each schema-valid Float64 parameter enters canonical stage identity using the exact copied IEEE-754 binary64 bits in fixed little-endian order. Signed zero is preserved, so sign-sensitive callbacks cannot share semantic, optimized, plan, or cache-key identity. The compiler introduces no finite-only rule and does not normalize NaN payloads or infinities.
 
-The Run has one first-failure linearization under its mutex. Every scheduler,
-waiting-admission, backend-queue, and callback failure rechecks the cooperative
-token and plan currentness immediately before first storage: cancellation
-outranks graph `Stale`, which outranks the original failure. The selector uses
-only scalar and currentness observations, allocates nothing, and is reused by
-the no-throw diagnostic-construction fallback. In the absence of either stop,
-an unavailable GPU whose copied traits explicitly deny fallback remains
-`BackendUnavailable`; ordinary admission and queue rejection retain their
-original category.
+`Compiler::optimize` is an explicit conservative no-op in this baseline. It copies the semantic nodes into a distinct `OptimizedGraphIR` and produces a domain-separated `OptimizedGraphDigest`.
 
-Run-loop observation of cancellation or staleness is itself a no-throw
-boundary. If the Run first observes either stop while callbacks remain active
-and constructing the owned diagnostic or `Status` fails, it records the same
-prioritized code with an empty message while retaining the Run mutex. This
-fallback neither reacquires that mutex nor retires an in-flight slot: it stops
-new admission and waits until every callback has retired normally. The
-maintained regression proves that ownership directly: while the sole CPU
-worker is occupied, it admits the target CPU callback and then a separate CPU
-Run as its FIFO successor. Successor completion proves the target callback has
-finished abandonment; the target future must still remain incomplete while an
-independent GPU callback is gate-held.
+`Compiler::plan` copies dependency-ordered steps, selects CPU or a declared optional local GPU backend, records estimated bytes, and propagates optional named output Regions backward into per-step output/input demands using Whole, elementwise-exact, or clipped Halo rules. It produces `ExecutionPlan`, `ExecutionPlanDigest`, and `PlanCacheKey`. No stage contains a callback pointer, native device, or daemon object.
 
-Every callback popped from either backend FIFO enters the Run mutex and uses
-that same no-throw external-stop observation before copying dependencies,
-transferring Values, allocating reserved buffers, or invoking the operation. An
-existing or newly selected failure makes that worker retire exactly its own
-in-flight slot through the abandonment path. Direct CPU work, GPU work, and a
-GPU-to-CPU fallback all converge on this queued-attempt admission cutoff; the
-observation itself never retires a slot and `GraphContext` does not register or
-notify Runs. Cancellation or replacement after the cutoff may still race with
-transfer, resource acquisition, or entry into a non-preemptible in-process
-operation. That later interval remains cooperative/best-effort rather than a
-global mutex or forced-preemption guarantee, while completion and final result
-publication continue to reject every observed cancelled or stale outcome.
+A node or step may retain an immutable `PreparedOperation` owner for a registered static program; the owner keeps the definition lease alive and is released after dependent plan/Run owners. Preparation state is not runtime mutable state and does not enter semantic or cache identity. Each stage also carries a private runtime-only weak identity for the exact frozen operation registry; it is excluded from digests and serialization.
 
-At the operation-registry boundary, invocation validation preserves the order
-of operation lookup, input/demand counts, per-input validity and demand bounds,
-parameters, cancellation, closed CPU/GPU backend vocabulary, backend
-capability, and static descriptor compatibility. No input descriptor is read
-before its `Value` is valid. Unknown backend representations are
-`InvalidArgument` and enter neither C++ nor DSO code; known unsupported
-backends remain `BackendUnavailable`. After capability succeeds, the registry
-precomputes one expected output descriptor and facets through shared inference.
-Preserve/Match validate shapes independently of dtype; explicit input dtype,
-shape and semantic conflicts return `TypeMismatch` before callback entry. The same descriptor is reused after the
-callback to validate output type, shape, and requested Region, including a
-default-invalid output. This does not duplicate the Run's plan-derived demand
-coverage checks or the DSO adapter's contiguous-layout/facet views.
+### Static operation preparation
 
-MetalFp32 plans expose typed Upload/Operation/HostAccess actions. The Run
-validates actual packed upload bytes/capacity against that plan, reuses native
-buffers and checks fallback-induced extra uploads. CpuStorage can retain a
-completed Metal shared buffer; CPU access does not force another copy. Native
-allocation, source/scratch/output and retained copies share the controlled byte
-budget. One queue and synchronous host services drain device work before the
-existing completion/currentness boundary. Native handles remain private.
+`OperationDefinition::prepare_static` is the public pure preparation hook for deterministic operations such as NUM-01. `OperationRegistry::prepare_operation` validates complete static input metadata and parameters, including exact copied IEEE-754 parameter bits, then invokes the hook once outside registry synchronization. The returned `OperationPreparation` owns resolved output metadata and optional immutable state in `PreparedOperation`; it contains no Value payloads, Run data, I/O state or private mutable cache.
 
-Optional context caches separate CPU exact and Metal numeric/implementation/device
-identity. Numeric fallback and its descendants cannot populate expected native
-result entries; Metal-mode disk read/write is disabled. See [Cache Model](Cache-Model.md)
-and [S4 Workflow](S4-Workflow.md).
+Static preparation can provide `additional_workspace_bytes`, a checked size increment to the runtime workspace bound. It performs no runtime payload construction; the resolved bound participates in planning and operation identity. Runtime allocation/work and cancellation obligations remain with callbacks.
 
-Every operation result is checked against the planned element type and shape.
-Each producer Value must cover the consumer's planned input demand before
-transfer or callback entry; callbacks and ABI v9 input views receive that exact
-demand. Image and regional-source Runs lazily materialize only demanded tiles;
-Whole/effect boundaries materialize once per Run. See [Region semantics](Region-Semantics.md).
-The execution context must use the same frozen registry that produced the
-plan. Cancellation and plan currentness are checked before work, during
-completion, before result assembly, and once more after all named Values,
-diagnostics, plan/result digests, and execute timing have been assembled. The
-Run holds its mutex for this final cancellation-then-currentness recheck;
-passing it immediately before the sole success return is the success-
-publication linearization point. A late cancelled/stale local result and its
-diagnostics are discarded, and all Values and resource owners retire without
-entering the caller-visible `ExecutionResult`.
+See [static sizing and ownership](Parallel-Execution-Model.md#static-sizing-and-runtime-ownership).
 
-An operation ABI v9 callback can distinguish ordinary failure from backend
-unavailability. ABI 9 additionally provides host-owned synchronous native services. The
-executor retries on CPU only when an optional GPU attempt returns the explicit
-backend-unavailable result without invoking its output sink and copied traits
-allow fallback. An output-publication attempt makes backend unavailability
-terminal: accepted output is a contract failure and rejected output retains
-the sink failure. Ordinary failure and unknown nonzero callback results fail
-the Run without a CPU attempt.
+Compiler nodes and plan steps retain the prepared owner across their executions. Direct requests may pass an existing matching handle; otherwise each direct preflight prepares once. A joint request prepares once for its compatible members.
 
-## Diagnostics
+Matching identity alone does not share state between separate calls. Request-owned inputs and the query passed to a continuation retain their existing ownership boundary: a request owns its copied record, while a `DependencyQuery` is borrowed and cannot be retained. Preparation and plan storage use ordinary host allocations outside per-Atom runtime scratch admission; there is no separate enforced preparation budget.
 
-Raw diagnostics include compile-stage duration, execute duration, operation
-attempt timing/outcome, per-operation native dispatch/time, selected backend,
-input copy count/bytes, collected output-copy bytes, shared host access, native
-upload/result reuse, peak allocated
-bytes, fallback reason, `strict_math_calls`, the 8-by-4
-`function_fallbacks` matrix, plan digest, and result digest. They are observations,
-not verdicts or release evidence.
+Operations bound their static source/program size. Continuation state remains subject to runtime limits. No global preparation cache or dynamic preparation state is introduced.
 
-NUM-01 increments `strict_math_calls` once per strict math call and attributes
-its fallback rows per function. Merge assigns unattributed reason counts to `Other`;
-operators without instrumentation contribute zero calls rather than inferred
-counts. The diagnostic fields are observational and do not imply that NUM-01 is
-complete.
+A session destroys its continuation before its prepared owner. A prepared owner destroys its program before releasing the definition/library lease. The external registry owner may be released earlier without invalidating these leases.
 
-## Runtime input lowering and execution
+### Execution
 
-Schema 2 validates every input declaration before semantic publication and
-copies its canonical table through semantic IR, optimized IR and plan. Ordered
-sources retain node/declaration tags. Scalar ports accept Float32 `{1}` from
-declarations or compatible producers: generic, dimensionless Scalar, or a
-dimensionless single-sample Signal. Analyze checks dtype/shape/known facets and
-retains the nonempty interval-intersection check for direct declarations. Image
-consumers require the exact profile from a declaration or a producer's image
-output guarantee. Generic producers do not implicitly acquire that guarantee.
+`ExecutionContext` owns a fixed CPU pool, an optional one-worker GPU callback lane, one deterministic FIFO per lane, a frozen operation registry, and a shared controlled-buffer budget. Both FIFOs share the single nonblocking `maximum_queued_tasks` admission for callbacks that have not started. A worker releases the move-only admission token before entering the callback, so running callbacks do not occupy the waiting bound; rejection, exception, and shutdown drop paths release it exactly once.
 
-`execute(plan, bindings, cancellation, options)` snapshots input names and Value
-metadata, checks the name multiset, then Values in declaration-id order, then
-all direct scalar constraints before the first callback or transfer. Image and
-mask pixels are validated only in consumed regions, before their consuming callback.
-Computed scalar consumers validate metadata, complete coverage and finite/range
-constraints after dependency/cache lookup and before callback entry. Numeric
-errors are OperationFailed; metadata conflicts are TypeMismatch. Direct binding
-numeric errors remain InvalidArgument.
-Entry rejects default/stale/foreign-registry plans as Stale before observing
-bindings or the token. After entry, cancellation precedes Stale and ordinary
-binding failure. Long numeric scans periodically check cancellation and graph
-currentness. Run-owned snapshots survive all admitted callbacks; returned
-Values own their immutable bytes independently. Runs share no mutable bindings
-or results and do not reuse output by plan digest.
+`execute` creates one private `ExecutionRun` with deterministic ready-step ordering and a caller-selected maximum parallelism.
 
-External inputs begin with a CPU backend label and use the existing explicit
-transfer/fallback path. Caller-preexisting input bytes are outside maximum_live_bytes; source-read buffers
-and collected or streamed output buffers are inside it.
-Each step bounds output capacity plus workspace_bytes and
-workspace_input_multiplier (0..16) times demanded input bytes. Images no longer
-reserve a duplicate sink copy. The executor reserves a conservative complete
-working set before callbacks, including possible transfers, then each output,
-copy and scratch allocation obtains a sublease. Per-invocation limits prevent
-scratch from consuming another step's reserved capacity. Temporary competition
-waits only for active work, observes cancellation/currentness, and fails when
-externally retained results leave insufficient capacity.
+The Run has one first-failure linearization under its mutex. Every scheduler, waiting-admission, backend-queue, and callback failure rechecks the cooperative token and plan currentness immediately before first storage: cancellation outranks graph `Stale`, which outranks the original failure. The selector uses only scalar and currentness observations, allocates nothing, and is reused by the no-throw diagnostic-construction fallback.
 
-Fan-out/repeated edges count every reader. Callback-local inputs retire before
-completion; producer slots clear after their last reader completes unless they
-are named outputs. Shared storage has one lease. Returned Values retain their
-allocation after the Run or ExecutionContext ends. Completion returns unused
-reservation capacity; final owner destruction releases retained capacity.
-Diagnostics distinguish planned_peak_bytes, actual peak_live_bytes,
-retained_input_bytes and peak_active_tasks. Metadata/stacks/process RSS are not
-part of the payload budget. `test_memory_liveness` exercises gated fan-out,
-post-context results, budget recovery and exact/one-byte-short workspace limits.
-RawBenchmarkOptions.bindings is copied once on entry and supplied to each
-independently compiled sample.
+In the absence of either stop, an unavailable GPU whose copied traits explicitly deny fallback remains `BackendUnavailable`; ordinary admission and queue rejection retain their original category.
 
-Direct `OperationRegistry::invoke` uses the same input-demand derivation as
-physical planning: it rejects partial-channel RGBA outputs, incomplete Whole
-outputs, insufficient halo, mismatched mask spatial shape and Value coverage
-shorter than the claimed demand before callback allocation. Whole caches retire
-after their final remaining boundary/output reader, including chains of Whole
-operations; `test_regional_execution` checks a three-node chain at 16/15 bytes.
+Run-loop observation of cancellation or staleness is itself a no-throw boundary. If the Run first observes either stop while callbacks remain active and constructing the owned diagnostic or `Status` fails, it records the same prioritized code with an empty message while retaining the Run mutex. This fallback neither reacquires that mutex nor retires an in-flight slot: it stops new admission and waits until every callback has retired normally.
 
-Run completion waits for queue callback ownership to retire as well as the
-logical in-flight steps. A final scope clears all Run-held Value/binding owners
-on success, cancellation and failure. Releasing the caller's returned result
-therefore immediately returns its payload capacity even if queue metadata is
-still retiring. The private callback-body gate in `test_memory_liveness` checks
-this boundary for successful and cancelled calls with an eight-byte budget.
+The maintained regression proves that ownership directly: while the sole CPU worker is occupied, it admits the target CPU callback and then a separate CPU Run as its FIFO successor. Successor completion proves the target callback has finished abandonment; the target future must still remain incomplete while an independent GPU callback is gate-held.
 
-## Operation foundations (shared contract slice)
+Every callback popped from either backend FIFO enters the Run mutex and uses that same no-throw external-stop observation before copying dependencies, transferring Values, allocating reserved buffers, or invoking the operation. An existing or newly selected failure makes that worker retire exactly its own in-flight slot through the abandonment path.
+
+Direct CPU work, GPU work, and a GPU-to-CPU fallback all converge on this queued-attempt admission cutoff; the observation itself never retires a slot and `GraphContext` does not register or notify Runs. Cancellation or replacement after the cutoff may still race with transfer, resource acquisition, or entry into a non-preemptible in-process operation.
+
+That later interval remains cooperative/best-effort rather than a global mutex or forced-preemption guarantee, while completion and final result publication continue to reject every observed cancelled or stale outcome.
+
+At the operation-registry boundary, invocation validation preserves the order of operation lookup, input/demand counts, per-input validity and demand bounds, parameters, cancellation, closed CPU/GPU backend vocabulary, backend capability, and static descriptor compatibility. No input descriptor is read before its `Value` is valid. Unknown backend representations are `InvalidArgument` and enter neither C++ nor DSO code; known unsupported backends remain `BackendUnavailable`.
+
+After capability succeeds, the registry precomputes one expected output descriptor and facets through shared inference. Preserve/Match validate shapes independently of dtype; explicit input dtype, shape and semantic conflicts return `TypeMismatch` before callback entry. The same descriptor is reused after the callback to validate output type, shape, and requested Region, including a default-invalid output.
+
+This does not duplicate the Run's plan-derived demand coverage checks or the DSO adapter's contiguous-layout/facet views.
+
+`NativeGpu` plans expose typed Upload/Operation/HostAccess actions for steps
+with declared native implementations. The Run validates actual packed upload
+bytes/capacity against that plan, reuses native buffers and checks
+fallback-induced extra uploads. `CpuStorage` can retain completed native
+storage; host access does not force another copy.
+
+The current operation DSO interface is ABI v11: it exports `ps_operation_plugin_get_api_v11`, and ABI v10 modules reject before table lookup. `ps_gpu_service_v11` reports the selected GPU backend and its minimum buffer-offset alignment. Each dispatch declares MSL or SPIR-V; MSL runs on Metal and SPIR-V runs on Vulkan, with a format/backend mismatch reported as `BackendUnavailable`. MSL retains host-enforced safe math and disabled FP contraction; a SPIR-V operation owns its declared numerical profile.
+
+The optional `PHOTOSPIDER_ENABLE_VULKAN` native backend and core service tests pass on an NVIDIA GeForce RTX 3090 and Intel UHD Graphics 770. Public Perlin, Gaussian and PixelOE Vulkan behavior is documented in [the Vulkan execution report](../../out/gpu-whole-tiled/VULKAN_MODEL.md); the tested operator workflows are on FreeBSD Intel UHD Graphics 770, while macOS PixelOE validation covers Metal. Structural planar scratch applies a live requested-byte limit while the execution root charges each backing allocation at actual capacity; Vulkan UBO constants are charged separately by the host command allocator. Generic Value `ExecutionRun` GPU steps use nonblocking per-allocation admission: each callback is limited by planned logical requested bytes, and the root charges actual native capacity. Disk pending writes and memory cache are reclaimed before admission; ordinary CPU `ExecutionRun` retains its complete reservation. Dependency GPU phases use queried actual capacity for public `DependencySession` workspace, requested-byte quotas for legacy Value GPU callbacks, and separate root charges for output and auxiliary allocations; the phase and lifetime rules are detailed below.
+
+Native allocations charge actual backing capacity to the shared resource budget. Standard structural planar callback scratch and generic Value GPU callbacks also have separate live requested-byte quotas; Vulkan uniform-buffer constants are charged by the host command allocator at actual capacity. Generic Value GPU steps obtain actual-capacity admission without waiting, after reclaim attempts; the root reservation remains the atomic admission authority. `planned_peak_bytes` reports the observed peak reservation, including the complete CPU reservation and incremental native reservations, rather than a pre-execution GPU upper bound. Dependency GPU stages also obtain actual-capacity admission without a blocking stop callback. `DependencySession` limits each public poll phase by its actual-capacity workspace bound; legacy Value GPU dependency callbacks use a logical requested-byte quota. Dependency output capacity is queried from the active device. Constants, discovery buffers, and fragment-atlas payload and directory allocations use separately charged root allocations. Both dependency Run entry points reclaim pending disk writes and cache entries according to managed resource dimensions before admission. One queue and synchronous host services drain device work before the existing completion/currentness boundary. Native handles remain private.
+
+Optional context caches separate CPU exact results from native results by
+placement mode, selected backend, operation implementation/profile and device
+generation. Numeric fallback and its descendants do not populate expected
+native result entries; disk read/write is restricted to `CpuExact` plans. See
+[Cache Model](Cache-Model.md) and [S4 Workflow](S4-Workflow.md).
+
+Every operation result is checked against the planned element type and shape. Each producer Value must cover the consumer's planned input demand before transfer or callback entry; callbacks and ABI v11 input views receive that exact demand. Image and regional-source Runs lazily materialize only demanded tiles; Whole/effect boundaries materialize once per Run.
+
+See [Region semantics](Region-Semantics.md). The execution context must use the same frozen registry that produced the plan. Cancellation and plan currentness are checked before work, during completion, before result assembly, and once more after all named Values, diagnostics, plan/result digests, and execute timing have been assembled.
+
+The Run holds its mutex for this final cancellation-then-currentness recheck; passing it immediately before the sole success return is the success-publication linearization point. A late cancelled/stale local result and its diagnostics are discarded, and all Values and resource owners retire without entering the caller-visible `ExecutionResult`.
+
+An operation ABI v11 callback can distinguish ordinary failure from backend unavailability. ABI 11 provides host-owned synchronous native services for Metal and Vulkan; core native Vulkan dispatch tests pass on the two devices listed above. The executor retries on CPU only when an optional GPU attempt returns the explicit ABI v11 backend-unavailable result without invoking its output sink and copied traits allow fallback.
+
+An output-publication attempt makes backend unavailability terminal: accepted output is a contract failure and rejected output retains the sink failure. Ordinary failure and unknown nonzero callback results fail the Run without a CPU attempt.
+
+### Diagnostics
+
+Raw diagnostics include compile-stage duration, execute duration, operation attempt timing/outcome, per-operation native dispatch/time, selected backend, input copy count/bytes, collected output-copy bytes, shared host access, native upload/result reuse, peak allocated bytes, fallback reason, `strict_math_calls`, the 8-by-4 `function_fallbacks` matrix, plan digest, and result digest. They are observations, not verdicts or release evidence.
+
+NUM-01 increments `strict_math_calls` once per strict math call and attributes its fallback rows per function. Merge assigns unattributed reason counts to `Other`; operators without instrumentation contribute zero calls rather than inferred counts. The diagnostic fields are observational and do not imply that NUM-01 is complete.
+
+### Runtime input lowering and execution
+
+Schema 2 validates every input declaration before semantic publication and copies its canonical table through semantic IR, optimized IR and plan. Ordered sources retain node/declaration tags. Scalar ports accept Float32 `{1}` from declarations or compatible producers: generic, dimensionless Scalar, or a dimensionless single-sample Signal.
+
+Analyze checks dtype/shape/known facets and retains the nonempty interval-intersection check for direct declarations. Image consumers require the exact profile from a declaration or a producer's image output guarantee. Generic producers do not implicitly acquire that guarantee.
+
+`execute(plan, bindings, cancellation, options)` snapshots input names and Value metadata, checks the name multiset, then Values in declaration-id order, then all direct scalar constraints before the first callback or transfer. Image and mask pixels are validated only in consumed regions, before their consuming callback. Computed scalar consumers validate metadata, complete coverage and finite/range constraints after dependency/cache lookup and before callback entry.
+
+Numeric errors are OperationFailed; metadata conflicts are TypeMismatch. Direct binding numeric errors remain InvalidArgument. Entry rejects default/stale/foreign-registry plans as Stale before observing bindings or the token.
+
+After entry, cancellation precedes Stale and ordinary binding failure. Long numeric scans periodically check cancellation and graph currentness. Run-owned snapshots survive all admitted callbacks; returned Values own their immutable bytes independently.
+
+Runs share no mutable bindings or results and do not reuse output by plan digest.
+
+External inputs begin with a CPU backend label and use the existing explicit transfer/fallback path. Caller-preexisting input bytes are outside maximum_live_bytes; source-read buffers and collected or streamed output buffers are inside it. Each step bounds output capacity plus workspace_bytes and workspace_input_multiplier (0..16) times demanded input bytes.
+
+Images no longer reserve a duplicate sink copy. The executor reserves a conservative complete working set before callbacks, including possible transfers, then each output, copy and scratch allocation obtains a sublease. Per-invocation limits prevent scratch from consuming another step's reserved capacity.
+
+Temporary competition waits only for active work, observes cancellation/currentness, and fails when externally retained results leave insufficient capacity.
+
+Fan-out/repeated edges count every reader. Callback-local inputs retire before completion; producer slots clear after their last reader completes unless they are named outputs. Shared storage has one lease.
+
+Returned Values retain their allocation after the Run or ExecutionContext ends. Completion returns unused reservation capacity; final owner destruction releases retained capacity. Diagnostics distinguish planned_peak_bytes, actual peak_live_bytes, retained_input_bytes and peak_active_tasks.
+
+Metadata/stacks/process RSS are not part of the payload budget. `test_memory_liveness` exercises gated fan-out, post-context results, budget recovery and exact/one-byte-short workspace limits. RawBenchmarkOptions.bindings is copied once on entry and supplied to each independently compiled sample.
+
+Direct `OperationRegistry::invoke` uses the same input-demand derivation as physical planning: it rejects partial-channel RGBA outputs, incomplete Whole outputs, insufficient halo, mismatched mask spatial shape and Value coverage shorter than the claimed demand before callback allocation. Whole caches retire after their final remaining boundary/output reader, including chains of Whole operations; `test_regional_execution` checks a three-node chain at 16/15 bytes.
+
+Run completion waits for queue callback ownership to retire as well as the logical in-flight steps. A final scope clears all Run-held Value/binding owners on success, cancellation and failure. Releasing the caller's returned result therefore immediately returns its payload capacity even if queue metadata is still retiring.
+
+The private callback-body gate in `test_memory_liveness` checks this boundary for successful and cancelled calls with an eight-byte budget.
+
+### Operation foundations (shared contract slice)
 
 #289 implements ABI/traits 7, `SemanticDescriptor`, static dtype/axis/repeated-
-input inference and actual output facets in IR/plan. New axes and typed contracts
-use Whole; no G4 mapping is added. Complete constraints and inferred facets enter
-v7 compiler domains and v3 result-region keys; the no-op optimizer remains v5.
-See [Plugin ABI](Plugin-ABI.md) for the exposed helpers and staged limits.
-Computed bounded scalar consumption and supported image-v2 snapshots/cache
-storage are implemented. Sampling-domain metadata remains distinct from scalar
-value units and enters eligible result keys. Numeric, channel/color, expression/
-LUT and component families now use these contracts. The self-contained
-[foundations workflow](Foundations-Workflow.md) runs their public compositions.
+input inference and actual output facets in IR/plan. New axes and typed contracts use Whole; no G4 mapping is added. Complete constraints and inferred facets enter v7 compiler domains and v3 result-region keys; the no-op optimizer remains v5.
 
-## G4 staged execution
+See [Plugin ABI](Plugin-ABI.md) for the exposed helpers and staged limits. Computed bounded scalar consumption and supported image-v2 snapshots/cache storage are implemented. Sampling-domain metadata remains distinct from scalar value units and enters eligible result keys.
 
-The current package 0.9/ABI and traits 9 adds dependency plan templates and the
-C++ start/poll/supply protocol. Whole inference rules remain available for
-synchronous implementations; dependency implementations can discover exact
-per-port fragments at run time. See [Dependency data and execution](Dependency-Data.md)
-for implemented behavior and the remaining integration work.
+Numeric, channel/color, expression/ LUT and component families now use these contracts. The self-contained [foundations workflow](Foundations-Workflow.md) runs their public compositions.
 
-## Independent result lowering
+### G4 staged execution
 
-M2 (#305) gives each SemanticNode an ordered `outputs` sequence of independently
-inferred descriptor/facets/EffectiveAtomic records. Workflow producer port names
-resolve to `ValueRef{node_id, output_index}`; a terminal RequestRecord port cannot
-feed a consumer, while an Atomic sibling remains composable. A PlanStep selects
-one original output index and carries a single projected output contract. Pure
-unreferenced result steps are removed; side-effecting singleton roots remain.
-Each retained producer reference names its selected physical step, so different
-shapes and types never share a node-only metadata slot. The semantic and physical
-v9 identities encode ordered outputs and selected result indices respectively.
-Pruning preserves the graph-selected staged execution family and its established
-Whole streaming behavior. Runtime routing and optional joint execution are implemented by #306–#308.
+The current package 0.9/ABI and traits 9 adds dependency plan templates and the C++ start/poll/supply protocol. Whole inference rules remain available for synchronous implementations; dependency implementations can discover exact per-port fragments at run time. See [Dependency data and execution](Dependency-Data.md) for implemented behavior and the remaining integration work.
 
-## Independent result execution
+### Independent result lowering
 
-M3 (#306) routes certificates, subscriptions, dirty propagation, frozen snapshot
-results, flights, Whole reuse and diagnostics by `ValueRef`. Public certificate
-lookup takes a result reference; timing and backend records identify the selected
-result. Content witnesses encode the selected named contract without a global
-node ID. Static parameters remain complete; sample evidence follows actual reads.
+M2 (#305) gives each SemanticNode an ordered `outputs` sequence of independently inferred descriptor/facets/EffectiveAtomic records. Workflow producer port names resolve to `ValueRef{node_id, output_index}`; a terminal RequestRecord port cannot feed a consumer, while an Atomic sibling remains composable. A PlanStep selects one original output index and carries a single projected output contract.
 
-Synchronous callbacks receive only the selected output's declared inputs.
-`input_indices` preserves original port numbers and `input_metadata` describes
-the complete static input signature. The C value view exposes `input_index`.
-An explicit empty projection executes without fetching any input samples; absent
-projection retains all-input behavior. Staged reads outside the selected input
-projection fail validation. Empty input sets never evaluate their producers.
+Pure unreferenced result steps are removed; side-effecting singleton roots remain. Each retained producer reference names its selected physical step, so different shapes and types never share a node-only metadata slot. The semantic and physical v9 identities encode ordered outputs and selected result indices respectively.
 
-`test_multi_output_execution` exercises independent sibling caches, certificates,
-dirty subscriptions, frozen snapshots, named C outputs and an unused failing
-producer. Existing single-output fallback messages retain their spelling; named
-outputs add the port name to identify the failing result.
+Pruning preserves the graph-selected staged execution family and its established Whole streaming behavior. Runtime routing and optional joint execution are implemented by #306–#308.
 
-## Atomic execution groups
+### Independent result execution
 
-The plan exposes optional CPU execution groups for distinct PerAtomOutcome
-results of the same semantic node. The coordinator registers all known root
-and newly discovered input demands before selecting ready observations. It
-immediately groups one observation per output without waiting for future work
-or combining Runs. Shapes and ROIs may differ. `enable_joint=false`, fewer than
-two available members, unsupported implementation or insufficient shared
-reservation selects singleton execution. Per-observation flights still share
-work across Runs, including mixed cache hits and externally owned flights.
+M3 (#306) routes certificates, subscriptions, dirty propagation, frozen snapshot results, flights, Whole reuse and diagnostics by `ValueRef`. Public certificate lookup takes a result reference; timing and backend records identify the selected result. Content witnesses encode the selected named contract without a global node ID.
 
-C/C++ joint polls validate independent Needs/Complete/error outcomes. Identical
-reads may share transport; each member retains its own associations and error.
-Successful members publish to their own flights/cache. Unattributable execution
-failure releases shared temporary resources and retries unfinished members
-once through singleton; cancellation, stale state and malformed protocol do
-not retry. Shared work and backing owners are charged once. A group's shared
-cancellation fires only after all remaining observations lose their waiters.
+Static parameters remain complete; sample evidence follows actual reads.
+
+Synchronous callbacks receive only the selected output's declared inputs. `input_indices` preserves original port numbers and `input_metadata` describes the complete static input signature. The C value view exposes `input_index`.
+
+An explicit empty projection executes without fetching any input samples; absent projection retains all-input behavior. Staged reads outside the selected input projection fail validation. Empty input sets never evaluate their producers.
+
+`test_multi_output_execution` exercises independent sibling caches, certificates, dirty subscriptions, frozen snapshots, named C outputs and an unused failing producer. Existing single-output fallback messages retain their spelling; named outputs add the port name to identify the failing result.
+
+### Atomic execution groups
+
+The plan exposes optional CPU execution groups for distinct PerAtomOutcome results of the same semantic node. The coordinator registers all known root and newly discovered input demands before selecting ready observations. It immediately groups one observation per output without waiting for future work or combining Runs.
+
+Shapes and ROIs may differ. `enable_joint=false`, fewer than two available members, unsupported implementation or insufficient shared reservation selects singleton execution. Per-observation flights still share work across Runs, including mixed cache hits and externally owned flights.
+
+C/C++ joint polls validate independent Needs/Complete/error outcomes. Identical reads may share transport; each member retains its own associations and error. Successful members publish to their own flights/cache.
+
+Unattributable execution failure releases shared temporary resources and retries unfinished members once through singleton; cancellation, stale state and malformed protocol do not retry. Shared work and backing owners are charged once. A group's shared cancellation fires only after all remaining observations lose their waiters.
+
 Upstream errors retire just their member. RequestRecord stays independent.
 
-`test_dependency_joint`, `test_joint_execution` and `test_multi_output_ops`
-exercise the protocol, scheduler and real compositions. The installed
-[multi-output example](../../examples/multi_output_workflow/README.md) prints
-actual per-result attempts and source reads for both execution modes.
+`test_dependency_joint`, `test_joint_execution` and `test_multi_output_ops` exercise the protocol, scheduler and real compositions. The installed [multi-output example](../../examples/multi_output_workflow/README.md) prints actual per-result attempts and source reads for both execution modes.
 
-Staged completed-content templates hash the selected output contract, static
-parameters and observable input metadata/producer contracts, without plan,
-graph, node or physical step IDs. Actual sample bits follow the retained
-Data/Control/Validation witness. Public binding names identify source routes.
-On a cross-plan hit, each record and certificate is rebound along corresponding
-input ports before publication; ambiguous topology is an optional cache miss.
-Flight identity remains plan/snapshot-specific. Template hashing and rebinding
-consume the optional cache-work budget. Node/declaration renumbering, sibling
-pruning and a multi-level cached producer DAG have direct regressions.
+Staged completed-content templates hash the selected output contract, static parameters and observable input metadata/producer contracts, without plan, graph, node or physical step IDs. Actual sample bits follow the retained Data/Control/Validation witness. Public binding names identify source routes.
 
-## Metadata-specialized array views
+On a cross-plan hit, each record and certificate is rebound along corresponding input ports before publication; ambiguous topology is an optional cache miss. Flight identity remains plan/snapshot-specific. Template hashing and rebinding consume the optional cache-work budget.
 
-C++ definitions marked `requires_metadata_specialization` provide a pure
-`specialize_metadata` callback. The registry validates ordinary parameters and
-input contracts first, invokes the callback outside its mutex under the retained
-definition lease, and validates the fixed-count output metadata. Compiler and
-direct entry points use `resolve_traits`; unresolved templates cannot infer their
-placeholder descriptor. Shape, dtype, facets, tuple grouping, payload bounds and
-static dependency pieces become immutable per-node traits and enter stage identity.
-No pixel access or query-dependent metadata is permitted.
+Node/declaration renumbering, sibling pruning and a multi-level cached producer DAG have direct regressions.
 
-`maximum_output_payload_bytes` replaces the dense payload admission floor for a
-CPU staged output. Publication separately checks the actual capacities of newly
-owned output buffers; borrowed owners must have been supplied in that session.
-Source owners, metadata and workspace remain charged. This permits scalar-backed
-constant and source-backed broadcast views without reserving logical dense bytes.
-Ordinary/direct and structured execution preserve a single covering view;
-multiple owners use `execute_fragments` or explicitly selected dense layout.
-`ValueFragments::collect` is an explicit packed copy and observes cancellation.
+### Metadata-specialized array views
 
-`make_default_operation_registry(false)` permits embedding registration alongside
-built-ins. Freeze the registry before compilation or execution. Successful custom
-registration clears the built-in persistent-cache identity; failed registration
-leaves it unchanged. The default factory call remains frozen.
+C++ definitions marked `requires_metadata_specialization` provide a pure `specialize_metadata` callback. The registry validates ordinary parameters and input contracts first, invokes the callback outside its mutex under the retained definition lease, and validates the fixed-count output metadata. Compiler and direct entry points use `resolve_traits`; unresolved templates cannot infer their placeholder descriptor.
 
-## Structured schema specialization
+Shape, dtype, facets, tuple grouping, payload bounds and static dependency pieces become immutable per-node traits and enter stage identity. No pixel access or query-dependent metadata is permitted.
 
-Pure per-node metadata specializers can resolve a protocol-2 Result schema while
-preserving its registered Result kind, schema id and version. Returned Value
-metadata, tuple grouping and physical Value flags are rejected on this path.
-The resolved closed SchemaTemplate is validated before output inference and
-included in the existing semantic/plan/cache identities. This additive behavior
-changes no public record layout or C ABI. CRV-09 uses it to specialize fixed
-measured-report metadata and owned sampled-table shape; source sampling, report
-and table gate remain ordinary nodes in one frozen workflow snapshot.
+`maximum_output_payload_bytes` replaces the dense payload admission floor for a CPU staged output. Publication separately checks the actual capacities of newly owned output buffers; borrowed owners must have been supplied in that session. Source owners, metadata and workspace remain charged.
 
-## Regional layout execution
+This permits scalar-backed constant and source-backed broadcast views without reserving logical dense bytes. Ordinary/direct and structured execution preserve a single covering view; multiple owners use `execute_fragments` or explicitly selected dense layout. `ValueFragments::collect` is an explicit packed copy and observes cancellation.
 
-The current layout operations use per-node metadata specialization to resolve
-shape, permutation or counts and layout before execution. `regional_atomic`
-passes the original query and its normalized requested rectangle set to the
-callback where required. Each logical sample remains an Atomic observation;
-the rectangle set is not converted into one Atomic observation.
-`preserve_output_views` lets a valid affine view retain its source owner;
-output payload admission uses the actual newly allocated capacity through the
-existing nonblocking reserve and cache-reclaim path, rather than a dense
-logical-size reservation. The same
-physical owner/stride partition is intentionally not reused by the content
-cache because these operations are `cacheable=false`; pure and active-Run
-sharing are independent paths.
+`make_default_operation_registry(false)` permits embedding registration alongside built-ins. Freeze the registry before compilation or execution. Successful custom registration clears the built-in persistent-cache identity; failed registration leaves it unchanged.
 
-Dependency certificates and `NeedBatch` metadata are copied and accounted at
-their public boundaries. A `DependencyCertificate` or `DependencyNeedBatch`
-copy admits fresh metadata capacity and owns a new metadata owner; it does not
-copy the source owner. The host invokes private `reseal_metadata()` when a
-mutable batch is finalized before acceptance. A `DependencySession` and its
-callbacks use the active TLS resource root when present, and otherwise restore
-the root saved at session start, including cross-scope work and metadata.
-`ValueFragments` publication
-passes a lifetime token for owned publication metadata; each published `Value`
-retains its immutable storage alias until the final owner is destroyed.
+The default factory call remains frozen.
 
-These mechanisms do not change legacy boundaries. A caller that extracts a raw
-`Value` or returns a raw vector and then copies it is outside the publication
-token's accounting. Empty containers and geometry work internal to the current
-implementation are not comprehensively charged, and the managed-resource
-model does not certify that all process RSS is controlled.
+### Structured schema specialization
 
-## Partitioned static mappings
+Pure per-node metadata specializers can resolve a protocol-2 Result schema while preserving its registered Result kind, schema id and version. Returned Value metadata, tuple grouping and physical Value flags are rejected on this path. The resolved closed SchemaTemplate is validated before output inference and included in the existing semantic/plan/cache identities.
 
-`static_dependency_pieces` partitions the complete inferred observation domain
-into disjoint coverage sets. Each piece records per-port Data/Control/Validation
-relations and optional descriptor tags. Selected input axes may add a signed
-translation; fixed intervals require zero translation. Certificate construction
-checks only the selected piece's coordinates against the source domain, while
-backward and transpose use widened arithmetic and exact clipping. This supports
-concatenation slabs without enumerating their logical samples.
+This additive behavior changes no public record layout or C ABI. CRV-09 uses it to specialize fixed measured-report metadata and owned sampled-table shape; source sampling, report and table gate remain ordinary nodes in one frozen workflow snapshot.
 
-A Session intersects each declared piece with Q before callbacks and retains
-descriptor evidence separately. Clipping work, copied axes/tags and descriptor
-expansion charge Session and shared work limits. Its retained geometry ledger
-includes vector capacity growth and construction overlap; resource exhaustion
-never widens Q or requests an unhit source port. Generic dynamic regional
-operations retain bounded explicit rows: gather records observed index positions,
-and scatter records its global index scan plus each output's actual contributors.
+### Regional layout execution
 
-## Prepared Whole callbacks
+The current layout operations use per-node metadata specialization to resolve shape, permutation or counts and layout before execution. `regional_atomic` passes the original query and its normalized requested rectangle set to the callback where required. Each logical sample remains an Atomic observation; the rectangle set is not converted into one Atomic observation.
 
-CPU Whole callbacks may use immutable static preparation. The executor passes
-`OperationInvocation::prepared` from the plan. The registry validates its
-definition, complete metadata and exact parameter bits before any callback
-validation, then lends the owning handle to the normalized invocation. Direct
-calls without a handle prepare once. No runtime bytes enter prepared state.
+`preserve_output_views` lets a valid affine view retain its source owner; output payload admission uses the actual newly allocated capacity through the existing nonblocking reserve and cache-reclaim path, rather than a dense logical-size reservation. The same physical owner/stride partition is intentionally not reused by the content cache because these operations are `cacheable=false`; pure and active-Run sharing are independent paths.
 
-`OperationOutputSpecialization::input_indices` may narrow a CPU Whole output's
-registered runtime projection from static metadata/parameters. Absent retains
-the registered projection; an empty vector reads no payload. Duplicate/out-of-
-range ports and broadening a registered projection reject. Complete metadata
-remains mandatory. Resolved projections use the existing trait/digest fields.
-CPU Whole Atomic outputs may retain generic trailing-axis tuple identity; GPU,
-image tuple and other invalid combinations remain rejected.
+Dependency certificates and `NeedBatch` metadata are copied and accounted at their public boundaries. A `DependencyCertificate` or `DependencyNeedBatch` copy admits fresh metadata capacity and owns a new metadata owner; it does not copy the source owner. The host invokes private `reseal_metadata()` when a mutable batch is finalized before acceptance.
 
-### CPU Whole input views
+A `DependencySession` and its callbacks use the active TLS resource root when present, and otherwise restore the root saved at session start, including cross-scope work and metadata. `ValueFragments` publication passes a lifetime token for owned publication metadata; each published `Value` retains its immutable storage alias until the final owner is destroyed.
 
-Package 0.18 / OperationTraits16 extends CPU Whole view publication. A view
-output preserves one affine owner covering each complete input demand, retaining
-its strides, storage and resources. Compatible fragments of that same owner may
-be joined after an address-map proof. If no such view exists, Auto may collect; `requires_input_views=true` instead returns Domain/Run
-InvalidArgument/InvalidDomain with ViewUnavailable before callback. It requires
-CPU Whole `preserve_output_views`, excludes GPU/joint/Result and participates
-in compiled identity. Typed validation still covers all active input samples.
+These mechanisms do not change legacy boundaries. A caller that extracts a raw `Value` or returns a raw vector and then copies it is outside the publication token's accounting. Empty containers and geometry work internal to the current implementation are not comprehensively charged, and the managed-resource model does not certify that all process RSS is controlled.
+
+### Partitioned static mappings
+
+`static_dependency_pieces` partitions the complete inferred observation domain into disjoint coverage sets. Each piece records per-port Data/Control/Validation relations and optional descriptor tags. Selected input axes may add a signed translation; fixed intervals require zero translation.
+
+Certificate construction checks only the selected piece's coordinates against the source domain, while backward and transpose use widened arithmetic and exact clipping. This supports concatenation slabs without enumerating their logical samples.
+
+A Session intersects each declared piece with Q before callbacks and retains descriptor evidence separately. Clipping work, copied axes/tags and descriptor expansion charge Session and shared work limits. Its retained geometry ledger includes vector capacity growth and construction overlap; resource exhaustion never widens Q or requests an unhit source port.
+
+Generic dynamic regional operations retain bounded explicit rows: gather records observed index positions, and scatter records its global index scan plus each output's actual contributors.
+
+### Prepared Whole callbacks
+
+Deterministic, side-effect-free CPU or GPU Whole callbacks may use immutable static preparation. The executor passes `OperationInvocation::prepared` from the plan. The registry validates its definition, complete metadata and exact parameter bits before any callback validation, then lends the owning handle to the normalized invocation.
+
+Direct calls without a handle prepare once. No runtime bytes enter prepared state.
+
+`OperationOutputSpecialization::input_indices` may narrow a CPU Whole output's registered runtime projection from static metadata/parameters. Absent retains the registered projection; an empty vector reads no payload. Duplicate/out-of-range ports and broadening a registered projection reject.
+
+Complete metadata remains mandatory. Resolved projections use the existing trait/digest fields. CPU Whole Atomic outputs may retain generic trailing-axis tuple identity; GPU, image tuple and other invalid combinations remain rejected.
+
+#### CPU Whole input views
+
+CPU Whole callbacks can publish input views. A view output preserves one affine owner covering each complete input demand, retaining its strides, storage and resources. Compatible fragments of that same owner may be joined after an address-map proof.
+
+If no such view exists, Auto may collect; `requires_input_views=true` instead returns Domain/Run InvalidArgument/InvalidDomain with ViewUnavailable before callback. It requires CPU Whole `preserve_output_views`, excludes GPU/joint/Result and participates in compiled identity. Typed validation still covers all active input samples.
+
 The ordinary and structured execution bridges follow the same rule.
 
-Explicit output payload bounds and on-demand view allocation apply to Whole.
-Borrowed input owners remain charged independently; callback allocation is
-limited to declared output payload plus workspace, with sticky failure. Returned
-new backing storage must also fit the output bound. Direct calls already supply
-one Value per input and preserve that physical representation.
+Explicit output payload bounds and on-demand view allocation apply to Whole. Borrowed input owners remain charged independently; callback allocation is limited to declared output payload plus workspace, with sticky failure. Returned new backing storage must also fit the output bound.
 
-This changes C++ trait/specialization layout, requiring an installed-consumer
-rebuild and rejecting package0.17 consumers. Canonical framing14, document2,
-C operation ABI9 and provider ABI1 are unchanged; traits16 changes semantic
-identity. No daemon ownership or persistent format is introduced.
+Direct calls already supply one Value per input and preserve that physical representation.
+
+Current public layouts require a matching installed package. The [version contract](../development/Compiler-Version-Contract.md) identifies the independently versioned interfaces.
+## Non-goals and explicit boundaries
+
+- The kernel does not own daemon sessions, IPC, persistent jobs, or process isolation.
+- Internal compiler representations are not a public serialization format.
+- A planned backend capability or mathematical reference does not establish native execution; actual diagnostics report dispatched work.
+- Planar GPU boundary copies do not provide cross-node device-resident planar output storage.
+
+## Consequences
+
+- **Reusable planning:** immutable metadata and parameter identities support reuse, while changed bindings remain separate execution inputs.
+- **Explicit admission:** resource and queue limits can reject work before it executes.
+- **Ownership cost:** retained inputs, intermediates, and results hold their storage leases through completion and publication.
+- **Compatibility:** public layout changes require consumer rebuilds under the package version contract.

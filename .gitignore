@@ -41,6 +41,13 @@
 !plugins/ops/**/
 !plugins/ops/**/*.cpp
 !plugins/ops/**/*.hpp
+!plugins/ops/03-generation/*.metal
+!plugins/ops/03-generation/perlin.slang
+!plugins/ops/03-generation/*.hpp.in
+!plugins/ops/05-filter/*.metal
+!plugins/ops/05-filter/*.hpp.in
+!plugins/ops/gpu/*.metal
+!plugins/ops/gpu/integer.slang
 !plugins/ops/README.md
 !plugins/ops/09-composite/inpaint_ns_license.txt
 !plugins/ops/rgba32f/
@@ -139,6 +146,9 @@
 !tests/**/*.cpp
 !tests/**/*.h
 !tests/**/*.hpp
+!tests/fixtures/native_vulkan.slang
+!tests/fixtures/native_scale.slang
+!tests/fixtures/perlin_coordinates.slang
 !tests/oracles/fmt09_division.py
 !tests/**/CMakeLists.txt
 # Exact long-lived manual-fuzz seeds; generated corpus mutations stay ignored.
@@ -240,6 +250,8 @@ __pycache__/
 
 # FMT-11 independent oracles and performance workflow.
 !tools/
+!tools/compile_native_vulkan_fixtures.py
+!tools/compile_builtin_vulkan.py
 !tools/fmt11/
 !tools/fmt11/*.py
 !tools/fmt11/*.sh
@@ -279,3 +291,24 @@ __pycache__/
 !examples/alpha_performance/*.py
 !examples/alpha_performance/*.md
 !examples/alpha_performance/CMakeLists.txt
+
+!examples/dynamic_scheduler/
+!examples/dynamic_scheduler/*.cpp
+!examples/dynamic_scheduler/*.hpp
+!examples/dynamic_scheduler/*.md
+!examples/dynamic_scheduler/CMakeLists.txt
+!examples/perlin_workflow/
+!examples/perlin_workflow/*.cpp
+!examples/perlin_workflow/*.md
+!examples/perlin_workflow/CMakeLists.txt
+
+!examples/gaussian_workflow/
+!examples/gaussian_workflow/*.cpp
+!examples/gaussian_workflow/*.md
+!examples/gaussian_workflow/CMakeLists.txt
+
+!plugins/ops/05-filter/gaussian.slang
+!tests/fixtures/gaussian_input.slang
+
+!plugins/ops/PixelOE/src/copy.slang
+!plugins/ops/PixelOE/tools/compile_vulkan_kernels.py

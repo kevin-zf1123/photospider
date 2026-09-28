@@ -42,7 +42,7 @@ void equal(const px::Array& a, const px::Array& b, const std::string& name) {
 int main() try {
   px::Environment environment;
   Memory memory;
-  ps_planar_services_v1 services{};
+  ps_planar_services_v3 services{};
   services.struct_size = sizeof(services);
   services.context = &memory;
   services.cancelled = [](void* raw) {

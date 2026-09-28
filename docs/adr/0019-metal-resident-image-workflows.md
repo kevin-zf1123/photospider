@@ -8,6 +8,12 @@
 - Baseline: kernel `0e65eac`, daemon `8816f85`
 - Reader mirror: [Chinese](zh/0019-metal-resident-image-workflows.zh.md)
 
+Current API clarification: this ADR records the original selector name
+`MetalFp32`. The current public selector is `ExecutionMode::NativeGpu` (`2`);
+it grants native placement, while the context selects Metal or Vulkan and the
+operation/profile defines numerical behavior. The Metal floating-point rules
+below do not define Vulkan arithmetic or exact-integer GPU implementations.
+
 ## Research and scope
 
 S4 delivers one native Apple Silicon Metal backend and all eight existing image
@@ -36,7 +42,7 @@ tables and package-minor requests are rejected; C++ consumers rebuild. There is
 one current interface, without compatibility aliases. C++17, WorkflowDocument
 schema 2, provider ABI 1 and daemon IPC v3 remain.
 
-Planning selects CpuExact (default) or MetalFp32. Numeric mode and native
+At acceptance, planning selected CpuExact (default) or MetalFp32. Numeric mode and native
 implementation capabilities influence physical plan identity; changed trait
 encoding changes semantic identity. Runtime handles, allocation addresses,
 timings and device epochs never enter semantic identity. No optimization rule
@@ -45,8 +51,9 @@ is added. Native program bytes and compilation options identify implementations.
 ## Native storage, access and completion
 
 ExecutionContext owns an optional actual device, one queue, pipeline reuse and
-one synchronous GPU lane. Metal availability requires supported Apple Silicon
-hardware; disabled builds and unavailable devices retain CPU execution.
+one synchronous GPU lane. The original S4 implementation used Metal on
+supported Apple Silicon. Current builds can select the optional Metal or Vulkan
+backend; disabled builds and unavailable devices retain CPU execution.
 The lane waits for each submitted command buffer before callback retirement.
 At most one native submission executes per context; no asynchronous callback
 completion API or unbounded device submission queue is introduced.
@@ -75,9 +82,10 @@ dispatch count, native completion time and host validation remain distinguishabl
 ABI 6 retains synchronous callbacks and adds host-owned native services:
 invocation-local opaque buffer tokens, bounded input/output/scratch views,
 MSL program and entrypoint, buffer bindings, constant bytes and dispatch grid.
-The host validates records, owns pipeline compilation and command submission,
-and returns only after native completion. Plugins do not create devices or
-queues, retain tokens, or expose Objective-C types in the installed SDK.
+The current ABI 11 dispatch accepts MSL or SPIR-V according to the active
+backend. The host validates records, owns pipeline compilation and command
+submission, and returns only after native completion. Plugins do not create
+devices or queues, retain tokens, or expose Objective-C types in the installed SDK.
 Native shaders remain trusted process code; validation is not a sandbox.
 
 The C11 rgba32f module and built-ins use this same host service for all eight
@@ -87,8 +95,9 @@ rules for both registration paths.
 
 ## Numeric modes and fallback
 
-CpuExact retains existing CPU arithmetic and cache semantics. MetalFp32 is
-explicitly opt-in and uses safe floating-point compilation without contraction.
+`CpuExact` retains CPU arithmetic and cache semantics. The original Metal FP32
+operation profile uses safe floating-point compilation without contraction;
+`ExecutionMode::NativeGpu` grants placement and does not select this profile.
 Each operation and the named representative chain are checked against an
 independent CPU oracle with atol=1e-6 and rtol=1e-5. Arbitrary graph composition
 can propagate operation errors; this tolerance is not a graph-size-independent
@@ -101,8 +110,8 @@ native color computation preserves outside bits. Unsupported HDR/subnormal or
 other numerical cases use a checked CPU path before publication. Malformed
 inputs still return their established errors.
 
-Fallback is per operation. A CPU fallback in a MetalFp32 chain consumes its
-actual inputs and does not make the complete chain CpuExact. Backend or numeric
+Fallback is per operation. A CPU fallback in a `NativeGpu` plan consumes its
+actual inputs and does not change the plan's placement mode. Backend or numeric
 rejection can retry only before publication, after all submitted work drains.
 A submitted device execution error terminates the Run; device loss invalidates
 its residency generation. Cancellation stops new admission, drains submitted
@@ -116,8 +125,8 @@ numeric mode and device generation. Generic unproven sources remain executable
 without cross-Run content reuse. Dirty mapping only guides demand; exact
 content identity authorizes reuse.
 
-CPU exact and Metal derived entries cannot substitute for each other. An
-operation that falls back, and its descendants, do not populate expected Metal
+CPU exact and `NativeGpu` derived entries cannot substitute for each other. An
+operation that falls back, and its descendants, do not populate expected native
 cache entries. GPU ancestry never enters S3 disk persistence. Cache clear,
 eviction and device loss retire eligibility without releasing active owners.
 Independent subscribers retain S3 cancellation semantics; only successful

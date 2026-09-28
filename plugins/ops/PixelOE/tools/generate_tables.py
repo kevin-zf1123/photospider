@@ -41,9 +41,20 @@ for n in range(2,257):
         c=torch.linspace(0,1,cent)[:,None].expand(-1,3)
         interp=torch.cat([a,c])
     tables[f'interp{n}']=interp.contiguous().numpy().reshape(-1)
-lines=['#include "runtime.hpp"','namespace px {','const std::vector<float>& table(const std::string& key) {','static const std::map<std::string,std::vector<float>> tables = {']
-for name,data in tables.items():
-    values=','.join(float(v).hex()+'f' for v in data)
-    lines.append('{"'+name+'", {'+values+'}},')
-lines+=['}; return tables.at(key);','}','}']
-Path(sys.argv[1]).write_text('\n'.join(lines)+'\n')
+lines = ['#include "runtime.hpp"', '#include <algorithm>', '#include <iterator>',
+         '#include <string_view>', 'namespace px {', 'namespace {']
+for name, data in sorted(tables.items()):
+    values = ','.join(float(v).hex() + 'f' for v in data)
+    lines.append('constexpr float values_' + name + '[] = {' + values + '};')
+lines += ['struct Entry { std::string_view name; TableView values; };',
+          'constexpr Entry entries[] = {']
+for name in sorted(tables):
+    lines.append('{"' + name + '", {values_' + name + ', sizeof(values_' + name + ') / sizeof(float)}},')
+lines += ['};', '}  // namespace',
+          'TableView table(std::string_view key) {',
+          '  const auto* found = std::lower_bound(std::begin(entries), std::end(entries), key,',
+          '      [](const Entry& entry, std::string_view name) { return entry.name < name; });',
+          '  if (found == std::end(entries) || found->name != key)',
+          '    throw std::out_of_range("unknown coefficient table");',
+          '  return found->values;', '}', '}  // namespace px']
+Path(sys.argv[1]).write_text('\n'.join(lines) + '\n')

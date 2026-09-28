@@ -5,6 +5,6 @@
 #include "photospider/plugin/planar_operation_plugin_api.h"
 namespace ps::plugin_internal {
 Status prepare_planar_plugin(OperationDefinition*,
-                             const ps_planar_operation_v1&, void*,
+                             const ps_planar_operation_v3&, void*,
                              std::shared_ptr<void>);
 }  // namespace ps::plugin_internal

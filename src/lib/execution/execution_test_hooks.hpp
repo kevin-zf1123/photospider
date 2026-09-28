@@ -5,6 +5,17 @@
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::execution_testing {
+enum class TimingKind : std::uint8_t {
+  ValueMaterialization,
+  NativeGather,
+  AtlasMaterialization,
+  ReadyDispatch,
+  CompletionPublication,
+  FinalAssembly,
+};
+using ExecutionTimingHook = void (*)(TimingKind, std::uint64_t, std::uint64_t,
+                                     bool) noexcept;
+ExecutionTimingHook execution_timing_hook() noexcept;
 
 /**
  * @brief Callback invoked after one backend callback enters its waiting queue.
@@ -136,6 +147,26 @@ struct ExecutionTestHooks final {
   /** @brief Called after a completed checkpoint and its provenance are found.
    */
   FinalResultReadyHook checkpoint_borrowed = nullptr;
+  /** @brief Called after native submission, before synchronous completion.
+   * @note Must not re-enter the device queue or access in-flight buffers.
+   */
+  FinalResultReadyHook native_submitted = nullptr;
+  /** @brief Opt into actual native devices; default scheduler fixtures use
+   * hardware-independent lanes. Read only when constructing a context.
+   */
+  bool native_device = false;
+  /** @brief Vulkan allocation fault checkpoint, zero disables injection. */
+  std::uint32_t native_allocation_failure = 0;
+  /** @brief Optional smaller Vulkan allocation-object limit for tests. */
+  std::uint32_t native_allocation_limit = 0;
+  /** @brief Observes vkFreeMemory completion before capacity is returned. */
+  FinalResultReadyHook native_memory_freed = nullptr;
+  /** @brief Optional host materialization/stage observer for private profiling.
+   * Bytes count successful output spans (zero for scheduler stages).
+   */
+  ExecutionTimingHook execution_timing = nullptr;
+  /** @brief Injects a typed capacity-query error before native preparation. */
+  ErrorCode (*native_capacity_error)() noexcept = nullptr;
 };
 
 /**
@@ -147,6 +178,10 @@ struct ExecutionTestHooks final {
  * install competing sets concurrently.
  */
 void install_execution_test_hooks(const ExecutionTestHooks* hooks) noexcept;
+
+/** @brief Whether a newly constructed context requires actual native hardware.
+ */
+bool use_native_device() noexcept;
 
 /**
  * @brief Notifies the installed callback-waiting boundary observer.
@@ -218,5 +253,12 @@ void notify_checkpoint_published() noexcept;
 /** @brief Observes a successful checkpoint lookup outside its directory lock.
  */
 void notify_checkpoint_borrowed() noexcept;
+
+/** @brief Observes native submission while storage remains owned in flight. */
+void notify_native_submitted() noexcept;
+bool fail_native_allocation(std::uint32_t checkpoint) noexcept;
+std::uint32_t native_allocation_limit(std::uint32_t physical) noexcept;
+void notify_native_memory_freed() noexcept;
+ErrorCode native_capacity_error() noexcept;
 
 }  // namespace ps::execution_testing

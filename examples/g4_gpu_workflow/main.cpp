@@ -13,7 +13,7 @@ namespace {
 using namespace ps;  // NOLINT(build/namespaces)
 constexpr std::uint64_t length = 8192;
 // NOLINTBEGIN(whitespace/indent_namespace)
-constexpr char shader[] = PS_FRAGMENT_ATLAS_MSL_V9
+constexpr char shader[] = PS_FRAGMENT_ATLAS_MSL_V11
     "kernel void sparse_sum(device const uchar* data [[buffer(0)]],"
     " device const ulong* directory [[buffer(1)]],"
     " device uint* output [[buffer(2)]], constant ulong* c [[buffer(3)]]) {"
@@ -105,17 +105,17 @@ struct SparseState {
             if (!data.ok() || !directory.ok() || !destination.ok())
               return Result<Value>(
                   Status{ErrorCode::OperationFailed, "native view failed"});
-            ps_gpu_buffer_binding_v9 bindings[] = {
-                {sizeof(ps_gpu_buffer_binding_v9), 0, data.value(), 0,
+            ps_gpu_buffer_binding_v11 bindings[] = {
+                {sizeof(ps_gpu_buffer_binding_v11), 0, data.value(), 0,
                  atlas.payload.bytes().size(), 0},
-                {sizeof(ps_gpu_buffer_binding_v9), 1, directory.value(), 0,
+                {sizeof(ps_gpu_buffer_binding_v11), 1, directory.value(), 0,
                  atlas.directory.bytes().size(), 0},
-                {sizeof(ps_gpu_buffer_binding_v9), 2, destination.value(), 0,
+                {sizeof(ps_gpu_buffer_binding_v11), 2, destination.value(), 0,
                  memory.size(), 1}};
             const std::uint64_t constants[] = {
                 atlas.slot_count, length, atlas.tile_shape[0],
                 atlas.payload_bytes, block_offset};
-            ps_gpu_dispatch_v9 command{};
+            ps_gpu_dispatch_v11 command{};
             command.struct_size = sizeof(command);
             command.source = shader;
             command.source_size = sizeof(shader) - 1;
@@ -273,7 +273,7 @@ int main() {
     }
     PlanningOptions planning;
     planning.execution_mode =
-        gpu ? ExecutionMode::MetalFp32 : ExecutionMode::CpuExact;
+        gpu ? ExecutionMode::NativeGpu : ExecutionMode::CpuExact;
     auto compiled = Compiler(registry).compile(graph, planning);
     if (check(compiled.ok(), "compile failed"))
       return 1;
@@ -343,13 +343,14 @@ int main() {
               << "; peak=" << diagnostics.peak_live_bytes << '\n';
   }
   PlanningOptions planning;
-  planning.execution_mode = ExecutionMode::MetalFp32;
+  planning.execution_mode = ExecutionMode::NativeGpu;
   auto compiled = Compiler(registry).compile(graph, planning).take_value();
   // Actual device directory capacity is 32768 for 256 eighty-byte slots.
-  // One live continuation, 4 output + 32 workspace, and both atlas buffers
-  // form this finite stage's complete reservation.
+  // The live peak contains the continuation, both atlas buffers, 12-byte
+  // incoming and outgoing states, and 8-byte GPU scratch. The 4-byte final
+  // output is allocated after both states retire, while the token pins scratch.
   constexpr std::uint64_t minimum =
-      sizeof(SparseState) + 4 + 32 + 65 * 4 + 32768;
+      sizeof(SparseState) + 12 + 12 + 8 + 65 * 4 + 32768;
   for (const auto bytes : {minimum - 1, minimum}) {
     ExecutionContextConfig bounded;
     bounded.gpu_enabled = true;

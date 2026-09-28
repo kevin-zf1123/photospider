@@ -21,6 +21,34 @@ struct Lease {
 
 int main() {
   using namespace ps;  // NOLINT(build/namespaces)
+  {
+    unsigned parent_failures = 0, child_failures = 0;
+    auto parent = BufferAllocator().limited_requested(
+        8, [&](ErrorCode) { ++parent_failures; });
+    auto child = parent.limited(6, [&](ErrorCode) { ++child_failures; });
+    auto first = child.allocate(6).take_value();
+    PS_CHECK(parent.owns_allocation(first) && child.owns_allocation(first));
+    PS_CHECK(!child.allocate(1).ok());
+    PS_CHECK(parent_failures == 1 && child_failures == 1);
+    auto second = parent.allocate(2).take_value();
+    PS_CHECK(!parent.allocate(1).ok());
+    auto retained = std::move(first).freeze();
+    auto alias = retained;
+    retained.reset();
+    PS_CHECK(!child.allocate(1).ok());
+    alias.reset();
+    PS_CHECK(child.allocate(6).ok());
+    PS_CHECK(!parent.allocate(UINT64_MAX).ok());
+    second = MutableBuffer();
+    PS_CHECK(parent.allocate(8).ok());
+    PS_CHECK(!parent.limited_requested(0).allocate(1).ok());
+    auto narrow = parent.limited_requested(3);
+    auto copied = narrow;
+    auto shared = copied.allocate(3).take_value();
+    PS_CHECK(!narrow.allocate(1).ok());
+    PS_CHECK(parent.owns_allocation(shared));
+    PS_CHECK(!child.owns_allocation(shared));
+  }
   auto live = std::make_shared<std::uint64_t>(0);
   Value retained;
   {

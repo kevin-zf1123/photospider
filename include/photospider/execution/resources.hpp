@@ -105,6 +105,10 @@ class PHOTOSPIDER_API ResourceLease final {
 
  private:
   friend class ResourceBudget;
+  friend class execution_internal::MemoryReservation;
+  // Classifies already-reserved payload as shared native bytes. Host/Payload
+  // stay charged by this lease; Device/Shared are added atomically.
+  Status add_shared_payload(std::uint64_t bytes);
   struct Impl;
   std::shared_ptr<Impl> impl_;
 };
@@ -135,6 +139,12 @@ class PHOTOSPIDER_API ResourceBudget final {
    */
   bool try_consume(ResourceWork work, Status& failure) const;
   ResourceStatistics statistics() const;
+  /** @brief Snapshot of ordinary capacity remaining in every dimension.
+   * Excludes live reservations and protected cleanup capacity. This read
+   * performs no admission and sets no sticky failure; concurrent reservations
+   * may change availability before the caller's next reserve().
+   */
+  ResourceCapacity available_capacity() const;
   /** @brief Compares capacity ownership only; never a semantic result key. */
   bool same_owner(const ResourceBudget& other) const noexcept {
     return impl_ == other.impl_;

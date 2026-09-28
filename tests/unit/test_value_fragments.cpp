@@ -6,6 +6,63 @@
 #include "support/test_support.hpp"
 
 namespace {
+int bounded_read() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  constexpr std::uint64_t count = 2048;
+  const ValueDescriptor descriptor{ElementType::UInt8, {count}};
+  std::vector<Value> pieces;
+  for (std::uint64_t i = 0; i < count; ++i)
+    pieces.push_back(Value::create(descriptor, Region({{i, 1}}), {0, {1}, {i}},
+                                   {static_cast<std::uint8_t>(i)})
+                         .take_value());
+  FootprintLimits construction;
+  construction.maximum_work = 1000000000;
+  auto created = ValueFragments::create(
+      descriptor, {}, Footprint::all(descriptor.shape).take_value(), pieces,
+      construction);
+  PS_CHECK(created.ok());
+  const auto& fragments = created.value();
+  PS_CHECK(fragments.fragments().size() == count);
+  // Every independent allocation remains a separate lookup candidate.
+  constexpr std::uint64_t bound = 2 + 4 + (1 + count) * 2;
+  std::uint64_t charged = 0, calls = 0;
+  FootprintLimits limits;
+  limits.maximum_work = bound;
+  limits.consume_work = [&](std::uint64_t work) {
+    charged += work;
+    ++calls;
+    return Status::success();
+  };
+  std::uint8_t destination = 17;
+  PS_CHECK(fragments.read({count - 1}, &destination, 1, limits).ok());
+  PS_CHECK(destination == 255 && charged == bound && calls == count + 3);
+  destination = 17;
+  limits.maximum_work = bound - 1;
+  PS_CHECK(fragments.read({count - 1}, &destination, 1, limits).code ==
+           ErrorCode::ResourceExhausted);
+  PS_CHECK(destination == 17);
+  CancellationSource cancellation;
+  limits.maximum_work = bound;
+  limits.cancellation = cancellation.token();
+  calls = 0;
+  limits.consume_work = [&](std::uint64_t) {
+    if (++calls == 32)
+      cancellation.cancel();
+    return Status::success();
+  };
+  PS_CHECK(fragments.read({count - 1}, &destination, 1, limits).code ==
+           ErrorCode::Cancelled);
+  PS_CHECK(destination == 17 && calls == 32);
+  // A host failure remains typed and never writes a partial sample.
+  limits.cancellation = {};
+  limits.consume_work = [](std::uint64_t) {
+    return Status::failure(ErrorCode::BackendUnavailable, "host failure");
+  };
+  PS_CHECK(fragments.read({count - 1}, &destination, 1, limits).code ==
+           ErrorCode::BackendUnavailable);
+  PS_CHECK(destination == 17);
+  return 0;
+}
 int packed_collection() {
   using namespace ps;  // NOLINT(build/namespaces)
   for (const auto type : {ElementType::UInt8, ElementType::Int64,
@@ -119,6 +176,7 @@ int packed_collection() {
 }
 }  // namespace
 int main() {
+  PS_CHECK(bounded_read() == 0);
   PS_CHECK(packed_collection() == 0);
   using namespace ps;  // NOLINT(build/namespaces)
   for (auto type : {ElementType::UInt8, ElementType::Int64,

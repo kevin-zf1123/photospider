@@ -2,6 +2,15 @@
 
 状态：Proposed。旧测试 kernel 不作为规格依据。本文是空间滤波的中文功能目录，说明成员范围、区别和使用边界；具体端口、公式、数值、需求及资源契约以链接的英文族与成员规格为准。旧版 field/image 实现曾经存在，不代表这些规格已经 Accepted 或运行时已注册。
 
+当前已注册 `filter.gaussian_baked64_v1_strict_cpu_whole`，采用 baked64 系数、
+完整二维表达式的一次最终舍入和宿主分配的多线程。其 Whole 需求覆盖完整输入与
+输出。`filter.gaussian_baked64_v1_strict_cpu_tiled` 使用相同数值 profile，按
+精确输入支持计算请求的 Region，保留对应 dirty 转置；每个 tile callback 单线程。
+`filter.gaussian_baked64_v1_strict_gpu` 按内核构建选择 Metal 或 Vulkan 整数计算，
+保持相同的单次最终舍入，禁用 CPU fallback。Vulkan Gaussian 已在 FreeBSD Intel
+UHD 770 实机验证；NVIDIA 和 Linux 尚未验证。参数、资源边界和可运行示例见
+[Gaussian 实现说明](gaussian-implementation.md)。数学规格状态仍为 Proposed。
+
 空间滤波族列于本页；其余 24 个频域、去噪与恢复族见[频域、去噪与恢复](frequency-restoration.md)。
 
 ## 20 个空间族 / 47 个成员

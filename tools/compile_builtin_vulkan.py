@@ -1,0 +1,97 @@
+"""Compile and validate the built-in integer Vulkan shader ABI with Slang."""
+import argparse
+import json
+from pathlib import Path
+import struct
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('--slangc', type=Path, required=True)
+p.add_argument('--spirv-val', default='spirv-val')
+p.add_argument('--operator', choices=['perlin', 'gaussian'], default='perlin')
+p.add_argument('--out', type=Path)
+a = p.parse_args()
+perlin = a.operator == 'perlin'
+family = '03-generation' if perlin else '05-filter'
+operator_name = a.operator.capitalize()
+namespace = 'generation_ops' if perlin else 'filter_ops'
+if a.out is None:
+    a.out = ROOT / f'plugins/ops/{family}/{a.operator}_spirv.hpp'
+version = subprocess.check_output([str(a.slangc), '-version'], text=True,
+                                  stderr=subprocess.STDOUT).strip()
+if version != '2026.18.2':
+    raise ValueError(f'Expected Slang 2026.18.2, got {version!r}')
+with tempfile.TemporaryDirectory() as temporary:
+    module = Path(temporary) / f'{a.operator}.spv'
+    reflection = Path(temporary) / f'{a.operator}.json'
+    subprocess.run([
+        str(a.slangc), str(ROOT / f'plugins/ops/{family}/{a.operator}.slang'),
+        '-entry', f'{a.operator}_exact', '-target', 'spirv', '-profile', 'spirv_1_5',
+        '-floating-point-mode', 'precise', '-fvk-use-entrypoint-name',
+        '-reflection-json', str(reflection), '-o', str(module)], check=True)
+    subprocess.run([a.spirv_val, '--target-env', 'vulkan1.2', str(module)], check=True)
+    layout = json.loads(reflection.read_text())
+    resources = layout['parameters']
+    buffers = ['input', 'output'] + ([] if perlin else ['kx', 'ky']) + ['scratch']
+    expected = [(v, 'resource') for v in buffers] + [('arguments', 'constantBuffer')]
+    if len(resources) != len(expected):
+        raise ValueError('Unexpected shader resource count')
+    for index, (resource, (name, kind)) in enumerate(zip(resources, expected)):
+        binding = resource['binding']
+        if (resource['name'] != name or resource['type']['kind'] != kind or
+                binding['kind'] != 'descriptorTableSlot' or
+                binding['index'] != index or binding.get('space', 0) != 0):
+            raise ValueError(f'Unexpected descriptor layout for {name}')
+    scalars = ['uint8', 'uint32'] + ([] if perlin else ['uint64', 'uint64']) + ['uint32']
+    accesses = ['read', 'readWrite'] + ([] if perlin else ['read', 'read']) + ['readWrite']
+    for resource, scalar, access in zip(resources[:-1], scalars, accesses):
+        resource_type = resource['type']
+        if (resource_type['baseShape'] != 'structuredBuffer' or
+                resource_type['resultType']['scalarType'] != scalar or
+                resource_type.get('access', 'read') != access):
+            raise ValueError('Shader storage element type/access changed')
+    arguments = resources[-1]['type']['elementType']
+    offsets = dict(begin=0, count=8, words=12, input_narrow=16,
+                   output_narrow=20, offset=24, rank=32, shape=48,
+                   strides=176, origin=304)
+    if not perlin:
+        offsets = dict(begin=0, tap_begin=8, tap_end=16, offset=24, nx=32, ny=40,
+                       cval=48, x_offset=56, y_offset=64, shape=80, strides=208,
+                       origin=336, count=464, rank=468, x=472, y=476, boundary=480,
+                       narrow=484, identity=488, initialize=492, finish=496)
+    fields = arguments['fields']
+    if {v['name']: v['binding']['offset'] for v in fields} != offsets:
+        raise ValueError('Shader UBO field offsets changed')
+    for field in (v for v in fields if v['name'] in ('shape', 'strides', 'origin')):
+        if field['type']['elementCount'] != 8 or field['binding']['elementStride'] != 16:
+            raise ValueError('Shader UBO array layout changed')
+    uniform = next(v for v in arguments['sizes'] if v['kind'] == 'uniform')
+    if uniform['value'] != (432 if perlin else 512) or uniform['alignment'] != 16:
+        raise ValueError('Shader UBO size/alignment changed')
+    if layout['entryPoints'][0]['threadGroupSize'] != [64, 1, 1]:
+        raise ValueError('Shader local size changed')
+    data = module.read_bytes()
+    if not data or len(data) % 4 or len(data) > 262144:
+        raise ValueError('SPIR-V exceeds the public dispatch bounds')
+    words = struct.unpack('<' + 'I' * (len(data) // 4), data)
+    capabilities = set()
+    cursor = 5
+    while cursor < len(words):
+        count, opcode = words[cursor] >> 16, words[cursor] & 65535
+        if not count or cursor + count > len(words):
+            raise ValueError('Malformed SPIR-V instruction')
+        if opcode == 17:
+            capabilities.add(words[cursor + 1])
+        cursor += count
+    if capabilities != {1, 11, 39, 4449}:
+        raise ValueError(f'Shader feature requirements changed: {capabilities}')
+lines = ['#pragma once', '#include <cstdint>',
+         '// Generated by tools/compile_builtin_vulkan.py; Slang 2026.18.2.',
+         f'namespace ps::plugin_internal::{namespace} {{',
+         f'inline constexpr std::uint32_t k{operator_name}Spirv[] = {{']
+lines += ['    ' + ', '.join(f'0x{word:08x}U' for word in words[i:i+6]) + ','
+          for i in range(0, len(words), 6)]
+lines += ['};', f'}}  // namespace ps::plugin_internal::{namespace}']
+a.out.write_text('\n'.join(lines) + '\n')

@@ -140,7 +140,7 @@ int main() {
            changed.value().digest().value != plan.digest().value);
   PS_CHECK(changed.value().optimized_digest().value ==
            plan.optimized_digest().value);
-  options.execution_mode = ExecutionMode::MetalFp32;
+  options.execution_mode = ExecutionMode::NativeGpu;
   auto native = compiler.plan(compiled.value().optimized, options);
   PS_CHECK(native.ok());
   auto native_tile =
@@ -159,7 +159,7 @@ int main() {
       ++host_access;
   }
   PS_CHECK(uploads == 3 && bytes == 44 && host_access == 1);
-  PS_CHECK(native_tile.value().execution_mode() == ExecutionMode::MetalFp32);
+  PS_CHECK(native_tile.value().execution_mode() == ExecutionMode::NativeGpu);
   PS_CHECK(native.value().optimized_digest().value ==
            plan.optimized_digest().value);
   options.execution_mode = static_cast<ExecutionMode>(99);

@@ -55,15 +55,15 @@ if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
     "${_photospider_consumer_sanitizer_flag}")
 endif()
 
-foreach(_old_minor IN ITEMS 0.23 0.24 0.25 0.26)
+foreach(_old_minor IN ITEMS 0.23 0.24 0.25 0.26 0.27)
   find_package(Photospider ${_old_minor} CONFIG QUIET COMPONENTS kernel)
   if(Photospider_FOUND)
-    message(FATAL_ERROR "Photospider 0.27 must reject a ${_old_minor} consumer")
+    message(FATAL_ERROR "Photospider 0.28 must reject a ${_old_minor} consumer")
   endif()
 endforeach()
 
 find_package(
-  Photospider 0.27 CONFIG REQUIRED
+  Photospider 0.28 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
 foreach(
@@ -384,3 +384,37 @@ foreach(_format_kind IN ITEMS model_metadata model_conversion alpha_operations r
   target_link_options(photospider_${_format_kind}_consumer PRIVATE ${_photospider_consumer_link_options})
   add_dependencies(run_photospider_consumer photospider_${_format_kind}_consumer)
 endforeach()
+
+# Real native planar ABI against installed public headers/library only.
+foreach(_kind IN ITEMS planar planar_gpu)
+  if(_kind STREQUAL "planar")
+    set(_fixture_source ../fixtures/planar_operation_fixture.c)
+  else()
+    set(_fixture_source ../fixtures/planar_gpu_fixture.c)
+  endif()
+  add_library(photospider_${_kind}_abi_fixture MODULE ${_fixture_source})
+  target_link_libraries(photospider_${_kind}_abi_fixture PRIVATE Photospider::operation_sdk)
+  target_compile_definitions(photospider_${_kind}_abi_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+  set_target_properties(photospider_${_kind}_abi_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+endforeach()
+add_executable(photospider_planar_gpu_consumer ../integration/test_planar_gpu.cpp)
+target_include_directories(photospider_planar_gpu_consumer PRIVATE ..)
+target_link_libraries(photospider_planar_gpu_consumer PRIVATE Photospider::kernel)
+target_compile_definitions(photospider_planar_gpu_consumer PRIVATE PS_PLANAR_PUBLIC_CONSUMER
+  PS_PLANAR_FIXTURE="$<TARGET_FILE:photospider_planar_abi_fixture>"
+  PS_PLANAR_GPU_FIXTURE="$<TARGET_FILE:photospider_planar_gpu_abi_fixture>")
+target_compile_options(photospider_planar_gpu_consumer PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_planar_gpu_consumer PRIVATE ${_photospider_consumer_link_options})
+add_dependencies(photospider_planar_gpu_consumer photospider_planar_abi_fixture photospider_planar_gpu_abi_fixture)
+
+add_executable(photospider_cpu_stages_consumer ../integration/test_cpu_stages.cpp)
+target_include_directories(photospider_cpu_stages_consumer PRIVATE ..)
+target_link_libraries(photospider_cpu_stages_consumer PRIVATE Photospider::kernel)
+target_compile_options(photospider_cpu_stages_consumer PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_cpu_stages_consumer PRIVATE ${_photospider_consumer_link_options})
+
+add_executable(photospider_scheduler_consumer ../../examples/dynamic_scheduler/main.cpp)
+target_link_libraries(photospider_scheduler_consumer PRIVATE Photospider::kernel)
+target_compile_features(photospider_scheduler_consumer PRIVATE cxx_std_17)
+target_compile_options(photospider_scheduler_consumer PRIVATE ${_photospider_consumer_compile_options})
+target_link_options(photospider_scheduler_consumer PRIVATE ${_photospider_consumer_link_options})

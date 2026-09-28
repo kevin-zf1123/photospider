@@ -268,6 +268,71 @@ Status ValueFragments::read(const std::vector<std::uint64_t>& coordinate,
   }
   return Status::failure(ErrorCode::NotFound, "authorized fragment missing");
 }
+Status ValueFragments::read(const std::vector<std::uint64_t>& coordinate,
+                            void* destination, std::size_t size,
+                            const FootprintLimits& limits) const {
+  if (!valid() || !destination || coordinate.size() != descriptor_.shape.size())
+    return invalid("read outside authorized fragments");
+  auto remaining = limits.maximum_work;
+  const auto admit = [&](std::uint64_t amount) {
+    if (limits.cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, "fragment read cancelled"};
+    if (amount > remaining)
+      return Status{ErrorCode::ResourceExhausted, "fragment lookup work limit",
+                    FailureReason::WorkLimit};
+    if (limits.consume_work) {
+      auto status = limits.consume_work(amount);
+      if (!status.ok())
+        return status;
+    }
+    remaining -= amount;
+    return Status::success();
+  };
+  auto status = admit(1);
+  if (!status.ok())
+    return status;
+  const auto rank = coordinate.size();
+  const auto contains = [&](const Region& region) {
+    for (std::size_t axis = 0; axis < rank; ++axis) {
+      const auto& dimension = region.dimensions()[axis];
+      if (coordinate[axis] < dimension.offset ||
+          coordinate[axis] - dimension.offset >= dimension.extent)
+        return false;
+    }
+    return true;
+  };
+  bool authorized = false;
+  for (const auto& box : authorized_.boxes()) {
+    status = admit(rank + 1);
+    if (!status.ok())
+      return status;
+    if (contains(box)) {
+      authorized = true;
+      break;
+    }
+  }
+  if (!authorized)
+    return invalid("read outside authorized fragments");
+  if (size != Value::element_size(descriptor_.element_type))
+    return Status::failure(ErrorCode::TypeMismatch,
+                           "fragment sample width mismatch");
+  for (const auto& fragment : fragments_) {
+    status = admit(rank + 1);
+    if (!status.ok())
+      return status;
+    if (!contains(fragment.region()))
+      continue;
+    status = admit(4 * rank + 1);
+    if (!status.ok())
+      return status;
+    auto offset = fragment.byte_address(coordinate);
+    if (!offset.ok())
+      return offset.status();
+    std::memcpy(destination, fragment.bytes().data() + offset.value(), size);
+    return Status::success();
+  }
+  return Status::failure(ErrorCode::NotFound, "authorized fragment missing");
+}
 Result<ValueFragments> ValueFragments::restrict(
     const Footprint& subset, const FootprintLimits& limits) const {
   auto outside = subset.subtract(authorized_, limits);

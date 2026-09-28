@@ -155,7 +155,7 @@ int valid_views(const std::shared_ptr<OperationRegistry>& base) {
       for (int layout = 0; layout < 5; ++layout) {
         auto s = scene(kind, layout);
         GraphContext graph(s.document);
-        for (auto mode : {ExecutionMode::CpuExact, ExecutionMode::MetalFp32}) {
+        for (auto mode : {ExecutionMode::CpuExact, ExecutionMode::NativeGpu}) {
           PlanningOptions options;
           options.execution_mode = mode;
           auto compiled = compiler.compile(graph, options);
@@ -164,7 +164,7 @@ int valid_views(const std::shared_ptr<OperationRegistry>& base) {
           PS_CHECK(result.ok());
           s4_fixture::check(s, result.value().values.at("result"));
           dispatches += result.value().diagnostics.native_dispatch_count;
-          if (mode == ExecutionMode::MetalFp32 && execution.gpu_enabled())
+          if (mode == ExecutionMode::NativeGpu && execution.gpu_enabled())
             PS_CHECK(result.value().diagnostics.native_dispatch_count == 1 &&
                      result.value().diagnostics.fallback_reasons.empty());
         }

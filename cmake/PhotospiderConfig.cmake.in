@@ -2,6 +2,9 @@
 
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
+if(@PHOTOSPIDER_ENABLE_VULKAN@)
+  find_dependency(Vulkan)
+endif()
 if(@PHOTOSPIDER_ENABLE_INPAINT_OPENCV@)
   find_dependency(OpenCV 4.12.0 EXACT COMPONENTS core photo)
 endif()

@@ -16,6 +16,8 @@
 #include "photospider/data/value.hpp"
 #include "photospider/execution/cancellation.hpp"
 #include "photospider/execution/data_movement.hpp"
+#include "photospider/plugin/cpu_parallel_api.h"
+#include "photospider/plugin/cpu_tiles_api.h"
 #include "photospider/plugin/dependency_program.hpp"
 #include "photospider/plugin/operation_plugin_api.h"
 #include "photospider/plugin/result_program.hpp"
@@ -368,6 +370,11 @@ struct PHOTOSPIDER_API OperationTraits final {
   /** @brief CPU callback consumes and publishes structural planar image
    * windows. Legacy Value callbacks cannot claim image storage compliance. */
   bool planar_storage_capable = false;
+  /** @brief Whole-dependency CPU orchestration submits bounded computation
+   * tiles to the host pool. Coordinator and tile callbacks have separate
+   * service permissions; host range parallelism is reserved for Whole calls.
+   */
+  bool cpu_staged_tiles = false;
   /** @brief Host fetches the exact static mapped support, including disjoint
    * windows and generic scalar/plane inputs. CPU staged native callbacks only.
    * Kept distinct from a bitwise relation: validation may fail before aliasing.
@@ -399,23 +406,25 @@ struct PHOTOSPIDER_API OperationTraits final {
   bool deterministic = true;
   /** @brief Callback has no externally visible side effect. */
   bool side_effect_free = true;
-  /** @brief Required CPU implementation is available. */
+  /** @brief CPU implementation is available. At least one backend is required.
+   */
   bool supports_cpu = true;
-  /** @brief Optional local GPU implementation is available. */
+  /** @brief Local GPU implementation is available. May be GPU-only. */
   bool supports_gpu = false;
-  /** @brief Recoverable GPU failure may execute the CPU implementation. */
+  /** @brief Recoverable GPU failure may execute CPU; requires both backends. */
   bool allows_cpu_fallback = false;
   /**
    * @brief Declared output-capacity bound, raised to packed bytes when
    * representable.
    * @note Non-densely-representable generic outputs use this bound with at
    * least one element. Workspace and potential transfers are accounted
-   * separately; every controlled allocation must fit its complete working-set
-   * reservation.
+   * separately. Ordinary Value CPU steps use complete working-set reservations;
+   * native Value GPU steps admit actual backing capacity per allocation.
+   * Dependency programs and planar callbacks apply their own phase quotas.
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 18U;
+  std::uint32_t version = 20U;
   /** @brief Registered template requires pure per-node metadata resolution.
    * Free inference rejects templates. OperationRegistry::resolve_traits
    * clears this flag only after validated specialization.
@@ -427,7 +436,11 @@ struct PHOTOSPIDER_API OperationTraits final {
   std::vector<OperationParameterSpec> parameter_schema;
   /** @brief Ordered constraints; a repeated template has prefix+one record. */
   std::vector<OperationPortConstraint> input_schema;
-  /** @brief Fixed maximum scratch bytes per invocation, excluding output. */
+  /** @brief Maximum scratch bytes per invocation, excluding output.
+   * Resolved traits include the checked static preparation increment.
+   * Structural planar callbacks count live requested bytes; the root accounts
+   * actual native backing capacity separately.
+   */
   std::uint64_t workspace_bytes = 0;
   /** @brief Additional scratch bound per demanded input byte, in 0..16. */
   std::uint32_t workspace_input_multiplier = 0;
@@ -566,7 +579,10 @@ struct PHOTOSPIDER_API OperationInvocation final {
    */
   BufferAllocator allocator;
   /** @brief Borrowed native services; valid only during this invocation. */
-  const ps_gpu_service_v9* gpu = nullptr;
+  const ps_gpu_service_v11* gpu = nullptr;
+  /** @brief Borrowed host range service, CPU Whole only. Synchronous blocks
+   * share the context worker quota; unavailable for direct/tile/GPU calls. */
+  const ps_cpu_parallel_service_v1* cpu_parallel = nullptr;
   /** @brief Explicit immutable resource owners for static output identities.
    * Input Value owners are also admitted by invoke. No dynamic sample port.
    */
@@ -635,6 +651,16 @@ struct PHOTOSPIDER_API PlanarOperationInvocation final {
   /** @brief Validate an immutable identity view without requesting a writer.
    * Output is invalid in this mode and must not be accessed. */
   bool validate_only = false;
+  /** @brief Host range service for Whole callbacks; null for tiles. */
+  const ps_cpu_parallel_service_v1* cpu_parallel = nullptr;
+  /** @brief Actual backend; GPU Whole has no CPU range grant. */
+  Backend backend = Backend::Cpu;
+  /** @brief Synchronous native services; GPU scratch comes from allocator.
+   * Row windows remain host storage. Borrow only until callback return.
+   */
+  const ps_gpu_service_v11* gpu = nullptr;
+  /** @brief Synchronous stages supplied only to a CPU tile coordinator. */
+  const ps_cpu_tiles_service_v1* cpu_tiles = nullptr;
 };
 /** @brief Callback writes only the requested output window; host publishes
  * that coverage after successful return and cancellation/current checks.
@@ -703,6 +729,16 @@ using OperationMetadataSpecializer = std::function<Result<std::vector<
 struct OperationPreparation final {
   std::vector<OperationOutputSpecialization> outputs;
   std::shared_ptr<const void> state;
+  /** @brief Additional runtime scratch bound derived only from static metadata
+   * and parameter sizes. The host checked-adds this to workspace_bytes before
+   * planning or direct invocation; overflow returns ResourceExhausted.
+   * This reserves no compilation payload and performs no runtime work. Actual
+   * construction, computation and cancellation remain inside runtime callbacks,
+   * using their allocator and work services. The resolved bound participates in
+   * operation identity and is shared by the definition's selected outputs.
+   * Zero preserves the registered bound. Joint workspace is independent.
+   */
+  std::uint64_t additional_workspace_bytes = 0;
 };
 /** @brief Pure static preparation, called outside registry synchronization.
  * Same validation and exception contract as OperationMetadataSpecializer.
@@ -837,7 +873,9 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @param definition Complete owned definition.
    * @return Success or validation/duplicate/frozen failure.
    * @throws std::bad_alloc If registry allocation fails without mutation.
-   * @note CPU support and a nonempty callback are mandatory. Fixed traits
+   * @note At least one backend and its callback protocol are mandatory. A
+   * GPU-only operation rejects CPU planning/invocation and cannot enable CPU
+   * fallback. Fixed traits
    * validate only the logical descriptor; callback output validation applies
    * the published Value's actual layout and backing bytes. Passing an rvalue
    * transfers the callable into immutable registry ownership before locking.
@@ -998,18 +1036,22 @@ class PHOTOSPIDER_API OperationRegistry final {
   /** @brief Host-only structural callback entry after plan/binding validation.
    * The registry still checks exact window authorization and parameters before
    * preparing output pages or invoking the callback. */
-  Status invoke_planar(const std::string& key,
-                       const std::vector<PlanarImageReadWindow>& inputs,
-                       const std::vector<Region>& input_demands,
-                       const std::map<std::string, ParameterValue>& parameters,
-                       const Region& output_region, PlanarImage& output,
-                       const CancellationToken& cancellation = {},
-                       const BufferAllocator& allocator = BufferAllocator(),
-                       std::shared_ptr<const PreparedOperation> prepared = {},
-                       const std::function<bool()>& current = {},
-                       NumericDiagnostics* numeric = nullptr,
-                       const ResourceBudget* resources = nullptr,
-                       const ErrorCode* metadata_failure = nullptr) const;
+  Status invoke_planar(
+      const std::string& key, const std::vector<PlanarImageReadWindow>& inputs,
+      const std::vector<Region>& input_demands,
+      const std::map<std::string, ParameterValue>& parameters,
+      const Region& output_region, PlanarImage& output,
+      const CancellationToken& cancellation = {},
+      const BufferAllocator& allocator = BufferAllocator(),
+      std::shared_ptr<const PreparedOperation> prepared = {},
+      const std::function<bool()>& current = {},
+      NumericDiagnostics* numeric = nullptr,
+      const ResourceBudget* resources = nullptr,
+      const ErrorCode* metadata_failure = nullptr,
+      const ps_cpu_parallel_service_v1* cpu_parallel = nullptr,
+      const std::function<Status(bool)>& completion_status = {},
+      Backend backend = Backend::Cpu, const ps_gpu_service_v11* gpu = nullptr,
+      const ps_cpu_tiles_service_v1* cpu_tiles = nullptr) const;
   Status invoke_planar_mapped_validation(
       std::shared_ptr<const PreparedOperation> prepared,
       const PlanarImageReadWindow& input, std::uint32_t input_port,

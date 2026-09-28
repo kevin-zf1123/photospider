@@ -321,9 +321,11 @@ class ResultCache final {
     }
   }
   /** @brief Reclaims cache references before strict working-set admission. */
-  void reclaim_for(std::uint64_t requested) {
+  void reclaim_for(std::uint64_t requested, bool native = false) {
     std::lock_guard<std::mutex> lock(mutex_);
-    while (!entries_.empty() && budget_->available() < requested)
+    while (!entries_.empty() &&
+           (native ? !budget_->can_allocate(requested, true)
+                   : budget_->available() < requested))
       evict();
   }
   using Work = std::function<Result<ExecutionResult>(const CancellationToken&)>;

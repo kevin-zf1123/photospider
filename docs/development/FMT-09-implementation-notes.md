@@ -4,9 +4,9 @@ The original English operator specifications remain the behavioral contract.
 These notes explain implementation choices; they do not relax numerical or
 resource limits.
 
-The R2 public C++ invocation layout requires package 0.25 and a complete rebuild
-of C++ consumers. The installed gate rejects 0.24 package requests; C operation
-ABI9 and planar C extension v1 are unchanged. Tests using the private factory or
+The public C++ invocation layout requires package 0.28 and a complete rebuild
+of C++ consumers. Package requests from other minor versions reject. C operation
+ABI9 and planar C extension v2 are independently versioned. Tests using the private factory or
 SIMD entry link the noninstalled static test kernel, including shared builds.
 
 ## Borrowed host services and ownership

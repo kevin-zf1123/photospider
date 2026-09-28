@@ -215,6 +215,27 @@ Status ResourceLease::grow(ResourceCapacity additional) {
     impl_->amount.values[i] += additional.values[i];
   return Status::success();
 }
+Status ResourceLease::add_shared_payload(std::uint64_t bytes) {
+  if (!impl_)
+    return Status::failure(ErrorCode::Stale, "invalid resource lease");
+  std::lock_guard<std::mutex> lock(impl_->root->mutex);
+  if (impl_->quarantined)
+    return Status::failure(ErrorCode::Stale, "quarantined resource lease");
+  const auto payload = impl_->amount[ResourceKind::Payload];
+  const auto shared = impl_->amount[ResourceKind::Shared];
+  if (shared > payload || bytes > payload - shared)
+    return Status::failure(ErrorCode::InvalidArgument,
+                           "native classification exceeds reserved payload");
+  ResourceCapacity additional;
+  additional[ResourceKind::Device] = bytes;
+  additional[ResourceKind::Shared] = bytes;
+  if (!impl_->root->fits(additional))
+    return exhausted();
+  impl_->root->add(additional);
+  impl_->amount[ResourceKind::Device] += bytes;
+  impl_->amount[ResourceKind::Shared] += bytes;
+  return Status::success();
+}
 Status ResourceLease::shrink(ResourceCapacity released) {
   if (!impl_)
     return Status::failure(ErrorCode::Stale, "invalid resource lease");
@@ -294,6 +315,15 @@ bool ResourceBudget::try_consume(ResourceWork work, Status& failure) const {
   return true;
 }
 
+ResourceCapacity ResourceBudget::available_capacity() const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  ResourceCapacity result;
+  for (std::size_t i = 0; i < result.values.size(); ++i)
+    result.values[i] = impl_->limits.capacity.values[i] -
+                       impl_->stats.protected_cleanup.values[i] -
+                       impl_->stats.live.values[i];
+  return result;
+}
 ResourceStatistics ResourceBudget::statistics() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   auto result = impl_->stats;
@@ -360,18 +390,25 @@ Result<std::shared_ptr<const CpuStorage>> ResourceBudget::reference(
   }
 }
 BufferAllocator ResourceBudget::allocator() const {
-  return BufferAllocator(
-      [root = *this](std::uint64_t bytes) {
-        constexpr auto metadata = sizeof(CpuStorage);
-        if (bytes > UINT64_MAX - metadata)
-          return Result<std::shared_ptr<void>>(exhausted());
-        auto capacity = ResourceCapacity::host(bytes + metadata, metadata);
-        capacity[ResourceKind::Payload] = bytes;
-        auto admitted = root.reserve(capacity);
-        if (!admitted.ok())
-          return Result<std::shared_ptr<void>>(admitted.status());
-        return Result<std::shared_ptr<void>>(admitted.value().impl_);
-      },
-      impl_);
+  const auto reserve = [root = *this](bool shared) {
+    return BufferAllocator::Reserve([root, shared](std::uint64_t bytes) {
+      constexpr auto metadata = sizeof(CpuStorage);
+      if (bytes > UINT64_MAX - metadata)
+        return Result<std::shared_ptr<void>>(exhausted());
+      auto capacity = ResourceCapacity::host(bytes + metadata, metadata);
+      capacity[ResourceKind::Payload] = bytes;
+      if (shared) {
+        capacity[ResourceKind::Device] = bytes;
+        capacity[ResourceKind::Shared] = bytes;
+      }
+      auto admitted = root.reserve(capacity);
+      if (!admitted.ok())
+        return Result<std::shared_ptr<void>>(admitted.status());
+      return Result<std::shared_ptr<void>>(admitted.value().impl_);
+    });
+  };
+  BufferAllocator result(reserve(false), impl_);
+  result.native_shared_reserve_ = reserve(true);
+  return result;
 }
 }  // namespace ps

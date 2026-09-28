@@ -146,7 +146,7 @@ class OperationLibrary final {
    * @throws Nothing.
    * @note A nonnull destroy callback becomes part of rollback immediately.
    */
-  void attach_api(const ps_operation_plugin_api_v9* api) noexcept {
+  void attach_api(const ps_operation_plugin_api_v11* api) noexcept {
     api_ = api;
   }
 
@@ -154,7 +154,7 @@ class OperationLibrary final {
   /** @brief Platform native library handle. */
   void* handle_ = nullptr;
   /** @brief Mapped immutable plugin API table. */
-  const ps_operation_plugin_api_v9* api_ = nullptr;
+  const ps_operation_plugin_api_v11* api_ = nullptr;
 };
 
 /**
@@ -222,19 +222,19 @@ void* find_symbol(void* handle, const char* name) noexcept {
  */
 Result<ElementType> decode_element_type(std::uint32_t type) {
   switch (type) {
-    case PS_OPERATION_ELEMENT_UINT8_V9:
+    case PS_OPERATION_ELEMENT_UINT8_V11:
       return Result<ElementType>(ElementType::UInt8);
-    case PS_OPERATION_ELEMENT_INT64_V9:
+    case PS_OPERATION_ELEMENT_INT64_V11:
       return Result<ElementType>(ElementType::Int64);
-    case PS_OPERATION_ELEMENT_FLOAT32_V9:
+    case PS_OPERATION_ELEMENT_FLOAT32_V11:
       return Result<ElementType>(ElementType::Float32);
-    case PS_OPERATION_ELEMENT_FLOAT64_V9:
+    case PS_OPERATION_ELEMENT_FLOAT64_V11:
       return Result<ElementType>(ElementType::Float64);
-    case PS_OPERATION_ELEMENT_INT8_V9:
+    case PS_OPERATION_ELEMENT_INT8_V11:
       return Result<ElementType>(ElementType::Int8);
-    case PS_OPERATION_ELEMENT_UINT16_V9:
+    case PS_OPERATION_ELEMENT_UINT16_V11:
       return Result<ElementType>(ElementType::UInt16);
-    case PS_OPERATION_ELEMENT_INT16_V9:
+    case PS_OPERATION_ELEMENT_INT16_V11:
       return Result<ElementType>(ElementType::Int16);
     default:
       return Result<ElementType>(Status::failure(
@@ -251,17 +251,17 @@ Result<ElementType> decode_element_type(std::uint32_t type) {
  */
 Result<OperationShapeRule> decode_shape_rule(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_SHAPE_AXES_V9:
+    case PS_OPERATION_SHAPE_AXES_V11:
       return Result<OperationShapeRule>(OperationShapeRule::Axes);
-    case PS_OPERATION_SHAPE_SHRINK_V9:
+    case PS_OPERATION_SHAPE_SHRINK_V11:
       return Result<OperationShapeRule>(OperationShapeRule::Shrink);
-    case PS_OPERATION_SHAPE_SCALAR_V9:
+    case PS_OPERATION_SHAPE_SCALAR_V11:
       return Result<OperationShapeRule>(OperationShapeRule::Scalar);
-    case PS_OPERATION_SHAPE_PRESERVE_FIRST_V9:
+    case PS_OPERATION_SHAPE_PRESERVE_FIRST_V11:
       return Result<OperationShapeRule>(OperationShapeRule::PreserveFirstInput);
-    case PS_OPERATION_SHAPE_MATCH_INPUTS_V9:
+    case PS_OPERATION_SHAPE_MATCH_INPUTS_V11:
       return Result<OperationShapeRule>(OperationShapeRule::MatchAllInputs);
-    case PS_OPERATION_SHAPE_FIXED_V9:
+    case PS_OPERATION_SHAPE_FIXED_V11:
       return Result<OperationShapeRule>(OperationShapeRule::Fixed);
     default:
       return Result<OperationShapeRule>(
@@ -279,15 +279,15 @@ Result<OperationShapeRule> decode_shape_rule(std::uint32_t value) {
  */
 Result<OperationRegionRule> decode_region_rule(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_REGION_DEPENDENCY_V9:
+    case PS_OPERATION_REGION_DEPENDENCY_V11:
       return Result<OperationRegionRule>(OperationRegionRule::Dependency);
-    case PS_OPERATION_REGION_SHRINK_V9:
+    case PS_OPERATION_REGION_SHRINK_V11:
       return Result<OperationRegionRule>(OperationRegionRule::Shrink);
-    case PS_OPERATION_REGION_WHOLE_V9:
+    case PS_OPERATION_REGION_WHOLE_V11:
       return Result<OperationRegionRule>(OperationRegionRule::Whole);
-    case PS_OPERATION_REGION_ELEMENTWISE_V9:
+    case PS_OPERATION_REGION_ELEMENTWISE_V11:
       return Result<OperationRegionRule>(OperationRegionRule::Elementwise);
-    case PS_OPERATION_REGION_HALO_V9:
+    case PS_OPERATION_REGION_HALO_V11:
       return Result<OperationRegionRule>(OperationRegionRule::Halo);
     default:
       return Result<OperationRegionRule>(
@@ -298,20 +298,20 @@ Result<OperationRegionRule> decode_region_rule(std::uint32_t value) {
 
 /**
  * @brief Decodes one closed C ABI source-parameter type.
- * @param value Numeric operation ABI v9 parameter type.
+ * @param value Numeric operation ABI v11 parameter type.
  * @return Typed parameter kind or invalid-argument failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note Unknown numeric values fail before registry publication.
  */
 Result<OperationParameterType> decode_parameter_type(std::uint32_t value) {
   switch (value) {
-    case PS_OPERATION_PARAMETER_INT64_V9:
+    case PS_OPERATION_PARAMETER_INT64_V11:
       return Result<OperationParameterType>(OperationParameterType::Int64);
-    case PS_OPERATION_PARAMETER_FLOAT64_V9:
+    case PS_OPERATION_PARAMETER_FLOAT64_V11:
       return Result<OperationParameterType>(OperationParameterType::Float64);
-    case PS_OPERATION_PARAMETER_BOOL_V9:
+    case PS_OPERATION_PARAMETER_BOOL_V11:
       return Result<OperationParameterType>(OperationParameterType::Bool);
-    case PS_OPERATION_PARAMETER_STRING_V9:
+    case PS_OPERATION_PARAMETER_STRING_V11:
       return Result<OperationParameterType>(OperationParameterType::String);
     default:
       return Result<OperationParameterType>(
@@ -399,7 +399,7 @@ bool parameter_type_matches(const ParameterValue& value,
  * @param traits Candidate copied record.
  * @return Success or precise consistency failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
- * @note CPU support is mandatory and cacheability requires deterministic,
+ * @note At least one backend is required; cacheability requires deterministic,
  * side-effect-free behavior. Fixed shapes validate only rank/extents here;
  * actual C++ callback Value layout and storage are validated at publication.
  */
@@ -442,15 +442,17 @@ Status validate_selected_traits(const OperationTraits& traits) {
                           traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.outputs[0].fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 18U ||
-      !traits.supports_cpu || !known_shape || !known_region ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 20U ||
+      (!traits.supports_cpu && !traits.supports_gpu) || !known_shape ||
+      !known_region ||
       (traits.share_blocks_across_outputs &&
        (!traits.deterministic || !traits.side_effect_free ||
         traits.outputs[0].dependency_version != 1 ||
         traits.outputs[0].observation_kind != ObservationKind::Atomic ||
         traits.outputs[0].regional_atomic ||
         traits.outputs[0].static_dependency_pieces)) ||
-      (traits.allows_cpu_fallback && !traits.supports_gpu) ||
+      (traits.allows_cpu_fallback &&
+       (!traits.supports_gpu || !traits.supports_cpu)) ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
       ((traits.outputs[0].shape_rule ==
@@ -736,7 +738,7 @@ std::uint8_t* allocate_plugin_scratch(void* context,
  */
 int publish_plugin_output(void* context, std::uint32_t element_type,
                           const std::uint64_t* shape, std::uint32_t rank,
-                          const ps_operation_facet_view_v9* facets,
+                          const ps_operation_facet_view_v11* facets,
                           std::uint32_t facet_count, const std::uint8_t* data,
                           std::uint64_t byte_size) noexcept {
   auto* state = static_cast<OutputSinkState*>(context);
@@ -755,7 +757,7 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
         rank == 0U || rank > 8U || facet_count > 64U ||
         (facet_count != 0U &&
          (!facets || reinterpret_cast<std::uintptr_t>(facets) %
-                             alignof(ps_operation_facet_view_v9) !=
+                             alignof(ps_operation_facet_view_v11) !=
                          0U)) ||
         (byte_size != 0U && !data) ||
         byte_size > static_cast<std::uint64_t>(
@@ -807,8 +809,8 @@ int publish_plugin_output(void* context, std::uint32_t element_type,
     std::vector<ValueFacet> owned_facets;
     owned_facets.reserve(facet_count);
     for (std::uint32_t index = 0U; index < facet_count; ++index) {
-      const ps_operation_facet_view_v9& facet = facets[index];
-      if (facet.struct_size != sizeof(ps_operation_facet_view_v9) ||
+      const ps_operation_facet_view_v11& facet = facets[index];
+      if (facet.struct_size != sizeof(ps_operation_facet_view_v11) ||
           !facet.key || facet.key_size == 0U || facet.key_size > 256U ||
           facet.version == 0U || facet.payload_size > 64U * 1024U ||
           (facet.payload_size != 0U && !facet.payload)) {
@@ -1041,13 +1043,12 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
            static_cast<bool>(definition.prepare_static)) ||
       (definition.specialize_metadata && definition.prepare_static) ||
       (definition.prepare_static &&
-       ((!staged && (definition.traits.supports_gpu ||
-                     std::any_of(definition.traits.outputs.begin(),
-                                 definition.traits.outputs.end(),
-                                 [](const auto& output) {
-                                   return output.region_rule !=
-                                          OperationRegionRule::Whole;
-                                 }))) ||
+       ((!staged && std::any_of(definition.traits.outputs.begin(),
+                                definition.traits.outputs.end(),
+                                [](const auto& output) {
+                                  return output.region_rule !=
+                                         OperationRegionRule::Whole;
+                                })) ||
         !definition.traits.deterministic ||
         !definition.traits.side_effect_free)) ||
       (planar && !dual_planar
@@ -1069,7 +1070,10 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
               definition.traits.outputs[0].maximum_output_payload_bytes ||
               definition.traits.outputs[0].preserve_output_views ||
               definition.traits.outputs[0].requires_input_views ||
-              definition.traits.supports_gpu ||
+              (definition.traits.supports_gpu &&
+               (definition.traits.allows_cpu_fallback ||
+                definition.traits.outputs[0].region_rule !=
+                    OperationRegionRule::Whole)) ||
               (definition.traits.outputs[0].region_rule !=
                    OperationRegionRule::Whole &&
                definition.traits.outputs[0].region_rule !=
@@ -1147,8 +1151,8 @@ bool copy_text(const char* pointer, std::uint32_t size, std::string* output) {
     output->assign(pointer, size);
   return true;
 }
-bool copy_facets(const ps_operation_facet_view_v9* pointer, std::uint32_t count,
-                 std::vector<ValueFacet>* output) {
+bool copy_facets(const ps_operation_facet_view_v11* pointer,
+                 std::uint32_t count, std::vector<ValueFacet>* output) {
   if (!records(pointer, count, 64))
     return false;
   for (std::uint32_t i = 0; i < count; ++i) {
@@ -1163,12 +1167,13 @@ bool copy_facets(const ps_operation_facet_view_v9* pointer, std::uint32_t count,
   }
   return input_internal::canonicalize_facets(output).ok();
 }
-bool copy_contract(const ps_operation_contract_v9* c, OperationTraits* t) {
+bool copy_contract(const ps_operation_contract_v11* c, OperationTraits* t) {
   if (!c)
     return true;
-  if (reinterpret_cast<std::uintptr_t>(c) % alignof(ps_operation_contract_v9) ||
+  if (reinterpret_cast<std::uintptr_t>(c) %
+          alignof(ps_operation_contract_v11) ||
       c->struct_size != sizeof(*c) || c->repeated_match > 1 ||
-      c->dtype_rule > PS_OPERATION_DTYPE_PARAMETER_V9 ||
+      c->dtype_rule > PS_OPERATION_DTYPE_PARAMETER_V11 ||
       !records(c->axes, c->axis_count, 8) ||
       !copy_text(c->dtype_parameter, c->dtype_parameter_size,
                  &t->outputs[0].output_dtype_parameter) ||
@@ -1227,7 +1232,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   OperationLibrary pending_library(opened.value());
 
   using VersionFunction = std::uint32_t (*)();
-  using ApiFunction = const ps_operation_plugin_api_v9* (*)();
+  using ApiFunction = const ps_operation_plugin_api_v11* (*)();
   VersionFunction version = nullptr;
   ApiFunction get_api = nullptr;
   void* version_symbol = find_symbol(pending_library.handle(),
@@ -1239,14 +1244,14 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation plugin ABI version is unsupported");
   }
-  const ps_operation_plugin_api_v9* api = nullptr;
+  const ps_operation_plugin_api_v11* api = nullptr;
   try {
-    if (version() != PS_OPERATION_ABI_VERSION_9) {
+    if (version() != PS_OPERATION_ABI_VERSION_11) {
       return Status::failure(ErrorCode::InvalidArgument,
                              "operation plugin ABI version is unsupported");
     }
-    void* api_symbol =
-        find_symbol(pending_library.handle(), "ps_operation_plugin_get_api_v9");
+    void* api_symbol = find_symbol(pending_library.handle(),
+                                   "ps_operation_plugin_get_api_v11");
     std::memcpy(&get_api, &api_symbol, sizeof(get_api));
     if (!get_api)
       return Status::failure(ErrorCode::InvalidArgument,
@@ -1261,9 +1266,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
   if (!api ||
       reinterpret_cast<std::uintptr_t>(api) %
-              alignof(ps_operation_plugin_api_v9) !=
+              alignof(ps_operation_plugin_api_v11) !=
           0U ||
-      api->struct_size != sizeof(ps_operation_plugin_api_v9)) {
+      api->struct_size != sizeof(ps_operation_plugin_api_v11)) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation plugin API table is malformed");
   }
@@ -1271,7 +1276,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   if (api->operation_count == 0U || api->operation_count > 1024U ||
       !api->operations ||
       reinterpret_cast<std::uintptr_t>(api->operations) %
-              alignof(ps_operation_descriptor_v9) !=
+              alignof(ps_operation_descriptor_v11) !=
           0U ||
       !api->destroy) {
     return Status::failure(ErrorCode::InvalidArgument,
@@ -1285,13 +1290,18 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   // Allocation failure leaves the stack owner intact for exact rollback.
   auto library = std::make_shared<OperationLibrary>(std::move(pending_library));
 
-  using PlanarApiFunction = const ps_planar_operation_plugin_api_v1* (*)();
+  using PlanarApiFunction = const ps_planar_operation_plugin_api_v3* (*)();
   PlanarApiFunction planar_api_function = nullptr;
   void* planar_symbol =
-      find_symbol(library->handle(), "ps_operation_plugin_get_planar_api_v1");
+      find_symbol(library->handle(), "ps_operation_plugin_get_planar_api_v3");
   std::memcpy(&planar_api_function, &planar_symbol,
               sizeof(planar_api_function));
-  const ps_planar_operation_plugin_api_v1* planar_api = nullptr;
+  if (!planar_api_function &&
+      (find_symbol(library->handle(),
+                   "ps_operation_plugin_get_planar_api_v1") ||
+       find_symbol(library->handle(), "ps_operation_plugin_get_planar_api_v2")))
+    return Status{ErrorCode::InvalidArgument, "unsupported planar ABI version"};
+  const ps_planar_operation_plugin_api_v3* planar_api = nullptr;
   if (planar_api_function) {
     try {
       planar_api = planar_api_function();
@@ -1300,13 +1310,13 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     }
     if (!planar_api ||
         reinterpret_cast<uintptr_t>(planar_api) %
-            alignof(ps_planar_operation_plugin_api_v1) ||
+            alignof(ps_planar_operation_plugin_api_v3) ||
         planar_api->struct_size != sizeof(*planar_api) ||
-        planar_api->abi_version != PS_PLANAR_OPERATION_ABI_VERSION_1 ||
+        planar_api->abi_version != PS_PLANAR_OPERATION_ABI_VERSION_3 ||
         planar_api->operation_count != api->operation_count ||
         !planar_api->operations ||
         reinterpret_cast<uintptr_t>(planar_api->operations) %
-            alignof(ps_planar_operation_v1))
+            alignof(ps_planar_operation_v3))
       return Status{ErrorCode::InvalidArgument,
                     "malformed planar extension table"};
   }
@@ -1314,10 +1324,10 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   std::vector<std::shared_ptr<OperationDefinition>> staged;
   staged.reserve(api->operation_count);
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
-    const ps_operation_descriptor_v9& descriptor = api->operations[index];
-    if (descriptor.struct_size != sizeof(ps_operation_descriptor_v9) ||
+    const ps_operation_descriptor_v11& descriptor = api->operations[index];
+    if (descriptor.struct_size != sizeof(ps_operation_descriptor_v11) ||
         descriptor.output_count == 0 ||
-        descriptor.output_count > PS_OPERATION_MAX_OUTPUTS_V9 ||
+        descriptor.output_count > PS_OPERATION_MAX_OUTPUTS_V11 ||
         !descriptor.key || descriptor.key_size == 0U ||
         descriptor.key_size > 1024U ||
         (static_cast<bool>(descriptor.execute) ==
@@ -1328,7 +1338,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
          (descriptor.input_schema == nullptr)) ||
         (descriptor.input_schema &&
          reinterpret_cast<std::uintptr_t>(descriptor.input_schema) %
-                 alignof(ps_operation_port_constraint_v9) !=
+                 alignof(ps_operation_port_constraint_v11) !=
              0) ||
         descriptor.outputs[0].output_rank > 8U ||
         ((descriptor.outputs[0].output_rank == 0U) !=
@@ -1342,7 +1352,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
          (descriptor.parameters == nullptr)) ||
         (descriptor.parameters &&
          reinterpret_cast<std::uintptr_t>(descriptor.parameters) %
-                 alignof(ps_operation_parameter_descriptor_v9) !=
+                 alignof(ps_operation_parameter_descriptor_v11) !=
              0U) ||
         (descriptor.flags &
          ~(PS_OPERATION_FLAG_DETERMINISTIC |
@@ -1360,16 +1370,16 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       return Status::failure(ErrorCode::InvalidArgument,
                              "operation plugin key is invalid or duplicated");
     }
-    auto copy_port = [](const ps_operation_port_constraint_v9& source,
+    auto copy_port = [](const ps_operation_port_constraint_v11& source,
                         OperationPortConstraint* target) {
-      if (source.struct_size != sizeof(ps_operation_port_constraint_v9))
+      if (source.struct_size != sizeof(ps_operation_port_constraint_v11))
         return false;
       target->kind = static_cast<OperationPortKind>(source.kind);
       std::memcpy(&target->minimum, &source.minimum_bits, sizeof(float));
       std::memcpy(&target->maximum, &source.maximum_bits, sizeof(float));
       if (const auto* m = source.semantic) {
         if (reinterpret_cast<std::uintptr_t>(m) %
-                alignof(ps_operation_semantic_constraint_v9) ||
+                alignof(ps_operation_semantic_constraint_v11) ||
             m->struct_size != sizeof(*m) ||
             !copy_facets(m->facets, m->facet_count, &target->facets))
           return false;
@@ -1478,10 +1488,10 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     definition.traits.parameter_schema.reserve(descriptor.parameter_count);
     for (std::uint32_t parameter_index = 0U;
          parameter_index < descriptor.parameter_count; ++parameter_index) {
-      const ps_operation_parameter_descriptor_v9& parameter =
+      const ps_operation_parameter_descriptor_v11& parameter =
           descriptor.parameters[parameter_index];
       if (parameter.struct_size !=
-              sizeof(ps_operation_parameter_descriptor_v9) ||
+              sizeof(ps_operation_parameter_descriptor_v11) ||
           !parameter.key || parameter.key_size == 0U ||
           parameter.key_size > 1024U || parameter.required > 1U ||
           parameter.bounded > 1U) {
@@ -1546,7 +1556,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
 
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
-    const ps_operation_descriptor_v9* descriptor = &api->operations[index];
+    const ps_operation_descriptor_v11* descriptor = &api->operations[index];
     if (descriptor->dependency_program || planar_api)
       continue;
     staged[index]->callback =
@@ -1577,8 +1587,8 @@ Status OperationRegistry::load_plugin(const std::string& path) {
               Status::failure(ErrorCode::InvalidArgument,
                               "plugin invocation backend is unknown"));
       }
-      std::vector<ps_operation_value_view_v9> views;
-      std::vector<std::vector<ps_operation_facet_view_v9>> facet_views;
+      std::vector<ps_operation_value_view_v11> views;
+      std::vector<std::vector<ps_operation_facet_view_v11>> facet_views;
       std::vector<std::vector<std::uint64_t>> demand_offsets;
       std::vector<std::vector<std::uint64_t>> storage_origins;
       std::vector<std::vector<std::uint64_t>> region_offsets, region_extents;
@@ -1604,13 +1614,13 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         auto& input_facets = facet_views.emplace_back();
         input_facets.reserve(input.facets().size());
         for (const ValueFacet& facet : input.facets()) {
-          input_facets.push_back(ps_operation_facet_view_v9{
-              sizeof(ps_operation_facet_view_v9), facet.key.data(),
+          input_facets.push_back(ps_operation_facet_view_v11{
+              sizeof(ps_operation_facet_view_v11), facet.key.data(),
               static_cast<std::uint32_t>(facet.key.size()), facet.version,
               facet.payload.empty() ? nullptr : facet.payload.data(),
               static_cast<std::uint32_t>(facet.payload.size())});
         }
-        ps_operation_value_view_v9 view{};
+        ps_operation_value_view_v11 view{};
         view.struct_size = sizeof(view);
         view.element_type =
             static_cast<std::uint32_t>(input_descriptor.element_type);
@@ -1649,26 +1659,26 @@ Status OperationRegistry::load_plugin(const std::string& path) {
         view.facets = input_facets.empty() ? nullptr : input_facets.data();
         views.push_back(view);
       }
-      std::vector<ps_operation_parameter_value_v9> parameter_views;
+      std::vector<ps_operation_parameter_value_v11> parameter_views;
       parameter_views.reserve(invocation.parameters.size());
       for (const auto& parameter : invocation.parameters) {
-        ps_operation_parameter_value_v9 view{};
+        ps_operation_parameter_value_v11 view{};
         view.struct_size = sizeof(view);
         view.key = parameter.first.data();
         view.key_size = static_cast<std::uint32_t>(parameter.first.size());
         if (const auto* value = std::get_if<std::int64_t>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_INT64_V9;
+          view.type = PS_OPERATION_PARAMETER_INT64_V11;
           view.int64_value = *value;
         } else if (const auto* value = std::get_if<double>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_FLOAT64_V9;
+          view.type = PS_OPERATION_PARAMETER_FLOAT64_V11;
           view.float64_value = *value;
         } else if (const auto* value = std::get_if<bool>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_BOOL_V9;
+          view.type = PS_OPERATION_PARAMETER_BOOL_V11;
           view.bool_value = *value ? 1U : 0U;
         } else {
           const std::string& string_value =
               std::get<std::string>(parameter.second);
-          view.type = PS_OPERATION_PARAMETER_STRING_V9;
+          view.type = PS_OPERATION_PARAMETER_STRING_V11;
           view.string_value = string_value.data();
           view.string_size = static_cast<std::uint32_t>(string_value.size());
         }
@@ -1701,7 +1711,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
           output_extents, Value::element_size(output.descriptor.element_type));
       if (!packed.ok())
         return Result<Value>(packed.status());
-      ps_operation_output_sink_v9 sink{};
+      ps_operation_output_sink_v11 sink{};
       sink.struct_size = sizeof(sink);
       sink.context = &output;
       sink.publish = publish_plugin_output;
@@ -1715,10 +1725,10 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       sink.allocate_scratch = allocate_plugin_scratch;
       sink.gpu = invocation.gpu;
       sink.output_index = invocation.output_index;
-      std::vector<ps_operation_facet_view_v9> output_facets;
+      std::vector<ps_operation_facet_view_v11> output_facets;
       for (const auto& f : expected.value().facets)
         output_facets.push_back(
-            {sizeof(ps_operation_facet_view_v9), f.key.data(),
+            {sizeof(ps_operation_facet_view_v11), f.key.data(),
              static_cast<std::uint32_t>(f.key.size()), f.version,
              f.payload.empty() ? nullptr : f.payload.data(),
              static_cast<std::uint32_t>(f.payload.size())});
@@ -1744,7 +1754,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       }
       if (!output.allocation_failure.ok())
         return Result<Value>(output.allocation_failure);
-      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V9 &&
+      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V11 &&
           output.published && !output.result.ok() &&
           output.result.status().code != ErrorCode::ResourceExhausted &&
           output.result.status().code != ErrorCode::Cancelled) {
@@ -1757,12 +1767,12 @@ Status OperationRegistry::load_plugin(const std::string& path) {
             ErrorCode::OperationFailed,
             "operation plugin violated output sink at-most-once contract"));
       }
-      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V9 &&
+      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V11 &&
           output.published && !output.result.ok() &&
           output.result.status().code == ErrorCode::ResourceExhausted) {
         return output.result;
       }
-      if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V9 &&
+      if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11 &&
           output.published) {
         if (!output.result.ok()) {
           return output.result;
@@ -1772,13 +1782,13 @@ Status OperationRegistry::load_plugin(const std::string& path) {
             "operation plugin published output before reporting backend "
             "unavailable"));
       }
-      if (code != PS_OPERATION_RESULT_SUCCESS_V9) {
+      if (code != PS_OPERATION_RESULT_SUCCESS_V11) {
         ErrorCode error_code = ErrorCode::OperationFailed;
         const char* default_diagnostic = "operation plugin callback failed";
-        if (code == PS_OPERATION_RESULT_CANCELLED_V9) {
+        if (code == PS_OPERATION_RESULT_CANCELLED_V11) {
           error_code = ErrorCode::Cancelled;
           default_diagnostic = "operation plugin callback was cancelled";
-        } else if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V9) {
+        } else if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11) {
           error_code = ErrorCode::BackendUnavailable;
           default_diagnostic = "operation plugin backend is unavailable";
         }
@@ -1848,13 +1858,19 @@ bool OperationRegistry::frozen() const noexcept {
  */
 Result<OperationTraits> OperationRegistry::find_traits(
     const std::string& key) const {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
-  const auto iterator = impl_->definitions.find(key);
-  if (iterator == impl_->definitions.end()) {
-    return Result<OperationTraits>(Status::failure(
-        ErrorCode::NotFound, "operation key is not registered"));
+  Impl::DefinitionHandle definition;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto iterator = impl_->definitions.find(key);
+    if (iterator == impl_->definitions.end()) {
+      return Result<OperationTraits>(Status::failure(
+          ErrorCode::NotFound, "operation key is not registered"));
+    }
+    definition = iterator->second;
   }
-  return Result<OperationTraits>(iterator->second->traits);
+  // Published definitions are immutable. Retain the owner while trait vectors
+  // and strings are copied without serializing unrelated registry readers.
+  return Result<OperationTraits>(definition->traits);
 }
 
 Result<OperationTraits> OperationRegistry::resolve_traits(
@@ -1923,6 +1939,12 @@ OperationRegistry::prepare_operation(
         if (!prepared.ok())
           return Answer(prepared.status());
         auto result = prepared.take_value();
+        if (result.additional_workspace_bytes >
+            UINT64_MAX - traits.workspace_bytes)
+          return Answer(Status{ErrorCode::ResourceExhausted,
+                               "prepared workspace bound overflows",
+                               FailureReason::CapacityLimit});
+        traits.workspace_bytes += result.additional_workspace_bytes;
         program = std::move(result.state);
         specialized = Result<std::vector<OperationOutputSpecialization>>(
             std::move(result.outputs));
@@ -2504,7 +2526,11 @@ Status OperationRegistry::invoke_planar(
     const CancellationToken& cancellation, const BufferAllocator& allocator,
     std::shared_ptr<const PreparedOperation> prepared,
     const std::function<bool()>& current, NumericDiagnostics* numeric,
-    const ResourceBudget* resources, const ErrorCode* metadata_failure) const {
+    const ResourceBudget* resources, const ErrorCode* metadata_failure,
+    const ps_cpu_parallel_service_v1* cpu_parallel,
+    const std::function<Status(bool)>& completion_status, Backend backend,
+    const ps_gpu_service_v11* gpu,
+    const ps_cpu_tiles_service_v1* cpu_tiles) const {
   Impl::DefinitionHandle definition;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -2518,6 +2544,18 @@ Status OperationRegistry::invoke_planar(
       !definition->planar_callback)
     return Status::failure(ErrorCode::TypeMismatch,
                            "operation lacks structural planar storage support");
+  if ((backend != Backend::Cpu && backend != Backend::Gpu) ||
+      (backend == Backend::Cpu && (gpu || !definition->traits.supports_cpu)) ||
+      (backend == Backend::Gpu &&
+       (cpu_parallel || !definition->traits.supports_gpu)))
+    return Status{ErrorCode::InvalidArgument, "invalid planar backend"};
+  if (backend == Backend::Gpu && !gpu)
+    return Status{ErrorCode::BackendUnavailable,
+                  "native planar GPU unavailable"};
+  if ((definition->traits.cpu_staged_tiles &&
+       (backend != Backend::Cpu || !cpu_tiles || cpu_parallel)) ||
+      (!definition->traits.cpu_staged_tiles && cpu_tiles))
+    return Status{ErrorCode::InvalidArgument, "invalid CPU stage services"};
   auto expanded =
       resolve_operation_traits(definition->traits, inputs.size(), parameters);
   if (!expanded.ok())
@@ -2676,7 +2714,7 @@ Status OperationRegistry::invoke_planar(
       bound += count.value() * factor;
     }
     auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
-    auto scratch = allocator.limited(
+    auto scratch = allocator.limited_requested(
         bound, [failure](ErrorCode code) { failure->store(code); });
     NumericDiagnostics local_numeric;
     Status numeric_status = Status::success();
@@ -2705,14 +2743,20 @@ Status OperationRegistry::invoke_planar(
       return work_status;
     };
     const PlanarOperationInvocation invocation{
-        inputs,   input_demands,  parameters,  output_region,
-        window,   cancellation,   scratch,     inferred,
-        prepared, report_numeric, consume_work};
+        inputs,       input_demands, parameters, output_region, window,
+        cancellation, scratch,       inferred,   prepared,      report_numeric,
+        consume_work, nullptr,       false,      cpu_parallel,  backend,
+        gpu,          cpu_tiles};
     input_internal::Float32Environment environment;
     if (!environment.active())
       return Status{ErrorCode::OperationFailed,
                     "floating environment unavailable"};
     auto status = definition->planar_callback(invocation);
+    if (completion_status) {
+      auto failure_status = completion_status(status.ok());
+      if (!failure_status.ok())
+        status = std::move(failure_status);
+    }
     if (!numeric_status.ok())
       status = numeric_status;
     if (!work_status.ok())
@@ -3257,6 +3301,9 @@ Result<Value> OperationRegistry::invoke_current(
       return Result<Value>(admitted_resources.status());
     normalized.resources = admitted_resources.take_value();
     normalized.gpu = invocation.gpu;
+    if (invocation.backend == Backend::Cpu &&
+        resolved_shape.outputs[0].region_rule == OperationRegionRule::Whole)
+      normalized.cpu_parallel = invocation.cpu_parallel;
     normalized.output_index = invocation.output_index;
     normalized.prepared = std::move(prepared);
     normalized.input_indices = projected_positions;
@@ -3326,12 +3373,16 @@ Result<Value> OperationRegistry::invoke_current(
         return Result<Value>(Status{ErrorCode::ResourceExhausted, {}});
       view_allocation_failure =
           std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
-      normalized.allocator = normalized.allocator.limited(
-          payload + resolved.workspace_bytes,
-          [failure = view_allocation_failure](ErrorCode code) {
-            auto expected = ErrorCode::Ok;
-            failure->compare_exchange_strong(expected, code);
-          });
+      const auto observe = [failure = view_allocation_failure](ErrorCode code) {
+        auto expected = ErrorCode::Ok;
+        failure->compare_exchange_strong(expected, code);
+      };
+      normalized.allocator =
+          normalized.backend == Backend::Gpu
+              ? normalized.allocator.limited_requested(
+                    payload + resolved.workspace_bytes, observe)
+              : normalized.allocator.limited(payload + resolved.workspace_bytes,
+                                             observe);
     }
     auto result = definition->callback(normalized);
     if (view_allocation_failure &&

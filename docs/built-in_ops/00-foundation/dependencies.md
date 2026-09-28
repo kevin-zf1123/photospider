@@ -27,7 +27,9 @@
 | 迭代/图算法 | 具名solver与收敛 | 预条件、并行solver | 残差、全局边界、取消粒度 |
 | ML | 固定模型与pre/post reference | 受支持execution provider | 同一模型/数据域的误差、内存、吞吐 |
 
-近似快速模式应显式命名并给质量参数，CPUExact/MetalFp32现有含义不能自动覆盖新算法。不要为每个op创建自己的线程池、GPU资源系统或文件缓存。宿主/内核继续拥有其已接受的资源和生命周期。
+近似快速模式应显式命名并给质量参数。`CpuExact` 与 `NativeGpu` 选择执行放置；
+NativeGpu 不替新算法定义数值语义，必须由 operation/profile 说明并验证。不要为每个
+operation 创建自己的线程池、GPU 资源系统或文件缓存；宿主/内核继续拥有其资源和生命周期。
 
 ## 来源
 

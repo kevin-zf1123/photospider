@@ -6,6 +6,10 @@
 - 基线：kernel `0e65eac`，daemon `8816f85`
 - 权威英文：[ADR 0019](../0019-metal-resident-image-workflows.md)
 
+当前 API 说明：本 ADR 记录原 selector 名称 `MetalFp32`。当前公开选择器为
+`ExecutionMode::NativeGpu`（值 `2`），只授予原生放置；context 选择 Metal 或 Vulkan，数值行为
+由 operation/profile 定义。下文的 Metal 浮点规则不定义 Vulkan 算术，也不约束 GPU 整数精确实现。
+
 ## 研究与范围
 
 S4 交付一个 Apple Silicon Metal 后端，覆盖内置与独立 C 算子包中的八个图像算子。
@@ -22,14 +26,15 @@ GUI、daemon 协议扩展、远程设备和持久 GPU 缓存不在范围内。
 
 package 0.6、operation ABI 6 和 traits 6 替换 0.5/5，拒绝旧表与旧 minor 请求，
 C++ 消费者重编译，不保留兼容别名。C++17、文档 schema 2、provider ABI 1、IPC v3
-保持。计划选择 CpuExact（默认）或 MetalFp32。数值模式与原生实现能力影响物理身份，
+保持。接受该 ADR 时，计划选择 CpuExact（默认）或 MetalFp32。数值模式与原生实现能力影响物理身份，
 trait 编码变化影响语义身份；运行句柄、分配地址、耗时与设备代次不进入语义身份。
 不新增优化规则，程序字节与编译选项标识原生实现。
 
 ## 原生存储、访问与完成
 
 ExecutionContext 拥有实际可选设备、一个队列、pipeline 复用及同步 GPU lane。
-只在受支持 Apple Silicon 上启用；关闭构建选项或设备不可用时保留 CPU。
+初始 S4 实现使用受支持 Apple Silicon 上的 Metal。当前 build 可选择可选 Metal 或 Vulkan
+backend；关闭 build 或设备不可用时保留 CPU。
 每个 context 同时最多执行一个原生提交，等待命令完成后回调才退役，不新增异步
 回调 API 或无限设备提交队列。
 
@@ -47,22 +52,24 @@ Value 布局、origin、Region 和描述符独立于分配。发布后的 bytes 
 ## 可信纯 C GPU 服务
 
 ABI 6 保留同步回调，增加调用内 buffer token、有界输入/输出/scratch view、MSL
-程序与入口、buffer bindings、常量和 dispatch grid。宿主验证记录并管理编译、提交，
-原生完成后才返回。插件不创建设备/队列、不保留 token、不向 SDK 暴露 Objective-C。
+程序与入口、buffer bindings、常量和 dispatch grid。当前 ABI 11 dispatch 按 active backend
+接受 MSL 或 SPIR-V。宿主验证记录并管理编译、提交，原生完成后才返回。插件不创建设备/队列、
+不保留 token、不向 SDK 暴露 Objective-C。
 shader 为可信进程内代码，校验不提供沙箱。C11 rgba32f 和内置八个算子使用相同服务。
 CPU 回调不能宣称完成 Metal 工作，两条注册路径均执行既有输出、数值、取消检查。
 
 ## 数值模式与回退
 
-CpuExact 保持既有 CPU 算术及缓存语义。显式 MetalFp32 关闭 fast-math 和 contraction，
-每算子及指定代表链对独立 CPU oracle 使用 atol=1e-6、rtol=1e-5。任意组合会传播误差，
-不承诺与图规模无关的总误差或 CPU 位相同。
+`CpuExact` 保持 CPU 算术及缓存语义。原 Metal FP32 operation profile 关闭 fast-math
+和 contraction；`ExecutionMode::NativeGpu` 只授予放置权限，不选择该 profile。每算子及指定
+代表链对独立 CPU oracle 使用 atol=1e-6、rtol=1e-5。任意组合会传播误差，不承诺与图规模
+无关的总误差或 CPU 位相同。
 
 Gaussian 在宿主 double 生成系数，GPU 补偿 Float32 累加；box 使用补偿累加与边缘
 实际样本数。圆章以宿主 double 几何生成精确行区间，GPU 计算颜色，圆外保留位型。
 不适用的 HDR、subnormal 或其他数值情况在发布前回退 CPU，非法输入保持既有错误。
 
-回退粒度为算子。Metal 链内 CPU 回退消费实际输入，不使整条链成为 CpuExact。
+回退粒度为算子。`NativeGpu` plan 内 CPU 回退消费实际输入，不改变 plan 的选址模式。
 后端/数值拒绝只在发布前、已提交工作排空后重试；设备执行错误终止 Run，设备失效
 使驻留代次无效。取消停止新 admission，排空已提交工作并拒绝发布；stale/frozen
 规则保持。
@@ -73,7 +80,7 @@ Gaussian 在宿主 double 生成系数，GPU 补偿 Float32 累加；box 使用�
 实际实现、数值模式与设备代次。不可信内容身份的 source 可执行，但不跨 Run 复用。
 dirty mapping 引导需求，精确内容身份授权复用。
 
-CPU 精确结果与 Metal 派生结果隔离。发生回退的算子及其后继不写预期 Metal 条目，
+CPU 精确结果与 `NativeGpu` 派生结果隔离。发生回退的算子及其后继不写预期原生条目，
 GPU 上游不进入 S3 磁盘缓存。清理、驱逐、设备失效移除复用资格，但不提前释放活跃
 owner。共享计算保持独立订阅取消语义，成功验证且有效的结果才进入完成缓存。
 

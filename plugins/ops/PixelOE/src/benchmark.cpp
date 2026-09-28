@@ -25,7 +25,7 @@ int main(int argc, char** argv) try {
   uint32_t w = std::stoul(argv[1]), h = std::stoul(argv[2]);
   int reps = argc > 3 ? std::stoi(argv[3]) : 3;
   Memory memory;
-  ps_planar_services_v1 services{};
+  ps_planar_services_v3 services{};
   services.struct_size = sizeof(services);
   services.context = &memory;
   services.cancelled = [](void*) { return 0; };

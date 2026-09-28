@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <utility>
 
 #include "01-numeric/exact_product.hpp"
 #include "01-numeric/math_constants.hpp"
@@ -37,9 +38,35 @@ struct DirectedIntervalStorage final {
   Workspace rounding;
   std::size_t used = 0;
   unsigned precision = 128;
+  unsigned product_checkpoint_words = 0;
   execution_internal::WorkConsumer consume;
-  explicit DirectedIntervalStorage(SequenceProfile profile)
-      : rounding(profile) {}
+  // A runtime initialization consumer admits and polls between complete slots.
+  // Keep Number's ordinary zero-initialization semantics for external users.
+  static Number initialized_number(
+      const execution_internal::WorkConsumer* initialization, std::size_t) {
+    if (initialization)
+      initialization->check(kWords + 1);
+    return Number{};
+  }
+  template <std::size_t... I>
+  static std::array<Number, kSlots> initialized_pool(
+      const execution_internal::WorkConsumer* initialization,
+      std::index_sequence<I...>) {
+    return {{initialized_number(initialization, I)...}};
+  }
+  static SequenceProfile initialized_profile(
+      SequenceProfile profile,
+      const execution_internal::WorkConsumer* initialization) {
+    if (initialization)
+      initialization->check(5 * kWords + 11);
+    return profile;
+  }
+  explicit DirectedIntervalStorage(
+      SequenceProfile profile,
+      const execution_internal::WorkConsumer* initialization = nullptr)
+      : pool(initialized_pool(initialization,
+                              std::make_index_sequence<kSlots>{})),
+        rounding(initialized_profile(profile, initialization)) {}
   struct Frame {
     DirectedIntervalStorage& context;
     std::size_t saved;
@@ -288,8 +315,8 @@ struct DirectedIntervalStorage final {
       if (top(a) >= 0 && top(b) >= 0 &&
           top(a) + top(b) + 1 >= static_cast<int>(kWords * 64))
         capacity();
-    auto status =
-        multiply_fixed(a.magnitude, b.magnitude, &product.magnitude, *consume);
+    auto status = multiply_fixed(a.magnitude, b.magnitude, &product.magnitude,
+                                 *consume, product_checkpoint_words);
     if (!status.ok())
       throw status;
     product.negative = a.negative != b.negative;
@@ -314,7 +341,8 @@ struct DirectedIntervalStorage final {
               top(*left) + top(*right) + 1 >= static_cast<int>(kWords * 64))
             capacity();
         auto status = multiply_fixed(left->magnitude, right->magnitude,
-                                     &product.magnitude, *consume);
+                                     &product.magnitude, *consume,
+                                     product_checkpoint_words);
         if (!status.ok())
           throw status;
         product.negative = left->negative != right->negative;

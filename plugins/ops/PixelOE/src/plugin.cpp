@@ -3,14 +3,27 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifdef PIXELOE_PROFILE_IO
+#include <chrono>
+#include <cinttypes>
+#endif
 
 #include "photospider/data/tensor_description.hpp"
 #include "runtime.hpp"  // NOLINT(build/include_subdir)
 namespace {
 using px::Failure;
+enum class Profile : uint32_t { CpuWhole, MetalNative, CpuTiled, VulkanNative };
+Profile profile(void* user) {
+  return static_cast<Profile>(reinterpret_cast<uintptr_t>(user) / 3);
+}
+uint32_t selected_output(void* user) {
+  return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(user) % 3);
+}
 struct Parameter {
   const char* name;
   uint32_t type;
@@ -44,7 +57,7 @@ void choice(const std::string& v, std::initializer_list<const char*> choices) {
   }
   throw Failure(6, "unsupported PixelOE option: " + v);
 }
-px::Options options(const ps_operation_parameter_value_v9* p, uint32_t n) {
+px::Options options(const ps_operation_parameter_value_v11* p, uint32_t n) {
   px::Options o;
   for (uint32_t i = 0; i < n; ++i) {
     std::string key(p[i].key, p[i].key_size);
@@ -155,7 +168,7 @@ void validate_channel(const ps::TensorChannelDescription& ch, size_t index) {
     validate_color(*ch.interpretation);
   }
 }
-void validate_metadata(const ps_planar_metadata_v1& m) {
+void validate_metadata(const ps_planar_metadata_v3& m) {
   if (m.element_type != 4 || m.rank != 3 || m.shape[2] != 3 ||
       m.height_axis != 0 || m.width_axis != 1 || m.channel_axis != 2) {
     throw Failure(5, "PixelOE requires planar Float32 [H,W,3] RGB");
@@ -227,9 +240,9 @@ int protect(F fn, char* diagnostic, size_t capacity) noexcept {
     return 1;
   }
 }
-int infer(void* user, const ps_planar_metadata_v1* inputs, uint32_t count,
-          const ps_operation_parameter_value_v9* params, uint32_t pc,
-          ps_planar_metadata_v1* output, char* diagnostic, size_t capacity) {
+int infer(void* user, const ps_planar_metadata_v3* inputs, uint32_t count,
+          const ps_operation_parameter_value_v11* params, uint32_t pc,
+          ps_planar_metadata_v3* output, char* diagnostic, size_t capacity) {
   return protect(
       [&] {
         if (count != 1) {
@@ -237,8 +250,7 @@ int infer(void* user, const ps_planar_metadata_v1* inputs, uint32_t count,
         }
         validate_metadata(inputs[0]);
         auto o = options(params, pc);
-        uint32_t selected =
-            static_cast<uint32_t>(reinterpret_cast<uintptr_t>(user));
+        const uint32_t selected = selected_output(user);
         uint64_t h = inputs[0].shape[0], w = inputs[0].shape[1],
                  p = o.pixel_size;
         // Shader indexing is uint32; bounds also keep 32.32 fixed sums
@@ -268,7 +280,7 @@ int infer(void* user, const ps_planar_metadata_v1* inputs, uint32_t count,
         output->channel_axis = 2;
         if (selected != 2) {
           const auto& f = rgb_facet();
-          static const ps_operation_facet_view_v9 view{
+          static const ps_operation_facet_view_v11 view{
               sizeof(view),
               f.key.data(),
               static_cast<uint32_t>(f.key.size()),
@@ -281,10 +293,35 @@ int infer(void* user, const ps_planar_metadata_v1* inputs, uint32_t count,
       },
       diagnostic, capacity);
 }
-int execute(void* user, const ps_planar_metadata_v1* inputs, uint32_t count,
-            const ps_operation_parameter_value_v9* params, uint32_t pc,
-            const ps_planar_metadata_v1* output,
-            const ps_planar_services_v1* services, char* diagnostic,
+struct TransferSpan {
+  const uint8_t* source;
+  uint8_t* destination;
+  uint64_t samples;
+};
+constexpr uint32_t kTransferBatch = 1024;
+constexpr uint32_t kTransferGrain = 32;
+void transfer(px::Context& c, const TransferSpan* spans, uint32_t count,
+              bool input) {
+  c.parallel_for(count, kTransferGrain, [&](uint64_t begin, uint64_t end) {
+    for (auto index = begin; index < end; ++index) {
+      const auto& span = spans[index];
+      for (uint64_t i = 0; i < span.samples; ++i) {
+        if (i % 64 == 0)
+          c.check();
+        float value;
+        std::memcpy(&value, span.source + 4 * i, 4);
+        if (!std::isfinite(value) || (input && (value < 0 || value > 1)))
+          throw Failure(1, input ? "PixelOE input must be finite in [0,1]"
+                                 : "PixelOE produced nonfinite samples");
+      }
+      std::memcpy(span.destination, span.source, span.samples * 4);
+    }
+  });
+}
+int execute(void* user, const ps_planar_metadata_v3* inputs, uint32_t count,
+            const ps_operation_parameter_value_v11* params, uint32_t pc,
+            const ps_planar_metadata_v3* output,
+            const ps_planar_services_v3* services, char* diagnostic,
             size_t capacity) {
   return protect(
       [&] {
@@ -292,10 +329,31 @@ int execute(void* user, const ps_planar_metadata_v1* inputs, uint32_t count,
           throw Failure(5, "PixelOE requires one input");
         }
         px::Context c(services);
+        const auto target = profile(user);
+        const uint32_t required_backend =
+            target == Profile::MetalNative    ? PS_GPU_BACKEND_METAL_V11
+            : target == Profile::VulkanNative ? PS_GPU_BACKEND_VULKAN_V11
+                                              : 0;
+        if (required_backend &&
+            (!services->gpu || services->gpu->backend != required_backend))
+          throw Failure(
+              3, "PixelOE numerical profile requires its named native backend");
+        if (!required_backend && services->gpu)
+          throw Failure(3, "PixelOE CPU profile requires CPU services");
         auto o = options(params, pc);
         uint32_t h = inputs[0].shape[0], w = inputs[0].shape[1];
         auto img = c.image(h, w);
         auto* dst = static_cast<float*>(img.data);
+        // Row services belong to the coordinator. Retained windows keep these
+        // disjoint spans stable while pool callbacks validate and copy them.
+        auto span_owner = c.tiled_enabled()
+                              ? c.empty(kTransferBatch, sizeof(TransferSpan))
+                              : px::Array{};
+        auto* spans = static_cast<TransferSpan*>(span_owner.data);
+        uint32_t pending = 0;
+#ifdef PIXELOE_PROFILE_IO
+        const auto input_start = std::chrono::steady_clock::now();
+#endif
         for (uint32_t ch = 0; ch < 3; ++ch) {
           for (uint32_t y = 0; y < h; ++y) {
             for (uint32_t x = 0; x < w;) {
@@ -308,6 +366,19 @@ int execute(void* user, const ps_planar_metadata_v1* inputs, uint32_t count,
                 throw Failure(1, "PixelOE input row unavailable");
               }
               samples = std::min<uint64_t>(samples, w - x);
+              c.charge(16 * samples);
+              if (c.tiled_enabled()) {
+                auto* target = reinterpret_cast<uint8_t*>(
+                    dst + static_cast<uint64_t>(ch) * h * w +
+                    static_cast<uint64_t>(y) * w + x);
+                new (spans + pending++) TransferSpan{data, target, samples};
+                if (pending == kTransferBatch) {
+                  transfer(c, spans, pending, true);
+                  pending = 0;
+                }
+                x += samples;
+                continue;
+              }
               for (uint64_t i = 0; i < samples; ++i) {
                 float v;
                 std::memcpy(&v, data + 4 * i, 4);
@@ -321,8 +392,14 @@ int execute(void* user, const ps_planar_metadata_v1* inputs, uint32_t count,
             }
           }
         }
-        uint32_t selected =
-            static_cast<uint32_t>(reinterpret_cast<uintptr_t>(user));
+        if (pending) {
+          transfer(c, spans, pending, true);
+          pending = 0;
+        }
+#ifdef PIXELOE_PROFILE_IO
+        const auto input_end = std::chrono::steady_clock::now();
+#endif
+        const uint32_t selected = selected_output(user);
         auto result = px::run(c, std::move(img), o, selected);
         auto out = selected == 2
                        ? result.weight
@@ -332,6 +409,9 @@ int execute(void* user, const ps_planar_metadata_v1* inputs, uint32_t count,
           throw Failure(1, "PixelOE output shape mismatch");
         }
         const auto* values = static_cast<const float*>(out.data);
+#ifdef PIXELOE_PROFILE_IO
+        const auto output_start = std::chrono::steady_clock::now();
+#endif
         for (uint32_t ch = 0; ch < out.channels; ++ch) {
           for (uint32_t y = 0; y < out.height; ++y) {
             for (uint32_t x = 0; x < out.width;) {
@@ -344,9 +424,20 @@ int execute(void* user, const ps_planar_metadata_v1* inputs, uint32_t count,
                 throw Failure(1, "PixelOE output row unavailable");
               }
               samples = std::min<uint64_t>(samples, out.width - x);
+              c.charge(12 * samples);
               const float* row =
                   values + static_cast<uint64_t>(ch) * out.height * out.width +
                   static_cast<uint64_t>(y) * out.width + x;
+              if (c.tiled_enabled()) {
+                new (spans + pending++) TransferSpan{
+                    reinterpret_cast<const uint8_t*>(row), data, samples};
+                if (pending == kTransferBatch) {
+                  transfer(c, spans, pending, false);
+                  pending = 0;
+                }
+                x += samples;
+                continue;
+              }
               for (uint64_t i = 0; i < samples; ++i) {
                 if (!std::isfinite(row[i])) {
                   throw Failure(1, "PixelOE produced nonfinite samples");
@@ -357,39 +448,72 @@ int execute(void* user, const ps_planar_metadata_v1* inputs, uint32_t count,
             }
           }
         }
+        if (pending)
+          transfer(c, spans, pending, false);
+#ifdef PIXELOE_PROFILE_IO
+        const auto output_end = std::chrono::steady_clock::now();
+        const auto input_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(input_end -
+                                                                 input_start)
+                .count();
+        const auto output_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(output_end -
+                                                                 output_start)
+                .count();
+        std::fprintf(stderr,
+                     "PS_PIXELOE_IO {\"profile\":%u,\"input_bytes\":%" PRIu64
+                     ",\"input_host_ns\":%" PRIu64 ",\"output_bytes\":%" PRIu64
+                     ",\"output_host_ns\":%" PRIu64 "}\n",
+                     static_cast<unsigned>(target), uint64_t{h} * w * 3 * 4,
+                     static_cast<uint64_t>(std::max<int64_t>(0, input_ns)),
+                     uint64_t{out.height} * out.width * out.channels * 4,
+                     static_cast<uint64_t>(std::max<int64_t>(0, output_ns)));
+#endif
       },
       diagnostic, capacity);
 }
-int unused(void*, const ps_operation_value_view_v9*, uint32_t,
-           const ps_operation_parameter_value_v9*, uint32_t, uint32_t,
-           ps_operation_cancelled_v9, void*, const ps_operation_output_sink_v9*,
-           char*, size_t) {
+int unused(void*, const ps_operation_value_view_v11*, uint32_t,
+           const ps_operation_parameter_value_v11*, uint32_t, uint32_t,
+           ps_operation_cancelled_v11, void*,
+           const ps_operation_output_sink_v11*, char*, size_t) {
   return 1;
 }
 struct Tables {
-  std::vector<ps_operation_parameter_descriptor_v9> parameters;
-  ps_operation_port_constraint_v9 input{};
-  ps_operation_descriptor_v9 operations[3]{};
-  ps_planar_operation_v1 planar[3]{};
-  ps_operation_plugin_api_v9 api{};
-  ps_planar_operation_plugin_api_v1 extension{};
+  std::vector<ps_operation_parameter_descriptor_v11> parameters;
+  ps_operation_port_constraint_v11 input{};
+  ps_operation_descriptor_v11 operations[12]{};
+  ps_planar_operation_v3 planar[12]{};
+  ps_operation_plugin_api_v11 api{};
+  ps_planar_operation_plugin_api_v3 extension{};
   Tables() {
     for (const auto& p : schema) {
-      parameters.push_back({sizeof(ps_operation_parameter_descriptor_v9),
+      parameters.push_back({sizeof(ps_operation_parameter_descriptor_v11),
                             p.name, static_cast<uint32_t>(std::strlen(p.name)),
                             p.type, 1, p.type <= 2 ? 1u : 0u, p.lo, p.hi});
     }
     input.struct_size = sizeof(input);
-    input.kind = PS_OPERATION_PORT_VALUE_V9;
-    const char* keys[]{"pixeloe.pixelize", "pixeloe.expanded",
-                       "pixeloe.weight"};
-    for (uint32_t i = 0; i < 3; ++i) {
+    input.kind = PS_OPERATION_PORT_VALUE_V11;
+    const char* keys[]{"pixeloe.pixelize",
+                       "pixeloe.expanded",
+                       "pixeloe.weight",
+                       "pixeloe.pixelize_metal_native_fp32",
+                       "pixeloe.expanded_metal_native_fp32",
+                       "pixeloe.weight_metal_native_fp32",
+                       "pixeloe.pixelize_cpu_tiled",
+                       "pixeloe.expanded_cpu_tiled",
+                       "pixeloe.weight_cpu_tiled",
+                       "pixeloe.pixelize_vulkan_native_fp32",
+                       "pixeloe.expanded_vulkan_native_fp32",
+                       "pixeloe.weight_vulkan_native_fp32"};
+    for (uint32_t i = 0; i < 12; ++i) {
       auto& d = operations[i];
       d.struct_size = sizeof(d);
       d.key = keys[i];
       d.key_size = std::strlen(keys[i]);
       d.input_count = 1;
-      d.flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
+      d.flags = (i < 3 || (i >= 6 && i < 9) ? PS_OPERATION_FLAG_CPU
+                                            : PS_OPERATION_FLAG_GPU) |
+                PS_OPERATION_FLAG_DETERMINISTIC |
                 PS_OPERATION_FLAG_SIDE_EFFECT_FREE;
       d.parameter_count = parameters.size();
       d.parameters = parameters.data();
@@ -405,14 +529,16 @@ struct Tables {
       out.key = "values";
       out.key_size = 6;
       out.output_element_type = 4;
-      out.shape_rule = PS_OPERATION_SHAPE_PRESERVE_FIRST_V9;
-      out.region_rule = PS_OPERATION_REGION_WHOLE_V9;
+      out.shape_rule = PS_OPERATION_SHAPE_PRESERVE_FIRST_V11;
+      out.region_rule = PS_OPERATION_REGION_WHOLE_V11;
       out.output_schema = input;
-      planar[i] = {sizeof(ps_planar_operation_v1), infer, execute};
+      planar[i] = {sizeof(ps_planar_operation_v3), infer, execute,
+                   (i >= 6 && i < 9) ? PS_PLANAR_EXECUTION_CPU_STAGES_V3
+                                     : PS_PLANAR_EXECUTION_WHOLE_V3};
     }
-    api = {sizeof(api), 3, operations,
-           [](const ps_operation_descriptor_v9*, uint32_t) {}};
-    extension = {sizeof(extension), PS_PLANAR_OPERATION_ABI_VERSION_1, 3,
+    api = {sizeof(api), 12, operations,
+           [](const ps_operation_descriptor_v11*, uint32_t) {}};
+    extension = {sizeof(extension), PS_PLANAR_OPERATION_ABI_VERSION_3, 12,
                  planar};
   }
 };
@@ -422,18 +548,18 @@ Tables& tables() {
 }
 }  // namespace
 extern "C" PS_OPERATION_EXPORT uint32_t ps_operation_plugin_get_abi_version() {
-  return PS_OPERATION_ABI_VERSION_9;
+  return PS_OPERATION_ABI_VERSION_11;
 }
-extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v9*
-ps_operation_plugin_get_api_v9() {
+extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v11*
+ps_operation_plugin_get_api_v11() {
   try {
     return &tables().api;
   } catch (...) {
     return nullptr;
   }
 }
-extern "C" PS_OPERATION_EXPORT const ps_planar_operation_plugin_api_v1*
-ps_operation_plugin_get_planar_api_v1() {
+extern "C" PS_OPERATION_EXPORT const ps_planar_operation_plugin_api_v3*
+ps_operation_plugin_get_planar_api_v3() {
   try {
     return &tables().extension;
   } catch (...) {

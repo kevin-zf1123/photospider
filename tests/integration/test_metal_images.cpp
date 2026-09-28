@@ -31,10 +31,11 @@ ps::Result<ps::Value> padded_image(const ps::OperationInvocation& call,
       "kernel void pad(device const uchar* a [[buffer(0)]], "
       "device uchar* b [[buffer(1)]], constant uint& shift [[buffer(2)]], "
       "uint i [[thread_position_in_grid]]){b[i+shift]=a[i];}";
-  ps_gpu_buffer_binding_v9 buffers[] = {
-      {sizeof(ps_gpu_buffer_binding_v9), 0, input_token, 0, 16, 0},
-      {sizeof(ps_gpu_buffer_binding_v9), 1, output_token, 0, output.size(), 1}};
-  ps_gpu_dispatch_v9 command{};
+  ps_gpu_buffer_binding_v11 buffers[] = {
+      {sizeof(ps_gpu_buffer_binding_v11), 0, input_token, 0, 16, 0},
+      {sizeof(ps_gpu_buffer_binding_v11), 1, output_token, 0, output.size(),
+       1}};
+  ps_gpu_dispatch_v11 command{};
   command.struct_size = sizeof(command);
   command.source = shader;
   command.source_size = sizeof(shader) - 1;
@@ -102,7 +103,7 @@ void check_native_alignment(const std::shared_ptr<ps::OperationRegistry>& base,
   document.outputs = {{"result", 2, "value"}};
   ps::GraphContext graph(document);
   ps::PlanningOptions planning;
-  planning.execution_mode = ps::ExecutionMode::MetalFp32;
+  planning.execution_mode = ps::ExecutionMode::NativeGpu;
   auto compiled = ps::Compiler(registry).compile(graph, planning);
   s4_fixture::require(compiled.ok(), "alignment compile");
   ps::ExecutionContextConfig config;
@@ -204,9 +205,9 @@ int main(int argc, char** argv) {
     ps::ExecutionContext cpu(operations);
     s4_fixture::all_operations(cpu, operations, ps::ExecutionMode::CpuExact);
     check_domain_failures(cpu, operations, ps::ExecutionMode::CpuExact);
-    check_domain_failures(execution, operations, ps::ExecutionMode::MetalFp32);
+    check_domain_failures(execution, operations, ps::ExecutionMode::NativeGpu);
     const auto dispatches = s4_fixture::all_operations(
-        execution, operations, ps::ExecutionMode::MetalFp32);
+        execution, operations, ps::ExecutionMode::NativeGpu);
     s4_fixture::numeric_edges(execution, operations);
     if (!execution.gpu_enabled()) {
       std::cout << "CPU fallback oracle passed; native hardware skipped\n";

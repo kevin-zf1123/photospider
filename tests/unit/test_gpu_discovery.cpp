@@ -200,7 +200,7 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
   gpu.buffer = [](const std::uint8_t*, std::uint64_t, bool) {
     return Result<std::uint64_t>(Status{ErrorCode::BackendUnavailable, {}});
   };
-  gpu.execute = [](const ps_gpu_dispatch_v9*, std::uint32_t) {
+  gpu.execute = [](const ps_gpu_dispatch_v11*, std::uint32_t) {
     return Status{ErrorCode::BackendUnavailable, {}};
   };
   gpu.allocate_discovery = [&](std::uint64_t bytes) {

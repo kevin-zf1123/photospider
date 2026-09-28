@@ -47,12 +47,13 @@ struct DiskCacheStatistics final {
 struct PHOTOSPIDER_API ExecutionContextConfig final {
   /** @brief Fixed CPU worker count; zero resolves to bounded hardware count. */
   std::uint32_t cpu_workers = 0;
-  /** @brief Whether to attempt creating a native Apple Silicon Metal device. */
+  /** @brief Whether to create the configured native Metal or Vulkan device. */
   bool gpu_enabled = false;
   /**
    * @brief Single aggregate waiting-callback limit across CPU/GPU lanes.
    * @note A callback releases its slot when a worker starts it; running
-   * callbacks do not consume this ExecutionContext-wide bound.
+   * callbacks do not consume this ExecutionContext-wide bound. A staged CPU
+   * job holds one slot until its tile callbacks retire and it leaves the queue.
    */
   std::uint32_t maximum_queued_tasks = 1024;
   /** @brief Maximum reserved/allocated controlled computation buffer bytes. */
@@ -80,6 +81,39 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
    * allocator/OS overhead are explicitly outside this model, never RSS bounds.
    */
   std::optional<ResourceLimits> managed_resources = {};
+  /** @brief Enables monotonic timing for accepted CPU/GPU FIFO callbacks.
+   * Default-off measurement reads three clocks per accepted/started callback.
+   * The fixed envelope timestamp is present in both modes. Range-block claims
+   * and work before pool submission are outside these observations.
+   */
+  bool collect_scheduler_timing = false;
+};
+
+/** @brief Cumulative accepted-callback observations for one backend FIFO.
+ * @note Counters saturate at UINT64_MAX and set saturated. Counts and sums can
+ * be differenced between unsaturated snapshots; maxima span context lifetime,
+ * including warmup. These observations measure callbacks rather than range
+ * blocks, requests, device commands or an execution-time decomposition.
+ */
+struct PHOTOSPIDER_API CallbackQueueStatistics final {
+  std::uint64_t accepted_callbacks = 0, started_callbacks = 0;
+  /** @brief Sum from submit entry to successful publication, including mutex
+   * acquisition and queue storage. Failed submissions are excluded.
+   */
+  std::uint64_t submission_ns = 0;
+  /** @brief Sum from successful publication to worker removal from the FIFO.
+   * Admission-token retirement and callback execution follow that boundary.
+   */
+  std::uint64_t queue_wait_ns = 0;
+  std::uint64_t maximum_queue_wait_ns = 0, maximum_queued_callbacks = 0;
+  bool saturated = false;
+};
+/** @brief Context-local scheduler observations, separately synchronized per
+ * lane. Disabled collection returns enabled=false and zero-valued lanes.
+ */
+struct PHOTOSPIDER_API SchedulerStatistics final {
+  bool enabled = false;
+  CallbackQueueStatistics cpu, gpu;
 };
 
 /**
@@ -207,6 +241,8 @@ struct PHOTOSPIDER_API OperationTiming final {
   /** @brief Actual native work for this attempt, zero for CPU/cache hits. */
   std::uint64_t native_dispatch_count = 0;
   std::uint64_t native_compute_us = 0;
+  /** @brief Completed CPU computation stages and their tile callbacks. */
+  std::uint64_t cpu_stage_count = 0, cpu_tile_callback_count = 0;
   /** @brief Actual numeric work of this attempt; empty for nonnumeric/cache
    * work.
    */
@@ -250,6 +286,9 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
    * attempts. */
   std::uint64_t native_dispatch_count = 0;
   std::uint64_t native_submission_count = 0;
+  /** @brief Completed computation stages, independent of delivered output
+   * tiles. */
+  std::uint64_t cpu_stage_count = 0, cpu_tile_callback_count = 0;
   /** @brief Device command time; zero when unavailable, never host callback
    * time. */
   std::uint64_t native_compute_us = 0;
@@ -269,7 +308,8 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
    * twice in the context budget and cached earlier allocations are excluded.
    */
   std::uint64_t shared_peak_live_bytes = 0;
-  /** @brief Conservative complete working-set reservation for this Run. */
+  /** @brief Peak reserved payload capacity observed for this Run, including
+   * complete CPU reservations and incremental native allocations. */
   std::uint64_t planned_peak_bytes = 0;
   /** @brief Caller-preexisting immutable input capacity outside the budget. */
   std::uint64_t retained_input_bytes = 0;
@@ -645,6 +685,12 @@ class PHOTOSPIDER_API ExecutionContext final {
 
   /** @brief Thread-safe cumulative optional cache statistics. */
   ResultCacheStatistics cache_statistics() const;
+  /** @brief Returns cumulative FIFO observations when collection is enabled.
+   * @note Thread-safe. Each lane is sampled under its own mutex, so the two
+   * lane snapshots can represent different instants. Concurrent Runs share
+   * these counters; per-request subtraction does not isolate one Run.
+   */
+  SchedulerStatistics scheduler_statistics() const;
 
   /**
    * @brief Returns the fixed resolved CPU worker count.

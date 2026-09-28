@@ -205,7 +205,7 @@ struct DependencyBlockServices final {
   std::function<Status(const std::string&, const Value&)> publish;
 };
 /** @brief Host-owned zeroed request table borrowed during discovery compute.
- * @note Wire layout follows PS_GPU_DISCOVERY_MSL_V9. The callback must use a
+ * @note Wire layout follows PS_GPU_DISCOVERY_MSL_V11. The callback must use a
  * separate finite discovery dispatch, never publish numerical output, and make
  * at most the declared candidates emit attempts across all dispatches. It may
  * read only already supplied control/data. Pointers expire at compute return;
@@ -233,12 +233,12 @@ struct DependencyGpuServices final {
   std::function<Result<FragmentAtlas>(
       const FragmentAtlasPlan&, const ValueFragments&, const FootprintLimits&)>
       materialize;
-  /** @brief Acquires a native view; same bounds as ps_gpu_service_v9::buffer.
+  /** @brief Acquires a native view; same bounds as ps_gpu_service_v11::buffer.
    */
   std::function<Result<std::uint64_t>(const std::uint8_t*, std::uint64_t, bool)>
       buffer;
-  /** @brief Executes and drains 1..32 bounded ps_gpu_dispatch_v9 records. */
-  std::function<Status(const ps_gpu_dispatch_v9*, std::uint32_t)> execute;
+  /** @brief Executes and drains 1..32 bounded ps_gpu_dispatch_v11 records. */
+  std::function<Status(const ps_gpu_dispatch_v11*, std::uint32_t)> execute;
   /** @brief Separately admits an exact native discovery allocation.
    * @note The Session bounds size before calling. Returned mutable storage
    * must have exactly the requested byte span and remain charged until retired.
@@ -316,7 +316,7 @@ struct PHOTOSPIDER_API DependencyPhase final {
    * handled explicitly; publishing a numerical result after an unresolved
    * read is invalid. GPU services never infer dependencies from shader code.
    */
-  std::function<Status(const ps_gpu_dispatch_v9*, std::uint32_t)> gpu_execute;
+  std::function<Status(const ps_gpu_dispatch_v11*, std::uint32_t)> gpu_execute;
   /** @brief Runs bounded discovery and appends decoded needs to this poll.
    * @note capacity is 1..maximum_gpu_requests and <=65536. candidates is a
    * positive upper bound on all emit attempts, <=UINT32_MAX, charged before

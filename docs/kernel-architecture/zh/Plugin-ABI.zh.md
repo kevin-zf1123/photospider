@@ -1,325 +1,275 @@
 # Operation 与 Data-Definition ABI
 
+## 核心摘要
+
+应用需要明确的接口来加载扩展并交换数据。内核验证带版本的描述记录，并为每次调用借出执行服务。扩展因此获得一致的验证、资源所有权和完成规则。
+
+## 架构心智模型
+
+```mermaid
+sequenceDiagram
+    participant Host as 宿主
+    participant Plugin as 插件
+    participant Services as 执行服务
+    Host->>Plugin: 检查版本并复制描述
+    Host->>Host: 验证参数和元数据
+    Host->>Plugin: 通过借用服务调用
+    Plugin->>Services: 分配、计费与执行
+    Services-->>Plugin: 同步工作完成
+    Plugin-->>Host: 返回状态
+    Host->>Host: 检查宿主错误并发布
+```
+
+## 契约与不变量
+
 Photospider 安装两份 narrow same-trust extension header：
 
-- operation ABI v9：copied semantic trait、closed typed parameter schema、
-  plan-derived input demand 与一个 synchronous Value callback；
+- operation ABI v11：copied semantic trait、closed typed parameter schema、plan-derived input demand、一个 synchronous Value callback 和 versioned native GPU service；
 - data-provider ABI v1：copied schema key、element type 与 maximum rank。
 
-已安装的 C++ convenience wrapper `operation_plugin.hpp` 是可直接包含且 self-contained
-的 header：它在暴露 `element_type_value` 前自行包含 `<cstdint>` dependency 与 operation
-C ABI，不依赖 consumer 先包含另一份 Photospider header。导出的
-`Photospider::operation_sdk` interface target 会传播 `cxx_std_17`，因此 C++ consumer
-可以从 package 获得 wrapper 的实际语言要求，无需自行重复声明。Maintained consumer
-通过与 compiler 相符的 dialect assertion 证明这项传播：MSVC-compatible frontend 定义
-`_MSVC_LANG` 时使用该宏，否则使用 `__cplusplus`。它不私自添加 standard flag，也不
-要求 `/Zc:__cplusplus`。
+已安装的 C++ convenience wrapper `operation_plugin.hpp` 是可直接包含且 self-contained 的 header：它在暴露 `element_type_value` 前自行包含 `<cstdint>` dependency 与 operation C ABI，不依赖 consumer 先包含另一份 Photospider header。
 
-Provider contract 继续保持纯 C。`Photospider::data_provider_sdk` 只传播 include
-directory，不传播 C++ compile feature，所以 C11 translation unit 可以消费它而不会
-获得 C++ 语言要求。Package 不发布独立的 `data_definition_sdk` alias。
+导出的 `Photospider::operation_sdk` interface target 会传播 `cxx_std_17`，因此 C++ consumer 可以从 package 获得 wrapper 的实际语言要求，无需自行重复声明。
 
-## Operation record
+Maintained consumer 通过与 compiler 相符的 dialect assertion 证明这项传播：MSVC-compatible frontend 定义 `_MSVC_LANG` 时使用该宏，否则使用 `__cplusplus`。它不私自添加 standard flag，也不 要求 `/Zc:__cplusplus`。
 
-Operation descriptor 包含 length-framed key、input count、flag、estimated bytes、output
-element type、closed scalar/preserve/match/fixed shape 与 Whole/Elementwise/Halo Region
-rule、halo radius、cacheability、bounded parameter-schema pointer/count、callback 与
-opaque plugin state。Parameter record 发布 unique key、精确 Int64/Float64/Bool/String
-type 与 required presence。Compiler 在 semantic IR 前拒绝 unknown、missing、wrong-type
-与 conflicting parameter；callback 只接收 validated canonical value，不存在隐藏 default
-fallback。
+Provider contract 继续保持纯 C。`Photospider::data_provider_sdk` 只传播 include directory，不传播 C++ compile feature，所以 C11 translation unit 可以消费它而不会 获得 C++ 语言要求。Package 不发布独立的 `data_definition_sdk` alias。
 
-Callback 接收 bounded dense whole-Region input view、每个 input 的 planned demand
-offset/extent、bounded facet array、backend enum、cooperative cancellation callback 与
-host-owned output sink。它最多发布一个带 bounded facet 的 output；host 复制并验证为
-dense whole-Region Value。第一次 sink 调用即占用 publication，即使 validation 拒绝也不
-例外。任何第二次调用都会设置 invocation-local sticky violation，且不分配、不抛异常、
-不替换第一次 accepted/rejected `Result`；callback 返回后，adapter 会报告稳定的 terminal
-`OperationFailed` diagnostic：
-`operation plugin violated output sink at-most-once contract`。Null sink context 返回零，
-且不改变 invocation state。DSO input view 精确覆盖其 logical contiguous bytes；trailing
-backing bytes 会被拒绝，不能成为不可见的 plugin state。
+### Operation record
 
-Synchronous callback 保持 `int` signature，但返回一个闭合的 version-seven result：success、
-ordinary failure、cancellation 或 backend unavailable。backend unavailable 与 ordinary
-failure 不同，并且只有 copied trait 允许时才能从 GPU attempt 请求 CPU fallback。unknown
-nonzero integer 是 ordinary `OperationFailed` result。报告 backend unavailable 的 callback
-不得调用 output sink。若已调用，accepted output 是 terminal `OperationFailed` contract
-violation；rejected generic output 保留 sink 的精确 typed failure。错误 image output
-返回 OperationFailed，显式 callback cancellation 与 resource exhaustion 保留各自分类。两种路径都不暴露
-`BackendUnavailable` 或触发 CPU fallback；host cancellation 继续是最高优先级 result。
-在该 cancellation check 之后，duplicate sink violation 优先于 success、backend
-unavailable、ordinary failure、callback-reported cancellation 与 unknown result；因此它
-绝不会发布第一次 Value，也绝不会请求 CPU fallback。
+Operation descriptor 包含 length-framed key、input count、flag、estimated bytes、output element type、closed scalar/preserve/match/fixed shape 与 Whole/Elementwise/Halo Region rule、halo radius、cacheability、bounded parameter-schema pointer/count、callback 与 opaque plugin state。
 
-在任何 C++ 或 DSO callback entry 之前，`OperationRegistry::invoke` 会验证 operation/
-input/demand count，先检查每个 input 的 `Value::valid()` 再读取 descriptor，验证每个
-demand 与 parameter，观察 host cancellation，拒绝 CPU/GPU 之外的 backend value，随后
-检查 backend capability。已知但不支持的 backend 仍为 `BackendUnavailable`；未知数字
-backend 返回 `InvalidArgument`，且 DSO adapter 绝不会把它转换为 GPU。完成这些更高
-优先级检查后，registry 使用 `resolve_operation_traits` 和 `infer_operation_output`，
-与 semantic lowering 共享 dtype、shape、canonical output facets 推断。Preserve/Match
-仅比较 shape，input dtype 限制由端口显式声明；失配在 callback 前拒绝。
-Callback output validation 复用该预计算
-descriptor；成功 callback 返回 default-invalid generic `Value` 时仍安全地得到
-`TypeMismatch`，错误 image output 返回 `OperationFailed`。
-直接调用与物理规划共享受检查的输入需求规则。Registry 在 callback 前拒绝 Value/halo
-覆盖不足、不完整通道图像输出和蒙版 shape 不匹配。计算产生的蒙版数值错误为
-OperationFailed，绑定蒙版数值错误仍为 InvalidArgument。
+Parameter record 发布 unique key、精确 Int64/Float64/Bool/String type 与 required presence。Compiler 在 semantic IR 前拒绝 unknown、missing、wrong-type 与 conflicting parameter；callback 只接收 validated canonical value，不存在隐藏 default fallback。
 
-C++ `OperationTraits::Fixed` record 只描述 logical output descriptor。Registration 会
-验证非零 rank-1..8 shape、闭合 element type/rule 与普通 trait combination，但不会计算
-dense element/byte product。Callback 可返回任何通过普通 publication validation 的 Value
-layout，包括在巨大 logical shape 上只占八字节的 zero-stride broadcast。
-`estimated_bytes` 是独立的 modeled admission estimate。同步 C DSO Fixed descriptor 更严格，
-因为其 sink 不携带 output stride：loading 会独立要求 contiguous signed stride 与 uint64
-byte count 可表示。对于 dense total bytes `B`，loader 还要求 `B > 0`、zero-based last
-byte `B - 1 <= INT64_MAX`，以及 `B <= SIZE_MAX`。因此在 64-bit host 上，UInt8
-`{INT64_MAX + 1}` descriptor 与 `{2, 2^62}` 可表示；任一边界再增加一个 element 都会被
-拒绝。复制的 `requires_dense_output` trait 还会在 semantic IR 发布前按解析后的 dtype
-检查完整输出，覆盖 dtype 来自输入或静态参数的 Fixed 输出。该要求为 false 时，
-C++ Fixed broadcast 语义继续有效。分阶段 C dependency program 也将该字段设为 false：
-宿主服务逐个校验实际输出 fragment。仅物化有界合法片段时，logical Fixed domain
-无需具有可表示的完整 dense byte product。分阶段 C 契约见
-[依赖数据](Dependency-Data.zh.md#c-分阶段程序)。
+Callback 接收 bounded dense whole-Region input view、每个 input 的 planned demand offset/extent、bounded facet array、backend enum、cooperative cancellation callback 与 host-owned output sink。
 
-## Validation
+它最多发布一个带 bounded facet 的 output；host 复制并验证为 dense whole-Region Value。第一次 sink 调用即占用 publication，即使 validation 拒绝也不 例外。
 
-在任何 Windows、Linux 或 Darwin native-loader 调用前，operation/provider loading 会把
-精确 `std::string` path 验证为非空、最多 4096 bytes 且不含 embedded NUL。Malformed path
-返回 `InvalidArgument`；平台无法加载的合法精确 path 仍返回 `NotFound`。被拒 path 不会
-打开 truncated prefix，不发布 registry key/schema，也不会启动 native-owner lifecycle。
+任何第二次调用都会设置 invocation-local sticky violation，且不分配、不抛异常、 不替换第一次 accepted/rejected `Result`；callback 返回后，adapter 会报告稳定的 terminal `OperationFailed` diagnostic： `operation plugin violated output sink at-most-once contract`。
 
-Loading 验证 exact ABI version/structure size、pointer/array alignment、pointer/count pair、
-bounded key/count/rank/parameter value、严格 UTF-8 operation/parameter-schema/
-provider-schema key、duplicate parameter declaration、closed enum/flag/type combination、
-required callback、logical C++ fixed descriptor、dense C DSO fixed stride/byte
-representability（包括 signed last-byte 与 host allocation-size bound）、output
-element/shape/byte count、facet array/key/version/payload、arithmetic overflow 与
-exactly-once destroy ownership。Key validation 会在 publication
-前拒绝 invalid continuation byte、truncation、overlong encoding、UTF-16 surrogate、
-大于 U+10FFFF 的值、embedded null 与 ASCII control，但不执行 Unicode normalization。
-普通 facet payload 与 Value byte 仍是 opaque binary data。该 ABI version 拒绝 trailing
-structure bytes，也不发布 v1 compatibility entry point。
+Null sink context 返回零， 且不改变 invocation state。DSO input view 精确覆盖其 logical contiguous bytes；trailing backing bytes 会被拒绝，不能成为不可见的 plugin state。
 
-Malformed registration 不发布任何内容。Builtin/embedding definition 与每个 DSO
-definition 都会在 publication 前完整构造，随后由 private immutable owning handle 保留。
-Registry map、DSO transaction staging 与 invocation snapshot 只复制该 handle：registry
-mutex 持有期间绝不复制或执行 embedding callable。Multi-record publication 对 handle map
-执行 copy-then-swap，因此 allocation failure 不能暴露 prefix；被替换的 map 在 unlock 后
-retire。Invocation 持有的 handle 会让 callback 及其捕获的 DSO lease 存活到 callback
-完成。Embedding C++ operation callback 的 `std::bad_alloc` 会继续传播，使 caller 能够
-保留 resource-exhaustion policy；其他每个 `std::exception` 都映射为
-`OperationFailed`。若 `what()` 返回 null，则在不从 null 构造 string 的前提下规范化为
-空 diagnostic。Nonstandard exception 获得稳定的通用 `OperationFailed` diagnostic。
-Output 在 callback 返回前复制。Plugin-owned descriptor table 在 library unload 前 destroy。
+Synchronous callback 保持 `int` signature，但返回一个闭合的 version-seven result：success、 ordinary failure、cancellation 或 backend unavailable。backend unavailable 与 ordinary failure 不同，并且只有 copied trait 允许时才能从 GPU attempt 请求 CPU fallback。
 
-Dense layout product 在 multiplication 前使用 checked uint64 division，随后验证 complete
-byte range。Boundary fixture 会加载真实 DSO，并要求后续 descriptor 不可表示时进行
-transactional rejection，同时 destroy 与 native close 各恰好一次。Compile-time-width
-helper 即使在 64-bit test builder 上也会实例化 32-bit allocation-size path。
+unknown nonzero integer 是 ordinary `OperationFailed` result。报告 backend unavailable 的 callback 不得调用 output sink。若已调用，accepted output 是 terminal `OperationFailed` contract violation；rejected generic output 保留 sink 的精确 typed failure。
 
-Native open 后，每个 operation/provider handle 都立即由 move-only stack owner 持有。
-当 exact API structure prefix 可安全读取后，该 owner 也接管已经取得的 destroy callback。
-因此 symbol、table、schema、heap-owner 或后续 staging failure 会对每个已取得的 destroy
-callback 与 native close 各调用恰好一次。成功 loading 会把同一个 owner 显式 move 到
-published heap lease。
+错误 image output 返回 OperationFailed，显式 callback cancellation 与 resource exhaustion 保留各自分类。两种路径都不暴露 `BackendUnavailable` 或触发 CPU fallback；host cancellation 继续是最高优先级 result。
 
-Provider registry 在 copied schema record 之前声明 native lease，因此逆序析构会在
-最终 provider destroy callback 与 native unload 前退役所有 registry-owned schema。
-`find()` 结果自行拥有复制后的 key，也不包含 DSO pointer，因此可在 registry teardown
-后继续存在而不借用 mapped provider memory。
+ 在该 cancellation check 之后，duplicate sink violation 优先于 success、backend unavailable、ordinary failure、callback-reported cancellation 与 unknown result；因此它 绝不会发布第一次 Value，也绝不会请求 CPU fallback。
 
-## Lifecycle 与边界
+每个 operation 至少声明一个可用 backend。允许 GPU-only 注册；CPU 规划和直接 CPU 调用在 callback 前拒绝该注册。CPU fallback 要求同时具备 CPU 和 GPU 能力。 设备不可用时不能将 GPU-only callback 静默放到 CPU 上调用。对应 C ABI flag 遵循 相同规则；专用 CPU/planar 协议仍保留各自更严格的后端限制。
 
-Path 只来自 embedding-process startup configuration，并作为精确且 NUL-free 的 byte
-sequence 消费。Registry 在 compiler/executor 使用前完成 assembly 并 freeze。DSO 与 host
-在同一 trust domain 内执行。ABI check 是 correctness validation，不是 sandbox、signature、
-certificate、package admission 或 process isolation。
+在任何 C++ 或 DSO callback entry 之前，`OperationRegistry::invoke` 会验证 operation/ input/demand count，先检查每个 input 的 `Value::valid()` 再读取 descriptor，验证每个 demand 与 parameter，观察 host cancellation，拒绝 CPU/GPU 之外的 backend value，随后 检查 backend capability。
 
-不存在 policy ABI/SDK/DSO、external scheduling plugin 或 IPC plugin path。Data-definition
-ABI 不构造 Value，也不提供 storage。
+已知但不支持的 backend 仍为 `BackendUnavailable`；未知数字 backend 返回 `InvalidArgument`，且 DSO adapter 绝不会把它转换为 GPU。
 
-## Static preparation 与 ownership
+完成这些更高 优先级检查后，registry 使用 `resolve_operation_traits` 和 `infer_operation_output`， 与 semantic lowering 共享 dtype、shape、canonical output facets 推断。Preserve/Match 仅比较 shape，input dtype 限制由端口显式声明；失配在 callback 前拒绝。
 
-公开 C++ operation definition 可以为 pure、deterministic preparation 提供
-`prepare_static`。`OperationRegistry::prepare_operation` 验证 static input metadata 与
-parameters，包括 copied IEEE-754 bits，然后在 registry synchronization 之外调用一次。
-返回的 `OperationPreparation` 会包装成 immutable `PreparedOperation`；其中只保存
-metadata/static-program data，不包含 Value payload、Run data、I/O state 或 mutable private
-cache。Preparation 只对相同 registry definition、static metadata 和 parameters 有效。
+ Callback output validation 复用该预计算 descriptor；成功 callback 返回 default-invalid generic `Value` 时仍安全地得到 `TypeMismatch`，错误 image output 返回 `OperationFailed`。 直接调用与物理规划共享受检查的输入需求规则。Registry 在 callback 前拒绝 Value/halo 覆盖不足、不完整通道图像输出和蒙版 shape 不匹配。
 
-Compiler node 和 plan step 跨执行拥有这个 prepared handle。Direct request 复用显式提供的
-匹配 handle，或在 preflight 准备一次；joint request 为兼容成员准备一次。不同调用不会
-隐式共享状态。Request 拥有复制后的 request record，而 continuation 收到的
-`DependencyQuery` 是 borrowed。Preparation 和 plan 使用普通宿主分配，位于 per-Atom
-runtime scratch admission 之外；目前没有单独强制的 preparation budget，静态源码与
-程序大小由算子限制。没有 global preparation cache 或 dynamic preparation state。
-Callback 退役后销毁 continuation，随后 session 释放 prepared owner。Prepared owner
-先销毁程序，再释放 definition/library lease；外部 registry owner 可以提前释放。
-Runtime callback pointer 和 DSO handle 不进入 semantic 或 cache identity。
+计算产生的蒙版数值错误为 OperationFailed，绑定蒙版数值错误仍为 InvalidArgument。
 
-## Version-nine 语义与输出契约
+C++ `OperationTraits::Fixed` record 只描述 logical output descriptor。Registration 会 验证非零 rank-1..8 shape、闭合 element type/rule 与普通 trait combination，但不会计算 dense element/byte product。
 
-Package 0.9.0、operation ABI/traits 9 替换 0.8/8。Host 先检查 version，再读取
-`get_api_v9`；无旧 table、symbol alias 或 image-v1 reader。WorkflowDocument schema 2、
-provider ABI 1、C++17 保持。
+Callback 可返回任何通过普通 publication validation 的 Value layout，包括在巨大 logical shape 上只占八字节的 zero-stride broadcast。 `estimated_bytes` 是独立的 modeled admission estimate。
 
-`data/semantic.hpp` 的 `SemanticDescriptor` 编码 image-v2/semantic-v1 facet，canonical
-payload 上限 4096 bytes。Helper 构造 RGBA/coverage、验证元数据/区域样本，以及转换
-最多 8192 字符的 lowercase-hex 静态 `semantic` 参数，调用者不必手写 hex。通道名/角色/
-单位、color/white/transfer/reference/association、采样轴与样本值单位分别声明。
-Image 为 Float32 HWC，typed image validation 支持 finite signed/HDR。Vector token
-区分 pixel/normalized displacement/position；complex 固定完整未 shift 频谱、DC0、
-负号无归一化 forward 和 inverse /N。仅描述数据，不实现 FFT。Generic opaque facets
-及其浮点位模式保持；构造 Value 元数据时拒绝 malformed known typed facets。
+同步 C DSO Fixed descriptor 更严格， 因为其 sink 不携带 output stride：loading 会独立要求 contiguous signed stride 与 uint64 byte count 可表示。对于 dense total bytes `B`，loader 还要求 `B > 0`、zero-based last byte `B - 1 <= INT64_MAX`，以及 `B <= SIZE_MAX`。
 
-每个 C port 可指向 exact-sized semantic constraint，声明 kind/facets/dtype/rank。
-`element_type_mask` 低 0..3 位对应 UInt8/Int64/Float64/Float32，零表示无限制，
-与非零精确 `element_type` 互斥；未知位或冲突字段在注册时拒绝。复制的 mask 进入
-compiler/result identity。
-每输出 contract 选择声明/输入/静态参数 dtype，rank 1..8 axes（常量、正 Int64
-参数、输入轴、实际输入数量）及 checked 非负偏移，output semantics 选择 drop、preserve
-input、establish facets 或静态 semantic 参数。固定前缀后可有一个同构重复组，启用时
-minimum>=1、maximum 有界，总输入<=1024。Loader 在原子发布前复制全部 record，lowering
-展开精确有序表。每输出 Region 与分阶段依赖协议决定空间读取；Whole 保留保守需求。
+因此在 64-bit host 上，UInt8 `{INT64_MAX + 1}` descriptor 与 `{2, 2^62}` 可表示；任一边界再增加一个 element 都会被 拒绝。复制的 `requires_dense_output` trait 还会在 semantic IR 发布前按解析后的 dtype 检查完整输出，覆盖 dtype 来自输入或静态参数的 Fixed 输出。该要求为 false 时， C++ Fixed broadcast 语义继续有效。
 
-闭集 semantic 词汇还会根据输入元数据推断通道提取/选择/合并、alpha 关联和 RGB/XYZ/Lab
-变换。`IndexListCount` 与 swizzle 共享公开 canonical indices parser：1..64 个 [0,63]
-十进制索引，逗号分隔，无空格或前导零。规则复用既有 source/parameter 字段，发布前
-拒绝非法组合，不按 operation key 分派推断。精确 role、参考白、去 alpha 和 generic
-输出行为见[通道与颜色算子](Channel-and-Color-Operations.zh.md)。
+分阶段 C dependency program 也将该字段设为 false： 宿主服务逐个校验实际输出 fragment。仅物化有界合法片段时，logical Fixed domain 无需具有可表示的完整 dense byte product。分阶段 C 契约见 [依赖数据](Dependency-Data.zh.md#c-分阶段程序)。
 
-闭集 `SampleExpression`/`ApplyLut1d` 在编译器、直接调用及 C 声明中共享有界 parser
-与均匀域校验。前者输入 generic Float64 `[K]` (1..256)，要求有限 start、有限正 step，
-验证已解析 Float32 `[count]` (1..1048576)，输出值/轴单位 dimensionless；多样本端点
-有限且大于 start。后者接受 SampledSignal query 及 N>=2 的 SampledSignal/Lut 表，
-query 值单位匹配 table 轴单位，输出 Drop。两者 Whole，见
-[表达式与 LUT](Expression-and-LUT-Operations.zh.md)。
+### Validation
 
-SemanticNode/PlanStep 保留真实 output facets，C sink 向 callback 提供相同的已解析
-类型/shape/facets，并据此检查结果；typed facet 失配为 OperationFailed。Drop 移除已知
-typed 语义保证；注册时拒绝 Drop（包含 NULL C contract 的默认规则）搭配
-RgbaFloat32、Float32Mask 或 Typed 输出端口。此类输出必须显式选择 preserve、
-establish 或 transform；端口种类本身不建立语义。无关 opaque generic facet
-保持既有发布规则。规划与 tile 派生从推导后的 output facets 识别 image，要求完整
-逻辑 C 通道覆盖，包含 generic 端口和 Whole 输出。RGB/XYZ/Lab 的三或四通道图像
-仍允许 HW 空间 Region。直接调用在 callback 前应用同一通道覆盖检查；执行、
-frozen Region 与 stream 继承规划的覆盖要求。完整约束及输出规则进入
-v8 compiler identity 和 v4 result-region key。
+在任何 Windows、Linux 或 Darwin native-loader 调用前，operation/provider loading 会把 精确 `std::string` path 验证为非空、最多 4096 bytes 且不含 embedded NUL。Malformed path 返回 `InvalidArgument`；平台无法加载的合法精确 path 仍返回 `NotFound`。
 
-共享契约与八个既有算子现已支持 image-v2 signed/HDR RGB、canonical
-coverage-premultiplied D65 语义，包含符合资格的原生 Metal 执行。八算子显式保留
-首输入的语义 facet。快照与 memory/native/disk cache 保留受支持 image-v2 表示和真实
-canonical facet；磁盘格式 2 拒绝旧格式。Bounded scalar 接受兼容 computed Float32 `{1}`，包含 dimensionless Scalar/单样本 Signal facet。
-每个 consumer 在 callback 前检查范围（含缓存命中），直接绑定保留 preflight。标量读取
-使用逻辑地址，支持 padding/stride。默认 registry 也提供 CPU Whole [数值算子](Numeric-Operations.zh.md)。
-通用 typed image validator 也接受 straight 表示；八个既有算子端口要求 canonical RGBA。
+被拒 path 不会 打开 truncated prefix，不发布 registry key/schema，也不会启动 native-owner lifecycle。
 
-## ABI 9 区域视图与宿主分配
+Loading 验证 exact ABI version/structure size、pointer/array alignment、pointer/count pair、 bounded key/count/rank/parameter value、严格 UTF-8 operation/parameter-schema/ provider-schema key、duplicate parameter declaration、closed enum/flag/type combination、 required callback、logical C++ fixed descriptor、dense C DSO fixed stride/byte representability（包括 signed last-byte 与 host allocation-size bound）、output element/shape/byte count、facet array/key/version/payload、arithmetic overflow 与 exactly-once destroy ownership。
 
-ABI 9 输入包含独立 storage origin、byte offset、signed strides、有效 coverage 和 demand。
-输出 sink 提供精确 descriptor/Region 和 packed 字节数，allocate_output 返回宿主输出，
-allocate_scratch 返回回调局部临时缓冲区。发布宿主输出直接冻结；发布栈/调用方数据则
-通过相同宿主分配器复制。指针只在回调期间有效，禁止自行释放或保留。通用输入允许
-backing padding，只能按 origin/stride 访问有效区域。首个发布即占用 sink，重复发布
-不能替换结果并返回 OperationFailed，宿主取消优先；资源失败保留分类。旧整图 dense
-输入/复制输出说明由本节替换，宿主在 API table 查询前拒绝 ABI 7。
+Key validation 会在 publication 前拒绝 invalid continuation byte、truncation、overlong encoding、UTF-16 surrogate、 大于 U+10FFFF 的值、embedded null 与 ASCII control，但不执行 Unicode normalization。 普通 facet payload 与 Value byte 仍是 opaque binary data。
 
-## S3 缩放端口
+该 ABI version 拒绝 trailing structure bytes，也不发布 v1 compatibility entry point。
 
-ABI 9 包含 S3 引入的 Shrink 形状/区域规则及必需的 spatial_factor_parameter 指针/长度。
-有界 Int64 参数解析为 [1,16]，输出 H/W 向上取整，输入需求为裁剪 box。允许蒙版
-输出。未知布局、指针/数量失配、非法范围和旧 ABI 7 在发布前拒绝。
+Malformed registration 不发布任何内容。Builtin/embedding definition 与每个 DSO definition 都会在 publication 前完整构造，随后由 private immutable owning handle 保留。
 
-## S4 宿主 GPU 服务
+ Registry map、DSO transaction staging 与 invocation snapshot 只复制该 handle：registry mutex 持有期间绝不复制或执行 embedding callable。Multi-record publication 对 handle map 执行 copy-then-swap，因此 allocation failure 不能暴露 prefix；被替换的 map 在 unlock 后 retire。
 
-ABI 9 输出 sink 的 gpu 指向调用内 ps_gpu_service_v9，CPU 时为空。buffer 创建宿主
-分配的有界 token，禁止写入已冻结输入；execute 验证 shader、entry、bindings、常量及
-grid，完成后才返回。参数失败粘滞，不能由 callback 成功覆盖。Token/指针不跨回调
-保留，提交后错误终止 Run；无发布的数值/后端拒绝允许按 trait 回退。CPU 与 C 模块
-使用同一服务，SDK 不暴露 Objective-C 类型。详见公开头及 S4-Workflow。
+Invocation 持有的 handle 会让 callback 及其捕获的 DSO lease 存活到 callback 完成。Embedding C++ operation callback 的 `std::bad_alloc` 会继续传播，使 caller 能够 保留 resource-exhaustion policy；其他每个 `std::exception` 都映射为 `OperationFailed`。
 
-## G4 观察与 continuation 契约
+若 `what()` 返回 null，则在不从 null 构造 string 的前提下规范化为 空 diagnostic。Nonstandard exception 获得稳定的通用 `OperationFailed` diagnostic。 Output 在 callback 返回前复制。Plugin-owned descriptor table 在 library unload 前 destroy。
 
-ABI/Traits 9 增加 Atomic、终端 RequestRecord 与显式 RequestFailureOnly。当前 C
-descriptor 复制并校验这些字段，同步调用继续可用。`dependency_plugin_api.h`
-提供可选 C 分阶段程序表，使用宿主 continuation、精确关联、fragment 读取和跨 poll
-owner handle。ABI 9 增加可选 `ps_dependency_joint_program_v9`，使用相同服务与完成
-规则验证各成员 outcome，详见 Dependency-Data 的 M4 章节。
+Dense layout product 在 multiplication 前使用 checked uint64 division，随后验证 complete byte range。Boundary fixture 会加载真实 DSO，并要求后续 descriptor 不可表示时进行 transactional rejection，同时 destroy 与 native close 各恰好一次。
 
-C++ registry 可选择 `start_dependency`，通过有界宿主 continuation、poll 和 supply
-阶段执行。编译器检查所选结果相关输入祖先的 EffectiveAtomic，拒绝 RequestRecord 到活跃消费者的执行边。排除的端口仅保留静态 metadata，不执行生产者。
-协议、allocator 生命周期和 CPU Run 行为见 [依赖数据与执行](Dependency-Data.zh.md)。
+Compile-time-width helper 即使在 64-bit test builder 上也会实例化 32-bit allocation-size path。
 
-## ABI 9 输出选择与联合执行
+Native open 后，每个 operation/provider handle 都立即由 move-only stack owner 持有。 当 exact API structure prefix 可安全读取后，该 owner 也接管已经取得的 destroy callback。
 
-`OperationTraits::outputs` 为非空有序 `OperationOutputTraits` 表，上限 64。
-每输出独立声明唯一端口名、schema、shape、facets、输入投影、Region、观察和失败
-契约；单输出内建声明 `value`。C ABI 内嵌有界输出表与数量。Shape axis 支持检查
-溢出的 ceil-div、参数减法和用于非整数 radius 的 `CeilParameter` 缩放。
-多输出算子必须确定且无外部副作用。
+ 因此 symbol、table、schema、heap-owner 或后续 staging failure 会对每个已取得的 destroy callback 与 native close 各调用恰好一次。成功 loading 会把同一个 owner 显式 move 到 published heap lease。
 
-Invocation/query/sink 携带原始 `output_index`；投影输入 view 保留原始
-`input_index`，不填 invalid Value。推导仍可获取完整静态输入元数据。
-C/C++ joint continuation 可选地处理每输出一个 Atomic 观察。服务、coverage、
-handle、读取关联和终态错误均按成员隔离；宿主拒绝重复、缺失、未知成员和过期或
-跨成员 handle。共享 work 服务只计费一次共同计算，错误具有粘性。
-Singleton 入口仍必需；RequestRecord 不参与联合执行。Provider ABI 保持 1。
-调度、资源、缓存和数值契约见 ADR 0021 与多输出算子指南。
+Provider registry 在 copied schema record 之前声明 native lease，因此逆序析构会在 最终 provider destroy callback 与 native unload 前退役所有 registry-owned schema。 `find()` 结果自行拥有复制后的 key，也不包含 DSO pointer，因此可在 registry teardown 后继续存在而不借用 mapped provider memory。
 
-## Whole callback 的静态准备
+### Lifecycle 与边界
 
-CPU Whole callback 可以复用不可变静态 preparation。执行器通过
-`OperationInvocation::prepared` 传递 plan 持有的 owner；registry 核验定义、完整
-metadata 和参数原始位后，再进行 callback 验证并向规范化调用提供 owner。直接调用
-未提供 handle 时准备一次。prepared state 不包含运行期输入字节。
+Path 只来自 embedding-process startup configuration，并作为精确且 NUL-free 的 byte sequence 消费。Registry 在 compiler/executor 使用前完成 assembly 并 freeze。DSO 与 host 在同一 trust domain 内执行。
 
-`OperationOutputSpecialization::input_indices` 可依据静态 metadata/参数收窄 CPU
-Whole 输出的注册输入投影。缺省保留注册投影，空 vector 不读取任何 payload；重复、
-越界或扩大注册投影均拒绝。完整 metadata 始终必要，投影复用既有 traits/digest 字段。
-CPU Whole Atomic 输出可保留 generic trailing-axis tuple 身份；GPU、image tuple
-及其他非法组合仍被拒绝。
+ABI check 是 correctness validation，不是 sandbox、signature、 certificate、package admission 或 process isolation。
 
-callback wrapper 向另一 registry 转发 invocation 时必须清除 `prepared`，
-让目标 registry 准备自身定义。转发外部 handle 返回 `Stale`，seal 不可转移。
+不存在 policy ABI/SDK/DSO、external scheduling plugin 或 IPC plugin path。Data-definition ABI 不构造 Value，也不提供 storage。
 
-### CPU Whole 输入视图
+### Static preparation 与 ownership
 
-package0.18 / OperationTraits16 扩展 CPU Whole 视图发布。视图输出优先保留
-覆盖完整输入需求的单个仿射 owner、strides、storage 和 resources；同一 owner
-的兼容 fragments 通过地址映射证明后可以合并。不存在这种视图时，Auto 可以 collect，`requires_input_views=true` 则在 callback
-之前返回 Domain/Run 的 InvalidArgument/InvalidDomain、ViewUnavailable。
-该字段要求 CPU Whole 的 `preserve_output_views`，排除 GPU/joint/Result，
-并参与编译身份。typed 验证仍覆盖全部有效输入。普通和 structured 执行桥接
-遵循同一规则。
+公开 C++ operation definition 可以为 pure、deterministic preparation 提供 `prepare_static`。`OperationRegistry::prepare_operation` 验证 static input metadata 与 parameters，包括 copied IEEE-754 bits，然后在 registry synchronization 之外调用一次。
 
-Whole 支持显式输出 payload 上界和按实际分配计费。借用输入 owner 独立计费；
-callback allocator 限制为输出上界加 workspace，分配失败保持 sticky；新返回
-backing 也必须满足输出上界。直接调用已经逐输入提供单个 Value。
+ 返回的 `OperationPreparation` 会包装成 immutable `PreparedOperation`；其中只保存 metadata/static-program data，不包含 Value payload、Run data、I/O state 或 mutable private cache。Preparation 只对相同 registry definition、static metadata 和 parameters 有效。
 
-C++ traits/specialization 布局改变，安装消费方必须重编译，拒绝 package0.17。
-canonical framing14、document2、C operation ABI9 和 provider ABI1 不变；
-traits16 改变语义身份，不引入 daemon 所有权或持久格式变化。
+静态 prepare 可以通过 `additional_workspace_bytes` 提供运行时 workspace 大小增量， 内核执行检查加法。此过程不构造运行时 payload；resolved bound 参与规划和 operation identity。运行时分配、工作计费和取消仍由 callback 负责，见 [静态大小与所有权](Parallel-Execution-Model.zh.md#静态大小推导与运行时所有权)。
 
-## 结构化 planar 扩展 v1（包版本 0.24）
+Compiler node 和 plan step 跨执行拥有这个 prepared handle。Direct request 复用显式提供的 匹配 handle，或在 preflight 准备一次；joint request 为兼容成员准备一次。不同调用不会 隐式共享状态。Request 拥有复制后的 request record，而 continuation 收到的 `DependencyQuery` 是 borrowed。
 
-`planar_operation_plugin_api.h` 在现有显式路径加载器上增加可选入口
-`ps_operation_plugin_get_planar_api_v1`，基础 operation ABI 保持 v9。
-扩展模块的每条基础记录都必须对应一条 planar 记录；同一模块不混合传统
-Value 与 planar 回调。基础 destroy 管理两张表，共享库租约覆盖推导及执行。
+Preparation 和 plan 使用普通宿主分配，位于 per-Atom runtime scratch admission 之外；目前没有单独强制的 preparation budget，静态源码与 程序大小由算子限制。没有 global preparation cache 或 dynamic preparation state。 Callback 退役后销毁 continuation，随后 session 释放 prepared owner。
 
-首版支持 CPU Whole、每条记录一个输出、静态元数据推导以及连续或分块图像的
-有界行访问。宿主复制并验证输出元数据，再交给 execute。计算缓冲区必须经
-scratch 服务分配，可提前释放；行、参数、facet 和服务指针仅在回调内有效。
-服务失败保持粘性。成功返回后经取消及计划有效性检查才发布事务输出。
-插件只能在宿主分配的回调线程上串行执行，不得创建工作线程或向外部线程池提交工作。
-内核统一拥有调度与线程分配。宿主及插件必须保存和恢复调用者浮点环境。
-SIMD 可在该线程内处理独立数据通道，同时保留算子的数值契约。不存在隐式 GPU
-回退或 staging 桥接。
+Prepared owner 先销毁程序，再释放 definition/library lease；外部 registry owner 可以提前释放。 Runtime callback pointer 和 DSO handle 不进入 semantic 或 cache identity。
 
-C++ planar invocation 新增宿主 scratch allocator 与已验证输出元数据。
-工作区声明约束同时存活的 scratch，临时内存与输出共享执行根预算。
-纯元数据特化必须保留 planar 协议，不能引入 generic view 或输入投影。
-C++ 布局及符号发生变化，安装包消费者须针对 0.24 重编译。已有 traits 已编码
-planar、工作区、特化和输出布局，因此持久 OperationTraits 版本保持 17。
+### Version-nine 语义与输出契约
+
+Package 0.9.0、operation ABI/traits 9 替换 0.8/8。Host 先检查 version，再读取 `get_api_v10`；无旧 table、symbol alias 或 image-v1 reader。WorkflowDocument schema 2、 provider ABI 1、C++17 保持。
+
+`data/semantic.hpp` 的 `SemanticDescriptor` 编码 image-v2/semantic-v1 facet，canonical payload 上限 4096 bytes。Helper 构造 RGBA/coverage、验证元数据/区域样本，以及转换 最多 8192 字符的 lowercase-hex 静态 `semantic` 参数，调用者不必手写 hex。
+
+通道名/角色/ 单位、color/white/transfer/reference/association、采样轴与样本值单位分别声明。 Image 为 Float32 HWC，typed image validation 支持 finite signed/HDR。
+
+Vector token 区分 pixel/normalized displacement/position；complex 固定完整未 shift 频谱、DC0、 负号无归一化 forward 和 inverse /N。仅描述数据，不实现 FFT。Generic opaque facets 及其浮点位模式保持；构造 Value 元数据时拒绝 malformed known typed facets。
+
+每个 C port 可指向 exact-sized semantic constraint，声明 kind/facets/dtype/rank。 `element_type_mask` 低 0..3 位对应 UInt8/Int64/Float64/Float32，零表示无限制， 与非零精确 `element_type` 互斥；未知位或冲突字段在注册时拒绝。复制的 mask 进入 compiler/result identity。
+
+ 每输出 contract 选择声明/输入/静态参数 dtype，rank 1..8 axes（常量、正 Int64 参数、输入轴、实际输入数量）及 checked 非负偏移，output semantics 选择 drop、preserve input、establish facets 或静态 semantic 参数。固定前缀后可有一个同构重复组，启用时 minimum>=1、maximum 有界，总输入<=1024。
+
+Loader 在原子发布前复制全部 record，lowering 展开精确有序表。每输出 Region 与分阶段依赖协议决定空间读取；Whole 保留保守需求。
+
+闭集 semantic 词汇还会根据输入元数据推断通道提取/选择/合并、alpha 关联和 RGB/XYZ/Lab 变换。`IndexListCount` 与 swizzle 共享公开 canonical indices parser：1..64 个 [0,63] 十进制索引，逗号分隔，无空格或前导零。规则复用既有 source/parameter 字段，发布前 拒绝非法组合，不按 operation key 分派推断。
+
+精确 role、参考白、去 alpha 和 generic 输出行为见[通道与颜色算子](Channel-and-Color-Operations.zh.md)。
+
+闭集 `SampleExpression`/`ApplyLut1d` 在编译器、直接调用及 C 声明中共享有界 parser 与均匀域校验。前者输入 generic Float64 `[K]` (1..256)，要求有限 start、有限正 step， 验证已解析 Float32 `[count]` (1..1048576)，输出值/轴单位 dimensionless；多样本端点 有限且大于 start。
+
+后者接受 SampledSignal query 及 N>=2 的 SampledSignal/Lut 表， query 值单位匹配 table 轴单位，输出 Drop。两者 Whole，见 [表达式与 LUT](Expression-and-LUT-Operations.zh.md)。
+
+SemanticNode/PlanStep 保留真实 output facets，C sink 向 callback 提供相同的已解析 类型/shape/facets，并据此检查结果；typed facet 失配为 OperationFailed。Drop 移除已知 typed 语义保证；注册时拒绝 Drop（包含 NULL C contract 的默认规则）搭配 RgbaFloat32、Float32Mask 或 Typed 输出端口。
+
+此类输出必须显式选择 preserve、 establish 或 transform；端口种类本身不建立语义。无关 opaque generic facet 保持既有发布规则。规划与 tile 派生从推导后的 output facets 识别 image，要求完整 逻辑 C 通道覆盖，包含 generic 端口和 Whole 输出。RGB/XYZ/Lab 的三或四通道图像 仍允许 HW 空间 Region。
+
+直接调用在 callback 前应用同一通道覆盖检查；执行、 frozen Region 与 stream 继承规划的覆盖要求。完整约束及输出规则进入 v8 compiler identity 和 v4 result-region key。
+
+共享契约与八个既有算子现已支持 image-v2 signed/HDR RGB、canonical coverage-premultiplied D65 语义，包含符合资格的原生 Metal 执行。八算子显式保留 首输入的语义 facet。快照与 memory/native/disk cache 保留受支持 image-v2 表示和真实 canonical facet；磁盘格式 2 拒绝旧格式。
+
+Bounded scalar 接受兼容 computed Float32 `{1}`，包含 dimensionless Scalar/单样本 Signal facet。 每个 consumer 在 callback 前检查范围（含缓存命中），直接绑定保留 preflight。标量读取 使用逻辑地址，支持 padding/stride。默认 registry 也提供 CPU Whole [数值算子](Numeric-Operations.zh.md)。
+
+ 通用 typed image validator 也接受 straight 表示；八个既有算子端口要求 canonical RGBA。
+
+### ABI 11 区域视图与宿主分配
+
+ABI 11 输入包含独立 storage origin、byte offset、signed strides、有效 coverage 和 demand。 输出 sink 提供精确 descriptor/Region 和 packed 字节数，allocate_output 返回宿主输出， allocate_scratch 返回回调局部临时缓冲区。发布宿主输出直接冻结；发布栈/调用方数据则 通过相同宿主分配器复制。指针只在回调期间有效，禁止自行释放或保留。
+
+通用输入允许 backing padding，只能按 origin/stride 访问有效区域。首个发布即占用 sink，重复发布 不能替换结果并返回 OperationFailed，宿主取消优先；资源失败保留分类。旧整图 dense 输入/复制输出说明由本节替换，宿主在 API table 查询前拒绝 ABI 7。
+
+### S3 缩放端口
+
+Operation ABI 11 包含 S3 引入的 Shrink 形状/区域规则及必需的 spatial_factor_parameter 指针/长度。 有界 Int64 参数解析为 [1,16]，输出 H/W 向上取整，输入需求为裁剪 box。允许蒙版 输出。未知布局、指针/数量失配、非法范围和旧 ABI 7 在发布前拒绝。
+
+### S4 宿主 GPU 服务（operation ABI 11）
+
+ABI 11 output sink 携带调用内的 `ps_gpu_service_v11`，CPU invocation 中为空。`buffer` 创建宿主管理的有界 token，并保持 frozen input 只读；`execute` 验证 shader、entry、bindings、常量与 grid，且在 native 工作完成后返回。服务错误具有粘性并覆盖 callback 成功结果。Token 与指针在 callback 返回时失效。
+
+CPU 与 C 模块 使用同一服务，SDK 不暴露 Objective-C 类型。详见公开头及 S4-Workflow。
+
+### G4 观察与 continuation 契约
+
+ABI/Traits 9 增加 Atomic、终端 RequestRecord 与显式 RequestFailureOnly。当前 C descriptor 复制并校验这些字段，同步调用继续可用。`dependency_plugin_api.h` 提供可选 C 分阶段程序表，使用宿主 continuation、精确关联、fragment 读取和跨 poll owner handle。
+
+ABI 10 增加可选 `ps_dependency_joint_program_v10`，使用相同服务与完成 规则验证各成员 outcome，详见 Dependency-Data 的 M4 章节。
+
+C++ registry 可选择 `start_dependency`，通过有界宿主 continuation、poll 和 supply 阶段执行。编译器检查所选结果相关输入祖先的 EffectiveAtomic，拒绝 RequestRecord 到活跃消费者的执行边。排除的端口仅保留静态 metadata，不执行生产者。 协议、allocator 生命周期和 CPU Run 行为见 [依赖数据与执行](Dependency-Data.zh.md)。
+
+### ABI 11 输出选择与联合执行
+
+`OperationTraits::outputs` 为非空有序 `OperationOutputTraits` 表，上限 64。 每输出独立声明唯一端口名、schema、shape、facets、输入投影、Region、观察和失败 契约；单输出内建声明 `value`。C ABI 内嵌有界输出表与数量。Shape axis 支持检查 溢出的 ceil-div、参数减法和用于非整数 radius 的 `CeilParameter` 缩放。 多输出算子必须确定且无外部副作用。
+
+Invocation/query/sink 携带原始 `output_index`；投影输入 view 保留原始 `input_index`，不填 invalid Value。推导仍可获取完整静态输入元数据。 C/C++ joint continuation 可选地处理每输出一个 Atomic 观察。服务、coverage、 handle、读取关联和终态错误均按成员隔离；宿主拒绝重复、缺失、未知成员和过期或 跨成员 handle。
+
+共享 work 服务只计费一次共同计算，错误具有粘性。 Singleton 入口仍必需；RequestRecord 不参与联合执行。Provider ABI 保持 1。 调度、资源、缓存和数值契约见 ADR 0021 与多输出算子指南。
+
+### Whole callback 的静态准备
+
+确定性、无副作用的 CPU 或 GPU Whole callback 可以复用不可变静态 preparation。 执行器通过 `OperationInvocation::prepared` 传递 plan 持有的 owner；registry 核验定义、完整 metadata 和参数原始位后，再进行 callback 验证并向规范化调用提供 owner。直接调用 未提供 handle 时准备一次。prepared state 不包含运行期输入字节。
+
+`OperationOutputSpecialization::input_indices` 可依据静态 metadata/参数收窄 CPU Whole 输出的注册输入投影。缺省保留注册投影，空 vector 不读取任何 payload；重复、 越界或扩大注册投影均拒绝。完整 metadata 始终必要，投影复用既有 traits/digest 字段。
+
+ CPU Whole Atomic 输出可保留 generic trailing-axis tuple 身份；GPU、image tuple 及其他非法组合仍被拒绝。
+
+callback wrapper 向另一 registry 转发 invocation 时必须清除 `prepared`， 让目标 registry 准备自身定义。转发外部 handle 返回 `Stale`，seal 不可转移。
+
+#### CPU Whole 输入视图
+
+package0.18 / OperationTraits16 扩展 CPU Whole 视图发布。视图输出优先保留 覆盖完整输入需求的单个仿射 owner、strides、storage 和 resources；同一 owner 的兼容 fragments 通过地址映射证明后可以合并。
+
+不存在这种视图时，Auto 可以 collect，`requires_input_views=true` 则在 callback 之前返回 Domain/Run 的 InvalidArgument/InvalidDomain、ViewUnavailable。 该字段要求 CPU Whole 的 `preserve_output_views`，排除 GPU/joint/Result， 并参与编译身份。typed 验证仍覆盖全部有效输入。
+
+普通和 structured 执行桥接 遵循同一规则。
+
+Whole 支持显式输出 payload 上界和按实际分配计费。借用输入 owner 独立计费； callback allocator 限制为输出上界加 workspace，分配失败保持 sticky；新返回 backing 也必须满足输出上界。直接调用已经逐输入提供单个 Value。
+
+C++ traits/specialization 布局改变，安装消费方必须重编译，拒绝 package0.17。 canonical framing14、document2、C operation ABI10 和 provider ABI1 不变； traits16 改变语义身份，不引入 daemon 所有权或持久格式变化。
+
+### 结构化 planar 扩展 v3（包版本 0.28）
+
+`planar_operation_plugin_api.h` 提供可选入口 `ps_operation_plugin_get_planar_api_v3`，基础 operation ABI 为 v11。扩展模块的每条基础记录对应一条 planar 记录，不混合 Value 与 planar 回调。注册前验证精确表大小、版本 3、记录数量、对齐和回调。Loader 对仅提供 planar v1 或 v2 的模块返回 `InvalidArgument`，不提供兼容 shim。
+
+基础 destroy 管理两张表，动态库 lease 覆盖推导、执行与全部活动 范围块。安装后的 planar 插件及 C++ 消费方必须重编译。
+
+接口支持 CPU/GPU Whole 和 CPU staged 单输出操作、静态元数据推导及连续/分块存储的有界行访问。宿主复制并验证推导结果后再执行。行、参数、facet 和服务指针在回调返回时失效。
+
+标准 structural planar callback 根据声明的 workspace 和输入 demand 大小推导 workspace 上界，并将 `ps_planar_services_v3::allocate_scratch` 限制在 `BufferAllocator::limited_requested(bound)` 下。该 quota 限制仍存活分配请求字节数的总和；execution root 另按每个 backing allocation 的实际容量计费，包括 native Vulkan 容量。嵌套的 capacity/request scope 会在 native allocator conversion 后保留 provenance 和 failure observer。
+
+`ps_planar_services_v3::cpu_parallel` 提供独立版本、精确大小的 `ps_cpu_parallel_service_v1`。Whole 回调提交 count、grain 和可选 worker 额度；调用线程参与计算，辅助 worker 来自同一 context 池。每个活动块拥有唯一 scratch slot，写入互不相交的输出。Planar 记录也可选择 `PS_PLANAR_EXECUTION_CPU_STAGES_V3`，并取得互斥的 `cpu_tiles` 服务。调用线程负责协调一系列 stage，并等待每阶段完成后再继续；单线程 tile callback 运行在共享内核 worker 上。`RegionRule` 仍表示数据依赖，与内部 work-item 几何相互独立。
+
+块只能读取不可变输入并使用预分配 缓冲区，不能调用行访问、分配或释放服务，即使该块运行在原回调线程上。 取消查询允许并发调用。线程违规保持粘滞，嵌套范围调用拒绝。同步屏障返回前 全部活动块均已退出，包括失败和取消路径；借用的 block/user 不得逃逸。
+
+宿主为每个块保存、恢复浮点环境，并设置 nearest-even 与渐进下溢。插件编译 必须关闭 fast math 和隐式 FMA contraction，保留声明的归约顺序。SIMD 可在 块内执行。`ps_cpu_tile_stage_v1` 描述三维 work-item grid。宿主检查 tile 大小为正，计算各轴 ceil-div 和 checked product，再以轴 0 为最快变化轴枚举半开 box。任意 extent 为零时 callback 数为零。这些坐标表示计算工作，独立于 tensor 轴和物理 planar storage tile。`maximum_parallelism` 限制 worker grant，不改变几何。Stage 持有共享 waiting admission 和 managed Queue lease，直到 callbacks 退出且 job 摘除；取消停止新领取并排空活动 callback。分配与 row 服务由 coordinator 执行，每个 tile callback 作为一个任务在共享 CPU worker 上运行。C++ Whole Value 和 planar invocation 提供 range 服务；CPU staged invocation 提供 tile 服务。容量和 happens-before 见 [执行模型](Parallel-Execution-Model.zh.md)。
+
+服务失败在 writer commit 前检查， 发布前再次检查取消和 currentness。设备边界使用显式复制。
+
+### 原生 GPU 的线程组、token 与 planar 服务
+
+`release(token)` 在同步执行完成后释放 view owner。最多同时存活 1024 个 slot； slot 复用增加 generation，旧 token 和重复释放均在读取 buffer 前拒绝。 generation 耗尽时停止复用该 slot，不允许回绕。已有粘滞错误不妨碍合法释放。 所有 GPU 服务只允许回调所属线程调用，禁止 CPU range worker 调用。
+
+planar GPU Whole 回调使用 GPU 队列、native scratch、backend=2 和 GPU 服务；CPU 回调为 backend=1，GPU 服务为空。输入输出 row 仍为宿主 存储，插件在设备边界显式复制，中间 scratch 可跨 GPU 阶段驻留；这不表示 planar 图节点间的输出页面已经驻留设备。
+
+GPU planar 不允许 joint 或 CPU fallback；成功的非空回调必须实际提交设备工作。原生粘滞错误在 writer commit 之前检查。`consume_work` 预付算法工作并检查取消/过期，成功返回 1，粘滞失败 返回 0；传入 0 只检查外部停止。
+
+GPU allocation capacity 使用 execution root resource budget 实际计量的 native capacity。Planar scratch 的 requested-byte charge 与 actual-capacity charge 均保留到 native allocation owner 释放其 backing memory 后。Invocation 的 Vulkan uniform-buffer constants 由 host command allocator 分配，并按实际 capacity 计费，不占用 plugin scratch quota。Token release 与 scratch release 退役不同的 owner；及时回收需要分别释放。Generic Value GPU callback 也使用 `limited_requested(step.planned_bytes)`；其 `ExecutionRun` root 在回收尝试后，按 native allocation 查询到的实际 capacity 执行非阻塞准入。普通 CPU `ExecutionRun` step 保留 complete reservation。Dependency GPU phase 对公开 `DependencySession` workspace 按查询到的实际 capacity 准入，并以 requested-byte 限额管理 legacy Value GPU callback；辅助 allocation 单独向 root 计费。
+### Operation ABI 11 代码格式与 Vulkan binding
+
+当前 DSO 入口为 `ps_operation_plugin_get_abi_version()`（返回 `PS_OPERATION_ABI_VERSION_11`）和 `ps_operation_plugin_get_api_v11()`。Loader 在读取 table 前检查版本，并拒绝 ABI 10 module；operation descriptor、parameter、input view、output sink、GPU dispatch/service、callback result 与 table record 使用 `_v11` 类型。Provider ABI v1 和 planar extension v3 独立版本化。插件与安装后的 C++ consumer 必须针对匹配 ABI 11 SDK 重建。
+
+`ps_gpu_dispatch_v11::code_format` 选择 MSL（`PS_GPU_CODE_MSL_V11`，值为零且是默认值）或 SPIR-V（`PS_GPU_CODE_SPIRV_V11`）。所选设备接受匹配编码；编码与后端不匹配时返回 `BackendUnavailable`。MSL 保留宿主强制的 safe math 和关闭 FP contraction。SPIR-V module 携带其 operation 的数值执行模式，数值 profile 由算子规格负责；ABI v11 不宣称 Metal 与 Vulkan 算术等价。
+
+GPU service 报告所选 backend（`PS_GPU_BACKEND_METAL_V11` 或 `PS_GPU_BACKEND_VULKAN_V11`）和 `minimum_buffer_offset_alignment`。Token 绑定有界宿主 owner view。对于每个 storage binding，宿主检查 `view.offset + binding.offset` 不溢出，并要求总偏移可被报告的 alignment 整除。Shader 可以通过 constants 与整数索引访问更细的逻辑子区域。Vulkan 使用 descriptor set 0，在 binding index 放置 storage-buffer descriptor；非空常量使用独立 uniform-buffer descriptor，最多 4096 字节，布局必须匹配受信任的 SPIR-V module。
+
+SPIR-V 输入必须是自然对齐到 `uint32_t` 的字节区间、长度为 4 的倍数，且小端 module magic 为 `0x07230203`。Vulkan pipeline 要求反射得到固定 `LocalSize`；显式 dispatch group 必须与之匹配。group 三轴全零时使用反射到的大小。宿主以 checked ceil-div 和设备限制计算完整 workgroup；shader 必须保护填充 invocation。ABI v11 不提供 push constants。
+
+可选 `PHOTOSPIDER_ENABLE_VULKAN` 原生 backend 与核心 dispatch 测试已在 NVIDIA GeForce RTX 3090 和 Intel UHD Graphics 770 通过。这些测试验证原生服务；公开 Vulkan 算子行为见[Vulkan 执行报告](../../../out/gpu-whole-tiled/VULKAN_MODEL.md)中的具体实现证据。标准 structural planar scratch 与 generic Value GPU callback 都在 requested-byte quota 下计费，实际 backing capacity 计入 execution root；UBO constants 由 host command allocator 单独按实际 capacity 计费。Generic Value `ExecutionRun` GPU step 在非阻塞逐分配准入前尝试回收 pending disk writes 与 memory cache。普通 CPU `ExecutionRun` step 保留 complete reservation。Dependency GPU phase 对公开 `DependencySession` workspace 按查询到的实际 capacity 准入，并以 requested-byte 限额管理 legacy Value GPU callback；output、constants、discovery 与 fragment-atlas allocation 分别向 root 计费。CMake 每个 kernel build 选择一种原生 GPU backend。
+
+## 非目标与明确边界
+
+- 原生模块是受信任的进程内代码；ABI 验证不提供插件沙箱。
+- 服务指针和 token 不得逃逸其声明的回调或 continuation 寿命。
+- 不提供旧 operation ABI 入口或兼容别名。
+- GPU planar 回调不支持 staged 执行、joint result 或 CPU fallback。
+- 跨图节点驻留设备的 planar 输出页面，以及 Device/Shared 独立分配子额度，不属于当前 planar 接口。
+
+## 后果与代价
+
+- **重新构建：** operation ABI 11 和 planar v3 要求匹配的插件表及重新构建的安装消费方；loader 拒绝 ABI 10 与 planar v1/v2 模块。
+- **执行成本：** 描述验证、资源计费、边界复制和同步设备完成均影响延迟。
+- **状态保留：** 动态库、输入、buffer 和 token 的 owner 持续存活到最后一个消费者或原生命令退出。

@@ -3,6 +3,8 @@
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::plugin_internal {
+Status register_gaussian(OperationRegistry* registry);
+Status register_perlin(OperationRegistry* registry);
 Status register_rgb_basis(OperationRegistry* registry);
 Status register_metadata_assignment(OperationRegistry* registry);
 Status register_channel_assembly(OperationRegistry* registry);

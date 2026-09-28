@@ -20,7 +20,6 @@
 #include <vector>
 
 #include "data/input_validation.hpp"
-#include "execution/native_gpu.hpp"
 #include "plugin/dependency_identity.hpp"
 #include "plugin/operation_identity.hpp"
 
@@ -223,7 +222,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v16");
+  digest.text("semantic-graph-ir-v18");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -303,7 +302,7 @@ std::string physical_digest(
     std::uint64_t tile_height, std::uint64_t tile_width,
     ExecutionMode execution_mode, const std::vector<PhysicalStep>& physical) {
   DigestBuilder digest;
-  digest.text("physical-plan-v16");
+  digest.text("physical-plan-v18");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
   digest.integer(physical.size());
   for (const auto& access : physical) {
@@ -387,15 +386,6 @@ Result<std::vector<PhysicalStep>> native_access_plan(
   std::uint64_t complete = 0;
   for (std::size_t i = 0; i < steps->size(); ++i) {
     auto& step = (*steps)[i];
-    if (step.backend == Backend::Gpu) {
-      // Every native allocation rounds by less than twice its payload. This
-      // also bounds any split of declared scratch into multiple allocations.
-      if (step.planned_bytes > static_cast<std::uint64_t>(INT64_MAX) / 2)
-        return Result<std::vector<PhysicalStep>>(
-            Status::failure(ErrorCode::ResourceExhausted,
-                            "native workspace capacity overflows"));
-      step.planned_bytes *= 2;
-    }
     if (step.planned_bytes > UINT64_MAX - complete)
       return Result<std::vector<PhysicalStep>>(
           Status::failure(ErrorCode::ResourceExhausted,
@@ -419,13 +409,7 @@ Result<std::vector<PhysicalStep>> native_access_plan(
         return Result<std::vector<PhysicalStep>>(Status::failure(
             ErrorCode::ResourceExhausted, "native transfer size overflows"));
       const auto bytes = count.value() * width;
-      const auto capacity = step.backend == Backend::Gpu
-                                ? gpu_internal::allocation_capacity(bytes)
-                                : 0;
-      if (step.backend == Backend::Gpu && !capacity)
-        return Result<std::vector<PhysicalStep>>(
-            Status::failure(ErrorCode::ResourceExhausted,
-                            "native transfer is not addressable"));
+      const auto capacity = step.backend == Backend::Gpu ? bytes : 0;
       result.push_back({step.backend == Backend::Gpu
                             ? PhysicalStepKind::Upload
                             : PhysicalStepKind::HostAccess,
@@ -1153,9 +1137,9 @@ Result<OptimizedGraphIR> Compiler::optimize(
 Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
                                      const PlanningOptions& options) const {
   if (options.execution_mode != ExecutionMode::CpuExact &&
-      options.execution_mode != ExecutionMode::MetalFp32)
-    return Result<ExecutionPlan>(Status::failure(
-        ErrorCode::InvalidArgument, "unknown execution numeric mode"));
+      options.execution_mode != ExecutionMode::NativeGpu)
+    return Result<ExecutionPlan>(
+        Status::failure(ErrorCode::InvalidArgument, "unknown execution mode"));
   if (options.tile_height == 0 || options.tile_width == 0 ||
       (options.tile_height & (options.tile_height - 1)) != 0 ||
       (options.tile_width & (options.tile_width - 1)) != 0)
@@ -1234,7 +1218,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       step.output_descriptor = output.descriptor;
       step.output_result_schema = output.result_schema;
       step.output_facets = output.facets;
-      step.backend = options.execution_mode == ExecutionMode::MetalFp32 &&
+      step.backend = options.execution_mode == ExecutionMode::NativeGpu &&
                              node.traits.supports_gpu
                          ? Backend::Gpu
                          : Backend::Cpu;

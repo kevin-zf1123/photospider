@@ -14,6 +14,41 @@ change。每个 installed-boundary change 必须说明影响，并通过隔离
 Package 不承诺解码或执行其他 build 的内部 IR。Daemon 绝不把内部 IR 放上 local
 IPC。
 
+## 当前源码与 package 状态（0.28.0）
+
+当前源码采用 operation DSO ABI v11。插件导出
+`ps_operation_plugin_get_api_v11`；loader 在读取 table 前拒绝 ABI 10，operation
+record/result 使用 `_v11` 名称。v11 GPU service 报告 Metal 或 Vulkan backend 及最小
+buffer offset alignment。GPU dispatch 标记 MSL 或 SPIR-V；backend 与代码格式不匹配时
+返回 `BackendUnavailable`。Provider ABI 1、planar C 扩展 v3、OperationTraits 20、
+WorkflowDocument schema 3、semantic/physical domain v18、外层 plan-cache-key v15 与
+optimizer v5 保持不变。Package 0.28.0 仍是当前版本，源码中的 operation 接口为 ABI 11。
+当前 C++ 选址选择器为 `ExecutionMode::NativeGpu`（值 `2`），`CpuExact`（值 `1`）保持。
+`NativeGpu` 允许 traits 声明的原生放置；active context 选择 Metal 或 Vulkan，数值行为由
+operation/profile 定义。枚举值仍为 2，因此该名称更改不改变 canonical plan digest bytes
+或 plan identity，也不要求修改版本 domain。
+公开 `BufferAllocator` 布局因 requested-byte lease 改变；即使 package 0.28.0 仍为当前版本，安装后的 C++ 消费方也必须重建。插件则需匹配其所用 C ABI 的公开头文件。
+
+Vulkan backend 由可选且默认关闭的 `PHOTOSPIDER_ENABLE_VULKAN` 构建项选择，其原生
+核心测试已在 NVIDIA GeForce RTX 3090 和 Intel UHD Graphics 770 通过。标准 structural
+planar scratch 与 generic Value GPU callback 使用 requested-byte quota，root budget 仍按实际
+backing capacity 计费；Vulkan UBO constants 由独立 host command allocator 计费。Generic
+Value `ExecutionRun` 在非阻塞逐分配准入前尝试回收 pending disk writes 和 memory cache；CPU
+执行保留 complete reservation。Dependency GPU workspace admission 已集成。Perlin、Gaussian
+和 PixelOE 提供公开 MSL/Metal 与 SPIR-V/Vulkan 实现；数值 profile 和平台证据按算子区分。
+其他 GPU entry 需按注册实现与已配置设备核对支持情况。
+
+## 包 0.28.0 当前接口
+
+包 0.28.0 提供 CPU Whole host range、planar C 扩展 v3 与 operation C ABI 11。
+operation 模块导出 `ps_operation_plugin_get_api_v11`；ABI 10 table 在读取前拒绝。GPU
+dispatch 支持显式完整线程组，GPU token 可以同步释放，slot 复用检查 generation。planar
+v3 提供 backend、GPU、粘滞 work 和 CPU staged tile 服务；loader 对 planar v1/v2 模块
+返回 `InvalidArgument`，无兼容 shim。标准 structural planar callback scratch 使用
+`limited_requested()` 限制仍存活的请求字节总量，execution root 仍按实际 backing capacity
+计费。Invocation 的 Vulkan uniform-buffer constants 通过 host command allocator 按实际
+capacity 计费，不占用 plugin scratch quota。Kernel、C++ 消费方与 operation/planar 插件需匹配重建。
+
 ## Digest
 
 `SemanticGraphDigest`、`OptimizedGraphDigest`、`ExecutionPlanDigest` 与
@@ -81,7 +116,7 @@ photospider.result-digest.v2，包含显式 storage origin；流式 tile 借用�
 ## S4 原生契约
 
 package 0.6.0、operation ABI/traits 6 增加纯 C 宿主 GPU 服务、CPU 可访问原生存储与
-显式 CpuExact/MetalFp32；拒绝 ABI 5 和 package 0.5。C++17、schema 2、provider ABI 1、
+显式 CpuExact/MetalFp32（MetalFp32 是当时的选址选择器名称）；拒绝 ABI 5 和 package 0.5。C++17、schema 2、provider ABI 1、
 IPC v3 保持。semantic-graph-ir-v6、physical-plan-v6、plan-cache-key-v6 编码新 trait、
 数值模式及显式访问。优化规则仍为 optimizer-v5-canonical-noop，摘要由新语义输入改变。
 结果区域键 v2 区分数值/后端/设备/实现，上传键单独散列实际逻辑字节；句柄与耗时不进入
@@ -348,30 +383,27 @@ v3 明确相对坐标约定，新增精确类型化数值编码、同位采样�
 旧 v1-v3 tensor facet 与 override 字节明确拒绝。v4 保持 4096 字节 facet 上限
 与规范化小端编码。WorkflowDocument、operation C ABI、provider C ABI 版本不变。
 
-包版本 0.24.0 增加独立版本的 planar C operation 扩展 v1，通过现有 ABI v9
-模块加载入口发现。公开 C++ planar invocation 增加受计账约束的 scratch
-以及已验证输出元数据，安装包 C++ 消费者需要重新编译。基础 operation/provider
-C ABI、WorkflowDocument、TDM4 和 OperationTraits17 保持不变。
-PixelOE 独立插件与 workflow 使用 `find_package(Photospider 0.24)` 验证此边界。
+## 包 0.28.0：宿主管理的 CPU 范围服务
 
-## 包 0.27.0：组合 C++ 接口
+包 0.28.0 在 C++ Whole Value/planar invocation 和 planar C 扩展 v3 中
+提供同步范围工作和 CPU_STAGES tile 服务。planar 插件导出
+`ps_operation_plugin_get_planar_api_v3`；loader 对 v1/v2 表返回
+`InvalidArgument`，不提供兼容 shim。基础 operation ABI v11 与 provider ABI v1
+独立版本化。内核、C++ 消费方和 planar 插件必须一起重编译。FMT-04/05、FMT-09、FMT-10、
+FMT-11 的组合接口、exact mapped inputs、validation-only、numeric reporting、
+model coordinates 及粘滞 work admission 均保留。
 
-包 0.27.0 提供 FMT-04/05、FMT-09、FMT-10 与 FMT-11 的组合接口。
-`PlanarOperationInvocation` 包含精确映射输入、仅验证调用、数值诊断和同步借用
-的 `consume_work` 服务；`OperationDefinition` 包含映射验证，`OperationTraits`
-包含精确 planar 依赖能力。公开 TensorDescription、TensorInterpretation 和
-metadata records 包含模型坐标。内核、原生 C++ 插件和安装消费者必须一起重新
-编译，不能混用各来源分支编译出的对象。
+`consume_work` 返回借用的 `const Status&`，在下一次 checkpoint 或回调返回时
+失效；长期保留失败状态需复制。`ResourceBudget::try_consume` 原子预付全部 work
+维度，成功时不修改 failure。普通及 exact planar 回调均提供粘滞 work admission
+和 numeric reporting，没有 managed root 时也保留取消及 currentness 检查。
 
-`consume_work` 返回借用的 `const Status&`，有效期截止下次 checkpoint 或 callback
-返回；需要保留的失败必须复制。`ResourceBudget::try_consume` 在同一事务中准入
-所有 work 维度，成功时不修改调用者失败对象。普通与精确 planar callback 均
-获得 sticky work 准入与数值诊断服务，无 managed root 时也提供这些服务。
+SameMinorVersion 接受不高于安装版本的 0.28 请求，拒绝其他 minor。
+独立 examples 和 PixelOE 请求 0.28；共享库 VERSION=0.28.0、SOVERSION=0.28。
+二进制消费方在独立安装前缀重建，静态消费方必须重新链接。
 
-SameMinorVersion 接受不高于安装版本的 0.27 请求，拒绝 0.23 至 0.26。
-独立 examples 和 PixelOE 请求 0.27；共享库 VERSION=0.27.0、SOVERSION=0.27。
-此前链接无版本库的消费者应在干净安装前缀重新构建，静态消费者必须重新链接。
-
-Tensor description 按张量语义元数据约定选择规范化 TDM4/TDM5 编码。
-OperationTraits 为 18；operation C ABI9、planar C 扩展 v1、provider ABI1 和
-WorkflowDocument schema3 保持各自独立的兼容边界。
+Tensor-description 按元数据契约选择 TDM4/TDM5。当前实现的 OperationTraits 为 20，
+semantic/physical domain 为 `semantic-graph-ir-v18` 和 `physical-plan-v18`；
+外层 `plan-cache-key-v15` 与 `optimizer-v5-canonical-noop` 保持不变。operation
+C ABI11、planar C extension v3、provider ABI1 与 WorkflowDocument schema3
+分别定义各自的兼容轴。历史包版本段保留其交付时的版本事实。

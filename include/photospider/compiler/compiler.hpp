@@ -294,14 +294,16 @@ class PHOTOSPIDER_API OptimizedGraphIR final {
  *
  * @note Options select local capabilities only and contain no plugin paths.
  */
-/** @brief Explicit arithmetic and placement policy; CPU exact is the default.
+/** @brief Explicit placement permission; operation profiles define arithmetic.
  */
-enum class ExecutionMode : std::uint32_t { CpuExact = 1, MetalFp32 = 2 };
+enum class ExecutionMode : std::uint32_t { CpuExact = 1, NativeGpu = 2 };
 
 struct PHOTOSPIDER_API PlanningOptions final {
-  /** @brief MetalFp32 permits native FP32 implementations and typed CPU
-   * fallback.
-   * @note This changes physical identity, not source parameters or input bits.
+  /** @brief NativeGpu selects declared GPU implementations on the context
+   * device, with CPU fallback only when permitted by the operation contract.
+   * CpuExact selects CPU implementations.
+   * @note Each operation/profile defines its numerical behavior. Placement
+   * changes physical identity, not source parameters or input bits.
    */
   ExecutionMode execution_mode = ExecutionMode::CpuExact;
   /**
@@ -367,8 +369,10 @@ struct PHOTOSPIDER_API PhysicalStep final {
   Region region;
   /** @brief Packed payload byte count; zero only for non-dense CPU metadata. */
   std::uint64_t packed_bytes = 0;
-  /** @brief Upload capacity or operation output/workspace bound; access is
-   * zero. */
+  /** @brief Logical requested upload bytes or operation output/workspace
+   * bound; host access is zero. Native backing capacity is resolved per device
+   * during execution and charged independently of this immutable plan.
+   */
   std::uint64_t allocation_bytes = 0;
   /** @brief Named result for a terminal host access; empty otherwise. */
   std::string output_name;
@@ -549,7 +553,7 @@ class PHOTOSPIDER_API ExecutionPlan final {
   const std::vector<PhysicalStep>& physical_steps() const noexcept {
     return physical_steps_;
   }
-  /** @brief Explicit numeric policy retained when deriving tile plans. */
+  /** @brief Explicit placement permission retained when deriving tile plans. */
   ExecutionMode execution_mode() const noexcept { return execution_mode_; }
   /**
    * @brief Derives one demand-local plan without reanalyzing or enumerating

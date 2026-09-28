@@ -28,8 +28,10 @@ The first-failure selector is allocation-free and is also used when failure
 diagnostic construction itself fails, so an already observed stop cannot be
 downgraded to queue, admission, or backend failure.
 
-GPU selection names the optional native Metal implementation under explicit
-MetalFp32 policy. The existing single GPU lane drains submitted commands before
-callback retirement, including cancellation. Traits permit output-free CPU
-fallback; submitted device execution errors terminate the Run. Both attempts,
-actual dispatches/copies and cache reuse remain visible in raw diagnostics.
+`ExecutionMode::NativeGpu` grants placement of operations whose traits declare
+a native implementation. The execution context selects its configured Metal
+or Vulkan device; the operation profile defines arithmetic. The single GPU
+lane drains submitted commands before callback retirement, including
+cancellation. Traits permit output-free CPU fallback; submitted device
+execution errors terminate the Run. Raw diagnostics distinguish attempts,
+actual dispatches/copies and cache reuse.

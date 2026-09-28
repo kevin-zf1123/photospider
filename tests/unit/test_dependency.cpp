@@ -59,8 +59,48 @@ int exhaustive() {
       const auto complement = full.restrict(bits(7 & ~coverage)).take_value();
       auto merged = restricted.merge(complement);
       PS_CHECK(merged.ok());
+      PS_CHECK(merged.value().coverage() == full.coverage());
+      PS_CHECK(merged.value().metadata_entries() == full.metadata_entries());
+      PS_CHECK(merged.value().storage_entries() == full.storage_entries());
+      for (unsigned dirty = 0; dirty < 8; ++dirty)
+        PS_CHECK(merged.value().transpose({0, 1, bits(dirty), {}}).value() ==
+                 full.transpose({0, 1, bits(dirty), {}}).value());
       PS_CHECK(merged.value().merge(full).ok());
     }
+  }
+  return 0;
+}
+int canonical_merge() {
+  const std::vector<AtomCertificate> rows{
+      {{1}, {{0, 15, bits(5), {{2, 7}, {1, 42}, {2, 7}}}}},
+      {{0}, {{0, 3, bits(6), {{1, 42}, {1, 42}}}}}};
+  const auto expected =
+      DependencyCertificate::create("canonical", bits(3), {{3}}, rows)
+          .take_value();
+  auto left =
+      DependencyCertificate::create("canonical", bits(2), {{3}}, {rows[0]})
+          .take_value();
+  auto right =
+      DependencyCertificate::create("canonical", bits(1), {{3}}, {rows[1]})
+          .take_value();
+  auto result = left.merge(right);
+  PS_CHECK(result.ok());
+  left = {};
+  right = {};
+  PS_CHECK(result.value().metadata_entries() == expected.metadata_entries());
+  PS_CHECK(result.value().storage_entries() == expected.storage_entries());
+  for (std::uint32_t role = 1; role <= 8; role <<= 1) {
+    for (unsigned mask = 0; mask < 8; ++mask)
+      PS_CHECK(result.value().transpose({0, role, bits(mask), {}}).value() ==
+               expected.transpose({0, role, bits(mask), {}}).value());
+    PS_CHECK(result.value().transpose({0, role, bits(0), {{2, 7}}}).value() ==
+             expected.transpose({0, role, bits(0), {{2, 7}}}).value());
+  }
+  PS_CHECK(result.value().rows()[0].output == std::vector<std::uint64_t>{0});
+  PS_CHECK(result.value().rows()[1].inputs.size() == 4);
+  for (const auto& need : result.value().rows()[1].inputs) {
+    PS_CHECK(need.tags.size() == 2);
+    PS_CHECK(need.tags[0].kind == 1 && need.tags[1].kind == 2);
   }
   return 0;
 }
@@ -111,6 +151,8 @@ int boundaries() {
   // or nonempty output exists to enforce this budget on the caller's behalf.
   PS_CHECK(identity.transpose({0, 8, bits(1), {}}, limits).status().code ==
            ErrorCode::ResourceExhausted);
+  PS_CHECK(identity.merge(identity, limits).status().code ==
+           ErrorCode::ResourceExhausted);
   limits.maximum_work = 1048576;
   limits.maximum_boxes = 2;
   PS_CHECK(identity.merge(identity, limits).status().code ==
@@ -122,6 +164,8 @@ int boundaries() {
   CancellationSource cancellation;
   cancellation.cancel();
   limits.cancellation = cancellation.token();
+  PS_CHECK(identity.merge(identity, limits).status().code ==
+           ErrorCode::Cancelled);
   PS_CHECK(identity.transpose({0, 1, bits(1), {}}, limits).status().code ==
            ErrorCode::Cancelled);
   return 0;
@@ -208,6 +252,7 @@ int translated_pieces() {
 }
 }  // namespace
 int main() {
+  PS_CHECK(canonical_merge() == 0);
   PS_CHECK(exhaustive() == 0);
   PS_CHECK(boundaries() == 0);
   PS_CHECK(translated_pieces() == 0);

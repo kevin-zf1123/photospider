@@ -226,7 +226,7 @@ inline std::uint64_t all_operations(
       auto result = execution.execute(compiled.value().plan, s.bindings);
       require(result.ok(), result.status().message);
       check(s, result.value().values.at("result"));
-      if (mode == ps::ExecutionMode::MetalFp32 && execution.gpu_enabled()) {
+      if (mode == ps::ExecutionMode::NativeGpu && execution.gpu_enabled()) {
         require(result.value().diagnostics.native_dispatch_count > 0,
                 std::string("missing native dispatch: ") +
                     s.document.nodes[0].operation);
@@ -261,7 +261,7 @@ inline void numeric_edges(
     auto exact = compiler.compile(graph, options);
     require(exact.ok(), exact.status().message);
     auto expected = cpu.execute(exact.value().plan, s.bindings);
-    options.execution_mode = ps::ExecutionMode::MetalFp32;
+    options.execution_mode = ps::ExecutionMode::NativeGpu;
     auto native = compiler.compile(graph, options);
     require(native.ok(), native.status().message);
     auto actual = execution.execute(native.value().plan, s.bindings);
@@ -281,7 +281,7 @@ inline void numeric_edges(
     auto s = scene(kind, 64, 64, 16);
     ps::GraphContext graph(s.document);
     ps::PlanningOptions options;
-    options.execution_mode = ps::ExecutionMode::MetalFp32;
+    options.execution_mode = ps::ExecutionMode::NativeGpu;
     auto compiled = compiler.compile(graph, options);
     require(compiled.ok(), compiled.status().message);
     auto result = execution.execute(compiled.value().plan, s.bindings);
@@ -329,7 +329,7 @@ inline void numeric_edges(
                           {s1_fixture::profile()}};
   ps::GraphContext graph(s.document);
   ps::PlanningOptions options;
-  options.execution_mode = ps::ExecutionMode::MetalFp32;
+  options.execution_mode = ps::ExecutionMode::NativeGpu;
   options.output_regions = {{"result", region}};
   auto compiled = compiler.compile(graph, options);
   require(compiled.ok(), compiled.status().message);

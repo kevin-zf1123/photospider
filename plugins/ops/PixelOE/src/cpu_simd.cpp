@@ -97,8 +97,8 @@ int pad(int x, int n, bool reflect) {
   }
   return std::clamp(x, 0, n - 1);
 }
-void blur(Context& c, const Arguments& a, uint32_t planes, int radius,
-          bool rows) {
+void blur(Context& c, const Arguments& a, uint64_t first_row, uint64_t last_row,
+          int radius, bool rows) {
   const uint32_t h = number(a, "height"), w = number(a, "width"),
                  offset = number(a, "offset");
   const bool reflect = number(a, "reflect") != 0;
@@ -108,65 +108,65 @@ void blur(Context& c, const Arguments& a, uint32_t planes, int radius,
   const uint32_t mode = rows ? 0 : number(a, "mode");
   const auto* extra = mode == 1 ? data(a, "add_src") : dst;
   const size_t hw = static_cast<size_t>(h) * w;
-  for (uint32_t plane = 0; plane < planes; ++plane) {
-    for (uint32_t y = 0; y < h; ++y) {
-      c.check();
-      const size_t row = plane * hw + static_cast<size_t>(y) * w;
-      // Reuse vertical offsets across the entire row; no gather is needed.
-      size_t vertical[65];
-      if (!rows) {
-        for (int k = 0; k <= 2 * radius; ++k) {
-          vertical[k] =
-              plane * hw + static_cast<size_t>(pad(
-                               static_cast<int>(y) + k - radius, h, reflect)) *
-                               w;
-        }
+  for (uint64_t logical_row = first_row; logical_row < last_row;
+       ++logical_row) {
+    const auto plane = static_cast<uint32_t>(logical_row / h);
+    const auto y = static_cast<uint32_t>(logical_row % h);
+    c.check();
+    const size_t row = plane * hw + static_cast<size_t>(y) * w;
+    // Reuse vertical offsets across the entire row; no gather is needed.
+    size_t vertical[65];
+    if (!rows) {
+      for (int k = 0; k <= 2 * radius; ++k) {
+        vertical[k] =
+            plane * hw + static_cast<size_t>(pad(
+                             static_cast<int>(y) + k - radius, h, reflect)) *
+                             w;
       }
-      const uint32_t begin = rows ? std::min<uint32_t>(radius, w) : 0;
-      const uint32_t end = rows && w > static_cast<uint32_t>(radius)
-                               ? w - radius
-                               : (rows ? 0 : w);
-      auto scalar = [&](uint32_t x) {
-        float acc = 0;
-        for (int k = 0; k <= 2 * radius; ++k) {
-          const size_t index =
-              rows ? row + pad(static_cast<int>(x) + k - radius, w, reflect)
-                   : vertical[k] + x;
-          acc += taps[k] * src[index];
-        }
-        if (mode)
-          acc += extra[row + x];
-        dst[row + x] = acc;
-      };
-      uint32_t x = 0;
-      for (; x < begin; ++x)
-        scalar(x);
-      // Four independent accumulators hide multiply/add latency, preserving
-      // ascending tap order in each SIMD lane. No horizontal FP reduction.
-      for (; x + 4 * kLanes <= end; x += 4 * kLanes) {
-        Vec s0 = splat(0), s1 = s0, s2 = s0, s3 = s0;
-        for (int k = 0; k <= 2 * radius; ++k) {
-          const auto* p = src + (rows ? row + x + k - radius : vertical[k] + x);
-          const Vec t = splat(taps[k]);
-          s0 = add(s0, mul(t, load(p)));
-          s1 = add(s1, mul(t, load(p + kLanes)));
-          s2 = add(s2, mul(t, load(p + 2 * kLanes)));
-          s3 = add(s3, mul(t, load(p + 3 * kLanes)));
-        }
-        if (mode) {
-          s0 = add(s0, load(extra + row + x));
-          s1 = add(s1, load(extra + row + x + kLanes));
-          s2 = add(s2, load(extra + row + x + 2 * kLanes));
-          s3 = add(s3, load(extra + row + x + 3 * kLanes));
-        }
-        store(dst + row + x, s0);
-        store(dst + row + x + kLanes, s1);
-        store(dst + row + x + 2 * kLanes, s2);
-        store(dst + row + x + 3 * kLanes, s3);
-      }
-      for (; x < w; ++x)
-        scalar(x);
     }
+    const uint32_t begin = rows ? std::min<uint32_t>(radius, w) : 0;
+    const uint32_t end =
+        rows && w > static_cast<uint32_t>(radius) ? w - radius : (rows ? 0 : w);
+    auto scalar = [&](uint32_t x) {
+      float acc = 0;
+      for (int k = 0; k <= 2 * radius; ++k) {
+        const size_t index =
+            rows ? row + pad(static_cast<int>(x) + k - radius, w, reflect)
+                 : vertical[k] + x;
+        acc += taps[k] * src[index];
+      }
+      if (mode)
+        acc += extra[row + x];
+      dst[row + x] = acc;
+    };
+    uint32_t x = 0;
+    for (; x < begin; ++x)
+      scalar(x);
+    // Four independent accumulators hide multiply/add latency, preserving
+    // ascending tap order in each SIMD lane. No horizontal FP reduction.
+    for (; x + 4 * kLanes <= end; x += 4 * kLanes) {
+      Vec s0 = splat(0), s1 = s0, s2 = s0, s3 = s0;
+      for (int k = 0; k <= 2 * radius; ++k) {
+        const auto* p = src + (rows ? row + x + k - radius : vertical[k] + x);
+        const Vec t = splat(taps[k]);
+        s0 = add(s0, mul(t, load(p)));
+        s1 = add(s1, mul(t, load(p + kLanes)));
+        s2 = add(s2, mul(t, load(p + 2 * kLanes)));
+        s3 = add(s3, mul(t, load(p + 3 * kLanes)));
+      }
+      if (mode) {
+        s0 = add(s0, load(extra + row + x));
+        s1 = add(s1, load(extra + row + x + kLanes));
+        s2 = add(s2, load(extra + row + x + 2 * kLanes));
+        s3 = add(s3, load(extra + row + x + 3 * kLanes));
+      }
+      store(dst + row + x, s0);
+      store(dst + row + x + kLanes, s1);
+      store(dst + row + x + 2 * kLanes, s2);
+      store(dst + row + x + 3 * kLanes, s3);
+    }
+    for (; x < w; ++x)
+      scalar(x);
   }
 }
 float morph_scalar(const float* src, const float* se, uint32_t ks, size_t base,
@@ -208,7 +208,8 @@ Vec morph_vector(const float* src, const float* se, uint32_t ks, size_t base,
   }
   return acc;
 }
-void morphology(Context& c, const Arguments& a, uint32_t planes, bool blend) {
+void morphology(Context& c, const Arguments& a, uint64_t first_row,
+                uint64_t last_row, bool blend) {
   const uint32_t h = number(a, "height"), w = number(a, "width");
   const size_t hw = static_cast<size_t>(h) * w;
   const auto* src = data(a, blend ? "img" : "src");
@@ -223,51 +224,52 @@ void morphology(Context& c, const Arguments& a, uint32_t planes, bool blend) {
   const auto* raw = blend ? data(a, "w_raw") : nullptr;
   auto* weights = blend ? data(a, "w_out") : nullptr;
   const uint32_t r = std::max(ks, kd) / 2;
-  for (uint32_t plane = 0; plane < planes; ++plane) {
+  for (uint64_t logical_row = first_row; logical_row < last_row;
+       ++logical_row) {
+    const auto plane = static_cast<uint32_t>(logical_row / h);
+    const auto y = static_cast<uint32_t>(logical_row % h);
     const size_t base = plane * hw, wb = (plane / 3) * hw;
     const uint32_t slot = norm == 1 ? 0 : plane / 3;
     const float lo = norm ? data(a, "wmin")[slot] : 0,
                 denom = norm ? data(a, "wmax")[slot] - lo + 1e-8f : 1;
-    for (uint32_t y = 0; y < h; ++y) {
-      c.check();
-      const size_t row = static_cast<size_t>(y) * w;
-      uint32_t x = 0;
-      auto scalar = [&](uint32_t sx) {
-        float v = morph_scalar(src, se, ks, base, y, sx, h, w, dilate);
-        if (blend) {
-          const float weight =
-              norm ? (raw[wb + row + sx] - lo) / denom : raw[wb + row + sx];
-          float d = morph_scalar(src, sd, kd, base, y, sx, h, w, true);
-          d = std::fmin(std::fmax(d, 0.0f), 1.0f);
-          v = v * weight + d * (1.0f - weight);
-          if (plane % 3 == 0)
-            weights[wb + row + sx] = weight;
-        } else if (clamp) {
-          v = std::fmin(std::fmax(v, 0.0f), 1.0f);
-        }
-        dst[base + row + sx] = v;
-      };
-      for (; x < std::min(r, w); ++x)
-        scalar(x);
-      for (; x + kLanes + r <= w; x += kLanes) {
-        Vec v = morph_vector(src, se, ks, base, y, x, h, w, dilate);
-        if (blend) {
-          Vec weight = load(raw + wb + row + x);
-          if (norm)
-            weight = divide(sub(weight, splat(lo)), splat(denom));
-          Vec d = morph_vector(src, sd, kd, base, y, x, h, w, true);
-          d = minimum(maximum(d, splat(0)), splat(1));
-          v = add(mul(v, weight), mul(d, sub(splat(1), weight)));
-          if (plane % 3 == 0)
-            store(weights + wb + row + x, weight);
-        } else if (clamp) {
-          v = minimum(maximum(v, splat(0)), splat(1));
-        }
-        store(dst + base + row + x, v);
+    c.check();
+    const size_t row = static_cast<size_t>(y) * w;
+    uint32_t x = 0;
+    auto scalar = [&](uint32_t sx) {
+      float v = morph_scalar(src, se, ks, base, y, sx, h, w, dilate);
+      if (blend) {
+        const float weight =
+            norm ? (raw[wb + row + sx] - lo) / denom : raw[wb + row + sx];
+        float d = morph_scalar(src, sd, kd, base, y, sx, h, w, true);
+        d = std::fmin(std::fmax(d, 0.0f), 1.0f);
+        v = v * weight + d * (1.0f - weight);
+        if (plane % 3 == 0)
+          weights[wb + row + sx] = weight;
+      } else if (clamp) {
+        v = std::fmin(std::fmax(v, 0.0f), 1.0f);
       }
-      for (; x < w; ++x)
-        scalar(x);
+      dst[base + row + sx] = v;
+    };
+    for (; x < std::min(r, w); ++x)
+      scalar(x);
+    for (; x + kLanes + r <= w; x += kLanes) {
+      Vec v = morph_vector(src, se, ks, base, y, x, h, w, dilate);
+      if (blend) {
+        Vec weight = load(raw + wb + row + x);
+        if (norm)
+          weight = divide(sub(weight, splat(lo)), splat(denom));
+        Vec d = morph_vector(src, sd, kd, base, y, x, h, w, true);
+        d = minimum(maximum(d, splat(0)), splat(1));
+        v = add(mul(v, weight), mul(d, sub(splat(1), weight)));
+        if (plane % 3 == 0)
+          store(weights + wb + row + x, weight);
+      } else if (clamp) {
+        v = minimum(maximum(v, splat(0)), splat(1));
+      }
+      store(dst + base + row + x, v);
     }
+    for (; x < w; ++x)
+      scalar(x);
   }
 }
 }  // namespace
@@ -283,13 +285,20 @@ bool dispatch_simd(Context& c, const char* entry, std::array<uint32_t, 3> grid,
       const std::string name =
           std::string(rows ? "lr_rows_r" : "lr_cols_r") + std::to_string(r);
       if (entry == name) {
-        blur(c, a, grid[2], r, rows);
+        c.parallel_for(static_cast<uint64_t>(grid[2]) * number(a, "height"), 8,
+                       [&](uint64_t begin, uint64_t end) {
+                         blur(c, a, begin, end, r, rows);
+                       });
         return true;
       }
     }
   }
   if (std::strcmp(entry, "morph") == 0 || std::strcmp(entry, "oe_blend") == 0) {
-    morphology(c, a, grid[2], std::strcmp(entry, "oe_blend") == 0);
+    const bool blend = std::strcmp(entry, "oe_blend") == 0;
+    c.parallel_for(static_cast<uint64_t>(grid[2]) * number(a, "height"), 8,
+                   [&](uint64_t begin, uint64_t end) {
+                     morphology(c, a, begin, end, blend);
+                   });
     return true;
   }
 #else

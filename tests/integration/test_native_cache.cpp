@@ -59,12 +59,12 @@ void typed_residency() {
                      "kernel void copy_bits(device const uint* a "
                      "[[buffer(0)]], device uint* b [[buffer(1)]], uint i "
                      "[[thread_position_in_grid]]) { b[i]=a[i]; }";
-                 ps_gpu_buffer_binding_v9 buffers[] = {
-                     {sizeof(ps_gpu_buffer_binding_v9), 0, source, 0,
+                 ps_gpu_buffer_binding_v11 buffers[] = {
+                     {sizeof(ps_gpu_buffer_binding_v11), 0, source, 0,
                       output.size(), 0},
-                     {sizeof(ps_gpu_buffer_binding_v9), 1, destination, 0,
+                     {sizeof(ps_gpu_buffer_binding_v11), 1, destination, 0,
                       output.size(), 1}};
-                 ps_gpu_dispatch_v9 command{};
+                 ps_gpu_dispatch_v11 command{};
                  command.struct_size = sizeof(command);
                  command.source = shader;
                  command.source_size = sizeof(shader) - 1;
@@ -85,9 +85,9 @@ void typed_residency() {
   ps::Compiler compiler(operations);
   ps::InputSnapshotStore store;
   ps::ExecutionContext execution(operations,
-                                 s4::config(ps::ExecutionMode::MetalFp32));
+                                 s4::config(ps::ExecutionMode::NativeGpu));
   ps::PlanningOptions planning;
-  planning.execution_mode = ps::ExecutionMode::MetalFp32;
+  planning.execution_mode = ps::ExecutionMode::NativeGpu;
   for (const auto& semantic : typed_images::descriptions()) {
     auto original = typed_images::value(semantic);
     ps::GraphContext graph(typed_images::document(original));
@@ -152,10 +152,10 @@ void sharing(const std::shared_ptr<ps::OperationRegistry>& base) {
   scene.bindings.inputs[0].value = {};
   ps::GraphContext graph(scene.document);
   ps::PlanningOptions options;
-  options.execution_mode = ps::ExecutionMode::MetalFp32;
+  options.execution_mode = ps::ExecutionMode::NativeGpu;
   auto plan = ps::Compiler(registry).compile(graph, options).take_value().plan;
   ps::ExecutionContext execution(registry,
-                                 s4::config(ps::ExecutionMode::MetalFp32));
+                                 s4::config(ps::ExecutionMode::NativeGpu));
   auto wait_entered = [&] {
     std::unique_lock<std::mutex> lock(mutex);
     s3::require(changed.wait_for(lock, std::chrono::seconds(5),
@@ -282,7 +282,7 @@ void whole_fallback(const std::shared_ptr<ps::OperationRegistry>& base) {
   document.outputs = {{"result", 3, "value"}};
   ps::GraphContext graph(document);
   ps::PlanningOptions planning;
-  planning.execution_mode = ps::ExecutionMode::MetalFp32;
+  planning.execution_mode = ps::ExecutionMode::NativeGpu;
   planning.tile_height = planning.tile_width = 2;
   auto plan = s3::take(ps::Compiler(registry).compile(graph, planning)).plan;
   ps::InputSnapshotStore store;
@@ -291,7 +291,7 @@ void whole_fallback(const std::shared_ptr<ps::OperationRegistry>& base) {
   ps::ExecutionBindings bindings{
       {{"image", {}, {}, snapshot}, {"factor", factor}}};
   ps::ExecutionContext context(registry,
-                               s4::config(ps::ExecutionMode::MetalFp32));
+                               s4::config(ps::ExecutionMode::NativeGpu));
   for (int run = 0; run < 2; ++run) {
     auto result = s3::take(context.execute(plan, bindings));
     unsigned final_calls = 0;
@@ -321,7 +321,7 @@ int main(int argc, char** argv) {
       s3::require(registry->load_plugin(argv[1]).ok(), "plugin load");
       s3::require(registry->freeze().ok(), "registry freeze");
     }
-    if (!s4::cache_edits(registry, ps::ExecutionMode::MetalFp32))
+    if (!s4::cache_edits(registry, ps::ExecutionMode::NativeGpu))
       return 77;
     typed_residency();
     sharing(registry);
@@ -339,11 +339,11 @@ int main(int argc, char** argv) {
           std::filesystem::remove_all(directory, error);
         }
       } cleanup{directory};
-      auto config = s4::config(ps::ExecutionMode::MetalFp32);
+      auto config = s4::config(ps::ExecutionMode::NativeGpu);
       config.disk_cache =
           ps::DiskCacheConfig{directory.string(), 1024 * 1024, 4096, 512};
       ps::ExecutionContext context(registry, config);
-      s3::Scene native(registry, ps::ExecutionMode::MetalFp32);
+      s3::Scene native(registry, ps::ExecutionMode::NativeGpu);
       s3::require(context.execute(native.freeze(context, 2)).ok(),
                   "native disk isolation run");
       context.flush_disk_cache();

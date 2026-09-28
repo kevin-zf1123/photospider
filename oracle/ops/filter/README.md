@@ -58,3 +58,39 @@ python3 -m venv build/filter-oracle-venv
 build/filter-oracle-venv/bin/python -m pip install -r oracle/ops/filter/requirements-diagnostic.txt
 build/filter-oracle-venv/bin/python oracle/ops/filter/run_oracles.py --self-test --report build/filter-oracle/full-self-test.json
 ```
+
+## Gaussian 原生运行时对照
+
+`check_gaussian_coefficients_runtime.py` 通过原位 IEEE 传输对照实际 C++ baked64
+builder 与独立 MPFR 定向区间；`check_gaussian_runtime.py` 对照公开 CPU Whole、tiled 或 GPU
+workflow 与 MPFR 系数、Fraction 完整二维表达式和直接 IEEE 舍入。
+
+```sh
+python3 oracle/ops/filter/check_gaussian_coefficients_runtime.py --runner build/kernel-dev/test_gaussian_coefficients
+python3 oracle/ops/filter/check_gaussian_runtime.py --runner build/kernel-dev/test_gaussian_workflow
+python3 oracle/ops/filter/check_gaussian_runtime.py --runner build/kernel-dev/test_gaussian_workflow --tiled
+python3 oracle/ops/filter/check_gaussian_runtime.py --runner build/kernel-dev/test_gaussian_gpu
+```
+
+前者包含 312 个系数比较，后者包含 94 个 workflow、707 个输出位比较，覆盖两种
+dtype、五种边界、特殊值、零半径、系数下溢和不能提前窄化的 Float64 cval。
+参数错误、owner、非平凡布局、work/capacity 预算和取消由原生 integration tests
+单独验证。`--tiled` 运行实际 Regional 实现。GPU 校验使用 `--runner build/kernel-dev/test_gaussian_gpu`，要求原生 dispatch 且无 fallback。
+这些检查不构成所有输入的完备证明。使用 Vulkan kernel build 时，同一 runner
+选择 SPIR-V；配置 kernel 时传入 `-DPHOTOSPIDER_ENABLE_VULKAN=ON`。本轮
+FreeBSD Intel UHD 770 的 [Vulkan test](../../../out/gpu-whole-tiled/raw/gaussian-vulkan-intel-tests.log)、
+[MPFR/Fraction result](../../../out/gpu-whole-tiled/raw/gaussian-vulkan-intel-oracle.json)
+及 [validation-layer log](../../../out/gpu-whole-tiled/raw/gaussian-vulkan-oracle-validation.log)
+分别记录 focused pass、94 workflows/707 exact matches 和无验证错误。macOS Metal
+focused test 见 [此日志](../../../out/gpu-whole-tiled/raw/gaussian-vulkan-metal-test.log)。
+NVIDIA 和 Linux Gaussian Vulkan 尚未实测。
+
+Vulkan Gaussian 在 FreeBSD Intel UHD 770 上通过真实 public workflow。94 个
+workflow 的 707 个输出 bit 均匹配 MPFR 系数、Fraction 表达式和直接 IEEE 舍入；
+focused test 也通过。Validation-layer log 无 VUID、Validation Error 或
+SYNC-Hazard。相同 `test_gaussian_gpu` runner 可在 Vulkan 内核构建中执行 SPIR-V；
+Intel 验证记录见 `out/gpu-whole-tiled/raw/gaussian-vulkan-intel-oracle.json`、
+`gaussian-vulkan-intel-tests.log` 和 `gaussian-vulkan-oracle-validation.log`。
+Metal focused test 也通过，见 `gaussian-vulkan-metal-test.log`。此证据限定于
+记录的有限 fixture；NVIDIA 和 Linux Gaussian Vulkan 尚未验证，oracle 对照本身
+不测性能。

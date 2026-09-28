@@ -1,23 +1,34 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderPixelOE VERSION 1.0.0 LANGUAGES CXX)
-find_package(Photospider 0.27 CONFIG REQUIRED COMPONENTS operation_sdk kernel)
+find_package(Photospider 0.28 CONFIG REQUIRED COMPONENTS operation_sdk kernel)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
-find_program(SLANGC slangc REQUIRED)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 file(GLOB_RECURSE SHADERS CONFIGURE_DEPENDS "third_party/shaders/*.slang")
-set(GENERATED "${CMAKE_CURRENT_BINARY_DIR}/generated")
-file(MAKE_DIRECTORY "${GENERATED}")
-execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/compile_kernels.py"
-  --slangc "${SLANGC}" --root "${CMAKE_CURRENT_SOURCE_DIR}/third_party/shaders" --out "${GENERATED}"
-  COMMAND_ERROR_IS_FATAL ANY)
-execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_tables.py" "${GENERATED}/tables.cpp"
-  COMMAND_ERROR_IS_FATAL ANY)
+set(PIXELOE_PREGENERATED_DIR "" CACHE PATH "Verified portable Slang CPU source bundle")
+if(PIXELOE_PREGENERATED_DIR)
+  set(GENERATED "${PIXELOE_PREGENERATED_DIR}")
+  execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/cpu_sources.py"
+    verify --root "${CMAKE_CURRENT_SOURCE_DIR}" --bundle "${GENERATED}"
+    COMMAND_ERROR_IS_FATAL ANY)
+else()
+  find_program(SLANGC slangc REQUIRED)
+  set(GENERATED "${CMAKE_CURRENT_BINARY_DIR}/generated")
+  file(MAKE_DIRECTORY "${GENERATED}")
+  execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/compile_kernels.py"
+    --slangc "${SLANGC}" --root "${CMAKE_CURRENT_SOURCE_DIR}/third_party/shaders" --out "${GENERATED}"
+    COMMAND_ERROR_IS_FATAL ANY)
+  execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/compile_gpu_kernels.py"
+    --slangc "${SLANGC}" --root "${CMAKE_CURRENT_SOURCE_DIR}/third_party/shaders" --out "${GENERATED}"
+    COMMAND_ERROR_IS_FATAL ANY)
+  execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_tables.py" "${GENERATED}/tables.cpp"
+    COMMAND_ERROR_IS_FATAL ANY)
+endif()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${SHADERS}
-  tools/compile_kernels.py tools/generate_tables.py)
+  tools/compile_kernels.py tools/compile_gpu_kernels.py tools/compile_vulkan_kernels.py src/copy.slang tools/generate_tables.py tools/cpu_sources.py)
 file(GLOB KERNELS "${GENERATED}/*.cpp")
-add_library(pixeloe_cpu OBJECT src/runtime.cpp src/cpu_simd.cpp src/pipeline.cpp ${KERNELS})
+add_library(pixeloe_cpu OBJECT src/runtime.cpp src/gpu_runtime.cpp src/gpu_work.cpp src/cpu_simd.cpp src/pipeline.cpp ${KERNELS})
 # ISA flags apply only to the specialization TU. The dispatcher must remain
 # executable on x86-64 hosts without AVX/OSXSAVE support.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64|ARM64)$")
@@ -31,12 +42,24 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
   endif()
 endif()
 target_link_libraries(pixeloe_cpu PRIVATE Photospider::operation_sdk)
-target_include_directories(pixeloe_cpu PRIVATE src)
+target_include_directories(pixeloe_cpu PRIVATE src "${GENERATED}/prelude")
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+  # Slang permits an application-provided platform classification. These
+  # macros select its POSIX helpers; no Linux binary is loaded on FreeBSD.
+  target_compile_definitions(pixeloe_cpu PRIVATE SLANG_PLATFORM=1 SLANG_LINUX=1)
+endif()
 add_library(photospider_pixeloe MODULE src/plugin.cpp $<TARGET_OBJECTS:pixeloe_cpu>)
 target_link_libraries(photospider_pixeloe PRIVATE Photospider::operation_sdk Photospider::kernel)
 target_include_directories(photospider_pixeloe PRIVATE src)
 target_compile_definitions(photospider_pixeloe PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
-foreach(target pixeloe_cpu photospider_pixeloe)
+add_library(photospider_pixeloe_io_profile MODULE EXCLUDE_FROM_ALL
+  src/plugin.cpp $<TARGET_OBJECTS:pixeloe_cpu>)
+target_link_libraries(photospider_pixeloe_io_profile PRIVATE
+  Photospider::operation_sdk Photospider::kernel)
+target_include_directories(photospider_pixeloe_io_profile PRIVATE src)
+target_compile_definitions(photospider_pixeloe_io_profile PRIVATE
+  PHOTOSPIDER_OPERATION_PLUGIN_BUILD PIXELOE_PROFILE_IO=1)
+foreach(target pixeloe_cpu photospider_pixeloe photospider_pixeloe_io_profile)
   if(MSVC)
     target_compile_options(${target} PRIVATE /fp:strict)
   else()
@@ -56,4 +79,19 @@ if(MSVC)
   target_compile_options(pixeloe_check_simd PRIVATE /fp:strict)
 else()
   target_compile_options(pixeloe_check_simd PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
+endif()
+add_executable(pixeloe_check_stages src/check_stages.cpp $<TARGET_OBJECTS:pixeloe_cpu>)
+target_include_directories(pixeloe_check_stages PRIVATE src)
+target_link_libraries(pixeloe_check_stages PRIVATE Photospider::kernel)
+if(MSVC)
+  target_compile_options(pixeloe_check_stages PRIVATE /fp:strict)
+else()
+  target_compile_options(pixeloe_check_stages PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
+endif()
+
+if(UNIX)
+  find_package(Threads REQUIRED)
+  add_executable(pixeloe_check_tables src/check_tables.cpp "${GENERATED}/tables.cpp")
+  target_include_directories(pixeloe_check_tables PRIVATE src)
+  target_link_libraries(pixeloe_check_tables PRIVATE Photospider::operation_sdk Threads::Threads)
 endif()

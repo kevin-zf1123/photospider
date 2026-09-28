@@ -418,8 +418,23 @@ Result<DependencyCertificate> DependencyCertificate::merge(
     entries += weight.value();
     rows.push_back(*row);
   }
-  return create_owned(
-      identity_, coverage.take_value(), input_shapes_, std::move(rows), limits,
+  // Both sources are immutable canonical certificates. The ordered merge
+  // preserves unique rows and normalized needs; overlap was checked above.
+  // Re-running create_owned would sort and normalize every accumulated row.
+  status = bounded(entries, limits);
+  if (!status.ok())
+    return Result<DependencyCertificate>(status);
+  DependencyCertificate result;
+  result.metadata_owner_ = dependency_internal::metadata_owner(
+      dependency_internal::certificate_bytes(identity_, coverage.value(),
+                                             input_shapes_, rows, {}, false),
       metadata_owner_ ? metadata_owner_ : other.metadata_owner_);
+  result.identity_ = identity_;
+  result.coverage_ = coverage.take_value();
+  result.input_shapes_ = input_shapes_;
+  result.rows_ = std::move(rows);
+  result.metadata_entries_ = entries;
+  result.storage_entries_ = result.measure_storage();
+  return Result<DependencyCertificate>(std::move(result));
 }
 }  // namespace ps

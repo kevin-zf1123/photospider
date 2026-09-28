@@ -937,7 +937,7 @@ Status DependencySession::begin_joint_phase(
   phase.gpu_buffer = [no_gpu](const std::uint8_t*, std::uint64_t, bool) {
     return Result<std::uint64_t>(no_gpu());
   };
-  phase.gpu_execute = [no_gpu](const ps_gpu_dispatch_v9*, std::uint32_t) {
+  phase.gpu_execute = [no_gpu](const ps_gpu_dispatch_v11*, std::uint32_t) {
     return no_gpu();
   };
   phase.discover =
@@ -1440,7 +1440,7 @@ Result<DependencyProgress> DependencySession::poll(
               impl_->record_failure(Status{ErrorCode::OperationFailed, {}}));
         }
       };
-      phase.gpu_execute = [&](const ps_gpu_dispatch_v9* commands,
+      phase.gpu_execute = [&](const ps_gpu_dispatch_v11* commands,
                               std::uint32_t count) -> Status {
         try {
           auto status = native_allowed();

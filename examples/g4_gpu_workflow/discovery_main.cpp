@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
     }
     PlanningOptions options;
     options.execution_mode =
-        gpu ? ExecutionMode::MetalFp32 : ExecutionMode::CpuExact;
+        gpu ? ExecutionMode::NativeGpu : ExecutionMode::CpuExact;
     GraphContext graph(document());
     auto compiled = Compiler(registry).compile(graph, options).take_value();
     auto frozen = context.freeze(compiled.plan, bindings).take_value();
@@ -178,9 +178,11 @@ int main(int argc, char** argv) {
     GraphContext large(document(128));
     auto large_plan = Compiler(registry).compile(large, options).take_value();
     // Table: 18448 logical bytes -> 32768 native capacity. Control atlas:
-    // 8+160.
+    // 8+160. Discovery allocates neither the output nor the declared scratch;
+    // those allocations occur in the later compute phase after its table
+    // retires.
     const auto minimum =
-        large_plan.plan.steps()[0].traits.outputs[0].continuation_bytes + 12 +
+        large_plan.plan.steps()[0].traits.outputs[0].continuation_bytes +
         32768 + 168;
     for (auto bytes : {minimum - 1, minimum}) {
       ExecutionContextConfig tight;

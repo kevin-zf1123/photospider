@@ -106,8 +106,13 @@ final-value NUM error bounds and strict fallback. GPU support is not implicit.
 Charge outputs, kernels, scratch, iterative states, arbitrary-precision limbs,
 retained ancestors, collection owners and comparison-resource snapshots to root
 capacity/work/stage budgets. Mathematical operation counts exclude neither limb
-cost nor refinement work from actual accounting. Poll cancellation every 1024
-scalar work units or sooner, including refinement and long solves. Resource failure
+cost nor refinement work from actual accounting. CPU callbacks poll cancellation
+every 1024 scalar work units or sooner, including refinement and long solves.
+A GPU profile must declare a finite work bound per nonpreemptive native submission,
+check cancellation before submission and after completion, and drain submitted
+work before releasing any referenced owner. It must report measured cancellation
+latency separately from its work bound. Cancellation prevents further submissions
+and successful result publication; it does not imply device preemption. Resource failure
 does not lower precision, change algorithms or spill to disk. Early-stop state
 retention and cooperative termination follow [iteration](FILTER_iterative_contract.md).
 
