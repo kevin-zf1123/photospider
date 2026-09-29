@@ -44,8 +44,9 @@ struct GaussianExact final {
     return Answer(base + nx * ny * per_tap);
   }
 
-  Status begin(const std::uint64_t* kx, std::uint64_t nx,
-               const std::uint64_t* ky, std::uint64_t ny, bool output_narrow,
+  // Reuse only after a successful begin() with the same immutable kernel.
+  // The denominator is never modified by add() or finish().
+  Status reset(std::uint64_t nx, std::uint64_t ny, bool output_narrow,
                const execution_internal::WorkConsumer& consume) {
     if (!nx || !ny || nx > UINT64_MAX / ny)
       return {ErrorCode::ResourceExhausted, "Gaussian tap product overflow"};
@@ -54,12 +55,20 @@ struct GaussianExact final {
       return status;
     ratio.numerator.words.fill(0);
     ratio.negative = false;
-    x.words.fill(0);
-    y.words.fill(0);
     first_nan = infinities = 0;
     all_negative_zero = true;
     narrow = output_narrow;
     remaining = nx * ny;
+    return Status::success();
+  }
+  Status begin(const std::uint64_t* kx, std::uint64_t nx,
+               const std::uint64_t* ky, std::uint64_t ny, bool output_narrow,
+               const execution_internal::WorkConsumer& consume) {
+    const auto status = reset(nx, ny, output_narrow, consume);
+    if (!status.ok())
+      return status;
+    x.words.fill(0);
+    y.words.fill(0);
     for (unsigned axis = 0; axis < 2; ++axis) {
       auto& sum = axis ? y : x;
       const auto* weights = axis ? ky : kx;

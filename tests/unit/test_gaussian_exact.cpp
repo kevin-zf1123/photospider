@@ -121,6 +121,16 @@ int main() {
                .code == ErrorCode::Cancelled);
   auto reused = evaluate(samples, true);
   PS_CHECK(reused.ok() && reused.value() == exact.value());
+  const auto normalizer = math->ratio.denominator;
+  PS_CHECK(math->reset(3, 3, true, consume).ok());
+  for (unsigned i = 0; i < 9; ++i)
+    PS_CHECK(
+        math->add(weights[i % 3], weights[i / 3], samples[i], true, consume)
+            .ok());
+  auto reset_result = math->finish(consume);
+  PS_CHECK(reset_result.ok() && reset_result.value() == exact.value());
+  PS_CHECK(math->ratio.denominator.words == normalizer.words);
+  PS_CHECK(math->reset(3, 3, true, cancelled).code == ErrorCode::Cancelled);
   PS_CHECK(!GaussianExact::work_bound(0, 1).ok());
   PS_CHECK(!GaussianExact::work_bound(UINT64_MAX, 2).ok());
   PS_CHECK(!GaussianExact::work_bound(UINT64_MAX, 1).ok());

@@ -142,6 +142,7 @@ int prepare_block(void* user, std::uint64_t, std::uint64_t,
 struct Slot final {
   GaussianExact math;
   Status status{};
+  bool normalized = false;
 };
 struct Work final {
   const OperationInvocation& call;
@@ -173,9 +174,12 @@ Result<std::uint64_t> evaluate_point(
   using Answer = Result<std::uint64_t>;
   if (!p.rx && !p.ry)
     return read(coordinate[p.y], coordinate[p.x]);
-  auto status = slot->math.begin(kx, nx, ky, ny, narrow, consume);
+  auto status = slot->normalized
+                    ? slot->math.reset(nx, ny, narrow, consume)
+                    : slot->math.begin(kx, nx, ky, ny, narrow, consume);
   if (!status.ok())
     return Answer(status);
+  slot->normalized = true;
   for (std::uint64_t j = 0; j < ny; ++j)
     for (std::uint64_t i = 0; i < nx; ++i) {
       status = consume(shape.size() * 4 + 16);
