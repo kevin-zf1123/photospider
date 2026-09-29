@@ -89,7 +89,7 @@ int main() try {
     }
   };
   size_t cases = 0;
-  for (uint32_t w : {1, 2, 3, 7, 8, 15, 16, 31, 32, 33, 65, 128}) {
+  for (uint32_t w : {1, 2, 3, 7, 8, 15, 16, 24, 31, 32, 33, 65, 128}) {
     for (uint32_t h : {1, 2, 7, 33, 66}) {
       auto src = scalar.image(h, w), a = scalar.image(h, w),
            b = scalar.image(h, w), extra = scalar.image(h, w);

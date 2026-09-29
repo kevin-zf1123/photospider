@@ -165,6 +165,16 @@ void blur(Context& c, const Arguments& a, uint64_t first_row, uint64_t last_row,
       store(dst + row + x + 2 * kLanes, s2);
       store(dst + row + x + 3 * kLanes, s3);
     }
+    for (; x + kLanes <= end; x += kLanes) {
+      Vec acc = splat(0);
+      for (int k = 0; k <= 2 * radius; ++k) {
+        const auto* p = src + (rows ? row + x + k - radius : vertical[k] + x);
+        acc = add(acc, mul(splat(taps[k]), load(p)));
+      }
+      if (mode)
+        acc = add(acc, load(extra + row + x));
+      store(dst + row + x, acc);
+    }
     for (; x < w; ++x)
       scalar(x);
   }
