@@ -17,7 +17,7 @@ struct GaussianExact final {
   using Integer = numeric_ops::FixedInteger<68>;
   numeric_ops::ExactRatioWorkspace<68> ratio{
       numeric_ops::SequenceProfile::Strict};
-  Integer x, y, product, value;
+  Integer x, y, value;
   std::uint64_t first_nan = 0;
   unsigned infinities = 0;
   bool all_negative_zero = true, narrow = false;
@@ -105,16 +105,32 @@ struct GaussianExact final {
         all_negative_zero && sample.negative && !sample.magnitude;
     if (sample.nan || sample.infinite || first_nan || infinities)
       return Status::success();
-    x.set(numeric_ops::BinaryParts::decode(kx, false), 1074);
-    y.set(numeric_ops::BinaryParts::decode(ky, false), 1074);
-    value.set(sample, 1074);
-    status = numeric_ops::multiply_fixed(x, y, &product, consume, 32);
+    // Three IEEE significands have at most 159 bits. Multiply at bit zero,
+    // then place the exact product in the existing 2^-3222 accumulator.
+    // This avoids multiplying the thousands of zero bits below each operand.
+    const auto wx = numeric_ops::BinaryParts::decode(kx, false);
+    const auto wy = numeric_ops::BinaryParts::decode(ky, false);
+    status = consume(12);
     if (!status.ok())
       return status;
-    status =
-        numeric_ops::multiply_fixed(product, value, &ratio.term, consume, 32);
-    if (!status.ok())
-      return status;
+    const auto weight =
+        static_cast<unsigned __int128>(wx.significand) * wy.significand;
+    const auto low =
+        static_cast<unsigned __int128>(static_cast<std::uint64_t>(weight)) *
+        sample.significand;
+    const auto high = (weight >> 64) * sample.significand + (low >> 64);
+    const std::array<std::uint64_t, 3> compact{
+        static_cast<std::uint64_t>(low), static_cast<std::uint64_t>(high),
+        static_cast<std::uint64_t>(high >> 64)};
+    const auto shift = static_cast<unsigned>(wx.exponent + wy.exponent +
+                                             sample.exponent + 3222);
+    const auto whole = shift / 64, tail = shift % 64;
+    ratio.term.words.fill(0);
+    for (unsigned i = 0; i < compact.size(); ++i) {
+      ratio.term.words[whole + i] |= compact[i] << tail;
+      if (tail)
+        ratio.term.words[whole + i + 1] |= compact[i] >> (64 - tail);
+    }
     status = consume(68 * 3);
     if (!status.ok())
       return status;

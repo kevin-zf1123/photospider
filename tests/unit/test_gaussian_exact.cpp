@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <random>
 
 #include "05-filter/gaussian_exact.hpp"
 #include "support/test_support.hpp"
@@ -42,7 +43,7 @@ int main() {
       return Result<std::uint64_t>(status);
     for (unsigned i = 0; i < 9; ++i) {
       status = math->add(weights[i % 3], weights[i / 3], samples[i], narrow,
-                         consume);
+                         bounded);
       if (!status.ok())
         return Result<std::uint64_t>(status);
     }
@@ -124,5 +125,52 @@ int main() {
   PS_CHECK(!GaussianExact::work_bound(UINT64_MAX, 2).ok());
   PS_CHECK(!GaussianExact::work_bound(UINT64_MAX, 1).ok());
   PS_CHECK(!GaussianExact::work_bound(1000000000, 1000000000).ok());
+  // Compare compact tap products with the independent full-width integer
+  // construction across significand carries, extreme exponents and signs.
+  std::mt19937_64 random(50402);
+  auto reference = std::make_unique<decltype(math->ratio)>(
+      ps::plugin_internal::numeric_ops::SequenceProfile::Strict);
+  GaussianExact::Integer x, y, weight, value;
+  for (unsigned trial = 0; trial < 256; ++trial) {
+    std::array<std::uint64_t, 2> kx, ky;
+    for (unsigned i = 0; i < 2; ++i) {
+      kx[i] = 1 + random() % UINT64_C(0x3ff0000000000000);
+      ky[i] = 1 + random() % UINT64_C(0x3ff0000000000000);
+    }
+    // Include the minimum and maximum coefficient, not only random normals.
+    if (trial % 4 == 0)
+      kx = {1, UINT64_C(0x3ff0000000000000)};
+    PS_CHECK(math->begin(kx.data(), 2, ky.data(), 2, trial % 2, consume).ok());
+    reference->denominator = math->ratio.denominator;
+    reference->numerator.words.fill(0);
+    reference->negative = false;
+    for (unsigned i = 0; i < 4; ++i) {
+      auto sample = random();
+      if (trial % 2)
+        sample &= UINT64_C(0xffffffff);
+      const auto exponent_mask =
+          trial % 2 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+      if ((sample & exponent_mask) == exponent_mask)
+        sample ^=
+            trial % 2 ? UINT64_C(0x00800000) : UINT64_C(0x0010000000000000);
+      if (trial % 8 == 0)
+        sample = i % 2 ? exponent_mask - 1 : 1;
+      using ps::plugin_internal::numeric_ops::BinaryParts;
+      const auto parts = BinaryParts::decode(sample, trial % 2);
+      x.set(BinaryParts::decode(kx[i % 2], false), 1074);
+      y.set(BinaryParts::decode(ky[i / 2], false), 1074);
+      value.set(parts, 1074);
+      using ps::plugin_internal::numeric_ops::multiply_fixed;
+      PS_CHECK(multiply_fixed(x, y, &weight, consume).ok());
+      PS_CHECK(multiply_fixed(weight, value, &reference->term, consume).ok());
+      reference->add_term(parts.negative);
+      PS_CHECK(
+          math->add(kx[i % 2], ky[i / 2], sample, trial % 2, consume).ok());
+    }
+    const auto expected = reference->round(trial % 2, consume, -1074);
+    const auto actual = math->finish(consume);
+    PS_CHECK(expected.ok() && actual.ok() &&
+             expected.value() == actual.value());
+  }
   return 0;
 }
