@@ -65,11 +65,11 @@ Only requested output samples are computed.
 `filter.gaussian_baked64_v1_strict_gpu` uses Whole demand and the same baked64
 mathematics. It selects MSL/Metal or SPIR-V/Vulkan from the active GPU service and
 has no CPU fallback. Host execution certifies coefficients; the device evaluates
-and rounds every output sample using exact integer arithmetic. A dispatch handles
-up to 64 output samples and 16 taps per sample; a submission may group two ordered
-dispatches, so each lane processes at most 32 taps between submission drains.
-Cancellation stops later submissions and publication while retaining all owners
-until completion. FreeBSD Intel UHD 770 passed the independent 94-workflow,
+and rounds every output sample using exact integer arithmetic. A dispatch covers
+up to 256 output lanes on Metal and 64 on Vulkan, with at most 16 taps per lane.
+A submission may group two ordered dispatches, so each lane processes at most 32
+taps between submission drains. Cancellation stops later submissions and
+publication while retaining all owners until completion. FreeBSD Intel UHD 770 passed the independent 94-workflow,
 707-output-bit MPFR/Fraction/IEEE comparison and focused Vulkan test. NVIDIA and
 Linux Gaussian Vulkan execution remain untested. See the [current implementation](../gaussian-implementation.md)
 and [public workflow](../../../../examples/gaussian_workflow/README.md).

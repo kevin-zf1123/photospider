@@ -214,7 +214,7 @@ int native_layout() {
     PS_CHECK(result.ok() &&
              result.value().diagnostics.fallback_reasons.empty());
     if (gpu) {
-      PS_CHECK(result.value().diagnostics.native_dispatch_count == 5);
+      PS_CHECK(result.value().diagnostics.native_dispatch_count > 1);
       retained = result.value().values.at("output");
     } else {
       reference = result.value().values.at("output");
@@ -299,6 +299,26 @@ int main(int argc, char** argv) {
                  reference.value().values.at("output").copy_bytes());
   }
   for (bool narrow : {false, true}) {
+    // Cross multiple workgroups and scratch reuse in a partial final batch.
+    std::vector<std::uint64_t> many(17 * 31);
+    for (unsigned i = 0; i < many.size(); ++i) {
+      const double value = static_cast<double>(i % 97) / 128. - .25;
+      if (narrow) {
+        const float small = static_cast<float>(value);
+        std::uint32_t word;
+        std::memcpy(&word, &small, 4);
+        many[i] = word;
+      } else {
+        std::memcpy(&many[i], &value, 8);
+      }
+    }
+    auto large_input = input_value(narrow, 17, 31, many);
+    const auto p = parameters(2, 2, "reflect_half");
+    auto actual = run(registry, context, large_input, p);
+    auto expected = run(registry, context, large_input, p, false);
+    PS_CHECK(actual.ok() && expected.ok() && dispatched(actual.value()) == 0);
+    PS_CHECK(actual.value().values.at("output").copy_bytes() ==
+             expected.value().values.at("output").copy_bytes());
     for (unsigned special = 0; special < 6; ++special) {
       std::vector<std::uint64_t> values(
           35, narrow ? UINT64_C(0x80000001) : UINT64_C(0x8000000000000001));
@@ -341,8 +361,12 @@ int main(int argc, char** argv) {
     hooks.native_device = true;
     hooks.native_submitted = cancel_submitted;
     execution_testing::install_execution_test_hooks(&hooks);
-    auto cancelled = run(registry, context, input, parameters(3, 2, "clamp"),
-                         true, midflight.token());
+    std::vector<std::uint64_t> full_batch(17 * 31);
+    for (unsigned i = 0; i < full_batch.size(); ++i)
+      full_batch[i] = raw[i % raw.size()];
+    const auto cancel_input = input_value(false, 17, 31, full_batch);
+    auto cancelled = run(registry, context, cancel_input,
+                         parameters(3, 2, "clamp"), true, midflight.token());
     execution_testing::install_execution_test_hooks(&native_hooks);
     active_cancellation = nullptr;
     const auto drain_us = std::chrono::duration<double, std::micro>(

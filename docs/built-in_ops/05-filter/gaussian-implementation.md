@@ -74,11 +74,15 @@ preserve -0; exact finite cancellation returns +0. Boundary constants retain the
 Float64 value until the final output rounding. Both radii zero copy bits,
 including signaling NaN payloads and signed zero.
 
-Finite accumulation uses 68 uint64 limbs. In units of 2^-1074, coefficient
-integers are at most 2^1074 and finite input magnitudes are below 2^2098.
-With at most UINT64_MAX taps, the numerator is below 2^4310 and the denominator
-below 2^2212. Final ratio alignment and its remainder bit fit the same workspace.
-The implementation has no rounded horizontal floating intermediate.
+Finite accumulation uses 68 uint64 limbs. For each finite tap, the implementation
+multiplies the two coefficient significands and the sample significand in a
+compact 159-bit product, then shifts that product into the exact accumulator.
+This avoids multiplying long fixed-width integers whose lower words are zero.
+In units of 2^-1074, coefficient integers are at most 2^1074 and finite input
+magnitudes are below 2^2098. With at most UINT64_MAX taps, the numerator is below
+2^4310 and the denominator below 2^2212. Final ratio alignment and its remainder
+bit fit the same workspace. The implementation has no rounded horizontal
+floating intermediate.
 
 ## Ownership, work and parallelism
 
@@ -87,7 +91,10 @@ Coefficients are generated during execution using the managed callback allocator
 work budget and cancellation token. Their identity derives from the exact static
 parameter bits and operation version. All host ranges in one invocation share
 one immutable coefficient owner; separate invocations generate their own table.
-There is no hidden global coefficient cache.
+There is no hidden global coefficient cache. Each invocation-local arithmetic
+slot builds the exact normalization denominator once for its coefficient table,
+then reuses the denominator while resetting the numerator between samples.
+Different slots do not share mutable arithmetic state.
 
 The kernel grants Whole work to its shared CPU pool. A one-worker configuration
 uses the same calculation. Each live worker slot owns its integer scratch and
@@ -135,10 +142,13 @@ and retained carry order preserve exactness. Final long division uses at most
 The first NaN and infinity/zero state persist across consecutive tap chunks.
 Both radii zero retain the exact-copy rule, including signaling NaNs.
 
-A dispatch handles at most 64 output samples and 16 taps per sample. Partial
-integer state remains in one reusable managed buffer, at most 350208 bytes. The
-runtime currently groups up to two ordered dispatches in one synchronous native
-submission; each lane therefore handles at most 32 taps between submission drains.
+A dispatch handles at most 256 output samples on Metal and 64 on Vulkan, with at
+most 16 taps per sample. Partial integer state remains in one reusable managed
+buffer. Static workspace admission reserves 1,400,832 bytes for 256 lanes on both
+backends; Vulkan uses 64 lanes per dispatch but retains this conservative
+reservation. The runtime groups up to two ordered dispatches in one synchronous
+native submission; each lane therefore handles at most 32 taps between submission
+drains.
 Inter-dispatch barriers preserve the exact accumulated integer state. Per-lane work
 admission is 100000 units per tap, plus 4096 initialization units and 131072
 finalization units when those stages occur. Constants/command construction are
@@ -146,7 +156,7 @@ charged separately. Checked static workspace includes this scratch, coefficient
 arena and full radius-derived table reservation. All buffer owners remain live
 through native completion; only the final successful invocation publishes output.
 
-Vulkan uses a 512-byte std140 constants buffer. The complete coefficient table is
+Vulkan uses 64 output lanes per dispatch and a 512-byte std140 constants buffer. The complete coefficient table is
 bound at byte offset zero; constants provide the original x/y coefficient offsets
 so cropping retains its tap coordinates. The registry key and exact arithmetic are
 shared with Metal. Native Vulkan verification is currently limited to Intel UHD
@@ -168,6 +178,41 @@ The focused cancellation fixtures measured 9095.35 us from cancel to return on
 FreeBSD Intel Vulkan and 2028.5 us on macOS Metal. Each is one observation, not a
 worst-case bound or latency guarantee. See the [Intel log](../../../out/gpu-whole-tiled/raw/gaussian-cohort-intel-final.log)
 and [Metal log](../../../out/gpu-whole-tiled/raw/gaussian-cohort-metal-final.log).
+
+## Paired arithmetic and dispatch measurements
+
+The current paired files in `out/performance-review/` compare successive arithmetic
+changes on Apple M5/macOS 27.2. Each reported figure below is the median of five
+per-process measured-call medians; the ranges show the minimum and maximum of
+those five medians. The benchmark rows report bitwise equality with the Whole
+reference. These are focused public-workflow cases, not cross-platform estimates.
+
+| Comparison | Workload | Before, ms | After, ms | Paired observation |
+| --- | --- | ---: | ---: | --- |
+| Compact Gaussian tap product | Whole, 32 × 32, 1 worker | 30.758 (30.342–31.660) | 7.314 (7.266–7.484) | Issued work falls by 68 units; peak host bytes fall by 34,816. |
+| Compact Gaussian tap product | Whole, 64 × 64, 4 workers | 30.875 (30.742–31.134) | 7.297 (7.202–7.385) | Issued work falls by 272 units; peak host bytes fall by 34,816. |
+| Compact Gaussian tap product | Tiled, 32 × 32, 4 workers | 20.821 (20.581–21.677) | 12.057 (11.909–12.252) | Peak host bytes varied from 2,280,512 to 2,427,800 after the change. |
+| Reused normalizer | Whole, 32 × 32, 1 worker | 7.365 (7.302–7.507) | 6.181 (6.133–6.246) | Peak host bytes increase by 512. |
+| Reused normalizer | Whole, 64 × 64, 4 workers | 7.501 (7.316–7.574) | 6.311 (6.179–6.439) | Peak host bytes increase by 512. |
+| Reused normalizer | Tiled, 32 × 32, 4 workers | 12.161 (11.819–14.218) | 11.583 (11.428–12.162) | The timing ranges overlap. |
+
+The per-process timing ranges are narrow for the two Whole Gaussian pairs. The
+tiled compact-product case also improves in this workload, while its managed peak
+varies with active slots. Normalizer reuse has a smaller effect, especially in the
+tiled case. These measurements support the arithmetic changes for the tested
+cases only.
+
+For Gaussian GPU on Metal, the paired 32 × 32 case changes from 45.835 ms (45.711–45.857)
+to 11.799 ms (11.774–11.923), with native dispatches/submissions changing from
+32/16 to 8/4. At 128 × 128, the medians change from 733.153 ms
+(729.338–769.127) to 185.632 ms (184.896–185.975); dispatch/submission counts
+change from 512/256 to 128/64. The 256-lane Metal capacity accounts for the
+dispatch reduction in these paired runs. Vulkan retains 64 lanes per dispatch.
+The supplied rows retain byte equality and show higher declared host workspace
+for the wider Metal dispatch. These results apply to the recorded M5 Metal run.
+
+Raw files: `out/performance-review/gaussian-compact-paired.json`,
+`gaussian-normalizer-paired.json` and `gaussian-gpu-paired.json`.
 
 ## Dispatch-cohort timing evidence
 
@@ -236,6 +281,7 @@ The FreeBSD Intel Vulkan run compares 94 workflows and 707 output bit patterns
 against DirectedMPFR coefficients plus Fraction and IEEE rounding; the focused
 Vulkan test and Mac Metal focused test pass. These fixtures are finite evidence,
 not an exhaustive all-input proof or validation of NVIDIA/Linux GPU support.
-Performance effects of batching two dispatches are still under measurement.
+These cohort-1/cohort-2 measurements describe the earlier 64-lane dispatch
+geometry. The newer Metal lane-capacity comparison is reported separately above.
 Performance reports and raw platform evidence are kept in untracked
 `out/gpu-whole-tiled/`; the source example defines reproducible timing boundaries.

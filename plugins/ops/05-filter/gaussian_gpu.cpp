@@ -89,7 +89,8 @@ Result<Value> execute_gaussian_gpu(const OperationInvocation& call,
   const auto count = call.output_region.element_count().value();
   if (!count)
     return std::move(output).publish(input.facets(), input.resources());
-  const auto lanes = std::min<std::uint64_t>(64, count);
+  const auto lanes =
+      std::min<std::uint64_t>(vulkan ? 64 : kGaussianGpuMaximumLanes, count);
   auto status = consume(lanes * (8 + 10 * 136));
   if (!status.ok())
     return Answer(status);
@@ -149,6 +150,8 @@ Result<Value> execute_gaussian_gpu(const OperationInvocation& call,
   command.constant_size = vulkan ? sizeof(VulkanArguments) : sizeof(args);
   command.constant_index = 5;
   command.grid[1] = command.grid[2] = 1;
+  command.group[0] = 64;
+  command.group[1] = command.group[2] = 1;
   const auto taps = kernel.nx * kernel.ny;
   // Two ordered dispatches share scratch across the backend's device barrier.
   // Bound each submission to at most 32 taps per lane for cancellation drain.
