@@ -56,14 +56,17 @@ For the 1-D tiled benchmark, input rank 2 with one coverage box and one fragment
 ## Mathematics and bounds
 
 IEEE bit decoding obtains exact floor modulo 256 and dyadic fractions. With
-common denominator D=2^q, each fade numerator has denominator D^5. Three fade
-weights and a corner dot share denominator D^16. The eight signed terms are
-summed exactly. The conservative magnitude bound 16*D^16 needs at most
-16q+5 bits, so 8/16/272 uint64 limbs cover q<=31/63/1074. Every multiplication
-uses distinct output scratch; negative gradients use sign/magnitude arithmetic.
-Integer lattice values are +0; a negative nonzero result underflowing to zero
-retains -0. Floating input conversion and intermediate floating arithmetic are
-not involved.
+common denominator D=2^q, each fade numerator has denominator D^5. CPU evaluation
+forms the trilinear interpolation as seven nested lerps over the eight exact
+corner values instead of expanding eight products of fade weights. Each lerp
+appends 5*q denominator bits: the corner values have denominator D, the four x
+lerps have denominator D^6, the two y lerps D^11, and the final z lerp D^16.
+These are exact signed integer numerators at each level; the output is rounded
+once from the final D^16 expression. The conservative magnitude bound 16*D^16 needs at most
+16q+5 bits, so 8/16/272 uint64 limbs cover q<=31/63/1074. Negative gradients use
+sign/magnitude arithmetic. Integer lattice values are +0; a negative nonzero
+result underflowing to zero retains -0. Floating input conversion and
+intermediate floating arithmetic are not involved.
 
 Output and all slot storage use the managed allocator. Arithmetic work consumes
 the resource root installed for each host block. Address/decode work is charged
@@ -80,9 +83,10 @@ quota-sensitive admission and construction costs remain optimization work.
 GPU has explicit Whole demand/dirty semantics. Host admission decodes the finite
 input bits to establish the maximum fractional denominator q and device work
 bound. The shader independently decodes coordinates and performs the complete
-fade, gradient and eight-corner weighted polynomial. CPU code does not compute
-output values. Float64 values are transported as bits; no device floating-point
-intermediate is used.
+fade, gradient and eight-corner weighted polynomial. It retains the expanded
+polynomial expression; the seven-lerp arithmetic change is currently in the CPU
+exact evaluator. CPU code does not compute output values. Float64 values are
+transported as bits; no device floating-point intermediate is used.
 
 Device scratch contains 17 little-endian base-2^32 integers per active lane.
 The same `16*q+5` bit bound admits 16, 32 or 544 words for q<=31, q<=63 or
@@ -171,6 +175,24 @@ The initial 64-sample Intel Vulkan benchmark records median 3.99121 ms, p95
 Whole reference. It is a baseline only, not evidence of an improvement. See
 [`perlin-vulkan-intel-first.log`](../../../out/gpu-whole-tiled/raw/perlin-vulkan-intel-first.log).
 
+## Measured exact arithmetic changes
+
+The paired Apple M5/macOS 27.2 benchmark compares the original CPU eight-term
+weighted polynomial with the exact seven-lerp form. It uses 16,384 Float64 output samples and reports the
+median of five per-process measured-call medians; ranges below are the minimum
+and maximum of those medians. Every paired row reports bitwise equality with the
+Whole reference.
+
+| Mode | Workers | Weighted polynomial, ms | Nested lerps, ms | Paired observation |
+| --- | ---: | ---: | ---: | --- |
+| Whole | 1 | 23.607 (22.860–24.714) | 13.575 (13.249–13.964) | Declared arithmetic work falls from 63,045,632 to 29,540,352. |
+| Whole | 4 | 8.360 (8.143–8.994) | 5.927 (5.704–6.312) | Output and workspace are unchanged. |
+| Tiled | 4 | 18.446 (14.206–19.547) | 15.881 (14.900–16.641) | Improvement is smaller; the timing ranges overlap. |
+
+These are results from this fixed workload and benchmark host only. They do not
+establish relative performance on other processors or GPUs. Raw rows are in
+`out/performance-review/perlin-lerp-paired.json`.
+
 ## Measured budget-admission optimization
 
 The budget and tiled timing values in this section describe their recorded benchmark builds. The tiled issued-work figures predate the bounded scalar-read accounting described above and are not current-code work totals.
@@ -207,6 +229,28 @@ the corresponding macOS workload. Timing files are
 `out/gpu-whole-tiled/raw/perlin-whole-freebsd-{initial,precharge}.jsonl`.
 Fully instrumented macOS TSAN passes both the arithmetic and public workflow
 tests without a race report; raw test logs are in `raw/perlin-tsan-tests.txt`.
+
+## Native arithmetic-only paired measurements
+
+A separate FreeBSD 15.1 amd64 harness run used Clang 22 and pinned execution to
+CPU 0. It ran three fixed-order rounds rather than alternating before and after.
+The same isolated arithmetic harness linked against a compatible existing kernel
+static library. Matching checksums provide a consistency check, but the timing
+harness did not compare all output bytes. Separate oracle and unit tests establish
+arithmetic correctness. These timings exclude public workflow setup, scheduling
+and publication.
+
+| Arithmetic case | Samples | Earlier headers, ms | Current headers, ms |
+| --- | ---: | ---: | ---: |
+| Perlin full precision, q=63 | 1,000 | 16.271 (16.253–16.297) | 15.453 (15.420–15.546) |
+| Perlin full precision, q=1074 | 100 | 15.276 (15.247–15.660) | 4.985 (4.969–5.010) |
+
+These three-round arithmetic measurements are limited evidence for the exact
+kernel expressions. They do not describe a full workflow or establish a gain on
+other CPUs. The harness and raw measurements are in ignored
+`out/performance-review/`. The tracked arithmetic and workflow validation
+commands remain the ones listed under [Execution and validation](#execution-and-validation);
+they verify correctness and do not reproduce this timing harness.
 
 ## Measured tiled scheduling and traversal
 

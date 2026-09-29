@@ -84,6 +84,83 @@ comparisons.
   environment, invalid input/parameters, budget failures, zero variance,
   signed-zero/subnormal copies, RGB metadata and partial Whole rejection.
 
+## SIMD blur tail paired measurements
+
+After the low-rank blur's four-vector loop, the SIMD path processes any remaining
+full vectors one at a time, then handles the final partial vector with scalar code.
+Each vector lane retains ascending tap order, and row boundaries stay unchanged.
+On Apple M5/macOS 27.2, five paired CPU Whole workflow runs measured these input
+sizes with one worker. Each table value is the median of five per-process
+execution medians; the range gives the minimum and maximum of those medians.
+
+| Input | Before, ms | One-vector tail, ms | Observation |
+| --- | ---: | ---: | --- |
+| 24 × 256 | 3.381 (3.370–3.391) | 3.137 (3.120–3.181) | 7.2% lower median; checksums and peak bytes match. |
+| 128 × 128 | 6.049 (5.917–6.073) | 5.886 (5.870–5.910) | 2.7% lower median; checksums and peak bytes match. |
+| 256 × 256 | 19.694 (19.524–19.740) | 19.601 (19.543–19.846) | Ranges overlap; no stable gain established. |
+
+The change passed 4,030 bitwise SIMD/AOT comparisons, CPU and tiled contract
+checks, and the stage check. These measurements support a small and workload-
+dependent CPU Whole improvement. They do not show a gain for every image size or
+establish a broader PixelOE speedup. Raw paired rows are in
+`out/performance-review/pixeloe-tail-paired.json`.
+
+The maintained source builds and checks can be run with:
+
+```sh
+cmake --build build/pixeloe --target photospider_pixeloe pixeloe_workflow pixeloe_check_simd pixeloe_check_stages -j 8
+build/pixeloe/pixeloe_check_simd
+build/pixeloe/pixeloe_check_stages
+build/pixeloe/pixeloe_workflow build/pixeloe/libphotospider_pixeloe.so 24 256 backend=cpu workers=1 warmup=1 repeat=5
+```
+
+The final command measures five current executions after one warmup using the
+workflow's deterministic default RGB input. It reproduces a current-build sample,
+not the paired comparison; the old-build measurements and exact paired runner
+invocation are not part of the tracked source tree.
+
+## CPU Whole quantization label buckets
+
+The CPU Whole path with its SIMD-enabled dispatcher accumulates each chunk's
+label buckets directly into that chunk's existing `int64[K*4]` partial region.
+Each chunk visits samples in their original order, and `km_update` keeps its
+prior sequence. The change reduces repeated pixel scans for full-grid K-means
+while preserving the partial-table allocation and memory peak. It does
+not change scalar CPU, CPU tiled, generated-kernel or GPU execution. The bucket
+accumulation itself uses the existing scalar fixed-point label routine inside
+the SIMD-enabled specialization; this is not vector arithmetic over labels.
+
+Five alternating public-workflow pairs used one warmup and seven timed executions
+per process. The high-cost case used a 256 × 256 RGB input, `pixel_size=2`,
+`num_colors=128`, `do_quant=true`, `do_color_match=false`, `thickness=0` and
+`no_post_upscale=true`.
+
+| Input and worker count | Existing path, ms | Chunk buckets, ms | Observation |
+| --- | ---: | ---: | --- |
+| Heavy quantization, 1 worker | 79.242 (78.947–79.885) | 63.774 (63.288–64.210) | 19.5% lower median. |
+| Heavy quantization, 4 workers | 22.365 (22.156–22.421) | 18.754 (18.669–24.350) | 16.2% lower median; the bucket arm includes one high sample. |
+| Default quantization, 512 × 512, 1 worker | 79.724 (79.545–80.673) | 78.585 (78.377–79.055) | 1.4% lower median. |
+| Default quantization, 512 × 512, 4 workers | 25.997 (25.699–30.844) | 25.353 (25.320–25.757) | Small change with broad baseline spread. |
+
+Checksums and peak managed bytes matched for each pair; the high-cost case used
+3,514,302 bytes in both arms. The default case shows only a small difference.
+Repeat-k-means also changed only slightly, from 26.188 to 26.071 ms at four
+workers. These results support the heavy full-grid K-means case, not a general
+quantization speedup or a reduction in scratch memory. Raw data are in
+`out/performance-review/pixeloe-buckets-heavy-paired.json` and
+`pixeloe-buckets-paired.json`.
+
+Build the maintained public workflow and run a current heavy-case sample with:
+
+```sh
+cmake --build build/pixeloe --target photospider_pixeloe pixeloe_workflow -j 8
+build/pixeloe/pixeloe_workflow build/pixeloe/libphotospider_pixeloe.so 256 256 backend=cpu workers=1 warmup=1 repeat=7 do_quant=true pixel_size=2 num_colors=128 do_color_match=false thickness=0 no_post_upscale=true
+build/pixeloe/pixeloe_workflow build/pixeloe/libphotospider_pixeloe.so 256 256 backend=cpu workers=4 warmup=1 repeat=7 do_quant=true pixel_size=2 num_colors=128 do_color_match=false thickness=0 no_post_upscale=true
+```
+
+These commands measure the current build using the workflow's deterministic
+input. They do not recreate the alternating before/after experiment.
+
 The finite option suite is not an exhaustive Cartesian product. Approximate
 vector transcendental functions and reassociated reductions are not introduced.
 No correctly-rounded transcendental or cross-libm bitwise claim is made.
