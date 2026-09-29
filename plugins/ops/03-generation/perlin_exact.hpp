@@ -65,18 +65,20 @@ inline constexpr std::array<unsigned, 256> kPerlinPermutation = {
 
 // All numerators use a common D=2^q. Fade has denominator D^5;
 // weight*dot has denominator D^16. Before sign cancellation the sum of eight
-// magnitudes is <16*D^16. Intermediate polynomial terms are <=31*D^2.
-// Thus 16*q+5 bits suffice, including rounding's dyadic extraction (no shift
-// workspace enlargement). q<=31/63/1074 fits 8/16/272 uint64 limbs.
-// The owner allocates this fixed workspace through the execution allocator.
+// magnitudes is <16*D^16. Intermediate polynomial terms are <=31*D^2; lerp
+// terms are <6*D^16. Thus 16*q+5 bits suffice, including rounding's dyadic
+// extraction (no shift workspace enlargement). q<=31/63/1074 fits 8/16/272
+// uint64 limbs. The owner allocates this fixed workspace through the execution
+// allocator.
 template <std::size_t Words>
 struct PerlinExact final {
   using Integer = numeric_ops::FixedInteger<Words>;
   using Ratio = numeric_ops::ExactRatioWorkspace<Words>;
   Ratio ratio{numeric_ops::SequenceProfile::Strict};
   std::array<Integer, 3> fractions;
-  std::array<std::array<Integer, 2>, 3> fades;
-  Integer denominator, a, b, c, weight, dot;
+  std::array<Integer, 3> fades;
+  std::array<Integer, 4> interpolants;
+  Integer denominator, a, b, c, dot;
 
   // Conservative declared work, reserved before evaluating one sample. The
   // local consumer still checks every multiplication row and never exceeds
@@ -93,9 +95,8 @@ struct PerlinExact final {
     };
     return 32 * Words +
            3 * (product(q, q) + product(2 * q, q) + product(2 * q + 4, 3 * q)) +
-           8 * (product(5 * q + 1, 5 * q + 1) + product(10 * q + 1, 5 * q + 1) +
-                product(15 * q + 1, q + 2)) +
-           512;
+           4 * product(q + 3, 5 * q + 1) + 2 * product(6 * q + 3, 5 * q + 1) +
+           product(11 * q + 3, 5 * q + 1) + 512;
   }
 
   static void power(unsigned exponent, Integer* target) {
@@ -151,15 +152,14 @@ struct PerlinExact final {
       Ratio::shift(n, q, &c);
       times(15, &c);
       a.subtract(c);
-      status = numeric_ops::multiply_fixed(a, b, &fades[axis][1], consume);
+      status = numeric_ops::multiply_fixed(a, b, &fades[axis], consume);
       if (!status.ok())
         return Answer(status);
-      power(5 * q, &fades[axis][0]);
-      fades[axis][0].subtract(fades[axis][1]);
     }
-    ratio.numerator.words.fill(0);
-    ratio.negative = false;
-    for (unsigned corner = 0; corner < 8; ++corner) {
+    // L(a,b,F) = a*2^(5*q) + (b-a)*F is exact signed-magnitude
+    // interpolation. Four x, two y and one z lerps replace 24 corner-weight
+    // products with seven products. Each level appends 5*q denominator bits.
+    const auto gradient = [&](unsigned corner) {
       const unsigned x = corner & 1, y = (corner >> 1) & 1, z = corner >> 2;
       const auto p = [](unsigned index) {
         return kPerlinPermutation[index & 255];
@@ -188,18 +188,55 @@ struct PerlinExact final {
         dot = a;
         sign = other_sign;
       }
-      status =
-          numeric_ops::multiply_fixed(fades[0][x], fades[1][y], &a, consume);
+      return sign;
+    };
+    const auto interpolate = [&](const Integer& lower, bool lower_sign,
+                                 const Integer& upper, bool upper_sign,
+                                 const Integer& fade, Integer* output,
+                                 bool* output_sign) {
+      ratio.numerator = upper;
+      ratio.negative = upper_sign;
+      ratio.term = lower;
+      ratio.add_term(!lower_sign);
+      const bool difference_sign = ratio.negative;
+      auto checked =
+          numeric_ops::multiply_fixed(ratio.numerator, fade, &c, consume);
+      if (!checked.ok())
+        return checked;
+      if (!Ratio::shift(lower, 5 * q, &a))
+        return Status{ErrorCode::ResourceExhausted, "Perlin lerp capacity",
+                      FailureReason::CapacityLimit};
+      ratio.numerator = a;
+      ratio.negative = lower_sign;
+      ratio.term = c;
+      ratio.add_term(difference_sign);
+      *output = ratio.numerator;
+      *output_sign = ratio.negative;
+      return Status::success();
+    };
+    std::array<bool, 4> signs{};
+    for (unsigned index = 0; index < 4; ++index) {
+      const bool lower_sign = gradient(2 * index);
+      b = dot;
+      const bool upper_sign = gradient(2 * index + 1);
+      status = interpolate(b, lower_sign, dot, upper_sign, fades[0],
+                           &interpolants[index], &signs[index]);
       if (!status.ok())
         return Answer(status);
-      status = numeric_ops::multiply_fixed(a, fades[2][z], &weight, consume);
-      if (!status.ok())
-        return Answer(status);
-      status = numeric_ops::multiply_fixed(weight, dot, &ratio.term, consume);
-      if (!status.ok())
-        return Answer(status);
-      ratio.add_term(sign);
     }
+    for (unsigned index = 0; index < 2; ++index) {
+      status = interpolate(interpolants[2 * index], signs[2 * index],
+                           interpolants[2 * index + 1], signs[2 * index + 1],
+                           fades[1], &interpolants[index], &signs[index]);
+      if (!status.ok())
+        return Answer(status);
+    }
+    status = interpolate(interpolants[0], signs[0], interpolants[1], signs[1],
+                         fades[2], &b, &signs[0]);
+    if (!status.ok())
+      return Answer(status);
+    ratio.numerator = b;
+    ratio.negative = signs[0];
     power(16 * q, &ratio.denominator);
     return ratio.round(output_narrow, consume, 0);
   }

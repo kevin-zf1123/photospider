@@ -80,7 +80,14 @@ int main(int argc, char** argv) {
         PerlinCoordinate::decode(bits(.75), false).value()};
     auto result = evaluate({x, bits(.25), bits(.75)}, false, false);
     PS_CHECK(result.ok() && result.value() == fixture.expected);
-    auto again = reused->evaluate(coordinates, false, success);
+    auto credit = PerlinExact<272>::work_bound(fixture.q);
+    const auto bounded = [&](std::uint64_t units) {
+      if (units > credit)
+        return Status{ErrorCode::Internal, "Perlin work bound exceeded"};
+      credit -= units;
+      return Status::success();
+    };
+    auto again = reused->evaluate(coordinates, false, bounded);
     PS_CHECK(again.ok() && again.value() == fixture.expected);
   }
   for (auto nonfinite :
