@@ -177,6 +177,51 @@ int main() try {
       }
     }
   }
+  for (uint32_t count : {1, 127, 128, 259}) {
+    for (uint32_t k : {3, 32, 256}) {
+      constexpr uint32_t batch = 2, chunk = 128;
+      const uint32_t chunks = (count + chunk - 1) / chunk;
+      auto pixels = scalar.empty(batch * count * 3),
+           labels = scalar.empty(batch * count),
+           repeats = scalar.empty(batch * count), control = scalar.empty(1),
+           a = scalar.empty(batch * chunks * k * 4, 8),
+           b = scalar.empty(batch * chunks * k * 4, 8);
+      fill(pixels, false);
+      for (uint32_t i = 0; i < batch * count; ++i) {
+        // Cover empty buckets, concentration, and labels ignored by all bins.
+        static_cast<uint32_t*>(labels.data)[i] = i % (k + 1);
+        static_cast<uint32_t*>(repeats.data)[i] = i % 7 + 1;
+      }
+      for (uint32_t repeat : {0, 1}) {
+        for (uint32_t running : {0, 1}) {
+          static_cast<uint32_t*>(control.data)[0] = running;
+          std::memset(a.data, 0x5a, a.count * 8);
+          std::memset(b.data, 0x5a, b.count * 8);
+          auto args = [&](const px::Array& out) {
+            return px::Arguments{
+                {"pix", pixels},  {"labels", labels}, {"repeat", repeats},
+                {"part", out},    {"run", control},   {"it", 0},
+                {"K", k},         {"count", count},   {"batch", batch},
+                {"chunk", chunk}, {"chunks", chunks}, {"use_repeat", repeat}};
+          };
+          scalar.dispatch("km_partial", {batch * chunks * k, 1, 1}, args(a));
+          simd.dispatch("km_partial", {batch * chunks * k, 1, 1}, args(b));
+          if (std::memcmp(a.data, b.data, a.count * 8))
+            throw std::runtime_error("fixed-point label buckets differ");
+          ++cases;
+          if (running) {
+            std::memset(a.data, 0x5a, a.count * 8);
+            std::memset(b.data, 0x5a, b.count * 8);
+            scalar.dispatch("km_partial", {1, 1, 1}, args(a));
+            simd.dispatch("km_partial", {1, 1, 1}, args(b));
+            if (std::memcmp(a.data, b.data, a.count * 8))
+              throw std::runtime_error("partial grid buckets differ");
+            ++cases;
+          }
+        }
+      }
+    }
+  }
   // Cancellation interrupts a specialization without requiring a second thread.
   auto src = scalar.image(128, 128), dst = scalar.image(128, 128);
   const auto& values = px::table("se3");

@@ -287,6 +287,52 @@ void morphology(Context& c, const Arguments& a, uint64_t first_row,
 bool dispatch_simd(Context& c, const char* entry, std::array<uint32_t, 3> grid,
                    const Arguments& a) {
 #if defined(PIXELOE_NEON) || defined(PIXELOE_AVX2)
+  if (!c.tiled_enabled() && std::strcmp(entry, "km_partial") == 0) {
+    const auto* run = static_cast<const uint32_t*>(a.get("run").data);
+    if (!run[number(a, "it")])
+      return true;
+    const auto k = number(a, "K"), count = number(a, "count"),
+               chunk = number(a, "chunk"), chunks = number(a, "chunks"),
+               batch = number(a, "batch");
+    if (grid[0] != static_cast<uint64_t>(batch) * chunks * k || grid[1] != 1 ||
+        grid[2] != 1)
+      return false;
+    const auto* pixels = data(a, "pix");
+    const auto* labels = static_cast<const uint32_t*>(a.get("labels").data);
+    const auto* repeats = static_cast<const uint32_t*>(a.get("repeat").data);
+    auto* partial = static_cast<int64_t*>(a.get("part").data);
+    const bool repeat = number(a, "use_repeat") != 0;
+    // Keep the original per-chunk fixed-point table and km_update topology.
+    // Each label is scanned once, while members of every bucket retain their
+    // original sample order. Other backends keep the generated kernel.
+    c.parallel_for(
+        static_cast<uint64_t>(batch) * chunks, 1,
+        [&](uint64_t begin, uint64_t end) {
+          for (auto block = begin; block < end; ++block) {
+            c.check();
+            const auto b = block / chunks, offset = (block % chunks) * chunk;
+            auto* sums = partial + block * k * 4;
+            std::fill_n(sums, static_cast<size_t>(k) * 4, int64_t{0});
+            const auto limit = std::min<uint64_t>(offset + chunk, count);
+            for (auto n = offset; n < limit; ++n) {
+              if ((n - offset) % 64 == 0)
+                c.check();
+              const auto label = labels[b * count + n];
+              if (label >= k)
+                continue;
+              const int64_t m = repeat ? repeats[b * count + n] : 1;
+              auto* bucket = sums + label * 4;
+              for (unsigned channel = 0; channel < 3; ++channel)
+                bucket[channel] +=
+                    static_cast<int64_t>(pixels[(b * 3 + channel) * count + n] *
+                                         0x1p32f) *
+                    m;
+              bucket[3] += m;
+            }
+          }
+        });
+    return true;
+  }
   const bool rows = std::strncmp(entry, "lr_rows_r", 9) == 0;
   if (rows || std::strncmp(entry, "lr_cols_r", 9) == 0) {
     // Radius comes from validated internal pipeline options; match known entry
