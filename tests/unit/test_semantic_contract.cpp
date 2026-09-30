@@ -64,24 +64,23 @@ int codec() {
   PS_CHECK(!validate_semantic_descriptor(signal(), {ElementType::Float32, {0}})
                 .ok());
   auto alpha = rgba_semantics();
-  const auto value = [&](const SemanticDescriptor& s, float a) {
+  const auto value = [&](float a) {
     float samples[] = {-2, 4, .25F, a};
     std::vector<std::uint8_t> bytes(sizeof(samples));
     std::memcpy(bytes.data(), samples, sizeof(samples));
     return Value::create({ElementType::Float32, {1, 1, 4}},
-                         Region::whole({1, 1, 4}), {0, {16, 16, 4}}, bytes,
-                         {encode_semantic(s).take_value()})
+                         Region::whole({1, 1, 4}), {0, {16, 16, 4}}, bytes)
         .take_value();
   };
-  PS_CHECK(validate_semantic_value(alpha, value(alpha, .5F)).ok());
-  PS_CHECK(!validate_semantic_value(alpha, value(alpha, 0)).ok());
+  PS_CHECK(validate_semantic_value(alpha, value(.5F)).ok());
+  PS_CHECK(!validate_semantic_value(alpha, value(0)).ok());
   alpha.association = "straight";
-  PS_CHECK(validate_semantic_value(alpha, value(alpha, 0)).ok());
-  PS_CHECK(!validate_semantic_value(alpha, value(alpha, 2)).ok());
-  PS_CHECK(validate_semantic_value(alpha, value(alpha, 0),
-                                   ErrorCode::OperationFailed,
-                                   [] { return ErrorCode::Cancelled; })
-               .code == ErrorCode::Cancelled);
+  PS_CHECK(validate_semantic_value(alpha, value(0)).ok());
+  PS_CHECK(!validate_semantic_value(alpha, value(2)).ok());
+  PS_CHECK(
+      validate_semantic_value(alpha, value(0), ErrorCode::OperationFailed, [] {
+        return ErrorCode::Cancelled;
+      }).code == ErrorCode::Cancelled);
   return 0;
 }
 OperationDefinition generator() {
@@ -269,15 +268,16 @@ int explicit_drop() {
         OperationSemanticRule::PreserveInput;
     PS_CHECK(registry->register_operation({"typed", traits, callback}).ok());
     PS_CHECK(registry->freeze().ok());
-    auto typed =
-        Value::create(
-            input.descriptor, Region::whole(input.descriptor.shape),
-            mask ? StridedLayout{0, {4, 4}} : StridedLayout{0, {16, 16, 4}},
-            std::vector<std::uint8_t>(mask ? 4 : 16), input.facets)
-            .take_value();
+    auto typed = Value::create(
+        input.descriptor, Region::whole(input.descriptor.shape),
+        mask ? StridedLayout{0, {4, 4}} : StridedLayout{0, {16, 16, 4}},
+        std::vector<std::uint8_t>(mask ? 4 : 16), input.facets);
+    PS_CHECK(!typed.ok() && typed.status().code == ErrorCode::TypeMismatch);
     WorkflowDocument doc;
-    doc.inputs = {{1, "input", typed.descriptor(), typed.region(),
-                   typed.layout(), typed.facets()}};
+    doc.inputs = {
+        {1, "input", input.descriptor, Region::whole(input.descriptor.shape),
+         mask ? StridedLayout{0, {4, 4}} : StridedLayout{0, {16, 16, 4}},
+         input.facets}};
     doc.nodes = {{1, "drop", {WorkflowInputReference{1}}, {}},
                  {2, "typed", {WorkflowNodeOutput{1, "value"}}, {}}};
     doc.outputs = {{"output", 2, "value"}};
@@ -338,15 +338,19 @@ int builtin_identity() {
   auto coverage = encode_semantic(coverage_semantics()).take_value();
   auto mask =
       Value::create({ElementType::Float32, {1, 1}}, Region::whole({1, 1}),
-                    {0, {4, 4}}, std::vector<std::uint8_t>(4), {coverage})
-          .take_value();
+                    {0, {4, 4}}, std::vector<std::uint8_t>(4), {coverage});
+  PS_CHECK(!mask.ok() && mask.status().code == ErrorCode::TypeMismatch);
   auto bytes = Value::create({ElementType::UInt8, {2}}, Region::whole({2}),
                              {0, {1}}, {3, 7}, {{"opaque", 1, {9}}})
                    .take_value();
   {
     WorkflowDocument legacy;
-    legacy.inputs = {{1, "input", mask.descriptor(), mask.region(),
-                      mask.layout(), mask.facets()}};
+    legacy.inputs = {{1,
+                      "input",
+                      {ElementType::Float32, {1, 1}},
+                      Region::whole({1, 1}),
+                      {0, {4, 4}},
+                      {coverage}}};
     legacy.nodes = {{1, "core.identity", {WorkflowInputReference{1}}, {}}};
     legacy.outputs = {{"output", 1, "value"}};
     GraphContext graph(legacy);

@@ -48,9 +48,26 @@ void allocate_with_quotas(BufferAllocator allocator,
 
 ## 调度与状态机 (Execution & State)
 
-`consume(ResourceWork)` 原子准入 work、byte、request 和 stage 计数。work 或 I/O 超限返回 `ResourceExhausted` 和 `WorkLimit`；stage 超限返回 `StageLimit`。失败不增加已发放计数，已发放工作不会因失败、回退或取消退款。回调提交还会消耗跨 Run 累计的 root stage。普通 callback 提交使用 Queue 计量等待 worker 开始的回调，worker 取走 callback 时释放 Queue slot；callback envelope metadata 保留到回调退出。planar `CPU_STAGES` job 会保留等待准入和 managed Queue lease，直到所有已提交 tile 退出且 job 从队列摘除。
+`consume(ResourceWork)` 原子准入 work、byte、request 和 stage 计数。work 或 I/O 超限返回 `ResourceExhausted` 和 `WorkLimit`；stage 超限返回 `StageLimit`。失败不增加已发放计数，已发放工作不会因失败、回退或取消退款。回调提交还会消耗跨 Run 累计的 root stage。普通 callback 提交使用 Queue 计量等待 worker 开始的回调，worker 取走 callback 时释放 Queue slot；callback envelope metadata 保留到回调退出。CPU tile job 会保留等待准入和 managed Queue lease，直到所有已提交 tile 退出且 job 从队列摘除。
 
 Staged dependency 的 `NeedBatch` 和 certificate 副本各自取得 metadata owner；复制向量不会转移源 owner 的计费。宿主在接受最终可变 batch 前重新封装 metadata。dependency session 记录 session 开始时的 root；continuation 在没有活动 `ResourceAllocationScope` 时恢复此 root 进行 metadata 分配，活动 scope 始终优先。
+
+Structured Result execution 使用同一 root 管理图像页、不可变 sample coverage、relation witnesses、field storage 和 retained source owners。Result image slot 为每个 frame 和 layer 持有一个有界 planar backing。Metadata 与 coverage maps 计入 Metadata；planar pixel capacity 计入 Payload。Image read capability 保留 Result 和授权其 sample Region 的 captured descriptor。复制 capability 也会保留 backing 和 accounting lease。`ResultRef::capture()` 固定一份不可变的 descriptor revision、coverage、relations 和 dependency evidence；共享 waiter 消费该 publication snapshot，不观察生产者之后的 revision。
+
+Result relation rows 与已发布图像 payload 使用所选 resource root 计量。每次 publication 都必须符合配置的 payload、work、I/O 和 stage 限额。`Exact`、`Conservative` 与 `Unknown` 具有不同的 dirty-propagation 行为；未解析的 relation 不能证明输出为 clean。发布图像时，宿主先将字节复制到 Result 管理的 PlanarImage backing，并在公开 sample coverage 前计入该 payload。Schema selection 只保留声明过的 typed image 与 Result metadata resources，包括 ICC 和 OCIO bindings。Compiler 将嵌套 Result schemas 及其 resource identities 带入 plan；runtime Result bindings 会在 execution root 下重新准入所需 owners。
+
+`ExecutionDependencies` 返回的 coverage 和 guarantee maps 使用同一 resource root 的 `ResourceMap` allocator。`source_support()` 与 `potential_dirty()` 返回 root-owned `ResourceMap<Footprint>`；`source_observations()` 返回 root-owned `ResourceVector<SourceObservation>`。每条 observation 自有其 `ResourceString` input name 和 `Footprint`，并记录 typed target、slot 与 roles。这些值可比 `ExecutionDependencies` 对象和 `ExecutionContext` 活得更久；其 allocator owners 会让 accounting root 保持存活，直到最后一个 map、vector、name 或 footprint 释放。
+
+```cpp
+#include "photospider/execution/dependencies.hpp"
+
+// dependencies is ExecutionResult::dependencies from a completed run.
+ps::ResourceMap<ps::Footprint> coverage = dependencies.coverage();
+ps::ResourceMap<ps::DependencyGuarantee> guarantees = dependencies.guarantees();
+auto observations = dependencies.source_observations();
+```
+
+Maps 和 observation sequence 是复制后的 snapshots。调用方可以保留或移动这些值而不借用 dependency object，其 root-owned storage 会继续计入预算。
 
 GPU context 在创建可选 device 前创建资源 root，并显式把同一 root 传入 native 分配。未配置托管资源时，device 使用普通分配。Invocation metadata 使用显式独立的计量域。native pipeline cache 最多保留 64 个 entry；单批最多保留 32 条命令，每条最多 31 个 storage binding；一次 invocation 最多 1024 个存活 view token。地址映射仅持有弱 `CpuStorage` 引用，不拥有 native buffer。
 
@@ -69,4 +86,4 @@ GPU context 在创建可选 device 前创建资源 root，并显式把同一 roo
 - `WithinBudgetOrFail` 只覆盖已纳入计量的 allocation，不限制总 RSS、驱动私有存储和标准库外部存储。
 - 空容器及部分内部几何/重建 metadata 未被完整计量。重建的外层 `ValueFragments` metadata 可能独立于原 publication token 存活，但每个 `Value` 仍持有自身 storage owner。
 - 调用方从管理范围取出原始 `Value` 或 vector 并在 managed allocator 之外复制时，自行承担该副本的内存成本。
-- 前缀最终性和跨字段关联校验由 result publisher 负责，不属于 `TemporaryStorage`。
+- 前缀最终性和跨字段关联校验由 Result publisher 负责，不属于 `TemporaryStorage`。

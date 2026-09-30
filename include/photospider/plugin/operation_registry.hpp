@@ -244,8 +244,6 @@ enum class OperationSemanticRule : std::uint32_t {
  * are copied at registration and may be read concurrently afterwards.
  */
 struct PHOTOSPIDER_API OperationOutputTraits final {
-  /** @brief Structural image axes/groups; DAG tile size comes from plan. */
-  std::optional<PlanarImageLayout> planar_layout = {};
   /** @brief Unique strict UTF-8 result key, 1..128 bytes. */
   std::string key = "value";
   /** @brief Optional ordered original input-port projection for evaluation. */
@@ -367,19 +365,11 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
  * @note Traits are copied into semantic IR; callback/DSO identities are not.
  */
 struct PHOTOSPIDER_API OperationTraits final {
-  /** @brief CPU callback consumes and publishes structural planar image
-   * windows. Legacy Value callbacks cannot claim image storage compliance. */
-  bool planar_storage_capable = false;
   /** @brief Whole-dependency CPU orchestration submits bounded computation
    * tiles to the host pool. Coordinator and tile callbacks have separate
    * service permissions; host range parallelism is reserved for Whole calls.
    */
   bool cpu_staged_tiles = false;
-  /** @brief Host fetches the exact static mapped support, including disjoint
-   * windows and generic scalar/plane inputs. CPU staged native callbacks only.
-   * Kept distinct from a bitwise relation: validation may fail before aliasing.
-   */
-  bool planar_exact_dependencies = false;
   /** @brief Optional CPU joint contract version, zero disables grouping. */
   std::uint32_t joint_contract = 0;
   /** @brief Shared host-owned state capacity, charged once per group. */
@@ -424,7 +414,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 20U;
+  std::uint32_t version = 21U;
   /** @brief Registered template requires pure per-node metadata resolution.
    * Free inference rejects templates. OperationRegistry::resolve_traits
    * clears this flag only after validated specialization.
@@ -602,88 +592,6 @@ using CallbackSignature = Result<Value>(const OperationInvocation&);
 /** @brief Type-erased callable implementing `CallbackSignature`. */
 using OperationCallback = std::function<CallbackSignature>;
 
-/** @brief One exact authorized input rectangle; exactly one storage is valid.
- * Host owns the underlying pages/value for the complete callback lifetime. */
-struct PHOTOSPIDER_API PlanarMappedInput final {
-  std::uint32_t port = 0;
-  Region region;
-  PlanarImageReadWindow image;
-  Value value;
-};
-
-/** @brief Borrowed call scope for a structural planar image operation. */
-struct PHOTOSPIDER_API PlanarOperationInvocation final {
-  const std::vector<PlanarImageReadWindow>& inputs;
-  const std::vector<Region>& input_demands;
-  const std::map<std::string, ParameterValue>& parameters;
-  const Region& output_region;
-  const PlanarImageWriteWindow& output;
-  CancellationToken cancellation;
-  /** @brief Host scratch allocator with the declared aggregate live bound. */
-  BufferAllocator allocator;
-  /** @brief Resolved, validated output metadata borrowed for this call. */
-  const OperationMetadata& output_metadata;
-  /** @brief Registry-validated immutable preparation; nonnull at host entry.
-   * Borrow state only during this call. The handle retains the definition/DSO.
-   * This is a C++ API addition; the C operation ABI is unchanged.
-   */
-  std::shared_ptr<const PreparedOperation> prepared = {};
-  /** @brief Borrowed, bounded report service; errors are sticky at host entry.
-   * The report is retained even when numerical evaluation later fails.
-   * Valid only until the callback returns. Invoke serially on the callback
-   * thread; do not retain it or dispatch concurrent reports to this service.
-   */
-  std::function<Status(const NumericDiagnostics&)> report_numeric = {};
-  /** @brief Host work admission and cancellation/currentness checkpoint.
-   * Nonempty at registry entry, even without a managed resource root. Checks
-   * cancellation first, then plan currentness, and precharges the exact amount
-   * before work begins. Passing zero performs only a checkpoint. Failures are
-   * sticky at host entry, including failures ignored by a plugin. Poll during
-   * long inner/refinement loops, not only before publication. Borrowed for the
-   * callback lifetime; call serially on the callback thread, never retain it.
-   * @return Status borrowed until the next checkpoint or callback return.
-   * Copy failures that must outlive that interval. Success is allocation-free.
-   */
-  std::function<const Status&(std::uint64_t)> consume_work = {};
-  /** @brief Present only for exact-dependency callbacks. Legacy inputs is then
-   * empty. The callback may not read a descriptor-only dependency's samples. */
-  const std::vector<PlanarMappedInput>* exact_inputs = nullptr;
-  /** @brief Validate an immutable identity view without requesting a writer.
-   * Output is invalid in this mode and must not be accessed. */
-  bool validate_only = false;
-  /** @brief Host range service for Whole callbacks; null for tiles. */
-  const ps_cpu_parallel_service_v1* cpu_parallel = nullptr;
-  /** @brief Actual backend; GPU Whole has no CPU range grant. */
-  Backend backend = Backend::Cpu;
-  /** @brief Synchronous native services; GPU scratch comes from allocator.
-   * Row windows remain host storage. Borrow only until callback return.
-   */
-  const ps_gpu_service_v11* gpu = nullptr;
-  /** @brief Synchronous stages supplied only to a CPU tile coordinator. */
-  const ps_cpu_tiles_service_v1* cpu_tiles = nullptr;
-};
-/** @brief Callback writes only the requested output window; host publishes
- * that coverage after successful return and cancellation/current checks.
- */
-using PlanarOperationCallback = std::function<Status(
-    const PlanarOperationInvocation&)>;  // NOLINT(whitespace/indent_namespace)
-
-/** @brief Read-only validation for one exact source piece of a planar mapped
- * copy/view. The host calls this only for a Data|Validation mapped need, before
- * publishing either an alias or a copied owner. No writable output is exposed.
- * The bounded input window is the sole sample-read authority. Preparation and
- * definition are immutable; callbacks may run concurrently. C ABI unchanged.
- */
-struct PHOTOSPIDER_API PlanarMappedValidationInvocation final {
-  const PlanarImageReadWindow& input;
-  std::uint32_t input_port = 0;
-  const Region& output_region;
-  CancellationToken cancellation;
-  std::shared_ptr<const PreparedOperation> prepared;
-};
-using PlanarMappedValidationCallback = std::function<Status(
-    const PlanarMappedValidationInvocation&)>;  // NOLINT(whitespace/indent_namespace)
-
 /** @brief Owned per-node Value or structured Result metadata.
  * Result specialization requires protocol 2 and preserves the registered schema
  * id/version and Result port kind. It may resolve fields/domain/semantic
@@ -807,13 +715,6 @@ struct PHOTOSPIDER_API OperationDefinition final {
    * Supported only for deterministic side-effect-free operations.
    */
   OperationPreparer prepare_static = {};
-  /** @brief Exclusive structural image callback when planar_storage_capable. */
-  PlanarOperationCallback planar_callback = {};
-  /** @brief Optional read-only validation for mapped planar Data|Validation
-   * pieces. Requires dual generic/planar static preparation. Such mappings
-   * without this callback are rejected during preparation, never trusted.
-   */
-  PlanarMappedValidationCallback validate_planar_mapped = {};
 };
 
 /**
@@ -1033,39 +934,6 @@ class PHOTOSPIDER_API OperationRegistry final {
       const BufferAllocator& allocator,
       std::shared_ptr<std::atomic<ErrorCode>> failure) const;
   friend class ExecutionContext;
-  /** @brief Host-only structural callback entry after plan/binding validation.
-   * The registry still checks exact window authorization and parameters before
-   * preparing output pages or invoking the callback. */
-  Status invoke_planar(
-      const std::string& key, const std::vector<PlanarImageReadWindow>& inputs,
-      const std::vector<Region>& input_demands,
-      const std::map<std::string, ParameterValue>& parameters,
-      const Region& output_region, PlanarImage& output,
-      const CancellationToken& cancellation = {},
-      const BufferAllocator& allocator = BufferAllocator(),
-      std::shared_ptr<const PreparedOperation> prepared = {},
-      const std::function<bool()>& current = {},
-      NumericDiagnostics* numeric = nullptr,
-      const ResourceBudget* resources = nullptr,
-      const ErrorCode* metadata_failure = nullptr,
-      const ps_cpu_parallel_service_v1* cpu_parallel = nullptr,
-      const std::function<Status(bool)>& completion_status = {},
-      Backend backend = Backend::Cpu, const ps_gpu_service_v11* gpu = nullptr,
-      const ps_cpu_tiles_service_v1* cpu_tiles = nullptr) const;
-  Status invoke_planar_mapped_validation(
-      std::shared_ptr<const PreparedOperation> prepared,
-      const PlanarImageReadWindow& input, std::uint32_t input_port,
-      const Region& output_region, const CancellationToken& cancellation,
-      const std::function<bool()>& current) const;
-  Status invoke_planar_exact(
-      const std::string& key, const std::vector<PlanarMappedInput>& inputs,
-      const std::vector<OperationMetadata>& metadata,
-      const std::map<std::string, ParameterValue>& parameters,
-      const Region& region, PlanarImage& output, bool validate_only,
-      const CancellationToken& cancellation, const BufferAllocator& allocator,
-      std::shared_ptr<const PreparedOperation> prepared,
-      const std::function<bool()>& current, NumericDiagnostics* numeric,
-      const ResourceBudget* resources, const ErrorCode* metadata_failure) const;
   friend class Compiler;
   friend std::shared_ptr<OperationRegistry> make_default_operation_registry(
       bool);

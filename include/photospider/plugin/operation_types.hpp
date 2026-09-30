@@ -38,7 +38,5 @@ struct PHOTOSPIDER_API OperationMetadata final {
    * and standalone Values default to sample observations. No payload is held.
    */
   std::uint32_t atomic_trailing_axes = 0;
-  /** @brief Structural image layout, independent of semantic facets. */
-  std::optional<PlanarImageLayout> planar_layout = {};
 };
 }  // namespace ps

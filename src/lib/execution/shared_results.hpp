@@ -62,6 +62,18 @@ class SharedResults final {
         call_->group->refresh();
       }
     }
+    void add_interest(std::string_view key,
+                      const ResourceBudget& budget) const {
+      if (!call_)
+        return;
+      std::lock_guard<std::recursive_mutex> lock(call_->group->mutex);
+      auto found = std::lower_bound(call_->keys.begin(), call_->keys.end(), key,
+                                    ResourceStringLess{});
+      if (found == call_->keys.end() || std::string_view(*found) != key)
+        call_->keys.insert(found,
+                           ResourceString(key.data(), key.size(),
+                                          ResourceAllocator<char>(budget)));
+    }
 
    private:
     friend class SharedResults;

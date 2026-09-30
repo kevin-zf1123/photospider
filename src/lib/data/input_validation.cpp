@@ -111,20 +111,40 @@ Result<DenseMetadata> dense_metadata(const ValueDescriptor& descriptor) {
   return Result<DenseMetadata>(std::move(result));
 }
 
-Status canonicalize_facets(std::vector<ValueFacet>* facets) {
-  if (facets->size() > 64) {
+Status validate_facets(const std::vector<ValueFacet>& facets, bool canonical) {
+  if (facets.size() > 64) {
     return failure(ErrorCode::InvalidArgument, "too many facets");
   }
-  std::set<std::string> keys;
+  ResourceLease decoder_workspace;
+  if (auto* root = resource_internal::metadata_budget()) {
+    std::uint64_t bytes = 0;
+    for (const auto& facet : facets)
+      if (typed_facet(facet.key) ||
+          facet.key == "photospider.tensor-description")
+        bytes = std::max<std::uint64_t>(bytes, 512 + 16 * facet.payload.size());
+    auto work = root->consume({facets.size() * facets.size() + bytes});
+    if (!work.ok())
+      return work;
+    if (bytes) {
+      auto admitted = root->reserve(ResourceCapacity::host(bytes, bytes));
+      if (!admitted.ok())
+        return admitted.status();
+      decoder_workspace = admitted.take_value();
+    }
+  }
   std::size_t total = 0;
   unsigned typed_count = 0;
   bool tensor_description = false;
-  for (const auto& facet : *facets) {
+  for (std::size_t index = 0; index < facets.size(); ++index) {
+    const auto& facet = facets[index];
     if (facet.key.empty() || facet.key.size() > 256 || facet.version == 0 ||
         std::any_of(
             facet.key.begin(), facet.key.end(),
             [](unsigned char byte) { return byte < 0x21 || byte > 0x7e; }) ||
-        !keys.insert(facet.key).second) {
+        std::any_of(
+            facets.begin(), facets.begin() + index,
+            [&](const auto& prior) { return prior.key == facet.key; }) ||
+        (canonical && index && facets[index - 1].key >= facet.key)) {
       return failure(ErrorCode::InvalidArgument, "invalid or duplicate facet");
     }
     if (facet.payload.size() > 64 * 1024 ||
@@ -153,9 +173,14 @@ Status canonicalize_facets(std::vector<ValueFacet>* facets) {
     return failure(
         ErrorCode::InvalidArgument,
         "tensor-description v3 cannot mix legacy typed coordinate conventions");
-  std::sort(
-      facets->begin(), facets->end(),
-      [](const ValueFacet& a, const ValueFacet& b) { return a.key < b.key; });
+  return Status::success();
+}
+Status canonicalize_facets(std::vector<ValueFacet>* facets) {
+  auto status = validate_facets(*facets, false);
+  if (!status.ok())
+    return status;
+  std::sort(facets->begin(), facets->end(),
+            [](const auto& a, const auto& b) { return a.key < b.key; });
   return Status::success();
 }
 
@@ -184,39 +209,27 @@ bool whole_region(const Region& region,
 }
 
 Status validate_declaration(WorkflowInputDeclaration* declaration) {
-  if (declaration->planar_layout) {
-    const auto& layout = *declaration->planar_layout;
-    auto structural =
-        PlanarImage::validate_layout(declaration->descriptor, layout);
-    if (!structural.ok())
-      return structural;
-    const auto rank = declaration->descriptor.shape.size();
-    if ((rank != 2 && rank != 3) || layout.height_axis >= rank ||
-        layout.width_axis >= rank || layout.height_axis == layout.width_axis ||
-        (rank == 2 && layout.channel_axis) ||
-        (rank == 3 && (!layout.channel_axis || *layout.channel_axis >= rank ||
-                       *layout.channel_axis == layout.height_axis ||
-                       *layout.channel_axis == layout.width_axis)) ||
-        !whole_region(declaration->region, declaration->descriptor.shape) ||
-        declaration->layout.byte_offset ||
+  if (declaration->result_schema) {
+    if (!declaration->descriptor.shape.empty() ||
+        !declaration->region.empty() || !declaration->facets.empty() ||
         !declaration->layout.byte_strides.empty() ||
-        !declaration->layout.origin.empty())
+        !declaration->layout.origin.empty() || declaration->layout.byte_offset)
       return failure(ErrorCode::InvalidArgument,
-                     "invalid structural image declaration");
-    return canonicalize_facets(&declaration->facets);
+                     "Result declaration has Value metadata");
+    return declaration->result_schema->validate(true);
   }
   for (const auto& facet : declaration->facets) {
     if (facet.key == "photospider.image" ||
         (facet.key == "photospider.color-array" &&
          declaration->descriptor.shape.size() >= 3))
       return failure(ErrorCode::InvalidArgument,
-                     "image declaration requires planar layout");
+                     "image declaration requires Result schema");
     if (facet.key == "photospider.semantic") {
       auto semantic = decode_semantic(facet);
       if (semantic.ok() && (semantic.value().kind == SemanticKind::ImagePlane ||
                             semantic.value().kind == SemanticKind::Mask))
         return failure(ErrorCode::InvalidArgument,
-                       "image declaration requires planar layout");
+                       "image declaration requires Result schema");
     }
   }
   auto dense = dense_metadata(declaration->descriptor);
@@ -239,9 +252,9 @@ Status validate_declaration(WorkflowInputDeclaration* declaration) {
 
 Status validate_binding(const WorkflowInputDeclaration& declaration,
                         const Value& value) {
-  if (declaration.planar_layout)
+  if (declaration.result_schema)
     return failure(ErrorCode::TypeMismatch,
-                   "structural image binding requires planar storage");
+                   "Result declaration requires a Result binding");
   if (!value.valid())
     return failure(ErrorCode::InvalidArgument, "invalid bound Value");
   if (value.descriptor().element_type != declaration.descriptor.element_type ||
@@ -335,9 +348,7 @@ Result<Region> derive_input_demand(
     const std::vector<std::uint64_t>& output_shape,
     const std::vector<std::uint64_t>& input_shape, OperationPortKind kind,
     std::uint32_t input_port) {
-  if (traits.outputs[0].region_rule == OperationRegionRule::Dependency &&
-      !(traits.planar_storage_capable &&
-        traits.outputs[0].static_dependency_pieces))
+  if (traits.outputs[0].region_rule == OperationRegionRule::Dependency)
     return Result<Region>(
         Status::failure(ErrorCode::InvalidArgument,
                         "dependency program requires runtime resolution"));
@@ -531,12 +542,9 @@ Status validate_port_metadata(const OperationPortConstraint& port,
       std::any_of(descriptor.shape.begin(), descriptor.shape.end(),
                   [](auto n) { return n == 0; }))
     return failure(ErrorCode::TypeMismatch, "invalid port descriptor");
-  auto canonical = facets;
-  auto canonical_status = canonicalize_facets(&canonical);
+  auto canonical_status = validate_facets(facets, true);
   if (!canonical_status.ok())
     return canonical_status;
-  if (!same_facets(canonical, facets))
-    return failure(ErrorCode::InvalidArgument, "port facets are not canonical");
   if ((port.element_type &&
        port.element_type !=
            static_cast<std::uint32_t>(descriptor.element_type)) ||

@@ -12,6 +12,7 @@
 
 #include "photospider/core/export.hpp"
 #include "photospider/data/planar_image.hpp"
+#include "photospider/data/result.hpp"
 #include "photospider/data/value.hpp"
 
 namespace ps {
@@ -66,12 +67,13 @@ using WorkflowInput = std::variant<WorkflowNodeOutput, WorkflowInputReference>;
  * @brief Compile-time input metadata copied into immutable compiler stages.
  * @note Analyze validates 0..4096 unique nonzero ids and exact case-sensitive
  * printable ASCII names (1..128 bytes, no spaces). Every declaration is bound
- * once per Run, including unused declarations. No payload or owner is retained
- * in IR/plans. Metadata changes require recompilation; order is nonsemantic.
- * Malformed declaration metadata is InvalidArgument at analyze; checked dense
- * products/strides/host sizes and bounded payload exhaustion are
- * ResourceExhausted. B must be positive, B-1 <= INT64_MAX and B <= SIZE_MAX.
- * Caller mutation must finish before GraphContext copies the document.
+ * once per Run, including unused declarations. Runtime payload and input
+ * Result owners are supplied through execution bindings. Metadata changes
+ * require recompilation; order is nonsemantic. Malformed declaration metadata
+ * is InvalidArgument at analyze; checked dense products/strides/host sizes and
+ * bounded payload exhaustion are ResourceExhausted. B must be positive, B-1 <=
+ * INT64_MAX and B <= SIZE_MAX. Caller mutation must finish before GraphContext
+ * copies the document.
  */
 struct PHOTOSPIDER_API WorkflowInputDeclaration final {
   /** @brief Nonzero id, canonical declaration ordering key. */
@@ -86,9 +88,9 @@ struct PHOTOSPIDER_API WorkflowInputDeclaration final {
   StridedLayout layout;
   /** @brief Exact closed facet set using Value bounds, canonicalized by key. */
   std::vector<ValueFacet> facets;
-  /** @brief Structural planar image declaration; when set, layout is empty
-   * because tiled addresses cannot be represented by affine strides. */
-  std::optional<PlanarImageLayout> planar_layout = {};
+  /** @brief Structured Result schema, including typed image slots. When set,
+   * Value descriptor shape, Region, layout, and facets are empty. */
+  std::shared_ptr<const SchemaTemplate> result_schema = {};
 };
 
 /**
@@ -129,8 +131,8 @@ struct PHOTOSPIDER_API WorkflowOutput final {
  * identity.
  */
 struct PHOTOSPIDER_API WorkflowDocument final {
-  /** @brief Positive source schema version; current writer emits 3. */
-  std::uint32_t schema_version = 3;
+  /** @brief Positive source schema version; current writer emits 4. */
+  std::uint32_t schema_version = 4;
   /** @brief Required runtime inputs; canonical semantic order is declaration
    * id. */
   std::vector<WorkflowInputDeclaration> inputs;

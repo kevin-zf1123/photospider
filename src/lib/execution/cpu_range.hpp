@@ -416,6 +416,8 @@ class CpuRangeScope final {
     return self.failure_.ok()                                   ? 0
            : self.failure_.code == ErrorCode::Cancelled         ? 2
            : self.failure_.code == ErrorCode::ResourceExhausted ? 4
+           : self.failure_.code == ErrorCode::TypeMismatch      ? 5
+           : self.failure_.code == ErrorCode::InvalidArgument   ? 6
                                                                 : 1;
   }
   CpuRangeQueue& queue_;

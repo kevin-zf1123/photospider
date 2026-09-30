@@ -1,5 +1,9 @@
 # 精确依赖数据
 
+英文权威文档：[Dependency-Data.md](../Dependency-Data.md)。
+
+图像 dependency 已进入 structured Result 协议。`ResultRef` 是图像唯一的输入、输出、ownership 和 publication 路径；`PlanarImage` 仅作为 Result image slot 的 backing。下文仍涉及的 `ValueFragments`、`DependencyCertificate`、`start_dependency` 和旧 C `dependency_program` 是普通 Value dependency 协议。图像依赖通过 `start_result`、`ResultImageNeed` 和 `ResultRelation` 表达，不再走独立的 planar executor。
+
 ## 模块边界与职责
 
 本模块以精确逻辑覆盖、不可变输入片段、逐观察依赖证书和宿主驱动的 continuation 描述 dependency execution。Footprint 与证书持有结构元数据，ValueFragments 持有实际 Value owner，Run 持有 continuation 与准入后的输出/scratch lease。执行协调器负责 callback 调度和错误传播。
@@ -55,9 +59,9 @@ Footprint 表示非零 rank 1..8 逻辑域中的精确集合，以规范不交�
 
 FootprintLimits 对每次集合操作限制候选工作与矩形条目，包括重复构造工作。超限返回 ResourceExhausted，取消返回 Cancelled，两者均不等于 Empty 或 bbox 近似。复合调用方还需限制跨调用的总工作和元数据；单次集合额度不是完整执行预算。
 
-ValueFragments 保存完整 descriptor/facets、授权 Footprint 与有 owner 的矩形 Value。构造时裁剪输入覆盖，拒绝缺失样本和不一致重叠；同 owner 的等价 origin-relative mapping 去重。Generic 数组允许任意样本子集。经验证的 ColorArray tuple 必须覆盖完整 C；结构化 image facet 和 rank 至少为 3 的 ColorArray metadata 在 Value fragment 构造时因要求 planar storage 返回 `TypeMismatch`。因此不能拼接部分通道 Value 来构造 image Value；图像使用独立 `PlanarImage` 路径。`read` 通过 Value 的 checked signed-stride 地址复制实际 dtype 宽度；空洞、未授权地址或错误宽度均失败，不会同步取数或补零。`restrict` 同时限制 owner 与覆盖；`collect` 在通过完整矩形检查后使用 BufferAllocator 分配。retained capacity 统计实际唯一 storage owner，与有效区域大小分开。
+ValueFragments 保存完整 descriptor/facets、授权 Footprint 与有 owner 的矩形 Value。构造时裁剪输入覆盖，拒绝缺失样本和不一致重叠；同 owner 的等价 origin-relative mapping 去重。Generic 数组允许任意样本子集。经验证的 ColorArray tuple 必须覆盖完整 C。结构化图像数据不进入此 Value 容器，而由 typed Result image slot 携带，并通过 `ResultImageInput` 读取。`read` 通过 Value 的 checked signed-stride 地址复制实际 dtype 宽度；空洞、未授权地址或错误宽度均失败，不会同步取数或补零。`restrict` 同时限制 owner 与覆盖；`collect` 在通过完整矩形检查后使用 BufferAllocator 分配。retained capacity 统计实际唯一 storage owner，与有效区域大小分开。
 
-DependencyCertificate 保存身份、精确观察覆盖、声明输入域及每项观察的 AtomCertificate。 Generic 观察是逻辑 sample；证书模型可用 HW 域表示图像像素，每项代表完整像素；该表示本身不开放当前 registry 的 planar image dependency execution。Row 保存输入端口、 各项依赖 role、精确样本 Footprint 和非空间 tagged atom。多角色输入规范展开，发布前限制展开后的元数据。显式空 row 表示已知空，缺失 row 表示未知，不能发布为完整解析。 身份绑定调用方的访问/数值/错误合同及快照；数据类型不能证明任意 callback 遵守读取声明。
+旧 DependencyCertificate 保存 Value Atomic 协议的身份、精确观察覆盖、声明输入域及每项观察的 AtomCertificate。Structured Result dependencies 使用 `ResultRelation`，它以展平的 Value、field、image 和 descriptor 坐标寻址，并保留 selected slot 与 roles。显式空 row 表示已知空，缺失 row 表示未知，不能发布为完整解析。身份绑定调用方的访问/数值/错误合同及快照；数据类型不能证明任意 callback 遵守读取声明。
 
 restrict(P) 拒绝覆盖域以外的 P。backward(P) 仅按端口/role 对相应 row 求取数并集， 该投影不是证书。transpose(dirty) 精确返回覆盖域内与相同端口、相交 role 的样本/tag 支持相交的观察。merge 要求身份/域一致，重叠观察的规范 row 相同。请求级失败证据及终端 RequestRecord 不属于原子成功证书。
 
@@ -67,9 +71,9 @@ Focused 检查为 test_footprint、test_value_fragments、test_dependency、test
 
 ## 调度与状态机
 
-当前 `OperationTraits` 的语义版本为 20，区分本地 `Atomic`、终端 `RequestRecord`、请求级失败交付、依赖协议版本、continuation 字节上限与有限阶段数。注册时必须选择一个同步 callback 或一个分阶段 start。分阶段程序要求 deterministic、side-effect-free。协议版本 1 使用 RegionRule::Dependency，允许 Typed/Axes/重复输入静态推断，无需强制 Whole demand。编译器检查所请求结果与副作用根可达的执行边， 每个结果仅沿所声明的相关输入祖先计算 EffectiveAtomic。RequestRecord 不得供给活跃消费者；排除的端口仅保留静态 metadata，不执行生产者，也不创建生产者证书。依赖计划保留未解析需求，不生成矩形近似。
+当前 `OperationTraits` 使用语义版本 21，区分本地 `Atomic`、终端 `RequestRecord`、请求级失败交付、依赖协议版本、continuation 字节上限、有限阶段数和 typed output ports。针对选中的 output 使用相应的同步或 staged entry。分阶段程序要求 deterministic、side-effect-free。Value dependency protocol 继续服务于普通 Value operations。Structured Result 使用 dependency protocol 2，可请求 Result objects、image slots、Value fragments 和 closed I/O actions。编译器检查所请求结果与副作用根可达的执行边；RequestRecord 不得供给活跃消费者，排除的 ports 保留静态 metadata 而不执行 producer。依赖计划保留未解析需求，不生成矩形近似。
 
-`start_dependency` 复制校验后的 metadata、参数、original Q 与不可变输入 bundle identity。Generic Atomic 每次最多一个 sample。依赖观察模型可以表示 HW image atom，但当前 registry `start_dependency` 会在 continuation 创建前对结构化 image 输入或推导出的 image 输出返回 `TypeMismatch`；`ExecutionContext::execute_atoms` 也拒绝 planar image plan。 RequestRecord 保留完整 Q。ABI version 11 的 C plugin descriptor 可提供 joint table，支持 PerAtomOutcome，逐成员验证 outcome。普通 singleton start 接受一个 observation，并应用已声明的 tuple 闭包；修改失败标志不能扩展该范围。下述显式 static mapping 路径可以接收区域 Atomic 查询。
+`start_dependency` 仍是 Value-fragment Atomic protocol，接收普通 numeric Values，不承载图像 ownership。图像 dependency 使用 `start_result`，其 query 捕获 selected output 和 image-slot demand。每次 staged poll 可先读取声明的 Control samples，再依据值返回 Data image Need。成功 publication 附带 `ResultRelation`，记录实际消费的 control 和 data support。`Exact`、`Conservative` 和 `Unknown` 在组合和 dirty query 中保留各自含义。RequestRecord 和 Result continuation 保留其 selected output 的完整 captured query。基础 numeric C operation API 为 ABI 11；结构化 Result C table 独立使用 ABI 1。C++ 与 C Result callbacks 提供 typed image needs 和 Result publication；已删除 planar-only C header 和 executor，不提供兼容 shim。
 
 Continuation 在宿主分配中原位构造。`poll` 只消费已提供 fragment，返回逐输出关联的 Need 或完整结果。`supply` 的每个端口必须精确匹配取数并集及 bundle identity。 即使不读取源像素，每个原子 row 仍保留 descriptor 证据。终端依赖与 original Q 单独保存，不产生原子证书。证书 identity 包括 registry definition 实例、backend、全部 traits、参数、输入输出 metadata 和 bundle identity；只有同一契约下的不同原子查询才能 restrict/merge。
 
@@ -79,9 +83,21 @@ Discovery 工作量、poll 数、continuation 字节及阶段输出/scratch 有�
 
 默认路径每次执行一个 Atomic 观察。既有同步 Whole 保留完整全局观察及 validation， 不能据此扩大分阶段 sample 查询。终端按完整 original Q 执行一次。直接 `OperationRegistry::invoke` 对已提供的不可变 Value 采用同一观察规则。Frozen 执行保留捕获的图和输入 owner。当前 CPU 依赖执行按串行 ready 顺序推进，符合调用者的 maximum parallelism 上限。Legacy Whole 记录在实际请求时每 Run 至多执行一次，未连边 effect 仍执行一次。 纯 Whole 祖先延迟解析，后代合法缓存命中无需再次物化祖先像素。Atomic Value stream 按配置的 tile 交付并释放，终端 stream 保留完整 original Q。
 
-公开 progressive workflow 与 `test_dependency_program` 覆盖 generic Value 源发现、 legacy->staged->legacy 组合、完整 Q 终端、单 worker 推进、有限 admission、取消及 frozen 输入所有权。成功的依赖 Run 发布不可变结构证据，见下文。活跃 demand 替换、共享 Flight 与依赖 result cache 复用见下文及[缓存模型](Cache-Model.zh.md)。C++ 和 C staged GPU fragment transport 接入 generic Value 路径，详见 Fragment Atlas。它们不表示 image-v2 dependency 可执行。
+现有 progressive Value workflows 涉及 source discovery、组合、full-Q terminal behavior、worker progress、有限 admission、取消和 frozen input ownership。13 项 focused 检查全部通过，包括 `test_execution_dependencies`、`test_multi_output_execution` 和 `test_generic_result_cache`；覆盖 numeric workflow 行为、alias root-cache 命中且实际输出为 14、准确 dirty 传播和有界 proof work。Result contract fixture 覆盖 captured facts、owner retirement、tuple closure、跨 frame support、dirty transpose 和 semantic-alias diamond rebind。Native Metal 验证通过 affine 与 broadcast packed transfer，并在 500-unit 限额下拒绝 root work；Result fixture 回读到浮点值 4。五个 installed consumers 均通过：unified workflow、C++、Result contracts、C11 和 native GPU。C fixture 验证消费 `ResultObjectNeed` 后绑定动态 Field domain，包括零行/非零行替换。`source_support()` 预算不足时返回带类型的 `ResourceExhausted`。成功的 dependency Runs 发布不可变结构证据，见下文。活跃 demand 替换、共享 Flight 与 dependency result cache 复用见下文及[缓存模型](Cache-Model.zh.md)。C++ staged GPU fragment access 已接入[Fragment Atlas](Fragment-Atlas.zh.md)。有界 native discovery 见 [GPU Discovery](GPU-Discovery.zh.md)。
 
-[依赖采样算子](Dependency-Sampling.zh.md) 描述 STMap helper 契约及可执行的 generic radius gather/scatter。存在 helper 说明不代表 STMap 图像路径可通过当前 dependency executor 调用。可选纯静态 validator 在编译时及直接 Empty 查询的 state 决策之前执行。
+[依赖采样算子](Dependency-Sampling.zh.md)描述 STMap helper 契约及 generic radius operations。当前 STMap 图像路径仍使用旧 Value dependency contract，不能提供 Result image ownership；当前 catalog 可用性见[图像 operations](Image-Operations.zh.md)。可选纯静态 validator 在编译时及直接 Empty 查询的 state 决策之前执行。
+
+## Structured Result 图像依赖
+
+Structured Result callbacks 使用显式的 `ResultValueNeed`、`ResultImageNeed` 和 `ResultObjectNeed` records。Image Need 指定 input、image slot、逻辑 sample Footprint 和 role。Coordinator 在提供 capability 受限的 `ResultImageInput` 前，会依照 input Result schema 和已认证 coverage 校验 Need。该 capability 只授权请求的 samples，不会触发隐藏读取。
+
+Callback 可分阶段执行。例如，先请求 map/control Value fragments，在后续 poll 读取这些 samples，再请求 control values 所选择的 image source samples。最终 image publication 为每个 output observation 附带 `ResultRelation` row，记录已消费 Control support 和选中的 Data support。真正未消费的 control coordinate 不会产生 relation edge；tile 边界也不会把整个 tile 的所有 samples 变成 dependency。
+
+`ResultRelation` 是不可变的结构 evidence。其 image slot support 使用展平的 `{frame, layer, descriptor axes...}` 坐标，保留 target、slot，并区分 Data、Control、Validation 和 Descriptor roles。Tensor description facets 和其他已声明语义 descriptor facts 通过对应的 Descriptor/Validation support 消费；layout group 不会隐式创建 sample support。Ancestry relation 记录原始 Need port，以便 replacement 沿同一个逻辑 input rebind evidence。Result runtime descriptor witness 可通过 Descriptor role（bit 8）执行 transpose；numeric Value descriptor/facet 是静态契约，变化需要重新编译，因此 numeric Value dirty query 只接受 payload roles 1..7。`visit_declared()` 为 representation/projection validation 枚举声明的已知 spans，包括 Unknown relation 中仍可见的部分；成功不证明关系完整或 clean。普通 `visit()` 和 `intersects()` 对 Unknown 仍返回 unresolved。只有完整 captured coverage 才能使 `Exact` 证明 clean；`Conservative` 可以扩大 potential dirty；`Unknown` 始终是 unresolved。
+
+`ExecutionDependencies` 和 shared dependency manifests 保留 relation evidence 与 source associations，不保留 pixel payload、`ResultRef` owners、source callbacks 或 workers。已发布的 `ResultRef` 另外拥有 typed image backing，并可通过单调 association 保留已消费的输入 Result owners。`ResultRef::capture()` 将 descriptor、relations 和 dependency evidence 固定在同一个认证 revision；host actor 发布该 captured view。`DemandHandle::replace_bindings` 提交新的 immutable inputs 时，会按旧 evidence 的 source support 对比字节，并沿 captured relation 计算 potential dirty。已消费的 Control sample 变化会使旧输出 relation dirty；下次 request 在新 binding generation 下发现新的 Data support。未消费的 controls 保持 clean。Semantic-alias diamond ancestry rebind 已由 focused Result contract fixture 验证。旧 evidence 保持不可变，继续描述旧 generation。
+
+Dependency 和 dirty queries 消费逻辑 sample relation 作为证据。Tile projection 可以合并物理 I/O，但不能取代 relation，也不能把无关 samples 认证为已读取。Empty image demand 不执行 sample 工作，同时保留 descriptor 和 control obligations。Public `ResourceMap` 和 `ResourceVector` 结果拥有 root 计量的 metadata。复制的 coverage map、source observation vector 或 Result output map 会保留 names、容器存储以及其中的 Result owners，直到释放为止。Consumer 不再使用时应 move 或释放这些容器，并将其副本纳入与 payload 和 relation 工作相同的资源预算。Continuation state、I/O、relation/maps、payload、队列、work 和 retained owners 在同一个 execution root 下受预算限制。
 
 ## C 分阶段程序的内存与错误路径
 
@@ -102,7 +118,7 @@ poll 提交逐输出、逐端口和角色的精确 run 与 tag 关联。Atomic �
 
 `checkpoint_before`、`checkpoint_read` 和 `checkpoint_publish` 传递复制后的状态，不增加输入读取权限。查询未命中时成功返回 handle 0；命中时导入完整成功 witness，并返回 sequence 和字节数。非零 handle 仅在当前 poll 返回前有效，与 invocation 共用单调 ID 空间。`checkpoint_read` 复制正长度且范围有效的字节区间，不暴露 storage 指针。发布会把正长度 opaque state 复制到由当前 stage allocator 分配的 packed UInt8 Value；operation 必须声明足够 workspace。状态必须编码完整且确定的算法值，不含指针、handle 或未初始化 padding；之后修改来源字节不会改变已发布状态。复制工作在分配或访问前计费。无效 handle、区间、scope 或 terminal 使用会产生 sticky failure。
 
-C staged Value fragment 路径接受 generic Value 和合法完整 ColorArray tuple；需要 planar storage 的结构化 image descriptor 会在 callback 发布前被拒绝。`PlanarImage` 是独立的 image storage contract。原生插件仍是受信任的进程内代码，指针元数据校验不提供内存隔离。
+C staged `dependency_program` table 保持 Value-fragment protocol。独立版本化的 Result operation table 提供 typed Result/image ports、image Needs、Result publication、relation rows、borrowed service scopes 和 sticky host errors。基础 C operation table 仍为 ABI 11；Result operation ABI 为 1。原生插件仍是受信任的进程内代码，指针元数据校验不提供内存隔离。
 
 `test_dependency_plugin` 加载真实 C11 模块，检查四种 dtype、负 stride、 两个远端样本与中间缺口、owner 保留、start 失败、忽略读取错误、重复发布、 取消、库生命周期和 full-Q RequestRecord。公开 workflow 只读取 16 字节， 验证实际 admission 边界及少一字节的失败，并检查取消清理后恢复执行。 同一测试和 C 模块也通过安装包分别消费静态库和共享库。
 
@@ -114,7 +130,7 @@ C staged Value fragment 路径接受 generic Value 和合法完整 ColorArray tu
 
 `coverage()` 表明证据完整的命名输出样本域。`certificate(node)` 返回已观察的 Atomic rows；未知 node、Whole 和 terminal 均返回 NotFound，不能据此宣称未知 row 为 clean。`potential_dirty(input, samples)` 对捕获关系及已记录输出子域精确， 只沿直接订阅使用真实 `DirtyDeltaQueue` 传播。同代稍后到达的新 delta 会再次传播。 入口 Footprint 复制、遍历和答案增长有总量边界，取消和 ResourceExhausted 均显式失败，不返回部分 clean/dirty 答案。
 
-该查询仅处理固定 declaration 下的 payload 变化。Descriptor/schema 替换沿重新编译路径；样本记录图未表示 metadata-output 原子，因此拒绝 Descriptor-role 编辑。逐节点 certificate 仍保留非空间 tag，可直接在该节点执行 transpose， 不把缺少 metadata-only 上游样本记录误判为 clean。
+该查询处理固定 declaration 下的 payload 变化。Numeric Value descriptor/facet 是静态契约，变化需要重新编译，不作为 dirty sample edit 接受。Typed Result runtime descriptor observations 使用 role bit 8，可沿 captured relation transpose；改变已编译 schema 的 Result descriptor/schema 仍需重新编译。样本记录图没有跨节点 metadata-output atoms。逐节点 certificate 保留非空间 tags，可在该节点 transpose；若未记录 metadata-output atom，API 不会据此推导上游 metadata clean。
 
 `restrict({name: subset})` 沿已保存直接关联后向收缩所有相关 Atomic rows 和订阅， 移除不再需要的记录和 root。未知覆盖域拒绝；非空 Whole 子集保留完整全局 manifest， Empty Whole 子集没有 payload 支持； terminal RequestRecord 仅接受相同完整 Q。Atomic Empty 是已知空，省略的输出名则不在结果中。该操作不读取像素或调用算子。
 
@@ -122,9 +138,9 @@ C staged Value fragment 路径接受 generic Value 和合法完整 ColorArray tu
 
 ## 精确 demand 与 binding generation 状态机
 
-`ExecutionContext::open_demand(plan, bindings)` 固定当前图契约及不可变 Value/snapshot bindings。`DemandHandle` 副本共享 bundle 和 generation。`request({name: Footprint})` 返回精确 `ValueFragments`、诊断和结构证据，每个请求保留 original Q。Generic Atomic callback 每次最多处理一个样本；观察模型虽可表示 HW 图像像素，当前 registry `start_dependency` 会在建立 continuation 前拒绝结构化 image 输入或推导出的 image 输出，`execute_atoms` 也拒绝 planar image plan。staged terminal RequestRecord 一次接收完整稀疏 Q。 Legacy 同步 terminal 只接受矩形 Q。Empty 输出验证静态 metadata，跳过 source 读取、 admission 和 continuation callback；未请求的名称不出现在结果中。 `execute_fragments(frozen, Q)` 对固定 bundle 提供相同精确查询，结果 generation 为零。
+`ExecutionContext::open_demand(plan, bindings)` 固定当前图契约及不可变 Value/Result bindings。`DemandHandle` 副本共享 bundle 和 generation。`request({name: Footprint})` 返回稀疏 Value fragments 或具名 ResultRefs、诊断和结构证据；每个请求保留 original Q。Value Atomic callback 保持 Value 契约；structured Result callback 通过 typed Needs 接收 selected image slots。Staged terminal RequestRecord 或 Result callback 对其 selected output 接收完整 captured query。Empty output 校验静态 metadata 和 descriptor obligations，然后跳过 sample 读取。未请求的名称不出现在结果中。`execute_fragments(frozen, Q)` 对固定 bundle 提供相同精确查询，结果 generation 为零。
 
-成功请求按精确命名 query 保留结构 publication。`replace_bindings` 比较旧记录所需 source support 的不可变字节，通过既有关系计算 potential dirty，将新 bundle、 generation 和累计 dirty 一起提交，不信任调用者 dirty hint。控制证据变化后，dirty 一直保留到该精确 query 成功重新发布，即使数值结果相同。`source_support()` 是字节比较使用的有界取数并集，不能替代逐输出证书关联。当前支持的完整 ColorArray tuple 比较包括完整 C；结构化 image plan 不属于该 Value dependency 路径。Generic 比较保留全部 dtype 位模式。静态 descriptor/schema 变化需要重新编译 plan。
+成功请求按精确命名 query 捕获不可变结构 publication。`replace_bindings` 将新 bindings 与 captured evidence 实际消费过的 source support 比较，通过旧关系计算 potential dirty，再原子提交新 bundle、generation 和累计 dirty。不信任调用者 dirty hint。已消费的 Control evidence 变化后，dirty 会保留到对应 query 成功重新发布，即使 output value 恰好相同。新请求可以在 replacement control values 下发现不同 Data sample 或 Result image slot；新关系取代新 generation 的 support，旧 evidence 保持不变。`source_support()` 是字节比较用的有界取数并集，不替代逐 output relations。ColorArray tuple 比较包括完整 C；generic 比较保留全部 dtype 位模式。Numeric Value descriptor/facet 变化，以及改变已编译契约的 Result schema 变化，需要新编译 plan；typed Result runtime descriptor edits 通过 roles=8 和声明的 Descriptor/Validation support 参与 dirty query。Tensor semantic metadata 和 descriptor edits 由声明的 support 表示，不从 tile geometry 推导。
 
 替换在发布前验证全部 bindings。样本、metadata 限额或验证失败保留旧 generation； 与 request 发布或其他 replacement 竞争时返回 Stale，供调用者重试。已完成替换前捕获的 latest 请求不能发布到新 generation，取消优先于 Stale。`freeze()` 固定当前 bundle，独立于后续编辑；`release(Q)` 删除一个精确订阅，但不取消活跃请求，后者仍可重新发布该订阅；`cancel()` 停止该 handle 并退休其 publication 和 bundle。Context 析构先取消并排空活跃 demand 调用，再退休既有 workers。直接 context 调用不能与析构竞争，已有 handle 调用可与析构竞争。 输入 owner 析构在 publication mutex 之外执行。
 
@@ -136,7 +152,7 @@ U2 兄弟工作集反例已成为真实 `test_dependency_program` workflow：A�
 
 ## 共享精确观察 Flight 状态机
 
-`request` 和 `execute_fragments` 认领单个 generic Value Atomic 样本，或完整 terminal Q。依赖证书可用 HW atom 表示一个图像像素；当前 Value 依赖路径仍会拒绝结构化 planar image plan。Key 绑定捕获的 bundle 身份、plan/operation 契约、节点、geometry、精确 query 和资源策略。共享要求所选结果相关输入祖先的实现都 deterministic 且 side-effect-free。 排除的输入不影响共享或缓存资格。因此，即使本地 callback 是纯函数，带副作用或非确定性的 Whole 祖先也会阻止下游共享。Dispatch 不扩大 Q，不合批 RequestFailureOnly 观察。
+`request` 和 `execute_fragments` 认领 selected output 的精确 Q。Value Atomic observations 和 structured Result image observations 使用各自的 producer protocol；structured image query 还绑定 selected image slot。Key 绑定 captured bundle identity、plan/operation contract、节点、geometry、精确 query、output selection 和 resource policy。共享要求 selected result 相关输入祖先的实现全部 deterministic 且 side-effect-free。排除的输入不影响共享或缓存资格。即使本地 callback 是纯函数，带副作用或非确定性的 Whole 祖先也会阻止下游共享。Dispatch 不会超出声明的 tuple closure 扩展 Q，也不合批 RequestFailureOnly observations。
 
 目录线性化认领，为 producer 分配唯一 FlightId，并将 waiter 的取消/当前性与 producer token 分开。显式 token 和辅助 set token 都属于 waiter。调用方 coordinator 推进阶段并等待依赖；callback worker 不等待其他 Flight。等待 callback 时 coordinator 检查祖先 waiter。发起父请求取消后，仍被独立 waiter 需要的子节点可以完成。Latest waiter 在 replacement 后变为 Stale 时，frozen waiter 同样可取得旧 bundle 的成功结果。
 
@@ -206,11 +222,11 @@ C joint table 复用 singleton 的服务及完成验证器。共享单调句柄�
 
 `DependencyCertificate::create_mapped` 保存不交覆盖片段及端口/role 轴映射。 每个输入轴选择一个独立 observation 轴或固定区间，tags 单独保存。该闭合集合表示可精确计算 broadcast/permutation 的 backward demand 和 dirty transpose，无需枚举复制后的输出样本。Restriction 与相同 map 的 merge 使用集合几何；不同 map 的重叠可能需要有界逐行比较。`row` 解析一个观察，`materialize` 显式生成有界 rows，mapped 证书调用 `rows()` 会抛异常。所有变换限制工作量和保留元数据，包括规范化增加的 boxes。 `storage_entries()` 统计实际保留的坐标、支持集和 tags，供 cache admission 使用， 独立于去重后的源支持投影。
 
-CPU staged Atomic 输出可声明完整不相交的 `static_dependency_pieces`，也可由 metadata specialization 生成。每个 piece 携带 observation coverage 和完整各端口 dependency； `DependencyAxis::translation` 针对该 piece coverage 应用。首次 `DependencyNeedBatch::static_mapping` 请求 Q 对应的完整注册 pieces；不允许动态 associations、重复请求、GPU、joint 或 checkpoint。成功 supply 后才能发布，宿主自动保留 descriptor tags。Data 与 Validation 可不同：可接受的 ColorArray tuple 中，Data 可选择一个通道，Validation 闭包扩展到完整 C；每端口取数并集须满足完整 tuple 规则。要求 planar storage 的结构化 image 仍使用独立 `PlanarImage` 路径。普通与 structured executor 均推进一个区域 session 并保留紧凑证书。C descriptor 不暴露该 C++ 字段。
+CPU staged Atomic Value output 可声明完整不相交的 `static_dependency_pieces`，也可由 metadata specialization 生成。每个 piece 携带 observation coverage 和完整各端口 dependency；`DependencyAxis::translation` 针对 piece coverage 应用。首次 `DependencyNeedBatch::static_mapping` 请求 Q 对应的完整注册 pieces；不允许动态 associations、重复请求、GPU、joint 或 checkpoint。成功 supply 后才能发布，宿主自动保留 descriptor tags。Data 与 Validation 可不同：可接受的 ColorArray tuple 中，Data 可选择一个 channel，Validation 闭包扩展到完整 C；每端口取数并集须满足完整 tuple 规则。Structured Result image operations 通过 `ResultRelation` 发布展平 `{frame, layer, descriptor axes...}` samples 的依赖。Tensor description facets 参与声明的 metadata/validation dependencies；物理 layout groups 不生成隐式 support。C dependency descriptor 不暴露该 C++ Value protocol 字段。
 
 ### 跨 output 的 pure block sharing
 
-`share_blocks_across_outputs` 是语义 trait version 20 的 opt-in field，默认 false， 仅适用于 pure Atomic dependency-v1。宿主使用包含完整 resolved output contract、static parameter、input metadata 与当前 supplied bytes、incoming state、phase/range 和 mode 的 common block namespace。公开 output 与 dependency certificate 仍独立；该 namespace 不是 joint output，也不负责并发 producer 协调。Static mapping 和 regional Atomic 程序不能启用该字段。公共 namespace 中的 transition 必须独立于 selected output index 与 metadata；如需区分，必须显式编码到 incoming state 或 mode。原有禁止依赖原始 Q 的约束继续适用，宿主不会通过分析 callback 代码推断 purity。
+`share_blocks_across_outputs` 是语义 trait version 21 的可选字段，默认 false，仅适用于 pure Atomic dependency-v1 Value operations。宿主使用由完整 resolved output contract、static parameters、input metadata 与当前 supplied bytes、incoming state、phase/range 和 mode 组成的 common block namespace。Public outputs 与 dependency certificates 仍独立；该 namespace 不是 joint output，也不负责并发 producer 协调。Static mapping 和 regional Atomic 程序不能启用该字段。公共 namespace 中的 transition 必须独立于 selected output index 与 metadata；如需区分，必须显式编码到 incoming state 或 mode。原有禁止依赖 original Q 的约束继续适用，宿主不会通过分析 callback 代码推断 purity。Structured Result outputs 使用独立的 output-scoped continuation、Result identity 和 support publication。
 
 可选 retention 仅在 `result_cache_bytes` 为正且 proof-work budget 准入 key/retention 工作时使用 accounted result LRU。miss、关闭 cache 或 proof budget 耗尽时按相同 block transition 重算；不保证每个 Run 只执行一次。
 

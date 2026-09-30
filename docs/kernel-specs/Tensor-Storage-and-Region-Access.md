@@ -5,19 +5,18 @@ kind: shared_kernel_contract
 status: Accepted
 implementation_status: implemented_cpu
 clarification_status: selected_storage_policy_complete
-inspection_commit: d49d1840
 ---
 
 # Tensor storage and region access
 
-This is the storage contract implemented by package 0.19.0, following the FMT
-clarification of 2026-09-22. [Chinese reader version](zh/Tensor-Storage-and-Region-Access.zh.md).
-It owns physical layout, tile geometry, region access and storage ownership;
-[FMT-common](../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)
-owns the associated color/alpha interpretation. The supported CPU interfaces
-and explicit migration boundaries are described below. This implementation does
-not preserve the retired image memory/numeric contracts. The implemented FMT-01
-family is documented in [Channel and color operations](../kernel-architecture/Channel-and-Color-Operations.md).
+This is the CPU storage contract in package 0.29.0 and WorkflowDocument schema 4.
+[Chinese reader version](zh/Tensor-Storage-and-Region-Access.zh.md). It owns
+physical layout, tile geometry, and region access. A structured `ResultRef` is
+the sole semantic, publication, input/output, and lifetime owner for image data;
+`PlanarImage` is private typed backing inside its image slots. It does not create
+a second public image result or execution path. [FMT-common](../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)
+owns associated color/alpha interpretation. This contract does not preserve the
+retired image memory/numeric interfaces or provide compatibility adapters.
 
 ## Confirmed decisions
 
@@ -33,15 +32,15 @@ family is documented in [Channel and color operations](../kernel-architecture/Ch
 | Page preparation | Explicitly acquire/prepare required pages before running the operator, with resource/cancellation checks. Do not use page-fault handling to dispatch DAG computation. |
 | Page retention | Retain produced page backing until the image's final lifetime owner retires; fail on budget exhaustion. No automatic eviction, DAG replay or temporary-file paging. |
 
-Graph-wide geometry replaces the earlier per-plane/per-operator tile proposal.
-One continuous image virtual range replaces the earlier independent block-owner
-proposal. Physical page backing is provided on demand. These do not restore
-Image/Layer as special semantic carrier types.
-Generic tensor shape/dtype, explicit structural layout, color groups and consumed
-metadata remain separate. Raw/override does not change actual storage addresses
-or turn an interleaved import into a planar image by relabeling it.
+Graph-wide geometry remains the selected tile policy. Each typed image slot owns
+one planar backing per frame/layer pair; each backing uses one continuous image
+virtual range with pages provided on demand. A typed Result image slot is the
+semantic image carrier. The former Image/Layer Value special cases remain
+retired. Generic tensor shape/dtype, physical layout, color groups and consumed
+metadata remain separate. Raw/override does not change storage addresses or
+turn an interleaved import into planar storage by relabeling it.
 
-The 2026-09-23 [codec-boundary clarification](../built-in_ops/02-format-color/op_specs/FMT_codec_boundary.md)
+The [codec-boundary clarification](../built-in_ops/02-format-color/op_specs/FMT_codec_boundary.md)
 requires same-size, co-sited color/alpha planes within an image, including
 full-resolution Y/Cb/Cr. External chroma subsampling and physical layout/packing
 belong to input/output codecs; FMT-16/17 are retired. This clarifies the image
@@ -70,8 +69,20 @@ owner and row pitch without requiring full-row copying.
 One tensor retains its uniform dtype and shape relationships. A color group and
 alpha can share that carrier while retaining independent semantic roles. This
 storage contract defines no premultiplied Lab and does not apply a color transfer
-to alpha. Operations declare the groups/components they consume; merely sharing
-one backing does not add a whole-color/alpha validation or payload-read obligation.
+to alpha. Semantic Image and ColorArray facets preserve their existing complete
+channel-tuple closure, including alpha when it is a channel. TDM-only facets and
+`PlanarImageLayout::groups` describe metadata or physical organization and do
+not add peer-channel or alpha sample demand. An operation's declared sample
+needs remain the dependency authority.
+
+For a structured image slot, each backing descriptor keeps its declared axis
+order. `{H,W}` and `{H,W,C}` are common examples, not required axis orders. A
+CHW backing uses descriptor shape `{C,H,W}` and maps channel, height, and width
+to descriptor axes 0, 1, and 2. Result logical coordinates prepend frame and
+layer, so that backing appears as `{N,L,C,H,W}` to sample requests. `N` and `L`
+are positive and `N*L` is bounded by 4096. The slot schema retains frame/layer
+identity, while plane and tile formulas apply independently to each backing.
+Frame and layer are not flattened into color channels.
 
 ## Continuous and tiled planes
 
@@ -138,10 +149,11 @@ arithmetic before proportional allocation.
 Tile size is a graph policy rather than an operator parameter. The 128x128
 planning default remains configurable. **Tile height and width must each be a
 positive power of two. Non-power-of-two tile geometry is unsupported** and is
-rejected with InvalidArgument by `Compiler::plan` and `PlanarImage::create`,
-including geometry attached to continuous storage. Image and ROI extents may be
-arbitrary positive sizes; incomplete edge tiles retain their actual valid extent.
-Validated geometry permits shift/mask address calculation.
+rejected with InvalidArgument by `Compiler::plan`; `ResultBuilder` validates
+the tile geometry when it creates private backing, including for continuous
+storage. Image and ROI extents may be arbitrary positive sizes;
+incomplete edge tiles retain their actual valid extent. Validated geometry
+permits shift/mask address calculation.
 Halo reads and cross-tile ROIs may exceed a tile; they do not change stored output
 tile geometry. Tileless numeric tensors are not assigned fictitious image axes.
 Incoming image storage that does not match the required planar/tiling layout
@@ -152,20 +164,23 @@ must be normalized through the explicit import/layout conversion boundary.
 Contiguous means one reserved virtual byte span with a shared lifetime owner,
 including its alignment gaps. It does not require adjacent physical RAM frames
 or eagerly provided backing for the full image. Each coordinate has a stable
-address offset within that range. A plane/tile view retains the address-space
-owner and the backing needed by its access window. Keeping that owner alive
-retains the whole virtual reservation and all page backing already containing
-produced data. Retiring a small window does not evict those pages while the image
-remains alive. The final lifetime owner releases the pages and virtual reservation.
+address offset within that range. Internal plane/tile access retains the backing
+needed by its bounded window. The owning Result retains every frame/layer
+backing and all pages already containing published data. Closing an internal
+access window does not evict those pages while the Result remains alive. The
+last Result owner releases its image pages, virtual reservations, and retained
+input associations.
 
-An access request identifies exact logical coverage and components. Map that
-coverage to corresponding tile portions; return supported read views/fragments
-or explicitly materialize a packed read region. Crossing tiles does not require
-collecting the complete image. Physical transport/page granularity may exceed
-logical demand and must be reported/accounted separately. Partial image outputs
-occupy their offsets within the reserved full-image range. Packed temporary read
-windows are permitted as explicit staging, but independent ROI allocations are
-not the authoritative storage of the same image.
+An image access request uses the Result schema and an exact logical sample set.
+The coordinator maps it to page/tile portions and the typed `ResultImageInput`
+exposes reads bounded by the captured descriptor, selected slot, published
+coverage, and declared Need. A C++ or C callback reads samples through its
+Result service; it cannot construct or retain a `PlanarImage` owner or acquire a
+standalone image window. Crossing tiles does not require collecting the complete
+image. Physical page/transport granularity may exceed logical demand and is
+accounted separately. `ResultBuilder::publish_image` writes exact output regions
+and certifies their support before publication. Packed staging may occur inside
+the host, but it is not a second authoritative image representation.
 
 Distinguish virtual reservation, provided page backing, and valid produced sample
 coverage. A newly provided zero-filled page does not make all its pixels valid.
@@ -176,17 +191,18 @@ or validate other samples sharing its pages. Missing sample coverage
 is never an implicit zero. Published regions remain immutable, including when
 other disjoint regions in the same image are produced later.
 
-The executor explicitly prepares the necessary source/destination pages and
-upstream data before operator access, with budget/cancellation checks. Operators
-receive bounded access windows retaining their pages for the access lifetime;
-no window may be invalidated while in use. Kernel dispatch and resource failure
-must not be hidden in a synchronous fault handler. This does not promise that
-the operating system itself never incurs an ordinary demand-page fault.
+The structured Result coordinator explicitly prepares source backing and
+upstream data before a callback reads samples, with budget and cancellation
+checks. Private host windows retain pages while in use; callback capabilities
+remain bounded to the Result Need. Kernel dispatch and resource failure are not
+hidden in a synchronous fault handler. This does not promise that the operating
+system itself never incurs an ordinary demand-page fault.
 
-Do not expose the entire reserved range as an unconditionally readable ByteView.
-Access needs both provided backing and authorized valid sample coverage. Dense
-export acquires its complete required region explicitly. A raw numeric consumer
-does not bypass either requirement.
+The public Result API does not expose the reserved range as an unconditionally
+readable ByteView or a standalone `PlanarImage` factory. Image reads require a
+valid Result descriptor and published sample coverage. Dense export requests
+its complete region explicitly. A raw numeric consumer does not bypass either
+requirement.
 
 Accounting separates reserved virtual bytes from page-backed bytes and metadata.
 Charge each actually provided page's full capacity, including any row/alignment
@@ -195,8 +211,8 @@ may retain more backed pages than its logical payload, so both amounts must be
 reported. Page provision/commit is not a portable promise about physical RSS.
 Address reservation limits and sparse bookkeeping need explicit admission; do
 not allocate one metadata record for every possible page in a huge unused range.
-Cancellation, source failure and allocation/provision failure publish no success
-for the affected observation and release unpublished resources normally.
+Cancellation, source failure and allocation/provision failure fail the affected
+Result publication and release unpublished resources normally.
 
 ## Selected lifetime and failure policy
 
@@ -208,11 +224,9 @@ page backing, while OS residency is separate. Active access windows cannot be
 revoked. Unpublished failed allocations can be released normally, without
 discarding already published observations or data sharing a provided page.
 
-The CPU storage owner and window APIs implement this policy. FMT-01 remains a
-separate Proposed operator family using auto/view/materialize: its materialized
-result must provide requested samples within a full-result virtual range. Packed
-ROI reading is an explicit access-window operation, not a second authoritative
-image representation.
+The CPU Result owner and its private planar backing implement this policy.
+Packed ROI reads are bounded accesses to the Result's image slot; they do not
+create another semantic image object or publication route.
 
 ## Checked row-padded edge example
 
@@ -235,128 +249,145 @@ requires the page at index 9, or 16384 backed bytes, while only four sample byte
 are requested. It does not make the other pixels in that page valid. This also
 shows why valid-byte count, virtual span and page-backed capacity are separate.
 
-A standalone integer-address enumeration in this documentation session checked
-all 104000 sample starts for unique addresses and bounds, comparing a sequential
-tile-prefix construction against the closed-form offsets above. It also checked
-the total reservation and that one-sample page calculation. An additional full
-64x64 UInt8 tile case checks that its 4096-byte payload still advances to the
-next 16384-byte page boundary under this host geometry. It did not allocate
-virtual image storage, run an operator or measure OS residency.
+## Result-owned image storage and public interfaces
 
-## Implemented CPU interfaces and migration boundary
+The public contract has independent package, workflow, traits, and plugin
+versions: package 0.29.0, WorkflowDocument schema 4, semantic operation traits
+21, numeric C operation ABI 11, and Result operation ABI 1. These versions are
+not interchangeable. Structured Results own image publication and lifetime through typed slots backed by planar pages.
 
-[PlanarImage](../../include/photospider/data/planar_image.hpp) is a physical
-storage owner for a generic `ValueDescriptor`, facets, resources and structural
-axes/groups. It imposes no RGB, alpha-range, premultiplication or color-transfer
-arithmetic. Rank-two storage declares height/width axes and no channel axis;
-rank-three storage declares all three axes explicitly. Current physical dtypes
-are UInt8, Int64, Float32 and Float64. Component groups are nonoverlapping channel
-intervals, with at most 64 groups and a nonempty role of at most 128 bytes.
+```cpp
+struct ResultImageSpec final {
+  ResourceString key;
+  std::uint64_t frames = 1, layers = 1;
+  ValueDescriptor descriptor;
+  PlanarImageLayout layout;
+  std::vector<ValueFacet> facets;
+};
 
-`PlanarImage::create` reserves a full image without making samples valid.
-`import_value` explicitly copies a complete interleaved/strided external Value
-into the declared planar layout without an additional full-image packed buffer.
-`publish` copies an exact packed region transactionally. `acquire` returns an
-owner-retaining read window; `row_run` stops at the authorized ROI or tile edge.
-`rectangle_run` returns multiple authorized rows with an explicit byte row stride,
-bounded in both axes by the ROI and physical tile. Each row authorizes only its
-sample span; inter-row padding and tile gaps remain excluded. Read pointers live
-until the window retires; writable pointers live until publication or destruction.
-The transactional writer exposes the same bounded rectangle access. Callers
-synchronize writes and check cancellation during long copies.
-`read` is an explicit packed-region export. No API publishes the whole reserved
-address span as an unconditional ByteView. Missing coverage returns NotFound;
-overlapping publication fails rather than mutating published samples.
+class ResultRef final {
+ public:
+  const SchemaTemplate& schema() const;
+  Result<ResultDescriptor> descriptor(bool require_complete = true) const;
+  Status read_image(const ResultDescriptor&, std::uint32_t slot,
+                    const std::vector<std::uint64_t>& coordinate,
+                    void* destination, std::size_t bytes) const;
+};
 
-A prepared `PlanarImageWriteWindow` supplies only its authorized row runs.
-The host prepares destination pages before invoking an operation and commits
-coverage after successful completion. Abandonment, callback failure or observed
-cancellation rolls back unpublished pages and charges while preserving existing
-published regions. Ordinary read windows do not prevent disjoint publication.
-Lock acquisition observes cancellation. Execution additionally pins external
-input owners against publication until the Run retires (publication returns
-Stale), so input capacity and sample coverage remain stable while their retained
-capacity is admitted.
-
-Accounting distinguishes `reserved_bytes()`, `backed_bytes()`,
-`metadata_bytes()` and `valid_samples()`. Metadata is conservatively charged,
-including owned groups/facets, sparse coverage/page records and transactional
-peak capacity. `resident_bytes()` is an atomic snapshot of backing plus charged
-metadata, **not** measured physical RSS. `PlanarPageBudget` aggregates admitted
-backing and metadata across owners; execution connects its leases to the same
-`MemoryBudget` as generic tensors. Repeated owners and results rebound to their
-own accounting domain must not be charged twice. Per-image virtual, page,
-metadata-record and access-work limits are checked independently.
-
-### Public compiler and execution path
-
-WorkflowDocument schema 3 represents an image with
-`WorkflowInputDeclaration.planar_layout`; its affine `layout` must be empty.
-The declaration records storage mode, spatial/channel axes, row pitch and
-component groups. Its tile geometry comes from `PlanningOptions`, defaulting
-to 128x128 for the entire DAG. Generic numeric declarations retain their own
-affine layout. Raw metadata overrides cannot exchange these storage contracts.
-
-A C++ operation explicitly registers `planar_storage_capable`, a
-`planar_callback`, and `OperationOutputTraits.planar_layout`. The compiler
-checks structural layout continuity on its edges. The callback receives exact
-read windows and a host-prepared write window, not an unrestricted output owner.
-The executor checks bindings against the declaration and DAG tile geometry,
-uses the shared CPU queue/admission services, and checks cancellation/currentness
-before callback work and before publishing results. Named image results live in
-`ExecutionResult.images`. The generic `values` map is not an implicit dense
-image export; callers explicitly acquire or read an image region.
-
-The current planar operation path supports CPU single-output callbacks with
-one or more planar inputs, generic `Value` port schemas and Whole or Elementwise
-region rules. Numerical checks belong to the consuming operation; legacy
-`Typed` and special image/mask/scalar port schemas are not accepted on this path.
-Unsupported callback/trait combinations, including GPU, staged/joint execution,
-prepared metadata specialization,
-workspace declarations and legacy view-output traits, are rejected at
-registration. Planar freeze/demand/stream/atom entry points that do not yet have
-structural image outputs reject the request. Legacy image/Layer structured-result
-schemas are also outside this storage contract and must not bypass the Value
-gates. There is no fallback to legacy image Values, independently allocated
-snapshots or the previous numeric rules.
-These are explicit capability boundaries for subsequent operator migration.
-Generic non-image tensor facilities remain available.
-
-### Runnable acceptance
-
-The [public workflow fixture](../../tests/integration/test_planar_image_workflow.cpp)
-registers a planar copy callback, builds a two-node WorkflowDocument, compiles
-it and executes it through ExecutionContext. Its ROI crosses four stored tiles;
-the oracle checks original sample bits, exact valid coverage and missing-sample
-failure. Additional cases exercise continuous planes, alternate axes, edge
-padding, small page-aligned tiles, owner/window lifetime, resource exhaustion,
-rollback, cancellation and same-context result rebinding. Expected offsets use
-host page geometry; the 16384-byte-page example above is not a platform default.
-The installed consumer builds the same public fixture against the installed
-package, independently of private kernel headers.
-
-Use the repository [build prerequisites](../development/Testing-and-Validation.md#build-prerequisite).
-
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build build --target test_planar_image_workflow -j 8
-ctest --test-dir build -R '^test_planar_image_workflow$' --output-on-failure
-ctest --test-dir build -R '^test_installed_consumer$' --output-on-failure
+class ResultBuilder final {
+ public:
+  Status publish_image(std::uint32_t slot, const Region& region,
+                       ByteView packed, ResultRelation relation,
+                       ResultFinality finality);
+  Result<ResultRef> seal();
+};
 ```
 
-A passing planar fixture exits with status zero after checking both the DAG
-result and storage boundary cases. The package gate also retains generic tensor,
-C SDK and shared-library consumer checks. Retired image-contract golden tests
-are not evidence of support for the new interfaces.
+The excerpt omits schema fields, budget/cancellation arguments, and unrelated
+Result operations. `SchemaTemplate` holds image slots and any primitive fields
+that share the Result contract. `ResultFieldSpec` remains packed primitive
+records; image samples use typed image slots backed by planar pages.
+
+`ResultRef` is the public owner of image schema, published sample coverage,
+dependency relation and lifetime. `ResultRef::capture()` snapshots the certified descriptor, field/image relations,
+descriptor basis, and dependency bundle at one revision. The Result’s ordered
+source association remains separate live state and may grow monotonically as
+inputs are consumed. The host actor publishes this captured view, preventing an
+observer from pairing earlier evidence with a later prefix. Result resources
+retain schema-declared owners, including ICC/OCIO resources referenced by
+typed image facets; the compiler selects nested resources and runtime bindings
+are admitted again under the execution resource root. The public `PlanarImage` class retains
+structural `validate_layout` checking and read-only declarations, but creation,
+import, view assembly, read/write acquisition, packed publication, and image
+reads are private implementation methods accessible to `ResultBuilder` and
+`ResultRef`. Valid backing is never returned as an independent application
+owner. A Result contains one internal planar backing per frame/layer pair.
+`ResultBuilder` creates that backing under the Result budget, and the last
+owning Result reference retires its pages and virtual reservations.
+
+The memory counters describe this internal backing: reserved virtual bytes,
+page-backed bytes, charged metadata and valid samples are distinct. A window or
+view may retain pages that contain samples outside its logical read set. The
+resource root accounts the page capacity, metadata, staging, relation/maps,
+continuation state, queued work, and retained owners under their respective
+limits. `resident_bytes()` is an accounting snapshot, not measured process RSS.
+An allocation, page preparation, cancellation or callback error cannot publish
+success for the affected observation. Already published regions remain
+immutable; overlap is rejected, and the last Result owner releases its backing.
+
+## Compiler, execution and CPU services
+
+WorkflowDocument schema 4 declares a structured input with
+`WorkflowInputDeclaration.result_schema`; `ExecutionBinding.result` supplies its
+owning `ResultRef`. A named image output is a Result output and appears in
+`ExecutionResult.results` (or `DemandResult.results`). Numeric Values retain their ordinary nonzero extents and affine tensor layout.
+The structural image facet is rejected by Value storage.
+
+`PlanningOptions` captures named output regions and positive power-of-two tile
+extents. The compiler resolves the selected output and image-slot schema before
+execution. `ResultProgramQuery` captures the output index, image slot and
+requested image footprint; tile height/width affect physical backing geometry.
+Image footprints use flattened `{frame, layer, descriptor axes...}` samples and
+close over all channels for the semantic Image or ColorArray tuple contract.
+TDM-only facets and layout groups do not add sample support or alpha demand.
+
+The operation registry selects `start_result` for structured outputs. A
+`ResultProgramNeed` can request typed image samples from a Result input, alongside
+Value fragments, structured Result fields and bounded host I/O. The coordinator
+validates each Need against the source Result descriptor and published coverage.
+The callback reads through `ResultImageInput`/`ResultProgramPhase::read_image`;
+the CPU parallel and CPU tile services provide host computation facilities
+according to the registered operation contract. The callback publishes image
+regions and exact dependency evidence through `ResultBuilder`; it does not
+receive a PlanarImage owner or writable PlanarImage window. C operation modules
+use `result_operation_plugin_api.h` ABI 1 for the corresponding typed Result
+ports and services. The C base numeric table remains ABI 11.
+
+Result execution is coordinated by the same plan and execution context as
+numeric Values. The standard execute/frozen and exact-demand paths return
+named Results; `execute_stream` observes selected Result publication through its
+Result observer. Dependency relations preserve selected sample support across
+Data, Control, Validation and Descriptor roles. A changed, consumed Control
+sample can invalidate the old relation and cause the next request to discover
+new Data samples. A truly unconsumed control or unrelated tile adds no support.
+Typed Result runtime descriptor observations can participate in dirty transpose
+with role bit 8. Numeric Value descriptor/facet changes are static and require
+recompilation; numeric Value dirty queries accept payload roles 1..7. Result
+schema changes that alter the compiled contract also require recompilation.
+See [Global Results](../kernel-architecture/Global-Results.md),
+[Dependency Data](../kernel-architecture/Dependency-Data.md), and
+[Region Semantics](../kernel-architecture/Region-Semantics.md) for the wider
+Result and dirty contracts.
+
+Production image operations that still use image Value contracts are not runnable through Result image slots. Their current source and registry status are listed in [Image operations](../kernel-architecture/Image-Operations.md).
+
+## Current fixture sources
+
+[`test_unified_result_images.cpp`](../../tests/integration/test_unified_result_images.cpp)
+uses test-defined operations for Result image input/output, mixed numeric
+control and Result ports, frame/layer samples, dynamic support and dirty
+replacement. [`test_result_plugin.cpp`](../../tests/integration/test_result_plugin.cpp)
+loads a C11 Result module. CMake also defines an installed-package consumer
+check. All 13 focused checks passed, including 8192-row paging, prefix
+publication, cancellation, shared execution, captured facts, owner retirement,
+tuple closure, cross-frame support, dirty transpose, alias root-cache reuse,
+numeric multi-output behavior, and bounded proof work. The C11 Result fixture
+and native Metal Result fixture passed; the latter dispatched and submitted
+once and read back float value 4. Native GPU checks also passed affine and
+broadcast packed transfers and root-work rejection at a 500-unit limit. Five
+installed consumers passed: unified workflow, C++, Result contracts, C11, and
+native GPU. The C fixture verified dynamic Field-domain binding after consuming
+`ResultObjectNeed`, including Descriptor/Field replacement between zero and
+nonzero rows. Insufficient `source_support()` budget returns typed
+`ResourceExhausted`.
 
 ## Platform reference boundary
 
 [Microsoft VirtualAlloc](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc)
 distinguishes reserve and commit, including host page/allocation granularity and
 the distinction between commitment and physical allocation. It supports the
-terminology here. The CPU backend uses anonymous virtual reservation and
-explicit page protection/provision on POSIX, and reserve/commit on Windows.
-The inspected macOS host reports P=16384 through getconf PAGESIZE; the backend
-resolves host properties rather than assuming 4096. Native macOS acceptance
-does not establish Windows/Linux runtime acceptance. GPU image mapping is not
-provided by the planar callback path.
+terminology here. The CPU storage implementation uses platform-specific virtual
+reservation and page-provision mechanisms; these notes make no claim that every
+target operating system has passed runtime validation. The CPU address formulas
+do not define native GPU image mapping; an accelerator path must retain the
+Result slot's ownership, sample authorization and publication contract.

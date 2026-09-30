@@ -55,15 +55,15 @@ if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
     "${_photospider_consumer_sanitizer_flag}")
 endif()
 
-foreach(_old_minor IN ITEMS 0.23 0.24 0.25 0.26 0.27)
+foreach(_old_minor IN ITEMS 0.23 0.24 0.25 0.26 0.27 0.28)
   find_package(Photospider ${_old_minor} CONFIG QUIET COMPONENTS kernel)
   if(Photospider_FOUND)
-    message(FATAL_ERROR "Photospider 0.28 must reject a ${_old_minor} consumer")
+    message(FATAL_ERROR "Photospider 0.29 must reject a ${_old_minor} consumer")
   endif()
 endforeach()
 
 find_package(
-  Photospider 0.28 CONFIG REQUIRED
+  Photospider 0.29 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
 foreach(
@@ -160,25 +160,6 @@ target_compile_options(photospider_semantic_consumer PRIVATE ${_photospider_cons
 target_link_options(photospider_semantic_consumer PRIVATE ${_photospider_consumer_link_options})
 add_dependencies(photospider_semantic_consumer photospider_contract_fixture)
 
-
-add_executable(photospider_channel_extraction_consumer ../integration/test_channel_extraction.cpp)
-target_include_directories(photospider_channel_extraction_consumer PRIVATE .. ../../examples/numeric_workflow)
-target_link_libraries(photospider_channel_extraction_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_channel_extraction_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_channel_extraction_consumer PRIVATE ${_photospider_consumer_link_options})
-
-add_executable(photospider_transfer_consumer ../integration/test_transfer_operations.cpp)
-target_include_directories(photospider_transfer_consumer PRIVATE ..)
-target_link_libraries(photospider_transfer_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_transfer_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_transfer_consumer PRIVATE ${_photospider_consumer_link_options})
-
-add_executable(photospider_numeric_conversion_consumer ../integration/test_numeric_conversion.cpp)
-target_include_directories(photospider_numeric_conversion_consumer PRIVATE ..)
-target_link_libraries(photospider_numeric_conversion_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_conversion_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_numeric_conversion_consumer PRIVATE ${_photospider_consumer_link_options})
-
 add_library(photospider_expression_contract MODULE ../fixtures/expression_contract_fixture.c)
 target_link_libraries(photospider_expression_contract PRIVATE Photospider::operation_sdk)
 set_target_properties(photospider_expression_contract PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
@@ -197,14 +178,6 @@ target_compile_options(photospider_basic_consumer PRIVATE ${_photospider_consume
 target_link_options(photospider_basic_consumer PRIVATE ${_photospider_consumer_link_options})
 
 # Public structural-image DAG through the installed C++ package.
-add_executable(photospider_planar_consumer
-  ../integration/test_planar_image_workflow.cpp)
-target_include_directories(photospider_planar_consumer PRIVATE ..)
-target_link_libraries(photospider_planar_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_planar_consumer PRIVATE
-  ${_photospider_consumer_compile_options})
-target_link_options(photospider_planar_consumer PRIVATE
-  ${_photospider_consumer_link_options})
 
 add_library(photospider_dependency_fixture MODULE ../fixtures/dependency_fixture.c)
 target_link_libraries(photospider_dependency_fixture PRIVATE Photospider::operation_sdk)
@@ -298,19 +271,8 @@ add_subdirectory(../../examples/multi_output_workflow multi-output)
 target_compile_options(photospider_multi_output_workflow PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_multi_output_workflow PRIVATE ${_photospider_consumer_link_options})
 
-foreach(_handoff_test IN ITEMS region_runs planar_preparation data_movement_contract)
-  add_executable(photospider_${_handoff_test}_consumer ../unit/test_${_handoff_test}.cpp)
-  target_include_directories(photospider_${_handoff_test}_consumer PRIVATE ..)
-  target_link_libraries(photospider_${_handoff_test}_consumer PRIVATE Photospider::kernel)
-  target_compile_options(photospider_${_handoff_test}_consumer PRIVATE ${_photospider_consumer_compile_options})
-  target_link_options(photospider_${_handoff_test}_consumer PRIVATE ${_photospider_consumer_link_options})
-endforeach()
-
 add_custom_target(
   run_photospider_consumer
-  COMMAND "$<TARGET_FILE:photospider_region_runs_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_planar_preparation_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_data_movement_contract_consumer>"
   COMMAND "$<TARGET_FILE:photospider_consumer>"
   COMMAND "$<TARGET_FILE:photospider_dependency_consumer>"
   COMMAND "$<TARGET_FILE:photospider_execution_dependencies_consumer>"
@@ -320,26 +282,13 @@ add_custom_target(
   COMMAND "$<TARGET_FILE:photospider_fragment_atlas_consumer>"
   COMMAND "$<TARGET_FILE:photospider_ordered_scan_consumer>"
   COMMAND "$<TARGET_FILE:photospider_ordered_reduction_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_channel_extraction_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_numeric_conversion_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_transfer_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_channel_assembly_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_channel_editing_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_metadata_consumer>"
   COMMAND "$<TARGET_FILE:photospider_model_metadata_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_model_conversion_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_alpha_operations_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_rgb_basis_consumer>"
   COMMAND "$<TARGET_FILE:photospider_expression_consumer>"
   COMMAND "$<TARGET_FILE:photospider_basic_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_planar_consumer>"
   COMMAND "$<TARGET_FILE:photospider_semantic_consumer>"
-  DEPENDS photospider_metadata_consumer test_gpu_sync_fallback test_gpu_discovery_workflow photospider_gpu_discovery_consumer test_gpu_c_abi_execution test_gpu_fragment_execution photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_dependency_consumer photospider_basic_consumer photospider_planar_consumer photospider_foundations_workflow photospider_channel_extraction_consumer photospider_numeric_conversion_consumer photospider_channel_assembly_consumer photospider_channel_editing_consumer photospider_expression_consumer photospider_semantic_consumer photospider_consumer
+  DEPENDS test_gpu_sync_fallback test_gpu_discovery_workflow photospider_gpu_discovery_consumer test_gpu_c_abi_execution test_gpu_fragment_execution photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_dependency_consumer photospider_basic_consumer photospider_foundations_workflow photospider_expression_consumer photospider_semantic_consumer photospider_consumer
   USES_TERMINAL
   VERBATIM)
-
-add_dependencies(run_photospider_consumer photospider_transfer_consumer photospider_region_runs_consumer
-  photospider_planar_preparation_consumer photospider_data_movement_contract_consumer)
 
 # Focused installed managed-resource consumer; only installed kernel headers.
 add_executable(photospider_resource_consumer ../unit/test_resources.cpp)
@@ -357,25 +306,8 @@ target_link_options(photospider_result_consumer PRIVATE ${_photospider_consumer_
 
 add_subdirectory(../../examples/representations_workflow representations_workflow)
 
-add_executable(photospider_channel_assembly_consumer ../integration/test_channel_assembly.cpp)
-target_link_libraries(photospider_channel_assembly_consumer PRIVATE Photospider::kernel)
-target_include_directories(photospider_channel_assembly_consumer PRIVATE ../../examples/numeric_workflow)
-target_compile_options(photospider_channel_assembly_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_channel_assembly_consumer PRIVATE ${_photospider_consumer_link_options})
-
-add_executable(photospider_channel_editing_consumer ../integration/test_channel_editing.cpp)
-target_link_libraries(photospider_channel_editing_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_channel_editing_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_channel_editing_consumer PRIVATE ${_photospider_consumer_link_options})
-
-add_executable(photospider_metadata_consumer ../integration/test_metadata_assignment.cpp)
-target_link_libraries(photospider_metadata_consumer PRIVATE Photospider::kernel)
-target_include_directories(photospider_metadata_consumer PRIVATE ../../examples/numeric_workflow)
-target_compile_options(photospider_metadata_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_metadata_consumer PRIVATE ${_photospider_consumer_link_options})
-
 # Format/color family gates use only installed public kernel headers.
-foreach(_format_kind IN ITEMS model_metadata model_conversion alpha_operations rgb_basis)
+foreach(_format_kind IN ITEMS model_metadata)
   add_executable(photospider_${_format_kind}_consumer
     ../integration/test_${_format_kind}.cpp)
   target_include_directories(photospider_${_format_kind}_consumer PRIVATE ..)
@@ -385,36 +317,41 @@ foreach(_format_kind IN ITEMS model_metadata model_conversion alpha_operations r
   add_dependencies(run_photospider_consumer photospider_${_format_kind}_consumer)
 endforeach()
 
-# Real native planar ABI against installed public headers/library only.
-foreach(_kind IN ITEMS planar planar_gpu)
-  if(_kind STREQUAL "planar")
-    set(_fixture_source ../fixtures/planar_operation_fixture.c)
-  else()
-    set(_fixture_source ../fixtures/planar_gpu_fixture.c)
-  endif()
-  add_library(photospider_${_kind}_abi_fixture MODULE ${_fixture_source})
-  target_link_libraries(photospider_${_kind}_abi_fixture PRIVATE Photospider::operation_sdk)
-  target_compile_definitions(photospider_${_kind}_abi_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
-  set_target_properties(photospider_${_kind}_abi_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-endforeach()
-add_executable(photospider_planar_gpu_consumer ../integration/test_planar_gpu.cpp)
-target_include_directories(photospider_planar_gpu_consumer PRIVATE ..)
-target_link_libraries(photospider_planar_gpu_consumer PRIVATE Photospider::kernel)
-target_compile_definitions(photospider_planar_gpu_consumer PRIVATE PS_PLANAR_PUBLIC_CONSUMER
-  PS_PLANAR_FIXTURE="$<TARGET_FILE:photospider_planar_abi_fixture>"
-  PS_PLANAR_GPU_FIXTURE="$<TARGET_FILE:photospider_planar_gpu_abi_fixture>")
-target_compile_options(photospider_planar_gpu_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_planar_gpu_consumer PRIVATE ${_photospider_consumer_link_options})
-add_dependencies(photospider_planar_gpu_consumer photospider_planar_abi_fixture photospider_planar_gpu_abi_fixture)
-
-add_executable(photospider_cpu_stages_consumer ../integration/test_cpu_stages.cpp)
-target_include_directories(photospider_cpu_stages_consumer PRIVATE ..)
-target_link_libraries(photospider_cpu_stages_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_cpu_stages_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_cpu_stages_consumer PRIVATE ${_photospider_consumer_link_options})
-
 add_executable(photospider_scheduler_consumer ../../examples/dynamic_scheduler/main.cpp)
 target_link_libraries(photospider_scheduler_consumer PRIVATE Photospider::kernel)
 target_compile_features(photospider_scheduler_consumer PRIVATE cxx_std_17)
 target_compile_options(photospider_scheduler_consumer PRIVATE ${_photospider_consumer_compile_options})
 target_link_options(photospider_scheduler_consumer PRIVATE ${_photospider_consumer_link_options})
+
+# Unified Result workflow and C11 DSO consume only the installed kernel/SDK.
+add_subdirectory(../../examples/unified_result_workflow unified_result_workflow)
+add_executable(photospider_unified_result_consumer ../integration/test_unified_result_images.cpp)
+target_include_directories(photospider_unified_result_consumer PRIVATE ..)
+target_link_libraries(photospider_unified_result_consumer PRIVATE Photospider::kernel)
+add_executable(photospider_result_contract_consumer ../integration/test_result_image_contracts.cpp)
+target_link_libraries(photospider_result_contract_consumer PRIVATE Photospider::kernel)
+add_library(result_consumer_fixture MODULE ../fixtures/result_operation_fixture.c)
+target_link_libraries(result_consumer_fixture PRIVATE Photospider::operation_sdk)
+set_target_properties(result_consumer_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+add_executable(photospider_result_c_consumer ../integration/test_result_plugin.cpp)
+target_link_libraries(photospider_result_c_consumer PRIVATE Photospider::kernel)
+target_compile_definitions(photospider_result_c_consumer PRIVATE PS_RESULT_FIXTURE="$<TARGET_FILE:result_consumer_fixture>")
+add_dependencies(photospider_result_c_consumer result_consumer_fixture)
+foreach(_case RANGE 1 6)
+  add_library(result_consumer_bad_${_case} MODULE ../fixtures/result_operation_fixture.c)
+  target_link_libraries(result_consumer_bad_${_case} PRIVATE Photospider::operation_sdk)
+  set_target_properties(result_consumer_bad_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  target_compile_definitions(result_consumer_bad_${_case} PRIVATE PS_BAD_RESULT_CASE=${_case})
+  target_compile_definitions(photospider_result_c_consumer PRIVATE PS_BAD_RESULT_${_case}="$<TARGET_FILE:result_consumer_bad_${_case}>")
+  add_dependencies(photospider_result_c_consumer result_consumer_bad_${_case})
+endforeach()
+enable_testing()
+add_test(NAME installed_unified_result_workflow COMMAND photospider_unified_result_workflow)
+add_test(NAME installed_unified_result_cpp COMMAND photospider_unified_result_consumer)
+add_test(NAME installed_unified_result_contracts COMMAND photospider_result_contract_consumer)
+add_test(NAME installed_unified_result_c11 COMMAND photospider_result_c_consumer)
+add_test(NAME installed_unified_result_native_gpu COMMAND photospider_result_c_consumer --gpu-only)
+set_tests_properties(installed_unified_result_native_gpu PROPERTIES SKIP_RETURN_CODE 77)
+add_custom_target(run_unified_result_consumer
+  COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^installed_unified_result_"
+  DEPENDS photospider_unified_result_workflow photospider_unified_result_consumer photospider_result_contract_consumer photospider_result_c_consumer)

@@ -153,6 +153,8 @@ struct PHOTOSPIDER_API TensorColorGroup final {
  * ResourceBindings; these fields cannot manufacture resource ownership.
  */
 struct PHOTOSPIDER_API TensorDescription final {
+  /** @brief Retires after all admitted decoder containers. */
+  ResourceLease metadata_owner;
   std::optional<std::uint32_t> channel_axis;
   std::vector<TensorChannelDescription> channels;
   std::optional<TensorChannelDescription> component;

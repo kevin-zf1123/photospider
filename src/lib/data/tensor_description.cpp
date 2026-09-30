@@ -287,6 +287,11 @@ Status validate_structure(const TensorDescription& value) {
       if (current)
         sampling = current;
     }
+    if (group.alpha && *group.alpha < value.channels.size()) {
+      const auto& alpha_sampling = value.channels[*group.alpha].sampling;
+      if (sampling && alpha_sampling && sampling->grid != alpha_sampling->grid)
+        return invalid("group alpha sampling grid disagrees");
+    }
     std::set<std::uint64_t> seen;
     for (std::size_t i = 0; i < group.indices.size(); ++i)
       if (!seen.insert(group.indices[i]).second ||
@@ -896,6 +901,22 @@ Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
     value.channel_axis = axis;
   if (count > (facet.payload.size() - reader.offset) / 3)
     return Answer(invalid("truncated tensor channel table"));
+  if (const auto* root = resource_internal::metadata_budget()) {
+    // Each channel has a six-byte minimum encoding. The retained channels,
+    // validation assertion copies and map nodes are charged separately from
+    // the remaining wire structures (groups/components/text), whose minimum
+    // encoding sizes bound their expansion by 512 bytes per encoded byte.
+    const auto bytes = 2 * sizeof(TensorDescription) +
+                       count * (3 * sizeof(TensorChannelDescription) + 128) +
+                       512 * facet.payload.size();
+    auto admitted = root->reserve(ResourceCapacity::host(bytes, bytes));
+    if (!admitted.ok())
+      return Answer(admitted.status());
+    value.metadata_owner = admitted.take_value();
+    auto work = root->consume({bytes});
+    if (!work.ok())
+      return Answer(work);
+  }
   value.channels.resize(count);
   for (auto& channel : value.channels)
     if (!reader.channel(&channel))
@@ -949,11 +970,15 @@ Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
   std::uint16_t group_count = 0;
   if (!reader.u16(&group_count) || group_count > 128)
     return Answer(invalid("invalid group count"));
+  if (group_count > (facet.payload.size() - reader.offset) / 15)
+    return Answer(invalid("truncated tensor group table"));
   value.groups.resize(group_count);
   for (auto& group : value.groups) {
     std::uint16_t count = 0;
     if (!reader.text(&group.name) || !reader.u16(&count) || count > 64)
       return Answer(invalid("invalid group header"));
+    if (count > (facet.payload.size() - reader.offset) / 14)
+      return Answer(invalid("truncated group components"));
     group.indices.resize(count);
     group.components.resize(count);
     for (std::size_t i = 0; i < count; ++i)
@@ -1102,11 +1127,13 @@ Status validate_tensor_description(const TensorDescription& description,
     // A rank-preserving, single Gray plane has no invented channel axis.
     // Only the unique implicit component zero is addressable in that form.
     if (!description.channel_axis &&
-        (description.groups.size() != 1 || group.interpretation.model != "gray" ||
+        (description.groups.size() != 1 ||
+         group.interpretation.model != "gray" ||
          group.indices != std::vector<std::uint64_t>{0} || group.alpha))
       return invalid("axis-free group must be one Gray component");
     const auto count = description.channel_axis
-                           ? descriptor.shape[*description.channel_axis] : 1;
+                           ? descriptor.shape[*description.channel_axis]
+                           : 1;
     for (auto index : group.indices)
       if (index >= count)
         return invalid("group index exceeds channel count");

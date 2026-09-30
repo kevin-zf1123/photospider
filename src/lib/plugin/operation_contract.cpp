@@ -45,7 +45,7 @@ Result<OperationTraits> resolve_operation_traits(
   if (!status.ok())
     return Result<OperationTraits>(status);
   auto result = traits;
-  if (count > 1024 || traits.version != 20)
+  if (count > 1024 || traits.version != 21)
     return Result<OperationTraits>(invalid("invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
     if (traits.input_schema.size() != traits.input_count + 1 ||
@@ -137,6 +137,10 @@ Result<OperationMetadata> infer_operation_output(
       domains.push_back(input.descriptor.shape);
       continue;
     }
+    if (!input.result_schema->images.empty()) {
+      domains.push_back(input.result_schema->images[0].sample_shape());
+      continue;
+    }
     std::vector<std::uint64_t> domain;
     for (const auto& extent : input.result_schema->domain) {
       if (extent.kind != ResultExtentKind::Fixed) {
@@ -162,7 +166,6 @@ Result<OperationMetadata> infer_operation_output(
   }
   OperationMetadata result;
   result.atomic_trailing_axes = t.outputs[0].atomic_trailing_axes;
-  result.planar_layout = t.outputs[0].planar_layout;
   result.descriptor.element_type = t.outputs[0].output_element_type;
   if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Input ||
       t.outputs[0].output_dtype_rule == OperationDtypeRule::WidenNumericInput) {
@@ -393,98 +396,6 @@ Result<OperationMetadata> infer_operation_output(
     if (!certificate.ok())
       return Result<OperationMetadata>(certificate.status());
   }
-  if (result.planar_layout) {
-    const auto layout_status =
-        PlanarImage::validate_layout(result.descriptor, *result.planar_layout);
-    if (!layout_status.ok())
-      return Result<OperationMetadata>(layout_status);
-  }
-  if (t.outputs[0].data_movement == DataMovementKind::BitwiseMapped) {
-    const auto& output = t.outputs[0];
-    if (!output.planar_layout || !output.static_dependency_pieces)
-      return Result<OperationMetadata>(invalid("missing bitwise mapping"));
-    const auto& layout = *output.planar_layout;
-    for (const auto& piece : *output.static_dependency_pieces) {
-      if (piece.inputs.empty() ||
-          piece.coverage.shape() != result.descriptor.shape)
-        return Result<OperationMetadata>(
-            invalid("bitwise piece needs one source"));
-      // Exactly one value source stays first. Additional needs may carry
-      // descriptor tags only; they authorize no sample copy or read.
-      for (std::size_t j = 1; j < piece.inputs.size(); ++j) {
-        const auto& descriptor = piece.inputs[j];
-        if (descriptor.port >= inputs.size() || !descriptor.axes.empty() ||
-            descriptor.tags.empty() ||
-            descriptor.roles !=
-                static_cast<std::uint32_t>(DependencyRole::Descriptor))
-          return Result<OperationMetadata>(
-              invalid("bitwise extra need is not descriptor-only"));
-      }
-      const auto& map = piece.inputs[0];
-      const auto data = static_cast<std::uint32_t>(DependencyRole::Data);
-      const auto validation =
-          static_cast<std::uint32_t>(DependencyRole::Validation);
-      if (map.port >= inputs.size() ||
-          (map.roles != data && map.roles != (data | validation)) ||
-          !map.tags.empty())
-        return Result<OperationMetadata>(
-            invalid("invalid bitwise source role"));
-      const auto& input = inputs[map.port];
-      if (input.result_schema ||
-          input.descriptor.element_type != result.descriptor.element_type ||
-          map.axes.size() != input.descriptor.shape.size())
-        return Result<OperationMetadata>(
-            invalid("bitwise source dtype/rank differs"));
-      const bool scalar =
-          !input.planar_layout &&
-          input.descriptor.shape == std::vector<std::uint64_t>{1} &&
-          map.axes[0].observation_axis == -1 && map.axes[0].fixed.offset == 0 &&
-          map.axes[0].fixed.extent == 1 && map.axes[0].translation == 0;
-      std::vector<bool> seen(result.descriptor.shape.size(), false);
-      for (const auto& axis : map.axes) {
-        if (axis.observation_axis < -1 ||
-            axis.observation_axis >= static_cast<std::int32_t>(seen.size()))
-          return Result<OperationMetadata>(
-              invalid("bitwise axis outside rank"));
-        if (axis.observation_axis < 0) {
-          if (axis.fixed.extent != 1 || axis.translation)
-            return Result<OperationMetadata>(
-                invalid("invalid fixed bitwise axis"));
-        } else {
-          if (seen[axis.observation_axis])
-            return Result<OperationMetadata>(invalid("duplicate bitwise axis"));
-          seen[axis.observation_axis] = true;
-          if ((axis.observation_axis ==
-                   static_cast<std::int32_t>(layout.height_axis) ||
-               axis.observation_axis ==
-                   static_cast<std::int32_t>(layout.width_axis)) &&
-              axis.translation != 0)
-            return Result<OperationMetadata>(
-                invalid("bitwise v1 spatial translation"));
-        }
-      }
-      if (!scalar && (!seen[layout.height_axis] || !seen[layout.width_axis]))
-        return Result<OperationMetadata>(
-            invalid("bitwise spatial mapping incomplete"));
-      if (input.planar_layout) {
-        const auto& source = *input.planar_layout;
-        if (!PlanarImage::validate_layout(input.descriptor, source).ok() ||
-            map.axes[source.height_axis].observation_axis !=
-                static_cast<std::int32_t>(layout.height_axis) ||
-            map.axes[source.width_axis].observation_axis !=
-                static_cast<std::int32_t>(layout.width_axis))
-          return Result<OperationMetadata>(
-              invalid("bitwise planar axes differ"));
-      }
-      for (const auto& box : piece.coverage.boxes()) {
-        for (auto axis : {layout.height_axis, layout.width_axis})
-          if (box.dimensions()[axis].offset != 0 ||
-              box.dimensions()[axis].extent != result.descriptor.shape[axis])
-            return Result<OperationMetadata>(
-                invalid("bitwise v1 pieces partition channels only"));
-      }
-    }
-  }
   return Result<OperationMetadata>(std::move(result));
 }
 Result<std::vector<OperationMetadata>> infer_operation_outputs(
@@ -516,36 +427,20 @@ Status validate_operation_contract(const OperationTraits& t) {
           DataMovementViewPolicy::RequireView &&
       selected.data_movement_view_policy != DataMovementViewPolicy::Materialize)
     return invalid("unknown data movement view policy");
-  if (selected.data_movement == DataMovementKind::None) {
-    if (selected.data_movement_view_policy != DataMovementViewPolicy::Auto &&
-        !t.planar_exact_dependencies)
-      return invalid("view policy requires a data movement relation");
-  } else if (!t.planar_storage_capable || !selected.planar_layout ||
-             !selected.static_dependency_pieces || !selected.regional_atomic ||
-             selected.atomic_trailing_axes || selected.input_indices ||
-             selected.result_schema ||
-             selected.failure_delivery != FailureDelivery::RequestFailureOnly) {
-    return invalid("bitwise mapped v1 requires complete CPU planar pieces");
-  }
+  if (selected.data_movement != DataMovementKind::None ||
+      selected.data_movement_view_policy != DataMovementViewPolicy::Auto)
+    return invalid("image data movement belongs to Result continuations");
   const bool staged_atomic =
       selected.region_rule == OperationRegionRule::Dependency &&
       selected.dependency_version == 1;
-  const bool whole = selected.region_rule == OperationRegionRule::Whole &&
-                     selected.dependency_version == 0;
+  const bool whole =
+      selected.region_rule == OperationRegionRule::Whole &&
+      (selected.dependency_version == 0 || selected.dependency_version == 2);
   if (t.cpu_staged_tiles &&
-      (!t.planar_storage_capable || !t.supports_cpu || t.supports_gpu ||
-       t.planar_exact_dependencies || t.joint_contract || !whole))
-    return invalid("CPU stages require a CPU-only Whole planar contract");
-  if (t.planar_exact_dependencies &&
-      (!t.planar_storage_capable || !t.supports_cpu || t.supports_gpu ||
-       t.joint_contract || !staged_atomic || selected.atomic_trailing_axes ||
-       selected.input_indices || selected.result_schema ||
-       selected.data_movement != DataMovementKind::None ||
-       selected.failure_delivery != FailureDelivery::RequestFailureOnly ||
-       (!t.requires_metadata_specialization &&
-        (!selected.static_dependency_pieces || !selected.regional_atomic))))
-    return invalid(
-        "exact planar capability requires prepared CPU regional pieces");
+      (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
+       selected.dependency_version != 2 ||
+       selected.region_rule != OperationRegionRule::Whole))
+    return invalid("CPU stages require a CPU-only Whole Result continuation");
   if ((selected.regional_atomic || selected.preserve_output_views) &&
       (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
        selected.observation_kind != ObservationKind::Atomic ||
@@ -581,8 +476,10 @@ Status validate_operation_contract(const OperationTraits& t) {
        (t.outputs[0].observation_kind != ObservationKind::Atomic ||
         !t.outputs[0].dependency_version)) ||
       t.outputs[0].dependency_version > 2 ||
-      ((t.outputs[0].dependency_version != 0) !=
-       (t.outputs[0].region_rule == OperationRegionRule::Dependency)) ||
+      (((t.outputs[0].dependency_version != 0) !=
+        (t.outputs[0].region_rule == OperationRegionRule::Dependency)) &&
+       !(t.outputs[0].dependency_version == 2 &&
+         t.outputs[0].region_rule == OperationRegionRule::Whole)) ||
       (t.outputs[0].dependency_version == 0 &&
        (t.outputs[0].continuation_bytes ||
         t.outputs[0].maximum_dependency_stages)) ||

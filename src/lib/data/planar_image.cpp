@@ -36,14 +36,15 @@ std::uint64_t PlanarPageBudget::live_bytes() const noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   return live_bytes_;
 }
-Result<std::shared_ptr<void>> PlanarPageBudget::charge(std::uint64_t bytes) {
+Result<std::shared_ptr<void>> PlanarPageBudget::charge(std::uint64_t bytes,
+                                                       bool metadata) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (bytes > maximum_bytes_ - live_bytes_)
     return Result<std::shared_ptr<void>>(Status::failure(
         ErrorCode::ResourceExhausted, "aggregate image page budget exceeded"));
   std::shared_ptr<void> lease;
   if (reserve_ && bytes) {
-    auto reserved = reserve_(bytes);
+    auto reserved = reserve_(bytes, metadata);
     if (!reserved.ok())
       return reserved;
     lease = reserved.take_value();
@@ -158,6 +159,7 @@ void import_row(std::uint8_t* destination, const std::uint8_t* source,
 }  // namespace
 
 struct PlanarImage::Impl final {
+  std::shared_ptr<void> metadata_lease;
   ValueDescriptor descriptor;
   std::vector<ValueFacet> facets;
   ResourceBindings resources;
@@ -176,7 +178,6 @@ struct PlanarImage::Impl final {
   mutable std::shared_timed_mutex mutex;
   std::set<std::uint64_t> pages;
   std::vector<std::shared_ptr<void>> page_leases;
-  std::shared_ptr<void> metadata_lease;
   std::uint64_t metadata_charge = 0;
   std::uint64_t base_metadata = 0;
   std::uint64_t execution_pins = 0;
@@ -264,10 +265,38 @@ Status PlanarImage::validate_layout(const ValueDescriptor& descriptor,
   return Status::success();
 }
 
-Result<PlanarImage> PlanarImage::create(ValueDescriptor descriptor,
-                                        PlanarImageConfig config,
-                                        std::vector<ValueFacet> facets,
-                                        ResourceBindings resources) {
+Result<PlanarImage> PlanarImage::create(
+    const ValueDescriptor& source_descriptor,
+    const PlanarImageConfig& source_config,
+    const std::vector<ValueFacet>& source_facets,
+    const ResourceBindings& resources) {
+  auto aggregate = source_config.aggregate_budget;
+  if (!aggregate)
+    aggregate =
+        std::make_shared<PlanarPageBudget>(source_config.maximum_backed_bytes);
+  uint64_t initial_metadata = 1024;
+  for (const auto& group : source_config.groups)
+    initial_metadata += 256 + group.role.size();
+  for (const auto& facet : source_facets)
+    initial_metadata += 256 + facet.key.size() + facet.payload.size();
+  auto metadata = aggregate->charge(initial_metadata, true);
+  if (!metadata.ok())
+    return Result<PlanarImage>(metadata.status());
+  std::shared_ptr<Impl> out;
+  try {
+    out = std::make_shared<Impl>();
+  } catch (const std::bad_alloc&) {
+    aggregate->release(initial_metadata);
+    return Result<PlanarImage>(exhausted("image metadata allocation failed"));
+  }
+  out->config.aggregate_budget = aggregate;
+  out->metadata_lease = metadata.take_value();
+  out->metadata_charge = initial_metadata;
+  out->base_metadata = initial_metadata;
+  auto descriptor = source_descriptor;
+  auto config = source_config;
+  auto facets = source_facets;
+  config.aggregate_budget = std::move(aggregate);
   PlanarImageLayout layout;
   layout.order = config.order;
   layout.height_axis = config.height_axis;
@@ -303,7 +332,6 @@ Result<PlanarImage> PlanarImage::create(ValueDescriptor descriptor,
   if (!config.aggregate_budget)
     config.aggregate_budget =
         std::make_shared<PlanarPageBudget>(config.maximum_backed_bytes);
-  auto out = std::make_shared<Impl>();
   out->descriptor = std::move(descriptor);
   out->facets = std::move(facets);
   out->resources = selected.take_value();
@@ -365,17 +393,7 @@ Result<PlanarImage> PlanarImage::create(ValueDescriptor descriptor,
       out->virtual_bytes > SIZE_MAX || out->virtual_bytes > INT64_MAX ||
       out->virtual_bytes > out->config.maximum_virtual_bytes)
     return Result<PlanarImage>(exhausted("image reservation overflow"));
-  std::uint64_t initial_metadata = 1024;
-  for (const auto& group : out->config.groups)
-    initial_metadata += 256 + group.role.capacity();
-  for (const auto& facet : out->facets)
-    initial_metadata += 256 + facet.key.capacity() + facet.payload.capacity();
-  auto metadata = out->config.aggregate_budget->charge(initial_metadata);
-  if (!metadata.ok())
-    return Result<PlanarImage>(metadata.status());
-  out->metadata_lease = metadata.take_value();
-  out->metadata_charge = initial_metadata;
-  out->base_metadata = initial_metadata;
+
   out->base = static_cast<std::uint8_t*>(
       reserve_address(static_cast<std::size_t>(out->virtual_bytes)));
   if (!out->base)
@@ -543,7 +561,8 @@ Result<PlanarImage> PlanarImage::channel_view(
   alias->view_metadata_budget = metadata_budget
                                     ? std::move(metadata_budget)
                                     : alias->config.aggregate_budget;
-  auto charged = alias->view_metadata_budget->charge(alias->metadata_charge);
+  auto charged =
+      alias->view_metadata_budget->charge(alias->metadata_charge, true);
   if (!charged.ok()) {
     alias->metadata_charge = 0;
     return Result<PlanarImage>(charged.status());
@@ -672,7 +691,8 @@ Result<PlanarImage> PlanarImage::assemble_view(
   alias->view_metadata_budget = metadata_budget
                                     ? std::move(metadata_budget)
                                     : first->config.aggregate_budget;
-  auto charged = alias->view_metadata_budget->charge(alias->metadata_charge);
+  auto charged =
+      alias->view_metadata_budget->charge(alias->metadata_charge, true);
   if (!charged.ok()) {
     alias->metadata_charge = 0;
     return Answer(charged.status());
@@ -965,6 +985,7 @@ Status each_sample(const Region& region, const CancellationToken& cancellation,
 }  // namespace
 
 struct PlanarImageWriteWindow::Impl final {
+  std::shared_ptr<void> metadata_lease;
   std::shared_ptr<PlanarImage::Impl> image;
   std::unique_lock<std::shared_timed_mutex> lock;
   Region region;
@@ -974,7 +995,6 @@ struct PlanarImageWriteWindow::Impl final {
   std::uint64_t charge = 0;
   std::shared_ptr<void> external_lease;
   std::uint64_t metadata_charge = 0;
-  std::shared_ptr<void> metadata_lease;
   std::size_t provided = 0;
   bool committed = false;
 
@@ -1144,7 +1164,8 @@ Result<PlanarImageWriteWindow> PlanarImage::begin_write(
                          upper_pages, &candidate_metadata))
     return Result<PlanarImageWriteWindow>(
         exhausted("image metadata capacity overflow"));
-  auto metadata = impl_->config.aggregate_budget->charge(candidate_metadata);
+  auto metadata =
+      impl_->config.aggregate_budget->charge(candidate_metadata, true);
   if (!metadata.ok())
     return Result<PlanarImageWriteWindow>(metadata.status());
   prepared->metadata_charge = candidate_metadata;

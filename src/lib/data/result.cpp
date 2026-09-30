@@ -3,17 +3,22 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "core/stored_failure.hpp"
+#include "data/input_validation.hpp"
+#include "execution/dependency_records.hpp"
 #include "photospider/data/representation.hpp"
+#include "photospider/data/tensor_description.hpp"
 
 namespace ps {
 namespace {
@@ -54,6 +59,56 @@ Result<std::uint64_t> scaled(const ResultExtent& extent, std::uint64_t count) {
   return Result<std::uint64_t>(count + extent.offset);
 }
 }  // namespace
+std::vector<std::uint64_t> ResultImageSpec::sample_shape() const {
+  std::vector<std::uint64_t> shape{frames, layers};
+  shape.insert(shape.end(), descriptor.shape.begin(), descriptor.shape.end());
+  return shape;
+}
+Result<std::uint64_t> ResultImageSpec::sample_count() const {
+  if (!frames || !layers || frames > 4096 / layers ||
+      (descriptor.shape.size() != 2 && descriptor.shape.size() != 3))
+    return Result<std::uint64_t>(invalid_schema());
+  std::uint64_t count = frames * layers;
+  for (auto n : descriptor.shape) {
+    if (!n || count > UINT64_MAX / n)
+      return Result<std::uint64_t>(invalid_schema());
+    count *= n;
+  }
+  return Result<std::uint64_t>(count);
+}
+Result<Footprint> ResultImageSpec::close_samples(
+    const Footprint& samples, const FootprintLimits& limits) const {
+  auto layout_status = PlanarImage::validate_layout(descriptor, layout);
+  if (!layout_status.ok())
+    return Result<Footprint>(layout_status);
+  if (!samples.valid() || samples.shape() != sample_shape())
+    return Result<Footprint>(invalid_schema());
+  ResourceLease bridge;
+  if (const auto* root = resource_internal::metadata_budget()) {
+    const auto bytes =
+        samples.boxes().size() *
+        (sizeof(Region) + samples.shape().size() * sizeof(RegionDimension));
+    auto admission = root->reserve(ResourceCapacity::host(bytes, bytes));
+    if (!admission.ok())
+      return Result<Footprint>(admission.status());
+    bridge = admission.take_value();
+  }
+  std::vector<Region> boxes;
+  boxes.reserve(samples.boxes().size());
+  const auto tuple = input_internal::tuple_channel_axis(descriptor, facets);
+  for (const auto& box : samples.boxes()) {
+    auto dimensions = box.dimensions();
+    if (tuple && !box.empty())
+      dimensions[*tuple + 2] = {0, descriptor.shape[*tuple]};
+    boxes.emplace_back(std::move(dimensions));
+  }
+  return Footprint::from_regions(sample_shape(), boxes, limits);
+}
+const Footprint& ResultDescriptor::image_coverage(std::uint32_t slot) const {
+  if (slot >= image_count_)
+    throw std::out_of_range("invalid image slot");
+  return images_[slot];
+}
 Status SchemaTemplate::validate(bool resolved) const {
   // These historical schemas pack image planes into result fields. Structural
   // images now require PlanarImage owners and cannot use ResultBuilder.
@@ -68,8 +123,8 @@ Status SchemaTemplate::validate(bool resolved) const {
                   }))
     return Status::failure(ErrorCode::TypeMismatch,
                            "legacy layer schema requires planar storage");
-  if (!key_valid(id) || !version || fields.empty() || fields.size() > 16 ||
-      domain.size() > 8 ||
+  if (!key_valid(id) || !version || (fields.empty() && images.empty()) ||
+      fields.size() + images.size() > 16 || domain.size() > 8 ||
       (publication != PublishPolicy::CompleteBundle &&
        publication != PublishPolicy::IndependentChunks &&
        publication != PublishPolicy::StablePrefix) ||
@@ -93,6 +148,34 @@ Status SchemaTemplate::validate(bool resolved) const {
         !row_bytes(static_cast<std::uint32_t>(i)).ok())
       return invalid_schema();
   }
+  for (const auto& image : images) {
+    if (!key_valid(image.key) || !add_key(image.key) ||
+        !image.sample_count().ok() ||
+        !PlanarImage::validate_layout(image.descriptor, image.layout).ok())
+      return invalid_schema();
+    const auto tuple =
+        input_internal::tuple_channel_axis(image.descriptor, image.facets);
+    if (tuple &&
+        (image.descriptor.shape.size() != 3 || !image.layout.channel_axis ||
+         *tuple != *image.layout.channel_axis))
+      return invalid_schema();
+    for (const auto& facet : image.facets) {
+      if (facet.key == "photospider.image" &&
+          (image.layout.height_axis != 0 || image.layout.width_axis != 1))
+        return invalid_schema();
+      if (facet.key == "photospider.tensor-description") {
+        auto tensor = decode_tensor_description(facet);
+        if (!tensor.ok())
+          return tensor.status();
+        if (tensor.value().channel_axis != image.layout.channel_axis)
+          return invalid_schema();
+      }
+    }
+    auto validated = input_internal::validate_port_metadata(
+        OperationPortConstraint{}, image.descriptor, image.facets);
+    if (!validated.ok())
+      return validated;
+  }
   for (const auto& extent : domain)
     if (!extent_valid(extent, resolved, fields.size()) ||
         extent.kind == ResultExtentKind::RuntimeCount)
@@ -107,6 +190,41 @@ Status SchemaTemplate::validate(bool resolved) const {
     payload += facet.payload.size();
   }
   return validate_representation_schema(*this);
+}
+Result<ResourceBindings> SchemaTemplate::select_resources(
+    const ResourceBindings& supplied) const try {
+  ResourceBindings accepted;
+  for (const auto& image : images) {
+    auto subset = supplied.select(image.facets);
+    if (!subset.ok())
+      return subset;
+    auto joined = accepted.unite(subset.value());
+    if (!joined.ok())
+      return joined;
+    accepted = joined.take_value();
+  }
+  std::uint64_t bytes = metadata.size() * sizeof(ValueFacet);
+  for (const auto& facet : metadata)
+    bytes += facet.key.size() + 1 + facet.payload.size();
+  ResourceLease bridge;
+  if (const auto* root = resource_internal::metadata_budget()) {
+    auto admitted = root->reserve(ResourceCapacity::host(bytes, bytes));
+    if (!admitted.ok())
+      return Result<ResourceBindings>(admitted.status());
+    bridge = admitted.take_value();
+  }
+  std::vector<ValueFacet> facets;
+  facets.reserve(metadata.size());
+  for (const auto& f : metadata)
+    facets.push_back(
+        {std::string(f.key), f.version,
+         std::vector<uint8_t>(f.payload.begin(), f.payload.end())});
+  auto subset = supplied.select(facets);
+  if (!subset.ok())
+    return subset;
+  return accepted.unite(subset.value());
+} catch (const std::bad_alloc&) {
+  return Result<ResourceBindings>(Status{ErrorCode::ResourceExhausted, {}});
 }
 Result<std::uint64_t> SchemaTemplate::row_bytes(std::uint32_t field) const {
   if (field >= fields.size())
@@ -189,7 +307,7 @@ void encode_schema(String* destination, const SchemaTemplate& schema) {
     word(e.divisor);
     word(e.offset);
   };
-  text("photospider.result-schema.v1");
+  text("photospider.result-schema.v2");
   text(schema.id);
   word(schema.version);
   word(static_cast<std::uint32_t>(schema.publication));
@@ -201,6 +319,34 @@ void encode_schema(String* destination, const SchemaTemplate& schema) {
     word(field.record_shape.size());
     for (auto size : field.record_shape)
       word(size);
+  }
+  word(schema.images.size());
+  for (const auto& image : schema.images) {
+    text(image.key);
+    word(image.frames);
+    word(image.layers);
+    word(static_cast<std::uint32_t>(image.descriptor.element_type));
+    word(image.descriptor.shape.size());
+    for (auto n : image.descriptor.shape)
+      word(n);
+    word(image.layout.height_axis);
+    word(image.layout.width_axis);
+    word(image.layout.channel_axis ? *image.layout.channel_axis + 1 : 0);
+    word(image.layout.groups.size());
+    for (const auto& group : image.layout.groups) {
+      text(group.role);
+      word(group.first_channel);
+      word(group.channel_count);
+    }
+    word(image.facets.size());
+    for (const auto& facet : image.facets) {
+      text(facet.key);
+      word(facet.version);
+      word(facet.payload.size());
+      if (!facet.payload.empty())
+        bytes.append(reinterpret_cast<const char*>(facet.payload.data()),
+                     facet.payload.size());
+    }
   }
   word(schema.domain.size());
   for (const auto& e : schema.domain)
@@ -231,9 +377,16 @@ bool same_extent(const ResultExtent& a, const ResultExtent& b) {
 }  // namespace
 std::uint64_t SchemaTemplate::canonical_size() const noexcept {
   std::uint64_t size =
-      8 + sizeof("photospider.result-schema.v1") - 1 + 8 + id.size() + 24 + 16;
+      8 + sizeof("photospider.result-schema.v2") - 1 + 8 + id.size() + 24 + 24;
   for (const auto& field : fields)
     size += 8 + field.key.size() + 8 + 56 + 8 + field.record_shape.size() * 8;
+  for (const auto& image : images) {
+    size += 8 + image.key.size() + 72 + image.descriptor.shape.size() * 8;
+    for (const auto& group : image.layout.groups)
+      size += 24 + group.role.size();
+    for (const auto& facet : image.facets)
+      size += 24 + facet.key.size() + facet.payload.size();
+  }
   size += domain.size() * 56;
   for (const auto& facet : metadata)
     size += 8 + facet.key.size() + 16 + facet.payload.size();
@@ -255,8 +408,13 @@ ResourceString SchemaTemplate::canonical() const {
 }
 Result<ResourceString> SchemaTemplate::managed_canonical(
     const ResourceBudget& budget) const {
-  if (!validate().ok())
-    return Result<ResourceString>(invalid_schema());
+  std::optional<ResourceAllocationScope> scope;
+  if (!resource_internal::metadata_budget() ||
+      !resource_internal::metadata_budget()->same_owner(budget))
+    scope.emplace(budget);
+  auto status = validate();
+  if (!status.ok())
+    return Result<ResourceString>(status);
   auto work = budget.consume({canonical_size()});
   if (!work.ok())
     return Result<ResourceString>(work);
@@ -271,8 +429,13 @@ Result<ResourceString> SchemaTemplate::managed_canonical(
 }
 Result<SchemaTemplate> SchemaTemplate::managed_copy(
     const ResourceBudget& budget) const {
-  if (!validate().ok())
-    return Result<SchemaTemplate>(invalid_schema());
+  std::optional<ResourceAllocationScope> scope;
+  if (!resource_internal::metadata_budget() ||
+      !resource_internal::metadata_budget()->same_owner(budget))
+    scope.emplace(budget);
+  auto status = validate();
+  if (!status.ok())
+    return Result<SchemaTemplate>(status);
   auto work = budget.consume({canonical_size()});
   if (!work.ok())
     return Result<SchemaTemplate>(work);
@@ -295,6 +458,27 @@ Result<SchemaTemplate> SchemaTemplate::managed_copy(
           field.record_shape.begin(), field.record_shape.end(),
           ResourceAllocator<std::uint64_t>(budget));
       copy.fields.push_back(std::move(target));
+    }
+    copy.images = ResourceVector<ResultImageSpec>(
+        ResourceAllocator<ResultImageSpec>(budget));
+    copy.images.reserve(images.size());
+    for (const auto& image : images) {
+      std::uint64_t bytes =
+          image.descriptor.shape.size() * sizeof(std::uint64_t);
+      bytes += image.layout.groups.size() * sizeof(ImageComponentGroup);
+      bytes += image.facets.size() * sizeof(ValueFacet);
+      for (const auto& group : image.layout.groups)
+        bytes += group.role.size() + 1;
+      for (const auto& facet : image.facets)
+        bytes += facet.key.size() + 1 + facet.payload.size();
+      auto lease = budget.reserve(ResourceCapacity::host(bytes, bytes));
+      if (!lease.ok())
+        return Result<SchemaTemplate>(lease.status());
+      auto target = image;
+      target.key = ResourceString(image.key.data(), image.key.size(),
+                                  ResourceAllocator<char>(budget));
+      target.metadata_owner = lease.take_value();
+      copy.images.push_back(std::move(target));
     }
     copy.domain = ResourceVector<ResultExtent>(
         domain.begin(), domain.end(), ResourceAllocator<ResultExtent>(budget));
@@ -320,9 +504,29 @@ bool SchemaTemplate::same_schema(const SchemaTemplate& other) const noexcept {
   if (id != other.id || version != other.version ||
       publication != other.publication ||
       fields.size() != other.fields.size() ||
+      images.size() != other.images.size() ||
       domain.size() != other.domain.size() ||
       metadata.size() != other.metadata.size())
     return false;
+  for (std::size_t i = 0; i < images.size(); ++i) {
+    const auto& a = images[i];
+    const auto& b = other.images[i];
+    if (a.key != b.key || a.frames != b.frames || a.layers != b.layers ||
+        a.descriptor.shape != b.descriptor.shape ||
+        a.descriptor.element_type != b.descriptor.element_type ||
+        a.layout.height_axis != b.layout.height_axis ||
+        a.layout.width_axis != b.layout.width_axis ||
+        a.layout.channel_axis != b.layout.channel_axis ||
+        a.layout.groups.size() != b.layout.groups.size() ||
+        !input_internal::same_facets(a.facets, b.facets))
+      return false;
+    for (std::size_t j = 0; j < a.layout.groups.size(); ++j)
+      if (a.layout.groups[j].role != b.layout.groups[j].role ||
+          a.layout.groups[j].first_channel !=
+              b.layout.groups[j].first_channel ||
+          a.layout.groups[j].channel_count != b.layout.groups[j].channel_count)
+        return false;
+  }
   for (std::size_t i = 0; i < fields.size(); ++i) {
     const auto& a = fields[i];
     const auto& b = other.fields[i];
@@ -343,6 +547,11 @@ bool SchemaTemplate::same_schema(const SchemaTemplate& other) const noexcept {
   return true;
 }
 struct ResultRef::Impl {
+  struct Image {
+    ResourceVector<PlanarImage> backing;
+    Footprint coverage;
+    ResultRelation relation;
+  };
   struct Field {
     TemporaryStorage storage;
     ResultRelation relation;
@@ -355,14 +564,63 @@ struct ResultRef::Impl {
   SchemaTemplate schema;
   ResourceString key;
   ResourceVector<std::uint64_t> association;
-  std::array<ResultRef, 16> input_owners;
+  ResourceVector<ResultRef> input_owners;
   std::array<Field, 16> fields;
+  std::array<Image, 16> images;
+  ResourceBindings resources;
   ResultRelation descriptor_relation;
+  std::shared_ptr<const execution_internal::DependencyBundle> dependencies;
   ResultGrowthLimits limits;
   std::uint64_t object = 0, revision = 1, bytes = 0;
   core_internal::StoredFailure failure;
   bool complete = false, owners_bound = false;
 };
+struct ResultRef::Capture {
+  ResourceLease lease;
+  ResultDescriptor descriptor;
+  std::array<ResultRelation, 16> fields, images;
+  ResultRelation basis;
+  std::shared_ptr<const execution_internal::DependencyBundle> dependencies;
+};
+Result<ResultRef> ResultRef::capture() const {
+  if (!impl_)
+    return Result<ResultRef>(Status{ErrorCode::Stale, {}});
+  if (captured_)
+    return Result<ResultRef>(*this);
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (!impl_->complete &&
+      impl_->schema.publication == PublishPolicy::CompleteBundle)
+    return Result<ResultRef>(unavailable());
+  auto admitted = impl_->budget.reserve(
+      ResourceCapacity::host(sizeof(Capture), sizeof(Capture)));
+  if (!admitted.ok())
+    return Result<ResultRef>(admitted.status());
+  try {
+    auto capture = std::shared_ptr<Capture>(new Capture());
+    capture->lease = admitted.take_value();
+    auto& facts = capture->descriptor;
+    facts.object_ = impl_->object;
+    facts.revision_ = impl_->revision;
+    facts.sealed_ = impl_->complete;
+    facts.field_count_ = impl_->schema.fields.size();
+    facts.image_count_ = impl_->schema.images.size();
+    for (uint32_t i = 0; i < facts.field_count_; ++i) {
+      facts.rows_[i] = impl_->fields[i].certified;
+      capture->fields[i] = impl_->fields[i].relation;
+    }
+    for (uint32_t i = 0; i < facts.image_count_; ++i) {
+      facts.images_[i] = impl_->images[i].coverage;
+      capture->images[i] = impl_->images[i].relation;
+    }
+    capture->basis = impl_->descriptor_relation;
+    capture->dependencies = impl_->dependencies;
+    ResultRef result = *this;
+    result.captured_ = std::move(capture);
+    return Result<ResultRef>(std::move(result));
+  } catch (const std::bad_alloc&) {
+    return Result<ResultRef>(Status{ErrorCode::ResourceExhausted, {}});
+  }
+}
 struct ResultReadPlan::Impl {
   ResourceLease lease;
   std::shared_ptr<ResultRef::Impl> result;
@@ -426,11 +684,18 @@ Result<ResultWritePlan> ResultBuilder::prepare_append(
 WeakResultRef ResultRef::weak() const noexcept {
   WeakResultRef weak;
   weak.impl_ = impl_;
+  weak.captured_ = captured_;
+  weak.captured_view_ = captured_ != nullptr;
   return weak;
 }
 ResultRef WeakResultRef::lock() const noexcept {
   ResultRef result;
   result.impl_ = impl_.lock();
+  if (captured_view_) {
+    result.captured_ = captured_.lock();
+    if (!result.captured_)
+      result.impl_.reset();
+  }
   return result;
 }
 std::uint64_t ResultRef::object_id() const noexcept {
@@ -440,6 +705,11 @@ const SchemaTemplate& ResultRef::schema() const {
   if (!impl_)
     throw std::logic_error("invalid ResultRef");
   return impl_->schema;
+}
+const ResourceBindings& ResultRef::resources() const {
+  if (!impl_)
+    throw std::logic_error("invalid ResultRef");
+  return impl_->resources;
 }
 bool ResultRef::matches_scope(std::string_view scope) const noexcept {
   if (!impl_ || scope.size() > 4096 || impl_->key.size() < scope.size() + 8)
@@ -463,24 +733,50 @@ std::string_view ResultRef::semantic_key() const {
 }
 Status ResultRef::retain_association(
     const ResourceVector<ResultRef>& inputs) const {
-  if (!impl_ || inputs.size() != impl_->association.size())
+  if (!impl_ || inputs.size() > 1024)
     return invalid_schema();
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  for (std::size_t i = 0; i < inputs.size(); ++i)
-    if (!inputs[i].owned_by(impl_->budget) ||
-        inputs[i].object_id() != impl_->association[i] ||
-        inputs[i].object_id() == impl_->object)
+  for (const auto& input : inputs)
+    if (!input.owned_by(impl_->budget) || input.object_id() == impl_->object)
       return invalid_schema();
-  if (impl_->owners_bound)
+  for (auto claimed : impl_->association)
+    if (std::none_of(inputs.begin(), inputs.end(), [&](const auto& input) {
+          return input.object_id() == claimed;
+        }))
+      return invalid_schema();
+  try {
+    ResourceVector<std::uint64_t> ids{
+        ResourceAllocator<std::uint64_t>(impl_->budget)};
+    for (const auto& input : inputs)
+      ids.push_back(input.object_id());
+    ResourceVector<ResultRef> owners(
+        inputs.begin(), inputs.end(),
+        ResourceAllocator<ResultRef>(impl_->budget));
+    impl_->input_owners = std::move(owners);
+    impl_->association = std::move(ids);
+    impl_->owners_bound = true;
     return Status::success();
-  for (std::size_t i = 0; i < inputs.size(); ++i)
-    impl_->input_owners[i] = inputs[i];
-  impl_->owners_bound = true;
-  return Status::success();
+  } catch (const std::bad_alloc&) {
+    return Status{ErrorCode::ResourceExhausted, {}};
+  }
 }
-const ResourceVector<std::uint64_t>& ResultRef::association() const {
+
+void ResultRef::bind_dependencies(
+    std::shared_ptr<const execution_internal::DependencyBundle> bundle) const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->dependencies = std::move(bundle);
+}
+std::shared_ptr<const execution_internal::DependencyBundle>
+ResultRef::dependencies() const {
+  if (captured_)
+    return captured_->dependencies;
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->dependencies;
+}
+ResourceVector<std::uint64_t> ResultRef::association() const {
   if (!impl_)
     throw std::logic_error("invalid ResultRef");
+  std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->association;
 }
 void ResultRef::bind_producer(std::uint64_t node) const noexcept {
@@ -505,11 +801,15 @@ Status ResultRef::production_status() const {
   if (!impl_)
     return Status{ErrorCode::Stale, {}};
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  if (impl_->complete)
+  if (captured_ ? captured_->descriptor.sealed() : impl_->complete)
     return Status::success();
   return impl_->failure.ok() ? unavailable() : impl_->failure.status();
 }
 Result<ResultDescriptor> ResultRef::descriptor(bool require_complete) const {
+  if (captured_)
+    return require_complete && !captured_->descriptor.sealed()
+               ? Result<ResultDescriptor>(unavailable())
+               : Result<ResultDescriptor>(captured_->descriptor);
   if (!impl_)
     return Result<ResultDescriptor>(Status{ErrorCode::Stale, {}});
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -525,13 +825,80 @@ Result<ResultDescriptor> ResultRef::descriptor(bool require_complete) const {
   facts.field_count_ = static_cast<std::uint32_t>(impl_->schema.fields.size());
   for (std::uint32_t i = 0; i < facts.field_count_; ++i)
     facts.rows_[i] = impl_->fields[i].certified;
+  facts.image_count_ = static_cast<std::uint32_t>(impl_->schema.images.size());
+  for (std::uint32_t i = 0; i < facts.image_count_; ++i)
+    facts.images_[i] = impl_->images[i].coverage;
   return Result<ResultDescriptor>(facts);
+}
+Status ResultRef::read_image(const ResultDescriptor& facts, std::uint32_t slot,
+                             const std::vector<std::uint64_t>& at,
+                             void* destination, std::size_t bytes,
+                             const CancellationToken& cancellation) const {
+  if (!impl_ ||
+      (captured_ && facts.revision() > captured_->descriptor.revision()))
+    return Status{ErrorCode::Stale, {}};
+  if (!destination || slot >= facts.image_count_ || at.size() < 4)
+    return Status{ErrorCode::InvalidArgument, "invalid image read"};
+  PlanarImage backing;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (facts.object_ != impl_->object || !facts.revision_ ||
+        facts.revision_ > impl_->revision ||
+        slot >= impl_->schema.images.size())
+      return Status{ErrorCode::Stale, "invalid image descriptor"};
+    const auto& spec = impl_->schema.images[slot];
+    if (at.size() != spec.descriptor.shape.size() + 2 ||
+        bytes != Value::element_size(spec.descriptor.element_type) ||
+        !facts.images_[slot].contains(at))
+      return Status{ErrorCode::InvalidArgument, "unauthorized image sample"};
+    backing = impl_->images[slot].backing[at[0] * spec.layers + at[1]];
+  }
+  std::optional<ResourceAllocationScope> scope;
+  if (!resource_internal::metadata_budget())
+    scope.emplace(impl_->budget);
+  auto admitted = impl_->budget.reserve(ResourceCapacity::host(
+      at.size() * (sizeof(std::uint64_t) + sizeof(RegionDimension)),
+      at.size() * (sizeof(std::uint64_t) + sizeof(RegionDimension))));
+  if (!admitted.ok())
+    return admitted.status();
+  auto bridge = admitted.take_value();
+  auto copied = impl_->budget.consume({1, bytes, 1});
+  if (!copied.ok())
+    return copied;
+  std::vector<std::uint64_t> coordinate(at.begin() + 2, at.end());
+  std::vector<RegionDimension> dimensions;
+  for (auto n : coordinate)
+    dimensions.push_back({n, 1});
+  auto window = backing.acquire(Region(std::move(dimensions)), cancellation);
+  if (!window.ok())
+    return window.status();
+  auto run = window.value().row_run(coordinate);
+  if (!run.ok())
+    return run.status();
+  std::memcpy(destination, run.value().data, bytes);
+  return Status::success();
+}
+Result<ResultRelation> ResultRef::image_relation(std::uint32_t slot) const {
+  if (captured_)
+    return slot < captured_->descriptor.image_count()
+               ? Result<ResultRelation>(captured_->images[slot])
+               : Result<ResultRelation>(unavailable());
+  if (!impl_)
+    return Result<ResultRelation>(Status{ErrorCode::Stale, {}});
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  if (slot >= impl_->schema.images.size() ||
+      !impl_->images[slot].relation.valid() ||
+      (!impl_->complete &&
+       impl_->schema.publication == PublishPolicy::CompleteBundle))
+    return Result<ResultRelation>(unavailable());
+  return Result<ResultRelation>(impl_->images[slot].relation);
 }
 Result<ResultReadPlan> ResultRef::prepare_read(const ResultDescriptor& facts,
                                                std::uint32_t field,
                                                std::uint64_t first,
                                                std::uint64_t rows) const {
-  if (!impl_)
+  if (!impl_ ||
+      (captured_ && facts.revision() > captured_->descriptor.revision()))
     return Result<ResultReadPlan>(Status{ErrorCode::Stale, {}});
   std::lock_guard<std::mutex> lock(impl_->mutex);
   if (facts.object_ != impl_->object || !facts.revision_ ||
@@ -563,6 +930,10 @@ Result<ResultReadPlan> ResultRef::prepare_read(const ResultDescriptor& facts,
   }
 }
 Result<ResultRelation> ResultRef::relation(std::uint32_t field) const {
+  if (captured_)
+    return field < captured_->descriptor.field_count()
+               ? Result<ResultRelation>(captured_->fields[field])
+               : Result<ResultRelation>(unavailable());
   if (!impl_)
     return Result<ResultRelation>(Status{ErrorCode::Stale, {}});
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -574,6 +945,8 @@ Result<ResultRelation> ResultRef::relation(std::uint32_t field) const {
   return Result<ResultRelation>(impl_->fields[field].relation);
 }
 Result<ResultRelation> ResultRef::descriptor_relation() const {
+  if (captured_)
+    return Result<ResultRelation>(captured_->basis);
   if (!impl_)
     return Result<ResultRelation>(Status{ErrorCode::Stale, {}});
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -640,15 +1013,24 @@ ResultBuilder::~ResultBuilder() noexcept {
 Result<ResultBuilder> ResultBuilder::start(
     ResourceBudget budget, const SchemaTemplate& schema,
     std::string_view semantic_key, ResultGrowthLimits limits,
-    std::vector<std::uint64_t> association) {
+    std::vector<std::uint64_t> association, std::uint64_t tile_height,
+    std::uint64_t tile_width, ResourceBindings resources) {
+  std::optional<ResourceAllocationScope> metadata_scope;
+  const auto* active_root = resource_internal::metadata_budget();
+  if (!active_root || !active_root->same_owner(budget))
+    metadata_scope.emplace(budget);
   auto valid = schema.validate(true);
   if (!valid.ok())
     return Result<ResultBuilder>(valid);
   if (semantic_key.empty() || semantic_key.size() > 4096 ||
-      association.size() > 16 ||
+      association.size() > 1024 ||
       std::any_of(association.begin(), association.end(),
                   [](auto id) { return id == 0; }))
     return Result<ResultBuilder>(invalid_schema());
+  auto admitted_resources = resources.reference(budget);
+  if (!admitted_resources.ok())
+    return Result<ResultBuilder>(admitted_resources.status());
+  resources = admitted_resources.take_value();
   for (const auto& field : schema.fields)
     if (field.rows.kind == ResultExtentKind::Fixed &&
         scaled(field.rows, field.rows.value).value() > limits.maximum_rows)
@@ -682,10 +1064,16 @@ Result<ResultBuilder> ResultBuilder::start(
   if (!lease.ok())
     return Result<ResultBuilder>(lease.status());
   try {
-    auto impl = std::shared_ptr<ResultRef::Impl>(
-        new ResultRef::Impl(std::move(budget)));
+    auto impl = std::shared_ptr<ResultRef::Impl>(new ResultRef::Impl(budget));
     impl->lease = lease.take_value();
     impl->schema = copied.take_value();
+    auto selected_resources = impl->schema.select_resources(resources);
+    if (!selected_resources.ok())
+      return Result<ResultBuilder>(selected_resources.status());
+    auto owned_resources = selected_resources.value().reference(impl->budget);
+    if (!owned_resources.ok())
+      return Result<ResultBuilder>(owned_resources.status());
+    impl->resources = owned_resources.take_value();
     impl->key = std::move(schema_key);
     impl->association = ResourceVector<std::uint64_t>(
         association.begin(), association.end(),
@@ -693,6 +1081,52 @@ Result<ResultBuilder> ResultBuilder::start(
     impl->limits = limits;
     for (std::uint32_t i = 0; i < impl->schema.fields.size(); ++i)
       impl->fields[i].row_bytes = impl->schema.row_bytes(i).value();
+    auto page_budget = std::make_shared<PlanarPageBudget>(
+        limits.maximum_bytes,
+        [root = impl->budget](std::uint64_t bytes,
+                              bool metadata) -> Result<std::shared_ptr<void>> {
+          auto capacity = ResourceCapacity::host(bytes, metadata ? bytes : 0);
+          capacity[ResourceKind::Payload] = metadata ? 0 : bytes;
+          auto charged = root.reserve(capacity);
+          if (!charged.ok())
+            return Result<std::shared_ptr<void>>(charged.status());
+          return Result<std::shared_ptr<void>>(
+              std::make_shared<ResourceLease>(charged.take_value()));
+        });
+    for (std::size_t i = 0; i < impl->schema.images.size(); ++i) {
+      const auto& spec = impl->schema.images[i];
+      auto& image = impl->images[i];
+      image.backing = ResourceVector<PlanarImage>(
+          ResourceAllocator<PlanarImage>(impl->budget));
+      image.backing.reserve(spec.frames * spec.layers);
+      auto coverage = Footprint::none(spec.sample_shape());
+      if (!coverage.ok())
+        return Result<ResultBuilder>(coverage.status());
+      image.coverage = coverage.take_value();
+      auto empty_relation = ResultRelation::cartesian(
+          impl->budget, spec.sample_count().value(), {0, 1, 0, 0});
+      if (!empty_relation.ok())
+        return Result<ResultBuilder>(empty_relation.status());
+      image.relation = empty_relation.take_value();
+      PlanarImageConfig config;
+      config.order = spec.layout.order;
+      config.height_axis = spec.layout.height_axis;
+      config.width_axis = spec.layout.width_axis;
+      config.channel_axis = spec.layout.channel_axis;
+      config.row_pitch_bytes = spec.layout.row_pitch_bytes;
+      config.groups = spec.layout.groups;
+      config.tile_height = tile_height;
+      config.tile_width = tile_width;
+      config.maximum_backed_bytes = limits.maximum_bytes;
+      config.aggregate_budget = page_budget;
+      for (std::uint64_t n = 0; n < spec.frames * spec.layers; ++n) {
+        auto backing = PlanarImage::create(spec.descriptor, config, spec.facets,
+                                           impl->resources);
+        if (!backing.ok())
+          return Result<ResultBuilder>(backing.status());
+        image.backing.push_back(backing.take_value());
+      }
+    }
     static std::atomic<std::uint64_t> next{1};
     auto id = next.load();
     do {
@@ -786,10 +1220,49 @@ Status ResultBuilder::publish(std::uint32_t field, std::uint64_t end,
     return reject(invalid_schema());
   auto& target = impl_->fields[field];
   if (end < target.certified || end > target.written ||
-      relation.coverage() < end ||
-      (target.relation.valid() && !target.relation.same_owner(relation)) ||
-      impl_->revision == UINT64_MAX)
+      relation.coverage() < end || impl_->revision == UINT64_MAX)
     return reject(invalid_schema());
+  if (target.relation.valid() && !target.relation.same_owner(relation) &&
+      target.certified) {
+    if (target.relation.guarantee() != relation.guarantee())
+      return reject(invalid_schema());
+    if (relation.guarantee() != DependencyGuarantee::Unknown) {
+      const auto ordered = [](const ResultSupport& a, const ResultSupport& b) {
+        return std::tie(a.input, a.roles, a.target, a.slot, a.first, a.count) <
+               std::tie(b.input, b.roles, b.target, b.slot, b.first, b.count);
+      };
+      for (uint64_t row = 0; row < target.certified; ++row) {
+        auto work = impl_->budget.consume({1});
+        if (!work.ok())
+          return reject(work);
+        ResourceVector<ResultSupport> prior{
+            ResourceAllocator<ResultSupport>(impl_->budget)},
+            next{ResourceAllocator<ResultSupport>(impl_->budget)};
+        auto status = target.relation.visit(row, impl_->limits.maximum_rows,
+                                            [&](auto support) {
+                                              prior.push_back(support);
+                                              return Status::success();
+                                            });
+        if (!status.ok())
+          return reject(status);
+        status =
+            relation.visit(row, impl_->limits.maximum_rows, [&](auto support) {
+              next.push_back(support);
+              return Status::success();
+            });
+        if (!status.ok())
+          return reject(status);
+        std::sort(prior.begin(), prior.end(), ordered);
+        std::sort(next.begin(), next.end(), ordered);
+        if (prior.size() != next.size() ||
+            !std::equal(prior.begin(), prior.end(), next.begin(),
+                        [&](const auto& a, const auto& b) {
+                          return !ordered(a, b) && !ordered(b, a);
+                        }))
+          return reject(invalid_schema());
+      }
+    }
+  }
   if (target.storage.valid()) {
     auto frozen = target.storage.freeze_prefix(end * target.row_bytes);
     if (!frozen.ok())
@@ -797,6 +1270,138 @@ Status ResultBuilder::publish(std::uint32_t field, std::uint64_t end,
   }
   target.relation = std::move(relation);
   target.certified = end;
+  ++impl_->revision;
+  return Status::success();
+}
+Status ResultBuilder::publish_image(std::uint32_t slot, const Region& region,
+                                    ByteView packed, ResultRelation relation,
+                                    ResultFinality finality,
+                                    const CancellationToken& cancellation) {
+  if (!impl_)
+    return Status{ErrorCode::Stale, {}};
+  std::optional<ResourceAllocationScope> metadata_scope;
+  const auto* active_root = resource_internal::metadata_budget();
+  if (!active_root || !active_root->same_owner(impl_->budget))
+    metadata_scope.emplace(impl_->budget);
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  const auto reject = [&](Status status) {
+    impl_->failure.record(status);
+    return status;
+  };
+  if (impl_->complete || !impl_->failure.ok())
+    return impl_->failure.ok() ? Status{ErrorCode::Stale, {}}
+                               : impl_->failure.status();
+  if (slot >= impl_->schema.images.size() || !finality.satisfied() ||
+      !impl_->descriptor_relation.valid() || !relation.owned_by(impl_->budget))
+    return reject(invalid_schema());
+  const auto& spec = impl_->schema.images[slot];
+  auto& target = impl_->images[slot];
+  FootprintLimits limits;
+  limits.cancellation = cancellation;
+  limits.consume_work = [root = impl_->budget](auto n) {
+    return root.consume({n});
+  };
+  auto samples = Footprint::from_regions(spec.sample_shape(), {region}, limits);
+  if (!samples.ok())
+    return reject(samples.status());
+  auto closed = spec.close_samples(samples.value(), limits);
+  if (!closed.ok())
+    return reject(closed.status());
+  if (closed.value() != samples.value() ||
+      relation.coverage() != spec.sample_count().value())
+    return reject(invalid_schema());
+  auto overlap = samples.value().intersect(target.coverage, limits);
+  if (!overlap.ok())
+    return reject(overlap.status());
+  if (!overlap.value().empty())
+    return reject(invalid_schema());
+  auto coverage = target.coverage.unite(samples.value(), limits);
+  if (!coverage.ok())
+    return reject(coverage.status());
+  auto count = samples.value().element_count();
+  const auto width = Value::element_size(spec.descriptor.element_type);
+  if (!count.ok() || count.value() > UINT64_MAX / width ||
+      count.value() * width != packed.size() || impl_->revision == UINT64_MAX)
+    return reject(invalid_schema());
+  auto copied_work = impl_->budget.consume(
+      {count.value(), packed.size(), count.value() ? 1U : 0U});
+  if (!copied_work.ok())
+    return reject(copied_work);
+  if (relation.guarantee() != DependencyGuarantee::Unknown) {
+    auto complete = samples.value().visit(
+        [&](const auto& at) {
+          std::uint64_t index = 0;
+          const auto shape = spec.sample_shape();
+          for (std::size_t axis = 0; axis < at.size(); ++axis)
+            index = index * shape[axis] + at[axis];
+          return relation.visit(
+              index, impl_->limits.maximum_rows,
+              [](ResultSupport) { return Status::success(); });
+        },
+        impl_->limits.maximum_rows, cancellation);
+    if (!complete.ok())
+      return reject(complete);
+  }
+  auto combined =
+      !target.coverage.empty() && target.relation.valid() &&
+              !target.relation.same_owner(relation)
+          ? ResultRelation::unite(impl_->budget, {target.relation, relation})
+          : Result<ResultRelation>(relation);
+  if (!combined.ok())
+    return reject(combined.status());
+  if (!samples.value().empty()) {
+    std::vector<RegionDimension> spatial(region.dimensions().begin() + 2,
+                                         region.dimensions().end());
+    Region plane_region(std::move(spatial));
+    const auto frame_count = region.dimensions()[0].extent;
+    const auto layer_count = region.dimensions()[1].extent;
+    const auto plane_bytes = packed.size() / frame_count / layer_count;
+    ResourceVector<PlanarImageWriteWindow> writers{
+        ResourceAllocator<PlanarImageWriteWindow>(impl_->budget)};
+    writers.reserve(frame_count * layer_count);
+    for (std::uint64_t n = region.dimensions()[0].offset;
+         n < region.dimensions()[0].offset + frame_count; ++n)
+      for (std::uint64_t l = region.dimensions()[1].offset;
+           l < region.dimensions()[1].offset + layer_count; ++l) {
+        auto prepared = target.backing[n * spec.layers + l].begin_write(
+            plane_region, cancellation);
+        if (!prepared.ok())
+          return reject(prepared.status());
+        writers.push_back(prepared.take_value());
+      }
+    auto plane =
+        Footprint::from_regions(spec.descriptor.shape, {plane_region}, limits);
+    if (!plane.ok())
+      return reject(plane.status());
+    for (std::size_t pair = 0; pair < writers.size(); ++pair) {
+      std::uint64_t scalar = 0;
+      auto status = plane.value().visit(
+          [&](const auto& at) -> Status {
+            auto run = writers[pair].row_run(at);
+            if (!run.ok())
+              return run.status();
+            std::memcpy(run.value().data,
+                        packed.data() + pair * plane_bytes + scalar * width,
+                        width);
+            ++scalar;
+            return Status::success();
+          },
+          count.value(), cancellation);
+      if (!status.ok())
+        return reject(status);
+    }
+    if (cancellation.cancelled())
+      return reject(Status{ErrorCode::Cancelled, {}});
+    // All admission/copy/cancellation checks precede this allocation-free
+    // commit barrier. A failed preparation retires every fresh page/window.
+    for (auto& writer : writers) {
+      auto status = writer.commit();
+      if (!status.ok())
+        return reject(status);
+    }
+  }
+  target.coverage = coverage.take_value();
+  target.relation = combined.take_value();
   ++impl_->revision;
   return Status::success();
 }
@@ -811,6 +1416,11 @@ Result<ResultRef> ResultBuilder::seal() {
     impl_->failure.record(status);
     return Result<ResultRef>(status);
   };
+  if (!impl_->descriptor_relation.valid())
+    return reject(invalid_schema());
+  for (std::size_t i = 0; i < impl_->schema.images.size(); ++i)
+    if (!impl_->images[i].relation.valid())
+      return reject(invalid_schema());
   for (std::uint32_t i = 0; i < impl_->schema.fields.size(); ++i) {
     const auto& field = impl_->schema.fields[i];
     const auto& state = impl_->fields[i];

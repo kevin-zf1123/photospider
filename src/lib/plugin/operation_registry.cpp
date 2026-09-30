@@ -23,8 +23,7 @@
 #include "plugin/dense_layout_validation.hpp"
 #include "plugin/dependency_plugin.hpp"
 #include "plugin/operation_resources.hpp"
-#include "plugin/planar_exact.hpp"
-#include "plugin/planar_plugin.hpp"
+#include "plugin/result_plugin.hpp"
 #include "plugin/utf8_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
@@ -76,7 +75,8 @@ class OperationLibrary final {
    */
   OperationLibrary(OperationLibrary&& other) noexcept
       : handle_(std::exchange(other.handle_, nullptr)),
-        api_(std::exchange(other.api_, nullptr)) {}
+        api_(std::exchange(other.api_, nullptr)),
+        result_api_(std::exchange(other.result_api_, nullptr)) {}
 
   /**
    * @brief Releases records and unloads the native library.
@@ -85,6 +85,12 @@ class OperationLibrary final {
    * plugin remains outside the correctness guarantee of the host process.
    */
   ~OperationLibrary() noexcept {
+    if (result_api_ && result_api_->destroy) {
+      try {
+        result_api_->destroy(result_api_->context);
+      } catch (...) {
+      }
+    }
     if (api_ && api_->destroy) {
       try {
         api_->destroy(api_->operations, api_->operation_count);
@@ -150,11 +156,17 @@ class OperationLibrary final {
     api_ = api;
   }
 
+  void attach_result_api(
+      const ps_result_operation_plugin_api_v1* api) noexcept {
+    result_api_ = api;
+  }
+
  private:
   /** @brief Platform native library handle. */
   void* handle_ = nullptr;
   /** @brief Mapped immutable plugin API table. */
   const ps_operation_plugin_api_v11* api_ = nullptr;
+  const ps_result_operation_plugin_api_v1* result_api_ = nullptr;
 };
 
 /**
@@ -442,7 +454,7 @@ Status validate_selected_traits(const OperationTraits& traits) {
                           traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.outputs[0].fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 20U ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 21U ||
       (!traits.supports_cpu && !traits.supports_gpu) || !known_shape ||
       !known_region ||
       (traits.share_blocks_across_outputs &&
@@ -1025,90 +1037,28 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
     return traits_status;
   const bool staged = definition.traits.outputs[0].dependency_version == 1;
   const bool structured = definition.traits.outputs[0].dependency_version == 2;
-  const bool planar = definition.traits.planar_storage_capable;
-  if (definition.traits.planar_exact_dependencies &&
-      (!planar || !staged || !definition.prepare_static ||
-       !definition.start_dependency || !definition.planar_callback))
-    return Status{ErrorCode::InvalidArgument,
-                  "invalid exact planar capability"};
-  const bool dual_planar = planar && staged && definition.prepare_static &&
-                           definition.start_dependency &&
-                           definition.planar_callback;
-  if (definition.validate_planar_mapped && !dual_planar)
-    return Status{ErrorCode::InvalidArgument,
-                  "mapped planar validation requires dual static preparation"};
   if (!valid_key(definition.key) || !traits_status.ok() ||
       definition.traits.requires_metadata_specialization !=
           (static_cast<bool>(definition.specialize_metadata) ||
            static_cast<bool>(definition.prepare_static)) ||
       (definition.specialize_metadata && definition.prepare_static) ||
       (definition.prepare_static &&
-       ((!staged && std::any_of(definition.traits.outputs.begin(),
-                                definition.traits.outputs.end(),
-                                [](const auto& output) {
-                                  return output.region_rule !=
-                                         OperationRegionRule::Whole;
-                                })) ||
+       ((!staged && !structured &&
+         std::any_of(definition.traits.outputs.begin(),
+                     definition.traits.outputs.end(),
+                     [](const auto& output) {
+                       return output.region_rule != OperationRegionRule::Whole;
+                     })) ||
         !definition.traits.deterministic ||
         !definition.traits.side_effect_free)) ||
-      (planar && !dual_planar
-           ? (!definition.planar_callback || definition.callback ||
-              definition.traits.input_count == 0 ||
-              definition.start_dependency || definition.start_result ||
-              definition.start_joint || definition.validate_dependency ||
-              definition.prepare_static || definition.traits.repeated_maximum ||
-              std::any_of(definition.traits.input_schema.begin(),
-                          definition.traits.input_schema.end(),
-                          [](const auto& port) {
-                            return port.kind != OperationPortKind::Value;
-                          }) ||
-              staged || structured || definition.traits.outputs.size() != 1 ||
-              !definition.traits.outputs[0].planar_layout ||
-              definition.traits.outputs[0].output_schema.kind !=
-                  OperationPortKind::Value ||
-              definition.traits.outputs[0].input_indices ||
-              definition.traits.outputs[0].maximum_output_payload_bytes ||
-              definition.traits.outputs[0].preserve_output_views ||
-              definition.traits.outputs[0].requires_input_views ||
-              (definition.traits.supports_gpu &&
-               (definition.traits.allows_cpu_fallback ||
-                definition.traits.outputs[0].region_rule !=
-                    OperationRegionRule::Whole)) ||
-              (definition.traits.outputs[0].region_rule !=
-                   OperationRegionRule::Whole &&
-               definition.traits.outputs[0].region_rule !=
-                   OperationRegionRule::Elementwise))
-           : !dual_planar &&
-                 (definition.planar_callback ||
-                  std::any_of(definition.traits.outputs.begin(),
-                              definition.traits.outputs.end(),
-                              [](const auto& output) {
-                                return output.planar_layout.has_value();
-                              }) ||
-                  (structured
-                       ? (!definition.start_result ||
-                          definition.start_dependency || definition.callback)
-                   : staged
-                       ? (!definition.start_dependency || definition.callback ||
-                          definition.start_result)
-                       : (!definition.callback || definition.start_dependency ||
-                          definition.start_result ||
-                          definition.validate_dependency)))))
+      (structured ? (!definition.start_result || definition.start_dependency ||
+                     definition.callback)
+       : staged   ? (!definition.start_dependency || definition.callback ||
+                   definition.start_result)
+                  : (!definition.callback || definition.start_dependency ||
+                   definition.start_result || definition.validate_dependency)))
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation definition is malformed");
-  if (dual_planar &&
-      (definition.callback || definition.start_result ||
-       definition.start_joint || definition.validate_dependency ||
-       definition.specialize_metadata ||
-       (definition.traits.input_count == 0 &&
-        !definition.traits.repeated_maximum) ||
-       definition.traits.outputs.size() != 1 ||
-       definition.traits.outputs[0].planar_layout ||
-       definition.traits.outputs[0].output_schema.kind !=
-           OperationPortKind::Value ||
-       definition.traits.supports_gpu))
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "dual storage operation definition is malformed");
   if (static_cast<bool>(definition.start_joint) !=
           (definition.traits.joint_contract != 0) ||
       definition.traits.joint_contract > 2 ||
@@ -1231,6 +1181,59 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
   OperationLibrary pending_library(opened.value());
 
+  for (const auto* symbol : {"ps_operation_plugin_get_planar_api_v1",
+                             "ps_operation_plugin_get_planar_api_v2",
+                             "ps_operation_plugin_get_planar_api_v3"})
+    if (find_symbol(pending_library.handle(), symbol))
+      return Status{ErrorCode::TypeMismatch,
+                    "image plugins require the Result ABI"};
+  using ResultApiFunction = const ps_result_operation_plugin_api_v1* (*)();
+  ResultApiFunction result_api_function = nullptr;
+  void* result_symbol = find_symbol(pending_library.handle(),
+                                    "ps_result_operation_plugin_get_api_v1");
+  std::memcpy(&result_api_function, &result_symbol,
+              sizeof(result_api_function));
+  if (result_api_function) {
+    const ps_result_operation_plugin_api_v1* table = nullptr;
+    try {
+      table = result_api_function();
+    } catch (...) {
+      return Status{ErrorCode::OperationFailed, "Result API entry threw"};
+    }
+    if (!table ||
+        reinterpret_cast<std::uintptr_t>(table) %
+            alignof(ps_result_operation_plugin_api_v1) ||
+        table->struct_size != sizeof(*table) || table->abi_version != 1)
+      return Status{ErrorCode::InvalidArgument,
+                    "unsupported Result API version or size"};
+    pending_library.attach_result_api(table);
+    auto owner = std::make_shared<OperationLibrary>(std::move(pending_library));
+    auto imported = plugin_internal::import_result_plugin(table, owner);
+    if (!imported.ok())
+      return imported.status();
+    OperationRegistry candidate;
+    for (auto& definition : imported.value()) {
+      auto status = candidate.register_operation(std::move(definition));
+      if (!status.ok())
+        return status;
+    }
+    std::map<std::string, Impl::DefinitionHandle> replacement;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      if (impl_->frozen)
+        return Status{ErrorCode::InvalidArgument,
+                      "registry froze during Result module load"};
+      replacement = impl_->definitions;
+      for (const auto& definition : candidate.impl_->definitions)
+        if (!replacement.emplace(definition.first, definition.second).second)
+          return Status{ErrorCode::InvalidArgument,
+                        "duplicate Result module operation"};
+      impl_->definitions.swap(replacement);
+      builtins_ = false;
+    }
+    return Status::success();
+  }
+
   using VersionFunction = std::uint32_t (*)();
   using ApiFunction = const ps_operation_plugin_api_v11* (*)();
   VersionFunction version = nullptr;
@@ -1290,37 +1293,11 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   // Allocation failure leaves the stack owner intact for exact rollback.
   auto library = std::make_shared<OperationLibrary>(std::move(pending_library));
 
-  using PlanarApiFunction = const ps_planar_operation_plugin_api_v3* (*)();
-  PlanarApiFunction planar_api_function = nullptr;
-  void* planar_symbol =
-      find_symbol(library->handle(), "ps_operation_plugin_get_planar_api_v3");
-  std::memcpy(&planar_api_function, &planar_symbol,
-              sizeof(planar_api_function));
-  if (!planar_api_function &&
-      (find_symbol(library->handle(),
-                   "ps_operation_plugin_get_planar_api_v1") ||
-       find_symbol(library->handle(), "ps_operation_plugin_get_planar_api_v2")))
-    return Status{ErrorCode::InvalidArgument, "unsupported planar ABI version"};
-  const ps_planar_operation_plugin_api_v3* planar_api = nullptr;
-  if (planar_api_function) {
-    try {
-      planar_api = planar_api_function();
-    } catch (...) {
-      return Status{ErrorCode::OperationFailed, "planar API lookup threw"};
-    }
-    if (!planar_api ||
-        reinterpret_cast<uintptr_t>(planar_api) %
-            alignof(ps_planar_operation_plugin_api_v3) ||
-        planar_api->struct_size != sizeof(*planar_api) ||
-        planar_api->abi_version != PS_PLANAR_OPERATION_ABI_VERSION_3 ||
-        planar_api->operation_count != api->operation_count ||
-        !planar_api->operations ||
-        reinterpret_cast<uintptr_t>(planar_api->operations) %
-            alignof(ps_planar_operation_v3))
-      return Status{ErrorCode::InvalidArgument,
-                    "malformed planar extension table"};
-  }
-
+  if (find_symbol(library->handle(), "ps_operation_plugin_get_planar_api_v1") ||
+      find_symbol(library->handle(), "ps_operation_plugin_get_planar_api_v2") ||
+      find_symbol(library->handle(), "ps_operation_plugin_get_planar_api_v3"))
+    return Status{ErrorCode::InvalidArgument,
+                  "Planar callback modules require the Result ABI"};
   std::vector<std::shared_ptr<OperationDefinition>> staged;
   staged.reserve(api->operation_count);
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
@@ -1525,16 +1502,6 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       if (!prepared.ok())
         return prepared;
     }
-    if (planar_api) {
-      if (descriptor.dependency_program)
-        return Status{ErrorCode::InvalidArgument,
-                      "planar extension cannot stage"};
-      const auto status = plugin_internal::prepare_planar_plugin(
-          &definition, planar_api->operations[index], descriptor.user_data,
-          library);
-      if (!status.ok())
-        return status;
-    }
     const Status traits_status = validate_traits(definition.traits);
     if (!traits_status.ok()) {
       return traits_status;
@@ -1557,7 +1524,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
 
   for (std::uint32_t index = 0; index < api->operation_count; ++index) {
     const ps_operation_descriptor_v11* descriptor = &api->operations[index];
-    if (descriptor->dependency_program || planar_api)
+    if (descriptor->dependency_program)
       continue;
     staged[index]->callback =
         [library, descriptor, traits = staged[index]->traits, unused = false](
@@ -1963,20 +1930,6 @@ OperationRegistry::prepare_operation(
         auto& output = traits.outputs[i];
         auto& specialization = specialized.value()[i];
         auto& metadata = specialization.metadata;
-        if (traits.planar_storage_capable && !output.dependency_version &&
-            (!metadata.planar_layout || metadata.result_schema ||
-             metadata.atomic_trailing_axes || specialization.regional_atomic ||
-             specialization.preserve_output_views ||
-             specialization.requires_input_views ||
-             specialization.maximum_output_payload_bytes ||
-             specialization.input_indices ||
-             specialization.static_dependency_pieces ||
-             specialization.data_movement != DataMovementKind::None ||
-             specialization.data_movement_view_policy !=
-                 DataMovementViewPolicy::Auto))
-          return Answer(
-              Status{ErrorCode::TypeMismatch,
-                     "planar specialization changed storage protocol"});
         if (specialization.input_indices) {
           if (output.region_rule != OperationRegionRule::Whole ||
               output.dependency_version || traits.supports_gpu ||
@@ -2036,7 +1989,6 @@ OperationRegistry::prepare_operation(
         output.output_semantic_input = 0;
         output.output_semantic_parameter.clear();
         output.output_facets = std::move(metadata.facets);
-        output.planar_layout = std::move(metadata.planar_layout);
         output.atomic_trailing_axes = metadata.atomic_trailing_axes;
         output.regional_atomic = specialization.regional_atomic;
         output.preserve_output_views = specialization.preserve_output_views;
@@ -2048,19 +2000,6 @@ OperationRegistry::prepare_operation(
         output.data_movement = specialization.data_movement;
         output.data_movement_view_policy =
             specialization.data_movement_view_policy;
-      }
-      for (const auto& output : traits.outputs) {
-        if (output.data_movement != DataMovementKind::BitwiseMapped ||
-            !output.static_dependency_pieces)
-          continue;
-        for (const auto& piece : *output.static_dependency_pieces)
-          for (const auto& need : piece.inputs)
-            if ((need.roles &
-                 static_cast<std::uint32_t>(DependencyRole::Validation)) &&
-                !definition->validate_planar_mapped)
-              return Answer(Status{
-                  ErrorCode::InvalidArgument,
-                  "mapped validation needs an explicit read-only callback"});
       }
       traits.requires_metadata_specialization = false;
       auto expanded_validation = traits;
@@ -2117,23 +2056,6 @@ Status OperationRegistry::validate_prepared(
     return Status{ErrorCode::Stale,
                   "prepared operation does not match static inputs/registry"};
   };
-  const auto same_planar_layout = [](const auto& a, const auto& b) {
-    if (a.has_value() != b.has_value())
-      return false;
-    if (!a)
-      return true;
-    if (a->order != b->order || a->height_axis != b->height_axis ||
-        a->width_axis != b->width_axis || a->channel_axis != b->channel_axis ||
-        a->row_pitch_bytes != b->row_pitch_bytes ||
-        a->groups.size() != b->groups.size())
-      return false;
-    for (std::size_t i = 0; i < a->groups.size(); ++i)
-      if (a->groups[i].role != b->groups[i].role ||
-          a->groups[i].first_channel != b->groups[i].first_channel ||
-          a->groups[i].channel_count != b->groups[i].channel_count)
-        return false;
-    return true;
-  };
   const auto& stored = *prepared.impl_;
   if (stored.registry != impl_->identity ||
       inputs.size() != stored.inputs.size() ||
@@ -2151,7 +2073,6 @@ Status OperationRegistry::validate_prepared(
     if (a.descriptor.element_type != b.descriptor.element_type ||
         a.descriptor.shape != b.descriptor.shape ||
         a.atomic_trailing_axes != b.atomic_trailing_axes ||
-        !same_planar_layout(a.planar_layout, b.planar_layout) ||
         !input_internal::same_facets(a.facets, b.facets) ||
         static_cast<bool>(a.result_schema) !=
             static_cast<bool>(b.result_schema) ||
@@ -2218,9 +2139,9 @@ Result<std::shared_ptr<DependencySession>> OperationRegistry::start_dependency(
   const auto traits = request.prepared->traits();
   for (const auto& input : request.inputs)
     if (input_internal::structural_image_metadata(input))
-      return Result<std::shared_ptr<DependencySession>>(Status::failure(
-          ErrorCode::TypeMismatch,
-          "legacy image dependency input requires planar storage"));
+      return Result<std::shared_ptr<DependencySession>>(
+          Status::failure(ErrorCode::TypeMismatch,
+                          "image dependency input requires Result schema"));
   auto selected = select_operation_output(traits, request.output_index);
   if (!selected.ok())
     return Result<std::shared_ptr<DependencySession>>(selected.status());
@@ -2229,9 +2150,9 @@ Result<std::shared_ptr<DependencySession>> OperationRegistry::start_dependency(
   if (!inferred.ok())
     return Result<std::shared_ptr<DependencySession>>(inferred.status());
   if (input_internal::structural_image_metadata(inferred.value()))
-    return Result<std::shared_ptr<DependencySession>>(Status::failure(
-        ErrorCode::TypeMismatch,
-        "legacy image dependency output requires planar storage"));
+    return Result<std::shared_ptr<DependencySession>>(
+        Status::failure(ErrorCode::TypeMismatch,
+                        "image dependency output requires Result schema"));
   return DependencySession::create(
       "registry-" + std::to_string(impl_->identity) + ":" + key, traits,
       definition->start_dependency, definition->validate_dependency,
@@ -2275,9 +2196,8 @@ Result<ResultContinuation> OperationRegistry::start_result(
         input_internal::structural_image_metadata(query.output) ||
         std::any_of(query.inputs.begin(), query.inputs.end(),
                     input_internal::structural_image_metadata))
-      return Answer(
-          Status{ErrorCode::TypeMismatch,
-                 "legacy image structured output requires planar storage"});
+      return Answer(Status{ErrorCode::TypeMismatch,
+                           "image structured output requires Result schema"});
     if (static_cast<bool>(metadata.result_schema) !=
             static_cast<bool>(query.output.result_schema) ||
         metadata.descriptor.shape != query.output.descriptor.shape ||
@@ -2360,9 +2280,8 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
     if (input_internal::structural_image_metadata(query.output) ||
         std::any_of(query.inputs.begin(), query.inputs.end(),
                     input_internal::structural_image_metadata))
-      return Answer(
-          Status{ErrorCode::TypeMismatch,
-                 "legacy image structured output requires planar storage"});
+      return Answer(Status{ErrorCode::TypeMismatch,
+                           "image structured output requires Result schema"});
     // Metadata and static validation were checked by Compiler. The context
     // verifies the plan belongs to this frozen registry before entering here.
     auto scoped = allocator.limited(
@@ -2460,601 +2379,6 @@ Result<Value> OperationRegistry::invoke(
   return invoke_current(key, invocation, {});
 }
 
-Status OperationRegistry::invoke_planar_mapped_validation(
-    std::shared_ptr<const PreparedOperation> prepared,
-    const PlanarImageReadWindow& input, std::uint32_t input_port,
-    const Region& output_region, const CancellationToken& cancellation,
-    const std::function<bool()>& current) const {
-  if (cancellation.cancelled())
-    return Status{ErrorCode::Cancelled, "mapped validation cancelled"};
-  if (current && !current())
-    return Status{ErrorCode::Stale, "mapped validation plan changed"};
-  if (!prepared || !input.valid() ||
-      input_port >= prepared->impl_->inputs.size())
-    return Status{ErrorCode::InvalidArgument,
-                  "invalid mapped validation window"};
-  const auto& stored = *prepared->impl_;
-  if (!stored.definition->validate_planar_mapped ||
-      stored.traits.outputs[0].data_movement != DataMovementKind::BitwiseMapped)
-    return Status{ErrorCode::InvalidArgument,
-                  "missing mapped validation contract"};
-  // Callback exit, including exceptions, must use one precedence rule.
-  const auto finish = [&](Status status) {
-    if (cancellation.cancelled())
-      return Status{ErrorCode::Cancelled, "mapped validation cancelled"};
-    if (current && !current())
-      return Status{ErrorCode::Stale, "mapped validation plan changed"};
-    return status;
-  };
-  try {
-    auto metadata = stored.inputs;
-    auto& actual = metadata[input_port];
-    actual.descriptor = input.descriptor();
-    actual.facets = input.facets();
-    actual.planar_layout = PlanarImageLayout{
-        input.config().order,           input.config().height_axis,
-        input.config().width_axis,      input.config().channel_axis,
-        input.config().row_pitch_bytes, input.config().groups};
-    auto status = validate_prepared(*prepared, stored.definition->key, metadata,
-                                    stored.parameters);
-    if (!status.ok())
-      return finish(std::move(status));
-    status =
-        output_region.validate(stored.traits.outputs[0].fixed_output_shape);
-    if (!status.ok())
-      return finish(std::move(status));
-    const PlanarMappedValidationInvocation invocation{
-        input, input_port, output_region, cancellation, prepared};
-    status = stored.definition->validate_planar_mapped(invocation);
-    return finish(std::move(status));
-  } catch (const std::bad_alloc&) {
-    return finish(Status{ErrorCode::ResourceExhausted,
-                         "mapped validation allocation",
-                         FailureReason::CapacityLimit});
-  } catch (...) {
-    return finish(Status{ErrorCode::OperationFailed,
-                         "mapped validation exception",
-                         FailureReason::HostException});
-  }
-}
-
-Status OperationRegistry::invoke_planar(
-    const std::string& key, const std::vector<PlanarImageReadWindow>& inputs,
-    const std::vector<Region>& input_demands,
-    const std::map<std::string, ParameterValue>& parameters,
-    const Region& output_region, PlanarImage& output,
-    const CancellationToken& cancellation, const BufferAllocator& allocator,
-    std::shared_ptr<const PreparedOperation> prepared,
-    const std::function<bool()>& current, NumericDiagnostics* numeric,
-    const ResourceBudget* resources, const ErrorCode* metadata_failure,
-    const ps_cpu_parallel_service_v1* cpu_parallel,
-    const std::function<Status(bool)>& completion_status, Backend backend,
-    const ps_gpu_service_v11* gpu,
-    const ps_cpu_tiles_service_v1* cpu_tiles) const {
-  Impl::DefinitionHandle definition;
-  {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    const auto found = impl_->definitions.find(key);
-    if (found == impl_->definitions.end())
-      return Status::failure(ErrorCode::NotFound,
-                             "planar operation is not registered");
-    definition = found->second;
-  }
-  if (!definition->traits.planar_storage_capable ||
-      !definition->planar_callback)
-    return Status::failure(ErrorCode::TypeMismatch,
-                           "operation lacks structural planar storage support");
-  if ((backend != Backend::Cpu && backend != Backend::Gpu) ||
-      (backend == Backend::Cpu && (gpu || !definition->traits.supports_cpu)) ||
-      (backend == Backend::Gpu &&
-       (cpu_parallel || !definition->traits.supports_gpu)))
-    return Status{ErrorCode::InvalidArgument, "invalid planar backend"};
-  if (backend == Backend::Gpu && !gpu)
-    return Status{ErrorCode::BackendUnavailable,
-                  "native planar GPU unavailable"};
-  if ((definition->traits.cpu_staged_tiles &&
-       (backend != Backend::Cpu || !cpu_tiles || cpu_parallel)) ||
-      (!definition->traits.cpu_staged_tiles && cpu_tiles))
-    return Status{ErrorCode::InvalidArgument, "invalid CPU stage services"};
-  auto expanded =
-      resolve_operation_traits(definition->traits, inputs.size(), parameters);
-  if (!expanded.ok())
-    return expanded.status();
-  if (input_demands.size() != inputs.size() || !output.valid())
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "invalid planar operation invocation");
-  if (cancellation.cancelled())
-    return Status::failure(ErrorCode::Cancelled, "planar operation cancelled");
-  auto status = validate_operation_parameters(definition->traits, parameters);
-  if (!status.ok())
-    return status;
-  const bool channel_extract =
-      key.compare(0, 22, "channel.extract_index_") == 0 ||
-      key.compare(0, 22, "channel.extract_named_") == 0;
-  // A compiled auto selection may materialize after its view proof failed.
-  // Do not rewrite static parameters: that would invalidate the preparation.
-  if (channel_extract &&
-      (std::get<std::string>(parameters.at("layout")) == "view" ||
-       (!prepared &&
-        std::get<std::string>(parameters.at("layout")) != "materialize")))
-    return {ErrorCode::InvalidArgument,
-            "ViewUnavailable: direct planar output cannot replace its owner",
-            FailureReason::InvalidDomain,
-            {FailureOrigin::Domain, FailureScope::Run}};
-  if (inputs.empty() || output_region.empty() ||
-      !output_region.validate(output.descriptor().shape).ok())
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "invalid planar output region");
-  const auto& first = inputs[0];
-  if (!first.valid())
-    return Status::failure(ErrorCode::TypeMismatch,
-                           "invalid planar input window");
-  for (std::size_t i = 0; i < inputs.size(); ++i) {
-    const auto& input = inputs[i];
-    const auto& actual = input.region().dimensions();
-    const auto& expected = input_demands[i].dimensions();
-    const bool exact =
-        actual.size() == expected.size() &&
-        std::equal(actual.begin(), actual.end(), expected.begin(),
-                   [](const auto& a, const auto& b) {
-                     return a.offset == b.offset && a.extent == b.extent;
-                   });
-    if (!input.valid() || !exact)
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "planar input window exceeds demand");
-    if (input.config().tile_height != output.config().tile_height ||
-        input.config().tile_width != output.config().tile_width)
-      return Status::failure(ErrorCode::TypeMismatch,
-                             "planar graph geometry mismatch");
-    status = input_internal::validate_port_metadata(
-        expanded.value().input_schema[i], input.descriptor(), input.facets());
-    if (!status.ok())
-      return status;
-  }
-  status = input_internal::validate_port_metadata(
-      definition->traits.outputs[0].output_schema, output.descriptor(),
-      output.facets());
-  if (!status.ok())
-    return status;
-  std::vector<OperationMetadata> metadata;
-  metadata.reserve(inputs.size());
-  for (const auto& input : inputs) {
-    OperationMetadata item;
-    item.descriptor = input.descriptor();
-    item.facets = input.facets();
-    item.planar_layout = PlanarImageLayout{
-        input.config().order,           input.config().height_axis,
-        input.config().width_axis,      input.config().channel_axis,
-        input.config().row_pitch_bytes, input.config().groups};
-    metadata.push_back(std::move(item));
-  }
-  if (prepared) {
-    status = validate_prepared(*prepared, key, metadata, parameters);
-    if (!status.ok())
-      return status;
-  } else {
-    auto created = prepare_operation(key, metadata, parameters);
-    if (!created.ok())
-      return created.status();
-    prepared = created.take_value();
-  }
-  if (current && !current())
-    return Status{ErrorCode::Stale, "planar plan changed before write"};
-  const auto& resolved_traits = prepared->traits();
-  auto expected_output =
-      infer_operation_output(resolved_traits, metadata, parameters);
-  if (!expected_output.ok())
-    return expected_output.status();
-  const auto& inferred = expected_output.value();
-  const auto& actual_config = output.config();
-  if (!inferred.planar_layout)
-    return Status{ErrorCode::TypeMismatch, "planar output layout is absent"};
-  const auto& expected_layout = *inferred.planar_layout;
-  bool same_groups =
-      expected_layout.groups.size() == actual_config.groups.size();
-  if (same_groups) {
-    for (std::size_t i = 0; i < expected_layout.groups.size(); ++i) {
-      const auto& left = expected_layout.groups[i];
-      const auto& right = actual_config.groups[i];
-      if (left.role != right.role ||
-          left.first_channel != right.first_channel ||
-          left.channel_count != right.channel_count)
-        same_groups = false;
-    }
-  }
-  if (inferred.descriptor.element_type != output.descriptor().element_type ||
-      inferred.descriptor.shape != output.descriptor().shape ||
-      !input_internal::same_facets(inferred.facets, output.facets()) ||
-      expected_layout.order != actual_config.order ||
-      expected_layout.height_axis != actual_config.height_axis ||
-      expected_layout.width_axis != actual_config.width_axis ||
-      expected_layout.channel_axis != actual_config.channel_axis ||
-      expected_layout.row_pitch_bytes != actual_config.row_pitch_bytes ||
-      !same_groups)
-    return Status::failure(ErrorCode::TypeMismatch,
-                           "planar output differs from inferred contract");
-  if (resolved_traits.outputs[0].region_rule == OperationRegionRule::Whole &&
-      !input_internal::whole_region(output_region, output.descriptor().shape))
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "Whole planar output requires whole region");
-  for (std::size_t i = 0; i < inputs.size(); ++i) {
-    auto required = input_internal::derive_input_demand(
-        resolved_traits, output_region, output.descriptor().shape,
-        inputs[i].descriptor().shape, resolved_traits.input_schema[i].kind, i);
-    if (!required.ok())
-      return required.status();
-    const auto& actual = input_demands[i].dimensions();
-    const auto& expected = required.value().dimensions();
-    if (actual.size() != expected.size() ||
-        !std::equal(actual.begin(), actual.end(), expected.begin(),
-                    [](const auto& a, const auto& b) {
-                      return a.offset == b.offset && a.extent == b.extent;
-                    }))
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "planar input demand differs from region rule");
-  }
-  try {
-    auto writer = output.begin_write(output_region, cancellation);
-    if (!writer.ok())
-      return writer.status();
-    auto window = writer.take_value();
-    uint64_t bound = resolved_traits.workspace_bytes;
-    for (const auto& demand : input_demands) {
-      auto count = demand.element_count();
-      if (!count.ok())
-        return count.status();
-      const size_t index = &demand - input_demands.data();
-      const uint64_t width =
-          Value::element_size(inputs[index].descriptor().element_type);
-      const uint64_t factor =
-          width * resolved_traits.workspace_input_multiplier;
-      if (factor && count.value() > (UINT64_MAX - bound) / factor)
-        return Status{ErrorCode::ResourceExhausted,
-                      "planar workspace overflow"};
-      bound += count.value() * factor;
-    }
-    auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
-    auto scratch = allocator.limited_requested(
-        bound, [failure](ErrorCode code) { failure->store(code); });
-    NumericDiagnostics local_numeric;
-    Status numeric_status = Status::success();
-    const auto report_numeric = [&](const NumericDiagnostics& report) {
-      if (!numeric_status.ok())
-        return numeric_status;
-      numeric_status = merge_numeric_diagnostics(&local_numeric, report);
-      if (numeric && numeric_status.ok())
-        *numeric = local_numeric;
-      return numeric_status;
-    };
-    Status work_status = Status::success();
-    const auto consume_work = [&](std::uint64_t amount) -> const Status& {
-      // Cancellation wins even if a previous checkpoint observed Stale/fuel.
-      if (cancellation.cancelled())
-        work_status =
-            Status{ErrorCode::Cancelled, "planar operation cancelled"};
-      if (!work_status.ok())
-        return work_status;
-      if (current && !current()) {
-        work_status =
-            Status{ErrorCode::Stale, "planar plan changed in callback"};
-      } else if (resources && amount) {
-        resources->try_consume({amount}, work_status);
-      }
-      return work_status;
-    };
-    const PlanarOperationInvocation invocation{
-        inputs,       input_demands, parameters, output_region, window,
-        cancellation, scratch,       inferred,   prepared,      report_numeric,
-        consume_work, nullptr,       false,      cpu_parallel,  backend,
-        gpu,          cpu_tiles};
-    input_internal::Float32Environment environment;
-    if (!environment.active())
-      return Status{ErrorCode::OperationFailed,
-                    "floating environment unavailable"};
-    auto status = definition->planar_callback(invocation);
-    if (completion_status) {
-      auto failure_status = completion_status(status.ok());
-      if (!failure_status.ok())
-        status = std::move(failure_status);
-    }
-    if (!numeric_status.ok())
-      status = numeric_status;
-    if (!work_status.ok())
-      status = work_status;
-    // A plugin may catch bad_alloc. The worker's sticky metadata failure must
-    // still be observed before commit, not merely before returning the result.
-    if (metadata_failure && *metadata_failure != ErrorCode::Ok &&
-        status.detail.origin != FailureOrigin::Protocol &&
-        status.code != ErrorCode::ResourceExhausted &&
-        status.code != ErrorCode::Cancelled && status.code != ErrorCode::Stale)
-      status = Status{*metadata_failure,
-                      "planar metadata allocation failed",
-                      FailureReason::CapacityLimit,
-                      {FailureOrigin::Resource, FailureScope::Unspecified}};
-    if (status.detail.origin == FailureOrigin::Protocol)
-      return status;
-    if (failure->load() != ErrorCode::Ok &&
-        status.code != ErrorCode::Cancelled && status.code != ErrorCode::Stale)
-      status = Status{failure->load(), "planar scratch allocation failed"};
-    if (cancellation.cancelled())
-      return Status::failure(ErrorCode::Cancelled,
-                             "planar operation cancelled after callback");
-    if (!status.ok())
-      return status;
-    if (current && !current())
-      return Status{ErrorCode::Stale, "planar plan changed before publication"};
-    return window.commit(cancellation);
-  } catch (const std::bad_alloc&) {
-    if (cancellation.cancelled())
-      return Status::failure(ErrorCode::Cancelled,
-                             "planar operation cancelled after callback");
-    return Status::failure(ErrorCode::ResourceExhausted,
-                           "planar operation allocation failed");
-  } catch (...) {
-    if (cancellation.cancelled())
-      return Status::failure(ErrorCode::Cancelled,
-                             "planar operation cancelled after callback");
-    return Status::failure(ErrorCode::OperationFailed,
-                           "planar operation callback threw");
-  }
-}
-
-Status OperationRegistry::invoke_planar_exact(
-    const std::string& key, const std::vector<PlanarMappedInput>& inputs,
-    const std::vector<OperationMetadata>& metadata,
-    const std::map<std::string, ParameterValue>& parameters,
-    const Region& output_region, PlanarImage& output, bool validate_only,
-    const CancellationToken& cancellation, const BufferAllocator& allocator,
-    std::shared_ptr<const PreparedOperation> prepared,
-    const std::function<bool()>& current, NumericDiagnostics* numeric,
-    const ResourceBudget* resources, const ErrorCode* metadata_failure) const {
-  try {
-    Impl::DefinitionHandle definition;
-    {
-      std::lock_guard<std::mutex> lock(impl_->mutex);
-      const auto found = impl_->definitions.find(key);
-      if (found == impl_->definitions.end())
-        return Status{ErrorCode::NotFound,
-                      "exact planar operation is not registered"};
-      definition = found->second;
-    }
-    if (!definition->traits.planar_exact_dependencies ||
-        !definition->planar_callback || !prepared || !output.valid() ||
-        output_region.empty())
-      return Status{ErrorCode::InvalidArgument,
-                    "invalid exact planar invocation"};
-    if (cancellation.cancelled())
-      return Status{ErrorCode::Cancelled, "exact planar invocation cancelled"};
-    auto status = validate_operation_parameters(definition->traits, parameters);
-    if (!status.ok())
-      return status;
-    status = validate_prepared(*prepared, key, metadata, parameters);
-    if (!status.ok())
-      return status;
-    const auto& resolved_traits = prepared->traits();
-    auto expected_output =
-        infer_operation_output(resolved_traits, metadata, parameters);
-    if (!expected_output.ok())
-      return expected_output.status();
-    const auto& inferred = expected_output.value();
-    const auto& actual_config = output.config();
-    if (!inferred.planar_layout)
-      return Status{ErrorCode::TypeMismatch, "planar output layout is absent"};
-    const auto& expected_layout = *inferred.planar_layout;
-    bool same_groups =
-        expected_layout.groups.size() == actual_config.groups.size();
-    if (same_groups) {
-      for (std::size_t i = 0; i < expected_layout.groups.size(); ++i) {
-        const auto& left = expected_layout.groups[i];
-        const auto& right = actual_config.groups[i];
-        if (left.role != right.role ||
-            left.first_channel != right.first_channel ||
-            left.channel_count != right.channel_count)
-          same_groups = false;
-      }
-    }
-    if (inferred.descriptor.element_type != output.descriptor().element_type ||
-        inferred.descriptor.shape != output.descriptor().shape ||
-        !input_internal::same_facets(inferred.facets, output.facets()) ||
-        expected_layout.order != actual_config.order ||
-        expected_layout.height_axis != actual_config.height_axis ||
-        expected_layout.width_axis != actual_config.width_axis ||
-        expected_layout.channel_axis != actual_config.channel_axis ||
-        expected_layout.row_pitch_bytes != actual_config.row_pitch_bytes ||
-        !same_groups)
-      return Status::failure(ErrorCode::TypeMismatch,
-                             "planar output differs from inferred contract");
-
-    if (!output_region.validate(output.descriptor().shape).ok())
-      return Status{ErrorCode::InvalidArgument,
-                    "exact planar output region is outside domain"};
-    if (validate_only && !resolved_traits.outputs[0].preserve_output_views)
-      return Status{ErrorCode::InvalidArgument,
-                    "exact planar validation has no view proof"};
-    FootprintLimits limits;
-    limits.cancellation = cancellation;
-    if (const auto* budget = resource_internal::metadata_budget()) {
-      limits.consume_work = [budget](std::uint64_t n) {
-        return budget->consume({n});
-      };
-    }
-    if (validate_only) {
-      auto proof = input_internal::planar_exact_identity_view(
-          resolved_traits, metadata, output.descriptor(), limits);
-      if (!proof.ok())
-        return proof.status();
-      if (!proof.value())
-        return Status{ErrorCode::InvalidArgument,
-                      "ViewUnavailable: exact Data map is not port-0 identity",
-                      FailureReason::InvalidDomain};
-    }
-    auto required = input_internal::planar_exact_requirements(
-        resolved_traits, metadata, output.descriptor(), output_region, limits);
-    if (!required.ok())
-      return required.status();
-    std::vector<std::vector<Region>> actual(metadata.size());
-    for (const auto& input : inputs) {
-      if (input.port >= metadata.size() ||
-          input.image.valid() == input.value.valid())
-        return Status{ErrorCode::InvalidArgument,
-                      "invalid exact planar input storage"};
-      const auto& m = metadata[input.port];
-      const auto& descriptor = input.image.valid() ? input.image.descriptor()
-                                                   : input.value.descriptor();
-      const auto& facets =
-          input.image.valid() ? input.image.facets() : input.value.facets();
-      const auto& region =
-          input.image.valid() ? input.image.region() : input.value.region();
-      auto supplied =
-          Footprint::from_regions(m.descriptor.shape, {region}, limits);
-      auto authorized =
-          Footprint::from_regions(m.descriptor.shape, {input.region}, limits);
-      if (!supplied.ok())
-        return supplied.status();
-      if (!authorized.ok())
-        return authorized.status();
-      if (supplied.value() != authorized.value() ||
-          descriptor.shape != m.descriptor.shape ||
-          descriptor.element_type != m.descriptor.element_type ||
-          !input_internal::same_facets(facets, m.facets))
-        return Status{ErrorCode::TypeMismatch,
-                      "exact planar input differs from authorization"};
-      if (input.image.valid()) {
-        const auto& config = input.image.config();
-        if (!m.planar_layout || config.order != m.planar_layout->order ||
-            config.height_axis != m.planar_layout->height_axis ||
-            config.width_axis != m.planar_layout->width_axis ||
-            config.channel_axis != m.planar_layout->channel_axis ||
-            config.row_pitch_bytes != m.planar_layout->row_pitch_bytes)
-          return Status{ErrorCode::TypeMismatch,
-                        "exact planar input layout mismatch"};
-        if (config.groups.size() != m.planar_layout->groups.size())
-          return Status{ErrorCode::TypeMismatch,
-                        "exact planar input groups differ"};
-        for (std::size_t j = 0; j < config.groups.size(); ++j) {
-          const auto& actual_group = config.groups[j];
-          const auto& expected_group = m.planar_layout->groups[j];
-          if (actual_group.role != expected_group.role ||
-              actual_group.first_channel != expected_group.first_channel ||
-              actual_group.channel_count != expected_group.channel_count)
-            return Status{ErrorCode::TypeMismatch,
-                          "exact planar input groups differ"};
-        }
-      } else if (m.planar_layout) {
-        return Status{ErrorCode::TypeMismatch,
-                      "generic storage supplied for planar input"};
-      }
-      actual[input.port].push_back(input.region);
-    }
-    for (std::size_t port = 0; port < metadata.size(); ++port) {
-      status = input_internal::validate_port_metadata(
-          resolved_traits.input_schema[port], metadata[port].descriptor,
-          metadata[port].facets);
-      if (!status.ok())
-        return status;
-      auto supplied = Footprint::from_regions(metadata[port].descriptor.shape,
-                                              actual[port], limits);
-      if (!supplied.ok())
-        return supplied.status();
-      if (supplied.value() != required.value()[port])
-        return Status{ErrorCode::InvalidArgument,
-                      "exact planar support differs from static map"};
-    }
-    if (current && !current())
-      return Status{ErrorCode::Stale, "plan changed before exact callback"};
-    PlanarImageWriteWindow window;
-    if (!validate_only) {
-      auto writer = output.begin_write(output_region, cancellation);
-      if (!writer.ok())
-        return writer.status();
-      window = writer.take_value();
-    }
-    std::uint64_t bound = resolved_traits.workspace_bytes;
-    for (const auto& input : inputs) {
-      auto count = input.region.element_count();
-      if (!count.ok())
-        return count.status();
-      const auto factor =
-          Value::element_size(metadata[input.port].descriptor.element_type) *
-          resolved_traits.workspace_input_multiplier;
-      if (factor && count.value() > (UINT64_MAX - bound) / factor)
-        return Status{ErrorCode::ResourceExhausted,
-                      "exact planar workspace overflow"};
-      bound += count.value() * factor;
-    }
-    auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
-    auto scratch = allocator.limited(
-        bound, [failure](ErrorCode code) { failure->store(code); });
-    NumericDiagnostics local_numeric;
-    Status numeric_status = Status::success();
-    const auto report_numeric = [&](const NumericDiagnostics& report) {
-      if (!numeric_status.ok())
-        return numeric_status;
-      numeric_status = merge_numeric_diagnostics(&local_numeric, report);
-      if (numeric && numeric_status.ok())
-        *numeric = local_numeric;
-      return numeric_status;
-    };
-    Status work_status = Status::success();
-    const auto consume_work = [&](std::uint64_t amount) -> const Status& {
-      // Cancellation wins even if a previous checkpoint observed Stale/fuel.
-      if (cancellation.cancelled())
-        work_status =
-            Status{ErrorCode::Cancelled, "planar operation cancelled"};
-      if (!work_status.ok())
-        return work_status;
-      if (current && !current()) {
-        work_status =
-            Status{ErrorCode::Stale, "planar plan changed in callback"};
-      } else if (resources && amount) {
-        resources->try_consume({amount}, work_status);
-      }
-      return work_status;
-    };
-    const std::vector<PlanarImageReadWindow> legacy_inputs;
-    const std::vector<Region> legacy_demands;
-    const PlanarOperationInvocation invocation{
-        legacy_inputs, legacy_demands, parameters,   output_region,
-        window,        cancellation,   scratch,      inferred,
-        prepared,      report_numeric, consume_work, &inputs,
-        validate_only};
-    input_internal::Float32Environment environment;
-    if (!environment.active())
-      return Status{ErrorCode::OperationFailed,
-                    "floating environment unavailable"};
-    status = definition->planar_callback(invocation);
-    if (status.detail.origin == FailureOrigin::Protocol)
-      return status;
-    if (!numeric_status.ok())
-      status = numeric_status;
-    if (!work_status.ok())
-      status = work_status;
-    if (metadata_failure && *metadata_failure != ErrorCode::Ok &&
-        status.code != ErrorCode::ResourceExhausted &&
-        status.code != ErrorCode::Cancelled && status.code != ErrorCode::Stale)
-      status = Status{*metadata_failure,
-                      "exact planar metadata allocation failed",
-                      FailureReason::CapacityLimit,
-                      {FailureOrigin::Resource, FailureScope::Unspecified}};
-    if (failure->load() != ErrorCode::Ok &&
-        status.code != ErrorCode::Cancelled && status.code != ErrorCode::Stale)
-      status =
-          Status{failure->load(), "exact planar scratch allocation failed"};
-    if (cancellation.cancelled())
-      return Status{ErrorCode::Cancelled, "exact planar callback cancelled"};
-    if (!status.ok())
-      return status;
-    if (current && !current())
-      return Status{ErrorCode::Stale, "plan changed before exact publication"};
-    return validate_only ? Status::success() : window.commit(cancellation);
-  } catch (const std::bad_alloc&) {
-    return Status{ErrorCode::ResourceExhausted,
-                  "exact planar allocation failed"};
-  } catch (...) {
-    return Status{ErrorCode::OperationFailed, "exact planar callback threw"};
-  }
-}
-
 Result<Value> OperationRegistry::invoke_current(
     const std::string& key, const OperationInvocation& invocation,
     const std::function<bool()>& current) const {
@@ -3068,11 +2392,6 @@ Result<Value> OperationRegistry::invoke_current(
     }
     definition = iterator->second;
   }
-  if (definition->traits.planar_storage_capable &&
-      !definition->start_dependency)
-    return Result<Value>(Status::failure(
-        ErrorCode::TypeMismatch,
-        "planar image operation requires structural image invocation"));
   const auto image_port = [](const OperationPortConstraint& port) {
     return port.kind == OperationPortKind::RgbaFloat32 ||
            port.kind == OperationPortKind::Float32Mask;
@@ -3192,8 +2511,8 @@ Result<Value> OperationRegistry::invoke_current(
   }
   if (std::any_of(complete_metadata.begin(), complete_metadata.end(),
                   input_internal::structural_image_metadata))
-    return Result<Value>(Status::failure(
-        ErrorCode::TypeMismatch, "legacy image input requires planar storage"));
+    return Result<Value>(Status::failure(ErrorCode::TypeMismatch,
+                                         "image input requires Result schema"));
   auto prepared = invocation.prepared;
   if (prepared) {
     auto valid = validate_prepared(*prepared, key, complete_metadata,
@@ -3219,9 +2538,8 @@ Result<Value> OperationRegistry::invoke_current(
     return Result<Value>(expected_output.status());
   }
   if (input_internal::structural_image_metadata(expected_output.value()))
-    return Result<Value>(
-        Status::failure(ErrorCode::TypeMismatch,
-                        "legacy image output requires planar storage"));
+    return Result<Value>(Status::failure(
+        ErrorCode::TypeMismatch, "image output requires Result schema"));
   const auto& included = resolved_shape.outputs[0].input_indices;
   const auto active = [&](std::uint32_t port) {
     return !included || std::find(included->begin(), included->end(), port) !=

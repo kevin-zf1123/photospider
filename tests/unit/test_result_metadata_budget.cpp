@@ -314,6 +314,24 @@ int main() {
   PS_CHECK(budget.statistics().peak[ResourceKind::Host] <= 16384);
   for (auto live : budget.statistics().live.values)
     PS_CHECK(live == 0);
+  SchemaTemplate image_schema;
+  image_schema.id = "test.large_image_metadata";
+  ResultImageSpec image;
+  image.key = "pixels";
+  image.descriptor = {ElementType::Float32, {1, 1}};
+  image.layout.channel_axis = {};
+  image.facets = {{"test.large", 1, std::vector<uint8_t>(65536, 9)}};
+  image_schema.images.push_back(std::move(image));
+  PS_CHECK(image_schema.validate(true).ok());
+  large_allocations = 0;
+  inspect_allocations = true;
+  auto refused_image = ResultBuilder::start(budget, image_schema, "scope");
+  inspect_allocations = false;
+  PS_CHECK(refused_image.status().code == ErrorCode::ResourceExhausted);
+  if constexpr (interpose_allocations)
+    PS_CHECK(large_allocations == 0);
+  for (auto live : budget.statistics().live.values)
+    PS_CHECK(live == 0);
   PS_CHECK(weak_windows() == 0);
   return 0;
 }

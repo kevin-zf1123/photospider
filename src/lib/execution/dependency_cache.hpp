@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -41,14 +42,14 @@ struct DependencyCacheManifest final {
   std::vector<ValueFacet> facets;
   Footprint outputs;
   std::map<std::string, Footprint> support;
-  std::map<std::size_t, std::vector<PlanInput>> routes;
+  DependencyRoutes routes;
   std::string content_identity;
   std::vector<std::string> fragment_keys;
   std::uint64_t metadata_entries = 0, epoch = 0;
 };
 struct DependencyCacheProof final {
   std::map<std::string, Footprint> support;
-  std::map<std::size_t, std::vector<PlanInput>> routes;
+  DependencyRoutes routes;
   std::uint64_t metadata_entries = 0;
 };
 /** @brief Projects the actual retained record DAG with a single shared budget.
@@ -80,8 +81,10 @@ inline Result<DependencyCacheProof> dependency_cache_proof(
   };
   if (!root || !charge(1))
     return Answer(Status{ErrorCode::ResourceExhausted, {}});
-  std::vector<const DependencyRecord*> pending{root.get()};
-  std::set<const DependencyRecord*> seen;
+  ResourceVector<const DependencyRecord*> pending{root.get()};
+  std::set<const DependencyRecord*, std::less<const DependencyRecord*>,
+           ResourceAllocator<const DependencyRecord*>>
+      seen;
   while (!pending.empty()) {
     if (limits.cancellation.cancelled())
       return Answer(Status{ErrorCode::Cancelled, {}});
@@ -105,7 +108,9 @@ inline Result<DependencyCacheProof> dependency_cache_proof(
     if (!result.routes.count(record->step)) {
       if (!charge(2 + step.inputs.size() * 2))
         return Answer(Status{ErrorCode::ResourceExhausted, {}});
-      result.routes.emplace(record->step, step.inputs);
+      result.routes.emplace(
+          record->step,
+          ResourceVector<PlanInput>(step.inputs.begin(), step.inputs.end()));
     }
     const auto needs =
         [&](const std::vector<DependencyNeed>& inputs) -> Status {

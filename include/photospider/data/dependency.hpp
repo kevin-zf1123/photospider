@@ -41,6 +41,8 @@ struct DependencyNeed final {
   std::uint32_t roles = static_cast<std::uint32_t>(DependencyRole::Data);
   Footprint samples;
   std::vector<DependencyTag> tags;
+  /** @brief ResultSupportTarget code and slot for structured observations. */
+  std::uint32_t target = 0, slot = 0;
 };
 /** @brief Complete support for one output observation atom, including empty.
  * @note Generic atoms are logical samples. Image-v2 atoms are complete pixels

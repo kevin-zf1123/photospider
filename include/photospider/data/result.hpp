@@ -7,6 +7,8 @@
 #include <string_view>
 #include <vector>
 
+#include "photospider/data/footprint.hpp"
+#include "photospider/data/planar_image.hpp"
 #include "photospider/data/result_relation.hpp"
 #include "photospider/data/value.hpp"
 #include "photospider/execution/resource_allocator.hpp"
@@ -14,7 +16,8 @@
 namespace ps {
 namespace execution_internal {
 class StructuredExecution;
-}
+struct DependencyBundle;
+}  // namespace execution_internal
 /** @brief Finality contract for immutable field ranges. */
 enum class PublishPolicy : std::uint32_t {
   CompleteBundle = 1,
@@ -46,6 +49,24 @@ struct ResultFieldSpec final {
   ResultExtent rows;
   ResourceVector<std::uint64_t> record_shape;
 };
+/** @brief Typed image slot. N/L are explicit bounded outer axes; descriptor
+ * describes each frame/layer's spatial and channel axes. Logical sample
+ * coordinates are {frame, layer, descriptor coordinates...}. The slot owns
+ * planar backing separately from primitive records. Tile geometry is physical.
+ */
+struct PHOTOSPIDER_API ResultImageSpec final {
+  ResourceLease metadata_owner;
+  ResourceString key;
+  std::uint64_t frames = 1, layers = 1;
+  ValueDescriptor descriptor;
+  PlanarImageLayout layout;
+  std::vector<ValueFacet> facets;
+
+  std::vector<std::uint64_t> sample_shape() const;
+  Result<std::uint64_t> sample_count() const;
+  Result<Footprint> close_samples(const Footprint& samples,
+                                  const FootprintLimits& limits = {}) const;
+};
 /** @brief Bounded semantic bytes with allocator-aware nested ownership. */
 struct ResultFacet final {
   ResourceString key;
@@ -65,6 +86,7 @@ struct PHOTOSPIDER_API SchemaTemplate final {
   std::uint32_t version = 1;
   PublishPolicy publication = PublishPolicy::CompleteBundle;
   ResourceVector<ResultFieldSpec> fields;
+  ResourceVector<ResultImageSpec> images;
   ResourceVector<ResultExtent> domain;
   ResourceVector<ResultFacet> metadata;
   /** @brief Checks the closed bounded structural vocabulary, with no I/O. */
@@ -82,6 +104,9 @@ struct PHOTOSPIDER_API SchemaTemplate final {
   Result<SchemaTemplate> managed_copy(const ResourceBudget& budget) const;
   Result<ResourceString> managed_canonical(const ResourceBudget& budget) const;
   bool same_schema(const SchemaTemplate& other) const noexcept;
+  /** @brief Retains only resources named by schema/typed image facets. */
+  Result<ResourceBindings> select_resources(
+      const ResourceBindings& supplied) const;
   Result<std::uint64_t> row_bytes(std::uint32_t field) const;
 };
 /** @brief Bounded growth policy for one producer object, not semantic count. */
@@ -112,6 +137,8 @@ class ResultDescriptor final {
   std::uint64_t object_id() const noexcept { return object_; }
   std::uint64_t revision() const noexcept { return revision_; }
   bool sealed() const noexcept { return sealed_; }
+  std::uint32_t image_count() const noexcept { return image_count_; }
+  const Footprint& image_coverage(std::uint32_t slot) const;
   std::uint32_t field_count() const noexcept { return field_count_; }
   std::uint64_t rows(std::uint32_t field) const noexcept {
     return field < field_count_ ? rows_[field] : 0;
@@ -121,6 +148,8 @@ class ResultDescriptor final {
   friend class ResultRef;
   std::uint64_t object_ = 0, revision_ = 0;
   std::uint32_t field_count_ = 0;
+  std::uint32_t image_count_ = 0;
+  std::array<Footprint, 16> images_{};
   bool sealed_ = false;
   std::array<std::uint64_t, 16> rows_{};
 };
@@ -142,14 +171,20 @@ class PHOTOSPIDER_API ResultRef final {
   /** @brief Borrowed immutable schema/key; invalid objects throw logic_error.
    */
   const SchemaTemplate& schema() const;
+  /** @brief Immutable schema-declared ICC/OCIO owners, retained with the
+   * Result. */
+  const ResourceBindings& resources() const;
+  /** @brief Captures certified descriptor/relations/evidence at one revision.
+   */
+  Result<ResultRef> capture() const;
   std::string_view semantic_key() const;
   /** @brief Checks the framed Run scope without copying canonical metadata. */
   bool matches_scope(std::string_view scope) const noexcept;
-  /** @brief Immutable ordered source-object association, independent of count.
+  /** @brief Snapshot of the monotone ordered source-object association.
    * Runtime publications retain these input objects with their backing until
    * the final derived result/window owner releases the association.
    */
-  const ResourceVector<std::uint64_t>& association() const;
+  ResourceVector<std::uint64_t> association() const;
   /** @brief Complete descriptor, or an explicitly allowed certified prefix.
    * An incomplete complete-request returns production failure or NotFound.
    * A later operational producer failure does not revoke a published prefix.
@@ -169,6 +204,14 @@ class PHOTOSPIDER_API ResultRef final {
    * to field support. Empty data does not imply an input-independent count.
    */
   Result<ResultRelation> descriptor_relation() const;
+  /** @brief Reads one certified sample from a captured descriptor. The owning
+   * descriptor and Result retain coverage/backing; no production is started.
+   */
+  Status read_image(const ResultDescriptor& descriptor, std::uint32_t slot,
+                    const std::vector<std::uint64_t>& coordinate,
+                    void* destination, std::size_t bytes,
+                    const CancellationToken& cancellation = {}) const;
+  Result<ResultRelation> image_relation(std::uint32_t slot) const;
 
  private:
   friend class ResultBuilder;
@@ -179,8 +222,14 @@ class PHOTOSPIDER_API ResultRef final {
   void retire_producer(const Status& failure) const noexcept;
   void bind_producer(std::uint64_t node) const noexcept;
   Status retain_association(const ResourceVector<ResultRef>& inputs) const;
+  void bind_dependencies(
+      std::shared_ptr<const execution_internal::DependencyBundle>) const;
+  std::shared_ptr<const execution_internal::DependencyBundle> dependencies()
+      const;
   struct Impl;
+  struct Capture;
   std::shared_ptr<Impl> impl_;
+  std::shared_ptr<const Capture> captured_;
 };
 /** @brief Non-owning completed-result lookup, independent of optional cache.
  * The object allocation is separate from its weak control block, so the last
@@ -194,6 +243,8 @@ class PHOTOSPIDER_API WeakResultRef final {
  private:
   friend class ResultRef;
   std::weak_ptr<ResultRef::Impl> impl_;
+  std::weak_ptr<const ResultRef::Capture> captured_;
+  bool captured_view_ = false;
 };
 /** @brief Explicit coordinator I/O request retaining its authorization and
  * owner. Copies share accounted metadata. load() is an explicit access
@@ -252,7 +303,9 @@ class PHOTOSPIDER_API ResultBuilder final {
   static Result<ResultBuilder> start(
       ResourceBudget budget, const SchemaTemplate& schema,
       std::string_view semantic_key, ResultGrowthLimits limits = {},
-      std::vector<std::uint64_t> association = {});
+      std::vector<std::uint64_t> association = {},
+      std::uint64_t tile_height = 128, std::uint64_t tile_width = 128,
+      ResourceBindings resources = {});
   ResultRef reference() const noexcept;
   /** @brief Fixes the witness for count/basis facts before any publication.
    * Coverage is one descriptor observation, including empty collections.
@@ -273,6 +326,15 @@ class PHOTOSPIDER_API ResultBuilder final {
    */
   Status publish(std::uint32_t field, std::uint64_t end,
                  ResultRelation relation, ResultFinality finality);
+  /** @brief Copies exactly one {N,L,spatial...} rectangle and certifies it.
+   * Relation uses flattened logical slot samples and must cover the domain.
+   * Overlap and incomplete finality fail permanently. Empty coverage performs
+   * no sample work while retaining descriptor obligations.
+   */
+  Status publish_image(std::uint32_t slot, const Region& region,
+                       ByteView packed, ResultRelation relation,
+                       ResultFinality finality,
+                       const CancellationToken& cancellation = {});
   /** @brief Closes all row constraints after the producer's association checks.
    * Fixed/FieldRows counts and complete certification are checked by the host.
    * Domain-specific numeric/association validation precedes this call.

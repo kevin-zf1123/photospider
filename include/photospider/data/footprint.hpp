@@ -2,10 +2,12 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include "photospider/data/region.hpp"
 #include "photospider/execution/cancellation.hpp"
+#include "photospider/execution/resources.hpp"
 
 namespace ps {
 
@@ -58,12 +60,12 @@ class PHOTOSPIDER_API Footprint final {
   /** @brief Creates a known empty set in the supplied domain. */
   static Result<Footprint> none(std::vector<std::uint64_t> shape,
                                 const FootprintLimits& limits = {});
-  bool valid() const noexcept { return !shape_.empty(); }
-  bool empty() const noexcept { return boxes_.empty(); }
+  bool valid() const noexcept { return impl_ != nullptr; }
+  bool empty() const noexcept { return boxes().empty(); }
   /** @brief Borrowed domain and canonical boxes, valid until move/destruction.
    */
-  const std::vector<std::uint64_t>& shape() const noexcept { return shape_; }
-  const std::vector<Region>& boxes() const noexcept { return boxes_; }
+  const std::vector<std::uint64_t>& shape() const noexcept;
+  const std::vector<Region>& boxes() const noexcept;
   /** @brief Exact coordinate membership; false for malformed/outside points.
    */
   bool contains(const std::vector<std::uint64_t>& coordinate) const noexcept;
@@ -100,7 +102,10 @@ class PHOTOSPIDER_API Footprint final {
       const CancellationToken& cancellation = {}) const;
 
  private:
-  std::vector<std::uint64_t> shape_;
-  std::vector<Region> boxes_;
+  struct Impl;
+  static Result<Footprint> make(std::vector<std::uint64_t> shape,
+                                std::vector<Region> boxes,
+                                ResourceLease lease = {});
+  std::shared_ptr<const Impl> impl_;
 };
 }  // namespace ps

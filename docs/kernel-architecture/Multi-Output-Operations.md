@@ -1,12 +1,12 @@
-# Multi-output operations
+# Named outputs and mixed Result ports
 
-A multi-output node exposes a fixed set of named ports. A workflow edge selects a port with `WorkflowNodeOutput{node, port}`, and a root selects one with `WorkflowOutput{name, node, port}`. The compiler resolves port names and output shapes before execution. Execution requests only demanded output regions; an unrequested port is not evaluated unless an enabled joint contract shares work among requested outputs.
+## Scope and ownership
+
+One operation node may declare multiple named outputs. Each output has its own port kind, descriptor or Result schema, input projection, and execution demand. A workflow edge names both the node and output port. The compiler specializes the selected output before execution.
+
+An output can be a numeric `Value` or a structured `Result`. A Result schema can combine typed image slots and primitive fields. Nodes may mix Result image inputs, numeric Value controls, and different output kinds. All image semantics and ownership pass through `ResultRef`; `PlanarImage` is backing inside a Result image slot.
 
 ```cpp
-#include <cstdint>
-#include <string>
-
-namespace ps {
 struct WorkflowNodeOutput final {
   std::uint64_t source_node = 0;
   std::string source_port = "value";
@@ -17,31 +17,24 @@ struct WorkflowOutput final {
   std::uint64_t node_id = 0;
   std::string port = "value";
 };
-}  // namespace ps
 ```
 
-The default registry's image multi-output operation is `image.split_horizontal`:
+The excerpt omits unrelated fields. Public execution places named Value outputs in `ExecutionResult::values` and structured outputs in `ExecutionResult::results`.
 
-| Port | Shape | Mapping to the input |
-| --- | --- | --- |
-| `full` | `{H,W,C}` | `(y,x,c)` |
-| `left` | `{H,split_x,C}` | `(y,x,c)` |
-| `right` | `{H,W-split_x,C}` | `(y,x+split_x,c)` |
+## Output selection and dependency
 
-The input is a Float32 rank-3 image. The required Int64 parameter `split_x` must satisfy `0 < split_x < W`; callers provide it explicitly. Each output uses the input's image interpretation. The operation declares the source pixels for each requested output region, then publishes immutable views that retain their source storage owner. A dense collection may copy a view. The planner can share dependency transport for joint members with matching demands; each output keeps its own coordinate mapping.
+`OperationTraits::outputs` declares available outputs. `select_operation_output` resolves the selected output's traits and index; `ResultProgramQuery::output_index` carries that selection into a structured callback. The selected output contract, query, schema, and input projection define its demand and identity.
 
-`image.split_horizontal` remains registered with a legacy `Value` callback and does not set `planar_storage_capable`. A workflow declaration with its packed `photospider.image` facet fails input validation with `InvalidArgument`; a structural `PlanarImageLayout` fails the operation capability check with `TypeMismatch`. The repository example creates the former declaration, so it builds but cannot complete execution. Its README explicitly excludes current runtime acceptance.
+The coordinator resolves only inputs in the selected projection. A Result callback may request a numeric Control sample, inspect it in the next stage, and then request the Data image samples selected by that value. The Result relation records consumed Control and Data support, and dirty transpose uses the same relation. Inputs outside the projection are not evaluated for that output.
 
-```cpp
-ps::WorkflowNodeOutput left{node_id, "left"};
-ps::WorkflowOutput result{"crop", node_id, "right"};
-```
+`ExecutionOptions::enable_joint` enables a registered contract for sharing physical work across eligible requested outputs. Each output keeps its own schema, query, relation, cache identity, and error. Joint execution does not authorize an unrequested output or merge unlike output semantics.
 
-`ExecutionOptions::enable_joint` enables or disables optional joint execution for operations that declare a joint contract. It affects physical sharing only; each named output retains its own descriptor, region and value semantics. The registered split definition validates `split_x` before requesting source samples.
+## Identity and resource effects
 
-The focused host test is [`test_multi_output_execution.cpp`](../../tests/integration/test_multi_output_execution.cpp); it uses test-defined operations to verify the named-output host contract. The executable workflow source is [`examples/multi_output_workflow`](../../examples/multi_output_workflow/README.md); its image declaration is rejected before the split callback runs. Image storage behavior is described in [Image Operations](Image-Operations.md).
+A structured producer's identity includes the selected output, output contract, captured query, parameters, and ordered input bundle. Physical tile dimensions do not change semantic output identity. Relation traversal, reads, publication payload, continuation state, and retained input owners consume the same execution-root budget.
 
-```sh
-cmake --build build --target test_multi_output_execution -j 8
-ctest --test-dir build -R '^test_multi_output_execution$' --output-on-failure
-```
+A selected output failure returns a typed error for the request. An eligible joint group may share a continuation only when its registered contract permits the requested members. Unrequested output work does not start. Result owners remain live until their last owning reference is released.
+
+## Executable fixture
+
+[`examples/unified_result_workflow`](../../examples/unified_result_workflow/README.md) uses public workflow APIs and minimal example operations to select a Result image output and a numeric output from the same node. The focused `test_multi_output_execution` and `test_unified_result_images` tests cover output selection, mixed ports, and image execution. The production operation catalog and image limitations are described in [Image operations](Image-Operations.md).

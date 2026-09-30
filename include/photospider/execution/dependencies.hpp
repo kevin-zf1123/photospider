@@ -11,6 +11,15 @@
 #include "photospider/data/dependency.hpp"
 
 namespace ps {
+/** @brief One typed source observation set, preserving roles and slot identity.
+ * Its name and sample owners retain their managed root through final release.
+ */
+struct SourceObservation final {
+  ResourceString input;
+  ResultSupportTarget target = ResultSupportTarget::Value;
+  std::uint32_t slot = 0, roles = 0;
+  Footprint samples;
+};
 namespace execution_internal {
 class DependencyRecords;
 }
@@ -26,13 +35,17 @@ class PHOTOSPIDER_API ExecutionDependencies final {
   ExecutionDependencies() = default;
   bool valid() const noexcept { return impl_ != nullptr; }
   /** @brief Exact named sample coverage proved by this execution.
-   * @return Owned coverage map, or an empty map for a default object.
+   * @return Root-accounted owned coverage map, or an empty map for a default
+   * object.
    * @throws std::bad_alloc For metadata copying.
    */
-  std::map<std::string, Footprint> coverage() const;
+  ResourceMap<Footprint> coverage() const;
   /** @brief Number of directly observed operation records, excluding sources.
    */
   std::size_t record_count() const noexcept;
+  /** @brief Root-accounted guarantees per observation; Unknown stays
+   * unresolved. */
+  ResourceMap<DependencyGuarantee> guarantees() const;
   /** @brief Retrieves merged per-observation evidence for an Atomic result.
    * @return Certificate or NotFound if no such resolved Atomic record exists.
    * Whole and terminal request records do not masquerade as sample rows.
@@ -49,20 +62,32 @@ class PHOTOSPIDER_API ExecutionDependencies final {
    * @throws std::bad_alloc For metadata allocation; no pixel reads occur.
    */
   Result<ExecutionDependencies> restrict(
-      const std::map<std::string, Footprint>& outputs,
+      const ResourceMap<Footprint>& outputs,
       const FootprintLimits& limits = {}) const;
   /** @brief Projects required root support onto named source payload sets.
    * @note This fetch union is for bounded content verification, not a
    * replacement for per-output certificates or their transpose relation.
    * @return Exact support for recorded roots, or a typed metadata/work failure.
    */
-  Result<std::map<std::string, Footprint>> source_support(
+  Result<ResourceMap<Footprint>> source_support(
+      const FootprintLimits& limits = {}) const;
+  /** @brief Projects typed descriptor/field/image/Value support with roles.
+   * @return Root-accounted owned observations, or NotFound for Unknown support
+   * and a typed error for exhausted work/capacity or invalid evidence.
+   * The returned names and vector capacities outlive this object and context.
+   */
+  Result<ResourceVector<SourceObservation>> source_observations(
       const FootprintLimits& limits = {}) const;
   /** @brief Transposes a source payload edit through recorded direct
    * associations.
    * @param input Exact workflow input name.
    * @param samples Potentially changed input samples in its descriptor domain.
-   * @param roles Matching Data/Control/Validation bit mask, 1..7.
+   * @param roles Nonempty Data=1/Control=2/Validation=4/Descriptor=8
+   * mask, 1..15 for Result inputs. Numeric Value payload edits use 1..7;
+   * their static descriptor/facets require recompilation.
+   * @param target Typed source observation domain; defaults to Value for a
+   * numeric input, first Image for an image Result, or Descriptor otherwise.
+   * @param slot Image/field index; Value and Descriptor require zero.
    * @param limits Bounds all set/queue work; cancellation returns Cancelled.
    * @return Exact potentially dirty subsets of coverage(), including known
    * empty answers. Invalid input/domain/roles reject; unknown output regions
@@ -73,9 +98,11 @@ class PHOTOSPIDER_API ExecutionDependencies final {
    * relations remain available through certificate().
    * @throws std::bad_alloc For metadata allocation.
    */
-  Result<std::map<std::string, Footprint>> potential_dirty(
+  Result<ResourceMap<Footprint>> potential_dirty(
       const std::string& input, const Footprint& samples,
-      std::uint32_t roles = 7, const FootprintLimits& limits = {}) const;
+      std::uint32_t roles = 7, const FootprintLimits& limits = {},
+      std::optional<ResultSupportTarget> target = {},
+      std::uint32_t slot = 0) const;
 
  private:
   friend class execution_internal::DependencyRecords;

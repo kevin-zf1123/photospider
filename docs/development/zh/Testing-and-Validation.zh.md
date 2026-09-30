@@ -1,7 +1,6 @@
 # 测试与验证
 
-本文定义 breaking scope reset 后维护中的 repository validation。Test 验证长期软件
-行为，不验证迁移完成或 provenance。
+本文说明当前 kernel package 的维护验证方式。Test 通过仓库 targets 和 installed consumers 检查可观察的软件行为。
 
 ## 构建前置依赖
 
@@ -220,7 +219,7 @@ parameter schema 并到达命名的 registry rejection。该 deterministic stage
 
 CTest 验证可观察正确性，包括数值结果、资源边界、并发、错误处理、安装消费、
 编译及运行边界。性能测量和依赖计时的诊断保持为可选工具，不以耗时阈值定义正确性。不得注册 stale-term
-search、source-layout audit、migration checklist、Doxygen audit、Issue replay 或
+search、source-layout audit、process checklist、Doxygen audit、Issue replay 或
 result/provenance orchestration。Manual source-quality tool 需要维护的中英文文档，并
 保持在 CTest/CI 之外。使用 Clang/GCC 对 source-tree 与 installed-tree header 做 direct
 self-containment scan 属于这种 manual check；不得注册到 CTest 或 CI。
@@ -248,53 +247,55 @@ ctest --preset kernel-dev --output-on-failure --output-junit ctest-results.xml
 `python3 -m cpplint`。不支持的 sanitizer/GPU platform 记录为 limitation，而不是
 successful gate。
 
-## 当前注册的正确性 workflow
+## Focused Result validation
 
-注册名描述行为，不使用历史 G1/G4/S1/S4 阶段名。使用
-`ctest --test-dir <build> --show-only=json-v1` 获取对应配置的实际清单。
-支持的 SME 构建增加 `test_numeric_conversion_sme`。
-所有已注册可执行文件，包括数值、expression 两个 workflow，均由默认测试构建生成。
+最终 focused core run 的以下十三项测试全部通过：`test_dependency_dirty`、
+`test_result_execution`、`test_result_plugin`、`test_result_native_gpu`、
+`test_result_image_contracts`、`test_unified_result_images`、
+`test_global_results`、`test_shared_results`、`test_result_metadata_budget`、
+`test_resources`、`test_execution_dependencies`、`test_multi_output_execution` 和
+`test_generic_result_cache`。这些测试覆盖 C Result 混合 outputs、图像 schema 推导、prefix/零行
+fields、typed Field/Descriptor replacement、64 个 sparse fragments、具名 C++ outputs、
+动态 Control-to-Data support、Unknown relation union 与 declared input projections、returned dependency map ownership、
+multi-output execution、shared Result caching 和 dependency owner admission。C fixture 通过同步 sink 使用 callback-local 嵌套 records
+解析 output metadata；宿主在 `set_output` 返回前复制这些 records。Image contract tests 验证
+大 facet allocation 前的 typed image metadata admission，以及 C resolver 对非法零 slot/多 slot
+schema 的拒绝行为。
 
-- `test_workflow_numeric_reductions`、`test_workflow_expression_lut` 执行公开通用数值 oracle。
-- `test_dependency_workflow` 覆盖精确稀疏读取、progressive 控制发现、动态 radius、
-  demand 替换、waiter 共享、内容缓存、有序归约/扫描及块状态重收敛。
-  旧 generic-image STMap 正例与计时入口已退休；planar STMap 尚未实现。
-- `test_planar_image_workflow`、`test_planar_plugin`、`test_planar_import`、
-  `test_planar_preparation`、`test_region_runs`、`test_data_movement_contract`
-  覆盖当前 planar 存储、C ABI 11 插件、准备 seal、mapped ROI、原始位、布局、所有权及发布。
-- `test_gpu_fragment_execution`、`test_gpu_sync_fallback`、
-  `test_gpu_discovery_workflow`、`test_gpu_c_abi_execution` 实测原生 dispatch、
-  sparse atlas、restart/fallback、discovery 与 C 服务。`test_native_gpu`、
-  `test_native_execution`、`test_fragment_atlas_gpu` 提供补充。
-  缺少硬件返回77并记为skip。`test_dependency_gpu`、`test_gpu_discovery` 的协议验证
-  可在CPU上运行。取消之前已检测到的Protocol违规保持Protocol错误；普通callback错误
-  可被取消覆盖。
-- `test_numeric_conversion_sme` 检查位结果和确定性取消。SME硬件或streaming vector
-  length不支持时返回77；`--midflight` 计时诊断不注册为CTest。
+`test_result_execution` 还使用 64-byte 和 256-byte windows 检查零行、部分行与 8192 行 discovery。
+Resource tests 覆盖 retained Result owners 和 metadata 限额。Focused suite 用时约三秒。
 
-已删除格式key的历史清单测试退休。`test_compiler` 改用一个虚构未知算子名，验证查询、
-调用及编译均返回NotFound。当前ABI/schema/package版本拒绝、畸形输入、整数溢出、
-质量数学和owner退休仍是正确性检查，不是迁移清单。
+Native C fixture 在 Metal 上完成一次 dispatch 并读回 4。Native GPU tests 还覆盖两种 invalid service
+mode，并保留 sticky errors。Base ABI numeric GPU-to-Result fixture 验证 backing 为 4000 bytes 的
+affine view 向单个 sample 传输 4 bytes，以及 backing 为 4 bytes 的 zero-stride broadcast view 向
+1000 samples 传输 4000 bytes。500-unit work limit 会以 `ResourceExhausted` 拒绝 broadcast copy。没有兼容硬件时 native CTest 返回 77；本次 host 使用 Metal，测试未 skip。
+
+复跑 core set 时，构建这些 test executables 并运行相应 CTest：
 
 ```sh
-cmake --build <build> -j 8
-ctest --test-dir <build> --output-on-failure
-ctest --test-dir <build> -R '^test_(dependency_workflow|gpu_fragment_execution|gpu_sync_fallback|gpu_discovery_workflow|gpu_c_abi_execution)$' --output-on-failure
+cmake --build build/kernel-dev --target test_dependency_dirty test_result_execution test_result_plugin test_unified_result_images test_global_results test_shared_results test_result_metadata_budget test_resources test_result_image_contracts test_execution_dependencies test_multi_output_execution test_generic_result_cache -j8
+ctest --test-dir build/kernel-dev -R '^test_(dependency_dirty|result_execution|result_plugin|result_native_gpu|result_image_contracts|unified_result_images|global_results|shared_results|result_metadata_budget|resources|execution_dependencies|multi_output_execution|generic_result_cache)$' --output-on-failure
 ```
+
+source-support admission fence、numeric descriptor guard 和 affine/broadcast Result 修改之后，最终 installed package run 的以下五项测试全部通过：
+`installed_unified_result_workflow`、`installed_unified_result_cpp`、
+`installed_unified_result_contracts`、`installed_unified_result_c11` 和
+`installed_unified_result_native_gpu`。Native case 使用 Metal，未 skip。日志位于
+`build/kernel-dev/unified-consumer.log`。
+
+```sh
+cmake --install build/kernel-dev --prefix build/unified-result-install
+cmake -S tests/consumer -B build/unified-result-consumer -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH=/Users/zhufeng/document/code/photospider/build/unified-result-install
+cmake --build build/unified-result-consumer --target run_unified_result_consumer -j8
+```
+
+Installed tests 运行 public C++ workflow、C++ workflow consumer、typed image-contract consumer、
+C11 Result DSO consumer 和 native GPU Result DSO consumer。Installed contract consumer 还覆盖 typed source-support budget refusal。Native test 在 Metal 上覆盖当前 affine 和 broadcast transfer 行为。这些 focused checks 不代表完整 CTest、sanitizer 或 release 平台矩阵验证。
 
 ## 安装与可选覆盖边界
 
-安装门禁接受0.28、拒绝0.23至0.27请求，并运行 FMT-04/05 alpha、FMT-09 transfer、FMT-10 RGB basis 与 FMT-11 model conversion workflow。实际运行清单由 `tests/consumer/CMakeLists.txt`
-中 `run_photospider_consumer` 的COMMAND定义，包括region runs、planar preparation、
-mapped movement及维护中的算子/registry workflow。四个GPU workflow及foundations
-在该嵌套门禁中当前仅作为构建依赖，不执行；原生运行覆盖来自仓库内CTest。
-未接入run target的resource、Result、representation及旧multi-output示例是可选
-consumer，不能作为已执行的安装覆盖。
+`test_installed_consumer` 配置隔离 prefix、安装 package，再通过 `find_package(Photospider CONFIG REQUIRED)` 构建并运行 external consumer。`tests/consumer/CMakeLists.txt` 中的实际 runtime command list 是判断依据。只出现在 `DEPENDS` 中的 target 属于 build coverage，不属于 runtime coverage。当前 `run_unified_result_consumer` target 会执行 public minimal workflow、C++ workflow consumer、typed image-contract consumer、C11 DSO consumer 和 native GPU consumer。
 
-旧image-vertical和S3/S4示例是未注册的迁移源码，不能列为当前通过的门禁。
-旧 `test_bindings`、`test_image_vertical*`、`test_metal_images`、`test_native_cache`、
-`test_s4_*` 不在当前清单。维护中的图像由上列planar测试验证，不恢复旧generic图像正例。
+Result image 行为由上文列出的 Result fixtures 和 installed consumers 覆盖。Production image 可用性按当前 catalog 与 runtime 契约执行，详见[图像 operations](../../kernel-architecture/zh/Image-Operations.zh.md)。
 
-使用自定义编译器/runtime时，将同一CC/CXX环境传给CTest；安装门禁会新配置嵌套consumer。
-Apple Silicon可用 `MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` 检查原生dispatch。
-不支持的GPU/sanitizer能力记为限制，不记为测试通过。
+使用自定义 compiler/runtime 时，将相同的 `CC` 与 `CXX` 环境传给 CTest，因为 installed gate 会配置 nested consumer。Unsupported GPU 或 sanitizer 能力记录为限制，不记录为测试通过。

@@ -2,7 +2,7 @@
 
 ## 1. Core summary (TL;DR)
 
-Photospider loads trusted operation and data-provider modules into the host process through versioned C tables. The host validates and copies descriptors before publishing them, then lends callback-scoped services with explicit memory and cancellation rules. Current package 0.28 uses operation ABI 11, data-provider ABI 1, and optional planar extension ABI 3.
+Photospider loads trusted operation modules through versioned C tables and copies their declarations before publishing them. Structured `Result` is the only image-facing input and output contract; each image slot stores typed planar samples inside its Result object. The package is 0.29.0, the base operation table is ABI 11, and the independent structured Result table is ABI 1.
 
 ## 2. Mental model & intuition
 
@@ -12,83 +12,74 @@ sequenceDiagram
     participant Module
     participant Callback
     participant Services
-    Host->>Module: Read exact ABI version and table
-    Host->>Host: Validate and copy descriptor data
-    Host->>Host: Publish immutable definition and library lease
-    Host->>Callback: Invoke with borrowed views and services
-    Callback->>Services: Allocate, charge work, or dispatch
-    Services-->>Callback: Return typed result and retain active owners
-    Callback-->>Host: Return status
-    Host->>Host: Check sticky failures and cancellation
-    Host->>Host: Publish output or return failure
+    Host->>Module: Read Result or base operation table
+    Host->>Host: Validate and copy descriptors
+    Host->>Host: Publish immutable definitions and library lease
+    Host->>Callback: Lend query and callback-scoped services
+    Callback->>Services: Request typed inputs and selected output work
+    Services-->>Callback: Return authorized reads and retain active owners
+    Callback-->>Host: Return status or a staged Need
+    Host->>Host: Check cancellation, sticky failures, and publication
 ```
 
-The registry owns a published definition and its dynamic-library lease. An invocation snapshot retains that definition while user code runs, so unloading waits for every callback owner to retire. Callback arguments and service tables are borrowed for the documented call; output storage and explicit handles have their own owners.
+The registry owns each immutable definition and its dynamic-library lease. An invocation snapshot retains the definition while callbacks run. The structured coordinator resolves named outputs, selected input projections, Result image sample requests, field I/O, dependency evidence, and backend services; the `PlanarImage` allocations remain backing owned by the Result.
 
 ## 3. Formal contracts & APIs
 
-### Current entry points
+### Entry points and core model
 
 ```c
-#include "photospider/plugin/operation_plugin_api.h"
-#include "photospider/plugin/data_provider_api.h"
-#include "photospider/plugin/planar_operation_plugin_api.h"
+#include "photospider/plugin/result_operation_plugin_api.h"
 
-const ps_operation_plugin_api_v11* operation_api(void) {
-  return ps_operation_plugin_get_api_v11();
-}
+const ps_result_operation_plugin_api_v1*
+ps_result_operation_plugin_get_api_v1(void);
 ```
 
-The planar table is an optional extension to operation ABI 11. Its operation records map one-to-one to the base operation table. Every record in an extended module is planar and replaces the ordinary Value callback. Provider ABI 1 independently publishes copied schema keys, element type, and maximum rank.
+```cpp
+#include <utility>
+#include "photospider/data/result.hpp"
 
-Operation ABI 11 carries versioned descriptors for key, flags, input/output traits, parameter schema, callbacks, and opaque module state. The copied traits include backend capability, determinism and side-effect declarations, shape and Region rules, input constraints, output facets and cache policy. The C table uses exact structure sizes and closed enum values. Unknown, missing, wrong-type, or conflicting parameters fail before callback entry; callbacks receive validated canonical values.
-
-An operation may publish up to 64 ordered output descriptors. Each output has its own name, dtype and shape contract, Region rule, semantic constraints, observation/failure policy, and input projection. The host copies all active records before registry publication. Multi-output definitions must be deterministic and side-effect-free. Invocation and query records carry the selected `output_index`; projected views retain original `input_index` values.
-
-Operation callbacks receive input views with storage origin, byte offset, signed strides, valid coverage, and exact demand. Input bytes are borrowed through callback return. The output sink describes the expected descriptor, Region, and packed size. `allocate_output` returns host-owned storage; `allocate_scratch` returns callback-local storage. Publishing a host output freezes it without copying. Publishing caller or stack memory copies through the same host allocator. A first publish attempt claims the sink, even when it fails; later attempts become sticky `OperationFailed` violations.
-
-The C operation result codes distinguish success, ordinary failure, cancellation, backend unavailable, resource exhaustion, type mismatch, and invalid argument. Unknown nonzero values map to `OperationFailed`. A GPU callback may report backend unavailable for CPU fallback only when its descriptor advertises both backends and permits fallback, and only before output publication. Host cancellation and sticky service failures retain their own priority. GPU-only descriptors are rejected before a CPU callback can run.
-
-C++ `OperationTraits::Fixed` represents a logical output descriptor. The C++ registry can publish sparse or zero-stride broadcast Values with very large logical shape because it does not require a dense byte product unless the operation requests dense output. A synchronous C DSO output sink is denser: its fixed descriptor must have representable contiguous signed strides, a nonzero `uint64_t` byte count, a last byte within `INT64_MAX`, and a size within `SIZE_MAX`. Staged dependency outputs are checked per fragment and can represent a large logical domain when each requested fragment is bounded.
-
-Pure static C++ preparation may specialize output traits and add a checked runtime workspace bound from metadata and parameters. A `PreparedOperation` is immutable, safe to share concurrently, and holds its registered definition/library through its state destructor. It contains no Value payload, Run data, I/O state, or mutable cache. The resolved workspace and output specialization participate in operation identity; separate calls do not share preparation implicitly.
-
-### Planar extension and synchronous services
-
-```c
-#include "photospider/plugin/planar_operation_plugin_api.h"
-
-int charge_work(const ps_planar_services_v3* services, uint64_t units) {
-  return services->consume_work(services->context, units);
-}
+ps::SchemaTemplate schema;
+ps::ResultImageSpec pixels;
+pixels.key = "pixels";
+pixels.frames = 2;
+pixels.layers = 3;
+pixels.descriptor = {ps::ElementType::Float32, {1080, 1920, 4}};
+pixels.layout.height_axis = 0;
+pixels.layout.width_axis = 1;
+pixels.layout.channel_axis = 2;
+schema.images.push_back(std::move(pixels));
 ```
 
-Whole planar callbacks use the selected CPU or GPU lane. CPU Whole callbacks may use the synchronous range service; GPU Whole callbacks use the synchronous native GPU service. CPU staged callbacks receive the coordinator-only `cpu_tiles` service, while the coordinator performs row access and allocation. Scratch is host-owned, zero-initialized, 8-byte aligned, limited by aggregate live requested bytes, and released explicitly or at callback return. Native backing capacity is separately charged to the context root. Service failures are sticky and override callback success. Output commits only after callback success and final cancellation checks.
+A Result schema keeps primitive records and image slots as separate typed members, with at most 16 combined fields and image slots. Each image slot is limited to 4096 frame/layer backing pairs and describes a bounded `{frame, layer, ...sample}` domain; `descriptor` describes one frame/layer and `layout` describes planar storage. Primitive record bytes live in `ResultFieldSpec`; image pixels live in the image slot's typed planar backing. Result object identity, schema, descriptor facts, fields, image backing, relations, and source association share one owning Result reference. Numeric `Value` outputs remain available through the Value path.
 
-Planar extension ABI 3 supports single-output Whole CPU/GPU and CPU staged operations. Staged execution requires CPU-only capability. GPU services are callback-thread-only; tokens keep view owners alive through synchronous dispatch and expire at callback return. Planar row pointers refer to host storage and require explicit device-boundary copies.
+Result operation ABI 1 is a separate C table. A module exports `ps_result_operation_plugin_get_api_v1`; the loader requires the exact table size and ABI version, imports every record into a private registry candidate, and publishes the complete candidate atomically. A failed record leaves the registry unchanged. The base operation ABI 11 remains available for operations that use its Value/dependency callback contract. The loader does not load the former planar callback table.
 
-The C++ dependency `start_dependency` protocol is the staged counterpart for Value operations. ABI 11 publishes finite per-poll services for exact associations, authorized reads/fragments, retained input owners, output publication, scratch, cancellation, work, checkpoints, pure blocks, native atlas/dispatch, and bounded GPU discovery. Service errors are sticky. Borrowed service/view pointers expire at poll return; retained input handles remain valid until explicit release or state destruction. Joint polling groups independent Atomic outputs, while singleton callbacks remain required. See [Dependency Data](Dependency-Data.md) for the complete service lifecycle.
+Each Result output descriptor has a name, a typed Value or Result port, input projection, and Whole or Regional execution declaration. Input ports can constrain ordinary Values, numeric scalar bounds, typed Values, or a Result schema. The optional `resolve_metadata` callback receives borrowed compiled input metadata, parameters, and output prototypes. During this pure metadata step, it calls the synchronous `ps_result_metadata_sink_v1::set_output` once for each output using that output's registry index. The sink copies and validates every nested descriptor before `set_output` returns, so the callback can use local schema, image, and facet records. Sink errors are sticky, and preparation fails if any output is omitted. The operation key, output names/projections, output kind, Result schema id/version, and declared output constraints stay fixed. A start/poll callback receives actual resolved input/output metadata, selected `output_index`, requested Regions, tile geometry, parameters, and backend. `need_value` and `need_image` add bounded sample requests; `need_result` requests field facts, while field reads use a Need/poll/reply sequence around temporary-storage I/O. `read_image` is limited to the captured image capability granted by `need_image`. `requested_kind` distinguishes a complete Result object query (`0`) from a Value footprint (`1`) or image footprint (`2`). A kind-1 or kind-2 query with zero Regions describes Empty coverage. A retained image handle preserves that same selected slot and coverage until release or state destruction.
 
-### Validation, lifetime, and errors
+The callback can publish a typed Result image with relation rows and finality, append and publish primitive fields, bind descriptor support, publish an ordinary Value output, and seal its Result. `ResultSupportTarget` separates Value samples, fields, image slots, and descriptor observations. `Exact`, `Conservative`, and `Unknown` preserve their declared dirty-propagation strength; Exact is a registration claim about support, not a numeric theorem proved by the host. Association is monotone and retains consumed source objects through the derived output lifetime. `ResultRef::capture()` freezes one descriptor revision together with its image/field coverage, relations, and dependency evidence; a shared waiter consumes that captured publication. `ResultRef::resources()` exposes the schema-selected ICC/OCIO bindings retained with its typed image facets and Result metadata.
 
-Before opening a module, the loader validates the exact nonempty path, byte-length bound, and absence of embedded NUL. It then validates ABI versions, exact table sizes, pointer/count pairs, alignment, bounded counts, UTF-8 keys, enums, flags, traits, and required callbacks before publishing any definition. Rejection leaves the registry unchanged and releases acquired native handles. A later descriptor failure in a multi-record table rejects the whole table.
+### Callback lifetime, resources, and execution
 
-The registry copies schema and descriptor data it needs. It retains the module lease with each immutable definition. Invocation handles keep the module loaded through callbacks; descriptor tables are destroyed before unload. Provider lookup results own their copied keys and do not borrow mapped provider memory. C++ embedding callbacks use the same immutable definition ownership model. DSO registration uses a private transaction: loading the library alone does not publish operations. A later bad record rejects the complete module table and invokes every acquired destroy/close action once. Registry snapshots retain shared definition handles; callbacks and callable destructors do not run under the registry mutex.
+The query and service table are borrowed for one `start` or `poll`. A saved phase context expires when that call returns. Retained image handles and operation state have explicit release/destruction lifetimes. Result C service calls run on the callback entry thread. CPU work scheduled through `cpu_parallel` or `cpu_tiles` may call only `cancelled` from worker callbacks; workers may write scratch bytes that the entry thread already allocated for them. The metadata sink is borrowed only during resolver entry, and `set_output` runs on that entry thread. Callbacks check service return codes; the host keeps service failures sticky even if a callback later reports success.
 
-The installed `Photospider::operation_sdk` target propagates `cxx_std_17` and the wrapper headers. `Photospider::data_provider_sdk` supplies the provider include directory without a C++ language feature, so C11 providers do not inherit a C++ requirement.
+Whole CPU callbacks can use the CPU range service. CPU tile callbacks use the coordinator's tile service. When a native GPU lane exists, Whole and staged Result callbacks receive its native services subject to the operation's declared capability. GPU service calls are restricted to the active callback thread and their dispatch retains referenced owners until completion. C++ `ResultProgramPhase::gpu_status` is a borrowed reader for the active native invocation. The callback calls it on the entry thread after a GPU service call to recover the specific host status, including errors that the numeric GPU table otherwise reports as a general failure. The reader expires with the phase. CPU tile callbacks run as indivisible tile tasks.
 
-The ABI is same-process trusted code. Callback exceptions cannot cross C boundaries. Host service errors remain sticky, allocation failures keep their resource classification, and unexpected callback failures become `OperationFailed`. No callback may free or retain borrowed pointers beyond their declared lifetime.
+A configured resource root accounts admitted work, stages, I/O, relation/map metadata, payload capacity, and retained owners. A callback that exceeds a bound receives a resource or stage failure; issued work is not refunded. Result publication validates schema, sample coordinates, relation coverage, finality, cancellation, and resource ownership before exposing the immutable result.
+
+Base operation ABI 11 keeps its separate Value/dependency entry points and existing multi-output projection rules. The public C SDK targets are `Photospider::operation_sdk` for C++ operation helpers and `Photospider::data_provider_sdk` for the pure-C provider headers. The Result ABI header is a C11 interface and its DSO callback table does not inherit the operation SDK's C++ requirement.
 
 ## 4. Non-goals & explicit boundaries
 
-- ABI validation checks structure and behavior contracts; it does not sandbox, authenticate, or isolate modules.
-- There is no plugin scheduling ABI, policy DSO, provider storage service, or IPC plugin-loading path.
-- Operation ABI 11 and planar extension ABI 3 have no older-entry compatibility path. Installed C++ consumers and modules must be rebuilt against matching public headers.
-- GPU support depends on the build's selected native backend. ABI availability does not imply that a device or every operation can execute on GPU.
-- Planar GPU supports Whole callbacks, not staged callbacks or CPU fallback.
+- Operation modules are trusted in-process code. ABI validation does not sandbox or authenticate them.
+- The removed planar extension ABI v1, v2, and v3 are rejected. The old planar header and separate image executor are removed; no compatibility adapter is provided.
+- Package 0.29 requires C++ consumers to rebuild. WorkflowDocument schema 4 and OperationTraits version 21 reject older contracts. The base C operation table remains ABI 11; the independent Result operation table is ABI 1.
+- Production image operation availability follows the source and registry classifications in [Image operations](Image-Operations.md).
+- GPU execution requires a build with a native backend and an available device. A table or capability declaration alone does not prove hardware execution.
+- The C image descriptor carries planar storage order and row pitch as physical layout inputs. The C Result table exposes the declared Value and Result ports; IPC plugin loading and daemon protocol remain outside this ABI.
 
 ## 5. Consequences
 
-Malformed or incompatible modules fail during loading before registry publication. Callers receive a status and may choose another module; the loader does not silently reinterpret an old table. A callback that ignores a failed allocation or another service violation still receives the sticky host failure after it returns.
+Malformed or incompatible tables fail before registry publication, and the loader does not reinterpret an older planar table. A module rejected after native loading releases its library owner; a published definition keeps the library loaded until the last invocation or state owner retires. Callbacks are not retried automatically after service, resource, cancellation, or backend errors.
 
-Synchronous dispatch keeps callback owners alive until device completion and can delay cancellation by the dispatch duration. Long CPU callbacks must poll cancellation. Resource and queue exhaustion are finite errors; callbacks are not retried automatically. Native modules run with host-process privileges, so only trusted code should be loaded.
+Synchronous native dispatch retains input owners until device completion, so cancellation can wait for an in-flight call. Long CPU callbacks must observe cancellation through the services. Native modules run with host-process privileges, so only trusted code should be loaded.

@@ -17,9 +17,15 @@
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/data/result.hpp"
 #include "photospider/data/value_fragments.hpp"
+#include "photospider/plugin/cpu_parallel_api.h"
+#include "photospider/plugin/cpu_tiles_api.h"
+#include "photospider/plugin/operation_plugin_api.h"
 #include "photospider/plugin/operation_types.hpp"
 
 namespace ps {
+namespace plugin_internal {
+class FailureLatch;
+}
 /** @brief Compiler-owned immutable input/output metadata for a staged result.
  * Prepared before execution; it contains no runtime allocation or callback.
  */
@@ -43,6 +49,14 @@ struct ResultProgramQuery final {
   const OperationMetadata& output;
   const std::map<std::string, ParameterValue>& parameters;
   std::optional<Footprint> value_outputs;
+  /** @brief Captured demand for image slot zero of the selected named output.
+   * Absent requests complete slot domains. Primitive fields retain their own
+   * publication rules. Tile dimensions are physical scheduling choices.
+   */
+  std::optional<Footprint> image_outputs;
+  std::uint32_t image_slot = 0;
+  std::uint64_t tile_height = 128, tile_width = 128;
+  Backend backend = Backend::Cpu;
   std::string_view semantic_key;
   std::uint32_t output_index = 0;
   std::uint64_t page_bytes = 4096;
@@ -55,6 +69,34 @@ struct ResultProgramQuery final {
 struct ResultValueNeed final {
   std::uint32_t input = 0;
   Footprint samples;
+  std::uint32_t roles = 1;
+};
+struct ResultImageNeed final {
+  std::uint32_t input = 0, slot = 0;
+  Footprint samples;
+  std::uint32_t roles = 1;
+};
+/** @brief Owning capability restricted to the explicit image Need. */
+class PHOTOSPIDER_API ResultImageInput final {
+ public:
+  ResultImageInput() = default;
+  std::uint64_t object_id() const noexcept { return result_.object_id(); }
+  const ResultImageSpec& spec() const {
+    return result_.schema().images.at(slot_);
+  }
+  const Footprint& coverage() const noexcept { return samples_; }
+  Status read(const std::vector<std::uint64_t>& coordinate, void* destination,
+              std::size_t bytes,
+              const CancellationToken& cancellation = {}) const;
+
+ private:
+  friend class execution_internal::StructuredExecution;
+  ResultRef result_;
+  ResultDescriptor descriptor_;
+  std::uint32_t slot_ = 0;
+  Footprint samples_;
+  std::shared_ptr<std::atomic<ErrorCode>> failure_;
+  std::shared_ptr<plugin_internal::FailureLatch> observer_;
 };
 /** @brief Requests complete associated data or a monotone minimum field prefix.
  * Complete requests wait for seal. A prefix request returns a sealed shorter
@@ -95,6 +137,7 @@ struct ResultProgramNeed final {
   ResourceVector<ResultValueNeed> values;
   ResourceVector<ResultObjectNeed> results;
   ResourceVector<ResultIoRequest> io;
+  ResourceVector<ResultImageNeed> images = {};
 };
 /** @brief New certified prefix or complete object, published by one producer.
  */
@@ -109,6 +152,7 @@ struct ResultPublication final {
 struct ResultValuePublication final {
   ValueFragments value;
   ResultRelation relation;
+  ResultRelation descriptor = {};
 };
 // NOLINTBEGIN(whitespace/indent_namespace)
 using ResultProgramPoll =
@@ -119,6 +163,11 @@ using ResultValueInputs =
 using ResultObjectInputs =
     std::map<std::uint32_t, ResultRef, std::less<std::uint32_t>,
              ResourceAllocator<std::pair<const std::uint32_t, ResultRef>>>;
+using ResultImageInputs = std::map<
+    std::pair<std::uint32_t, std::uint32_t>, ResultImageInput,
+    std::less<std::pair<std::uint32_t, std::uint32_t>>,
+    ResourceAllocator<std::pair<const std::pair<std::uint32_t, std::uint32_t>,
+                                ResultImageInput>>>;
 // NOLINTEND
 /** @brief Ready inputs/windows borrowed only until this poll returns.
  * Root resource operations are explicit admission; mandatory I/O is returned as
@@ -137,8 +186,23 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
   /** @brief Host-provided first-failure observer; callbacks must not retain it.
    */
   std::function<void(const Status&)> failure_observer = {};
+  const ResultImageInputs* images = nullptr;
+  const ps_cpu_parallel_service_v1* cpu_parallel = nullptr;
+  const ps_cpu_tiles_service_v1* cpu_tiles = nullptr;
+  const ps_gpu_service_v11* gpu = nullptr;
+  /** @brief Borrowed host status reader for the current native invocation.
+   * Read on the entry thread after a GPU service call to preserve specific
+   * errors that the numeric GPU ABI reports through its general failure code.
+   * Must not be retained beyond this phase. */
+  std::function<Status()> gpu_status = {};
+  /** @brief Ordered object ids for all consumed Result owners, including
+   * earlier Need stages. Borrowed for this phase; copy into ResultBuilder. */
+  const ResourceVector<std::uint64_t>* association = nullptr;
   Status read(std::uint32_t input, const std::vector<std::uint64_t>& coordinate,
               void* destination, std::size_t bytes) const;
+  Status read_image(std::uint32_t input, std::uint32_t slot,
+                    const std::vector<std::uint64_t>& coordinate,
+                    void* destination, std::size_t bytes) const;
 };
 /** @brief Move-only host-owned structured continuation; destructor runs once.
  */

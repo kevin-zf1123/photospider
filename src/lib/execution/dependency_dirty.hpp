@@ -2,12 +2,14 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <utility>
 
 #include "photospider/data/footprint.hpp"
+#include "photospider/execution/resource_allocator.hpp"
 
 namespace ps::execution_internal {
 /** @brief One incremental direct-edge propagation item in a fixed generation.
@@ -27,7 +29,8 @@ class DirtyDeltaQueue final {
  public:
   explicit DirtyDeltaQueue(FootprintLimits limits = {})
       : limits_(std::move(limits)) {}
-  Status receive(std::uint64_t record, const Footprint& dirty) {
+  Status receive(std::uint64_t record, const Footprint& dirty,
+                 bool observe_empty = false) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (failure_)
       return *failure_;
@@ -35,6 +38,7 @@ class DirtyDeltaQueue final {
       return fail_locked(
           Status::failure(ErrorCode::InvalidArgument, "invalid dirty domain"));
     auto found = entries_.find(record);
+    const bool first = found == entries_.end();
     if (found == entries_.end()) {
       if (entries_.size() >= limits_.maximum_boxes)
         return fail_locked(Status::failure(ErrorCode::ResourceExhausted,
@@ -49,7 +53,8 @@ class DirtyDeltaQueue final {
     auto accumulated = found->second.accumulated.unite(dirty, limits_);
     if (!accumulated.ok())
       return fail_locked(accumulated.status());
-    if (accumulated.value() == found->second.accumulated)
+    if (accumulated.value() == found->second.accumulated &&
+        !(first && observe_empty))
       return Status::success();
     // Allocate queue storage before committing the changed set/queued flag.
     if (!found->second.queued)
@@ -105,8 +110,10 @@ class DirtyDeltaQueue final {
   };
   FootprintLimits limits_;
   mutable std::mutex mutex_;
-  std::map<std::uint64_t, Entry> entries_;
-  std::deque<std::uint64_t> ready_;
+  std::map<std::uint64_t, Entry, std::less<std::uint64_t>,
+           ResourceAllocator<std::pair<const std::uint64_t, Entry>>>
+      entries_;
+  std::deque<std::uint64_t, ResourceAllocator<std::uint64_t>> ready_;
   std::optional<Status> failure_;
 };
 }  // namespace ps::execution_internal

@@ -1,12 +1,12 @@
-# 多输出算子
+# 具名 outputs 与混合 Result ports
 
-多输出节点公开一组编译时确定的命名端口。workflow 边通过 `WorkflowNodeOutput{node, port}` 选择端口，根通过 `WorkflowOutput{name, node, port}` 选择端口。编译器在执行前解析端口名和输出 shape。执行阶段只请求有需求的输出区域；未请求端口不计算，启用 joint contract 后，被请求的输出可以共享物理工作。
+## 范围与 ownership
+
+一个 operation node 可声明多个具名 outputs。每个 output 拥有自己的 port kind、descriptor 或 Result schema、input projection 和 execution demand。Workflow edge 同时指定 node 和 output port。Compiler 在执行前专门化选中的 output。
+
+Output 可以是 numeric `Value` 或 structured `Result`。Result schema 可组合 typed image slots 和 primitive fields。Node 可以混合 Result 图像 inputs、numeric Value controls 和不同类型的 outputs。所有图像语义与 ownership 都经 `ResultRef`；`PlanarImage` 是 Result image slot 内的 backing。
 
 ```cpp
-#include <cstdint>
-#include <string>
-
-namespace ps {
 struct WorkflowNodeOutput final {
   std::uint64_t source_node = 0;
   std::string source_port = "value";
@@ -17,31 +17,24 @@ struct WorkflowOutput final {
   std::uint64_t node_id = 0;
   std::string port = "value";
 };
-}  // namespace ps
 ```
 
-默认 registry 中的图像多输出算子为 `image.split_horizontal`：
+片段省略了无关字段。Public execution 将具名 Value outputs 放入 `ExecutionResult::values`，将 structured outputs 放入 `ExecutionResult::results`。
 
-| 端口 | Shape | 输入坐标映射 |
-| --- | --- | --- |
-| `full` | `{H,W,C}` | `(y,x,c)` |
-| `left` | `{H,split_x,C}` | `(y,x,c)` |
-| `right` | `{H,W-split_x,C}` | `(y,x+split_x,c)` |
+## Output selection 与 dependency
 
-输入是 Float32 rank-3 图像。必填 Int64 参数 `split_x` 满足 `0 < split_x < W`，由调用者显式提供。每个输出沿用输入的图像解释。算子为每个请求区域声明来源像素，并发布保留来源存储 owner 的不可变视图。收集稠密结果时可能复制视图。Joint 成员需求相同时，规划器可以共享依赖传输；每个输出仍保留自己的坐标映射。
+`OperationTraits::outputs` 声明可用 outputs。`select_operation_output` 解析所选 output 的 traits 和 index；`ResultProgramQuery::output_index` 将该选择传递给 structured callback。所选 output contract、query、schema 和 input projection 定义它的 demand 与 identity。
 
-`image.split_horizontal` 仍注册为 legacy `Value` callback，且未设置 `planar_storage_capable`。带 packed `photospider.image` facet 的 workflow declaration 在输入校验时返回 `InvalidArgument`；structural `PlanarImageLayout` 在算子 capability 检查时返回 `TypeMismatch`。仓库示例会创建前一种 declaration，因此源码可以构建，但执行无法完成。其 README 明确说明它不是当前运行验收。
+Coordinator 只解析所选 projection 中的 inputs。Result callback 可请求 numeric Control sample，在下一 stage 检查它，再请求由该值选择的 Data image samples。Result relation 记录已消费的 Control 与 Data support，dirty transpose 使用同一 relation。不属于该 output projection 的 inputs 不会为该 output 执行。
 
-```cpp
-ps::WorkflowNodeOutput left{node_id, "left"};
-ps::WorkflowOutput result{"crop", node_id, "right"};
-```
+`ExecutionOptions::enable_joint` 可启用注册过的 contract，在符合条件的 requested outputs 之间共享物理 work。每个 output 仍保留自己的 schema、query、relation、cache identity 和 error。Joint execution 不会授权未请求的 output，也不会合并不同的 output 语义。
 
-`ExecutionOptions::enable_joint` 控制是否为声明了 joint contract 的算子启用可选联合执行。它只影响物理共享；每个命名输出仍有自己的 descriptor、Region 和值语义。注册的 split 定义会在请求来源样本前校验 `split_x`。
+## Identity 与资源影响
 
-宿主集成测试为 [`test_multi_output_execution.cpp`](../../../tests/integration/test_multi_output_execution.cpp)，它使用测试定义的算子核验 named-output 宿主契约。示例源码位于 [`examples/multi_output_workflow`](../../../examples/multi_output_workflow/README.md)；其图像 declaration 会在 split callback 运行前被拒绝。图像存储行为见[图像算子](Image-Operations.zh.md)。
+Structured producer 的 identity 包含所选 output、output contract、captured query、parameters 和有序 input bundle。物理 tile 尺寸不改变 semantic output identity。Relation traversal、reads、publication payload、continuation state 和 retained input owners 共用 execution-root budget。
 
-```sh
-cmake --build build --target test_multi_output_execution -j 8
-ctest --test-dir build -R '^test_multi_output_execution$' --output-on-failure
-```
+所选 output 失败时，请求返回 typed error。只有注册 contract 允许请求的成员时，符合条件的 joint group 才能共享 continuation。未请求的 output 不会启动。Result owners 在最后一个 owning reference 释放前保持存活。
+
+## 可执行 fixture
+
+[`examples/unified_result_workflow`](../../../examples/unified_result_workflow/README.zh.md) 使用 public workflow APIs 和最小 example operations，从同一 node 选择 Result image output 与 numeric output。Focused `test_multi_output_execution` 和 `test_unified_result_images` 覆盖 output selection、混合 ports 和图像执行。Production operation catalog 与图像限制见[图像 operations](Image-Operations.zh.md)。

@@ -153,19 +153,21 @@ struct PHOTOSPIDER_API RegionalSource final {
  */
 using ExecutionSink = std::function<Status(const std::string&, ValueView)>;
 
-/** @brief One exact-name immutable Value supplied to a Run. */
+/** @brief One exact-name immutable input supplied to a Run.
+ * Select exactly one Value, source, snapshot, or Result matching its
+ * declaration.
+ */
 struct PHOTOSPIDER_API ExecutionBinding final {
   /** @brief Case-sensitive required declaration name. */
   std::string name;
   /** @brief Valid Value with exactly matching metadata and dense bytes. */
   Value value;
-  /** @brief Alternative source; exactly one of a valid Value or source is
-   * required. */
+  /** @brief Alternative source supplying an ordinary numeric Value. */
   std::shared_ptr<const RegionalSource> source = {};
   /** @brief Alternative immutable kernel snapshot; select exactly one input. */
   std::shared_ptr<const InputSnapshot> snapshot = {};
-  /** @brief Structural planar image binding; exact plan geometry required. */
-  std::shared_ptr<const PlanarImage> image = {};
+  /** @brief Structured Result binding matching the declared schema. */
+  ResultRef result = {};
 };
 /**
  * @brief Per-call input snapshot; duplicate entries remain visible to
@@ -368,8 +370,6 @@ struct AtomObservation final {
 struct PHOTOSPIDER_API ExecutionResult final {
   /** @brief Sorted caller-requested named Values. */
   std::map<std::string, Value> values;
-  /** @brief Authoritative planar image outputs; no implicit dense export. */
-  std::map<std::string, PlanarImage> images;
   /** @brief Raw compiler-independent execution diagnostics. */
   ExecutionDiagnostics diagnostics;
   /** @brief Direct structural evidence for a completed dependency-network Run.
@@ -422,6 +422,7 @@ using DemandQuery = std::map<std::string, Footprint>;
 /** @brief Complete sparse result; holes remain unauthorized and unallocated. */
 struct PHOTOSPIDER_API DemandResult final {
   std::map<std::string, ValueFragments> values;
+  ResourceMap<ResultRef> results;
   ExecutionDiagnostics diagnostics;
   ExecutionDependencies dependencies;
   /** @brief Captured demand generation; zero for direct frozen execution. */
@@ -731,10 +732,6 @@ class PHOTOSPIDER_API ExecutionContext final {
       const ExecutionOptions& options = {});
 
  private:
-  Result<ExecutionResult> execute_planar(const ExecutionPlan& plan,
-                                         ExecutionBindings bindings,
-                                         const CancellationToken& cancellation,
-                                         const ExecutionOptions& options);
   Result<ExecutionResult> execute_regions(
       const ExecutionPlan& plan, ExecutionBindings bindings,
       const ExecutionSink* sink, const CancellationToken& cancellation,

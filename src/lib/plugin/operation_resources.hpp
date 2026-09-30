@@ -23,12 +23,27 @@ inline Result<ResourceBindings> admit_operation_resources(
     accepted = joined.take_value();
     return Status::success();
   };
+  const auto select_metadata = [&](const OperationMetadata& metadata) {
+    auto status = select(metadata.facets);
+    if (!status.ok())
+      return status;
+    if (metadata.result_schema) {
+      auto subset = metadata.result_schema->select_resources(supplied);
+      if (!subset.ok())
+        return subset.status();
+      auto joined = accepted.unite(subset.value());
+      if (!joined.ok())
+        return joined.status();
+      accepted = joined.take_value();
+    }
+    return Status::success();
+  };
   for (const auto& input : inputs) {
-    auto status = select(input.facets);
+    auto status = select_metadata(input);
     if (!status.ok())
       return Result<ResourceBindings>(status);
   }
-  auto status = select(output.facets);
+  auto status = select_metadata(output);
   if (!status.ok())
     return Result<ResourceBindings>(status);
   if (const auto* root = resource_internal::metadata_budget())

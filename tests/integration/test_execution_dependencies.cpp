@@ -271,13 +271,14 @@ int whole_record() {
           .open_demand(global_plan,
                        {{{"x", values<double>(ElementType::Float64, {3, 5})}}})
           .take_value();
-  const DemandQuery empty_query{{"global", Footprint::none({2}).take_value()}};
+  const ResourceMap<Footprint> empty_query{
+      {"global", Footprint::none({2}).take_value()}};
   auto complete =
       demand.request({{"global", Footprint::all({2}).take_value()}});
   PS_CHECK(complete.ok());
   auto empty = complete.value().dependencies.restrict(empty_query);
   PS_CHECK(empty.ok() && empty.value().coverage() == empty_query);
-  auto independent = demand.request(empty_query);
+  auto independent = demand.request({{"global", empty_query.at("global")}});
   PS_CHECK(independent.ok());
   auto support = empty.value().source_support();
   auto expected_support = independent.value().dependencies.source_support();

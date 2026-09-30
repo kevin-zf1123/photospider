@@ -312,3 +312,10 @@ __pycache__/
 
 !plugins/ops/PixelOE/src/copy.slang
 !plugins/ops/PixelOE/tools/compile_vulkan_kernels.py
+
+# Public unified Result workflow and its dedicated minimal operations.
+!examples/unified_result_workflow/
+!examples/unified_result_workflow/*.hpp
+!examples/unified_result_workflow/*.cpp
+!examples/unified_result_workflow/CMakeLists.txt
+!examples/unified_result_workflow/*.md

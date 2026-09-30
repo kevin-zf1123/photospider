@@ -1,8 +1,6 @@
 # Testing and Validation
 
-This document defines maintained repository validation after the breaking
-scope reset. Tests validate long-lived software behavior, not migration
-completion or provenance.
+This document describes maintained validation for the current kernel package. Tests exercise observable software behavior through repository targets and installed consumers.
 
 ## Build prerequisite
 
@@ -277,7 +275,7 @@ CTest entries validate observable correctness, including numerical results,
 resource bounds, multithreading, error handling, package consumption, compilation
 and runtime boundaries. Performance measurements and timing-dependent diagnostics
 remain opt-in tools; elapsed-time thresholds do not define correctness. Do not register stale-term searches, source-layout audits,
-migration checklists, Doxygen audits, Issue replay, or result/provenance
+process checklists, Doxygen audits, Issue replay, or result/provenance
 orchestration. Manual source-quality tools require maintained English and
 Chinese documentation and remain outside CTest/CI. Direct source-tree and
 installed-tree header self-containment scans with Clang and GCC are such manual
@@ -309,68 +307,75 @@ Format changed C/C++ with ClangFormat 21 and lint the same files with
 `python3 -m cpplint`. Record unsupported sanitizer/GPU platforms as limitations
 rather than successful gates.
 
-## Current registered correctness workflows
+## Focused Result validation
 
-Registration names describe behavior, not historical G1/G4/S1/S4 milestones.
-Use `ctest --test-dir <build> --show-only=json-v1` for the actual inventory of
-that configuration. Enabling the supported SME build adds `test_numeric_conversion_sme`. All registered
-executables, including the two numeric/expression workflows, are
-built by the default testing build.
+The final focused core run passed these thirteen tests: `test_dependency_dirty`,
+`test_result_execution`, `test_result_plugin`, `test_result_native_gpu`,
+`test_result_image_contracts`, `test_unified_result_images`,
+`test_global_results`, `test_shared_results`, `test_result_metadata_budget`,
+`test_resources`, `test_execution_dependencies`, `test_multi_output_execution`,
+and `test_generic_result_cache`. Together they cover mixed C Result outputs, image schema
+resolution, prefix and zero-row fields, typed Field/Descriptor replacement,
+64 sparse fragments, named C++ outputs, dynamic Control-to-Data support,
+Unknown relation unions and declared input projections, returned dependency
+map ownership, multiple-output execution, shared Result caching, and dependency
+owner admission. The C fixture resolves output metadata with callback-local nested
+records through the synchronous sink; the host copies them before `set_output`
+returns. Image contract tests check typed image metadata admission before large
+facet allocations and C resolver rejection for invalid zero-slot/multi-slot
+schemas.
 
-- `test_workflow_numeric_reductions` and `test_workflow_expression_lut` run public generic numerical oracles.
-- `test_dependency_workflow` checks exact sparse reads, progressive control
-  discovery, dynamic radius, demand replacement, waiter sharing, content cache,
-  ordered reductions/scans and block-state reconvergence. Its former
-  generic-image STMap positive fixture and timing mode are retired; planar
-  STMap execution has not been implemented.
-- `test_planar_image_workflow`, `test_planar_plugin`, `test_planar_import`,
-  `test_planar_preparation`, `test_region_runs` and `test_data_movement_contract`
-  cover current planar storage, C ABI 11 plugins, preparation seals, mapped ROI,
-  raw bits, layout, ownership and publication boundaries.
-- `test_gpu_fragment_execution`, `test_gpu_sync_fallback`,
-  `test_gpu_discovery_workflow` and `test_gpu_c_abi_execution` exercise actual
-  native dispatch, sparse atlases, restart/fallback, discovery and C services.
-  `test_native_gpu`, `test_native_execution` and `test_fragment_atlas_gpu`
-  complement them. No hardware returns 77 and is recorded as skipped.
-  `test_dependency_gpu` and `test_gpu_discovery` retain CPU-runnable protocol
-  validation. Protocol violations detected before cancellation remain Protocol
-  failures; ordinary callback failures can be superseded by cancellation.
-- `test_numeric_conversion_sme` checks bits and deterministic cancellation.
-  Missing SME hardware or an unsupported streaming vector length returns 77.
-  Its `--midflight` timing diagnostic is not registered with CTest.
+`test_result_execution` also exercises zero, partial, and 8192-row discovery
+with 64-byte and 256-byte windows. Resource tests cover retained Result owners
+and bounded metadata. The focused suite completed in approximately three
+seconds.
 
-The removed-format-key checklist is retired. `test_compiler` instead checks
-`NotFound` for one synthetic unknown operation through lookup, invocation and
-compilation. Current ABI/schema/package-version rejection, malformed input,
-integer overflow, quality mathematics and owner-retirement tests remain
-correctness tests; they are not migration checklists.
+The native C fixture dispatched once on Metal and read back 4. The native
+GPU tests also exercise two invalid service modes and preserve their sticky
+errors. The base-ABI numeric GPU-to-Result fixture checked an affine view with
+4000 backing bytes transferred as 4 bytes to one sample, and a zero-stride
+broadcast view with 4 backing bytes transferred as 4000 bytes to 1000 samples.
+A 500-unit work limit rejected the broadcast copy with `ResourceExhausted`. The native CTest returns 77 when compatible hardware is absent;
+the final run on this host used Metal and was not skipped.
+
+To reproduce the core set, build the test executables and run their CTest cases:
 
 ```sh
-cmake --build <build> -j 8
-ctest --test-dir <build> --output-on-failure
-ctest --test-dir <build> -R '^test_(dependency_workflow|gpu_fragment_execution|gpu_sync_fallback|gpu_discovery_workflow|gpu_c_abi_execution)$' --output-on-failure
+cmake --build build/kernel-dev --target test_dependency_dirty test_result_execution test_result_plugin test_unified_result_images test_global_results test_shared_results test_result_metadata_budget test_resources test_result_image_contracts test_execution_dependencies test_multi_output_execution test_generic_result_cache -j8
+ctest --test-dir build/kernel-dev -R '^test_(dependency_dirty|result_execution|result_plugin|result_native_gpu|result_image_contracts|unified_result_images|global_results|shared_results|result_metadata_budget|resources|execution_dependencies|multi_output_execution|generic_result_cache)$' --output-on-failure
 ```
+
+The final installed-package run passed these five tests after the source-support admission fence, numeric descriptor guard, and affine/broadcast Result changes:
+`installed_unified_result_workflow`, `installed_unified_result_cpp`,
+`installed_unified_result_contracts`, `installed_unified_result_c11`, and
+`installed_unified_result_native_gpu`. The native case used Metal and was not
+skipped. Its log is `build/kernel-dev/unified-consumer.log`.
+
+```sh
+cmake --install build/kernel-dev --prefix build/unified-result-install
+cmake -S tests/consumer -B build/unified-result-consumer -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH=/Users/zhufeng/document/code/photospider/build/unified-result-install
+cmake --build build/unified-result-consumer --target run_unified_result_consumer -j8
+```
+
+The installed tests invoke the public C++ workflow, the C++ workflow consumer,
+the typed image-contract consumer, a C11 Result DSO consumer, and the native
+GPU Result DSO consumer. The installed contract consumer also exercises the typed
+source-support budget refusal. The native test covers current affine and broadcast
+transfer behavior on Metal. These focused checks do not represent full CTest,
+sanitizer, or release-matrix validation.
 
 ## Installed and optional coverage boundaries
 
-The installed gate accepts package 0.28 and rejects 0.23 through 0.27 requests. Its actual
-runtime inventory is the `COMMAND` list of `run_photospider_consumer` in
-`tests/consumer/CMakeLists.txt`, including region runs, planar preparations,
-mapped movement, FMT-04/05 alpha, FMT-09 transfer, FMT-10 RGB basis, FMT-11 model
-conversion and maintained operator/registry workflows. The four GPU
-workflow targets and foundations example are currently build dependencies only
-in that nested gate, not installed runtime executions. Their in-tree CTests
-remain the native execution coverage. Resource, Result, representation and
-legacy multi-output example targets outside that run target are optional
-consumers and are not evidence of executed installed coverage.
+`test_installed_consumer` configures an isolated prefix, installs the package,
+and builds/runs an external consumer through `find_package(Photospider CONFIG
+REQUIRED)`. Read `tests/consumer/CMakeLists.txt` for its actual runtime command
+list. A target that appears only in `DEPENDS` is build coverage, not runtime
+coverage. The current `run_unified_result_consumer` target executes the public minimal
+workflow, C++ workflow consumer, typed image-contract consumer, C11 DSO consumer,
+and native GPU consumer.
 
-Old image-vertical and S3/S4 examples are unregistered migration sources. They
-must not be listed as current passing gates. Their former `test_bindings`,
-`test_image_vertical*`, `test_metal_images`, `test_native_cache` and `test_s4_*`
-entries are absent from the current inventory. Maintained images use the planar
-correctness entries above; old generic-image acceptance is not restored.
+Result image behavior is covered by the Result fixtures and installed consumers listed above. Production image availability follows the current catalog and runtime contract in [Image operations](../kernel-architecture/Image-Operations.md).
 
-For a custom compiler/runtime, propagate the same `CC`/`CXX` environment to
-CTest: the installed gate configures a fresh nested consumer. On Apple Silicon,
-`MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1` can check native dispatch. Unsupported
-GPU/sanitizer capability is a limitation, not a successful test.
+For a custom compiler/runtime, pass the same `CC` and `CXX` environment to CTest
+because the installed gate configures a nested consumer. Report unsupported GPU
+or sanitizer capability as a limitation, not a successful test.

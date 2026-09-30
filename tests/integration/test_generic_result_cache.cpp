@@ -179,8 +179,8 @@ int cache_shared_route_budget() {
   const DemandQuery query{{"y", Footprint::all({1}).take_value()}};
   PS_CHECK(execution.execute_fragments(frozen, query).ok() && *calls == 1);
   // Split the old shared Whole owner into two equivalent new source nodes.
-  // The root content matches, but its proof must not be cloned twice against
-  // a single prepaid metadata charge. Safe miss still reuses each branch.
+  // The unchanged root content may reuse cached pixels. Each corresponding
+  // ancestry copy retains its own metadata admission for its new route.
   document.nodes = {
       {10, leaf.key, {WorkflowInputReference{1}}, {}},
       {11, leaf.key, {WorkflowInputReference{1}}, {}},
@@ -197,7 +197,7 @@ int cache_shared_route_budget() {
       execution.freeze(changed_plan, {{{"x", Value::from_float64(7)}}})
           .take_value();
   auto result = execution.execute_fragments(changed_frozen, query);
-  PS_CHECK(result.ok() && *calls == 2 &&
+  PS_CHECK(result.ok() && *calls == 1 &&
            result.value().diagnostics.cache_hits > 0);
   double actual = 0;
   PS_CHECK(
@@ -281,7 +281,7 @@ int dependency_cache_proof_limits() {
           "root", q, {{1}, {1}, {1}, {1}},
           {{{0}, {{0, 1, q, {}}, {1, 1, q, {}}, {2, 1, q, {}}, {3, 1, q, {}}}}})
           .take_value();
-  root->upstream = branches;
+  root->upstream.assign(branches.begin(), branches.end());
   std::uint64_t work = 100000, visits = 0;
   auto proof = dependency_cache_proof(plan, root, 10000, &work, &visits, {});
   PS_CHECK(proof.ok() && visits == 9 && proof.value().metadata_entries > 1200);
@@ -294,9 +294,14 @@ int dependency_cache_proof_limits() {
   ExecutionContext context(registry);
   auto frozen = context.freeze(plan, {{{"x", scalar(7)}}}).take_value();
   auto computed = context.execute_fragments(frozen, {{"y", q}});
-  PS_CHECK(computed.ok() &&
-           computed.value().dependencies.source_support().value() ==
-               proof.value().support);
+  PS_CHECK(computed.ok());
+  const auto support =
+      computed.value().dependencies.source_support().take_value();
+  PS_CHECK(support.size() == proof.value().support.size());
+  for (const auto& source : proof.value().support) {
+    auto actual = support.find(source.first);
+    PS_CHECK(actual != support.end() && actual->second == source.second);
+  }
   work = 1;
   visits = 0;
   for (unsigned i = 0; i < 100; ++i)

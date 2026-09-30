@@ -46,9 +46,26 @@ Copies of a lease share one reservation. Its capacity remains charged until the 
 
 ## Execution & State
 
-`consume(ResourceWork)` admits work, byte, request, and stage counters atomically. Work or I/O exhaustion returns `ResourceExhausted` with `WorkLimit`; stage exhaustion returns `StageLimit`. Rejected work does not increment issued counters. Issued work is not refunded after failure, fallback, or cancellation. Callback submission also charges one cumulative root stage. For ordinary callback submissions, Queue capacity counts callbacks waiting to start and is released when a worker removes the callback; callback envelope metadata remains charged through callback retirement. A planar `CPU_STAGES` job retains its waiting admission and managed Queue lease until all submitted tiles retire and the job is unlinked.
+`consume(ResourceWork)` admits work, byte, request, and stage counters atomically. Work or I/O exhaustion returns `ResourceExhausted` with `WorkLimit`; stage exhaustion returns `StageLimit`. Rejected work does not increment issued counters. Issued work is not refunded after failure, fallback, or cancellation. Callback submission also charges one cumulative root stage. For ordinary callback submissions, Queue capacity counts callbacks waiting to start and is released when a worker removes the callback; callback envelope metadata remains charged through callback retirement. A CPU tile job retains its waiting admission and managed Queue lease until all submitted tiles retire and the job is unlinked.
 
 Staged dependency `NeedBatch` and certificate copies acquire their own metadata owner; copying the vectors does not transfer the source owner's accounting. The host reseals finalized mutable batch metadata before accepting it. A dependency session carries the root selected at session start. If continuation work runs outside an active `ResourceAllocationScope`, the session restores that root for metadata allocations; an active scope remains authoritative.
+
+Structured Result execution uses the same root for image pages, immutable sample coverage, relation witnesses, field storage, and retained source owners. A Result image slot owns one bounded planar backing per frame and layer. Metadata and coverage maps are charged as Metadata; planar pixel capacity is charged as Payload. An image read capability retains the Result and the captured descriptor that authorized its sample Region. Copying that capability also retains its backing and accounting lease. `ResultRef::capture()` retains an immutable descriptor revision, coverage, relations, and dependency evidence; shared waiters consume that publication snapshot rather than observing a later producer revision.
+
+Result relation rows and published image payload use the selected resource root. Each publication must fit configured payload and work, I/O, and stage limits. `Exact`, `Conservative`, and `Unknown` relations have distinct dirty-propagation behavior; an unresolved relation cannot certify a clean output. Image publication copies bytes into the Result's managed PlanarImage backing and charges that payload before exposing the sample coverage. Schema selection retains only declared typed image and Result metadata resources, including ICC and OCIO bindings. The compiler carries nested Result schemas and their resource identities into the plan; runtime Result bindings re-admit the required owners under the execution root.
+
+`ExecutionDependencies` returns its coverage and guarantee maps with `ResourceMap` allocators tied to the same root. `source_support()` and `potential_dirty()` return root-owned `ResourceMap<Footprint>` values; `source_observations()` returns a root-owned `ResourceVector<SourceObservation>`. Each observation owns its `ResourceString` input name and `Footprint`, and records the typed target, slot, and roles. These values can outlive the `ExecutionDependencies` object and `ExecutionContext`; their allocator owners keep the accounting root alive until the last returned map, vector, name, or footprint is released.
+
+```cpp
+#include "photospider/execution/dependencies.hpp"
+
+// dependencies is ExecutionResult::dependencies from a completed run.
+ps::ResourceMap<ps::Footprint> coverage = dependencies.coverage();
+ps::ResourceMap<ps::DependencyGuarantee> guarantees = dependencies.guarantees();
+auto observations = dependencies.source_observations();
+```
+
+The maps and observation sequence are copied snapshots. Callers can retain or move them without borrowing the dependency object, while their root-owned storage stays charged.
 
 GPU contexts create the resource root before the optional device and pass the same root explicitly into native allocations. Without managed resources the native device has no root and uses ordinary allocation. Invocation metadata has a separate explicitly supplied accounting domain. The native pipeline cache retains at most 64 entries; a dispatch batch retains up to 32 commands, each with up to 31 storage bindings; an invocation retains at most 1024 live buffer views. The address map keeps weak `CpuStorage` references and does not own native buffers.
 
@@ -67,4 +84,4 @@ Resource products, alignment, and page rounding are checked before allocation or
 - Managed capacity is a `WithinBudgetOrFail` guarantee for accounted allocations; it does not cap total RSS or opaque driver and standard-library storage.
 - Empty containers and some internal geometry/reconstruction metadata are not comprehensively charged. Reconstructed outer `ValueFragments` metadata may outlive its original publication token, while each `Value` retains its storage owner.
 - A caller that extracts a raw `Value` or vector and copies it outside the managed allocator assumes that copy's memory cost.
-- Prefix finality and cross-field association validation belong to the result publisher, not `TemporaryStorage`.
+- Prefix finality and cross-field association validation belong to the Result publisher, not `TemporaryStorage`.

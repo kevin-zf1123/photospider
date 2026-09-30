@@ -1,6 +1,7 @@
 ---
 spec_schema_version: 1
 id: KERNEL-tensor-storage-zh
+kind: shared_kernel_contract
 status: Accepted
 implementation_status: implemented_cpu
 clarification_status: selected_storage_policy_complete
@@ -8,14 +9,15 @@ clarification_status: selected_storage_policy_complete
 
 # 张量存储与区域访问
 
-本文是 package 0.19.0 所实现的存储契约译文，源于 2026-09-22 的 FMT 澄清，
-[英文版本](../Tensor-Storage-and-Region-Access.md)为权威。本文
-负责物理布局、tile 几何、区域访问和存储所有权；颜色与 alpha 解释由
+本文是 package 0.29.0、WorkflowDocument schema 4 的 CPU 存储契约译文，
+[英文版本](../Tensor-Storage-and-Region-Access.md)为权威。本文负责物理布局、tile
+几何和区域访问。结构化 `ResultRef` 是图像数据唯一的语义、发布、input/output 和
+生命周期 owner；`PlanarImage` 仅作为 image slots 内部的 private typed backing，
+不创建并列 public image result 或执行路径。颜色与 alpha 解释由
 [FMT 公共规格](../../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)
-定义。下文明确 CPU 接口支持范围与迁移边界；不保留已退休图像的内存或数值契约。
-已实现的 FMT-01 家族见[通道与颜色算子](../../kernel-architecture/zh/Channel-and-Color-Operations.zh.md)。
+定义。本契约不保留已退休图像的内存／数值接口，也不提供兼容适配。
 
-2026-09-23 的[codec 边界澄清](../../built-in_ops/02-format-color/op_specs/FMT_codec_boundary.md)
+补充的[codec 边界澄清](../../built-in_ops/02-format-color/op_specs/FMT_codec_boundary.md)
 要求同一图像的颜色／alpha 平面同尺寸、同采样网格，包括全分辨率 Y/Cb/Cr。
 外部色度子采样及布局／位打包归 input/output codec，FMT-16/17 已退休。
 Interleaved 导入须经 codec 转为 planar 后进入内核。这是图像边界澄清，
@@ -35,10 +37,11 @@ Interleaved 导入须经 codec 转为 planar 后进入内核。这是图像边�
 | 页准备 | 算子执行前显式取得、准备所需页，检查资源与取消；不在缺页异常中调度 DAG 计算。 |
 | 页保留 | 已产生数据的页 backing 保留到图像最后一个生命周期 owner 释放；超预算失败，不自动驱逐、DAG 回算或临时文件换页。 |
 
-DAG 统一配置替换此前逐平面／逐算子 tile 配置建议；整图连续虚拟地址替换独立
-分块 owner 建议，实际页 backing 按需提供。这些要求不恢复 Image/Layer 特殊语义类型。张量 shape/dtype、
-结构布局、颜色组与实际消费的 metadata 继续分离。raw／override 不能改变真实
-地址映射，也不能通过改标签把交错图像变成平面图像。
+DAG 统一配置是当前 tile 策略。每个 typed image slot 为每个 frame/layer pair
+拥有一份 planar backing；每份 backing 使用整图连续虚拟地址范围，并按需提供页面。
+Typed Result image slot 是当前图像语义载体；旧 Image/Layer Value 特殊类型仍已退役。
+张量 shape/dtype、物理布局、颜色组与实际消费的 metadata 继续分离。raw／override
+不能改变真实地址映射，也不能通过改标签把交错图像变成平面图像。
 
 ## 逻辑坐标与布局
 
@@ -53,8 +56,18 @@ RGBA 中 pixel stride 为 4*d 的 R view 不满足标准图像存储要求，发
 需要显式物理转换。平面行的普通 ROI view 可以保留 owner 和行 pitch，无需复制整行。
 
 同一张量保持统一 dtype 和 shape 关系。颜色组与 alpha 可以共享载体并保留独立
-语义；本契约不定义预乘 Lab，也不对 alpha 执行颜色 transfer。算子声明所消费的
-组／分量，共享 backing 不自动增加完整颜色或 alpha 的校验／读取义务。
+语义；本契约不定义预乘 Lab，也不对 alpha 执行颜色 transfer。Semantic Image 和
+ColorArray facets 保留其既有完整 channel tuple 闭包；若 alpha 是一个 channel，
+闭包也包含 alpha。只有 TDM 的 facets 和 `PlanarImageLayout::groups` 描述 metadata
+或物理组织，不会增加 peer-channel 或 alpha sample demand。Operation 声明的 sample
+needs 仍是 dependency 的权威依据。
+
+Structured image slot 的每个 backing descriptor 保留自身声明的轴顺序。`{H,W}` 和
+`{H,W,C}` 是常见示例，不是固定轴顺序。CHW backing 使用 descriptor shape `{C,H,W}`，
+并将 channel、height、width 分别映射到 descriptor axes 0、1、2。Result logical coordinates
+在样本请求中为该 backing 前置 frame 和 layer，因此表示为 `{N,L,C,H,W}`。`N`、`L` 为正数，
+`N*L` 最多 4096。Slot schema 保留 frame/layer identity；plane 和 tile 公式分别用于每个
+backing。Frame 和 layer 不压入 color channels。
 
 ## 连续平面与分块平面
 
@@ -106,8 +119,8 @@ sample_offset(y,x) = tile_offset + (y mod Th)*Tw*d + (x mod Tw)*d
 偏移、对齐取整和 shape 乘积必须在按规模分配前检查溢出。
 
 **tile 高度和宽度必须分别为正的 2 次幂，不支持非 2 次幂 tile。**
-`Compiler::plan` 和 `PlanarImage::create` 以 InvalidArgument 拒绝不符合的几何，
-continuous 存储附带的 tile 几何同样受此约束。图像和 ROI 的有效尺寸可为任意正值；
+`Compiler::plan` 以 InvalidArgument 拒绝不符合的 DAG tile 几何；`ResultBuilder` 创建内部
+backing 时也会校验 tile 几何，continuous 存储同样遵循此约束。图像和 ROI 的有效尺寸可为任意正值；
 不足整 tile 的边缘保持实际有效范围。校验后的几何允许用移位和掩码计算地址。
 
 tile 大小是 DAG 策略，不是算子参数。128×128 默认值保留且可配置，不
@@ -118,15 +131,18 @@ tile 大小是 DAG 策略，不是算子参数。128×128 默认值保留且可�
 ## backing、view 与精确访问
 
 连续指具有共享生命周期的整图预留虚拟字节范围，包含对齐间隙，不要求物理 RAM
-页相邻，也不要求一次提供整图 backing。每个坐标在范围内有稳定偏移。平面／tile
-view 保留地址空间 owner 和访问窗口所需 backing；owner 存活期间保留完整虚拟
-范围及已产生数据的全部页。关闭一个小窗口不会驱逐仍存活图像的页；最后一个
-生命周期 owner 释放页和地址范围。
+页相邻，也不要求一次提供整图 backing。每个坐标在范围内有稳定偏移。内部 plane/tile
+访问保留有界窗口所需 backing。Owning Result 保留全部 frame/layer backing 及含有已发布
+数据的页面。关闭内部访问窗口不会在 Result 存活期间驱逐页面。最后一个 Result owner
+释放图像页、虚拟地址范围和保留的输入 associations。
 
-请求指定精确逻辑覆盖与分量，内核映射到对应 tile 局部，返回受支持的 view／分片
-或显式物化紧密读取窗口，跨块不要求收集整图。物理传输／页粒度可能超过逻辑请求，
-分别报告和计费。部分图像输出写入预留整图范围内的相应偏移。独立紧密读取窗口
-可作为显式临时存储，但不成为该图像的权威主存储。
+Image access request 使用 Result schema 和精确逻辑 sample set。Coordinator 将需求
+映射到 page/tile portions；typed `ResultImageInput` 只能在 captured descriptor、
+selected slot、已发布 coverage 和声明 Need 范围内读取。C++ 或 C callback 通过
+Result service 读取，不能构造或保留独立 `PlanarImage` owner 或获取独立窗口。
+跨 tile 不要求收集整图。物理 page/transport 粒度可能超过逻辑请求，需分别计费。
+`ResultBuilder::publish_image` 写入精确 output regions，并在发布前认证其 support。
+Host 内可进行 packed staging，但它不是第二种权威图像表示。
 
 区分虚拟预留、已提供页 backing 和已产生有效样本。新提供的零页不意味着其中
 所有像素有效。连续平面中一页可跨平面；页对齐分块模式中，一页不包含下一块，
@@ -134,20 +150,21 @@ view 保留地址空间 owner 和访问窗口所需 backing；owner 存活期间
 样本。缺失样本不隐式视为零。已发布区域保持不可变，后续可以产生同一图像
 中其他不相交区域。
 
-执行器在算子访问前显式准备源／目标页及上游数据，检查预算与取消。算子获得
-有界访问窗口，窗口存活期间保留所需页，不能撤销仍使用中的窗口。不能把内核
-调度和资源失败隐藏在同步缺页处理器中；这不承诺操作系统不会发生普通按需缺页。
+Structured Result coordinator 在 callback 读取前显式准备源 backing 和上游数据，
+检查预算与取消。Private host windows 在使用期间保留页面；callback capability
+限定在 Result Need 范围内。不能把内核调度和资源失败隐藏在同步缺页处理器中；
+这不承诺操作系统不会发生普通按需缺页。
 
-不能把整段预留地址暴露为可无条件读取的 ByteView。访问同时需要已提供 backing
-和获准的有效样本覆盖；dense 导出须显式取得完整所需区域，raw 数值消费者也不
-绕过这些条件。
+Public Result API 不暴露可无条件读取的整段预留地址 ByteView，也不提供独立
+`PlanarImage` factory。图像读取要求有效 Result descriptor 和已发布 sample coverage。
+Dense 导出须显式请求完整区域，raw 数值消费者也不能绕过这些条件。
 
 资源统计区分虚拟预留字节、已提供页字节及 metadata。每个实际提供的页按完整
 容量计费，包括共享该页的行／地址间隙，同时计算临时窗口和新旧 backing。
 小 view 可保留多于逻辑 payload 的 backing，二者分别报告。页提供／commit
 不等于跨平台物理 RSS 保证。地址预留上限和稀疏 bookkeeping 必须准入；不能为
-巨大未使用范围的每个潜在页预分配一条 metadata。取消、上游与分配／供页失败
-不发布受影响观察的成功结果，未发布资源正常清理。
+巨大未使用范围的每个潜在页预分配一条 metadata。取消、上游与分配／供页失败会终结
+受影响的 Result publication，未发布资源正常清理。
 
 ## 已选生命周期与失败策略
 
@@ -156,9 +173,8 @@ view 保留地址空间 owner 和访问窗口所需 backing；owner 存活期间
 锁定常驻；资源计数描述已提供 backing，操作系统驻留另计。活动窗口不可撤销。
 失败且未发布的分配可正常释放，不能丢弃既有观察或共享页面中的有效数据。
 
-CPU 存储 owner 和窗口 API 实现本策略。FMT-01 仍为独立的 Proposed 算子族，
-采用 auto/view/materialize；其物化结果须在完整结果虚拟范围内提供所请求样本。
-紧密 ROI 读取属于显式窗口操作，不是第二套权威图像表示。
+CPU Result owner 和内部 planar backing 实现本策略。Packed ROI 读取是对 Result
+image slot 的有界访问，不会创建另一语义图像对象或发布路径。
 
 ## 已验算的行填充与页对齐示例
 
@@ -178,94 +194,122 @@ W=200、H=130、C=4、Float32、T=128，页／预留粒度 P=16384。
 时，请求该样本需要页索引 9 的一个 16384 字节页，逻辑读取仍只有 4 字节，不会
 令同页其他像素有效。有效样本、虚拟范围与实际页 backing 必须分别计量。
 
-本次文档会话通过独立整数地址枚举检查了 104000 个样本起点的唯一性和边界，
-并比较顺序 tile 前缀累加与上述闭式偏移公式，核验总预留量和单样本页面计算。
-另检查完整 64×64 UInt8 tile：4096 字节 payload 后，下一块仍从 16384 字节页
-边界开始。未分配虚拟图像、未运行算子，也未测量 OS 驻留。
+## Result 拥有的图像存储与 public interfaces
 
-## 已实现的 CPU 接口与迁移边界
+Public contract 使用彼此独立的 package、workflow、traits 和 plugin versions：
+package 0.29.0、WorkflowDocument schema 4、semantic operation traits 21、numeric C
+operation ABI 11 和 Result operation ABI 1。这些版本不能互换。旧 planar C table、
+planar operation callbacks 和独立 planar executor 已删除；不提供旧版本适配。
 
-[PlanarImage](../../../include/photospider/data/planar_image.hpp) 是通用
-`ValueDescriptor`、facets、resources 和结构轴／分组的物理存储 owner，不增加
-RGB、alpha 范围、预乘或颜色 transfer 运算。rank-2 声明高／宽轴且没有通道轴；
-rank-3 显式声明全部三个轴。当前物理 dtype 为 UInt8、Int64、Float32、Float64。
-分量组采用互不重叠的通道区间，最多 64 组；role 非空且最多 128 字节。
+```cpp
+struct ResultImageSpec final {
+  ResourceString key;
+  std::uint64_t frames = 1, layers = 1;
+  ValueDescriptor descriptor;
+  PlanarImageLayout layout;
+  std::vector<ValueFacet> facets;
+};
 
-`PlanarImage::create` 预留整图，但不使样本有效。`import_value` 显式将完整的交错／
-strided 外部 Value 复制到声明的 planar 布局，不另建整图 packed 缓冲区。
-`publish` 以事务方式复制精确 packed 区域；`acquire` 返回保留 owner 的读取窗口，
-`row_run` 在获准 ROI 或 tile 边界停止。
-`rectangle_run` 返回带显式字节行步长的多行区域，两轴均受 ROI 和物理 tile 边界约束。
-每行只授权其样本范围，行间 padding 和 tile 间隙不可访问。读取指针有效至窗口释放，
-写入指针有效至发布或窗口销毁；事务写窗口提供相同的有界矩形访问。
-调用方负责写入同步，并在长时间复制期间检查取消。`read` 是显式 packed 区域导出。
-没有接口将完整预留地址暴露为可无条件读取的 ByteView。缺失覆盖返回 NotFound；
-重复发布既有样本失败，不修改已发布区域。
+class ResultRef final {
+ public:
+  const SchemaTemplate& schema() const;
+  Result<ResultDescriptor> descriptor(bool require_complete = true) const;
+  Status read_image(const ResultDescriptor&, std::uint32_t slot,
+                    const std::vector<std::uint64_t>& coordinate,
+                    void* destination, std::size_t bytes) const;
+};
 
-已准备的 `PlanarImageWriteWindow` 只提供获准行段。宿主在调用算子前准备目标页，
-成功完成后提交覆盖。放弃窗口、回调失败或已观察到的取消，会回滚未发布页和计费，
-保留既有已发布区域。普通读取窗口不阻止不相交发布；获取锁时观察取消。
-执行还会固定外部输入 owner，在 Run 退役前以 Stale 拒绝发布，使准入期间输入容量和样本
-覆盖保持稳定。
-
-统计区分 `reserved_bytes()`、`backed_bytes()`、`metadata_bytes()` 和
-`valid_samples()`。metadata 保守计费，包含持有的 groups／facets、稀疏覆盖／页记录
-及事务峰值容量。`resident_bytes()` 是 backing 加已计费 metadata 的原子快照，
-**不是**实测物理 RSS。`PlanarPageBudget` 聚合各 owner 的 backing 与 metadata，
-执行时租约接入通用张量使用的同一个 `MemoryBudget`。重复 owner 以及回绑到原计费域
-的结果不能重复计费。逐图虚拟地址、页面、metadata 记录和访问工作量分别检查上限。
-
-### 公开编译与执行链路
-
-WorkflowDocument schema 3 使用 `WorkflowInputDeclaration.planar_layout` 声明图像，
-其仿射 `layout` 必须为空。声明包含存储模式、空间／通道轴、行 pitch 和分量组。
-tile 几何统一来自 `PlanningOptions`，整个 DAG 默认 128×128。通用数值声明继续使用
-其仿射布局；raw metadata override 不能交换这两种存储契约。
-
-C++ 算子显式注册 `planar_storage_capable`、`planar_callback` 和
-`OperationOutputTraits.planar_layout`。编译器检查边上的结构布局连续性。
-回调接收精确读取窗口与宿主准备的写窗口，不接收可任意写入的输出 owner。
-执行器验证绑定与声明／DAG tile 几何一致，使用共享 CPU 队列与准入服务，并在回调
-执行前及结果发布前检查取消和图版本。具名图像结果位于 `ExecutionResult.images`。
-通用 `values` map 不隐式导出 dense 图像；调用方显式 acquire 或 read 图像区域。
-
-当前 planar 算子路径支持至少一个 planar 输入、通用 `Value` 端口 schema、CPU 单输出回调
-及 Whole／Elementwise 区域规则。数值检查由消费算子负责；该路径不接受旧 `Typed`
-或特殊 image／mask／scalar 端口 schema。
-不支持的回调／trait 组合在注册时拒绝，包括 GPU、staged／joint 执行、prepared
-metadata specialization、workspace 声明及旧 view-output traits。尚无结构图像输出
-支持的 freeze／demand／stream／atom 入口明确拒绝请求。旧 image／Layer 结构化
-结果 schema 也不属于本存储契约，不能绕过 Value 门槛。不回退到旧图像 Value、
-独立分块 snapshot 或原有数值规则。这些是后续算子迁移的明确能力边界。
-非图像通用张量能力继续提供。
-
-### 可运行验收
-
-[公开 workflow fixture](../../../tests/integration/test_planar_image_workflow.cpp)
-注册 planar copy 回调，构造两节点 WorkflowDocument，并通过 Compiler 和
-ExecutionContext 执行。ROI 跨越四个存储 tile，oracle 检查原始样本位、精确有效
-覆盖和缺失样本失败。其他案例覆盖连续平面、不同轴顺序、边缘 padding、小块页对齐、
-owner／窗口生命周期、资源耗尽、回滚、取消和同 context 结果回绑。预期地址使用实际
-主机页几何；上面的 16384 字节页示例不是平台默认值。安装消费方用安装后的包构建
-同一公开 fixture，不依赖内核私有头文件。
-
-构建前遵循仓库的[依赖前提](../../development/Testing-and-Validation.md#build-prerequisite)。
-
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
-cmake --build build --target test_planar_image_workflow -j 8
-ctest --test-dir build -R '^test_planar_image_workflow$' --output-on-failure
-ctest --test-dir build -R '^test_installed_consumer$' --output-on-failure
+class ResultBuilder final {
+ public:
+  Status publish_image(std::uint32_t slot, const Region& region,
+                       ByteView packed, ResultRelation relation,
+                       ResultFinality finality);
+  Result<ResultRef> seal();
+};
 ```
 
-planar fixture 检查 DAG 结果和存储边界后以状态零退出。包消费 gate 还保留通用张量、
-C SDK 和共享库消费检查。已退休的旧图像 golden tests 不构成新接口的支持证据。
+片段省略了 schema fields、budget/cancellation arguments 和其他 Result operations。
+`SchemaTemplate` 可同时保存 image slots 与遵循同一 Result contract 的 primitive
+fields。`ResultFieldSpec` 仍表示 packed primitive records；image samples 使用由 planar
+pages backing 的 typed image slots。
+
+`ResultRef` 是图像 schema、已发布 sample coverage、dependency relation 和生命周期的
+public owner。`ResultRef::capture()` 在一个 revision snapshot 已认证的 descriptor、field/image
+relations、descriptor basis 和 dependency bundle。Result 的有序 source association 是独立
+live state；消费 inputs 时可单调扩展。Host actor 发布该 captured view，避免
+observer 将早期 evidence 与较晚的 prefix 配对。Result resources 保留 schema 声明的 owners，
+包括 typed image facets 引用的 ICC/OCIO resources；compiler 选择 nested resources，runtime
+bindings 还会在 execution resource root 下重新准入。Public `PlanarImage` class 保留结构化的 `validate_layout` 检查和只读声明；
+但创建、导入、view 组装、读写 acquisition、packed publication 和图像读取都是 private
+实现方法，只供 `ResultBuilder` 与 `ResultRef` 访问。Valid backing 不会作为独立应用层
+owner 返回。一个 Result 为每个 frame/layer pair 持有一份内部 planar backing。
+`ResultBuilder` 在 Result budget 下创建 backing；最后一个 owning Result reference
+释放其页面和虚拟地址预留。
+
+内存计数分别表示该内部 backing 的虚拟预留字节、页 backing 字节、计费 metadata 和有效
+samples。Private window/view 可能保留包含其逻辑读取集合之外 samples 的页面。Execution
+root 按相应资源维度计量页面容量、metadata、staging、relation/maps、continuation state、
+排队工作和保留的 owners。`resident_bytes()` 是计费快照，不是实测 process RSS。
+Allocation、页面准备、取消或 callback 错误都不能为受影响 observation 发布成功。已发布
+regions 保持不可变；重叠发布会被拒绝，最后一个 Result owner 释放 backing。
+
+## 编译、执行与 CPU services
+
+WorkflowDocument schema 4 通过 `WorkflowInputDeclaration.result_schema` 声明结构化输入；
+`ExecutionBinding.result` 提供 owning `ResultRef`。具名 image output 是 Result output，
+出现在 `ExecutionResult.results` 或 `DemandResult.results`。Numeric Values 继续使用普通非零 extents 与 affine tensor layout。Value storage 拒绝 structural image facet。
+
+`PlanningOptions` 捕获具名 output regions 和正数的 2 次幂 tile extents。执行前，编译器解析
+选定 output 和 image-slot schema。`ResultProgramQuery` 捕获 output index、image slot 和请求
+footprint；tile height/width 决定物理 backing geometry。Image footprints 使用展平的
+`{frame, layer, descriptor axes...}` samples，并按 Semantic Image 或 ColorArray tuple
+contract 闭合到全部 channels。只有 TDM 的 facets 和 layout groups 不增加 sample support
+或 alpha demand。
+
+Operation registry 为结构化 outputs 选择 `start_result`。`ResultProgramNeed` 可同时请求
+Result input 的 typed image samples、Value fragments、structured Result fields 和有界 host
+I/O。Coordinator 会依据 source Result descriptor 和已发布 coverage 校验每个 Need。
+Callback 经 `ResultImageInput` 和 `ResultProgramPhase::read_image` 读取；CPU parallel/tile
+services 根据注册 operation contract 提供宿主计算能力。Callback 通过 `ResultBuilder`
+发布 image regions 和精确 dependency evidence；不会收到 PlanarImage owner 或可写
+PlanarImage window。C operation modules 使用 ABI 1 的
+`result_operation_plugin_api.h` 提供相应 typed Result ports 和 services。Numeric C base
+table 仍为 ABI 11。
+
+Result execution 与 numeric Values 共用 plan 和 execution context。普通 execute/frozen 和
+exact-demand paths 返回具名 Results；`execute_stream` 通过 Result observer 观察选中 Result
+publication。Dependency relations 保留 Data、Control、Validation 和 Descriptor roles 的
+selected sample support。已消费 Control sample 变化可使旧 relation 失效，并使下次 request
+发现新的 Data samples。真正未消费的 control 或无关 tile 不产生 support。Typed Result runtime
+descriptor observations 可通过 role bit 8 参与 dirty transpose。Numeric Value descriptor/facet
+变化属于静态契约，需要重新编译；numeric Value dirty query 只接受 payload roles 1..7。改变已编译
+contract 的 Result schema 变化也需要重新编译。更完整的 Result
+和 dirty 契约见[全局结果](../../kernel-architecture/Global-Results.md)、
+[依赖数据](../../kernel-architecture/Dependency-Data.md)和
+[Region 语义](../../kernel-architecture/Region-Semantics.md)。
+
+仍使用图像 Value contracts 的 production operations 不能通过 Result image slots 运行；
+当前源码与 registry 状态见[图像 operations](../../kernel-architecture/zh/Image-Operations.zh.md)。
+
+## 当前 fixture 源码
+
+[`test_unified_result_images.cpp`](../../../tests/integration/test_unified_result_images.cpp)
+使用测试定义的 operations 覆盖 Result image input/output、混合 numeric control 与 Result
+ports、frame/layer samples、dynamic support 和 dirty replacement。
+[`test_result_plugin.cpp`](../../../tests/integration/test_result_plugin.cpp) 加载 C11 Result
+module。13 项 focused 检查全部通过，覆盖 8192 行分页、prefix publication、取消、共享执行、
+captured facts、owner retirement、tuple closure、跨 frame support、dirty transpose、alias root-cache
+复用、numeric multi-output 行为和有界 proof work。C11 Result fixture 与 native Metal Result fixture
+也通过；后者执行一次 dispatch 和一次 submission，并回读到浮点值 4。Native GPU 检查还通过
+affine 与 broadcast packed transfers，以及 500-unit 限额下的 root-work 拒绝。五个 installed
+consumers 均通过：unified workflow、C++、Result contracts、C11 和 native GPU。C fixture 验证了消费
+`ResultObjectNeed` 后绑定动态 Field domain，包括 Descriptor/Field 在零行和非零行之间替换。
+`source_support()` 预算不足时返回带类型的 `ResourceExhausted`。
 
 ## 平台参考边界
 
 [Microsoft VirtualAlloc](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc)
 区分 reserve 与 commit、主机页／分配粒度，以及 commitment 和物理分配。这支持
-本文术语。CPU 后端在 POSIX 使用匿名虚拟地址预留及显式页保护／供页，在 Windows
-使用 reserve／commit。本机 macOS 的 getconf PAGESIZE 返回 P=16384，后端读取实际
-主机属性，不固定假设 4096。macOS 原生验收不代表 Windows／Linux 运行时已验收；
-planar 回调路径尚不提供 GPU 图像映射。
+本文术语。CPU 存储实现按平台使用相应的虚拟地址预留和页供给机制；本文不声称所有
+目标操作系统都通过了运行时验证。这些 CPU 地址公式不定义 native GPU 图像映射；
+加速路径必须保留 Result slot 的所有权、sample 授权和发布契约。

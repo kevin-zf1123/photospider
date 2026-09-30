@@ -83,9 +83,9 @@ Result<Value> OperationRegistry::invoke_dependency_current(
     }
     if (std::any_of(metadata.begin(), metadata.end(),
                     input_internal::structural_image_metadata))
-      return failure(Status::failure(
-          ErrorCode::TypeMismatch,
-          "legacy image dependency input requires planar storage"));
+      return failure(
+          Status::failure(ErrorCode::TypeMismatch,
+                          "image dependency input requires Result schema"));
     auto resources = invocation.resources;
     for (const auto& input : invocation.inputs) {
       auto joined = resources.unite(input.resources());
@@ -105,9 +105,9 @@ Result<Value> OperationRegistry::invoke_dependency_current(
     if (!inferred.ok())
       return failure(inferred.status());
     if (input_internal::structural_image_metadata(inferred.value()))
-      return failure(Status::failure(
-          ErrorCode::TypeMismatch,
-          "legacy image dependency output requires planar storage"));
+      return failure(
+          Status::failure(ErrorCode::TypeMismatch,
+                          "image dependency output requires Result schema"));
     auto admitted_resources = plugin_internal::admit_operation_resources(
         resources, metadata, inferred.value());
     if (!admitted_resources.ok())

@@ -15,6 +15,13 @@ enum class DependencyGuarantee : std::uint32_t {
   Conservative = 2,
   Unknown = 3
 };
+/** @brief Disjoint input observation address spaces. */
+enum class ResultSupportTarget : std::uint32_t {
+  Value = 0,
+  Field = 1,
+  Image = 2,
+  Descriptor = 3
+};
 /** @brief Input support in flattened logical sample coordinates.
  * Roles are a nonempty mask: Data=1, Control=2, Validation=4, Descriptor=8.
  * The input index names the producing operation's immutable input bundle.
@@ -28,6 +35,8 @@ enum class DependencyGuarantee : std::uint32_t {
 struct ResultSupport final {
   std::uint32_t input = 0, roles = 1;
   std::uint64_t first = 0, count = 0;
+  ResultSupportTarget target = ResultSupportTarget::Value;
+  std::uint32_t slot = 0;
 };
 /** @brief Fixed row encoding for a paged irregular relation. */
 struct ResultRelationRow final {
@@ -57,15 +66,23 @@ class PHOTOSPIDER_API ResultRelation final {
   static Result<ResultRelation> cartesian(
       ResourceBudget budget, std::uint64_t outputs, ResultSupport support,
       DependencyGuarantee guarantee = DependencyGuarantee::Exact);
-  static Result<ResultRelation> identity(ResourceBudget budget,
-                                         std::uint64_t count,
-                                         std::uint32_t input = 0,
-                                         std::uint32_t roles = 1);
+  static Result<ResultRelation> identity(
+      ResourceBudget budget, std::uint64_t count, std::uint32_t input = 0,
+      std::uint32_t roles = 1,
+      ResultSupportTarget target = ResultSupportTarget::Value,
+      std::uint32_t slot = 0);
   /** @brief Validates and copies rows through a bounded reader into disk.
    * The reader is invoked in increasing index order; no complete row vector is
    * required. Row order is physical, and does not change support semantics.
    */
   static Result<ResultRelation> rows(
+      ResourceBudget budget, std::uint64_t outputs, std::uint64_t count,
+      const std::function<Result<ResultRelationRow>(std::uint64_t)>& reader,
+      DependencyGuarantee guarantee = DependencyGuarantee::Exact);
+  /** @brief Root-accounted sparse rows for callback construction and queries.
+   * At most 65536 rows; sorted by output for bounded sparse lookup. No I/O.
+   */
+  static Result<ResultRelation> sample_rows(
       ResourceBudget budget, std::uint64_t outputs, std::uint64_t count,
       const std::function<Result<ResultRelationRow>(std::uint64_t)>& reader,
       DependencyGuarantee guarantee = DependencyGuarantee::Exact);
@@ -92,6 +109,13 @@ class PHOTOSPIDER_API ResultRelation final {
    */
   Status visit(std::uint64_t output, std::uint64_t maximum_work,
                const std::function<Status(ResultSupport)>& visitor) const;
+  /** @brief Visits every declared span, including known parts of Unknown.
+   * Intended for representation/projection validation. Unknown nodes contribute
+   * no declared spans; success proves no completeness and cannot prove clean.
+   * Missing sparse rows still fail with NotFound. */
+  Status visit_declared(
+      std::uint64_t output, std::uint64_t maximum_work,
+      const std::function<Status(ResultSupport)>& visitor) const;
   /** @brief Potential dirty membership; nullopt means Unresolved.
    * Empty intersection proves clean only for a complete Exact/Conservative
    * relation. Resource/I/O failure is returned separately from Unresolved.

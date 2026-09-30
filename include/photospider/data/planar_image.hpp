@@ -40,7 +40,8 @@ struct PHOTOSPIDER_API PlanarImageLayout final {
  */
 class PHOTOSPIDER_API PlanarPageBudget final {
  public:
-  using Reserve = std::function<Result<std::shared_ptr<void>>(std::uint64_t)>;
+  using Reserve =
+      std::function<Result<std::shared_ptr<void>>(std::uint64_t, bool)>;
   explicit PlanarPageBudget(std::uint64_t maximum_bytes, Reserve reserve = {},
                             std::shared_ptr<void> accounting_domain = {});
   std::uint64_t maximum_bytes() const noexcept { return maximum_bytes_; }
@@ -53,7 +54,8 @@ class PHOTOSPIDER_API PlanarPageBudget final {
  private:
   friend class PlanarImage;
   friend class PlanarImageWriteWindow;
-  Result<std::shared_ptr<void>> charge(std::uint64_t bytes);
+  Result<std::shared_ptr<void>> charge(std::uint64_t bytes,
+                                       bool metadata = false);
   void release(std::uint64_t bytes) noexcept;
   std::uint64_t maximum_bytes_;
   mutable std::mutex mutex_;
@@ -197,6 +199,7 @@ class PHOTOSPIDER_API PlanarImageWriteWindow final {
 
  private:
   friend class PlanarImage;
+  friend class ResultBuilder;
   friend class OperationRegistry;
   friend class ExecutionContext;
   explicit PlanarImageWriteWindow(std::unique_ptr<Impl> impl);
@@ -222,16 +225,19 @@ class PHOTOSPIDER_API PlanarImage final {
   static Status validate_layout(const ValueDescriptor& descriptor,
                                 const PlanarImageLayout& layout);
 
+ private:
+  friend class ResultBuilder;
+  friend class ResultRef;
   /** @brief Reserve the full address span without providing page backing.
    * @return Empty image or InvalidArgument/ResourceExhausted.
    * @throws std::bad_alloc On host metadata allocation failure.
    * @note Copies share one owner; backing and metadata charge persist until
    * the last owner retires. Safe for concurrent read and disjoint publication.
    */
-  static Result<PlanarImage> create(ValueDescriptor descriptor,
-                                    PlanarImageConfig config,
-                                    std::vector<ValueFacet> facets = {},
-                                    ResourceBindings resources = {});
+  static Result<PlanarImage> create(const ValueDescriptor& descriptor,
+                                    const PlanarImageConfig& config,
+                                    const std::vector<ValueFacet>& facets = {},
+                                    const ResourceBindings& resources = {});
 
   /** @brief Explicitly convert a complete interleaved or strided Value.
    * @return New planar owner or typed validation, budget, or cancel failure.
@@ -286,6 +292,7 @@ class PHOTOSPIDER_API PlanarImage final {
       const CancellationToken& cancellation = {},
       const ResourceBindings& resources = {});
 
+ public:
   bool valid() const noexcept { return impl_ != nullptr; }
   const ValueDescriptor& descriptor() const;
   const std::vector<ValueFacet>& facets() const;
@@ -307,6 +314,7 @@ class PHOTOSPIDER_API PlanarImage final {
   Result<std::uint64_t> byte_offset(
       const std::vector<std::uint64_t>& coordinate) const;
 
+ private:
   /** @brief Acquire exact valid coverage and retain backing for view reads.
    * @return Move-only window, or NotFound for any unpublished sample.
    * @note The requested region is never silently widened to whole channels;

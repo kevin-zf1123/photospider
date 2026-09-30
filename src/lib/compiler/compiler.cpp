@@ -181,23 +181,9 @@ void append_declarations(
     digest->integer(declaration.layout.byte_strides.size());
     for (auto stride : declaration.layout.byte_strides)
       digest->integer(static_cast<std::uint64_t>(stride));
-    digest->integer(declaration.planar_layout.has_value());
-    if (declaration.planar_layout) {
-      const auto& layout = *declaration.planar_layout;
-      digest->integer(static_cast<std::uint32_t>(layout.order));
-      digest->integer(layout.height_axis);
-      digest->integer(layout.width_axis);
-      digest->integer(layout.channel_axis.has_value());
-      if (layout.channel_axis)
-        digest->integer(*layout.channel_axis);
-      digest->integer(layout.row_pitch_bytes);
-      digest->integer(layout.groups.size());
-      for (const auto& group : layout.groups) {
-        digest->text(group.role);
-        digest->integer(group.first_channel);
-        digest->integer(group.channel_count);
-      }
-    }
+    digest->integer(static_cast<bool>(declaration.result_schema));
+    if (declaration.result_schema)
+      digest->text(declaration.result_schema->canonical());
     digest->integer(declaration.facets.size());
     for (const auto& facet : declaration.facets) {
       digest->text(facet.key);
@@ -222,7 +208,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v18");
+  digest.text("semantic-graph-ir-v19");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -302,7 +288,7 @@ std::string physical_digest(
     std::uint64_t tile_height, std::uint64_t tile_width,
     ExecutionMode execution_mode, const std::vector<PhysicalStep>& physical) {
   DigestBuilder digest;
-  digest.text("physical-plan-v18");
+  digest.text("physical-plan-v19");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
   digest.integer(physical.size());
   for (const auto& access : physical) {
@@ -330,6 +316,15 @@ std::string physical_digest(
     digest.text(requested.first);
     append_region(&digest, requested.second);
   }
+  const auto image_storage = [&](const SchemaTemplate& schema) {
+    for (const auto& image : schema.images) {
+      digest.integer(static_cast<std::uint32_t>(image.layout.order));
+      digest.integer(image.layout.row_pitch_bytes);
+    }
+  };
+  for (const auto& declaration : declarations)
+    if (declaration.result_schema)
+      image_storage(*declaration.result_schema);
   append_declarations(&digest, declarations);
   digest.text(optimized);
   digest.integer(steps.size());
@@ -356,6 +351,8 @@ std::string physical_digest(
     digest.integer(static_cast<bool>(step.output_result_schema));
     if (step.output_result_schema)
       digest.text(step.output_result_schema->canonical());
+    if (step.output_result_schema)
+      image_storage(*step.output_result_schema);
     append_region(&digest, step.output_demand);
     digest.integer(step.input_demands.size());
     for (const Region& demand : step.input_demands) {
@@ -536,12 +533,6 @@ bool ExecutionPlan::structured_network() const noexcept {
 }
 
 bool ExecutionPlan::dependency_network() const noexcept {
-  for (const auto& input : input_declarations_)
-    if (input.planar_layout)
-      return false;
-  for (const auto& step : steps_)
-    if (step.traits.outputs[0].planar_layout)
-      return false;
   if (dependency_protocol_)
     return true;
   for (const auto& step : steps_)
@@ -736,7 +727,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
         Status::failure(ErrorCode::Stale, "graph snapshot is stale"));
   }
   const WorkflowDocument& document = snapshot.document();
-  if (document.schema_version != 3U || document.nodes.empty() ||
+  if (document.schema_version != 4U || document.nodes.empty() ||
       document.nodes.size() > 65536U || document.outputs.empty() ||
       document.outputs.size() > 4096U || document.inputs.size() > 4096U) {
     return Result<SemanticGraphIR>(
@@ -779,7 +770,16 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
     const auto status = input_internal::validate_declaration(&declaration);
     if (!status.ok())
       return Result<SemanticGraphIR>(status);
-    const auto admitted = admit_resources(declaration.facets);
+    auto admitted = admit_resources(declaration.facets);
+    if (admitted.ok() && declaration.result_schema) {
+      auto subset = declaration.result_schema->select_resources(resources);
+      if (!subset.ok())
+        return Result<SemanticGraphIR>(subset.status());
+      auto joined = retained_resources.unite(subset.value());
+      if (!joined.ok())
+        return Result<SemanticGraphIR>(joined.status());
+      retained_resources = joined.take_value();
+    }
     if (!admitted.ok())
       return Result<SemanticGraphIR>(admitted);
   }
@@ -882,7 +882,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
   std::map<std::uint64_t, std::pair<float, float>> scalar_intervals;
   semantic.nodes_.reserve(document.nodes.size());
   std::map<ValueRef, ValueDescriptor> output_by_value;
-  std::map<ValueRef, std::optional<PlanarImageLayout>> output_layouts;
   std::map<ValueRef, std::shared_ptr<const SchemaTemplate>> result_schemas;
   std::map<ValueRef, std::uint32_t> tuple_axes;
   while (!ready.empty()) {
@@ -915,7 +914,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
       std::vector<ValueFacet> facets;
       std::shared_ptr<const SchemaTemplate> result_schema;
       std::uint32_t atomic_trailing_axes = 0;
-      std::optional<PlanarImageLayout> planar_layout;
       if (const auto* producer = std::get_if<WorkflowNodeOutput>(&input)) {
         const auto ref =
             result_ports.at({producer->source_node, producer->source_port});
@@ -924,13 +922,12 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
         facets = output_facets.at(ref);
         result_schema = result_schemas.at(ref);
         atomic_trailing_axes = tuple_axes.at(ref);
-        planar_layout = output_layouts.at(ref);
       } else {
         const auto id = std::get<WorkflowInputReference>(input).input_id;
         const auto& declaration = declarations[declaration_by_id.at(id)];
         descriptor = declaration.descriptor;
         facets = declaration.facets;
-        planar_layout = declaration.planar_layout;
+        result_schema = declaration.result_schema;
         if (port.kind == OperationPortKind::Float32Scalar) {
           auto inserted = scalar_intervals.emplace(
               id, std::make_pair(port.minimum, port.maximum));
@@ -944,15 +941,13 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
           }
         }
       }
-      if ((!node.traits.planar_storage_capable && planar_layout) ||
-          (node.traits.planar_storage_capable && !planar_layout &&
-           !node.traits.outputs[0].dependency_version))
-        return Result<SemanticGraphIR>(Status::failure(
-            ErrorCode::TypeMismatch,
-            "operation and input disagree on planar image storage"));
+      if (input_internal::structural_image_metadata({descriptor, facets}))
+        return Result<SemanticGraphIR>(
+            Status{ErrorCode::TypeMismatch,
+                   "image operations require typed Result ports"});
       auto status = input_internal::validate_port_metadata(
           port, OperationMetadata{descriptor, facets, result_schema,
-                                  atomic_trailing_axes, planar_layout});
+                                  atomic_trailing_axes});
       if (!status.ok()) {
         if (status.detail.origin == FailureOrigin::Unspecified &&
             (status.code == ErrorCode::TypeMismatch ||
@@ -964,9 +959,9 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
         }
         return Result<SemanticGraphIR>(status);
       }
-      input_descriptors.push_back(
-          {std::move(descriptor), std::move(facets), std::move(result_schema),
-           atomic_trailing_axes, std::move(planar_layout)});
+      input_descriptors.push_back({std::move(descriptor), std::move(facets),
+                                   std::move(result_schema),
+                                   atomic_trailing_axes});
     }
     auto specialized = operations_->prepare_operation(
         source.operation, input_descriptors, source.parameters);
@@ -976,9 +971,8 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
     node.traits = node.prepared->traits();
     auto output = infer_operation_outputs(node.traits, input_descriptors,
                                           node.parameters);
-    if (!output.ok()) {
+    if (!output.ok())
       return Result<SemanticGraphIR>(output.status());
-    }
     if (node.traits.outputs[0].dependency_version) {
       const auto validated = operations_->validate_dependency_metadata(
           node.operation, input_descriptors, node.parameters);
@@ -988,13 +982,20 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
     for (std::uint32_t oi = 0; oi < node.traits.outputs.size(); ++oi) {
       const auto& contract = node.traits.outputs[oi];
       const auto& metadata = output.value()[oi];
-      if (contract.planar_layout) {
-        auto layout_status = PlanarImage::validate_layout(
-            metadata.descriptor, *contract.planar_layout);
-        if (!layout_status.ok())
-          return Result<SemanticGraphIR>(layout_status);
+      if (input_internal::structural_image_metadata(metadata))
+        return Result<SemanticGraphIR>(
+            Status{ErrorCode::TypeMismatch,
+                   "image output must be a typed Result slot"});
+      auto admitted = admit_resources(metadata.facets);
+      if (admitted.ok() && metadata.result_schema) {
+        auto subset = metadata.result_schema->select_resources(resources);
+        if (!subset.ok())
+          return Result<SemanticGraphIR>(subset.status());
+        auto joined = retained_resources.unite(subset.value());
+        if (!joined.ok())
+          return Result<SemanticGraphIR>(joined.status());
+        retained_resources = joined.take_value();
       }
-      const auto admitted = admit_resources(metadata.facets);
       if (!admitted.ok())
         return Result<SemanticGraphIR>(admitted);
       auto selected = select_operation_output(node.traits, oi).take_value();
@@ -1026,7 +1027,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
       effective_atomic.emplace(ref, atomic);
       output_facets.emplace(ref, metadata.facets);
       output_by_value.emplace(ref, metadata.descriptor);
-      output_layouts.emplace(ref, contract.planar_layout);
       result_schemas.emplace(ref, metadata.result_schema);
       tuple_axes.emplace(ref, metadata.atomic_trailing_axes);
       node.outputs.push_back({contract.key, metadata.descriptor,
@@ -1306,6 +1306,24 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       auto& step = plan.steps_[output.second];
       const auto requested = options.output_regions.find(output.first);
       if (step.output_result_schema) {
+        if (!step.output_result_schema->images.empty()) {
+          const auto shape =
+              step.output_result_schema->images[0].sample_shape();
+          auto region = requested == options.output_regions.end()
+                            ? Region::whole(shape)
+                            : requested->second;
+          auto samples = Footprint::from_regions(shape, {region});
+          if (!samples.ok())
+            return Result<ExecutionPlan>(samples.status());
+          auto closed = step.output_result_schema->images[0].close_samples(
+              samples.value());
+          if (!closed.ok() || closed.value().boxes().size() != 1)
+            return Result<ExecutionPlan>(Status{ErrorCode::InvalidArgument,
+                                                "invalid image output Region"});
+          plan.output_regions_.emplace(output.first, closed.value().boxes()[0]);
+          step.output_demand = closed.value().boxes()[0];
+          continue;
+        }
         if (requested != options.output_regions.end())
           return Result<ExecutionPlan>(Status{
               ErrorCode::InvalidArgument,
@@ -1355,7 +1373,8 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
             const auto& source =
                 plan.input_declarations_[std::get<PlanWorkflowInput>(input)
                                              .declaration_index];
-            metadata->inputs.push_back({source.descriptor, source.facets});
+            metadata->inputs.push_back(
+                {source.descriptor, source.facets, source.result_schema});
           }
         }
         step.structured_metadata = std::move(metadata);

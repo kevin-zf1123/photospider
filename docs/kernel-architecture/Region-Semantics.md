@@ -1,43 +1,47 @@
-# Region semantics
+# Logical regions and Result image samples
 
 ## Scope & Ownership
 
-A `Region` describes logical sample coverage in a complete tensor descriptor. Storage origin, byte offset, strides, padding, and physical planar pages describe how those samples are stored; they do not change the Region. The planner, executor, and storage owner each retain their own part of this contract: planning authorizes dependencies, execution passes exact demands, and storage bounds readable or writable samples.
+`Region` describes logical samples in a descriptor domain. A `Footprint` stores an exact set of such samples, including disjoint boxes and holes. Storage origin, byte offsets, strides, padding, planar pages, and tile geometry describe physical access; they do not redefine logical coordinates or valid coverage.
+
+For images, the descriptor domain is extended by Result frame and layer axes. `ResultRef` owns image meaning, descriptor, published coverage, dependency relation, and lifetime. `PlanarImage` backs a Result image slot and answers authorized sample reads. The planner determines requested samples, the operation declares input support, and the coordinator admits only the requested reads and publication.
 
 ## Data Layout & Memory
 
 ```cpp
-#include <cstdint>
-#include <vector>
-
-#include "photospider/data/region.hpp"
-
-ps::Region whole_region(const std::vector<std::uint64_t>& shape) {
-  return ps::Region::whole(shape);
-}
+struct ResultImageSpec final {
+  ResourceString key;
+  std::uint64_t frames = 1, layers = 1;
+  ValueDescriptor descriptor;
+  PlanarImageLayout layout;
+  std::vector<ValueFacet> facets;
+  std::vector<std::uint64_t> sample_shape() const;
+  Result<Footprint> close_samples(const Footprint& samples,
+                                  const FootprintLimits& limits = {}) const;
+};
 ```
 
-Each dimension is a half-open interval `[offset, offset + extent)` within its descriptor axis. The constructor validates dimensions and checked endpoints. A tensor of shape `(height, width, channel)` can request a pixel rectangle while retaining all four channel samples for each RGBA pixel. Planar storage can place channels in separate planes; complete logical channel coverage does not imply interleaved physical bytes.
+The snippet omits fields and ownership helpers. The logical image shape is `{N,L,H,W}` or `{N,L,H,W,C}`: `N` selects a frame, `L` selects a layer, `H/W` select a spatial sample, and optional `C` selects a channel. The current implementation requires positive `N` and `L` with `N*L <= 4096`, and a per-frame/layer descriptor of rank two or three. A four-channel pixel can be stored as separate planes; logical tuple completeness does not make the bytes interleaved.
 
-An input view separately exposes storage origin, offset, signed strides, valid coverage, and callback demand. A callback may address only samples inside the authorized demand and valid coverage, using the supplied storage mapping. Output publication records its descriptor and exact produced Region. Empty coverage has no sample reads.
+A request for a semantic image sample preserves the legacy image tuple closure across its complete channel axis, including alpha when alpha is a channel. A `ColorArray` request closes over the complete tuple described by its validated facet. TDM-only facets and structural layout groups do not expand the sample set to include peer channels or alpha. A typed image slot without either tuple facet follows its descriptor sample coordinates. Padding, plane gaps, and unpublished samples remain inaccessible. Storage views retain their backing owner, while Result coverage and its captured descriptor authorize what a callback may read.
 
-## Execution & State
+Ordinary Value descriptors and structured Result image descriptors have distinct contracts. A Value has nonzero extents; its request Footprint may be Empty while retaining the nonzero descriptor. A Result may have zero rows for a dynamic structured field, and an image slot may have an Empty requested footprint. Neither empty case authorizes fabricated samples or removes descriptor/count obligations.
 
-The planner derives dependencies from each operation's declared rule. Whole operations demand complete inputs. Elementwise operations map matching coordinates. Halo operations expand demand and clip it to the complete image boundary with checked arithmetic. Shrink maps ceil-divided output coordinates to clipped input boxes. Shape and dependency propagation reject unknown axes or ports, out-of-domain rectangles, and partial channel coverage where an image port requires complete channels.
+## Demand, Execution & State
 
-Planning options retain each output name's exact requested Region and positive tile dimensions. Changing either replans optimized IR. Distinct names remain part of plan identity even when they alias one node; runtime payload bytes do not enter plan identity. A tile plan derives a dependency-pruned subplan for one region without allocating the complete tile grid. Neighboring tiles may recompute overlapping halo. Whole, nondeterministic, and side-effecting boundaries materialize complete results once in topological order.
+The compiler resolves each named output's requested `Q`. For an image output, the Result continuation receives the captured output footprint and image slot. Its callback can request staged input needs: first Control samples, then Data image samples chosen from those control values. Each Need is checked against the Result schema, slot, logical sample domain, and the input's published coverage. A callback cannot synchronously fetch a hole or sample outside its current capability.
 
-The regional Value executor returns requested coverage. With no requested region, it requests complete output. Ordinary dense Value bindings provide complete snapshots; `RegionalSource` copies its metadata and callable for the Run and fills host-provided packed region storage. It must support concurrent immutable reads, observe cooperative cancellation, and report exactly the requested Region. Source and operation callbacks must not synchronously reenter execution on workers owned by the same context. This path handles Value dependencies; structural planar operations use the distinct planar executor described in [Data Model](Data-Model.md) and [Compiler and Execution](Compiler-and-Execution.md).
+`ResultRelation` records output-to-input support using flattened logical sample coordinates. It distinguishes input port, target, slot, and role. Data, Control, Validation, and Descriptor support remain distinct. Descriptor support covers count, basis, or semantic descriptor facts; static schema changes require recompilation. Frame and layer coordinates participate in the flattened image identity, so dirty edits can target a particular frame/layer sample.
 
-Value collection packs requested coverage while preserving the complete logical descriptor. Structural planar collection instead requires `PlanarImage` bindings whose descriptors, facets, layout, and tile geometry match the compiled declaration. Planar image execution rejects Value, `RegionalSource`, and snapshot bindings for planar inputs. `execute_stream` accepts the Value sink path and returns `TypeMismatch` for plans that require structural planar execution.
+After immutable bindings are replaced in a demand handle, the coordinator compares the new bindings with source samples consumed by captured evidence. It computes potential dirty output coverage from the old relation, commits the new binding generation atomically, then a new request discovers and records support under the new control values. Thus a changed, consumed Control value can invalidate an old branch and expose newly selected Data samples. An unrelated unconsumed control or tile remains clean. The evidence object itself is immutable: prior dependency queries continue to describe their original generation.
 
-`execute_stream` invokes its required sink synchronously on the execute caller thread. It passes borrowed `ValueView` objects that expire when the sink returns. Eligible deterministic, side-effect-free CPU dependency streams can prepare a bounded window of later tiles while the caller delivers the front tile; the window is limited by execution parallelism. Sink calls remain ordered, and a blocked sink stops further delivery while already admitted window work may finish. A sink failure stops later delivery and drains admitted work; already delivered tiles cannot be revoked. Collected failure returns no partial result.
+Tiles are scheduling units, not logical dependency proofs. Tile projection may group samples for I/O, but relation support remains sample-based. Whole operations keep Whole dependencies. Regional or dependency operations report their actual support; no tile grid is substituted for those relations. Tensor semantic metadata such as channel roles and ColorArray tuples participates in validation and sample closure where the contract declares it; physical `PlanarImageLayout::groups` do not silently create dependency edges.
 
-Cancellation and currentness checks guard admission, callback entry and completion, sink calls, and final assembly. At entry, Stale takes precedence over binding validation. After entry, Cancelled takes precedence over Stale and ordinary errors. All admitted callbacks retire before borrowed source/output storage is reused.
+`Exact` support can prove clean only when the captured relation is complete. `Conservative` support may mark a wider dirty set. `Unknown` remains unresolved and cannot be converted into an empty clean answer. Dirty means potentially affected, not numerically different. Relation traversal and footprint transformations are bounded and charged to the execution root; exceeding the work or metadata limit returns an error.
 
-## Algorithms & Math
+## Tile projection arithmetic
 
-For a positive tile size `T` and extent `E`, the planner computes the tile count with checked ceil division:
+For a positive tile extent `T` and logical extent `E`, the tile count is:
 
 $$
 C = \left\lceil \frac{E}{T} \right\rceil,
@@ -45,12 +49,12 @@ C = \left\lceil \frac{E}{T} \right\rceil,
 C = E / T + (E \bmod T \ne 0).
 $$
 
-The integer form avoids `E + T - 1` overflow. Bounds and shape products are checked before allocation. Empty extents produce no sample work. Numeric parameter schemas can declare finite inclusive bounds; bounded Int64 values remain within exact binary64 integer range, and bounded Float64 endpoints must be finite. A Halo operation may resolve its radius from a required bounded Int64 parameter.
+The integer form avoids evaluating `E + T - 1`, which can overflow. Tile projection groups exact requested samples for physical scheduling; it does not broaden their dependency support or coverage.
 
-## Limitations & Non-Goals
+## Limits & Error Handling
 
-- Regional execution does not make an operation region-capable when its declared rule requires whole inputs.
-- Collected outer tile traversal is sequential. Eligible deterministic CPU dependency streaming uses a bounded concurrent tile window; other stream and regional paths follow their own execution rules.
-- Caller-owned input payload is outside the computation `maximum_live_bytes` payload sublimit. When a managed resource root is enabled, the kernel admits a reference lease for external Value storage under the separate Referenced capacity dimension. Source-private external state, thread stacks, and process RSS remain outside the controlled allocation bound.
-- Streaming sinks receive irrevocable tiles before final stream success. Callers that need rollback must stage their own output.
-- `RegionalSource` is a C++ execution binding; it does not add a source codec or provider-ABI extension.
+Out-of-domain regions, invalid frame/layer products, unauthorized reads, incomplete publication, and overlapping image writes fail validation. Semantic image and ColorArray requests expand to their complete channel tuples before access; an invalid tuple description or a closure outside the slot domain fails validation. Resource exhaustion, cancellation, stale binding replacement, sticky callback failure, and protocol errors retain their execution statuses; they do not become Empty coverage. Admitted callbacks retire before the coordinator reuses borrowed storage.
+
+An empty output demand performs no image sample work, while descriptor and control obligations remain explicit. A successful image publication must cover the captured output demand and provide relation evidence. Previously published Result prefixes remain immutable; a later producer failure does not expand an older descriptor's authorization.
+
+Focused Result validation passed for N/L image samples, staged Control-to-Data support, binding replacement, dirty transpose and semantic-alias diamond rebind. The installed Result contracts and public-workflow consumers passed. The C11 fixture verified runtime Field rows, including replacement between zero and nonzero rows. Cross-frame support and independent slot dirtiness are covered by `test_result_image_contracts`.

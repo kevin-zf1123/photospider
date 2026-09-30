@@ -20,6 +20,7 @@
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
 #include "data/whole_input_view.hpp"
+#include "execution/dependency_records.hpp"
 #include "execution/result_callback_scope.hpp"
 #include "execution/shared_results.hpp"
 #include "photospider/data/representation.hpp"
@@ -141,12 +142,29 @@ class StructuredExecution final {
       const ExecutionSink* sink, const DemandQuery* requested,
       std::map<std::string, ValueFragments>* fragments) {
     const auto started = std::chrono::steady_clock::now();
+    ResourceAllocationScope coordinator_scope(resources_);
     Result<ExecutionResult> result(Status{ErrorCode::Internal, {}});
     try {
       auto admitted = plan_.resources().reference(resources_);
       if (!admitted.ok())
         return Result<ExecutionResult>(admitted.status());
       bindings_resources_ = admitted.take_value();
+      for (const auto& binding : bindings_) {
+        const ResourceBindings* supplied =
+            binding.result.valid()  ? &binding.result.resources()
+            : binding.value.valid() ? &binding.value.resources()
+            : binding.source        ? &binding.source->resources
+                                    : nullptr;
+        if (!supplied)
+          continue;
+        auto reowned = supplied->reference(resources_);
+        if (!reowned.ok())
+          return Result<ExecutionResult>(reowned.status());
+        auto joined = bindings_resources_.unite(reowned.value());
+        if (!joined.ok())
+          return Result<ExecutionResult>(joined.status());
+        bindings_resources_ = joined.take_value();
+      }
       result = run_body(sink, requested, fragments);
     } catch (const std::bad_alloc&) {
       result =
@@ -203,10 +221,7 @@ class StructuredExecution final {
     auto traversal = consume(plan_.steps().size() + 1);
     if (!traversal.ok())
       return Answer(traversal);
-    for (const auto& step : plan_.steps())
-      if (step.backend != Backend::Cpu)
-        return Answer(Status{ErrorCode::BackendUnavailable,
-                             "structured coordinator requires CPU stages"});
+
     auto capacity = ResourceCapacity::host(sizeof(*this), sizeof(*this));
     auto admitted = resources_.reserve(capacity);
     if (!admitted.ok())
@@ -240,6 +255,17 @@ class StructuredExecution final {
       snapshot_.append(digits,
                        static_cast<std::size_t>(converted.ptr - digits));
     }
+    records_ = std::make_unique<DependencyRecords>(
+        plan_, std::string(snapshot_), set_limits());
+    if (!records_->status().ok())
+      return Answer(records_->status());
+    for (std::size_t i = 0; i < bindings_.size(); ++i)
+      if (bindings_[i].result.valid()) {
+        auto status =
+            records_->bind_result(PlanWorkflowInput{i}, bindings_[i].result);
+        if (!status.ok())
+          return Answer(status);
+      }
     if (shared_) {
       ResourceVector<bool> reachable(plan_.steps().size(), false,
                                      ResourceAllocator<bool>(resources_));
@@ -290,12 +316,15 @@ class StructuredExecution final {
         if (found == plan_.outputs().end() || !item.second.valid())
           return Answer(protocol("invalid structured named query"));
         const auto& output = plan_.steps()[found->second];
-        if (output.output_result_schema ||
-            item.second.shape() != output.output_descriptor.shape)
+        const auto shape =
+            output.output_result_schema &&
+                    !output.output_result_schema->images.empty()
+                ? output.output_result_schema->images[0].sample_shape()
+                : output.output_descriptor.shape;
+        if (item.second.shape() != shape)
           return Answer(protocol("structured query domain mismatch"));
         auto allowed = Footprint::from_regions(
-            output.output_descriptor.shape,
-            {plan_.output_regions().at(item.first)}, set_limits());
+            shape, {plan_.output_regions().at(item.first)}, set_limits());
         if (!allowed.ok())
           return Answer(allowed.status());
         auto outside = item.second.subtract(allowed.value(), set_limits());
@@ -336,12 +365,33 @@ class StructuredExecution final {
         return Answer(status);
       const auto& step = plan_.steps()[named.second];
       if (step.output_result_schema) {
-        if (requested || fragments)
-          return Answer(
-              protocol("ResultRef outputs use descriptor observations"));
-        auto object = result_object(named.second, ResultObjectNeed{});
+        std::optional<Footprint> demand;
+        if (!step.output_result_schema->images.empty()) {
+          auto wanted =
+              requested
+                  ? Result<Footprint>(requested->at(named.first))
+                  : Footprint::from_regions(
+                        step.output_result_schema->images[0].sample_shape(),
+                        {plan_.output_regions().at(named.first)}, set_limits());
+          if (!wanted.ok())
+            return Answer(wanted.status());
+          auto closed = step.output_result_schema->images[0].close_samples(
+              wanted.value(), set_limits());
+          if (!closed.ok())
+            return Answer(closed.status());
+          demand = closed.take_value();
+        }
+        auto object = result_object(named.second, ResultObjectNeed{}, demand);
         if (!object.ok())
           return Answer(object.status());
+        auto object_coverage =
+            demand ? *demand : Footprint::all({1}, set_limits()).take_value();
+        auto evidence = record_object(named.second, object.value());
+        if (!evidence.ok())
+          return Answer(evidence);
+        evidence = records_->output(named.first, named.second, object_coverage);
+        if (!evidence.ok())
+          return Answer(evidence);
         result.results.emplace(named.first, object.take_value());
         continue;
       }
@@ -399,6 +449,10 @@ class StructuredExecution final {
           return Answer(collected.status());
         result.values.emplace(named.first, collected.take_value());
       }
+      auto evidence =
+          records_->output(named.first, named.second, wanted.value());
+      if (!evidence.ok())
+        return Answer(evidence);
       if (actors_[named.second] &&
           actors_[named.second]->value_relation.valid())
         result.result_relations.emplace(named.first,
@@ -407,6 +461,10 @@ class StructuredExecution final {
     auto status = consume(0);
     if (!status.ok())
       return Answer(status);
+    auto snapshot = records_->snapshot();
+    if (!snapshot.ok())
+      return Answer(snapshot.status());
+    result.dependencies = snapshot.take_value();
     return Answer(std::move(result));
   }
 
@@ -417,6 +475,10 @@ class StructuredExecution final {
           key(ResourceAllocator<char>(budget)),
           values(std::less<std::uint32_t>{},
                  ResourceAllocator<ResultValueInputs::value_type>(budget)),
+          images(std::less<std::pair<std::uint32_t, std::uint32_t>>{},
+                 ResourceAllocator<ResultImageInputs::value_type>(budget)),
+          owners(std::less<std::pair<std::uint32_t, std::uint64_t>>{},
+                 ResourceAllocator<OwnerMap::value_type>(budget)),
           results(std::less<std::uint32_t>{},
                   ResourceAllocator<ResultObjectInputs::value_type>(budget)),
           io(ResourceAllocator<ResultIoReply>(budget)),
@@ -431,6 +493,13 @@ class StructuredExecution final {
     ResourceString key;
     ResultContinuation continuation;
     ResultValueInputs values;
+    ResultImageInputs images;
+    using OwnerMap = std::map<
+        std::pair<std::uint32_t, std::uint64_t>, ResultRef,
+        std::less<std::pair<std::uint32_t, std::uint64_t>>,
+        ResourceAllocator<std::pair<
+            const std::pair<std::uint32_t, std::uint64_t>, ResultRef>>>;
+    OwnerMap owners;
     ResultObjectInputs results;
     ResourceVector<ResultIoReply> io;
     ResultRef published;
@@ -474,8 +543,25 @@ class StructuredExecution final {
     }
     ~ActiveScope() { target = previous; }
   };
-  Status dispatch(const std::function<Status()>& task) {
-    return dispatch_(task, [&] { refresh_shared(); });
+  Status dispatch(const std::function<Status()>& task,
+                  Backend backend = Backend::Cpu, bool whole = false,
+                  bool tiles = false) {
+    return dispatch_(
+        backend, whole, tiles, active_token(),
+        [&](const StructuredServices& services) {
+          const auto* before = active_services_;
+          active_services_ = &services;
+          struct Restore {
+            const StructuredServices*& target;
+            const StructuredServices* previous;
+            ~Restore() { target = previous; }
+          } restore{active_services_, before};
+          auto status = task();
+          if (services.observe)
+            services.observe(diagnostics_);
+          return status;
+        },
+        [&] { refresh_shared(); });
   }
   Status consume(std::uint64_t count) {
     const auto stopped = active_stop();
@@ -518,17 +604,30 @@ class StructuredExecution final {
     actor.io.clear();
     return failure;
   }
-  Result<std::shared_ptr<Actor>> actor(std::size_t index,
-                                       std::optional<Footprint> outputs) {
+  Result<std::shared_ptr<Actor>> actor(
+      std::size_t index, std::optional<Footprint> outputs,
+      std::optional<Footprint> image_outputs = {},
+      std::uint32_t image_slot = 0) {
     using Answer = Result<std::shared_ptr<Actor>>;
     if (index >= plan_.steps().size())
       return Answer(protocol("invalid result step"));
     const auto& step = plan_.steps()[index];
     if (step.traits.outputs[0].dependency_version != 2)
       return Answer(protocol("structured continuation required"));
+    if (image_outputs &&
+        step.traits.outputs[0].region_rule == OperationRegionRule::Whole) {
+      auto full = Footprint::all(image_outputs->shape(), set_limits());
+      if (!full.ok())
+        return Answer(full.status());
+      image_outputs = full.take_value();
+    }
     if (actors_[index]) {
-      if (outputs && (!actors_[index]->query.value_outputs ||
-                      *outputs != *actors_[index]->query.value_outputs)) {
+      if (image_slot != actors_[index]->query.image_slot ||
+          (image_outputs &&
+           (!actors_[index]->query.image_outputs ||
+            *image_outputs != *actors_[index]->query.image_outputs)) ||
+          (outputs && (!actors_[index]->query.value_outputs ||
+                       *outputs != *actors_[index]->query.value_outputs))) {
         if (actors_[index]->busy)
           return Answer(Status{ErrorCode::Cycle, {}});
         if (!actors_[index]->complete)
@@ -547,6 +646,22 @@ class StructuredExecution final {
     key.append(templates_[index].data(), templates_[index].size());
     key.push_back(':');
     key.append(snapshot_);
+    if (image_outputs) {
+      content_internal::Sha256 digest;
+      digest.text("image-demand.v2");
+      digest.integer(image_slot);
+      for (auto n : image_outputs->shape())
+        digest.integer(n);
+      for (const auto& box : image_outputs->boxes())
+        for (const auto& axis : box.dimensions()) {
+          digest.integer(axis.offset);
+          digest.integer(axis.extent);
+        }
+      auto suffix = digest.finish();
+      key.push_back(':');
+      key.append(suffix.data(), suffix.size());
+      call_.add_interest(key, resources_);
+    }
     if (step.output_result_schema) {
       for (const auto& shared : actors_)
         if (shared && shared->query.semantic_key == std::string_view(key)) {
@@ -566,6 +681,11 @@ class StructuredExecution final {
     auto created = std::make_shared<Actor>(step, resources_);
     created->lease = lease.take_value();
     created->query.value_outputs = std::move(outputs);
+    created->query.image_outputs = std::move(image_outputs);
+    created->query.image_slot = image_slot;
+    created->query.tile_height = plan_.tile_height();
+    created->query.tile_width = plan_.tile_width();
+    created->query.backend = step.backend;
     created->query.output_index = step.output_index;
     created->query.resources = bindings_resources_;
     created->key = std::move(key);
@@ -618,6 +738,50 @@ class StructuredExecution final {
     actors_[index] = created;
     return Answer(std::move(created));
   }
+  Status record_object(std::size_t index, const ResultRef& object) {
+    records_->set_cancellation(active_token());
+    auto facts = object.descriptor(false);
+    if (!facts.ok())
+      return facts.status();
+    auto descriptor = object.descriptor_relation();
+    if (!descriptor.ok())
+      return descriptor.status();
+    auto status = records_->bind_result(PlanStepInput{index}, object);
+    if (!status.ok())
+      return status;
+    const auto& schema = object.schema();
+    for (std::uint32_t slot = 0; slot < schema.fields.size(); ++slot) {
+      const auto rows = facts.value().rows(slot);
+      auto coverage = rows ? Footprint::all({rows}, set_limits())
+                           : Footprint::none({1}, set_limits());
+      if (!coverage.ok())
+        return coverage.status();
+      auto relation = object.relation(slot);
+      if (!relation.ok())
+        return relation.status();
+      status = records_->append_relation(
+          index, coverage.value(), relation.take_value(), descriptor.value(),
+          ResultSupportTarget::Field, slot);
+      if (!status.ok())
+        return status;
+    }
+    for (std::uint32_t slot = 0; slot < schema.images.size(); ++slot) {
+      auto relation = object.image_relation(slot);
+      if (!relation.ok())
+        return relation.status();
+      auto status = records_->append_relation(
+          index, facts.value().image_coverage(slot), relation.take_value(),
+          descriptor.value(), ResultSupportTarget::Image, slot);
+      if (!status.ok())
+        return status;
+    }
+    auto count = Footprint::all({1}, set_limits());
+    if (!count.ok())
+      return count.status();
+    return records_->append_relation(index, count.value(),
+                                     descriptor.take_value(), {},
+                                     ResultSupportTarget::Descriptor);
+  }
   bool satisfied(const Actor& actor, const ResultObjectNeed& request) const {
     if (!actor.published.valid())
       return false;
@@ -629,8 +793,10 @@ class StructuredExecution final {
             facts.value().rows(request.field) >= request.minimum_rows);
   }
   Result<ResultRef> result_object(std::size_t index,
-                                  const ResultObjectNeed& request) {
-    auto acquired = actor(index, {});
+                                  const ResultObjectNeed& request,
+                                  std::optional<Footprint> image_outputs = {},
+                                  std::uint32_t image_slot = 0) {
+    auto acquired = actor(index, {}, std::move(image_outputs), image_slot);
     if (!acquired.ok())
       return Result<ResultRef>(acquired.status());
     auto current = acquired.take_value();
@@ -640,8 +806,19 @@ class StructuredExecution final {
                                         [&] { return service_peers(); });
       if (!ready.ok())
         return ready;
+      auto bundle = ready.value().dependencies();
+      if (!bundle)
+        return Result<ResultRef>(
+            protocol("shared Result has no captured dependency ancestry"));
+      records_->set_cancellation(active_token());
+      auto bound = records_->bind_result(PlanStepInput{index}, ready.value());
+      if (!bound.ok())
+        return Result<ResultRef>(bound);
+      auto imported = records_->import_bundle(*bundle, index);
+      if (!imported.ok())
+        return Result<ResultRef>(imported);
       current->published = ready.value();
-      current->complete = current->published.production_status().ok();
+      current->complete = current->published.descriptor(false).value().sealed();
       auto notified = notify(*current);
       return notified.ok() ? ready : Result<ResultRef>(notified);
     }
@@ -656,9 +833,37 @@ class StructuredExecution final {
       if (!status.ok())
         return Result<ResultRef>(status);
     }
+    if (&current->query.inputs !=
+        &plan_.steps()[index].structured_metadata->inputs) {
+      auto bundle = current->published.dependencies();
+      if (!bundle)
+        return Result<ResultRef>(protocol("alias Result has no ancestry"));
+      records_->set_cancellation(active_token());
+      auto imported = records_->import_bundle(*bundle, index);
+      if (!imported.ok())
+        return Result<ResultRef>(imported);
+    }
     auto notified = notify(*current);
     return notified.ok() ? Result<ResultRef>(current->published)
                          : Result<ResultRef>(notified);
+  }
+  Result<ResultRef> object_input(const PlanInput& input,
+                                 const ResultObjectNeed& need,
+                                 std::optional<Footprint> samples,
+                                 std::uint32_t slot = 0) {
+    if (const auto* source = std::get_if<PlanWorkflowInput>(&input)) {
+      const auto& object = bindings_.at(source->declaration_index).result;
+      if (!object.owned_by(resources_))
+        return Result<ResultRef>(
+            protocol("Result binding belongs to a different resource root"));
+      return Result<ResultRef>(object);
+    }
+    auto ready = result_object(std::get<PlanStepInput>(input).step_index, need,
+                               std::move(samples), slot);
+    if (!ready.ok())
+      return ready;
+    auto bound = records_->bind_result(input, ready.value());
+    return bound.ok() ? ready : Result<ResultRef>(bound);
   }
   Status service_peers() {
     if (service_depth_ >= 64)
@@ -823,61 +1028,80 @@ class StructuredExecution final {
     const auto started = std::chrono::steady_clock::now();
     Result<ResultProgramPoll> polled(Status{ErrorCode::Internal, {}});
     ErrorCode sticky = actor.failure->load();
-    auto status = dispatch([&] {
-      ResultCallbackScope scope(&sticky, actor.service_failure.get());
-      ResourceAllocationScope metadata_scope(resources_, &sticky);
-      auto limit = step.traits.workspace_bytes;
-      if (actor.query.value_outputs) {
-        auto count = actor.query.value_outputs->element_count();
-        const auto width =
-            Value::element_size(step.output_descriptor.element_type);
-        if (!count.ok() || count.value() > (UINT64_MAX - limit) / width)
-          return Status{ErrorCode::ResourceExhausted, {}};
-        limit += count.value() * width;
-      }
-      auto allocator = resources_.allocator().limited(
-          limit, [full = actor.service_failure](ErrorCode code) {
-            full->record(Status{code, {}});
-          });
-      auto observe_failure = [&actor, &sticky](const Status& failed) {
-        if (sticky != ErrorCode::Ok)
-          actor.service_failure->record(
-              sticky == ErrorCode::InvalidArgument
-                  ? Status{sticky,
-                           {},
-                           FailureReason::UnauthorizedRead,
-                           {FailureOrigin::Protocol, FailureScope::Group}}
-                  : Status{sticky, {}});
-        auto first = actor.service_failure->record(failed);
-        auto expected = ErrorCode::Ok;
-        actor.failure->compare_exchange_strong(expected, first.code);
-      };
-      auto work = [&](std::uint64_t count) {
-        auto result = consume(count);
-        if (!result.ok()) {
-          observe_failure(result);
-        }
-        return result;
-      };
-      ResultProgramPhase phase{actor.query, actor.values,  actor.results,
-                               actor.io,    allocator,     resources_,
-                               work,        actor.failure, observe_failure};
-      polled = actor.continuation.poll(phase);
-      if (sticky != ErrorCode::Ok) {
-        auto expected = ErrorCode::Ok;
-        actor.failure->compare_exchange_strong(expected, sticky);
-      }
-      auto failure = actor.service_failure->snapshot();
-      if (!failure.ok())
-        return failure;
-      const auto code = actor.failure->load();
-      if (code == ErrorCode::InvalidArgument)
-        return Status{code,
-                      {},
-                      FailureReason::UnauthorizedRead,
-                      {FailureOrigin::Protocol, FailureScope::Group}};
-      return Status{code, {}};
-    });
+    auto status = dispatch(
+        [&] {
+          ResultCallbackScope scope(&sticky, actor.service_failure.get());
+          ResourceAllocationScope metadata_scope(resources_, &sticky);
+          auto limit = step.traits.workspace_bytes;
+          if (actor.query.value_outputs) {
+            auto count = actor.query.value_outputs->element_count();
+            const auto width =
+                Value::element_size(step.output_descriptor.element_type);
+            if (!count.ok() || count.value() > (UINT64_MAX - limit) / width)
+              return Status{ErrorCode::ResourceExhausted, {}};
+            limit += count.value() * width;
+          }
+          auto allocator =
+              (active_services_ ? active_services_->allocator
+                                : resources_.allocator())
+                  .limited(limit,
+                           [full = actor.service_failure](ErrorCode code) {
+                             full->record(Status{code, {}});
+                           });
+          auto observe_failure = [&actor, &sticky](const Status& failed) {
+            if (sticky != ErrorCode::Ok)
+              actor.service_failure->record(
+                  sticky == ErrorCode::InvalidArgument
+                      ? Status{sticky,
+                               {},
+                               FailureReason::UnauthorizedRead,
+                               {FailureOrigin::Protocol, FailureScope::Group}}
+                      : Status{sticky, {}});
+            auto first = actor.service_failure->record(failed);
+            auto expected = ErrorCode::Ok;
+            actor.failure->compare_exchange_strong(expected, first.code);
+          };
+          auto work = [&](std::uint64_t count) {
+            auto result = consume(count);
+            if (!result.ok()) {
+              observe_failure(result);
+            }
+            return result;
+          };
+          ResultProgramPhase phase{actor.query, actor.values,  actor.results,
+                                   actor.io,    allocator,     resources_,
+                                   work,        actor.failure, observe_failure};
+          ResourceVector<std::uint64_t> association{
+              ResourceAllocator<std::uint64_t>(resources_)};
+          for (const auto& owner : actor.owners)
+            association.push_back(owner.second.object_id());
+          phase.association = &association;
+          phase.images = &actor.images;
+          if (active_services_) {
+            phase.cpu_parallel = active_services_->cpu_parallel;
+            phase.cpu_tiles = active_services_->cpu_tiles;
+            phase.gpu = active_services_->gpu;
+            phase.gpu_status = active_services_->gpu_status;
+          }
+          polled = actor.continuation.poll(phase);
+          if (sticky != ErrorCode::Ok) {
+            auto expected = ErrorCode::Ok;
+            actor.failure->compare_exchange_strong(expected, sticky);
+          }
+          auto failure = actor.service_failure->snapshot();
+          if (!failure.ok())
+            return failure;
+          const auto code = actor.failure->load();
+          if (code == ErrorCode::InvalidArgument)
+            return Status{code,
+                          {},
+                          FailureReason::UnauthorizedRead,
+                          {FailureOrigin::Protocol, FailureScope::Group}};
+          return Status{code, {}};
+        },
+        step.backend,
+        step.traits.outputs[0].region_rule == OperationRegionRule::Whole,
+        step.traits.cpu_staged_tiles);
     const auto host_failure = actor.service_failure->snapshot();
     if (host_failure.detail.origin == FailureOrigin::Protocol)
       status = host_failure;
@@ -894,6 +1118,7 @@ class StructuredExecution final {
       return retire(actor, polled.status());
     actor.values.clear();
     actor.io.clear();
+    actor.images.clear();
     const auto elapsed = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - started)
@@ -904,24 +1129,28 @@ class StructuredExecution final {
         [&](const auto& item) { return item.output == step.result_ref(); });
     if (timing == diagnostics_.operation_timings.end()) {
       diagnostics_.operation_timings.push_back(
-          {step.result_ref(), Backend::Cpu, elapsed,
+          {step.result_ref(), step.backend, elapsed,
            status.ok() ? polled.status().code : status.code, 1, 0});
     } else {
       timing->duration_us += elapsed;
       ++timing->invocation_count;
       timing->outcome = status.ok() ? polled.status().code : status.code;
     }
+    diagnostics_.selected_backends[step.result_ref()] = step.backend;
     diagnostics_.peak_active_tasks = 1;
     auto event = polled.take_value();
     if (const auto* need = std::get_if<ResultProgramNeed>(&event)) {
-      const auto count =
-          need->values.size() + need->results.size() + need->io.size();
+      const auto count = need->values.size() + need->results.size() +
+                         need->images.size() + need->io.size();
       if (!count || count > 64 ||
           (!need->values.empty() &&
            !need->values.get_allocator().owned_by(resources_)) ||
           (!need->results.empty() &&
            !need->results.get_allocator().owned_by(resources_)) ||
-          (!need->io.empty() && !need->io.get_allocator().owned_by(resources_)))
+          (!need->io.empty() &&
+           !need->io.get_allocator().owned_by(resources_)) ||
+          (!need->images.empty() &&
+           !need->images.get_allocator().owned_by(resources_)))
         return retire(actor, protocol("invalid structured Need envelope"));
       std::array<bool, 1024> requested_values{}, requested_results{};
       const auto selected_port = [&](std::uint32_t port) {
@@ -932,6 +1161,7 @@ class StructuredExecution final {
       // Validate the complete envelope before executing a source read or I/O.
       for (const auto& input : need->values)
         if (input.input >= step.inputs.size() || !selected_port(input.input) ||
+            !input.roles || (input.roles & ~15U) ||
             actor.query.inputs[input.input].result_schema ||
             !input.samples.valid() ||
             input.samples.shape() !=
@@ -941,9 +1171,20 @@ class StructuredExecution final {
       for (const auto& input : need->results)
         if (input.input >= step.inputs.size() || !selected_port(input.input) ||
             !actor.query.inputs[input.input].result_schema ||
-            !std::holds_alternative<PlanStepInput>(step.inputs[input.input]) ||
             std::exchange(requested_results[input.input], true))
           return retire(actor, protocol("invalid structured Result request"));
+      for (const auto& input : need->images) {
+        if (input.input >= step.inputs.size() || !selected_port(input.input) ||
+            !input.roles || (input.roles & ~15U) ||
+            !actor.query.inputs[input.input].result_schema ||
+            input.slot >=
+                actor.query.inputs[input.input].result_schema->images.size() ||
+            !input.samples.valid() ||
+            input.samples.shape() != actor.query.inputs[input.input]
+                                         .result_schema->images[input.slot]
+                                         .sample_shape())
+          return retire(actor, protocol("invalid typed image Need"));
+      }
       for (const auto& action : need->io) {
         auto valid = validate_io(action);
         if (!valid.ok())
@@ -963,12 +1204,48 @@ class StructuredExecution final {
         actor.values.emplace(input.input, ready.take_value());
       }
       for (const auto& input : need->results) {
-        auto ready = result_object(
-            std::get<PlanStepInput>(step.inputs[input.input]).step_index,
-            input);
+        auto ready = object_input(step.inputs[input.input], input, {});
         if (!ready.ok())
           return retire(actor, ready.status());
+        auto bound =
+            records_->bind_result(step.inputs[input.input], ready.value());
+        if (!bound.ok())
+          return retire(actor, bound);
+        actor.owners[{input.input, ready.value().object_id()}] = ready.value();
         actor.results[input.input] = ready.take_value();
+      }
+      for (const auto& input : need->images) {
+        auto closed = actor.query.inputs[input.input]
+                          .result_schema->images[input.slot]
+                          .close_samples(input.samples, set_limits());
+        if (!closed.ok())
+          return retire(actor, closed.status());
+        auto ready = object_input(step.inputs[input.input], {}, closed.value(),
+                                  input.slot);
+        if (!ready.ok())
+          return retire(actor, ready.status());
+        auto descriptor = ready.value().descriptor();
+        if (!descriptor.ok())
+          return retire(actor, descriptor.status());
+        ResultImageInput capability;
+        capability.result_ = ready.value();
+        capability.descriptor_ = descriptor.take_value();
+        capability.slot_ = input.slot;
+        capability.samples_ = closed.value();
+        capability.failure_ = actor.failure;
+        capability.observer_ = actor.service_failure;
+        auto outside = closed.value().subtract(
+            capability.descriptor_.image_coverage(input.slot), set_limits());
+        if (!outside.ok() || !outside.value().empty())
+          return retire(actor,
+                        protocol("image Need is outside published coverage"));
+        actor.owners[{input.input, ready.value().object_id()}] =
+            ready.take_value();
+        if (!actor.images
+                 .emplace(std::make_pair(input.input, input.slot),
+                          std::move(capability))
+                 .second)
+          return retire(actor, protocol("duplicate image Need slot"));
       }
       for (const auto& request : need->io) {
         auto ready = io(request);
@@ -997,22 +1274,10 @@ class StructuredExecution final {
           ResourceAllocator<std::uint64_t>(resources_)};
       ResourceVector<ResultRef> input_owners{
           ResourceAllocator<ResultRef>(resources_)};
-      for (std::uint32_t port = 0; port < actor.query.inputs.size(); ++port)
-        if (actor.query.inputs[port].result_schema &&
-            (!step.traits.outputs[0].input_indices ||
-             std::find(step.traits.outputs[0].input_indices->begin(),
-                       step.traits.outputs[0].input_indices->end(),
-                       port) != step.traits.outputs[0].input_indices->end())) {
-          auto found = actor.results.find(port);
-          if (found == actor.results.end())
-            return retire(actor, protocol("missing result association input"));
-          association.push_back(found->second.object_id());
-          input_owners.push_back(found->second);
-        }
-      if (association.size() != published->result.association().size() ||
-          !std::equal(association.begin(), association.end(),
-                      published->result.association().begin()))
-        return retire(actor, protocol("result association mismatch"));
+      for (const auto& input : actor.owners) {
+        association.push_back(input.second.object_id());
+        input_owners.push_back(input.second);
+      }
       auto retained = published->result.retain_association(input_owners);
       if (!retained.ok())
         return retire(actor, retained);
@@ -1042,7 +1307,25 @@ class StructuredExecution final {
         }
         return retire(actor, validated);
       }
-      actor.published = published->result;
+      if (published->complete && actor.query.image_outputs) {
+        auto outside = actor.query.image_outputs->subtract(
+            descriptor.value().image_coverage(actor.query.image_slot),
+            set_limits());
+        if (!outside.ok() || !outside.value().empty())
+          return retire(actor,
+                        protocol("image publication omitted captured demand"));
+      }
+      auto evidence = record_object(index, published->result);
+      if (!evidence.ok())
+        return retire(actor, evidence);
+      auto bundle = records_->capture_bundle(index);
+      if (!bundle.ok())
+        return retire(actor, bundle.status());
+      published->result.bind_dependencies(bundle.take_value());
+      auto captured = published->result.capture();
+      if (!captured.ok())
+        return retire(actor, captured.status());
+      actor.published = captured.take_value();
       actor.published_revision = descriptor.value().revision();
       actor.complete = published->complete;
       actor.shared.publish(actor.published, actor.complete);
@@ -1092,6 +1375,11 @@ class StructuredExecution final {
         set_limits(), {}, bindings_resources_);
     if (!admitted_value.ok())
       return retire(actor, admitted_value.status());
+    records_->set_cancellation(active_token());
+    auto evidence = records_->append_relation(
+        index, *actor.query.value_outputs, output.relation, output.descriptor);
+    if (!evidence.ok())
+      return retire(actor, evidence);
     actor.value = admitted_value.take_value();
     actor.value_relation = output.relation;
     actor.complete = true;
@@ -1186,10 +1474,6 @@ class StructuredExecution final {
       return Answer(protocol("ResultRef cannot be read as Value"));
     if (requested.shape() != step.output_descriptor.shape)
       return Answer(protocol("Value request domain mismatch"));
-    if (requested.empty())
-      return ValueFragments::create(step.output_descriptor, step.output_facets,
-                                    requested, {}, set_limits(),
-                                    bindings_resources_);
     if (step.traits.outputs[0].dependency_version == 2) {
       auto acquired = actor(index, requested);
       if (!acquired.ok())
@@ -1207,6 +1491,10 @@ class StructuredExecution final {
       return current->value ? Answer(*current->value)
                             : Answer(protocol("ordinary Value result missing"));
     }
+    if (requested.empty())
+      return ValueFragments::create(step.output_descriptor, step.output_facets,
+                                    requested, {}, set_limits(),
+                                    bindings_resources_);
     if (step.traits.outputs[0].dependency_version == 1)
       return dependency_value(index, requested);
     auto found = whole_.find(index);
@@ -1284,26 +1572,72 @@ class StructuredExecution final {
         ports.push_back(port);
       }
       Result<Value> output(Status{ErrorCode::Internal, {}});
-      auto status = dispatch([&] {
-        OperationInvocation invocation(inputs, demands, step.parameters,
-                                       Backend::Cpu, active_token(), region,
-                                       resources_.allocator());
-        invocation.output_index = step.output_index;
-        invocation.prepared = step.prepared;
-        invocation.resources = bindings_resources_;
-        invocation.input_indices = ports;
-        invocation.input_metadata = all;
-        const auto before = active_stop();
-        if (before != ErrorCode::Ok)
-          return Status{before, {}};
-        output = operations_->invoke(step.operation, invocation);
-        const auto after = active_stop();
-        return after == ErrorCode::Ok ? Status::success() : Status{after, {}};
-      });
+      auto status = dispatch(
+          [&] {
+            if (step.backend == Backend::Gpu) {
+              if (!active_services_ || !active_services_->native_input)
+                return Status{ErrorCode::BackendUnavailable, {}};
+              for (auto& input : inputs) {
+                auto native = active_services_->native_input(input);
+                if (!native.ok())
+                  return native.status();
+                if (native.value().second) {
+                  diagnostics_.transfer_bytes += native.value().second;
+                  ++diagnostics_.transfer_count;
+                }
+                input = std::move(native.value().first);
+              }
+            }
+            OperationInvocation invocation(inputs, demands, step.parameters,
+                                           step.backend, active_token(), region,
+                                           active_services_
+                                               ? active_services_->allocator
+                                               : resources_.allocator());
+            invocation.output_index = step.output_index;
+            invocation.prepared = step.prepared;
+            invocation.resources = bindings_resources_;
+            invocation.input_indices = ports;
+            invocation.input_metadata = all;
+            if (active_services_) {
+              invocation.gpu = active_services_->gpu;
+              invocation.cpu_parallel = active_services_->cpu_parallel;
+            }
+            const auto before = active_stop();
+            if (before != ErrorCode::Ok)
+              return Status{before, {}};
+            output = operations_->invoke(step.operation, invocation);
+            const auto after = active_stop();
+            return after == ErrorCode::Ok ? Status::success()
+                                          : Status{after, {}};
+          },
+          step.backend, whole);
       if (!status.ok())
         return Answer(status);
       if (!output.ok())
         return Answer(output.status());
+      diagnostics_.selected_backends[step.result_ref()] = step.backend;
+      std::vector<Footprint> witnesses;
+      for (const auto& meta : all) {
+        auto empty = Footprint::none(meta.descriptor.shape, set_limits());
+        if (!empty.ok())
+          return Answer(empty.status());
+        witnesses.push_back(empty.take_value());
+      }
+      for (std::size_t i = 0; i < ports.size(); ++i) {
+        auto samples = Footprint::from_regions(all[ports[i]].descriptor.shape,
+                                               {demands[i]}, set_limits());
+        if (!samples.ok())
+          return Answer(samples.status());
+        witnesses[ports[i]] = samples.take_value();
+      }
+      auto coverage = Footprint::from_regions(step.output_descriptor.shape,
+                                              {region}, set_limits());
+      if (!coverage.ok())
+        return Answer(coverage.status());
+      auto evidence = records_->append_legacy(
+          index, coverage.value(), witnesses.data(), witnesses.size());
+      if (!evidence.ok())
+        return Answer(evidence);
       parts.push_back(output.take_value());
     }
     auto assembled = ValueFragments::create_view(
@@ -1349,16 +1683,21 @@ class StructuredExecution final {
       request.output_index = step.output_index;
       request.prepared = step.prepared;
       request.resources = bindings_resources_;
+      request.backend = step.backend;
       request.cancellation = active_token();
       request.limits = options_.dependencies;
       Result<std::shared_ptr<DependencySession>> started(
           Status{ErrorCode::Internal, {}});
-      auto status = dispatch([&] {
-        started = operations_->start_dependency(
-            step.operation, request, resources_.allocator(),
-            [&](auto n) { return consume(n); });
-        return Status::success();
-      });
+      auto status = dispatch(
+          [&] {
+            started = operations_->start_dependency(
+                step.operation, request,
+                active_services_ ? active_services_->allocator
+                                 : resources_.allocator(),
+                [&](auto n) { return consume(n); });
+            return Status::success();
+          },
+          step.backend);
       if (!status.ok())
         return status;
       if (!started.ok())
@@ -1368,15 +1707,65 @@ class StructuredExecution final {
       for (;;) {
         std::uint64_t numeric_callback_us = 0;
         Result<DependencyProgress> progress(Status{ErrorCode::Internal, {}});
-        status = dispatch([&] {
-          const auto tick = std::chrono::steady_clock::now();
-          progress = session->poll(resources_.allocator());
-          numeric_callback_us += static_cast<std::uint64_t>(
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  std::chrono::steady_clock::now() - tick)
-                  .count());
-          return Status::success();
-        });
+        status = dispatch(
+            [&] {
+              const auto tick = std::chrono::steady_clock::now();
+              auto allocator = active_services_ ? active_services_->allocator
+                                                : resources_.allocator();
+              DependencyGpuServices gpu;
+              if (active_services_ && active_services_->gpu) {
+                const auto* api = active_services_->gpu;
+                const auto status_code = [](int code) {
+                  return code == 0
+                             ? Status::success()
+                             : Status{code == 2 ? ErrorCode::Cancelled
+                                      : code == 3
+                                          ? ErrorCode::BackendUnavailable
+                                      : code == 4 ? ErrorCode::ResourceExhausted
+                                      : code == 5 ? ErrorCode::TypeMismatch
+                                      : code == 6 ? ErrorCode::InvalidArgument
+                                                  : ErrorCode::OperationFailed,
+                                      {}};
+                };
+                gpu.allocation_capacity = active_services_->allocation_capacity;
+                gpu.allocate_discovery = [allocator](auto bytes) {
+                  return allocator.allocate(bytes);
+                };
+                gpu.materialize = [&, allocator](const auto& plan,
+                                                 const auto& input,
+                                                 const auto& bounds) {
+                  return plan.materialize(input, allocator, bounds);
+                };
+                gpu.buffer = [api, status_code,
+                              native_status = active_services_->gpu_status](
+                                 const auto* bytes, auto size,
+                                 bool writable) -> Result<uint64_t> {
+                  uint64_t token = 0;
+                  auto status = status_code(
+                      api->buffer(api->context, bytes, size, writable, &token));
+                  if (native_status && !native_status().ok())
+                    status = native_status();
+                  return status.ok() ? Result<uint64_t>(token)
+                                     : Result<uint64_t>(status);
+                };
+                gpu.execute = [api, status_code,
+                               native_status = active_services_->gpu_status](
+                                  const auto* commands, auto count) {
+                  auto status =
+                      status_code(api->execute(api->context, commands, count));
+                  return native_status && !native_status().ok()
+                             ? native_status()
+                             : status;
+                };
+              }
+              progress = session->poll(allocator, {}, {}, gpu);
+              numeric_callback_us += static_cast<std::uint64_t>(
+                  std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now() - tick)
+                      .count());
+              return Status::success();
+            },
+            step.backend);
         const auto numeric = numeric_internal::delta(
             session->numeric_diagnostics(), &reported_numeric);
         const auto code = status.ok() ? progress.status().code : status.code;
@@ -1391,7 +1780,7 @@ class StructuredExecution final {
             [&](const auto& item) { return item.output == step.result_ref(); });
         if (timing == diagnostics_.operation_timings.end()) {
           diagnostics_.operation_timings.push_back(
-              {step.result_ref(), Backend::Cpu, numeric_callback_us, code, 1,
+              {step.result_ref(), step.backend, numeric_callback_us, code, 1,
                elements});
           diagnostics_.operation_timings.back().numeric = numeric;
         } else {
@@ -1415,6 +1804,9 @@ class StructuredExecution final {
           return progress.status();
         auto event = progress.take_value();
         if (auto* done = std::get_if<DependencyResult>(&event)) {
+          auto evidence = records_->append(index, *done);
+          if (!evidence.ok())
+            return evidence;
           for (const auto& part : done->value.fragments())
             parts.push_back(part);
           return Status::success();
@@ -1505,6 +1897,8 @@ class StructuredExecution final {
       whole_;
   ExecutionDiagnostics diagnostics_;
   Status sink_failure_;
+  const StructuredServices* active_services_ = nullptr;
+  std::unique_ptr<DependencyRecords> records_;
 };
 Result<ExecutionResult> execute_structured(
     const ExecutionPlan& plan, std::vector<ExecutionBinding> bindings,

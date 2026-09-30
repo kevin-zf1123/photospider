@@ -49,8 +49,6 @@ bool same_facets(const std::vector<ValueFacet>& left,
                  const std::vector<ValueFacet>& right) noexcept;
 /** @brief Detects structural image metadata independent of port kind. */
 inline bool structural_image_metadata(const OperationMetadata& metadata) {
-  if (metadata.planar_layout)
-    return true;
   for (const auto& facet : metadata.facets) {
     if (facet.key == "photospider.image" ||
         (facet.key == "photospider.color-array" &&

@@ -1,15 +1,23 @@
 #include "photospider/data/footprint.hpp"
 
 #include <algorithm>
+#include <memory>
+#include <optional>
 #include <queue>
 #include <utility>
 #include <vector>
 
+#include "photospider/execution/resource_allocator.hpp"
+
 namespace ps {
 namespace {
-using Box = std::vector<RegionDimension>;
-using Boxes = std::vector<Box>;
+using Box = ResourceVector<RegionDimension>;
+using Boxes = ResourceVector<Box>;
 enum class Combine { Union, Intersection, Difference };
+struct Normalized {
+  ResourceLease lease;
+  std::vector<Region> boxes;
+};
 
 bool equal_boxes(const Boxes& a, const Boxes& b) {
   if (a.size() != b.size())
@@ -53,6 +61,10 @@ struct Work final {
       auto charged = limits.consume_work(1);
       if (!charged.ok())
         throw Stop{std::move(charged)};
+    } else if (auto* root = resource_internal::metadata_budget()) {
+      auto charged = root->consume({1});
+      if (!charged.ok())
+        throw Stop{std::move(charged)};
     }
     --remaining;
   }
@@ -87,7 +99,7 @@ Boxes sweep(const Boxes& a, const Boxes& b, std::size_t axis, std::size_t rank,
     return {};
   if (b.empty() && operation == Combine::Intersection)
     return {};
-  std::vector<std::uint64_t> boundaries;
+  ResourceVector<std::uint64_t> boundaries;
   for (const auto* boxes : {&a, &b})
     for (const auto& box : *boxes) {
       work->tick();
@@ -146,17 +158,17 @@ Status shape_status(const std::vector<std::uint64_t>& shape) {
   return Status::success();
 }
 
-Result<std::vector<Region>> combine(const std::vector<std::uint64_t>& shape,
-                                    const std::vector<Region>& a,
-                                    const std::vector<Region>& b,
-                                    Combine operation,
-                                    const FootprintLimits& limits,
-                                    std::uint64_t* consumed = nullptr) {
+Result<Normalized> combine(const std::vector<std::uint64_t>& shape,
+                           const std::vector<Region>& a,
+                           const std::vector<Region>& b, Combine operation,
+                           const FootprintLimits& limits,
+                           std::uint64_t* consumed = nullptr,
+                           std::uint64_t retained_bytes = 0) {
   if (consumed)
     *consumed = 0;
   auto status = shape_status(shape);
   if (!status.ok())
-    return Result<std::vector<Region>>(status);
+    return Result<Normalized>(status);
   try {
     Work work(limits, consumed);
     Boxes left, right;
@@ -167,36 +179,93 @@ Result<std::vector<Region>> combine(const std::vector<std::uint64_t>& shape,
         work.tick();
         status = region.validate(shape);
         if (!status.ok())
-          return Result<std::vector<Region>>(status);
+          return Result<Normalized>(status);
         if (!region.empty()) {
           work.capacity(target.size());
-          target.push_back(region.dimensions());
+          target.emplace_back(region.dimensions().begin(),
+                              region.dimensions().end());
         }
       }
     }
     auto normalized = sweep(left, right, 0, shape.size(), operation, &work);
-    std::vector<Region> result;
+    Normalized result;
+    if (auto* root = resource_internal::metadata_budget()) {
+      auto bytes = retained_bytes + normalized.size() * sizeof(Region);
+      for (const auto& box : normalized)
+        bytes += box.size() * sizeof(RegionDimension);
+      auto admitted = root->reserve(ResourceCapacity::host(bytes, bytes));
+      if (!admitted.ok())
+        return Result<Normalized>(admitted.status());
+      result.lease = admitted.take_value();
+    }
+    result.boxes.reserve(normalized.size());
     for (auto& box : normalized)
-      result.emplace_back(std::move(box));
-    return Result<std::vector<Region>>(std::move(result));
+      result.boxes.emplace_back(
+          std::vector<RegionDimension>(box.begin(), box.end()));
+    return Result<Normalized>(std::move(result));
   } catch (const Stop& stop) {
-    return Result<std::vector<Region>>(stop.status);
+    return Result<Normalized>(stop.status);
+  } catch (const std::bad_alloc&) {
+    return Result<Normalized>(Status{ErrorCode::ResourceExhausted, {}});
   }
 }
 }  // namespace
 
+struct Footprint::Impl {
+  ResourceLease lease;
+  std::optional<ResourceBudget> budget;
+  std::vector<std::uint64_t> shape;
+  std::vector<Region> boxes;
+};
+const std::vector<std::uint64_t>& Footprint::shape() const noexcept {
+  static const std::vector<std::uint64_t> empty;
+  return impl_ ? impl_->shape : empty;
+}
+const std::vector<Region>& Footprint::boxes() const noexcept {
+  static const std::vector<Region> empty;
+  return impl_ ? impl_->boxes : empty;
+}
+Result<Footprint> Footprint::make(std::vector<std::uint64_t> shape,
+                                  std::vector<Region> boxes,
+                                  ResourceLease lease) {
+  try {
+    if (!lease.valid()) {
+      if (auto* root = resource_internal::metadata_budget()) {
+        std::uint64_t bytes = sizeof(Impl) +
+                              shape.capacity() * sizeof(std::uint64_t) +
+                              boxes.capacity() * sizeof(Region);
+        for (const auto& box : boxes)
+          bytes += box.rank() * sizeof(RegionDimension);
+        auto admitted = root->reserve(ResourceCapacity::host(bytes, bytes));
+        if (!admitted.ok())
+          return Result<Footprint>(admitted.status());
+        lease = admitted.take_value();
+      }
+    }
+    auto storage = std::make_shared<Impl>();
+    if (auto* root = resource_internal::metadata_budget())
+      storage->budget = *root;
+    storage->lease = std::move(lease);
+    storage->shape = std::move(shape);
+    storage->boxes = std::move(boxes);
+    Footprint result;
+    result.impl_ = std::move(storage);
+    return Result<Footprint>(std::move(result));
+  } catch (const std::bad_alloc&) {
+    return Result<Footprint>(Status{ErrorCode::ResourceExhausted, {}});
+  }
+}
 Result<Footprint> Footprint::from_regions(std::vector<std::uint64_t> shape,
                                           const std::vector<Region>& boxes,
                                           const FootprintLimits& limits,
                                           std::uint64_t* consumed_work) {
-  auto normalized =
-      combine(shape, boxes, {}, Combine::Union, limits, consumed_work);
+  auto normalized = combine(shape, boxes, {}, Combine::Union, limits,
+                            consumed_work, sizeof(Impl) + shape.capacity() * 8);
   if (!normalized.ok())
     return Result<Footprint>(normalized.status());
-  Footprint result;
-  result.shape_ = std::move(shape);
-  result.boxes_ = normalized.take_value();
-  return Result<Footprint>(std::move(result));
+  auto result = normalized.take_value();
+  return make(std::move(shape), std::move(result.boxes),
+              std::move(result.lease));
 }
 Result<Footprint> Footprint::all(std::vector<std::uint64_t> shape,
                                  const FootprintLimits& limits) {
@@ -211,11 +280,11 @@ Result<Footprint> Footprint::none(std::vector<std::uint64_t> shape,
 }
 bool Footprint::contains(
     const std::vector<std::uint64_t>& coordinate) const noexcept {
-  if (!valid() || coordinate.size() != shape_.size())
+  if (!valid() || coordinate.size() != this->shape().size())
     return false;
-  for (const auto& box : boxes_) {
+  for (const auto& box : this->boxes()) {
     bool inside = true;
-    for (std::size_t axis = 0; axis < shape_.size(); ++axis) {
+    for (std::size_t axis = 0; axis < this->shape().size(); ++axis) {
       const auto d = box.dimensions()[axis];
       if (coordinate[axis] < d.offset ||
           coordinate[axis] - d.offset >= d.extent) {
@@ -230,52 +299,63 @@ bool Footprint::contains(
 }
 Result<Footprint> Footprint::unite(const Footprint& other,
                                    const FootprintLimits& limits) const {
-  if (shape_ != other.shape_)
+  std::optional<ResourceAllocationScope> scope;
+  if (impl_ && impl_->budget && !resource_internal::metadata_budget())
+    scope.emplace(*impl_->budget);
+  if (this->shape() != other.shape())
     return Result<Footprint>(Status::failure(ErrorCode::InvalidArgument,
                                              "footprint domain mismatch"));
-  auto boxes = combine(shape_, boxes_, other.boxes_, Combine::Union, limits);
+  auto boxes =
+      combine(this->shape(), this->boxes(), other.boxes(), Combine::Union,
+              limits, nullptr, sizeof(Impl) + shape().size() * 8);
   if (!boxes.ok())
     return Result<Footprint>(boxes.status());
-  Footprint result;
-  result.shape_ = shape_;
-  result.boxes_ = boxes.take_value();
-  return Result<Footprint>(std::move(result));
+  auto normalized = boxes.take_value();
+  return make(shape(), std::move(normalized.boxes),
+              std::move(normalized.lease));
 }
 Result<Footprint> Footprint::intersect(const Footprint& other,
                                        const FootprintLimits& limits) const {
-  if (shape_ != other.shape_)
+  std::optional<ResourceAllocationScope> scope;
+  if (impl_ && impl_->budget && !resource_internal::metadata_budget())
+    scope.emplace(*impl_->budget);
+  if (this->shape() != other.shape())
     return Result<Footprint>(Status::failure(ErrorCode::InvalidArgument,
                                              "footprint domain mismatch"));
-  auto boxes =
-      combine(shape_, boxes_, other.boxes_, Combine::Intersection, limits);
+  auto boxes = combine(this->shape(), this->boxes(), other.boxes(),
+                       Combine::Intersection, limits, nullptr,
+                       sizeof(Impl) + shape().size() * 8);
   if (!boxes.ok())
     return Result<Footprint>(boxes.status());
-  Footprint result;
-  result.shape_ = shape_;
-  result.boxes_ = boxes.take_value();
-  return Result<Footprint>(std::move(result));
+  auto normalized = boxes.take_value();
+  return make(shape(), std::move(normalized.boxes),
+              std::move(normalized.lease));
 }
 Result<Footprint> Footprint::subtract(const Footprint& other,
                                       const FootprintLimits& limits) const {
-  if (shape_ != other.shape_)
+  std::optional<ResourceAllocationScope> scope;
+  if (impl_ && impl_->budget && !resource_internal::metadata_budget())
+    scope.emplace(*impl_->budget);
+  if (this->shape() != other.shape())
     return Result<Footprint>(Status::failure(ErrorCode::InvalidArgument,
                                              "footprint domain mismatch"));
   auto boxes =
-      combine(shape_, boxes_, other.boxes_, Combine::Difference, limits);
+      combine(this->shape(), this->boxes(), other.boxes(), Combine::Difference,
+              limits, nullptr, sizeof(Impl) + shape().size() * 8);
   if (!boxes.ok())
     return Result<Footprint>(boxes.status());
-  Footprint result;
-  result.shape_ = shape_;
-  result.boxes_ = boxes.take_value();
-  return Result<Footprint>(std::move(result));
+  auto normalized = boxes.take_value();
+  return make(shape(), std::move(normalized.boxes),
+              std::move(normalized.lease));
 }
 bool Footprint::operator==(const Footprint& other) const noexcept {
-  if (shape_ != other.shape_ || boxes_.size() != other.boxes_.size())
+  if (this->shape() != other.shape() ||
+      this->boxes().size() != other.boxes().size())
     return false;
-  for (std::size_t i = 0; i < boxes_.size(); ++i)
-    for (std::size_t axis = 0; axis < shape_.size(); ++axis) {
-      const auto a = boxes_[i].dimensions()[axis];
-      const auto b = other.boxes_[i].dimensions()[axis];
+  for (std::size_t i = 0; i < this->boxes().size(); ++i)
+    for (std::size_t axis = 0; axis < this->shape().size(); ++axis) {
+      const auto a = this->boxes()[i].dimensions()[axis];
+      const auto b = other.boxes()[i].dimensions()[axis];
       if (a.offset != b.offset || a.extent != b.extent)
         return false;
     }
@@ -283,9 +363,9 @@ bool Footprint::operator==(const Footprint& other) const noexcept {
 }
 Result<std::uint64_t> Footprint::element_count() const {
   if (!valid())
-    return Result<std::uint64_t>(shape_status(shape_));
+    return Result<std::uint64_t>(shape_status(this->shape()));
   std::uint64_t sum = 0;
-  for (const auto& box : boxes_) {
+  for (const auto& box : this->boxes()) {
     auto count = box.element_count();
     if (!count.ok())
       return count;
@@ -299,82 +379,123 @@ Result<std::uint64_t> Footprint::element_count() const {
 Result<Footprint> Footprint::tile_cover(
     const std::vector<std::uint64_t>& geometry,
     const FootprintLimits& limits) const {
-  if (!valid() || geometry.size() != shape_.size() ||
+  std::optional<ResourceAllocationScope> scope;
+  if (impl_ && impl_->budget && !resource_internal::metadata_budget())
+    scope.emplace(*impl_->budget);
+  if (!valid() || geometry.size() != this->shape().size() ||
       !shape_status(geometry).ok())
     return Result<Footprint>(
         Status::failure(ErrorCode::InvalidArgument, "invalid tile geometry"));
+  ResourceLease bridge;
+  if (const auto* root = resource_internal::metadata_budget()) {
+    const auto bytes =
+        this->boxes().size() *
+            (sizeof(Region) + this->shape().size() * sizeof(RegionDimension)) +
+        this->shape().size() * 8;
+    auto admitted = root->reserve(ResourceCapacity::host(bytes, bytes));
+    if (!admitted.ok())
+      return Result<Footprint>(admitted.status());
+    bridge = admitted.take_value();
+  }
   std::vector<std::uint64_t> shape;
-  for (std::size_t axis = 0; axis < shape_.size(); ++axis)
-    shape.push_back(shape_[axis] / geometry[axis] +
-                    (shape_[axis] % geometry[axis] != 0));
+  shape.reserve(this->shape().size());
+  for (std::size_t axis = 0; axis < this->shape().size(); ++axis)
+    shape.push_back(this->shape()[axis] / geometry[axis] +
+                    (this->shape()[axis] % geometry[axis] != 0));
   std::vector<Region> boxes;
+  boxes.reserve(this->boxes().size());
   try {
     Work work(limits);
-    for (const auto& box : boxes_) {
+    for (const auto& box : this->boxes()) {
       work.tick();
       work.capacity(boxes.size());
       Box dimensions;
-      for (std::size_t axis = 0; axis < shape_.size(); ++axis) {
+      for (std::size_t axis = 0; axis < this->shape().size(); ++axis) {
         const auto d = box.dimensions()[axis];
         const auto first = d.offset / geometry[axis];
         const auto last = (d.offset + d.extent - 1) / geometry[axis];
         dimensions.push_back({first, last - first + 1});
       }
-      boxes.emplace_back(std::move(dimensions));
+      boxes.emplace_back(
+          std::vector<RegionDimension>(dimensions.begin(), dimensions.end()));
     }
     auto remaining = limits;
     remaining.maximum_work = work.remaining;
     return from_regions(std::move(shape), boxes, remaining);
   } catch (const Stop& stop) {
     return Result<Footprint>(stop.status);
+  } catch (const std::bad_alloc&) {
+    return Result<Footprint>(Status{ErrorCode::ResourceExhausted, {}});
   }
 }
 Status Footprint::visit(
     const std::function<Status(const std::vector<std::uint64_t>&)>& visitor,
     std::uint64_t maximum_samples,
     const CancellationToken& cancellation) const {
+  std::optional<ResourceAllocationScope> scope;
+  if (impl_ && impl_->budget && !resource_internal::metadata_budget())
+    scope.emplace(*impl_->budget);
   if (!valid() || !visitor)
     return Status::failure(ErrorCode::InvalidArgument,
                            "invalid footprint visit");
   if (cancellation.cancelled())
     return Status::failure(ErrorCode::Cancelled, "footprint visit cancelled");
-  struct Cursor {
-    std::size_t box;
-    std::vector<std::uint64_t> coordinate;
-  };
-  auto greater = [](const Cursor& a, const Cursor& b) {
-    return a.coordinate > b.coordinate;
-  };
-  std::priority_queue<Cursor, std::vector<Cursor>, decltype(greater)> ready(
-      greater);
-  for (std::size_t i = 0; i < boxes_.size(); ++i) {
-    std::vector<std::uint64_t> coordinate;
-    for (auto d : boxes_[i].dimensions())
-      coordinate.push_back(d.offset);
-    ready.push({i, std::move(coordinate)});
-  }
-  while (!ready.empty()) {
-    if (cancellation.cancelled())
-      return Status::failure(ErrorCode::Cancelled, "footprint visit cancelled");
-    if (!maximum_samples)
-      return Status::failure(ErrorCode::ResourceExhausted,
-                             "footprint visit limit");
-    --maximum_samples;
-    auto cursor = ready.top();
-    ready.pop();
-    auto status = visitor(cursor.coordinate);
-    if (!status.ok())
-      return status;
-    for (std::size_t axis = shape_.size(); axis-- > 0;) {
-      const auto d = boxes_[cursor.box].dimensions()[axis];
-      ++cursor.coordinate[axis];
-      if (cursor.coordinate[axis] < d.offset + d.extent) {
-        ready.push(std::move(cursor));
-        break;
-      }
-      cursor.coordinate[axis] = d.offset;
+  try {
+    struct Cursor {
+      std::size_t box;
+      ResourceVector<std::uint64_t> coordinate;
+    };
+    auto greater = [](const Cursor& a, const Cursor& b) {
+      return a.coordinate > b.coordinate;
+    };
+    std::priority_queue<Cursor, ResourceVector<Cursor>, decltype(greater)>
+        ready(greater);
+    for (std::size_t i = 0; i < this->boxes().size(); ++i) {
+      ResourceVector<std::uint64_t> coordinate;
+      for (auto d : this->boxes()[i].dimensions())
+        coordinate.push_back(d.offset);
+      ready.push({i, std::move(coordinate)});
     }
+    while (!ready.empty()) {
+      if (cancellation.cancelled())
+        return Status::failure(ErrorCode::Cancelled,
+                               "footprint visit cancelled");
+      if (!maximum_samples)
+        return Status::failure(ErrorCode::ResourceExhausted,
+                               "footprint visit limit");
+      --maximum_samples;
+      if (auto* root = resource_internal::metadata_budget()) {
+        auto work = root->consume({1});
+        if (!work.ok())
+          return work;
+      }
+      auto cursor = ready.top();
+      ready.pop();
+      ResourceLease coordinate_lease;
+      if (auto* root = resource_internal::metadata_budget()) {
+        const auto bytes = cursor.coordinate.size() * sizeof(std::uint64_t);
+        auto admission = root->reserve(ResourceCapacity::host(bytes, bytes));
+        if (!admission.ok())
+          return admission.status();
+        coordinate_lease = admission.take_value();
+      }
+      auto status = visitor(std::vector<std::uint64_t>(
+          cursor.coordinate.begin(), cursor.coordinate.end()));
+      if (!status.ok())
+        return status;
+      for (std::size_t axis = this->shape().size(); axis-- > 0;) {
+        const auto d = this->boxes()[cursor.box].dimensions()[axis];
+        ++cursor.coordinate[axis];
+        if (cursor.coordinate[axis] < d.offset + d.extent) {
+          ready.push(std::move(cursor));
+          break;
+        }
+        cursor.coordinate[axis] = d.offset;
+      }
+    }
+    return Status::success();
+  } catch (const std::bad_alloc&) {
+    return Status{ErrorCode::ResourceExhausted, {}};
   }
-  return Status::success();
 }
 }  // namespace ps

@@ -190,7 +190,9 @@ struct SumState {
       if (!made.ok())
         return Poll(made.status());
       builder = made.take_value();
-      auto witness = source.descriptor_relation();
+      auto witness = ResultRelation::cartesian(
+          phase.resources, 1, {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0},
+          DependencyGuarantee::Conservative);
       if (!witness.ok())
         return Poll(witness.status());
       auto bound = builder.bind_descriptor_relation(witness.value());
@@ -230,7 +232,10 @@ struct SumState {
       stage = 4;
       return Poll(ResultProgramNeed{{}, {}, {write.take_value()}});
     }
-    auto support = source.descriptor_relation();
+    auto support = ResultRelation::cartesian(
+        phase.resources, 1,
+        {0, 1, 0, descriptor.rows(0), ResultSupportTarget::Field, 0},
+        DependencyGuarantee::Conservative);
     if (!support.ok())
       return Poll(support.status());
     auto published =
@@ -266,15 +271,15 @@ struct ForwardState {
         if (!made.ok())
           return Poll(made.status());
         builder = made.take_value();
-        auto relation =
-            ResultRelation::cartesian(phase.resources, 37, {0, 15, 0, 37},
-                                      DependencyGuarantee::Conservative);
+        auto relation = ResultRelation::identity(phase.resources, 37, 0, 1,
+                                                 ResultSupportTarget::Field, 0);
         if (!relation.ok())
           return Poll(relation.status());
         support = relation.take_value();
-        auto descriptor =
-            ResultRelation::cartesian(phase.resources, 1, {0, 15, 0, 37},
-                                      DependencyGuarantee::Conservative);
+        auto descriptor = ResultRelation::cartesian(
+            phase.resources, 1,
+            {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0},
+            DependencyGuarantee::Conservative);
         if (!descriptor.ok())
           return Poll(descriptor.status());
         auto bound = builder.bind_descriptor_relation(descriptor.take_value());
@@ -351,7 +356,8 @@ struct FirstState {
     if (!fragments.ok())
       return Poll(fragments.status());
     auto relation = ResultRelation::cartesian(
-        phase.resources, 1, {0, 15, 0, 1}, DependencyGuarantee::Conservative);
+        phase.resources, 1, {0, 1, 0, 1, ResultSupportTarget::Field, 0},
+        DependencyGuarantee::Conservative);
     if (!relation.ok())
       return Poll(relation.status());
     return Poll(
@@ -809,8 +815,8 @@ int workflow() {
       ExecutionContextConfig config;
       config.cpu_workers = 1;
       config.managed_resources = ResourceLimits{};
-      config.managed_resources->capacity[ResourceKind::Host] = 65536;
-      config.managed_resources->capacity[ResourceKind::Metadata] = 65536;
+      config.managed_resources->capacity[ResourceKind::Host] = 131072;
+      config.managed_resources->capacity[ResourceKind::Metadata] = 131072;
       auto context = std::make_unique<ExecutionContext>(registry, config);
       auto root = context->resource_budget().take_value();
       auto source = std::make_shared<RegionalSource>();
@@ -844,7 +850,12 @@ int workflow() {
       if (!executed.ok())
         std::cerr << "structured failure "
                   << static_cast<int>(executed.status().code) << ' '
-                  << executed.status().message << '\n';
+                  << executed.status().message << " count=" << count
+                  << " page=" << page_bytes << " reason="
+                  << static_cast<unsigned>(executed.status().reason)
+                  << " live=" << root.statistics().live[ResourceKind::Host]
+                  << " peak=" << root.statistics().peak[ResourceKind::Host]
+                  << '\n';
       PS_CHECK(executed.ok());
       PS_CHECK(notified_nodes == std::set<std::uint64_t>({1, 2, 3}));
       PS_CHECK(builds == 1 && (count != 0 || reads == 0));
@@ -868,7 +879,8 @@ int workflow() {
       std::int64_t actual = 0;
       std::memcpy(&actual, page->bytes().data(), 8);
       PS_CHECK(actual == expected &&
-               root.statistics().peak[ResourceKind::Host] <= 65536);
+               root.statistics().peak[ResourceKind::Host] <=
+                   config.managed_resources->capacity[ResourceKind::Host]);
       auto retained_diagnostics = std::move(result.diagnostics);
       result = {};
       page.reset();
@@ -954,6 +966,8 @@ int workflow() {
             frozen,
             [](const std::string&, ValueView) { return Status::success(); }, {},
             stream_options);
+        if (!streamed.ok())
+          std::cerr << "stream failure: " << streamed.status().message << '\n';
         PS_CHECK(streamed.ok() && delivered >= 2 && builds == before + 1);
         PS_CHECK(notified_nodes == std::set<std::uint64_t>({1, 2, 3}));
         first = Result<ExecutionResult>(ExecutionResult{});

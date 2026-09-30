@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -31,6 +32,7 @@
 #include "data/content_digest.hpp"
 #include "data/input_validation.hpp"
 #include "data/whole_input_view.hpp"
+#include "execution/accounted_regions.hpp"
 #include "execution/callback_queue_timing.hpp"
 #include "execution/cpu_range.hpp"
 #include "execution/cpu_tiles.hpp"
@@ -48,7 +50,6 @@
 #include "execution/structured_execution.hpp"
 #include "photospider/execution/data_movement.hpp"
 #include "plugin/dependency_identity.hpp"
-#include "plugin/planar_exact.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
 #include "execution/execution_test_hooks.hpp"
@@ -939,6 +940,10 @@ Status retain_managed_inputs(std::vector<ExecutionBinding>* bindings,
   if (!budget->resources())
     return Status::success();
   for (auto& binding : *bindings) {
+    if (binding.result.valid() &&
+        !binding.result.owned_by(*budget->resources()))
+      return Status{ErrorCode::InvalidArgument,
+                    "Result binding belongs to a different resource root"};
     if (binding.source) {
       auto source = std::make_shared<RegionalSource>(*binding.source);
       auto resources = source->resources.reference(*budget->resources());
@@ -1071,6 +1076,24 @@ Result<std::vector<ExecutionBinding>> preflight_regional_bindings(
   std::vector<ExecutionBinding> result;
   for (const auto& declaration : plan.input_declarations()) {
     auto binding = *named.at(declaration.name)[0];
+    if (declaration.result_schema) {
+      if (!binding.result.valid() || binding.value.valid() || binding.source ||
+          binding.snapshot)
+        return Result<std::vector<ExecutionBinding>>(
+            Status{ErrorCode::InvalidArgument,
+                   "Result binding must select one immutable Result"});
+      if (!binding.result.schema().same_schema(*declaration.result_schema) ||
+          !binding.result.descriptor().ok())
+        return Result<std::vector<ExecutionBinding>>(
+            Status{ErrorCode::TypeMismatch,
+                   "Result binding schema or finality differs"});
+      result.push_back(std::move(binding));
+      continue;
+    }
+    if (binding.result.valid())
+      return Result<std::vector<ExecutionBinding>>(
+          Status{ErrorCode::TypeMismatch,
+                 "Value declaration received Result binding"});
     if (binding.snapshot) {
       binding.snapshot =
           std::make_shared<const InputSnapshot>(*binding.snapshot);
@@ -1320,12 +1343,88 @@ class ExecutionRun final : public std::enable_shared_from_this<ExecutionRun> {
       auto result = execution_internal::execute_structured(
           plan, std::move(bindings), operations, *budget->resources(), options,
           sink, cancellation, stop,
-          [&](const std::function<Status()>& task,
+          [&](Backend backend, bool whole, bool tiles,
+              const CancellationToken& token,
+              const std::function<Status(
+                  const execution_internal::StructuredServices&)>& task,
               const std::function<void()>& pump) {
+            if (backend == Backend::Gpu &&
+                (!gpu_pool || !native_device || !native_device->available()))
+              return Status{ErrorCode::BackendUnavailable,
+                            "native GPU Result lane is unavailable"};
+            if (tiles) {
+              auto issued = budget->resources()->consume({0, 0, 0, 1});
+              if (!issued.ok())
+                return issued;
+              execution_internal::CpuTileScope scope(
+                  pool->ranges(), token, budget->resources().get(),
+                  options.maximum_parallelism ? options.maximum_parallelism
+                                              : pool->ranges().workers(),
+                  [&] { return plan.current(); });
+              execution_internal::StructuredServices services;
+              services.cpu_tiles = scope.service();
+              services.allocator = budget->resources()->allocator();
+              services.observe = [&](auto& d) {
+                d.cpu_stage_count += scope.stages();
+                d.cpu_tile_callback_count += scope.tiles();
+              };
+              auto status = task(services);
+              return scope.status().ok() ? status : scope.status();
+            }
             auto completed = dependency_stage<int>(
-                pool, admission,
+                backend == Backend::Gpu ? gpu_pool : pool, admission,
                 [&] {
-                  auto status = task();
+                  execution_internal::StructuredServices services;
+                  services.allocator = budget->resources()->allocator();
+                  std::optional<gpu_internal::Invocation> native;
+                  if (backend == Backend::Gpu) {
+                    services.allocator =
+                        native_device->allocator(services.allocator);
+                    native.emplace(native_device, token, services.allocator);
+                    services.gpu = native->service();
+                    services.gpu_status = [&] { return native->status(); };
+                    services.native_input = [&](const Value& source)
+                        -> Result<std::pair<Value, uint64_t>> {
+                      using Answer = Result<std::pair<Value, uint64_t>>;
+                      if (native_device->owns(*source.storage()))
+                        return Answer(std::make_pair(source, uint64_t{0}));
+                      auto bytes =
+                          region_bytes(source.descriptor(), source.region());
+                      if (!bytes.ok())
+                        return Answer(bytes.status());
+                      auto issued =
+                          budget->resources()->consume({bytes.value()});
+                      if (!issued.ok())
+                        return Answer(issued);
+                      auto copied =
+                          transfer_value(source, services.allocator, true);
+                      return copied.ok()
+                                 ? Answer(std::make_pair(copied.take_value(),
+                                                         bytes.value()))
+                                 : Answer(copied.status());
+                    };
+                    services.allocation_capacity = [&](auto bytes) {
+                      auto capacity = native_device->allocation_capacity(bytes);
+                      return capacity.ok() ? capacity.value() : 0;
+                    };
+                    services.observe = [&](auto& d) {
+                      const auto& stats = native->statistics();
+                      d.native_dispatch_count += stats.dispatches;
+                      d.native_submission_count += stats.submissions;
+                      d.native_compute_us += stats.device_us;
+                      d.native_constant_bytes += stats.constant_bytes;
+                    };
+                  }
+                  execution_internal::CpuRangeScope ranges(
+                      pool->ranges(), token, budget->resources().get(),
+                      [&] { return plan.current(); });
+                  if (backend == Backend::Cpu && whole)
+                    services.cpu_parallel = ranges.service();
+                  auto status = task(services);
+                  if (!ranges.status().ok())
+                    status = ranges.status();
+                  if (native && !native->status().ok())
+                    status = native->status();
                   return status.ok() ? Result<int>(1) : Result<int>(status);
                 },
                 pump, budget->resources().get());
@@ -5557,25 +5656,31 @@ Result<DemandQuery> close_color_demands(const DemandQuery& query,
       return Result<DemandQuery>(
           Status{ErrorCode::InvalidArgument, "unknown color demand output"});
     const auto& step = plan.steps()[found->second];
-    auto closed = input_internal::color_output_samples(
-        {step.output_descriptor, step.output_facets}, item.second, limits);
+    auto closed =
+        step.output_result_schema && !step.output_result_schema->images.empty()
+            ? step.output_result_schema->images[0].close_samples(item.second,
+                                                                 limits)
+            : input_internal::color_output_samples(
+                  {step.output_descriptor, step.output_facets}, item.second,
+                  limits);
     if (!closed.ok())
       return Result<DemandQuery>(closed.status());
     result.emplace(item.first, closed.take_value());
   }
   return Result<DemandQuery>(std::move(result));
 }
-Status unite_named(DemandQuery* target, const DemandQuery& values,
+template <class NamedValues>
+Status unite_named(DemandQuery* target, const NamedValues& values,
                    const FootprintLimits& limits) {
   for (const auto& item : values) {
-    auto found = target->find(item.first);
+    auto found = target->find(std::string(item.first));
     auto next = found == target->end()
                     ? Footprint::from_regions(item.second.shape(),
                                               item.second.boxes(), limits)
                     : found->second.unite(item.second, limits);
     if (!next.ok())
       return next.status();
-    target->insert_or_assign(item.first, next.take_value());
+    target->insert_or_assign(std::string(item.first), next.take_value());
   }
   std::uint64_t entries = 0;
   for (const auto& item : *target) {
@@ -5593,14 +5698,17 @@ Result<DemandQuery> changed_inputs(const ExecutionBindings& before,
                                    const FootprintLimits& limits) {
   std::map<std::string, const ExecutionBinding*> old, next;
   for (const auto& input : before.inputs)
-    old.emplace(input.name, &input);
+    old.emplace(ResourceString(input.name.data(), input.name.size()), &input);
   for (const auto& input : after.inputs)
-    next.emplace(input.name, &input);
+    next.emplace(ResourceString(input.name.data(), input.name.size()), &input);
   std::uint64_t remaining = access.maximum_samples;
   DemandQuery changes;
   for (const auto& required : support) {
     const auto& a = *old.at(required.first);
     const auto& b = *next.at(required.first);
+    if (a.result.valid() || b.result.valid())
+      return Result<DemandQuery>(Status{
+          ErrorCode::TypeMismatch, "Value comparison requires Value sources"});
     OperationMetadata metadata =
         a.snapshot
             ? OperationMetadata{a.snapshot->descriptor(), a.snapshot->facets()}
@@ -5675,11 +5783,179 @@ Result<DemandQuery> changed_inputs(const ExecutionBindings& before,
   }
   return Result<DemandQuery>(std::move(changes));
 }
-}  // namespace
-
-namespace {
-bool planar_required(const ExecutionPlan& plan);
+Result<ResourceVector<SourceObservation>> changed_observations(
+    const ExecutionBindings& before, const ExecutionBindings& after,
+    const ResourceVector<SourceObservation>& observations,
+    SnapshotAccessOptions access, const FootprintLimits& limits) {
+  using Answer = Result<ResourceVector<SourceObservation>>;
+  using Key = std::tuple<ResourceString, ResultSupportTarget, std::uint32_t>;
+  std::map<Key, Footprint, std::less<Key>,
+           ResourceAllocator<std::pair<const Key, Footprint>>>
+      physical, changes;
+  std::map<ResourceString, const ExecutionBinding*, ResourceStringLess,
+           ResourceAllocator<
+               std::pair<const ResourceString, const ExecutionBinding*>>>
+      old, next;
+  for (const auto& input : before.inputs)
+    old.emplace(ResourceString(input.name.data(), input.name.size()), &input);
+  for (const auto& input : after.inputs)
+    next.emplace(ResourceString(input.name.data(), input.name.size()), &input);
+  for (const auto& observation : observations) {
+    Key key{observation.input, observation.target, observation.slot};
+    auto found = physical.find(key);
+    auto united = found == physical.end()
+                      ? Result<Footprint>(observation.samples)
+                      : found->second.unite(observation.samples, limits);
+    if (!united.ok())
+      return Answer(united.status());
+    physical.insert_or_assign(key, united.take_value());
+    if (physical.size() > limits.maximum_boxes)
+      return Answer(Status{ErrorCode::ResourceExhausted, {}});
+  }
+  std::uint64_t remaining = access.maximum_samples;
+  for (const auto& item : physical) {
+    const auto& name = std::get<0>(item.first);
+    const auto kind = std::get<1>(item.first);
+    const auto slot = std::get<2>(item.first);
+    const auto& samples = item.second;
+    if (samples.empty())
+      continue;
+    const auto& a = *old.at(name);
+    const auto& b = *next.at(name);
+    auto count = samples.element_count();
+    if (!count.ok())
+      return Answer(count.status());
+    if (count.value() > remaining)
+      return Answer(
+          Status{ErrorCode::ResourceExhausted, "demand update sample limit"});
+    if (kind == ResultSupportTarget::Value) {
+      auto compared =
+          changed_inputs(before, after, {{std::string(name), samples}},
+                         {remaining, access.cancellation}, limits);
+      if (!compared.ok())
+        return Answer(compared.status());
+      remaining -= count.value();
+      auto found = compared.value().find(std::string(name));
+      if (found != compared.value().end())
+        changes.emplace(item.first, found->second);
+      continue;
+    }
+    if (!a.result.valid() || !b.result.valid() ||
+        !a.result.schema().same_schema(b.result.schema()))
+      return Answer(
+          Status{ErrorCode::TypeMismatch, "Result source schema changed"});
+    auto left = a.result.descriptor();
+    auto right = b.result.descriptor();
+    if (!left.ok())
+      return Answer(left.status());
+    if (!right.ok())
+      return Answer(right.status());
+    if (kind == ResultSupportTarget::Descriptor) {
+      --remaining;
+      bool dirty = left.value().sealed() != right.value().sealed();
+      for (std::uint32_t i = 0; i < left.value().field_count(); ++i)
+        dirty |= left.value().rows(i) != right.value().rows(i);
+      for (std::uint32_t i = 0; i < left.value().image_count(); ++i)
+        dirty |=
+            left.value().image_coverage(i) != right.value().image_coverage(i);
+      if (dirty)
+        changes.emplace(item.first, samples);
+      continue;
+    }
+    execution_internal::AccountedRegions boxes;
+    auto status = samples.visit(
+        [&](const auto& at) -> Status {
+          if (!remaining)
+            return Status{ErrorCode::ResourceExhausted, {}};
+          --remaining;
+          bool dirty = false;
+          if (kind == ResultSupportTarget::Image) {
+            if (slot >= a.result.schema().images.size())
+              return Status{ErrorCode::TypeMismatch, {}};
+            const auto width = Value::element_size(
+                a.result.schema().images[slot].descriptor.element_type);
+            std::uint8_t first[8]{}, second[8]{};
+            if (!right.value().image_coverage(slot).contains(at)) {
+              dirty = true;
+            } else {
+              auto read = a.result.read_image(left.value(), slot, at, first,
+                                              width, access.cancellation);
+              if (!read.ok())
+                return read;
+              read = b.result.read_image(right.value(), slot, at, second, width,
+                                         access.cancellation);
+              if (!read.ok())
+                return read;
+              dirty = std::memcmp(first, second, width) != 0;
+            }
+          } else {
+            if (kind != ResultSupportTarget::Field ||
+                slot >= a.result.schema().fields.size() || at.size() != 1)
+              return Status{ErrorCode::TypeMismatch, {}};
+            if (at[0] >= right.value().rows(slot)) {
+              dirty = true;
+            } else {
+              auto first = a.result.prepare_read(left.value(), slot, at[0], 1);
+              if (!first.ok())
+                return first.status();
+              auto second =
+                  b.result.prepare_read(right.value(), slot, at[0], 1);
+              if (!second.ok())
+                return second.status();
+              auto bytes = a.result.schema().row_bytes(slot);
+              if (!bytes.ok())
+                return bytes.status();
+              auto first_bytes =
+                  first.value().load(bytes.value(), access.cancellation);
+              if (!first_bytes.ok())
+                return first_bytes.status();
+              auto second_bytes =
+                  second.value().load(bytes.value(), access.cancellation);
+              if (!second_bytes.ok())
+                return second_bytes.status();
+              dirty = std::memcmp(first_bytes.value()->bytes().data(),
+                                  second_bytes.value()->bytes().data(),
+                                  bytes.value()) != 0;
+            }
+          }
+          if (dirty) {
+            if (boxes.boxes.size() >= limits.maximum_boxes)
+              return Status{ErrorCode::ResourceExhausted, {}};
+            std::array<RegionDimension, 8> dimensions{};
+            for (std::size_t i = 0; i < at.size(); ++i)
+              dimensions[i] = {at[i], 1};
+            auto admitted = boxes.append(dimensions.data(), at.size());
+            if (!admitted.ok())
+              return admitted;
+          }
+          return Status::success();
+        },
+        count.value(), access.cancellation);
+    if (!status.ok())
+      return Answer(status);
+    auto dirty = Footprint::from_regions(samples.shape(), boxes.boxes, limits);
+    if (!dirty.ok())
+      return Answer(dirty.status());
+    if (!dirty.value().empty())
+      changes.emplace(item.first, dirty.take_value());
+  }
+  ResourceVector<SourceObservation> answer;
+  for (const auto& observation : observations) {
+    auto found =
+        changes.find({observation.input, observation.target, observation.slot});
+    if (found == changes.end())
+      continue;
+    auto dirty = found->second.intersect(observation.samples, limits);
+    if (!dirty.ok())
+      return Answer(dirty.status());
+    if (!dirty.value().empty())
+      answer.push_back({observation.input, observation.target, observation.slot,
+                        observation.roles, dirty.take_value()});
+  }
+  return Answer(std::move(answer));
 }
+
+}  // namespace
 
 Result<FrozenExecution> ExecutionContext::freeze(
     const ExecutionPlan& plan, ExecutionBindings bindings) const {
@@ -5687,10 +5963,6 @@ Result<FrozenExecution> ExecutionContext::freeze(
       plan.operation_registry_.lock().get() != impl_->operation_registry.get())
     return Result<FrozenExecution>(
         Status::failure(ErrorCode::Stale, "invalid stale or foreign plan"));
-  if (planar_required(plan))
-    return Result<FrozenExecution>(Status::failure(
-        ErrorCode::TypeMismatch,
-        "planar image freeze requires structural capture migration"));
   for (auto& binding : bindings.inputs) {
     if (binding.source)
       return Result<FrozenExecution>(Status::failure(
@@ -5726,10 +5998,6 @@ Result<DemandResult> ExecutionContext::execute_fragments(
       frozen.operations_ != impl_->operation_registry)
     return Result<DemandResult>(
         Status{ErrorCode::Stale, "invalid or foreign frozen demand"});
-  if (planar_required(frozen.plan_))
-    return Result<DemandResult>(Status::failure(
-        ErrorCode::TypeMismatch,
-        "planar image fragment demand requires structural output"));
   const auto stop = [&] {
     if (options.dependencies.sets.cancellation.cancelled())
       return ErrorCode::Cancelled;
@@ -5808,6 +6076,7 @@ Result<DemandResult> ExecutionContext::execute_fragments(
     auto completed = run.take_value();
     result.diagnostics = std::move(completed.diagnostics);
     result.dependencies = std::move(completed.dependencies);
+    result.results = std::move(completed.results);
     if (stop() != ErrorCode::Ok)
       return failure(Status{stop(), {}});
     return Result<DemandResult>(std::move(result));
@@ -5828,10 +6097,6 @@ Result<DemandResult> ExecutionContext::execute_fragments(
 Result<DemandHandle> ExecutionContext::open_demand(const ExecutionPlan& plan,
                                                    ExecutionBindings bindings,
                                                    DemandConfig config) {
-  if (planar_required(plan))
-    return Result<DemandHandle>(Status::failure(
-        ErrorCode::TypeMismatch,
-        "planar image demand handle requires structural output"));
   if (!impl_ || !plan.current() ||
       plan.operation_registry_.lock() != impl_->operation_registry)
     return Result<DemandHandle>(
@@ -6026,12 +6291,17 @@ bool DemandHandle::cancel() const noexcept {
   return first;
 }
 Result<DemandUpdate> DemandHandle::replace_bindings(
-    ExecutionBindings bindings, const SnapshotAccessOptions& options) const {
+    ExecutionBindings bindings, const SnapshotAccessOptions& options) const
+    try {
   if (!impl_)
     return Result<DemandUpdate>(Status{ErrorCode::Stale, {}});
   auto owner = impl_->owner.lock();
   if (!owner)
     return Result<DemandUpdate>(Status{ErrorCode::Cancelled, {}});
+  auto root = owner->context->resource_budget();
+  std::optional<ResourceAllocationScope> root_scope;
+  if (root.ok())
+    root_scope.emplace(root.value());
   auto begun = owner->acquire(impl_, options.cancellation);
   if (!begun.ok())
     return Result<DemandUpdate>(begun.status());
@@ -6055,19 +6325,19 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
   auto next = std::make_shared<const FrozenExecution>(frozen.take_value());
   FootprintLimits limits{impl_->config.maximum_metadata_entries, 1048576,
                          lease->cancellation};
-  DemandQuery support;
+  ResourceVector<SourceObservation> support;
   for (const auto& item : publications) {
-    auto source = item.second->dependencies.source_support(limits);
+    auto source = item.second->dependencies.source_observations(limits);
     if (!source.ok())
       return failure(source.status());
-    auto status = unite_named(&support, source.value(), limits);
-    if (!status.ok())
-      return failure(status);
+    if (source.value().size() > limits.maximum_boxes - support.size())
+      return failure(Status{ErrorCode::ResourceExhausted, {}});
+    support.insert(support.end(), source.value().begin(), source.value().end());
   }
   auto access = options;
   access.cancellation = lease->cancellation;
-  auto changes = changed_inputs(lease->bundle->bindings_, next->bindings_,
-                                support, access, limits);
+  auto changes = changed_observations(lease->bundle->bindings_, next->bindings_,
+                                      support, access, limits);
   if (!changes.ok())
     return failure(changes.status());
   DemandUpdate update;
@@ -6079,7 +6349,8 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
     auto publication = std::make_shared<Impl::Publication>(*item.second);
     for (const auto& change : changes.value()) {
       auto dirty = publication->dependencies.potential_dirty(
-          change.first, change.second, 7, limits);
+          std::string(change.input), change.samples, change.roles, limits,
+          change.target, change.slot);
       if (!dirty.ok())
         return failure(dirty.status());
       auto status = unite_named(&publication->dirty, dirty.value(), limits);
@@ -6134,1596 +6405,13 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
   ++impl_->revision;
   impl_->generation.store(update.generation, std::memory_order_release);
   return Result<DemandUpdate>(std::move(update));
-}
-
-namespace {
-bool structural_image_facets(const ValueDescriptor& descriptor,
-                             const std::vector<ValueFacet>& facets) {
-  for (const auto& facet : facets) {
-    if (facet.key == "photospider.image")
-      return true;
-    if (facet.key == "photospider.color-array" && descriptor.shape.size() >= 3)
-      return true;
-    if (facet.key == "photospider.semantic") {
-      auto semantic = decode_semantic(facet);
-      if (semantic.ok() && (semantic.value().kind == SemanticKind::Image ||
-                            semantic.value().kind == SemanticKind::ImagePlane ||
-                            semantic.value().kind == SemanticKind::Mask))
-        return true;
-    }
-  }
-  return false;
-}
-bool planar_required(const ExecutionPlan& plan) {
-  for (const auto& input : plan.input_declarations())
-    if (input.planar_layout ||
-        structural_image_facets(input.descriptor, input.facets))
-      return true;
-  for (const auto& step : plan.steps())
-    if (step.traits.outputs[0].planar_layout ||
-        structural_image_facets(step.output_descriptor, step.output_facets))
-      return true;
-  return false;
-}
-}  // namespace
-
-Result<ExecutionResult> ExecutionContext::execute_planar(
-    const ExecutionPlan& plan, ExecutionBindings bindings,
-    const CancellationToken& cancellation, const ExecutionOptions& options) {
-  const auto started = std::chrono::steady_clock::now();
-  const auto elapsed_us = [](std::chrono::steady_clock::time_point begin) {
-    return static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - begin)
-            .count());
-  };
-  if (!impl_ || !plan.current() ||
-      plan.operation_registry_.lock().get() != impl_->operation_registry.get())
-    return Result<ExecutionResult>(Status::failure(
-        ErrorCode::Stale, "invalid or foreign planar execution plan"));
-  if (cancellation.cancelled())
-    return Result<ExecutionResult>(
-        Status::failure(ErrorCode::Cancelled, "planar execution cancelled"));
-  if (plan.outputs().size() > 1) {
-    ExecutionResult combined;
-    combined.diagnostics.plan_digest = plan.digest().value;
-    for (const auto& named : plan.outputs()) {
-      auto isolated =
-          plan.tile_plan(named.first, plan.output_regions().at(named.first));
-      if (!isolated.ok())
-        return Result<ExecutionResult>(isolated.status());
-      auto run =
-          execute_planar(isolated.value(), bindings, cancellation, options);
-      if (!run.ok())
-        return run;
-      auto child = run.take_value();
-      if (child.images.count(named.first))
-        combined.images.emplace(named.first,
-                                std::move(child.images.at(named.first)));
-      else
-        combined.values.emplace(named.first,
-                                std::move(child.values.at(named.first)));
-      auto& total = combined.diagnostics;
-      const auto& part = child.diagnostics;
-      total.operation_timings.insert(total.operation_timings.end(),
-                                     part.operation_timings.begin(),
-                                     part.operation_timings.end());
-      total.selected_backends.insert(part.selected_backends.begin(),
-                                     part.selected_backends.end());
-      total.source_read_count += part.source_read_count;
-      total.source_read_bytes += part.source_read_bytes;
-      total.result_copy_bytes += part.result_copy_bytes;
-      total.tile_count += part.tile_count;
-      total.transfer_count += part.transfer_count;
-      total.transfer_bytes += part.transfer_bytes;
-      total.native_dispatch_count += part.native_dispatch_count;
-      total.native_submission_count += part.native_submission_count;
-      total.cpu_stage_count += part.cpu_stage_count;
-      total.cpu_tile_callback_count += part.cpu_tile_callback_count;
-      total.native_compute_us += part.native_compute_us;
-      total.native_constant_bytes += part.native_constant_bytes;
-      total.host_access_count += part.host_access_count;
-      total.retained_input_bytes =
-          std::max(total.retained_input_bytes, part.retained_input_bytes);
-      total.peak_live_bytes =
-          std::max(total.peak_live_bytes, part.peak_live_bytes);
-      total.planned_peak_bytes =
-          std::max(total.planned_peak_bytes, part.planned_peak_bytes);
-      total.peak_active_tasks =
-          std::max(total.peak_active_tasks, part.peak_active_tasks);
-      total.managed_resources = part.managed_resources;
-    }
-    combined.diagnostics.execute_us = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - started)
-            .count());
-    return Result<ExecutionResult>(std::move(combined));
-  }
-  auto observation = std::make_shared<execution_internal::MemoryObservation>();
-  auto page_budget = std::make_shared<PlanarPageBudget>(
-      impl_->maximum_live_bytes,
-      [memory = impl_->budget,
-       observation](std::uint64_t bytes) -> Result<std::shared_ptr<void>> {
-        auto reserved = memory->reserve(bytes, {}, observation);
-        if (!reserved.ok())
-          return Result<std::shared_ptr<void>>(reserved.status());
-        auto reservation = reserved.take_value();
-        auto lease = reservation->reserve_external(bytes);
-        reservation->seal();
-        return lease;
-      },
-      impl_->budget);
-  // All plugin planar entry points, including validation-only mapped
-  // operations, share context-wide waiting admission and their selected lane.
-  // Waiting for retirement keeps references captured by body alive.
-  const auto dispatch_planar_callback =
-      [&](const std::function<Status()>& body, std::uint64_t* callback_us,
-          Backend backend = Backend::Cpu) -> Status {
-    auto* pool =
-        backend == Backend::Gpu ? impl_->gpu_pool.get() : &impl_->cpu_pool;
-    if (!pool ||
-        (backend == Backend::Gpu &&
-         (!impl_->native_device || !impl_->native_device->available())))
-      return Status{ErrorCode::BackendUnavailable,
-                    "native planar GPU unavailable"};
-    struct Completion final {
-      Status status{ErrorCode::Internal, "planar callback did not run"};
-      std::mutex mutex;
-      std::condition_variable changed;
-      bool done = false;
-      std::uint64_t callback_us = 0;
-      ResourceLease lease;
-    };
-    auto completion = std::make_shared<Completion>();
-    if (const auto& resources = impl_->budget->resources()) {
-      auto capacity =
-          ResourceCapacity::host(sizeof(Completion), sizeof(Completion));
-      capacity[ResourceKind::Queue] = 1;
-      capacity[ResourceKind::Entries] = 1;
-      auto admitted = resources->reserve(capacity);
-      if (!admitted.ok())
-        return admitted.status();
-      completion->lease = admitted.take_value();
-    }
-    auto admission = impl_->waiting_admission.try_acquire();
-    if (!admission)
-      return Status::failure(ErrorCode::ResourceExhausted,
-                             "planar callback queue is full");
-    if (const auto& resources = impl_->budget->resources()) {
-      auto issued = resources->consume({0, 0, 0, 1});
-      if (!issued.ok())
-        return issued;
-    }
-    QueuedCallback callback{
-        [&, completion] {
-          const auto callback_started = std::chrono::steady_clock::now();
-          try {
-            if (cancellation.cancelled() || !plan.current()) {
-              completion->status = Status::failure(
-                  cancellation.cancelled() ? ErrorCode::Cancelled
-                                           : ErrorCode::Stale,
-                  "planar execution stopped before callback");
-              return;
-            }
-            completion->status = body();
-          } catch (const std::bad_alloc&) {
-            completion->status = Status{ErrorCode::ResourceExhausted, {}};
-          } catch (...) {
-            completion->status = Status{ErrorCode::OperationFailed, {}};
-          }
-          completion->callback_us = elapsed_us(callback_started);
-        },
-        std::move(*admission),
-        [completion] {
-          {
-            std::lock_guard<std::mutex> lock(completion->mutex);
-            completion->done = true;
-          }
-          completion->changed.notify_one();
-        },
-        completion->lease};
-    if (!pool->submit(std::move(callback)))
-      return Status::failure(ErrorCode::ResourceExhausted,
-                             "planar callback queue stopped");
-    std::unique_lock<std::mutex> completion_lock(completion->mutex);
-    completion->changed.wait(completion_lock, [&] { return completion->done; });
-    auto status = std::move(completion->status);
-    if (cancellation.cancelled() || !plan.current())
-      status = Status::failure(
-          cancellation.cancelled() ? ErrorCode::Cancelled : ErrorCode::Stale,
-          "planar execution stopped after callback");
-    if (callback_us)
-      *callback_us = completion->callback_us;
-    return status;
-  };
-  const auto run_planar_callback =
-      [&](const std::function<Status()>& body, std::uint64_t* callback_us,
-          Backend backend = Backend::Cpu, bool coordinator = false) -> Status {
-    Status status;
-    try {
-      if (coordinator) {
-        if (execution_internal::in_kernel_worker)
-          return Status{ErrorCode::InvalidArgument,
-                        "nested CPU stage coordinator"};
-        const auto begin = std::chrono::steady_clock::now();
-        status = body();
-        if (callback_us)
-          *callback_us = elapsed_us(begin);
-      } else {
-        status = dispatch_planar_callback(body, callback_us, backend);
-      }
-    } catch (const std::bad_alloc&) {
-      status = Status{ErrorCode::ResourceExhausted, {}};
-    } catch (...) {
-      status = Status{ErrorCode::OperationFailed, {}};
-    }
-    // Admission and queue submission failures obey the same post-entry
-    // priority as callback completion, without allocating a diagnostic.
-    if (cancellation.cancelled())
-      return Status{ErrorCode::Cancelled, {}};
-    if (!plan.current())
-      return Status{ErrorCode::Stale, {}};
-    return status;
-  };
-  ExecutionDiagnostics diagnostics;
-  diagnostics.plan_digest = plan.digest().value;
-  for (const auto& step : plan.steps())
-    if (((step.traits.outputs[0].planar_layout ||
-          structural_image_facets(step.output_descriptor,
-                                  step.output_facets)) &&
-         !step.traits.planar_storage_capable) ||
-        step.output_result_schema ||
-        (step.backend == Backend::Gpu &&
-         (!step.traits.planar_storage_capable ||
-          step.traits.outputs[0].region_rule != OperationRegionRule::Whole ||
-          step.traits.allows_cpu_fallback)))
-      return Result<ExecutionResult>(Status::failure(
-          ErrorCode::TypeMismatch,
-          "image operation has not migrated to planar storage"));
-  for (const auto& step : plan.steps())
-    if (step.backend == Backend::Gpu &&
-        (!impl_->native_device || !impl_->native_device->available() ||
-         !impl_->gpu_pool))
-      return Result<ExecutionResult>(Status{ErrorCode::BackendUnavailable,
-                                            "native planar GPU unavailable"});
-  if (bindings.inputs.size() != plan.input_declarations().size())
-    return Result<ExecutionResult>(Status::failure(
-        ErrorCode::InvalidArgument, "planar binding count mismatch"));
-  auto retained_inputs = retain_managed_inputs(&bindings.inputs, impl_->budget);
-  if (!retained_inputs.ok())
-    return Result<ExecutionResult>(retained_inputs);
-  auto admitted_resources =
-      impl_->budget->resources()
-          ? plan.resources().reference(*impl_->budget->resources())
-          : Result<ResourceBindings>(plan.resources());
-  if (!admitted_resources.ok())
-    return Result<ExecutionResult>(admitted_resources.status());
-  const auto resources = admitted_resources.take_value();
-  std::map<std::string, const ExecutionBinding*> named;
-  for (const auto& binding : bindings.inputs) {
-    if (!input_internal::valid_input_name(binding.name) ||
-        !named.emplace(binding.name, &binding).second)
-      return Result<ExecutionResult>(Status::failure(
-          ErrorCode::InvalidArgument, "invalid planar binding names"));
-  }
-  std::vector<Value> generic_sources;
-  std::vector<PlanarImage> sources;
-  sources.reserve(plan.input_declarations().size());
-  std::set<const void*> retained_sources;
-  std::vector<std::shared_ptr<void>> input_pins;
-  std::vector<std::shared_ptr<void>> input_admissions;
-  for (const auto& declaration : plan.input_declarations()) {
-    const auto found = named.find(declaration.name);
-    if (found == named.end())
-      return Result<ExecutionResult>(Status::failure(ErrorCode::InvalidArgument,
-                                                     "missing planar binding"));
-    const auto& binding = *found->second;
-    if (!declaration.planar_layout) {
-      if (!binding.value.valid() || binding.image || binding.source ||
-          binding.snapshot ||
-          binding.value.descriptor().shape != declaration.descriptor.shape ||
-          binding.value.descriptor().element_type !=
-              declaration.descriptor.element_type ||
-          !input_internal::same_facets(binding.value.facets(),
-                                       declaration.facets))
-        return Result<ExecutionResult>(
-            Status{ErrorCode::TypeMismatch,
-                   "invalid generic binding in planar graph"});
-      auto status =
-          input_internal::validate_binding(declaration, binding.value);
-      if (!status.ok())
-        return Result<ExecutionResult>(status);
-      generic_sources.push_back(binding.value);
-      sources.emplace_back();
-      continue;
-    }
-    generic_sources.emplace_back();
-    if (!binding.image || !binding.image->valid() || binding.value.valid() ||
-        binding.source || binding.snapshot)
-      return Result<ExecutionResult>(
-          Status::failure(ErrorCode::TypeMismatch,
-                          "image input requires explicit planar import"));
-    const auto& image = *binding.image;
-    if (image.descriptor().shape != declaration.descriptor.shape ||
-        image.descriptor().element_type !=
-            declaration.descriptor.element_type ||
-        !input_internal::same_facets(image.facets(), declaration.facets) ||
-        !declaration.planar_layout ||
-        image.config().order != declaration.planar_layout->order ||
-        image.config().height_axis != declaration.planar_layout->height_axis ||
-        image.config().width_axis != declaration.planar_layout->width_axis ||
-        image.config().channel_axis !=
-            declaration.planar_layout->channel_axis ||
-        image.config().row_pitch_bytes !=
-            declaration.planar_layout->row_pitch_bytes ||
-        image.config().groups.size() !=
-            declaration.planar_layout->groups.size() ||
-        image.config().tile_height != plan.tile_height() ||
-        image.config().tile_width != plan.tile_width())
-      return Result<ExecutionResult>(Status::failure(
-          ErrorCode::TypeMismatch,
-          "planar image declaration or DAG tile geometry mismatch"));
-    for (std::size_t i = 0; i < image.config().groups.size(); ++i) {
-      const auto& actual = image.config().groups[i];
-      const auto& expected = declaration.planar_layout->groups[i];
-      if (actual.role != expected.role ||
-          actual.first_channel != expected.first_channel ||
-          actual.channel_count != expected.channel_count)
-        return Result<ExecutionResult>(Status::failure(
-            ErrorCode::TypeMismatch, "planar component groups mismatch"));
-    }
-    sources.push_back(image);
-    if (retained_sources.insert(image.owner_token()).second) {
-      if (image.config().aggregate_budget->accounting_domain() ==
-          impl_->budget.get()) {
-        auto pinned = image.pin_for_execution(cancellation);
-        if (!pinned.ok())
-          return Result<ExecutionResult>(pinned.status());
-        input_pins.push_back(pinned.take_value());
-        diagnostics.retained_input_bytes += image.resident_bytes();
-      } else {
-        const auto table = impl_->planar_foreign_sources;
-        std::unique_lock<std::timed_mutex> held(table->mutex, std::defer_lock);
-        while (!held.try_lock_for(std::chrono::milliseconds(2)))
-          if (cancellation.cancelled())
-            return Result<ExecutionResult>(Status::failure(
-                ErrorCode::Cancelled, "planar source admission cancelled"));
-        const auto token = image.owner_token();
-        auto known = table->entries.find(token);
-        while (known != table->entries.end() && known->second->retiring) {
-          if (cancellation.cancelled())
-            return Result<ExecutionResult>(Status::failure(
-                ErrorCode::Cancelled, "planar source retirement cancelled"));
-          table->changed.wait_for(held, std::chrono::milliseconds(2));
-          known = table->entries.find(token);
-        }
-        auto admission =
-            known == table->entries.end() ? nullptr : known->second;
-        if (!admission) {
-          admission = std::make_shared<Impl::ForeignPlanarAdmission>();
-          admission->owner = image;
-          auto pinned = image.pin_for_execution(cancellation);
-          if (!pinned.ok())
-            return Result<ExecutionResult>(pinned.status());
-          admission->pin = pinned.take_value();
-          admission->resident_bytes = image.resident_bytes();
-          const auto overhead = sizeof(Impl::ForeignPlanarAdmission) + 128;
-          auto charge = checked_add(admission->resident_bytes, overhead);
-          if (!charge.ok())
-            return Result<ExecutionResult>(charge.status());
-          if (charge.value()) {
-            auto reserved =
-                impl_->budget->reserve(charge.value(), {}, observation);
-            if (!reserved.ok())
-              return Result<ExecutionResult>(reserved.status());
-            auto reservation = reserved.take_value();
-            auto lease = reservation->reserve_external(charge.value());
-            reservation->seal();
-            if (!lease.ok())
-              return Result<ExecutionResult>(lease.status());
-            admission->lease = lease.take_value();
-          }
-          try {
-            table->entries.emplace(token, admission);
-          } catch (const std::bad_alloc&) {
-            held.unlock();
-            return Result<ExecutionResult>(Status::failure(
-                ErrorCode::ResourceExhausted,
-                "planar source admission metadata allocation failed"));
-          }
-        }
-        if (admission->active_runs == UINT32_MAX)
-          return Result<ExecutionResult>(
-              Status::failure(ErrorCode::ResourceExhausted,
-                              "too many concurrent planar source references"));
-        ++admission->active_runs;
-        held.unlock();
-        auto run_admission = std::shared_ptr<void>(
-            admission.get(), [table, admission, token](void*) {
-              bool last = false;
-              {
-                std::lock_guard<std::timed_mutex> lock(table->mutex);
-                last = --admission->active_runs == 0;
-                if (last)
-                  admission->retiring = true;
-              }
-              if (!last)
-                return;
-              admission->lease.reset();
-              admission->pin.reset();
-              admission->owner = {};
-              {
-                std::lock_guard<std::timed_mutex> lock(table->mutex);
-                const auto current = table->entries.find(token);
-                if (current != table->entries.end() &&
-                    current->second.get() == admission.get())
-                  table->entries.erase(current);
-              }
-              table->changed.notify_all();
-            });
-        input_admissions.push_back(std::move(run_admission));
-        diagnostics.retained_input_bytes += admission->resident_bytes;
-      }
-    }
-  }
-  // A generic ancestor requested by a planar assembly keeps the ordinary
-  // dependency executor. Rebuild only its reachable subgraph, so unrelated
-  // image declarations do not force a rectangular bridge or destroy aliases.
-  if (plan.outputs().size() == 1) {
-    std::vector<bool> needed(plan.steps().size(), false);
-    needed[plan.outputs().begin()->second] = true;
-    bool generic = true;
-    std::set<std::size_t> declarations;
-    for (std::size_t i = needed.size(); i-- > 0;) {
-      if (!needed[i])
-        continue;
-      const auto& step = plan.steps()[i];
-      if (step.traits.outputs[0].planar_layout || step.output_result_schema)
-        generic = false;
-      for (const auto& edge : step.inputs) {
-        if (const auto* input = std::get_if<PlanWorkflowInput>(&edge)) {
-          declarations.insert(input->declaration_index);
-          if (plan.input_declarations()[input->declaration_index].planar_layout)
-            generic = false;
-        } else {
-          needed[std::get<PlanStepInput>(edge).step_index] = true;
-        }
-      }
-    }
-    if (generic) {
-      WorkflowDocument document;
-      ExecutionBindings selected_bindings;
-      for (auto index : declarations) {
-        const auto& declaration = plan.input_declarations()[index];
-        document.inputs.push_back(declaration);
-        for (const auto& binding : bindings.inputs)
-          if (binding.name == declaration.name)
-            selected_bindings.inputs.push_back(binding);
-      }
-      std::set<std::uint64_t> nodes;
-      for (std::size_t i = 0; i < needed.size(); ++i) {
-        if (!needed[i])
-          continue;
-        const auto& step = plan.steps()[i];
-        if (!nodes.insert(step.node_id).second)
-          continue;
-        WorkflowNode node;
-        node.id = step.node_id;
-        node.operation = step.operation;
-        node.parameters = step.parameters;
-        for (const auto& edge : step.inputs) {
-          if (const auto* input = std::get_if<PlanWorkflowInput>(&edge)) {
-            node.inputs.push_back(WorkflowInputReference{
-                plan.input_declarations()[input->declaration_index].id});
-          } else {
-            const auto& producer =
-                plan.steps()[std::get<PlanStepInput>(edge).step_index];
-            node.inputs.push_back(WorkflowNodeOutput{
-                producer.node_id, producer.traits.outputs[0].key});
-          }
-        }
-        document.nodes.push_back(std::move(node));
-      }
-      const auto& root = *plan.outputs().begin();
-      const auto& step = plan.steps()[root.second];
-      document.outputs = {
-          {root.first, step.node_id, step.traits.outputs[0].key}};
-      GraphContext graph(document);
-      Compiler compiler(impl_->operation_registry);
-      PlanningOptions planning;
-      planning.output_regions = plan.output_regions();
-      auto compiled = compiler.compile(graph, planning, plan.resources());
-      if (!compiled.ok())
-        return Result<ExecutionResult>(compiled.status());
-      auto result = execute(compiled.value().plan, std::move(selected_bindings),
-                            cancellation);
-      if (!plan.current())
-        return Result<ExecutionResult>(
-            Status{ErrorCode::Stale, "assembly source plan changed"});
-      return result;
-    }
-  }
-  // Assembly resolves its ancestors per exact piece. Do not eagerly execute
-  // unselected ports or rectangular scheduling envelopes across channel gaps.
-  std::vector<bool> active(plan.steps().size(), false);
-  for (const auto& root : plan.outputs())
-    active[root.second] = true;
-  for (std::size_t i = active.size(); i-- > 0;)
-    if (active[i] && !((plan.steps()[i].traits.planar_exact_dependencies ||
-                        plan.steps()[i].traits.outputs[0].data_movement ==
-                            DataMovementKind::BitwiseMapped) &&
-                       plan.steps()[i].traits.outputs[0].planar_layout))
-      for (const auto& input : plan.steps()[i].inputs)
-        if (const auto* producer = std::get_if<PlanStepInput>(&input))
-          active[producer->step_index] = true;
-  std::vector<PlanarImage> produced(plan.steps().size());
-  std::vector<Value> tensor_outputs(plan.steps().size());
-  for (std::size_t index = 0; index < plan.steps().size(); ++index) {
-    if (!active[index])
-      continue;
-    if (cancellation.cancelled() || !plan.current())
-      return Result<ExecutionResult>(Status::failure(
-          cancellation.cancelled() ? ErrorCode::Cancelled : ErrorCode::Stale,
-          "planar execution stopped"));
-    const auto& step = plan.steps()[index];
-    if (step.inputs.size() != step.input_demands.size())
-      return Result<ExecutionResult>(Status::failure(
-          ErrorCode::TypeMismatch, "unsupported planar operation arity"));
-    if (step.traits.planar_exact_dependencies &&
-        step.traits.outputs[0].planar_layout) {
-      const auto& layout = *step.traits.outputs[0].planar_layout;
-      std::vector<OperationMetadata> metadata;
-      for (const auto& edge : step.inputs) {
-        OperationMetadata m;
-        if (const auto* input = std::get_if<PlanWorkflowInput>(&edge)) {
-          const auto& declaration =
-              plan.input_declarations()[input->declaration_index];
-          m.descriptor = declaration.descriptor;
-          m.facets = declaration.facets;
-          m.planar_layout = declaration.planar_layout;
-        } else {
-          const auto& producer =
-              plan.steps()[std::get<PlanStepInput>(edge).step_index];
-          m.descriptor = producer.output_descriptor;
-          m.facets = producer.output_facets;
-          m.planar_layout = producer.traits.outputs[0].planar_layout;
-        }
-        metadata.push_back(std::move(m));
-      }
-      FootprintLimits limits;
-      limits.cancellation = cancellation;
-      if (const auto& root = impl_->budget->resources()) {
-        limits.consume_work = [&root](std::uint64_t n) {
-          return root->consume({n});
-        };
-      }
-      // Bound bookkeeping before normalization or acquiring disjoint windows.
-      const auto capacity =
-          step.traits.outputs[0].static_dependency_pieces->size();
-      auto admitted = impl_->budget->reserve(
-          4096 + capacity * (metadata.size() + 1) * 8192, {}, observation);
-      if (!admitted.ok())
-        return Result<ExecutionResult>(admitted.status());
-      auto bookkeeping = admitted.take_value();
-      auto bookkeeping_owner = bookkeeping->reserve_external(
-          4096 + capacity * (metadata.size() + 1) * 8192);
-      bookkeeping->seal();
-      if (!bookkeeping_owner.ok())
-        return Result<ExecutionResult>(bookkeeping_owner.status());
-      auto required = input_internal::planar_exact_requirements(
-          step.traits, metadata, step.output_descriptor, step.output_demand,
-          limits);
-      if (!required.ok())
-        return Result<ExecutionResult>(required.status());
-      std::vector<PlanarMappedInput> exact_inputs;
-      std::vector<PlanarImage> image_owners;
-      ResourceBindings owned = resources;
-      for (std::size_t port = 0; port < metadata.size(); ++port) {
-        for (const auto& region : required.value()[port].boxes()) {
-          if (cancellation.cancelled() || !plan.current())
-            return Result<ExecutionResult>(
-                Status{cancellation.cancelled() ? ErrorCode::Cancelled
-                                                : ErrorCode::Stale,
-                       "exact planar fetch stopped"});
-          PlanarImage source_image;
-          Value source_value;
-          const auto& edge = step.inputs[port];
-          if (const auto* external = std::get_if<PlanWorkflowInput>(&edge)) {
-            source_image = sources[external->declaration_index];
-            source_value = generic_sources[external->declaration_index];
-            ++diagnostics.source_read_count;
-            diagnostics.source_read_bytes +=
-                region.element_count().value() *
-                Value::element_size(metadata[port].descriptor.element_type);
-          } else {
-            const auto producer = std::get<PlanStepInput>(edge).step_index;
-            ExecutionPlan selected = plan;
-            selected.outputs_ = {{"exact_source", producer}};
-            selected.output_regions_ = {
-                {"exact_source",
-                 Region::whole(metadata[port].descriptor.shape)}};
-            auto subplan = selected.tile_plan("exact_source", region);
-            if (!subplan.ok())
-              return Result<ExecutionResult>(subplan.status());
-            auto run =
-                execute_planar(subplan.value(), bindings, cancellation, {});
-            if (!run.ok())
-              return run;
-            if (run.value().images.count("exact_source"))
-              source_image = run.value().images.at("exact_source");
-            else
-              source_value = run.value().values.at("exact_source");
-            const auto& child = run.value().diagnostics;
-            diagnostics.peak_live_bytes =
-                std::max(diagnostics.peak_live_bytes, child.peak_live_bytes);
-            diagnostics.planned_peak_bytes = std::max(
-                diagnostics.planned_peak_bytes, child.planned_peak_bytes);
-            diagnostics.source_read_count += child.source_read_count;
-            diagnostics.source_read_bytes += child.source_read_bytes;
-            diagnostics.result_copy_bytes += child.result_copy_bytes;
-            diagnostics.operation_timings.insert(
-                diagnostics.operation_timings.end(),
-                child.operation_timings.begin(), child.operation_timings.end());
-          }
-          auto united =
-              owned.unite(source_image.valid() ? source_image.resources()
-                                               : source_value.resources());
-          if (!united.ok())
-            return Result<ExecutionResult>(united.status());
-          owned = united.take_value();
-          PlanarMappedInput input;
-          input.port = static_cast<std::uint32_t>(port);
-          input.region = region;
-          if (source_image.valid()) {
-            auto read = source_image.acquire(region, cancellation);
-            if (!read.ok())
-              return Result<ExecutionResult>(read.status());
-            input.image = read.take_value();
-          } else {
-            auto view = source_value.view(region);
-            if (!view.ok())
-              return Result<ExecutionResult>(view.status());
-            input.value = view.take_value();
-          }
-          image_owners.push_back(std::move(source_image));
-          exact_inputs.push_back(std::move(input));
-        }
-      }
-      PlanarImageConfig config;
-      config.order = layout.order;
-      config.height_axis = layout.height_axis;
-      config.width_axis = layout.width_axis;
-      config.channel_axis = layout.channel_axis;
-      config.row_pitch_bytes = layout.row_pitch_bytes;
-      config.groups = layout.groups;
-      config.tile_height = plan.tile_height();
-      config.tile_width = plan.tile_width();
-      config.aggregate_budget = page_budget;
-      config.maximum_backed_bytes = page_budget->maximum_bytes();
-      auto created = PlanarImage::create(step.output_descriptor, config,
-                                         step.output_facets, owned);
-      if (!created.ok())
-        return Result<ExecutionResult>(created.status());
-      auto image = created.take_value();
-      const auto policy = step.traits.outputs[0].data_movement_view_policy;
-      bool validate_only = step.traits.outputs[0].preserve_output_views &&
-                           policy != DataMovementViewPolicy::Materialize;
-      if (validate_only) {
-        auto proof = input_internal::planar_exact_identity_view(
-            step.traits, metadata, step.output_descriptor, limits);
-        if (!proof.ok())
-          return Result<ExecutionResult>(proof.status());
-        validate_only = proof.value();
-      }
-      if (policy == DataMovementViewPolicy::RequireView && !validate_only)
-        return Result<ExecutionResult>(
-            Status{ErrorCode::InvalidArgument,
-                   "ViewUnavailable: exact operation has no complete identity "
-                   "view proof",
-                   FailureReason::InvalidDomain});
-      // At most two passes: validate a proved identity alias, or materialize if
-      // its requested coverage is spread over incompatible upstream owners.
-      for (;;) {
-        struct Completion final {
-          Status status{ErrorCode::Internal, "planar callback did not run"};
-          std::mutex mutex;
-          std::condition_variable changed;
-          bool done = false;
-          std::uint64_t callback_us = 0;
-          NumericDiagnostics numeric;
-          ResourceLease lease;
-        };
-        auto completion = std::make_shared<Completion>();
-        if (const auto& resources = impl_->budget->resources()) {
-          auto capacity =
-              ResourceCapacity::host(sizeof(Completion), sizeof(Completion));
-          capacity[ResourceKind::Queue] = 1;
-          capacity[ResourceKind::Entries] = 1;
-          auto admitted = resources->reserve(capacity);
-          if (!admitted.ok())
-            return Result<ExecutionResult>(admitted.status());
-          completion->lease = admitted.take_value();
-        }
-        auto admission = impl_->waiting_admission.try_acquire();
-        if (!admission)
-          return Result<ExecutionResult>(Status::failure(
-              ErrorCode::ResourceExhausted, "planar callback queue is full"));
-        if (const auto& resources = impl_->budget->resources()) {
-          auto issued = resources->consume({0, 0, 0, 1});
-          if (!issued.ok())
-            return Result<ExecutionResult>(issued);
-        }
-        QueuedCallback callback{
-            [&, completion] {
-              const auto callback_started = std::chrono::steady_clock::now();
-              try {
-                if (cancellation.cancelled() || !plan.current()) {
-                  completion->status = Status::failure(
-                      cancellation.cancelled() ? ErrorCode::Cancelled
-                                               : ErrorCode::Stale,
-                      "planar execution stopped before callback");
-                  return;
-                }
-                ErrorCode metadata_failure = ErrorCode::Ok;
-                std::optional<ResourceAllocationScope> resource_scope;
-                if (const auto& budget = impl_->budget->resources())
-                  resource_scope.emplace(*budget, &metadata_failure);
-                completion->status =
-                    impl_->operation_registry->invoke_planar_exact(
-                        step.operation, exact_inputs, metadata, step.parameters,
-                        step.output_demand, image, validate_only, cancellation,
-                        impl_->budget->on_demand_allocator(observation),
-                        step.prepared, [&plan] { return plan.current(); },
-                        &completion->numeric,
-                        impl_->budget->resources()
-                            ? &*impl_->budget->resources()
-                            : nullptr,
-                        &metadata_failure);
-                if (metadata_failure != ErrorCode::Ok &&
-                    completion->status.detail.origin !=
-                        FailureOrigin::Protocol &&
-                    completion->status.code != ErrorCode::ResourceExhausted &&
-                    completion->status.code != ErrorCode::Cancelled &&
-                    completion->status.code != ErrorCode::Stale)
-                  completion->status = Status{
-                      metadata_failure,
-                      "exact planar metadata allocation failed",
-                      FailureReason::CapacityLimit,
-                      {FailureOrigin::Resource, FailureScope::Unspecified}};
-              } catch (const std::bad_alloc&) {
-                completion->status = Status{ErrorCode::ResourceExhausted, {}};
-              } catch (...) {
-                completion->status = Status{ErrorCode::OperationFailed, {}};
-              }
-              completion->callback_us = elapsed_us(callback_started);
-            },
-            std::move(*admission),
-            [completion] {
-              {
-                std::lock_guard<std::mutex> lock(completion->mutex);
-                completion->done = true;
-              }
-              completion->changed.notify_one();
-            },
-            completion->lease};
-        if (!impl_->cpu_pool.submit(std::move(callback)))
-          return Result<ExecutionResult>(Status::failure(
-              ErrorCode::ResourceExhausted, "planar callback queue stopped"));
-        std::unique_lock<std::mutex> completion_lock(completion->mutex);
-        completion->changed.wait(completion_lock,
-                                 [&] { return completion->done; });
-        auto status = std::move(completion->status);
-        if (status.detail.origin != FailureOrigin::Protocol &&
-            (cancellation.cancelled() || !plan.current()))
-          status =
-              Status::failure(cancellation.cancelled() ? ErrorCode::Cancelled
-                                                       : ErrorCode::Stale,
-                              "planar execution stopped after callback");
-        OperationTiming timing;
-        timing.output = step.result_ref();
-        timing.backend = Backend::Cpu;
-        timing.duration_us = completion->callback_us;
-        timing.numeric = completion->numeric;
-        timing.outcome = status.code;
-        auto count = step.output_demand.element_count();
-        if (count.ok())
-          timing.computed_elements = count.value();
-        diagnostics.operation_timings.push_back(std::move(timing));
-        if (!status.ok())
-          return Result<ExecutionResult>(status);
-
-        if (!validate_only) {
-          diagnostics.result_copy_bytes +=
-              step.output_demand.element_count().value() *
-              Value::element_size(step.output_descriptor.element_type);
-          break;
-        }
-        bool viewed = false;
-        for (std::size_t part = 0; part < image_owners.size(); ++part) {
-          if (exact_inputs[part].port != 0 || !image_owners[part].valid())
-            continue;
-          const auto& source = image_owners[part];
-          auto available = source.acquire(step.output_demand, cancellation);
-          if (!available.ok())
-            continue;
-          const auto channels =
-              layout.channel_axis
-                  ? step.output_demand.dimensions()[*layout.channel_axis]
-                  : RegionDimension{0, 1};
-          auto alias = PlanarImage::assemble_view(
-              {source}, {channels.offset}, {channels.extent},
-              step.output_descriptor, layout, step.output_demand,
-              step.output_facets, page_budget, cancellation, owned);
-          if (alias.ok()) {
-            image = alias.take_value();
-            image.retain_execution_admission(
-                std::make_shared<std::vector<std::shared_ptr<void>>>(
-                    input_admissions));
-            viewed = true;
-            break;
-          }
-          if (alias.status().message.find("ViewUnavailable:") != 0)
-            return Result<ExecutionResult>(alias.status());
-        }
-        if (viewed)
-          break;
-        if (policy == DataMovementViewPolicy::RequireView)
-          return Result<ExecutionResult>(Status{
-              ErrorCode::InvalidArgument,
-              "ViewUnavailable: identity source coverage has multiple owners",
-              FailureReason::InvalidDomain});
-        validate_only = false;
-      }
-      produced[index] = std::move(image);
-      diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
-      diagnostics.peak_active_tasks = 1;
-      continue;
-    }
-    if ((step.traits.outputs[0].data_movement ==
-         DataMovementKind::BitwiseMapped) &&
-        step.traits.outputs[0].planar_layout) {
-      const auto& layout = *step.traits.outputs[0].planar_layout;
-      const auto width =
-          Value::element_size(step.output_descriptor.element_type);
-      struct Part final {
-        Region output;
-        Region input;
-        DependencyMappedNeed map;
-        PlanarImage image;
-        Value value;
-      };
-      const auto own_started = std::chrono::steady_clock::now();
-      std::uint64_t child_us = 0;
-      const auto capacity =
-          step.traits.outputs[0].static_dependency_pieces->size();
-      auto admitted = impl_->budget->reserve(
-          4096 + capacity * (sizeof(Part) + 2048), {}, observation);
-      if (!admitted.ok())
-        return Result<ExecutionResult>(admitted.status());
-      auto scratch = admitted.take_value();
-      auto scratch_owner =
-          scratch->reserve_external(4096 + capacity * (sizeof(Part) + 2048));
-      scratch->seal();
-      if (!scratch_owner.ok())
-        return Result<ExecutionResult>(scratch_owner.status());
-      if (const auto& root = impl_->budget->resources()) {
-        const auto samples = step.output_demand.element_count();
-        if (!samples.ok())
-          return Result<ExecutionResult>(samples.status());
-        auto status = root->consume(
-            {samples.value() * (step.output_descriptor.shape.size() + width) +
-             capacity * 32});
-        if (!status.ok())
-          return Result<ExecutionResult>(status);
-      }
-      std::vector<Part> parts;
-      parts.reserve(capacity);
-      std::unordered_map<std::string, std::size_t> selected_parts;
-      ResourceBindings owned = resources;
-      for (const auto& piece :
-           *step.traits.outputs[0].static_dependency_pieces) {
-        for (const auto& box : piece.coverage.boxes()) {
-          if (cancellation.cancelled() || !plan.current())
-            return Result<ExecutionResult>(Status{cancellation.cancelled()
-                                                      ? ErrorCode::Cancelled
-                                                      : ErrorCode::Stale,
-                                                  "assembly mapping stopped"});
-          auto dims = step.output_demand.dimensions();
-          bool hit = true;
-          for (std::size_t d = 0; d < dims.size(); ++d) {
-            const auto p = box.dimensions()[d];
-            const auto first = std::max(p.offset, dims[d].offset);
-            const auto last =
-                std::min(p.offset + p.extent, dims[d].offset + dims[d].extent);
-            if (first >= last) {
-              hit = false;
-              break;
-            }
-            dims[d] = {first, last - first};
-          }
-          if (!hit)
-            continue;
-          const auto& map = piece.inputs.front();
-          std::vector<RegionDimension> mapped;
-          for (const auto& axis : map.axes) {
-            if (axis.observation_axis < 0) {
-              mapped.push_back(axis.fixed);
-            } else {
-              auto dim = dims[axis.observation_axis];
-              dim.offset = static_cast<std::uint64_t>(
-                  static_cast<__int128>(dim.offset) + axis.translation);
-              mapped.push_back(dim);
-            }
-          }
-          Part part{Region(dims), Region(mapped), map, {}, {}};
-          std::string source_key = std::to_string(map.port);
-          for (const auto& dim : mapped)
-            source_key += ":" + std::to_string(dim.offset) + ":" +
-                          std::to_string(dim.extent);
-          const auto previous = selected_parts.find(source_key);
-          const bool reused = previous != selected_parts.end();
-          if (reused) {
-            part.image = parts[previous->second].image;
-            part.value = parts[previous->second].value;
-          } else {
-            selected_parts.emplace(std::move(source_key), parts.size());
-          }
-          if (!reused) {
-            const auto& edge = step.inputs[map.port];
-            if (const auto* external = std::get_if<PlanWorkflowInput>(&edge)) {
-              part.image = sources[external->declaration_index];
-              part.value = generic_sources[external->declaration_index];
-              auto count = part.input.element_count();
-              if (!count.ok())
-                return Result<ExecutionResult>(count.status());
-              ++diagnostics.source_read_count;
-              diagnostics.source_read_bytes += count.value() * width;
-            } else {
-              const auto producer = std::get<PlanStepInput>(edge).step_index;
-              ExecutionPlan selected = plan;
-              selected.outputs_ = {{"assembly_source", producer}};
-              selected.output_regions_ = {
-                  {"assembly_source",
-                   Region::whole(
-                       plan.steps()[producer].output_descriptor.shape)}};
-              auto subplan = selected.tile_plan("assembly_source", part.input);
-              if (!subplan.ok())
-                return Result<ExecutionResult>(subplan.status());
-              const auto producer_started = std::chrono::steady_clock::now();
-              auto run =
-                  execute_planar(subplan.value(), bindings, cancellation, {});
-              child_us += elapsed_us(producer_started);
-              if (!run.ok())
-                return run;
-              if (run.value().images.count("assembly_source"))
-                part.image = run.value().images.at("assembly_source");
-              else
-                part.value = run.value().values.at("assembly_source");
-              const auto& child = run.value().diagnostics;
-              diagnostics.peak_live_bytes =
-                  std::max(diagnostics.peak_live_bytes, child.peak_live_bytes);
-              diagnostics.planned_peak_bytes = std::max(
-                  diagnostics.planned_peak_bytes, child.planned_peak_bytes);
-              diagnostics.source_read_count += child.source_read_count;
-              diagnostics.source_read_bytes += child.source_read_bytes;
-              diagnostics.result_copy_bytes += child.result_copy_bytes;
-              diagnostics.operation_timings.insert(
-                  diagnostics.operation_timings.end(),
-                  child.operation_timings.begin(),
-                  child.operation_timings.end());
-            }
-          }
-          auto united =
-              owned.unite(part.image.valid() ? part.image.resources()
-                                             : part.value.resources());
-          if (!united.ok())
-            return Result<ExecutionResult>(united.status());
-          owned = united.take_value();
-          parts.push_back(std::move(part));
-        }
-      }
-      if (parts.empty())
-        return Result<ExecutionResult>(
-            Status{ErrorCode::Internal, "assembly has no requested pieces"});
-      // Declarations may list disjoint pieces in any order. Alias assembly
-      // consumes destination order, not declaration or input-port order.
-      if (layout.channel_axis) {
-        const auto axis = *layout.channel_axis;
-        std::sort(parts.begin(), parts.end(),
-                  [axis](const auto& a, const auto& b) {
-                    return a.output.dimensions()[axis].offset <
-                           b.output.dimensions()[axis].offset;
-                  });
-      }
-      // Copy/view metadata is not a finite-sample certificate. Validate only
-      // the exact mapped pieces carrying Validation, before publishing an
-      // alias OR materialized output. Bypass pieces must never be scanned.
-      const auto validation_role =
-          static_cast<std::uint32_t>(DependencyRole::Validation);
-      const bool needs_validation =
-          std::any_of(parts.begin(), parts.end(), [&](const auto& part) {
-            return (part.map.roles & validation_role) != 0;
-          });
-      if (needs_validation) {
-        // One queue entry for the bounded piece set, not one per channel.
-        auto status = run_planar_callback(
-            [&]() -> Status {
-              for (const auto& part : parts) {
-                if (!(part.map.roles & validation_role))
-                  continue;
-                if (!part.image.valid())
-                  return Status{ErrorCode::TypeMismatch,
-                                "mapped validation requires a planar owner"};
-                auto acquired = part.image.acquire(part.input, cancellation);
-                if (!acquired.ok())
-                  return acquired.status();
-                auto validated =
-                    impl_->operation_registry->invoke_planar_mapped_validation(
-                        step.prepared, acquired.value(), part.map.port,
-                        part.output, cancellation,
-                        [&plan] { return plan.current(); });
-                if (!validated.ok())
-                  return validated;
-              }
-              return Status::success();
-            },
-            nullptr);
-        if (!status.ok())
-          return Result<ExecutionResult>(status);
-      }
-      const auto policy = step.traits.outputs[0].data_movement_view_policy;
-      bool viewed = false;
-      if (policy != DataMovementViewPolicy::Materialize) {
-        std::vector<PlanarImage> planes;
-        std::vector<std::uint64_t> channels, channel_counts;
-        bool images_only = true;
-        for (const auto& part : parts) {
-          if (!part.image.valid()) {
-            images_only = false;
-            break;
-          }
-          const auto axis = part.image.config().channel_axis;
-          const auto input_c =
-              axis ? part.input.dimensions()[*axis] : RegionDimension{0, 1};
-          planes.push_back(part.image);
-          channels.push_back(input_c.offset);
-          channel_counts.push_back(input_c.extent);
-        }
-        if (images_only) {
-          auto alias = PlanarImage::assemble_view(
-              planes, channels, channel_counts, step.output_descriptor, layout,
-              step.output_demand, step.output_facets, page_budget, cancellation,
-              owned);
-          if (alias.ok()) {
-            auto image = alias.take_value();
-            image.retain_execution_admission(
-                std::make_shared<std::vector<std::shared_ptr<void>>>(
-                    input_admissions));
-            produced[index] = std::move(image);
-            viewed = true;
-          } else if (policy == DataMovementViewPolicy::RequireView ||
-                     alias.status().message.find("ViewUnavailable:") != 0) {
-            return Result<ExecutionResult>(alias.status());
-          }
-        } else if (policy == DataMovementViewPolicy::RequireView) {
-          return Result<ExecutionResult>(
-              Status{ErrorCode::InvalidArgument,
-                     "ViewUnavailable: mixed generic/planar owners",
-                     FailureReason::InvalidDomain});
-        }
-      }
-      if (!viewed) {
-        PlanarImageConfig config;
-        config.order = layout.order;
-        config.height_axis = layout.height_axis;
-        config.width_axis = layout.width_axis;
-        config.channel_axis = layout.channel_axis;
-        config.row_pitch_bytes = layout.row_pitch_bytes;
-        config.groups = layout.groups;
-        config.tile_height = plan.tile_height();
-        config.tile_width = plan.tile_width();
-        config.aggregate_budget = page_budget;
-        config.maximum_backed_bytes = page_budget->maximum_bytes();
-        auto created = PlanarImage::create(step.output_descriptor, config,
-                                           step.output_facets, owned);
-        if (!created.ok())
-          return Result<ExecutionResult>(created.status());
-        auto image = created.take_value();
-        auto write = image.begin_write(step.output_demand, cancellation);
-        if (!write.ok())
-          return Result<ExecutionResult>(write.status());
-        auto writer = write.take_value();
-        for (const auto& part : parts) {
-          std::optional<PlanarImageReadWindow> read;
-          if (part.image.valid()) {
-            auto window = part.image.acquire(part.input, cancellation);
-            if (!window.ok())
-              return Result<ExecutionResult>(window.status());
-            read = window.take_value();
-          }
-          // Validation is already complete. Pass a data-only projection to
-          // the copy primitive; do not weaken its public mapping contract.
-          auto copy_map = part.map;
-          copy_map.roles &= ~validation_role;
-          auto copied = copy_planar_region(
-              part.output, copy_map, read ? &*read : nullptr,
-              part.value.valid() ? &part.value : nullptr, writer, layout, width,
-              cancellation, [&plan] { return plan.current(); });
-          if (!copied.ok())
-            return Result<ExecutionResult>(copied);
-          if (!plan.current())
-            return Result<ExecutionResult>(
-                Status{ErrorCode::Stale, "assembly plan changed"});
-          diagnostics.result_copy_bytes +=
-              part.output.element_count().value() * width;
-        }
-        auto published = writer.commit(cancellation);
-        if (!published.ok())
-          return Result<ExecutionResult>(published);
-        produced[index] = std::move(image);
-      }
-      OperationTiming timing;
-      timing.output = step.result_ref();
-      timing.backend = Backend::Cpu;
-      timing.outcome = ErrorCode::Ok;
-      timing.duration_us = elapsed_us(own_started) - child_us;
-      timing.computed_elements = step.output_demand.element_count().value();
-      diagnostics.operation_timings.push_back(timing);
-      diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
-      diagnostics.peak_active_tasks = 1;
-      continue;
-    }
-    std::vector<Value> generic_inputs;
-    bool all_generic =
-        !step.traits.outputs[0].planar_layout &&
-        !structural_image_facets(step.output_descriptor, step.output_facets);
-    for (const auto& input : step.inputs) {
-      const Value* value = nullptr;
-      if (const auto* external = std::get_if<PlanWorkflowInput>(&input))
-        value = &generic_sources.at(external->declaration_index);
-      else
-        value = &tensor_outputs.at(std::get<PlanStepInput>(input).step_index);
-      if (!value->valid()) {
-        all_generic = false;
-        break;
-      }
-      generic_inputs.push_back(*value);
-    }
-    if (all_generic) {
-      WorkflowDocument document;
-      WorkflowNode node;
-      node.id = 1;
-      node.operation = step.operation;
-      node.parameters = step.parameters;
-      ExecutionBindings child_bindings;
-      for (std::size_t port = 0; port < generic_inputs.size(); ++port) {
-        const auto& value = generic_inputs[port];
-        const auto name = std::string("input") + std::to_string(port);
-        auto dense = input_internal::dense_metadata(value.descriptor());
-        if (!dense.ok())
-          return Result<ExecutionResult>(dense.status());
-        auto layout = dense.take_value().layout;
-        document.inputs.push_back({port + 1, name, value.descriptor(),
-                                   Region::whole(value.descriptor().shape),
-                                   layout, value.facets()});
-        node.inputs.push_back(WorkflowInputReference{port + 1});
-        auto source = std::make_shared<RegionalSource>();
-        source->descriptor = value.descriptor();
-        source->facets = value.facets();
-        source->resources = value.resources();
-        source->read =
-            [value](const Region& region, std::uint8_t* target, std::uint64_t,
-                    const BufferAllocator&,
-                    const CancellationToken& cancellation) -> Result<Region> {
-          auto view = value.view(region);
-          if (!view.ok())
-            return Result<Region>(view.status());
-          auto count = region.element_count();
-          if (!count.ok())
-            return Result<Region>(count.status());
-          std::vector<std::uint64_t> at;
-          for (const auto& dim : region.dimensions())
-            at.push_back(dim.offset);
-          const auto width =
-              Value::element_size(value.descriptor().element_type);
-          for (std::uint64_t sample = 0; sample < count.value(); ++sample) {
-            if (cancellation.cancelled())
-              return Result<Region>(
-                  Status{ErrorCode::Cancelled, "generic bridge cancelled"});
-            auto address = value.byte_address(at);
-            if (!address.ok())
-              return Result<Region>(address.status());
-            std::memcpy(target + sample * width,
-                        value.bytes().data() + address.value(), width);
-            for (std::size_t axis = at.size(); axis-- > 0;) {
-              const auto dim = region.dimensions()[axis];
-              if (++at[axis] < dim.offset + dim.extent)
-                break;
-              at[axis] = dim.offset;
-            }
-          }
-          return Result<Region>(region);
-        };
-        child_bindings.inputs.push_back({name, {}, source});
-      }
-      document.nodes.push_back(std::move(node));
-      document.outputs = {{"output", 1, step.traits.outputs[0].key}};
-      GraphContext graph(document);
-      PlanningOptions options;
-      options.output_regions = {{"output", step.output_demand}};
-      Compiler compiler(impl_->operation_registry);
-      auto compiled = compiler.compile(graph, options, resources);
-      if (!compiled.ok())
-        return Result<ExecutionResult>(compiled.status());
-      auto child = execute(compiled.value().plan, std::move(child_bindings),
-                           cancellation);
-      if (!child.ok())
-        return child;
-      tensor_outputs[index] = std::move(child.value().values.at("output"));
-      for (auto timing : child.value().diagnostics.operation_timings) {
-        timing.output = step.result_ref();
-        diagnostics.operation_timings.push_back(std::move(timing));
-      }
-      diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
-      continue;
-    }
-    if (step.inputs.empty())
-      return Result<ExecutionResult>(Status{
-          ErrorCode::TypeMismatch, "unsupported planar operation arity"});
-    std::vector<PlanarImageReadWindow> windows;
-    std::vector<const PlanarImage*> source_images;
-    windows.reserve(step.inputs.size());
-    source_images.reserve(step.inputs.size());
-    for (std::size_t port = 0; port < step.inputs.size(); ++port) {
-      const PlanarImage* source = nullptr;
-      if (const auto* external =
-              std::get_if<PlanWorkflowInput>(&step.inputs[port])) {
-        if (external->declaration_index >= sources.size())
-          return Result<ExecutionResult>(Status::failure(
-              ErrorCode::Internal, "planar declaration index out of bounds"));
-        source = &sources[external->declaration_index];
-      } else {
-        const auto producer = std::get<PlanStepInput>(step.inputs[port]);
-        if (producer.step_index >= index ||
-            !produced[producer.step_index].valid())
-          return Result<ExecutionResult>(Status::failure(
-              ErrorCode::Internal, "planar producer is unavailable"));
-        source = &produced[producer.step_index];
-      }
-      const bool extraction =
-          step.operation.compare(0, 22, "channel.extract_index_") == 0 ||
-          step.operation.compare(0, 22, "channel.extract_named_") == 0;
-      if (extraction &&
-          std::get<std::string>(step.parameters.at("layout")) == "view") {
-        const auto axis = source->config().channel_axis;
-        const auto& map = step.traits.outputs[0]
-                              .static_dependency_pieces->front()
-                              .inputs[0]
-                              .axes;
-        if (!axis || map[*axis].observation_axis != -1)
-          return Result<ExecutionResult>(Status{
-              ErrorCode::InvalidArgument,
-              "ViewUnavailable: spatial selection requires materialization",
-              FailureReason::InvalidDomain,
-              {FailureOrigin::Domain, FailureScope::Run}});
-      }
-      auto window = source->acquire(step.input_demands[port], cancellation);
-      if (!window.ok())
-        return Result<ExecutionResult>(window.status());
-      windows.push_back(window.take_value());
-      source_images.push_back(source);
-      if (std::holds_alternative<PlanWorkflowInput>(step.inputs[port])) {
-        auto count = step.input_demands[port].element_count();
-        if (!count.ok() ||
-            count.value() > UINT64_MAX / Value::element_size(
-                                             source->descriptor().element_type))
-          return Result<ExecutionResult>(
-              Status::failure(ErrorCode::ResourceExhausted,
-                              "planar source read accounting overflow"));
-        ++diagnostics.source_read_count;
-        diagnostics.source_read_bytes +=
-            count.value() *
-            Value::element_size(source->descriptor().element_type);
-      }
-    }
-    const bool channel_extract =
-        step.operation.compare(0, 22, "channel.extract_index_") == 0 ||
-        step.operation.compare(0, 22, "channel.extract_named_") == 0;
-    if (channel_extract && !step.traits.outputs[0].planar_layout) {
-      const auto& axes = step.traits.outputs[0]
-                             .static_dependency_pieces->front()
-                             .inputs[0]
-                             .axes;
-      const auto count = step.output_demand.element_count();
-      if (!count.ok())
-        return Result<ExecutionResult>(count.status());
-      const auto width =
-          Value::element_size(step.output_descriptor.element_type);
-      auto reserved =
-          impl_->budget->reserve(count.value() * width, {}, observation);
-      if (!reserved.ok())
-        return Result<ExecutionResult>(reserved.status());
-      auto reservation = reserved.take_value();
-      auto allocated = MutableValue::allocate(
-          step.output_descriptor, step.output_demand, reservation->allocator());
-      if (!allocated.ok())
-        return Result<ExecutionResult>(allocated.status());
-      auto output = allocated.take_value();
-      std::vector<std::uint64_t> at;
-      for (const auto& dim : step.output_demand.dimensions())
-        at.push_back(dim.offset);
-      std::vector<std::uint64_t> source_at(axes.size());
-      for (std::uint64_t sample = 0; sample < count.value(); ++sample) {
-        if (cancellation.cancelled())
-          return Result<ExecutionResult>(
-              Status{ErrorCode::Cancelled, "channel extraction cancelled"});
-        for (std::size_t axis = 0; axis < axes.size(); ++axis)
-          source_at[axis] = axes[axis].observation_axis < 0
-                                ? axes[axis].fixed.offset
-                                : at[axes[axis].observation_axis];
-        auto read = windows[0].row_run(source_at);
-        if (!read.ok())
-          return Result<ExecutionResult>(read.status());
-        std::memcpy(output.data() + sample * width, read.value().data, width);
-        for (std::size_t axis = at.size(); axis-- > 0;) {
-          const auto dim = step.output_demand.dimensions()[axis];
-          if (++at[axis] < dim.offset + dim.extent)
-            break;
-          at[axis] = dim.offset;
-        }
-      }
-      auto output_resources = source_images[0]->resources().unite(resources);
-      if (!output_resources.ok())
-        return Result<ExecutionResult>(output_resources.status());
-      auto published = std::move(output).publish(step.output_facets,
-                                                 output_resources.take_value());
-      reservation->seal();
-      if (!published.ok())
-        return Result<ExecutionResult>(published.status());
-      tensor_outputs[index] = published.take_value();
-      diagnostics.result_copy_bytes += count.value() * width;
-      diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
-      diagnostics.peak_active_tasks = 1;
-      continue;
-    }
-    const auto source_channel_axis = source_images[0]->config().channel_axis;
-    const auto& pieces = step.traits.outputs[0].static_dependency_pieces;
-    const bool structural_selection =
-        channel_extract && source_channel_axis && pieces &&
-        pieces->front().inputs[0].axes[*source_channel_axis].observation_axis ==
-            -1;
-    if (structural_selection &&
-        std::get<std::string>(step.parameters.at("layout")) != "materialize") {
-      const auto& mapping = step.traits.outputs[0].static_dependency_pieces;
-      if (!mapping || mapping->size() != 1 || mapping->front().inputs.empty() ||
-          !source_images[0]->config().channel_axis)
-        return Result<ExecutionResult>(Status::failure(
-            ErrorCode::Internal, "channel view mapping is missing"));
-      const auto channel_axis = *source_images[0]->config().channel_axis;
-      const auto& axes = mapping->front().inputs[0].axes;
-      if (channel_axis >= axes.size() ||
-          axes[channel_axis].observation_axis != -1 ||
-          axes[channel_axis].fixed.extent != 1)
-        return Result<ExecutionResult>(Status::failure(
-            ErrorCode::Internal, "channel view mapping is invalid"));
-      auto view = source_images[0]->channel_view(
-          axes[channel_axis].fixed.offset,
-          std::get<bool>(step.parameters.at("keepdims")), step.output_demand,
-          step.output_facets, page_budget, cancellation, resources);
-      if (!view.ok())
-        return Result<ExecutionResult>(view.status());
-      auto available = view.value().acquire(step.output_demand, cancellation);
-      if (!available.ok())
-        return Result<ExecutionResult>(available.status());
-      auto alias = view.take_value();
-      if (!input_admissions.empty()) {
-        auto retained = std::make_shared<std::vector<std::shared_ptr<void>>>(
-            input_admissions);
-        alias.retain_execution_admission(retained);
-      }
-      produced[index] = std::move(alias);
-      OperationTiming timing;
-      timing.output = step.result_ref();
-      timing.backend = Backend::Cpu;
-      timing.outcome = ErrorCode::Ok;
-      auto count = step.output_demand.element_count();
-      if (count.ok())
-        timing.computed_elements = count.value();
-      diagnostics.operation_timings.push_back(std::move(timing));
-      diagnostics.selected_backends[step.result_ref()] = Backend::Cpu;
-      diagnostics.peak_active_tasks = 1;
-      continue;
-    }
-    if (!step.traits.outputs[0].planar_layout)
-      return Result<ExecutionResult>(
-          Status{ErrorCode::TypeMismatch, "missing planar output layout"});
-    const auto& declared = *step.traits.outputs[0].planar_layout;
-    PlanarImageConfig config;
-    config.order = declared.order;
-    config.height_axis = declared.height_axis;
-    config.width_axis = declared.width_axis;
-    config.channel_axis = declared.channel_axis;
-    config.row_pitch_bytes = declared.row_pitch_bytes;
-    config.groups = declared.groups;
-    config.tile_height = plan.tile_height();
-    config.tile_width = plan.tile_width();
-    config.aggregate_budget = page_budget;
-    config.maximum_backed_bytes = page_budget->maximum_bytes();
-    auto output = PlanarImage::create(step.output_descriptor, config,
-                                      step.output_facets, resources);
-    if (!output.ok())
-      return Result<ExecutionResult>(output.status());
-    auto image = output.take_value();
-    std::uint64_t callback_us = 0;
-    NumericDiagnostics numeric;
-    gpu_internal::Statistics native_statistics;
-    std::uint64_t cpu_stages = 0, cpu_tiles = 0;
-    std::uint32_t tile_peak = 0;
-    auto status = run_planar_callback(
-        [&] {
-          // Worker threads do not inherit the caller's metadata scope.
-          // Keep the root active through all callback-owned temporaries,
-          // matching the generic dependency worker's admission contract.
-          const auto& resources = impl_->budget->resources();
-          ErrorCode metadata_failure = ErrorCode::Ok;
-          std::optional<ResourceAllocationScope> scope;
-          if (resources)
-            scope.emplace(*resources, &metadata_failure);
-          std::optional<execution_internal::CpuRangeScope> cpu_range;
-          std::optional<execution_internal::CpuTileScope> tile_scope;
-          std::optional<gpu_internal::Invocation> native;
-          execution_internal::ScopedMemoryAdmission admission(
-              [this, observation,
-               native_backend =
-                   step.backend == Backend::Gpu](std::uint64_t bytes) {
-                if (native_backend) {
-                  if (impl_->disk && !impl_->budget->can_allocate(bytes, true))
-                    impl_->disk->drop_pending();
-                  if (impl_->cache)
-                    impl_->cache->reclaim_for(bytes, true);
-                  if (!impl_->budget->can_allocate(bytes, true))
-                    impl_->native_device->clear_pipeline_cache();
-                }
-                return impl_->budget->reserve(bytes, {}, observation);
-              });
-          auto allocator = impl_->budget->on_demand_allocator(
-              observation, admission.callback());
-          if (step.backend == Backend::Gpu) {
-            allocator = impl_->native_device->allocator(allocator);
-            native.emplace(impl_->native_device, cancellation, allocator);
-          } else if (step.traits.cpu_staged_tiles) {
-            tile_scope.emplace(impl_->cpu_pool.ranges(), cancellation,
-                               resources ? &*resources : nullptr,
-                               options.maximum_parallelism
-                                   ? options.maximum_parallelism
-                                   : impl_->cpu_worker_count,
-                               [&plan] { return plan.current(); });
-          } else {
-            cpu_range.emplace(impl_->cpu_pool.ranges(), cancellation,
-                              resources ? &*resources : nullptr,
-                              [&plan] { return plan.current(); });
-          }
-          const auto completion_status = [&](bool successful) -> Status {
-            if (tile_scope && !tile_scope->status().ok())
-              return tile_scope->status();
-            if (cpu_range && !cpu_range->status().ok())
-              return cpu_range->status();
-            if (native) {
-              if (!native->status().ok())
-                return native->status();
-              if (successful && !native->statistics().dispatches)
-                return Status{ErrorCode::OperationFailed,
-                              "GPU planar callback performed no native work"};
-            }
-            return Status::success();
-          };
-          const auto* parallel =
-              cpu_range && step.traits.outputs[0].region_rule ==
-                               OperationRegionRule::Whole
-                  ? cpu_range->service()
-                  : nullptr;
-          auto callback_status = impl_->operation_registry->invoke_planar(
-              step.operation, windows, step.input_demands, step.parameters,
-              step.output_demand, image, cancellation, allocator, step.prepared,
-              [&plan] { return plan.current(); }, &numeric,
-              resources ? &*resources : nullptr, &metadata_failure, parallel,
-              completion_status, step.backend,
-              native ? native->service() : nullptr,
-              tile_scope ? tile_scope->service() : nullptr);
-          if (tile_scope) {
-            cpu_stages = tile_scope->stages();
-            cpu_tiles = tile_scope->tiles();
-            tile_peak = tile_scope->peak();
-          }
-          if (native)
-            native_statistics = native->statistics();
-          if (metadata_failure != ErrorCode::Ok &&
-              callback_status.detail.origin != FailureOrigin::Protocol &&
-              callback_status.code != ErrorCode::ResourceExhausted &&
-              callback_status.code != ErrorCode::Cancelled &&
-              callback_status.code != ErrorCode::Stale)
-            callback_status =
-                Status{metadata_failure,
-                       "planar metadata allocation failed",
-                       FailureReason::CapacityLimit,
-                       {FailureOrigin::Resource, FailureScope::Unspecified}};
-          return callback_status;
-        },
-        &callback_us, step.backend, step.traits.cpu_staged_tiles);
-    OperationTiming timing;
-    timing.output = step.result_ref();
-    timing.backend = step.backend;
-    timing.native_compute_us = native_statistics.device_us;
-    timing.native_dispatch_count = native_statistics.dispatches;
-    timing.cpu_stage_count = cpu_stages;
-    timing.cpu_tile_callback_count = cpu_tiles;
-    timing.duration_us = callback_us;
-    timing.numeric = numeric;
-    timing.outcome = status.code;
-    auto count = step.output_demand.element_count();
-    if (count.ok())
-      timing.computed_elements = count.value();
-    diagnostics.operation_timings.push_back(std::move(timing));
-    diagnostics.native_dispatch_count += native_statistics.dispatches;
-    diagnostics.native_submission_count += native_statistics.submissions;
-    diagnostics.native_compute_us += native_statistics.device_us;
-    diagnostics.native_constant_bytes += native_statistics.constant_bytes;
-    diagnostics.cpu_stage_count += cpu_stages;
-    diagnostics.cpu_tile_callback_count += cpu_tiles;
-    if (!status.ok())
-      return Result<ExecutionResult>(status);
-    produced[index] = std::move(image);
-    diagnostics.selected_backends[step.result_ref()] = step.backend;
-    diagnostics.peak_active_tasks =
-        std::max(diagnostics.peak_active_tasks, std::max(1U, tile_peak));
-  }
-  ExecutionResult result;
-  for (const auto& named_output : plan.outputs()) {
-    if (tensor_outputs[named_output.second].valid()) {
-      auto value = tensor_outputs[named_output.second].view(
-          plan.output_regions().at(named_output.first));
-      if (!value.ok())
-        return Result<ExecutionResult>(value.status());
-      result.values.emplace(named_output.first, value.take_value());
-      continue;
-    }
-    auto image = produced[named_output.second];
-    auto window = image.acquire(plan.output_regions().at(named_output.first),
-                                cancellation);
-    if (!window.ok())
-      return Result<ExecutionResult>(window.status());
-    result.images.emplace(named_output.first, std::move(image));
-    const auto& output = result.images.at(named_output.first);
-    const auto& request = plan.output_regions().at(named_output.first);
-    const auto y = request.dimensions()[output.config().height_axis];
-    const auto x = request.dimensions()[output.config().width_axis];
-    diagnostics.tile_count += ((y.offset + y.extent - 1) / plan.tile_height() -
-                               y.offset / plan.tile_height() + 1) *
-                              ((x.offset + x.extent - 1) / plan.tile_width() -
-                               x.offset / plan.tile_width() + 1);
-  }
-  if (cancellation.cancelled() || !plan.current())
-    return Result<ExecutionResult>(Status::failure(
-        cancellation.cancelled() ? ErrorCode::Cancelled : ErrorCode::Stale,
-        "planar result publication stopped"));
-  const auto peaks = impl_->budget->peaks(observation);
-  diagnostics.peak_live_bytes =
-      std::max(diagnostics.peak_live_bytes, peaks.first);
-  diagnostics.planned_peak_bytes =
-      std::max(diagnostics.planned_peak_bytes, peaks.second);
-  diagnostics.execute_us = elapsed_us(started);
-  if (impl_->budget->resources())
-    diagnostics.managed_resources = impl_->budget->resources()->statistics();
-  result.diagnostics = std::move(diagnostics);
-  return Result<ExecutionResult>(std::move(result));
+} catch (const std::bad_alloc&) {
+  return Result<DemandUpdate>(Status{ErrorCode::ResourceExhausted, {}});
 }
 
 Result<ExecutionResult> ExecutionContext::execute(
     const FrozenExecution& frozen, const CancellationToken& cancellation,
     const ExecutionOptions& options) {
-  if (planar_required(frozen.plan_))
-    return execute_planar(frozen.plan_, frozen.bindings_, cancellation,
-                          options);
   if (frozen.plan_.structured_network())
     return execute_regions(frozen.plan_, frozen.bindings_, nullptr,
                            cancellation, options, false, UINT64_MAX,
@@ -7733,10 +6421,6 @@ Result<ExecutionResult> ExecutionContext::execute(
 Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
     const FrozenExecution& frozen, const ExecutionSink& sink,
     const CancellationToken& cancellation, const ExecutionOptions& options) {
-  if (planar_required(frozen.plan_))
-    return Result<ExecutionDiagnostics>(
-        Status::failure(ErrorCode::TypeMismatch,
-                        "planar image stream requires structural sink"));
   if (frozen.plan_.structured_network()) {
     auto result =
         execute_regions(frozen.plan_, frozen.bindings_, &sink, cancellation,
@@ -7753,8 +6437,6 @@ Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
 Result<ExecutionResult> ExecutionContext::execute(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const CancellationToken& cancellation, const ExecutionOptions& options) {
-  if (planar_required(plan))
-    return execute_planar(plan, std::move(bindings), cancellation, options);
   if (plan.dependency_network())
     return execute_regions(plan, std::move(bindings), nullptr, cancellation,
                            options);
@@ -7911,10 +6593,6 @@ Result<ExecutionDiagnostics> ExecutionContext::execute_stream(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const ExecutionSink& sink, const CancellationToken& cancellation,
     const ExecutionOptions& options) {
-  if (planar_required(plan))
-    return Result<ExecutionDiagnostics>(
-        Status::failure(ErrorCode::TypeMismatch,
-                        "planar image stream requires structural sink"));
   auto result =
       execute_regions(plan, std::move(bindings), &sink, cancellation, options);
   if (!result.ok())
@@ -7926,10 +6604,6 @@ Result<ExecutionResult> ExecutionContext::execute_atoms(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const DemandQuery& requested, const CancellationToken& cancellation,
     const ExecutionOptions& options) {
-  if (planar_required(plan))
-    return Result<ExecutionResult>(
-        Status::failure(ErrorCode::TypeMismatch,
-                        "planar image atoms require structural output"));
   auto root = resource_budget();
   if (!root.ok())
     return Result<ExecutionResult>(root.status());
@@ -7947,10 +6621,6 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
     const ExecutionOptions& options, bool shared_producer,
     std::uint64_t producer_epoch, const std::string& snapshot_identity,
     bool atom_outcomes, const DemandQuery* requested) {
-  if (planar_required(plan))
-    return Result<ExecutionResult>(
-        Status::failure(ErrorCode::TypeMismatch,
-                        "legacy regional image storage is unavailable"));
   if (!impl_ || !plan.current() ||
       plan.operation_registry_.lock() != impl_->operation_registry)
     return Result<ExecutionResult>(Status::failure(
