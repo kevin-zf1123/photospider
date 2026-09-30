@@ -1,83 +1,40 @@
-# ADR 0007: Execution Runs and Local Resources Have Separate Owners
+# ADR 0007: Execution Runs and Context Resources Have Separate Owners
 
-- Status: Accepted, narrowed by ADR 0015
-- Date: 2026-09-01 boundary revision
+- Status: Accepted
 
-## Context
+## 1. Core Summary (TL;DR)
+A graph context owns source revisions; an execution context owns local resources; each execution call owns its run state and staged results. This separation permits graph replacement and shared worker use without retaining or publishing stale results.
 
-Independent graphs may share local workers without sharing source state.
-Likewise, a cancelled or stale execution must release resources without
-publishing its staged result. Graph, Run, and physical-resource lifetimes must
-therefore remain distinct.
+## 2. Mental Model & Intuition
 
-## Decision
+```text
+GraphContext --> immutable snapshot --> compiler plan --+
+                                                        +--> Run A --+--> caller results
+ExecutionContext --> shared bounded CPU/GPU resources --+            |
+                                                        +--> Run B --+ (separate state)
+```
 
-`GraphContext` owns only a copied `WorkflowDocument`, its current nonzero
-revision, and snapshot-currentness state. It owns no worker, device queue,
-result registry, or execution lifetime.
+Runs compete for shared context capacity while retaining independent cancellation, bindings, intermediate values, and diagnostics. A run joins work only through explicit context-managed demand mechanisms.
 
-`ExecutionContext` owns the fixed local pools, deterministic per-lane FIFOs,
-their single context-wide waiting-callback admission, frozen operation set, and
-modeled-byte ledger described by ADR 0003. A running callback is no longer
-waiting and therefore does not consume that shared queue bound.
+## 3. Formal Contracts & APIs
 
-Each `ExecutionContext::execute` call creates one source-private
-`ExecutionRun`. The Run owns:
+```cpp
+class GraphContext { public: GraphSnapshot snapshot() const; std::uint64_t replace(WorkflowDocument); };
+class ExecutionContext {
+ public:
+  Result<ExecutionResult> execute(const ExecutionPlan&, ExecutionBindings = {},
+      const CancellationToken& = {}, const ExecutionOptions& = {});
+};
+```
 
-- the immutable plan reference and captured currentness predicate;
-- dependency counts, deterministic ready-step priority, and per-call
-  parallelism;
-- intermediate Values and their Run-local backend labels;
-- cooperative cancellation observation and the first terminal failure;
-- operation timing, transfer, fallback, peak-byte, and result diagnostics.
+The plan captures graph currentness and frozen operation-registry identity. A call owns its bindings snapshot and run state; output values are caller-owned and may outlive the context. When a worker removes a queued attempt, it checks cancellation and plan currentness before transfer, resource admission, or operation entry. A stop observed after this cutoff may race with an in-process callback; callbacks drain cooperatively, and late completion cannot release dependent work or publish a result. Final publication checks cancellation and plan currentness again. See [Compiler and execution](../kernel-architecture/Compiler-and-Execution.md) for the full ordering.
 
-The kernel defines no public or daemon-shaped Run identifier. Run identity is
-object ownership inside one synchronous `execute` call.
+Failures discard collected staged results. Streaming calls deliver tiles synchronously, so already-consumed tiles cannot be rolled back if a later callback fails.
 
-### Completion and publication
+## 4. Non-Goals & Explicit Boundaries
+- Run state has no daemon Job identifier or durable identity.
+- Cancellation is cooperative. A callback already running may need to return before the call drains.
+- Results are not retained by `GraphContext`; optional context caches are disposable derived state.
 
-After either backend FIFO pops a queued attempt, the worker takes the Run mutex
-and observes the same prioritized cancellation/currentness boundary before
-dependency copying, transfer, modeled-byte admission, or operation invocation.
-An existing or newly observed failure abandons that callback and retires its
-one in-flight slot; the observation itself owns no retirement. CPU, GPU, and
-GPU-to-CPU fallback attempts use the same cutoff without registering Runs in
-`GraphContext` or adding replacement notifications.
-
-This worker-entry observation is a queued-attempt admission cutoff, not a
-global exclusion or preemption guarantee. Cancellation or replacement after
-the cutoff may race with transfer, resource admission, or an in-process
-operation entry. Such a callback may drain under cooperative/best-effort
-semantics, but its completion and final result still cannot publish after the
-stop is observed.
-
-An operation completion is accepted only while the caller token is not
-cancelled and the plan's captured graph revision remains current. A rejected
-late completion retires its callback and byte lease but cannot release a
-dependent step or enter the result map.
-
-Final result assembly occurs once, after all requested outputs are available.
-The same cancellation/currentness gates run again before returning
-`ExecutionResult`. Failure returns one typed status and discards staged output.
-Results are caller-owned in-memory Values; the graph context does not retain or
-publish them.
-
-### Determinism and fallback
-
-Ready steps are ordered by plan index, and dependencies are released only by a
-successful predecessor. CPU is required. A GPU attempt may fall back to CPU
-only when operation traits allow it; both attempts remain visible in raw
-diagnostics.
-
-## Boundary
-
-This Run is not a daemon Job and has no queue/status/result identity outside
-the call. There is no retry, attempt record, persistence, remote execution,
-external scheduler, policy DSO, or security authority.
-
-## Consequences
-
-- Graph replacement invalidates old work without stopping unrelated contexts.
-- Shared local pools do not imply shared graph or result state.
-- Cancellation, exception, and staleness have exact no-publication paths.
-- Daemon orchestration can wrap the public call without becoming kernel state.
+## 5. Consequences
+Graph replacement makes plans stale but does not stop unrelated Runs. Callers must keep contexts alive during direct execute calls and treat `Stale`, cancellation, and callback failures as terminal for that call. Shutdown waits for owned callbacks to retire; a slow callback therefore delays resource teardown.

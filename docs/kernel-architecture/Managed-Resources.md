@@ -1,179 +1,70 @@
-# Managed resources and mandatory temporary storage
+# Managed resources and temporary storage
 
-`ExecutionContextConfig::managed_resources` enables one shared `ResourceBudget`
-for existing controlled buffer reservations and explicit temporary-storage
-clients. `maximum_live_bytes` remains a payload sublimit. Obtain the root with
-`ExecutionContext::resource_budget()`. It is independent of completed-result
-cache configuration and retained leases can outlive the context.
+## Scope & Ownership
 
-## Capacity and work
+When `ExecutionContextConfig::managed_resources` is configured, the context owns one resource root shared by controlled CPU and GPU work. `ExecutionContext::resource_budget()` returns it as a `Result`; it reports `NotFound` when managed resources are not enabled. Retained leases can outlive the context. Managed accounting covers declared capacity, not process RSS. Thread stacks, driver-private allocations, operating-system page cache, and allocations outside managed allocators remain outside the guarantee.
 
-`ResourceCapacity` separates host, device, shared, metadata, referenced input,
-temporary disk, entries, files, I/O slots, queue and Payload constraints.
-Payload counts managed buffer bytes and is capped by `maximum_live_bytes` in
-an execution context, including structured callbacks. Host includes
-metadata and shared bytes; device includes shared bytes. Overlapping dimensions
-must not be added to report physical memory. Whole vectors are checked before
-admission. `ResourceLease` copies share one owner. Growth includes simultaneous
-old/new capacity; shrinking is allowed only after storage retirement or an
-unissued reservation is abandoned. Protected cleanup capacity cannot be spent
-by ordinary stages. Admission never waits on retained owners: insufficient
-capacity returns `ResourceExhausted` with `CapacityLimit`.
+```cpp
+#include <cstdint>
 
-Lease object capacity is charged automatically, while managed buffer and
-file/window owners charge their declared C++ object capacity. Fixed root and
-device bootstrap state, thread stacks, driver state and OS page cache are outside
-this accounting model. Standard-library, Objective-C and driver-private
-allocations remain outside unless an explicit managed allocator owns them.
-`ResourceAllocator` admits its requested block and explicit alignment header
-before allocating; cancellation state/control storage and its flattened source
-list use that allocator. Retained allocator-aware diagnostics own their capacity
-independently of result payloads. `ResourceAllocationKind::Payload` marks STL
-computation data: its element block also counts toward Payload, while the
-explicit header remains Metadata. Copy, rebind and active-scope copying preserve
-that role. This API does not certify process RSS or opaque native-device
-allocator overhead.
-The counter `live` means live admitted capacity, including unused reservations;
-`peak` is an observed peak of that counter, not a proved input-class bound.
-The guarantee is `WithinBudgetOrFail` for the declared capacity model.
+#include "photospider/execution/resources.hpp"
 
-`reference(storage)` admits the full caller allocation capacity under the
-Referenced sublimit, deduplicated by actual storage owner within one root.
-The returned alias preserves the `CpuStorage` address and retains the reference
-lease through downstream views. Execute bindings use this admission when the
-managed root is enabled. Source-private state is not inferred from callbacks.
-Concurrent first references and last-reference retirement are serialized so
-the same live owner never needs a second capacity reservation.
-
-`consume(ResourceWork)` precharges work, bytes, requests and stages atomically.
-Exceeding work or I/O limits returns `WorkLimit`; exceeding only stages returns
-`StageLimit`. Both use `ResourceExhausted` and leave issued counters unchanged.
-Issued work is never refunded after failure, fallback or cancellation. Singleton
-and joint dependency sessions charge their current Run root before issuing work,
-including start failures and GPU discovery normalization. `FootprintLimits` can
-carry a borrowed host work callback for precharged set construction; this callback
-is not stored in an immutable Footprint or any semantic identity.
-Every queued source, Whole/backend attempt, singleton/joint dependency callback
-and structured callback also precharges one root stage before submission. The
-root stage count is cumulative across Runs. Queue counts callbacks waiting for
-a worker and is released before callback entry; envelope metadata remains
-charged through callback retirement. These limits apply with the cache disabled.
-
-## Native GPU metadata
-
-`ExecutionContext` creates its `MemoryBudget` before its optional native device
-and passes the device the same explicit `ResourceBudget` root. Omitting
-`managed_resources` creates an unmanaged device with a null root; the device
-uses ordinary allocation and never inherits a caller's thread-local allocation
-scope. `Invocation` receives the device metadata account explicitly, since the
-invocation is constructed before callback allocation scopes are entered.
-
-With a managed root, native GPU dynamic allocations use `ResourceAllocator`:
-pipeline keys and map nodes, native-buffer owners, allocation-address lookup
-nodes, allocated invocation-view vector capacity and temporary SPIR-V module
-word storage. Vulkan pipeline wrappers and control blocks use this allocator;
-Metal pipeline objects are Objective-C
-objects whose internal storage remains opaque. The allocator charges requested block bytes, its alignment header,
-and an Entries slot; `ResourceLease` accounting adds its own managed overhead.
-Native buffer storage is charged separately using its admitted actual capacity.
-Host, Metadata, Shared, Device and Payload are overlapping budget dimensions,
-not separate physical allocations to sum.
-
-The native pipeline cache holds at most 64 entries. A submitted batch retains
-pipeline references in a fixed array of 32 command slots, with up to 31 storage
-bindings per command. An invocation independently retains at most 1024 view
-tokens. The allocation-address map holds weak `CpuStorage` references, so it
-does not own native buffers. These limits bound the corresponding structures;
-thread stacks and fixed bootstrap objects remain outside the managed metadata
-counter. Metal and Vulkan serialize device queue operations and protect the
-pipeline map with a separate cache mutex. Cache clearing releases its charged
-keys and map nodes. Vulkan wrapper metadata remains charged while a batch pin
-owns it; Metal's native pipeline objects are opaque and their native lifetime
-is not a managed metadata charge.
-
-For managed native metadata, allocation gets one bounded recovery attempt. The
-first attempt uses a nested resource scope whose failure sink is null. If it
-fails, the device clears the native pipeline cache and retries once in the
-caller's original scope, preserving that scope's sticky failure on a terminal
-allocation error. This metadata reclaim clears only the native pipeline cache.
-GPU payload admission has a separate path: it releases eligible pending disk
-and result-cache owners, clears the native pipeline cache when needed, then
-performs the atomic root reservation. Unmanaged devices use their explicit null
-root directly and do not run the managed cache-clear retry.
-
-
-## Temporary backing
-
-`TemporaryStorage` owns a private, unbuffered temporary file with arithmetic byte
-addressing. Encoded extents are rounded separately to 4096 bytes. The disk limit
-counts the encoded file capacity, not filesystem blocks or physical device I/O.
-No per-page resident directory, mmap or optional-cache eviction is required.
-Every read is explicit, range checked and window bounded; no producer computation
-occurs inside storage access. Reads allocate an owning immutable buffer, retaining
-the backing and root until the last window is released.
-
-Append reserves growth before writing. Failure restores the previous allocation
-end or quarantines its reservation if rollback cannot be verified. Successful
-file close settles quarantine; failed close keeps capacity charged. A monotone
-frozen prefix cannot be overwritten. Sealing stops further production. Prefix
-finality and cross-field association validation belong to the result publisher,
-not to this byte-storage primitive. Cancellation stops new I/O; already submitted
-synchronous calls finish before owners are released. Cleanup needs no new window.
-
-## Focused checks
-
-```sh
-cmake --build build/issue257-shared --target test_resources test_dependency_program test_dependency_joint test_joint_execution test_footprint test_memory_liveness -j 8
-ctest --test-dir build/issue257-shared -R '^(test_resources|test_dependency_program|test_dependency_joint|test_joint_execution|test_footprint|test_memory_liveness)$' --output-on-failure
+namespace ps {
+Result<ResourceLease> reserve_capacity(const ResourceBudget& budget,
+                                       std::uint64_t bytes) {
+  return budget.reserve(ResourceCapacity::host(bytes));
+}
+}
 ```
 
-`test_resources` includes a 65536-byte temporary payload under a 16384-byte
-managed host limit, independent owner/accounting assertions, alias lifetime,
-concurrent admission, referenced-owner deduplication, cancellation and bounded
-failure. `test_dependency_program` reproduces the parent Need/upstream/resume
-fuel sequence: root 10000 admits only the upstream's 6000 algorithm units; root
-30000 admits both 6000-unit phases. Host protocol work consumes additional units.
-`test_managed_dispatch` checks zero/cumulative root stages, zero/one Queue slots
-across Whole, source, dependency and atom execution, and structured source error
-provenance through returned failures and exceptions.
+The budget tracks Host, Device, Shared, Metadata, Referenced, TemporaryDisk, Entries, Files, I/O slots, Queue, and Payload dimensions. Some dimensions describe the same physical bytes: Host includes Metadata and Shared, and Device includes Shared. Do not add these overlapping counters as if they were separate allocations. Context Payload is additionally limited by `maximum_live_bytes`. Referenced caller-owned storage is separately admitted under Referenced and does not consume the Payload sublimit.
 
-The installed target `photospider_resource_consumer` compiles the same public
-API behavior checks through `find_package(Photospider 0.14 CONFIG REQUIRED)`.
-It does not include private kernel headers or link a source-tree kernel target.
+## Data Layout & Memory
 
-## Current staged metadata and view boundaries
+```cpp
+#include <cstdint>
 
-Staged dependency certificates and `NeedBatch` metadata are admitted and copied
-at their public boundaries. A copy admits fresh metadata capacity and owns a
-new metadata owner; it does not copy the source owner. The host invokes private
-`reseal_metadata()` before accepting finalized mutable batch vectors.
-Dependency sessions and callbacks use the active TLS resource root when one is
-present; otherwise they restore the root saved at session start, including when
-work crosses a scope boundary.
+#include "photospider/data/storage.hpp"
 
-For regional layout operations, `regional_atomic` passes the original query and
-normalized requested rectangle set to the callback. Each logical sample remains
-an Atomic observation; the rectangle set is not one Atomic observation. When
-`preserve_output_views` publishes an
-affine view, payload admission uses the existing nonblocking reserve and
-cache-reclaim path for the actual newly allocated bytes; the retained source
-owner is accounted separately. `ValueFragments` can carry a
-publication lifetime token for owned metadata, while each published `Value`
-retains its immutable storage alias until the last owner is released. The
-layout operations are `cacheable=false` because content cache entries do not
-encode physical owner/stride partitions; pure and active-Run sharing have
-separate lifetimes.
+namespace ps {
+void allocate_with_quotas(BufferAllocator allocator,
+                          std::uint64_t maximum_capacity,
+                          std::uint64_t maximum_requested,
+                          std::uint64_t bytes) {
+  auto scoped = allocator.limited(maximum_capacity);
+  auto requested = scoped.limited_requested(maximum_requested);
+  auto allocation = requested.allocate(bytes);
+}
+}  // namespace ps
+```
 
-The accounting boundary remains explicit: caller code that extracts a raw
-`Value` or returns a raw vector and copies it is outside the publication token's
-accounting. Empty containers and geometry work internal to the current
-implementation are not comprehensively charged. The declared budget therefore
-provides `WithinBudgetOrFail` only for the accounted capacity model and does not
-certify total process RSS.
+Copies of a lease share one reservation. Its capacity remains charged until the last lease owner is destroyed. A grow reserves the additional capacity atomically. Callers shrink only after the corresponding storage has been released; failed admission returns `ResourceExhausted` with a capacity-limit status and does not wait for another owner to retire. `ResourceAllocator` admits its requested block and alignment header before allocation and retains the lease in the allocation header until after physical storage is freed. Payload-kind STL allocations also count their elements toward Payload; the allocator header remains Metadata.
 
-This exclusion also covers host container reconstruction in
-`ExecutionRun` and structured execution: those paths extract published Values
-and create new `ValueFragments` containers without transferring the original
-container token. Each Value still retains its source and publication owner;
-the reconstructed outer vector/coverage/descriptor storage is legacy container
-metadata and can retire after its last Value releases that owner.
+`CpuStorage` exposes immutable borrowed bytes while an owning storage reference remains alive. Its native owner is destroyed before capacity and requested-byte leases are released. `BufferAllocator::limited()` constrains actual backing capacity; `limited_requested()` constrains the sum of live requested bytes. Nested scopes can apply both limits. Native conversion preserves allocation provenance and failure observers, and charges actual native capacity to the root.
+
+`reference(storage)` admits the full capacity of storage owned outside the resource root under Referenced, deduplicated by live storage owner within one root. If the root allocator already owns the storage, the method returns it without a Referenced reservation; its existing Payload and Host capacity leases remain in force. Execute bindings use this admission for retained inputs when the managed root is enabled. A downstream view keeps the selected owner and its existing accounting lease alive.
+
+## Execution & State
+
+`consume(ResourceWork)` admits work, byte, request, and stage counters atomically. Work or I/O exhaustion returns `ResourceExhausted` with `WorkLimit`; stage exhaustion returns `StageLimit`. Rejected work does not increment issued counters. Issued work is not refunded after failure, fallback, or cancellation. Callback submission also charges one cumulative root stage. For ordinary callback submissions, Queue capacity counts callbacks waiting to start and is released when a worker removes the callback; callback envelope metadata remains charged through callback retirement. A planar `CPU_STAGES` job retains its waiting admission and managed Queue lease until all submitted tiles retire and the job is unlinked.
+
+Staged dependency `NeedBatch` and certificate copies acquire their own metadata owner; copying the vectors does not transfer the source owner's accounting. The host reseals finalized mutable batch metadata before accepting it. A dependency session carries the root selected at session start. If continuation work runs outside an active `ResourceAllocationScope`, the session restores that root for metadata allocations; an active scope remains authoritative.
+
+GPU contexts create the resource root before the optional device and pass the same root explicitly into native allocations. Without managed resources the native device has no root and uses ordinary allocation. Invocation metadata has a separate explicitly supplied accounting domain. The native pipeline cache retains at most 64 entries; a dispatch batch retains up to 32 commands, each with up to 31 storage bindings; an invocation retains at most 1024 live buffer views. The address map keeps weak `CpuStorage` references and does not own native buffers.
+
+When managed native metadata admission fails, the device clears its native pipeline cache and retries once. GPU payload admission can first reclaim eligible pending disk writes and result-cache owners, then reserves actual native capacity atomically. These recovery paths do not retry operation callbacks.
+
+`TemporaryStorage` owns a private unbuffered temporary file with byte addressing. Encoded extents are rounded to 4096 bytes, and the disk limit counts encoded file capacity rather than filesystem blocks. Reads are bounded, range checked, synchronous, and return immutable owning buffers that keep the backing file and root lease alive. Appends reserve capacity before writing; failed rollback quarantines the reservation until successful file close. A frozen prefix cannot be overwritten, and sealing ends production. Cancellation prevents new I/O while submitted synchronous calls finish before owners retire.
+
+An operation that declares `preserve_output_views` may publish an affine input view when it covers the required input region. Compatible fragments from the same owner may be combined only after address mapping proves their coverage. Storage owned outside the resource root receives a Referenced lease; storage already owned by the root keeps its existing Payload and Host accounting without another Referenced charge. Newly allocated output backing follows the active output allocator. The option supports CPU Atomic staged or Whole execution and excludes GPU and joint execution. `requires_input_views` further restricts the operation to Whole execution.
+
+## Algorithms & Math
+
+Resource products, alignment, and page rounding are checked before allocation or publication. Admission operates on declared or queried allocation capacity; `live` reports currently admitted capacity including unused reservations, and `peak` reports the observed maximum of that counter.
+
+## Limitations & Non-Goals
+
+- Managed capacity is a `WithinBudgetOrFail` guarantee for accounted allocations; it does not cap total RSS or opaque driver and standard-library storage.
+- Empty containers and some internal geometry/reconstruction metadata are not comprehensively charged. Reconstructed outer `ValueFragments` metadata may outlive its original publication token, while each `Value` retains its storage owner.
+- A caller that extracts a raw `Value` or vector and copies it outside the managed allocator assumes that copy's memory cost.
+- Prefix finality and cross-field association validation belong to the result publisher, not `TemporaryStorage`.

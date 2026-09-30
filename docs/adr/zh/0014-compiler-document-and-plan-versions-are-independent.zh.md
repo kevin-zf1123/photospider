@@ -1,99 +1,47 @@
-# ADR 0014：Compiler Document、IR、Plan 与 Digest 具有独立 Identity
+# ADR 0014：Compiler 阶段与兼容版本保持独立
 
-- 状态：已接受，由 ADR 0015 收窄
-- 日期：2026-09-01 边界修订
+- 状态：已接受
 
-## ADR 0016 的已接受目标
+## 1. 核心摘要 (TL;DR)
+Compiler 从版本化 workflow 文档逐步构造不同的不可变语义、优化和物理 plan。文档 schema、plugin ABI、package API、planner 行为和 daemon IPC 是不同契约。分别管理这些版本，避免暗示并不存在的兼容性。
 
-已接受目标将静态输入/端口 schema 纳入规范身份，排除普通标量及图像运行字节；新身份域与版本由 #257 实现。
-参见[ADR 0016](0016-workflow-inputs-and-execution-bindings.zh.md)。下文原版本与
-表示描述保留为实现基线，直到 #257 交付；本次决策接受不表示运行实现已经改变。
+## 2. 架构心智模型
 
-## 背景
+```text
+WorkflowDocument -> SemanticGraphIR -> OptimizedGraphIR -> ExecutionPlan
+       |                    |                  |                |
+ document schema       semantic digest    optimized digest   plan digest/key
+```
 
-Typed compiler 需要可复现的中间 identity，同时不能混淆 source document、semantic
-meaning、optimization result、physical plan、runtime allocation、cache entry 或
-daemon object。
+每次阶段转换都会校验输入，并返回完整对象或错误。Plan 面向本地能力，不携带远程设备句柄。Frozen registry 身份用于运行时检查阶段来源，但不属于规范化语义内容。
 
-## 决策
+## 3. 契约规约与接口
 
-Compiler pipeline 有四个显式 value domain：
+```cpp
+// Excerpt; compiler and value types are declared by the public headers.
+class Compiler {
+ public:
+  Result<SemanticGraphIR> analyze(const GraphSnapshot&, ResourceBindings) const;
+  Result<OptimizedGraphIR> optimize(const SemanticGraphIR&) const;
+  Result<ExecutionPlan> plan(const OptimizedGraphIR&, const PlanningOptions&) const;
+};
 
-1. `WorkflowDocument`，caller-owned source model；
-2. `SemanticGraphIR`，已规范化并完成 type/shape/trait validation；
-3. `OptimizedGraphIR`，语义等价的优化形式；
-4. `ExecutionPlan`，面向一组本地 target capability 的 physical plan。
+struct SemanticGraphDigest { std::string value; };
+struct OptimizedGraphDigest { std::string value; };
+struct ExecutionPlanDigest { std::string value; };
+struct PlanCacheKey { std::string value; };
+```
 
-每个 stage 构造后不可变，并在下一 stage 开始前完成验证。Compiler diagnostic 带
-source location 与 stage-local code；不修改 input document。
+当前 Workflow 文档 schema 版本为 3。不同 digest 使用不同身份域；Plan cache key 用于可丢弃的派生查找。Compiler 按对应阶段编码封闭文档字段、规范化参数、复制的 operation trait、静态 preparation identity 字段、输入/输出 demand、optimizer identity 和目标能力等信息。运行时地址、分配 ID、计时、取消状态、队列状态和 daemon ID 不纳入 digest。Float 参数身份按复制得到的 binary64 位模式保留，并以小端编码，因此正零和负零不同；schema 允许的非有限 payload 也不规范化。对符号敏感的 operation 因此不会在 semantic、optimized、plan 或 cache identity 阶段发生碰撞。
 
-### Version axis
+独立版本轴包括 Workflow 文档 schema、operation trait/ABI schema、semantic IR、optimizer 规则、physical planner、安装 package/API 和 daemon IPC。一个轴改变不表示其他轴兼容。内部 IR 和 plan 是进程内契约，不是 daemon wire format；跨发布版本没有内部读取兼容承诺。每个阶段保留 exact frozen registry 的私有 weak identity，防止 optimizer、planner 或 executor 使用来自另一 registry 的对象，即使 operation key 相同也不行；该运行时身份不进入 digest 或序列化数据。静态 prepared state 和 library pointer 不编码进 digest；按契约需要时，其推导元数据和声明的 workspace 上限会参与阶段身份。
 
-Document schema、operation-trait schema、semantic IR schema、optimizer rule set、
-physical planner、public package/API 与 daemon IPC 是独立 version axis。一个 axis
-的变化不会默示另一个 axis 兼容。0.x 开发期间，installed package/API change 可以
-是 breaking，并且必须通过隔离 consumer 测试。
+缓存命中仍须校验 plan 和 currentness。嵌入方提供的 cache hit 也要重新验证；格式错误或过期的条目作为 miss 处理。阶段身份和校验细节见 [Compiler 和执行](../../kernel-architecture/Compiler-and-Execution.md)。
 
-内部 semantic/optimized/plan representation 不是 wire format，daemon 不会序列化
-它们。不承诺跨 release 的内部 IR reader compatibility。
+## 4. 非目标与明确边界
+- Digest 不是加密签名、授权、证明或持久对象身份。
+- Kernel 不迁移持久化文档；consumer 管理文档存储和迁移策略。
+- 内部 compiler stage 没有跨发布版本 reader 兼容承诺。
 
-每个 in-memory stage 携带产生它的 exact frozen operation registry 的 private weak
-identity。即使 operation key 相同，optimizer、planner 和 executor 也会拒绝来自其他
-registry 的 stage。该 runtime freshness identity 不进入 canonical digest 或 wire/package data。
-
-### Digest 与 cache key
-
-Compiler 可以暴露：
-
-- 规范化 semantic content 的 `SemanticGraphDigest`；
-- optimized form 加 optimizer identity 的 `OptimizedGraphDigest`；
-- physical plan content 加 target capability 的 `ExecutionPlanDigest`；
-- 用于派生 lookup 的 `PlanCacheKey`。
-
-Canonical hashing 使用显式 field order、width、enum spelling，以及每个 copied Float64
-parameter 中存在的精确 IEEE-754 binary64 bit。positive zero 与 negative zero 因而在
-semantic、optimized、plan 与 cache-key stage 保持不同。Compiler 不会规范化 NaN payload
-或 infinity，这条 identity 规则也不增加 finite-only validation；每个通过 schema validation
-的 copied bit pattern 都按 fixed little-endian order 编码。Digest 排除 runtime allocation
-id、address、timing、cancellation observation、queue state 与 daemon id。
-
-这些 digest 是用于 reproducibility、diagnostic、benchmark comparison 和可丢弃
-derived cache 的非安全 identity。它们不是 signature、certificate、attestation、
-authorization token、durable object identity 或 receipt。Plan cache 总能删除，并
-从 source、当前 operation trait 和 compiler 重建。
-
-### Correctness gate
-
-每个 stage 按需检查 duplicate node id、missing reference、cycle、operation
-availability、operation 发布的 closed parameter vocabulary、required item、exact
-parameter type、parameter bound、type/shape/`Region` rule、integer overflow、backend
-capability 与 plan dependency order。unknown、missing、wrong-type 或 conflicting
-parameter declaration 会在 semantic IR publication 前失败，builtin callback 不提供隐藏
-default。Embedding-provided cache hit 使用前必须重新
-验证。Malformed 或 stale entry 变成 miss，不能绕过 compiler validation。
-
-Physical planning 接受 named workflow output 的 optional bounded demand。它把 demand
-按 whole-input、elementwise-exact 或 overflow-safe clipped halo Region 反向传播，保守合并
-多个 consumer，保存每个 step 的 output/input demand，并把这些值纳入 physical
-plan/cache identity。Execution 在 transfer/callback entry 前验证每个 produced Value 覆盖
-planned input demand。当前 materialization boundary 仍是 complete Value；demand contract
-不宣称已有 dirty 或 incremental executor。
-
-### Closed source vocabulary
-
-当前 `WorkflowDocument` 没有 generic extension bag。其 closed field 与 parameter
-variant 被直接验证。新 semantic vocabulary 需要显式 document/API version change 与
-compiler handling；未知 field 不会被静默接受进 IR/digest。
-
-## 边界
-
-`WorkflowDocument` 是 compiler input，不是 storage service。Compiler 不拥有 durable
-migration authority、recovery journal、daemon lifecycle 或 security provenance
-角色。ADR 0015 取代过去附加到这些 version 与 digest axis 的所有更广泛含义。
-
-## 后果
-
-- Stage identity 可检查、可测试，而不成为一个全局 version number。
-- 派生 cache 可安全丢弃。
-- Daemon 与 package compatibility 可演进，而不暴露内部 IR。
-- Reproducibility digest 不隐含 trust 或 persistence。
+## 5. 后果与代价
+Consumer 应分别维护自己公开的每种契约版本，并在源文档、trait、规则或目标能力变化时重建可丢弃的 plan。过期或无效 cache entry 会被拒绝或视为 miss。即使 workflow schema 不变，package API 仍可能发生不兼容变化。

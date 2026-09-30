@@ -1,78 +1,38 @@
 # 当前实现与规格前置条件
 
-2026-09-23 更新：package 0.20.0 [移除 13 个旧格式／颜色接口](../02-format-color/op_specs/FMT_legacy_retirement.md)。
-下方历史交付表保留溯源；旧 typed 图像节点的注册不代表已迁移到 planar 执行。
-新 FMT 规格保持 Proposed/未实现。
+Photospider 0.28.0 提供 operation C ABI v11。本文概括当前包内可核对的注册入口、数据类型和执行边界；单个算子的端口、参数、数值行为和 Region 规则以对应实现契约为准。
 
+## 默认 registry 与类型边界
 
-核对日期：2026-09-13。基线为本地 `ops@66b16339`；当前文档工作分支
-`ops-specs@6e429e4b` 包含该基线，并额外实现 PNT-05A。项目版本为 **0.10.0**，
-C operation ABI 为 **9**。来源为合并记录、当前注册代码、公开头文件和实现文档；
-本轮仅更新文档，未重新构建或运行产品测试。以下链接提供可执行示例和既有验收入口。
+默认 registry 的注册入口位于[`builtin_operations.cpp`](../../../src/lib/plugin/builtin_operations.cpp)，公开 operation C ABI 定义于[`operation_plugin_api.h`](../../../include/photospider/plugin/operation_plugin_api.h)。当前分类指南描述的是各族已实现子集；逐 key 的参数、dtype、shape、Region 与错误契约仍以对应专题为准。
 
-## 合并记录与交付范围
+存在 key 只说明 registry 接受该定义，不单独证明任意存储路径都可执行。`OperationTraits::planar_storage_capable` 和结构化 callback 决定 operation 能否进入 planar 执行路径；[`operation_registry.cpp`](../../../src/lib/plugin/operation_registry.cpp) 实施该门控。
 
-| `ops` 合并提交 | 交付 | 当前读取入口 |
+[`ElementType` in `value.hpp`](../../../include/photospider/data/value.hpp) 定义七种内建元素类型：`UInt8`、`Int8`、`UInt16`、`Int16`、`Int64`、`Float32` 和 `Float64`。descriptor 的 rank 为 1 到 8，各轴长度必须大于零。浮点 `Value` 可保留通用位模式；算子的数值契约可施加更窄的限制。
+
+图像 operation 按各自声明支持的语义描述符、布局、类型和 Region 执行。结构化 planar 路径要求 operation 声明 planar 能力并提供相应 callback；仅有旧式 image `Value` callback 的节点不因此获得 planar 执行能力。`SchemaTemplate::validate` 会拒绝旧 layer 图像 schema 并返回 `TypeMismatch`，要求使用 planar storage owner；拒绝分支见[`result.cpp`](../../../src/lib/data/result.cpp)。Layer operation 的规格入口并不表示旧 `Result` schema 路径仍可用。
+
+## 当前能力入口
+
+| 能力 | 实现子集与调用入口 | 数据和执行边界 |
 | --- | --- | --- |
-| `2495393c` / PR #298 | 四 dtype、typed semantics/image v2、静态 shape、computed scalar、基础数值/颜色/连通域 | [Foundations](../../kernel-architecture/Foundations-Workflow.md) |
-| `00864936` / basic CPU operators | 曲线、LUT、mask、滤镜、直方图、levels、字段生成等 21 项 CPU 算子 | [Basic operations](../../kernel-architecture/Basic-Operations.md) |
-| `ffc5d0e2` / PR #301 | G4 精确依赖、按端口读取、STMap、动态 radius gather/scatter | [Dependency sampling](../../kernel-architecture/Dependency-Sampling.md) |
-| `575a424d` / PR #314 | 命名多输出、独立 Region/依赖、可选 joint 执行；四个场景算子 | [Multi-output](../../kernel-architecture/Multi-Output-Operations.md) |
-| `f7515f4f` / PR #324 | managed resources、分页全局结果、结构化表示、Layer/发光、atom 错误与质量；统计/FFT/连通域流程 | [Global results](../../kernel-architecture/Global-Results.md)、[资源](../../kernel-architecture/Managed-Resources.md) |
-| `66b16339` / PR #325 | 直方图 factory 在读取源之前拒绝必需扫描阶段数已超限的尺寸/桶数 | [Integer statistics](../../kernel-architecture/Integer-Statistics.md) |
+| Numeric、expression 与 LUT | 默认 registry 的数值、curve、field、统计和 expression/LUT operation；从[基础算子](../../kernel-architecture/Basic-Operations.md)、[数值操作](../../kernel-architecture/Numeric-Operations.md)、[表达式与 LUT](../../kernel-architecture/Expression-and-LUT-Operations.md)查看 key 契约；[Foundations workflow](../../../examples/foundations_workflow/README.md)提供可运行的 numeric 与 expression/LUT 场景。 | 仅按具体 key 公开的 dtype、shape、参数和 Whole/Region 规则执行；输入为 generic `Value` 不等于图像 planar 能力。 |
+| Channel 与 color | 默认 registry 中明确注册的通道构造、提取、颜色模型转换和 RGB 基底节点，见[通道与颜色操作](../../kernel-architecture/Channel-and-Color-Operations.md)。 | 各节点只接受其声明的 facet、dtype 与布局；不提供任意图像格式转换或 ICC/OCIO 管理。 |
+| Image 与 mask | legacy `Value` 回调包括 exposure、opacity、mask、source-over、box downsample、brush、mix、STMap、horizontal split，以及受构建条件控制的 inpaint；详情见[图像操作](../../kernel-architecture/Image-Operations.md)。 | legacy image callback 不支持结构化 `PlanarImage`。带 `photospider.image` 的输入声明缺少 planar layout 时在输入校验中拒绝；结构化 planar 输入还要求 `planar_storage_capable` 和 planar callback。 |
+| Dependency sampling | `numeric.radius_gather` 和 `numeric.radius_scatter` 可通过 generic `Value` 路径执行；`image.stmap` 的注册 helper 保留受限 bilinear sampling contract，见[依赖采样](../../kernel-architecture/Dependency-Sampling.md)。 | Radius operation 只接受其 generic Value 契约；STMap 的 legacy image dependency 调用会因结构化图像输入或推导出的图像输出缺少 planar storage 而被拒绝，helper 注册不构成可执行 workflow。 |
+| Named multi-output | `image.split_horizontal` 提供 `full`、`left`、`right` 三个 Value 输出，见[多输出操作](../../kernel-architecture/Multi-Output-Operations.md)。 | 它使用 legacy image Value 路径，不获得 planar storage；joint 执行是否可用及独立端口需求以 operation 契约为准。 |
+| Statistics、FFT 与 connected components | 调用方分别创建并注册 `make_statistics_operation`、`make_fft_operation`、`make_component_operation`；对应的[统计](../../kernel-architecture/Integer-Statistics.md)、[外轴 FFT](../../kernel-architecture/External-FFT.md)、[分页连通域](../../kernel-architecture/Paged-Components.md)指南和[工作流验收入口](../14-roadmap/workflows.md)记录当前子集。 | statistics 接受契约限定的 Int64 source/UInt8 mask 并发布分页结果；FFT 当前链覆盖 Float64 real 与 Full/R2CHalf spectrum；components 当前链覆盖 UInt8 mask、labels、area 和 filter。factory 不会自动注册到默认 registry。 |
+| Layer 与 structured representations | `LayerPixel` 及其纯计算 helper 保留在[`data/layer.hpp`](../../../include/photospider/data/layer.hpp)；[`make_layer_operation`](../../../src/lib/plugin/layer_operation.cpp) 仍构造 operation definition，representation schema/spec API 构造数据描述。 | 当前旧 Layer Result schema 在 `SchemaTemplate::validate` 中返回 `TypeMismatch`；`validate_traits` 经 selected-output 与 operation-contract 校验会拒绝以这些旧 Layer Result schema 作为输出的 operation definition，因此这些 Layer Result operation 当前无法成功注册或执行。schema/spec 构造不代表 operation 注册；`examples/layer_workflow` 的旧 source 不是当前运行验收。边界见[Layer runtime](../../kernel-architecture/Layer-Runtime.md)。 |
+| Local inpaint | 默认 registry 保留 `image.local_inpaint_navier_stokes_native_apple_silicon` 和可选 OpenCV key；实现与目标契约见[PNT-05A 实现说明](../09-composite/inpaint-ns-implementation.md)。 | 这些是 legacy image Value operation；当前结构化图像调用因缺少 planar storage 而返回 `TypeMismatch`，所以该 key 与其 Whole/input contract 不构成可执行 workflow。OpenCV adapter 还要求对应构建选项。 |
 
-PNT-05A 的 `05f81347` 规格和 `6e429e4b` 实现属于当前 `ops-specs` 的附加提交，
-不在上述 `ops` 合并基线中。旧 package 0.6/0.7、ABI 6/7 和“只有 8 项图像算子”
-描述是早期快照，已由本页替换。
+## Result、资源与错误边界
 
-## 默认 registry 的可用节点
+`Result` 的 `RuntimeCount` extent 可解析为空结果，空集合使用零行且不分配数据 backing。`CompleteBundle` 在 seal 前不发布；`StablePrefix` 与 `IndependentChunks` 当前都只提供有序字段前缀，已发布范围不可撤回，后续失败可保留已发布前缀；任意乱序范围发布不属于当前 API。见[Global Results](../../kernel-architecture/Global-Results.md)。
 
-以下名称来自[注册入口](../../../src/lib/plugin/builtin_operations.cpp)和对应分类实现。
-表格按能力归组；每项精确端口、参数、输入域和 Region 以链接的实现契约为准。
-斜杠表示同前缀的多个 key，例如 `numeric.mean/variance` 表示 `numeric.mean` 和 `numeric.variance`。
+受管资源预算限制内核声明并计量的 managed capacity、work 和 stage，不构成进程 RSS 上限；调用方输入和未计量的系统/驱动分配不因此受限。见[Managed Resources](../../kernel-architecture/Managed-Resources.md)。普通 `execute` 对执行错误保持 fail-fast；`execute_atoms` 只为受支持的 managed CPU Value dependency plans 收集有界、带 scope 的 Atom observation，并拒绝 planar image plans。见[Atom errors and quality](../../kernel-architecture/Atom-Errors-and-Quality.md)。
 
-| 能力 | 已实现 key | 实现契约 |
-| --- | --- | --- |
-| 数值与统计 | `numeric.add/subtract/multiply/divide`, `numeric.clamp`, `numeric.mean/variance`, `numeric.minimum/maximum/abs`, `numeric.ordered_scan` | [Numeric](../../kernel-architecture/Numeric-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md)、[ordered scan 源码](../../../plugins/ops/01-numeric/numeric_ordered_scan.cpp) |
-| 曲线与生成 | `numeric.sample_expression`, `lut.apply_1d`, `curve.sample_linear/sample_monotone`, `field.apply_lut_1d`, `field.smoothstep` | [Expression/LUT](../../kernel-architecture/Expression-and-LUT-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
-| 分析与等级 | `analysis.histogram`, `analysis.histogram_out_of_range`, `grade.levels` | [Basic](../../kernel-architecture/Basic-Operations.md)；05-filter 原实现已退役，新规格仍 Proposed |
-| 原有 RGBA/mask 链路与 mix | `image.exposure_gain/opacity/mask/source_over/downsample_box/brush_circle`, `mask.downsample_box`, `image.mix` | [Image](../../kernel-architecture/Image-Operations.md)、[Basic](../../kernel-architecture/Basic-Operations.md) |
-| 动态依赖采样 | `image.stmap`, `numeric.radius_gather`, `numeric.radius_scatter` | [Dependency sampling](../../kernel-architecture/Dependency-Sampling.md)；STMap 是明确边界模式的 bilinear 子集 |
-| 命名多输出 | `image.split_horizontal` → `full/left/right` | [Multi-output](../../kernel-architecture/Multi-Output-Operations.md)；旧 filter 多输出已退役 |
-| 当前分支局部修复 | `image.local_inpaint_navier_stokes_native_apple_silicon`；可选 `image.local_inpaint_navier_stokes_openCV` | [PNT-05A 实现](../09-composite/inpaint-ns-implementation.md)；Whole、opaque RGBA、binary mask，OpenCV adapter 需构建开关 |
+## 规格状态、边界与修订入口
 
-原有 8 项有可选 Metal 后端；新增 CPU 算子、joint 与 structured Result 不因此获得 GPU 支持。
-PNT-05A 仍有编译期 profile/shape 拒绝时机与规格不完全一致的已记录限制。
+规格的 `Proposed` 或 `Accepted` 状态描述目标契约状态，不表示实现已经注册。oracle 覆盖、operation 注册、planar storage 能力和 CPU/GPU backend 支持是不同事实，应分别按对应实现文档核对。
 
-## 显式注册的全局流程与表示
-
-下列 operation factory 返回可注册的 `OperationDefinition`。调用者冻结尺寸/schema 后使用
-`OperationRegistry::register_operation` 注册，并配置
-`ExecutionContextConfig::managed_resources`；这些 key 不由默认 registry 自动加入。
-
-| 公开入口 | 可用计算链与输出 | 边界 / 示例 |
-| --- | --- | --- |
-| `make_statistics_operation` | `statistics.histogram` → `statistics.parameters` → `statistics.grade` | facet-free Int64 HW + UInt8 mask；分页稀疏整数频数、全局参数、Float64 pixels；[workflow](../../../examples/statistics_workflow/README.md) |
-| `make_fft_operation` | `fft.forward_real`, `fft.import_response`, `fft.multiply`, `fft.inverse_real` | Float64 HW real、Full/R2CHalf Spectrum；逆变换输出 real projection + measured imaginary residual；[workflow](../../../examples/fft_workflow/README.md) |
-| `make_component_operation` | `components4.labels` → `components4.area` → `components4.filter` | UInt8 HW，四连通 MinPixel ID，分页关联面积索引与 UInt8 mask；[workflow](../../../examples/components_workflow/README.md) |
-| `make_layer_operation` | `layer.assemble/over/opacity/emit_front/emit_behind/flatten/response/response_over/coverage_raw_plus/raw_checked/raw_capped/weight/weighted_reduce/weighted_finalize/require_valid` | coverage 与 emission 分离；固定 linear-sRGB D65；[Layer runtime](../../kernel-architecture/Layer-Runtime.md)、[workflow](../../../examples/layer_workflow/README.md) |
-| `*_schema` / `*_spec` | Spectrum、Bands、PathSet、DynamicPoints、Components、PlanarYCbCr、BrushState、IterativeState | 已实现描述、分页字段和校验；Haar/causal brush/diagonal iteration 有限定示例；[表示契约](../../kernel-architecture/Structured-Representations.md) |
-
-表示和示例 helper 已交付的范围分别记录；通用 wavelet、路径布尔/描边、smudge、任意迭代 solver
-仍需专用节点。`analysis.histogram` 与 `statistics.histogram` 具有不同输入和结果契约，不能按名称互换。
-
-## 当前契约与剩余边界
-
-| 主题 | 已实现 | 仍需逐算子明确 |
-| --- | --- | --- |
-| dtype / shape | UInt8、Int64、Float32、Float64；Value rank 1..8、正轴长；静态输出、命名多输出；Result RuntimeCount 可为零 | 已有 Float32/64 HWC2 ComplexField，无原生 complex dtype；动态结果采用有版本 schema，不修改已发布 Value descriptor |
-| 颜色 / alpha | image v2 支持明确模型/角色和 signed/HDR；CoverageRGBA 的 A∈[0,1]、A=0⇒P=0；Layer 独立 E | ICC/OCIO、任意空间转换和隐含颜色保存不自动提供；每个端口有自己的输入子集 |
-| 依赖与发布 | protocol 1 精确 Value fragments；protocol 2 Result 分页、ObjectId/关联；CompleteBundle/StablePrefix/IndependentChunks | IndependentChunks 当前仅有序前缀子集；Conservative/Unknown 不能升级 Exact；终端 RequestRecord 不作可组合中间结果 |
-| 预算与寿命 | root capacity/work/stages、mandatory backing、显式 I/O、cache-off 共享、最终 owner 释放 | `WithinBudgetOrFail` 只覆盖声明的 managed capacity；RSS/driver/OS cache 等排除，有限预算可能拒绝执行 |
-| 错误与质量 | `Status.code/reason/detail`、Atom/ValidationDomain/Association/Group/Run/Waiter scope；`execute_atoms`；Measured/CertifiedBound | 普通 `execute` 仍 fail-fast；CertifiedBound 当前仅受限整数对角系统 factory，不覆盖任意 solver |
-| 未交付功能族 | 可复用公共基础已具备 | 通用路径光栅、EDT/Canny、更多重采样核/地图生成、3D LUT、ICC/OCIO、RAW、时域、Deep、ML 等仍按各篇 Proposed 规格推进 |
-
-资源、错误及数值边界详见[公共契约](contracts.md)。完整需求目录和 D1/D2/D3 成熟度
-不代表所有条目已成为 registry 节点；后续执行链见[路线图](../14-roadmap/implementation.md)。
-
-2026-09-26：旧测试生成算子 `field.coordinate`、`field.constant` 已删除实现及注册；03-generation新规格尚未实现。
+通用路径光栅、任意 solver、RAW、时域、Deep 和 ML 等能力不由现有基础设施自动提供；只有当前 registry、factory 或明确执行接口实现的部分才属于可调用能力。按[规格模板](spec-template.md)选择规格、实现说明或 workflow 的维护位置。

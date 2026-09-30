@@ -1,114 +1,51 @@
-# ADR 0014: Compiler Documents, IR, Plans, and Digests Have Separate Identities
+# ADR 0014: Compiler Stages and Compatibility Versions Stay Distinct
 
-- Status: Accepted, narrowed by ADR 0015
-- Date: 2026-09-01 boundary revision
+- Status: Accepted
 
-## Accepted target amendment by ADR 0016
+## 1. Core Summary (TL;DR)
+The compiler builds distinct immutable semantic, optimized, and physical-plan values from a versioned workflow document. Document schema, plugin ABI, package API, planner behavior, and daemon IPC versions describe different contracts. Keeping them separate avoids implying compatibility where none is promised.
 
-The accepted target extends canonical identities with static input/port schemas and excludes ordinary scalar/image run bytes; the specified new domains and versions belong to implementation #257.
-See [ADR 0016](0016-workflow-inputs-and-execution-bindings.md). Existing version
-and representation descriptions below remain the implementation baseline until
-#257 delivers the target; decision acceptance does not report runtime changes.
+## 2. Mental Model & Intuition
 
-## Context
+```text
+WorkflowDocument -> SemanticGraphIR -> OptimizedGraphIR -> ExecutionPlan
+       |                    |                  |                |
+ document schema       semantic digest    optimized digest   plan digest/key
+```
 
-A typed compiler needs reproducible intermediate identities without confusing a
-source document, semantic meaning, optimization result, physical plan, runtime
-allocation, cache entry, or daemon object.
+Each transition validates its input and returns a complete value or an error. The plan targets local capabilities; it does not contain a remote device handle. A frozen registry identity protects stage use at runtime but is not canonical semantic content.
 
-## Decision
+## 3. Formal Contracts & APIs
 
-The compiler pipeline has four explicit value domains:
+```cpp
+// Excerpt; compiler and value types are declared by the public headers.
+class Compiler {
+ public:
+  Result<SemanticGraphIR> analyze(const GraphSnapshot&, ResourceBindings) const;
+  Result<OptimizedGraphIR> optimize(const SemanticGraphIR&) const;
+  Result<ExecutionPlan> plan(const OptimizedGraphIR&, const PlanningOptions&) const;
+};
 
-1. `WorkflowDocument`, the caller-owned source model;
-2. `SemanticGraphIR`, normalized and type/shape/trait validated;
-3. `OptimizedGraphIR`, a semantically equivalent optimized form;
-4. `ExecutionPlan`, a local physical plan for one target capability set.
+struct SemanticGraphDigest { std::string value; };
+struct OptimizedGraphDigest { std::string value; };
+struct ExecutionPlanDigest { std::string value; };
+struct PlanCacheKey { std::string value; };
+```
 
-Each stage is immutable after construction and is validated before the next
-stage begins. Compiler diagnostics carry source locations and stage-local
-codes; they do not mutate the input document.
+Workflow documents currently use schema version 3. Digests identify canonical content in separate domains; the plan cache key identifies disposable derived lookup. The compiler encodes the closed document fields, normalized parameters, copied operation traits, static preparation identity fields, output/input demands, optimizer identity, and target capability facts in their corresponding stage domains.
 
-### Version axes
+Each stage also carries a private weak identity for the exact frozen operation registry; optimizer, planner, and executor reject a foreign-registry stage even if operation keys match. That runtime identity is excluded from canonical digests and serialized data. Runtime addresses, allocation IDs, timings, cancellation, queue state, and daemon identifiers are excluded. Float parameter identity preserves copied binary64 bits in fixed little-endian order, including signed zero and non-finite payloads accepted by schema validation.
 
-Document schema, operation-trait schema, semantic IR schema, optimizer rule
-set, physical planner, public package/API, and daemon IPC are independent
-version axes. A change in one axis does not silently claim compatibility in
-another. During 0.x development, an installed package/API change may be
-breaking and must be tested through an isolated consumer.
+Thus sign-sensitive operations do not collide across semantic, optimized, plan, or cache identities. Static prepared state and library pointers remain outside digest bytes; their resolved metadata and declared workspace bounds participate where specified.
 
-Internal semantic/optimized/plan representations are not wire formats and are
-not serialized by the daemon. No reader compatibility promise is made for
-internal IR across releases.
+The independent axes include workflow document schema, operation trait/ABI schema, semantic IR, optimizer rules, physical planner, installed package/API, and daemon IPC. Changing one does not assert compatibility in another.
 
-Each in-memory stage carries a private weak identity for the exact frozen
-operation registry that produced it. Optimizer, planner, and executor reject a
-stage from another registry even when operation keys match. This runtime
-freshness identity is excluded from canonical digests and wire/package data.
+Internal IR and plan objects are in-memory contracts, not daemon wire formats. Their registry identity prevents use with an incompatible frozen operation set. A matching cache key never replaces plan validation and stale checks. Embedding-provided cache hits are revalidated; malformed or stale entries become misses. See [Compiler and execution](../kernel-architecture/Compiler-and-Execution.md) for current identity fields and stage validation.
 
-### Digests and cache keys
+## 4. Non-Goals & Explicit Boundaries
+- Digests are not cryptographic signatures, authorization, attestations, or durable identities.
+- The kernel does not migrate persisted documents; consumers own document storage and migration policy.
+- Internal compiler stages have no cross-release reader compatibility promise.
 
-The compiler may expose:
-
-- `SemanticGraphDigest` for normalized semantic content;
-- `OptimizedGraphDigest` for the optimized form plus optimizer identity;
-- `ExecutionPlanDigest` for physical plan content plus target capabilities;
-- `PlanCacheKey` for derived lookup.
-
-Canonical hashing uses explicit field ordering, widths, enum spellings, and
-the exact IEEE-754 binary64 bits present in each copied Float64 parameter.
-Positive and negative zero therefore remain distinct at semantic, optimized,
-plan, and cache-key stages. The compiler does not normalize NaN payloads or
-infinities and this identity rule adds no finite-only validation; every
-schema-valid copied bit pattern is encoded in fixed little-endian order. A
-digest excludes runtime allocation ids, addresses, timings, cancellation
-observations, queue state, and daemon ids.
-
-These digests are non-security identities for reproducibility, diagnostics,
-benchmark comparison, and disposable derived caches. They are not signatures,
-certificates, attestations, authorization tokens, durable object identities, or
-receipts. Plan caches can always be deleted and rebuilt from source plus the
-current operation traits and compiler.
-
-### Correctness gates
-
-Every stage checks duplicate node ids, missing references, cycles, operation
-availability, the operation-published closed parameter vocabulary, required
-items, exact parameter types, parameter bounds, type/shape/`Region` rules,
-integer overflow, backend capability, and plan dependency ordering as
-applicable. Unknown, missing, wrong-type, or conflicting parameter declarations
-fail before semantic IR publication and no built-in callback supplies a hidden
-default. An
-embedding-provided cache hit must be revalidated before use. A malformed or
-stale entry becomes a miss; it cannot bypass compiler validation.
-
-Physical planning accepts optional bounded demands for named workflow outputs.
-It propagates those demands backward as whole-input, elementwise-exact, or
-overflow-safe clipped halo Regions, merges multiple consumers conservatively,
-stores per-step output/input demands, and includes those values in physical
-plan/cache identity. Execution verifies each produced Value covers the planned
-input demand before transfer or callback entry. Complete Values remain the
-current materialization boundary; the demand contract does not claim a dirty
-or incremental executor.
-
-### Closed source vocabulary
-
-The current `WorkflowDocument` has no generic extension bag. Its closed fields
-and parameter variant are validated directly. New semantic vocabulary requires
-an explicit document/API version change plus compiler handling; unknown fields
-are not silently accepted into IR or digests.
-
-## Boundary
-
-`WorkflowDocument` is compiler input, not a storage service. The compiler has no
-durable migration authority, recovery journal, daemon lifecycle, or security
-provenance role. ADR 0015 supersedes all broader meanings formerly attached to
-these version and digest axes.
-
-## Consequences
-
-- Stage identities are inspectable and testable without becoming one global
-  version number.
-- Derived caches remain safe to discard.
-- Daemon and package compatibility can evolve without exposing internal IR.
-- Reproducibility digests do not imply trust or persistence.
+## 5. Consequences
+Consumers must version each public boundary they actually expose and rebuild disposable plans when source, traits, rules, or target capabilities change. A stale or invalid cache entry is rejected or treated as a miss. Package API changes can be breaking even when workflow schema is unchanged.

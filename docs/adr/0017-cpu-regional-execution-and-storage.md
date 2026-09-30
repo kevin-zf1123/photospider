@@ -1,196 +1,87 @@
-# ADR 0017: CPU Regional Execution and Storage
+# ADR 0017: Execute Regional Work with Bounded CPU Storage
 
 - Status: Accepted
-- Date: 2026-09-09
-- Acceptance: the maintainer explicitly requested implementation of the complete S2 plan in this task, including package 0.4 / operation ABI 4 and protected PR delivery.
-- Baseline: `main@70b760fee96575391b825df1b179480407f33a2b`
-- Decision Issue: #263; implementation: #264, #210, #211, #265, #266
-- Reader mirror: [Chinese](zh/0017-cpu-regional-execution-and-storage.zh.md)
 
-Acceptance specifies a target, not completed implementation. GitHub Issues
-own delivery status. ADR 0015 retains product ownership and exclusions. This
-ADR replaces ADR 0016's whole-only runtime storage/output, full-image numeric
-preflight, operation ABI 3 and modeled callback-budget clauses. Its source
-schema, immutable binding snapshots, image profile, scalar domains and
-cancellation/currentness priority otherwise remain.
+## 1. Core Summary (TL;DR)
 
-## Research and selected approach
+The planner propagates requested output regions through operation traits, and the execution context schedules the resulting work with bounded CPU workers and memory accounting. Dense `Value` storage remains immutable and region-addressable; structural images use `PlanarImage` owners and publish only completed writes. Callers can collect requested outputs or synchronously consume ordered output tiles.
 
-At the baseline, `Value::create` checks addresses over the whole descriptor;
-the operation host requires whole input/output Values; physical demand is
-propagated but not materialized. `ExecutionRun` retains every intermediate
-while releasing modeled resource leases immediately after each callback.
-Those mechanisms cannot establish bounded regional execution.
+## 2. Mental Model & Intuition
 
-[libvips evaluation](https://www.libvips.org/API/current/how-it-works.html)
-demonstrates region-producing sources and sink-driven evaluation.
-[Halide scheduling](https://halide-lang.org/docs/tutorial/lesson_08_scheduling_2.html)
-separates algorithm meaning from computation/storage placement and describes
-locality, redundant computation and parallelism tradeoffs. We adopt explicit
-regional demand and completion-scoped storage in the existing compiler and
-ExecutionContext, without a framework dependency or an unmeasured speed claim.
+```text
+requested output region
+          |
+          v
+planner propagates demands and partitions splittable axes
+          |
+          v
+bounded admission -> CPU workers -> operation callbacks
+       |                   / \
+queue or budget      successful output    failure/cancel/stale
+limit rejects               |                 |
+                          v                 v
+                     publish result    stop admissions
+                          |            drain admitted work
+                    collect / sink          |
+                                      return failure
+```
 
-Whole-image cropping after execution cannot meet small-ROI memory acceptance.
-Retaining ABI 3 alongside a second regional ABI adds a second output/lifetime
-contract; the maintainer selected one breaking ABI. Process RSS accounting
-would require unrelated allocation instrumentation; S2 bounds controlled
-computation buffers instead. Native devices, cross-run caches, forward dirty
-propagation and disk-derived data remain later decisions.
+The planner works backward from each requested output and records input demand. The execution context admits work only when queue and allocation limits permit it. CPU workers invoke callbacks over the planned regions, publish immutable results, and release storage when its final owner retires. A streaming sink applies synchronous backpressure because the executor returns from one sink call before delivering the next tile.
 
-## Logical values and CPU storage
+## 3. Formal Contracts & APIs
 
-A Value separates the full logical descriptor, valid Region, storage view and
-shared immutable owner. A view carries an explicit logical origin, byte offset
-and signed strides. Address validation covers the valid Region, with checked
-rank, containment, integer arithmetic, element tail and storage bounds. Existing
-negative/broadcast layouts remain legal when proven in bounds. Publication is
-atomic and copies share only immutable storage.
+```cpp
+struct RegionDimension { std::uint64_t offset; std::uint64_t extent; };
+class Region;
+class Value;
+class PlanarImage;
+struct ExecutionPlan;
+struct ExecutionBindings;
+struct ExecutionOptions;
+struct ExecutionContextConfig;
 
-Host-controlled mutable allocations become immutable at publication. Writable
-output cannot overlap an active input or another writable allocation. Read-only
-views may share an owner. Reuse requires every using callback to have finished
-and every retained Value/view reference to have retired. Fan-out and repeated
-edges must not release early. A result owns its reservation until its last copy
-is destroyed; accounting state can outlive ExecutionContext.
+using ExecutionSink =
+    std::function<Status(const std::string&, ValueView)>;
 
-`ExecutionBindings` additionally accepts a regional source with the declaration's
-exact descriptor and facets. The source fills a host-provided region buffer
-synchronously. A Run owns its immutable source snapshot until all admitted
-callbacks retire. All names, metadata and scalar intervals are validated before
-operation entry. Pixel domains are validated when their demanded region is read;
-unread pixels are not scanned. Complete dense Value bindings remain supported.
-Source/sink callbacks must not retain borrowed writable/read-only pointers.
+class ExecutionContext {
+ public:
+  [[nodiscard]] Result<ExecutionResult> execute(
+      const ExecutionPlan& plan, ExecutionBindings bindings = {},
+      const CancellationToken& cancellation = CancellationToken(),
+      const ExecutionOptions& options = {});
+  [[nodiscard]] Result<ExecutionDiagnostics> execute_stream(
+      const ExecutionPlan& plan, ExecutionBindings bindings,
+      const ExecutionSink& sink,
+      const CancellationToken& cancellation = CancellationToken(),
+      const ExecutionOptions& options = {});
+};
+```
 
-## Operations and public versions
+These declarations reproduce the current public member signatures; enclosing headers and unrelated methods are omitted.
 
-Package version becomes 0.4.0; OperationTraits and operation C ABI become 4.
-All maintained C structures/constants/entrypoints use `_v4` / `_V4`; ABI 3 is
-rejected before table lookup with no adapter. C++ consumers rebuild. C++17,
-WorkflowDocument schema 2 and provider ABI 1 remain. Data providers still define
-semantic schemas rather than runtime storage or file codecs.
+`Region` stores half-open logical intervals in descriptor axis order. Coordinates describe samples, not byte offsets. The planner validates requests against output descriptors and propagates demand according to operation traits such as Whole, elementwise, or halo behavior. It clips halo demand at logical image bounds. Tiling partitions only axes authorized by the operation and image contract; a tile retains the complete channel group when the channel axis is atomic. Collected outputs contain the exact planned output coverage, while the descriptor continues to describe the full logical value.
 
-Both operation APIs expose ordered regional input views, explicit output
-Region, host-managed output allocation and scratch. The host owns validation,
-allocation failure and immutable publication. Only successful completion
-publishes output. C pointer/count/size validation and exception fencing remain.
-Operation workspace requirements have a checked computable upper bound used
-before tile admission; operation-internal pixel buffers use the host allocator.
-A trusted callback violating the allocation contract does not acquire a sandbox
-guarantee. Optional callback GPU behavior remains distinct from native devices.
+`Value` describes a logical descriptor, valid region, strided byte layout, facets, resource owners, and immutable `CpuStorage`. `Value::view(region)` returns an owning `Value` that shares the storage owner without copying. `ValueView` instead borrows a `Value` and owns no storage; its referenced value must outlive the view. `MutableBuffer` is exclusive and move-only; `freeze()` transfers its storage into immutable ownership. A published allocation remains alive while any owning `Value` retains it. Retiled and regional operations copy only the requested coverage into host-managed output storage.
 
-Static halo specialization is a copied trait contract, resolved from validated
-node parameters during analysis; it never depends on per-run pixels/scalars.
-Add a bounded Float32 mask input port: rank-two {H,W}, no facets, finite [0,1],
-spatially matching the image. Scalar ports retain whole {1}; RGBA ports retain
-all four channels and the exact ADR 0016 profile.
+`PlanarImageLayout` defines height, width, optional channel axes, component groups, row pitch, and continuous or tiled physical order. Logical axis order does not imply interleaved physical storage. `PlanarImage` owns immutable-published samples; writers use unpublished write windows and commit completed regions. `PlanarPageBudget` accounts backed image pages independently from the maximum virtual reservation. Page owners and their accounting leases may outlive the execution context. The ordinary `execute_stream` entry points accept Value-based regional output and return `TypeMismatch` for plans that require structural planar output; planar execution uses the structural image result path.
 
-## Demand, scheduling and resource ownership
+The operation plugin interfaces currently use operation ABI 11 and planar operation ABI 3. The ordinary C interface is declared in [`operation_plugin_api.h`](../../include/photospider/plugin/operation_plugin_api.h); the separate planar interface is declared in [`planar_operation_plugin_api.h`](../../include/photospider/plugin/planar_operation_plugin_api.h). A callback receives validated metadata, requested regions, and host services through the ABI version selected by the registry. The registry rejects a mismatched ABI before invoking plugin callbacks. Callback exceptions are fenced at the host boundary.
 
-PlanningOptions carries positive tile height/width, default 128/128, and named
-output Regions. ROI/tile edits replan optimized IR. Canonical physical identity
-includes normalized demands and tile geometry. Trait additions, static halo
-specialization and mask semantics enter semantic identity. Use domain-separated
-v4 semantic, optimizer, physical-plan and plan-cache domains; source schema
-remains 2. Run payloads, allocation addresses, timing and cancellation are absent.
+`ExecutionContextConfig` bounds CPU worker count, queued callbacks, controlled live bytes, and optional caches. Ordinary callback submissions release their waiting slot when a worker starts the callback. A `CPU_STAGES` job keeps its admission until every submitted tile retires and the job is unlinked, so a running staged job can still prevent another submission when the waiting limit is full. See the [parallel execution model](../kernel-architecture/Parallel-Execution-Model.md) for the shared scheduler queue. `maximum_live_bytes` accounts controlled computation payloads, including regional reads and managed outputs, scratch, intermediates, and transfers. It does not represent process RSS or count caller-preexisting input storage. An allocation must reserve its budget before payload allocation, and its lease remains until the last storage owner releases it.
 
-Generate tiles lazily in named-output lexical order and spatial row/column
-order. Derive each tile's upstream demands separately, merging fan-out within
-that tile; overlapping halos between tiles may recompute. Halo expands/clips
-against the complete logical image, never the tile boundary. Retiling gathers
-only demanded coverage into accounted buffers. Partial-channel, empty and
-out-of-bounds image requests fail planning.
+## 4. Non-Goals & Explicit Boundaries
 
-Only deterministic, side-effect-free paths with legal regional rules may
-recompute per tile. Whole operations create explicit complete materialization
-boundaries; their full working set and retained results are budgeted. Failure
-to fit returns ResourceExhausted instead of silently exceeding the budget.
+- CPU regional execution is required; GPU backends are optional and operation-specific. GPU availability does not imply every operation can execute there.
+- The controlled byte limit covers instrumented payload allocations. It does not bound caller allocations, uninstrumented metadata, thread stacks, or operating-system overhead.
+- `Region` describes logical coverage. It does not promise that a general strided `Value` is physically contiguous.
+- A planar image's channel grouping describes logical samples and semantic components; it does not convert planar storage into interleaved bytes.
+- The executor does not roll back tiles already consumed by a streaming sink. Streaming has no persistent commit protocol.
+- Trusted in-process operation code is not sandboxed. Allocation services and ABI checks enforce the callback contract but do not contain arbitrary native code.
 
-The ExecutionContext aggregate `maximum_live_bytes` bounds actual controlled
-allocation capacity: source reads, outputs, scratch, retained intermediates,
-transfers and sink staging. Shared storage is charged once. Caller-preexisting
-inputs and caller-created copies are reported separately; metadata, stacks and
-process RSS are outside this bound. Reserved working-set bytes and actual
-allocation peaks are distinct diagnostics. Idle reusable capacity remains
-charged until freed.
+## 5. Consequences
 
-Before scheduling a tile, reserve a conservative complete working-set peak.
-Temporary contention reduces concurrency or waits for admitted work that can
-finish with its existing reservation. A minimum working set that cannot fit
-fails; no callback holds partial resources while waiting for the remainder.
-Externally retained results cannot force an indefinite wait for caller action.
-The worker count, maximum parallelism and aggregate waiting-task bounds remain
-finite. Diagnostic aggregation is bounded by graph size, not total tile count.
+Invalid, empty, or out-of-bounds output requests fail during planning. A callback may be rejected when queue admission, workspace reservation, or output allocation cannot be satisfied. Work that can proceed within current leases waits for worker capacity. Cancellation is cooperative; after valid entry, observed cancellation takes precedence over stale graph state and ordinary operation failure. An operation failure does not publish its incomplete output, and execution failure prevents ordinary `execute` from returning a partial collected result.
 
-## Collection, streaming and failure
+Large whole-operation working sets can require more memory than a small requested output because the operation establishes a full-materialization boundary. Callers should select region-aware operations and tile geometry when the operation contract permits them, configure realistic resource limits, and release retained results when they no longer need them. Shared storage is charged once while shared; externally retained results keep their accounting lease alive.
 
-`execute` collects exactly the requested Region for each named result, using
-accounted storage; no request means whole output. A streaming execution entry
-uses the same plan and bindings with synchronous ordered sink callbacks. The
-sink's borrowed view expires on return. Backpressure bounds completed-but-not-
-consumed tiles. Callers may copy data into their own separately owned storage.
-
-Check cancellation then currentness before admission, after callback completion,
-before each sink delivery, after the final sink callback and after final assembly before returning. Entry still rejects a
-foreign/default/stale plan before bindings or cancellation. After valid entry,
-Cancelled precedes Stale and ordinary failures. Sink failure stops future
-delivery; all admitted work retires before return. Already consumed tiles cannot
-be rolled back; only a final successful return validates the complete stream.
-Streaming is not a durable commit or result-publication protocol.
-
-Malformed names/parameters/source descriptors fail before invocation; demanded
-bound pixel-domain failures are InvalidArgument. Wrong valid types/coverage are
-TypeMismatch, invalid computed pixels are OperationFailed, checked byte overflow
-or allocation exhaustion is ResourceExhausted. Source/sink exceptions are fenced
-as execution failures. No failure publishes a partial collected result.
-
-## Image vertical and oracle
-
-`S2Image.RegionAndTiles` is:
-foreground -> Gaussian -> exposure -> mask -> source-over(background).
-
-- `image.gaussian_blur` requires static Int64 radius in [1,64] and Float64 sigma
-  in [0.1,64], finite, with no defaults. Radius resolves the spatial halo. Use a
-  normalized sampled Gaussian kernel, horizontal then vertical passes, clamp
-  at the image edge, fixed traversal and Float32 rounding after each pass.
-- `image.exposure_gain` retains ADR 0016's dynamic Float32 gain [0,16].
-- `image.mask` scales premultiplied RGBA by independent Float32 {H,W} [0,1].
-- `image.source_over` computes F + B * (1 - F.alpha), including output alpha,
-  following the [source-over formula](https://www.w3.org/TR/compositing-1/#porterduffcompositingoperators_srcover).
-
-Preserve finite/HDR/premultiplied rules, nearest ties-to-even and gradual
-underflow. Disable arithmetic reassociation and FMA contraction. Static kernel
-coefficients use normalized binary64 arithmetic. Taps run from -radius to +radius; multiply and accumulate each tap in binary64 with no contraction, then each separable pass writes
-binary32. Compare whole/tiled runs of the same implementation bit-for-bit.
-An independent whole-image oracle uses abs(error) <= 1e-6 + 1e-5*abs(reference).
-Include a hand-checkable small fixture, edges, nonzero ROI, non-divisible tiles,
-tiles smaller than halo, masks 0/1, transparency, HDR and invalid parameters.
-
-Programmatic large regional sources and a synchronous checking sink prove
-bounded storage without retaining the complete image. Test fan-out, repeated
-inputs, multiple outputs, concurrent Runs, slow/failing sinks, exactly sufficient
-budget and one byte less, malformed views, cancellation/stale, cleanup and
-result ownership after context destruction. Public built-in and installed C
-plugin paths run the same example and independent oracle.
-
-## Delivery
-
-Order: #263 contract, #264 storage/ABI, #210 CPU liveness, #211 tile/halo,
-#265 regional execution, #266 vertical, companion daemon installed-consumer
-migration. #152 remains the broader parent; #209 machine calibration and native
-storage/liveness/tiling scope linked to #153/#154 remain open. S2 does not close
-HEX or MED parents. Issues record native dependencies, actual tests and merged
-commits; Projects mirror them.
-
-Use scoped independent code/contract review, affected static/shared installed
-consumers and existing protected CI. Daemon migration only consumes the public
-installed 0.4 package and adapts affected calls/codec without adding wire
-features. Coordinate the breaking kernel and daemon PRs. No OpenSpec, feedback,
-C++20, release archive or unrelated optimization is part of this decision.
-
-## S3 target amendment
-
-[ADR 0018](0018-local-result-caches-and-frozen-execution.md) explicitly permits bounded disposable disk-derived data and frozen execution, and replaces the operation/trait and scaled-region target. Its acceptance does not establish implementation completion.
-
-## S4 target amendment
-
-[ADR 0019](0019-metal-resident-image-workflows.md) adds explicitly selected Metal execution, native shared storage and operation ABI 6. Its acceptance defines a target, not implementation completion. All other boundaries remain.
+`execute_stream` delivers named Value-based output tiles in deterministic name and spatial order, one synchronous sink call at a time. The `ValueView` expires when the sink returns; the sink can copy bytes or call `ValueView::retain()` to keep an owning `Value`. Retained outputs keep their storage leases alive and can exhaust the execution budget. Sink failure, cancellation, or staleness stops further delivery, and admitted callbacks retire before the call returns. Previously consumed tiles remain consumed even if a later tile fails. Memory limits do not bound process RSS, and operation/backend support depends on each operation's registered traits and configured backend.

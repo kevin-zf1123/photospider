@@ -1,115 +1,42 @@
 # Expression and 1D LUT operations
 
-The default registry provides `numeric.sample_expression` and `lut.apply_1d`
-through public WorkflowDocument, Compiler and ExecutionContext APIs. Both are
-CPU Whole operations with packed Float32 outputs. Their accepted scope is
-[ADR 0020](../adr/0020-composable-operation-foundations.md); the
-[Chinese mirror](zh/Expression-and-LUT-Operations.zh.md) describes this implementation.
+The default registry exposes two expression samplers: the unsuffixed `numeric.sample_expression` Value operation and the profile-specific `numeric.sample_expression_<profile>` family. `lut.apply_1d` consumes a SampledSignal query and a typed one-dimensional table. The accepted composition boundary is [ADR 0020](../adr/0020-composable-operation-foundations.md); this page describes the currently registered keys. The [Chinese mirror](zh/Expression-and-LUT-Operations.zh.md) follows the same contracts.
 
-## Expression sampling
+## Unsuffixed expression sampler
 
-Input is one unfaceted generic Float64 `[K]`, `1 <= K <= 256`, containing dynamic
-coefficients. All coefficients must be finite, including unused entries. Required
-static parameters are String `expression`, Int64 `count` in `[1,1048576]`, finite
-Float64 `start`, and finite positive Float64 `step`. Constructors explicitly write
-defaults, for example `count=3, start=0, step=.5`; the registry supplies none.
-The finite sampling endpoint `fma(count-1, step, start)` must exceed start when
-count exceeds one. The output is Float32 `[count]`, with SampledSignal metadata:
-channel name/role `value`, value unit `dimensionless`, and a `dimensionless`
-sampling axis whose origin/step are the parameters. Shape remains fixed per plan.
+`numeric.sample_expression` takes one generic Float64 coefficient vector `[K]`, where `1 <= K <= 256`. Its required static parameters are String `expression`, Int64 `count` in `[1,1048576]`, Float64 `start`, and positive Float64 `step`. The operation returns Float32 `[count]` with SampledSignal metadata; the sample axis uses the supplied start and step, and the value channel is named and role-tagged `value`. The constructor supplies no defaults.
 
-Grammar permits decimal/scientific literals, `x`, `c[index]`, parentheses,
-unary `+ -`, binary `+ - * / ^`, unary `abs sqrt exp log sin cos`, and binary
-`min max`. Indices are nonnegative decimal integers checked against K. Hexadecimal
-literals, NaN/infinity names and arbitrary identifiers are rejected. Power is
-right-associative and binds above unary minus: `-2^2=-4`, `2^-2=.25`,
-`2^3^2=512`; `0^0=1`. Source is at most 4096 bytes; the actual AST has at most
-256 nodes and height 32. Parentheses do not add AST nodes. The iterative parser
-is shared by compilation and execution; no script, loop, file I/O or Run binding
-is stored in registry or plan state.
+The expression grammar accepts decimal or scientific numeric literals, `x`, `c[index]`, parentheses, unary `+` and `-`, binary `+ - * / ^`, unary `abs`, `sqrt`, `exp`, `log`, `sin`, `cos`, and binary `min`, `max`. Power is right-associative and binds more tightly than unary minus: `-2^2` is `-4`, `2^-2` is `0.25`, and `2^3^2` is `512`; `0^0` is `1`. The parser rejects arbitrary identifiers, hexadecimal literals, `NaN` and infinity names, malformed indices and malformed function calls. Source is limited to 4096 bytes, 256 AST nodes and AST height 32; parentheses do not add nodes.
 
-Each sample uses `x=fma(i,step,start)` and Float64 evaluation in a controlled
-nearest/gradual-underflow environment. Every subexpression must be finite, so
-`min(1e300*1e300,0)` fails. Division by zero and function domain errors fail;
-Float32 output range is checked before narrowing. The invocation allocator owns
-output and 4096 bytes of coefficient/evaluation scratch. Evaluation checks
-cancellation within the AST and between samples; failures release unpublished
-allocations and restore the caller's numeric environment.
+The unsuffixed operation requires finite `start` and finite positive `step`. When `count > 1`, `fma(count-1,step,start)` must be finite and greater than `start`. The sampler computes each coordinate as `fma(i,step,start)` and evaluates in a controlled Float64 nearest-even, gradual-underflow environment. Every coefficient is validated, including unused entries. Each subexpression must be finite, division by zero and function-domain errors fail, and the final value must fit finite Float32. Output and a 4096-byte evaluation workspace use the invocation allocator. Cancellation is checked during evaluation and before publication; failure releases unpublished allocations and restores the caller's floating-point environment.
+
+## Profile-specific named-coefficient sampler
+
+`numeric.sample_expression_strict`, `numeric.sample_expression_accelerated_apple_silicon` and `numeric.sample_expression_accelerated_x86_64` take dynamic scalar `[1]` inputs. Input 0 is `start`, input 1 is `end`, and each remaining input is a coefficient whose name appears in the required String `coefficient_names`. The helper `ps::numeric::sample_expression_node` builds this form from an expression and a map of named coefficient inputs.
+
+Required static parameters are String `expression`, String `coefficient_names`, Int64 `count` in `[1,1048576]`, and String `dtype` (`float32` or `float64`). The `values` output is generic `[count]` in the selected dtype. The `axis` output is Float64 `[3]` containing start, end and computed step when count exceeds one; for count one it contains `[start,start,0]`. A values request with count one does not read the end and still reads the coefficients used by the expression. For a count greater than one, values needs finite distinct endpoints and representable adjacent coordinates; evaluated coefficients must be finite. Both outputs are Whole and materialized through the invocation allocator. An axis-only request skips coefficient evaluation; an empty request skips payload work.
+
+This family has its own parser and function set. It accepts decimal/scientific literals, `x`, `pi`, `e`, named coefficient identifiers, parentheses, unary `+ -`, binary `+ - * / ^`, unary `abs`, `sqrt`, `exp`, `ln`, `sin`, `cos`, `tan`, and binary `min`, `max`. `log` is the function name on the unsuffixed Value key; the profile-specific keys use `ln` and also provide `tan`, `pi` and `e`. The suffix selects a CPU numeric profile. Unsupported host profiles fail during preparation. Strict evaluation uses the same left-to-right Float64 expression order and rounds once to the requested output dtype. Accelerated profiles certify candidate results against the fixed strict result and replay uncertain samples through the strict evaluator. They preserve the profile's result across Whole and regional requests. These keys have two named outputs and dynamic endpoint bindings; they do not share the unsuffixed sampler's coefficient-vector input or static start/step parameters.
+
+The public workflow helper is declared in [`numeric/expression.hpp`](../../include/photospider/numeric/expression.hpp). It produces an ordinary `WorkflowNode` with `values` and `axis` outputs. The helper serializes free coefficient names in bytewise-sorted order and rejects missing, unused or duplicate names before adding the node.
 
 ## Linear LUT application
 
-Inputs are a Float32 SampledSignal query and a Float32 `[N]` single-channel
-SampledSignal or Lut table, `N >= 2`. The query's **sample value unit** must equal
-the table's **sampling axis unit**. Query axis units and table value units can
-be independent. Table domain is its finite origin, positive step and finite
-increasing `fma(N-1,step,origin)` endpoint. Required String `out_of_domain` is
-`reject` (constructor default) or explicit `clip`. Clip returns the nearest
-endpoint outside that domain. The output has the query shape and empty facets;
-this operation does not establish table-value semantic metadata on the result.
+`lut.apply_1d` takes a Float32 SampledSignal query as input 0 and a Float32 rank-1 table as input 1. The table must carry a single-channel SampledSignal or Lut domain and contain at least two samples. The query sample-value unit must match the table sampling-axis unit; the query axis unit and table-value unit are independent. The required String parameter `out_of_domain` is `reject` or `clip`. The result has the query shape, Float32 dtype and empty facets.
 
-Endpoint samples are exact. Interior interpolation uses Float64 compensated
-local distances and weighted products, normalized by the step's binary exponent.
-It combines the numerator before division to retain cancellation and avoids
-intermediate overflow for huge steps. Signed table values, HDR and opposite
-Float32 extremes are supported without a gamut clamp. Interior indices at or
-above `2^53`, nonrepresentable arithmetic, or discarded compensation exceeding
-one eighth of a Float32 ULP fail with `OperationFailed`; they do not publish an
-unreliable finite sample. This is linear 1D interpolation, not a color 3D LUT.
+The table domain requires finite origin, finite positive sample step and a finite increasing endpoint from `fma(N-1,step,origin)`. The operation returns exact table endpoints for endpoint queries and uses compensated Float64 interpolation inside the domain. It rejects an interior index at or above `2^53`, arithmetic that cannot be represented, or discarded compensation larger than one eighth of a Float32 ULP before writing output. Values outside the table domain fail under `reject` and return the nearest table endpoint under `clip`. Signed table values and HDR values are supported; the operation does not clamp to a color gamut or establish table-value semantic metadata on its output.
 
-The shared closed metadata rules `SampleExpression` (13) and `ApplyLut1d` (14)
-reuse `output_semantic_input` and `output_semantic_parameter`. They validate input
-metadata, required parameters and resolved output shape/dtype before IR or direct
-callback execution, including C plugin declarations. SampleExpression's named
-String parameter is the expression, with required Float64 `start`/`step`; its
-resolved output supplies count. ApplyLut1d uses two ordered inputs and its named
-String parameter for the domain policy. The same parser supplies coefficient
-index validation; no inference is selected by operation key. ABI/Traits stay 7.
+## Errors and validation
 
-Malformed expressions/parameters return `InvalidArgument`; incompatible metadata
-returns `TypeMismatch`; computed numeric failures return `OperationFailed` with
-the sample index. Direct invalid typed bindings retain `InvalidArgument`.
-Cancellation, stale plans and resource exhaustion retain their existing codes.
+Malformed expression syntax, invalid static parameters, and invalid coefficient-name maps return `InvalidArgument`. Type, shape or semantic mismatches return `TypeMismatch`. Nonfinite coefficients, undefined math, coordinate collapse, interpolation precision loss, or output overflow return `OperationFailed` with the sample index where available. Cancellation and resource exhaustion keep their own status codes. The host validates the closed semantic contract before callback execution, including compatible C operation declarations.
 
-## Public workflow and checkable results
+## Public workflows and verification
 
-[test_expression_operations.cpp](../../tests/integration/test_expression_operations.cpp)
-provides runnable public workflows in `sample()`, `luts()` and `gain_scene()`.
-`document()` declares immutable Values, `run()` compiles a GraphContext and calls
-execute with per-run bindings. A generator node has this public representation:
+[`test_expression_operations.cpp`](../../tests/integration/test_expression_operations.cpp) runs the unsuffixed expression and LUT fixtures, allocation/cancellation cases and C expression contract fixture. Its expression cases cover grammar and numeric boundaries; its LUT cases cover endpoint behavior, unit matching and interpolation near precision limits.
 
-```cpp
-ps::WorkflowNode generator{
-    1, "numeric.sample_expression", {ps::WorkflowInputReference{1}},
-    {{"expression", std::string("c[0]*x^2")}, {"count", std::int64_t{3}},
-     {"start", 0.0}, {"step", 0.5}}};
-```
-
-Bind input 1 as Float64 `[1]` containing `1`. Expected samples are `[0,.25,1]`.
-Connect the output as input 2 of `lut.apply_1d`, with a dimensionless SampledSignal
-query `.25` as input 1 and `out_of_domain="reject"`: the result is `.125`.
-Change expression, coefficients, start/step or static count to compose variants;
-changing static shape requires recompilation. For gain, choose `count=1` and
-`c[0]*2`, then connect its output to `image.exposure_gain`'s scalar input. The
-same plan accepts changing coefficient Values and checks each generated result
-against `[0,16]` before entering gain, including cache hits.
+[`examples/foundations_workflow`](../../examples/foundations_workflow/README.md) provides the maintained `numeric` and `expression-lut` scenarios. The named-coefficient authoring API and profile examples are in [`examples/numeric_workflow`](../../examples/numeric_workflow/README.md). Direct-binding result cache eligibility is part of the [host cache model](Cache-Model.md).
 
 ```sh
-cmake --build build/issue257-static --target test_expression_operations -j 8
-ctest --test-dir build/issue257-static -R '^test_expression_operations$' --output-on-failure
+cmake --build build --target test_expression_operations photospider_foundations_workflow -j 8
+ctest --test-dir build -R '^(test_expression_operations|test_workflow_expression_lut)$' --output-on-failure
 ```
-
-Exit zero checks independent expression/LUT oracles, multiple counts, grammar and
-numeric boundaries, dynamic sequential/concurrent bindings, warmed invalid gain,
-shared cancellation and allocation release. It checks near-endpoint interpolation
-against `222044608266240F`, exact weighted cancellation to zero, opposite maximum
-Float32 midpoint zero and a DBL_MAX sampling step. The installed consumer builds
-this same source and a pure C contract fixture using only installed public targets.
-
-Regional/stream result caching accepts preflight-validated Whole dense direct
-Value bindings up to 2048 bytes, covering all 256 Float64 coefficients. Category,
-dtype, rank/shape, exact facets, byte length and every input bit enter the key.
-Larger or partial direct inputs remain uncacheable. Pure generic/scalar ordinary
-execute retains its existing fast path; this eligibility applies to regional
-execution and execute_stream. The generator-to-image workflow exercises actual
-ordinary execute cache hits. This does not add new snapshot or disk value types;
-see the [cache model](Cache-Model.md).

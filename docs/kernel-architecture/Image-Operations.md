@@ -1,206 +1,40 @@
-# Retired Float32 image operation contract
+# Image operations
 
-Package 0.19 retires the packed image execution contract described below.
-These declarations, numerical rules and S1–S4 commands are migration reference,
-not the current executable image API. Image operations require explicit planar
-storage capability; unsupported legacy calls fail without compatibility fallback.
-Use [Tensor storage and region access](../kernel-specs/Tensor-Storage-and-Region-Access.md)
-for the current CPU interfaces and runnable workflow. Generic scalar and
-non-image tensor facilities remain supported under their own contracts.
+The default registry contains image and mask keys with legacy `Value` callbacks. Their registration does not mean that a workflow can bind a packed image or pass a structural `PlanarImageLayout` to them. Input validation rejects a `photospider.image` facet on a declaration without planar layout with `InvalidArgument` (`image declaration requires planar layout`). The compiler also rejects a structural planar image when an operation's `OperationTraits::planar_storage_capable` flag is false; the legacy image callbacks below do not set that flag. Operation plugin C ABI 11 and planar extension ABI 3 describe separate interfaces and do not change these checks.
 
-The default registry includes CPU operations implemented in
-[`plugins/ops/README.md`](../../plugins/ops/README.md).
-The two S1 operations below have two ordered runtime Value inputs, no compile-time parameters or
-implicit defaults, and one regional image output named by the workflow.
+## Registered image Value operations
 
-| Operation | Input 0 | Input 1 | Output |
-| --- | --- | --- | --- |
-| `image.exposure_gain` | Image | Float32 scalar gain, inclusive [0,16] | RGB multiplied by gain; alpha copied bit-for-bit |
-| `image.opacity` | Image | Float32 scalar opacity, inclusive [0,1] | All RGBA channels multiplied by opacity |
+| Key | Legacy Value inputs and result | Region behavior |
+| --- | --- | --- |
+| `image.exposure_gain`, `image.opacity` | `RgbaFloat32` image and Float32 scalar (`[0,16]` for gain, `[0,1]` for opacity); output preserves the image schema | Elementwise |
+| `image.mask` | `RgbaFloat32` image and Float32 mask; image output | Elementwise |
+| `image.source_over` | Foreground and background `RgbaFloat32` images; image output | Elementwise |
+| `image.mix` | Two `RgbaFloat32` images and Float32 mask; output preserves first image schema | Elementwise |
+| `image.downsample_box`, `mask.downsample_box` | Image or mask and required Int64 `factor` in `[1,16]`; reduced spatial output | Shrink |
+| `image.brush_circle` | Image and ordered Float32 scalar inputs for center, radius, color and alpha | Elementwise |
+| `image.stmap` | Image and a coordinate-map Value | Dependency |
+| `image.split_horizontal` | Typed Float32 rank-3 image and required Int64 `split_x`; ports `full`, `left`, `right` | Dependency, with optional joint execution |
+| `image.local_inpaint_navier_stokes_native_apple_silicon`; optional `image.local_inpaint_navier_stokes_openCV` | Image and mask plus operation-specific settings | Whole |
 
-An image declaration is dense Float32 {H,W,4}, H/W positive, whole Region, offset
-zero and canonical row-major strides. Runtime views have explicit origin, strides
-and valid Region. Both carry exactly one facet: key `photospider.image`,
-version 2, the canonical payload from `encode_semantic(rgba_semantics())`.
-Image-v1 metadata is rejected; callers use the public typed helper.
-RGB is finite and signed; alpha is finite in [0,1], and alpha zero requires
-RGB zero. HDR RGB may exceed one or alpha. Signed zero is accepted. The caller
-supplies linear sRGB/Rec.709, D65, scene-referred relative RGB with dimensionless
-coverage alpha and coverage-premultiplied association; no color conversion, gamma,
-clamp or unpremultiplication occurs.
+These registered callbacks process `Value` storage using descriptors, facets, strides and regions admitted by their port schemas. They do not implement planar page access. The image callbacks have `planar_storage_capable=false`, including `image.exposure_gain`, `image.opacity`, `image.mix` and `image.split_horizontal`. A workflow that declares a packed `photospider.image` input fails input validation with `InvalidArgument`; a structural planar declaration reaches the operation capability check and fails compilation with `TypeMismatch`.
 
-Scalar inputs may be direct workflow declarations or upstream Float32 `{1}`
-results. Allowed facets are none, one dimensionless Scalar, or one dimensionless
-single-sample SampledSignal. The sampling-axis unit/domain is independent of the
-sample value unit and remains intact. Other typed or opaque facets are rejected.
-Direct bindings retain whole dense declarations (offset zero, stride `{4}`, four
-bytes). Computed views require complete `{1}` coverage and may be padded,
-unaligned, broadcast or negatively strided; C++, C and Metal marshalling read
-logical sample zero with byte-safe access. No cast or clamp occurs. Per-Run
-scalar bytes do not change compiled-plan identity; eligible result keys include
-both the bytes and allowed semantic facets.
+For legacy RGBA Values, `image.exposure_gain` multiplies RGB by a Float32 gain in `[0,16]` and copies alpha; `image.opacity` multiplies all four channels by a Float32 opacity in `[0,1]`. `image.mask` multiplies all four foreground channels by the matching Float32 coverage sample. `image.source_over` computes `F + B * (1 - F.alpha)` for premultiplied foreground and background values. `image.mix` computes `(1-M)A+MB` for all four channels and preserves the first image's semantic facet. The box-downsample operations require an Int64 factor in `[1,16]`; output dimensions are input dimensions divided by the factor and rounded up. `image.brush_circle` receives scalars in x, y, radius, red, green, blue, alpha order. Its center and RGB values are finite Float32, radius is a positive normal Float32, and alpha is in `[0,1]`. `image.split_horizontal` requires `0 < split_x < W`; its `full`, `left`, and `right` outputs map `(y,x,c)` to the source `(y,x,c)`, `(y,x,c)`, and `(y,x+split_x,c)` respectively. Each port has its own output coordinates and dependency request. Joint execution can share transport for requested members; it does not grant planar storage access.
 
-These operations are deterministic, side-effect-free, cacheable, PreserveFirstInput
-and Elementwise. Image input demand equals requested spatial output demand with
-all four channels; scalar demand is always whole {1}. Smaller demand returns only the requested Region, preserving the logical descriptor. Each image step reserves its output bytes through the host allocator; no
-second sink copy is needed. The complete Run reservation includes retained
-intermediates and scratch. Caller-preexisting inputs and process RSS are
-outside the controlled-buffer bound.
+The independently built [`rgba32f` C module](../../plugins/ops/rgba32f) provides its own legacy operation callbacks and optional Metal shaders. It is loaded as trusted native code through operation ABI 11. The package does not export the planar operation extension, and its callbacks do not gain planar access by being written in C or dispatched to Metal. GPU execution requires a matching module, selected backend and available device.
 
-Multiplication rounds each stage to IEEE binary32 nearest, ties to even, with
-gradual underflow. Host schema/numeric validation and image callback scopes
-save and restore the thread's floating environment, preventing inherited
-rounding or flush-to-zero modes from changing the result. Computed non-finite
-pixels, invalid profile or alpha-zero/nonzero-RGB output fail OperationFailed.
-Direct scalar errors fail InvalidArgument before work; invalid computed scalar
-numbers fail OperationFailed before each consuming callback, including cached
-and shared-producer results. Metadata mismatches are TypeMismatch. Pixel errors
-fail before the consuming callback. Unread pixels are not scanned.
+## Planar image execution boundary
 
-All eight operations implement this image-v2 contract in C++, C and Metal.
-Each declares PreserveInput semantics and publishes the first input's exact facet;
-box operations change only the logical H/W. Their ports require canonical RGBA
-or typed coverage masks. Straight alpha, RGB-only, reordered channels and other
-color models require explicit conversion before these operations.
+`PlanarImageLayout` represents channel planes with separate physical storage while preserving the logical tensor shape. The default image-operation callbacks listed above do not declare the capability required by the compiler to consume that structural layout. Current public planar data, region and allocation behavior is documented in [Tensor Storage and Region Access](../kernel-specs/Tensor-Storage-and-Region-Access.md). `test_planar_image_workflow` checks the internal planar copy path; it does not establish planar support for these built-in image keys.
 
-## Reusable operation package and executable example
+Use each operation's legacy Value path only when the workflow supplies an input representation admitted by its port schema. To run image work over public planar storage, compose operations that explicitly declare planar capability and document a planar callback. Registry presence, shared `image.*` naming, semantic facets and the existence of a Metal implementation do not substitute for that declaration.
 
-[`plugins/ops/rgba32f`](../../plugins/ops/rgba32f/CMakeLists.txt) builds the
-maintained ABI9 C module `photospider_rgba32f_ops` using only
-`Photospider::operation_sdk`. It implements the same image operations and profile
-as the built-ins above, with strict floating-point compilation. The ABI9 host
-validates ports and establishes nearest/gradual-underflow arithmetic before
-entry. The callback requests its output from the host allocator and publishes that
-same buffer; success freezes it, and failure releases it without publication. Load this
-trusted package into an empty registry and freeze it before compilation;
-its operation keys are already present in the default registry.
+## Checks and examples
 
-[`examples/image_vertical/image_fixture.hpp`](../../examples/image_vertical/image_fixture.hpp)
-is the shared public fixture contract for tests, installed consumers, and the
-companion daemon vertical. It fixes the exact declarations, chain, A/B values,
-shape/layout/facets, requested pixel (0,1), and output table from
-[ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md#named-fixtures-and-image-oracle).
-The bounded CPU oracle `s1-rgba32f-exposure-opacity-v1` independently computes
-16 channels from each binding snapshot, rounds each stage to binary32, checks
-that calculation against the frozen table, and compares the complete named
-`result` logical descriptor and the requested pixel's 16 bytes exactly. It calls no operation callback.
-
-[`photospider_image_vertical`](../../examples/image_vertical/main.cpp) compiles
-once and executes A/B with that same plan. Each run requires two successful CPU
-callbacks (nodes 10,20), unchanged plan identity, the expected distinct result
-digests, zero transfers/bytes/fallbacks, and peak 48 actual allocated bytes. Both image
-input demands and step output demands are offsets {0,1,0}/extents {1,1,4};
-scalar demand stays whole {1}, and the result remains the one-pixel Region with logical shape {2,2,4}.
-The executable prints named input/output Values, descriptor/Region/layout/facets,
-plan/result digests, compile/execute/operation timings, selected backends,
-transfer/resource observations, and correctness on separate lines. Timing
-values may be zero. Digests are diagnostic; correctness uses actual bytes.
-
-It then runs two raw benchmark samples per payload with the matching captured
-CPU oracle. These samples retain `RawBenchmarkRunner`'s independent compilation
-semantics and are reported separately from the compile-once executions.
-A mismatch exits nonzero. With no argument it uses built-ins; its optional
-argument is the exact trusted native module path.
+[`examples/multi_output_workflow`](../../examples/multi_output_workflow/README.md) builds, but running its split fixture fails when its packed image facet is added to a workflow input declaration. The README records that the example is not current runtime acceptance. [`examples/s3_image_workflow`](../../examples/s3_image_workflow/main.cpp) is another source example; no focused CTest target is registered for it. `test_basic_operations` does not exercise `image.mix`.
 
 ```sh
-cmake --build build/issue257-static --target photospider_image_vertical test_bindings -j 8
-build/issue257-static/examples/image_vertical/photospider_image_vertical
-ctest --test-dir build/issue257-static -R '^test_(image_vertical|image_vertical_plugin|bindings|installed_consumer)$' --output-on-failure
+cmake --build build --target photospider_multi_output_workflow test_multi_output_execution -j 8
+ctest --test-dir build -R '^test_multi_output_execution$' --output-on-failure
 ```
 
-`test_image_vertical_plugin` passes the generator-resolved package path to the
-same executable. `test_bindings` retains the exact negative binding and output
-demand cases, independent concurrent snapshots, numeric/floating-environment
-boundaries, cancellation, and resource checks; its positive DSO path now uses
-the maintained package. The intentionally invalid output DSO stays test-only.
-
-For an installed kernel prefix, both source directories also build independently:
-
-```sh
-cmake -S plugins/ops/rgba32f -B build/rgba32f-package -DCMAKE_PREFIX_PATH=/absolute/kernel-prefix -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/rgba32f-package --target photospider_rgba32f_ops -j 8
-cmake -S examples/image_vertical -B build/image-example -DCMAKE_PREFIX_PATH=/absolute/kernel-prefix -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/image-example --target photospider_image_vertical -j 8
-build/image-example/photospider_image_vertical /absolute/path/to/native-module
-```
-
-The isolated installed consumer builds this same operation source package
-against the installed SDK, runs A/B through its shared bridge, and runs the
-same executable with built-ins and the module. Static and shared kernel builds
-exercise this path and package 0.7/rejected 0.6 requests; see
-[Testing and Validation](../development/Testing-and-Validation.md).
-
-## S2 mask and composition
-
-The default registry retains `image.mask` and `image.source_over`. The former
-accepts an RGBA image and a matching Float32 `{H,W}` coverage mask; each finite
-mask sample in `[0,1]` multiplies all foreground channels. Source-over accepts
-matching foreground and background images and computes `F + B * (1 - F.alpha)`
-per premultiplied channel. Both are elementwise CPU operations. The former
-built-in `image.gaussian_blur` has been removed; proposed replacement behavior
-is in [05-filter](../built-in_ops/05-filter/spatial.md).
-
-## S3 box shrink and circle stamp
-
-Package 0.9 / operation ABI 9 exposes the following built-ins and the same C
-module operations. These use existing Float32 linear-sRGB premultiplied RGBA
-and finite [0,1] Float32 HW masks. All parameters listed as scalar inputs are
-ordinary Float32 `{1}` bindings, not compile-time node parameters.
-
-| Name | Inputs | Static parameters | Output and Region |
-| --- | --- | --- | --- |
-| `image.downsample_box` | RGBA image | Required Int64 `factor` in [1,16], no implicit default | RGBA `{ceil(H/f),ceil(W/f),4}`; clipped integer-box demand |
-| `mask.downsample_box` | HW mask | Same `factor` | Mask `{ceil(H/f),ceil(W/f)}`; clipped integer-box demand |
-| `image.brush_circle` | image, x, y, radius, red, green, blue, alpha, in this order | None | Same image shape; Elementwise demand |
-
-Box operations sum each cell in binary64 row/column order and round the actual
-covered-sample average to binary32. Edges divide by their actual sample count.
-Factor one preserves numeric values. No gamma conversion or unpremultiplication
-occurs. The application preview defaults to factor four.
-
-Brush x/y accept all finite Float32; radius accepts positive normal Float32
-through FLT_MAX; linear unassociated RGB accepts [-FLT_MAX,FLT_MAX], alpha [0,1]. Every
-input is required. The closed circle tests pixel centers using binary64 squared
-distance. Inside, source RGB is multiplied by alpha in binary32 and composited
-with the premultiplied background using source-over without contraction;
-outside, all sample bits are retained. One event is one hard-edge circle, with
-no antialiasing, interpolation, pressure or device input. The application plans
-the clipped bounding ROI and applies its result as a snapshot patch.
-
-`test_s3_operations [trusted-module]` runs public compile/execute examples with
-independent box-distribution and circle oracles, including odd sizes, edge ROIs,
-factors 1/2/4/16 and invalid scalar inputs. The reusable interactive example is
-tracked by #275/#277.
-
-## S4 native Metal boundary
-
-The independently built [`rgba32f` operation module](../../plugins/ops/rgba32f)
-has its own C ABI registration and shader package. It is separate from the
-default repository-owned built-in registry. Removing the built-in 05-filter
-implementation does not register a replacement filter or establish native
-support for any proposed FIL member. Current default-registry image and Metal
-behavior must be checked against the corresponding registered operation and
-planar execution tests.
-
-## Computed scalar composition
-
-[`test_computed_scalar.cpp`](../../tests/integration/test_computed_scalar.cpp)
-registers a small public `coefficient.scale` producer and connects its result to
-exposure, opacity or brush through WorkflowDocument. One compiled plan changes
-coefficient bindings between sequential/concurrent Runs. For exposure, coefficient
-1 generates gain 2; coefficient 3 generates gain 6, so the same source pixel's RGB
-triples while alpha stays unchanged. A cached value 1.5 is legal as gain and
-rejected as opacity. Generic NaN results remain valid standalone Values but cannot
-enter either bounded consumer. The fixture demonstrates Scalar/Signal metadata,
-five layouts, field/opaque rejection and independent shared cancellation.
-
-```sh
-cmake --build build/issue257-static --target test_computed_scalar -j 8
-MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build/issue257-static -R '^test_computed_scalar' --output-on-failure
-```
-
-Both C++ and C consumer runs report `layouts=5 semantic_kinds=3` and
-`oracle=passed`; available native hardware must execute 45 dispatches. Without
-native hardware the same test verifies CPU/fallback behavior and reports zero
-native dispatches. Change the fixture's coefficient binding or the pure producer
-callback to continue composing; expression parsing is a later operation slice.
+`test_multi_output_execution` validates named-output host infrastructure with test-defined operations. It does not validate `image.split_horizontal` on planar input. Optional OpenCV and native GPU paths require their own build and backend evidence.

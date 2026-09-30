@@ -1,14 +1,13 @@
-# Foundations workflows
+# Foundations workflow example
 
-This C++17 example uses the public WorkflowDocument, Compiler and ExecutionContext
-interfaces. It targets package 0.27 and runs two maintained generic scenarios
-with the default `all` selector. Format/color families have separate integration
-tests and examples.
+This C++17 example builds against `Photospider::kernel` and runs the maintained `numeric` and `expression-lut` scenarios. The default `all` selector runs both. The executable also accepts `generator-gain`, but the planar storage gate rejects its typed-image snapshot import, so it is not a runnable current scenario and is excluded from `all` and CTest.
 
 | Scenario | Independently checked result |
 | --- | --- |
-| `numeric` | `[3,2,1]-[4,4,4]=[-1,-2,-3]`; mean of `[1,2,3]` is 2, variance is 2/3 |
-| `expression-lut` | sampled square `[0,.25,1]`; linear LUT at .25 yields .125 |
+| `numeric` | `[3,2,1] - [4,4,4] = [-1,-2,-3]`; mean of `[1,2,3]` is `2`, variance is `2/3`. |
+| `expression-lut` | Sampling `x^2` yields `[0,0.25,1]`; a linear LUT lookup at `0.25` yields `0.125`. |
+
+From the repository root, build and run the example with:
 
 ```sh
 cmake --build build --target photospider_foundations_workflow -j 8
@@ -16,15 +15,14 @@ build/examples/foundations_workflow/photospider_foundations_workflow --scenario 
 ctest --test-dir build -R '^test_workflow_(numeric_reductions|expression_lut)$' --output-on-failure
 ```
 
-Success ends with `Foundations scenarios=2 oracle=passed backend=cpu`.
-Use `--scenario numeric`, or `expression-lut` to run one graph.
+Pass `--scenario numeric` or `--scenario expression-lut` to run one maintained scenario. The executable prints `Foundations scenarios=2 oracle=passed backend=cpu` after both pass. An error prints `Foundations failed: ...` and exits with status 1.
 
-For an existing installed 0.27 package, configure this directory with
-`cmake -S examples/foundations_workflow -B build/foundations-consumer -DCMAKE_PREFIX_PATH=/path/to/install`,
-then build that directory. It consumes only `Photospider::kernel`.
+The standalone CMake project requires an installed Photospider 0.28 package. For example, configure it with:
 
-The explicit `generator-gain` selector remains as a
-legacy typed-image migration source. It is excluded from `all` and the
-active acceptance set; its former typed path is not evidence of planar
-support. The [retirement record](../../docs/built-in_ops/02-format-color/op_specs/FMT_legacy_retirement.md)
-lists removed operations. No replacement format conversion is supplied here.
+```sh
+cmake -S examples/foundations_workflow -B build/foundations-consumer -DCMAKE_PREFIX_PATH=/path/to/install
+cmake --build build/foundations-consumer -j 8
+build/foundations-consumer/photospider_foundations_workflow --scenario all
+```
+
+The consumer links only `Photospider::kernel`. The source-level result checks and the two registered CTest cases cover the CPU scenarios above; they do not validate other operation families or native GPU execution.

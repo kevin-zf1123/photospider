@@ -1,48 +1,70 @@
 # 架构概览
 
-Photospider 是用于 local graph 的 C++17 可嵌入 compiler/execution kernel。Caller 拥有独立
-`GraphContext`，并选择独立或共享 `ExecutionContext`。
+## 1. 核心摘要 (TL;DR)
 
-## Pipeline
+Photospider 是可嵌入的 C++17 内核，用于校验本地图工作流、编译不可变计划，并使用调用方提供的绑定执行。`GraphContext` 持有源文档及其修订状态；`ExecutionContext` 持有有界线程、算子定义、缓存和资源计费。Daemon 使用已安装的内核 API，并独立管理自己的会话和进程生命周期。
+
+## 2. 架构心智模型
 
 ```text
-WorkflowDocument -> GraphContext/GraphSnapshot
-  -> Compiler::analyze -> SemanticGraphIR
-  -> Compiler::optimize -> OptimizedGraphIR
-  -> Compiler::plan -> ExecutionPlan
-  -> ExecutionContext::execute -> ExecutionResult
+WorkflowDocument -> GraphContext -> GraphSnapshot
+                                    |
+                                    v
+                         analyze -> SemanticGraphIR
+                                    |
+                                    v
+                         optimize -> OptimizedGraphIR
+                                    |
+                                    v
+                                  Plan
+                                   |
+ExecutionBindings ----------------> Run
+                                   |
+                        +----------+----------+
+                        |                     |
+                    就绪 CPU step         就绪原生 step
+                    竞争有界 CPU pool       进入一个 GPU lane
+                        +----------+----------+
+                                   |
+                    命名 Value / PlanarImage
+                           + diagnostics
 ```
 
-每个 compiler stage 返回完整 immutable value 或一个 failure。Source、semantic、optimized、
-plan、runtime Value 与 daemon identity 相互分离。
+Compiler 负责校验与规划。每个 `ExecutionRun` 持有自己的就绪任务、中间 Value、取消观察结果和诊断。多个 Run 共享 context 的 worker pool 与字节 ledger；返回的 Value 则独立持有存储租约。
 
-## Module ownership
+## 3. 契约与接口
 
-| Module | 当前 ownership |
-| --- | --- |
-| graph | `GraphContext`、`GraphSnapshot`、copied source revision/currentness |
-| compiler | fail-closed parameter validation、typed IR、conservative no-op optimization、demand-aware local plan、typed digest/key |
-| execution | bounded CPU pool、optional native GPU queue/lane、private Run、cancellation、byte ledger、raw diagnostic |
-| data | regional immutable `Value` 与 CPU 可访问/原生存储、rank-general `Region`、`StridedLayout` |
-| plugin | exact operation ABI v11/data-definition ABI v1、typed parameter schema、demand-aware callback 与 startup-frozen registry |
-| benchmark | raw compile/plan/execute observation，加 named correctness oracle 或显式 unchecked 状态；execution cancellation 会中止完整 run 且不发布 report |
+```cpp
+class Compiler {
+ public:
+  Result<SemanticGraphIR> analyze(const GraphSnapshot&,
+                                  ResourceBindings = {}) const;
+  Result<OptimizedGraphIR> optimize(const SemanticGraphIR&) const;
+  Result<ExecutionPlan> plan(const OptimizedGraphIR&,
+                             const PlanningOptions& = {}) const;
+};
 
-CPU exact 为必需默认。`ExecutionMode::NativeGpu` 允许放置 traits 声明了原生实现的算子；
-ExecutionContext 选择已配置的 Metal 或 Vulkan backend，数值行为由算子/profile 定义。
-Shared native storage 可保留完成结果并避免重复上传，主机访问与实际复制分别报告。
-Metal/Foundation 仍是可关闭的 Apple 私有构建依赖，参见 [S4 工作流](S4-Workflow.zh.md)。
+class ExecutionContext {
+ public:
+  Result<ExecutionResult> execute(
+      const ExecutionPlan&, ExecutionBindings = {},
+      const CancellationToken& = CancellationToken(),
+      const ExecutionOptions& = {});
+};
+```
 
-Cancellation 是 cooperative。Completion 与 final result return 前都会检查 plan currentness
-和 cancellation。Resource lease 与 intermediate Value 使用普通精确 C++ ownership。
+以上是省略其他成员后的 public method 声明。每个阶段返回完整不可变值或带类型的失败。当前 optimizer 把 semantic node 复制到独立阶段，并计算单独的 digest。Planning 记录命名输出 demand，并按 Whole、Elementwise 和裁剪后的 Halo 规则推导每步输入 demand。Execution 在调用回调前检查 plan currentness 和冻结的 operation-registry identity，并在发布前校验输出 descriptor 与 demand 覆盖范围。`analyze` 可接收不可变的 `ResourceBindings`，绑定静态 facet 所需的资源，例如色彩配置文件。
 
-Planning 把 optional named output Region 按 Whole、Elementwise 和 overflow-safe clipped Halo
-规则反向传播。所得 per-step output/input demand 进入 plan identity，并在 operation callback
-收到 demand 前由 execution 再次验证。
+`CpuExact` 是默认执行模式。`NativeGpu` 仅允许把声明了原生实现且匹配当前配置后端的算子放到 GPU。CPU 工作使用固定 context pool；原生回调使用配置的 backend lane。Cancellation 是协作式的，已经进入回调的任务可能需要完成后 Run 才能返回。
 
-Daemon 依赖 installed public package。Kernel 从不依赖 daemon source，不序列化 internal IR，
-也不拥有 daemon namespace 或 Job/result lifecycle。
+## 4. 明确边界
 
-0.7 foundations 已实现 typed image-v2、共享静态 dtype/shape/output 推断、computed
-bounded scalar 及 numeric/channel/color/expression/LUT/component 算子。
-[独立 foundations workflow](Foundations-Workflow.zh.md)展示公开组合入口。
-该能力交付线为 ops；main 已审计基线仍为 0.6，daemon 的 0.6 consumer 尚未迁移。
+- Kernel 不拥有 daemon session、IPC、持久 Job 或进程生命周期。
+- Compiler IR 和 plan 是进程内值，不是可序列化的 workflow 格式。
+- Native operation module 是受信任的进程内代码；ABI 校验不构成沙箱。
+- GPU 可用不代表所有算子都有原生实现。
+- Result 是内存中的 owner，不是持久身份或恢复记录。
+
+## 5. 后果与代价
+
+Plan 可与新 bindings 重用，但不包含运行时输入地址。如果队列准入或共享字节 ledger 达到配置上限，Run 会返回失败状态；调用方应以返回状态码判断结果。保留 Result 会继续持有存储租约，因此调用方决定结果内存继续计费多久。Native placement、fallback、数据传输和缓存复用可从 diagnostics 观察，并会改变 Run 的计算量与内存成本。

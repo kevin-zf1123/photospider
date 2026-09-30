@@ -1,53 +1,47 @@
-# ADR 0005: Workflow Source Publication and Compilation Are Separate Atomic Steps
+# ADR 0005: Graph Contexts Publish Source Before Compilation
 
-- Status: Accepted, revised by ADR 0015
-- Date: 2026-09-01 boundary revision
+- Status: Accepted
 
-## Context
+## 1. Core Summary (TL;DR)
+`GraphContext` stores an immutable copy of a versioned `WorkflowDocument` and publishes replacements with a new revision. `Compiler` validates snapshots into complete immutable stages. Source publication and semantic validity remain separate so invalid input never leaks partial compiler output.
 
-The kernel receives a caller-owned, format-neutral `WorkflowDocument`.
-Replacing source state and validating compiler semantics have different failure
-boundaries: source replacement must be atomic, while an invalid graph must
-fail without publishing partial IR or a plan.
+## 2. Mental Model & Intuition
 
-## Decision
+```text
+caller document --> GraphContext --snapshot/revision--> analyze --> optimize --> plan
+                         |                                  |           |         |
+                         +-- replace: revision advances ----+-----------+---------+
+                                                            stale stages rejected
+```
 
-`GraphContext` copies a complete source document and owns a nonzero monotonic
-revision. `snapshot()` captures one coherent document/revision pair.
-`replace()` prepares the new copy before publication and then advances the
-revision under the same lock. Allocation failure leaves source and revision
-unchanged; revision overflow fails before publication. A successful
-replacement immediately makes older snapshots, IR, and plans stale.
+The context serializes snapshot capture and replacement. Compiler stages check the captured revision before publication; replacing source makes prior stages stale.
 
-Source publication does not claim semantic validity. `Compiler::analyze`
-validates a captured snapshot as one fail-before-publication transaction:
+## 3. Formal Contracts & APIs
 
-- document version, nonzero unique node ids, and unique nonempty output names;
-- source references, ports, operation availability, and parameter vocabulary;
-- cycle-free deterministic topology;
-- operation input counts and statically inferred type/shape/Region rules;
-- graph currentness before returning complete `SemanticGraphIR`.
+```cpp
+struct WorkflowDocument { std::uint32_t schema_version = 3; /* inputs, nodes, outputs */ };
+class GraphContext {
+ public:
+  explicit GraphContext(WorkflowDocument);
+  GraphSnapshot snapshot() const;
+  std::uint64_t replace(WorkflowDocument);
+};
+class Compiler {
+ public:
+  Result<SemanticGraphIR> analyze(const GraphSnapshot&, ResourceBindings = {}) const;
+  Result<OptimizedGraphIR> optimize(const SemanticGraphIR&) const;
+  Result<ExecutionPlan> plan(const OptimizedGraphIR&, const PlanningOptions& = {}) const;
+};
+```
 
-Recoverable failures use the public `ErrorCode` categories such as
-`InvalidArgument`, `NotFound`, `Cycle`, `TypeMismatch`, and `Stale`.
-`std::bad_alloc` remains process resource exhaustion and is not converted into
-a successful empty graph.
+The context copies caller data. `snapshot()` returns a coherent document/revision pair. `replace()` allocates the new immutable document before taking the mutex, then publishes the document and next revision together under the lock. Allocation failure leaves source and revision unchanged; revision overflow throws before publication. Context destruction sets the shared revision token to zero, invalidating outstanding snapshots.
 
-Later optimizer and planner stages construct complete immutable values before
-return and repeat the currentness check. No partial IR or plan escapes a
-failure.
+Analysis validates bounded document and text input, unique IDs, references, ports, operation and required typed-parameter contracts, acyclic topology, and inferred output type/shape/Region metadata. It checks snapshot currentness before publishing a complete `SemanticGraphIR`. Optimization and planning likewise return complete stages or typed failures; allocation failure may propagate as `std::bad_alloc`. See [Graph lifecycle](../kernel-architecture/Graph-Lifecycle.md) and [Compiler and execution](../kernel-architecture/Compiler-and-Execution.md) for current validation details.
 
-## Boundary
+## 4. Non-Goals & Explicit Boundaries
+- `WorkflowDocument` is compiler input. Parsing, filesystem access, storage, and daemon error mapping belong to consumers.
+- Replacing source does not imply successful validation or execution.
+- Snapshots do not keep a destroyed context current; context destruction invalidates them.
 
-`WorkflowDocument` is an in-memory compiler input. The kernel owns no file
-discovery, parser, YAML adapter, document persistence, storage service, or
-daemon wire error mapping. A consumer may translate a file or local IPC
-payload into a document before calling the kernel.
-
-## Consequences
-
-- Source replacement is atomic even when the replacement is later found
-  semantically invalid.
-- Compiler validation never partially mutates a graph context.
-- Revision checks reject plans compiled from replaced source.
-- File-format policy remains outside the kernel package.
+## 5. Consequences
+Callers can atomically replace source without mutating existing snapshots. They must recompile after replacement and handle `Stale` results when replacement races a pipeline. Invalid graphs consume validation work but publish no partial IR or plan.

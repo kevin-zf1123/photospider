@@ -1,127 +1,115 @@
-# ADR 0021: Independent node results and Atomic joint execution
+# ADR 0021: Route Named Results and Join Ready Atomic Work
 
-- Status: Accepted by the maintainer on 2026-09-12
-- Delivery: [#302](https://github.com/kevin-zf1123/photospider/issues/302), leaves #303–#313
-- Decision baseline: `ops@ffc5d0e297b9d0ea136975413d3443e23e6fa458`, package 0.8.0 / operation ABI 8
+- Status: Accepted
+- Reader mirror: [Chinese](zh/0021-independent-node-results.zh.md)
 
-## Context and evidence
+## 1. Core summary (TL;DR)
 
-The compiler currently accepts only the `value` output port and indexes metadata
-and steps by node. Execution records and several caches also assume one result
-per node. PerAtomOutcome is declared but rejected at registration; Atomic staged
-sessions allow one observation. Existing immutable Values, exact Footprints,
-association certificates, independent flight waiters and storage-owner accounting
-remain the foundations. These source observations do not establish the new
-runtime behavior.
+One operation node can produce several named results, each with its own metadata, dependencies, observation contract and failure path. The compiler and executor identify every result by `ValueRef`, so an unused sibling does not add work to a selected result. An optional CPU joint session can advance compatible, already-ready Atomic observations together while preserving an outcome for each member.
 
-[MLIR operations and values](https://mlir.llvm.org/docs/LangRef/#operations)
-provide a reference for distinguishing an operation from its typed results.
-[ITU-R BT.709-6](https://www.itu.int/dms_pubrec/itu-r/rec/bt/r-rec-bt.709-6-201506-i!!pdf-e.pdf)
-defines the OETF and YCbCr matrix used below. The box filter, edge policy and
-floating-point representation below are explicit Photospider choices.
+## 2. Mental model and intuition
 
-## Results, inference and version axes
+The compiler resolves all output descriptors and facets from static input metadata and parameters. Execution then follows only demanded result ports and their relevant input edges. If joint execution is enabled, the coordinator can combine ready members that share an operation instance and snapshot; each member still owns its reads, state, certificate, cache identity and terminal outcome.
 
-One Value has one dtype, nonzero static shape and coordinate domain. A node has
-an ordered nonempty set of independently named outputs, represented in C++ by
-OperationOutputTraits and SemanticOutput. ValueRef is (node_id, output_index).
-Names are unique and resolve to declaration-order indices; singleton operations
-explicitly declare `value`. Each output owns its metadata, relevant input ports,
-Region, observation and failure contract. Inference is static and checked;
-ceil-div, subtraction and fractional-radius extents never invoke numeric code.
+```text
+                       one operation node
+                      /        |         \
+                  output A  output B   output C
+                     |          |          |
+                demand A    demand B    unselected
+                     |          |       no execution
+                  Atomic     Atomic
+                     \          /
+                 ready CPU joint poll
+                  /                  \
+              Need A                 B outcome
+                |                 /           \
+       resolve A inputs      success B       error B
+                |                 |              |
+          another poll         publish B   fail only B dependents
+```
 
-Semantic IR is multi-output. Each demanded result lowers to one single-output
-PlanStep. Unselected pure outputs create no demand; Empty, Whole and unresolved
-sets differ. Existing singleton side effects remain observable; multi-output
-operations must be deterministic and side-effect-free. RequestRecord remains a
-terminal whole-request result. Consumer legality and EffectiveAtomic refer to
-the selected result and its relevant ancestry, never an unrelated sibling.
+`ValueRef` is `(node_id, output_index)`. It routes a result independently of its physical plan-step index. `RequestRecord` is a terminal whole-query observation, not a sample-level dependency. `Atomic` observations represent restriction-stable values or errors, usually one generic sample or one complete image pixel.
 
-C++ and C invocations identify the selected result. Projected inputs retain
-original port indices; invalid Values are not missing-input placeholders. Records,
-subscriptions, dirty routing, Whole results, diagnostics and flights distinguish
-results. Content keys include the selected output and contract, metadata, static
-parameters and actual input dependencies, but no global node or graph ids.
-Unknown certificate rows are not empty dependencies. Fetch unions never replace
-per-output Data/Control/Validation/Descriptor associations.
+## 3. Formal contracts and APIs
 
-The target package is 0.9.0 and operation ABI/traits 9, with no ABI 8 adapter.
-Repository callbacks and installed consumers migrate together. WorkflowDocument
-schema 2, provider ABI 1, C++17 and image-v2 whole-pixel semantics remain.
-Semantic/physical-plan/plan-cache domains become v9; result-region identity becomes
-v5. The unchanged conservative optimizer and result-digest framing retain their
-versions. Disposable old cache entries miss; this creates no recovery product.
+```cpp
+struct SemanticOutput {
+  std::string key;
+  ValueDescriptor descriptor;
+  std::vector<ValueFacet> facets;
+  bool effective_atomic = true;
+};
 
-## Atomic joint execution
+struct WorkflowNodeOutput {
+  std::uint64_t source_node = 0;
+  std::string source_port = "value";
+};
 
-An optional joint entrypoint accompanies singleton evaluation. Plan execution
-groups are physical choices. Each group selects at most one Atomic observation
-per output; members can have different shapes, coordinates and ROIs. RequestRecord
-never enters a group. Register all known root and newly discovered input demands
-before selecting ready members of the same node, snapshot, backend and joint
-contract. Do not wait for future requests or coalesce across Runs; existing
-per-observation flights still share work across Runs.
+struct WorkflowOutput {
+  std::string name;
+  std::uint64_t node_id = 0;
+  std::string port = "value";
+};
 
-C and C++ joint members independently emit reads, successful values or errors.
-Every selected observation has exactly one terminal outcome. Reject missing,
-duplicate, unknown and out-of-coverage outcomes. Preserve per-member sticky state,
-association rows and tokens. Deduplicate transport only; each success receives
-its own validated certificate, flight completion and cache publication. Numeric
-failure reaches only actual dependents. The public execute call retains its
-original all-request success/error aggregation and deterministic error order.
+struct OperationOutputTraits {
+  std::string key = "value";
+  std::optional<std::vector<std::uint32_t>> input_indices;
+  ObservationKind observation_kind = ObservationKind::Atomic;
+  FailureDelivery failure_delivery = FailureDelivery::RequestFailureOnly;
+  std::uint32_t atomic_trailing_axes = 0;
+};
 
-Use singleton when no compatible joint implementation exists, fewer than two
-members are ready or joint admission exceeds budget. After an unattributable
-execution failure, retire joint temporary resources and retry each unfinished
-member once through singleton, without regrouping. Cancellation, stale work and
-structural protocol errors do not retry. A shared group stops only when every
-member has no active waiter. One member's cancellation never overrides another's
-live request. One admission slot and shared scratch reservation belong to the
-group; real storage is charged once per backing owner and retained until its last
-view/cache/result reference retires.
+struct OperationTraits {
+  std::vector<OperationOutputTraits> outputs;
+  std::uint32_t joint_contract = 0;
+};
 
-## Reusable operations
+class Compiler {
+ public:
+  Result<ExecutionPlan> plan(const OptimizedGraphIR&,
+                             const PlanningOptions&) const;
+};
 
-- `color.rgb_to_ycbcr420`: finite Float32 linear-sRGB RGB without alpha, samples
-  in [0,1]. Apply BT.709 OETF then matrix. Y is HW; Cb and Cr are ceil(H/2) by
-  ceil(W/2), with signed color differences nominally in [-0.5,0.5]. Use centered
-  2x2 box chroma and average valid samples at odd edges. Plane roles, color and
-  nominal sampling positions are explicit, separate from numerical support.
-- `image.split_horizontal`: full/left/right, with 0 < split_x < W, independent
-  ROI origins and immutable shared storage views when feasible.
-- `image.convolve_channels`: HW r/g/b, independent Float32 HW kernels and integer
-  anchors, odd/even asymmetric support and zero/clamp boundaries. Each output
-  reads its own whole kernel and local image neighborhood. Regional
-  `field.convolve` permits reuse of exported kernels.
-- `image.gaussian_blur_with_kernel`: image plus parameter-derived Float32 kernel.
-  Finite Float64 radius and sigma are in [0,64]. R=ceil(radius), shape=(2R+1)^2.
-  At integer offsets define a(d)=clamp(radius+1-|d|,0,1), then normalize
-  exp(-(x*x+y*y)/(2*sigma*sigma))*a(x)*a(y). Sigma=0 is a center impulse with the
-  same shape. Integer radius gives ordinary truncated weights; fractional radius
-  continuously introduces boundary weights. Radius=1.25 gives 5x5 and per-axis
-  outer factor 0.25. Image evaluation uses the exported coefficients with fixed
-  row-major binary64 accumulation. Kernel-only requests read no image samples;
-  joint requests share generation. Existing Gaussian semantics do not change.
+class ExecutionContext {
+ public:
+  Result<ExecutionResult> execute(const ExecutionPlan&, ExecutionBindings,
+                                  const CancellationToken& = {},
+                                  const ExecutionOptions& = {});
+};
+```
 
-## Acceptance and delivery
+The class excerpts omit unrelated members.
 
-Leaves #303–#313 implement contracts, ABI, compiler, execution identities,
-PerAtomOutcome, joint scheduling, plane/420, crops, channel convolutions, Gaussian
-outputs and installed workflows in order, with a separate validated commit each.
-`examples/multi_output_workflow` must run through installed static/shared public
-APIs with independent numeric oracles, source support and callback counts.
+These C++ declarations show the routing fields; surrounding types and validation are omitted. `OperationTraits` contains a declaration-ordered output vector. The current record is version 20; this package is 0.28.0 and the C operation ABI is 11. Every output has a unique key and a separately inferred descriptor and facet set. The C operation descriptor has the same ordered model, with at most 64 output records. Multiple outputs require deterministic, side-effect-free behavior. Singleton operations explicitly declare `value`.
 
-Test singleton versus joint, unselected siblings, same-shape cache separation,
-different ROI/tile/order, control edits, unknown rows, late dirty increments,
-frozen snapshots, mixed hit/flight, waiter cancellation, stale publication,
-shared-owner retirement and budget fallback. Radius cases include 0, 0.25, 1,
-1.25, 2, 64, adjacent floats around integers and invalid/non-finite parameters.
-C fixtures cover protocol sizes/counts/coverage and lifetimes. Follow focused
-local validation and existing six CI jobs rather than adding process-text tests.
+Workflow edges select an exact producer port by name. A caller-visible `WorkflowOutput` names a selected node and port, then assigns a unique result label. The compiler resolves output names to declaration-order indices and records each result as `ValueRef`. Static inference receives complete input metadata; an output's `input_indices` projection controls its executable input ancestry and callback view. Projected C callback inputs retain their original schema indices.
 
-After all leaves, a fresh independent comprehensive review precedes the PR to
-ops, required finding fixes, final-HEAD CI and Codex bot review. Merge commits
-preserve leaf history. Explicitly settle Issues after ops merge, synchronize
-local ops and delete only the task branch. No main merge, daemon migration,
-dynamic output lengths, new Metal algorithms or #206 channel-pruning completion
-is implied. Accepted decisions are not claims of implemented or delivered behavior.
+The compiler computes each output's effective observation kind from its declared kind and the ancestry of its relevant inputs. An Atomic result remains Atomic only when its selected ancestors are Atomic. `atomic_trailing_axes` can group complete trailing dimensions into one generic observation tuple; image pixels retain all logical channels. A consumer's Atomic requirement is checked against only the selected result and relevant ancestry, so an unrelated sibling does not change that result's legality.
+
+Planning creates a single-output `PlanStep` for each demanded result. An unselected pure output adds no execution demand. The same node may therefore contribute separate steps when callers request multiple outputs, while each step carries that result's contract and identity. C++ invocation and the C output sink receive the selected declaration-order `output_index`.
+
+`FailureDelivery::RequestFailureOnly` reports one failure for an observation and does not permit batching multiple Atomic observations. `FailureDelivery::PerAtomOutcome` is available to staged Atomic operations that implement a complete outcome protocol. A joint poll returns one `Need`, success or member-local failure for every supplied member. Missing, duplicate or unknown outcomes are protocol errors. The public `execute` call still returns one aggregate success or error for its complete requested output set.
+
+`OperationTraits::joint_contract` is an optional CPU execution capability; singleton dependency callbacks remain required. Contract 1 groups distinct Atomic outputs from the same node. Contract 2 groups distinct `AtomKey` observations and can include multiple coordinates from one output. The coordinator groups only known ready demands that share the operation, static parameters, input snapshot and CPU backend. It does not wait for future requests or join groups across Runs. `ExecutionOptions::enable_joint` controls grouping and defaults to true.
+
+Each joint member has an independent waiter and terminal state. Member-level errors affect that member and its actual consumers. The coordinator charges one shared continuation and scratch reservation, plus each member's adapter, output and workspace requirements; backing storage is charged once per owner. The joint session releases borrowed member services when each poll returns. A contract-1 joint admission or execution failure that can be retried releases joint reservations and evaluates unfinished members through singleton callbacks. Protocol, cancellation, stale and group/run-scoped failures remain failures. Contract 2 treats an enclosing group failure as terminal because its members form one coordinate batch.
+
+An in-tree example operation, `image.split_horizontal`, declares `full`, `left` and `right` outputs. It requires an image and an integer `split_x` strictly inside the input width. `full` retains the full shape; `left` has width `split_x`; `right` has width `input_width - split_x`. Each output preserves the image facet and requests only its source coordinates. The callback can publish an owner-backed view of the requested source fragment. The maintained example source currently documents that its typed image binding still needs planar migration, so it is an API illustration rather than proof of installed planar workflow execution.
+
+## 4. Non-goals and explicit boundaries
+
+- Multiple outputs do not imply shared evaluation, shared cache keys or one callback that publishes several Values. Each demanded result follows its declared execution contract.
+- An unselected pure sibling does not execute solely because another result from its node is selected. Side-effecting operations remain singleton roots under their declared contract.
+- A fetch union is not a substitute for per-output Data, Control, Validation and Descriptor associations or their certificates.
+- Joint execution is an optional physical optimization. It does not promise one poll, parallel member execution, or a common failure for independent members.
+- Joint grouping is CPU-only and limited to compatible staged Atomic contracts. It does not combine RequestRecord observations or unrelated nodes.
+- Dynamic output counts, late-added output ports and automatic channel pruning are outside the fixed declaration-ordered output table.
+
+## 5. Consequences
+
+Output metadata and result identity include the selected output contract, its resolved descriptor and facets, static parameters and its actual input dependencies. Changing an output role, shape, relevant-input projection or observation contract changes its identity. Unrelated node ids and graph-wide identity do not substitute for the selected output's content dependencies.
+
+Each published result owns its bytes or references its backing owner. A cache hit, flight join or joint member receives result-specific validated evidence. Cancellation of one waiter does not cancel other active waiters; shared work stops when no member has a live waiter. Retained views keep their storage owners alive and consume budget until the final reference retires.
+
+Joint execution adds member bookkeeping and shared state and can require more peak memory than evaluating one output at a time. When reservation or admission does not fit, the coordinator falls back to singleton execution where the contract permits it. Callers can disable grouping, inspect `joint_groups`, `joint_polls` and `joint_fallbacks`, and budget for retained named outputs. Structural protocol errors, cancellation and stale work are surfaced rather than retried as independent computations.

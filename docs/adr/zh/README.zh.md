@@ -1,30 +1,23 @@
 # 架构决策记录
 
-英文 ADR 是权威来源。每个已接受 ADR 都在本目录中具有面向读者的中文镜像。ADR
-记录决策与目标契约；当前实现事实与公开实时交付状态分别由 kernel 架构文档和
-GitHub Issue 维护。GitHub Project 是这些 Issue 的 maintainer operational view。
-私有 personal-overlay OpenSpec 文件属于 maintainer working note，不具有公开
-architecture 或 delivery authority。
+ADR 记录长期有效的架构约束及其理由。了解边界为何存在时阅读 ADR；了解当前实现行为时阅读 [kernel 架构文档](../../kernel-architecture/zh/README.zh.md)。英文 ADR 为权威来源，中文镜像面向中文读者。
 
 | ADR | 决策 |
 | --- | --- |
-| [0002](0002-external-libraries-are-kernel-adapters.zh.md) | 外库不进入 kernel 语义。 |
-| [0003](0003-process-owned-execution-resources.zh.md) | 本地执行资源具有显式所有者。 |
-| [0005](0005-graph-document-ingestion-is-a-classified-transaction.zh.md) | Workflow 文档摄取是分类事务。 |
-| [0006](0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md) | 文档分离事实、决策与交付状态。 |
-| [0007](0007-compute-runs-and-process-execution-have-separate-owners.zh.md) | Compute Run 与本地执行资源具有不同所有者。 |
-| [0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md) | Value、facet、layout 与 Region 是显式验证契约。 |
-| [0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md) | Operation 与 data provider 使用版本化进程内 ABI。 |
-| [0014](0014-compiler-document-and-plan-versions-are-independent.zh.md) | Compiler document、IR、plan 与 digest 具有独立 identity。 |
-| [0015](0015-breaking-product-boundary-scope-reset.zh.md) | 产品边界是可嵌入 kernel 与临时 local daemon。 |
-| [0016](0016-workflow-inputs-and-execution-bindings.zh.md) | 已接受的 Float32 图像、运行期标量及 operation ABI v3 目标；实现尚未交付。 |
-| [0017](0017-cpu-regional-execution-and-storage.zh.md) | 已接受的 CPU 区域存储、有界执行与 operation ABI 4 目标。 |
-| [0020](0020-composable-operation-foundations.zh.md) | 已接受的 G1/G2/G3/G5 组合、image v2 与 operation ABI 7 目标；实现由 #287 追踪。 |
-| [0021](0021-independent-node-results.zh.md) | 独立命名结果、每输出依赖和 Atomic 联合执行；#302。 |
+| [0002](0002-external-libraries-are-kernel-adapters.zh.md) | 第三方库位于 kernel 契约之后。 |
+| [0003](0003-process-owned-execution-resources.zh.md) | 为本地执行资源指定明确所有者。 |
+| [0005](0005-graph-document-ingestion-is-a-classified-transaction.zh.md) | 分开发布 workflow 源文档与编译阶段。 |
+| [0006](0006-kernel-documentation-separates-facts-decisions-targets-and-status.zh.md) | 将当前行为文档与架构决策分开维护。 |
+| [0007](0007-compute-runs-and-process-execution-have-separate-owners.zh.md) | 分开每次运行的状态与共享执行上下文资源。 |
+| [0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.zh.md) | 将 Value、输入绑定、布局和 Region 定义为显式契约。 |
+| [0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md) | 为可信 operation 与 data provider 模块使用版本化 C 契约。 |
+| [0014](0014-compiler-document-and-plan-versions-are-independent.zh.md) | 区分文档、编译阶段、plan 与 ABI 的标识。 |
+| [0015](0015-breaking-product-boundary-scope-reset.zh.md) | 将编译与执行保留在可嵌入 kernel 中。 |
+| [0016](0016-workflow-inputs-and-execution-bindings.zh.md) | 每次执行都绑定已声明的 workflow 输入。 |
+| [0017](0017-cpu-regional-execution-and-storage.zh.md) | 使用有界 CPU 存储执行区域工作。 |
+| [0018](0018-local-result-caches-and-frozen-execution.zh.md) | 冻结执行输入，并复用精确匹配的本地结果。 |
+| [0019](0019-metal-resident-image-workflows.zh.md) | 让受支持的图像工作流驻留于 Metal 存储。 |
+| [0020](0020-composable-operation-foundations.zh.md) | 在算子间组合数值、语义和输出契约。 |
+| [0021](0021-independent-node-results.zh.md) | 显式表示独立节点结果与联合执行。 |
 
-ADR 0015 是最高 active 产品边界权威。重置前 ADR 0001、0004、0009、0010、0011 与 0013 已由该
-breaking decision 有意从 active 集合退役。其历史文本只能从 Git 历史和
-`pre-breaking-scope-reset-2026-09-01` tag 取得，不得作为 roadmap 或恢复来源。
-
-新 ADR 使用下一个四位编号。普通 supersession 会链接替代项；当保留旧决策会错误
-宣传已删产品领域时，breaking scope reset 可以直接将 active decision 退役。
+[Kernel 概览](../../kernel-architecture/zh/Overview.zh.md)说明当前所有权和执行行为。各 ADR 在其约束适用时仍可供查阅；决策记录本身不能证明某项提议或已接受能力已经实现。

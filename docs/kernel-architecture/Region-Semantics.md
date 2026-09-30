@@ -1,106 +1,56 @@
-# Region Semantics
+# Region semantics
 
-A Value's bounds-checked Region is logical coverage in its complete descriptor,
-independent of its origin-relative storage view. S2 provides CPU regional
-execution. S3 adds explicit dirty mapping, immutable snapshots and opt-in result
-caching under ADR 0018.
+## Scope & Ownership
 
-## Planning
+A `Region` describes logical sample coverage in a complete tensor descriptor. Storage origin, byte offset, strides, padding, and physical planar pages describe how those samples are stored; they do not change the Region. The planner, executor, and storage owner each retain their own part of this contract: planning authorizes dependencies, execution passes exact demands, and storage bounds readable or writable samples.
 
-Whole demands complete inputs. Elementwise maps matching coordinates. Halo
-expands symmetric demand and clips at the complete image boundary with checked
-arithmetic. RGBA ports require all four channels, scalars always demand whole
-{1}, and Float32Mask {H,W} ports project the image's spatial axes. Empty,
-out-of-bounds, unknown-name and partial-channel image demands fail planning,
-including channel demand propagated through a generic downstream port.
+## Data Layout & Memory
 
-PlanningOptions retains each output name's exact Region and positive
-`tile_height`/`tile_width`, default 128x128. Changing these options replans
-optimized IR. Named Regions and geometry enter physical identity even when
-several names alias one node. Runtime bytes never enter plan identity.
+```cpp
+#include <cstdint>
+#include <vector>
 
-`ExecutionPlan::tile_plan(name, region)` derives one dependency-pruned plan
-without source analysis or a complete tile-grid allocation. Fan-out demand
-merges inside that tile; neighboring tiles may recompute overlapping halo.
-Whole, nondeterministic and side-effecting nodes are explicit whole_boundary
-steps. Their materialization remains complete and must fit the resource budget.
+#include "photospider/data/region.hpp"
 
-Numeric parameter schemas can declare finite inclusive bounds. Int64 endpoints
-are exact integers within +/- (2^53-1); Float64 endpoints are finite. A
-halo_radius_parameter references a required bounded Int64 with minimum >=1 and
-maximum <=UINT32_MAX on a Halo operation with zero fixed radius. Analyze
-validates and resolves it into copied node traits. Unbounded Float64 parameters
-retain their exact prior bit semantics.
+ps::Region whole_region(const std::vector<std::uint64_t>& shape) {
+  return ps::Region::whole(shape);
+}
+```
 
-## Execution and storage
+Each dimension is a half-open interval `[offset, offset + extent)` within its descriptor axis. The constructor validates dimensions and checked endpoints. A tensor of shape `(height, width, channel)` can request a pixel rectangle while retaining all four channel samples for each RGBA pixel. Planar storage can place channels in separate planes; complete logical channel coverage does not imply interleaved physical bytes.
 
-Image paths, explicit regional demands and RegionalSource bindings use the
-regional executor. Complete generic scalar/broadcast execution keeps the same
-bounded worker executor. Ordinary execute returns each name's requested
-coverage; image collection packs that Region while preserving the complete
-logical descriptor. No request means complete output.
+An input view separately exposes storage origin, offset, signed strides, valid coverage, and callback demand. A callback may address only samples inside the authorized demand and valid coverage, using the supplied storage mapping. Output publication records its descriptor and exact produced Region. Empty coverage has no sample reads.
 
-The Run materializes Whole/effect boundaries once in topological order, then
-lazily processes output tiles in name/row/column order. Completed Whole results
-are immutable Run-local values, not a cross-run cache. References expire when
-no remaining output needs them. Tile processing is sequential at the outer
-level; independent dependency-ready branches use the fixed worker pools.
-Callbacks see exact input/output demands. Source reads and computation buffers
-use the same context budget and owned worker queue.
+## Execution & State
 
-Regular Value bindings remain complete dense snapshots. RegionalSource copies
-metadata/callable per Run and fills host-provided packed region storage, with a
-separately declared scratch limit. It must return exactly the written requested
-Region. Bounded scalar parameter ports require ordinary Value bindings; other
-regional inputs may use sources. Every binding name, descriptor/facet set and
-scalar interval is validated before a source or operation callback. Pixel
-content is checked only in the region consumed by a constrained port.
+The planner derives dependencies from each operation's declared rule. Whole operations demand complete inputs. Elementwise operations map matching coordinates. Halo operations expand demand and clip it to the complete image boundary with checked arithmetic. Shrink maps ceil-divided output coordinates to clipped input boxes. Shape and dependency propagation reject unknown axes or ports, out-of-domain rectangles, and partial channel coverage where an image port requires complete channels.
 
-A source must support concurrent immutable reads and observe cooperative stop.
-Source and operation callbacks must not synchronously reenter execution on the
-same context's workers. All admitted callbacks retire before their borrowed
-source/output storage is reused. No source codec or provider-ABI extension is
-introduced.
+Planning options retain each output name's exact requested Region and positive tile dimensions. Changing either replans optimized IR. Distinct names remain part of plan identity even when they alias one node; runtime payload bytes do not enter plan identity. A tile plan derives a dependency-pruned subplan for one region without allocating the complete tile grid. Neighboring tiles may recompute overlapping halo. Whole, nondeterministic, and side-effecting boundaries materialize complete results once in topological order.
 
-## Streaming and resource observations
+The regional Value executor returns requested coverage. With no requested region, it requests complete output. Ordinary dense Value bindings provide complete snapshots; `RegionalSource` copies its metadata and callable for the Run and fills host-provided packed region storage. It must support concurrent immutable reads, observe cooperative cancellation, and report exactly the requested Region. Source and operation callbacks must not synchronously reenter execution on workers owned by the same context. This path handles Value dependencies; structural planar operations use the distinct planar executor described in [Data Model](Data-Model.md) and [Compiler and Execution](Compiler-and-Execution.md).
 
-`execute_stream` invokes a required synchronous ExecutionSink with borrowed
-ValueView objects. Views and pointers expire when the sink returns. A blocked
-sink prevents the next tile's source read, bounding output staging. Sink calls
-run on the execute caller thread. The caller may copy pixels into its own
-separately owned memory.
+Value collection packs requested coverage while preserving the complete logical descriptor. Structural planar collection instead requires `PlanarImage` bindings whose descriptors, facets, layout, and tile geometry match the compiled declaration. Planar image execution rejects Value, `RegionalSource`, and snapshot bindings for planar inputs. `execute_stream` accepts the Value sink path and returns `TypeMismatch` for plans that require structural planar execution.
 
-Cancellation/currentness is checked before admission, at callback entry and
-completion, before and after each sink call, and after final assembly. A sink
-failure stops subsequent delivery and drains admitted work. Consumed tiles
-cannot be revoked; only final success validates the complete stream. Collected
-failure returns no partial ExecutionResult. Entry Stale precedes token/binding
-validation; after entry Cancelled precedes Stale and ordinary errors.
+`execute_stream` invokes its required sink synchronously on the execute caller thread. It passes borrowed `ValueView` objects that expire when the sink returns. Eligible deterministic, side-effect-free CPU dependency streams can prepare a bounded window of later tiles while the caller delivers the front tile; the window is limited by execution parallelism. Sink calls remain ordered, and a blocked sink stops further delivery while already admitted window work may finish. A sink failure stops later delivery and drains admitted work; already delivered tiles cannot be revoked. Collected failure returns no partial result.
 
-The budget counts actual controlled source/output/scratch/intermediate/transfer/
-collector capacity once per owner. A conservative complete working set is
-reserved before work, and individual allocations retain their leases until the
-last owner retires. Source buffers and intermediate slots clear after their
-last reader. Caller-preexisting Values and source-owned external state, metadata,
-thread stacks and process RSS are outside the controlled allocation bound.
-`retained_input_bytes` reports distinct preexisting Value storage; opaque source
-state is not measured. Foreign accounting domains are not mistaken for this
-context's allocations.
+Cancellation and currentness checks guard admission, callback entry and completion, sink calls, and final assembly. At entry, Stale takes precedence over binding validation. After entry, Cancelled takes precedence over Stale and ordinary errors. All admitted callbacks retire before borrowed source/output storage is reused.
 
-Diagnostics aggregate operation count/elements/timing by node/backend, report
-successful source reads/bytes, delivered tiles, active callbacks, actual peak
-and planned reservation peak. Storage peaks include collector, Whole and tile
-allocations in the same Run. Streaming has no result_digest; its sink checks
-actual pixels. Collected digests include logical coverage and storage origins.
+## Algorithms & Math
 
-`test_tile_plan` checks demand legality and identity. `test_regional_execution`
-executes a 5x7 ROI of a logical 64 GiB image without full allocation, verifies
-9 ordered tiles and exact resource bounds, and covers concurrent snapshots,
-backpressure, source/sink failures, cancellation/stale, Whole/effect single
-execution and multiple outputs. Gaussian/composition acceptance is #266.
+For a positive tile size `T` and extent `E`, the planner computes the tile count with checked ceil division:
 
-## S3 additions
+$$
+C = \left\lceil \frac{E}{T} \right\rceil,
+\qquad
+C = E / T + (E \bmod T \ne 0).
+$$
 
-Shrink shape/Region traits map ceil-divided spatial output to clipped integer input boxes. operation_dirty_region maps edits forward, including Halo expansion and Whole/scalar fallback. Immutable snapshot bindings preserve old versions. Explicit FrozenExecution replaces editable graph currentness with pinned validity; ordinary execute retains stale checks. See [Cache Model](Cache-Model.md) and [S3 Workflow](S3-Workflow.md).
+The integer form avoids `E + T - 1` overflow. Bounds and shape products are checked before allocation. Empty extents produce no sample work. Numeric parameter schemas can declare finite inclusive bounds; bounded Int64 values remain within exact binary64 integer range, and bounded Float64 endpoints must be finite. A Halo operation may resolve its radius from a required bounded Int64 parameter.
 
-Shared producer allocation peaks are reported separately in shared_peak_live_bytes; peak_live_bytes retains caller-local allocation meaning. The context budget charges shared owners once.
+## Limitations & Non-Goals
+
+- Regional execution does not make an operation region-capable when its declared rule requires whole inputs.
+- Collected outer tile traversal is sequential. Eligible deterministic CPU dependency streaming uses a bounded concurrent tile window; other stream and regional paths follow their own execution rules.
+- Caller-owned input payload is outside the computation `maximum_live_bytes` payload sublimit. When a managed resource root is enabled, the kernel admits a reference lease for external Value storage under the separate Referenced capacity dimension. Source-private external state, thread stacks, and process RSS remain outside the controlled allocation bound.
+- Streaming sinks receive irrevocable tiles before final stream success. Callers that need rollback must stage their own output.
+- `RegionalSource` is a C++ execution binding; it does not add a source codec or provider-ABI extension.

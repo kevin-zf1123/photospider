@@ -1,45 +1,40 @@
-# ADR 0002：外库不进入 Kernel 语义
+# ADR 0002：外部库留在 Kernel 契约之后
 
-## 状态
+- 状态：已接受
 
-已接受，并由 ADR 0015 针对当前可嵌入 kernel 边界收窄。
+## 1. 核心摘要 (TL;DR)
+Kernel 通过编译器、数据、执行和插件契约提供接口，不暴露第三方库类型。Operation 实现可以在契约之后使用私有依赖。这使安装后的 kernel 无需可选库即可使用，也允许针对具体能力进行集成。
 
-## 背景
+## 2. 架构心智模型
 
-Reset 之前的产品在 core、adapter、CLI、persistence、service 或产品安全路径中
-嵌入 OpenCV、yaml-cpp、FTXUI、CURL 和 OpenSSL。这种耦合使 optional library 成为
-kernel build 的一部分，并让它们的类型和 lifecycle 假设影响 kernel 语义。
+```text
+consumer document / values
+          |
+          v
+ Photospider public contracts <----> operation/provider ABI
+                                          |
+                                          v
+                              implementation-private libraries
+```
 
-Scope Reset 保留一个可嵌入 graph compiler/executor，必需 platform dependency 只有
-C++ runtime 与 thread library。第三方算法仍可供 operation implementation 使用，但不属于
-kernel package contract。
+Kernel 拥有类型化 workflow 和执行边界。Plugin 拥有内部 adapter，并在 ABI 边界转换数据与错误。
 
-## 决策
+## 3. 契约规约与接口
 
-Kernel 使用 public contract 和 standard-library representation 拥有
-`WorkflowDocument`、typed IR、operation trait、`Value`、`Region`、layout、execution 与
-diagnostic 类型。
+```cpp
+struct WorkflowDocument;
+class Value;
+class Region;
+class OperationRegistry;
+struct ExecutionContextConfig;
+```
 
-本仓库不提供 OpenCV/yaml-cpp adapter、CLI library、codec 或 dependency-toggle
-compatibility profile。Canonical kernel target 与 installed package 不会 find、link、export
-或 advertise 这些库。
+这些公共 C++ 类型定义 kernel 面向调用方的数据模型。Operation 与 data-provider 的 C 接口分别声明在 `photospider/plugin/operation_plugin_api.h` 和 `photospider/plugin/data_provider_api.h`。Plugin 通过定宽记录和借用缓冲区传递数据；第三方对象与异常留在 plugin 内部。安装包要求 C++ 运行时和 Threads；可选 native backend 与集成由构建选项控制。
 
-受信任的进程内 operation 或 data-provider DSO 可以在私有实现中链接第三方库。
-它必须在 operation/provider ABI 边界转换所有 input、output、exception 和 lifecycle
-behavior。任何第三方 type、allocator owner、exception、path 或 configuration object 都不得
-跨越 public ABI。ABI validation 是 correctness validation，不是 sandboxing 或 native-code
-security。
+## 4. 非目标与明确边界
+- Kernel 不定义文件发现、文档解析、持久化、编解码、UI、网络或加密服务。
+- ABI 校验互操作正确性，不隔离 native code，也不证明 plugin 可信。
+- Plugin 不得通过公共 ABI 转移第三方 allocator 或库对象的所有权。
 
-`WorkflowDocument` 是 in-memory compiler input。File format 与 storage service 属于 consumer
-关切，不是 kernel adapter 或 authority。
-
-## 结果
-
-- Clean kernel configure/build/install 和 isolated consumer 不需要 optional third-party
-  package。
-- Kernel 原语刻意保持最小；Photospider 不重建通用图像处理、serialization、UI、
-  network 或 crypto library。
-- Operation DSO 在 process-global startup-configured operation set 内部，拥有所需的
-  library initialization、thread setting 和 exception translation。
-- 新增本仓库拥有的 library integration 需要聚焦的 operation/provider 决策；它不得重新
-  引入 core dependency、compatibility option 或 filesystem authority。
+## 5. 后果与代价
+Plugin 作者需要在边界处转换数据、错误和生命周期，并管理库级线程设置。这增加 adapter 工作，但避免库 ABI 和 allocator 决定 kernel 的兼容要求。启用可选集成的构建配置需要相应依赖。

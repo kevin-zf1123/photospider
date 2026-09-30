@@ -1,66 +1,32 @@
-# ADR 0006：文档分离事实、决策与交付状态
+# ADR 0006：文档将当前事实与架构决策分开
 
-- 状态：已接受，由 ADR 0015 收窄
-- 日期：2026-09-01 边界修订
+- 状态：已接受
 
-## 背景
+## 1. 核心摘要 (TL;DR)
+架构文档描述当前源码树中的行为。ADR 记录长期边界及其理由。区分两者后，工程师可以直接依据当前契约工作，无需重建交付历史。
 
-读者需要区分已实现行为、架构决策与当前交付状态。混合这些时间含义，会让未实现
-target 看起来已是当前行为，或让 obsolete roadmap 继续授权已删产品领域。
+## 2. 架构心智模型
 
-## 决策
+```text
+typed public headers + implementation --> current behavior documentation
+accepted architecture constraints ------> ADRs
+```
 
-Active documentation 使用三个层次：
+两种文档从不同角度描述同一产品：当前事实说明今天可以调用什么，ADR 说明长期边界为何存在。
 
-| 层次 | 权威 | 内容 |
-| --- | --- | --- |
-| 当前事实 | `docs/kernel-architecture/` | checked-out tree 中的行为、所有权、invariant、limitation 与 source/test entry point |
-| 决策 | `docs/adr/` | 已接受边界、理由、后果、supersession 与显式 non-goal |
-| 交付状态 | 公开 GitHub Issue | 具体 task、dependency、实际 verification、risk 与 completion state |
+## 3. 契约规约与接口
 
-ADR 0015 是最高 active 产品边界决策。低层事实、Issue、Project field、archived
-OpenSpec note 或历史 tag 都不能覆盖它。Breaking reset 后不再有 active roadmap
-layer；保留的 compiler 与 heterogeneous-execution 工作由维护中的 architecture 和
-已收窄 live tracking 描述。
+```cpp
+// Public declarations and behavior are authoritative for current API facts.
+#include <photospider/photospider.hpp>
+```
 
-[`docs/development/Current-Development-Program.md`](../../development/zh/Current-Development-Program.zh.md)
-是当前 baseline、milestone、critical path 与 active leaf Issue 的 checked-in 公开快照。
-它不能修改 architecture；快照过期时，以 GitHub 的 live Issue state 为准。GitHub
-Project 是 maintainer operational view，只同步 Issue 状态，不能覆盖 Issue。
+`docs/kernel-architecture/` 记录已经实现的所有权、接口、不变量和限制。`docs/adr/` 记录已接受的设计、理由、后果和边界。实现变化时，当前事实文档应跟随检出代码中的头文件与实现；只有架构决策改变时才修改 ADR。英文文档是权威版本，维护中的中文镜像表达同一契约。
 
-私有 personal overlay 中的 OpenSpec 文件属于 maintainer working note。它们没有公开
-architecture 或 delivery authority，不构成公开 completion gate。只有 accepted 内容被
-提升到适用的公开 ADR、current-fact 或 development document 以及 GitHub Issue 后，
-相关内容才生效。
+## 4. 非目标与明确边界
+- ADR 不承担任务追踪、发布状态或路线图职责。
+- 架构文档不声明实现尚不具备的行为。
+- 私有工作笔记和外部 issue tracker 不是公共 API 的权威来源。
 
-### Promotion workflow
-
-把计划行为提升为当前事实需要一个连贯 change：
-
-1. 实现行为与 long-lived test；
-2. 更新相关英文 current-fact document 与中文镜像；
-3. 只有决策改变时才更新受影响 ADR；
-4. 使用实际 test result 更新 live Issue/Project state 与 checked-in delivery snapshot。
-
-Status checkbox 本身绝不证明当前行为。反过来，当 installed contract 与 maintained
-documentation 仍描述旧边界时，代码也不算完成。
-
-### Archive rule
-
-Git 历史、annotated tag 与 archived OpenSpec change 可以保留历史文本。Active index
-不得把 archive 链接成当前权威。被删领域标记为 removed、out of scope 或
-archive-only；不得描述为 later、future、deferred、optional 或 default-disabled。
-
-### 语言一致性
-
-英文公开文档是权威来源。每个维护的 official public document 都在同一 change 中更新
-忠实、面向读者的中文镜像。镜像不引入额外 requirement。私有 working note 遵循
-personal-overlay policy，不属于公开 parity gate。
-
-## 后果
-
-- 阅读当前 architecture 无需重建迁移历史。
-- Breaking retirement 显式呈现，而不是隐藏在 stale link 后。
-- Delivery record 引用真实 code 与 test result，但不成为产品权威。
-- 干净 primary clone 无需 personal workflow data 也能理解。
-- Maintainer 可以在私下使用 OpenSpec，公开 review 不依赖不可见材料。
+## 5. 后果与代价
+读者可以判断一条陈述描述的是当前行为还是设计约束。维护者只需更新职责发生变化的文档，避免过期交付细节被误认为产品行为。若头文件与当前事实文档不一致，应先核对实现，再决定如何修正文档。

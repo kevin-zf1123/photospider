@@ -1,206 +1,59 @@
-# Cache Model
+# Cache model
 
-`PlanCacheKey` remains a non-security physical-plan identity and excludes input
-payload. It does not validate stale plans or identify execution results.
+## Scope & Ownership
 
-Package 0.7 provides opt-in ExecutionContext result retention with
-`result_cache_bytes`, a sublimit of `maximum_live_bytes`. Copies share immutable
-allocation leases, eviction releases only cache references, and strict working
-admission reclaims optional entries first. `clear_result_cache()` invalidates
-retention epochs; active readers remain valid and old producers cannot refill
-a cleared epoch. Cache statistics expose hits, misses, evictions, sharing,
-entries and retained capacity. Zero cache bytes preserves uncached execution.
+Photospider has separate identities and owners for compiled plans, immutable input snapshots, completed CPU/GPU results, native input copies, in-flight shared computations, and disposable disk results. Cache entries retain references to immutable owners; clearing or evicting an entry drops cache eligibility while active readers keep their owners and resource leases alive.
 
-InputSnapshotStore owns independently bounded immutable rank-1..8 blocks for
-UInt8, Int64, Float32 and Float64 Values. Generic Values retain every valid raw
-bit pattern; typed imports and patches validate their semantic sample rules.
-Image-v2 RGB/RGBA/XYZ/Lab retains ordered channel roles, reference white, units
-and alpha association, and always validates/copies complete pixel channels.
-The configured block extent applies to every generic axis and to image H/W;
-image C stays complete. `maximum_blocks` bounds each version's directory before
-payload allocation. `maximum_bytes` counts actual retained blocks across all
-versions; directory metadata is separately bounded, not a process RSS limit.
+`PlanCacheKey` describes physical plan identity. It excludes input payload and does not validate graph currentness or identify computed results. Result retention is opt-in through `ExecutionContextConfig::result_cache_bytes`, bounded by the context's managed live-byte limit. A zero limit keeps completed results uncached.
 
-Patches require exact dtype, shape and facets, copy intersecting blocks and
-preserve old versions. `SnapshotAccessOptions` supplies cancellation and a sample
-bound for import/read/hash and for affected-block copying during patch. Cancelled
-reads may have partially filled the caller's buffer; only success validates it.
-`content_identity(region)` uses domain `photospider.input-region.v2` and canonical
-SHA-256 over dtype, shape, requested coordinates, facets and exact sample bits.
-Integer/IEEE samples are decoded at their native width and encoded as uint64
-little-endian fields. Block geometry, origin/stride and allocation are excluded.
-Signed zeros and NaN payloads remain distinct. Snapshot bindings supply regional
-reads with the Run cancellation token, including generic inputs.
+## Data Layout & Memory
 
-Memory and native completed Values retain their actual facets. Result hits
-revalidate resolved descriptor, demanded coverage, output semantic rules and
-typed sample constraints before reuse, including the flight-completion race
-lookup. Numeric validation establishes nearest/gradual-underflow arithmetic and
-restores the caller's floating environment. Generic Drop outputs may publish
-opaque facets; PreserveInput chains originating at that dynamic boundary retain
-this capability while still rejecting unproven typed facets. Known declaration
-and explicit output semantics require exact facet equality. Invalid computed typed values remain OperationFailed. Input-copy keys
-already include complete metadata and preserve it on native publication.
+```cpp
+#include "photospider/data/input_snapshot.hpp"
 
-Result-region keys v3 recursively cover each consumer's demanded producer regions,
-operation semantics/parameters and stable input content. Unrelated graph edits
-and node identifiers do not invalidate unchanged content. Whole dependencies
-remain conservative; scalar changes invalidate dependent output. Generic
-unproven input sources remain executable but disable cross-Run reuse for their
-descendants. Only deterministic, side-effect-free, cacheable work with a proven implementation qualifies.
-
-Regional result keys also accept preflight-validated dense, offset-zero direct
-Values up to 2048 bytes when the derived demand covers the complete Whole value.
-Snapshot, bounded-scalar and compact whole-Value sources have distinct category
-tags. Compact keys include dtype, rank/shape, exact facets, byte length and raw
-bytes, including signed-zero bits and unused coefficients. Larger/partial direct
-inputs remain unproven. This qualification applies to regional execution and
-execute_stream; pure generic/scalar ordinary execute keeps its existing fast
-path. Disk result eligibility remains restricted to supported image/mask Values. The public expression workflow
-checks 2048/2049+ boundaries, dtype/shape/facet separation, concurrent coefficients
-and cached invalid bounded consumers.
-
-Bounded shared coordinators merge identical in-flight regional computations;
-CPU work stays in the existing callback pool. Each waiting caller independently
-observes its own cancellation/currentness. Last-subscriber cancellation drains
-the producer before returning. Explicit producer snapshots own their inputs
-and registry independently of caller stack and editable graph state.
-
-FrozenExecution captures a current plan and immutable Value/snapshot bindings.
-It is an in-memory owned object, with no serialized-plan reader. Its lifetime
-is independent of graph replacement/destruction; capture copies snapshot handles
-so later replacement of a caller-owned handle cannot alter frozen inputs. Ordinary plan
-execution retains stale checks. `for_region` derives a pinned output tile.
-Custom RegionalSource callbacks must be imported before freeze.
-
-## Disposable disk regions
-
-An explicit `ExecutionContextConfig::disk_cache` requires positive result cache
-capacity. DiskCacheConfig sets the directory, total byte/entry limits and a
-bounded write queue. One context exclusively locks the directory. The cache
-contains only `.pscache` files named by canonical SHA-256 keys and disposable
-`.tmp` writes; unrelated names are ignored. Bytes include an active write
-reservation. Pending writes retain the original accounted immutable buffers
-and can be dropped under computation pressure.
-
-Persistent eligibility is restricted to `make_default_operation_registry()`.
-Its implementation fingerprint covers maintained source/headers, compiler,
-platform and build options. Custom and C-module registries retain process-local
-cache support but publish no persistent implementation identity. This is a
-correctness identity, not native-code trust or a security signature.
-
-Disk format 2 (`PSCACHE2`, disk-result key domain v2) stores Float32 HW coverage
-masks or supported HWC image-v2 regions. The header encodes dtype, shape,
-Region, exact canonical facet keys/versions/payloads, byte count and key. SHA-256
-covers this header and packed little-endian Float32 sample bits. Old format 1
-is a miss. Reads compare the complete expected header, publish the stored
-validated facets and revalidate typed samples; no default RGBA facet is rebuilt. Allocation size comes from the validated plan, never
-file-supplied lengths. Header/size/hash/numeric mismatch is a disposable miss.
-Writes complete in a temporary file before rename; no durable commit/recovery
-claim is made. Write failure/queue pressure skips retention without failing the
-computed result. `flush_disk_cache()` is an explicit caller operation outside
-publication; destruction also joins the writer. `clear_disk_cache()` removes
-entries and invalidates pending write epochs.
-
-`test_disk_cache` runs separate processes for initial write, reuse, header,
-length, checksum and version corruption, deletion/rebuild, failed writes and
-strict quota/queue-pressure cases. `test_input_snapshot` and the typed disk
-regressions exercise RGB/BGR, straight/premultiplied RGBA, XYZ/XYZA and Lab/LabA,
-including D65/D50 metadata separation, three-channel patches, retained frozen
-inputs, cold/warm reuse and restart. `tests/support/typed_images.hpp` provides
-the public WorkflowDocument/compile/execute identity example and checkable
-signed/HDR/negative-zero sample payloads. See [ADR 0018](../adr/0018-local-result-caches-and-frozen-execution.md).
-
-## S4 native retention
-
-`NativeGpu` result keys additionally separate the placement mode, selected
-backend, operation key and copied traits, plus the native device/build identity.
-A fallback result and its descendants never populate the expected native
-result keys.
-The current frozen registry fixes C-module implementation ownership for the
-context. CPU exact results cannot be replaced by approximately computed native
-results. Loss of the device disables native keys and clears retained entries.
-
-Completed native input copies share the same bounded LRU. Their keys hash the
-actual demanded logical sample bytes, descriptor, facets, Region and device;
-they do not rely on mutable addresses or caller revision claims. This can avoid
-another native upload even for immutable ordinary Value bindings. It does not
-make an arbitrary RegionalSource eligible for computed-result caching; such a
-source is read again before its actual bytes authorize input-copy reuse.
-
-`native_retained_bytes` counts unique native owners within `retained_bytes`.
-`native_upload_hits` reports avoided uploads. Copies, result retention and
-active readers all retain their original controlled allocation leases. Clear
-and eviction retire eligibility without invalidating borrowed active data.
-Native shared computations keep the independent/last-subscriber cancellation
-rules. Shared followers report shared work without counting the producer's
-native dispatches and transfers a second time.
-
-Disk read and write are restricted to `CpuExact` execution in this
-implementation, including when a `NativeGpu` plan falls back to CPU. CPU disk
-behavior otherwise remains unchanged. Native implementations and generated shader inputs
-participate in maintained build identity; generated build headers are not source
-assets. `test_native_cache` and its C-module variant cover reuse, edits, numeric
-mode/fallback isolation, cancellation, clear races and bounded retained capacity.
-
-Focused validation using the existing build directory:
-
-```sh
-cmake --build build/issue257-static --target test_input_snapshot test_disk_cache test_result_cache test_frozen_execution test_native_cache -j 8
-MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build/issue257-static -R '^test_(input_snapshot|disk_cache|result_cache|frozen_execution|native_cache(_plugin)?)$' --output-on-failure
+namespace ps {
+Result<InputSnapshot> import_snapshot(const InputSnapshotStore& store,
+                                      const Value& value) {
+  return store.import_value(value);
+}
+}
 ```
 
-Typed native residency uses a public pure byte-copy operation: each of the nine
-image descriptors must preserve exact bytes/facets, dispatch once cold and zero
-times on a cache hit. This validates storage and reuse without introducing a
-color conversion operation. Existing native cancellation and budget cases remain.
+`InputSnapshotStore` retains immutable rank-1 through rank-8 blocks for Values with the supported built-in dtypes. Generic imports preserve raw valid bit patterns, while supported typed scalar/tensor values are validated. Values carrying image, image-plane, mask, or rank-three-and-higher ColorArray identity require structural planar storage and are rejected by snapshot import. `maximum_blocks` bounds each version's directory; `maximum_bytes` bounds actual retained payload across versions, and directory metadata has a separate bound. Caller-supplied Values and snapshot metadata are outside this byte limit.
 
-## G4 exact dependency content cache
+Patches require matching dtype, shape, and facets and replace an exact nonempty region. They copy intersecting blocks and preserve old versions. Snapshot access options provide cancellation and a sample bound for import, read, hash, and affected-block copying. A cancelled read may have partially filled caller memory; success alone validates the complete read.
 
-`DemandHandle::request` and `execute_fragments` retain successful exact
-observations in the same context pixel LRU when `result_cache_bytes` is positive.
-The cache remains process-local; this path does not write dependency records to
-disk. Every ancestor must be deterministic, side-effect-free and cacheable. A
-manifest holds structural record links, the complete transitive source
-Data/Control/Validation footprint, content identity and fragment keys. It retains
-no input/snapshot/pixel owner. Source bytes from all old positive and negative
-control evidence must match the current immutable bindings before any pixels
-are reused. Equal output bytes alone cannot establish that match.
+`content_identity(region)` hashes dtype, shape, requested coordinates, facets, and exact sample bits using canonical framing. Block geometry, origin, stride, and allocation do not affect identity. Signed zeros and distinct NaN payloads remain distinct. Snapshot bindings provide regional reads with the Run cancellation token. Snapshot/session identifiers are provenance only; deterministic operations cannot derive sample values or dependencies from the identifier spelling.
 
-The candidate template binds the plan, node, exact Q and resource policy, while
-source identity uses the canonical snapshot v2 framing for all four dtypes.
-Value and snapshot sources use the same logical bytes, independent of block or
-stride layout. Snapshot/session identity is provenance only; deterministic
-programs cannot derive values or dependencies from its spelling. The template is
-conservative across graph/plan changes. Up to eight bounded content versions may
-be retained per template. A hit imports per-output associations under the current
-bundle identity, allowing cached and newly computed rows to merge safely.
+## Execution & State
 
-Every fragment key includes its actual logical Region. Legal repartitioning
-cannot mix old and new overlapping pieces after partial eviction. All keys must
-still exist in the current epoch before the LRU acquires their Values together;
-any missing piece makes the candidate a miss. Only the producer can populate the
-captured epoch. `clear_result_cache` prevents its late completion from backfilling
-that epoch. Foreign output storage is copied through the existing accounted
-allocator before retention. Active results and demand evidence survive eviction
-or clear without retaining cache eligibility.
+Memory result hits revalidate the resolved descriptor, demanded coverage, output semantic rules, and typed samples, including after a concurrent flight completes. Numeric validation establishes the required floating-point environment and restores the caller's environment. Generic Drop outputs may carry opaque facets; a PreserveInput chain retains that capability while typed declarations still require proven facets. Invalid computed typed values fail with `OperationFailed`.
 
-`maximum_dependency_cache_metadata` bounds retained proof units (1..1048576,
-default 65536). Accounting traverses actual distinct record owners, including
-recomputed equal observations, their rows/tags/coordinates and source witnesses;
-shared pointer owners within one manifest count once. It does not substitute the
-smaller merged public certificate size. `maximum_dependency_cache_work` supplies
-one separate optional per-Run budget (default 1048576; zero disables this cache).
-Traversal/copy/hash work is charged before execution; exact-set normalization gets
-a precharged finite allowance. Optional proof exhaustion skips reuse/retention
-and continues computation. `dependency_cache_records_visited` counts newly visited
-proof records; `dependency_cache_work` reports consumed/precharged work units,
-including reserved normalization work rather than CPU instructions or time.
+Regional result keys recursively cover demanded producer regions, operation semantics and parameters, and stable source content. Unrelated graph edits and node identifiers do not invalidate equal content. Whole dependencies remain conservative, and scalar changes invalidate dependent output. An unproven generic input remains executable but disables cross-Run result reuse for its descendants. Only deterministic, side-effect-free operations marked cacheable with a proven implementation qualify.
 
-The G4 public workflow checks unchanged-content hits, unrelated edits, changed
-control with equal numeric output, and retained dirty evidence after clear.
-Focused regressions additionally cover snapshot/Value bit identity, sparse
-mixed hit/miss certificates, frozen versions, adaptive fragment partitions after
-partial eviction, duplicate record owners, tiny shared proof budgets, and a real
-producer completing after clear. These checks do not complete ordered-scan carry
-reuse or native GPU fragment execution.
+Small preflight-validated dense offset-zero Values can establish compact content identity when the derived demand covers the complete value; the current bound is 2048 bytes. Snapshot, bounded-scalar, and compact whole-Value sources use distinct key categories. Larger or partial direct inputs remain unproven. Disk result eligibility is narrower and covers supported image and mask Values.
+
+Bounded shared coordinators merge identical in-flight regional computations. CPU work runs in the context callback pool. Each waiting caller observes its own cancellation and currentness. When the last subscriber cancels, the producer drains before the call returns. Producer snapshots own their inputs and registry independently of caller stack and editable graph state.
+
+`FrozenExecution` captures a current plan and immutable Value/snapshot bindings. It remains valid across graph replacement or destruction. Capture copies snapshot handles so later caller-handle replacement cannot change pinned inputs. `for_region` derives a pinned output tile. Custom `RegionalSource` callbacks must be imported before freeze; ordinary plan execution retains stale checks.
+
+The result cache also retains exact dependency observations requested through `DemandHandle` and fragment execution. A manifest holds structural links, transitive Data/Control/Validation footprints, content identities, and fragment keys, but no input, snapshot, or pixel owners. Source bytes, including prior positive and negative control evidence, must match before reuse. Every fragment key includes its actual logical Region; all pieces must remain in the current cache epoch to form a hit. Clearing the cache prevents an old producer from repopulating that epoch.
+
+`ExecutionContextConfig::maximum_dependency_cache_metadata` defaults to 65536 proof units and is bounded to 1..1048576. It counts distinct record owners, row/tag/coordinate storage, and source witnesses within each manifest; a shared owner within one manifest counts once. `maximum_dependency_cache_work` is an optional separate per-Run work budget, defaulting to 1048576; zero disables dependency cache reuse. Proof exhaustion skips reuse or retention and allows computation to continue. Deduplication does not erase already incurred traversal, hashing, association, or normalization work. Snapshot/session identity is provenance, not semantic content identity.
+
+## Algorithms & Math
+
+The bounded disk cache uses canonical SHA-256 keys and an implementation fingerprint for the default operation registry. It stores eligible `Value` outputs with Float32 samples and exactly one valid image or coverage-mask semantic facet. Eligibility checks descriptor, Region, facets, resource bindings, and sample validity. Structural planar execution has a separate path and does not use the Value result or disk cache. Each disk record validates dtype, shape, Region, facet keys and payloads, byte count, checksum, and result key before publication. Reads size allocations from the validated plan, not file-provided lengths. A malformed, truncated, mismatched, or unsupported record is treated as a disposable miss.
+
+Writes use a temporary file and rename only after the complete record is written. The cache makes no durable recovery guarantee. Queue pressure or write failure skips retention without failing the computed result. Pending writes retain accounted source buffers and can be discarded under computation pressure. `flush_disk_cache()` waits for queued writes; `clear_disk_cache()` removes entries and invalidates pending write epochs. The configured directory is exclusively locked by one context; unrelated files are ignored.
+
+The public API and focused behavior checks are in `include/photospider/data/input_snapshot.hpp`, `tests/unit/test_input_snapshot.cpp`, and `tests/integration/test_frozen_execution.cpp`. The public planar execution workflow is covered by `tests/integration/test_planar_image_workflow.cpp`; it exercises structural image bindings and does not imply snapshot or result-cache support for planar pages.
+
+## Limitations & Non-Goals
+
+- Disk caching requires explicit configuration and positive in-memory result-cache capacity. It is disposable local storage, not a durable result store.
+- Persistent implementation identity is available only for the default registry. Custom and C-module registries can use process-local caching but do not receive a persistent implementation identity.
+- Disk reads and writes apply only when the compiled plan's `execution_mode` is `CpuExact`. Selecting a native GPU plan does not gain disk-cache eligibility when backend selection later falls back to CPU; native GPU results remain isolated from CPU-exact keys.
+- A fallback result and its descendants do not populate native result keys. Approximate native results cannot replace exact CPU results.
+- Native input-copy reuse hashes demanded logical bytes, descriptor, facets, Region, and device identity. It can avoid an upload for immutable ordinary Values; it does not make arbitrary `RegionalSource` computation cacheable.
+- Cache clear and eviction remove eligibility without invalidating active borrowed data. Frozen executions are in-memory owners; there is no serialized frozen-plan reader.

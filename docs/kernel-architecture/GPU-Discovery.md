@@ -1,98 +1,74 @@
 # Bounded GPU dependency discovery
 
-C++ `DependencyPhase::discover(capacity, candidates, compute)` and the C
-`ps_dependency_services_v9::discover` service run a separate bounded discovery
-callback over already supplied inputs. The host allocates a zeroed native table
-through existing MemoryBudget admission, runs synchronous native work, freezes
-the buffer, validates it and appends decoded needs to the current poll. There is
-no shader page-fault executor or automatic tracing of arbitrary kernels.
+## Scope & Ownership
 
-A nonempty successful table requires the program to return Need. The Session
-attaches rows for the current Atomic observation, or full original terminal
-RequestRecord, then the existing Run resolves upstream inputs and supplies the
-next poll. Numerical completion with unresolved table requests fails. Discovery
-inside a pure block, a pure block inside discovery and recursive discovery are
-rejected; a cached block cannot suppress required table population. An empty
-table adds no dependency and may precede a constant/control-only completion.
+GPU discovery lets a registered dependency program inspect already supplied inputs on the selected GPU and return a bounded set of additional input regions. The host owns the table allocation, native dispatch lifetime, decoding, validation, and attachment of discovered needs to the current poll. Discovery is explicit; it does not trace arbitrary shader reads.
 
-The callback borrows table pointers only until return. Native work drains before
-host decoding; freezing revokes writable native views. C services return Boolean
-1 success / 0 failure, while the C compute callback returns operation result
-codes, never NEED. C discovery services expose ready reads, scratch, atlas,
-native views/dispatch, work and cancellation, without publication, association,
-checkpoint or block services. Errors remain sticky even if ignored.
+```c
+#include "photospider/plugin/dependency_plugin_api.h"
 
-## Wire format and bounds
-
-`PS_GPU_DISCOVERY_MSL_V9` supplies the Metal `ps_discovery_emit` helper. The table
-starts with four little-endian uint32 words: attempted emit count, overflow,
-zero and zero. It is followed by `capacity` records of 144 bytes each:
-
-| Byte offset | Field |
-| --- | --- |
-| 0, 4, 8, 12 | uint32 port, role mask, rank, zero |
-| 16..79 | uint64 offsets[8] |
-| 80..143 | uint64 extents[8] |
-
-The atomic counter includes every emit attempt. A slot beyond capacity sets the
-sticky overflow flag and writes no record. Programs declare a positive upper
-bound `candidates` on all attempts across their discovery dispatches, including
-duplicates and overflow. This is at most UINT32_MAX. The trusted shader must
-respect its declared finite work; the host does not sandbox arbitrary loops.
-
-The host verifies header, count, rank, port, role mask (Data/Control/Validation),
-positive extents, unused zero axes and global domain bounds. Every raw image
-record must cover full C before normalization; two half-channel records cannot
-combine to bypass image-v2 closure. Invalid records fail; overflow returns
-ResourceExhausted and never an empty/partial successful dependency set.
-
-`DependencyLimits::maximum_gpu_requests` limits one table, defaults to 65536 and
-can be zero to disable discovery. The hard capacity limit is also 65536. Existing
-invocation work, stage and metadata limits bound repeated calls; this table limit
-also participates in Flight identity. Capacity and initialization/decoding work
-are charged before allocation, and candidate work before the callback. Each
-native table allocation rounds its own logical byte span to real device capacity
-before admission. Table, atlas, state, scratch and output leases remain charged
-until their last owner retires.
-
-Normalization groups share the same remaining invocation work. The optional
-`Footprint::from_regions(..., consumed_work)` counter reports charged work on
-success, failure and exceptions after entry; the decoder deducts actual work
-between groups. Per-poll discovery metadata also shares one limit across calls,
-including row/need/box units and role expansion. Each group receives only its
-remaining box grant. Raw callback associations are bounded and their search is
-charged before automatic attachment; deduplication cannot erase this work.
-
-## Public verification
-
-`examples/g4_gpu_workflow/discovery_plugin.c` is a real C11 staged plugin using
-Int64 controls and Float32 data. For each observation a GPU discovery dispatch
-reads the supplied control atlas and requests two distant coordinates. After
-host supply, a second dispatch reads the data atlas and computes the result.
-Integer controls avoid a CPU/Metal floating-point address-rounding difference;
-negative/out-of-domain controls fail on both paths.
-
-The independent expected values are 8 and 24. Two observations perform four
-native dispatches. A control edit changes the first result to 24 and replaces its
-data edges; old data edits are clean while new data edits dirty that output. A
-frozen execution still returns 8. Capacity-one overflow, disabled discovery and
-premature numerical completion fail. A 128-entry table has 18448 logical bytes
-and 32768 native allocation bytes; the current C adapter's complete minimum
-stage reservation is 33108 bytes, and 33107 fails finitely.
-
-```sh
-cmake --build build/issue257-static --target test_gpu_discovery test_gpu_discovery_workflow -j 8
-ctest --test-dir build/issue257-static -R '^(test_gpu_discovery|test_gpu_discovery_workflow)$' --output-on-failure
-build/issue257-static/test_gpu_discovery_workflow
+int request_discovery(ps_dependency_services_v11* services,
+                      uint32_t capacity, uint32_t candidates,
+                      ps_dependency_discovery_compute_v11 compute,
+                      void* user) {
+  return services->discover(services->context, capacity, candidates, compute,
+                            user);
+}
 ```
 
-`test_gpu_discovery` uses explicitly nonnative protocol mocks for malformed
-headers/records, shared work and metadata budgets, raw row limits, ignored
-failures, recursive/block misuse, cancellation, terminal full-Q preservation,
-partial image channels and a rank-eight domain beyond uint64 dense cardinality.
-These mocks are not native evidence. Static/shared installed consumers run them
-and compile the real C11 module/loader; the standalone example builds against the
-installed public package. Native unavailability returns 77 after CPU checks.
+These callback and service types are declared in `dependency_plugin_api.h` under dependency service ABI v11. The table layout is defined by `PS_GPU_DISCOVERY_MSL_V11` in `gpu_discovery_msl.h`. The callback may use ready-input reads, accounted scratch, cancellation and synchronous GPU buffer/dispatch services. It returns success or an error; it never returns `NEED` itself. Every service failure is sticky, including when the callback ignores its return value.
 
-Synchronous GPU producers and CPU fallback within dependency templates are
-described in [Fragment Atlas](Fragment-Atlas.md#synchronous-producers-and-cpu-fallback).
+## Data Layout & Memory
+
+The host allocates and zeroes a bounded native table through the active execution resource budget. Its wire layout begins with four little-endian `uint32_t` words: attempted emit count, overflow flag, and two reserved zero words. The header is followed by `capacity` fixed 144-byte records:
+
+| Offset | Contents |
+| --- | --- |
+| 0, 4, 8, 12 | `uint32_t` port, role mask, rank, reserved zero |
+| 16..79 | `uint64_t offsets[8]` |
+| 80..143 | `uint64_t extents[8]` |
+
+The callback borrows the table until it returns. The host drains submitted native work before freezing the table; frozen buffers cannot be written through retained native views. The host validates each record's port, rank, Data/Control/Validation roles, positive extents, zeroed unused axes, and descriptor bounds. For image inputs, every raw record must include all channels before normalization; separate partial-channel records cannot combine to bypass channel closure.
+
+`capacity` is positive and no greater than 65536. `candidates` bounds every emit attempt, including duplicates and attempts beyond capacity, and is charged before callback execution. The table sets overflow only when an emit attempt has no available record slot; filling the final slot alone is not overflow. An out-of-capacity attempt does not write a record. Overflow returns `ResourceExhausted`; malformed records fail the callback. Discovery table bytes, native allocation capacity, decoding work, request metadata, and candidate work are charged to their applicable limits. Table, atlas, scratch, state, and output owners remain charged until their last owner retires.
+
+## Execution & State
+
+```mermaid
+flowchart LR
+    P[Dependency poll with ready inputs] --> D[Bounded GPU discovery callback]
+    D --> T[Native table and dispatch drain]
+    T --> V{Freeze and validate}
+    V -->|empty table| C[Continue poll]
+    V -->|valid needs| N[Return NEED]
+    V -->|overflow or invalid record| E[Sticky failure]
+    N --> R[Host resolves upstream regions]
+    R --> S[Supply authorized inputs]
+    S --> P
+```
+
+After a nonempty table validates, the dependency program must return `NEED`. The host preserves each request's association with its current Atomic observation or complete terminal `RequestRecord`, resolves upstream inputs, supplies them, and polls again. Returning numerical completion while discovered requests remain unresolved is a protocol error. An empty table adds no dependency and can precede a constant or control-only completion.
+
+`DependencyLimits::maximum_gpu_requests` bounds one discovery table; its default and hard maximum are 65536, and zero disables discovery. The setting participates in dependency Flight identity. Each poll's request metadata and each Run's work budget are shared across discovery calls and normalization groups. The host charges raw rows and association lookup before deduplicating requests, so duplicate output does not erase performed work. A `Footprint::from_regions` call can report consumed work on success, failure, or exception; the decoder subtracts that usage before processing the next group. Exceeding the discovery request limit or shared work/metadata bounds returns a finite resource failure.
+
+Discovery cannot run recursively, inside a pure dependency block, or while a discovery callback invokes a pure block. Discovery callbacks are synchronous and trusted; cancellation is cooperative, and submitted dispatches drain before native owners retire. The table pointer and discovery-service table expire when compute returns. Other dependency service/context/input/scratch pointers expire when poll returns. A `retain_input` handle keeps its exact authorization and original owner until `release_owner` or dependency state destruction; it does not expire at poll return.
+
+Discovery service functions return Boolean `1` for success and `0` for failure. The discovery compute callback returns ordinary operation result codes, never `NEED`. The enclosing dependency callback returns `NEED` only after the host validates a nonempty discovery table and attaches the resulting requests.
+
+## Algorithms & Math
+
+The wire table reserves 16 bytes for its header and 144 bytes per record. For a table of capacity `K`, the logical size is:
+
+$$
+S = 16 + 144K.
+$$
+
+The host checks the multiplication and addition before allocation, then admits the queried native backing capacity, which can exceed `S`. The candidate bound is independent of table capacity because overflow and duplicate attempts still consume work.
+
+## Limitations & Non-Goals
+
+- Discovery is an explicit trusted callback protocol, not page-fault handling, implicit shader tracing, or a sandbox for arbitrary shader loops.
+- The discovery service exposes no output publication, association editing, checkpoint, or pure-block service of its own.
+- Only already supplied inputs are available to a discovery callback. Missing samples must become declared needs before numerical completion.
+- Native GPU discovery requires a build with an enabled native backend and a usable device. `PHOTOSPIDER_ENABLE_METAL` is enabled by default on Apple platforms; `PHOTOSPIDER_ENABLE_VULKAN` is optional and defaults off.
+- Protocol mocks exercise validation and failure paths but do not establish native GPU behavior.

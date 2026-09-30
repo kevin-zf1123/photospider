@@ -1,148 +1,96 @@
 # Data Model
 
-## Source and compiler values
+## 1. Scope and ownership
 
-`WorkflowDocument` contains a version, bounded nodes, typed scalar parameters,
-input edges, and named outputs. It is caller-owned compiler input, not a file
-format or storage object.
+The compiler owns immutable descriptions of graph structure and inferred metadata. Each execution receives named input owners and creates runtime Values or PlanarImages. `ExecutionResult` owns the requested named outputs and diagnostics; returned storage remains alive through shared owners and resource leases.
 
-`SemanticGraphIR`, `OptimizedGraphIR`, and `ExecutionPlan` are immutable stage
-values with separate typed digests. They contain copied operation traits and
-stable keys, never callbacks, DSO handles, runtime allocations, or daemon ids.
+## 2. Core structures and memory layout
 
-## Runtime Value
+```cpp
+struct WorkflowDocument {
+  std::uint32_t schema_version = 3;
+  std::vector<WorkflowInputDeclaration> inputs;
+  std::vector<WorkflowNode> nodes;
+  std::vector<WorkflowOutput> outputs;
+};
 
-A generic regional `Value` contains:
+class Region;  // logical offset/extent intervals in descriptor-axis order
 
-- `ValueDescriptor`: `UInt8`, `Int64`, `Float64`, or `Float32` plus rank-1-to-8 nonzero
-  shape;
-- one rank-matching logical `Region`;
-- `StridedLayout`: logical origin, byte offset and one signed byte stride per axis;
-- up to 64 unique versioned `ValueFacet` key/payload records;
-- one shared immutable `CpuStorage` owner.
+class Value {
+ public:
+  static Result<Value> create(ValueDescriptor, Region, StridedLayout,
+                              std::vector<std::uint8_t>,
+                              std::vector<ValueFacet> = {},
+                              ResourceBindings = {});
+};
 
-`Value::create` checks rank, shape, Region containment, element vocabulary,
-stride count, signed offset/span arithmetic, overflow, element tail, valid-Region
-buffer bounds, facet keys/versions, duplicate keys, and bounded facet payloads
-before atomic publication. Negative and zero strides are accepted only when
-the addressed byte range stays inside the buffer. Facets are sorted by key;
-copies share immutable bytes and expose no writable pointer.
+struct ExecutionBinding {
+  std::string name;
+  Value value;
+  std::shared_ptr<const RegionalSource> source;
+  std::shared_ptr<const InputSnapshot> snapshot;
+  std::shared_ptr<const PlanarImage> image;
+};
 
-`Region` uses unsigned offset/extent pairs in descriptor-axis order. It is a
-logical subset, never a byte range. Interval addition and element-count
-multiplication are checked.
+class PlanarImage {
+ public:
+  static Result<PlanarImage> create(ValueDescriptor, PlanarImageConfig,
+                                    std::vector<ValueFacet> = {},
+                                    ResourceBindings = {});
+  static Result<PlanarImage> import_value(const Value&, PlanarImageConfig,
+                                          const CancellationToken& = {});
+};
+```
 
-`Value::as_float64()` is a strict scalar accessor: in addition to the exact
-Float64 descriptor, contiguous layout, and storage bounds, the Value Region
-must be rank one and exactly `{offset=0, extent=1}`. Empty, partial, and offset
-Regions remain legal general Value coverage but return `TypeMismatch` through
-this accessor.
+`WorkflowDocument` is copied compiler input. Its nodes carry operation keys, ordered input references, typed parameters, and named output selections. Input declarations describe fixed metadata; execution bindings provide the corresponding payload or image owner. Plans keep declaration metadata, not caller pixel addresses.
 
-`BufferAllocator` obtains a reservation before allocating exact-capacity CPU
-bytes. `MutableBuffer` and `MutableValue` are move-only; publication consumes
-the writer and retains the lease with immutable storage. `Value::from_storage`
-validates origin-relative coverage without copying; `view` restricts coverage
-while sharing ownership, and `byte_address` checks logical coordinates.
-`bytes()` returns a borrowed `ByteView`; `copy_bytes()` explicitly copies into
-caller-owned memory. Storage and its reservation may outlive the allocator.
-`test_storage` verifies partial/reversed views and last-owner lease release.
-Execution-wide resource admission retains allocation leases to the last owner.
-Generic numeric regional sources use this storage; their synchronous streaming
-sinks receive a borrowed `ValueView` that expires when the callback returns.
-Image execution uses the structural storage contract below.
+A generic `Value` has a nonzero rank-1-to-8 descriptor, a logical `Region`, a `StridedLayout`, up to 64 unique facets, and shared immutable CPU-accessible storage. Its element types are `UInt8`, `Int8`, `UInt16`, `Int16`, `Int64`, `Float32`, and `Float64`. `Value::create` validates shape and coverage, stride count and addressed byte span, element type, and facet/resource consistency before publishing. Negative and zero strides are valid when every addressed byte remains in the backing allocation. Copies share storage and expose no writable pointer.
 
-## Structural image storage
+`Region` stores unsigned offset/extent pairs in descriptor-axis order. It describes logical samples, not bytes. Region interval and element-count arithmetic is checked. `Value::as_float64()` accepts only a contiguous Float64 scalar whose Region is exactly rank one with `{offset=0, extent=1}`; other valid Value coverage remains usable through the general accessors.
 
-Package 0.19 uses one image memory contract, defined in
-[Tensor storage and region access](../kernel-specs/Tensor-Storage-and-Region-Access.md).
-`PlanarImage` is the physical owner for a rank-two or rank-three generic tensor
-with explicit image axes, component groups, facets and resources. It is not an
-RGB/Layer semantic carrier and imposes no color arithmetic. Each image reserves
-one continuous virtual address range. Continuous planes and DAG-sized tiled
-planes both store contiguous row samples. In tiled storage, right edges pad to
-tile width, bottom edges retain only valid rows, and every block starts on a host
-page boundary. Tile height and width must each be a positive power of two;
-non-power-of-two geometry is rejected by planning and image creation. Image/ROI
-extents need not be powers of two. See the storage contract for edge rules.
+`BufferAllocator` reserves capacity before allocation. Move-only mutable buffers transfer their lease into immutable storage at publication. `Value::from_storage` and `view` can share backing without copying; `bytes()` returns a borrowed view and `copy_bytes()` makes an explicit caller-owned copy. Storage can outlive the allocator and execution context. Regional-source callbacks fill a requested packed Region synchronously; their writable destination and allocator pointers expire when the callback returns.
 
-Virtual reservation, page backing, metadata capacity and valid samples are
-separate. Pages are explicitly prepared and admitted before operator access.
-Only successful publication makes its exact samples valid; unproduced samples
-in a supplied page remain unreadable through the API. Published samples are
-immutable. Produced backing and its leases survive until the last image/window
-owner retires; budget exhaustion does not evict live pages or replay producers.
+`PlanarImage` represents structural rank-two or rank-three storage with explicit image axes, component groups, facets, and resources. Its virtual address reservation, backed pages, metadata capacity, and valid samples are distinct quantities. Continuous rows and tiled rows store contiguous samples within each row. Tiled geometry requires positive power-of-two tile height and width; image and ROI extents may end at partial tiles.
 
-`PlanarImage::import_value` is the explicit interleaved/strided import boundary.
-`acquire` provides a retained exact read window with bounded `row_run` spans.
-`rectangle_run` provides multiple authorized rows with explicit byte stride,
-bounded by both ROI and physical tile; padding remains excluded. FMT-01 uses
-these rectangles to amortize coordinate validation and copy in tile order.
-`read` explicitly copies a requested region into caller-owned packed storage.
-A host-prepared transactional write window supplies only authorized output
-spans. It commits on successful operation completion or rolls back unpublished
-resources on failure. The complete reservation is never a readable `ByteView`.
-A raw numeric interpretation does not bypass these physical access rules.
+Pages become readable only after their produced samples are published. Published samples are immutable, and storage leases remain until the last image or read-window owner retires. Budget exhaustion does not evict live backing. `acquire` returns a retained read window; `row_run` and `rectangle_run` expose only authorized spans, bounded by the requested Region and physical tile. `read` copies into caller-owned packed storage. A transactional write window publishes authorized output spans on commit and discards unpublished writes on failure.
 
-Image execution pins external source owners against publication for the Run,
-then admits their stable retained capacity. Ordinary retained read windows still
-allow disjoint publication. Shared accounting recognizes repeated owners and
-same-context result rebinding without charging the same backing twice.
+## 3. Scheduling and state
 
-## Results and data definitions
+```text
+WorkflowDocument -> declarations + inferred descriptors -> ExecutionPlan
+          |                                              |
+          +---- caller-owned named bindings ------------+
+                                                         v
+                                                    ExecutionRun
+                                           +-------------+-------------+
+                                           |                           |
+                                     generic Value              PlanarImage
+                                           |                           |
+                                  named result Value          named result image
+                                           +-------------+-------------+
+                                                         v
+                                                ExecutionResult
+```
 
-`ExecutionResult` owns named generic `values`, named planar `images`, structured
-results where supported, and raw diagnostics. Images have no automatic dense
-Value export. Results retain their storage leases but have no durable identity,
-receipt, serialization or recovery contract.
+`ExecutionBindings` uses exact names. Ordinary generic execution accepts one of `Value`, `RegionalSource`, or `InputSnapshot` for a generic input; a planar declaration selects `image`. In planar execution, a non-planar declaration accepts a matching `Value` only, while a planar declaration requires `PlanarImage`. Execution checks declaration names and metadata before callbacks. Image binding also checks descriptor, facets, structural layout, and plan tile geometry. The plan does not capture runtime addresses, so separate immutable bindings can execute the same current plan independently or concurrently.
 
-The data-definition registry copies a schema key, element type, and maximum
-rank from startup configuration or a trusted DSO, then freezes. Provider load
-accepts only an exact nonempty 1..4096-byte path without embedded NUL before
-the platform loader; malformed paths are `InvalidArgument`, while a valid path
-that cannot be loaded is `NotFound`. It does not construct Values or provide
-storage.
+Workflow input declaration ids and node ids use separate namespaces. A document may contain up to 4096 declarations; each declaration has a unique nonzero id and unique 1-to-128-byte printable ASCII name (`0x21` through `0x7e`). Compiler stages carry declarations in id order. Each declaration fixes a complete descriptor, whole Region, canonical dense input layout, and exact facet set; planar declarations use `planar_layout` with an empty affine layout.
 
-## Workflow inputs and binding snapshots
+During planar execution, the Run pins external image owners against publication and admits their stable resident capacity. Repeated references to the same owner and same-context result rebinding share one accounting entry. Ordinary read windows still permit publication to disjoint regions. See [Tensor storage and region access](../kernel-specs/Tensor-Storage-and-Region-Access.md) for page, tile, and publication geometry.
 
-Schema 3 uses `WorkflowInputDeclaration` and tagged `WorkflowInput` sources:
-`WorkflowNodeOutput` or `WorkflowInputReference`. Node ids and declaration ids
-have independent namespaces. Declarations are unique by nonzero id and exact
-1..128-byte printable ASCII name without spaces, bounded by 4096 and copied in
-id order through `input_declarations()` on every compiler stage.
+`ExecutionResult` can contain named generic Values, named PlanarImages, supported structured results, and diagnostics. Planar images have no implicit dense Value export. Each result owner retains the leases needed by its storage until its final release.
 
-A generic numeric declaration fixes a UInt8/Int64/Float64/Float32 descriptor,
-whole Region, zero byte offset, positive canonical row-major strides and an
-exact facet set. Dense byte count B is checked without allocating payload: B > 0,
-B - 1 <= INT64_MAX and B <= SIZE_MAX; every stored stride also fits int64.
-General Values retain their existing strided/partial-Region behavior.
+## 4. Algorithms and validation
 
-An image declaration instead carries `planar_layout` and an empty affine
-layout. Its axes, storage mode, row pitch and component groups are compiler
-metadata. `OperationOutputTraits.planar_layout` declares each supported planar
-output, independently from its inputs. Layout and capability changes affect
-compiler identity; runtime addresses do not. The one DAG tile geometry comes
-from PlanningOptions and is checked against every bound image.
+For a dense generic input, the compiler validates the packed byte count using checked products without allocating payload. The byte count must be positive, the last addressable byte must fit `INT64_MAX`, and the total must fit `SIZE_MAX`; stored row-major strides must fit their signed representation. General runtime Values can use non-dense strided layouts and partial Regions when their addressed span fits storage.
 
-`ExecutionBindings` contains exact-name entries. Generic inputs select a Value,
-RegionalSource or non-image InputSnapshot. Planar inputs select `image` and no
-other storage alternative. Source metadata and required names are checked before
-callbacks; image binding checks descriptor, facets, structural layout and tile
-geometry. Plans never retain input pixel addresses. Independent bindings can
-execute a current plan repeatedly or concurrently.
+An image input declaration carries `planar_layout`; its affine layout is empty because tiled addresses cannot be represented by ordinary strides. The layout describes axes, storage mode, row pitch, and component groups. Each operation declares planar output support independently. `PlanningOptions` supplies one DAG tile geometry, which execution checks against bound images.
 
-The CPU planar callback path supports explicit single-output Whole/Elementwise
-operations with at least one planar input. Unsupported traits and unmigrated
-image operations fail explicitly. Legacy image/Layer structured schemas cannot
-provide an alternative image storage path.
-The old packed-image binding, snapshot and ValueFragments paths are not alternate
-image implementations. Non-image Value capabilities remain. Image demand,
-streaming, frozen/atom and GPU entry points require their own structural
-migration; unsupported entries reject without executing legacy image code.
+Float32 Values preserve binary32 payload bits. A scalar or operation contract validates any numeric domain it consumes; storage accepts the element representation independently from that domain.
 
-Float32 uses element code 4 and preserves all IEEE binary32 bit patterns in a
-generic Value. Scalar/operation contracts supply any consumed numerical domain
-checks. The former typed-image domains in [Image operations](Image-Operations.md)
-and [ADR 0016](../adr/0016-workflow-inputs-and-execution-bindings.md) do not authorize
-legacy image execution under the planar contract.
+## 5. Limitations and non-goals
 
-CpuStorage denotes CPU-accessible immutable storage and may own a completed Metal shared buffer. Its bytes are readable after publication; native owners and reservation leases can outlive ExecutionContext. Device handles remain private.
+- Results are in-memory values. They have no durable identity, receipt, serialization, or recovery contract.
+- The data-definition registry stores copied schema metadata from trusted startup registrations or DSOs; it does not allocate Values or provide storage.
+- Structural planar callback support is operation-trait and entry-point specific. An unsupported combination returns a typed failure before legacy image code can run.
+- `CpuStorage` exposes CPU-accessible immutable bytes and may retain completed native storage. Device handles remain private.

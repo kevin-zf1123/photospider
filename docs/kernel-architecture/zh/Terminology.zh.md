@@ -1,25 +1,23 @@
 # Kernel 术语
 
-| 术语 | Canonical 含义 |
+| 术语 | 含义 |
 | --- | --- |
-| `WorkflowDocument` | Caller-owned、format-neutral source graph。 |
-| `GraphContext` | 一个 copied source document 加 monotonic revision/currentness；绝不是 daemon Session。 |
-| `GraphSnapshot` | Coherent source/revision capture；replace/destruction 后 currentness 变为 false。 |
-| `SemanticGraphIR` | 带 copied trait 与 inferred output descriptor 的 deterministic topological node。 |
-| `OptimizedGraphIR` | 独立的 semantics-equivalent stage；当前为 conservative no-op。 |
-| `ExecutionPlan` | Dependency-ordered local step、backend label、estimated bytes、named output demand 与 derived per-input demand。 |
-| `ExecutionContext` | Bounded CPU/GPU callback pool、frozen operation 与 byte ledger 的 owner。 |
-| `ExecutionRun` | 一次同步 execute 调用的 private state；绝不是 daemon Job 或 public identity。 |
-| `Value` | Immutable dense descriptor、Region、strided layout、bounded facet 与 owned shared bytes。 |
-| `Region` | Value shape 的 rank-general logical subset；绝不是 buffer/storage object。 |
-| operation trait | Copied compiler-visible input count、effect、backend/fallback、type/shape/Region rule、fixed shape、typed parameter schema 与 estimated bytes。 |
-| operation parameter schema | Semantic IR 前发布的 closed canonical key、exact source variant type 与 required flag。 |
-| operation/data-definition DSO | Startup-configured trusted in-process extension。 |
-| digest/cache key | Non-security reproducibility 或 disposable lookup identity。 |
-| cancellation | 防止 late result publication 的 cooperative observation。 |
-| fallback | Optional GPU callback 未调用 output sink 并返回显式 backend unavailable 后，由 trait 允许的 CPU attempt。 |
+| `WorkflowDocument` | 调用方持有、作为 compiler 输入的 source graph。 |
+| `GraphContext` | 持有复制的 workflow document 和当前 revision。 |
+| `GraphSnapshot` | 编译使用的一致 source/revision 快照。 |
+| `SemanticGraphIR` | Analysis 产生的不可变、已推导 operation graph。 |
+| `OptimizedGraphIR` | 独立的语义等价阶段；当前 optimizer 复制 semantic graph。 |
+| `ExecutionPlan` | 按依赖排序的本地 operation、放置选择及传播后的 demand。 |
+| `ExecutionContext` | 持有有界 worker、冻结的 operation definition、缓存和资源计费。 |
+| `ExecutionRun` | 单次同步执行调用的私有状态。 |
+| `ExecutionBindings` | 每次 Run 按名称提供的输入 owner：`Value`、`RegionalSource`、`InputSnapshot` 或 `PlanarImage`。 |
+| `Value` | 不可变逻辑 descriptor 与 Region、仿射字节布局、facets 和共享 storage owner。 |
+| `Region` | descriptor 轴坐标中的逻辑子集，不表示字节范围。 |
+| `PlanarImage` | 显式声明轴、分量组和受控样本访问的结构化图像存储。 |
+| operation traits | 冻结的输入/输出契约、资源上限和 backend 能力声明。 |
+| operation registry | 编译与执行 plan 所用的受信任 operation definition 集合，注册后冻结。 |
+| digest / cache key | 用于复现检查或可丢弃缓存查找的非安全 identity。 |
+| cancellation | 协作式停止请求，阻止较晚的结果成功发布。 |
+| CPU fallback | 原生 callback 在发布输出前报告 backend unavailable，且 operation traits 允许时，新发起的 CPU attempt。 |
 
-`SessionId`、`JobId`、Job status/result release 与 daemon process lifecycle 只属于
-`photospider-daemon`。Network service、tenant isolation、durable work、worker process、policy
-plugin、native-code security product、durable result identity 与 release evidence 已删除或
-不在范围内。
+`SessionId`、`JobId`、daemon IPC 和进程生命周期属于 `photospider-daemon`；Daemon Job 是临时状态。持久 result 与恢复能力在当前产品边界之外。Kernel result 是内存中的值，其 backing 生命周期由 owner 决定。

@@ -1,79 +1,56 @@
 # Region 语义
 
-Value 的 Region 是完整 descriptor 内经过边界检查的逻辑覆盖，与 origin-relative
-存储视图分离。S2 提供 CPU 区域执行；跨 Run 脏区传播与结果缓存尚未实现。
+## 模块边界与职责 (Scope & Ownership)
 
-## 规划
+`Region` 描述完整张量描述符中的逻辑样本覆盖范围。存储 origin、byte offset、有符号 stride、padding 和物理 planar 页描述样本的存储方式，不改变 Region。规划器授权依赖，执行器传递精确需求，存储 owner 限定可读和可写样本。
 
-Whole 要求完整输入；Elementwise 映射对应坐标；Halo 对称扩展并以受检运算裁剪到
-完整图像边界。RGBA 必须包含全部四通道，scalar 始终要求 whole {1}，Float32Mask
-{H,W} 映射图像空间轴。空、越界、未知名称、图像部分通道需求在规划时失败，也包括
-通过通用下游传播的部分通道请求。
+## 核心数据结构与内存布局 (Data Layout & Memory)
 
-PlanningOptions 保留各名称的精确 Region 和正整数 tile_height/tile_width，默认
-128x128。改变选项重新规划 optimized IR；命名 Region 和几何进入 physical identity，
-即使多个名称指向同一节点。运行期字节不进入 plan identity。
+```cpp
+#include <cstdint>
+#include <vector>
 
-ExecutionPlan::tile_plan(name, region) 派生去掉无关依赖的单个 tile 计划，不重新分析
-源文档或构造完整网格。同一 tile 内合并 fan-out，邻接 tile 的 halo 可重算。Whole、
-非确定、有副作用节点标为 whole_boundary，须完整物化并满足预算。
+#include "photospider/data/region.hpp"
 
-数值 schema 可声明有限闭区间。Int64 端点为 +/- (2^53-1) 内精确整数；Float64 端点
-有限。halo_radius_parameter 指向 required bounded Int64，min>=1、max<=UINT32_MAX，
-算子为 Halo 且固定 radius 为零。analyze 校验并解析到 node traits。无边界 Float64
-继续保留原有精确 bit 语义。
+ps::Region whole_region(const std::vector<std::uint64_t>& shape) {
+  return ps::Region::whole(shape);
+}
+```
 
-## 执行与存储
+每个维度是描述符轴内的半开区间 `[offset, offset + extent)`。构造函数验证维度和经过溢出检查的端点。形状为 `(height, width, channel)` 的张量可请求像素矩形，同时保留每个像素的四个 RGBA 通道样本。Planar storage 可以把通道放在不同平面；逻辑通道完整不表示物理字节交错连续。
 
-图像路径、显式区域需求和 RegionalSource 使用区域执行器；完整通用 scalar/broadcast
-仍使用原有的有界 worker 执行器。execute 返回每个名称请求的 coverage；图像收集将
-该 Region 紧密存储，同时保留完整逻辑 descriptor。未指定请求表示完整输出。
+输入 view 另外提供 storage origin、offset、有符号 stride、有效 coverage 和 callback demand。回调只能用给定映射访问授权需求与有效 coverage 的交集内样本。输出发布记录其描述符和实际产出的精确 Region。空 coverage 不授权读取样本。
 
-Run 先按拓扑顺序将 Whole/effect 边界执行一次，再按名称、行、列顺序惰性处理 tile。
-Whole 结果为 Run 内不可变 Value，不是跨 Run 缓存；没有后续输出需要时释放引用。
-外层 tile 顺序执行，依赖已满足的独立分支可使用固定 worker pool 并行。回调收到
-精确输入/输出需求，源读取和计算缓冲区共享 context 预算与 worker 队列。
+## 调度与状态机 (Execution & State)
 
-普通 Value 绑定仍为完整 dense 快照。RegionalSource 每 Run 复制元数据/callable，
-填充宿主提供的紧密区域缓冲区，并声明独立 scratch 上限；必须返回精确写入的请求
-Region。bounded scalar 参数要求普通 Value，其他输入可用区域源。在源或算子回调
-之前校验所有名称、descriptor/facet 和 scalar 区间，像素仅在受约束端口消费的区域校验。
+规划器根据 operation 声明的规则推导依赖。Whole operation 需求完整输入；Elementwise 按坐标映射；Halo 扩展需求并在完整图像边界裁剪，运算使用溢出检查；Shrink 把 ceil-div 输出坐标映射为裁剪后的输入 box。如果图像端口要求全通道，未知端口或轴、越界矩形和部分通道需求都会被拒绝。
 
-源须支持并发不可变读取和协作取消。源/算子回调不得在同一 context 的 worker 上
-同步重新进入 execute。全部准入回调完成后，才能复用借用存储。不增加源 codec 或
-provider ABI。
+规划选项为每个输出名称保留精确 Region 和正数 tile 尺寸。修改任一选项都会重新规划优化后的 IR。即使多个名称指向同一节点，名称和 Region 仍进入 plan identity；运行时字节不进入 identity。`tile_plan` 为一个 Region 推导依赖裁剪子计划，不必分配完整 tile 网格。相邻 tile 可能重复计算重叠 halo。Whole、非确定性和有副作用边界按拓扑顺序一次性物化完整结果。
 
-## 流式输出与资源观察
+Regional Value executor 返回请求 coverage；没有请求时返回完整输出。普通 dense Value binding 提供完整快照；`RegionalSource` 在 Run 内复制其 metadata 与 callable，并填充宿主提供的 packed region 存储。它必须支持并发不可变读取、观察协作式取消，并准确返回被写入的 Region。source 和 operation callback 不得在同一 context 自有 worker 上同步重入执行。
 
-execute_stream 通过同步 ExecutionSink 交付借用 ValueView，视图和指针在 sink 返回
-时失效。sink 阻塞时不读取下一个 tile，因而暂存有界。sink 在 execute 调用线程运行；
-调用方可复制到自己独立拥有的内存。
+Value 收集会打包请求 coverage，同时保留完整逻辑描述符。结构化 planar 收集使用不同路径，要求 `PlanarImage` binding 的描述符、facet、layout 和 tile 几何匹配编译声明。Planar 输入拒绝 Value、`RegionalSource` 和 snapshot binding。`execute_stream` 支持 Value sink；若计划要求结构化 planar 执行则返回 `TypeMismatch`。参见 [数据模型](Data-Model.zh.md) 与 [编译和执行](Compiler-and-Execution.zh.md)。
 
-准入前、回调入口/完成、每次 sink 前后、最终组装后检查取消/currentness。sink 失败
-停止后续交付并等待全部准入工作退出。已消费 tile 无法撤回，最终成功才表示完整
-stream 有效；收集失败不返回部分 ExecutionResult。入口 Stale 优先于 token/binding
-校验，入口后 Cancelled 优先于 Stale 和普通错误。
+`execute_stream` 在 execute 调用线程同步调用 sink，并传入借用的 `ValueView`；view 在 sink 返回时失效。符合条件的确定性、无副作用 CPU dependency stream 可在交付前端 tile 的同时准备有界数量的后续 tile；窗口受执行并行度限制。Sink 调用仍按序进行；sink 阻塞会停止后续交付，但已准入窗口中的工作可以完成。Sink 失败会停止后续交付并排空已准入工作；已交付 tile 无法撤销。收集式执行失败时不返回部分结果。
 
-预算按所有者单次计入实际受控的源/输出/scratch/中间结果/传输/collector 容量。
-开始前预留保守完整工作集；分配租约保留到最后所有者释放。源缓冲区和中间槽位在
-最后 reader 后清空。调用方已有 Value、源自有外部状态、元数据、线程栈和 RSS 不计入。
-retained_input_bytes 报告不同的已有 Value 存储；不测量源的不透明状态。不同计账域
-的分配不会被误认为属于当前 context。
+取消和 currentness 检查覆盖准入、callback 入口与结束、sink 调用和最终组装。入口处 Stale 优先于 binding 校验；进入后 Cancelled 优先于 Stale 和普通错误。所有已准入 callback 退出后，宿主才复用借用的 source/output storage。
 
-诊断按 node/backend 聚合次数、元素数、耗时，并报告成功源读取/字节、交付 tile、
-活动回调、实际分配峰值和预留峰值。峰值包含同一 Run 的 collector、Whole 和 tile。
-streaming 不提供 result_digest，由 sink 检查实际像素；收集 digest 包含 coverage 和 origin。
+## 算法与数学实现 (Algorithms & Math)
 
-test_tile_plan 验证需求合法性和 identity。test_regional_execution 对逻辑 64 GiB 图像
-仅执行 5x7 ROI，验证 9 个顺序 tile、精确资源边界、并发快照、背压、源/sink 失败、
-取消/stale、Whole/effect 单次执行和多输出。Gaussian/合成场景由 #266 验收。
+对正数 tile 大小 `T` 和 extent `E`，规划器以 checked ceil-div 计算 tile 数：
 
-## S3 修订
+$$
+C = \left\lceil \frac{E}{T} \right\rceil,
+\qquad
+C = E / T + (E \bmod T \ne 0).
+$$
 
-ADR 0018 已实现显式正向脏区映射、不可变快照和可选跨 Run 结果缓存。Shrink 规则
-使用向上取整空间输出和裁剪整数输入 box；operation_dirty_region 包括 Halo 扩张
-及 Whole/标量整图回退。快照保留旧版本；FrozenExecution 使用冻结有效性，普通
-execute 仍检查 stale。此前未实现缓存/脏区传播的描述由本节替换。参见缓存模型和
-S3 workflow 指南。
+整数表达式避免 `E + T - 1` 溢出。分配前检查边界与形状乘积。空 extent 不产生样本工作。数值参数 schema 可声明有限闭区间；有界 Int64 端点保持在 binary64 精确整数范围，有界 Float64 端点必须有限。Halo operation 可从必需的有界 Int64 参数解析 radius。
 
-共享生产者分配峰值单独报告在 shared_peak_live_bytes；peak_live_bytes 保留调用方局部分配含义。context 预算对共享所有者只计费一次。
+## 限制与非目标 (Limitations & Non-Goals)
+
+- 如果 operation 声明需要完整输入，regional 执行不会把它变成局部 operation。
+- 收集式外层 tile 遍历顺序执行。符合条件的确定性 CPU dependency stream 使用有界并发 tile 窗口；其他 stream 和 regional 路径遵循各自的执行方式。
+- caller-owned 输入 payload 不计入 computation `maximum_live_bytes` 子限额。启用 managed resource root 时，外部 Value storage 另按 Referenced 准入；source 私有外部状态、线程栈和进程 RSS 不计入受控内存上界。
+- 流式 sink 在最终成功前收到的 tile 不可撤销。需要回滚时调用方必须自行暂存输出。
+- `RegionalSource` 是 C++ execution binding，不增加 source codec 或 provider ABI 扩展。

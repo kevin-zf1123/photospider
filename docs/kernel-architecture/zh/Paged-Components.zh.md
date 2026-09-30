@@ -1,99 +1,73 @@
 # 分页四连通分量与面积索引
 
-英文权威文档：[Paged-Components.md](../Paged-Components.md)。
+英文权威版本：[Paged-Components.md](../Paged-Components.md)。
 
-Package 0.10 的安装 C++ API 提供 `make_component_operation`、
-`component_area_schema` 和 `component_filter_schema`。工厂使用 C operation ABI 9。
+## 1. 模块边界与职责
 
-## 公开 profile
+CPU 操作 `components4.labels`、`components4.area` 和 `components4.filter` 计算四连通划分、派生有序面积索引，并按面积筛选标签。Labels producer 在完整 raster 扫描期间持有磁盘支持的 union-find 表。Result 将完整 labels/table 一起发布；area 和 filter Result 保留解释行内容所需的精确输入 ObjectId 与 backing。
 
-这些工厂要求 ComponentsSpec 的 HW 为正、`H*W <= (INT64_MAX-4095)/32`、
-`maximum_count <= INT64_MAX`，且 ID 模式为 MinPixel。输入为无 facet 的
-UInt8 HW mask，任意非零字节都是前景。命名基底 `components_min_pixel_v1`
-使用背景零和 `1+最小行主序像素位置` 作为组件 ID。ID 在快照内确定；编辑造成
-分裂或合并时不保证保持。
+## 2. 核心数据结构与内存布局
 
-| 阶段 | 输入与输出 |
+```cpp
+enum class ComponentIdScheme : std::uint32_t { MinPixel = 1, CompactMinOrder = 2 };
+struct ComponentsSpec final {
+  std::uint64_t height = 1, width = 1, maximum_count = 1048576;
+  ComponentIdScheme ids = ComponentIdScheme::MinPixel;
+};
+Result<SchemaTemplate> component_area_schema(const ComponentsSpec& spec);
+Result<SchemaTemplate> component_filter_schema(const ComponentsSpec& spec);
+Result<OperationDefinition> make_component_operation(
+    ComponentOperation operation, const ComponentsSpec& spec);
+```
+
+当前工厂支持 `MinPixel`：HW 尺寸为正，校验 `H*W <= (INT64_MAX-4095)/32`，并要求 `maximum_count <= INT64_MAX`。输入是无 facet 的 UInt8 HW mask；任意非零字节表示前景。背景标签为零。前景组件 ID 是最小行主序前景像素位置加一。同一输入快照中的 ID 确定，但后续输入编辑造成连通区分裂或合并时，ID 可以变化。
+
+| Operation | 输入与输出 |
 | --- | --- |
-| `components4.labels` | UInt8 HW → 完整 Components：N 个 Int64 labels、K 个 Int64[id,area,min] 行 |
-| `components4.area` | 完整 Components → RuntimeCount K 的完整有序 Int64[id,area] 索引 |
-| `components4.filter` | Components 及其面积索引 → 完整 N 行 UInt8 0/1 mask |
+| `components4.labels` | UInt8 HW -> CompleteBundle labels 与 `(id,area,min_position)` 行 |
+| `components4.area` | 完整 Components -> CompleteBundle 有序 `(id,area)` 行及 RuntimeCount |
+| `components4.filter` | Components 及其关联面积索引 -> CompleteBundle UInt8 HW mask |
 
-索引 schema 为 `photospider.component_area_index`，字段 `rows`，metadata
-`component_area_basis_v1` 保留 Components specification。过滤 schema 为
-`photospider.component_filter`，字段 `mask`，metadata 为
-`component_filter_basis_v1`。二者保留 HW domain 和完整基底。过滤必需参数
-`minimum_area` 为正 Int64，进入算子语义 key；支持完整正 Int64 范围，不把
-阈值转成浮点数。输出严格等于 `label!=0 && associated_area[label]>=minimum_area`。
+Area index schema 保留 Components basis。Filter schema 保留相同 basis，并要求正 Int64 `minimum_area`；该参数进入 operation identity。每个像素仅当 `label!=0 && area[label]>=minimum_area` 时输出 1。`maximum_count` 限制最终组件数，不限制 N 个 labels 和 N 个临时 union record 的工作空间。N>0 时 K=0 仍合法；此时 labels/mask 全零，表无数据行。
 
-`maximum_count` 仅限制最终 K。K=0、maximum_count=0、N>0 合法：labels 有
-N 个零，Components 与 area 表均零行，filter 产生 N 个零。该上限不能替代
-固定 N 个 labels 或私有 N 个 union 记录的容量准入。组件数超限在发布前返回
-OperationFailed/InvalidDomain，origin 为 Domain，scope 为 Group。页、磁盘和
-工作预算耗尽仍报告 ResourceExhausted。
+## 3. 调度与状态机
 
-## Rank-union recipe 与基底证明
+```text
+UInt8 source -> labels producer -> 完整 Components Result
+                                       |                |
+                                       v                |
+                                 area producer          |
+                                       |                |
+                                  area index            |
+                                       +-------+--------+
+                                               v
+                                            filter
+                                               |
+                                           二值 mask
+```
 
-1. 创建私有临时文件，一次 Extend 已检查的 32*N 字节。有限 callback 读取
-   source strip，写入连续记录：背景 `[0,0,0,0]`；前景像素 i 写入
-   `[i+1,0,i,1]`，依次为 parent、rank、minimum、area。parent 是一基地址，
-   minimum 是零基位置。
-2. 按行主序遍历前景，x>0 时合并左邻，y>0 时合并上邻。页边界不改变邻接。
-   当前像素首次处理边之前仍是自身根，因为先前像素只访问更小索引。在两次
-   合并之间保留当前组件根；其他根获胜时同时更新地址和完整 record。
-3. 通过有界分页 parent 读取查找邻根。同根不重复合并；不同根按 rank 连接，
-   对不交集合面积求和、对位置取最小值。两个缓存记录都更新后才处理下一个邻居。
-   非根 area/minimum 可以过时，不能作为根事实使用。
-4. 全部边完成后重新扫描像素并查根，输出 label=`minimum+1`；仅在扫描像素
-   等于 minimum 时追加 `[id,area,minimum]`，自然形成唯一有序表，无需驻留
-   排序表。全部写入结束后 labels 和表一起发布。
+Labels 读取有界 source strip，完成所有私有 union 写入和第二次输出扫描后，才发布 CompleteBundle。Area 等待完整且已验证的 Components 结果。Filter 同时要求精确的 Components Result 和其 area index；它先验证关联及行数，再把每条索引行与完整 Components 表比较，之后才处理像素。索引关联不匹配返回 `TypeMismatch`，原因是 `InvalidAssociation`，scope 为 `Association`，并记录 index ObjectId。非零 label 没有关联 area 时也会失败，不会把面积当成零。
 
-left/top 定向使每条网格边恰好访问一次。union 不会合并真正不同的连通分量；
-每条路径的全部边均包含，因此结果恰好是四连通划分。根 minimum/area 由最小
-值和不交集合求和保持。根地址可以不同于发布 ID。无路径压缩的 rank parent
-链为 O(log N)，实现检查地址及 64-hop 上限，不声称逆 Ackermann 复杂度。
+三个操作都使用 CompleteBundle 和 Conservative(All) support。Descriptor support 与数据行分开，K=0 时仍存在。结构校验会检查计数和 basis，但不证明导入标签图连通。只有 labels 操作自身的构造保证其输出为四连通结果。
 
-2×127 梳形图中 N=254、前景=191、私有 UF payload=8128 字节。本两遍初始化
-方案在 union 开始时有 191 个根；设计中的 65 个临时行组件是另一种计数调度
-示意，不是本实现的实际初始状态。最终 K=1。
+Labels operation 声明 8192 字节 callback workspace；area 和 filter 各声明 4096 字节。当前窗口上限为 `min(user_page_bytes,1024)`；labels 至少需要 32 字节，area/filter 至少需要 24 字节。根预算负责临时 backing、window、work、I/O 和 stage。替换脏页前先写出旧页，再读取替代页。完整发布前资源耗尽会释放私有状态，不发布部分 labels/table。
 
-## 索引验证、支持与所有权
+## 4. 算法与数学
 
-Area 等待完整、已验证的 Components，以有限页复制 ID/area 对，association
-精确指向该 Labels ObjectId。Filter 首先检查此关联及相等 K；相同形状、K
-甚至相同数值也不能替代对象关联。过滤前逐行比较完整索引与 Components 表，
-从而验证外部索引的顺序、正面积和完整性。失败使用 InvalidAssociation、
-Association scope 和索引 ObjectId。查找采用分页 lower_bound 和一个保留
-cache window。背景跳过查找；非零 label 缺失属性时失败，不默认为 area=0。
+Labels producer 创建一个私有临时文件，并扩展至经检查的 `32*N` 字节。每像素占四个 64 位字：背景为 `[0,0,0,0]`；前景位置 `i` 为 `[i+1,0,i,1]`，依次表示 parent address、rank、最小位置和面积。Parent address 从 1 开始；最小位置从 0 开始。
 
-三个阶段均为 CompleteBundle，关系保持 Conservative(All)，K=0 也保留独立
-descriptor 支持。导入 Components 的 count/basis 验证与连通性证明不同；新
-labels recipe 和独立 BFS 为本实现生成的结果提供连通性证据。输入关联及
-读取窗口在 ExecutionContext 销毁后保留上游和强制存储，直到最后 owner 释放。
+Producer 按行主序访问像素，只处理左、上边。每条边通过有界分页 parent 读取查找根。根相同时跳过；否则按 rank 合并、累加不相交集合面积并保留较小位置。处理下一邻居前先更新两条缓存记录。当前前景像素处理首条边前仍是一个根，因为更早像素只访问更小索引。全部边完成后，第二次扫描查根，写入 `minimum+1` 标签，并只在最小位置追加 `(id,area,minimum)`。这样无需驻留排序表即可生成唯一有序行。
 
-## 实际资源边界
+四连通网格的每条边只由 left/top 方向访问一次。Union 不会连接不同连通区，扫描又包括各连通区的全部边。根 minimum 与 area 分别由取最小值和不相交集合求和保持。仅按 rank 的 parent 链深度为 O(log N)；实现检查 record 地址，并把查根限制在 64 跳。算法不做路径压缩。
 
-UF 占 32*N 逻辑磁盘字节，按 4096 字节编码 extent 准入。Create、Extend 和
-依赖写入是不同 coordinator 阶段。source、union、输出窗口最多为
-min(user page,1024) 字节。Labels 至少需要 32 字节窗口，area/filter 至少
-需要 24 字节。两个输出 slab 和可能更小的最后表复制具有有限重叠容量。
-Labels 在 edge、parent find、两条 union 更新和最终 emit 之间保留四个可写
-LRU 页。替换脏页时先写出再读取新页；命中缓存时在当前 poll 内继续。两个
-union 记录都驻留后才应用缓存更新。emit 使用同一缓存，能读取最新根事实。
-最后 append 完成后可将剩余私有脏页和 UF 一起丢弃，因为后续不再读取私有树；
-关联验证只消费发布字段。
+Label 生成和最终查根复杂度为 `O(N log N)`；面积索引复制/校验为 `O(K)`；过滤为 `O(N log K)`。表示校验还会对 K 条 table row 各扫描 N 个 label，并对非零 label 二分查表，工作量为 `O(NK + N log K)`。分页字段交替访问可能导致窗口重读，因此实际 I/O 不能只按最终 payload 计算。
 
-Labels 声明 8192 字节 callback workspace，包含最多 4096 字节缓存树 payload
-以及有界输出 slab/尾页复制。area/filter 仍声明 4096 字节。读取窗口 owner、
-metadata 及跨阶段字段另按实际所有权计入根预算。
+## 5. 限制与非目标
 
-Union 和最终查根为 O(N log N)，索引复制/比较 O(K)，过滤 O(N log K)。现有
-Components validator 另需 O(NK+N log K) 工作，在 labels/table 间切换时
-可能反复加载单页。ResultBuilder 小批追加也会重写对齐 padding。因此验证
-I/O 和 padding 写入不能仅按最终逻辑 payload 配置预算；实际工作和 I/O 均
-累计计账，超限失败并释放私有部分结果。公开示例使用有限的一百万阶段上限
-及显式根预算。
+- 这些工厂只支持 `ComponentIdScheme::MinPixel`；`CompactMinOrder` 是表示枚举，不代表工厂能力。
+- Validator 检查 labels/table 精确成员关系和 basis，不验证任意导入 labels 的连通性。
+- `maximum_count` 限制最终 K，不限制临时 N 条记录。N>0 时 K=0 合法。超过数量限制会在发布前作为无效 domain 失败。
+- 全部 N 条 label、N 条临时记录、I/O、work 和输出容量仍需要根预算准入。Page、disk 或 stage 耗尽返回资源错误。
+- Managed-capacity 计账不构成进程 RSS 上界。
 
-[components_workflow](../../../examples/components_workflow/README.md) 提供
-公开执行、安装命令、精确 BFS 参考、动态/空集合、分页面积索引及超过 Host
-容量的数据。测量来自产品 managed-capacity 计账，不是进程 RSS 硬上界。
+公共入口与可运行用法见 [components workflow](../../../examples/components_workflow/README.md)。

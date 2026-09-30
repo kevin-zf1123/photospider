@@ -4,7 +4,7 @@
 > and is not a description of the current architecture. Current compute
 > responsibilities are documented in
 > `../../kernel-architecture/Compute-Boundaries.md` and
-> `../../kernel-architecture/Compute-Flow.md`.
+> `../../kernel-architecture/Compiler-and-Execution.md`.
 
 This document records the in-place split of `ComputeService`. The first split
 has landed inside the backend, behind the installable public `ps::Host` facade.

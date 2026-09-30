@@ -1,110 +1,97 @@
-# ADR 0018：本地结果缓存与冻结执行
+# ADR 0018：冻结输入并复用精确局部结果
 
 - 状态：Accepted
-- 日期：2026-09-09
-- 接受：维护者明确批准完整 S3 计划、以下选项及逐 Issue 提交、独立审查、受保护 PR 交付和清理。
-- 基线：kernel `54d57f30a68807c4d09fbc7439debda0a9b0c614`
-- 权威原文：[English](../0018-local-result-caches-and-frozen-execution.md)
+- 英文权威文档：[ADR 0018](../0018-local-result-caches-and-frozen-execution.md)
 
-接受确定目标，Issue 记录实际交付。本决策只替换 ADR 0015 对本地磁盘派生 Value
-的排除、显式冻结执行的图当前性要求，以及 ADR 0017 的算子/traits 版本与同尺寸
-区域映射条款。应用拥有预览请求、事件队列和发布；内核拥有输入、执行、共享计算
-和可丢弃缓存。不加入 daemon Job/IPC、文档保存、恢复、artifact 权威、原生 GPU
-或增量编译产品。
+## 1. 核心摘要（TL;DR）
 
-## 研究与选择
+可变 workflow 图和编辑中的输入需要稳定的执行输入，区域计算也需要在精确依赖未改变时复用结果。内核拥有不可变输入快照、冻结执行包和有界的派生结果缓存。精确内容与依赖身份允许复用，同时缓存仍只是加速器。
 
-[libvips evaluation](https://www.libvips.org/API/8.17/how-it-works.html) 和
-[tilecache](https://www.libvips.org/API/8.17/method.Image.tilecache.html) 展示按需区域
-生成、有界 tile 保留和下游失效。
-[OpenImageIO ImageCache](https://github.com/AcademySoftwareFoundation/OpenImageIO/blob/main/src/include/OpenImageIO/imagecache.h)
-采用近似容量限制；本实现继续严格遵守 S2 受控分配上限。
-[libvips shrink](https://www.libvips.org/API/8.17/method.Image.shrink.html) 提供 box
-滤波比较。不引入框架依赖或时间性能声明。FNV PlanCacheKey 不包含像素，不能标识
-运行结果；#203 仍只复用编译片段。
+## 2. 架构心智模型（Mental Model & Intuition）
 
-整图身份会使无关工作失效；调用方版本声明无法验证可变数据。选择内核不可变分块
-快照和精确需求内容身份。选择单一 breaking ABI 5，避免双套区域校验。应用请求
-策略放在内核之外。可丢弃条目无需事务数据库恢复。
+`InputSnapshotStore` 类似带版本的分块存储：补丁只复制与其相交的块，其余块继续由旧版本共享。冻结执行固定一份已编译计划、对应注册表及不可变绑定，因此后续图编辑不会改变该次运行。
 
-## 版本与缩放区域
+```text
+图 + 绑定 --freeze--> 冻结计划与输入所有者
+                           |
+                       局部结果请求
+                       /        \
+                 精确缓存命中    缓存未命中
+                      |            |
+                      |         producer flight
+                      |         /           \
+                      |      等待者 A      等待者 B
+                      |         \           /
+                      +------ 已验证不可变结果
+                                  |
+                         内存缓存 / 可选磁盘缓存
+```
 
-软件包 0.5.0、OperationTraits 5、operation C ABI 5 替换 0.4/4。C++17、源 schema 2、
-provider ABI 1 保持。C++ 消费者重建；拒绝 ABI 4，不提供适配。变化的编译语义使用
-v5 摘要域。运行内容使用独立 SHA-256 域，保留参数和样本位模式，包括有符号零。
+`ExecutionContext` 拥有 worker 资源、in-flight 协调和缓存条目。若返回的 `Value` 仍持有结果存储及预算租约，结果可以比 context 活得更久。预览策略、事件队列、发布仲裁和界面呈现由应用代码负责。
 
-显式 box 缩小规则解析必需的 [1,16] 整数参数。输出 H/W 为输入除以因子向上取整，
-保留完整通道。反向需求乘因子后裁剪图像边缘；正向脏区使用 floor/ceil 除法映射。
-算术检查溢出。图像和蒙版各自保留 profile。边缘按实际样本数平均，累加顺序固定
-为行/列。通用 Whole 保持保守语义。
+## 3. 契约规约与接口（Formal Contracts & APIs）
 
-## 输入与执行快照
+```cpp
+struct InputSnapshotStoreConfig {
+  std::uint64_t maximum_bytes = 256U * 1024U * 1024U;
+  std::uint32_t block_size = 128;
+  std::uint64_t maximum_blocks = 65536;
+};
 
-公开快照存储导入有效 Float32 RGBA 或蒙版，持有不可变块；精确区域替换 patch
-只复制受影响块，提供区域读取和身份。旧版本可读，未修改块共享。像素存储设置
-独立字节上限；失败保留原快照并返回 ResourceExhausted。元数据不计入像素预算。
+class InputSnapshotStore {
+ public:
+  Result<InputSnapshot> import_value(const Value&, const SnapshotAccessOptions& = {}) const;
+  Result<InputSnapshot> patch(const InputSnapshot&, const Value& replacement,
+                              const SnapshotAccessOptions& = {}) const;
+  std::uint64_t live_bytes() const;
+};
 
-显式冻结执行捕获当前有效且匹配的计划、不可变绑定及 registry 所有权，允许原图
-替换或销毁。普通 execute 保留 stale/cancel 优先级。冻结执行检查取消与自身有效性，
-不使用后续输入版本，并在回调全部退出前保留所有者。
+struct ExecutionContextConfig {
+  std::uint32_t cpu_workers = 0;
+  bool gpu_enabled = false;
+  std::uint32_t maximum_queued_tasks = 1024;
+  std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
+  std::uint64_t result_cache_bytes = 0;
+  std::optional<DiskCacheConfig> disk_cache = {};
+};
 
-## 结果缓存与共享计算
+class ExecutionContext {
+ public:
+  Result<FrozenExecution> freeze(const ExecutionPlan&,
+                                 ExecutionBindings = {}) const;
+  Result<ExecutionResult> execute(const FrozenExecution&,
+                                  const CancellationToken& = {},
+                                  const ExecutionOptions& = {});
+};
+```
 
-ExecutionContext 显式启用缓存。键覆盖局部算子语义、参数位、按序需求输入内容与
-元数据、输出 Region、后端及实现身份。整图修订和无关分支不进入局部键。未证明
-稳定的通用输入仍可执行，但相关结果不能跨 Run 复用。只缓存明确 cacheable、确定、
-无副作用的路径；标量绑定按不可变 Value 的精确字节标识。
+以上摘录省略 `ExecutionContext` 的其他成员。
 
-正向失效遵守 Elementwise、Halo、缩小和 Whole 依赖。改曝光保留 blur；局部像素
-只影响依赖需求区域；无关图编辑不破坏复用。清空和驱逐均允许重算。精确内容身份
-授权复用，不能只凭脏区提示。
+快照保存受支持的 rank-1..8 `Value` 输入，并保留样本位和 facets。每个快照不可变；`patch` 接受相同 descriptor 和 facets，以及非空替换 Region，只复制相交块，所有旧版本继续可读。存储对保留版本的负载总字节数实施一个聚合上限。元数据和调用方持有的 `Value` 不计入该上限。当前实现会拒绝带 `photospider.image`、rank-3 或更高维 `photospider.color-array`、`ImagePlane` 和类型化 `Mask` 的输入快照，因为它们需要结构化 planar storage；图像 workflow 使用 `PlanarImage` 绑定路径。
 
-同一 ExecutionContext 的相同在途计算共享一个生产者；订阅者独立取消，一个取消
-不影响其他订阅者，最后一个退出时请求停止。生产者保留冻结输入和 registry，直到
-已接纳回调全部退休。回调不得等待占据同一池的另一回调。只有成功校验的不可变
-结果可以进入完成缓存。
+`content_identity` 对规范元数据和请求区域中的精确样本位计算哈希。shape、dtype、坐标和 facets 参与身份；分配地址、布局和分块几何不参与。读取和身份计算支持样本上限及协作式取消。读取被取消时，调用方目标缓冲区可能只写入一部分，调用方应丢弃它。
 
-缓存容量是 maximum_live_bytes 子限额，共享分配只计费一次。驱逐或销毁 context
-后，调用方保留结果仍持有容量租约。接纳计算前回收空闲条目，不无限等待调用方
-释放。无法保留缓存则跳过，最小工作集无法容纳则 ResourceExhausted。分别报告命中、
-未命中、驱逐、共享计算、驻留字节和实际工作量。
+`freeze` 捕获当前有效且匹配的计划、不可变绑定和 operation registry 所有者。自定义 `RegionalSource` 必须先导入内核快照。捕获过程不调用 operation callback，并在返回前重新检查图的 currentness。图被替换或销毁后，冻结执行仍使用捕获的输入版本；普通执行仍执行其 currentness 检查。每次 execute 调用独立提供取消状态，所有者会保留到已准入 callback 退出。当前捕获 API 会拒绝需要结构化 planar image capture 的计划，因此不冻结 `PlanarImage` 绑定路径。
 
-## 算子与应用 workflow
+已完成结果的保留是可选的，其容量是 `maximum_live_bytes` 的子限额；设为零会关闭保留，但相同的 in-flight demand 仍可共享。键包含局部 operation 契约和实现、精确请求输入内容及元数据、输出 Region 和相关 backend 身份。编译图 revision 和无关分支不进入局部结果键。dirty 提示可以缩小计算范围，但不能在缺少内容身份时证明结果可复用。参与计算的每个 operation 都必须确定、无副作用且声明可缓存，输入依赖也必须已证明，结果才可复用。
 
-C++ 与维护的 C 模块提供图像/蒙版 box 缩小及 image.brush_circle。圆心、正半径、
-非负有限线性 RGB、[0,1] alpha 为运行输入。闭圆内像素中心使用预乘 source-over；
-圆外保持原像素。一个事件一个硬边圆章，不补点，不处理设备动态。只执行裁剪后的
-圆包围 Region，再按序发布 patch。
+同一 context 中完全相同的 in-flight 请求由协调器共享一个 producer。每个 waiter 独立取消。取消一个 waiter 不会移除仍在等待的其他请求；最后一个 waiter 离开时，协调器请求取消 producer。producer 持有冻结输入和 registry，直到已准入 callback 退出。producer 不会占用 worker 等待同一线程池的另一个 callback。只有验证成功的不可变结果才进入完成缓存。
 
-应用先执行四分之一分辨率代理，再执行全尺寸。代理 blur 的半径/sigma 按比例
-缩放并限制合法范围，结果明确为近似；正式导出保留原参数。有界队列合并待处理
-滑块预览，已接纳笔画不丢失。满时背压允许重试。有限 tile 批次交替服务预览/导出。
-发布检查内容版本、目标、质量；拒绝过期与质量下降。冻结导出始终读取原始输入。
+可选磁盘缓存要求调用方明确选择本地目录、启用正数的内存结果缓存容量，并使用维护的内建 operation registry 身份。自定义 operation registry 没有持久缓存身份，因此磁盘查询未命中且不能写入。缓存只保存 CPU-exact 模式下、带 image-v2 或规范 coverage-mask 元数据的 Float32 值，并受字节数、条目数和排队写入数限制。缓存存活期间，内核独占所选目录。启动时会清理遗留临时文件并索引有界条目；命中后再依据预期键、descriptor、facets、语义样本和校验和校验条目。未知或损坏条目作为缓存未命中处理。磁盘数据不恢复 workflow 状态，也不授予结果权威性；异步写入遇到失败或队列压力时会丢弃。GPU 模式运行不会读写磁盘条目。
 
-## 可丢弃磁盘数据
+## 4. 负面清单与边界（Non-Goals & Explicit Boundaries）
 
-嵌入方显式指定独占本地目录、字节和条目上限。内核只保存有限 CPU Float32 图像/
-蒙版区域，使用版本化未压缩规范字节表示。发布前校验描述符、facets、Region、
-检查后的长度、键和 SHA-256。持久复用要求可验证的维护实现指纹；实现或构建变化
-导致 miss。未核验的外部实现只允许符合纯函数要求的进程内复用。
+- 快照覆盖不可变输入 `Value` 及其内容，不序列化 execution plan 或 workflow document。
+- 冻结执行固定一份内存中的计划及输入，不会让后续图编辑自动成为普通执行的当前状态。当前 `freeze` 会拒绝需要结构化 planar image capture 的计划。
+- 结果缓存是可丢弃的加速数据，不提供事务恢复、持久提交、请求历史或权威 artifact。
+- 预览队列、编辑合并、面向用户的新鲜度策略和发布决策由内核之外负责。
+- 未证明的可变输入可以执行，但其依赖结果不能跨运行复用。
+- 磁盘持久化仅支持当前 disk-cache 实现接受的格式。缓存文件不是插件、交换或备份格式。
 
-临时文件完整后才发布。残缺、损坏、未知版本和失配条目丢弃重算。有界异步写入
-遇失败或压力跳过缓存，不进入必需的预览发布路径。重启只复用派生数据，不恢复
-工作状态、请求、文档或输出权威。不声明持久提交保证。一个目录同时只有一个
-活动所有者。
+## 5. 后果与代价（Consequences）
 
-## 验收与交付
+保留旧快照和返回的 `Value` 会继续占用其 backing block 和租约。旧版本仍被引用时，补丁还会为变更块消耗额外预算。快照导入或补丁超过存储预算时返回 `ResourceExhausted`；调用方可释放不再使用的版本后重试。
 
-S3Cache.LocalInvalidation 比较缓存开关输出及曝光、圆章、无关分支变更后的精确
-工作区域。S3Preview.LatestAndExport 在冻结导出期间回放编辑，验证顺序、边界、
-进度及发布仲裁。S3Disk.DiscardAndRebuild 使用独立进程，损坏、删除、驱逐后比较
-独立正式结果。
+资源准入前，缓存会回收空闲条目。驱逐和清缓存会移除复用资格，但不会使调用方仍持有的 `Value` 失效。缓存准入失败时跳过保留；若工作集本身超过 context 的受控 buffer 容量，执行返回 `ResourceExhausted`。调用方需要释放不再使用的结果以归还容量。
 
-使用确定性同步覆盖奇数尺寸、边缘、halo、透明/HDR、无效参数、旧快照、取消/
-清空竞态及精确/不足预算。examples/s3_image_workflow 使用安装公开 API。验证静态/
-共享 C/C++ 和 daemon 0.5 消费。逐叶提交；独立全面审查及 CI/bot 修复后受保护合并
-并结算 Issue。
-
-## S4 目标修订
-
-[ADR 0019](0019-metal-resident-image-workflows.zh.md) 增加显式 Metal 执行、原生 shared storage 和 operation ABI 6。接受定义目标，不代表实现完成；其余边界保持。
+取消采用协作方式。已提交工作退出后才释放其所有者；只要仍有订阅者需要结果，producer 就继续运行。磁盘写入可能因 I/O 错误或队列压力被丢弃，因此后续未命中属于正常情况。`flush_disk_cache` 由调用方显式执行，结果发布不会等待磁盘写入。

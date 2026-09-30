@@ -1,147 +1,59 @@
 # 缓存模型
 
-PlanCacheKey 仍是非安全物理计划身份，不包含输入像素，也不能验证过期计划或标识
-执行结果。
+## 模块边界与职责 (Scope & Ownership)
 
-package 0.7 通过 ExecutionContext.result_cache_bytes 显式启用结果保留，它是
-maximum_live_bytes 的子限额。副本共享不可变分配租约；驱逐只释放缓存引用，严格
-工作集接纳前优先回收可选条目。clear_result_cache() 推进保留 epoch，活动读取者
-仍有效，旧生产者不能重新填充已清空 epoch。统计报告命中、未命中、驱逐、共享、
-条目数和容量。零缓存额度保留无缓存执行。
+Photospider 分别管理编译计划、不可变输入快照、已完成 CPU/GPU 结果、native 输入副本、共享中的计算和可丢弃磁盘结果。缓存 entry 保留不可变 owner；清除或淘汰只撤销缓存资格，活动 reader 仍持有原 owner 与资源租约。
 
-InputSnapshotStore 独立限额管理 rank 1–8 的 UInt8、Int64、Float32、Float64 不可变块。
-Generic Value 保留所有合法原始位模式；typed 导入与 patch 校验各自的语义样本规则。
-Image-v2 RGB/RGBA/XYZ/Lab 保留有序通道角色、参考白、单位和 alpha association，始终
-校验并复制完整像素通道。配置的 block_size 用于 generic 的每个轴及图像 H/W，图像 C
-保持完整。maximum_blocks 在像素分配前限制每个版本的目录条目；maximum_bytes 统计
-所有版本仍持有的实际块。目录元数据单独有界，该额度不是进程 RSS 上限。
+`PlanCacheKey` 描述物理计划 identity，不包含输入 payload，也不检查图是否过期或标识计算结果。结果缓存由 `ExecutionContextConfig::result_cache_bytes` 显式启用，并受 context 托管 live-byte 限额约束。零值不保留已完成结果。
 
-Patch 要求 dtype、shape、facets 完全一致，复制相交块并保留旧版本。
-SnapshotAccessOptions 提供取消与样本上限，约束导入、读取、hash 以及 patch 的受影响
-块复制。取消的 read 可能已经部分写入调用方缓冲区，只有成功返回才确认其内容。
-content_identity(region) 使用 photospider.input-region.v2 域及规范 SHA-256，包含 dtype、
-shape、需求坐标、facets 和精确样本位。整数/IEEE 样本按实际宽度解码，再编码为
-uint64 little-endian 字段；分块、origin/stride 和分配地址不进入身份。正负零及 NaN
-payload 保持不同。包括 generic 输入在内，快照绑定的区域读取传递 Run 取消令牌。
+## 核心数据结构与内存布局 (Data Layout & Memory)
 
-内存和 native 完成值保留真实 facet。结果命中在复用前核对解析后的 descriptor、需求
-coverage、输出语义规则和 typed 样本约束，包含 flight 完成竞态中的二次查询。数值验证
-建立 nearest/gradual-underflow 并恢复调用方浮点环境。Generic Drop 输出可发布 opaque
-facet；由该动态边界开始的 PreserveInput 链保持此能力，仍拒绝未推断 typed facet。
-已知 declaration 和显式输出语义要求精确 facet 相等。非法计算
-typed 值仍为 OperationFailed。输入副本键已包含完整元数据，native 发布保留这些信息。
+```cpp
+#include "photospider/data/input_snapshot.hpp"
 
-result-region v3 键递归覆盖各消费者实际需要的上游区域、算子语义/参数和稳定输入内容。无关
-图编辑及节点编号不影响相同内容。Whole 依赖保守；标量变化影响相关输出。未证明
-稳定的通用输入仍可执行，其后代不跨 Run 复用。只缓存确定、无副作用、cacheable
-的 CPU 工作。
-
-区域结果 key 也接受经过 preflight 的 dense、offset-zero 直接 Value：最多 2048 bytes，
-派生 demand 必须覆盖完整 Whole 值。Snapshot、bounded-scalar、compact Whole Value 有
-独立类别 tag；compact key 包含 dtype、rank/shape、精确 facet、byte 长度与原始 bytes，
-包括负零和未使用系数。更大或局部直接输入无资格。该规则用于区域执行与 execute_stream；
-纯 generic/scalar 的普通 execute 保持既有快速路径；磁盘结果仍仅支持既有图像/蒙版。公开
-expression workflow 检查 2048/2049+ 边界、dtype/shape/facet 分离、并发系数及缓存非法
-bounded 消费者拒绝。
-
-有界协调线程合并相同在途区域计算；CPU 工作仍在原回调池。调用方分别观察取消与
-图当前性。最后一个订阅者取消后，等待生产者退出才返回。生产者快照独立持有输入
-和 registry，不依赖调用方栈或可编辑图。
-
-FrozenExecution 是内存中的拥有者对象，无序列化 plan reader；捕获当前计划及不可变
-Value/快照绑定，允许原图替换/销毁。捕获复制快照句柄，调用方之后替换句柄不改变
-冻结输入。普通
-执行仍检查 stale。for_region 派生冻结输出 tile。自定义 RegionalSource 须先导入
-再冻结。
-
-## 可丢弃磁盘区域
-
-显式 ExecutionContextConfig::disk_cache 要求正结果缓存容量。DiskCacheConfig 指定
-目录、总字节/条目上限和有界写队列；一个 context 独占锁定目录。只管理 SHA-256
-文件名的 .pscache 与可丢弃 .tmp，忽略无关名字。磁盘容量包含活动写入预留；待写
-结果继续持有原受控分配，计算压力下可丢弃待写队列。
-
-持久复用限定 make_default_operation_registry()；指纹覆盖维护源码/头文件、编译器、
-平台和构建参数。自定义与 C 模块 registry 支持进程内缓存，不发布持久实现身份。
-该身份用于正确性，不构成原生代码信任或安全签名。
-
-磁盘格式 2（PSCACHE2、disk-result key domain v2）保存 Float32 HW coverage 蒙版或
-受支持的 HWC image-v2 区域。头编码 dtype、shape、Region、精确 canonical facet 的
-key/version/payload、字节数和 key；SHA-256 覆盖头与 packed little-endian Float32
-样本位。旧格式 1 为 miss。读取比较完整预期头，发布已验证 facet 并复验 typed 样本，
-不重建默认 RGBA facet。分配尺寸来自已验证计划，不来自文件
-长度声明。头、尺寸、摘要或数值失配均作为 miss。临时文件完整后 rename，不提供
-持久提交/恢复保证。写入失败或队列压力跳过保留，不使计算结果失败。
-flush_disk_cache() 是发布路径之外的显式等待；销毁也等待写线程。
-clear_disk_cache() 删除条目并作废待写 epoch。
-
-test_disk_cache 使用独立进程覆盖写入、复用、头/长度/摘要/版本损坏、删除重建、
-写失败与严格配额/队列压力。test_input_snapshot 和 typed disk 回归覆盖 RGB/BGR、
-straight/premul RGBA、XYZ/XYZA、Lab/LabA，包含 D65/D50 元数据隔离、三通道 patch、
-冻结旧输入、冷/热复用和重启。tests/support/typed_images.hpp 提供公开
-WorkflowDocument/compile/execute identity 示例与可检查的 signed/HDR/负零样本。
-参见 ADR 0018。
-
-## S4 原生驻留
-
-`NativeGpu` 结果键增加选址模式、所选 backend、operation key 与 copied traits，以及
-native device/build identity。回退结果及后继不写预期原生结果键；冻结 registry 保持 C 模块实现所有权。
-CPU 精确缓存与原生近似结果隔离；设备失效停止原生键并清理条目。
-
-完成的原生输入副本共用有界 LRU，按实际需求样本、描述符、facet、Region 和设备
-生成身份，不使用可复用分配地址或调用者 revision。普通不可变 Value 也可以避免
-重复上传；任意 RegionalSource 仍须重新读取实际字节，不因此获得计算结果缓存资格。
-
-native_retained_bytes 是 retained_bytes 内唯一原生 owner 容量，native_upload_hits
-记录避免的上传。活跃读者、缓存、输入副本保持原始预算 lease。clear/eviction 只
-移除资格；共享工作保留独立/最后订阅取消，follower 不重复计数 producer 的原生工作。
-
-本实现磁盘读写仅允许 `CpuExact`；`NativeGpu` 计划即使回退到 CPU 也不读写磁盘。CPU
-磁盘行为保持。
-原生源码和 shader 输入进入实现身份，生成头留在构建目录。test_native_cache 及 C
-插件版本验证复用、编辑、模式/回退隔离、取消、clear race 和保留容量。
-
-使用既有构建目录执行 focused 验证：
-
-```sh
-cmake --build build/issue257-static --target test_input_snapshot test_disk_cache test_result_cache test_frozen_execution test_native_cache -j 8
-MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build/issue257-static -R '^test_(input_snapshot|disk_cache|result_cache|frozen_execution|native_cache(_plugin)?)$' --output-on-failure
+namespace ps {
+Result<InputSnapshot> import_snapshot(const InputSnapshotStore& store,
+                                      const Value& value) {
+  return store.import_value(value);
+}
+}
 ```
 
-Typed native 驻留使用公开纯字节复制操作：九种描述符均须保留精确 bytes/facets，冷运行
-一次 dispatch，缓存命中零 dispatch。此处验证存储与复用，不新增颜色转换算子。
-既有 native 取消与预算用例继续保留。
+`InputSnapshotStore` 将受支持内建 dtype 的 rank 1 至 rank 8 Value 存入不可变分块。Generic 导入精确保留有效原始位；支持的 typed scalar/tensor 值会校验语义样本。携带 image、image-plane、mask 或 rank 至少为 3 的 ColorArray identity 的 Value 必须使用结构化 planar storage，snapshot import 会拒绝它们。`maximum_blocks` 限制每个版本的目录项数；`maximum_bytes` 限制所有版本保留的实际 payload。目录 metadata 有独立上限。调用方传入的 Value 与 snapshot metadata 不计入该字节限额。
 
-## G4 精确依赖内容缓存
+Patch 要求 dtype、shape 和 facets 匹配，并替换一个精确非空 Region。它只复制相交 block，保留旧版本。Snapshot access options 为导入、读取、hash 和受影响 block 复制提供取消与样本上限。取消读取可能只填充调用方 buffer 的一部分；成功才表示完整读取有效。
 
-`DemandHandle::request` 与 `execute_fragments` 在 `result_cache_bytes` 为正时，使用同一
-context 像素 LRU 保留成功的精确观察。此路径只在进程内生效，不将依赖记录写入磁盘。
-全部祖先必须 deterministic、side-effect-free 且 cacheable。Manifest 持有结构记录链接、
-完整传递的源 Data/Control/Validation footprint、内容身份和 fragment key，不持有输入、
-snapshot 或像素 owner。复用前，旧记录全部正向和负向控制证据中的源字节必须与当前
-不可变绑定一致。仅输出字节相同不足以证明可复用。
+`content_identity(region)` 使用规范 framing 对 dtype、shape、请求坐标、facets 和精确样本位进行 hash。分块几何、origin、stride 和 allocation 不影响 identity；正负零和不同 NaN payload 保持区分。Snapshot binding 用 Run 取消 token 提供 regional read。Snapshot/session identity 只表示来源；确定性 operation 不能从其字符串推导值或依赖。
 
-候选模板绑定 plan、node、精确 Q 和资源策略；源身份对四种 dtype 使用 snapshot v2
-规范编码。Value 与 snapshot 按相同逻辑字节编码，不受 block 或 stride 布局影响。
-Snapshot/session 身份仅表示来源；确定性程序不得根据其字符串计算数值或依赖。
-模板对图和计划变化采用保守失效。每个模板最多保留八个有界内容版本。命中后逐输出
-关联以当前 bundle 身份导入，因此缓存行与本次新计算行能够安全合并。
+## 调度与状态机 (Execution & State)
 
-每个 fragment key 包含实际逻辑 Region。部分逐出后合法分区变化不会拼接旧新重叠块。
-只有当前 epoch 中全部 key 仍存在，LRU 才一起取得所有 Value；缺少任意块均为 miss。
-只有 producer 能填入其捕获的 epoch；`clear_result_cache` 阻止旧 producer 晚完成后回填。
-外部输出存储经过既有计费 allocator 复制后才能保留。活跃结果和 demand 证据在逐出、
-清空后仍有效，但不因此保留缓存资格。
+Memory result 命中会重新验证解析后的 descriptor、需求 coverage、输出语义规则和 typed 样本，包括共享 flight 完成后的并发查找。数值校验设置所需浮点环境并恢复调用方环境。Generic Drop 输出可携带不透明 facet；从该边界开始的 PreserveInput 链保留此能力，但 typed 声明仍需已证明 facet。非法计算 typed 值返回 `OperationFailed`。
 
-`maximum_dependency_cache_metadata` 限制保留的证明单位，范围 1..1048576、默认 65536。
-计费遍历实际不同记录 owner，包括重算的相同观察、其 row/tag/坐标及源证据；同一
-manifest 内共享的指针 owner 只计一次。不以较小的已合并公开 certificate 大小代替。
-`maximum_dependency_cache_work` 提供每 Run 独立可选预算，默认 1048576，零禁用此缓存。
-遍历、复制、哈希均预先计费；精确集合归一化获得预扣的有限工作额度。可选证明预算
-耗尽时跳过复用/保留并继续计算。`dependency_cache_records_visited` 统计新遍历的证明
-记录；`dependency_cache_work` 报告已消耗/预扣单位，含归一化预留，不代表 CPU 指令或时间。
+Regional result key 递归覆盖所需 producer Region、operation 语义与参数，以及稳定 source content。无关图编辑和节点 ID 不会使相同内容失效；Whole 依赖采用保守策略，scalar 变化会使相关输出失效。未证明的 generic input 仍可执行，但会禁用其后代的跨 Run 结果复用。只有确定性、无副作用、声明 cacheable 且实现身份已证明的工作可复用。
 
-G4 公开 workflow 检查相同内容命中、无关编辑、输出数值相同的控制变化及清空后的 dirty
-证据。Focused 回归另外覆盖 snapshot/Value 位级身份、稀疏混合命中/未命中 certificate、
-frozen 版本、部分逐出后的分区变化、重复 owner、极小共享证明预算，以及清空后真实
-producer 完成。这些检查尚未完成 ordered-scan carry 复用和原生 GPU fragment 执行。
+小型、经过 preflight 验证、offset 为零的 dense Value，在推导需求覆盖完整 Value 且不超过 2048 bytes 时可建立 compact content identity。Snapshot、bounded scalar 和 compact whole-Value source 使用独立 key 类别。更大或局部 direct input 未证明稳定。磁盘缓存资格更严格，只覆盖通过校验的 Float32 Value 输出，且 facet 必须是唯一有效的 image 或 coverage-mask semantic。结构化 planar executor 不走 Value result/disk cache。
+
+有界共享 coordinator 合并相同的 in-flight regional computation。CPU 工作运行在 context callback pool 中。每个等待者独立处理自己的 cancellation 和 currentness；最后一个订阅者取消后，producer 排空才返回。Producer snapshot 自行持有输入和 registry，不依赖 caller stack 或可编辑图。
+
+`FrozenExecution` 捕获当前计划及不可变 Value/snapshot binding。图被替换或销毁后，frozen 对象仍有效。Capture 会复制 snapshot handle，避免调用方后续替换 handle 改变冻结输入。`for_region` 派生固定输出 tile。自定义 `RegionalSource` 必须先导入再 freeze；普通计划执行仍检查 stale。
+
+DemandHandle 和 fragment execution 也可在同一 context pixel LRU 中保留精确依赖 observation。Manifest 保存结构链接、传递 Data/Control/Validation footprint、内容 identity 与 fragment key，不保存 input、snapshot 或 pixel owner。复用前须匹配包括正负 control 证据在内的 source bytes。每个 fragment key 包含实际逻辑 Region；所有片段必须仍在当前 cache epoch 才能命中。清 cache 后旧 producer 不能重新填充该 epoch。
+
+`maximum_dependency_cache_metadata` 默认 65536 proof units，范围为 1..1048576；每个 manifest 按 distinct record owner、row/tag/coordinate storage 和 source witness 计数，同一 manifest 内共享 owner 只计一次。`maximum_dependency_cache_work` 是独立的可选 per-Run work 上限，默认 1048576；设为零会禁用依赖缓存复用。proof 超限会跳过复用或保留，继续执行计算。去重不抵消已经发生的遍历、hash、关联和规范化工作。
+
+## 算法与数学实现 (Algorithms & Math)
+
+有界磁盘缓存使用规范 SHA-256 key，以及默认 operation registry 的实现 fingerprint。它只保存符合资格的 Float32 `Value` 区域。每条记录在发布前校验 dtype、shape、Region、facet key/payload、字节数、checksum 和结果 key。读取分配大小来自已验证计划，不来自文件字段。损坏、截断、不匹配或不支持的记录按可丢弃 miss 处理。
+
+写入先完成临时文件，再 rename；该缓存不提供持久恢复保证。队列压力或写入失败只跳过保留，不使已计算结果失败。待写项持有已计费源 buffer，在计算压力下可丢弃。一个 context 独占配置目录；其他文件会被忽略。`flush_disk_cache()` 等待排队写入；`clear_disk_cache()` 删除 entry 并使待写 epoch 失效。
+
+## 限制与非目标 (Limitations & Non-Goals)
+
+- 磁盘缓存需显式配置，且内存 result-cache 容量必须为正。它是本地可丢弃存储，不是持久结果库。
+- 持久实现身份仅对默认 registry 提供。自定义和 C module registry 可使用进程内缓存，但没有持久实现身份。
+- 只有编译计划的 `execution_mode` 为 `CpuExact` 时才读写磁盘缓存。计划选择 native GPU 后，即使 backend 选择最终回退到 CPU，也不具备磁盘缓存资格；native GPU 结果仍与 CPU-exact key 隔离。
+- 回退结果及其后代不写入 native key；近似 native 结果不能替代 exact CPU 结果。
+- Native 输入副本 key hash 实际需求样本字节、descriptor、facets、Region 和 device identity，可避免不可变普通 Value 重复上传，但不会让任意 `RegionalSource` 获得计算结果缓存资格。
+- 清除与淘汰不会使活动借用数据失效。FrozenExecution 是内存 owner，没有序列化 frozen-plan reader。
+
+公开 API 与行为检查见 `include/photospider/data/input_snapshot.hpp`、`tests/unit/test_input_snapshot.cpp` 和 `tests/integration/test_frozen_execution.cpp`。结构化 planar 输入工作流见 `tests/integration/test_planar_image_workflow.cpp`；该入口验证 planar binding，不表示 planar page 支持 snapshot 或 result cache。

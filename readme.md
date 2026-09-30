@@ -1,9 +1,6 @@
 # Photospider
 
-Photospider is a C++17, session-agnostic, single-machine graph compiler and
-execution kernel for embedding in local applications. The 0.x breaking scope
-reset is governed by
-[ADR 0015](docs/adr/0015-breaking-product-boundary-scope-reset.md).
+Photospider is a C++17, single-machine graph compiler and execution kernel for embedding in local applications. The kernel owns workflow compilation, planning, local execution, values, and execution resources. See the [architecture overview](docs/kernel-architecture/Overview.md) for current ownership.
 
 ## Product surface
 
@@ -11,52 +8,29 @@ The installed `Photospider::kernel` target provides:
 
 - schema-3 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
 - typed semantic IR and optimized IR;
-- operation ABI v11 semantic traits with closed typed parameter schemas,
-  optimization, and Region-demand-aware local physical planning;
+- operation ABI v11 semantic traits with closed typed parameter schemas, optimization, and Region-demand-aware local physical planning;
 - CPU-required and GPU-optional local execution;
-- eight signed/HDR Float32 image-v2/mask operations with composable bounded scalars;
+- operation support is defined by each registered contract; see [image operations](docs/kernel-architecture/Image-Operations.md) and the [built-in operations index](docs/built-in_ops/README.md);
 - reusable numeric, channel/alpha/color, bounded expression/LUT and component operations;
-- explicit regional `Value`, bounded semantic facets, rank-general `Region`,
-  strided layout, immutable bytes, Metal shared storage and bounded local caches;
-- cooperative cancellation, local resource accounting, fallback, and stale
-  completion rejection;
-- raw compile/plan/execute diagnostics, named correctness oracle or explicit
-  `unchecked` status, and non-security digests.
+- explicit regional `Value`, bounded semantic facets, rank-general `Region`, strided layout, immutable bytes, Metal shared storage and bounded local caches;
+- cooperative cancellation, local resource accounting, fallback, and stale completion rejection;
+- raw compile/plan/execute diagnostics, named correctness oracle or explicit `unchecked` status, and non-security digests.
 
-Independent `GraphContext` and `ExecutionContext` instances may run
-concurrently. The kernel defines no daemon Session, Job queue, network service,
-durable work, process-worker supervisor, policy DSO, plugin security product,
-durable result object, or release-evidence profile.
+Independent `GraphContext` and `ExecutionContext` instances may run concurrently. The kernel defines no daemon Session, Job queue, network service, durable work, process-worker supervisor, policy DSO, plugin security product, durable result object, or release-evidence profile.
 
-Operation and data-provider DSOs are trusted in-process extensions configured
-at startup. Their exact ABI version/size, alignment, pointer/count, bounded
-text/count/rank, closed trait vocabulary, output type/shape/bytes, overflow,
-required/exact parameter type, planned input demand, exception, and cleanup
-validation remains a correctness boundary.
+Operation and data-provider DSOs are trusted in-process extensions configured at startup. Their exact ABI version/size, alignment, pointer/count, bounded text/count/rank, closed trait vocabulary, output type/shape/bytes, overflow, required/exact parameter type, planned input demand, exception, and cleanup validation remains a correctness boundary.
 
 ## Build
 
-Building the kernel requires CMake 3.21+, C99 and C++17 compilers, Threads, and
-the pinned SLEEF 3.9.0 source. Before configuring, follow the
-[SLEEF preparation instructions](third_party/SLEEF.md) to download it into
-`third_party/sleef/`. This ignored directory is not included in the repository;
-CMake does not download dependencies. There is no mandatory media, serialization,
-cryptographic, or GPU SDK dependency.
+Building the kernel requires CMake 3.21+, Clang C and C++ compilers with C99 and C++17 support, Threads, and the pinned SLEEF 3.9.0 source. Before configuring, follow the [SLEEF preparation instructions](third_party/SLEEF.md) to download it into `third_party/sleef/`. This ignored directory is not included in the repository; CMake does not download dependencies. Configure in a new, empty `build/` directory so the build and install commands below use the same tree. There is no mandatory media, serialization, cryptographic, or GPU SDK dependency.
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
+CC=clang CXX=clang++ cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-CPU exact execution is the default. `ExecutionMode::NativeGpu` grants native
-placement to operations whose traits declare a GPU implementation;
-`ExecutionContextConfig::gpu_enabled` enables the context's configured Metal or
-Vulkan backend. The mode selects placement, while each operation/profile defines
-its numerical behavior, and traits govern CPU fallback. Apple builds use
-Metal/Foundation privately; set `PHOTOSPIDER_ENABLE_METAL=OFF` for the CPU
-configuration. See the [native GPU workflow guide](docs/kernel-architecture/S4-Workflow.md)
-for the supported-operation boundary and validation entry points.
+CPU exact execution is the default. `ExecutionMode::NativeGpu` grants native placement to operations whose traits declare a GPU implementation; `ExecutionContextConfig::gpu_enabled` enables the context's configured Metal or Vulkan backend. The mode selects placement, while each operation/profile defines its numerical behavior, and traits govern CPU fallback. Apple builds use Metal/Foundation privately; set `PHOTOSPIDER_ENABLE_METAL=OFF` for the CPU configuration. See the [G4 GPU workflow example](examples/g4_gpu_workflow/README.md) and [Compiler and Execution](docs/kernel-architecture/Compiler-and-Execution.md) for an example and the current execution contracts.
 
 ## Install and consume
 
@@ -77,28 +51,15 @@ Extension authors request only the narrow component they use:
 | Operation ABI headers | `operation_sdk` | `Photospider::operation_sdk` |
 | Data-provider ABI header | `data_provider_sdk` | `Photospider::data_provider_sdk` |
 
-There is no policy SDK, worker executable, server component, evidence target,
-or legacy preset.
+There is no policy SDK, worker executable, server component, evidence target, or legacy preset.
 
 ## Local daemon
 
-The separate
-[`photospider-daemon`](https://github.com/kevin-zf1123/photospider-daemon)
-repository owns local
-IPC v3 and ephemeral Session/Job orchestration. The daemon has no private
-kernel include, copied compiler/planner implementation, internal-IR wire
-format, remote endpoint, or plugin path method. Its existing 0.6 consumer has not
-been migrated to the current breaking 0.28 package; migration remains separate work.
+The separate [`photospider-daemon`](https://github.com/kevin-zf1123/photospider-daemon) repository owns local IPC and ephemeral Session/Job orchestration, while the kernel owns compilation, execution, values, and execution resources. The daemon consumes the installed public kernel package; compatibility with a particular daemon revision is not established by this repository.
 
 ## Composable workflows
 
-The self-contained [foundations example](examples/foundations_workflow) builds
-against an installed 0.7 package and runs ten numeric, color, curve, mask, filter
-and generated-field scenarios with independent result checks. Copy the directory outside
-this checkout or follow its README to modify and combine public workflows.
-The foundations implementation targets `ops`; `main@fba06270` remains the 0.6
-baseline. PR review, CI and merge status are recorded in the current delivery
-Issues rather than implied by local example success.
+The self-contained [foundations example](examples/foundations_workflow) builds against an installed 0.28 package. Its default `all` selector runs numeric and expression/LUT scenarios with result checks. The README documents repository and installed-package build commands.
 
 ## Documentation
 
@@ -107,22 +68,15 @@ Issues rather than implied by local example success.
 | Current ownership and behavior | [Architecture overview](docs/kernel-architecture/Overview.md) |
 | Canonical terms | [Kernel terminology](docs/kernel-architecture/Terminology.md) |
 | Compiler and local execution | [Compiler and execution](docs/kernel-architecture/Compiler-and-Execution.md) |
-| Native Metal workflows | [S4 support boundary](docs/kernel-architecture/S4-Workflow.md) |
-| Composable foundations | [Foundations examples](docs/kernel-architecture/Foundations-Workflow.md) |
-| Runnable image workflow | [Image operations](docs/kernel-architecture/Image-Operations.md) |
+| Native GPU workflow example | [G4 GPU example](examples/g4_gpu_workflow/README.md) |
+| Composable foundations | [Foundations example](examples/foundations_workflow/README.md) |
+| Image contracts and execution boundaries | [Image operations](docs/kernel-architecture/Image-Operations.md) |
 | Values and memory | [Data model](docs/kernel-architecture/Data-Model.md) |
 | Operation/provider ABI | [Plugin ABI](docs/kernel-architecture/Plugin-ABI.md) |
 | Build and validation | [Testing and validation](docs/development/Testing-and-Validation.md) |
-| Current delivery sequence | [Current Development Program](docs/development/Current-Development-Program.md) |
+| Architecture decisions | [ADR index](docs/adr/README.md) |
 
-English documentation is authoritative. Official documents under `docs/`
-have maintained Chinese mirrors in their corresponding `zh/` directories.
-
-## Archive boundary
-
-The pre-reset source is recoverable only from Git history and the annotated
-tag `pre-breaking-scope-reset-2026-09-01`. The active tree intentionally has no
-compatibility shim, disabled legacy product, or archived-source copy.
+English documentation is authoritative. Official documents under `docs/` have maintained Chinese mirrors in their corresponding `zh/` directories.
 
 ## License
 
@@ -130,5 +84,4 @@ Photospider is licensed under the [MIT License](LICENSE).
 
 Copyright (c) 2026 Zhu Feng.
 
-Runnable named-output graphs, numerical oracles and static/shared installation
-commands: [multi-output workflow](examples/multi_output_workflow/README.md).
+Named-output API and host tests: [Multi-output operations](docs/kernel-architecture/Multi-Output-Operations.md).

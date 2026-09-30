@@ -1,220 +1,76 @@
-# ADR 0015：将产品边界重置为嵌入式内核与本地守护进程
+# ADR 0015：让编译与执行归内核所有
 
-- 状态：已接受
-- 日期：2026-09-01
-- 决策类型：0.x 破坏性产品边界重置
-- 归档标签：`pre-breaking-scope-reset-2026-09-01`
-- 已归档 kernel commit：`446e83687ecf49be8e9b66beac8b40c7b8b224de`
-- 配套 daemon 决策：`photospider-daemon/docs/adr/0001`
+- 状态：Accepted
 
-## ADR 0016 的已接受目标
+## 1. 核心摘要 (TL;DR)
 
-产品所有权及排除范围保持不变。已接受目标仅修订 operation ABI、输入及元素契约条款，包括 ABI v3 与 Float32。
-参见[ADR 0016](0016-workflow-inputs-and-execution-bindings.zh.md)。下文原版本与
-表示描述保留为实现基线，直到 #257 交付；本次决策接受不表示运行实现已经改变。
+Photospider 将嵌入式图工作流编译与执行和本地进程编排分开。内核拥有类型化工作流数据、规划、执行、资源、取消和结果；daemon 拥有本地 session、job 和 IPC。这个边界让内核保持可嵌入，并让 daemon 只消费安装后的公开软件包。
 
-## 背景
-
-Photospider 曾在一个 kernel 中累积多种不同产品概念：嵌入式图执行、本地 daemon
-路由、持久服务状态、进程 worker 监管、policy plugin、plugin 准入、artifact
-权威和发布证据画像。这些概念造成所有权含混，也让本地 correctness 机制被描述成
-service 或 security 产品。
-
-本决策是有意进行的 0.x 破坏性切割。重置前源码只通过 Git 历史和上述 annotated
-archive tag 保留。active tree 不保留关闭的 target、兼容 adapter、抛异常 stub、
-forwarding header 或归档源码副本。
-
-## 决策
-
-### 所有权矩阵
-
-| 能力 | Photospider kernel | Photospider daemon |
-| --- | --- | --- |
-| Workflow source model 与验证 | 拥有 `WorkflowDocument` 和 graph validation | 只通过已安装的公开 kernel API 接收 workflow |
-| Compiler pipeline | 拥有 semantic IR、optimized IR、operation traits、优化和 physical planning | 不复制或序列化内部 IR |
-| 本地执行 | 拥有 CPU 必需/GPU 可选执行、transfer、residency、本地资源核算、取消、fallback 和结果发布 | 通过公开 compile/execute facade 提交工作 |
-| Runtime data | 拥有 `Value`、`Region`、layout、memory 和非持久结果 | 仅在 daemon Job 存活期间保留临时结果 |
-| Graph 所有权 | 拥有独立 `GraphContext`/`ExecutionContext` 对象 | 拥有不透明 `SessionId` 逻辑命名空间 |
-| 工作编排 | 不定义 Job identity、queue、status、registry 或 retry | 拥有临时 `JobId`、queue、status、取消、result 与 release |
-| IPC | 无 | 拥有 local IPC v3 和 `photospiderd` 生命周期 |
-| Operation 与 provider | 拥有 semantic traits、operation/provider ABI 与 registry，以及可信进程内 DSO 加载 | IPC 绝不接收 plugin 路径 |
-| Benchmark | 拥有原始 timing、backend/transfer/resource diagnostics、plan digest 和 correctness oracle | 可报告普通 daemon 生命周期 timing，但不拥有 evidence authority |
-
-依赖方向仅为单向：
+## 2. 架构心智模型 (Mental Model & Intuition)
 
 ```text
-photospider-daemon
-  -> 隔离安装的 Photospider package
-  -> 公开 compile/execute/value contract
+应用 -> WorkflowDocument -> Compiler -> ExecutionPlan
+                                   |             |
+                                   v             v
+                              内核注册表     ExecutionContext
+                                                | CPU / 可选 GPU
+                                                v
+                                             命名结果
+
+客户端 -> 本地 IPC -> daemon Session / Job -> 已安装的内核 API
+                           |                    (线上不传内部 IR)
+                           +-> job 生命周期和临时结果生命周期
 ```
 
-Kernel 绝不依赖 daemon。Daemon 绝不 include kernel 私有 header、链接 source-tree
-target、复制 compiler/planner code 或把内部 IR 放上 wire。
+编译器将调用方拥有的文档转换为类型化语义阶段与优化阶段，再生成物理计划。`ExecutionContext` 使用有界的本地 worker 和资源运行计划。daemon 通过已安装内核的 facade 提交工作，并拥有临时 job 记录与结果的生命周期。
 
-### Kernel 边界
+## 3. 契约规约与接口 (Formal Contracts & APIs)
 
-Kernel 是 session-agnostic、单机且可嵌入的。一个进程支持多个独立
-`GraphContext` 和 `ExecutionContext`，也支持它们并发。Graph context 是 kernel
-对象或 handle，不是 daemon Session，也不是 registry entry。
+```cpp
+class Compiler final {
+ public:
+  explicit Compiler(std::shared_ptr<OperationRegistry> operations);
+  Result<SemanticGraphIR> analyze(const GraphSnapshot& snapshot,
+                                  ResourceBindings resources = {}) const;
+  Result<OptimizedGraphIR> optimize(const SemanticGraphIR& semantic) const;
+  Result<ExecutionPlan> plan(const OptimizedGraphIR& optimized,
+                             const PlanningOptions& options = {}) const;
+};
 
-保留的 pipeline 为：
-
-```text
-WorkflowDocument
-  -> SemanticGraphIR
-  -> OptimizedGraphIR
-  -> ExecutionPlan
-  -> local ExecutionContext
-  -> ExecutionResult
+class PHOTOSPIDER_API ExecutionContext final {
+ public:
+  Result<ExecutionResult> execute(
+      const ExecutionPlan& plan, ExecutionBindings bindings = {},
+      const CancellationToken& cancellation = CancellationToken(),
+      const ExecutionOptions& options = {});
+};
 ```
 
-Document identity、semantic identity、optimized identity、physical plan
-identity、runtime allocation identity 和 daemon identity 保持分离。
-`SemanticGraphDigest`、`OptimizedGraphDigest`、`ExecutionPlanDigest` 与
-`PlanCacheKey` 是非安全的 compiler/cache identity。派生 cache 可丢弃并重建。
+这些代码还原公开 compiler 和 execution 方法的签名；省略了头文件与无关声明。`Compiler::analyze` 接收 graph snapshot 和可选的 resource bindings。`ExecutionPlan` 是公开 class。
 
-### Daemon 边界
+内核拥有 `WorkflowDocument` 的解释、图验证、语义与优化 IR、算子 traits、规划、`Value` 和 `Region` 契约、本地执行、资源计账、取消、后端选择、fallback 与结果发布。`GraphContext` 和 `ExecutionContext` 是独立对象，既不是 daemon session，也不是全局注册表条目。阶段 digest 和 plan/cache key 是用于复现与可丢弃派生数据的非安全身份。
 
-Daemon 是同一用户、本机、非持久 orchestration layer。其 Session 是一个进程和
-一个 trust domain 内的逻辑命名空间，不是 tenant 或 isolation boundary。重启会
-清空全部 Session、Job 和 result。
+daemon 拥有本地 IPC，以及围绕已安装内核软件包的临时进程编排。内核通过公开 API 拥有编译器 IR、执行资源、值和执行结果。本 ADR 规定组件边界；daemon session、job、取消和清理的实现细节由 daemon 仓库维护。
 
-Job 状态机严格为：
+算子和数据 provider 通过公开 C 接口加载到宿主进程。配置好的 operation registry 在执行期间保持冻结。ABI 校验、边界检查、异常隔离和清理用于保障正确性，不提供不可信代码隔离。
 
-```text
-Queued -> Running -> Succeeded | Failed | Cancelled
-```
+内核保留防御性正确性检查，包括 ABI 版本和结构大小、对齐、指针/count 与数组边界、整数和分配溢出、图和 plan 有效性、过期句柄/完成、取消时的结果发布检查、异常隔离及精确资源清理。仅当算子契约允许时，可选 GPU 失败才会回退 CPU。这些检查不提供进程隔离。
 
-不存在 attempt identity、自动 retry、checkpoint、recovery journal、持久
-Job specification、持久 artifact identity、output commit、receipt 或按 tenant
-quota。调用者 retry 是一次新 submit。Session close 会取消未完成 Job 并释放临时
-result。Job cancel 映射到 kernel cooperative best-effort cancellation，并拒绝
-stale publication。
+维护中的 benchmark 报告原始 compile/plan/execute/operation 时间、所选 backend、传输次数和字节数、活动字节峰值、fallback/错误原因、plan/result identity 及正确性观测。提供 oracle 时，每个样本记录有界且规范的 `oracle_name`；未提供 oracle 的运行标记为 `unchecked`。benchmark 不创建证据权威、持久制品身份或发布判定。
 
-Local IPC v3 只暴露：
+## 4. 负面清单与边界 (Non-Goals & Explicit Boundaries)
 
-1. `session.create`
-2. `session.close`
-3. `job.submit`
-4. `job.status`
-5. `job.cancel`
-6. `job.result`
-7. `job.release`
-8. `daemon.info`
-9. `daemon.shutdown`
+- 内核是单机可嵌入库，不定义 daemon job 身份、全局队列、服务状态、自动重试或持久化。
+- daemon 是本地编排进程。session 是进程内逻辑命名空间，不是租户或隔离边界。
+- 两个组件都不提供网络服务、认证、授权、多租户配额、远程执行或分布式设备。
+- 持久化 job、checkpoint、恢复日志、持久结果、制品权威身份、回执、发布证据和运行 SLO 判定不属于当前产品。daemon 的临时 job 仍属于本地编排。
+- operation 和 provider DSO 在宿主进程权限下运行。系统不提供沙箱、进程隔离、密码学准入或策略插件产品。
+- 内部语义 IR、优化 IR 和物理 plan 不是稳定的线上格式。
 
-受支持 POSIX 系统使用 Unix-domain socket；受支持 Windows build 可使用本机
-named-pipe abstraction。不存在 TCP、HTTP、gRPC、TLS、remote endpoint、v2
-adapter 或双协议。
+## 5. 后果与代价 (Consequences)
 
-### Operation 与 provider 边界
+内核调用方管理自己的 graph 和 execution context、输入分配、并发调用及结果生命周期。受控执行缓冲区受 context 配置限制；调用方拥有的输入和未计账的进程开销不受 RSS 上限约束。普通执行以协作方式观察取消，并拒绝从过期 graph revision 发布结果。已捕获的 frozen work 遵循其独立的 captured-plan 生命周期契约。
 
-保留 operation ABI/SDK/registry 和 data-definition/provider ABI。Operation
-semantic traits 是 compiler input。Operation/provider DSO 与 host 处于同一信任域
-并在进程内运行。Operation set 在进程启动时配置，开始执行后只读。
+daemon 调用方通过已安装内核的公开软件包和 API 集成。本内核仓库不能证明与某个 daemon 修订版兼容，也不规定 daemon 的清理和重启行为。
 
-ABI version、structure size、alignment、pointer/count pair、array bound、
-overflow、type/shape/`Region`/layout/facet validation、exception fencing 和
-exact cleanup 都是 correctness contract，而不是 sandbox 或 plugin security
-product。
-
-破坏性的 operation ABI 为 version two。每个 operation 发布带 required 标志的 closed
-typed parameter schema；compiler 在 semantic IR 形成前拒绝 unknown、missing、
-wrong-type、duplicate/conflicting 或其他非法参数。Operation callback 接收已验证参数值与
-plan-derived input Region。因此 Whole、Elementwise 与 overflow-safe clipped Halo rule
-会真实改变 physical input demand 和 plan identity，而不是只作为 digest metadata。
-
-### 保留的 correctness validation
-
-本次重置删除安全产品声明，而不是 defensive correctness。以下仍为必需：
-
-- ABI version/size/alignment 与 pointer/count/array validation；
-- integer 与 allocation overflow validation；
-- graph、typed IR、type、shape、`Region`、layout、facet 与 plan validation；
-- malformed local-IPC frame 与 result-shape validation；
-- stale handle、stale completion 与取消后 publication rejection；
-- exception fencing 和精确资源清理；
-- 可选 GPU path 不可用或拒绝工作时的 CPU fallback；
-- deterministic CPU 与 optional GPU FIFO 共享一个 ExecutionContext-wide waiting-callback
-  bound，running callback 不计入该数量；
-- 平台和 toolchain 支持时的普通负向、并发、ASAN、TSAN 与 fuzz coverage。
-
-### 删除的产品领域
-
-Active 产品不包含或宣传：
-
-- execution-profile SLO identity 或 release evidence；
-- verdict/envelope/attestation/receipt authority；
-- network service、authentication、authorization、Principal、Tenant、role、
-  capability、multi-tenant quota 或 control plane；
-- durable Job、attempt、checkpoint、recovery、journal、backup/restore、deploy、
-  rollback 或 operations-readiness authority；
-- fresh worker process、heartbeat/lease supervision、TERM/KILL/reap ownership 或
-  remote/distributed worker model；
-- plugin process isolation、sandbox、cryptographic trust、signature、certificate、
-  package admission 或 trust bundle；
-- policy DSO、policy public ABI/SDK/loader/registry/fixture；
-- durable artifact authority、durable Value identity、output commit、receipt 或
-  manifest-last publication。
-
-普通 bounded local concurrency 与 backpressure 仍保留。`ExecutionRun`、per-lane
-deterministic FIFO、它们的 single shared waiting admission、CPU worker、可选 local GPU
-lane、`ResourceLedger`、transfer/residency tracking、deterministic scheduling、
-cancellation、fallback 和 stale-completion rejection 都是 kernel mechanism，不得改名为
-daemon 或 service authority。
-
-### Benchmark
-
-维护的 benchmark 可报告原始 compile/plan/execute/operation timing、selected
-backend、transfer count/bytes、peak live bytes、fallback/error reason、plan
-digest、result digest 和 correctness oracle。提供 oracle 时必须给出 bounded canonical
-`oracle_name`，并记录在每个 sample 与 report；没有 oracle 的 run 会显式标记为
-`unchecked`。它们不生成 execution-profile
-identity、applicability/startability verdict、evidence envelope、attestation、
-release evidence 或 durable artifact reference。
-
-## 精确非目标
-
-- Remote 或 multi-user service operation。
-- Authentication、authorization、tenant isolation 或 security control plane。
-- Durable queueing、retry、recovery、checkpointing 或 artifact storage。
-- Operation/provider DSO 的 process isolation 或 sandboxing。
-- 内部 semantic/optimized/physical IR 的稳定序列化。
-- 兼容 IPC v2、frozen four-cell gate、被删 package component 或被删 public
-  header。
-- Distributed execution 或 remote device。
-
-这些内容已经删除或不在范围内；它们不是 deferred、optional、default-disabled
-或未来 roadmap 项。
-
-## 被取代的决策与权威
-
-本 ADR 是最高 active 产品边界权威。它将 ADR 0001、0004、0009、0010、0011 和 0013 从
-active ADR 集合退役，因为其精确的 graph-state scheduler、OpenCV operation、
-service/evidence 或 dense-image facet 决策在 reset implementation 中不存在。它取代
-ADR 0002、0003、0005、0007、0008、0012 与 0014 中的产品范围部分；这些 ADR
-保留的本地 kernel contract 会直接收窄。它也取代所有把 Job、worker process、
-policy、trust、isolation、durable artifact、evidence 或 network-service authority
-分给 kernel，或者把 IPC v2 compatible maintenance 分给 daemon 的 active
-roadmap、私有 OpenSpec working note、architecture page、Issue 或 Project
-description。
-
-历史 archive 仅是历史证据。Active index 不得把 archive 链接成当前权威，也不得
-使用 archive 恢复已删除领域，除非先产生一个明确取代本决策的新破坏性产品决策。
-
-## 后果
-
-- 0.x 版本线立即发生 source 与 package compatibility break。
-- Kernel 和 daemon release 必须从隔离安装的 package 构建并测试。
-- 被删实现只能从 Git 历史和 annotated archive tag 恢复。
-- 文档、Issue、Project、test、CI inventory 与 package export 必须描述同一边界。
-- 未来任何重新引入已删领域的提案，必须先产生一个明确取代本决策的新
-  product-boundary ADR。
-
-## S3 目标修订
-
-[ADR 0018](0018-local-result-caches-and-frozen-execution.zh.md) 明确允许有界可丢弃磁盘派生数据与冻结执行，并替换算子版本及缩放区域目标；接受不代表实现完成。
-
-## S4 目标修订
-
-[ADR 0019](0019-metal-resident-image-workflows.zh.md) 增加显式 Metal 执行、原生 shared storage 和 operation ABI 6。接受定义目标，不代表实现完成；其余边界保持。
+消费者应使用安装的软件包，并匹配其公开软件包和 ABI 版本。公开契约变化时，下游需要重建。插件校验可以拒绝不匹配或格式错误的接口表，但不能保证已接受的进程内 DSO 安全。

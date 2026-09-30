@@ -1,116 +1,48 @@
-# ADR 0012: Operations and Data Definitions Use Exact In-Process C ABIs
+# ADR 0012: Operation Plugins Use Versioned C Contracts
 
-- Status: Accepted, narrowed by ADR 0015
-- Date: 2026-09-01 boundary revision
+- Status: Accepted
 
-## Accepted target amendment by ADR 0016
+## 1. Core Summary (TL;DR)
+Operation plugins and data providers cross the kernel boundary through versioned C interfaces. The host validates and copies descriptors before making registry entries available. This keeps compiler metadata independent from plugin C++ object layouts while leaving native plugins in the host process and trust domain.
 
-The accepted target replaces operation ABI v2 with ABI v3 and per-port schemas; provider ABI v1 keeps its layout and adds Float32 element decoding.
-See [ADR 0016](0016-workflow-inputs-and-execution-bindings.md). Existing version
-and representation descriptions below remain the implementation baseline until
-#257 delivers the target; decision acceptance does not report runtime changes.
+## 2. Mental Model & Intuition
 
-## Context
+```text
+startup configuration --> load library --> validate exact table --> copy traits/schemas
+                                                   |
+                                      registry frozen for compiler and runs
+                                                   |
+                                          synchronous callback
+                                                   |
+                                      host validates/copies output
+```
 
-The kernel needs an operation extension point and a directly related data
-definition extension point without exposing compiler/runtime implementation
-objects. Correctness validation must remain strong without claiming that a C
-ABI makes native code safe or isolated.
+Library-owned tables remain mapped while their destroy callback runs. The host owns copied metadata and validates generic `Value` callback output. Dependency programs can retain authorized input-owner handles until explicit release or state destruction; their per-poll input/output pointers remain borrowed. Planar callbacks write through host-owned row buffers, and GPU tokens retain allocations until release or callback retirement. These lifetimes differ and are detailed in [Plugin ABI](../kernel-architecture/Plugin-ABI.md).
 
-## Decision
+## 3. Formal Contracts & APIs
 
-The operation ABI is an exact version-two C contract; the data-provider ABI
-remains an independent version-one contract. Their C++ helpers add no second
-binary contract. Operation ABI v1 is not retained as an adapter or decoder.
+```c
+#define PS_OPERATION_ABI_VERSION_11 11U
+uint32_t ps_operation_plugin_get_abi_version(void);
+const ps_operation_plugin_api_v11 *ps_operation_plugin_get_api_v11(void);
+#define PS_DATA_PROVIDER_ABI_VERSION_1 1U
+#define PS_PLANAR_OPERATION_ABI_VERSION_3 3U
+uint32_t ps_data_provider_get_abi_version(void);
+const ps_data_provider_api_v1 *ps_data_provider_get_api_v1(void);
+```
 
-### Operation ABI
+Operation ABI v11 declares operation traits, parameter and port schemas, callbacks, output contracts, and native GPU services. The independently versioned provider ABI v1 publishes bounded data-schema records. The specialized planar interface is separately versioned as ABI v3. See [Plugin ABI](../kernel-architecture/Plugin-ABI.md) for record layouts and callback order.
 
-An operation descriptor contains one length-framed key, exact input count,
-flags, estimated bytes, output element type, one closed shape rule (including
-an explicitly bounded fixed shape), one closed Region rule, optional halo
-radius, cacheability, a bounded parameter-schema pointer/count, one synchronous
-execute callback, and opaque descriptor-owned state. Each parameter schema
-record publishes a unique key, exact closed type, and required/optional bit.
+The loader checks exact ABI versions and structure sizes, natural pointer/array alignment, pointer/count pairs, bounded counts and key lengths, strict UTF-8 keys, checked arithmetic, closed enum/flag combinations, required callbacks, dense fixed-output representability, callback results, output byte/facet bounds, and exactly-once destroy ownership. It rejects trailing structure bytes. Multi-record updates use copy-then-swap, so allocation failure or a later invalid record cannot publish a valid prefix. A library guard acquires ownership immediately and invokes any safely readable destroy callback before closing each rejected library. Published plugin tables are destroyed before unload.
 
-The host copies these values into `OperationTraits` and semantic IR. It does
-not copy callback, DSO, or opaque-state identity into IR or digests. A callback
-receives bounded dense whole-Region input views plus plan-derived input-demand
-offsets/extents, a canonical array of already schema-validated parameter
-values, bounded facet records, selected local backend, cooperative cancellation
-observation, and a host-owned single-publication output sink. The host copies
-output facets/bytes before callback return and rebuilds a validated Value.
+Generic operation callbacks run synchronously. Their input views and output sink are borrowed for the call, and accepted generic Value output is copied or frozen before return. The first sink publication attempt claims the sink even when validation fails; a second attempt records a sticky violation. Host cancellation is checked first, followed by sink allocation failure, malformed image output, and duplicate publication. A backend-unavailable result after a published sink attempt does not request fallback: an accepted output becomes `OperationFailed`, while a rejected first attempt returns the sink’s typed failure. Unknown nonzero callback results become `OperationFailed`. CPU fallback is available only for an explicit backend-unavailable result from a GPU attempt whose copied traits permit it, before any sink publication attempt.
 
-The C++ registry treats a Fixed rule as a logical descriptor contract: rank is
-1..8, every extent is nonzero, and the element type and rule are closed. It
-does not multiply the logical extents during trait publication. An embedding
-callback may therefore publish a valid zero-stride broadcast Value even when
-the corresponding dense element or byte product overflows. `estimated_bytes`
-remains the callback's independent modeled resource-admission value and is
-copied into the physical plan. The C DSO descriptor remains deliberately
-narrower because ABI v2 publishes no strides: a Fixed DSO output must have
-representable contiguous signed strides and a complete uint64 byte count, and
-the loader rejects it transactionally otherwise. Preserve and Match semantics
-are unchanged.
+Planar callbacks use host-owned row buffers and invocation-local scratch services; they do not return a generic Value through the operation sink. GPU allocation tokens retain backing ownership until release or callback retirement. Dependency programs may retain authorized input handles until release or state destruction, while ordinary service pointers expire at the synchronous poll boundary. The registry is frozen before compiler and executor use.
 
-The unchanged `int` callback result has a closed version-two vocabulary:
-success, ordinary failure, cooperative cancellation, and backend unavailable.
-An explicit backend-unavailable result becomes `BackendUnavailable`; only a
-GPU attempt whose copied traits permit CPU fallback may retry on CPU. Ordinary
-failure and every unknown nonzero integer remain `OperationFailed` and never
-trigger fallback. A backend-unavailable callback must not invoke the output
-sink. If it does, an accepted output becomes a terminal `OperationFailed`
-contract violation and a rejected output preserves the sink's exact typed
-failure; neither path exposes `BackendUnavailable` or retries on CPU. Host
-cancellation remains authoritative. Callback signature and descriptor layout
-remain unchanged.
+## 4. Non-Goals & Explicit Boundaries
+- ABI validation is not a sandbox, signature verification, package admission, or crash isolation.
+- The daemon does not load operation plugins as an IPC capability.
+- Provider records describe semantic schemas; they do not read files or create stored Values.
 
-### Data-definition ABI
-
-A data provider publishes only bounded schema records: key, element type, and
-maximum rank. The registry copies and freezes them. This ABI directly supports
-operation/Value vocabulary; it does not read files, create runtime Values, or
-own persistence.
-
-### Exact validation and lifetime
-
-Load and registration validate before publication:
-
-- exact ABI version and exact structure size;
-- natural pointer/array alignment;
-- pointer/count pairs, maximum record/key/rank/parameter bounds, and checked
-  arithmetic;
-- length-framed keys without embedded NUL/control bytes;
-- closed enum/flag/rule/parameter-type vocabulary, unique parameter keys,
-  required-item presence, exact source type, and legal trait combinations;
-- descriptor-only C++ fixed-shape validation, plus independent dense
-  stride/byte representability for stride-free C DSO fixed descriptors;
-- required callbacks, single output publication, exact output element/shape,
-  bounded facet array/key/version/payload, and byte count;
-- callback exception fencing and exactly-once destroy ownership.
-
-This version intentionally rejects trailing structure bytes rather than
-treating them as forward compatibility. A malformed table publishes no
-partial registry entry; multi-record publication uses copy-then-swap so
-allocation failure also publishes no prefix. Libraries load only from explicit
-process-startup configuration; registries become read-only before
-compiler/executor use and destroy plugin-owned tables before unloading.
-
-Operation/provider DSOs execute in process with the same trust as the host.
-ABI validation prevents malformed interoperability; it is not a sandbox,
-signature, certificate, trust chain, package admission, heartbeat, or process
-supervisor.
-
-## Boundary
-
-There is no policy ABI/SDK/DSO, external scheduler, plugin path over IPC,
-isolated plugin process, or native-code security product. The daemon never
-selects a plugin path.
-
-## Consequences
-
-- Installed C11/C++17 consumers can author same-trust operation/data-definition
-  DSOs.
-- Compiler traits remain copied portable values.
-- Exact validation, exception fences, and destroy-before-unload preserve
-  correctness and cleanup.
-- ABI version changes are explicit breaking changes in the 0.x package.
+## 5. Consequences
+A version or layout mismatch rejects loading/registration before publication. Malformed descriptors publish no prefix of a registry update. Callback exceptions are fenced at the boundary, but a crash or hang in native code can still affect the host process. ABI changes require rebuilding external consumers against the matching headers and package.

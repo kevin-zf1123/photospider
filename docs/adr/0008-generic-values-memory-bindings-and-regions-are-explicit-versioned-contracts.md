@@ -1,77 +1,48 @@
-# ADR 0008: Value, Layout, and Region Are Explicit Validated Contracts
+# ADR 0008: Values and Input Bindings Carry Explicit Layout Contracts
 
-- Status: Accepted, narrowed by ADR 0015
-- Date: 2026-09-01 boundary revision
+- Status: Accepted
 
-## Accepted target amendment by ADR 0016
+## 1. Core Summary (TL;DR)
+A `Value` describes logical type, shape, valid coverage, byte layout, semantic facets, and retained resources explicitly. Workflow declarations define required inputs; each run supplies exactly one matching binding per declaration. This prevents pointers or payload bytes from silently defining graph meaning.
 
-The accepted target adds Float32 and the S1 image/scalar binding constraints.
-See [ADR 0016](0016-workflow-inputs-and-execution-bindings.md). Existing version
-and representation descriptions below remain the implementation baseline until
-#257 delivers the target; decision acceptance does not report runtime changes.
+## 2. Mental Model & Intuition
 
-## Context
+```text
+WorkflowInputDeclaration (type, shape, region, layout, facets)
+                    |
+                    +-- Run binding: Value | RegionalSource | InputSnapshot | PlanarImage
+                    |
+                    +-- validated read or exact demand --> operation
+```
 
-Typed compilation and local heterogeneous execution need a runtime value that
-does not infer logical shape or addressed bytes from a raw pointer. The
-breaking baseline intentionally keeps this contract small enough to validate
-completely.
+For an RGBA tensor shaped `[height, width, 4]`, the channel axis can remain whole while a planner requests a rectangular spatial region. Logical region coordinates describe pixels/elements; strides describe addresses. Planar images retain separate channel planes rather than claiming interleaved storage.
 
-## Decision
+## 3. Formal Contracts & APIs
 
-One immutable dense `Value` contains exactly:
+```cpp
+struct ValueDescriptor { ElementType element_type; std::vector<std::uint64_t> shape; };
+struct StridedLayout { std::uint64_t byte_offset; std::vector<std::int64_t> byte_strides; std::vector<std::uint64_t> origin; };
+class Value {
+ public:
+  static Result<Value> create(ValueDescriptor, Region, StridedLayout,
+      std::vector<std::uint8_t>, std::vector<ValueFacet> = {}, ResourceBindings = {});
+};
+struct WorkflowInputDeclaration { std::uint64_t id; std::string name; ValueDescriptor descriptor; Region region; StridedLayout layout; };
+struct ExecutionBinding { std::string name; Value value; /* alternatively source, snapshot, or image */ };
+```
 
-- a `ValueDescriptor` with one closed `ElementType` and rank-1-to-8 nonzero
-  shape;
-- one rank-matching logical `Region` of unsigned half-open intervals;
-- one `StridedLayout` with byte offset and one signed byte stride per axis;
-- zero to 64 versioned `ValueFacet` records with unique printable-ASCII keys
-  and bounded opaque payloads;
-- one shared immutable owned byte vector.
+The element vocabulary currently includes `UInt8`, `Int8`, `UInt16`, `Int16`, `Int64`, `Float32`, and `Float64`. Shape rank is 1..8 with nonzero extents. A `Region` is rank-matching logical coverage using half-open intervals. A layout uses signed byte strides and an origin; validation checks the complete addressed range against retained storage, including negative and zero strides. Value bytes use immutable shared storage.
 
-The closed element vocabulary is `UInt8`, `Int64`, and `Float64`. Signed
-strides permit reversed or broadcast views only when complete addressed-range
-validation proves that every element byte remains inside the owned vector.
+A Value has at most 64 facets. Each key is unique printable ASCII of at most 256 bytes, and the host sorts facets by key before publication. Each facet payload is at most 64 KiB; validation also bounds the aggregate payload. Resource bindings retain explicit owners.
 
-`Value::create` publishes atomically after checking rank, nonzero extents,
-Region rank/containment, element vocabulary, stride count, signed
-multiply/add overflow, offset bounds, element tail, complete addressed byte
-range, facet key/version uniqueness, per-facet payload size, and aggregate
-facet payload size. Facets are sorted by key before publication. Failure
-returns no partial Value. Copies share immutable bytes and never expose a
-writable pointer.
+Empty Region coverage is valid for a generic Value, although operation ports may require nonempty coverage. See [Region semantics](../kernel-architecture/Region-Semantics.md).
 
-`Region` is rank-general logical coverage, not a byte range. Construction and
-containment use checked unsigned addition; `element_count` uses checked
-multiplication. An empty interval makes the complete Region empty.
+Each declared input is bound exactly once on each Run, including unused declarations. The binding must match declared metadata and required whole coverage. Exactly one input source form is selected. Caller containers stay unchanged while copied; immutable source state must support concurrent reads. Payload bytes are run data, not compiler identity.
 
-### Identity and local transfer
+## 4. Non-Goals & Explicit Boundaries
+- A logical region is not a byte range and does not imply physical contiguity.
+- Generic Values do not imply persistence or a serialization format.
+- Planar storage is not interleaved RGBA storage. Writable external producer binding is not inferred from a pointer.
 
-Logical descriptor/Region/layout facts are independent from allocation
-address, backend label, and optional reproducibility digests. `Value` itself
-has no durable or daemon identity.
-
-When local execution crosses backend labels it creates another validated Value
-with copied immutable bytes. Transfer/residency observations live in the
-owning `ExecutionRun`, not in a persistent Value registry.
-
-### Data definitions
-
-The data-definition ABI may register a bounded schema key, element type, and
-maximum rank for operation/Value semantics. Registry records are copied and
-frozen at startup. The ABI does not add a storage or construction service.
-
-## Boundary
-
-The current contract has no blocked layout, readiness fence, writable producer
-binding, general serialization API, durable artifact, receipt, retention,
-recovery, or storage-service semantics. Facets are bounded semantic records,
-not memory owners or extension-code handles.
-
-## Consequences
-
-- Compiler, operation, and runtime checks share one small dense Value model.
-- Malformed or duplicate facets fail before Value publication.
-- Negative/broadcast strides remain safe through complete range validation.
-- Cross-backend copies cannot publish malformed layout or stale result state.
-- A Value or digest never implies persistence or authorization.
+## 5. Consequences
+Malformed rank, shape, bounds, facets, or layout fail before Value publication. Binding shape/layout/facet differences fail validation before callbacks. Bad bounds, overflow, and bounded payload exhaustion can return typed failures or allocation exceptions according to the failing operation. Callers must retain explicit resource owners and keep borrowed callback buffers only for their documented lifetime.

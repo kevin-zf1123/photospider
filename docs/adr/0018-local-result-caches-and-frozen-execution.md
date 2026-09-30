@@ -1,150 +1,97 @@
-# ADR 0018: Local Result Caches and Frozen Execution
+# ADR 0018: Freeze Inputs and Reuse Exact Local Results
 
 - Status: Accepted
-- Date: 2026-09-09
-- Acceptance: the maintainer explicitly requested implementation of the complete S3 plan, including all choices below and per-Issue commits, independent review, protected PR delivery and cleanup.
-- Baseline: kernel `54d57f30a68807c4d09fbc7439debda0a9b0c614`
 - Reader mirror: [Chinese](zh/0018-local-result-caches-and-frozen-execution.zh.md)
 
-Acceptance defines a target; the linked Issues record actual delivery. This
-ADR replaces only ADR 0015's exclusion of local disk-derived Values, the
-ordinary graph-currentness requirement for explicitly frozen execution, and
-ADR 0017's operation/trait version and same-size spatial mapping clauses.
-Application code owns preview requests, event queues and presentation. Kernel
-objects own immutable inputs, execution, shared computations and disposable
-caches. No daemon Job/IPC, document saving, recovery, artifact authority, native
-GPU or incremental compiler product is added.
+## 1. Core summary (TL;DR)
 
-## Research and choice
+Mutable workflow graphs and edited inputs need stable execution inputs, while regional work benefits from reusing results whose exact dependencies have not changed. The kernel owns immutable input snapshots, frozen execution bundles and bounded disposable result caches. Exact content and dependency identity permit reuse without making cache state authoritative.
 
-[libvips evaluation](https://www.libvips.org/API/8.17/how-it-works.html) and
-[tilecache](https://www.libvips.org/API/8.17/method.Image.tilecache.html) demonstrate
-demand-driven regional production, bounded tile retention and downstream
-invalidation. [OpenImageIO ImageCache](https://github.com/AcademySoftwareFoundation/OpenImageIO/blob/main/src/include/OpenImageIO/imagecache.h)
-uses approximate retention limits; S2's controlled allocation limit remains
-strict here. [libvips shrink](https://www.libvips.org/API/8.17/method.Image.shrink.html)
-provides the box-filter comparison. No framework dependency or timing claim is
-introduced. Existing FNV PlanCacheKey excludes payload and cannot identify
-runtime results. #203 remains compiler-fragment reuse, not result caching.
+## 2. Mental model and intuition
 
-Whole-image identity would invalidate unrelated work; caller-provided revision
-claims would place correctness on unverifiable mutable data. Choose immutable
-kernel-owned tiled snapshots and exact demanded content identities. A second
-operation ABI path would duplicate regional validation; choose one breaking
-ABI 5. Application request policy remains outside the kernel. Transactional
-database recovery is unnecessary for disposable cache entries.
+`InputSnapshotStore` works like a versioned block store: a patch copies the blocks it intersects and shares the rest with earlier versions. A frozen execution pins one compiled plan, its registry and its immutable bindings, so later graph edits do not change that run.
 
-## Versions and scaled regions
+```text
+Graph + bindings --freeze--> Frozen plan and input owners
+                                  |
+                         requested local result
+                           /             \
+                  exact cache hit      cache miss
+                       |                  |
+                       |             producer flight
+                       |             /            \
+                       |       subscriber A    subscriber B
+                       |             \            /
+                       +---------- validated immutable result
+                                      |
+                           memory cache / optional disk cache
+```
 
-Package 0.5.0, OperationTraits 5 and operation C ABI 5 replace 0.4/4. C++17,
-WorkflowDocument schema 2 and provider ABI 1 remain. C++ consumers rebuild;
-operation ABI 4 is rejected without adapters. Changed compiler semantics use
-v5 digest domains. Runtime content identity uses separately domain-separated
-SHA-256, preserving exact parameter/sample bit patterns including signed zero.
+An `ExecutionContext` owns worker resources, in-flight coordination and its cache entries. A result may outlive the context when a returned `Value` still owns the result storage and its budget lease. Application code owns preview policy, event queues, publication arbitration and presentation.
 
-An explicit spatial box-shrink rule resolves a required integer parameter in
-[1,16]. Output H/W are ceil(input H/W / factor); channels remain complete.
-Backward demand multiplies output spatial coordinates by factor, clipped at
-logical edges. Forward dirty mapping divides covered input coordinates with
-floor/ceil rounding. All arithmetic is checked. Image and mask outputs retain
-their respective profile. Edge cells average actual covered samples; box
-accumulation uses fixed row/column order. Generic Whole remains conservative.
+## 3. Formal contracts and APIs
 
-## Immutable input and execution snapshots
+```cpp
+struct InputSnapshotStoreConfig {
+  std::uint64_t maximum_bytes = 256U * 1024U * 1024U;
+  std::uint32_t block_size = 128;
+  std::uint64_t maximum_blocks = 65536;
+};
 
-A public snapshot store imports valid Float32 RGBA images or masks, owns
-immutable blocks and applies ordered exact-region replacement patches by
-copying affected blocks only. It provides regional reads and identities.
-Retained versions remain readable and share unchanged storage. The store has
-an independent byte limit; failure leaves the original snapshot intact and
-reports ResourceExhausted. Metadata is outside pixel-storage accounting.
+class InputSnapshotStore {
+ public:
+  Result<InputSnapshot> import_value(const Value&, const SnapshotAccessOptions& = {}) const;
+  Result<InputSnapshot> patch(const InputSnapshot&, const Value& replacement,
+                              const SnapshotAccessOptions& = {}) const;
+  std::uint64_t live_bytes() const;
+};
 
-An explicitly frozen execution snapshot captures a currently valid matching
-plan, immutable bindings and registry ownership. It survives source graph
-replacement/destruction. Ordinary execute retains existing stale/cancellation
-priority. Frozen execution observes cancellation and its own validity, never
-uses a later input version, and retains owners until callbacks retire.
+struct ExecutionContextConfig {
+  std::uint32_t cpu_workers = 0;
+  bool gpu_enabled = false;
+  std::uint32_t maximum_queued_tasks = 1024;
+  std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
+  std::uint64_t result_cache_bytes = 0;
+  std::optional<DiskCacheConfig> disk_cache = {};
+};
 
-## Result caching and shared computation
+class ExecutionContext {
+ public:
+  Result<FrozenExecution> freeze(const ExecutionPlan&,
+                                 ExecutionBindings = {}) const;
+  Result<ExecutionResult> execute(const FrozenExecution&,
+                                  const CancellationToken& = {},
+                                  const ExecutionOptions& = {});
+};
+```
 
-Caching is opt-in on ExecutionContext. Cache keys include exact local operation
-semantics, parameter bits, ordered demanded input content and metadata, output
-Region, backend and implementation identity. Global graph revision and
-unrelated branches do not enter the local key. Generic unproven sources remain
-executable but their dependent results cannot cross Run boundaries. Only
-cacheable, deterministic, side-effect-free paths qualify. Scalar bindings are
-copied immutable Values and use their exact bytes.
+The excerpt omits unrelated members of `ExecutionContext`.
 
-Forward invalidation respects Elementwise, Halo, shrink and Whole dependencies.
-Changing exposure retains blur; changing local pixels affects only dependent
-requested regions; unrelated graph edits preserve cache validity. Cache clear
-and eviction always permit recomputation. Exact content identity, not a dirty
-hint alone, authorizes reuse.
+Snapshots contain supported rank-1..8 `Value` inputs and preserve their sample bits and facets. Each snapshot is immutable; `patch` accepts a matching descriptor and facets plus a nonempty replacement Region, copies intersecting blocks, and leaves every earlier version readable. The store enforces one aggregate payload-byte limit across retained versions. Metadata and caller-owned Values are outside that limit. In the current implementation, snapshot import rejects `photospider.image`, rank-three-or-higher `photospider.color-array`, `ImagePlane` and typed `Mask` values because these require structural planar storage; image workflows use the `PlanarImage` binding path instead.
 
-Identical in-flight computations share one producer within an ExecutionContext.
-Every subscriber has independent cancellation. One cancellation cannot stop
-another subscriber; the last subscriber requests producer cancellation.
-Producer-owned frozen inputs and registry survive until admitted callbacks
-retire. No callback waits on another callback occupying the same worker pool.
-Only successfully validated immutable output can enter the completed cache.
+`content_identity` hashes canonical metadata and the requested exact sample bits. Shape, dtype, coordinates and facets participate; allocation address, layout and block geometry do not. Read and identity operations accept sample bounds and cooperative cancellation. A cancelled read may have partially filled the caller's destination, which the caller must discard.
 
-Cache capacity is a sublimit of maximum_live_bytes. Shared allocations count
-once; retained results continue owning their leases after eviction/context
-teardown. Reclaim idle entries before admission; do not wait indefinitely for
-caller-owned results. Failed cache admission skips retention; an impossible
-working set fails ResourceExhausted. Report hits, misses, evictions, shared
-computations, retained bytes and actual operation work separately.
+`freeze` captures a current matching plan, immutable bindings and the operation registry owner. A custom `RegionalSource` must first be imported into a kernel snapshot. Capture invokes no operation callback and rechecks graph currentness before returning. Frozen execution uses the captured input versions after graph replacement or destruction; ordinary execution retains its normal currentness checks. Each execute call supplies independent cancellation, and owners remain alive until admitted callbacks retire. The current capture API rejects plans that require structural planar image capture; it does not freeze the `PlanarImage` binding path.
 
-## Operations and application workflow
+Completed-result retention is optional. Its capacity is a sublimit of `maximum_live_bytes`; zero disables retention while exact in-flight demand sharing remains available. Keys cover the local operation contract and implementation, exact demanded input content and metadata, output Region and relevant backend identity. Compiler graph revision and unrelated branches do not enter a local result key. A dirty hint can narrow work but cannot establish reuse without content identity. Reuse requires every participating operation to be deterministic, side-effect-free and cacheable, with proven input dependencies.
 
-Provide image/mask box shrink and image.brush_circle through C++ and the
-maintained C module. Brush center, positive radius, nonnegative finite linear
-RGB and alpha [0,1] vary per invocation. Pixel centers inside the closed circle
-receive premultiplied source-over; outside pixels remain unchanged. One event
-is one hard-edge stamp, with no automatic interpolation or device dynamics.
-Apply only the clipped circle bounding Region, then publish its patch in order.
+The coordinator lets identical in-flight requests in one context share a producer. Each waiter has independent cancellation. Cancelling one waiter leaves other live waiters attached; when the last waiter leaves, the coordinator requests producer cancellation. The producer owns its frozen inputs and registry until admitted callbacks retire. It does not block a worker by waiting for another callback in the same pool. Only validated successful immutable results enter completed caches.
 
-The application example uses a factor-four proxy followed by full resolution.
-Proxy blur radius/sigma scale with resolution and clamp to supported bounds;
-proxy output is explicitly approximate. Final/export uses original parameters.
-Bounded queues coalesce pending slider previews; admitted brush events are
-never dropped. Full admission reports backpressure and permits retry. Finite
-tile batches alternate preview/export service. Publication checks content
-version, target and quality; stale results and quality downgrades are rejected.
-A frozen export continues reading its original input during editing.
+An optional disk cache requires an explicitly selected local directory, a positive in-memory result-cache capacity and the maintained built-in operation registry identity. Custom operation registries have no persistent-cache identity, so disk lookups miss and writes are ineligible. The cache stores only CPU-exact Float32 values with image-v2 or canonical coverage-mask metadata, under bounded byte, entry and queued-write limits. The kernel exclusively locks the selected directory while the cache is alive. Startup removes abandoned temporary files and indexes bounded entries; a disk hit is checked against the expected key, descriptor, facets, semantic samples and checksum before use. Unsupported or corrupt entries are treated as misses. Disk data never restores workflow state or grants result authority; failed or pressured asynchronous writes are dropped. GPU-mode runs do not read or write disk entries.
 
-## Disposable disk data
+## 4. Non-goals and explicit boundaries
 
-The embedding explicitly selects an exclusive local directory, byte and entry
-limits. The kernel persists only finite CPU Float32 image/mask regions in a
-versioned uncompressed canonical byte representation. Validate descriptor,
-facets, Region, checked byte length, key and SHA-256 checksum before publication.
-Persistent eligibility requires a verified maintained implementation fingerprint;
-implementation/build changes cause misses. Unknown external implementations
-remain eligible only for process-local reuse when otherwise proven pure.
+- Snapshots cover immutable input Values and their content; they do not serialize an execution plan or workflow document.
+- A frozen execution pins one in-memory plan and its inputs; it does not make later graph edits current for ordinary execution. `freeze` currently rejects plans that require structural planar image capture.
+- Result caches are disposable accelerators. They do not provide transactional recovery, durable commits, request history or authoritative artifacts.
+- The kernel does not own preview queues, edit coalescing, user-visible freshness policy or publication decisions.
+- Unproven mutable sources may execute, but their dependent results cannot be reused across runs.
+- Disk persistence is restricted to the formats accepted by the current disk-cache implementation. Cache files are not a plugin, interchange or backup format.
 
-Temporary files become entries only after completion. Incomplete, corrupt,
-unknown-version and mismatched entries are discarded and recomputed. A bounded
-asynchronous writer drops cache writes on failure or pressure, outside required
-preview publication. Restart may reuse valid derived data but never restores
-work state, requests, documents or output authority. No durable commit guarantee
-is advertised. A single active owner uses a directory at a time.
+## 5. Consequences
 
-## Acceptance and delivery
+Retaining old snapshots and returned Values retains their backing blocks and leases. Patches consume additional budget for changed blocks while older versions remain referenced. A snapshot import or patch that exceeds the store budget fails with `ResourceExhausted`; callers can release obsolete versions and retry.
 
-S3Cache.LocalInvalidation compares cached and uncached results and exact work
-regions after exposure, stamp and unrelated-branch changes. S3Preview.LatestAndExport
-replays edits while exporting a frozen snapshot, proving order, bounds, progress
-and publication arbitration. S3Disk.DiscardAndRebuild uses separate processes,
-corruption, deletion and eviction, and compares independent formal results.
+The cache reclaims idle entries before resource admission. Eviction and cache clearing remove reuse eligibility but do not invalidate Values already held by callers. Cache admission failure skips retention; if the working set itself exceeds the context's controlled-buffer capacity, execution fails with `ResourceExhausted`. The caller must release unneeded results to make their owned capacity available.
 
-Cover odd sizes, clipped edges, halo, transparent/HDR data, invalid parameters,
-old snapshots, cancellation/clear races and exact/insufficient budgets with
-deterministic synchronization. Ship examples/s3_image_workflow through installed
-public APIs. Static/shared C/C++ consumers and daemon 0.5 consumption remain
-required. Each leaf has a separate commit; comprehensive independent review and
-required CI/bot fixes precede protected merge and Issue settlement.
-
-## S4 target amendment
-
-[ADR 0019](0019-metal-resident-image-workflows.md) adds explicitly selected Metal execution, native shared storage and operation ABI 6. Its acceptance defines a target, not implementation completion. All other boundaries remain.
+Cancellation is cooperative. Submitted work retires before its owners are released, and a producer continues while any subscriber still needs it. Disk cache writes may be dropped under I/O failure or queue pressure, so callers must treat a later miss as normal. `flush_disk_cache` is explicit; result publication does not wait for disk writes.

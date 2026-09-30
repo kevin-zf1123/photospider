@@ -1,122 +1,73 @@
 # Paged four-connected components and area index
 
-Package 0.10 exposes `make_component_operation`, `component_area_schema` and
-`component_filter_schema` through the installed C++ API. The factory uses C operation ABI 9.
+[Chinese reader version](zh/Paged-Components.zh.md).
 
-## Public profile
+## 1. Scope and ownership
 
-`ComponentsSpec` requires positive HW, `H*W <= (INT64_MAX-4095)/32`,
-`maximum_count <= INT64_MAX` and MinPixel IDs for these factories. Input masks
-are facet-free UInt8 HW; any nonzero byte is foreground. The named
-`components_min_pixel_v1` basis uses background zero and component ID
-`1+minimum(row-major pixel index)`. IDs are deterministic within a snapshot;
-edits that split or merge components need not preserve them.
+The `components4.labels`, `components4.area`, and `components4.filter` CPU operations compute a four-connected partition, derive a sorted area index, and threshold labels by area. The labels producer owns a disk-backed union-find table during the full raster scan. Result publication owns the completed labels/table together; area and filter Results retain the exact input ObjectIds and backing needed to interpret their rows.
 
-| Stage | Input and output |
+## 2. Data layout and memory
+
+```cpp
+enum class ComponentIdScheme : std::uint32_t { MinPixel = 1, CompactMinOrder = 2 };
+struct ComponentsSpec final {
+  std::uint64_t height = 1, width = 1, maximum_count = 1048576;
+  ComponentIdScheme ids = ComponentIdScheme::MinPixel;
+};
+Result<SchemaTemplate> component_area_schema(const ComponentsSpec& spec);
+Result<SchemaTemplate> component_filter_schema(const ComponentsSpec& spec);
+Result<OperationDefinition> make_component_operation(
+    ComponentOperation operation, const ComponentsSpec& spec);
+```
+
+The current operation factory supports `MinPixel`: positive HW dimensions, checked `H*W <= (INT64_MAX-4095)/32`, and `maximum_count <= INT64_MAX`. Input is a facet-free UInt8 HW mask; any nonzero byte is foreground. Background label is zero. A foreground component ID is one plus the minimum row-major foreground pixel position. IDs are deterministic for one input snapshot; a later edit that splits or merges regions can change them.
+
+| Operation | Input and output |
 | --- | --- |
-| `components4.labels` | UInt8 HW → complete Components: N Int64 labels and K Int64[id,area,min] rows |
-| `components4.area` | Complete Components → complete sorted Int64[id,area] index with RuntimeCount K |
-| `components4.filter` | Components plus its area index → complete N-row UInt8 0/1 mask |
+| `components4.labels` | UInt8 HW -> CompleteBundle labels and `(id,area,min_position)` rows |
+| `components4.area` | Complete Components -> CompleteBundle sorted `(id,area)` rows with RuntimeCount |
+| `components4.filter` | Components plus its associated area index -> CompleteBundle UInt8 HW mask |
 
-The index schema is `photospider.component_area_index`, with field `rows` and
-`component_area_basis_v1` metadata retaining the Components specification.
-The filter schema is `photospider.component_filter`, field `mask`, and
-`component_filter_basis_v1` metadata. Both retain HW domain and the full basis;
-the filter's required positive Int64 `minimum_area` belongs to the operation
-semantic key. It supports the complete positive Int64 range without floating
-conversion of the threshold. Output is exactly
-`label!=0 && associated_area[label]>=minimum_area`.
+The area index schema retains the Components basis. The filter schema retains the same basis and takes a required positive Int64 `minimum_area` in its operation identity. For each pixel it emits one iff `label!=0 && area[label]>=minimum_area`. `maximum_count` limits final component count, not workspace for all N labels and N provisional union records. K=0 is valid even when N>0; outputs then contain all-zero labels/mask and zero table rows.
 
-`maximum_count` constrains final K only. K=0, maximum_count=0 and N>0 are legal:
-labels contains N zeros, Components and area tables have zero rows, and filter
-produces N zeros. The limit cannot substitute for capacity admission of the N
-fixed labels or N private union records. Exceeding the count limit is an
-explicit OperationFailed/InvalidDomain failure with Domain/Group scope before
-publication. Page, disk and work exhaustion remain ResourceExhausted failures.
+## 3. Execution and state machine
 
-## Rank-union recipe and basis proof
+```text
+UInt8 source -> labels producer -> complete Components Result
+                                     |                 |
+                                     v                 |
+                               area producer           |
+                                     |                 |
+                                area index             |
+                                     +--------+--------+
+                                              v
+                                           filter
+                                              |
+                                         binary mask
+```
 
-1. Create one private temporary file and extend it once by checked 32*N bytes.
-   Read source strips into bounded callbacks and write contiguous records:
-   background `[0,0,0,0]`; foreground `[i+1,0,i,1]` for parent, rank, minimum,
-   area. Parent addresses are one-based; minimum is zero-based.
-2. Traverse pixels in row-major order. For foreground pixels, union left when
-   x>0 and top when y>0. No page boundary changes this adjacency. Every current
-   vertex is still a self-root before its first edge: previous vertices only
-   visited smaller indices. Retain the current component root across its two
-   unions, updating both address and record when another root wins.
-3. Find neighbour roots by bounded paged parent reads. Same-root union is a
-   no-op. Otherwise link by rank, sum disjoint areas and take the minimum
-   position. Apply both cached record updates before the next neighbour. Non-root
-   area/minimum fields may be stale and are never used as root facts.
-4. Once every edge is processed, scan pixels again and find roots. Emit
-   `minimum+1` as the label. Append `[id,area,minimum]` only when the scanned
-   pixel equals that minimum, producing unique sorted rows without an in-RAM
-   sorting table. Publish labels and table together only after all writes finish.
+Labels reads bounded source strips, then completes all private union writes and the second output scan before publishing the CompleteBundle. Area waits for a complete validated Components result. Filter requires both the exact Components Result and its area index; it verifies their association and equal counts, compares every index row against the complete Components table, then evaluates pixels. The index association mismatch is `TypeMismatch` with `InvalidAssociation`, `Association` scope, and the index ObjectId. A nonzero label with no associated area also fails; it is not treated as area zero.
 
-Each grid edge is visited once through left/top orientation. Union never joins
-distinct true connected components; every path's edges are included, so the
-result is exactly the four-connected partition. Root minimum and area are
-preserved by minimum and disjoint-set addition. The root address can differ
-from the published ID. Rank-only parent paths have O(log N) depth; the
-implementation checks addresses and a 64-hop bound. It does not claim inverse
-Ackermann complexity because it does not perform path compression.
+All three operations use CompleteBundle and Conservative(All) support. Descriptor support is separate from data rows, including for K=0. Structural validation checks counts and basis, but does not prove connectivity of an imported label map. Only the labels operation's construction establishes four-connectivity for its output.
 
-In the 2×127 comb, N=254, foreground=191 and private UF payload=8128 bytes.
-This two-pass initialization begins union with 191 roots. The design's 65
-temporary row components describes another illustrative schedule, not the
-actual provisional count of this implementation. The final K is one.
+The labels operation declares 8192 bytes of callback workspace; area and filter each declare 4096 bytes. Current windows are capped by `min(user_page_bytes,1024)`; labels needs at least 32 bytes, and area/filter need at least 24 bytes. The root charges temporary backing, windows, work, I/O, and stages. Dirty-page replacement writes a victim before reading its replacement. If resources run out before complete publication, the operation releases private state and publishes no partial labels/table.
 
-## Index validation, support and ownership
+## 4. Algorithms and math
 
-Area waits for a complete validated Components object and copies ID/area pairs
-through bounded pages. Its association names exactly that Labels ObjectId.
-Filter first requires this exact association and equal K; same shape, same K
-or even equal numeric contents cannot replace object association. Before any
-filtering it compares every index pair against the complete Components table.
-This also validates order, positivity and completeness of externally supplied
-index rows. Failures use InvalidAssociation, Association scope and the index's
-ObjectId. Lookup uses a sorted paged lower-bound search and one retained cache
-window. Background skips lookup. A missing nonzero label fails; it never
-silently becomes area zero.
+The labels producer creates one private temporary file and extends it by checked `32*N` bytes. Each pixel occupies four 64-bit words: background `[0,0,0,0]`; foreground position `i` as `[i+1,0,i,1]` for parent address, rank, minimum position, and area. Parent addresses start at one; minimum positions start at zero.
 
-All three stages use CompleteBundle. Relations remain Conservative(All), with
-separate reserved descriptor support even for K=0. Count/basis validation of an
-imported Components object is distinct from proving its connectivity; the new
-labels recipe and independent BFS provide that latter evidence for generated
-results. Input associations and read windows retain predecessors and mandatory
-backing after ExecutionContext destruction until the last owner releases them.
+The producer visits pixels in row-major order and considers only left and top edges. For each edge it finds roots using bounded paged parent reads. It skips a shared root; otherwise it links by rank, adds disjoint areas, and retains the smaller position. Both cached records are updated before the producer visits another neighbor. The current foreground pixel remains a root before its first edge because earlier pixels visit only smaller indices. Once all edges are processed, a second scan finds roots, writes label `minimum+1`, and appends `(id,area,minimum)` only at the minimum pixel. This emits unique sorted table rows without a resident sort table.
 
-## Actual resource envelope
+Every four-connected grid edge is visited once by its left/top orientation. Union cannot join distinct connected components; the scan includes every edge within each component. Root minimum and area are preserved by minimum and disjoint-set addition. Rank-only parent chains have O(log N) depth; the implementation checks record addresses and caps root traversal at 64 hops. It does not use path compression.
 
-UF occupies 32*N logical disk bytes, admitted in 4096-byte encoded extents.
-Create, Extend and dependent writes are separate coordinator stages. Source,
-union and output windows are at most min(user page,1024) bytes. Labels requires
-at least a 32-byte window; area/filter require at least 24 bytes. Two output
-slabs and a possible smaller final table copy have bounded overlapping
-capacity. Labels retains four mutable LRU pages across edge processing, parent
-finds, both union updates and final emission. A dirty victim is written before
-its replacement is read; cache hits continue within the current poll. Both
-union records are resident before either cached update is applied. Emission
-uses the same cache, so it sees the latest root facts. After the final append,
-remaining private dirty pages can be discarded with UF: no later stage reads
-that private tree. Association validation consumes only the published fields.
+Label generation and final root discovery cost `O(N log N)`. Area-index copy and verification cost `O(K)`, and filtering costs `O(N log K)`. Representation validation additionally scans N labels for each of K rows and binary-searches the table for nonzero labels, costing `O(NK + N log K)` work. Paged alternation can reload field windows, so actual I/O exceeds a calculation based only on final payload size.
 
-Labels declares 8192 bytes of callback workspace, including at most 4096 bytes
-of cached tree payload and the bounded output slabs/tail copy. Area and filter
-retain their 4096-byte workspace. All read-window owners, metadata and
-persistent fields remain separately charged to the root.
+## 5. Limitations and non-goals
 
-Union and final root discovery cost O(N log N), index copying/verification O(K),
-and filtering O(N log K). The existing Components validator additionally costs
-O(NK+N log K) work and can repeatedly reload its single page while alternating
-label and table fields. ResultBuilder's small appends also rewrite alignment
-padding. Neither validation I/O nor padding writes can be budgeted merely from
-logical final payload sizes. These operations consume actual cumulative
-work/I/O; exhausted limits fail and release partial private storage. The public
-example uses a finite one-million-stage envelope and explicit root limits.
+- Only `ComponentIdScheme::MinPixel` is supported by these factories; `CompactMinOrder` is a representation enum, not a factory capability.
+- The validator checks exact labels/table membership and basis, not connectivity of arbitrary imported labels.
+- `maximum_count` limits final K; it does not limit provisional N records. K=0 is valid for N>0. Exceeding the count limit fails before publication as an invalid domain.
+- All N label records, N provisional records, I/O, work, and output capacity still require root admission. Page, disk, and stage exhaustion return resource failures.
+- Managed-capacity accounting does not bound process RSS.
 
-[components_workflow](../../examples/components_workflow/README.md) supplies
-public execution and installation commands, exact BFS references, dynamic/empty
-cases, a paged index and data exceeding Host capacity. Measurements are the
-product's managed-capacity ledger, not process RSS hard bounds.
+See [the components workflow](../../examples/components_workflow/README.md) for the public entry point and runnable usage.

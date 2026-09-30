@@ -1,99 +1,52 @@
-# ADR 0012：Operation 与 Data Definition 使用精确的进程内 C ABI
+# ADR 0012：Operation Plugin 使用版本化 C 契约
 
-- 状态：已接受，由 ADR 0015 收窄
-- 日期：2026-09-01 边界修订
+- 状态：已接受
 
-## ADR 0016 的已接受目标
+## 1. 核心摘要 (TL;DR)
+Operation plugin 和 data provider 通过独立版本化的 C 接口跨越 kernel 边界。Host 在发布 registry 记录前校验并复制 descriptor。这样 compiler 元数据不依赖 plugin 的 C++ 对象布局；native plugin 仍在 host 进程和信任域中运行。
 
-已接受目标以 ABI v3 和逐端口 schema 替代 operation ABI v2；provider ABI v1 保持布局并增加 Float32 元素解码。
-参见[ADR 0016](0016-workflow-inputs-and-execution-bindings.zh.md)。下文原版本与
-表示描述保留为实现基线，直到 #257 交付；本次决策接受不表示运行实现已经改变。
+## 2. 架构心智模型
 
-## 背景
+```text
+startup configuration --> load library --> validate exact table --> copy traits/schemas
+                                                   |
+                                      registry frozen for compiler and runs
+                                                   |
+                                          synchronous callback
+                                                   |
+                                      host validates/copies output
+```
 
-Kernel 需要 operation extension point 和与其直接相关的 data-definition extension point，
-但不能暴露 compiler/runtime implementation object。必须保留强 correctness validation，
-同时不能声称 C ABI 会让 native code 安全或隔离。
+Library 自有的表在 destroy callback 执行时仍保持映射。Host 拥有复制后的元数据，并校验通用 `Value` callback 输出。Dependency program 可以保留经授权的输入 owner handle，直到显式释放或状态销毁；每次 poll 的输入/输出指针仍是借用。Planar callback 通过 host 所有的 row buffer 写入，GPU token 会将 allocation 保留到释放或 callback 结束。不同生命周期的完整说明见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。
 
-## 决策
+## 3. 契约规约与接口
 
-Operation ABI 是精确的 version-two C contract；data-provider ABI 仍是独立的
-version-one contract。其 C++ helper 不增加第二套 binary contract。不会保留 operation
-ABI v1 adapter 或 decoder。
+```c
+#define PS_OPERATION_ABI_VERSION_11 11U
+uint32_t ps_operation_plugin_get_abi_version(void);
+const ps_operation_plugin_api_v11 *ps_operation_plugin_get_api_v11(void);
+#define PS_DATA_PROVIDER_ABI_VERSION_1 1U
+#define PS_PLANAR_OPERATION_ABI_VERSION_3 3U
+uint32_t ps_data_provider_get_abi_version(void);
+const ps_data_provider_api_v1 *ps_data_provider_get_api_v1(void);
+```
 
-### Operation ABI
+Operation ABI v11 声明 operation trait、参数和端口 schema、callback、输出契约及 native GPU 服务。独立的 provider ABI v1 发布有界 data-schema 记录。完整结构与执行细节见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。
 
-Operation descriptor 包含一个 length-framed key、exact input count、flag、estimated bytes、
-output element type、一个 closed shape rule（包括显式有界 fixed shape）、一个 closed
-Region rule、optional halo radius、cacheability、bounded parameter-schema pointer/count、
-一个 synchronous execute callback 与 descriptor-owned opaque state。每个 parameter schema
-record 发布 unique key、精确 closed type 与 required/optional bit。
+专用 planar operation 接口单独使用 ABI v3，与 operation ABI v11 一样拥有独立记录和执行契约，详见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。Staged dependency program 使用 host 分配的零初始化 continuation state，并在 `destroy` 中释放关联资源；definition/library lease 会覆盖该状态的生命周期。
 
-Host 将这些 value 复制到 `OperationTraits` 和 semantic IR。Callback、DSO 或 opaque-state
-identity 不会复制进 IR/digest。Callback 接收 bounded dense whole-Region input view、
-plan-derived input-demand offset/extent、canonical 且已通过 schema validation 的 parameter
-value array、bounded facet record、selected local backend、cooperative cancellation
-observation 与 host-owned single-publication output sink。Host 在 callback 返回前复制 output
-facet/bytes，并重建 validated Value。
+Loader 会核对准确的 ABI 版本和结构尺寸、自然对齐、指针与计数配对、记录数量和 key 长度上限、严格 UTF-8 key、算术溢出、封闭 enum/flag 组合、必需 callback、定长输出的稠密可表示性、callback 返回值、输出字节/facet 上限，以及恰好一次的 destroy 所有权。它拒绝尾随结构字节。多记录更新采用 copy-then-swap，因此分配失败或后续记录无效时不会发布部分前缀。刚打开库时取得的 guard 会在可安全读取 destroy callback 后接管它，并在任何拒绝路径关闭库。Unload 前先销毁已发布的 plugin 表。
 
-C++ registry 把 Fixed rule 视为 logical descriptor contract：rank 为 1..8，每个 extent
-非零，element type 与 rule 属于闭合 vocabulary。Trait publication 不会相乘 logical
-extent。因此，即使对应 dense element/byte product 溢出，embedding callback 仍可发布合法
-zero-stride broadcast Value。`estimated_bytes` 继续是 callback 独立的 modeled resource-
-admission value，并复制进 physical plan。C DSO descriptor 则有意保持更窄，因为 ABI v2
-不发布 stride：Fixed DSO output 必须具有可表示的 contiguous signed stride 与完整 uint64
-byte count，否则 loader 会 transactional rejection。Preserve 与 Match semantics 不变。
+通用 operation callback 同步执行。输入 view 和输出 sink 仅在调用期间借用；接受的通用 Value 输出会在返回前复制或冻结。Sink 第一次发布尝试就占用该 sink，即使校验失败也一样；第二次尝试会留下 sticky violation。Host 先检查 cancellation，然后依次检查 sink 分配失败、malformed image output 和重复发布。若 sink 已经尝试发布后 callback 又返回 backend unavailable，则不会触发 fallback：已接受的输出变成 `OperationFailed`，第一次发布被拒绝时则返回 sink 保留的类型化错误。未知非零返回值变为 `OperationFailed`。只有 GPU attempt 在尚未尝试发布 sink 时明确报告 backend unavailable，且复制的 trait 允许时，才可请求 CPU fallback。
 
-保持不变的 `int` callback result 具有闭合的 version-two vocabulary：success、ordinary
-failure、cooperative cancellation 与 backend unavailable。显式 backend-unavailable result
-会映射为 `BackendUnavailable`；只有 copied trait 允许 CPU fallback 的 GPU attempt 才能在
-CPU 上重试。ordinary failure 与所有 unknown nonzero integer 仍映射为 `OperationFailed`，
-绝不触发 fallback。backend-unavailable callback 不得调用 output sink。若已经调用，
-accepted output 会成为 terminal `OperationFailed` contract violation；rejected output
-保留 sink 的精确 typed failure。两种路径都不暴露 `BackendUnavailable`，也不在 CPU 上
-重试；host cancellation 继续拥有最高优先级。callback signature 与 descriptor layout
-均保持不变。
+Planar callback 通过 host 所有的 row buffer 与 invocation-local scratch service 工作；它不会通过 operation sink 返回通用 Value。GPU allocation token 会将底层 owner 保留到显式释放或 callback 结束。
 
-### Data-definition ABI
+Dependency program 可以把授权的输入 handle 保留到释放或 continuation state 销毁；普通 service 指针只在同步 poll 调用期间有效。Registry 在 compiler 与 executor 使用前冻结。
 
-Data provider 只发布 bounded schema record：key、element type 与 maximum rank。Registry 会
-复制并 freeze 这些 record。该 ABI 直接服务 operation/Value vocabulary；它不读文件、不
-创建 runtime Value，也不拥有 persistence。
+## 4. 非目标与明确边界
+- ABI 校验不是 sandbox、签名验证、包准入或崩溃隔离。
+- Daemon 不把 operation plugin 作为 IPC 能力加载。
+- Provider 记录描述语义 schema，不读取文件，也不创建持久 Value。
 
-### 精确 validation 与 lifetime
-
-Load/registration 在 publication 前验证：
-
-- exact ABI version 与 exact structure size；
-- 自然 pointer/array alignment；
-- pointer/count pair、maximum record/key/rank/parameter bound 与 checked arithmetic；
-- 不含 embedded NUL/control byte 的 length-framed key；
-- closed enum/flag/rule/parameter-type vocabulary、unique parameter key、required item
-  presence、exact source type 与合法 trait combination；
-- descriptor-only C++ fixed-shape validation，以及对不携带 stride 的 C DSO fixed
-  descriptor 独立执行 dense stride/byte representability validation；
-- required callback、single output publication、exact output element/shape、bounded facet
-  array/key/version/payload 与 byte count；
-- callback exception fence 与 exactly-once destroy ownership。
-
-该版本有意拒绝 trailing structure bytes，不把它们视为 forward compatibility。Malformed
-table 不会发布 partial registry entry；multi-record publication 使用 copy-then-swap，
-allocation failure 也不发布 prefix。Library 只能来自显式 process-startup
-configuration；registry 在 compiler/executor 使用前变成 read-only，并在 unload 前
-destroy plugin-owned table。
-
-Operation/provider DSO 与 host 在同一 trust domain 内执行。ABI validation 防止 malformed
-interoperability；它不是 sandbox、signature、certificate、trust chain、package admission、
-heartbeat 或 process supervisor。
-
-## 边界
-
-不存在 policy ABI/SDK/DSO、external scheduler、IPC plugin path、isolated plugin process
-或 native-code security product。Daemon 永不选择 plugin path。
-
-## 结果
-
-- Installed C11/C++17 consumer 可编写同信任 operation/data-definition DSO。
-- Compiler trait 保持 copied portable value。
-- Exact validation、exception fence 与 destroy-before-unload 保证 correctness/cleanup。
-- ABI version change 是 0.x package 中的显式 breaking change。
+## 5. 后果与代价
+版本或布局不匹配会在发布前拒绝加载/注册。格式错误的 descriptor 不会留下 registry 前缀。Callback 异常会在边界处拦截，但 native code 的崩溃或挂起仍会影响 host 进程。ABI 改动要求外部 consumer 使用匹配的 header 与 package 重新构建。

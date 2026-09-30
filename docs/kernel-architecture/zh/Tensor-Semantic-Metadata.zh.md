@@ -1,166 +1,117 @@
-# 张量语义元数据、FMT-08 与 FMT-11
+# 张量语义元数据与原子编辑
 
-英文权威版本：[Tensor semantic metadata and FMT-08](../Tensor-Semantic-Metadata.md)。
+英文权威版本：[Tensor-Semantic-Metadata.md](../Tensor-Semantic-Metadata.md)。
 
-包 0.22.0 实现 FMT-08A 的 `metadata.assign_strict`、
-`metadata.assign_accelerated_apple_silicon`、`metadata.assign_accelerated_x86_64`。
-FMT-08B 是事务式公开 helper `format::remove_metadata`，展开为没有 set 条目的 A
-节点。各 CPU profile 保持原有后端准入规则，样本位完全一致；没有原生删除 key
-或仅按样本缓存的结果。
+## 1. 模块边界与职责
 
-## 版本与解释
+`TensorDescription` 描述逻辑 tensor、channel、axis、color group、encoding、sampling、profile 和 configured space。它不拥有样本存储、不认证样本值，也不隐含图像布局。`ResourceBindings` 持有 metadata 引用的不可变 ICC profile 与冻结 OCIO snapshot。Value 持有不可变 facet；view 还可能独立保留较早的样本 backing。
 
-包 0.27.0 接受 `photospider.tensor-description` 运行时版本 **4**（`TDM4`）
-与 **5**（`TDM5`），v4 的既有字节含义不变。任一 tensor、component、channel 或
-组的 interpretation 包含 `coordinates` 记录时，编码选择 v5；显式存在但字段
-为空的记录也选择 v5。完全没有该记录时选择 v4。拒绝 v1-v3、版本与标识不匹配、
-非 canonical 编码及尾随字节，不会给旧字节自动赋新单位。WorkflowDocument 和
-operation/provider C ABI 版本不变；canonical facet 与静态编辑参数参与编译身份。
-旧 ColorArray v1 保持独立约定，不能与这些 tensor facet 共存于一个 Value。
+## 2. 核心数据结构与内存布局
 
-FMT-11 新增公开字段改变 C++ 布局，因此消费者必须针对 0.27 重新编译；
-`find_package(Photospider 0.24)` 会被拒绝。详见
-[编译器版本契约](../../development/zh/Compiler-Version-Contract.zh.md)。
+```cpp
+using TensorEndpoint = std::variant<std::int64_t, double, TensorRationalEndpoint>;
+struct TensorDescription final {
+  std::optional<std::uint32_t> channel_axis;
+  std::vector<TensorChannelDescription> channels;
+  std::optional<TensorChannelDescription> component;
+  std::vector<TensorAxisDescription> axes;
+  std::string model, primaries, transfer, reference, association;
+  std::optional<std::array<double, 2>> white;
+  std::optional<std::array<double, 6>> primaries_xy;
+  std::optional<ColorProfileIdentity> profile;
+  std::vector<TensorColorGroup> groups;
+  std::optional<TensorEncoding> encoding;
+  std::optional<TensorSampling> sampling;
+  std::string convention = "relative-v1";
+  std::optional<TensorConfiguredSpace> configured;
+  std::optional<TensorAnalyticBinding> analytic_binding;
+  std::optional<TensorModelCoordinates> coordinates;
+};
+Result<ValueFacet> encode_tensor_description(const TensorDescription&);
+Result<TensorDescription> decode_tensor_description(const ValueFacet&);
+```
 
-`relative-v1` 明确 CIELAB/CIELCh 的 `l=L*/100`、不变的 a/b/chroma，以及 XYZ
-参考白 Y=1 的原有比例；该约定不实施数值裁剪。`icc-native`、`ocio-native`
-表示资源定义的坐标。绝对单位仍由分量/轴字符串显式声明，赋值不会缩放样本。
+`TensorDescription` 保存可选 channel axis 上的有序 channels、一个选中的 component、逻辑 axes、全局 interpretation 默认值和完整 color groups。校验要求 rank 为 1 到 8，channel axis 必须在 rank 内，axes 表为空或每个逻辑轴各有一项。每个 axis 有 name、unit、有限 origin 和正 step。完整 group 包含有序且不重复的 component indices 及对应 channel 描述；可选 alpha index 必须属于同一 tensor，且不能与颜色 indices 重合。Group 与显式提供的 channel 描述必须一致。
 
-`TensorDescription` 的 canonical 编码上限为 4096 字节。文本为最长 128 字节
-的严格 UTF-8；最多 128 个完整组，每组最多 64 个分量。整数与 IEEE binary64
-按小端字节编码，presence 为 0/1，通道/轴表有序，资源身份显式。v4 另用有界的
-小端 base-2^32 分子和正分母 limbs 编码约分后的有符号精确有理数端点；该变体
-改变安装包 C++ ABI，并在整数或 binary64 不能表示组合 decoder 端点时保留精确值。
-解码后重编码
-核对 canonical 字节并拒绝尾随数据。opaque annotation 使用独立 `ValueFacet`，
-不是语义字段，遵循宿主最多 64 个 facet、每个 64 KiB、总计 1 MiB 的限制。
+`TensorEncoding` 按下式将存储值解释为解码值：
 
-## 已注册 schema
+$$
+D(x)=d_0 + (x-s_0)\frac{d_1-d_0}{s_1-s_0}.
+$$
 
-| 记录 | 字段与含义 |
-| --- | --- |
-| Tensor | channel_axis、channels、component、axes、groups，以及全局 encoding/sampling/interpretation 默认值 |
-| Component | name、role、unit，以及可选 interpretation、encoding、sampling |
-| Axis | name、unit、有限 origin、有限正 step；解释世界坐标，不改变索引 |
-| Group | 唯一 name、有序且不重复的 indices、对应 components、完整 interpretation、可选同 tensor 内部 alpha；alpha 不得与颜色索引重合 |
-| Interpretation | model、primaries、transfer、reference、association、white、primaries_xy、profile、convention、configured、analytic_binding、coordinates |
-| Encoding | 精确类型的 stored/decoded 端点对；stored 递增，decoded 不相等且可反向 |
-| Sampling | 显式 grid；内部同尺寸、同位平面要求 scale=(1,1)、offset=(0,0)，外部 subsampling 被拒绝 |
-| Configured space | 冻结 config 身份、显式 canonical space、scene/display reference_space |
-| Analytic binding | 调用者声明的模型、基色、传递、参考、白点、有序角色/单位及 relative-v1 约定 |
+Stored 端点必须递增；decoded 端点必须不同，也可以递减。Stored 端点必须符合 tensor dtype。端点保留 Int64、binary64 或约分后的精确有理数类型。有理数幅度使用小端 base-2^32 limbs 编码，每个约分后的分子与正分母最多 128 个 word；整数不会先转成 binary64。描述只附加解释，不会转换、裁剪或缩放样本。完整整数颜色组必须从 component、channel 或 tensor 默认值取得显式 decoder。删除该 decoder 会使完整 native-color 声明失效。显式 encoding 或 sampling grid 冲突会导致校验失败。
 
-`TensorEndpoint` 是 Int64、有限 Float64 或有界精确有理数，序列化保留类型标签和精确位；Int64
-最大值不会经 Float64 中转。编码解释为：
-`D(x)=decoded[0]+(x-stored[0])*(decoded[1]-decoded[0])/(stored[1]-stored[0])`。
-存储区间必须适配 dtype。完整整数颜色组必须具有显式 decoder，可以来自组分量、
-通道或 tensor 默认值。删除必要 decoder 后不能保留完整 native-color 声明。
-显式分量/组之间的编码或 sampling grid 冲突会失败。
+内部颜色组使用同尺寸、共位采样：显式 grid、scale `(1,1)`、offset `(0,0)`。外部 subsampling 属于 I/O codec。Configured space 指定冻结 config identity、canonical space 和 `scene` 或 `display` reference。Analytic binding 由调用方提供 model/primaries/transfer/reference/white、有序 roles/units 和 convention；它不证明数学等价。
 
-完整组检查模型角色、索引、alpha、必需的色彩空间信息、采样及 analytic binding
-的顺序/单位。独立分量可以保留不完整的描述来源信息。profile/configured space
-不会生成猜测的基色、传递函数或白点；analytic binding 是调用者断言，不是等价
-证明。任何字段都不会认证样本有限性、coverage 范围或预乘零值条件。
+Color coordinates 可记录空值或 `relative`/`absolute` scale、可选描述性 observer、灰度解释（`linear_y`、`encoded_luma`、`cielab_l`、`oklab_l`）以及可选有限 binary64 NCL 系数 `[Kr,Kb]`。空字段表示未作断言。`relative-v1` 将 CIELAB/CIELCh lightness 存为 `L*/100`，a/b/chroma 保持不变，XYZ 继续使用 Y=1 reference scale；它不是范围裁剪。ICC/OCIO-native convention 指资源定义的坐标。上述字段均不证明样本有限性、alpha 合法性或预乘约束。
 
-## FMT-11 模型坐标断言
+`photospider.tensor-description` facet 上限为 4096 字节。文本为严格 UTF-8，最长 128 字节；最多 128 个 group，每组最多 64 个 component。Canonical 小端 codec 保留整数与 IEEE binary64 位、表顺序、显式 presence byte 和资源身份。版本 4 保持既有含义；版本 5 增加 model-coordinate 记录。tensor、component、channel 或 group 任一层存在 coordinates（包括显式存在但为空的记录）时使用 v5，否则使用 v4。旧版本、版本与 discriminator 不匹配、非 canonical 编码及尾随字节均被拒绝。Opaque annotation 是独立 Value facet，受宿主最多 64 个 facet、每个 64 KiB、总计 1 MiB 的限制。
 
-`TensorModelCoordinates` 包含 `scale`（空、relative 或 absolute）、`observer`
-（空或不超过 128 字节的显式 UTF-8 标识）、`gray_kind`（空、linear_y、
-encoded_luma、cielab_l 或 oklab_l）以及可选的两个有限 binary64 系数
-`ncl_coefficients=[Kr,Kb]`。
+## 3. 调度与状态机
 
-空字符串和缺失系数表示**未作断言**。channel、component 与重叠组之间逐字段
-检查兼容性：`{scale:relative}` 与 `{gray_kind:linear_y}` 可以互补；同一字段
-出现两个非空且不等的值才是冲突。中间组的空字段不能抹除之前的断言，也不能
-掩盖后续冲突。严格 `operator==` 不变，仍比较完整记录，不能用作兼容性判断。
-codec 只验证兼容性，不回填、改写各条原始描述；channel assembly 在输出描述中
-合并 overlay。
+`ps::format::assign_metadata` 先检查编辑语法、类型、选项、路径重叠和有界事务编码，再追加一个节点。Compiler 随后解析源相关 selectors 并校验完整候选。运行时保留逐坐标数据依赖，并通过合法 view 或复制后的输出发布新 metadata。
 
-TDM5 保持 4096 字节 facet 上限、严格 UTF-8、有限系数和 canonical presence
-检查。元数据允许有限系数，不代表具体转换公式必然接受；算子的语义准入另行
-检查定义域、模型与坐标要求。
+```text
+authoring：校验编辑语法 -> 编码有界事务 -> 追加节点
+                                         |
+compile：在源对象上解析 selector -> 构建候选 -> 校验
+                                      +----------+----------+
+                                      |                     |
+                                     通过                  无效
+                                      |                     |
+runtime：精确坐标映射 -> view/copy    编译错误；无输出
+```
 
-FMT-08 支持整个 `coordinates` 子树和 scale/observer/gray_kind/ncl_coefficients
-叶子的赋值、删除。适用路径为 `/semantic/coordinates`、
-`/semantic/component/interpretation/coordinates`、
-`/semantic/channels/index:0/interpretation/coordinates`、
-`/semantic/groups/gray/interpretation/coordinates`，并沿用原有选择器规则。
-整个子树赋值是替换，叶子 patch 保留兄弟字段；删除最后一个坐标记录后重新编码
-为 v4。显式保留空记录时仍是 v5。
+公开 helper 位于 `ps::format`：
 
-## 冻结资源
+```cpp
+struct MetadataOptions final {
+  std::string mode = "patch";
+  std::vector<MetadataSet> set;
+  std::optional<TensorDescription> description;
+  std::vector<std::string> remove;
+  std::string dependencies = "error", missing = "error";
+  std::string layout = "auto", profile = "strict";
+};
+Result<WorkflowNodeOutput> assign_metadata(
+    WorkflowDocument&, WorkflowInput, const MetadataOptions& = {});
+Result<WorkflowNodeOutput> remove_metadata(
+    WorkflowDocument&, WorkflowInput, const std::vector<std::string>&,
+    const MetadataOptions& = {});
+```
 
-`ResourceBindings` 封存并去重 ICC profile 与 `OcioConfigResource`。编译、绑定及
-输出准入时所有引用身份必须可解析；结果头只保留 facet 实际引用的资源。view
-仍可独立保留旧 backing，因此删除结果头引用不保证所有祖先分配立即释放。
+默认值为 `mode=patch`、`dependencies=error`、`missing=error`、`layout=auto`、`profile=strict`。注册的 CPU profile 为 `strict`、`accelerated_apple_silicon`、`accelerated_x86_64`；在各自后端准入规则下，它们产生相同 metadata 和样本位。Replace 要求完整 `description`（可为空），保留 opaque annotations，且只允许编辑 annotation。Patch 禁止填写 `description`。`remove_metadata` 通过同一 authoring 路径降低为仅删除的 patch。无效 authoring 不改变 document。源相关 selectors 和目标结构在 compile 阶段校验。
 
-ICC 准入检查显式 v2/v4 字节、header 模型/class/PCS、必需 tag、TRC/LUT 边界和
-profile ID。支持 RGB/Gray matrix/TRC 或已准入 LUT profile、既有 CMYK output
-路径及 profile-defined XYZ/Lab LUT 空间。Abstract/DeviceLink 不作为端点资源。
-header model 必须与声明一致，也检查旧 CMYK 约定。此结构检查不运行 CMM，不能
-证明 FMT-12 引擎兼容性。
+每个输出坐标依赖相同输入坐标。Metadata/resource 校验不增加像素 Validation 或 Control support；data dirty 映射为 identity。Auto/view 在 view 合法时通过保留输入 backing 发布更新后的不可变 metadata。Materialize 分配并复制请求的输出样本。Generic execution 允许合法正、负和零 stride。Continuous/tiled planar execution 保留物理 owner 和 DAG tile geometry。直接 planar invocation 使用调用方提供的 writer，因此强制 view 会返回 `ViewUnavailable`；编译后的公共执行可以发布 retained image view。Copy run 不跨越 request、fragment 或物理 tile 边界；region-copy 路径最多每 1024 个样本检查一次取消/currentness。
 
-OCIO 快照包含显式 config 字节、完整且排序的逻辑文件映射、已解析 context、
-调用者声明的 canonical space/reference，以及固定 engine/build/settings 身份。
-SHA-256 与字节长度覆盖全部分帧字节。缺失的查询保持缺失，不访问文件、网络或
-进程环境。准入验证快照 schema 和所有权，不解析 OCIO YAML 或证明变换可执行。
-未来 FMT-13 processor 必须用固定引擎核验空间与所选传递依赖，且只能访问该封闭
-快照。此实现完成带资源引用的描述 schema，不宣称已实现 OCIO 变换。
+## 4. 算法与数学
 
-快照复制、owner 元数据及跨 root 引用计入 ResourceBudget；复制/哈希每至多
-1024 字节检查取消和 work。查询最多扫描 1024 个声明条目。准入失败释放未发布
-owner。`ValueFragments::retained_bytes` 按实际存储身份去重并包含配置快照。
+路径使用 `/` 分段，`~0` 转义 `~`，`~1` 转义 `/`。
 
-## 原子 authoring 与路径编码
+- `/semantic` 选择整个语义记录。
+- `/semantic/channels/index:0/unit` 选择原始 channel；`name:` 和 `role:` selector 必须精确唯一匹配。`missing=ignore` 可以忽略零匹配删除，歧义 selector 仍会失败。
+- `/semantic/groups/color/interpretation/primaries` 选择 group 字段；`/semantic/axes/0/origin` 选择 axis 字段。
+- Coordinates 子树和叶子路径包括 `/semantic/coordinates`、`/semantic/component/interpretation/coordinates`、`/semantic/channels/index:0/interpretation/coordinates`、`/semantic/groups/gray/interpretation/coordinates`，并支持相同的 channel selectors。
+- `/annotations/app.note` 选择 opaque facet。`photospider.` 命名空间保留给语义 facet。
 
-`format::assign_metadata(document,input,MetadataOptions)` 追加一个节点，默认
-patch/error/error/auto/strict，分别对应 mode/dependencies/missing/layout/profile。
-replace 必须提供完整 description（可为空），保留 annotation，并只允许显式编辑
-annotation；patch 禁止 description。未知选项、路径、类型、重叠编辑及非法静态
-记录不会追加 helper 节点。依赖源描述的选择器在编译时验证。
+Selector 在修改前基于原始输入解析。Whole-subtree set 会替换整个子树；leaf set 保留兄弟字段。重复路径、祖先/后代重叠以及多个 selector 指向同一目标都会失败。删除 channel 或 axis 描述不会删除其数据槽位。Cascade 只清理受影响的旧依赖描述，并保留所有显式 set；清理会删除新设置的值时事务失败。Compiler 发布一个不可变候选，不会改写源对象或修复样本。
 
-路径以 `/` 分段，用 `~0` 转义 `~`、`~1` 转义 `/`：
+Channel、component 和重叠 group 的 coordinates assertion 逐字段合并。空值表示未作断言，且不能擦除此前的非空断言。同一字段有两个不等的非空值时冲突。精确 `operator==` 比较完整记录，不是兼容性判断。Codec 检查兼容性但不改写来源字段；channel assembly 会在输出描述中解析 overlay。
 
-- `/semantic` 是完整语义记录。
-- `/semantic/channels/index:0/unit` 也可以使用 `name:R` 或 `role:red`；必须在
-  原输入中唯一精确匹配。missing=ignore 可以忽略零匹配删除，歧义始终失败。
-- `/semantic/groups/color/interpretation/primaries` 是组内字段。
-- `/semantic/axes/0/origin` 是轴内字段。
-- `/annotations/app.note` 是 opaque facet；`photospider.` 前缀为保留语义命名空间。
+编辑事务是节点 `edits` 字符串中的有界 v1 记录，编码为小写十六进制。解码后最多 4096 字节、1024 个节点、深度 12；hex String 最长 8192 字节。树编码中，`o` 表示有序 map，`s` 表示 string，`u`/`i` 表示无符号/精确有符号整数，`d` 表示八个小端 Float64 字节，`b` 表示 opaque bytes；每项均以十进制长度或数量和 `:` 分隔。此事务 codec 与 TDM4/TDM5 facet codec 相互独立。优先使用 `MetadataOptions` 和类型化路径，不手写编码。
 
-所有选择器在编辑前对原输入解析。设置整个子树会替换它全部内容，设置叶子保留
-适用兄弟字段。重复、祖先/后代冲突及选择器别名冲突失败。删除通道/轴描述只重置
-对应描述记录，数据槽位不变。
+`ResourceBindings` 封存并去重显式 ICC/OCIO handles。每个引用身份必须在 compile、binding 和 output 准入时解析，ICC header model 也必须与声明的 interpretation 一致。ICC 准入检查显式 v2/v4 字节、profile class/PCS、必需 tags、TRC/LUT 边界和 profile identity。它接受 RGB/Gray matrix/TRC 和准入的 LUT profile；profile 定义的 XYZ/Lab endpoint 必须显式带 LUT，CMYK endpoint 路径要求对应 LUT 集。Abstract 与 DeviceLink profile 不是 endpoint resource。此结构校验不运行 color-management module。
 
-节点 `edits` String 是 v1 事务记录的小写十六进制。记录包含有序 version、set、
-remove 和可选 description。树编码为 `kind+十进制长度或条目数+':'+内容`；o 为
-有序 map、s 为字符串、u/i 为无符号/精确有符号整数、d 为 8 字节小端 Float64、
-b 为不透明字节。解码限制为 4096 字节、1024 节点、深度 12，String 上限 8192。
-事务编码与发布的 TDM4 编码独立，推荐使用公开的类型化 helper。
+OCIO snapshot 包含显式 config 字节、完整排序的逻辑文件映射、已解析 context、声明的 canonical spaces/references，以及固定的 engine/build/settings identity。Hash 和 byte length 覆盖所有分帧字节，包括缺失 lookup。准入只验证 snapshot 结构和所有权，不证明 transform 可执行。冻结后 lookup 不访问文件、网络或进程环境。Snapshot 复制和比较使用 `ResourceBudget`，按最多 1024 字节分块检查取消/work；file、context、space 表合计最多 1024 条目。`ValueFragments::retained_bytes` 按实际资源存储身份去重，也计入 config manifest。
 
-Cascade 依照封闭 schema 依赖处理：channel axis 关联通道表和组；encoding/
-sampling/configured/profile 关联包含它们的解释单元；完整组关联必需字段、引用
-的分量声明及重叠的显式赋值。只处理受影响单元，保留独立名称、单位及数据平面，
-拒绝删除新显式赋值。最终一次验证并发布不可变候选，不改源头或修复样本。
+## 5. 限制与非目标
 
-静态准备受 facet/事务上限约束，使用编译/准备存储；既有 OperationPreparer
-接口不提供运行时取消 token。运行时发布按实际 facet 容量、窗口、owner 与请求
-backing 准入。不引入图像规模的元数据 scratch、隐藏 alpha 绑定或私有线程池。
+- Tensor metadata 描述逻辑 axes 和 interpretation；不定义物理 strides、planar/tiled 存储或图像所有权。
+- Profile identity 不包含资源字节；调用方必须在 `ResourceBindings` 提供可解析的 handle。
+- Profile/configured-space 声明不会推断 analytic primaries、transfer 或 white。Analytic binding 仍是调用方来源信息。
+- Metadata 校验不认证数值范围、有限性、coverage 或颜色正确性。除 `photospider.tensor-description` 外，已注册的 `photospider.` facet 必须显式导入后才能由此编辑器消费。
+- ICC 准入是结构校验；OCIO 准入校验冻结快照，不执行 transform。Metadata assignment 不运行颜色管理转换，也不创建私有 worker pool。Profile class、tags 和 LUT 边界见[ICC profile 校验实现](../../../src/lib/data/icc_validation.cpp)。
+- 静态 authoring 受 facet 和 transaction 限制；其 preparation path 没有运行时 cancellation token。运行时资源准入使用对应的根预算与取消检查。
+- Metadata 编辑会禁用 sample-only cache reuse，因为输出 identity 包含 metadata。
 
-## 精确执行与验收
-
-输出每个坐标只依赖相同输入坐标；静态描述/资源检查不增加像素 Validation 或
-Control 支持。数据 dirty 映射为 identity，必需上游失败保持原有作用域。
-
-Auto/view 在既有不可变 backing 上发布独立元数据和精确有效覆盖；materialize
-总是新分配请求区域。generic 路径用于非图像数值张量的合法正/负/零 stride；
-continuous/tiled 图像路径保持 planar、单物理 owner 和 DAG tile geometry。
-直接 planar invocation 已由调用者提供 writer，forced view 报 ViewUnavailable；
-公开 compile/execute 可以发布 retained image view。连续复制不跨越请求、fragment
-或物理 tile 边界，每至多 1024 样本检查取消/currentness。
-
-[最小公开示例](../../../examples/metadata_workflow/README.md) 与
-`test_metadata_assignment` 检查位保真、不可变元数据、七种 dtype、rank 1..8、
-layout、稀疏跨 tile 请求、缺失覆盖、路径/cascade/stride、v3 端点/资源及错误回滚。
-`photospider_metadata_consumer` 使用隔离安装包运行同一验收。
-[性能说明](../../../examples/metadata_performance/README.md) 分开报告静态准备、公开
-执行、算子内部耗时及保留/新增 backing，未启用仅样本缓存。
+资源准入、复制或 hash 失败会阻止发布并释放未发布 owner。Result header 可以移除资源引用，而旧 view 仍持有样本 backing；删除 facet 不保证所有祖先分配立即释放。公共 workflow 见 [metadata_workflow](../../../examples/metadata_workflow/README.md)，性能 workload 见 [metadata_performance](../../../examples/metadata_performance/README.md)。

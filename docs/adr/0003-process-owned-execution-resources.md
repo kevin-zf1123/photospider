@@ -1,81 +1,51 @@
-# ADR 0003: Local Execution Resources Are Explicitly Owned
+# ADR 0003: Execution Contexts Own Local Resources
 
-- Status: Accepted, narrowed by ADR 0015
-- Date: 2026-09-01 boundary revision
+- Status: Accepted
 
-## Context
+## 1. Core Summary (TL;DR)
+An `ExecutionContext` owns bounded local workers, callback admission, caches, and resource accounting. Each call creates private run state and keeps its bindings and results separate from other calls. This makes resource sharing explicit without creating graph-count-scaled worker pools.
 
-An embeddable kernel must run independent graphs without creating hidden
-process singletons or scaling physical workers with graph count. Queue
-capacity, modeled memory, optional GPU work, cancellation, and shutdown need
-one visible owner.
+## 2. Mental Model & Intuition
 
-## Decision
+```text
+                  +--> CPU workers / FIFO --+
+ExecutionContext |                           |--> Run callback --> Values/results
+                  +--> optional GPU lane ----+
+                  shared admission, allocator, caches
 
-Each `ExecutionContext` owns one fixed local execution composition:
+Run A: dependencies, cancellation, staging, diagnostics
+Run B: dependencies, cancellation, staging, diagnostics
+```
 
-- a deterministic FIFO and fixed CPU worker pool;
-- an optional one-worker local GPU lane with its own deterministic FIFO;
-- one nonblocking shared waiting-callback admission limit across both FIFOs;
-- a frozen `OperationRegistry` shared by every invocation;
-- one exact-release `ResourceLedger` for the configured modeled-byte limit.
+Runs compete for the context's configured resources. CPU execution is available; native GPU execution depends on the host and configuration. Per-run scheduling and dependency state remain private.
 
-The context configuration is immutable after construction. Zero CPU workers
-selects a bounded hardware-derived count; CPU execution always exists. A zero
-queue or byte limit is invalid. An embedder may create multiple independent
-execution contexts or explicitly share one context across graphs.
+## 3. Formal Contracts & APIs
 
-### Admission and work ownership
+```cpp
+struct ExecutionContextConfig {
+  std::uint32_t cpu_workers = 0;
+  bool gpu_enabled = false;
+  std::uint32_t maximum_queued_tasks = 1024;
+  std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
+};
+struct ExecutionOptions { std::uint32_t maximum_parallelism = 0; };
+class ExecutionContext {
+ public:
+  Result<ExecutionResult> execute(const ExecutionPlan&, ExecutionBindings,
+      const CancellationToken&, const ExecutionOptions&);
+};
+```
 
-Each `execute` call creates one private `ExecutionRun`. The Run owns dependency
-counters, deterministic ready-step ordering, staged Values, per-step backend
-residency, in-flight accounting, cancellation observation, and raw diagnostics.
-`ExecutionOptions::maximum_parallelism` bounds in-flight plan steps for that
-Run. `maximum_queued_tasks` is one ExecutionContext-wide limit for callbacks
-accepted by either backend FIFO but not yet started; it is not duplicated per
-lane. A move-only waiting token is released when a worker pops the callback,
-so running callbacks do not consume the waiting limit. Enqueue rejection,
-allocation failure, shutdown drop, and exception unwinding roll the token back
-exactly once. This shared admission and the byte ledger provide nonblocking
-backpressure.
+The full configuration also controls demand work, result retention, managed capacity, optional disk cache, and scheduler observations. Construction rejects zero queue and live-byte limits and validates the other configured bounds. Zero CPU worker count resolves to a bounded hardware-derived count; zero `maximum_parallelism` uses the context CPU worker count. The caller must freeze the operation registry before construction, and the context retains it.
 
-Before invoking an operation, the Run acquires the step's complete planned
-byte charge. The move-only lease releases exactly once after the attempt,
-including fallback, exception, cancellation, and stale-completion paths.
+CPU and GPU callbacks share one waiting limit. A worker releases an ordinary callback slot when it starts that callback. A staged CPU job keeps its slot until its tile callbacks retire and the job leaves the queue.
 
-### Local transfer and fallback
+The context charges controlled buffers until their final owner retires. Caller-preexisting immutable input bytes are outside the live-byte payload limit.
 
-The CPU backend is required. When enabled, the GPU lane is another local
-in-process callback lane. If a dependency Value was produced on a different
-backend, execution makes an explicit immutable byte copy and records transfer
-count and bytes. Residency is Run-local derived state; it is neither persistent
-nor a global manager.
+## 4. Non-Goals & Explicit Boundaries
+- Resources are process-local. The context does not create daemon jobs, remote workers, or a process-wide singleton.
+- The configured byte model covers instrumented controlled resources, not process RSS, OS overhead, or arbitrary plugin allocations.
+- Callers must keep direct calls from racing context destruction. Cancellation is cooperative; it does not preempt a callback.
 
-Unavailable GPU capability and recoverable GPU failure may fall back to CPU
-only when copied operation traits permit it. The reason is an ordinary
-diagnostic.
-
-### Cancellation, exceptions, and shutdown
-
-Every callback is fenced. Cooperative cancellation and graph-revision
-currentness are checked before admission, during completion, and before final
-result assembly. Late work may finish cleanup but cannot publish a caller
-result after cancellation or staleness.
-
-Destruction stops queue admission, rejects queued callbacks, releases every
-dropped waiting token, wakes workers, and joins owned threads. Callers must not
-race `execute` with context destruction.
-
-## Boundary
-
-All resources are process-local. This ADR creates no daemon Session/Job,
-external scheduler, remote worker, process supervisor, plugin sandbox,
-durable state, or security domain.
-
-## Consequences
-
-- Physical resource count follows explicit context configuration, not graph
-  count.
-- Queue and byte backpressure are bounded and testable.
-- Transfer, fallback, stale rejection, and cleanup have one Run-local path.
-- Multiple contexts can execute concurrently without a kernel-global registry.
+## 5. Consequences
+A full waiting queue or exhausted managed capacity can reject work with a typed failure; callers should bound concurrent Runs and size limits for their workloads. A slow callback occupies a worker until it returns. Context destruction closes admission and joins owned workers, so shutdown waits for callbacks to retire. Optional caches consume configured memory and can be cleared.

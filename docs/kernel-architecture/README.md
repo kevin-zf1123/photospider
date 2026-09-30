@@ -1,39 +1,26 @@
 # Kernel Architecture
 
-These documents describe current kernel behavior after the breaking product
-boundary reset. English is authoritative; faithful Chinese mirrors are under
-[`zh/`](zh/README.zh.md).
+These guides describe the kernel's current contracts and runtime behavior. English is authoritative; Chinese reader versions are under [`zh/`](zh/README.zh.md). Start with the [overview](Overview.md) for ownership and execution flow.
 
-[ADR 0015](../adr/0015-breaking-product-boundary-scope-reset.md) is the highest
-active product-boundary authority.
+## Core model
 
-Public live delivery state is maintained in GitHub Issues. GitHub Projects are
-maintainer operational views of those Issues. The checked-in
-[Current Development Program](../development/Current-Development-Program.md)
-summarizes the baseline and execution order without changing this architecture.
+1. [Overview](Overview.md): module ownership, execution contexts, and result lifetimes.
+2. [Terminology](Terminology.md): names used across the architecture guides.
+3. [Compiler and Execution](Compiler-and-Execution.md): source validation, planning, scheduling, and run progression.
+4. [Data Model](Data-Model.md): Values, Regions, layouts, and retained storage.
+5. [Graph Lifecycle](Graph-Lifecycle.md): graph revisions and compiled-stage lifetimes.
+6. [Compute Boundaries](Compute-Boundaries.md): CPU/GPU placement and fallback.
+7. [Cache Model](Cache-Model.md): frozen inputs and bounded local result reuse.
+8. [Plugin ABI](Plugin-ABI.md): trusted in-process operation and provider interfaces.
+9. [Image Operations](Image-Operations.md): image descriptors, ports, and current image contracts.
+10. [Region Semantics](Region-Semantics.md): logical coverage, input demand, and boundary behavior.
 
-## Reading order
+## Workflows and focused topics
 
-1. [Overview](Overview.md)
-2. [Terminology](Terminology.md)
-3. [Compiler and Execution](Compiler-and-Execution.md)
-4. [Data Model](Data-Model.md)
-5. [Graph Lifecycle](Graph-Lifecycle.md)
-6. [Compute Flow](Compute-Flow.md)
-7. [Compute Boundaries](Compute-Boundaries.md)
-8. [Cache Model](Cache-Model.md)
-9. [Region Semantics](Region-Semantics.md)
-10. [Plugin ABI](Plugin-ABI.md)
-11. [Image Operations](Image-Operations.md)
+- [Foundations workflows](../../examples/foundations_workflow/README.md): runnable installed-package example and its current scenarios.
+- [G4 GPU workflow](../../examples/g4_gpu_workflow/README.md): native GPU execution example.
+- [Integer statistics](Integer-Statistics.md): paged histogram and streaming grade operations.
+- [External-axis FFT](External-FFT.md): bounded generations and FFT result contracts.
+- [Paged connected components](Paged-Components.md): connected-component labels and bounded filtering.
 
-The kernel is session-agnostic and owns no daemon Job, network service,
-durable work, process supervisor, policy DSO, plugin security product, durable
-result object, or release evidence. Pre-reset documents are available only
-through Git history and `pre-breaking-scope-reset-2026-09-01`.
-
-- [S4 native Metal workflow](S4-Workflow.md): current native support and validation entry points.
-- [Composable foundations workflow](Foundations-Workflow.md): standalone installed public API scenarios and reusable operations.
-
-- [Integer statistics workflow](Integer-Statistics.md): paged histogram, global parameters and streaming grade.
-- [External-axis FFT](External-FFT.md): bounded generations, full/half identities and independent DFT references.
-- [Paged four-connected components](Paged-Components.md): dynamic min-pixel labels, associated area index and bounded filtering.
+Operation-specific guides describe their own inputs, outputs, and execution rules. The [built-in operations index](../built-in_ops/README.md) routes to those contracts.

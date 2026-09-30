@@ -1,103 +1,93 @@
-# ADR 0019：Metal 驻留图像工作流
+# ADR 0019：让算子运行于配置的原生 GPU
 
 - 状态：Accepted
-- 日期：2026-09-09
-- 接受：维护者明确要求实施完整 S4 计划，包括以下决策、逐 Issue 提交、独立审查、受保护交付和清理。
-- 基线：kernel `0e65eac`，daemon `8816f85`
-- 权威英文：[ADR 0019](../0019-metal-resident-image-workflows.md)
+- 英文权威文档：[ADR 0019](../0019-metal-resident-image-workflows.md)
 
-当前 API 说明：本 ADR 记录原 selector 名称 `MetalFp32`。当前公开选择器为
-`ExecutionMode::NativeGpu`（值 `2`），只授予原生放置；context 选择 Metal 或 Vulkan，数值行为
-由 operation/profile 定义。下文的 Metal 浮点规则不定义 Vulkan 算术，也不约束 GPU 整数精确实现。
+## 1. 核心摘要（TL;DR）
 
-## 研究与范围
+部分算子可以在已配置的原生 GPU 上运行；算子声明支持时，CPU 执行仍可用。`NativeGpu` 选择放置权限，算子契约定义数值行为，内核拥有设备队列、缓冲区、资源计量和同步完成过程。C operation 接口提供有界的主机服务，不暴露设备句柄。
 
-S4 交付一个 Apple Silicon Metal 后端，覆盖内置与独立 C 算子包中的八个图像算子。
-CPU 必需。使用显式选址，#209 实测成本与自动选址留到 S5。其他 GPU 后端、#203、
-GUI、daemon 协议扩展、远程设备和持久 GPU 缓存不在范围内。
+## 2. 架构心智模型（Mental Model & Intuition）
 
-基线 GPU lane 执行同步主机回调，按后端标签复制主机字节，没有原生资源；结果键
-拒绝 GPU 上游。既有测试只证明调度。Apple shared storage 文档允许 CPU/GPU
-共享访问，waitUntilCompleted 等待命令与完成处理器。M5 实机探针关闭 fast-math 后，
-位型 2 乘 .5 的 GPU 结果为 0、CPU 为 1；最小 normal 乘 .5 的 GPU 结果为 0、CPU
-为 0x00400000；double shader 编译失败。探针只证明可行性，不构成产品验收。
+编译器依据所选模式和复制后的 operation 能力，为每个算子步骤标记 CPU 或 GPU 放置。context 拥有 CPU worker pool；启用且设备可用时，还拥有一个 GPU worker lane。GPU callback 获取有界视图并提交原生命令，只有这些命令完成后才返回。
 
-## 公开版本与身份
+```text
+                  ExecutionPlan
+                 /             \
+           CPU operation      GPU operation
+                |                  |
+         CPU worker pool    单个 GPU worker lane
+                                  |
+                          主机拥有的设备队列
+                                  |
+                           同步原生命令
+                                  |
+                         已验证的主机可读输出
+                                  |
+          +-----------------------+----------------+
+          |                                        |
+       发布成功                      发布前返回 BackendUnavailable
+                                                   |
+                                      契约允许时重启 CPU 执行
+```
 
-package 0.6、operation ABI 6 和 traits 6 替换 0.5/5，拒绝旧表与旧 minor 请求，
-C++ 消费者重编译，不保留兼容别名。C++17、文档 schema 2、provider ABI 1、IPC v3
-保持。接受该 ADR 时，计划选择 CpuExact（默认）或 MetalFp32。数值模式与原生实现能力影响物理身份，
-trait 编码变化影响语义身份；运行句柄、分配地址、耗时与设备代次不进入语义身份。
-不新增优化规则，程序字节与编译选项标识原生实现。
+每个构建最多选择一个原生 backend：支持的 Apple 构建使用 Metal，或选择可选 Vulkan。`ExecutionContext` 判断该 backend 是否有可用设备。backend 标签记录放置选择；dispatch 和 submission 诊断记录实际设备工作。
 
-## 原生存储、访问与完成
+## 3. 契约规约与接口（Formal Contracts & APIs）
 
-ExecutionContext 拥有实际可选设备、一个队列、pipeline 复用及同步 GPU lane。
-初始 S4 实现使用受支持 Apple Silicon 上的 Metal。当前 build 可选择可选 Metal 或 Vulkan
-backend；关闭 build 或设备不可用时保留 CPU。
-每个 context 同时最多执行一个原生提交，等待命令完成后回调才退役，不新增异步
-回调 API 或无限设备提交队列。
+```cpp
+enum class ExecutionMode : std::uint32_t {
+  CpuExact = 1,
+  NativeGpu = 2
+};
 
-CpuStorage 表示不可变、CPU 可访问的存储，可以拥有 Metal shared buffer。
-Value 布局、origin、Region 和描述符独立于分配。发布后的 bytes 立即可读，结果
-持有原生 owner 和预算 lease 时可以超过 context 生命周期。输出与 scratch 在完成
-前不得发布、释放或复用。原生输入副本、输出、scratch、暂存的实际容量计入现有预算，
-共享分配计算一次，分配前预留，缓存是子限额；无法容纳的工作集明确失败。
-驱动元数据、pipeline 和调用者既有输入不属于像素 buffer 分配，有观察能力时单独报告。
+struct PlanningOptions {
+  ExecutionMode execution_mode = ExecutionMode::CpuExact;
+};
 
-计划显式表示上传、算子、主机访问边界，包含类型化 producer、Region/layout 与字节
-界限。GPU 后继复用 buffer；完成后主机访问 shared buffer 不虚构 D2H 复制。
-分别报告复制数/字节、dispatch、设备完成时间与主机验证。
+struct ExecutionContextConfig {
+  bool gpu_enabled = false;
+  std::uint32_t cpu_workers = 0;
+};
+```
 
-## 可信纯 C GPU 服务
+安装后的 C operation plugin 接口为 operation ABI 11。其 output sink 提供调用级 `ps_gpu_service_v11`；独立版本化的结构化 planar operation extension 为 ABI 3。
 
-ABI 6 保留同步回调，增加调用内 buffer token、有界输入/输出/scratch view、MSL
-程序与入口、buffer bindings、常量和 dispatch grid。当前 ABI 11 dispatch 按 active backend
-接受 MSL 或 SPIR-V。宿主验证记录并管理编译、提交，原生完成后才返回。插件不创建设备/队列、
-不保留 token、不向 SDK 暴露 Objective-C。
-shader 为可信进程内代码，校验不提供沙箱。C11 rgba32f 和内置八个算子使用相同服务。
-CPU 回调不能宣称完成 Metal 工作，两条注册路径均执行既有输出、数值、取消检查。
+```c
+typedef struct ps_gpu_service_v11 {
+  uint32_t struct_size;
+  void *context;
+  int (*buffer)(void *context, const uint8_t *bytes, uint64_t byte_size,
+                uint32_t writable, uint64_t *token);
+  int (*execute)(void *context, const ps_gpu_dispatch_v11 *commands,
+                 uint32_t command_count);
+  int (*release)(void *context, uint64_t token);
+  uint32_t backend;
+  uint64_t minimum_buffer_offset_alignment;
+} ps_gpu_service_v11;
+```
 
-## 数值模式与回退
+`NativeGpu` 为声明支持的 GPU 实现选择放置。没有 GPU 实现的步骤在存在 CPU 实现时使用 CPU；若所选要求没有可用实现，规划返回 `BackendUnavailable`。该模式不选择数值 profile。operation 参数和 traits 定义可接受的值、精度和回退权限。
 
-`CpuExact` 保持 CPU 算术及缓存语义。原 Metal FP32 operation profile 关闭 fast-math
-和 contraction；`ExecutionMode::NativeGpu` 只授予放置权限，不选择该 profile。每算子及指定
-代表链对独立 CPU oracle 使用 atol=1e-6、rtol=1e-5。任意组合会传播误差，不承诺与图规模
-无关的总误差或 CPU 位相同。
+主机以不透明的调用级 token 借出缓冲区。token 仅指向主机拥有的有界输入、输出或 scratch 视图。输入保持只读；输出和 scratch 分配计入 execution context 的受控缓冲区预算。插件为 Metal 提供 MSL，为 Vulkan 提供 SPIR-V。主机校验记录并拥有设备及 pipeline 状态；service 指针和 token 仅在 callback 生命周期内有效。`execute` 接受有界命令批次，并在已提交工作排空后返回，包括取消和错误路径。成功的非空 GPU callback 必须报告真实 native dispatch。
 
-Gaussian 在宿主 double 生成系数，GPU 补偿 Float32 累加；box 使用补偿累加与边缘
-实际样本数。圆章以宿主 double 几何生成精确行区间，GPU 计算颜色，圆外保留位型。
-不适用的 HDR、subnormal 或其他数值情况在发布前回退 CPU，非法输入保持既有错误。
+context 只有一个 GPU worker lane，service 以同步方式提交命令。完成后的共享主机/设备存储可在访问状态转换后由 CPU 读取，该过程不意味着额外的 device-to-host copy。即使 context 结束，`Value` 也可能继续持有原生分配所有者和预算租约。Native result key 包含执行模式、所选 backend 和原生实现身份。GPU 回退会使该结果及其后代不具备 native result-cache 资格；owner 与复用规则见[缓存模型](../../kernel-architecture/Cache-Model.md)。
 
-回退粒度为算子。`NativeGpu` plan 内 CPU 回退消费实际输入，不改变 plan 的选址模式。
-后端/数值拒绝只在发布前、已提交工作排空后重试；设备执行错误终止 Run，设备失效
-使驻留代次无效。取消停止新 admission，排空已提交工作并拒绝发布；stale/frozen
-规则保持。
+对通用 operation ABI，仅当 GPU 尝试在发布前返回 `BackendUnavailable`、operation 同时支持 CPU、traits 允许回退，且取消/currentness 仍允许继续时，运行期才会回退。内核先释放失败的 GPU continuation 及其临时所有者，再在 CPU 上重启同一个 observation。已提交设备执行错误会终止 Run。planar GPU extension 契约范围更窄：仅 Whole 执行，必须产生原生工作，且不执行 CPU 回退。
 
-## 驻留与 S3 集成
+## 4. 负面清单与边界（Non-Goals & Explicit Boundaries）
 
-同一 context 可保留原生输入副本和成功结果。键包含可证明的不可变内容、Region、
-实际实现、数值模式与设备代次。不可信内容身份的 source 可执行，但不跨 Run 复用。
-dirty mapping 引导需求，精确内容身份授权复用。
+- `NativeGpu` 授予放置权限，不保证每个步骤都在设备上运行。
+- 内核不保证 CPU、Metal 与 Vulkan 间自动数值等价。各算子定义自己的数值契约。
+- 原生 GPU callback 是受信任的进程内代码。记录校验不会隔离 shader，也不能防止恶意代码危害进程。
+- 设备句柄、队列所有权和 pipeline 管理归主机负责。插件不保留 service 指针或调用级 token。
+- 本契约不保证跨图节点的 planar 输出页驻留设备，不提供远程 GPU、自动测量式放置或多设备调度器。
+- planar extension 不支持分阶段 GPU 执行、joint dependency 结果或 CPU 回退。
 
-CPU 精确结果与 `NativeGpu` 派生结果隔离。发生回退的算子及其后继不写预期原生条目，
-GPU 上游不进入 S3 磁盘缓存。清理、驱逐、设备失效移除复用资格，但不提前释放活跃
-owner。共享计算保持独立订阅取消语义，成功验证且有效的结果才进入完成缓存。
+## 5. 后果与代价（Consequences）
 
-## 验收与交付
+Execution context 按原生分配的实际容量计量 GPU 输入副本、输出、scratch 和 staging。工作集无法容纳时，准入返回 `ResourceExhausted`；降低并发度或释放保留的 `Value` 可以降低压力。Pipeline 元数据和驱动分配不计入像素缓冲区预算。
 
-独立安装示例 examples/s4_gpu_workflow 提供 resident-chain、all-operations、
-cache-edits、preview-export、fallback，支持 CPU/Metal、内置/C 插件及 whole/tile/ROI。
-非空原生验收必须观察到真实 dispatch。覆盖 halo/边缘、非整除、八算子、数值极端与
-圆章精确覆盖、复用、设备失败、取消/stale、预算和结果寿命。工作量与资源确定性断言，
-耗时不设通过阈值。
+设备不可用时，GPU-only operation 无法运行。允许 CPU 实现的 operation 可在 GPU 于发布前报告不可用时使用 CPU 路径。普通 operation 错误和已提交的设备错误会返回调用方，内核不会将其作为 CPU 工作自动重试。调用方可以查看 fallback 原因和实际 dispatch/submission 计数，区分设备工作与 CPU 执行。
 
-要求 static/shared 安装 C/C++ 消费者和 daemon 0.6 迁移。CI 保留既有必需任务；
-无设备测试明确 skip，不宣称 GPU 通过。逐 Issue 提交后独立全面审查，修复 CI/bot，
-按 kernel 再 daemon 合并，结算 Issue/Project 并清理分支。
-
-## 替代条款
-
-仅替代既有 CPU 存储/原生驻留限制、operation/traits/package 目标版本，以及显式
-Metal 模式下无条件精确数值等价要求。ADR 0015 产品归属、0016 CPU 输入、0017
-Region/预算、0018 snapshot/cache/frozen 归属继续有效。接受是目标，Issue 记录实测交付。
+同步 lane 明确了缓冲区寿命和发布顺序，但较长的 GPU callback 会占用 lane，直到其命令排空。取消会停止新准入，并等待已提交命令退出后再释放 callback 资源。当前 plugin 边界是 operation ABI 11 和 planar ABI 3；插件必须匹配这些接口。

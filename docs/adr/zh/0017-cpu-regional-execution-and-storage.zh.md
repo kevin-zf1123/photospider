@@ -1,145 +1,87 @@
-# ADR 0017：CPU 区域执行与存储
+# ADR 0017：使用有界 CPU 存储执行区域工作
 
 - 状态：Accepted
-- 日期：2026-09-09
-- 接受记录：维护者在本任务中明确要求实现完整 S2 计划，包括 0.4 / operation ABI 4 和遵守保护规则的 PR 交付。
-- 基线：`main@70b760fee96575391b825df1b179480407f33a2b`
-- 决策 Issue：#263；实现：#264、#210、#211、#265、#266
-- 权威来源：[英文 ADR](../0017-cpu-regional-execution-and-storage.md)
 
-接受记录定义目标，不代表实现完成。GitHub Issue 维护交付状态。ADR 0015 保持产品
-归属及排除项。本 ADR 替换 ADR 0016 的完整运行期存储/输出、整图像素预检、
-operation ABI 3 和回调估算预算条款；源 schema、不可变绑定快照、图像 profile、
-标量范围和取消/currentness 优先级继续适用。
+## 1. 核心摘要 (TL;DR)
 
-## 研究与方案
+规划器根据算子 traits 传播请求输出区域，执行上下文使用有界 CPU worker 和内存计账调度工作。密集 `Value` 存储保持不可变且可按区域寻址；结构化图像使用 `PlanarImage` owner，并且只发布已完成写入。调用方可以收集请求的输出，也可以同步消费有序输出 tile。
 
-基线中 `Value::create` 按完整 descriptor 检查地址，算子宿主要求完整输入/输出，
-物理需求虽已传播但不按区域物化。ExecutionRun 保留所有中间结果，却在回调结束后
-释放估算资源租约，因此无法证明区域执行的内存上限。
+## 2. 架构心智模型 (Mental Model & Intuition)
 
-[libvips evaluation](https://www.libvips.org/API/current/how-it-works.html) 提供区域源与
-sink 驱动的参考；[Halide scheduling](https://halide-lang.org/docs/tutorial/lesson_08_scheduling_2.html)
-将算法与计算/存储调度分离，并讨论局部性、重算和并行的取舍。S2 在现有编译器与
-ExecutionContext 中采用区域需求和按完成时刻管理的存储，不引入框架依赖或未经
-测量的速度结论。
+```text
+请求的输出区域
+       |
+       v
+规划器传播需求，并划分允许拆分的轴
+       |
+       v
+有界准入 -> CPU workers -> 算子 callbacks
+       |              /                 \
+队列或预算       成功输出            失败/取消/stale
+限制导致拒绝       |                    |
+                   v                    v
+                发布结果             停止准入
+                   |                排空已准入工作
+              收集 / sink                |
+                                    返回失败
+```
 
-整图执行后裁剪不能满足小 ROI 的内存验收；同时保留 ABI 3 与区域 ABI 会增加一套
-输出/生命周期契约，维护者选择统一升级。进程 RSS 约束需要范围外的分配跟踪；
-S2 约束受控计算缓冲区。原生设备、跨 Run 缓存、正向脏区传播和磁盘派生数据留待后续。
+规划器从每个请求输出反向推导，并记录各输入的需求区域。执行上下文只有在队列和分配限制允许时才准入工作。CPU worker 按计划区域调用 callback，发布不可变结果，并在最后一个 owner 释放时回收存储。streaming sink 提供同步背压，因为执行器完成一次 sink 调用后才交付下一个 tile。
 
-## Value 与 CPU 存储
+## 3. 契约规约与接口 (Formal Contracts & APIs)
 
-Value 分离完整逻辑 descriptor、有效 Region、存储视图及共享只读所有者。视图具有
-显式逻辑原点、字节偏移和有符号 strides。地址检查覆盖有效 Region，并验证 rank、
-包含关系、整数运算、元素末尾与分配边界。负 stride 和广播视图在证明安全时仍合法。
-发布原子完成，副本只共享不可变存储。
+```cpp
+struct RegionDimension { std::uint64_t offset; std::uint64_t extent; };
+class Region;
+class Value;
+class PlanarImage;
+struct ExecutionPlan;
+struct ExecutionBindings;
+struct ExecutionOptions;
+struct ExecutionContextConfig;
 
-宿主可写分配在发布后转为只读；可写输出不得与活动输入或其他可写分配重叠。只读
-视图可共享所有者。所有使用回调完成且全部 Value/视图引用释放后才能复用。fan-out
-和重复边不能提前释放。结果的租约保持到最后一个副本销毁；计账状态可晚于
-ExecutionContext 销毁。
+using ExecutionSink =
+    std::function<Status(const std::string&, ValueView)>;
 
-ExecutionBindings 增加元数据与声明精确匹配的区域源，源同步填充宿主提供的区域
-缓冲区。Run 保留不可变源快照到全部回调退出。先校验所有名称、元数据和 scalar
-区间，像素在读取需求区域时校验，未读像素不扫描。完整 dense Value 输入继续可用。
-源和 sink 不得保留借用的可写或只读指针。
+class ExecutionContext {
+ public:
+  [[nodiscard]] Result<ExecutionResult> execute(
+      const ExecutionPlan& plan, ExecutionBindings bindings = {},
+      const CancellationToken& cancellation = CancellationToken(),
+      const ExecutionOptions& options = {});
+  [[nodiscard]] Result<ExecutionDiagnostics> execute_stream(
+      const ExecutionPlan& plan, ExecutionBindings bindings,
+      const ExecutionSink& sink,
+      const CancellationToken& cancellation = CancellationToken(),
+      const ExecutionOptions& options = {});
+};
+```
 
-## 算子与版本
+这些签名还原当前公开成员；省略外围头文件和其他方法。
 
-软件包升至 0.4.0，OperationTraits 与 operation C ABI 升至 4。维护中的 C 类型、
-常量和入口统一使用 `_v4` / `_V4`；在查询 API table 前拒绝 ABI 3，不保留适配器。
-C++ 消费者重新构建。C++17、WorkflowDocument schema 2、provider ABI 1 保持不变；
-provider 仍定义语义 schema，不承担运行期存储或文件编解码。
+`Region` 在 descriptor 轴顺序中保存左闭右开的逻辑区间。坐标描述样本，不编码字节偏移。规划器根据 Whole、elementwise 或 halo 等算子 traits 校验请求并传播需求，再按逻辑图像边界裁剪 halo。只有算子和图像契约允许拆分的轴才会被 tile 化；通道轴属于原子分组时，每个 tile 保留完整通道组。收集的输出只包含 plan 请求的确切覆盖范围，而 descriptor 仍描述完整逻辑值。
 
-两种算子 API 都提供有序区域输入、明确输出 Region、宿主输出分配与 scratch。
-宿主管理校验、分配失败和只读发布；仅成功完成才发布。保留 C 指针/count/size 校验
-与异常边界。workspace 必须有可检查计算的上限，供 tile 准入预留；算子像素缓冲区
-使用宿主分配器。可信回调违反分配契约不构成宿主提供沙箱保证。可选 GPU 回调仍与
-原生设备区分。
+`Value` 描述逻辑 descriptor、有效 region、strided 字节布局、facets、资源 owner 和不可变 `CpuStorage`。`Value::view(region)` 返回一个共享 storage owner 且不复制数据的 owning `Value`。`ValueView` 则借用 `Value` 且不持有存储；被引用的 Value 必须比它活得更久。`MutableBuffer` 独占且只能移动；`freeze()` 将其存储转为不可变所有权。任一 owning `Value` 持有该分配时，已发布分配仍保持有效。重排和区域算子只将请求覆盖范围复制到宿主管理的输出存储。
 
-静态 halo specialization 属于复制的 trait，在 analyze 中从已校验参数解析，不依赖
-每次执行的像素/标量。新增 Float32 蒙版输入端口：二维 {H,W}、无 facet、有限 [0,1]，
-与图像空间尺寸一致。scalar 保持完整 {1}；RGBA 保持全部四通道和 ADR 0016 profile。
+`PlanarImageLayout` 定义 height、width、可选 channel 轴、component group、row pitch，以及 continuous 或 tiled 物理顺序。逻辑轴顺序不代表物理存储交错排列。`PlanarImage` 持有已发布且不可变的样本；写入方通过未发布的 write window 写入，并在完成区域后提交。`PlanarPageBudget` 分别计量图像已 backing 的 page 与最大虚拟地址预留。page owner 及计账 lease 可在 execution context 销毁后继续存活。普通 `execute_stream` 入口接收 Value 区域输出；plan 需要结构化 planar 输出时会返回 `TypeMismatch`，planar 执行使用结构化图像结果路径。
 
-## 需求、调度与预算
+当前 operation plugin 接口使用 operation ABI 11，planar operation 接口使用 ABI 3。普通 C 接口定义在 [`operation_plugin_api.h`](../../../include/photospider/plugin/operation_plugin_api.h)，独立 planar 接口定义在 [`planar_operation_plugin_api.h`](../../../include/photospider/plugin/planar_operation_plugin_api.h)。callback 通过注册表选定版本的 ABI 接收已校验元数据、请求区域和宿主服务。注册表会在调用插件 callback 前拒绝 ABI 不匹配。宿主边界会隔离 callback 异常。
 
-PlanningOptions 增加正整数 tile 高/宽，默认 128/128，并保留命名输出 Region。
-ROI/tile 变化重新规划 optimized IR。物理 identity 包含规范化需求及 tile 几何；
-trait、静态 halo 和 mask 语义进入 semantic identity。semantic、optimizer、physical
-plan、plan cache 使用独立 v4 domain；源 schema 仍为 2。运行期数据、地址、计时和
-取消状态不进入这些 identity。
+`ExecutionContextConfig` 限制 CPU worker 数量、等待 callback 数量、受控活动字节和可选 cache。普通 callback 在 worker 开始执行时释放等待槽位；`CPU_STAGES` job 会保留准入，直到所有已提交 tile 退出且 job 从队列摘除。因此等待上限已满时，即使 staged job 正在运行，也可能阻止另一项提交。共享 scheduler 队列见[并行执行模型](../../kernel-architecture/Parallel-Execution-Model.md)。`maximum_live_bytes` 计入受控计算 payload，包括区域读取、宿主管理的输出、scratch、中间数据和传输。该限制不是进程 RSS，也不计调用方执行前已拥有的输入存储。分配 payload 前先预留预算，计账 lease 会保留到最后一个 storage owner 释放。
 
-按输出名称字典序、空间行列序惰性生成 tile。逐 tile 反推需求并合并本 tile 的 fan-out；
-相邻 tile 的 halo 可以重算。halo 相对于完整逻辑图像扩展/裁剪，不能在 tile 边缘做
-图像边界扩展。retile 只拼接所需覆盖，缓冲区计账。部分通道、空或越界图像请求在
-规划时失败。
+## 4. 负面清单与边界 (Non-Goals & Explicit Boundaries)
 
-只有确定、无副作用、区域规则合法的路径可逐 tile 重算。Whole 算子建立明确完整
-物化边界，完整工作集与保留结果都计账；放不下则返回 ResourceExhausted。
+- CPU 区域执行为必需能力；GPU backend 是可选且按算子支持。GPU 可用不表示每个算子都能在 GPU 执行。
+- 受控字节上限覆盖已纳入计账的 payload 分配，不限制调用方分配、未计账元数据、线程栈或操作系统开销。
+- `Region` 描述逻辑覆盖，不保证一般 strided `Value` 在物理内存连续。
+- planar 图像的通道分组表示逻辑样本和语义分量，不会将 planar 存储转换为交错字节。
+- 执行器不会回滚已被 streaming sink 消费的 tile；streaming 没有持久提交协议。
+- 可信进程内 operation 代码不受沙箱保护。分配服务和 ABI 校验用于约束 callback 契约，不限制任意 native 代码。
 
-ExecutionContext 的 maximum_live_bytes 约束实际受控分配容量，包含源读取、输出、
-scratch、中间结果、传输和 sink 暂存。共享存储只计一次；调用方已有输入及自行复制
-的数据单列，元数据、线程栈、RSS 不计入。工作集预留和实际分配峰值分开报告；空闲
-复用容量在实际释放前仍计账。
+## 5. 后果与代价 (Consequences)
 
-tile 准入前预留完整保守工作集。临时竞争降低并发，或等待能在已有租约内完成的任务。
-最小工作集放不下则失败，禁止持有部分资源等待剩余资源。外部保留结果不能导致
-无限等待调用方释放。worker、最大并行度、共享等待队列均有界，诊断按图大小聚合，
-不能随 tile 总数无界增加。
+无效、空或越界的输出请求在规划阶段失败。无法满足队列准入、workspace 预留或输出分配时，callback 可能被拒绝。能够在已有 lease 内完成的工作会等待 worker 容量。取消采用协作方式；有效入口之后，已观察到的取消优先于 stale graph 状态和普通算子失败。算子失败不会发布不完整输出，普通 `execute` 失败时不会返回部分收集结果。
 
-## 收集、流式输出与失败
+Whole 算子的工作集可能比小输出请求占用更多内存，因为该算子会建立完整物化边界。若算子契约允许，调用方应选择支持区域需求的算子和 tile 几何，配置合理的资源限制，并在不再需要结果时释放其引用。共享存储只计一次；外部继续持有的结果会让其计账 lease 保持有效。
 
-execute 收集各命名输出精确请求的 Region，未指定则为完整输出，分配计入预算。
-流式入口复用相同 plan/bindings，按顺序同步调用 sink，借用视图在返回时失效。
-背压约束已完成而未消费的 tile；调用方可复制到自己的独立存储。
-
-准入前、回调完成后、每次 sink 交付前、最后一次 sink 返回后和最终组装后返回前检查取消及 currentness。入口先
-拒绝 foreign/default/stale plan，再读取绑定或取消。有效入口之后 Cancelled 优先于
-Stale，再优先于普通失败。sink 失败停止后续交付，所有准入工作退出后返回。已经
-消费的 tile 无法回滚；仅最终成功表示完整 stream 有效。流式执行不提供持久提交协议。
-
-错误名称/参数/源描述在回调前失败；读取到的绑定像素域错误为 InvalidArgument，
-合法对象类型/覆盖不匹配为 TypeMismatch，错误计算像素为 OperationFailed，字节溢出
-或分配耗尽为 ResourceExhausted。源/sink 异常转换为执行失败。失败不发布部分收集结果。
-
-## 图像场景与 oracle
-
-S2Image.RegionAndTiles：前景 → Gaussian → 曝光 → 蒙版 → source-over(背景)。
-
-- image.gaussian_blur 要求静态 radius:Int64 [1,64] 和有限 sigma:Float64 [0.1,64]，无默认值。
-  radius 决定空间 halo；归一化采样 Gaussian 核先横向后纵向，图像边缘 clamp，固定遍历顺序，
-  每遍输出 Float32。
-- image.exposure_gain 沿用动态 Float32 gain [0,16]。
-- image.mask 用独立 Float32 {H,W} [0,1] 缩放预乘 RGBA。
-- image.source_over 按 F + B × (1 − F.alpha) 计算全部 RGBA，依据
-  [source-over 公式](https://www.w3.org/TR/compositing-1/#porterduffcompositingoperators_srcover)。
-
-保留有限/HDR/预乘规则、nearest ties-to-even 与 gradual underflow，禁用重排与 FMA
-contraction。核系数使用归一化 binary64 运算，tap 按 -radius 到 +radius 遍历，每项乘法与累加使用无 contraction 的 binary64 运算，每遍写 binary32。同一实现的整图与
-分块结果逐位相等；独立整图 oracle 使用 abs(error) <= 1e-6 + 1e-5*abs(reference)。
-覆盖手算小场景、边缘、非零 ROI、不可整除 tile、tile 小于 halo、mask 0/1、透明、HDR、
-非法参数。
-
-程序化大图区域源与同步校验 sink 在不保存整图的条件下证明内存边界。覆盖 fan-out、
-重复输入、多输出、并发 Run、慢/失败 sink、恰好足够及少一字节预算、非法视图、取消/
-stale、清理及 context 销毁后的结果所有权。内置与安装 C 插件路径运行同一示例和独立 oracle。
-
-## 交付
-
-顺序：#263 契约、#264 存储/ABI、#210 CPU liveness、#211 tile/halo、#265 区域执行、
-#266 图像场景、daemon 安装消费迁移。#152 保留父索引；#209 标定及关联 #153/#154 的
-原生存储/liveness/tile 工作继续开放。S2 不关闭整个 HEX/MED 父任务。Issue 记录原生
-依赖、实际测试与合并 commit，Project 同步。
-
-执行独立局部代码/契约审核、受影响 static/shared 安装消费验证和既有保护 CI。
-daemon 只消费安装后的公开 0.4 包，适配调用/codec，不添加协议功能；协调两仓 PR。
-不包含 OpenSpec、feedback、C++20、发布归档或无关优化。
-
-## S3 目标修订
-
-[ADR 0018](0018-local-result-caches-and-frozen-execution.zh.md) 明确允许有界可丢弃磁盘派生数据与冻结执行，并替换算子版本及缩放区域目标；接受不代表实现完成。
-
-## S4 目标修订
-
-[ADR 0019](0019-metal-resident-image-workflows.zh.md) 增加显式 Metal 执行、原生 shared storage 和 operation ABI 6。接受定义目标，不代表实现完成；其余边界保持。
+`execute_stream` 按确定的名称与空间顺序交付基于 Value 的输出 tile，每次同步调用一个 sink。sink 返回后，其 `ValueView` 即失效；需要保留数据时，sink 可以复制字节，或调用 `ValueView::retain()` 获取 owning `Value`。被保留的输出会让存储 lease 继续有效，并可能耗尽执行预算。sink 失败、取消或过期状态会停止后续交付，已准入 callback 退出后调用才返回。先前消费的 tile 不会因后续 tile 失败而撤销。内存限制不约束进程 RSS；operation/backend 支持取决于算子注册的 traits 和配置的 backend。

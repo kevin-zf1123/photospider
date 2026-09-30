@@ -1,119 +1,55 @@
 # Numeric operations
 
-The default registry in `make_default_operation_registry()` provides these CPU
-operations through the public WorkflowDocument, Compiler and ExecutionContext
-interfaces. The accepted boundary is [ADR 0020](../adr/0020-composable-operation-foundations.md).
-The [Chinese mirror](zh/Numeric-Operations.zh.md) describes the same implementation.
+The default registry contains legacy unsuffixed arithmetic keys and newer profile-specific numeric families. The families have different parameter, region, and reduction contracts; choose a key by its exact name rather than assuming a suffix is cosmetic. Operation plugins use C ABI 11.
 
-Clamp and arithmetic use Whole input/output demands. Reductions
-read complete logical input support through sequential bounded stages. All return
-packed generic Values with empty facets. Rank-1..8 nonzero shapes remain required. Clamp
-and arithmetic preserve shape; reductions return Float64 `{1}`. Binary inputs
-must have identical dtype and shape. There is no implicit broadcasting, casting
-or semantic preservation. These descriptions apply to generic arrays and
-admitted non-image inputs. Legacy coverage/image Values are rejected by the
-planar gate; multiplying a legacy coverage mask is not a supported adaptation.
+## Unsuffixed Value operations
 
-| Key | Inputs | Static parameters |
+| Key | Inputs and output | Parameters and region |
 | --- | --- | --- |
-| `numeric.add`, `numeric.subtract`, `numeric.multiply`, `numeric.divide` | Two Float32 or two Float64 arrays | None |
-| `numeric.clamp` | One Float32/Float64 array | Finite inclusive Float64 `min`, `max`, with `min <= max` |
-| `numeric.mean`, `numeric.variance` | One Float32/Float64 array | Optional Int64 `block_size` in [1,65536], default 64 |
-| `numeric.ordered_scan` | One rank-1 Float64 array; same-shape generic output | Optional Int64 `block_size` in [1,65536], default 64 |
+| `numeric.add`, `numeric.subtract`, `numeric.multiply`, `numeric.divide` | Two same-shape, same-dtype Float32/Float64 generic Values; output preserves shape and dtype | No parameters; Whole input/output |
+| `numeric.clamp` | One Float32/Float64 generic Value; output preserves shape and dtype | Required finite Float64 `min`, `max`, with `min <= max`; Whole |
+| `numeric.mean`, `numeric.variance` | One rank-1..8 Float32/Float64 Value; Float64 scalar `[1]` | Optional Int64 `block_size` in `[1,65536]`, default 64; staged dependency reads |
+| `numeric.ordered_scan` | One rank-1 Float64 Value; same-shape Float64 output | Optional Int64 `block_size` in `[1,65536]`, default 64; prefix dependency reads |
 
-Package 0.20.0 removes `numeric.cast` and `numeric.encode_range`. Numeric
-format conversion belongs to the proposed FMT-06 family; see the
-[retirement record](../built-in_ops/02-format-color/op_specs/FMT_legacy_retirement.md).
+The four arithmetic keys calculate in the input dtype and reject nonfinite inputs or results. Division rejects either signed zero. Clamp checks the selected result before narrowing to Float32; an unused endpoint may exceed the Float32 range. The callbacks use the invocation allocator and do not broadcast, cast, or preserve semantic facets.
 
-Arithmetic computes in the input dtype, rejects non-finite inputs/results and
-rejects division by either signed zero. Clamp checks the selected result before
-Float32 narrowing; large unused Float64 endpoints are legal. Mean accumulates in
-Float64 in fixed logical row-major order; population variance uses two passes
-(mean, then squared deviations, `ddof=0`). Non-finite accumulated results fail.
-There is no implicit parallel or reassociated reduction.
+`numeric.mean` accumulates in Float64 in logical row-major order. `numeric.variance` uses two passes: it computes the mean first, then accumulates squared deviations with `ddof=0`. Both expose one scalar output and divide the source into exact logical row-major intervals. A requested block can span tensor axes without reading bounding-box gaps. `block_size` bounds input reads; it does not batch output observations. Nonfinite values and unrepresentable accumulated results fail. The execution context owns continuation state and live fragments; allocator and work limits apply while blocks are processed.
 
-Mean/variance use the staged dependency protocol with one scalar observation.
-`block_size` bounds requested samples per phase. Exact row-major intervals
-decompose across rank-1..8 axes
-without reading a bounding-box gap. Each block continues the incoming Float64
-accumulator directly, preserving the order and global sample index of nonfinite
-input, sum-overflow and variance-overflow checks. Variance finishes the first
-pass before retaining its exact mean for every second-pass block. Block size is
-an input-read granularity, not a batch of output observations.
+`numeric.ordered_scan` computes inclusive prefixes from a positive-zero Float64 carry with strict left-to-right addition, nearest-even rounding and gradual underflow. Output `j` reads only input `[0,j]`. The first nonfinite input or accumulated overflow fails with its global input index. Successful carries may be reused through completed checkpoints; failures are not cached and checkpoint eviction can cause recomputation.
 
-Admitted non-image semantic inputs use the supplied-fragment validator before
-arithmetic. Legacy image rejection does not establish planar reduction support.
-Opaque vendor facets do not add a validation scan. All state and
-live fragments use the current ExecutionContext worker/admission/allocator.
-Empty exact scalar queries read nothing; resource/discovery/cancellation bounds
-remain explicit. Source data can exceed the live payload budget when its blocks
-fit. Completed exact-demand cache hits retain the complete global source support;
-changing any observed input invalidates the scalar result. Completed internal transitions can also reuse the block cache described below.
+## Profile-specific pointwise operations
 
-`test_ordered_reduction` checks bitwise results over five block sizes and ranks
-1, 4 and 8, Float32/Float64, cache cold/warm, original error sample indices,
-second-pass cancellation/recovery, legacy image rejection, and a 32 KiB source
-under a 1 KiB controlled live budget. Its independent arithmetic oracle uses an
-explicit binary64 left fold. The [G4 public workflow](../../examples/g4_workflow/README.md)
-checks mean 1.5 and variance 1.25 over repeated `[0,1,2,3]` with bounded source reads.
+The numeric math families use three explicit suffixes:
 
-`numeric.ordered_scan` computes inclusive prefixes with a positive-zero Float64
-initial carry, strict left-to-right addition, nearest-even rounding and gradual
-underflow. It restores the caller's environment. Output j observes input `[0,j]`;
-no read or arithmetic extends past j. The first nonfinite input or accumulator
-fails with `nonfinite scan input i` or `scan overflow i`. Therefore `[1,inf]`
-queried at `{0}` succeeds with 1, while `{1}` or `{0,1}` fails at input 1.
-RequestFailureOnly still invokes each output independently.
+| Profile suffix | Admission |
+| --- | --- |
+| `_strict` | Portable strict implementation |
+| `_accelerated_apple_silicon` | Apple Silicon implementation when its runtime profile is available |
+| `_accelerated_x86_64` | x86-64 accelerated implementation when its runtime profile is available |
 
-Successful prefix carries can be reused through completed-only checkpoints in
-the same active input bundle. Each borrowed checkpoint imports its full direct
-input witness and upstream structural records. There are no cached failures or
-worker waits. Checkpoints use existing host allocator leases and bounded optional
-metadata retention; eviction can cause recomputation. A dense 256-output source
-test reads exactly 256 inputs once. Private execution-hook tests hold a real
-published prefix to check both waiter start orders, owner cancellation, warm
-result caching and exact imported source support. Direct/manual protocol tests
-check allocator ownership, scope/sequence rejection and witness limits.
-Scan and mean/variance now retain completed internal transitions across bundles
-through the existing result LRU. Keys include exact supplied sets/input bits,
-actual incoming state bits, phase, range and fixed nearest-even/gradual numeric
-mode. Variance includes its fixed mean in every second-pass incoming state.
-The host hashes supplied fragments after their normal validation; a hit copies
-state into the current stage allocator and retains current dependency evidence.
-Only successful transforms are stored, with no additional input reads or output
-batching. Changed incoming state forces the current block to recompute. Later
-blocks may hit after their incoming state reconverges and their inputs match.
-`block_cache_hits/misses` count these internal lookups separately from completed
-output `cache_hits`; optional cache-work exhaustion skips lookup/retention.
-The public block workflow and tests verify the `[1,2^54]` reconvergence boundary,
-frozen/current output differences, and second-pass invalidation when mean changes.
-Completed output caching still verifies its full transitive prefix support.
+`numeric_binary.cpp` registers each suffix for `add`, `subtract`, `multiply`, `divide`, `minimum`, `maximum`, `pow`, `atan2` and `atan2pi`. The exact elementary kernels accept same-dtype UInt8, Int64, Float32 and Float64 inputs for supported operations; divide is Float32/Float64 only. The certified transcendental functions use Float32/Float64 and their own domain and representability checks. These keys are Whole operations and keep dtype and shape. NaNs propagate according to each operation's exact kernel; domain and range failures follow each family's typed contract. `numeric.clamp_<profile>` and `numeric.remap_range_<profile>` report invalid bounds as `InvalidArgument/InvalidDomain`. Use the strict key when the selected accelerated profile is unavailable or its backend policy is not appropriate.
 
-The implementation reads logical coordinates using storage origin, byte offset
-and signed strides, including unaligned and zero-stride views. It allocates
-outputs through the invocation allocator, checks representable dense output
-before IR publication, polls cancellation during traversal and before publishing,
-and releases unpublished buffers on errors. Invalid parameters return
-`InvalidArgument`; unsupported/mismatched dtype or shape returns `TypeMismatch`
-before callback entry; invalid numeric results return `OperationFailed` with a
-sample index where applicable. Resource exhaustion and cancellation retain their
-own codes. No partial successful Value is published.
+The suffixed reduction family registers `numeric.reduce_sum`, `numeric.reduce_minimum`, `numeric.reduce_maximum`, `numeric.reduce_mean`, `numeric.reduce_count`, `numeric.reduce_variance` and `numeric.reduce_std`, each with the same three suffixes. These are Whole operations. They require a comma-separated String `axes` list of unique canonical nonnegative axis indices; sum, mean, variance and standard deviation also require String `dtype` (`uint8`, `int64`, `float32` or `float64`), subject to source and operation-domain compatibility. Variance and standard deviation require Int64 `ddof` in `0 <= ddof < N`, where `N` is the product of the reduced extents. Reduced axes become length one; unreduced extents remain unchanged. The implementation rejects invalid axes, unsupported dtype combinations, oversized inputs and invalid degrees of freedom. These reductions have profile-specific exact arithmetic and output conversion. They are separate registered keys from the unsuffixed staged `numeric.mean` and `numeric.variance` above.
 
-## Public workflow and validation
+`numeric.clamp_<profile>` and `numeric.remap_range_<profile>` use the same suffixes. Clamp takes three same-shape, same-dtype inputs in value, lower-bound, upper-bound order. Remap takes five in value, source-low, source-high, destination-low, destination-high order. Both preserve input shape and dtype, require rank 1..8, use Whole regions and reject invalid bounds during execution. This clamp family is distinct from the unsuffixed two-static-parameter `numeric.clamp`.
 
-[test_numeric_operations.cpp](../../tests/integration/test_numeric_operations.cpp)
-constructs public producer-to-operation workflows and checks arithmetic, clamp,
-mean/variance, strided and unaligned inputs, type/shape rejection, resource
-failure and cancellation. Expected values include `[3,2,1]-[4,4,4]=[-1,-2,-3]`,
-mean `[1,2,3]=2` and population variance `2/3`.
+The staged mean and variance callbacks keep their continuation state and each live source fragment under the execution context's allocator and resource limits. Completed scalar results retain the full observed input support in their cache evidence. Successful internal blocks can also be reused when supplied input bits, phase, range and incoming accumulator state match; variance includes the first-pass mean in its second-pass state. Failed blocks are not cached. Cache-work exhaustion skips optional lookup or retention, and an evicted block can be recomputed.
+
+The profile-specific pointwise and reduction implementations account work and cancellation through the execution resource budget. A profile that cannot be selected on the host fails during preparation; callers should use the strict suffix when portability is required. Profile names do not promise GPU execution.
+
+## Inputs, ownership and failures
+
+Generic numeric Values have rank 1..8 with nonzero extents and empty facets unless a family declares semantic input validation. Operations read logical coordinates, including legal storage offsets and signed strides, and allocate outputs through the invocation allocator. Output Values are not published until the callback completes and passes its final cancellation check.
+
+Invalid static parameters return `InvalidArgument`. Unsupported or incompatible dtype, shape, or facet metadata returns `TypeMismatch`. The unsuffixed finite-domain arithmetic, staged reductions and scan report nonfinite or unrepresentable results as `OperationFailed`. Profile-specific exact kernels preserve or classify IEEE values according to the operation; typed domain failures can return `InvalidArgument/InvalidDomain`. Resource exhaustion and cancellation retain their own status codes. No operation returns a partial successful Value.
+
+## Public workflows and checks
+
+[`test_numeric_operations.cpp`](../../tests/integration/test_numeric_operations.cpp) exercises the unsuffixed arithmetic, clamp, mean and variance paths, including strided and unaligned input, shape/type rejection, resource failure and cancellation. [`test_ordered_reduction.cpp`](../../tests/integration/test_ordered_reduction.cpp) checks reduction order, block boundaries, cache reuse and cancellation. The public [G4 workflow](../../examples/g4_workflow/README.md) checks mean `1.5` and population variance `1.25` for repeated `[0,1,2,3]`.
 
 ```sh
-cmake --build build --target test_numeric_operations -j 8
-ctest --test-dir build -R '^test_numeric_operations$' --output-on-failure
+cmake --build build --target test_numeric_operations test_ordered_reduction -j 8
+ctest --test-dir build -R '^(test_numeric_operations|test_ordered_reduction)$' --output-on-failure
 ```
 
-The [foundations example](../../examples/foundations_workflow/README.md) runs
-maintained generic numeric, expression/LUT and field-filter workflows. Unknown operation lookup, invocation and compilation rejection is covered by
-`test_compiler` using a synthetic key; historical removed-key lists are not
-runtime correctness gates. Format conversion implementation is documented in
-[Channel and Color Operations](Channel-and-Color-Operations.md).
+Generic arithmetic keys do not declare planar image capability. Their registration does not imply that a structural planar image can be passed as a generic numeric array.

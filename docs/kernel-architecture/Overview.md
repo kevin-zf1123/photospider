@@ -1,57 +1,71 @@
 # Architecture Overview
 
-Photospider is a C++17 embeddable compiler/execution kernel for local graphs.
-Callers own independent `GraphContext` objects and choose independent or shared
-`ExecutionContext` objects.
+## 1. Core summary (TL;DR)
 
-## Pipeline
+Photospider is an embeddable C++17 kernel that validates local workflows, compiles immutable plans, and executes them against caller-supplied bindings. A `GraphContext` owns source revisions; an `ExecutionContext` owns bounded workers, operation definitions, caches, and resource accounting. The daemon consumes the installed kernel API and owns its own sessions and process lifecycle.
+
+## 2. Mental model and intuition
 
 ```text
-WorkflowDocument -> GraphContext/GraphSnapshot
-  -> Compiler::analyze -> SemanticGraphIR
-  -> Compiler::optimize -> OptimizedGraphIR
-  -> Compiler::plan -> ExecutionPlan
-  -> ExecutionContext::execute -> ExecutionResult
+WorkflowDocument -> GraphContext -> GraphSnapshot
+                                    |
+                                    v
+                         analyze -> SemanticGraphIR
+                                    |
+                                    v
+                         optimize -> OptimizedGraphIR
+                                    |
+                                    v
+                                  Plan
+                                   |
+ExecutionBindings ----------------> Run
+                                   |
+                        +----------+----------+
+                        |                     |
+                 ready CPU steps       ready native steps
+                  compete for a         enter one configured
+                 bounded CPU pool          GPU lane
+                        +----------+----------+
+                                   |
+                    named Values / PlanarImages
+                           + diagnostics
 ```
 
-Every compiler stage returns a complete immutable value or one failure. Source,
-semantic, optimized, plan, runtime Value, and daemon identities are separate.
+The compiler owns validation and planning. Each `ExecutionRun` owns its ready work, intermediate Values, cancellation observations, and diagnostics. Runs share the context's worker pools and byte ledger, while returned Values keep their storage leases alive independently.
 
-## Module ownership
+## 3. Contracts and interfaces
 
-| Module | Current ownership |
-| --- | --- |
-| graph | `GraphContext`, `GraphSnapshot`, copied source revision/currentness |
-| compiler | fail-closed parameter validation, typed IR, conservative no-op optimization, demand-aware local plan, typed digests/key |
-| execution | bounded CPU pool, optional native GPU queue/lane, private Run, cancellation, byte ledger, raw diagnostics |
-| data | regional immutable `Value` and CPU-accessible/native storage, rank-general `Region`, `StridedLayout` |
-| plugin | exact operation ABI v11/data-definition ABI v1, typed parameter schemas, demand-aware callbacks, and startup-frozen registries |
-| benchmark | raw compile/plan/execute observations plus named correctness-oracle or explicit unchecked status; execution cancellation aborts the complete run without a report |
+```cpp
+class Compiler {
+ public:
+  Result<SemanticGraphIR> analyze(const GraphSnapshot&,
+                                  ResourceBindings = {}) const;
+  Result<OptimizedGraphIR> optimize(const SemanticGraphIR&) const;
+  Result<ExecutionPlan> plan(const OptimizedGraphIR&,
+                             const PlanningOptions& = {}) const;
+};
 
-CPU exact execution is required. `ExecutionMode::NativeGpu` grants placement of
-operations whose traits declare a native implementation; the execution context
-selects its configured Metal or Vulkan backend, while each operation/profile
-defines numerical behavior. Shared native storage can retain completed results
-and avoid redundant uploads; host access and actual copies have separate
-diagnostics. Metal/Foundation remain private requirements for Apple builds and
-can be disabled. See [S4 Workflow](S4-Workflow.md).
+class ExecutionContext {
+ public:
+  Result<ExecutionResult> execute(
+      const ExecutionPlan&, ExecutionBindings = {},
+      const CancellationToken& = CancellationToken(),
+      const ExecutionOptions& = {});
+};
+```
 
-Cancellation is cooperative. Plan currentness and cancellation are checked at
-completion and before final result return. Resource leases and intermediate
-Values use ordinary exact C++ ownership.
+These are abbreviated declarations of public methods; unrelated members are omitted. Each stage returns a complete immutable value or a typed failure. The current optimizer copies semantic nodes into a distinct stage and computes a separate digest. Planning records named output demands and derives per-step input demands for Whole, Elementwise, and clipped Halo rules. Execution checks plan currentness and the frozen operation-registry identity before callbacks, then validates output descriptors and demanded coverage before publication. `analyze` accepts immutable `ResourceBindings` for static facets such as color profiles.
 
-Planning propagates optional named output Regions backwards through Whole,
-Elementwise, and overflow-safe clipped Halo rules. The resulting per-step
-output and input demands are part of plan identity and are validated again at
-execution before an operation callback receives them.
+`CpuExact` is the default execution mode. `NativeGpu` permits placement only for operations that declare a native implementation and match the configured backend. CPU work uses the fixed context pool; native callbacks use the configured backend lane. Cancellation is cooperative, and callbacks already entered may finish before the Run returns.
 
-The daemon depends on the installed public package. The kernel never depends
-on daemon source, serializes no internal IR, and owns no daemon namespace or
-Job/result lifecycle.
+## 4. Non-goals and boundaries
 
-The 0.7 foundations implementation adds typed image-v2 semantics, shared static
-dtype/shape/output inference, computed bounded scalars and reusable numeric,
-channel/color, expression/LUT and component operations. The
-[standalone foundations workflow](Foundations-Workflow.md) demonstrates the
-public composition surface. This is the `ops` delivery line; main's audited
-baseline is 0.6 and daemon's 0.6 consumer remains unmigrated.
+- The kernel does not own daemon sessions, IPC, persistent jobs, or process lifecycle.
+- Compiler IR and plans are in-process values, not a serialized workflow format.
+- Native operation modules are trusted in-process code; ABI validation is not sandboxing.
+- GPU availability does not imply that every operation has a native implementation.
+- Results are in-memory owners, not durable identities or recovery records.
+
+## 5. Consequences
+
+Planning can be reused with new bindings, but runtime input addresses are not part of a plan. Queue admission and the shared byte ledger can reject a Run when configured bounds are exhausted; callers should treat returned status codes as the authoritative outcome. Retaining a result retains its storage lease, so callers control how long result memory remains charged. Native placement, fallback, transfers, and cache reuse are visible through diagnostics and can change the work and memory cost of a Run.

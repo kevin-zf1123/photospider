@@ -1,126 +1,83 @@
 # Integer histogram and global grade
 
-Package 0.10 exposes `statistics_schema`, `statistics_mean`, and
-`make_statistics_operation` through the installed C++ API. The C operation ABI
-remains 9. These CPU stages use structured protocol 2, managed root admission,
-mandatory temporary backing and existing shared Result lifetimes.
+[Chinese reader version](zh/Integer-Statistics.zh.md).
 
-## Schema and success domain
+## 1. Scope and ownership
 
-`StatisticsSpec{height,width,bins}` requires positive HW dimensions and 1..65536
-bins. The raster sample count is at most `(INT64_MAX-4095)/8`, so encoded scalar
-backing offsets fit the temporary-storage contract. Input Values are facet-free
-Int64 HW and UInt8 HW; mask values other than zero select samples. Selected
-integers must be in `[0,bins)`. There is no implicit color, luminance or transfer
-conversion. Masked-out samples may lie outside the bin domain.
+The statistics API describes integer-coded scalar rasters, sparse histograms, global parameters, and graded output. CPU producers scan immutable Value snapshots and publish mandatory Result backing under the execution root's capacity, work, I/O, and stage budgets. The histogram producer owns its bounded bin counters and temporary state until publication; downstream Results retain their input associations and backing.
 
-The Histogram factory also checks a necessary stage lower bound before source
-binding or execution: `S=H*ceil(W/512)*ceil(bins/512)` source-request polls,
-followed by at least one poll to consume the last reply and finish. It returns
-ResourceExhausted when `S>=1000000`, the recipe's fixed producer cap. The
-comparison uses division, so extreme valid dimensions cannot overflow the
-admission calculation. For example, 2048x2048 with 65536 bins is rejected since
-S=1048576. This is a recipe admission restriction; the generic schema,
-Parameters and Grade factories retain their existing size domain. Passing this
-lower-bound check does not reserve output stages or guarantee completion:
-populated rows, selected I/O windows and Run budgets can still exhaust limits.
+## 2. Data layout and memory
 
-Version-one schemas have a canonical `integer_statistics_v1` metadata facet
-containing profile 1, H, W and bins as four little-endian UInt64 words.
+```cpp
+struct StatisticsSpec final {
+  std::uint64_t height = 1, width = 1;
+  std::uint32_t bins = 8;
+};
+enum class StatisticsRepresentation : std::uint32_t {
+  Histogram = 1, Parameters, Graded
+};
+Result<SchemaTemplate> statistics_schema(
+    StatisticsRepresentation representation, const StatisticsSpec& spec);
+Result<double> statistics_mean(std::int64_t total, std::int64_t count);
+```
 
-| Schema | Publication and fields |
+`StatisticsSpec` requires positive H and W and 1 to 65536 bins. The raster sample product is bounded by `(INT64_MAX-4095)/8`. Inputs are facet-free Int64 HW values and UInt8 HW masks. A nonzero mask byte selects a sample; selected values must lie in `[0,bins)`. Masked-out values do not participate. The operation does not infer color or apply a transfer function.
+
+| Result schema | Fields and publication |
 | --- | --- |
-| `photospider.integer_histogram` | CompleteBundle; RuntimeCount Int64 `bin`, FieldRows Int64 `count` |
-| `photospider.integer_statistics` | CompleteBundle; one Int64[3] `count_total_valid`, one Float64 `mean` |
-| `photospider.graded_scalar` | StablePrefix; fixed H*W Float64 `pixels`, HW domain |
+| `photospider.integer_histogram` | RuntimeCount Int64 `bin`; matching Int64 `count` rows; CompleteBundle |
+| `photospider.integer_statistics` | Int64 `[count,total,valid]` and Float64 `mean`; CompleteBundle |
+| `photospider.graded_scalar` | Fixed H*W Float64 `pixels`; HW domain; StablePrefix |
 
-The fixed mathematical histogram has bins `[j,j+1)`. Its sparse encoding stores
-only positive counts with strictly increasing bin IDs, including bin zero when
-selected zero-valued samples exist. Runtime row count is the number of nonzero
-bins, not the number of selected samples. Missing bins mean zero only after
-seal. Parameters validates all imported rows, rejects duplicate/out-of-range
-IDs and nonpositive counts, and checks both integer arithmetic and total sample
-count against HW. Producers using these public factories validate the semantic
-contents; arbitrary third-party publishers remain responsible for their
-registered schema's semantic obligations.
+Histogram IDs are strictly increasing and only positive-count bins are stored. An absent bin means zero after the complete histogram seals. Empty selection yields no rows. Statistics for an empty selection have `[0,0,0]` and a nonsemantic zero mean; a nonempty selection of zeros is valid with mean zero. Physical Result window size is not part of schema identity.
 
-`D=sum(count)` and `T=sum(bin*count)` use checked nonnegative Int64 arithmetic.
-An empty selection emits `[0,0,0]` and a nonsemantic zero mean placeholder. A
-nonempty all-zero selection emits `[D,0,1]`. For D>0, mean is the correctly
-rounded binary64 value of the exact rational T/D. Integer long division extracts
-53 significant bits and uses remainder comparison for ties-to-even; converting
-T and D separately to double before division is not equivalent. Public
-`statistics_mean` also accepts the full nonnegative Int64 numerator/positive
-Int64 denominator domain where T/D<65536.
+## 3. Execution and state machine
 
-`statistics.grade` requires a finite nonnegative Float64 `target` parameter,
-complete consistent parameters, valid=1 and mean>0. It checks the exact integer
-ratio against bins-1 before relying on the rounded mean. Operations are
-`gain=round64(target/mean)`, then
-`y[i]=round64(gain*round64(Int64(x[i])))`, nearest ties-to-even, gradual
-underflow, no contraction. The floating environment is restored. Nonfinite
-gain or output returns ArithmeticOverflow; empty, zero-mean or inconsistent
-parameters return InvalidDomain. No approximate result replaces these failures
-and no CertifiedBound is implied.
+```text
+Int64 raster + UInt8 mask
+          |
+          v
+ histogram producer --complete sparse Result--> parameter producer
+                                                     |
+                                              complete parameters
+                                                     |
+                                          grade producer validates global data
+                                                     |
+                                          bounded output / stable prefixes
+```
 
-## Dependencies, paging and lifetime
+The histogram factory checks a necessary request-stage lower bound before binding inputs. With `S=H*ceil(W/512)*ceil(bins/512)`, it must fit the source request polls plus a completion poll. If `S>=1,000,000`, the factory returns `ResourceExhausted`. The implementation uses division checks to avoid overflow. Passing admission is not a reservation: the effective producer limit is also bounded by the dependency option (default 4096 stages) and root stage budget. Later I/O, work, stage, or capacity exhaustion prevents a complete histogram publication.
 
-Histogram scans the full selected domain before any publication. Parameters
-waits for the complete histogram. Both use Conservative Cartesian support over
-their inputs, including the mask's complete validation/control domain. Result
-descriptor observations are retained separately at reserved `[0,1)`, so an
-empty collection still has count/descriptor dependencies.
+Histogram and Parameters use CompleteBundle and Conservative Cartesian support. Parameters waits for the complete histogram, then checks sparse IDs, positive counts, totals, integer overflow, and selected count against HW. Grade validates the complete global parameter Result before producing any pixel prefix. Each output pixel depends on its source sample plus shared parameter and descriptor support. Descriptor observations are separate from data rows, even for empty collections. If later pixel work fails, an already published stable prefix remains valid.
 
-Grade validates complete global parameters before any prefix. Its relation
-unites compact identity support for each source pixel with one shared global
-parameter support expression and the parameter descriptor. The same relation
-owner covers all prefixes; no per-pixel global dependency vector is allocated.
-The union is Conservative. A later pixel or operational failure leaves already
-certified prefix ranges immutable; it does not manufacture a complete image.
+Histogram source strips are row-bounded and at most 4096 bytes per field, independently of Result read-window size. Other source reads and Result pages use at most `min(user_page_bytes,4096)`. The 24-byte `count_total_valid` record is indivisible; a smaller selected window fails with `ResourceExhausted`. Histogram counters and temporary state, source/result windows, mandatory backing, and every initialization/reset/scan consume root capacity or work as applicable.
 
-The named `bin_ranges_512` recipe reserves min(B,512) Int64 Payload counters
-before allocation. It rereads the immutable source snapshot once per 512-bin
-range, appends positive counts in increasing global bin order, and seals only
-after every range. This is the Design's bin-range multipass fallback, with work
-O(N*ceil(B/512)+B) and at most 4096 resident counter bytes. Initialization,
-reset/scanning and every pass consume root work. Extra passes may exhaust the
-work budget; no full B-counter allocation or unaccounted input spool is needed.
-Histogram source strips stop at HW row boundaries and use at most 4096 bytes
-per field, independently of the selected Result I/O window. Value requests are
-admitted by the root capacity budget; a 24-byte Result window does not force
-three source samples per poll on every bin-range pass. Histogram output,
-parameter input and grade output pages use min(user Result window,4096).
-The 24-byte
-parameter record is indivisible and fails when the selected window is smaller.
-Grade writes bounded Float64 windows to mandatory backing and yields stable
-prefixes to active downstream consumers. Stage/work/capacity exhaustion remains
-a distinct resource failure. Physical page geometry is absent from semantic
-schema identity and shared-result keys.
+## 4. Algorithms and math
 
-Result associations retain predecessor ObjectIds and their backing. Reading a
-window retains this ownership after the result and ExecutionContext are gone.
-The final result/window release reclaims mandatory backing. Optional cache-off
-duplicate DAG expressions share one producer; separate Run input snapshots do
-not alias their global parameter results. These are managed-capacity guarantees,
-not allocator/driver/process RSS hard bounds.
+The `bin_ranges_512` producer reserves `min(bins,512)` Int64 counters, rereads the immutable source for each bin range, and appends positive bins in increasing order. It uses at most 4096 bytes of counter storage. The work is `O(N*ceil(B/512)+B)` for N raster samples and B bins. This trades repeated source reads for bounded counter memory; it does not allocate a full B-counter array or an unaccounted input spool.
 
-## Executable acceptance
+Parameters computes `D=sum(count)` and `T=sum(bin*count)` with checked nonnegative Int64 arithmetic. For `D>0`, the mean is the correctly rounded binary64 value of the exact ratio:
 
-[statistics_workflow](../../examples/statistics_workflow/README.md) contains
-source → histogram → parameters → grade → active paged sink, standalone install
-consumer commands and a separate Python Fraction/Counter reference. It checks
-every pixel, dynamic/empty counts, multipage histograms, cross-row HW reads,
-small windows and budgets, cache-off aliases, different Run snapshots and
-post-context ownership. `test_statistics` verifies exact binary64 rounding and
-schema rejection; `test_statistics_callback` drives the public parameter
-callback with malformed external sparse records, integer overflow and a large
-integer rational golden case. Fixture pixel tolerances are measured agreement,
-not certified bounds. The `--large` workflow checks 200x200 samples, 65536 bins
-and a 24-byte Result window at the existing one-million-stage producer cap;
-a smaller regression fixes the producer envelope at 5000 stages. All source
-callbacks assert the independent 4096-byte strip cap.
+$$
+\mu = \operatorname{round}_{64}(T/D), \qquad 0 \le T/D < 65536.
+$$
 
-The `--stage-admission` example checks the rejected 2048x2048 profile without
-source binding. It also executes an empty 2x513/B513 histogram through real
-callbacks: eight source-request polls plus one final poll succeed at cap 9;
-cap 8 fails with `structured stage limit` and releases partial resources.
+Integer long division extracts 53 significant bits and compares the remainder for ties-to-even. Converting T and D separately to binary64 before division can produce a different result. The public `statistics_mean(total,count)` helper accepts nonnegative Int64 total and positive Int64 count in the same ratio domain. Empty input publishes `[0,0,0]` and a nonsemantic zero mean; nonempty zero-only input is valid with mean zero.
+
+`statistics.grade` requires a finite nonnegative Float64 target, valid parameters, and positive mean. Before using the rounded mean it checks the exact integer ratio against `bins-1`. It computes
+
+$$
+\mathrm{gain}=\operatorname{round}_{64}(target/mean),\qquad
+ y_i=\operatorname{round}_{64}(\mathrm{gain}\cdot\operatorname{round}_{64}(x_i)).
+$$
+
+The implementation uses nearest ties-to-even, gradual underflow, no contraction, and restores the caller's floating-point environment. Nonfinite gain or output is `ArithmeticOverflow`; empty, zero-mean, or inconsistent parameters are `InvalidDomain`. It does not clamp or substitute an approximate result.
+
+## 5. Limitations and non-goals
+
+- Input is an integer-coded scalar domain; color, luminance, and transfer conversion are outside this operation.
+- Histogram's fixed stage precheck is recipe-specific; Parameters and Grade do not apply it.
+- A measured Float64 grade has no certified numerical error bound. Managed capacity does not bound process RSS.
+- Physical page geometry does not change schema identity or shared-result keys.
+
+See [the statistics workflow](../../examples/statistics_workflow/README.md) for the public entry point and runnable usage.

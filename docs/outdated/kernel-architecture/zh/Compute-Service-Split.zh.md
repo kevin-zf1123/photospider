@@ -3,7 +3,7 @@
 > 归档于 2026-07-14。本文记录已经完成的原地迁移过程，不再用于说明当前架构。
 > 当前计算职责请参阅
 > `../../../kernel-architecture/zh/Compute-Boundaries.zh.md` 和
-> `../../../kernel-architecture/zh/Compute-Flow.zh.md`。
+> `../../../kernel-architecture/zh/Compiler-and-Execution.zh.md`。
 
 本文档记录 `ComputeService` 的就地拆分。第一轮拆分已经在 backend 内部、installable public
 `ps::Host` facade 之后落地。仍标记为 TODO 的项目，是有意推迟到后续 scheduler、traversal、

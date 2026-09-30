@@ -1,35 +1,23 @@
 # Architecture Decision Records
 
-English ADRs are authoritative. Each accepted ADR has a reader-oriented
-Chinese mirror under [`zh/`](zh/README.zh.md). ADRs record decisions and target
-contracts; current implementation facts and public live delivery status remain
-in the kernel architecture documents and GitHub Issues respectively. GitHub
-Projects are maintainer operational views of those Issues.
-Private personal-overlay OpenSpec files are maintainer working notes and carry
-no public architecture or delivery authority.
+ADRs record durable architecture constraints and their rationale. Use them to understand why a boundary exists; use the [kernel architecture](../kernel-architecture/README.md) for current implementation behavior. English ADRs are authoritative, with reader-oriented Chinese mirrors under [`zh/`](zh/README.zh.md).
 
 | ADR | Decision |
 | --- | --- |
-| [0002](0002-external-libraries-are-kernel-adapters.md) | External libraries stay outside kernel semantics. |
-| [0003](0003-process-owned-execution-resources.md) | Local execution resources are explicitly owned. |
-| [0005](0005-graph-document-ingestion-is-a-classified-transaction.md) | Workflow-document ingestion is a classified transaction. |
-| [0006](0006-kernel-documentation-separates-facts-decisions-targets-and-status.md) | Documentation separates facts, decisions, and delivery status. |
-| [0007](0007-compute-runs-and-process-execution-have-separate-owners.md) | Compute Runs and local execution resources have separate owners. |
-| [0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md) | Value, facets, layout, and Region are explicit validated contracts. |
-| [0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md) | Operations and data providers use versioned in-process ABIs. |
-| [0014](0014-compiler-document-and-plan-versions-are-independent.md) | Compiler documents, IR, plans, and digests have separate identities. |
-| [0015](0015-breaking-product-boundary-scope-reset.md) | The product boundary is an embeddable kernel and an ephemeral local daemon. |
-| [0016](0016-workflow-inputs-and-execution-bindings.md) | Accepted Float32 image/scalar and operation ABI v3 target; implementation pending. |
-| [0017](0017-cpu-regional-execution-and-storage.md) | Accepted CPU regional storage, bounded execution and operation ABI 4 target. |
-| [0020](0020-composable-operation-foundations.md) | Accepted G1/G2/G3/G5 composition, image v2 and operation ABI 7 target; implementation tracked by #287. |
-| [0021](0021-independent-node-results.md) | Independent named results, per-output dependencies and Atomic joint execution; #302. |
+| [0002](0002-external-libraries-are-kernel-adapters.md) | Keep third-party libraries behind kernel contracts. |
+| [0003](0003-process-owned-execution-resources.md) | Give local execution resources explicit owners. |
+| [0005](0005-graph-document-ingestion-is-a-classified-transaction.md) | Publish workflow source separately from compiler stages. |
+| [0006](0006-kernel-documentation-separates-facts-decisions-targets-and-status.md) | Keep current behavior documentation separate from architecture decisions. |
+| [0007](0007-compute-runs-and-process-execution-have-separate-owners.md) | Separate per-run state from shared execution-context resources. |
+| [0008](0008-generic-values-memory-bindings-and-regions-are-explicit-versioned-contracts.md) | Make values, input bindings, layouts, and Regions explicit contracts. |
+| [0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md) | Use versioned C contracts for trusted operation and data-provider modules. |
+| [0014](0014-compiler-document-and-plan-versions-are-independent.md) | Keep document, compiler-stage, plan, and ABI identities distinct. |
+| [0015](0015-breaking-product-boundary-scope-reset.md) | Keep compilation and execution in the embeddable kernel. |
+| [0016](0016-workflow-inputs-and-execution-bindings.md) | Bind declared workflow inputs for each execution. |
+| [0017](0017-cpu-regional-execution-and-storage.md) | Execute regional work with bounded CPU storage. |
+| [0018](0018-local-result-caches-and-frozen-execution.md) | Freeze execution inputs and reuse exact local results. |
+| [0019](0019-metal-resident-image-workflows.md) | Keep supported image workflows resident in Metal storage. |
+| [0020](0020-composable-operation-foundations.md) | Compose numeric, semantic, and output contracts across operations. |
+| [0021](0021-independent-node-results.md) | Represent independent node results and joint execution explicitly. |
 
-ADR 0015 is the highest active product-boundary authority. Pre-reset ADRs 0001,
-0004, 0009, 0010, 0011, and 0013 were deliberately retired from the active set
-by that breaking decision. Their historical text remains available only in Git history and the
-`pre-breaking-scope-reset-2026-09-01` tag; it must not be treated as a roadmap
-or recovery source.
-
-New ADRs use the next four-digit number. A normal supersession links its
-replacement. A breaking scope reset may instead retire an active decision when
-retaining it would incorrectly advertise a removed product domain.
+The [kernel overview](../kernel-architecture/Overview.md) states current ownership and execution behavior. Individual ADRs remain useful when their constraints apply; a decision record does not establish that a proposed or accepted capability is implemented.

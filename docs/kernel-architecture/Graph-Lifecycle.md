@@ -1,23 +1,37 @@
 # Graph Lifecycle
 
-`GraphContext` owns a copied `WorkflowDocument`, a nonzero monotonic revision,
-and shared currentness state. It is independently allocated and has no kernel
-name or global registry.
+## 1. Scope and ownership
 
-Construction publishes the caller's source at revision one. Semantic
-validation occurs later in `Compiler::analyze`; construction does not claim
-that the document compiles.
+`GraphContext` owns a copied `WorkflowDocument`, a monotonic revision, and shared currentness state used by snapshots and compiled stages. Construction publishes the initial source at revision 1. The caller owns the context object and must keep it alive while calls use it. Graph construction stores source; compilation performs semantic validation.
 
-`snapshot()` copies a coherent document/revision pair. `replace()` first
-allocates a new immutable document, then advances the revision and swaps source
-under one lock. Allocation or revision-overflow failure leaves state unchanged.
-A successful replacement monotonically makes every older snapshot, IR, and
-plan stale.
+## 2. Snapshot data
 
-Context destruction marks outstanding snapshots non-current. An executing Run
-that observes that change returns `Stale` and rejects late output. Destruction
-does not own, stop, or join a shared `ExecutionContext`; callers must retain
-normal C++ lifetime safety while compile/execute calls use their objects.
+```cpp
+class GraphContext {
+ public:
+  GraphSnapshot snapshot() const;
+  std::uint64_t replace(WorkflowDocument document);
+};
+```
 
-The kernel has no document filesystem adapter, implicit directory, durable
-graph identity, Session lifetime, or persistence service.
+`snapshot()` captures a coherent source and revision. `replace()` prepares the replacement before publishing it under the context lock. On success it advances the revision, so older snapshots and plans become stale. A failed replacement leaves the existing source and revision unchanged.
+
+## 3. State transitions and execution
+
+```text
+constructed at revision r -> snapshot(r) -> analyze / optimize / plan
+            |                                      |
+            +-- replace succeeds -> revision r+1  +-> execution checks currentness
+            |                                                   |
+            +-- destroy -> snapshots non-current                +-> Stale, discard result
+```
+
+Compiler stages retain currentness identity but do not retain mutable access to the source document. An execution that observes replacement or context destruction returns `Stale`; final result publication checks currentness again after callbacks complete.
+
+## 4. Failure and lifetime
+
+Replacement allocation or revision overflow fails without changing published state. Destruction marks outstanding snapshots non-current. Destruction does not own or stop an `ExecutionContext`; callers preserve ordinary C++ lifetime safety for every object used by an in-progress call.
+
+## 5. Limitations and non-goals
+
+The kernel provides no document filesystem adapter, implicit working directory, durable graph identifier, or persistence service. `GraphContext` revision is local compiler state and does not identify a daemon Session.
