@@ -2,11 +2,11 @@
 
 ## 当前安装契约
 
-当前 kernel package 为 **0.29.0**。由于 public workflow、structured Result、execution phase 和 root-owned dependency types 的布局发生变化，C++ consumers 必须针对匹配的已安装 headers 重建。Package 不适配旧 C++ layouts。
+当前 kernel package 为 **0.30.0**。`DiskCacheConfig` 和 `DiskCacheStatistics` 已移除。`ExecutionContextConfig` 不再包含磁盘缓存配置；`ExecutionContext::clear_disk_cache()`、`flush_disk_cache()` 和 `disk_cache_statistics()` 已移除；`OperationRegistry::persistent_cache_identity()` 也已移除。C++ consumers 必须针对 0.30 headers 重建。Package 使用 `SameMinorVersion` 兼容规则，因此 0.29 与 0.30 package 请求不兼容。
 
 | 契约 | 当前版本 |
 | --- | --- |
-| Package | 0.29.0 |
+| Package | 0.30.0 |
 | WorkflowDocument schema | 4 |
 | OperationTraits | 21 |
 | Numeric operation C table | ABI 11 |
@@ -19,7 +19,7 @@
 | Tensor-description codecs | TDM4/TDM5，按当前 codec 规则选择 |
 | Result schema canonical encoding | Version 2 |
 
-这些版本属于独立兼容轴。即使 C table 版本未变，C++ layout 变化仍要求 C++ consumers 重建。Numeric C table 保持 ABI 11；Result modules 使用独立版本化的 ABI 1 table。已移除的 planar C table 没有兼容 adapter，导出 v1-v3 入口的 modules 会被拒绝。
+这些版本属于独立兼容轴。即使 C table 版本未变，C++ layout 变化仍要求 C++ consumers 重建。Numeric C table 保持 ABI 11；Result modules 使用独立版本化的 ABI 1 table。已移除的 planar C table 没有兼容 adapter，导出 v1-v3 入口的 modules 会被拒绝。 这些删除改变了 public C++ API 和 `ExecutionContextConfig` 布局。WorkflowDocument schema、OperationTraits 版本、numeric operation C ABI、Result operation C ABI、data-provider C ABI、semantic/physical identity 版本和 Result schema encoding 均未变化。
 
 ## Result 与图像接口
 

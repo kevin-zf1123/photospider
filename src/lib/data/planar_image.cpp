@@ -143,19 +143,6 @@ void release_address(void* address, std::size_t size) noexcept {
 #endif
 }
 
-template <std::size_t Width>
-void import_row(std::uint8_t* destination, const std::uint8_t* source,
-                std::int64_t stride, std::uint64_t samples) {
-  if (stride == Width) {
-    std::memcpy(destination, source, samples * Width);
-    return;
-  }
-  // Fixed-size memcpy preserves every bit and supports unaligned storage.
-  // Value construction already proves all addressed samples are in bounds.
-  for (std::uint64_t x = 0; x < samples; ++x)
-    std::memcpy(destination + x * Width,
-                source + static_cast<std::int64_t>(x) * stride, Width);
-}
 }  // namespace
 
 struct PlanarImage::Impl final {
@@ -170,33 +157,23 @@ struct PlanarImage::Impl final {
   unsigned tile_height_shift = 0, tile_width_shift = 0;
   std::uint64_t virtual_bytes = 0, sample_count = 0;
   std::uint8_t* base = nullptr;
-  std::shared_ptr<Impl> view_source;
-  std::uint64_t view_channel = 0;
-  Region view_region;
-  std::shared_ptr<PlanarPageBudget> view_metadata_budget;
-  std::shared_ptr<void> execution_admission;
   mutable std::shared_timed_mutex mutex;
   std::set<std::uint64_t> pages;
   std::vector<std::shared_ptr<void>> page_leases;
   std::uint64_t metadata_charge = 0;
   std::uint64_t base_metadata = 0;
-  std::uint64_t execution_pins = 0;
   // One interval set per physical plane and logical row. Half-open X ranges.
   std::map<std::uint64_t, std::vector<Interval>> coverage;
 
   ~Impl() {
-    if (base && !view_source)
+    if (base)
       release_address(base, static_cast<std::size_t>(virtual_bytes));
-    if (view_metadata_budget)
-      view_metadata_budget->release(metadata_charge);
-    else if (config.aggregate_budget)
+    if (config.aggregate_budget)
       config.aggregate_budget->release(pages.size() * page + metadata_charge);
   }
 
   std::uint64_t offset(std::uint64_t y, std::uint64_t x,
                        std::uint64_t channel) const noexcept {
-    if (view_source)
-      return view_source->offset(y, x, view_channel + channel);
     const auto plane = channel * plane_step;
     if (config.order == ImagePlaneOrder::Continuous)
       return plane + y * row_pitch + x * scalar_width;
@@ -401,311 +378,6 @@ Result<PlanarImage> PlanarImage::create(
   return Result<PlanarImage>(PlanarImage(std::move(out)));
 }
 
-Result<PlanarImage> PlanarImage::import_value(
-    const Value& value, PlanarImageConfig config,
-    const CancellationToken& cancellation) {
-  if (!value.valid() || value.region().empty() ||
-      value.region().dimensions().size() != value.descriptor().shape.size())
-    return Result<PlanarImage>(invalid("invalid image import Value"));
-  for (std::size_t axis = 0; axis < value.region().rank(); ++axis)
-    if (value.region().dimensions()[axis].offset != 0 ||
-        value.region().dimensions()[axis].extent !=
-            value.descriptor().shape[axis])
-      return Result<PlanarImage>(invalid("image import requires whole Value"));
-  auto result = create(value.descriptor(), std::move(config), value.facets(),
-                       value.resources());
-  if (!result.ok())
-    return result;
-  auto image = result.take_value();
-  auto writer = image.begin_write(value.region(), cancellation);
-  if (!writer.ok())
-    return Result<PlanarImage>(writer.status());
-  auto window = writer.take_value();
-  std::vector<std::uint64_t> at(value.descriptor().shape.size(), 0);
-  const auto& storage = *image.impl_;
-  const auto& layout = storage.config;
-  const auto stride = value.layout().byte_strides[layout.width_axis];
-  const auto row_stride = value.layout().byte_strides[layout.height_axis];
-  const auto* source = value.bytes().data();
-  // Traverse bounded physical rectangles: each source tile stays hot while
-  // its channels are separated. Continuous storage uses short row bands.
-  const auto band_height =
-      layout.order == ImagePlaneOrder::Tiled ? layout.tile_height : 32;
-  const auto band_width = layout.order == ImagePlaneOrder::Tiled
-                              ? std::min<std::uint64_t>(layout.tile_width, 4096)
-                              : 4096;
-  for (std::uint64_t y = 0; y < storage.height; y += band_height) {
-    const auto rows = std::min(band_height, storage.height - y);
-    for (std::uint64_t x = 0; x < storage.width; x += band_width) {
-      const auto samples = std::min(band_width, storage.width - x);
-      at[layout.width_axis] = x;
-      for (std::uint64_t c = 0; c < storage.channels; ++c) {
-        if (layout.channel_axis)
-          at[*layout.channel_axis] = c;
-        at[layout.height_axis] = y;
-        const auto offset = value.byte_address(at);
-        if (!offset.ok())
-          return Result<PlanarImage>(offset.status());
-        auto* rectangle = storage.base + storage.offset(y, x, c);
-        const auto* input_rectangle = source + offset.value();
-        for (std::uint64_t dy = 0; dy < rows; ++dy) {
-          if (cancellation.cancelled())
-            return Result<PlanarImage>(Status::failure(
-                ErrorCode::Cancelled, "image import cancelled"));
-          auto* target = rectangle + dy * storage.row_pitch;
-          const auto* input =
-              input_rectangle + static_cast<std::int64_t>(dy) * row_stride;
-          switch (storage.scalar_width) {
-            case 1:
-              import_row<1>(target, input, stride, samples);
-              break;
-            case 2:
-              import_row<2>(target, input, stride, samples);
-              break;
-            case 4:
-              import_row<4>(target, input, stride, samples);
-              break;
-            case 8:
-              import_row<8>(target, input, stride, samples);
-              break;
-          }
-        }
-      }
-    }
-  }
-  auto status = window.commit(cancellation);
-  return status.ok() ? Result<PlanarImage>(std::move(image))
-                     : Result<PlanarImage>(status);
-}
-
-Result<PlanarImage> PlanarImage::channel_view(
-    std::uint64_t channel, bool keepdims, const Region& requested,
-    std::vector<ValueFacet> projected_facets,
-    std::shared_ptr<PlanarPageBudget> metadata_budget,
-    const CancellationToken& cancellation,
-    const ResourceBindings& resources) const {
-  if (!impl_ || !impl_->config.channel_axis || channel >= impl_->channels)
-    return Result<PlanarImage>(invalid("channel view requires a valid plane"));
-  auto status = input_internal::canonicalize_facets(&projected_facets);
-  if (!status.ok())
-    return Result<PlanarImage>(status);
-  auto effective_resources = impl_->resources.unite(resources);
-  if (!effective_resources.ok())
-    return Result<PlanarImage>(effective_resources.status());
-  auto selected = effective_resources.value().select(projected_facets);
-  if (!selected.ok())
-    return Result<PlanarImage>(selected.status());
-  auto root = impl_->view_source ? impl_->view_source : impl_;
-  const auto root_channel =
-      impl_->view_source ? impl_->view_channel + channel : channel;
-  auto alias = std::make_shared<Impl>();
-  alias->view_source = root;
-  alias->execution_admission = impl_->execution_admission;
-  alias->view_channel = root_channel;
-  alias->descriptor = impl_->descriptor;
-  alias->facets = std::move(projected_facets);
-  alias->resources = selected.take_value();
-  alias->config = impl_->config;
-  const auto axis = *impl_->config.channel_axis;
-  if (keepdims) {
-    alias->descriptor.shape[axis] = 1;
-    alias->config.groups.clear();
-    for (const auto& group : impl_->config.groups)
-      if (channel >= group.first_channel &&
-          channel - group.first_channel < group.channel_count)
-        alias->config.groups.push_back({group.role, 0, 1});
-  } else {
-    alias->descriptor.shape.erase(alias->descriptor.shape.begin() + axis);
-    if (alias->config.height_axis > axis)
-      --alias->config.height_axis;
-    if (alias->config.width_axis > axis)
-      --alias->config.width_axis;
-    alias->config.channel_axis.reset();
-    alias->config.groups.clear();
-  }
-  alias->height = root->height;
-  alias->width = root->width;
-  alias->channels = 1;
-  alias->scalar_width = root->scalar_width;
-  alias->page = root->page;
-  alias->plane_step = root->plane_step;
-  alias->row_pitch = root->row_pitch;
-  alias->full_step = root->full_step;
-  alias->edge_step = root->edge_step;
-  alias->columns = root->columns;
-  alias->virtual_bytes = root->virtual_bytes;
-  alias->base = root->base;
-  if (requested.empty() || !requested.validate(alias->descriptor.shape).ok())
-    return Result<PlanarImage>(invalid("invalid channel view request"));
-  std::vector<RegionDimension> source_dimensions;
-  source_dimensions.reserve(impl_->descriptor.shape.size());
-  for (std::size_t source_axis = 0;
-       source_axis < impl_->descriptor.shape.size(); ++source_axis) {
-    if (source_axis == axis)
-      source_dimensions.push_back({channel, 1});
-    else
-      source_dimensions.push_back(
-          requested
-              .dimensions()[source_axis < axis || keepdims ? source_axis
-                                                           : source_axis - 1]);
-  }
-  auto available = acquire(Region(std::move(source_dimensions)), cancellation);
-  if (!available.ok())
-    return Result<PlanarImage>(available.status());
-  alias->view_region = requested;
-  alias->metadata_charge =
-      sizeof(Impl) + alias->descriptor.shape.capacity() * sizeof(std::uint64_t);
-  for (const auto& facet : alias->facets)
-    alias->metadata_charge +=
-        sizeof(ValueFacet) + facet.key.capacity() + facet.payload.capacity();
-  alias->view_metadata_budget = metadata_budget
-                                    ? std::move(metadata_budget)
-                                    : alias->config.aggregate_budget;
-  auto charged =
-      alias->view_metadata_budget->charge(alias->metadata_charge, true);
-  if (!charged.ok()) {
-    alias->metadata_charge = 0;
-    return Result<PlanarImage>(charged.status());
-  }
-  alias->metadata_lease = charged.take_value();
-  return Result<PlanarImage>(PlanarImage(std::move(alias)));
-}
-
-Result<PlanarImage> PlanarImage::assemble_view(
-    const std::vector<PlanarImage>& sources,
-    const std::vector<std::uint64_t>& channels,
-    const std::vector<std::uint64_t>& channel_counts,
-    ValueDescriptor descriptor, PlanarImageLayout layout,
-    const Region& requested, std::vector<ValueFacet> facets,
-    std::shared_ptr<PlanarPageBudget> metadata_budget,
-    const CancellationToken& cancellation, const ResourceBindings& resources) {
-  using Answer = Result<PlanarImage>;
-  const auto unavailable = [] {
-    return invalid(
-        "ViewUnavailable: assembly has no canonical common-owner mapping");
-  };
-  if (!validate_layout(descriptor, layout).ok() || requested.empty() ||
-      !requested.validate(descriptor.shape).ok() || sources.empty() ||
-      sources.size() != channels.size() ||
-      sources.size() != channel_counts.size())
-    return Answer(unavailable());
-  auto first = sources[0].impl_;
-  if (!first || channels[0] >= first->channels)
-    return Answer(unavailable());
-  auto root = first->view_source ? first->view_source : first;
-  const auto start =
-      first->view_source ? first->view_channel + channels[0] : channels[0];
-  const auto requested_channels =
-      layout.channel_axis ? requested.dimensions()[*layout.channel_axis]
-                          : RegionDimension{0, 1};
-  const auto output_channels =
-      layout.channel_axis ? descriptor.shape[*layout.channel_axis] : 1;
-  const auto output_first = requested_channels.offset;
-  if (start < output_first)
-    return Answer(unavailable());
-  const auto base_channel = start - output_first;
-  if (output_channels > root->channels - base_channel)
-    return Answer(unavailable());
-  ResourceBindings owned = resources;
-  std::uint64_t traversed = 0;
-  auto admissions = std::make_shared<std::vector<std::shared_ptr<void>>>();
-  for (std::size_t i = 0; i < sources.size(); ++i) {
-    if (cancellation.cancelled())
-      return Answer(Status{ErrorCode::Cancelled, "assembly view cancelled"});
-    const auto& image = sources[i];
-    if (!image.impl_)
-      return Answer(unavailable());
-    const auto& source = *image.impl_;
-    const auto owner = source.view_source ? source.view_source : image.impl_;
-    const auto plane =
-        source.view_source ? source.view_channel + channels[i] : channels[i];
-    if (owner != root || plane != start + traversed ||
-        channels[i] >= source.channels || channel_counts[i] == 0 ||
-        channel_counts[i] > source.channels - channels[i] ||
-        channel_counts[i] > requested_channels.extent - traversed ||
-        source.height != descriptor.shape[layout.height_axis] ||
-        source.width != descriptor.shape[layout.width_axis] ||
-        source.descriptor.element_type != descriptor.element_type ||
-        source.config.order != layout.order ||
-        source.config.row_pitch_bytes != layout.row_pitch_bytes)
-      return Answer(unavailable());
-    auto dims = Region::whole(source.descriptor.shape).dimensions();
-    dims[source.config.height_axis] =
-        requested.dimensions()[layout.height_axis];
-    dims[source.config.width_axis] = requested.dimensions()[layout.width_axis];
-    if (source.config.channel_axis)
-      dims[*source.config.channel_axis] = {channels[i], channel_counts[i]};
-    auto window = image.acquire(Region(dims), cancellation);
-    if (!window.ok())
-      return Answer(window.status());
-    auto united = owned.unite(source.resources);
-    if (!united.ok())
-      return Answer(united.status());
-    owned = united.take_value();
-    if (source.execution_admission)
-      admissions->push_back(source.execution_admission);
-    traversed += channel_counts[i];
-  }
-  if (traversed != requested_channels.extent)
-    return Answer(unavailable());
-  auto status = input_internal::canonicalize_facets(&facets);
-  if (!status.ok())
-    return Answer(status);
-  auto selected = owned.select(facets);
-  if (!selected.ok())
-    return Answer(selected.status());
-  auto alias = std::make_shared<Impl>();
-  alias->view_source = root;
-  alias->view_channel = base_channel;
-  alias->view_region = requested;
-  alias->execution_admission = admissions;
-  alias->descriptor = std::move(descriptor);
-  alias->facets = std::move(facets);
-  alias->resources = selected.take_value();
-  alias->config = first->config;
-  alias->config.height_axis = layout.height_axis;
-  alias->config.width_axis = layout.width_axis;
-  alias->config.channel_axis = layout.channel_axis;
-  alias->config.groups = std::move(layout.groups);
-  alias->height = root->height;
-  alias->width = root->width;
-  alias->channels = output_channels;
-  alias->scalar_width = root->scalar_width;
-  alias->page = root->page;
-  alias->plane_step = root->plane_step;
-  alias->row_pitch = root->row_pitch;
-  alias->full_step = root->full_step;
-  alias->edge_step = root->edge_step;
-  alias->columns = root->columns;
-  alias->virtual_bytes = root->virtual_bytes;
-  alias->base = root->base;
-  alias->tile_height_shift = root->tile_height_shift;
-  alias->tile_width_shift = root->tile_width_shift;
-  alias->metadata_charge =
-      sizeof(Impl) +
-      alias->descriptor.shape.capacity() * sizeof(std::uint64_t) +
-      admissions->capacity() * sizeof(std::shared_ptr<void>);
-  for (const auto& facet : alias->facets)
-    alias->metadata_charge +=
-        sizeof(ValueFacet) + facet.key.capacity() + facet.payload.capacity();
-  alias->view_metadata_budget = metadata_budget
-                                    ? std::move(metadata_budget)
-                                    : first->config.aggregate_budget;
-  auto charged =
-      alias->view_metadata_budget->charge(alias->metadata_charge, true);
-  if (!charged.ok()) {
-    alias->metadata_charge = 0;
-    return Answer(charged.status());
-  }
-  alias->metadata_lease = charged.take_value();
-  return Answer(PlanarImage(std::move(alias)));
-}
-
-void PlanarImage::retain_execution_admission(std::shared_ptr<void> admission) {
-  if (impl_)
-    impl_->execution_admission = std::move(admission);
-}
-
 const ValueDescriptor& PlanarImage::descriptor() const {
   if (!impl_)
     throw std::logic_error("invalid planar image");
@@ -739,21 +411,17 @@ std::uint64_t PlanarImage::reserved_bytes() const {
 std::uint64_t PlanarImage::backed_bytes() const {
   if (!impl_)
     throw std::logic_error("invalid planar image");
-  const auto& owner = impl_->view_source ? impl_->view_source : impl_;
+  const auto& owner = impl_;
   std::shared_lock<std::shared_timed_mutex> lock(owner->mutex);
   return owner->pages.size() * owner->page;
 }
 std::uint64_t PlanarImage::valid_samples() const {
   if (!impl_)
     throw std::logic_error("invalid planar image");
-  if (impl_->view_source)
-    return impl_->view_region.element_count().value();
-  const auto& owner = impl_->view_source ? impl_->view_source : impl_;
+  const auto& owner = impl_;
   std::shared_lock<std::shared_timed_mutex> lock(owner->mutex);
   std::uint64_t count = 0;
   for (const auto& row : owner->coverage) {
-    if (impl_->view_source && row.first / owner->height != impl_->view_channel)
-      continue;
     for (const auto& interval : row.second)
       count += interval.second - interval.first;
   }
@@ -762,46 +430,22 @@ std::uint64_t PlanarImage::valid_samples() const {
 std::uint64_t PlanarImage::metadata_bytes() const {
   if (!impl_)
     throw std::logic_error("invalid planar image");
-  const auto& owner = impl_->view_source ? impl_->view_source : impl_;
+  const auto& owner = impl_;
   std::shared_lock<std::shared_timed_mutex> lock(owner->mutex);
-  return owner->metadata_charge +
-         (impl_->view_source ? impl_->metadata_charge : 0);
+  return owner->metadata_charge;
 }
 std::uint64_t PlanarImage::resident_bytes() const {
   if (!impl_)
     throw std::logic_error("invalid planar image");
-  const auto& owner = impl_->view_source ? impl_->view_source : impl_;
+  const auto& owner = impl_;
   std::shared_lock<std::shared_timed_mutex> lock(owner->mutex);
-  return owner->pages.size() * owner->page + owner->metadata_charge +
-         (impl_->view_source ? impl_->metadata_charge : 0);
+  return owner->pages.size() * owner->page + owner->metadata_charge;
 }
 
 const void* PlanarImage::owner_token() const noexcept {
   if (!impl_)
     return nullptr;
-  return impl_->view_source ? impl_->view_source.get() : impl_.get();
-}
-
-Result<std::shared_ptr<void>> PlanarImage::pin_for_execution(
-    const CancellationToken& cancellation) const {
-  if (!impl_)
-    return Result<std::shared_ptr<void>>(invalid("invalid planar image"));
-  const auto owner = impl_->view_source ? impl_->view_source : impl_;
-  std::unique_lock<std::shared_timed_mutex> lock(owner->mutex, std::defer_lock);
-  while (!lock.try_lock_for(std::chrono::milliseconds(2)))
-    if (cancellation.cancelled())
-      return Result<std::shared_ptr<void>>(
-          Status::failure(ErrorCode::Cancelled, "image source pin cancelled"));
-  if (cancellation.cancelled())
-    return Result<std::shared_ptr<void>>(
-        Status::failure(ErrorCode::Cancelled, "image source pin cancelled"));
-  ++owner->execution_pins;
-  lock.unlock();
-  return Result<std::shared_ptr<void>>(
-      std::shared_ptr<void>(owner.get(), [owner](void*) {
-        std::unique_lock<std::shared_timed_mutex> held(owner->mutex);
-        --owner->execution_pins;
-      }));
+  return impl_.get();
 }
 
 Result<std::uint64_t> PlanarImage::byte_offset(
@@ -883,17 +527,6 @@ Result<PlanarImageReadWindow> PlanarImage::acquire(
       !region.validate(impl_->descriptor.shape).ok())
     return Result<PlanarImageReadWindow>(
         invalid("invalid image window region"));
-  if (impl_->view_source) {
-    for (std::size_t axis = 0; axis < region.rank(); ++axis) {
-      const auto requested = region.dimensions()[axis];
-      const auto allowed = impl_->view_region.dimensions()[axis];
-      if (requested.offset < allowed.offset ||
-          requested.offset + requested.extent > allowed.offset + allowed.extent)
-        return Result<PlanarImageReadWindow>(Status::failure(
-            ErrorCode::NotFound,
-            "image channel view has no such published samples"));
-    }
-  }
   auto count = region.element_count();
   if (!count.ok() || count.value() > impl_->config.maximum_access_samples)
     return Result<PlanarImageReadWindow>(
@@ -901,7 +534,7 @@ Result<PlanarImageReadWindow> PlanarImage::acquire(
   if (cancellation.cancelled())
     return Result<PlanarImageReadWindow>(
         Status::failure(ErrorCode::Cancelled, "image read cancelled"));
-  const auto owner = impl_->view_source ? impl_->view_source : impl_;
+  const auto& owner = impl_;
   std::shared_lock<std::shared_timed_mutex> lock(owner->mutex, std::defer_lock);
   while (!lock.try_lock_for(std::chrono::milliseconds(2)))
     if (cancellation.cancelled())
@@ -918,10 +551,7 @@ Result<PlanarImageReadWindow> PlanarImage::acquire(
       if (cancellation.cancelled())
         return Result<PlanarImageReadWindow>(
             Status::failure(ErrorCode::Cancelled, "image read cancelled"));
-      const auto root_channel =
-          impl_->view_source ? impl_->view_channel + channel : channel;
-      const auto found =
-          owner->coverage.find(owner->row_key(root_channel, row));
+      const auto found = owner->coverage.find(owner->row_key(channel, row));
       if (found == owner->coverage.end())
         return Result<PlanarImageReadWindow>(Status::failure(
             ErrorCode::NotFound, "image sample coverage is missing"));
@@ -940,49 +570,6 @@ Result<PlanarImageReadWindow> PlanarImage::acquire(
   return Result<PlanarImageReadWindow>(
       PlanarImageReadWindow(std::make_shared<PlanarImage>(*this), region));
 }
-
-namespace {
-Status check_region(const PlanarImage::Impl& image, const Region& region,
-                    const void* packed, std::uint64_t byte_size) {
-  if (!packed || region.empty() ||
-      !region.validate(image.descriptor.shape).ok())
-    return invalid("invalid planar image region");
-  auto count = region.element_count();
-  std::uint64_t expected = 0;
-  if (!count.ok() || !multiply(count.value(), image.scalar_width, &expected))
-    return exhausted("image region size overflow");
-  if (expected != byte_size || expected > SIZE_MAX)
-    return Status::failure(ErrorCode::TypeMismatch,
-                           "packed image region byte size mismatch");
-  return Status::success();
-}
-
-template <class Function>
-Status each_sample(const Region& region, const CancellationToken& cancellation,
-                   Function function) {
-  std::vector<std::uint64_t> coordinate;
-  for (const auto dim : region.dimensions())
-    coordinate.push_back(dim.offset);
-  std::uint64_t index = 0;
-  for (;;) {
-    if ((index & 4095U) == 0 && cancellation.cancelled())
-      return Status::failure(ErrorCode::Cancelled,
-                             "image region access cancelled");
-    auto status = function(coordinate, index);
-    if (!status.ok())
-      return status;
-    ++index;
-    for (std::size_t axis = coordinate.size(); axis-- > 0;) {
-      const auto dim = region.dimensions()[axis];
-      if (++coordinate[axis] < dim.offset + dim.extent)
-        break;
-      coordinate[axis] = dim.offset;
-      if (axis == 0)
-        return Status::success();
-    }
-  }
-}
-}  // namespace
 
 struct PlanarImageWriteWindow::Impl final {
   std::shared_ptr<void> metadata_lease;
@@ -1103,9 +690,6 @@ Status PlanarImageWriteWindow::commit(const CancellationToken& cancellation) {
 
 Result<PlanarImageWriteWindow> PlanarImage::begin_write(
     const Region& region, const CancellationToken& cancellation) {
-  if (impl_ && impl_->view_source)
-    return Result<PlanarImageWriteWindow>(
-        invalid("cannot write a retained image channel view"));
   if (!impl_ || region.empty() ||
       !region.validate(impl_->descriptor.shape).ok())
     return Result<PlanarImageWriteWindow>(
@@ -1135,9 +719,6 @@ Result<PlanarImageWriteWindow> PlanarImage::begin_write(
     if (cancellation.cancelled())
       return Result<PlanarImageWriteWindow>(
           Status::failure(ErrorCode::Cancelled, "image write lock cancelled"));
-  if (impl_->execution_pins)
-    return Result<PlanarImageWriteWindow>(Status::failure(
-        ErrorCode::Stale, "image source is pinned for execution"));
   prepared->region = region;
   const auto y = region.dimensions()[impl_->config.height_axis];
   const auto x = region.dimensions()[impl_->config.width_axis];
@@ -1297,51 +878,4 @@ Result<PlanarImageWriteWindow> PlanarImage::begin_write(
       PlanarImageWriteWindow(std::move(prepared)));
 }
 
-Status PlanarImage::publish(const Region& region, const std::uint8_t* packed,
-                            std::uint64_t byte_size,
-                            const CancellationToken& cancellation) {
-  if (!impl_)
-    return invalid("invalid planar image");
-  auto status = check_region(*impl_, region, packed, byte_size);
-  if (!status.ok())
-    return status;
-  auto writer = begin_write(region, cancellation);
-  if (!writer.ok())
-    return writer.status();
-  auto window = writer.take_value();
-  status = each_sample(
-      region, cancellation, [&](const auto& at, std::uint64_t index) {
-        const auto offset =
-            impl_->offset(at[impl_->config.height_axis],
-                          at[impl_->config.width_axis], impl_->channel_of(at));
-        std::memcpy(impl_->base + offset, packed + index * impl_->scalar_width,
-                    impl_->scalar_width);
-        return Status::success();
-      });
-  if (!status.ok())
-    return status;
-  return window.commit(cancellation);
-}
-
-Status PlanarImage::read(const Region& region, std::uint8_t* packed,
-                         std::uint64_t byte_size,
-                         const CancellationToken& cancellation) const {
-  if (!impl_)
-    return invalid("invalid planar image");
-  auto status = check_region(*impl_, region, packed, byte_size);
-  if (!status.ok())
-    return status;
-  auto window = acquire(region, cancellation);
-  if (!window.ok())
-    return window.status();
-  return each_sample(
-      region, cancellation, [&](const auto& at, std::uint64_t index) {
-        const auto offset =
-            impl_->offset(at[impl_->config.height_axis],
-                          at[impl_->config.width_axis], impl_->channel_of(at));
-        std::memcpy(packed + index * impl_->scalar_width, impl_->base + offset,
-                    impl_->scalar_width);
-        return Status::success();
-      });
-}
 }  // namespace ps

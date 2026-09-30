@@ -17,7 +17,6 @@
 #include "execution/result_cache.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
-#include "support/typed_images.hpp"
 
 namespace {
 ps::Value scalar(float number) {
@@ -26,6 +25,73 @@ ps::Value scalar(float number) {
   return ps::Value::create({ps::ElementType::Float32, {1}},
                            ps::Region::whole({1}), {0, {4}}, std::move(bytes))
       .take_value();
+}
+int dynamic_opaque_cache_preservation() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  auto operations = std::make_shared<OperationRegistry>();
+  OperationTraits producer;
+  producer.input_count = 1;
+  producer.input_schema.resize(1);
+  const auto opaque =
+      Value::create({ElementType::Float64, {1}}, Region::whole({1}), {0, {8}},
+                    Value::from_float64(2).copy_bytes(),
+                    {{"vendor.test", 1, {42}}})
+          .take_value();
+  PS_CHECK(operations
+               ->register_operation({"source", producer,
+                                     [opaque](const OperationInvocation&) {
+                                       return Result<Value>(opaque);
+                                     }})
+               .ok());
+  auto identity = make_default_operation_registry()
+                      ->find_traits("core.identity")
+                      .take_value();
+  PS_CHECK(operations
+               ->register_operation({"identity", identity,
+                                     [](const OperationInvocation& call) {
+                                       return Result<Value>(call.inputs[0]);
+                                     }})
+               .ok());
+  PS_CHECK(operations->freeze().ok());
+  const auto input = scalar(1);
+  WorkflowDocument document;
+  document.inputs = {{1, "input", input.descriptor(), input.region(),
+                      input.layout(), input.facets()}};
+  document.nodes = {{1, "source", {WorkflowInputReference{1}}, {}},
+                    {2, "identity", {WorkflowNodeOutput{1, "value"}}, {}}};
+  document.outputs = {{"result", 1, "value"}};
+  GraphContext graph(document);
+  auto plan = Compiler(operations).compile(graph).take_value().plan;
+  InputSnapshotStore store;
+  ExecutionBindings bindings{{{"input",
+                               {},
+                               {},
+                               std::make_shared<InputSnapshot>(
+                                   store.import_value(input).take_value())}}};
+  ExecutionContext execution(operations, {1, false, 8, 65536, 8192});
+  for (bool warm : {false, true}) {
+    auto result = execution.execute(plan, bindings);
+    PS_CHECK(result.ok());
+    const auto& output = result.value().values.at("result");
+    PS_CHECK(output.copy_bytes() == opaque.copy_bytes());
+    PS_CHECK(output.facets().size() == 1 &&
+             output.facets()[0].key == opaque.facets()[0].key &&
+             output.facets()[0].version == opaque.facets()[0].version &&
+             output.facets()[0].payload == opaque.facets()[0].payload);
+    PS_CHECK(warm ? result.value().diagnostics.cache_hits > 0
+                  : result.value().diagnostics.cache_hits == 0);
+    const std::vector<Value> inputs{output};
+    const std::vector<Region> demands{output.region()};
+    const std::map<std::string, ParameterValue> parameters;
+    OperationInvocation call{inputs,           demands, parameters,
+                             Backend::Cpu,     {},      output.region(),
+                             BufferAllocator{}};
+    auto copied = operations->invoke("identity", call);
+    PS_CHECK(copied.ok() && copied.value().copy_bytes() == output.copy_bytes());
+    PS_CHECK(copied.value().facets().size() == 1 &&
+             copied.value().facets()[0].payload == output.facets()[0].payload);
+  }
+  return 0;
 }
 int dependency_content_bits() {
   using namespace ps;                      // NOLINT(build/namespaces)
@@ -310,8 +376,67 @@ int dependency_cache_proof_limits() {
   PS_CHECK(work == 0 && visits == 0);
   return 0;
 }
+int concurrent_reclamation() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  // Admission must reclaim entries created while it was waiting. Use exact
+  // accounted bytes and a barrier in the reclaimer, without timing sleeps.
+  std::mutex mutex;
+  std::condition_variable cv;
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  auto budget = std::make_shared<execution_internal::MemoryBudget>(16);
+  auto a_work = budget->reserve(8).take_value();
+  auto make_value = [](const BufferAllocator& allocator) {
+    return MutableValue::allocate({ElementType::Float32, {1, 1}},
+                                  Region::whole({1, 1}), allocator)
+        .take_value();
+  };
+  auto retained_a = budget->reserve(4).take_value();
+  auto a_result = make_value(retained_a->allocator());
+  retained_a->seal();
+  auto retained_b = budget->reserve(4).take_value();
+  auto b_result = make_value(retained_b->allocator());
+  retained_b->seal();
+  auto cached_value = make_value(a_work->allocator());
+  std::atomic<unsigned> reclamations{0};
+  bool first_reclaim = false, admission_continue = false;
+  auto waiting = std::async(std::launch::async, [&] {
+    return budget->reserve(
+        8,
+        [&] {
+          return std::chrono::steady_clock::now() < deadline
+                     ? ErrorCode::Ok
+                     : ErrorCode::Cancelled;
+        },
+        {},
+        [&] {
+          if (++reclamations == 1) {
+            std::unique_lock<std::mutex> lock(mutex);
+            first_reclaim = true;
+            cv.notify_all();
+            cv.wait(lock, [&] { return admission_continue; });
+          } else {
+            cached_value = {};
+          }
+        });
+  });
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    cv.wait_until(lock, deadline, [&] { return first_reclaim; });
+    a_work->seal();
+    admission_continue = true;
+  }
+  cv.notify_all();
+  auto admitted = waiting.get();
+  PS_CHECK(admitted.ok() && reclamations >= 2);
+  admitted.value()->seal();
+
+  return 0;
+}
 }  // namespace
 int main() {
+  PS_CHECK(dynamic_opaque_cache_preservation() == 0);
+  PS_CHECK(concurrent_reclamation() == 0);
   PS_CHECK(dependency_content_bits() == 0);
   PS_CHECK(dependency_cache_storage() == 0);
   PS_CHECK(cache_shared_route_budget() == 0);

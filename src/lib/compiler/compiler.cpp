@@ -619,7 +619,7 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(
                          .descriptor;
       auto demand = input_internal::derive_input_demand(
           step.traits, step.output_demand, step.output_descriptor.shape,
-          descriptor.shape, step.traits.input_schema[port].kind, port);
+          descriptor.shape, step.traits.input_schema[port].kind);
       if (!demand.ok())
         return Result<ExecutionPlan>(demand.status());
       step.input_demands.push_back(demand.value());
@@ -1461,8 +1461,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
                          .descriptor;
       auto input_demand = input_internal::derive_input_demand(
           step.traits, step.output_demand, step.output_descriptor.shape,
-          descriptor.shape, step.traits.input_schema[input_position].kind,
-          input_position);
+          descriptor.shape, step.traits.input_schema[input_position].kind);
       if (!input_demand.ok())
         return Result<ExecutionPlan>(input_demand.status());
       step.input_demands.push_back(input_demand.value());

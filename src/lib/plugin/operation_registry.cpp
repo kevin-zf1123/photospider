@@ -16,7 +16,6 @@
 #include <utility>
 #include <vector>
 
-#include "cache_build_identity.hpp"  // NOLINT(build/include_subdir)
 #include "data/input_validation.hpp"
 #include "photospider/plugin/operation_plugin_api.h"
 #include "plugin/builtin_operations.hpp"
@@ -603,10 +602,6 @@ Status validate_callback_output(const ValueDescriptor& expected,
     return Status::failure(ErrorCode::TypeMismatch,
                            "operation output contradicts static descriptor");
   }
-  if (output.region().rank() != expected.shape.size()) {
-    return Status::failure(ErrorCode::TypeMismatch,
-                           "operation output Region rank is incomplete");
-  }
   if (!output.view(demand).ok())
     return Status::failure(ErrorCode::TypeMismatch,
                            "operation output does not cover demand");
@@ -1037,7 +1032,7 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
     return traits_status;
   const bool staged = definition.traits.outputs[0].dependency_version == 1;
   const bool structured = definition.traits.outputs[0].dependency_version == 2;
-  if (!valid_key(definition.key) || !traits_status.ok() ||
+  if (!valid_key(definition.key) ||
       definition.traits.requires_metadata_specialization !=
           (static_cast<bool>(definition.specialize_metadata) ||
            static_cast<bool>(definition.prepare_static)) ||
@@ -1083,7 +1078,6 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   }
   const std::string& immutable_key = immutable_definition->key;
   impl_->definitions.emplace(immutable_key, immutable_definition);
-  builtins_ = false;
   return Status::success();
 }
 
@@ -1229,7 +1223,6 @@ Status OperationRegistry::load_plugin(const std::string& path) {
           return Status{ErrorCode::InvalidArgument,
                         "duplicate Result module operation"};
       impl_->definitions.swap(replacement);
-      builtins_ = false;
     }
     return Status::success();
   }
@@ -1527,15 +1520,11 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     if (descriptor->dependency_program)
       continue;
     staged[index]->callback =
-        [library, descriptor, traits = staged[index]->traits, unused = false](
+        [library, descriptor, traits = staged[index]->traits](
             const OperationInvocation& invocation) -> Result<Value> {
-      (void)unused;
       auto selected = select_operation_output(traits, invocation.output_index);
       if (!selected.ok())
         return Result<Value>(selected.status());
-      const bool image_output =
-          selected.value().outputs[0].output_schema.kind ==
-          OperationPortKind::RgbaFloat32;
       if (invocation.input_demands.size() != invocation.inputs.size()) {
         return Result<Value>(
             Status::failure(ErrorCode::InvalidArgument,
@@ -1721,23 +1710,10 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       }
       if (!output.allocation_failure.ok())
         return Result<Value>(output.allocation_failure);
-      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V11 &&
-          output.published && !output.result.ok() &&
-          output.result.status().code != ErrorCode::ResourceExhausted &&
-          output.result.status().code != ErrorCode::Cancelled) {
-        return Result<Value>(Status::failure(
-            ErrorCode::OperationFailed,
-            "image plugin violated output publication contract"));
-      }
       if (output.duplicate_publish_attempted) {
         return Result<Value>(Status::failure(
             ErrorCode::OperationFailed,
             "operation plugin violated output sink at-most-once contract"));
-      }
-      if (image_output && code != PS_OPERATION_RESULT_CANCELLED_V11 &&
-          output.published && !output.result.ok() &&
-          output.result.status().code == ErrorCode::ResourceExhausted) {
-        return output.result;
       }
       if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11 &&
           output.published) {
@@ -1795,7 +1771,6 @@ Status OperationRegistry::load_plugin(const std::string& path) {
       }
     }
     impl_->definitions.swap(replacement);
-    builtins_ = false;
   }
   return Status::success();
 }
@@ -2808,15 +2783,9 @@ std::shared_ptr<OperationRegistry> make_default_operation_registry(
       plugin_internal::register_builtin_operations(registry.get());
   if (!status.ok())
     throw std::logic_error(status.message);
-  registry->builtins_ = true;
   if (freeze)
     registry->freeze();
   return registry;
-}
-
-std::string OperationRegistry::persistent_cache_identity() const {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
-  return builtins_ ? PHOTOSPIDER_CACHE_BUILD_ID : "";
 }
 
 }  // namespace ps

@@ -2,7 +2,7 @@
 
 ## 范围与 ownership
 
-Kernel 分别管理编译计划、不可变输入快照、普通 Value 结果、共享中的 Result work 和可丢弃磁盘记录的 identity。进入缓存只赋予复用资格；活动 Values、Results、snapshots 和 read windows 在 entry 清除或淘汰后仍由各自 owner 与资源租约持有。
+Kernel 分别管理编译计划、不可变输入快照、普通 Value 结果、共享中的 Result work 和 native backend cache identities的 identity。进入缓存只赋予复用资格；活动 Values、Results、snapshots 和 read windows 在 entry 清除或淘汰后仍由各自 owner 与资源租约持有。
 
 `PlanCacheKey` 标识 physical plan，不包含输入 payload，也不证明 graph currentness 或标识计算结果。已完成 Result 的索引采用弱引用：缓存可定位仍存活的 Result，但 entry 本身不保留 payload。强引用 `ResultRef`、captured publication 或活动 waiter 拥有该 Result。`ResultRef::capture()` 在一个 revision snapshot 已认证的 descriptor、field/image relations、descriptor basis 和 dependency bundle。Result 的有序 source association 是共享 Result object 上独立的单调 owner 关系；消费新输入时可以继续扩展。
 
@@ -37,18 +37,10 @@ Dependency cache manifests 保留不可变 relation evidence、source observatio
 
 `maximum_dependency_cache_metadata` 默认 65536 proof units，范围为 1..1048576。`maximum_dependency_cache_work` 是单独的 per-run traversal 上限，默认 1048576，设为零会禁用 dependency reuse。Proof 超限时跳过复用或保留，并继续计算。Deduplication 不会抵消已经花费的遍历、hash、association 或 normalization work。
 
-## 磁盘缓存
-
-磁盘缓存使用规范 SHA-256 keys 和默认 registry 的 implementation fingerprint 保存符合条件的普通 Value records。发布前会校验 descriptor、Region、facets、payload length、checksum 和 result key。分配大小来自已验证 plan，而不是文件字段。损坏、截断、不匹配或不支持的记录按可丢弃 miss 处理。
-
-写入先写临时文件，完整写入后再 rename。该缓存不是 durable result store。队列压力或写入失败只跳过保留，不使已计算结果失败。`flush_disk_cache()` 等待排队写入；`clear_disk_cache()` 删除 entries 并使待写 epoch 失效。一个 context 独占配置目录，其他文件会被忽略。磁盘资格限于受支持的 CPU-exact 普通 Value 契约；structured image Results 使用 Result ownership 与 identity。
-
 ## 限制与当前入口
 
-- 磁盘缓存要求显式配置，且内存 Value-cache 容量为正。
-- 默认 registry 提供持久 implementation identity。Custom 与 C-module registries 可使用进程内缓存，但不具有持久 implementation identity。
 - Native GPU results 与 CPU-exact result keys 隔离。Fallback result 不写入 native keys，近似 native results 不替代 exact CPU results。
 - Native input-copy reuse 对所需逻辑 bytes、descriptor、facets、Region 和 device identity 做 hash。它可避免重复上传不可变 Values，但不会使任意 `RegionalSource` computation 获得缓存资格。
 - 清除或淘汰 cache entries 会撤销复用资格，不会使活动 owners 失效。Frozen executions 是内存 owners，不是序列化 plans。
 
-Public Result 图像入口见[`examples/unified_result_workflow`](../../../examples/unified_result_workflow/README.zh.md)；当前 production image operation 可用性见[图像 operations](Image-Operations.zh.md)。Snapshot 和 generic cache 行为由 `test_input_snapshot`、`test_frozen_execution`、`test_generic_result_cache` 与 `test_shared_results` 覆盖。Result capture、owner release 和图像缓存由 `test_result_image_contracts`、`test_global_results` 与 `test_shared_results` 覆盖。
+Public Result 图像入口见[`examples/unified_result_workflow`](../../../examples/unified_result_workflow/README.zh.md)；当前 production image operation 可用性见[图像 operations](Image-Operations.zh.md)。Snapshot 和 generic cache 行为由 `test_input_snapshot`、`test_frozen_execution`、`test_generic_result_cache` 与 `test_shared_results` 覆盖。Result capture 和 owner release 由 `test_result_image_contracts`、`test_global_results` 与 `test_shared_results` 覆盖。

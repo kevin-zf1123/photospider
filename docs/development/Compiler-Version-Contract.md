@@ -2,11 +2,11 @@
 
 ## Current installed contract
 
-The current kernel package is **0.29.0**. C++ consumers must rebuild against the matching installed headers because public workflow, structured Result, execution phase, and root-owned dependency types have changed layout. The package does not adapt older C++ layouts.
+The current kernel package is **0.30.0**. `DiskCacheConfig` and `DiskCacheStatistics` are removed. `ExecutionContextConfig` no longer carries disk-cache configuration; `ExecutionContext::clear_disk_cache()`, `flush_disk_cache()`, and `disk_cache_statistics()` are removed; and `OperationRegistry::persistent_cache_identity()` is removed. C++ consumers must rebuild against the 0.30 headers. The package uses `SameMinorVersion` compatibility, so 0.29 and 0.30 package requests are incompatible.
 
 | Contract | Current version |
 | --- | --- |
-| Package | 0.29.0 |
+| Package | 0.30.0 |
 | WorkflowDocument schema | 4 |
 | OperationTraits | 21 |
 | Numeric operation C table | ABI 11 |
@@ -19,7 +19,7 @@ The current kernel package is **0.29.0**. C++ consumers must rebuild against the
 | Tensor-description codecs | TDM4/TDM5, selected by the current codec rules |
 | Result schema canonical encoding | Version 2 |
 
-These versions are independent compatibility axes. A C++ layout change requires rebuilding C++ consumers even when a C table version remains unchanged. The numeric C table remains ABI 11; Result modules use the independently versioned ABI 1 table. The removed planar C table has no compatibility adapter, and modules exporting its v1-v3 entry points are rejected.
+These versions are independent compatibility axes. A C++ layout change requires rebuilding C++ consumers even when a C table version remains unchanged. The numeric C table remains ABI 11; Result modules use the independently versioned ABI 1 table. The removed planar C table has no compatibility adapter, and modules exporting its v1-v3 entry points are rejected. These removals change the public C++ API and `ExecutionContextConfig` layout. The WorkflowDocument schema, OperationTraits version, numeric operation C ABI, Result operation C ABI, data-provider C ABI, semantic/physical identity versions, and Result schema encoding remain unchanged.
 
 ## Result and image interface
 

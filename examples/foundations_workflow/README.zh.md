@@ -17,7 +17,7 @@ ctest --test-dir build -R '^test_workflow_(numeric_reductions|expression_lut)$' 
 
 可传入 `--scenario numeric` 或 `--scenario expression-lut` 单独运行一个维护中的场景。两个场景均通过后，程序打印 `Foundations scenarios=2 oracle=passed backend=cpu`。发生错误时打印 `Foundations failed: ...` 并以状态码 1 退出。
 
-独立 CMake 项目要求已安装 Photospider 0.28。配置示例：
+独立 CMake 项目要求已安装 Photospider 0.30。配置示例：
 
 ```sh
 cmake -S examples/foundations_workflow -B build/foundations-consumer -DCMAKE_PREFIX_PATH=/path/to/install

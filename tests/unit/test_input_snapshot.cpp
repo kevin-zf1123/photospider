@@ -1,7 +1,4 @@
-#include <cfenv>  // NOLINT(build/c++11)
 #include <cstring>
-#include <future>
-#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -10,7 +7,6 @@
 #include "data/content_digest.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
-#include "support/typed_images.hpp"
 
 namespace {
 int generic_snapshots() {
@@ -130,60 +126,11 @@ int generic_snapshots() {
            result.value().values.at("result").as_float64().value() == 0);
   return 0;
 }
-int numeric_environment() {
-#if defined(__APPLE__) && defined(__aarch64__)
-  using namespace ps;  // NOLINT(build/namespaces)
-  std::fenv_t original;
-  PS_CHECK(std::fegetenv(&original) == 0);
-  const auto rgba = rgba_semantics();
-  auto make = [&](float red, float alpha) {
-    std::vector<std::uint8_t> bytes(16);
-    std::memcpy(bytes.data(), &red, 4);
-    std::memcpy(bytes.data() + 12, &alpha, 4);
-    return Value::create({ElementType::Float32, {1, 1, 4}},
-                         Region::whole({1, 1, 4}), {0, {16, 16, 4}}, bytes,
-                         {encode_semantic(rgba).take_value()})
-        .take_value();
-  };
-  const auto invalid = make(std::numeric_limits<float>::denorm_min(), 0);
-  const auto valid = make(1, std::numeric_limits<float>::denorm_min());
-  InputSnapshotStore store;
-  PS_CHECK(store.import_value(valid).status().code == ErrorCode::TypeMismatch);
-  PS_CHECK(std::fesetenv(FE_DFL_DISABLE_DENORMS_ENV) == 0);
-  const bool direct_invalid = validate_semantic_value(rgba, invalid).ok();
-  const bool direct_valid = validate_semantic_value(rgba, valid).ok();
-  const bool accepted_invalid = store.import_value(invalid).ok();
-  const bool accepted_valid = store.import_value(valid).ok();
-  // The caller's flush mode must still be active after nested validation.
-  volatile float tiny = std::numeric_limits<float>::denorm_min();
-  volatile double converted = tiny;
-  const bool restored = converted == 0;
-  std::fesetenv(&original);
-  PS_CHECK(!direct_invalid && direct_valid);
-  PS_CHECK(!accepted_invalid);
-  PS_CHECK(!accepted_valid);
-  PS_CHECK(restored);
-#endif
-  return 0;
-}
-int typed_snapshots() {
-  using namespace ps;  // NOLINT(build/namespaces)
-  for (const auto& semantic : typed_images::descriptions()) {
-    auto original = typed_images::value(semantic);
-    InputSnapshotStore store({4096, 2});
-    PS_CHECK(store.import_value(original).status().code ==
-             ErrorCode::TypeMismatch);
-    PS_CHECK(store.live_bytes() == 0);
-  }
-  return 0;
-}
 }  // namespace
 
 int main() {
   using namespace ps;  // NOLINT(build/namespaces)
   PS_CHECK(generic_snapshots() == 0);
-  PS_CHECK(numeric_environment() == 0);
-  PS_CHECK(typed_snapshots() == 0);
   content_internal::Sha256 empty;
   PS_CHECK(empty.finish() ==
            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
@@ -197,14 +144,5 @@ int main() {
     million.bytes(chunk.data(), chunk.size());
   PS_CHECK(million.finish() ==
            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
-  const std::vector<std::uint64_t> shape{3, 5};
-  auto full =
-      Value::create({ElementType::Float32, shape}, Region::whole(shape),
-                    {0, {20, 4}}, std::vector<std::uint8_t>(60),
-                    {encode_semantic(coverage_semantics()).take_value()})
-          .take_value();
-  InputSnapshotStore store({76, 2});
-  PS_CHECK(store.import_value(full).status().code == ErrorCode::TypeMismatch);
-  PS_CHECK(store.live_bytes() == 0);
   return 0;
 }

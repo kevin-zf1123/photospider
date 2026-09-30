@@ -1,8 +1,8 @@
 # PixelOE CPU, Metal and Vulkan Slang plugin
 
-An independently built native operation module for Photospider 0.28. It ports PixelOE's pinned Slang pixelization pipeline, including all downscale modes, outline/statistics/weight options, color correction, sharpening, quantization and dithering. See [SPEC.md](SPEC.md) for the exact bounded parameter contract.
+PixelOE source ports its Slang pixelization pipeline, including downscale modes, outline/statistics/weight options, color correction, sharpening, quantization and dithering. The current kernel package is 0.30.0 and public image execution uses Result image slots. PixelOE still declares the removed planar operation extension, so it is retained as implementation material and its current public workflow is pending Result adaptation. See [SPEC.md](SPEC.md) for the bounded parameter contract.
 
-The host dynamically loads the shared module through `OperationRegistry::load_plugin`. The current package source uses base operation ABI v11 plus planar extension v3; the loader rejects ABI 10 and planar v1/v2 modules. Rebuild the plugin and C++ consumers against the matching SDK. Reference kernels are compiled from Slang ahead of time, with validated native SIMD specializations for selected CPU stages. PixelOE GPU entries include MSL for Metal and SPIR-V for Vulkan. The separate `backend=gpu` and `backend=vulkan` choices select distinct registered profiles; runtime validation requires the selected key to match the active native GPU backend. Python/Torch/Slang are build and validation dependencies only. Public kernel headers/libraries come exclusively from the installed package. No private Photospider headers and no built-in registration are used.
+The documented plugin build and public workflow commands below describe the retained planar integration and are not currently runnable against package 0.30.0. They remain useful for source-level generation, independent kernel checks and benchmarks; they do not demonstrate current Result image integration. A compatible Result operation must declare image slots and publish through Result ownership. The numeric operation C table remains ABI v11; the removed planar extension has no current compatibility surface. Reference kernels are compiled from Slang ahead of time, with validated native SIMD specializations for selected CPU stages. PixelOE GPU entries include MSL for Metal and SPIR-V for Vulkan. The separate `backend=gpu` and `backend=vulkan` choices select distinct registered profiles; runtime validation requires the selected key to match the active native GPU backend. Python/Torch/Slang are build and validation dependencies only. Public kernel headers/libraries come exclusively from the installed package. No private Photospider headers and no built-in registration are used.
 
 ## Build
 
@@ -25,7 +25,9 @@ Validated with Slang 2026.18.2 on Apple Silicon. The generator validates the Sla
 
 The package produces `libphotospider_pixeloe.so`, `pixeloe_workflow` and `pixeloe_benchmark` on the tested macOS configuration. CPU Whole computation uses synchronous ranges with caller participation. The `_cpu_tiled` operations use the CPU_STAGES coordinator and submit fixed-geometry single-thread tile callbacks to the shared host worker pool. Each stage joins before the next stage begins; the execution model is independent of the operation's Whole input/output dependency rule. The Metal and Vulkan native FP32 profiles use their matching native GPU services and retain intermediates across stages. ARM64 uses NEON; x86-64 admits AVX2 after CPU/OS feature detection, with ISA flags isolated to the specialization translation unit. Other targets use generated Slang code. Selected blur/morphology stages have native SIMD specializations that preserve the pinned Slang equations and FP operation order.
 
-## Public workflow
+## Legacy public workflow source
+
+The integration commands in this section are retained as source-level adaptation references. They do not run with the current package because the plugin still uses the removed planar execution extension.
 
 ```sh
 build/pixeloe/pixeloe_workflow \
@@ -34,7 +36,7 @@ build/pixeloe/pixeloe_workflow \
   workers=4 warmup=1 repeat=5 output=build/pixeloe-output.f32
 ```
 
-The executable constructs a real WorkflowDocument, loads the external module, compiles through the public Compiler and executes with a planar input binding. Its source contains the complete typed parameter map; strings, Int64, Float64 and Bool values are kept distinct. Registry parameters are required; the example supplies upstream defaults. `input=/path/raw.f32` accepts packed HWC RGB binary32 bytes as an explicit fixture import boundary. Outputs are packed HWC FP32 for inspection. Neither fixture I/O nor planar input construction is timed.
+The legacy executable source constructs a WorkflowDocument, loads the external module, compiles through the Compiler and executes with a planar input binding; this public workflow is pending Result adaptation. Its source contains the complete typed parameter map; strings, Int64, Float64 and Bool values are kept distinct. Registry parameters are required; the example supplies upstream defaults. `input=/path/raw.f32` accepts packed HWC RGB binary32 bytes as an explicit fixture import boundary. Outputs are packed HWC FP32 for inspection. Neither fixture I/O nor planar input construction is timed.
 
 The three CPU Whole keys are `pixeloe.pixelize`, `pixeloe.expanded` and `pixeloe.weight`. The three CPU staged keys append `_cpu_tiled`; Metal keys append `_metal_native_fp32`; Vulkan keys append `_vulkan_native_fp32`. All twelve publish `values`. `operation=pixeloe.expanded` or `pixeloe.weight` inspects the upstream intermediates. A workflow can request all three as separate nodes. Weight is explicitly computed even with thickness zero. These separate nodes currently repeat shared work.
 
@@ -50,9 +52,11 @@ A zero Lab source variance during color matching fails explicitly. In particular
 
 ## Validation and timing
 
+The Result C++/C plugin tests below verify the current kernel contract; they do not load or validate PixelOE.
+
 ```sh
 ctest --test-dir build \
-  -R '^(test_planar_plugin|test_planar_image_workflow|test_plugin_registry)$' \
+  -R '^(test_result_plugin|test_result_image_contracts|test_unified_result_images)$' \
   --output-on-failure
 build/pixeloe-python/bin/pip install kornia torchvision opencv-python-headless
 build/pixeloe-python/bin/python plugins/ops/PixelOE/tools/validate.py \
@@ -71,7 +75,7 @@ build/pixeloe-python/bin/python plugins/ops/PixelOE/tools/benchmark_assets.py \
   --assets assets/codec --build build/pixeloe --out build/pixeloe-assets
 ```
 
-The oracle checkout must be revision `0239787b8bb3e0c0dac615a33c896311d40cb46e`. `validate.py` uses the upstream Torch implementation and independent Torch convolution/sliding-statistics oracles for Slang-only options. It does not invoke these compiled shaders as its oracle. `check_contract.py` verifies exact scalar/SIMD/rounding equality, signed-zero and subnormal copies, invalid-domain failures and resource limits.
+Use the pinned PixelOE upstream checkout for reference comparisons. `validate.py` uses the upstream Torch implementation and independent Torch convolution/sliding-statistics oracles for Slang-only options. It does not invoke these compiled shaders as its oracle. `check_contract.py` verifies exact scalar/SIMD/rounding equality, signed-zero and subnormal copies, invalid-domain failures and resource limits.
 
 `pixeloe_benchmark` measures the native pipeline and sum of synchronous CPU kernel dispatches (Slang reference or admitted SIMD), with warmup and the same synthetic input formula. It excludes public binding/planning/planar transfer and uses a local scratch ledger; the public workflow measures actual managed execution separately. Per-kernel values are mean dispatch totals; median pipeline/kernel values are reported separately. They must not be added to public latency.
 

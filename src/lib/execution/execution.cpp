@@ -40,7 +40,6 @@
 #include "execution/dependency_content.hpp"
 #include "execution/dependency_flights.hpp"
 #include "execution/dependency_records.hpp"
-#include "execution/disk_cache.hpp"
 #include "execution/execution_timing.hpp"
 #include "execution/memory_budget.hpp"
 #include "execution/native_gpu.hpp"
@@ -868,15 +867,6 @@ struct ExecutionContext::Impl final {
       throw std::invalid_argument("invalid dependency cache metadata limit");
     if (requested.result_cache_bytes > requested.maximum_live_bytes)
       throw std::invalid_argument("cache limit exceeds execution budget");
-    if (requested.disk_cache) {
-      if (requested.result_cache_bytes == 0)
-        throw std::invalid_argument(
-            "disk cache requires positive result cache capacity");
-      disk = std::make_unique<execution_internal::DiskCache>(
-          *requested.disk_cache,
-          operation_registry->persistent_cache_identity(), budget,
-          requested.result_cache_bytes);
-    }
     if (requested.result_cache_bytes != 0)
       cache = std::make_unique<execution_internal::ResultCache>(
           requested.result_cache_bytes, budget,
@@ -902,28 +892,12 @@ struct ExecutionContext::Impl final {
   const std::uint64_t maximum_live_bytes;
   /** @brief Frozen operation registry retained beyond all callbacks. */
   std::shared_ptr<OperationRegistry> operation_registry;
-  struct ForeignPlanarAdmission final {
-    PlanarImage owner;
-    std::shared_ptr<void> pin;
-    std::shared_ptr<void> lease;
-    std::uint64_t resident_bytes = 0;
-    std::uint32_t active_runs = 0;
-    bool retiring = false;
-  };
-  struct ForeignPlanarTable final {
-    std::timed_mutex mutex;
-    std::condition_variable_any changed;
-    std::map<const void*, std::shared_ptr<ForeignPlanarAdmission>> entries;
-  };
-  std::shared_ptr<ForeignPlanarTable> planar_foreign_sources =
-      std::make_shared<ForeignPlanarTable>();
   /** @brief Shared CPU/GPU waiting-callback admission owner. */
   WaitingAdmission waiting_admission;
   /** @brief Required fixed CPU callback pool. */
   ThreadPool cpu_pool;
   /** @brief Optional single local GPU callback lane. */
   std::unique_ptr<ThreadPool> gpu_pool;
-  std::unique_ptr<execution_internal::DiskCache> disk;
   // Destroy coordinators before callback pools and their allocation budget.
   std::unique_ptr<execution_internal::ResultCache> cache;
   std::shared_ptr<execution_internal::DemandCoordinator> demands;
@@ -5545,17 +5519,6 @@ ExecutionContext::~ExecutionContext() noexcept {
   if (impl_ && impl_->demands)
     impl_->demands->close();
 }
-void ExecutionContext::clear_disk_cache() {
-  if (impl_->disk)
-    impl_->disk->clear();
-}
-void ExecutionContext::flush_disk_cache() {
-  if (impl_->disk)
-    impl_->disk->flush();
-}
-DiskCacheStatistics ExecutionContext::disk_cache_statistics() const {
-  return impl_->disk ? impl_->disk->statistics() : DiskCacheStatistics{};
-}
 void ExecutionContext::clear_result_cache() {
   impl_->dependency_flights->clear();
   impl_->dependency_checkpoints->clear();
@@ -6060,10 +6023,6 @@ Result<DemandResult> ExecutionContext::execute_fragments(
         frozen.plan_, validated.take_value(), combined.value(), options,
         nullptr,
         [this](std::uint64_t bytes) {
-          if (impl_->disk &&
-              !impl_->budget->can_allocate(
-                  bytes, static_cast<bool>(impl_->native_device)))
-            impl_->disk->drop_pending();
           if (impl_->cache)
             impl_->cache->reclaim_for(bytes,
                                       static_cast<bool>(impl_->native_device));
@@ -6535,15 +6494,11 @@ Result<ExecutionResult> ExecutionContext::execute(
         }
       }
     }
-    if (impl_->disk && impl_->budget->available() < working_bytes)
-      impl_->disk->drop_pending();
     if (impl_->cache)
       impl_->cache->reclaim_for(working_bytes);
     auto reserved = impl_->budget->reserve(
         working_bytes, [&] { return binding_stop(plan, cancellation); }, {},
         [this, working_bytes] {
-          if (impl_->disk)
-            impl_->disk->drop_pending();
           if (impl_->cache)
             impl_->cache->reclaim_for(working_bytes);
         });
@@ -6556,8 +6511,6 @@ Result<ExecutionResult> ExecutionContext::execute(
     } seal{reservation};
     execution_internal::ScopedMemoryAdmission incremental_admission(
         [this, reservation](std::uint64_t bytes) {
-          if (impl_->disk && !impl_->budget->can_allocate(bytes, true))
-            impl_->disk->drop_pending();
           if (impl_->cache)
             impl_->cache->reclaim_for(bytes, true);
           if (impl_->native_device && !impl_->budget->can_allocate(bytes, true))
@@ -6667,10 +6620,6 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           },
           plan, std::move(snapshot), cancellation, options, sink,
           [this](std::uint64_t bytes) {
-            if (impl_->disk &&
-                !impl_->budget->can_allocate(
-                    bytes, static_cast<bool>(impl_->native_device)))
-              impl_->disk->drop_pending();
             if (impl_->cache)
               impl_->cache->reclaim_for(
                   bytes, static_cast<bool>(impl_->native_device));
@@ -6802,14 +6751,10 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           return failure(sum.status());
         bytes = sum.value();
       }
-      if (impl_->disk && impl_->budget->available() < bytes)
-        impl_->disk->drop_pending();
       if (impl_->cache)
         impl_->cache->reclaim_for(bytes);
       auto reserved =
           impl_->budget->reserve(bytes, stop, observation, [this, bytes] {
-            if (impl_->disk)
-              impl_->disk->drop_pending();
             if (impl_->cache)
               impl_->cache->reclaim_for(bytes);
           });
@@ -6917,14 +6862,10 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           return Result<ExecutionResult>(total.status());
         working = total.value();
       }
-      if (impl_->disk && impl_->budget->available() < working)
-        impl_->disk->drop_pending();
       if (impl_->cache)
         impl_->cache->reclaim_for(working);
       auto reserved =
           impl_->budget->reserve(working, stop, observation, [this, working] {
-            if (impl_->disk)
-              impl_->disk->drop_pending();
             if (impl_->cache)
               impl_->cache->reclaim_for(working);
           });
@@ -7047,8 +6988,6 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
       }
       execution_internal::ScopedMemoryAdmission incremental_admission(
           [this, reservation = seal.reservation](std::uint64_t bytes) {
-            if (impl_->disk && !impl_->budget->can_allocate(bytes, true))
-              impl_->disk->drop_pending();
             if (impl_->cache)
               impl_->cache->reclaim_for(bytes, true);
             if (impl_->native_device &&
@@ -7076,11 +7015,6 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
                   keys[index], value, cache_epoch,
                   impl_->native_device &&
                       impl_->native_device->owns(*value.storage()));
-            if (impl_->disk &&
-                tile.execution_mode() == ExecutionMode::CpuExact &&
-                index < keys.size() && impl_->cache->epoch() == cache_epoch)
-              impl_->disk->put(keys[index], value,
-                               [&] { return binding_stop(tile, token); });
           },
           impl_->native_device, impl_->cache.get(), cache_epoch, resources);
       auto result = coordinator->run();
@@ -7135,15 +7069,6 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
           if (!retained.ok())
             return Result<ExecutionResult>(retained.status());
           auto hit = retained.take_value();
-          if (!hit.valid() && impl_->disk &&
-              tile.execution_mode() == ExecutionMode::CpuExact) {
-            const auto& step = tile.steps()[i];
-            hit =
-                impl_->disk->get(keys[i], step.output_descriptor,
-                                 step.output_demand, step.output_facets, stop);
-            if (hit.valid())
-              impl_->cache->put(keys[i], hit, cache_epoch);
-          }
           if (hit.valid()) {
             tile_cached[tile.steps()[i].result_ref()] = std::move(hit);
             tile_backends[tile.steps()[i].result_ref()] =

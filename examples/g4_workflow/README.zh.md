@@ -31,6 +31,4 @@ out/g4-consumer-static/photospider_dependency_workflow
 CTest 注册名为 `test_dependency_workflow`，不再使用历史 G4 开发阶段名。
 同一可执行文件还检查 progressive 控制依赖、动态 radius、demand 替换、waiter
 共享、内容缓存、有序归约/扫描及块状态重收敛。预期值与各场景见英文说明。
-旧 generic-image STMap 正例及其可选计时入口已退休：结构图像必须使用 planar
-绑定，`image.stmap` 尚未实现该执行能力，因此不声称 planar STMap 验收完成。
-当前图像绑定拒绝由 `test_planar_image_workflow` 与 `test_semantic_contract` 覆盖。
+保留的 generic-image STMap 源码使用旧 Value 图像契约，不是当前执行路径。当前 public 图像执行契约见[统一 Result workflow](../unified_result_workflow/README.md)；生产 STMap 图像执行需要 Result image slots。

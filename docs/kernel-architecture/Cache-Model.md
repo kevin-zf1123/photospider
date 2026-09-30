@@ -2,7 +2,7 @@
 
 ## Scope and ownership
 
-The kernel keeps separate identities for compiled plans, immutable input snapshots, ordinary Value results, shared in-flight Result work, and disposable disk records. Cache membership grants reuse eligibility; active Values, Results, snapshots, and read windows retain their own owners and resource leases after an entry is cleared or evicted.
+The kernel keeps separate identities for compiled plans, immutable input snapshots, ordinary Value results, shared in-flight Result work, and native backend cache identities. Cache membership grants reuse eligibility; active Values, Results, snapshots, and read windows retain their own owners and resource leases after an entry is cleared or evicted.
 
 `PlanCacheKey` identifies a physical plan. It excludes input payload and does not prove graph currentness or identify a computed output. Completed Result reuse is weakly indexed: the cache can locate a still-live Result, but the cache entry alone does not keep its payload alive. A strong `ResultRef`, captured publication, or active waiter owns that Result. `ResultRef::capture()` snapshots the certified descriptor, field/image relations, descriptor basis, and dependency bundle at one revision. The Result’s ordered source association remains a separate monotone owner relation on the shared Result object and can grow as inputs are consumed.
 
@@ -37,18 +37,10 @@ Dependency cache manifests retain immutable relation evidence, source observatio
 
 `maximum_dependency_cache_metadata` defaults to 65536 proof units and is bounded to 1..1048576. `maximum_dependency_cache_work` is a separate per-run traversal limit, defaults to 1048576, and zero disables dependency reuse. Proof exhaustion skips reuse or retention and permits computation to continue. Deduplication does not erase work already spent traversing, hashing, associating, or normalizing evidence.
 
-## Disk cache
-
-The disk cache stores eligible ordinary Value records using canonical SHA-256 keys and a default-registry implementation fingerprint. It validates the descriptor, Region, facets, payload length, checksum, and result key before publication. Allocation size comes from the validated plan, not file-provided lengths. A malformed, truncated, mismatched, or unsupported record is a disposable miss.
-
-Writes use a temporary file and rename after the complete record is written. The cache is not a durable result store. Queue pressure or write failure skips retention without failing the computed result. `flush_disk_cache()` waits for queued writes; `clear_disk_cache()` removes entries and invalidates pending write epochs. One context exclusively locks its configured directory; unrelated files are ignored. Disk eligibility is limited to the supported CPU-exact ordinary Value contract; structured image Results use Result ownership and identity.
-
 ## Limits and current entry points
 
-- Disk caching requires explicit configuration and positive in-memory Value-cache capacity.
-- Persistent implementation identity is available for the default registry. Custom and C-module registries can use process-local caching without persistent implementation identity.
 - Native GPU results remain isolated from CPU-exact result keys. A fallback result does not populate native keys, and approximate native results do not replace exact CPU results.
 - Native input-copy reuse hashes demanded logical bytes, descriptor, facets, Region, and device identity. It can avoid uploading immutable Values but does not make arbitrary `RegionalSource` computation cacheable.
 - Clearing or evicting cache entries removes reuse eligibility without invalidating active owners. Frozen executions are in-memory owners, not serialized plans.
 
-The public Result image entry point is [`examples/unified_result_workflow`](../../examples/unified_result_workflow/README.md); current production image operation availability is listed in [Image operations](Image-Operations.md). Snapshot and generic cache behavior is exercised by `test_input_snapshot`, `test_frozen_execution`, `test_generic_result_cache`, and `test_shared_results`. Result capture, owner release, and image-cache behavior are covered by `test_result_image_contracts`, `test_global_results`, and `test_shared_results`.
+The public Result image entry point is [`examples/unified_result_workflow`](../../examples/unified_result_workflow/README.md); current production image operation availability is listed in [Image operations](Image-Operations.md). Snapshot and generic cache behavior is exercised by `test_input_snapshot`, `test_frozen_execution`, `test_generic_result_cache`, and `test_shared_results`. Result capture and owner release are covered by `test_result_image_contracts`, `test_global_results`, and `test_shared_results`.

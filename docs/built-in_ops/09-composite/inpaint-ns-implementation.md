@@ -1,10 +1,11 @@
 # Local Navier-Stokes inpainting implementation
 
-This document describes the built-in OpenCV and native Apple Silicon operations,
-their resource boundaries, runnable public workflow and acceptance evidence.
+This document describes the retained OpenCV and native Apple Silicon source, its algorithm and resource boundaries, and source-level numerical checks. The callbacks still use the legacy Value image contract and do not execute through the current public Result image path.
 The authoritative contract is [PNT-05A](op_specs/PNT-05A_local_inpaint_navier_stokes.md).
 
-## Public behavior
+## Retained callback contract
+
+The constraints below describe the source callbacks; they are not a currently available public image operation contract because the compiler rejects their structural-image Value ports.
 
 Both operations take ordered Float32 Image `[H,W,4]` and canonical Float32
 coverage `[H,W]`, require exact Int64 `radius` in `[1,32]`, and expose only named
@@ -32,8 +33,7 @@ computed views without a full host scan.
 ## Implementation and resource boundaries
 
 `inpaint_ns_native.cpp` is a standalone C++ port of the single-channel Float32
-OpenCV 4.12.0 NS path, source blob
-`2f2f368fa13da0bc1426b71862205048c6ea0f94`. It retains the original Intel license
+OpenCV 4.12.0 NS path. It retains the original Intel license
 in source and in installed `share/licenses/Photospider/inpaint_ns_license.txt`.
 It has no OpenCV headers, calls or symbols. It uses a fixed host-owned heap,
 row-major initial insertion, stable insertion-order ties and up/left/down/right
@@ -79,10 +79,7 @@ the host cancellation token. Only before/after-channel cancellation is promised.
 `cv::Error::StsNoMem` maps to ResourceExhausted. No process-global OpenCV allocator
 or thread configuration is changed.
 
-The adapter and results derived from it do not enter reusable memory or disk
-result caches. Replacing a same-version OpenCV library can change numerical
-behavior without changing the kernel source build identity. Native results keep
-the standard cache policy; in-run Whole materialization still applies to both.
+The source marks the OpenCV adapter uncacheable and the native callback cacheable. These Value-result cache flags do not make either callback executable through the current Result image path. Replacing a same-version OpenCV library can change numerical behavior without changing the kernel source build identity. In-run Whole materialization still applies to both callbacks.
 
 Both callbacks save/restore floating environment and use nearest rounding and
 gradual underflow. Source flags disable fast math and FP contraction. Finite
@@ -90,7 +87,9 @@ checks plus overflow/invalid/divide-by-zero exception checks reject nonfinite
 arithmetic; native also checks weight/accumulation intermediates explicitly.
 Unmasked signed zero is copied through `memcpy`.
 
-## Actual focused evidence
+## Source-level numerical checks
+
+The matrix below records numerical checks for the retained implementation source. Its former runner is not a current registered test target, and these checks do not establish a public Result image workflow.
 
 Host: Apple M5, macOS 27.0, AppleClang 21.0.0.21000101, RelWithDebInfo,
 static arm64 kernel, Metal OFF. Adapter-enabled validation uses OpenCV 4.12.0
@@ -98,7 +97,6 @@ core/imgproc/photo built with `-fno-fast-math -frounding-math -ffp-contract=off`
 A binary with the same OpenCV version but different contraction settings is
 outside this numerical profile. CMake checks the version; the dependency
 provider must supply the specified floating-point configuration.
-`test_inpaint_ns` passes in both adapter-enabled and native-only builds.
 The adapter-enabled test independently calls OpenCV and checks 288
 backend/shape/pattern/radius combinations: 144 per backend, shapes 3x5, 5x7,
 11x13, 17x19; radii 1/3/8/32; constant, asymmetric pattern, scratches, edge/corner,
@@ -110,7 +108,7 @@ the remaining OpenCV-independent checks.
 | ID | Actual evidence and remaining scope |
 | --- | --- |
 | T01 | PASS: zero-mask exact bytes including image/mask signed zero; NaN/Inf still rejected. |
-| T02 | PASS: exact 5x5 `(0.25,0.5,0.75,1)` center-hole r=1 analytic fixture, plus matrix and public example. |
+| T02 | PASS: exact 5x5 `(0.25,0.5,0.75,1)` center-hole r=1 analytic fixture, plus the analytic fixture. |
 | T03 | PASS: placeholder change preserves complete output bytes for all 288 matrix cells. |
 | T04 | PASS for the listed small synthetic patterns and all four radii; no real-image corpus. |
 | T05 | PASS: combined top/left and bottom/right edges/corners, scattered holes, one known corner/center. No sanitizer run. |
@@ -125,10 +123,14 @@ the remaining OpenCV-independent checks.
 | T14 | PARTIAL: independent changed input/mask/radius/metadata executions and distant-NaN failures covered; same-context native cache reuse and adapter recomputation are checked, but no complete changed-input cache-invalidation regression. |
 | T15 | PASS native: each of six allocations fails independently, owners release, exact 1170-byte 5x5 capacity succeeds and 1169 fails. Adapter host buffers accounted, external allocation failure injection absent. |
 | T16 | PARTIAL native: pre-entry and six allocation-boundary cancellation points fail Cancelled. Frontier/init/prepublication polling is source-reviewed, not deterministically interrupted in tests; Stale and latency tests absent. Adapter internal interruption unsupported by adapter contract. |
-| T17 | PASS: registry, compile, bind, execute and named image in public workflow; adapter-enabled and native-only installed consumers run; exact facets and numbers checked. |
+| T17 | The former registry/compile/bind/execute example uses the legacy image path; it is not current Result image support or a current test target. |
 | T18 | PASS: two independent asynchronous invocations per backend match baseline; no concurrency stress/sanitizer matrix. |
 
-## Build and run
+## Source validation
+
+The standalone example and test runner use the removed planar/value binding surface, so their build, CTest and consumer commands are not current entry points. The retained test source documents independent numerical cases only.
+
+## Build source and independent checks
 
 The native implementation is built by default, with OpenCV discovery disabled. Enabling
 `PHOTOSPIDER_ENABLE_INPAINT_OPENCV` additionally registers the adapter and makes
@@ -157,49 +159,24 @@ Point `OpenCV_DIR` at that installation or an equivalently configured dependency
 
 ```sh
 cmake -S . -B build/inpaint-ns -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DBUILD_TESTING=ON -DPHOTOSPIDER_ENABLE_METAL=OFF -DBUILD_SHARED_LIBS=OFF \
+  -DBUILD_TESTING=OFF -DPHOTOSPIDER_ENABLE_METAL=OFF -DBUILD_SHARED_LIBS=OFF \
   -DPHOTOSPIDER_ENABLE_INPAINT_OPENCV=ON \
   -DOpenCV_DIR="$PWD/build/opencv-strict/lib/cmake/opencv4"
-cmake --build build/inpaint-ns --target test_inpaint_ns photospider_inpaint_ns_workflow -j 3
-ctest --test-dir build/inpaint-ns -R '^test_inpaint_ns$' --output-on-failure
-build/inpaint-ns/examples/inpaint_ns_workflow/photospider_inpaint_ns_workflow
-build/inpaint-ns/examples/inpaint_ns_workflow/photospider_inpaint_ns_workflow image.local_inpaint_navier_stokes_openCV
-cmake --install build/inpaint-ns --prefix "$PWD/build/inpaint-ns/install"
-cmake -S examples/inpaint_ns_workflow -B build/inpaint-ns/consumer \
-  -DCMAKE_PREFIX_PATH="$PWD/build/inpaint-ns/install;$PWD/build/opencv-strict"
-cmake --build build/inpaint-ns/consumer -j 3
-build/inpaint-ns/consumer/photospider_inpaint_ns_workflow
-build/inpaint-ns/consumer/photospider_inpaint_ns_workflow image.local_inpaint_navier_stokes_openCV
+cmake --build build/inpaint-ns --target photospider -j 3
 ```
 
-Both operations print center `0.25,0.5,0.75,1 PASS`. The example compiles a
-workflow through the public registry, binds opaque RGBA and binary coverage,
-executes radius 3 and checks the named `image` output and preserved facets.
-The standalone consumer uses only installed headers and `Photospider::kernel`.
+The retained implementation checks include the numerical matrix described above. They invoke source callbacks, not a supported Result image workflow.
 
-Native-only build and consumer:
+Native-only build:
 
 ```sh
 cmake -S . -B build/inpaint-native -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DBUILD_TESTING=ON -DPHOTOSPIDER_ENABLE_METAL=OFF -DBUILD_SHARED_LIBS=OFF \
+  -DBUILD_TESTING=OFF -DPHOTOSPIDER_ENABLE_METAL=OFF -DBUILD_SHARED_LIBS=OFF \
   -DPHOTOSPIDER_ENABLE_INPAINT_OPENCV=OFF
-cmake --build build/inpaint-native --target test_inpaint_ns photospider_inpaint_ns_workflow -j 3
-ctest --test-dir build/inpaint-native -R '^test_inpaint_ns$' --output-on-failure
-cmake --install build/inpaint-native --prefix "$PWD/build/inpaint-native/install"
-cmake -S examples/inpaint_ns_workflow -B build/inpaint-native/consumer \
-  -DCMAKE_PREFIX_PATH="$PWD/build/inpaint-native/install" \
-  -DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=TRUE
-cmake --build build/inpaint-native/consumer -j 3
-build/inpaint-native/consumer/photospider_inpaint_ns_workflow
-otool -L build/inpaint-native/consumer/photospider_inpaint_ns_workflow
+cmake --build build/inpaint-native --target photospider -j 3
 nm -u build/inpaint-native/libphotospider.a | rg -i 'opencv|__ZN2cv'
 ```
 
-Native-only validation prints PASS. The checked consumer links libc++ and
-libSystem, with no OpenCV dependency; the symbol filter returns no matches
-(`rg` exit 1). The OpenCV operation is absent when its adapter is disabled.
+On a native-only build, the symbol filter returns no OpenCV references (`rg` exit 1). The OpenCV callback source is absent when its adapter is disabled.
 
-Focused tests and public examples were run in adapter-enabled and native-only
-configurations. Installed consumers were also checked. ClangFormat 21, cpplint
-and `git diff --check` passed for the implementation. Full CTest, sanitizer,
-Metal and cross-platform validation are outside the recorded evidence.
+The retained test source does not exercise the removed planar workflow binding or the current Result image path.

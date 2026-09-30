@@ -4,7 +4,7 @@
 
 结构化 `Result` 是图像 samples 的 public semantic、input、output、publication 和 ownership 契约。Result schema 声明由 `PlanarImage` backing 的 typed image slots，也可以声明 primitive fields。普通非图像 numeric `Value` 仍然有效。看起来像图像的 `Value` facet 或 operation catalog 中存在注册项，都不会使 Value callback 成为 Result 图像 operation。
 
-当前 kernel package 为 0.29.0，WorkflowDocument schema 为 4，OperationTraits 版本为 21。独立 planar callback table、planar image executor 和 planar workflow binding 已移除。旧 planar C 入口 v1-v3 会被拒绝。Production operation 源码尚未改写为 Result 图像契约。下表说明当前源码和 runtime 可用性；test-defined minimal operations 与 public example 可使用 Result 图像路径。
+当前 kernel package 为 0.30.0，WorkflowDocument schema 为 4，OperationTraits 版本为 21。独立 planar callback table、planar image executor 和 planar workflow binding 已移除。旧 planar C 入口 v1-v3 会被拒绝。Production operation 源码尚未改写为 Result 图像契约。下表说明当前源码和 runtime 可用性；test-defined minimal operations 与 public example 可使用 Result 图像路径。
 
 ## Production 源码与 runtime 状态
 

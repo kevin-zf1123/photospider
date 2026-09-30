@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.29.0
+  VERSION 0.30.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -66,9 +66,6 @@ endif()
 set(PHOTOSPIDER_SANITIZER_MODE none)
 set(PHOTOSPIDER_SANITIZER_FLAG "")
 if(PHOTOSPIDER_ENABLE_ASAN OR PHOTOSPIDER_ENABLE_TSAN)
-  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    message(FATAL_ERROR "Photospider sanitizers require Clang C++")
-  endif()
   include(CheckCXXCompilerFlag)
   include(CheckLinkerFlag)
   if(PHOTOSPIDER_ENABLE_ASAN)
@@ -312,32 +309,18 @@ if(PHOTOSPIDER_ENABLE_VULKAN)
   list(APPEND PHOTOSPIDER_KERNEL_SOURCES src/lib/execution/native_gpu_vulkan.cpp)
 endif()
 # S1 binary32 contracts require nearest rounding and gradual underflow at runtime.
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  set_source_files_properties(${PHOTOSPIDER_OPERATION_SOURCES}
+set_source_files_properties(${PHOTOSPIDER_OPERATION_SOURCES}
 
-    src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
-    src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
-    src/lib/data/layer.cpp src/lib/data/representation.cpp
-    src/lib/data/quality.cpp
-    src/lib/data/statistics.cpp
-    src/lib/plugin/statistics_operation.cpp
-    src/lib/plugin/fft_operation.cpp
-    src/lib/plugin/layer_operation.cpp
-    src/lib/plugin/operation_registry.cpp PROPERTIES
-    COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
-elseif(MSVC)
-  set_source_files_properties(${PHOTOSPIDER_OPERATION_SOURCES}
-
-    src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
-    src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
-    src/lib/data/layer.cpp src/lib/data/representation.cpp
-    src/lib/data/quality.cpp
-    src/lib/data/statistics.cpp
-    src/lib/plugin/statistics_operation.cpp
-    src/lib/plugin/fft_operation.cpp
-    src/lib/plugin/layer_operation.cpp
-    src/lib/plugin/operation_registry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
-endif()
+  src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
+  src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
+  src/lib/data/layer.cpp src/lib/data/representation.cpp
+  src/lib/data/quality.cpp
+  src/lib/data/statistics.cpp
+  src/lib/plugin/statistics_operation.cpp
+  src/lib/plugin/fft_operation.cpp
+  src/lib/plugin/layer_operation.cpp
+  src/lib/plugin/operation_registry.cpp PROPERTIES
+  COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
 # Keep optional ISA flags/definitions local; all other kernel code retains the
 # ordinary host target and can perform runtime admission without SME opcodes.
 set_property(SOURCE plugins/ops/01-numeric/numeric_matrix.cpp APPEND PROPERTY
@@ -382,7 +365,7 @@ int main() { return 0; }" PHOTOSPIDER_COMPILER_HAS_CONVERSION_SME_ACLE)
 endif()
 include(cmake/NumericMath.cmake)
 
-# Disposable disk entries are compatible only with this maintained implementation.
+# Native GPU cache identities include the maintained implementation.
 file(GLOB_RECURSE _cache_identity_inputs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/*.hpp"
@@ -499,9 +482,6 @@ if(NOT BUILD_SHARED_LIBS)
 endif()
 
 if(PHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS)
-  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    message(FATAL_ERROR "manual fuzz targets require a Clang libFuzzer runtime")
-  endif()
   if(PHOTOSPIDER_ENABLE_TSAN)
     message(FATAL_ERROR "manual libFuzzer targets cannot be combined with TSAN")
   endif()
@@ -749,10 +729,11 @@ if(BUILD_TESTING)
     target_include_directories(${_fmt11_test} PRIVATE plugins/ops src/lib)
     target_compile_options(${_fmt11_test} PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
   endforeach()
-  add_test(NAME test_fmt11_package_version
+  add_test(NAME test_package_version
     COMMAND ${CMAKE_COMMAND}
       -DVERSION_FILE=${CMAKE_CURRENT_BINARY_DIR}/PhotospiderConfigVersion.cmake
-      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_fmt11_package_version.cmake)
+      -DCURRENT_VERSION=${PROJECT_VERSION}
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_package_version.cmake)
   photospider_add_test(test_transfer_simd photospider_test_kernel tests/unit/test_transfer_simd.cpp)
   target_include_directories(test_transfer_simd PRIVATE src/lib plugins/ops)
   target_compile_options(test_transfer_simd PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
@@ -771,11 +752,7 @@ if(BUILD_TESTING)
   photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)
   photospider_add_test(test_matrix_certificate photospider_test_kernel tests/unit/test_matrix_certificate.cpp)
   target_include_directories(test_matrix_certificate PRIVATE plugins/ops src/lib)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(test_matrix_certificate PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
-  elseif(MSVC)
-    target_compile_options(test_matrix_certificate PRIVATE /fp:strict)
-  endif()
+  target_compile_options(test_matrix_certificate PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
   photospider_add_test(test_ordered_reduction Photospider::kernel tests/integration/test_ordered_reduction.cpp)
   photospider_add_test(test_ordered_scan Photospider::kernel tests/integration/test_ordered_scan.cpp)
   photospider_add_test(test_scan_waiters photospider_test_kernel tests/integration/test_scan_waiters.cpp)
@@ -833,11 +810,6 @@ if(BUILD_TESTING)
   target_include_directories(test_scheduler_timing PRIVATE src/lib)
   photospider_add_test(test_native_execution Photospider::kernel tests/integration/test_native_execution.cpp)
   set_tests_properties(test_native_execution PROPERTIES SKIP_RETURN_CODE 77)
-  add_executable(test_disk_pending tests/integration/test_disk_pending.cpp)
-  target_link_libraries(test_disk_pending PRIVATE Photospider::kernel)
-  target_include_directories(test_disk_pending PRIVATE src/lib tests)
-  add_test(NAME test_disk_pending COMMAND test_disk_pending ${CMAKE_CURRENT_BINARY_DIR}/disk-pending-test)
-  set_tests_properties(test_disk_pending PROPERTIES TIMEOUT 30)
   photospider_add_test(test_native_dependency photospider_test_kernel tests/integration/test_native_dependency.cpp)
   target_include_directories(test_native_dependency PRIVATE src/lib)
   set_tests_properties(test_native_dependency PROPERTIES SKIP_RETURN_CODE 77)

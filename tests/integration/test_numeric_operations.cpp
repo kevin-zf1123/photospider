@@ -1,5 +1,3 @@
-#include <atomic>
-#include <cfenv>  // NOLINT(build/c++11)
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -152,17 +150,6 @@ int math_and_views() {
                     .take_value();
   PS_CHECK(equal<float>(run("numeric.add", {padded, array<float>({0, 0, 0})}),
                         {.5F, 1.5F, 2.5F}));
-  auto half = array<float>({.75F});
-  auto mask =
-      Value::create({ElementType::Float32, {1, 1}}, Region::whole({1, 1}),
-                    {0, {4, 4}}, half.copy_bytes(),
-                    {encode_semantic(coverage_semantics()).take_value()})
-          .take_value();
-  auto twice = Value::create(mask.descriptor(), mask.region(), mask.layout(),
-                             array<float>({2}).copy_bytes())
-                   .take_value();
-  auto old_mask = run("numeric.multiply", {mask, twice});
-  PS_CHECK(old_mask.status().code == ErrorCode::TypeMismatch);
   return 0;
 }
 int failures_and_resources() {

@@ -2,7 +2,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
-#include <filesystem>
 #include <future>
 #include <iostream>
 #include <memory>
@@ -326,36 +325,6 @@ int main(int argc, char** argv) {
     typed_residency();
     sharing(registry);
     whole_fallback(registry);
-    if (!registry->persistent_cache_identity().empty()) {
-      const auto directory =
-          std::filesystem::temp_directory_path() /
-          ("photospider-s4-disk-" +
-           std::to_string(
-               std::chrono::steady_clock::now().time_since_epoch().count()));
-      struct Cleanup {
-        std::filesystem::path directory;
-        ~Cleanup() {
-          std::error_code error;
-          std::filesystem::remove_all(directory, error);
-        }
-      } cleanup{directory};
-      auto config = s4::config(ps::ExecutionMode::NativeGpu);
-      config.disk_cache =
-          ps::DiskCacheConfig{directory.string(), 1024 * 1024, 4096, 512};
-      ps::ExecutionContext context(registry, config);
-      s3::Scene native(registry, ps::ExecutionMode::NativeGpu);
-      s3::require(context.execute(native.freeze(context, 2)).ok(),
-                  "native disk isolation run");
-      context.flush_disk_cache();
-      s3::require(context.disk_cache_statistics().entries == 0,
-                  "Metal ancestry reached disk cache");
-      s3::Scene exact(registry);
-      s3::require(context.execute(exact.freeze(context, 2)).ok(),
-                  "CPU disk run");
-      context.flush_disk_cache();
-      s3::require(context.disk_cache_statistics().entries > 0,
-                  "CPU disk cache stopped working");
-    }
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

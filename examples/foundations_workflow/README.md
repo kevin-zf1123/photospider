@@ -17,7 +17,7 @@ ctest --test-dir build -R '^test_workflow_(numeric_reductions|expression_lut)$' 
 
 Pass `--scenario numeric` or `--scenario expression-lut` to run one maintained scenario. The executable prints `Foundations scenarios=2 oracle=passed backend=cpu` after both pass. An error prints `Foundations failed: ...` and exits with status 1.
 
-The standalone CMake project requires an installed Photospider 0.28 package. For example, configure it with:
+The standalone CMake project requires an installed Photospider 0.30 package. For example, configure it with:
 
 ```sh
 cmake -S examples/foundations_workflow -B build/foundations-consumer -DCMAKE_PREFIX_PATH=/path/to/install

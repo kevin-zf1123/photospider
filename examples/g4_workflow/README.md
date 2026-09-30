@@ -95,8 +95,4 @@ out/g4-consumer-static/photospider_dependency_workflow
 
 CTest registers this executable as `test_dependency_workflow`. It is a
 correctness suite, independent of the historical G4 development milestone.
-The former generic-image STMap scenario and its optional timing mode are retired:
-structural images require planar bindings, and `image.stmap` has not implemented
-that execution capability. This does not claim planar STMap acceptance. Current
-planar storage/binding rejection is covered by `test_planar_image_workflow` and
-`test_semantic_contract`.
+The retained generic-image STMap source uses the legacy Value image contract and is not a current execution path. The public image execution contract is demonstrated by [the unified Result workflow](../unified_result_workflow/README.md); production STMap image execution requires Result image slots.

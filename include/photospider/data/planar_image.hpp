@@ -239,59 +239,6 @@ class PHOTOSPIDER_API PlanarImage final {
                                     const std::vector<ValueFacet>& facets = {},
                                     const ResourceBindings& resources = {});
 
-  /** @brief Explicitly convert a complete interleaved or strided Value.
-   * @return New planar owner or typed validation, budget, or cancel failure.
-   * @note Generic source strides are honored; this is the physical import
-   * conversion boundary, not a facet relabeling.
-   */
-  static Result<PlanarImage> import_value(
-      const Value& value, PlanarImageConfig config,
-      const CancellationToken& cancellation = {});
-
-  /** @brief Retain one existing plane as a read-only structural image alias.
-   * The output keeps the source's complete virtual owner and all backed pages;
-   * only requested valid samples may be read. No sample pages are copied or
-   * provisioned. keepdims retains a singleton channel axis; otherwise the
-   * output is rank two. Facets are the caller's projected description and
-   * required profile resources remain owned. A later write to this alias is
-   * rejected. The source may retire independently of the alias.
-   * @param channel Zero-based structural channel index.
-   * @param keepdims Retain the selected axis with extent one.
-   * @param requested Nonempty output coverage, fixed for the alias lifetime.
-   * @param projected_facets Explicit output interpretation.
-   * @param metadata_budget Optional alias metadata budget; defaults to source.
-   * @param cancellation Observed while acquiring source coverage or its lock.
-   * @param resources Additional owned resources for projected overrides.
-   * @return Alias, InvalidArgument for invalid structure, NotFound for missing
-   * source coverage, ResourceExhausted for admission, or Cancelled. No partial
-   * alias is published. May throw std::bad_alloc for metadata allocations.
-   * @note Concurrent immutable reads are safe. No sample cache is consulted.
-   */
-  Result<PlanarImage> channel_view(
-      std::uint64_t channel, bool keepdims, const Region& requested,
-      std::vector<ValueFacet> projected_facets = {},
-      std::shared_ptr<PlanarPageBudget> metadata_budget = {},
-      const CancellationToken& cancellation = {},
-      const ResourceBindings& resources = {}) const;
-
-  /** @brief Prove a read-only assembly alias from ordered source planes.
-   * All entries must map to consecutive physical planes of one root owner,
-   * with identical spatial maps. Each source must authorize its corresponding
-   * requested region. Unrelated/reordered/duplicate owners return
-   * InvalidArgument with ViewUnavailable; all other errors are preserved.
-   * The alias retains root storage, resources and exact coverage. No sample
-   * payload is copied. Immutable reads are concurrent-safe; no cache is used.
-   */
-  static Result<PlanarImage> assemble_view(
-      const std::vector<PlanarImage>& sources,
-      const std::vector<std::uint64_t>& channels,
-      const std::vector<std::uint64_t>& channel_counts,
-      ValueDescriptor descriptor, PlanarImageLayout layout,
-      const Region& requested, std::vector<ValueFacet> facets = {},
-      std::shared_ptr<PlanarPageBudget> metadata_budget = {},
-      const CancellationToken& cancellation = {},
-      const ResourceBindings& resources = {});
-
  public:
   bool valid() const noexcept { return impl_ != nullptr; }
   const ValueDescriptor& descriptor() const;
@@ -324,39 +271,15 @@ class PHOTOSPIDER_API PlanarImage final {
       const Region& region, const CancellationToken& cancellation = {}) const;
 
   /** @brief Prepare destination pages and exact write authority before work.
-   * @return Transactional window or overlap, budget, pin, or cancel failure.
+   * @return Transactional window or overlap, budget, or cancel failure.
    * @note Uncommitted windows are invisible to readers. Internal host code
-   * commits successful operations; callers use publish for packed imports.
+   * commits successful writes through the Result image slot.
    * Only one writer prepares an owner at a time; lock waiting is cancellable.
    */
   Result<PlanarImageWriteWindow> begin_write(
       const Region& region, const CancellationToken& cancellation = {});
 
-  /** @brief Copy packed region samples into their planar positions.
-   * @return Ok or exact region, overlap, budget, pin, or cancel failure.
-   * @note byte_size is exact; failure publishes no samples. Previously
-   * published samples remain immutable. Cancellation is observed per row.
-   */
-  Status publish(const Region& region, const std::uint8_t* packed,
-                 std::uint64_t byte_size,
-                 const CancellationToken& cancellation = {});
-
-  /** @brief Read exact region into packed descriptor-axis order.
-   * @return Ok, NotFound for unpublished coverage, or typed/cancel failure.
-   * @note Missing samples fail NotFound even when their page has backing.
-   * Destination may be partially filled on cancellation only.
-   */
-  Status read(const Region& region, std::uint8_t* packed,
-              std::uint64_t byte_size,
-              const CancellationToken& cancellation = {}) const;
-
- private:
-  friend class ExecutionContext;
   friend class PlanarImageReadWindow;
-  void retain_execution_admission(std::shared_ptr<void> admission);
-  /** @brief Pin a source against publication for one execution. */
-  Result<std::shared_ptr<void>> pin_for_execution(
-      const CancellationToken& cancellation) const;
   explicit PlanarImage(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
   std::shared_ptr<Impl> impl_;
 };

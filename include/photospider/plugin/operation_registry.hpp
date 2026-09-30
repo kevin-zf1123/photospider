@@ -919,13 +919,6 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @note Keys remain process configuration, not IPC values.
    */
   [[nodiscard]] std::vector<std::string> keys() const;
-  /** @brief Verifiable built-in build identity, empty for custom/DSO
-   * registries.
-   * @note Immutable after freeze; successful extension clears the identity;
-   * does not grant trust or sandboxing.
-   * @throws std::bad_alloc For the returned copied string.
-   */
-  std::string persistent_cache_identity() const;
 
  private:
   friend class execution_internal::StructuredExecution;
@@ -935,9 +928,6 @@ class PHOTOSPIDER_API OperationRegistry final {
       std::shared_ptr<std::atomic<ErrorCode>> failure) const;
   friend class ExecutionContext;
   friend class Compiler;
-  friend std::shared_ptr<OperationRegistry> make_default_operation_registry(
-      bool);
-  bool builtins_ = false;
   Status validate_prepared(
       const PreparedOperation& prepared, const std::string& key,
       const std::vector<OperationMetadata>& inputs,

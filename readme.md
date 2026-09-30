@@ -30,7 +30,7 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-CPU exact execution is the default. `ExecutionMode::NativeGpu` grants native placement to operations whose traits declare a GPU implementation; `ExecutionContextConfig::gpu_enabled` enables the context's configured Metal or Vulkan backend. The mode selects placement, while each operation/profile defines its numerical behavior, and traits govern CPU fallback. Apple builds use Metal/Foundation privately; set `PHOTOSPIDER_ENABLE_METAL=OFF` for the CPU configuration. See the [G4 GPU workflow example](examples/g4_gpu_workflow/README.md) and [Compiler and Execution](docs/kernel-architecture/Compiler-and-Execution.md) for an example and the current execution contracts.
+CPU exact execution is the default. `ExecutionMode::NativeGpu` grants native placement to operations whose traits declare a GPU implementation; `ExecutionContextConfig::gpu_enabled` enables the context's configured Metal or Vulkan backend. The mode selects placement, while each operation/profile defines its numerical behavior, and traits govern CPU fallback. Apple builds use Metal/Foundation privately; set `PHOTOSPIDER_ENABLE_METAL=OFF` for the CPU configuration. See [Compiler and Execution](docs/kernel-architecture/Compiler-and-Execution.md) for the current execution contracts. The public image Result path is demonstrated by [the unified Result workflow](examples/unified_result_workflow/README.md).
 
 ## Install and consume
 
@@ -39,7 +39,7 @@ cmake --install build --prefix /desired/photospider-prefix
 ```
 
 ```cmake
-find_package(Photospider 0.28 CONFIG REQUIRED COMPONENTS kernel)
+find_package(Photospider 0.30 CONFIG REQUIRED COMPONENTS kernel)
 target_link_libraries(app PRIVATE Photospider::kernel)
 ```
 
@@ -59,7 +59,7 @@ The separate [`photospider-daemon`](https://github.com/kevin-zf1123/photospider-
 
 ## Composable workflows
 
-The self-contained [foundations example](examples/foundations_workflow) builds against an installed 0.28 package. Its default `all` selector runs numeric and expression/LUT scenarios with result checks. The README documents repository and installed-package build commands.
+The self-contained [foundations example](examples/foundations_workflow) builds against an installed 0.30 package. Its default `all` selector runs numeric and expression/LUT scenarios with result checks. The README documents repository and installed-package build commands.
 
 ## Documentation
 

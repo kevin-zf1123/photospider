@@ -55,15 +55,8 @@ if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
     "${_photospider_consumer_sanitizer_flag}")
 endif()
 
-foreach(_old_minor IN ITEMS 0.23 0.24 0.25 0.26 0.27 0.28)
-  find_package(Photospider ${_old_minor} CONFIG QUIET COMPONENTS kernel)
-  if(Photospider_FOUND)
-    message(FATAL_ERROR "Photospider 0.29 must reject a ${_old_minor} consumer")
-  endif()
-endforeach()
-
 find_package(
-  Photospider 0.29 CONFIG REQUIRED
+  Photospider 0.30 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
 foreach(
@@ -94,12 +87,6 @@ foreach(_photospider_provider_feature IN LISTS
         "'${_photospider_provider_feature}'")
   endif()
 endforeach()
-if(TARGET Photospider::data_definition_sdk)
-  message(
-    FATAL_ERROR
-      "Photospider must not export the nonexistent data_definition_sdk target")
-endif()
-
 add_library(photospider_sdk_consumer OBJECT sdk_smoke.c)
 target_link_libraries(
   photospider_sdk_consumer

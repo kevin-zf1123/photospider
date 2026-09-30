@@ -6,7 +6,7 @@
 
 `ResultRef` 是图像数据唯一的语义、发布、ownership 和 input/output 路径。Result 可以包含 typed image slots、packed primitive fields，或二者兼有。`PlanarImage` 是 image slot 内部的标准存储 backing；它不提供并列的图像结果或执行路径。其创建、导入、views、读写和发布均为 Result owners 的 private 操作。普通非图像 numeric `Value` 仍可使用独立的合法存储形式。
 
-当前 package version 为 0.29.0，workflow schema 为 4，semantic operation traits 为 version 21。Numeric C operation table 仍为 ABI 11；Result operation table 为 ABI 1。这些版本号描述彼此独立的契约。
+当前 package version 为 0.30.0，workflow schema 为 4，semantic operation traits 为 version 21。Numeric C operation table 仍为 ABI 11；Result operation table 为 ABI 1。这些版本号描述彼此独立的契约。
 
 编译器将不可变 schema 复制到 plan。执行协调器拥有 producer 状态并调度 callbacks 和 I/O。`ResultRef` 拥有 schema、单调 descriptor facts、已认证 backing、dependency relations 和保留的输入 Result owners。复制引用会共享这些所有权。外部引用或 read window 可在 execution context 结束后继续保持所需 backing 存活。
 

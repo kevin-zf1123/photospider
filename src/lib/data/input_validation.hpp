@@ -89,8 +89,7 @@ Status validate_port_metadata(const OperationPortConstraint& port,
 Result<Region> derive_input_demand(
     const OperationTraits& traits, const Region& output_demand,
     const std::vector<std::uint64_t>& output_shape,
-    const std::vector<std::uint64_t>& input_shape, OperationPortKind kind,
-    std::uint32_t input_port = 0);
+    const std::vector<std::uint64_t>& input_shape, OperationPortKind kind);
 /** @brief Returns the canonical image-v2 RGBA facet. */
 ValueFacet image_facet();
 /**
@@ -101,43 +100,6 @@ ValueFacet image_facet();
 Status validate_port_value(const OperationPortConstraint& port,
                            const Value& value, ErrorCode numeric_failure,
                            const std::function<ErrorCode()>& stop);
-/** @brief Storage eligibility for image-v2 or canonical coverage-mask metadata.
- * @note Float32 only; image channels/roles come from the canonical descriptor.
- */
-inline Status validate_image_storage_metadata(
-    const ValueDescriptor& descriptor, const std::vector<ValueFacet>& facets) {
-  if (descriptor.element_type != ElementType::Float32 || facets.size() != 1)
-    return Status::failure(
-        ErrorCode::TypeMismatch,
-        "image storage requires Float32 and one typed facet");
-  auto semantic = decode_semantic(facets[0]);
-  if (!semantic.ok())
-    return semantic.status();
-  if (semantic.value().kind != SemanticKind::Image) {
-    const auto expected = encode_semantic(coverage_semantics()).take_value();
-    if (facets[0].key != expected.key ||
-        facets[0].version != expected.version ||
-        facets[0].payload != expected.payload)
-      return Status::failure(
-          ErrorCode::TypeMismatch,
-          "image storage requires image or coverage semantics");
-  }
-  return validate_semantic_descriptor(semantic.value(), descriptor);
-}
-/** @brief Checks storage eligibility, complete image channels and samples. */
-inline Status validate_image_storage_value(
-    const Value& value, const std::function<ErrorCode()>& stop = {}) {
-  if (!value.valid())
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "invalid image storage Value");
-  auto status =
-      validate_image_storage_metadata(value.descriptor(), value.facets());
-  if (!status.ok())
-    return status;
-  return validate_semantic_value(
-      decode_semantic(value.facets()[0]).take_value(), value,
-      ErrorCode::InvalidArgument, stop);
-}
 /** @brief Checks nonempty image demand including complete channel coverage. */
 bool image_demand(const Region& region) noexcept;
 /** @brief Recognized semantic keys; ColorArray is independent of SemanticKind.

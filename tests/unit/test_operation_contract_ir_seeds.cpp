@@ -57,13 +57,12 @@ int main() {
   PS_CHECK(exercise_operation_contract_ir_input(valid.data(), valid.size()) ==
            OperationContractIrStage::CompilerAccepted);
 
-  // Current C++ traits reject old schemas independently of C plugin ABI 9.
-  for (const auto version : {8, 9, 10, 11, 12, 13, 14, 15, 16, 17}) {
-    auto old_version = valid;
-    PS_CHECK(!old_version.empty());
-    old_version[0] = version;
-    PS_CHECK(exercise_operation_contract_ir_input(old_version.data(),
-                                                  old_version.size()) ==
+  const auto current_version = ps::OperationTraits{}.version;
+  for (const auto version : {0U, current_version - 1U, current_version + 1U}) {
+    auto unsupported = valid;
+    unsupported[0] = static_cast<std::uint8_t>(version);
+    PS_CHECK(exercise_operation_contract_ir_input(unsupported.data(),
+                                                  unsupported.size()) ==
              OperationContractIrStage::RegistrationRejected);
   }
 

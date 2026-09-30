@@ -4,7 +4,7 @@
 
 `ResultRef` is the single semantic, publication, ownership, and input/output path for image data. A Result may contain typed image slots, packed primitive fields, or both. `PlanarImage` is the standard storage backing inside an image slot; it does not provide a parallel image result or execution route. Its creation, import, views, reads, writes, and publication are private to Result owners. Ordinary non-image numeric `Value` remains a separate valid storage form.
 
-Current package version is 0.29.0, workflow schema is 4, and semantic operation traits are version 21. The numeric C operation table remains ABI 11; the Result operation table is ABI 1. These version numbers describe independent contracts.
+Current package version is 0.30.0, workflow schema is 4, and semantic operation traits are version 21. The numeric C operation table remains ABI 11; the Result operation table is ABI 1. These version numbers describe independent contracts.
 
 The compiler copies immutable schema into the plan. The execution coordinator owns producer state and schedules callbacks and I/O. A `ResultRef` owns its schema, monotone descriptor facts, certified backing, dependency relations, and retained input Result owners. Copies of a reference share this ownership. An external reference or read window keeps required backing alive after the execution context ends.
 

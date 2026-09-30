@@ -1,36 +1,36 @@
 # 工作流与可检查预期结果
 
-2026-09-13：下面分别列出已有公开可执行示例和 W1..W11 的完整需求 DAG。概念链中的部分节点已有实现，不等于整条链全部交付。示例和检查来自当前源码，本轮仅同步文档，未重新运行产品流程。
+下表区分当前可运行的 workflow 与保留的图像算子源码。图像算子仍使用旧 Value 图像端口时，不能据此视为当前 public Result 执行路径。W1..W11 是完整需求 DAG，概念链中的部分节点已有实现，不等于整条链全部交付。
 
 ## W0 当前已存在的使用基础
 
-当前 [image vertical](../../../examples/image_vertical/main.cpp) 提供 exposure→opacity 的公开示例。
+[Unified Result image workflow](../../../examples/unified_result_workflow/README.md) 是当前 public 图像执行示例，使用示例定义的最小 operation。保留的 [image vertical source](../../../examples/image_vertical/main.cpp) 使用旧 Value 图像接口，不能作为当前可执行图像 workflow。
 05-filter 新规格与 oracle 仍是 Proposed，不列为已运行的内核流程。
 
 ## 已交付的公开 workflow
 
 | 入口 / 对应需求 | 实际链路与注册方式 | 可检查结果 / 剩余范围 |
 | --- | --- | --- |
-| [Foundations](../../../examples/foundations_workflow)；W1/W2/W3 子集 | 默认 registry 的 numeric、expression/LUT 与仍保留的 generator-gain 迁移入口 | LUT x=.25→.125；滤镜流程等待新规格实现 |
-| [G4](../../../examples/g4_workflow/README.md)；W5 采样子集 | computed STMap → image；radius scatter → snapshot patch | 稀疏源像素 {0,1023} 共 32 bytes；远处 radius 修改触发依赖；完整 liquify/map compose 仍待实现 |
-| [Multi-output](../../../examples/multi_output_workflow/README.md) | 默认 registry 的 `image.split_horizontal` | 按端口独立 ROI；typed 图像示例尚需 planar 迁移 |
+| [Foundations](../../../examples/foundations_workflow)；W1 子集 | 默认 registry 的 numeric 与 expression/LUT 场景 | LUT x=.25→.125；RGB/滤镜流程尚无当前可运行实现 |
+| [G4](../../../examples/g4_workflow/README.md)；W5 数据依赖子集 | radius scatter/gather、动态 demand、dependency cache 与 scan/reduction | 稀疏读取与依赖变化的预期输出见示例；图像 STMap 旧源码不能通过当前 Result 图像路径执行 |
+| [Multi-output](../../../examples/multi_output_workflow/README.md) | 默认 registry 的 `image.split_horizontal` 源码使用 Value 图像端口 | 当前编译器要求图像使用 Result；可运行的 Result 输出选择示例见 [Unified Result](../../../examples/unified_result_workflow/README.md) |
 | [Statistics](../../../examples/statistics_workflow/README.md) | 显式 `make_statistics_operation`；Int64 source + UInt8 mask → histogram → parameters → grade → active sink | `x[i]=(3*i+1)%8`，target=2；Counter/有理数 oracle 检查频数/mean/每个 pixel；空或零 mean 的 grade 明确失败 |
 | [FFT](../../../examples/fft_workflow/README.md)；W10 频域子集 | 显式 `make_fft_operation`；Float64 source → FFT + imported response → multiply → inverse → sink | response `exp(-2*pi*i*(u/H+v/W))` 使图像循环下移/右移各一像素；独立 direct DFT；Full/Half、奇偶维度和 imaginary residual；PSD/Wiener 未交付 |
 | [Components](../../../examples/components_workflow/README.md) | 显式 `make_component_operation`；UInt8 mask → labels → associated area → filter | `101/111` 的 `[id,area,min]=[1,5,0]`；filter 为 `label!=0 && area>=minimum_area`；BFS oracle、空 K、跨页细桥 |
 | [Layer](../../../examples/layer_workflow/README.md)；W8 扩展 | 显式 `make_layer_operation`；assemble/over/emission/flatten 与 contributions→weighted reduce→optional | RGBA `[12.5,-2,1.25,1]`；W=0 valid=false；midpoint tree、严格 association underflow、最终 window 释放 |
 | [Representations](../../kernel-architecture/Structured-Representations.md) | 有版本 schema → paged producer → Result consumer | Haar `[1,3,5,7,9]` 重建、空/动态字段、brush 分批、迭代 `[3,4]`；表示/helper 子集，不代表通用图像效果节点 |
 | [Atom outcomes](../../../examples/atom_outcomes_workflow/README.md) | 公开 `execute_atoms` 与 joint contract 2 | 独立坐标结果、upstream failure provenance、Measured/受限 CertifiedBound；普通 execute 仍 fail-fast |
-| [PNT-05A](../09-composite/inpaint-ns-implementation.md)；当前 ops-specs 附加实现 | 默认 native key 或可选 OpenCV key；5×5 opaque RGBA + 中心 hole → `image` | radius=3，常量图重建 `[.25,.5,.75,1]`；Whole、输入限制与现有验收缺口见链接 |
+| [PNT-05A source](../09-composite/inpaint-ns-implementation.md) | Native Navier-Stokes implementation and optional OpenCV adapter remain in source; both expose the legacy Value image contract | 当前生产代码尚未适配 Result image slots，算法 callback 不能作为 public Result 图像 workflow 执行；数学与资源模型见链接 |
 
-各示例链接包含仓库内构建、运行或安装包 consumer 命令。已有配置目录可按相关目标运行，
-以下只是入口说明，并非本轮运行记录：
+各个当前可运行的 numeric/result 示例链接包含仓库内构建、运行或安装包 consumer 命令。已有配置目录可按相关目标运行，
+以下是入口说明：
 
 ```sh
 cmake --build <build-dir> --target photospider_statistics_workflow photospider_fft_workflow photospider_components_workflow photospider_layer_workflow -j 8
 ctest --test-dir <build-dir> -R '^(example_statistics_workflow|example_fft_workflow|example_components_workflow|photospider_layer_workflow)$' --output-on-failure
 ```
 
-统计的 `--stage-admission` 可单独检查 #325：2048×2048/B65536 在源绑定前拒绝；
+统计的 `--stage-admission` 可单独检查 stage admission：2048×2048/B65536 在源绑定前拒绝；
 2×513/B513 空输入需要 8 次源请求加 1 次完成 poll，cap 9 成功、cap 8 失败。
 全局流程必须显式配置 managed resources；有限预算可能失败。测试中的 managed peak、
 数值容差和页大小只代表各自 fixture，不能推广为 RSS 或任意尺寸完成保证。

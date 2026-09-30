@@ -1,7 +1,5 @@
 #include <cmath>
 #include <cstdint>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -104,53 +102,14 @@ void cache(const std::shared_ptr<ps::OperationRegistry>& registry) {
   std::cout << "S3Cache.LocalInvalidation blur_after_gain=0 patch_blur_tiles="
             << calls(changed, 10) << " unrelated_callbacks=0 oracle=passed\n";
 }
-void disk(const std::shared_ptr<ps::OperationRegistry>& registry,
-          const std::string& mode, const std::string& directory) {
-  s3::require(!directory.empty(),
-              "disk scenarios require --cache-dir DIRECTORY");
-  s3::require(!registry->persistent_cache_identity().empty(),
-              "disk profile requires maintained built-in registry");
-  if (mode == "disk-corrupt") {
-    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-      if (entry.path().extension() != ".pscache")
-        continue;
-      std::fstream file(entry.path(),
-                        std::ios::in | std::ios::out | std::ios::binary);
-      file.put('!');
-    }
-  }
-  ps::ExecutionContextConfig config{2, false, 16, 1024 * 1024, 256 * 1024};
-  config.disk_cache = ps::DiskCacheConfig{directory, 1024 * 1024, 4096, 512};
-  ps::ExecutionContext execution(registry, config);
-  s3::Scene scene(registry);
-  if (mode == "disk-clear")
-    execution.clear_disk_cache();
-  auto result = s3::take(execution.execute(scene.freeze(execution, 2)));
-  s3::Frame frame(s3::Scene::height, s3::Scene::width);
-  frame.blit(result.values.at("result"));
-  frame.check(scene.oracle(2));
-  execution.flush_disk_cache();
-  const auto stats = execution.disk_cache_statistics();
-  if (mode == "disk-read")
-    s3::require(stats.hits > 0,
-                "no disk hits; run disk-write first with this build");
-  if (mode == "disk-corrupt")
-    s3::require(stats.invalid_entries > 0,
-                "no corrupted entries; run disk-write first");
-  std::cout << "S3Disk.DiscardAndRebuild mode=" << mode
-            << " hits=" << stats.hits << " invalid=" << stats.invalid_entries
-            << " oracle=passed\n";
-}
 }  // namespace
 int main(int argc, char** argv) {
   try {
-    std::string scenario = "preview", module, directory;
+    std::string scenario = "preview", module;
     for (int i = 1; i < argc; ++i) {
       const std::string option = argv[i];
       if (option == "--help") {
-        std::cout << "--scenario "
-                     "cache|preview|disk-write|disk-read|disk-corrupt|disk-"
-                     "clear [--cache-dir DIRECTORY] [--module PATH]\n";
+        std::cout << "--scenario cache|preview [--module PATH]\n";
         return 0;
       }
       s3::require(i + 1 < argc, "missing option value");
@@ -158,8 +117,6 @@ int main(int argc, char** argv) {
         scenario = argv[++i];
       else if (option == "--module")
         module = argv[++i];
-      else if (option == "--cache-dir")
-        directory = argv[++i];
       else
         throw std::runtime_error("unknown option: " + option);
     }
@@ -173,9 +130,6 @@ int main(int argc, char** argv) {
       preview(registry);
     else if (scenario == "cache")
       cache(registry);
-    else if (scenario == "disk-write" || scenario == "disk-read" ||
-             scenario == "disk-corrupt" || scenario == "disk-clear")
-      disk(registry, scenario, directory);
     else
       throw std::runtime_error("unknown scenario: " + scenario);
     return 0;

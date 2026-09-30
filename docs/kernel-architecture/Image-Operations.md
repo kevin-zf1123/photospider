@@ -4,7 +4,7 @@
 
 Structured `Result` is the public semantic, input, output, publication, and ownership contract for image samples. A Result schema declares typed image slots backed by `PlanarImage`; it may also declare primitive fields. Ordinary non-image numeric `Value` remains valid. An image-looking `Value` facet or a registration in the operation catalog does not make a Value callback a Result image operation.
 
-The current kernel package is 0.29.0, WorkflowDocument schema 4, and OperationTraits version 21. The standalone planar callback table, planar image executor, and planar workflow binding were removed. Legacy planar C entry points v1-v3 are rejected. Production operation code has not been rewritten to the Result image contract. The table below describes current source and runtime availability; Result use is available through test-defined minimal operations and the public example.
+The current kernel package is 0.30.0, WorkflowDocument schema 4, and OperationTraits version 21. The standalone planar callback table, planar image executor, and planar workflow binding were removed. Legacy planar C entry points v1-v3 are rejected. Production operation code has not been rewritten to the Result image contract. The table below describes current source and runtime availability; Result use is available through test-defined minimal operations and the public example.
 
 ## Production source and runtime status
 

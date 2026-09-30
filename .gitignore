@@ -260,11 +260,10 @@ __pycache__/
 !examples/model_conversion_performance/*.md
 !examples/model_conversion_performance/CMakeLists.txt
 
-# FMT-11 package regression and exact-rational/style fixtures.
+# Package version regression and FMT-11 exact-rational fixtures.
 !tests/cmake/
-!tests/cmake/test_fmt11_package_version.cmake
+!tests/cmake/test_package_version.cmake
 !tests/fixtures/fmt11/rational_oracles.txt
-!tools/fmt11/style_scope.txt
 
 # FMT-09 reproducible constants/oracles and performance harness.
 !tests/oracles/fmt09_constants.py

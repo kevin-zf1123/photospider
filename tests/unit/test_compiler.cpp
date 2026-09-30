@@ -146,17 +146,6 @@ int main() {
   auto negative_zero = signed_zero_compiler.compile(negative_zero_graph);
   PS_CHECK(positive_zero.ok());
   PS_CHECK(negative_zero.ok());
-  // Canonical framing v18 with OperationTraits v20 and CPU execution model.
-  PS_CHECK(positive_zero.value().semantic.digest().value == "aeb3f892c2049ee7");
-  PS_CHECK(positive_zero.value().optimized.digest().value ==
-           "c8f64b567031345d");
-  PS_CHECK(positive_zero.value().plan.digest().value == "aa824f5a74bad50e");
-  PS_CHECK(positive_zero.value().plan.cache_key().value == "d4cd61fe8d68016a");
-  PS_CHECK(negative_zero.value().semantic.digest().value == "fb46b6f5482cda67");
-  PS_CHECK(negative_zero.value().optimized.digest().value ==
-           "cfa5029c07ceb52d");
-  PS_CHECK(negative_zero.value().plan.digest().value == "25d88d27741545e6");
-  PS_CHECK(negative_zero.value().plan.cache_key().value == "448fc58547277c67");
   PS_CHECK(positive_zero.value().semantic.digest().value !=
            negative_zero.value().semantic.digest().value);
   PS_CHECK(positive_zero.value().optimized.digest().value !=

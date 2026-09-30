@@ -952,12 +952,9 @@ ps::OperationDefinition structured_last() {
 }
 void structured_views() {
   auto registry = ps::make_default_operation_registry(false);
-  require(!registry->frozen() && !registry->persistent_cache_identity().empty(),
-          "explicit mutable built-in registry");
+  require(!registry->frozen(), "explicit mutable built-in registry");
   require(registry->register_operation(structured_last()).ok(),
           "register public consumer");
-  require(registry->persistent_cache_identity().empty(),
-          "custom registry cache identity");
   require(registry->freeze().ok(), "freeze extended built-ins");
   const auto input = scalar(ps::ElementType::Int64, 7);
   ps::WorkflowDocument document;
