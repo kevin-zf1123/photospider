@@ -12,9 +12,11 @@
 
 ## 开发循环
 
-实现期间使用 scoped formatting/lint、affected target 与 focused test。仅在明确请求 release 验证时，Source 与
-documentation 冻结后，最多运行一次 native clean configure、一次 full build 与一次
-完整 CTest/JUnit。该 final pass 不使用 Docker 或本地 architecture emulation。
+实现期间使用 scoped formatting/lint、affected target 与 focused test。任务明确要求
+clean full validation 时，删除选定的 ignored build 目录，从头 configure，构建全部
+注册目标并运行完整 CTest 清单。失败导致源码修改后，先重建受影响目标并重跑相关
+测试，再针对最终源码状态重新执行完整 build 和 CTest。clean validation 不自动包含
+sanitizer 或跨平台矩阵；native validation 不使用 Docker 或本地 architecture emulation。
 
 ## 必需行为领域
 
@@ -55,7 +57,7 @@ Kernel test 覆盖：
   `ExecutionResult`，并各自以一次健康 execute 证明精确 cleanup；
 - Value/Region/strided-layout/facet/buffer 负向契约；
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime，包括
-  C operation ABI 9 typed parameter schema、demand view，以及带精确 destroy/close count 的
+  C operation ABI 11 typed parameter schema、demand view，以及带精确 destroy/close count 的
   deterministic owner-allocation failure。一个 copy-aware C++ embedding callable 通过
   rvalue 注册，随后 arm 为拒绝后续 copy；它仍能完成 freeze/invoke，并允许未冻结 registry
   加载合法 DSO，且只有一次 invocation、copy count 不增加。这证明 registry/map/staging
@@ -225,15 +227,22 @@ self-containment scan 属于这种 manual check；不得注册到 CTest 或 CI�
 
 ## Final command
 
-精确 final build directory 与可选 capability flag 记录在 completion report。通常形态：
+`kernel-dev` preset 是本地 clean validation 的默认入口。删除 `build/` 会清除该目录下
+所有 ignored build 配置；保留源码文件及其外部的其他 ignored 数据。随后配置并构建
+preset，再运行完整 CTest 清单。该 preset 使用本机 Clang、RelWithDebInfo、
+`BUILD_TESTING=ON` 和平台默认的可选 backend。CTest JUnit 报告路径由
+`--output-junit` 显式指定；相对路径以 preset 的 binary directory
+`build/kernel-dev` 为基准。
 
 ```bash
-cmake -S . -B <clean-build> -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DBUILD_TESTING=ON
-cmake --build <clean-build> -j
-ctest --test-dir <clean-build> --output-on-failure --output-junit <report>
-cmake --install <clean-build> --prefix <fresh-prefix>
+rm -rf build
+cmake --preset kernel-dev
+cmake --build --preset kernel-dev -j
+ctest --preset kernel-dev --output-on-failure --output-junit ctest-results.xml
 ```
+
+完整 CTest 包含 `test_installed_consumer`，会安装到 fresh prefix，并配置、构建和运行
+外部 consumer。只有需要额外配置时才单独运行 installed gate。
 
 使用 ClangFormat 21 格式化 changed C/C++，并对相同文件运行
 `python3 -m cpplint`。不支持的 sanitizer/GPU platform 记录为 limitation，而不是
@@ -252,7 +261,7 @@ successful gate。
   旧 generic-image STMap 正例与计时入口已退休；planar STMap 尚未实现。
 - `test_planar_image_workflow`、`test_planar_plugin`、`test_planar_import`、
   `test_planar_preparation`、`test_region_runs`、`test_data_movement_contract`
-  覆盖当前 planar 存储、C ABI9 插件、准备 seal、mapped ROI、原始位、布局、所有权及发布。
+  覆盖当前 planar 存储、C ABI 11 插件、准备 seal、mapped ROI、原始位、布局、所有权及发布。
 - `test_gpu_fragment_execution`、`test_gpu_sync_fallback`、
   `test_gpu_discovery_workflow`、`test_gpu_c_abi_execution` 实测原生 dispatch、
   sparse atlas、restart/fallback、discovery 与 C 服务。`test_native_gpu`、
@@ -275,7 +284,7 @@ ctest --test-dir <build> -R '^test_(dependency_workflow|gpu_fragment_execution|g
 
 ## 安装与可选覆盖边界
 
-安装门禁接受0.27、拒绝0.23至0.26请求，并运行 FMT-04/05 alpha、FMT-09 transfer、FMT-10 RGB basis 与 FMT-11 model conversion workflow。实际运行清单由 `tests/consumer/CMakeLists.txt`
+安装门禁接受0.28、拒绝0.23至0.27请求，并运行 FMT-04/05 alpha、FMT-09 transfer、FMT-10 RGB basis 与 FMT-11 model conversion workflow。实际运行清单由 `tests/consumer/CMakeLists.txt`
 中 `run_photospider_consumer` 的COMMAND定义，包括region runs、planar preparation、
 mapped movement及维护中的算子/registry workflow。四个GPU workflow及foundations
 在该嵌套门禁中当前仅作为构建依赖，不执行；原生运行覆盖来自仓库内CTest。

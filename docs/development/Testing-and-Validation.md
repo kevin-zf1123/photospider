@@ -16,9 +16,13 @@ consumers do not need this source dependency.
 ## Development loop
 
 During implementation, use scoped formatting/lint, affected targets, and
-focused tests. Only for an explicitly requested release pass, after source and documentation freeze, run at most one native
-clean configure, one full build, and one complete CTest/JUnit pass. Do not use
-Docker or local architecture emulation for that final pass.
+focused tests. When a task explicitly requests a clean full validation, remove
+the selected ignored build directory, configure it from scratch, build all
+registered targets, and run the complete CTest inventory. If a failure requires
+a source change, rebuild the affected targets and rerun the affected tests; then
+repeat the complete build and CTest pass against the final source state. A clean
+validation does not imply sanitizer or cross-platform matrix coverage. Do not
+use Docker or local architecture emulation for native validation.
 
 ## Required behavior areas
 
@@ -69,7 +73,7 @@ Kernel tests cover:
   cleanup;
 - Value/Region/strided-layout/facet/buffer negative contracts;
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime,
-  including C operation ABI 9 typed parameter schemas, demand views, and
+  including C operation ABI 11 typed parameter schemas, demand views, and
   deterministic owner-allocation failure with exact destroy/close counts. A
   copy-aware C++ embedding callable is registered by rvalue, armed to reject
   later copies, then survives freeze/invoke and a valid DSO load into an
@@ -281,16 +285,25 @@ checks; they are not registered with CTest or CI.
 
 ## Final commands
 
-The exact final build directory and optional capability flags are recorded in
-the completion report. The normal shape is:
+The `kernel-dev` preset is the default clean local path. Removing `build/` clears
+all ignored build configurations in that directory; preserve source files and
+other ignored data outside it. Configure and build the preset, then run its full
+CTest inventory. The preset selects the local Clang, RelWithDebInfo,
+`BUILD_TESTING=ON`, and platform-default optional backends. CTest JUnit output is
+written to the explicit path passed to `--output-junit`; a relative path is
+resolved from the preset binary directory, `build/kernel-dev`.
 
 ```bash
-cmake -S . -B <clean-build> -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DBUILD_TESTING=ON
-cmake --build <clean-build> -j
-ctest --test-dir <clean-build> --output-on-failure --output-junit <report>
-cmake --install <clean-build> --prefix <fresh-prefix>
+rm -rf build
+cmake --preset kernel-dev
+cmake --build --preset kernel-dev -j
+ctest --preset kernel-dev --output-on-failure --output-junit ctest-results.xml
 ```
+
+The complete CTest run includes `test_installed_consumer`, which installs to a
+fresh prefix and configures, builds and runs an external consumer. Run the
+separate installed gate manually only when its additional configuration is
+needed.
 
 Format changed C/C++ with ClangFormat 21 and lint the same files with
 `python3 -m cpplint`. Record unsupported sanitizer/GPU platforms as limitations
@@ -312,7 +325,7 @@ built by the default testing build.
   STMap execution has not been implemented.
 - `test_planar_image_workflow`, `test_planar_plugin`, `test_planar_import`,
   `test_planar_preparation`, `test_region_runs` and `test_data_movement_contract`
-  cover current planar storage, C ABI 9 plugins, preparation seals, mapped ROI,
+  cover current planar storage, C ABI 11 plugins, preparation seals, mapped ROI,
   raw bits, layout, ownership and publication boundaries.
 - `test_gpu_fragment_execution`, `test_gpu_sync_fallback`,
   `test_gpu_discovery_workflow` and `test_gpu_c_abi_execution` exercise actual
@@ -340,7 +353,7 @@ ctest --test-dir <build> -R '^test_(dependency_workflow|gpu_fragment_execution|g
 
 ## Installed and optional coverage boundaries
 
-The installed gate accepts package 0.27 and rejects 0.23 through 0.26 requests. Its actual
+The installed gate accepts package 0.28 and rejects 0.23 through 0.27 requests. Its actual
 runtime inventory is the `COMMAND` list of `run_photospider_consumer` in
 `tests/consumer/CMakeLists.txt`, including region runs, planar preparations,
 mapped movement, FMT-04/05 alpha, FMT-09 transfer, FMT-10 RGB basis, FMT-11 model

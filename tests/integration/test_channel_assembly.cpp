@@ -212,6 +212,7 @@ void generic_oracle() {
         auto x = f.add({dtype, a}), y = f.add({dtype, b});
         format::ChannelAssemblyOptions options;
         options.metadata_mode = "raw";
+        options.layout = "materialize";
         auto edge = take(format::concatenate_channels(f.document, {x, y}, axis,
                                                       {0, rank - 1}, options));
         auto out = shape;
@@ -240,6 +241,7 @@ void mapped_and_metadata() {
   auto y = f.add({ElementType::UInt8, {2}},
                  {take(encode_tensor_description(component))});
   format::ChannelAssemblyOptions options;
+  options.layout = "materialize";
   TensorDescription target;
   target.channel_axis = 1;
   target.channels.resize(3);
@@ -307,6 +309,64 @@ void mapped_and_metadata() {
   require(encoded.version == 4, "version discriminator");
   encoded.version = 1;
   require(!decode_tensor_description(encoded).ok(), "old version rejection");
+}
+void auto_fragment_oracle() {
+  Fixture fixture;
+  auto a = fixture.add({ElementType::UInt8, {257}});
+  auto b = fixture.add({ElementType::UInt8, {257}});
+  format::ChannelAssemblyOptions options;
+  options.metadata_mode = "raw";
+  auto edge =
+      take(format::assemble_channels(fixture.document, {a, b}, 0, options));
+  fixture.document.outputs = {{"result", edge.source_node, edge.source_port}};
+  auto registry = make_default_operation_registry();
+  GraphContext graph(fixture.document);
+  auto compiled = take(Compiler(registry).compile(graph));
+  ExecutionContext context(registry);
+  auto dense_result = context.execute(compiled.plan, fixture.bindings);
+  require(dense_result.status().code == ErrorCode::TypeMismatch,
+          "fragmented auto output requires explicit dense layout");
+  auto frozen = take(context.freeze(compiled.plan, fixture.bindings));
+  auto result = take(context.execute_fragments(
+      frozen, {{"result", take(Footprint::all({2, 257}))}}));
+  const auto& fragments = result.values.at("result");
+  require(fragments.fragments().size() > 1,
+          "auto output retains exact fragments");
+  for (std::uint64_t channel = 0; channel < 2; ++channel)
+    for (std::uint64_t coordinate = 0; coordinate < 257; ++coordinate) {
+      std::uint8_t sample = 0;
+      require(
+          fragments.read({channel, coordinate}, &sample, sizeof(sample)).ok(),
+          "fragment sample authorized");
+      require(sample == fixture.raw[channel][coordinate],
+              "auto fragment byte oracle");
+    }
+}
+void shared_owner_alias_oracle() {
+  Fixture fixture;
+  auto input = fixture.add({ElementType::UInt8, {2, 3}});
+  OperationMetadata metadata;
+  metadata.descriptor = fixture.descriptors[0];
+  format::ChannelExtractOptions extraction;
+  extraction.axis = 1;
+  extraction.metadata_mode = "raw";
+  auto handles = take(
+      format::split_channels(fixture.document, input, metadata, extraction));
+  format::ChannelAssemblyOptions options;
+  options.metadata_mode = "raw";
+  options.layout = "view";
+  auto edge = take(format::assemble_channels(
+      fixture.document, {handles[2].output, handles[0].output}, 1, options));
+  auto result = run(fixture, edge);
+  const auto& value = result.values.at("result");
+  require(
+      value.storage().get() == fixture.bindings.inputs[0].value.storage().get(),
+      "reordered affine view retains the shared source backing");
+  check_oracle(result, fixture, 1, {1}, {{0, 2}, {0, 0}},
+               Region::whole({2, 2}));
+  fixture.bindings.inputs.clear();
+  check_oracle(result, fixture, 1, {1}, {{0, 2}, {0, 0}},
+               Region::whole({2, 2}));
 }
 void errors() {
   auto registry = make_default_operation_registry();
@@ -606,6 +666,7 @@ void override_and_profile_lifetime() {
   auto b = f.add({ElementType::UInt8, {2}},
                  {take(encode_tensor_description(right))});
   format::ChannelAssemblyOptions options;
+  options.layout = "materialize";
   TensorDescription target;
   target.channel_axis = 1;
   target.channels = {{"renamed", "", ""}, {"renamed", "", ""}};
@@ -745,6 +806,7 @@ void partial_coordinate_respect() {
                                                 "",
                                                 {}};
     format::ChannelAssemblyOptions options;
+    options.layout = "materialize";
     options.output_description = target;
     auto edge =
         take(format::assemble_channels(fixture.document, {a, b}, 1, options));
@@ -805,6 +867,8 @@ int main() try {
   partial_coordinate_respect();
   model_coordinate_overlay();
   generic_oracle();
+  auto_fragment_oracle();
+  shared_owner_alias_oracle();
   std::cout << "generic coordinate and all-dtype oracle passed\n";
   mapped_and_metadata();
   std::cout << "mapped selection and metadata passed\n";

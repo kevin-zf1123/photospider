@@ -1541,9 +1541,6 @@ Result<DependencyProgress> DependencySession::poll(
       }
       polled = impl_->state.poll_(impl_->state.storage_.data(), phase);
     }
-    // Returning Need relinquishes stage input leases; state-retained owners
-    // remain explicit real allocations, not merely a sealed reservation.
-    impl_->ready.clear();
     if (restored_metadata_failure != ErrorCode::Ok)
       impl_->record_failure(
           Status{restored_metadata_failure,
@@ -1613,6 +1610,9 @@ Result<DependencyProgress> DependencySession::poll(
         return Result<DependencyProgress>(impl_->retire(status));
     }
     if (auto* need = std::get_if<DependencyNeedBatch>(&value)) {
+      // Returning Need relinquishes stage input leases; state-retained owners
+      // remain explicit real allocations, not merely a sealed reservation.
+      impl_->ready.clear();
       // Public batches are mutable; seal the actual capacities before any
       // host retention or escaped progress event, including default builders.
       need->reseal_metadata();
@@ -1761,6 +1761,10 @@ Result<DependencyProgress> DependencySession::poll(
         payload += owner->capacity();
       }
     }
+    // Keep supplied aliases alive through payload validation. Distinct shared
+    // pointer control blocks may expose the same CpuStorage; the returned view
+    // can retain one alias while the borrowed-owner witness tracks another.
+    impl_->ready.clear();
     for (const auto& fragment : result.fragments()) {
       status = input_internal::validate_port_value(
           impl_->traits.outputs[0].output_schema, fragment,
