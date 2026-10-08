@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "photospider/compiler/compiler.hpp"
-#include "photospider/plugin/operation_plugin_api.h"
+#include "photospider/plugin/result_operation_plugin_api.h"
 
 namespace {
 
@@ -83,7 +83,7 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   // The C++ trait schema and the C plugin table have independent versions.
   traits.version = reader.next();
   traits.outputs[0].output_element_type = static_cast<ps::ElementType>(
-      (reader.next() % 6U) + PS_OPERATION_ELEMENT_UINT8_V11);
+      (reader.next() % 6U) + PS_RESULT_ELEMENT_UINT8_V2);
   traits.outputs[0].shape_rule =
       static_cast<ps::OperationShapeRule>((reader.next() % 6U) + 1U);
   traits.outputs[0].region_rule =

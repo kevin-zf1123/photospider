@@ -9,25 +9,21 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
 clarification_status: complete
-proposed_operation_keys:
+registered_operation_keys:
   - alpha.associate_strict
   - alpha.associate_accelerated_apple_silicon
   - alpha.associate_accelerated_x86_64
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-04A: export one group as premultiplied numeric samples
 
-CPU implementation (2026-09-25): the source package now includes this member/family,
-its public C++ authoring API, correctness fixtures and a
-[performance/review driver](../../../../examples/alpha_performance/README.md).
-`Proposed`/D1 still describe design-review status, not missing executable code.
-Apple Silicon and FreeBSD performance/portability require target-machine review.
+The default registry provides `alpha.associate_<profile>` for the three CPU
+profiles. The operation uses Result ABI 2 and preserves the declared tensor
+shape, dtype and channel positions. The specification remains Proposed. The current focused `test_alpha_operations` CTest and the fourteen small alpha benchmark smoke cases pass; no full matrix claim is made.
 
 
 Inherit the complete [FMT-04 boundary contract](FMT-04_alpha_association_contract.md).
-These implemented CPU primitive keys are not aliases of the retired typed-image keys.
+The operation accepts one single-tensor Result without fields, with optional second input only for raw explicit plane/scalar weights. All connected inputs are Descriptor-checked; semantic operands use Data and Validation, pass-through samples do not gain Validation, and no Control dependency is declared.
 
 ## Interface and representation
 
@@ -98,5 +94,4 @@ cache identity. A normal canonical-image consumer rejects A's boundary result;
 B explicitly restores straight interpretation, subject to its required coverage.
 
 Conceptual DAG: straight image with internal alpha -> A -> export adapter.
-Implementation must supply runnable public commands and independent bit/domain,
-region, low-budget, cancellation and lifetime checks; no runtime result is claimed.
+The native Result implementation uses the public helper and registry contract described above. Runtime and performance claims are limited to checks actually run on the target host.

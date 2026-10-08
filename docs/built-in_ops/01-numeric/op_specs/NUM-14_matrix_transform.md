@@ -12,10 +12,7 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+repository_commit: current working tree
 ---
 
 # NUM-14: matrix_transform
@@ -31,13 +28,16 @@ registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
 Apply a shared affine transform y=M*x+b to a collection of vectors. Inputs in
-order are `vectors`, `matrix`, `bias`, all with identical Float32/Float64 dtype.
-Vectors has shape [...,Cin], Cin in {2,3,4}; a rank-1 vector is allowed. Matrix
-has shape [Cout,Cin] and bias [Cout], Cout in {2,3,4}. Matrix and bias are dynamic
-inputs shared by all vector instances. A zero bias uses an explicit constant.
-There are no implicit dtype casts, per-vector matrices, broadcasting or optional
-bias input. Output values has shape [...,Cout] and the same dtype, with empty
-facets. Input/output vector ranks are 1..8 and logical counts at most 2^40.
+port order are `vectors`, `matrix`, `bias`; each input is a `Result` with one
+tensor member under any member key. Their dtypes match and are Float32 or
+Float64. The vectors tensor has `sample_shape()` [...,Cin], Cin in {2,3,4}; a
+rank-1 vector is allowed. The matrix has `sample_shape()` [Cout,Cin] and the
+bias [Cout], Cout in {2,3,4}. Matrix and bias are dynamic inputs shared by all
+vector instances. A zero bias uses an explicit constant. There are no implicit
+dtype casts, per-vector matrices, broadcasting or optional bias input. Output
+port key is `values`; its `photospider.tensor` Result schema contains tensor
+member `samples`, with shape [...,Cout], the same dtype, and no facets or batch
+topology. Input/output vector ranks are 1..8 and logical counts at most 2^40.
 
 Components follow y[r]=sum_c matrix[r,c]*vectors[c]+bias[r], defining matrix
 row/column orientation independently of actual storage strides. No numeric
@@ -70,16 +70,15 @@ Fixed NaN patterns and floating-environment restoration follow
 
 ## Whole demand and invalidation
 
-This operator uses the existing synchronous `Whole` execution path for all
-profiles. Every nonempty request requires all three complete inputs, including
-recognized typed validation, and computes one complete dense output. Sparse or
-partial consumers receive a projection of that output. Empty requests read
-nothing and do not invoke the callback. Direct invocation requires Whole input
-and output Regions.
+All profiles use the `WholeTensorProgram` Result path. Every nonempty request
+requires Data, Validation and Descriptor (role 13) for all three complete
+inputs, then computes one complete dense output. Sparse or partial consumers
+receive a projection of that output. Empty requests read no payload and perform
+no matrix arithmetic.
 
 Any change to vectors, matrix or bias invalidates all observed output samples
-through the generic Whole dependency mapping. There are no per-component Need
-rows, custom dependency certificates or matrix-specific partial failure atoms.
+through the generic Whole dependency mapping. There is no matrix-specific
+dependency mapping or partial failure atom.
 Zero coefficients do not remove input requirements. A failed invocation
 publishes no partial output. Published storage owns its lifetime independently
 of the execution context.
@@ -121,20 +120,41 @@ low budgets, cancellation and owner lifetime through public execution.
 
 ## Implementation and executable acceptance
 
-`numeric_matrix.cpp` registers all three keys. The public
-`photospider/numeric/matrix.hpp` helper `matrix_transform_node` authors the three
-explicit input edges. `exact_dot.hpp` uses a host-owned 4352-bit accumulator in
-units of 2^-2148; at most four binary64 products plus bias require 4198 magnitude
-bits. No product is independently rounded. Source NaN classification precedes
-generated invalid products; all required inputs and Validation have already
-arrived before numeric evaluation.
+`numeric_matrix.cpp` registers the strict, Apple Silicon accelerated, and x86_64
+accelerated keys. `matrix_transform_node` authors three Result input edges in
+the order `vectors`, `matrix`, `bias`; each edge has one tensor member under any
+member key. The output is the `values` Result with `photospider.tensor` schema
+and tensor member `samples`. `examples/numeric_workflow/matrix.cpp` keeps Values
+only as private typed backing for source Results. Its workflow bindings,
+execution, and output reads use Result.
 
-One Whole callback caches the small matrix and bias, traverses all vectors in
-blocks of at most 64, and publishes one owned dense Value. No shared kernel API
-or ABI change is required. The manual `photospider_numeric_matrix` executable
-and `matrix_oracle.py` are in
-[the numeric workflow example](../../../../examples/numeric_workflow/README.md).
-Specification status remains Proposed independently of implementation evidence.
+Static preparation validates dtype, rank, component counts, shape agreement, and
+the 2^40 logical-count limit, then specializes the output schema. Rebinding
+values with unchanged schemas reuses the compiled preparation. A warm content
+cache hit for fresh source Results updates all three output associations to the
+current source identities. Replacing the matrix during an open demand recomputes
+from the replacement samples.
+
+`exact_dot.hpp` uses a host-owned 4352-bit accumulator in units of 2^-2148; at
+most four binary64 products plus bias require 4198 magnitude bits. No product
+is independently rounded. The Whole kernel requests Data, Validation, and
+Descriptor (role 13) for each complete input, reads through authorized Result
+tensor windows, caches the small matrix and bias, traverses vectors in blocks
+of at most 64, and writes through one packed Result writer. It publishes a
+complete dense output before consumers project sparse or partial requests;
+Empty demand performs no matrix arithmetic. Source NaN classification follows
+the required input arrivals and cannot suppress an upstream source failure.
+Typed RGBA validation includes alpha and dirties every observed output.
+
+The manual executable checks negative, zero, and unaligned strides, shifted
+origins, all four caller and worker rounding modes, exception-flag restoration,
+exact callback work thresholds, low Payload capacity, actual computation
+cancellation, and final release of all Root resources. Retaining an output
+Result and read window charges the 16-byte Float64 output once; after Result
+release, the window remains readable, and releasing it returns Root usage to
+zero. These checks establish the executable behaviors above for the exercised
+profiles; they do not establish individual Accelerate or SME hardware
+instruction dispatch.
 
 ## Apple matrix candidate backends
 
@@ -176,9 +196,8 @@ resource scope; exact replay charges its own arithmetic work. Cancellation is
 checked around each block and during exact arithmetic. Resource/cancellation
 failures return directly and release unpublished output and scratch.
 
-Whole execution reports actual callback invocations and computed elements.
-Per-value numeric fallback/copy counters from DependencySession are unavailable
-on this path and must not be reported as measured zeros. Backend switches and
+Per-value numeric fallback/copy counters are unavailable on this path and must
+not be reported as measured zeros. Backend switches and
 optional feature configuration participate in cache build identity.
 
 Accelerate uses thread-local single-thread mode and restores the previous mode;
@@ -198,12 +217,31 @@ See [Apple's SME platform notes](https://github.com/apple-oss-distributions/xnu/
 and [Arm ACLE streaming/ZA rules](https://arm-software.github.io/acle/main/acle.html).
 The implementation preserves `-fno-fast-math -frounding-math -ffp-contract=off`.
 
-The workflow README provides backend selection, public end-to-end timing and
-candidate-plus-certificate timing commands. Timing excludes compilation/freeze
-and checks every public output against an analytic dyadic fixture. A separate
-cancellation-heavy fixture forces exact replay. Performance claims are limited
-to the stated dimensions, dtype, backend and hardware.
+The current executable is `photospider_numeric_matrix`; its default path runs the
+Result workflow checks, while `oracle`, `benchmark`, and `grid` modes remain
+available. CTest registers its default path as `test_numeric_matrix_result`.
+The separate `test_numeric_result_math` integration executable contains the
+`matrix_*` cases for shape, exact values, typed validation, Empty demand,
+resources, and cancellation. The manual-only preparation, fresh-source
+association, and escaped-owner assertions belong to `test_numeric_matrix_result`.
 
-Current Whole validation and measured performance are recorded in the workflow
-README. Results apply to native M5/Clang 21; historical regional or x86 results
-do not establish the changed Whole behavior on other platforms.
+The Fraction oracle independently checks exact dot products and source-NaN
+priority. Strict and Apple each passed 1,598 exact Fraction cases. The installed
+consumer passed `installed_numeric_matrix_result` 1/1 under Strict, and its
+Apple profile completed the full manual checks. Three bounded CLI workloads
+also passed bitwise comparison while reporting full output counts and two polls:
+Apple Float32 `benchmark 4096 4 4`, Strict Float64 cancellation-heavy
+`benchmark 65 4 3`, and Apple `grid 8`. These checks are correctness samples, not
+a performance campaign. Benchmark elapsed time includes Result coordination,
+digest, and polling work, so historical Value-path performance records do not
+measure current Result execution. CMake registers the installed consumer target
+as `photospider_numeric_matrix_consumer` / `installed_numeric_matrix_result`;
+both example and consumer compile with
+`-fno-fast-math -frounding-math -ffp-contract=off`. Reproduction commands and
+current verification boundaries are documented in the NUM-14 section of
+`examples/numeric_workflow/README.md`.
+
+Specification status remains Proposed independently of implementation status.
+Focused tests of the strict and locally available profiles do not prove that
+Accelerate or SME hardware instructions ran individually, and no cross-platform
+performance claim is made.

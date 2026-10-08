@@ -1,98 +1,76 @@
-# Regional dependency workflow
+# G4 dependency workflows
 
-The current `data` scenario runs a public WorkflowDocument/Compiler/
-ExecutionContext identity workflow over a logical billion-element source.
-It requests coordinates 1 and 999999998 separately through the existing
-regional executor, constructs exact ValueFragments, checks that the middle hole
-cannot be read, checks a per-output certificate transpose, and imports a generic
-Int64 snapshot. Only two actual source samples are read. This scenario exercises
-the data foundation.
+This executable demonstrates dependency-aware workflows through the public Result API. Its inputs and operation outputs are Results. The `data` case uses a billion-element logical tensor with only two published samples, while the other cases exercise progressive Needs, shared work, ordered reductions and scans, and block-state reuse. The small `Value` used by the generic `InputSnapshotStore` check is local typed backing for that separate API demonstration; it is not a workflow binding.
 
-The `progressive` scenario registers a C++ staged operation through the public
-registry, compiles a billion-element workflow and executes it with one CPU worker
-and a 128-byte controlled allocation budget. Control samples 0, 1 and 3 discover
-a payload read at 999999999. The source callbacks reject every unexpected read;
-the independent expected result is 17.25 and exactly 32 source bytes.
-No full input materialization occurs.
-
-The `radius` scenario patches a distant Int64 radius through InputSnapshotStore;
-scatter changes from 1 to 5, gather stays 1, and the frozen old execution stays 1.
-The returned runtime dependency records prove that editing radius[3] potentially
-dirties scatter{0} but leaves gather clean within the recorded query. The new
-source edge is present after recomputation, while frozen evidence retains the old
-relation. Restricting evidence to scatter also removes the gather root.
-Operator contracts are in [Dependency Sampling](../../docs/kernel-architecture/Dependency-Sampling.md).
-
-The `demand` scenario opens a context-owned handle and requests `{0,4}` in one
-exact sparse query. Two binding replacements change a radius and then its data
-without recomputing between edits. Dirty accumulates over both endpoints. The
-direct radius predicate gives latest values `[1+9,5+9]`, while a frozen bundle
-still returns `[1,5]`. It also rejects the middle hole and releases the exact
-subscription. These calls use the existing worker/allocator owners.
-
-The `shared` scenario submits two exact waiters against one immutable bundle.
-A bounded barrier in a registered identity callback lets the second waiter join
-the actual in-flight observation before the first is cancelled. Exactly one
-callback runs; the second waiter still receives 7 and complete identity evidence.
-Shared active work is available with result retention disabled.
-
-The `cache` scenario enables the existing result LRU and reuses two exact
-observations. An unrelated data edit still hits both. A changed control with
-unchanged numeric output recomputes both and installs the new data edge. Clearing
-cached pixels leaves that new dirty relation available in the returned evidence.
-The independent radius predicate still gives values `[1,5]`.
-
-The `reductions` scenario streams a logical 32 KiB source through `numeric.mean`
-and `numeric.variance` under a 1 KiB controlled live budget. Each source callback
-requires exactly 64 Float64 samples. Uniform `[0,1,2,3]` repetitions independently
-give mean 1.5 and population variance 1.25; one mean pass and two variance passes
-read exactly 98304 bytes. Runtime evidence retains the complete global support.
-The scalar operations use ordered incoming accumulators, never partial block
-sums.
-
-The `scan` scenario computes 128 inclusive prefixes of `[1,2,...,128]`. The
-triangular-number oracle checks every output, ending at 8256, while source
-callbacks reject any repeated prefix read. Completed carries let all 128 outputs
-read exactly 128 inputs. A separate `[1,inf,...]` binding then proves `{0}`
-succeeds with 1 and `{0,1}` reports the error at input 1.
-
-The `blocks` scenario edits the first input in `[0,1,2^54,4,5,6]` to 1.
-The first three one-sample transitions must recompute; after the accumulator
-reconverges at `2^54`, the last three transitions reuse completed states. The
-prefix ending at input 1 is now 2. A separate volatile binary64 left fold checks
-the final output; runtime evidence still records the complete current source
-prefix. Cache keys include incoming state, not just equal outgoing carries.
+The executable has three entry modes:
 
 ```sh
-cmake --build build/issue257-static --target photospider_dependency_workflow -j 8
-build/issue257-static/examples/g4_workflow/photospider_dependency_workflow
+build/kernel-dev/examples/g4_workflow/photospider_dependency_workflow
+build/kernel-dev/examples/g4_workflow/photospider_dependency_workflow --radius-only
+build/kernel-dev/examples/g4_workflow/photospider_dependency_workflow --scenario data
 ```
 
-Expected checked output:
+With no arguments it runs all nine cases: `data`, `progressive`, `dynamic`, `demand`, `shared`, `radius retention`, `reductions`, `scan`, and `blocks`. `--radius-only` runs `dynamic`, `demand`, and `radius retention`. `--scenario` selects one of `data`, `progressive`, `shared`, `reductions`, `scan`, or `blocks`.
 
-```text
-data: values=[1,999999998], source_reads=2, hole=rejected, transpose={1}, generic_snapshot=ok
-progressive: value=17.25, controls=[0,1,3], payload=[999999999], source_bytes=32, budget=128
-radius: scatter_before=1, scatter_after=5, gather=1, frozen=1
-dependencies: radius[3] -> scatter{0}, gather{}, new_data_edge=present, frozen_data_edge=absent
-demand: Q={0,4}, latest=[10,14], frozen=[1,5], generation=3, accumulated_dirty={0,4}, release=ok
-shared: callbacks=1, first=Cancelled, second=7, evidence=present
-cache: warm_hits=2, unrelated_edit_hits=2, control_edit_hits=0, values=[1,5], cleared_pixels=0, data3_dirty={0,4}
-reductions: mean=1.5, variance=1.25, block=64, source_bytes=98304, live_budget=1024, global_support=present
-scan: outputs=128, source_reads=128, last=8256, short_query=1, joint_query=nonfinite_input_1
-blocks: first_misses=6, edit_misses=3, edit_hits=3, prefix1=2, source_support=all
-```
+## Sparse data and support
 
-It also builds as a standalone installed public package consumer:
+The `data` case declares a Float64 tensor with one billion logical samples and binds a Result that publishes samples at coordinates 1 and 999999998. One `execute_fragments` call requests just those two points. The example checks their values, rejects a read from the unmaterialized middle, verifies `dependencies.source_support()` equals the requested footprint, and checks that `potential_dirty()` maps a changed input sample to the matching output sample. The sparse Result stays within a 4096-byte Payload budget. These dependency relations describe logical support; they are not counts of storage reads or data transfers.
+
+## Progressive control and data Needs
+
+The `progressive` case registers two no-input Result source operations and a staged `Follow` operation. The control source provides values at coordinates 0, 1, and 3; each value selects the next coordinate until the final control selects payload coordinate 999999999. `Follow` requests ResultProgramNeeds with Control role 2 for the control tensor and Data role 1 for the payload, then publishes value 17.25 with both the historical control relation and the final payload relation.
+
+The source operations generate 32 bytes in total for the requested samples. The example enforces a 128-byte Root Payload budget; the observed peak is 112 bytes. Generated-byte counters describe produced Result payload, not physical read traffic.
+
+## Dynamic edits, demand, and retained Results
+
+The `dynamic` case runs `numeric.radius_scatter` and `numeric.radius_gather` over bound Results. Editing `radius[3]` changes scatter output 0 from 1 to 5 while gather output 0 remains 1. A frozen execution still returns scatter value 1. The dependency evidence marks scatter output 0 dirty for the radius edit, leaves gather output 0 clean, and reports the newly selected data edge only in the updated generation. See the [dependency sampling contract](../../docs/kernel-architecture/Dependency-Sampling.md) for the operator behavior.
+
+The `demand` case opens a context-owned handle and requests the sparse footprint `{0,4}`. It changes the radius and then the data binding without recomputing between edits, so dirty coverage accumulates across both replacements. The latest result is `[10,14]`; a frozen bundle continues to return `[1,5]`. A read from the middle hole is rejected, and the example releases the exact query subscription.
+
+The `radius retention` case requests the same frozen query twice while retaining the first Result. The warm request returns the same Result ObjectId and has no operation timings. A new binding generation recomputes even when a data edit is outside the query and leaves dirty coverage empty. A subsequent radius edit changes the dirty footprint. After clearing the result cache, the retained output still reports its exact selected data support. This case demonstrates frozen Result retention and dependency evidence; it does not claim cross-generation content-cache reuse for radius operations.
+
+## Shared execution
+
+The `shared` case sends two exact waiters to the same immutable Result bundle. A barrier inside a registered identity operation lets the second caller join the in-flight computation before the first caller is cancelled. The first request returns `Cancelled`; the second still receives value 7 and complete dependency evidence. The callback runs once, including when Result retention is disabled.
+
+## Ordered reductions
+
+The `reductions` case connects a no-input Result source operation to `numeric.mean` and `numeric.variance`. Each source call generates 64 Float64 samples. Across 192 generated blocks, the source produces 98,304 bytes while the Root Payload peak is 624 bytes under a 1024-byte cap. For the repeating values `[0,1,2,3]`, the independently checked outputs are mean 1.5 and population variance 1.25. Both outputs record support for the full 4096-sample input. The byte count is generated output payload, not a measurement of physical reads. The scalar reductions use ordered incoming accumulators rather than partial block sums.
+
+## Ordered scan
+
+The `scan` case computes all 128 inclusive prefixes of `[1,2,...,128]` with block size 16. A Result source operation generates monotonically from each requested span; the example verifies each of the 128 samples is generated once and checks the triangular-number result ending at 8256.
+
+A second binding contains `[1,+inf,...]`. A request for `{0}` succeeds with 1, while the joint request `{0,1}` reports the non-finite value at input 1. This demonstrates request-local validation at the selected prefix boundary.
+
+## Block-state reuse
+
+The `blocks` case runs `numeric.ordered_scan` over `[0,1,2^54,4,5,6]`, then changes the first bound sample to 1. The initial execution has six block-cache misses. After the edit, the first three transitions miss and the last three hit because their incoming accumulator state has reconverged. The prefix through input 1 is 2, and the final output is checked with a volatile binary64 left fold. Dependency support still covers the complete current source prefix. A cache hit reuses a block result, but the operation still supplies the Result Need used to establish the dependency.
+
+## Build and run
+
+Build the in-tree executable and run either the complete demonstration or a selected case:
 
 ```sh
-cmake --install build/issue257-static --prefix "$PWD/out/g4-install-static"
-cmake -S examples/g4_workflow -B out/g4-consumer-static \
-  -DCMAKE_PREFIX_PATH="$PWD/out/g4-install-static"
-cmake --build out/g4-consumer-static -j 8
-out/g4-consumer-static/photospider_dependency_workflow
+cmake --build build/kernel-dev --target photospider_dependency_workflow -j 8
+build/kernel-dev/examples/g4_workflow/photospider_dependency_workflow
+build/kernel-dev/examples/g4_workflow/photospider_dependency_workflow --scenario progressive
+ctest --test-dir build/kernel-dev -R '^test_dependency_(workflow|radius_workflow)$' --output-on-failure
 ```
 
-CTest registers this executable as `test_dependency_workflow`. It is a
-correctness suite, independent of the historical G4 development milestone.
-The retained generic-image STMap source uses the legacy Value image contract and is not a current execution path. The public image execution contract is demonstrated by [the unified Result workflow](../unified_result_workflow/README.md); production STMap image execution requires Result image slots.
+The full workflow test invokes the no-argument mode. The radius test invokes `--radius-only`.
+
+The same executable can be built against an installed Photospider 0.30 package. The consumer test project also provides `photospider_sampling_consumer`; the dependency workflow tests cover the no-argument and radius-only modes.
+
+```sh
+cmake --install build/kernel-dev --prefix "$PWD/build/kernel-dev/consumer-install"
+cmake -S tests/consumer -B build/kernel-dev/consumer-build \
+  -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/consumer-install"
+cmake --build build/kernel-dev/consumer-build \
+  --target photospider_dependency_workflow photospider_sampling_consumer -j 8
+ctest --test-dir build/kernel-dev/consumer-build \
+  -R '^(installed_dependency_workflow|installed_dependency_radius_workflow)$' --output-on-failure
+```
+
+Payload peaks and limits in these examples cover Root Payload accounting. They are not process RSS and do not include all metadata or other process memory. The local `test_dependency_workflow` and `test_dependency_radius_workflow` CTests passed, and the installed consumer's `installed_dependency_workflow` and `installed_dependency_radius_workflow` CTests passed. These results cover the listed CPU workflow cases, not other platforms.

@@ -13,10 +13,7 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+repository_commit: current working tree
 ---
 
 # NUM-13A: prefix_sum
@@ -31,13 +28,17 @@ Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
-Produce boundary prefix sums along required static Int64 axis. For an input
+The `numeric.prefix_sum_*` operations accept one `Result` tensor member under
+any member key. The output port key is `values`; its Result schema is
+`photospider.tensor` with tensor member `samples`. The source
+`sample_shape()` includes batch axes; the output uses that complete shape as
+ordinary axes and has no facets or batch topology. The operation computes
+boundary prefix sums along the required static Int64 axis. For an input
 axis length N, output axis length is N+1; output[k] sums input axis positions
 [0,k). The first boundary k=0 is zero, and k=N includes the whole line. Other
 axis lengths and rank are preserved. There is no inclusive/exclusive mode.
 
-Input is named input and output values, with empty output facets. Shapes are
-rank 1..8 with positive extents and input/output logical count <=2^40. Axis is a
+Shapes are rank 1..8 with positive extents and input/output logical count <=2^40. Axis is a
 nonnegative index less than rank. Shape addition and product are checked before
 execution. This generic numeric scan does not infer physical units or image roles.
 
@@ -50,8 +51,15 @@ or correctly rounded conversion. Each complete-output prefix is the exact sum of
 own source interval, not a recurrence on previously rounded output values.
 Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
 
-Empty mathematical prefixes yield integer zero or floating +0; Whole still
-reads the active input for nonempty output demand.
+Empty mathematical prefixes yield integer zero or floating +0. For every
+nonempty output demand, Whole requests complete input support with Data,
+Validation and Descriptor (role 13), including a request limited to k=0. The
+kernel reads through authorized Result windows and does not pack the complete
+input into another payload. It computes and publishes the complete output in
+global coordinates; the requested footprint scopes observed dependency roots.
+Consumers can read any coordinate within the Result's complete published
+coverage. Empty demand has no sample coverage or arithmetic and issues no input
+payload Need.
 For nonempty prefixes, source NaN priority follows original logical axis order,
 with shared quieting/payload conversion. Mixed signed infinities and finite zero
 signs follow reduce_sum. The leading +0 is a boundary output, not an extra
@@ -69,31 +77,34 @@ infinity and does not contaminate the exact carry used by later outputs.
 
 ## Whole demand, state and invalidation
 
-Nonempty demand collects/validates complete input and computes complete output,
-including all lines and boundaries. Empty demand reads nothing; a request only
-at k=0 still reads input and can fail upstream/typed validation. Any active source
-edit invalidates all recorded observations. No per-output source-set, association
-row or persistent checkpoint remains. Each line uses an exact accumulator and a
-separate conversion snapshot, preserving NaN/Inf/zero source classifications.
+Nonempty demand requests and validates the complete input support, then computes
+complete output, including all lines and boundaries. A request only at k=0 still
+has full input validation and can fail upstream or typed checks, although that
+boundary performs no sample addition. Any active source edit invalidates all
+recorded observations. Each line uses an exact accumulator and a separate
+conversion snapshot, preserving NaN/Inf/zero source classifications.
 
 ## Resources, errors and acceptance
 
 Work is O(full_input_count) plus exact arithmetic and full-output conversions.
-Own the complete packed output and potentially a full collected input, plus fixed
-exact state. Coordinate vectors are bounded by rank8. Work/cancellation checks
-cover each input, carry snapshot and final conversion/publication. Integer
-ArithmeticOverflow is Domain/Run with the output coordinate; failures release
-all unpublished output/state. Schema caps, dtype rules and owner lifetime remain.
+The operation owns the complete packed output and uses authorized source windows
+with fixed exact state; it does not create a full input copy. Coordinate vectors
+are bounded by rank 8. Work/cancellation checks cover each input, carry snapshot
+and final conversion/publication. Integer `ArithmeticOverflow` is a Domain/Run
+failure with the output coordinate; failures release unpublished output and
+state. Schema caps, dtype rules and owner lifetime remain.
 
-Public [1,2,3] -> [0,1,3,6] and floating cancellation/special-value fixtures must
-retain exact bits. Independent prefix/rectangle sums verify every sampled result;
-integer oracle also checks the entire output for Whole overflow. Test arbitrary
-strides, whole-input dirty, unselected failure, Empty, zero boundary validation,
-work/output/state budgets and active cancellation.
+The current `test_numeric_scans_result` workflow checks `[1,2,3] -> [0,1,3,6]`,
+independent small-integer enumeration, batch and nonadjacent axes, negative and
+unaligned strides, special values, zero-boundary validation, Empty demand,
+resource budgets and cancellation. It checks complete-output integer overflow,
+including coordinates outside the requested projection. The older
+`test_numeric_result_math.cpp` integration fixture contains additional scan
+cases, but it was not rerun for this Result migration.
 
 ## Implementation and executable acceptance
 
-All six formal scan keys use Whole through photospider/numeric/scans.hpp.
-See [NUM-13 Whole execution](../scans-whole.md) for current public workflow,
-independent oracle and separate public/core timing. Older regional WSL/installed
-checks predate this implementation. Proposed status is unchanged.
+The six registered profile keys use Whole execution. Public authoring helpers are
+declared in `photospider/numeric/scans.hpp`; current execution and focused
+validation details are in [NUM-13 Whole execution](../scans-whole.md). Proposed
+specification status is unchanged.

@@ -30,7 +30,7 @@ This plan preserves the existing typed compiler stages and the separate daemon.
 | --- | --- | --- |
 | The pre-adjustment ADR 0016 candidate used fixed scalar source parameters and an add/multiply UInt8 tensor fixture. | Separate ordinary numeric run inputs from static shape/halo/specialization facts; use an image fixture with changed pixels and changed numeric bindings. | Revise #256 before accepting its public API. #257 implements; #258 delivers the operation example. |
 | PreserveFirstInput checks the first descriptor; MatchAllInputs requires every input descriptor to match. Elementwise/Halo require each input shape to match the output. | A rank-three RGBA image plus rank-one scalar cannot use the existing Elementwise/Halo path unchanged. Freeze explicit per-port descriptor, scalar and demand semantics. | #256 must address this before reporting that bindings alone satisfy the new S1 fixture. |
-| Value and C operation/provider vocabulary only contain UInt8, Int64, Float64. The current C ABI validates exact structure sizes and closed enums. | Float32=4 needs Value/loader/trait/invocation/output/provider handling and a declared old-plugin policy. Equal C structure layout alone is insufficient evidence of semantic compatibility. | Version and consumer decision in #256; exact implementation in #257. |
+| Operation plugins use the standalone Result C ABI 2; the former Base C operation table is removed. The data-provider C ABI remains independently versioned. | C++ Value APIs remain separate from the C plugin contract; Result modules must use the exact current table layout. | No Base C compatibility shim; keep provider ABI and C++ Value boundaries explicit. |
 | S1 draft requires complete dense CPU storage; current callbacks return complete Values. | Keep this as S1 support scope. Later regional/Storage work must replace the relevant contracts explicitly; no permanent all-storage-is-a-CPU-vector commitment. | S2 decision and implementation, not an automatic S1 general allocator. |
 | Planning output Regions enter normalized physical demand identity. | Region changes can replan the existing optimized IR; ordinary numeric/pixel changes reuse the plan. | Keep current stage separation. Execute-time ROI is a separate choice, not a reason to reanalyze an unchanged semantic graph. |
 | Cache-Model exposes PlanCacheKey and no cache service. #203 excludes retained execution Values and persistence. | Add result-cache/region-invalidation work separately; compile-fragment reuse cannot complete that capability. | S3-A and S3-C, after their decisions. |
@@ -41,7 +41,7 @@ This plan preserves the existing typed compiler stages and the separate daemon.
 
 Evidence entrypoints: `include/photospider/plugin/operation_registry.hpp`,
 `src/lib/compiler/compiler.cpp` (`infer_output_descriptor`, `derive_input_demand`),
-`include/photospider/plugin/operation_plugin_api.h`,
+`include/photospider/plugin/result_operation_plugin_api.h`,
 `src/lib/plugin/data_definition_registry.cpp`, `CMakeLists.txt`,
 `tests/consumer/CMakeLists.txt`, [Cache Model](../kernel-architecture/Cache-Model.md),
 [Region Semantics](../kernel-architecture/Region-Semantics.md),

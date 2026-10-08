@@ -39,7 +39,7 @@ int main() {
       std::vector<std::uint8_t> expected(30), actual(30);
       take(image.read(Region::whole(image.descriptor().shape), expected.data(),
                       expected.size()));
-      const auto& out = result.images.at("result");
+      const auto& out = result.tensors.at("result");
       take(out.read(Region::whole(out.descriptor().shape), actual.data(),
                     actual.size()));
       require(actual == expected, "declared copy changed bits");
@@ -172,12 +172,12 @@ int main() {
   auto compiled = take(Compiler(registry).compile(graph));
   ExecutionContext execution(registry);
   auto result = take(execution.execute(compiled.plan, probe_bindings(image)));
-  require(result.images.at("result").owner_token() == image.owner_token(),
+  require(result.tensors.at("result").owner_token() == image.owner_token(),
           "unordered valid pieces lost their affine alias");
   std::vector<std::uint8_t> expected(30), actual(30);
   take(image.read(Region::whole(image.descriptor().shape), expected.data(),
                   expected.size()));
-  take(result.images.at("result").read(Region::whole(image.descriptor().shape),
+  take(result.tensors.at("result").read(Region::whole(image.descriptor().shape),
                                        actual.data(), actual.size()));
   require(actual == expected,
           "unordered pieces silently reordered alias channels");

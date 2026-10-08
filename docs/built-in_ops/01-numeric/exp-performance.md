@@ -7,12 +7,12 @@ comparison CSV files remain historical measurements. The initial promotion also
 removed the binary64 SLEEF entry. The subsequent
 [adapter/FP64 update](adapter-performance.md) restores certified SLEEF binary64
 exp and NUM-01 AST exp, while Float32 NUM-04 retains IQK. No Float64 input is
-narrowed to fit the Float32 polynomial. The current exp callback reserves the
-larger of the Float32 and binary64 batch workspaces; the 768-byte Float32-only
-workspace below describes the initial promotion.
+narrowed to fit the Float32 polynomial. The current Result computation reserves
+an arithmetic object, a math batch workspace, and a Float32 SIMD workspace. The
+768-byte Float32-only workspace describes the historical initial adapter.
 
-Measured 2026-09-24 from `ops-impl` based on `4138e804`, with the local changes
-in this report. Specification status remains Proposed. The maintained
+The initial A/B experiment measured the Float32 promotion described here.
+Specification status remains Proposed. The maintained
 `numeric.exp_accelerated_apple_silicon` and `numeric.exp_accelerated_x86_64`
 callbacks now use a 64-sample batch and an IQK-derived normal-range SIMD expf.
 Strict and other NUM-04/05 functions retain their arithmetic paths. The initial
@@ -21,9 +21,8 @@ separate implementation changes, not additional measurements in these tables.
 
 ## Algorithm and correctness boundary
 
-The polynomial is adapted from
-[ik_llama.cpp iqk_utils.h at dad2cb3](https://github.com/ikawrakow/ik_llama.cpp/blob/dad2cb3e55138cbdd7df988c66c0c3c54f6d34ad/ggml/src/iqk/iqk_utils.h),
-which attributes the routine to Justine Tunney and Arm Limited. The original
+The polynomial is adapted from `ik_llama.cpp`'s `iqk_utils.h`, which attributes
+the routine to Justine Tunney and Arm Limited. The original
 MIT notice is retained in `third_party/IK_LLAMA_LICENSE.txt` and installed with
 the kernel's licenses. Only the normal-range exp polynomial was extracted;
 Photospider owns classification and fallback. The reviewed CPU files
@@ -52,16 +51,43 @@ steps respectively. Scaling remains normal for the admitted integer exponents.
 This establishes the existing four-step Float32 contract without a per-sample
 SLEEF certificate or an unproved reliance on upstream's error comment.
 
-The callback borrows nearest/gradual floating mode once per batch-enabled
-invocation and restores caller state on every exit. The 1,792-byte fixed batch
-workspace is admitted with the arithmetic workspace for accelerated exp.
+The Result computation phase establishes nearest/gradual floating mode on its
+CPU worker and restores that worker's prior environment on exit. The caller
+thread's floating-point environment is checked separately around `execute`.
+The historical initial adapter used a 1,792-byte fixed batch workspace; that
+size does not describe the current Result implementation.
 Per-lane indexing and mathematical work are still charged; checks are batched
 in groups of at most 64. Fallback owns its own admission/refinement charge,
 without double charging. Cancellation and failed work/capacity admission never
-publish a partial result. Whole execution and source/build cache identity remain
-in effect; per-value fallback diagnostics remain N/A.
+publish a partial result. The operation executes as a Whole Result computation
+and retains source/build cache identity.
 
-## Validation
+## Result-path acceptance
+
+The current benchmark acceptance runs the production IQK kernel through a
+Result workflow. The exp corpus completed with 20,503 inputs across six
+partitions, a maximum distance of two Float32 steps, and passing layout,
+floating-environment, resource, and cancellation checks. These correctness
+results validate the current Result execution route; they are not a new large
+performance campaign.
+
+The focused unary, binary, comparisons, and ColorArray Result CTests passed 4/4.
+Run them with:
+
+```sh
+ctest --test-dir build/kernel-dev -R '^(test_numeric_unary_result|test_numeric_binary_result|test_numeric_comparisons_result|test_numeric_color_array_result)$' --output-on-failure
+```
+
+The current exp and trigonometric timing smoke set completed 21 public/core/raw
+runs, including unaligned public input, reverse core input, and a 65-sample tail.
+CSV output checks confirmed scope labels for the sampled workloads. These are
+execution and metadata checks, not a performance comparison or platform matrix.
+
+## Historical validation record
+
+The measurements and validation results in this section record the earlier
+Value/callback implementation. They describe that implementation's evidence,
+not the current Result workflow or computation-poll timing scopes.
 
 Both macOS NEON and Linux AVX2 passed:
 
@@ -99,19 +125,23 @@ The Linux host exposes 24 logical CPUs; no claim is made about Windows mapping
 that virtual CPU to a particular P/E core. macOS has no hard CPU affinity here.
 The two hosts are separate measurements, not an ISA-only comparison.
 
-Both builds use RelWithDebInfo (-O2 -g); the IQK and benchmark-only FP32 SLEEF
-translation units use -O3, no fast-math and disabled implicit FMA contraction.
-The explicit FMA intrinsics remain fused. SLEEF is pinned to 3.9.0, commit
-906ca7512ee483296780a81a21b9ca715d40dfe1. The FP32 comparison directly includes
-its unmodified source, with math inlined in the batch loop, as confirmed by the
-absence of a separate expf symbol in the macOS object.
+Both historical builds use RelWithDebInfo (-O2 -g); the IQK and benchmark-only
+FP32 SLEEF translation units use -O3, no fast-math and disabled implicit FMA
+contraction. The explicit FMA intrinsics remain fused. The comparison used
+SLEEF 3.9.0. The FP32 comparison directly included its unmodified source, with
+math inlined in the batch loop, as confirmed by the absence of a separate expf
+symbol in the macOS object.
 
-All measurements use seed 404, prebuilt inputs and reused input buffers, one
-warmup, seven timed calls, one public CPU worker and result cache off. Every
-timed result is checked against an independent double-libm smoke expectation
-outside timing; the MPFR acceptance above supplies the stronger reference.
-Backend order is fixed and each row uses a separate process. Small-N variation
-and cross-process noise do not support claims of small speed differences.
+The historical A/B measurements use seed 404, prebuilt inputs and reused input
+buffers, one warmup, seven timed calls, one public CPU worker, and result cache
+off. Every timed result is checked against an independent double-libm smoke
+expectation outside timing; the MPFR acceptance above supplies the stronger
+reference. Backend order is fixed and each row uses a separate process. The
+historical public path uses Value inputs and its then-current callback-based
+workflow. Its `core` layer times a complete direct callback, including callback
+allocation and gather, while excluding executor and typed input admission. Its
+`raw` layer reuses preallocated math arrays and includes a scoped floating-point
+environment guard. These boundaries explain the historical rows only.
 
 - `scalar`: the original per-element CertifiedMath/SLEEF FP64 path, with no
   added batch workspace. It was selected through the private comparison
@@ -121,21 +151,36 @@ and cross-process noise do not support claims of small speed differences.
 - `iqk`: the production Float32 batch path.
 - `sleef32` (raw only): source-inlined FP32 SLEEF u10, a same-width math baseline.
 
-`public` uses a private comparison key authored in a WorkflowDocument and the
-public Compiler/freeze/execute_fragments route. It includes dispatch, collect,
-output allocation and callback; compile/freeze and verification are outside the
-timer. The formal keys are separately covered by the public unary oracle and
-resource tests. Payload ceiling is 1 GiB; discovery/Footprint work limits are
-2^50, cache proof work is zero. The optional managed resource ledger is unset in
-these timed public runs; separate managed-budget tests exercise accounting.
-`core` means the complete direct callback, including its allocations and gather,
-but excluding executor and typed input admission. `raw` reuses preallocated math
-arrays and includes a scoped fenv guard. Raw FP64 SLEEF includes output narrowing;
-its input widening is outside timing. Core/raw managed peaks are unmeasured
-(N/A); initial CSV files use zero as the unavailable-field sentinel, not as a
-zero-allocation assertion.
+The current `exp_benchmark.cpp` keeps that raw SIMD kernel unchanged and runs
+its `public` and `core` layers through a Result workflow. The fixture constructs
+immutable `Value` backing, publishes it as a source tensor Result under the
+execution Root, compiles a plan for each input schema, and freezes a new binding
+for each source Result. Static preparation is reused with the compiled plan.
+Cache is off and the workflow uses one CPU worker.
 
-## Public execution results
+Current `public` timing surrounds `Workflow::run`. It includes the
+`ExecutionContext::execute` call, coordinator work, continuation factory and
+initial Need, digest calculation, host publication, and the small wrapper that
+reads Root statistics and extracts the `ResultRef`. Benchmark operation
+definition creation and registration, source construction/publication, compile
+and static preparation, freeze, and output readback are outside this timer.
+Current `core` timing surrounds only `ResultContinuation::poll` on a CPU worker
+phase with supplied tensors. It includes the checked `consume_work` observer
+and Result publication. It excludes continuation factory setup, initial Need,
+coordinator work, source admission, compile/freeze, and readback. Current `raw`
+still times the preallocated SIMD computation with its floating-point
+environment scope.
+These current scopes are not directly comparable to the historical
+Value/callback core timing above.
+
+Current public CSV rows report peak Root Payload, which includes Root-owned
+state, scratch, and output. Immutable caller input storage is accounted as
+Referenced. This Root accounting is not process RSS. Core and raw report `N/A`
+for the Payload peak; that field means unmeasured, not zero allocation. The
+historical controlled Payload values and RSS readings below retain their
+original accounting boundaries.
+
+## Historical public execution results
 
 Median milliseconds; input is uniform Float32 [-10,10].
 
@@ -161,7 +206,7 @@ scheduler/allocation dominated: N=256 IQK measured about 42 us on both hosts,
 and was slightly slower than batch SLEEF in this run. No stable small-N win over
 batch SLEEF is claimed.
 
-## Raw math and input-range limits
+## Historical raw math and input-range limits
 
 Nanoseconds per element, uniform [-10,10]:
 
@@ -190,12 +235,13 @@ There is no robust improvement: refinement dominates, and no underflow semantics
 were weakened to improve this result. Pure IQK raw timings intentionally exclude
 unsupported input ranges; they do not represent full-domain exp throughput.
 
-Public controlled peak Payload at N=4,194,304 is 33,762,640 bytes for scalar and
-33,764,432 bytes for either batch adapter, a 1,792-byte scratch increase. This
-metric is not RSS. A separate `/usr/bin/time` run of IQK public N=4,194,304 reported peak RSS
-159,809,536 bytes on macOS and 170,664 KiB on Linux. These are whole benchmark
-process measurements, not kernel-only memory. Benchmark RSS also includes validation vectors,
-preallocated raw arrays, compiler/executor state and both comparison backends.
+Historical public controlled peak Payload at N=4,194,304 is 33,762,640 bytes
+for scalar and 33,764,432 bytes for either batch adapter, a 1,792-byte scratch
+increase. This metric is not RSS. A separate `/usr/bin/time` run of IQK public
+N=4,194,304 reported peak RSS 159,809,536 bytes on macOS and 170,664 KiB on
+Linux. These are whole benchmark process measurements, not kernel-only memory.
+Benchmark RSS also includes validation vectors, preallocated raw arrays,
+compiler/executor state, and both comparison backends.
 
 ## Profiler interpretation
 
@@ -226,24 +272,23 @@ and throughput only, not cycle, cache-miss or instruction-count explanations.
 ## Reproduction and artifacts
 
 ```sh
-cmake --build build --target photospider_numeric_exp_benchmark photospider_numeric_unary test_numeric_operations -j8
+mkdir -p build/num04-exp
+cmake --build build/kernel-dev --target photospider_numeric_exp_benchmark -j8
 python3 oracle/ops/numeric/exp_bound.py
 python3 oracle/ops/numeric/exp_oracle.py build/num04-exp/oracle.bin
-build/examples/numeric_workflow/photospider_numeric_exp_benchmark check build/num04-exp/oracle.bin
-python3 oracle/ops/numeric/unary_oracle.py build/examples/numeric_workflow/photospider_numeric_unary apple
-ctest --test-dir build -R '^test_numeric_operations$' --output-on-failure
-python3 examples/numeric_workflow/exp_measure.py build/examples/numeric_workflow/photospider_numeric_exp_benchmark build/num04-exp/mac.csv
+build/kernel-dev/examples/numeric_workflow/photospider_numeric_exp_benchmark check build/num04-exp/oracle.bin
+build/kernel-dev/examples/numeric_workflow/photospider_numeric_exp_benchmark --timing-scopes
+python3 examples/numeric_workflow/exp_measure.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_exp_benchmark build/num04-exp/result.csv
 ```
 
-Use `x86` for the Linux unary oracle and append `2` to exp_measure.py to pin it
-to Linux vCPU 2. Python must be able to load MPFR 4.2+; on this Mac it was
-`/opt/homebrew/bin/python3.11`. Create the output directory before corpus generation.
-The retained driver measures only the production implementation, with no SLEEF
-backend option. For a single run use `photospider_numeric_exp_benchmark public
-262144 10 7`. The normal formal exp helper automatically selects the new path on
-its matching accelerated profile. Reproducing the removed alternatives requires
-the experimental revision; the historical tables do not describe an available
-production switch.
+Append Linux CPU id `2` to `exp_measure.py` to pin each process to vCPU 2. Python
+must load MPFR 4.2+; the current driver measures the production implementation
+only and has no SLEEF comparison backend. For one run, use
+`photospider_numeric_exp_benchmark public 262144 10 7`. The normal formal exp
+helper selects the production path for its matching accelerated profile. The
+historical A/B tables are not reproduced by this current command because their
+Value/callback timing boundaries differ from the Result workflow and
+computation-poll scopes.
 
 Raw local files: `build/num04-exp/{mac,linux}.csv`, MPFR corpus, oracle/check/CTest
 logs, `scalar.trace`, `iqk.trace`, their exported sample XML and
@@ -251,7 +296,7 @@ logs, `scalar.trace`, `iqk.trace`, their exported sample XML and
 `/home/alex/photospider-num04-exp-20260924`. These are ignored measurement outputs;
 reusable drivers, the proof and implementation are tracked-source changes.
 
-## Promotion validation
+## Historical promotion validation
 
 After removal of all direct SLEEF exp calls, the final macOS and WSL builds
 re-ran the 20,503-case exp corpus (including scalar/Whole bit identity), the
@@ -259,5 +304,6 @@ re-ran the 20,503-case exp corpus (including scalar/Whole bit identity), the
 oracle. The numeric and expression focused CTests passed on both platforms.
 The retained Float32 kernel has the same coefficient/FMA graph as the measured
 candidate; historical A/B data above are not new Float64 or expression timings.
-The production batch workspace is now 768 bytes. No installed public API or ABI
-was added. SLEEF remains required for the other mathematical functions.
+At that promotion, the Float32-only batch workspace was 768 bytes. No installed
+public API or ABI was added. SLEEF remains required for the other mathematical
+functions.

@@ -12,15 +12,17 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+verification_status: focused_result_validation_passed
+repository_commit: current working tree
 ---
 
 # CRV-11F2: lowpass_nonuniform_hamming_sinc
+
+The dynamic inputs inherit the [family Result tensor-port contract](CRV-11_nonuniform_lowpass_contract.md): each port is a Result with exactly one tensor member and no fields under any structurally valid schema id/version/member key. Shapes use complete `sample_shape()` values, including batch axes.
+
+
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -31,11 +33,7 @@ values remain exact.
 ## Interface and mathematical definition
 
 Inherit the complete [nonuniform contract](CRV-11_nonuniform_lowpass_contract.md).
-Ordered dynamic ports are positions[K] and values, independently Float32/Float64.
-positions is finite strictly increasing, K=2..1048576; static axis selects the
-values extent K. Other axes are independent, values rank 1..8, positive shape
-and logical count <=2^40. Named samples retains values shape/dtype with generic
-facets and is evaluated at the original positions.
+Ordered dynamic ports are `positions` and `values` Results. `positions` has full `sample_shape()` [K], rank 1, finite strictly increasing Float32/64 values, K=2..1048576. `values` has full `sample_shape()` rank 1..8, positive shape and logical count <=2^40; static axis selects extent K. The output `samples` is a `photospider.tensor` v1 Result member preserving values shape/dtype with generic facets, evaluated at the original positions.
 
 Required static parameters are axis, support_radius and cutoff; boundary is
 reflect/replicate/zero/wrap, default reflect. All applicable numeric kernel
@@ -55,14 +53,20 @@ strict fallback. All values and outputs must be finite; this
 is not the uniform family's IEEE nonfinite aggregation. A precision/work/capacity
 limit fails explicitly instead of publishing unconverged integration.
 
-All three formal keys use Whole. Nonempty requests collect complete positions
-and values, validate positions globally, and compute every output. Each numerical
-integral still uses only positive-length pieces and their exact endpoint values;
-coefficient cancellation cannot remove validation. Any input edit invalidates all
-outputs. Nonfinite samples or overflow anywhere, including undelivered columns,
-fail Domain/Run. Empty reads nothing. Output storage is the complete dense shape;
-only one output's managed piece vector is retained at a time. Legal strides,
-immutable owners, cache-off, work/capacity/cancellation follow the shared contract.
+All three formal keys use Whole Result programs. Nonempty requests declare Data,
+Validation and Descriptor needs (role 13) for both complete input members. Typed
+and upstream validation covers all inputs. The callback reads positions through authorized windows into Root-owned
+promoted coordinate storage, then reads source values through authorized
+windows without collecting or copying the complete values tensor. It computes every output using the
+same positive-length pieces and exact endpoint values; coefficient cancellation
+does not remove endpoint validation. Input changes invalidate complete recorded
+output demand. Nonfinite samples or overflow, including outside delivery, fail
+Domain/Run. Empty reads no payload after static preflight. The Result writer
+publishes the complete dense output transactionally with full coverage and global
+coordinates. Root accounts the promoted positions vector, one reused piece
+vector, full output and workspaces. Legal strides and owner lifetime follow the
+shared contract; failure/cancellation publishes no partial output and releases
+temporary state.
 
 Use the shared compile/preflight/runtime error categories for malformed parameters,
 type mismatch, invalid positions, nonfinite demanded samples, output overflow,
@@ -88,6 +92,4 @@ commands and current evidence; the spec does not claim universal antialias rejec
 This primitive is registered in the five-kernel nonuniform low-pass family. Exact partition and paired-affine integration use global Taylor moments with a rigorous tail bound; this is not local adaptive quadrature, and accelerated keys currently use the strict fallback.
 Certified precision is bounded to 128..4096 bits and order <=512; unresolved
 capacity or rounding may return `ResourceExhausted`. See the [shared workflow](../../../../examples/numeric_workflow/README.md#nonuniform-lowpass)
-and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple validation for the Whole revision is recorded in
-that workflow and the math implementation notes. WSL/AVX2 and installed-package
-consumers have not been rerun. Whole numerical/fallback counters are N/A.
+and [CRV-11 umbrella](CRV-11_resample_signal.md). The focused Result CTest, Strict/Apple manual workflows, independent Result oracles and installed consumer pass. Historical performance measurements are from the earlier Value implementation; no Result performance or x86 numerical execution was run. See the shared workflow for exact coverage and commands.

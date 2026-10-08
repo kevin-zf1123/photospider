@@ -1,109 +1,59 @@
 # Paged integer statistics workflow
 
-This installed-public-API example registers `make_statistics_operation` and
-executes source → histogram → global parameters → grade → streaming sink.
-The sink requests certified prefixes while grade is active and checks every
-pixel. Duplicate histogram nodes must start once and return the same ObjectId
-with the optional cache disabled. No private kernel headers are used.
+This example registers `statistics.histogram`, `statistics.parameters`, and `statistics.grade` through the public kernel API. The workflow binds immutable `pixels` and `mask` Results directly as inputs. The C++ fixture's `variant` parameter selects values or backing layout for those bindings; it is not a workflow input or source operation.
+
+The graph shares one Histogram Result between the Parameters node and an alias output. Parameters publishes the integer count/total/valid record and the correctly rounded Float64 mean. Grade validates that complete Result before publishing Float64 raster rows as stable prefixes. A downstream Result sink requests those prefixes and checks every graded sample.
+
+## Build and run
+
+In a configured Photospider build:
 
 ```sh
-cmake --build build/issue257-shared --target photospider_statistics_workflow -j 8
-build/issue257-shared/examples/statistics_workflow/photospider_statistics_workflow
+cmake --build build/kernel-dev --target photospider_statistics_workflow test_statistics test_statistics_callback -j 8
+build/kernel-dev/examples/statistics_workflow/photospider_statistics_workflow
+build/kernel-dev/examples/statistics_workflow/photospider_statistics_workflow --large
+build/kernel-dev/examples/statistics_workflow/photospider_statistics_workflow --stage-admission
 ```
 
-An isolated consumer of an installed package:
+The standalone example uses the installed public package:
 
 ```sh
-cmake --install build/issue257-shared --prefix "$PWD/out/phase-a-delivery/install"
-cmake -S examples/statistics_workflow -B out/phase-a-delivery/statistics-consumer \
-  -DCMAKE_PREFIX_PATH="$PWD/out/phase-a-delivery/install"
-cmake --build out/phase-a-delivery/statistics-consumer -j 8
-out/phase-a-delivery/statistics-consumer/photospider_statistics_workflow
-out/phase-a-delivery/statistics-consumer/photospider_statistics_workflow --large
-out/phase-a-delivery/statistics-consumer/photospider_statistics_workflow --stage-admission
+cmake --install build/kernel-dev --prefix "$PWD/out/statistics-install"
+cmake -S examples/statistics_workflow -B out/statistics-consumer \
+  -DCMAKE_PREFIX_PATH="$PWD/out/statistics-install"
+cmake --build out/statistics-consumer -j 8
+out/statistics-consumer/photospider_statistics_workflow
 ```
 
-## Contract and independent reference
-
-Inputs are facet-free Int64 HW values and UInt8 HW masks. Any nonzero mask
-selects a sample; selected values must lie in `[0,bins)`. Bin `j` denotes
-`[j,j+1)`. This deliberately narrow scalar profile performs no color conversion.
-The mathematical bin domain is fixed, but only positive counts are stored,
-ordered by bin ID. Missing bins are zero only after the histogram seals.
-
-The example uses `x[i]=(3*i+1)%8`, target 2, and small exact integer sums.
-Its map-based histogram reference is independent of the dense-counter product
-implementation; its pixel reference uses long double evaluation of the rational
-expression. The pixel tolerance is **measured fixture agreement**, not a
-CertifiedBound. The declared product order is nearest binary64 mean, then
-`gain=target/mean`, then `gain*double(x[i])`.
-
-This Python standard-library reference can be run separately:
+After configuring with `BUILD_TESTING=ON`, run the focused unit and example checks with:
 
 ```sh
-python3 - <<'PY'
-from collections import Counter
-from fractions import Fraction
-for n in (1, 17, 1003, 65537):
-    values = [(3*i+1)%8 for i in range(n)]
-    counts = Counter(values)
-    mean = Fraction(sum(values), n)
-    print(n, sorted(counts.items()), 'total=', sum(values),
-          'mean=', float(mean).hex(),
-          'first_pixels=', [float(Fraction(2*x, 1)/mean) for x in values[:8]])
-PY
+ctest --test-dir build/kernel-dev \
+  -R '^(test_statistics|test_statistics_callback|example_statistics_workflow)$' --output-on-failure
 ```
 
-`test_statistics` additionally checks binary64 hexadecimal golden values derived
-from Python `Fraction`, including cases where separately converting large
-integers to double before division gives the wrong answer.
+The default run checks small sample counts with 64-, 256-, and 4096-byte Result windows, a 4,096-sample case with a 24-byte window, and a 65,537-sample case. `--large` runs 40,000 samples with 65,536 bins and a 24-byte Result window. `--stage-admission` exercises the Histogram factory's pre-binding stage lower-bound check. Before the smaller cases, the executable also runs a 1,000-sample, 65,536-bin profile with a 5,000-stage cap. `--stage-regression` stops after that profile.
 
-The executable covers counts 1/17/1003, page windows 64/256/4096 bytes, partial
-and empty masks, valid zero-mean statistics, invalid selected samples, ignored
-masked-out samples, changed source snapshots, undersized pages, exhausted work
-and host capacity, the 65,536-bin multipass recipe, disk exhaustion after a field is written, cancellation after
-histogram publication, cross-row HW, 257-bin paged output, and 65,537 logical
-input samples. Failed runs assert that Disk and Payload accounting returns to zero. It checks result and window
-ownership after `ExecutionContext` destruction and final mandatory disk release.
-Single-Run fixtures use a 64 KiB managed Host/Metadata cap. The changed-snapshot
-fixture retains the first Run's global results during the second execution and
-explicitly admits 128 KiB for their combined metadata and active workspace.
-Its oracle still checks distinct ObjectIds, the old total 57, and the new total
-58; the smaller explicit resource-failure fixtures are unchanged.
-Empty statistics have `count=total=0, valid=0`; all-zero selected values have
-`count>0, total=0, valid=1`. Both fail explicitly when asked to grade.
+Fixture setup creates the full caller-owned pixel and mask backings with `BufferAllocator`; `root.reference()` charges those bytes to Referenced. Host and Payload peaks exclude these input bytes. The Root Referenced cap is `18*n` bytes for `n=H*W`. Each run reports `referenced_peak` and checks that live Referenced and Disk usage return to zero after its Results and loaded windows are released. The independent map and numeric reference state are caller-owned outside Root accounting. Each run configures explicit Root limits. The nominal cases use 1 MiB for Host and Metadata, 10 million `ExecutionOptions::maximum_dependency_work` units per Run, a 100,000-stage limit per continuation, and 32 KiB Payload; dedicated failure cases use smaller limits. The case that retains Results from two separate Runs uses 2 MiB for Host and Metadata. The 65,537-sample case uses 100 million Run work units. `--large` configures 4 MiB Host/Metadata, 1 GiB Disk, 1 billion Run work units, a one-million-stage limit per continuation, and 32 KiB Payload. `maximum_dependency_work` is a Run limit, not a Root-wide work limit. Printed `issued_stages` is the Root's aggregate coordinator count, not the per-continuation stage limit. Typed Result observations and relations add metadata as requested coverage grows, so these configured caps are not a fixed per-image metadata cost.
 
-Resource accounting is the product's managed-capacity ledger, not a process RSS
-hard bound. The `bin_ranges_512` recipe uses admitted `min(bins,512)*8` Payload
-bytes and rereads the immutable source once per 512-bin range. Large bin domains
-therefore have a concrete bounded-memory path; extra passes may exhaust work. Source and output fields use windows no larger
-than 4096 bytes, and mandatory result backing is paged. Dependency relations
-remain Conservative and retain descriptor observations for empty collections.
+## Result inputs and outputs
 
-`--large` executes 200x200 samples with 65536 bins, a 24-byte Result I/O window,
-65536-byte managed Host budget, finite 100-million work and one-million-stage
-producer limits. Here `x[i]=(509*i)%65536`; the map reference checks all 40000
-nonzero histogram rows, count 40000 and total 1309905504, then the sink checks
-every grade pixel. Cache-off sharing and final-window cleanup are included.
-The measured Host peak was 40160 bytes. `--stage-regression` runs a 25x40 version
-at a 5000-stage producer cap; the old implementation exhausts that cap.
+The workflow declares `pixels` as a facet-free Int64 Result tensor of shape `{H,W}` and `mask` as a facet-free UInt8 Result tensor of the same shape, both without fields. The mask selects a sample when its byte is nonzero. Selected values must be in `[0,bins)`; masked-out values are ignored. The default fixture binding generates `x[i]=(3*i+1)%8` and selects every sample. Other fixture parameters create negative-stride pixel/mask backing or a constant zero-stride mask while preserving the same schemas.
 
-Histogram Value input strips have their own root-admitted 4096-byte field cap,
-asserted by every source callback. They are independent of Result I/O paging;
-histogram fields, parameter reads and grade outputs continue to obey the
-24-byte selected window. Printed root `issued_stages` sums coordinator actions
-across all producers, and differs from each producer's poll limit.
+The statistics operations accept and publish Results throughout. Histogram consumes the Int64 and UInt8 tensor Results and emits sparse `bin` and `count` fields. Parameters consumes the complete Histogram Result and emits `count_total_valid` plus `mean`. Grade consumes the Int64 tensor and the matching Parameters Result, then emits Float64 `pixels` in HW order. Its required Float64 `target` is 2. The example sink returns one Float64 tensor Result containing the checked scalar count.
 
-`--stage-admission` checks that the Histogram factory rejects
-`StatisticsSpec{2048,2048,65536}` with ResourceExhausted before source binding.
-The independent necessary count is `2048*ceil(2048/512)*ceil(65536/512) =
-1048576` source-request polls, exceeding the fixed 1000000-stage cap before
-output work. The factory rejects any profile whose required source polls leave
-no final consumption/publication poll. This lower bound does not guarantee
-that all accepted profiles fit their additional output/work/I/O budgets.
-Generic schemas and Parameters/Grade retain their existing size domain.
+Dependency support is expressed with typed Tensor, Field, and Descriptor relations. Histogram and Parameters use Conservative global support. Each grade sample depends on its source sample and on the shared parameter fields; descriptor support also invalidates the result when the input description changes. Duplicate Histogram nodes in the graph share one published Result even when the optional dependency cache is disabled.
 
-The same command executes an empty 2x513 input with 513 bins. Two source strips
-per row and two counter passes require eight source polls plus one final poll:
-cap 9 succeeds with empty histogram and `[count,total,valid]=[0,0,0]`; cap 8
-fails and releases partial storage. These checks also run in the default suite.
+Result associations store ObjectIds and do not own the associated source payload. Parameters copies the Histogram's numeric summary into its own fields, so releasing the Histogram Result can retire that source backing while the Parameters Result remains. A loaded field `CpuStorage` retains its read plan and Result implementation. Its bytes remain readable after the Result wrapper and execution context are gone; the loaded windows keep their field storage and Disk charge live until the final window is released.
+
+## Bounds and reference checks
+
+The `bin_ranges_512` recipe reserves `min(bins,512)` Int64 counters and scans the input Result once per 512-bin range. This bounds counter Payload at `min(bins,512)*8` bytes while trading memory for repeated tensor reads. Histogram tensor Needs are row-bounded, and field I/O is at most 4096 bytes per field, independent of the selected Result I/O window. Other tensor reads and field I/O are bounded by `min(page_bytes,4096)`. The 24-byte `count_total_valid` record is indivisible, so a smaller selected window returns `ResourceExhausted`.
+
+The Histogram factory rejects a profile before source binding when its minimum source request polls leave no final poll for consumption and publication. For `H=2048`, `W=2048`, and 65,536 bins, the lower bound is `2048*ceil(2048/512)*ceil(65536/512)=1,048,576` source polls, above its one-million-stage cap. Passing this check does not reserve later output, work, I/O, or Root capacity.
+
+The executable compares sparse bins against an independent map and checks integer totals, the correctly rounded mean, and every graded sample against a higher-precision reference. Its cases also cover empty and partial masks, invalid selected values, ignored invalid masked-out values, negative-stride Result backing, a zero-stride mask Result, a changed input binding while retaining prior Results, undersized windows, work/capacity/Disk exhaustion, cancellation after Histogram publication, and final owner release. The example reports aggregate `issued_stages`, Host, Payload, and Referenced peaks; Root counters are not process RSS or a fixed metadata cost. Result observations and typed relations make metadata use depend on requested coverage. Statistics operations use CPU stages. No CertifiedBound is claimed for Float64 grading; agreement with the example reference is a fixture check.
+
+For the scalar domain and exact mean algorithm, see [Integer Statistics](../../docs/kernel-architecture/Integer-Statistics.md). The focused test targets are `test_statistics` and `example_statistics_workflow`.
+
+Default cases passed locally and through the installed 0.30 consumer. The local `--large` run also passed with 40,000 populated bins, count 40,000 and total 1,309,905,304; the installed consumer was checked on the default run only. The local large run measured Root Host peak 273,268 bytes, Payload peak 6,224 bytes, Referenced peak 360,000 bytes, and 119,196 aggregate `issued_stages`. These managed Root counters are not process RSS or a fixed metadata cost.

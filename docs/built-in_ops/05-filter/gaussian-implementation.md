@@ -1,60 +1,81 @@
 # Finite Gaussian runtime
 
 The default registry provides `filter.gaussian_baked64_v1_strict_cpu_whole`,
-`filter.gaussian_baked64_v1_strict_cpu_tiled` and
-`filter.gaussian_baked64_v1_strict_gpu`.
-It evaluates FIL-04B's baked64 coefficient profile with one final rounding of the
-complete normalized two-dimensional expression. FIL-04 remains Proposed; runtime
-registration does not change that specification status. The GPU form uses the
-native backend selected by the kernel build: Metal runs MSL and Vulkan runs SPIR-V.
-Unavailable backends fail explicitly without CPU fallback. The Vulkan workflow has
-passed on FreeBSD Intel UHD 770; the Gaussian Vulkan port remains untested on NVIDIA
-and Linux.
+`filter.gaussian_baked64_v1_strict_cpu_tiled`, and
+`filter.gaussian_baked64_v1_strict_gpu`. Each operation accepts one Result with a
+single tensor member and publishes one Result tensor on output port `output`.
+The input schema has no fields and describes a Float32/Float64 tensor of
+rank 2..8, positive extents, and at most 2^40 samples. Gaussian preserves the
+complete sample shape, including batch axes, and clones the schema, facets, and
+bound resources to its output. This supports generic numeric tensors and existing
+typed image Results such as photospider.image, retaining their color facets and ICC
+profile owners so the output can feed other image operations. Gaussian does not
+add image semantics to a raw numeric tensor.
+
+The operations evaluate FIL-04B's baked64 coefficient profile with one final
+rounding of the complete normalized two-dimensional expression. FIL-04 remains
+Proposed; runtime registration does not change that specification status. Whole
+and GPU demand the complete input and publish a complete output. CPU tiled
+publishes requested chunks under IndependentChunks. The GPU form selects Metal
+MSL or Vulkan SPIR-V from the active native service and has no CPU fallback. The
+Result migration passes the current focused GPU test and installed-consumer
+checks on Metal. Earlier FreeBSD Intel UHD 770 Vulkan tests exercised the former
+Value path; the migrated Vulkan Result path has not been revalidated.
 
 ## Ports and explicit parameters
 
-Input `input` and output `output` have the same Float32/Float64 dtype and logical
-shape. Rank is 2..8, extents are positive and the total element count is at most
-2^40. All parameters below are mandatory static values; there are no defaults.
+Input port `input` and output port `output` each select one Result tensor member;
+that member key is preserved in the output schema. The input Result has no fields,
+and its sole Float32/Float64 tensor has rank 2..8, positive extents, and at most
+2^40 samples across all descriptor and batch axes. The output retains its sample
+shape, layout, facets, and Result resources. Raw numeric tensors may contain NaN
+or infinity; parameter validation requires finite sigma and cval values. All
+parameters below are mandatory static values; there are no defaults.
 
 | Parameter | Type | Domain |
 | --- | --- | --- |
 | `sigma_x`, `sigma_y` | Float64 | Finite, nonnegative |
 | `radius_x`, `radius_y` | Int64 | Nonnegative; a zero sigma requires zero radius |
-| `x_axis`, `y_axis` | Int64 | Distinct nonnegative axes smaller than rank |
+| `x_axis`, `y_axis` | Int64 | Distinct nonnegative axes in the complete sample shape |
 | `boundary` | String | `constant`, `clamp`, `wrap`, `reflect_half`, `reflect_whole` |
 | `cval` | Float64 | Finite, including when the input is Float32 |
 
 Other axes are independent planes. Channel counts do not trigger color or alpha
-arithmetic. Structurally valid input facets and their resource bindings are
-preserved. CPU Whole publishes a dense generic Value. Input producers may supply
-validated negative/broadcast strides, unaligned offsets and logical origins;
-workflow input bindings retain the kernel's dense external-binding requirements.
+arithmetic. Valid input facets and their resource bindings are retained by Result
+schema cloning. A typed ColorArray v1 input keeps its full batch, channel tuple,
+and ICC profile contract. Result input bindings can expose validated affine or
+paged storage; the kernel reads only the authorized windows supplied by its Need.
+Axis indices address the complete sample shape, with batch axes before descriptor
+axes. For RGBA sample shape {N,L,H,W,4}, y_axis=2 and x_axis=3.
 
-Whole demands the complete input and computes the complete output. Any input edit
-invalidates that output group. It does not expose sparse Regional evaluation.
-All boundary coordinates use the complete logical input shape, including singleton
-axes. CPU indexing uses signed 128-bit intermediates. GPU static table-byte
-admission bounds radii below 2^59, permitting signed 64-bit boundary arithmetic;
-validated byte addresses use modulo-2^64 offset/stride arithmetic.
+Whole and GPU request the complete input tensor and publish the complete output.
+An input edit invalidates the complete output. All boundary coordinates use the
+complete logical input sample shape, including batch axes and singleton axes.
+CPU indexing uses signed 128-bit intermediates. GPU static table-byte admission
+bounds radii below 2^59, permitting signed 64-bit boundary arithmetic; validated
+byte addresses use modulo-2^64 offset/stride arithmetic.
 
 ## Regional execution and dirty propagation
 
-The tiled form computes only requested output observations, including closure of
-atomic trailing axes and structural groups. Its first poll generates the baked
-coefficients under runtime budgets, then declares per-observation Data support.
-Its second poll reads authorized fragments and computes the requested samples.
-It never computes a Whole image for subsequent slicing. Each CPU tile callback
-is single-threaded; streamed execution schedules independent tiles on the shared
-host pool. Collected execution computes bounded tiles serially.
+The tiled form uses Result Dependency-v2 support and the IndependentChunks
+publication policy. It computes only requested output samples and respects
+atomic trailing axes and ColorArray channel tuples when choosing tile boundaries.
+The first tensor Need requests Data, Validation, and Descriptor roles (mask 13);
+later Needs request Data and Validation (mask 5), while descriptor support remains
+independent. The producer generates its coefficients once and retains one
+immutable owner across tile polls. The host's cpu_tiles service runs the granted
+stage; a tile callback does not create worker threads or schedule a concurrent
+window of tiles.
 
-Support is the Cartesian product of the active nonzero taps after boundary
-mapping. Constant, clamp and reflection modes have clipped interval unions;
-wrap can produce two intervals per axis. Other axes preserve their requested
-sample ranges. Coefficients that round to zero contribute no read or dirty edge.
-Retained association rows expose exact support and its transpose. Descriptor
-evidence remains independent of payload reads. Empty output requests validate
-static metadata without allocating coefficient or arithmetic payload.
+The compact Neighborhood relation records active radii without a per-sample
+support table. For each requested sample, the Data relation is the rectangular
+product of nonzero x/y taps after boundary mapping; the symmetric support is
+exact for the clipped or wrapped input coordinates. Coefficients that round to
+zero contribute no read or dirty edge. A separate Validation relation closes
+ColorArray channel tuples and atomic trailing axes, and is united with Data
+support. Descriptor evidence remains independent of sample reads. Empty output
+requests publish an empty Result through a stateless continuation; they skip
+coefficient generation, arithmetic scratch, and input payload access.
 
 ## Numerical execution
 
@@ -89,8 +110,9 @@ floating intermediate.
 Static preparation validates domains and computes checked storage sizes only.
 Coefficients are generated during execution using the managed callback allocator,
 work budget and cancellation token. Their identity derives from the exact static
-parameter bits and operation version. All host ranges in one invocation share
-one immutable coefficient owner; separate invocations generate their own table.
+parameter bits and operation version. One Result continuation retains the
+immutable coefficient owner across polls and CPU ranges; separate executions
+generate their own table.
 There is no hidden global coefficient cache. Each invocation-local arithmetic
 slot builds the exact normalization denominator once for its coefficient table,
 then reuses the denominator while resetting the numerator between samples.
@@ -100,13 +122,15 @@ The kernel grants Whole work to its shared CPU pool. A one-worker configuration
 uses the same calculation. Each live worker slot owns its integer scratch and
 writes disjoint output samples. No private worker pool is created. The synchronous
 range barrier retires every active block before scratch or coefficients release.
-Publication occurs only after successful completion and host failure checks.
-Returned Values retain their storage beyond ExecutionContext lifetime.
+Whole publication occurs only after successful completion and host failure
+checks. Result owners retain output backing and cloned resources beyond
+ExecutionContext lifetime.
 
 Declared workspace includes the coefficient arena, up to 64 arithmetic slots and
-the static radius-derived table size. Tiled workspace uses one arithmetic slot
-per callback and one coefficient owner per tile session. Each actual allocation retains managed
-capacity. The table reservation remains conservative when outer coefficients
+the static radius-derived table size. Tiled workspace uses an arithmetic slot for
+each active callback and reuses the continuation's coefficient owner across
+successive tile polls. Each allocation retains managed capacity. The table
+reservation remains conservative when outer coefficients
 underflow to zero. Arena construction admits 128 bounded slot initializations and
 one rounding-workspace initialization; coefficient refinement and long multiply
 rows poll cancellation.
@@ -116,15 +140,18 @@ bound is `19827 + 204*(nx+ny) + 24140*nx*ny` for active kernel lengths; address 
 read work are added separately. A local credit check covers every subsequent math
 charge and keeps cancellation polling. Unused credit is not refunded. Thus finite
 work limits may reject earlier than actual-limb accounting, while arithmetic
-never spends unadmitted work. Bounded fragment lookup separately prepays authorization scans, fragment
-candidates and logical addressing, and polls cancellation before each candidate.
-Capacity, indexing, cancellation and upstream failures publish no partial Value.
-A streaming sink may already have received earlier complete tiles before a later
-tile fails; the Run then reports failure and drains active stages.
+never spends unadmitted work. Authorized-window lookup separately prepays
+authorization scans, fragment candidates and logical addressing, and polls
+cancellation before each candidate. Capacity, indexing, cancellation and
+upstream failures do not produce a successful final Result. A tiled Result may
+already expose certified chunks when a later tile fails; the execution reports
+failure and drains admitted stages. Empty output requests use a stateless
+continuation to seal an empty Result without allocating coefficient, arithmetic,
+or input payload storage.
 
 ## Native GPU execution
 
-The GPU key has Whole demand and transactional publication. The host generates
+The GPU key has Whole demand and CompleteBundle publication. The host generates
 certified baked64 coefficients under the same runtime budgets. All sample loads,
 boundary mapping, weighted accumulation, special-value selection and final IEEE
 rounding run in the GPU integer kernel. Metal uses MSL; Vulkan uses SPIR-V generated
@@ -154,15 +181,16 @@ admission is 100000 units per tap, plus 4096 initialization units and 131072
 finalization units when those stages occur. Constants/command construction are
 charged separately. Checked static workspace includes this scratch, coefficient
 arena and full radius-derived table reservation. All buffer owners remain live
-through native completion; only the final successful invocation publishes output.
+through native completion; the Result publishes only after the complete invocation
+succeeds.
 
-Vulkan uses 64 output lanes per dispatch and a 512-byte std140 constants buffer. The complete coefficient table is
-bound at byte offset zero; constants provide the original x/y coefficient offsets
-so cropping retains its tap coordinates. The registry key and exact arithmetic are
-shared with Metal. Native Vulkan verification is currently limited to Intel UHD
-770 on FreeBSD; NVIDIA and Linux remain untested. The current submission policy
-groups two ordered dispatches at most, with a maximum of 32 taps per lane per
-submission. Measured timing evidence and its platform limits are recorded below.
+Vulkan uses 64 output lanes per dispatch and a 512-byte std140 constants buffer.
+The complete coefficient table is bound at byte offset zero; constants provide
+the original x/y coefficient offsets so cropping retains its tap coordinates.
+The registry key and exact arithmetic are shared with Metal. Earlier native
+Vulkan verification on FreeBSD Intel UHD 770 belongs to the former Value path.
+The Vulkan implementation remains in source, but its Result migration has not
+been revalidated. The GPU entry has no CPU fallback.
 `tools/compile_builtin_vulkan.py --operator gaussian` generates the SPIR-V with
 Slang 2026.18.2 and checks it with `spirv-val --target-env vulkan1.2`, including
 descriptor bindings, byte-storage types, the constants layout and local size.
@@ -178,6 +206,14 @@ The focused cancellation fixtures measured 9095.35 us from cancel to return on
 FreeBSD Intel Vulkan and 2028.5 us on macOS Metal. Each is one observation, not a
 worst-case bound or latency guarantee. See the [Intel log](../../../out/gpu-whole-tiled/raw/gaussian-cohort-intel-final.log)
 and [Metal log](../../../out/gpu-whole-tiled/raw/gaussian-cohort-metal-final.log).
+
+## Historical performance measurements
+
+The paired arithmetic, dispatch, and cohort measurements below are records from
+Value execution builds before the Result migration. They preserve the workloads
+and platform observations for those builds, but do not describe current Result
+publication, transfer costs, or end-to-end latency. This migration did not run a
+comparable performance benchmark.
 
 ## Paired arithmetic and dispatch measurements
 
@@ -256,8 +292,8 @@ validation ran separately in [the Intel validation log](../../../out/gpu-whole-t
 ## Execution and validation
 
 The [public workflow example](../../../examples/gaussian_workflow/README.md)
-constructs inputs, compiles a graph and compares multi-worker output with a
-separate one-worker execution. The
+binds a Result input, assembles published Result chunks, and compares output with
+a separate one-worker Whole execution. The
 [independent oracle runner](../../../oracle/ops/filter/README.md) uses directed
 MPFR coefficients and exact Fraction output rounding.
 
@@ -270,18 +306,18 @@ python3 oracle/ops/filter/check_gaussian_runtime.py --runner build/kernel-dev/te
 python3 oracle/ops/filter/check_gaussian_runtime.py --runner build/kernel-dev/test_gaussian_gpu
 ```
 
-Tests cover coefficient range/refinement, construction and arithmetic cancellation,
-work/capacity failure, all boundary modes, exceptional values, zero-support poison,
-independent planes, multiple host ranges and nontrivial producer storage layouts.
-Regional tests additionally check exact producer reads, interior/edge ROI,
-per-observation dependency rows and dirty transpose against independent tap
-enumeration. GPU tests require actual native dispatches without fallback and
-compare the same independent oracle, including special values across tap chunks.
-The FreeBSD Intel Vulkan run compares 94 workflows and 707 output bit patterns
-against DirectedMPFR coefficients plus Fraction and IEEE rounding; the focused
-Vulkan test and Mac Metal focused test pass. These fixtures are finite evidence,
-not an exhaustive all-input proof or validation of NVIDIA/Linux GPU support.
-These cohort-1/cohort-2 measurements describe the earlier 64-lane dispatch
-geometry. The newer Metal lane-capacity comparison is reported separately above.
-Performance reports and raw platform evidence are kept in untracked
-`out/gpu-whole-tiled/`; the source example defines reproducible timing boundaries.
+The five focused Gaussian Result tests cover coefficient range/refinement,
+arithmetic, Whole workflow, tiled support, and native GPU execution. Eight
+installed-consumer tests pass, including the standalone example in Whole, tiled,
+and GPU modes. The independent MPFR/Fraction oracle passes 94 workflows and 707
+output words for each of CPU Whole, CPU tiled, and native Metal GPU; coefficient
+validation passes 312 cases.
+
+Typed Result coverage checks retained CMYK ColorArray v1 facets and ICC
+resources, batch axes, a downstream image split, tuple closure, ROI support,
+outside-batch NaN handling, Empty output without payload allocation, and Result
+access after context retirement. These fixtures are finite evidence, not an
+exhaustive all-input proof. Earlier FreeBSD Intel Vulkan oracle results and timing
+records above belong to Value execution and do not validate the migrated Vulkan
+Result path. The raw performance reports are retained under ignored
+`out/gpu-whole-tiled/`; they do not report performance for this Result migration.

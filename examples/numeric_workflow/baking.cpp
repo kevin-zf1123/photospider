@@ -1,7 +1,6 @@
 #include <fenv.h>  // NOLINT(build/c++11)
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -12,15 +11,17 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/numeric/lut1d.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
+#include "result_fixture.hpp"     // NOLINT(build/include_subdir)
 
 namespace {
+namespace rf = numeric_result_fixture;
 void require(bool condition, const char* message) {
   if (!condition)
     throw std::runtime_error(message);
@@ -68,7 +69,6 @@ struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
   ps::numeric::BakedLut1d baked;
   std::string expression = "x^2";
   std::map<std::string, ps::WorkflowInput> coefficients;
@@ -110,13 +110,43 @@ struct Fixture {
                 doubles({3}, {0, 1, 2}), doubles({3, 2}, {0, 4, 1, 3, 4, 0})};
       expected = {.3125, 3.6875, 2.1875, 1.8125};
     }
-    for (unsigned i = 0; i < inputs.size(); ++i) {
-      const auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1, name, inputs[i].descriptor(),
-                                 inputs[i].region(), inputs[i].layout(),
-                                 inputs[i].facets()});
-      bindings.inputs.push_back({name, inputs[i]});
+    rf::declare_sources(&document, inputs);
+  }
+  ps::Result<ps::ExecutionBindings> bindings(
+      const ps::ResourceBudget& root) const {
+    ps::ExecutionBindings bindings;
+    for (std::size_t i = 0; i < inputs.size(); ++i) {
+      const auto& schema = *document.inputs[i].result_schema;
+      auto builder =
+          ps::ResultBuilder::start(root, schema, "manual.bake.source", {}, {},
+                                   128, 128, inputs[i].resources());
+      if (!builder.ok())
+        return ps::Result<ps::ExecutionBindings>(builder.status());
+      auto writable = builder.take_value();
+      auto descriptor = ps::ResultRelation::cartesian(root, 1, {});
+      if (!descriptor.ok())
+        return ps::Result<ps::ExecutionBindings>(descriptor.status());
+      auto status = writable.bind_descriptor_relation(descriptor.take_value());
+      if (!status.ok())
+        return ps::Result<ps::ExecutionBindings>(status);
+      auto count = schema.tensors[0].sample_count();
+      if (!count.ok())
+        return ps::Result<ps::ExecutionBindings>(count.status());
+      auto relation = ps::ResultRelation::cartesian(root, count.value(), {});
+      if (!relation.ok())
+        return ps::Result<ps::ExecutionBindings>(relation.status());
+      status = writable.publish_tensor(
+          0, inputs[i].region(), inputs[i].layout(), inputs[i].storage(),
+          relation.take_value(), {true, true, true, true});
+      if (!status.ok())
+        return ps::Result<ps::ExecutionBindings>(status);
+      auto published = writable.seal();
+      if (!published.ok())
+        return ps::Result<ps::ExecutionBindings>(published.status());
+      bindings.inputs.push_back(
+          {document.inputs[i].name, published.take_value()});
     }
+    return ps::Result<ps::ExecutionBindings>(std::move(bindings));
   }
   std::vector<std::uint64_t> shape() const {
     return kind >= 4 ? std::vector<std::uint64_t>{count, columns}
@@ -210,7 +240,10 @@ struct Fixture {
     config.managed_resources = ps::ResourceLimits{};
     config.managed_resources->maximum_work = work;
     ps::ExecutionContext context(registry, config);
-    auto frozen = context.freeze(plan.value().plan, bindings);
+    auto published = bindings(take(context.resource_budget()));
+    if (!published.ok())
+      return ps::Result<ps::DemandResult>(published.status());
+    auto frozen = context.freeze(plan.value().plan, published.value());
     if (!frozen.ok())
       return ps::Result<ps::DemandResult>(frozen.status());
     return context.execute_fragments(frozen.value(), query, cancellation,
@@ -227,38 +260,42 @@ ps::Footprint region(const std::vector<std::uint64_t>& shape,
                      std::vector<ps::Region> boxes) {
   return take(ps::Footprint::from_regions(shape, std::move(boxes)));
 }
-void check_value(const ps::ValueFragments& values,
+void check_value(const ps::ResultRef& values,
                  const std::vector<std::uint64_t>& at, double expected) {
   std::uint64_t bits = 0;
-  const auto width = ps::Value::element_size(values.descriptor().element_type);
+  const auto width = ps::Value::element_size(
+      values.schema().tensors[0].descriptor.element_type);
   std::uint64_t want = raw(expected);
   if (width == 4) {
     float f = static_cast<float>(expected);
     want = 0;
     std::memcpy(&want, &f, 4);
   }
-  require(values.read(at, &bits, width).ok() && bits == want,
+  require(rf::read(values, at, &bits, width).ok() && bits == want,
           "baking expected bits");
 }
 void compare(const ps::DemandResult& generated,
              const ps::DemandResult& explicit_result) {
-  require(generated.values.size() == explicit_result.values.size(),
+  require(generated.results.size() == explicit_result.results.size(),
           "export count equivalence");
-  for (const auto& item : generated.values) {
-    const auto& other = explicit_result.values.at(item.first);
-    require(item.second.descriptor().shape == other.descriptor().shape &&
-                item.second.descriptor().element_type ==
-                    other.descriptor().element_type &&
-                item.second.coverage() == other.coverage(),
+  for (const auto& item : generated.results) {
+    const auto& other = explicit_result.results.at(item.first);
+    const auto& spec = item.second.schema().tensors[0];
+    const auto& other_spec = other.schema().tensors[0];
+    const auto coverage = take(item.second.descriptor()).tensor_coverage(0);
+    require(spec.sample_shape() == other_spec.sample_shape() &&
+                spec.descriptor.element_type ==
+                    other_spec.descriptor.element_type &&
+                coverage == take(other.descriptor()).tensor_coverage(0),
             "bake descriptor/coverage equivalence");
-    require(item.second.coverage()
+    require(coverage
                 .visit(
                     [&](const auto& at) {
                       std::uint64_t a = 0, b = 0;
-                      auto width = ps::Value::element_size(
-                          item.second.descriptor().element_type);
-                      require(item.second.read(at, &a, width).ok() &&
-                                  other.read(at, &b, width).ok() && a == b,
+                      auto width =
+                          ps::Value::element_size(spec.descriptor.element_type);
+                      require(rf::read(item.second, at, &a, width).ok() &&
+                                  rf::read(other, at, &b, width).ok() && a == b,
                               "bake exact graph equivalence");
                       return ps::Status::success();
                     },
@@ -270,10 +307,12 @@ void compare(const ps::DemandResult& generated,
   require(sources == take(explicit_result.dependencies.source_support()),
           "bake source support equivalence");
   for (const auto& source : sources)
-    require(take(generated.dependencies.potential_dirty(source.first,
-                                                        source.second)) ==
+    require(take(generated.dependencies.potential_dirty(
+                std::string(source.first.data(), source.first.size()),
+                source.second)) ==
                 take(explicit_result.dependencies.potential_dirty(
-                    source.first, source.second)),
+                    std::string(source.first.data(), source.first.size()),
+                    source.second)),
             "bake dirty equivalence");
 }
 void graph_equivalence(ps::CpuNumericProfile profile) {
@@ -288,9 +327,8 @@ void graph_equivalence(ps::CpuNumericProfile profile) {
       for (auto* f : {&generated, &manual}) {
         auto input = array(ps::ElementType::Float32, {1}, {bits});
         f->inputs[0] = input;
-        f->bindings.inputs[0].value = input;
-        f->document.inputs[0].descriptor = input.descriptor();
-        f->document.inputs[0].layout = input.layout();
+        f->document.inputs[0].result_schema =
+            std::make_shared<ps::SchemaTemplate>(rf::source_schema(input));
       }
       generated.build();
       manual.build(true);
@@ -300,7 +338,7 @@ void graph_equivalence(ps::CpuNumericProfile profile) {
         auto traits = take(generated.registry->find_traits(node.operation));
         for (const auto& output : traits.outputs)
           require(output.region_rule == ps::OperationRegionRule::Whole &&
-                      output.dependency_version == 0,
+                      output.dependency_version == 2,
                   "all expanded formal source outputs use Whole");
       }
       for (unsigned mode = 0; mode < 4; ++mode) {
@@ -321,10 +359,16 @@ void graph_equivalence(ps::CpuNumericProfile profile) {
         auto actual = take(generated.run(query, budgets()));
         auto expected = take(manual.run(query, budgets()));
         compare(actual, expected);
+        for (const auto& output : actual.results) {
+          const auto shape = output.second.schema().tensors[0].sample_shape();
+          require(take(output.second.descriptor()).tensor_coverage(0) ==
+                      take(ps::Footprint::all(shape)),
+                  "sparse baking returns full Whole coverage");
+        }
         if (mode == 0) {
           for (unsigned i = 0; i < generated.count; ++i)
             for (unsigned c = 0; c < generated.columns; ++c)
-              check_value(actual.values.at("values"),
+              check_value(actual.results.at("values"),
                           kind >= 4 ? std::vector<std::uint64_t>{i, c}
                                     : std::vector<std::uint64_t>{i},
                           generated.expected[i * generated.columns + c]);
@@ -341,34 +385,46 @@ void graph_equivalence(ps::CpuNumericProfile profile) {
       << "six generated/explicit graphs, analytic values, mixed endpoints, "
          "both dtypes, independent outputs and sparse witnesses passed\n";
 }
+struct FailedSource final {
+  unsigned* calls;
+  explicit FailedSource(unsigned* counter) : calls(counter) {}
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase&) {
+    ++*calls;
+    return ps::Result<ps::ResultProgramPoll>(
+        ps::Status{ps::ErrorCode::OperationFailed, "required baking producer"});
+  }
+};
 void replace_with_failure(Fixture* fixture, unsigned input, unsigned* calls) {
   auto registry = ps::make_default_operation_registry(false);
   ps::OperationDefinition operation;
   operation.key = "manual.bake_failure";
   operation.traits.input_count = 0;
   operation.traits.input_schema.clear();
-  operation.traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
-  operation.traits.outputs[0].fixed_output_shape =
-      fixture->inputs[input].descriptor().shape;
-  operation.traits.outputs[0].output_element_type =
-      fixture->inputs[input].descriptor().element_type;
-  operation.callback = [calls](const auto&) {
-    ++*calls;
-    return ps::Result<ps::Value>(
-        ps::Status{ps::ErrorCode::OperationFailed, "required baking producer"});
+  auto& output = operation.traits.outputs[0];
+  output.region_rule = ps::OperationRegionRule::Whole;
+  output.output_schema.kind = ps::OperationPortKind::Result;
+  auto schema = *fixture->document.inputs[input].result_schema;
+  output.output_schema.result_schema_id = schema.id;
+  output.output_schema.result_schema_version = schema.version;
+  output.result_schema = std::move(schema);
+  output.continuation_bytes = sizeof(FailedSource);
+  output.maximum_dependency_stages = 8;
+  operation.start_result = [calls](const auto&, const auto& allocator) {
+    return ps::ResultContinuation::make<FailedSource>(allocator, calls);
   };
   require(registry->register_operation(std::move(operation)).ok() &&
               registry->freeze().ok(),
           "bake failing producer registry");
   fixture->registry = registry;
+  const auto input_id = fixture->document.inputs[input].id;
   for (auto& node : fixture->document.nodes)
     for (auto& edge : node.inputs)
       if (auto* ref = std::get_if<ps::WorkflowInputReference>(&edge);
-          ref && ref->input_id == input + 1)
+          ref && ref->input_id == input_id)
         edge = ps::WorkflowNodeOutput{100, "value"};
   fixture->document.nodes.push_back({100, "manual.bake_failure", {}, {}});
   fixture->document.inputs.erase(fixture->document.inputs.begin() + input);
-  fixture->bindings.inputs.erase(fixture->bindings.inputs.begin() + input);
+  fixture->inputs.erase(fixture->inputs.begin() + input);
 }
 void source_semantics(ps::CpuNumericProfile profile) {
   for (unsigned kind = 0; kind < 6; ++kind) {
@@ -383,13 +439,13 @@ void source_semantics(ps::CpuNumericProfile profile) {
                       budgets()));
     require(calls == 0, "all six N1 skip failing end");
     for (unsigned c = 0; c < singleton.columns; ++c)
-      check_value(both.values.at("values"),
+      check_value(both.results.at("values"),
                   kind >= 4 ? std::vector<std::uint64_t>{0, c}
                             : std::vector<std::uint64_t>{0},
                   singleton.expected[c]);
-    check_value(both.values.at("axis"), {0}, kind == 5 ? .5 : 0);
-    check_value(both.values.at("axis"), {1}, kind == 5 ? .5 : 0);
-    check_value(both.values.at("axis"), {2}, 0);
+    check_value(both.results.at("axis"), {0}, kind == 5 ? .5 : 0);
+    check_value(both.results.at("axis"), {1}, kind == 5 ? .5 : 0);
+    check_value(both.results.at("axis"), {2}, 0);
     Fixture first(kind, profile);
     first.build();
     calls = 0;
@@ -410,18 +466,20 @@ void source_semantics(ps::CpuNumericProfile profile) {
       isolated.coefficients = {{"a", ps::WorkflowInputReference{3}}};
       auto coefficient = doubles({1}, {1});
       isolated.inputs.push_back(coefficient);
-      isolated.document.inputs.push_back({3,
-                                          "input2",
-                                          coefficient.descriptor(),
-                                          coefficient.region(),
-                                          coefficient.layout(),
-                                          {}});
-      isolated.bindings.inputs.push_back({"input2", coefficient});
+      isolated.document.inputs.push_back({3, "input2",
+                                          std::make_shared<ps::SchemaTemplate>(
+                                              rf::source_schema(coefficient))});
       bad_source = 2;
     }
     isolated.build();
     calls = 0;
     replace_with_failure(&isolated, bad_source, &calls);
+    auto empty = take(
+        isolated.run({{"values", region(isolated.shape(), {})}}, budgets()));
+    require(calls == 0 && take(empty.results.at("values").descriptor())
+                              .tensor_coverage(0)
+                              .empty(),
+            "empty bake does not poll failing function producer");
     auto axis = take(
         isolated.run({{"axis", take(ps::Footprint::all({3}))}}, budgets()));
     require(calls == 0, "axis ignores failing function producer");
@@ -433,7 +491,6 @@ void source_semantics(ps::CpuNumericProfile profile) {
             "values preserve function producer failure");
     Fixture equal(kind, profile);
     equal.inputs[1] = equal.inputs[0];
-    equal.bindings.inputs[1].value = equal.inputs[1];
     equal.build();
     auto repeated =
         equal.run({{"values", take(ps::Footprint::all(equal.shape()))},
@@ -447,11 +504,11 @@ void source_semantics(ps::CpuNumericProfile profile) {
       auto result = take(std::move(repeated));
       for (unsigned i = 0; i < equal.count; ++i)
         for (unsigned c = 0; c < equal.columns; ++c)
-          check_value(result.values.at("values"),
+          check_value(result.results.at("values"),
                       kind >= 4 ? std::vector<std::uint64_t>{i, c}
                                 : std::vector<std::uint64_t>{i},
                       equal.expected[c]);
-      check_value(result.values.at("axis"), {2}, 0);
+      check_value(result.results.at("axis"), {2}, 0);
     }
   }
   std::cout
@@ -462,69 +519,119 @@ void dynamic_and_limits(ps::CpuNumericProfile profile) {
   for (unsigned kind = 0; kind < 6; ++kind) {
     Fixture fixture(kind, profile);
     fixture.build();
+    if (kind >= 2)
+      fixture.document.outputs.push_back(
+          {"query_values", fixture.document.nodes.front().id, "values"});
     ps::GraphContext graph(fixture.document);
     auto plan = take(ps::Compiler(fixture.registry).compile(graph));
-    ps::InputSnapshotStore store;
-    for (auto& binding : fixture.bindings.inputs) {
-      binding.snapshot = std::make_shared<const ps::InputSnapshot>(
-          take(store.import_value(binding.value)));
-      binding.value = {};
-    }
     ps::ExecutionContextConfig config;
     config.cpu_workers = 1;
     config.result_cache_bytes = 4 * 1024 * 1024;
     config.maximum_live_bytes = 8 * 1024 * 1024;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(fixture.registry, config);
-    auto demand = take(context.open_demand(plan.plan, fixture.bindings));
+    const auto root = take(context.resource_budget());
+    auto bindings = take(fixture.bindings(root));
+    auto demand = take(context.open_demand(plan.plan, bindings));
+    std::vector<std::shared_ptr<const ps::PreparedOperation>> preparations;
+    for (const auto& step : plan.plan.steps()) {
+      require(step.prepared != nullptr, "bake static preparation exists");
+      preparations.push_back(step.prepared);
+    }
     auto options = budgets();
     options.maximum_dependency_cache_work = 128 * 1024 * 1024;
     ps::DemandQuery query{{"values", take(ps::Footprint::all(fixture.shape()))},
                           {"axis", take(ps::Footprint::all({3}))}};
-    take(demand.request(query, {}, options));
-    require(take(demand.request(query, {}, options)).diagnostics.cache_hits > 0,
-            "bake warm cache");
-    fixture.bindings.inputs[0].snapshot =
-        std::make_shared<const ps::InputSnapshot>(
-            take(store.import_value(fixture.inputs[1])));
-    fixture.bindings.inputs[1].snapshot =
-        std::make_shared<const ps::InputSnapshot>(
-            take(store.import_value(fixture.inputs[0])));
-    require(demand.replace_bindings(fixture.bindings).ok(),
-            "replace bake endpoints");
+    if (kind >= 2)
+      query.emplace("query_values", take(ps::Footprint::all({fixture.count})));
+    const auto first = take(demand.request(query, {}, options));
+    const auto repeated = take(demand.request(query, {}, options));
+    for (const auto* key : {"values", "axis"})
+      require(first.results.at(key).object_id() ==
+                  repeated.results.at(key).object_id(),
+              "repeated bake demand keeps completed Results");
+    const auto fresh = take(fixture.bindings(root));
+    const auto warm = take(context.execute_fragments(
+        take(context.freeze(plan.plan, fresh)), query, {}, options));
+    require(warm.diagnostics.cache_hits == (kind >= 2 ? 3 : 2),
+            "fresh source Results reuse baked values and axis");
+    for (const auto& item : warm.results) {
+      const auto* key = item.first.c_str();
+      require(
+          rf::bytes(first.results.at(key)) == rf::bytes(warm.results.at(key)),
+          "bake content cache retains bits");
+      const auto association = warm.results.at(key).association();
+      for (unsigned port = 0; port < fresh.inputs.size(); ++port) {
+        const bool function_values = std::strcmp(key, "values") == 0;
+        if ((!function_values && port >= 2) ||
+            (function_values && kind >= 2 && port < 2))
+          continue;
+        require(std::find(association.begin(), association.end(),
+                          fresh.inputs[port].result.object_id()) !=
+                        association.end() &&
+                    std::find(association.begin(), association.end(),
+                              bindings.inputs[port].result.object_id()) ==
+                        association.end(),
+                "bake cached associations use current active sources");
+      }
+    }
+    if (kind >= 2) {
+      const auto association = warm.results.at("values").association();
+      require(std::find(association.begin(), association.end(),
+                        warm.results.at("query_values").object_id()) !=
+                      association.end() &&
+                  std::find(association.begin(), association.end(),
+                            first.results.at("query_values").object_id()) ==
+                      association.end(),
+              "cached baked table associates the current intermediate query");
+    }
+    bindings.inputs[0].result = point_math_checks::source(
+        root, fixture.inputs[1],
+        fixture.document.inputs[0].result_schema.get());
+    bindings.inputs[1].result = point_math_checks::source(
+        root, fixture.inputs[0],
+        fixture.document.inputs[1].result_schema.get());
+    require(demand.replace_bindings(bindings).ok(), "replace bake endpoints");
+    for (std::size_t i = 0; i < preparations.size(); ++i)
+      require(plan.plan.steps()[i].prepared == preparations[i],
+              "bake endpoint replacement reuses static preparation");
     auto reversed = take(demand.request(query, {}, options));
     for (unsigned i = 0; i < fixture.count; ++i)
       for (unsigned c = 0; c < fixture.columns; ++c)
         check_value(
-            reversed.values.at("values"),
+            reversed.results.at("values"),
             kind >= 4 ? std::vector<std::uint64_t>{i, c}
                       : std::vector<std::uint64_t>{i},
             fixture.expected[(fixture.count - 1 - i) * fixture.columns + c]);
     double a = 0, b = 0;
     std::memcpy(&a, fixture.inputs[0].bytes().data(), 8);
     std::memcpy(&b, fixture.inputs[1].bytes().data(), 8);
-    check_value(reversed.values.at("axis"), {0}, b);
-    check_value(reversed.values.at("axis"), {1}, a);
-    check_value(reversed.values.at("axis"), {2}, (a - b) / (fixture.count - 1));
+    check_value(reversed.results.at("axis"), {0}, b);
+    check_value(reversed.results.at("axis"), {1}, a);
+    check_value(reversed.results.at("axis"), {2},
+                (a - b) / (fixture.count - 1));
     Fixture limits(kind, profile);
     limits.build();
     auto limited = budgets();
     limited.dependencies.maximum_work = 1;
-    auto exhausted = limits.run(query, limited, 8 * 1024 * 1024, {}, 1);
+    auto bounded_query = query;
+    bounded_query.erase("query_values");
+    auto exhausted = limits.run(bounded_query, limited, 8 * 1024 * 1024, {}, 1);
     require(!exhausted.ok() &&
-                exhausted.status().code == ps::ErrorCode::ResourceExhausted,
+                exhausted.status().code == ps::ErrorCode::ResourceExhausted &&
+                exhausted.status().reason == ps::FailureReason::WorkLimit,
             "bake source work failure");
-    exhausted = limits.run(query, budgets(), 1);
+    exhausted = limits.run(bounded_query, budgets(), 1);
     require(!exhausted.ok() &&
                 exhausted.status().code == ps::ErrorCode::ResourceExhausted,
             "bake shared payload cap");
     ps::CancellationSource cancellation;
     cancellation.cancel();
-    auto failed =
-        limits.run(query, budgets(), 8 * 1024 * 1024, cancellation.token());
+    auto failed = limits.run(bounded_query, budgets(), 8 * 1024 * 1024,
+                             cancellation.token());
     require(!failed.ok() && failed.status().code == ps::ErrorCode::Cancelled,
             "bake cancellation propagation");
-    require(limits.run(query, budgets()).ok(),
+    require(limits.run(bounded_query, budgets()).ok(),
             "bake recovery after bounded failures");
   }
   Fixture sparse(5, profile);
@@ -533,9 +640,11 @@ void dynamic_and_limits(ps::CpuNumericProfile profile) {
   auto q = region(sparse.shape(), {ps::Region({{0, 1}, {1, 1}}),
                                    ps::Region({{1048575, 1}, {1, 1}})});
   auto result = sparse.run({{"values", q}}, budgets(), 1024 * 1024);
-  require(
-      !result.ok() && result.status().code == ps::ErrorCode::ResourceExhausted,
-      "million-row sparse bake requires complete query and table payload");
+  require(!result.ok() &&
+              result.status().code == ps::ErrorCode::ResourceExhausted &&
+              result.status().reason == ps::FailureReason::CapacityLimit &&
+              result.status().detail.node_id == 1,
+          "million-row sparse bake requires complete query and table payload");
   std::cout << "six cached reversed bindings, work/payload/cancel recovery and "
                "full-output budget passed\n";
 }
@@ -543,7 +652,6 @@ void dynamic_and_limits(ps::CpuNumericProfile profile) {
 void layouts_and_active_cancellation(ps::CpuNumericProfile profile) {
   for (unsigned kind = 0; kind < 6; ++kind) {
     Fixture fixture(kind, profile);
-    ps::InputSnapshotStore snapshots;
     for (unsigned port = 0; port < fixture.inputs.size(); ++port) {
       const auto& input = fixture.inputs[port];
       const auto width =
@@ -565,64 +673,82 @@ void layouts_and_active_cancellation(ps::CpuNumericProfile profile) {
       auto view = take(ps::Value::from_storage(
           input.descriptor(), input.region(),
           {1 + (count - 1) * width, strides}, std::move(storage).freeze()));
-      fixture.bindings.inputs[port].snapshot =
-          std::make_shared<const ps::InputSnapshot>(
-              take(snapshots.import_value(view)));
-      fixture.bindings.inputs[port].value = {};
+      fixture.inputs[port] = std::move(view);
     }
     fixture.build();
-    auto result = take(fixture.run(
-        {{"values", take(ps::Footprint::all(fixture.shape()))}}, budgets()));
-    for (unsigned i = 0; i < fixture.count; ++i)
-      for (unsigned c = 0; c < fixture.columns; ++c)
-        check_value(result.values.at("values"),
-                    kind >= 4 ? std::vector<std::uint64_t>{i, c}
-                              : std::vector<std::uint64_t>{i},
-                    fixture.expected[i * fixture.columns + c]);
-    Fixture active(kind, profile);
-    active.count = 4097;
-    active.build();
-    ps::GraphContext graph(active.document);
-    auto plan = take(ps::Compiler(active.registry).compile(graph));
-    ps::ExecutionContextConfig config;
-    config.cpu_workers = 1;
-    config.result_cache_bytes = 0;
-    config.maximum_live_bytes = 8 * 1024 * 1024;
-    config.managed_resources = ps::ResourceLimits{};
-    ps::ExecutionContext context(active.registry, config);
-    auto frozen = take(context.freeze(plan.plan, active.bindings));
-    auto budget = take(context.resource_budget());
-    const auto work = budget.statistics().issued.work;
-    ps::CancellationSource cancel;
-    std::atomic<bool> done{false};
-    std::thread watcher([&] {
-      while (!done.load() && budget.statistics().issued.work < work + 10000)
-        std::this_thread::yield();
-      if (!done.load())
-        cancel.cancel();
-    });
-    ps::Result<ps::DemandResult> cancelled(
-        ps::Status{ps::ErrorCode::Internal, "not executed"});
-    try {
-      cancelled = context.execute_fragments(
-          frozen, {{"values", take(ps::Footprint::all(active.shape()))}},
-          cancel.token(), budgets());
-    } catch (...) {
-      done.store(true);
-      watcher.join();
-      throw;
+    const auto original_document = fixture.document;
+    for (const auto rounding :
+         {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+      fixture.document = original_document;
+      fixture.registry = ps::make_default_operation_registry(false);
+      auto control = std::make_shared<point_math_checks::Control>();
+      control->rounding = rounding;
+      for (auto& node : fixture.document.nodes)
+        node = point_math_checks::checked_node(fixture.registry, node, control);
+      require(fixture.registry->freeze().ok(), "freeze baking fenv adapters");
+      fenv_t saved;
+      require(fegetenv(&saved) == 0 && fesetround(rounding) == 0 &&
+                  feclearexcept(FE_ALL_EXCEPT) == 0 &&
+                  feraiseexcept(FE_DIVBYZERO) == 0,
+              "set baking caller fenv");
+      auto result = take(fixture.run(
+          {{"values", take(ps::Footprint::all(fixture.shape()))}}, budgets()));
+      require(fegetround() == rounding &&
+                  fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO &&
+                  control->computation_polls > 0,
+              "baking caller and actual worker fenv preserved");
+      require(fesetenv(&saved) == 0, "restore baking caller fenv");
+      for (unsigned i = 0; i < fixture.count; ++i)
+        for (unsigned c = 0; c < fixture.columns; ++c)
+          check_value(result.results.at("values"),
+                      kind >= 4 ? std::vector<std::uint64_t>{i, c}
+                                : std::vector<std::uint64_t>{i},
+                      fixture.expected[i * fixture.columns + c]);
     }
-    done.store(true);
-    watcher.join();
-    require(!cancelled.ok() &&
-                cancelled.status().code == ps::ErrorCode::Cancelled &&
-                budget.statistics().issued.work >= work + 10000 &&
-                budget.statistics().live[ps::ResourceKind::Payload] == 0,
-            "active cancellation releases complete template intermediates");
+    for (const bool cancel : {false, true}) {
+      Fixture active(kind, profile);
+      active.count = 4097;
+      active.build();
+      auto control = std::make_shared<point_math_checks::Control>();
+      if (cancel)
+        control->cancel_after = 32;
+      else
+        control->maximum_work = 32;
+      active.registry = ps::make_default_operation_registry(false);
+      for (auto& node : active.document.nodes)
+        node = point_math_checks::checked_node(active.registry, node, control);
+      require(active.registry->freeze().ok(),
+              "freeze baking cancellation adapters");
+      ps::GraphContext graph(active.document);
+      auto plan = take(ps::Compiler(active.registry).compile(graph));
+      ps::ExecutionContextConfig config;
+      config.cpu_workers = 1;
+      config.result_cache_bytes = 0;
+      config.maximum_live_bytes = 8 * 1024 * 1024;
+      config.managed_resources = ps::ResourceLimits{};
+      ps::ExecutionContext context(active.registry, config);
+      auto frozen = take(context.freeze(
+          plan.plan, take(active.bindings(take(context.resource_budget())))));
+      auto budget = take(context.resource_budget());
+      auto cancelled = context.execute_fragments(
+          frozen, {{"values", take(ps::Footprint::all(active.shape()))}},
+          control->cancellation.token(), budgets());
+      require(
+          !cancelled.ok() && control->computation_polls > 0 &&
+              (cancel ? cancelled.status().code == ps::ErrorCode::Cancelled &&
+                            control->work >= 32
+                      : cancelled.status().code ==
+                                ps::ErrorCode::ResourceExhausted &&
+                            cancelled.status().reason ==
+                                ps::FailureReason::WorkLimit) &&
+              budget.statistics().live[ps::ResourceKind::Payload] == 0,
+          "actual computation work/cancellation releases template "
+          "intermediates");
+    }
   }
-  std::cout << "six templates all-port reversed/unaligned/scalar-zero snapshot "
-               "imports "
-               "and active cancellation passed\n";
+  std::cout << "six templates all-port reversed/unaligned/scalar-zero Result "
+               "sources, caller/worker fenv and computation work/cancellation "
+               "passed\n";
 }
 
 void reusable_exports(ps::CpuNumericProfile profile) {
@@ -642,28 +768,102 @@ void reusable_exports(ps::CpuNumericProfile profile) {
                         {"offset_values", take(ps::Footprint::all({3}))},
                         {"offset_axis", take(ps::Footprint::all({3}))}},
                        budgets()));
-  check_value(result.values.at("values"), {1}, .25);
-  check_value(result.values.at("offset_values"), {1}, 1.5);
-  check_value(result.values.at("offset_axis"), {2}, .5);
+  check_value(result.results.at("values"), {1}, .25);
+  check_value(result.results.at("offset_values"), {1}, 1.5);
+  check_value(result.results.at("offset_axis"), {2}, .5);
   Fixture single_column(4, profile);
   single_column.columns = 1;
   auto y = doubles({2, 1}, {0, 2});
   single_column.inputs[3] = y;
-  single_column.bindings.inputs[3].value = y;
-  single_column.document.inputs[3] = {4,          "input3",   y.descriptor(),
-                                      y.region(), y.layout(), {}};
+  single_column.document.inputs[3].result_schema =
+      std::make_shared<ps::SchemaTemplate>(rf::source_schema(y));
   single_column.build();
   auto column = take(single_column.run(
       {{"values", take(ps::Footprint::all({3, 1}))}}, budgets()));
-  require(column.values.at("values").descriptor().shape ==
+  require(column.results.at("values").schema().tensors[0].sample_shape() ==
               std::vector<std::uint64_t>{3, 1},
           "multi bake retains C1");
-  check_value(column.values.at("values"), {1, 0}, 1);
+  check_value(column.results.at("values"), {1, 0}, 1);
   std::cout << "multiple reusable named exports and multi C1 shape passed\n";
+}
+void retained_outputs(ps::CpuNumericProfile profile) {
+  for (unsigned kind = 0; kind < 6; ++kind)
+    for (const auto dtype :
+         {ps::ElementType::Float32, ps::ElementType::Float64}) {
+      ps::ResourceBudget root;
+      ps::ResultRef values, axis;
+      ps::ResultTensorReadWindow values_window, axis_window;
+      std::vector<std::weak_ptr<const ps::CpuStorage>> input_owners;
+      std::vector<std::uint64_t> shape;
+      std::uint64_t payload = 0;
+      double first = 0;
+      {
+        Fixture fixture(kind, profile, dtype);
+        fixture.build();
+        shape = fixture.shape();
+        first = fixture.expected[0];
+        payload =
+            fixture.count * fixture.columns * ps::Value::element_size(dtype);
+        for (const auto& input : fixture.inputs)
+          input_owners.push_back(input.storage());
+        ps::GraphContext graph(fixture.document);
+        auto plan = take(ps::Compiler(fixture.registry).compile(graph));
+        ps::ExecutionContextConfig config;
+        config.cpu_workers = 1;
+        config.result_cache_bytes = 0;
+        config.maximum_live_bytes = 8 * 1024 * 1024;
+        config.managed_resources = ps::ResourceLimits{};
+        ps::ExecutionContext context(fixture.registry, config);
+        root = take(context.resource_budget());
+        auto frozen =
+            take(context.freeze(plan.plan, take(fixture.bindings(root))));
+        auto result = take(context.execute_fragments(
+            frozen,
+            {{"values", take(ps::Footprint::all(shape))},
+             {"axis", take(ps::Footprint::all({3}))}},
+            {}, budgets()));
+        values = result.results.at("values");
+        axis = result.results.at("axis");
+        values_window = take(values.acquire_tensor(take(values.descriptor()), 0,
+                                                   ps::Region::whole(shape)));
+        axis_window = take(axis.acquire_tensor(take(axis.descriptor()), 0,
+                                               ps::Region::whole({3})));
+      }
+      for (const auto& input : input_owners)
+        require(input.expired(), "baked outputs retire every source backing");
+      require(root.statistics().live[ps::ResourceKind::Payload] == payload + 24,
+              "baked Result/window pairs share independent packed owners");
+      const std::vector<std::uint64_t> at(shape.size(), 0);
+      check_value(values, at, first);
+      check_value(axis, {0}, kind == 5 ? .5 : 0);
+      values = {};
+      axis = {};
+      std::uint64_t bits = 0;
+      const auto width = ps::Value::element_size(dtype);
+      std::memcpy(&bits, take(values_window.row_run(at)).data, width);
+      auto want = raw(first);
+      if (width == 4) {
+        const float f = static_cast<float>(first);
+        want = 0;
+        std::memcpy(&want, &f, 4);
+      }
+      require(bits == want, "baked values window outlives Result");
+      std::memcpy(&bits, take(axis_window.row_run({0})).data, 8);
+      require(bits == raw(kind == 5 ? .5 : 0),
+              "baked axis window outlives Result");
+      values_window = {};
+      require(root.statistics().live[ps::ResourceKind::Payload] == 24,
+              "releasing baked values preserves independent axis owner");
+      axis_window = {};
+      point_math_checks::released(root);
+    }
+  std::cout << "six templates Float32/64 source retirement, independent Result/"
+               "window owners and final all-Root release passed\n";
 }
 void authoring_boundaries() {
   using ps::numeric::SequenceInput;
-  const ps::ValueDescriptor scalar{ps::ElementType::Float64, {1}};
+  const auto scalar = std::make_shared<ps::SchemaTemplate>(
+      rf::source_schema(doubles({1}, {0})));
   SequenceInput start{ps::WorkflowNodeOutput{4, "values"}, scalar},
       end{ps::WorkflowNodeOutput{5, "values"}, scalar};
   ps::WorkflowDocument graph;
@@ -689,7 +889,8 @@ void authoring_boundaries() {
   for (unsigned kind = 0; kind < 5; ++kind) {
     auto badstart = start;
     if (kind == 0)
-      badstart.descriptor.shape = {2};
+      badstart.result_schema = std::make_shared<ps::SchemaTemplate>(
+          rf::source_schema(doubles({2}, {0, 1})));
     auto failed = ps::numeric::bake_lut1d_expression(
         graph, kind == 1 ? "a+" : "x", badstart, end, kind == 2 ? 0 : 3, {},
         kind == 3 ? ps::ElementType::Int64 : ps::ElementType::Float64,
@@ -725,6 +926,8 @@ void authoring_boundaries() {
 int main(int argc, char** argv) {
   try {
     const std::string selected = argc > 1 ? argv[1] : "strict";
+    require(selected == "strict" || selected == "apple" || selected == "x86",
+            "profile must be strict/apple/x86");
     const auto profile = selected == "strict" ? ps::CpuNumericProfile::Strict
                          : selected == "apple"
                              ? ps::CpuNumericProfile::AppleSiliconNeon
@@ -734,6 +937,7 @@ int main(int argc, char** argv) {
     dynamic_and_limits(profile);
     layouts_and_active_cancellation(profile);
     reusable_exports(profile);
+    retained_outputs(profile);
     authoring_boundaries();
     return 0;
   } catch (const std::exception& error) {

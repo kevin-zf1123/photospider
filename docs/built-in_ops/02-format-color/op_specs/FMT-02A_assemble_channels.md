@@ -13,18 +13,18 @@ implemented_operation_keys:
   - channel.assemble_strict
   - channel.assemble_accelerated_apple_silicon
   - channel.assemble_accelerated_x86_64
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-02A: assemble single components along a new channel axis
 
-Implementation: package 0.21.0 registers A/B/C CPU profiles with exact byte
-mapping, tensor-description v2, canonical static parameters, and legal retained
-views. See the [public API and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-02-channel-assembly)
-and [performance workflow](../../../../examples/channel_assembly_performance/README.md).
-Decision status remains Proposed; implementation facts below supersede the
-historical inspection's missing-runtime statements.
+Runtime contract: A/B/C are registered as twelve Result operation ABI 2 CPU
+keys: `assemble`, `concatenate`, `assemble_mapped`, and `scalar_literal`, each
+with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
+The public authoring helpers are installed in
+`photospider/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
+specification decision remains Proposed; implementation status is recorded
+separately. The performance guide records focused Result smokes and labels its earlier
+Value/planar measurements as historical; no full Result matrix is reported.
 
 
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md).
@@ -52,11 +52,12 @@ not automatically form a legal zero-copy output image.
 
 ## Interface and regional specialization
 
-Ordered repeated inputs `inputs[0..n)` produce one `values` tensor. n>=1;
-input rank is 1..7 and output rank is 2..8. The family supplies target dtypes,
+Ordered inputs `inputs[0..n)` are single-tensor Results and produce one
+`values` tensor. The family allows 1..1024 inputs. Input cell rank is 1..7 and output cell rank is 2..8; batch plus cell rank is at most 8. The family supplies target dtypes,
 checked extent/count limits, host arity admission and the complete support matrix.
 Parameters are static `metadata_mode`, conditional `input_overrides`, optional
-`output_description`, `layout` and required Int64 `axis` in [0,r]. There is no
+`output_description`, `layout` and required cell-axis Int64 `axis` in [0,r].
+The axis excludes the Result batch prefix; batch plus cell rank must be at most 8. There is no
 keepdims or implicit squeeze. Same dtype and exact nonchannel sizes are required.
 
 For requested Q, input i Data is exactly erase(Q intersect channel i, a).

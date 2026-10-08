@@ -23,7 +23,7 @@ static_assert(__cplusplus >= 201703L, "the kernel target must propagate C++17");
  * result, or five when a C++ exception reaches the bridge boundary.
  * @throws Nothing; every C++ exception is fenced at the C linkage boundary.
  * @note The function borrows no caller state and releases all graph, registry,
- * execution, and Value ownership before returning.
+ * execution, and Result ownership before returning.
  */
 extern "C" int photospider_consumer_run_pipeline(void) {
   try {
@@ -51,8 +51,13 @@ extern "C" int photospider_consumer_run_pipeline(void) {
     if (!result.ok()) {
       return 2;
     }
-    const auto value = result.value().values.at("answer").as_float64();
-    if (!value.ok() || value.value() != 42.0)
+    const auto& output = result.value().results.at("answer");
+    auto facts = output.descriptor();
+    double number = 0;
+    if (!facts.ok() ||
+        !output.read_tensor(facts.value(), 0, {0}, &number, sizeof(number))
+             .ok() ||
+        number != 42.0)
       return 3;
     return 0;
   } catch (const std::exception&) {

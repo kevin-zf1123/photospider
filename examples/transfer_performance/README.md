@@ -1,4 +1,111 @@
-# FMT-09 correctness-gated performance probe
+# FMT-09 transfer performance records
+
+FMT-09 encode/decode use Result operation ABI 2, and the current benchmark driver
+uses the public Result API. The commands and measurements under the historical
+section below describe the earlier Value/planar driver; they are not evidence
+about the current Result implementation. Current Result performance has no full
+matrix conclusion.
+
+## Current Result driver
+
+Build and run the registered Result operation through the public workflow path:
+
+```sh
+cmake --build build --target photospider_transfer_performance -j4
+B=build/examples/transfer_performance/photospider_transfer_performance
+$B 256 srgb encode f32 strict tiled full 5 128 1 respect palette unmanaged
+$B 258 hlg_oetf decode f64 strict tiled roi 1 256 1 respect sweep managed
+```
+
+The positional arguments are `size`, `curve`, `direction`, `dtype`, `profile`,
+`storage`, `coverage`, `repeats`, `tile`, `workers`, `mode`, `corpus`, and
+`budget`. Size is 1..4096; curves are `linear`, `power_gamma`, `power_gamma2`,
+`srgb`, `bt709`, `bt2020`, `bt2020_10`, `bt2020_12`, `bt1886`, `pq`,
+`hlg_oetf`, `acescc`, or `acescct`. Direction is `encode|decode`, dtype is
+`f32|f64`, profile is `strict|x86_64|apple_silicon`, storage is
+`generic|tiled|continuous`, coverage is `full|r|alpha|roi`, repeats is 1..1000,
+tile is 128 or 256, and workers is 1..64. Mode is `respect|raw`, corpus is
+`palette|sweep|file:<path>`, and budget is `unmanaged|managed`. A profile that
+cannot run on the host fails explicitly. The `roi` case requests a 3x3 R-channel
+region crossing the tile boundary and requires `size >= tile+2`.
+
+Respect mode uses the declared RGB group. Raw mode selects RGB components 0, 1,
+and 2 at cell axis 2. `power_gamma` uses gamma 2.2; `power_gamma2` selects gamma
+2. `bt2020_10` and `bt2020_12` select the named coefficient variants. The source
+is a `[size,size,4]` Float32 or Float64 Result tensor. Full, R-only, alpha-only,
+and tile-crossing ROI observations run through `Compiler` and `ExecutionContext`.
+The independent golden gate checks every execution after its timer stops. Each
+row includes two warmups plus the requested repetitions in `verified_executions`.
+
+The Result CSV columns are:
+
+```text
+size,curve,direction,dtype,profile,storage,coverage,mode,tile,workers,palette,compile_us,prepare_p50_us,cold_execute_us,execute_p50_us,execute_p95_us,callback_sum_p50_us,invocations,evaluated,strict_fallbacks,strict_math_calls,copied,views,source_logical_bytes,source_payload_bytes,run_live_payload_bytes,run_live_metadata_bytes,root_peak_host_bytes,implementation,corpus,budget,issued_work,verified_executions
+```
+
+`palette` is the number of independent golden records selected for the curve,
+direction and dtype. `compile_us` records graph compilation;
+`prepare_p50_us` is the median static operation preparation time.
+`cold_execute_us` is the first execution, while `execute_p50_us` and
+`execute_p95_us` summarize executions after two warmups. `callback_sum_p50_us` is
+the median, across executions, of the sum of public
+`operation_timings.duration_us` values reported for each execution. Those timings
+include dispatch waiting and host-side completion work, so they do not isolate
+callback body or math time and are not scheduler overhead. Input creation and
+graph compilation precede execution timing. Golden verification runs outside
+each execution timer and gates each emitted row.
+
+`invocations`, `evaluated`, `strict_fallbacks`, `strict_math_calls`, `copied` and
+`views` report the final execution's operation diagnostics. `copied` and `views`
+count operation-level sample handling, not memory traffic. `implementation`
+identifies the reported numeric implementation; `corpus` names the golden input
+set; `budget` records `managed` or `unmanaged`; `verified_executions` is the
+number of individually gated runs.
+
+`source_logical_bytes` is the dependency source-support element count multiplied
+by the source dtype width; it is logical support, not memory traffic.
+`source_payload_bytes` is Root live payload at the pre-execution baseline after
+input creation, compilation and preparation. `run_live_payload_bytes` and
+`run_live_metadata_bytes` are Root live-resource increases over that baseline
+while the result is held. `root_peak_host_bytes` is the cumulative Root Host peak,
+including source setup and oracle read windows. The driver always enforces a 2 GiB
+Host and 64 MiB Metadata Root capacity. `issued_work` is populated only for
+`managed`; it is blank for `unmanaged`. This benchmark reports neither process RSS
+nor isolated output size.
+
+Twenty-five selected serial Result smoke cases passed their independent golden
+gate, with two warmups and one measured execution per case. They cover all ten
+curves in both directions with alternating Float32/Float64 tiled and generic
+strict runs, plus managed HLG ROI and linear identity runs, ACEScc alpha bypass,
+Apple Silicon gamma-2 raw continuous storage, and Apple Silicon sRGB generic R-only
+coverage. This establishes those output checks only. The full matrix, 4096-sized
+cases, cross-platform behavior and a speed conclusion remain unverified.
+
+`test_transfer_operations`, `test_transfer_runtime`, `test_transfer_math` and
+`test_transfer_simd` pass, along with six shared FMT regression tests,
+`test_result_execution` and `test_shared_results`. Installed-package consumers
+`installed_transfer_operations` and `installed_transfer_runtime` pass 2/2. These
+checks establish operation, runtime and installation behavior; they do not
+establish full benchmark coverage or performance. The standalone installed-package
+performance consumer configures and builds successfully.
+
+`compare.py` runs serial ABBA comparisons between two separately built Result
+drivers with the same revision-2 CLI and output protocol. It cannot use the current
+Result `main.cpp` compiled against the older Value/planar implementation. The
+script refuses to start while build tools are active; keep builds, tests and other
+measurement workloads stopped during its run. `--managed` reports per-execution
+issued work from both drivers; Root capacity limits remain enforced in either
+benchmark mode. The old Value/planar measurement tables and profiling records
+below remain historical and are not Result performance evidence.
+
+The CSV protocol was checked separately in unmanaged and managed modes, using
+matching local and installed Result drivers with a size-2 linear case and one
+measured repetition. Each mode ran four ABBA processes and produced 12 verified
+samples. The check preserved blank `issued_work` in unmanaged mode and integer
+work values in managed mode. This verifies protocol handling, not a performance
+comparison.
+
+## Historical Value/planar benchmark workflow
 
 Build the `photospider_transfer_performance` target. It uses the checked-in,
 independent FMT-09 golden fixture, not a second invocation as its reference.

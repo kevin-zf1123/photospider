@@ -1,4 +1,5 @@
 #include <cmath>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <string>
@@ -6,6 +7,7 @@
 #include <vector>
 
 #include "photospider/compiler/compiler.hpp"
+#include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 /**
@@ -44,13 +46,15 @@ int main() {
   Compiler compiler(operations);
   // Unknown operations reject consistently without retaining historical keys.
   const std::string unknown_key = "test.unknown_operation";
-  const std::vector<ps::Value> no_inputs;
-  const std::vector<ps::Region> no_demands;
   const std::map<std::string, ps::ParameterValue> no_parameters;
   PS_CHECK(operations->find_traits(unknown_key).status().code ==
            ErrorCode::NotFound);
+  ps::ResultProgramMetadata unknown_metadata;
+  ps::ResultProgramQuery unknown_query(unknown_metadata, no_parameters);
+  ps::ResourceBudget direct_root;
   PS_CHECK(
-      operations->invoke(unknown_key, {no_inputs, no_demands, no_parameters})
+      operations
+          ->start_result(unknown_key, unknown_query, direct_root.allocator())
           .status()
           .code == ErrorCode::NotFound);
   WorkflowDocument unknown_operation;
@@ -107,30 +111,30 @@ int main() {
            equivalent_compiled.value().semantic.digest().value);
 
   auto signed_zero_operations = std::make_shared<ps::OperationRegistry>();
-  ps::OperationTraits signed_zero_traits;
-  signed_zero_traits.parameter_schema = {ps::OperationParameterSpec{
+  ps::OperationDefinition signed_zero_definition;
+  signed_zero_definition.key = "test.signed_zero";
+  signed_zero_definition.traits.workspace_bytes = 8;
+  signed_zero_definition.traits.parameter_schema = {ps::OperationParameterSpec{
       "value", ps::OperationParameterType::Float64, true}};
+  signed_zero_definition.traits.outputs[0] = multi_result::output("value");
+  signed_zero_definition.start_result =
+      [](const ps::ResultProgramQuery& query,
+         const ps::BufferAllocator& allocator) {
+        const auto parameter = query.parameters.find("value");
+        if (parameter == query.parameters.end())
+          return ps::Result<ps::ResultContinuation>(
+              ps::Status::failure(ErrorCode::InvalidArgument,
+                                  "signed-zero probe parameter is missing"));
+        const auto* value = std::get_if<double>(&parameter->second);
+        if (!value)
+          return ps::Result<ps::ResultContinuation>(ps::Status::failure(
+              ErrorCode::InvalidArgument,
+              "signed-zero probe parameter is not Float64"));
+        return ps::ResultContinuation::make<multi_result::Program>(
+            allocator, -1, std::signbit(*value) ? -1.0 : 1.0);
+      };
   PS_CHECK(signed_zero_operations
-               ->register_operation(ps::OperationDefinition{
-                   "test.signed_zero", signed_zero_traits,
-                   [](const ps::OperationInvocation& invocation)
-                       -> ps::Result<ps::Value> {
-                     const auto parameter = invocation.parameters.find("value");
-                     if (parameter == invocation.parameters.end()) {
-                       return ps::Result<ps::Value>(ps::Status::failure(
-                           ErrorCode::InvalidArgument,
-                           "signed-zero probe parameter is missing"));
-                     }
-                     const auto* value =
-                         std::get_if<double>(&parameter->second);
-                     if (!value) {
-                       return ps::Result<ps::Value>(ps::Status::failure(
-                           ErrorCode::InvalidArgument,
-                           "signed-zero probe parameter is not Float64"));
-                     }
-                     return ps::Result<ps::Value>(ps::Value::from_float64(
-                         std::signbit(*value) ? -1.0 : 1.0));
-                   }})
+               ->register_operation(std::move(signed_zero_definition))
                .ok());
   PS_CHECK(signed_zero_operations->freeze().ok());
   Compiler signed_zero_compiler(signed_zero_operations);
@@ -159,6 +163,12 @@ int main() {
       signed_zero_execution.execute(positive_zero.value().plan);
   auto negative_zero_result =
       signed_zero_execution.execute(negative_zero.value().plan);
+  if (!positive_zero_result.ok())
+    std::cerr << positive_zero_result.status().message << " code="
+              << static_cast<unsigned>(positive_zero_result.status().code)
+              << " reason="
+              << static_cast<unsigned>(positive_zero_result.status().reason)
+              << "\n";
   PS_CHECK(positive_zero_result.ok());
   PS_CHECK(negative_zero_result.ok());
   PS_CHECK(ps::test::named_scalar(positive_zero_result.value(), "value") ==

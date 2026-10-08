@@ -1,15 +1,23 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
-#include "photospider/plugin/dependency_program.hpp"
+#include "photospider/plugin/result_program.hpp"
 
 namespace ps::plugin_internal {
-/** @brief Decodes a completed immutable discovery table under exact bounds. */
-Result<std::vector<DependencyNeed>> decode_discovery(
+struct GpuDiscoveryRecord final {
+  std::uint32_t input = 0, roles = 0, rank = 0, slot = 0;
+  std::array<std::uint64_t, 8> offsets{}, extents{};
+};
+Status visit_discovery_records(
     const CpuStorage& table, std::uint32_t capacity, std::uint32_t candidates,
-    const DependencyQuery& query, const FootprintLimits& limits,
-    std::uint64_t* normalization_work, std::uint64_t* metadata_entries,
-    const std::function<Status(std::uint64_t)>& consume_work);
+    const FootprintLimits& limits,
+    const std::function<Status(const GpuDiscoveryRecord&)>& visit);
+Result<ResourceVector<ResultTensorNeed>> decode_result_discovery(
+    const CpuStorage& table, std::uint32_t capacity, std::uint32_t candidates,
+    const ResultProgramQuery& query, const ResourceBudget& resources,
+    FootprintLimits limits, std::uint64_t* metadata_entries);
 }  // namespace ps::plugin_internal

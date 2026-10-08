@@ -1,118 +1,42 @@
-# NUM-08 Whole execution
+# NUM-08 Result Whole execution
 
-The six formal `numeric.mix_*` and `numeric.smoothstep_*` keys use synchronous
-Whole callbacks, metadata-only shape/dtype/profile checks, one fixed arithmetic
-workspace and complete packed output. There are no dependency maps or retained
-continuations. Output remains `values`, with the input Float32/Float64 dtype,
-shape and empty facets. The public workflow directly authors formal keys and
-uses existing `broadcast_node` helpers. Legacy `field.smoothstep` is separate.
+The six `numeric.mix_*` and `numeric.smoothstep_*` operations consume three tensor Results and produce one tensor Result. The coordinator requests complete data, typed-validation, and descriptor support for each input with Need role `13`; the callback writes the complete packed output before the executor serves a consumer projection.
 
-Nonempty requests collect and typed-validate all three complete inputs; Empty
-reads no payload and invokes no callback. The executor projects the complete
-result to consumer coordinates. Any source edit invalidates all observed
-outputs. Invalid factors/edges anywhere, including outside a projection, fail
-with InvalidArgument/InvalidDomain/Run and no Atom key; diagnostics preserve
-port, raw bits and global coordinate. No partial output is published.
+## Data and execution contract
 
-Eager mix input behavior was explicitly selected for this migration: unselected
-endpoint source/typed failures are visible and may precede callback factor
-checking. Mathematical selection stays unchanged. t=-0/0 copies a, t=1 copies b,
-including sNaN and signed zero without quieting. Interior NaN/Inf precedence,
-one-round exact `(1-t)*a+t*b`, and smoothstep's edge validation before input NaN
-remain unchanged. The original exact linear/cubic workspace and accelerated
-final-error gate are reused. No NUM-14 certificate or Float64 narrowing is added.
-Scalar/NEON/AVX2 facilities and matrix Scalar/Accelerate/SME targets remain.
+Each input Result supplies one tensor member; its member key is not fixed by these operations. Metadata specialization checks the first member of every input for equal `sample_shape()` and Float32 or Float64 dtype, rank 1 through 8, positive extents, and at most 2^40 samples. `sample_shape()` includes batch axes. The output Result uses schema `photospider.tensor`, tensor key `samples`, output port key `values`, and the full shape as ordinary axes with no facets or batch axes.
 
-Capacity includes three full input collections, full N × dtype-width output and
-one fixed InterpolationMath workspace. This can increase sparse-request memory
-and work. Allocator-owned scratch/output release on failure; owned results may
-outlive context. Work/cancellation checks occur per element, in exact arithmetic
-and before publication. Per-value numeric counters are N/A for these callbacks.
-
-## Executed validation
-
-2026-09-21, Apple M5 arm64, macOS 27.0 (26A5425a), Clang 21.1.3,
-RelWithDebInfo, no fast math and disabled FP contraction for numerical code:
-
-- Strict and Apple each passed 5,244 independent IEEE/Fraction oracle cases,
-  using their specified exact/final-FP32-scaled acceptance rules.
-- Both public manual suites passed composition, eager source failure and
-  source-before-factor priority, Q-outside invalid factor/edge, edge-before-NaN,
-  full source support/dirty, Empty, typed-invalid unselected endpoints,
-  unselected-cache invalidation and factor mutation.
-- Direct tests passed endpoint sNaN copying/fenv, exact cubic fenv, negative/
-  zero/unaligned strides, shifted origins, arbitrary singleton strides and
-  65-element Float32 all-port tails. Direct partial output rejects; public
-  sparse projection retains global coordinates.
-- Complete output/scratch/work budget rejection and cancellation after arithmetic
-  began released unpublished Payload. The cancellation watcher does not identify
-  an exact instruction inside a single refinement.
-- Five focused CTests passed: numeric operations, dependency sampling, execution
-  demand, resources, compiler. ClangFormat 21/cpplint and independent code/spec
-  review passed. No current x86, installed-consumer or full release matrix ran.
-
-```sh
-DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric \
-  --target photospider_numeric_interpolation -j8
-build/clang21-numeric/examples/numeric_workflow/photospider_numeric_interpolation _strict
-python3 oracle/ops/numeric/interpolation_oracle.py \
-  build/clang21-numeric/examples/numeric_workflow/photospider_numeric_interpolation _strict
+```text
+Input Result 0 ── Need role 13 ──┐
+Input Result 1 ── Need role 13 ──┼─> owning read windows ─> Whole callback
+Input Result 2 ── Need role 13 ──┘                         │
+                                                          v
+                                               packed transactional writer
+                                                          │
+                                                          v
+                                        complete Result -> requested projection
 ```
 
-Repeat with `_accelerated_apple_silicon`. The editable public workflow gives
-`smoothstep=[0,0,.15625,.5,.84375,1,1]`, then
-`mix=[10,10,11.5625,15,18.4375,20,20]`. Historical WSL/installed-consumer passes
-were for the pre-Whole staged implementation.
+The coordinator satisfies the three full-shape Tensor Needs before starting the synchronous callback. The callback acquires owning read windows over each input's `sample_shape()` and receives one packed writer. It computes coordinates in logical row-major order and writes through that writer. The writer is borrowed for the callback; each read window retains the authorized input backing while it is in use. The sealed output owns its backing and remains readable after its execution context retires.
 
-## Public/core timings and profiler
+The published Result retains the full output shape and global sample coordinates. Query coverage `Q` selects the observed dependency roots and the coordinates served to the consumer; it does not narrow the publication to a packed ROI Result.
 
-Float64 `[N]` with dyadic `t[i]=(i%17)/16`. Smoothstep takes x=t and edges 0/1;
-mix takes endpoints 0/1 and factor t. Independent expected bits come from the
-exactly representable dyadic polynomial `t*t*(3-2*t)` or t. Every output was
-checked after every completed timed execution. Before registration objects are
-from `5681916f`, linked against the same kernel. One worker, cache off, 1 GiB
-public Payload limit, 2^40 dependency/run/Footprint work limits, 512 MiB dependency
-state and default managed ResourceLimits. One warm-up plus seven timed samples.
+The callback validates every mix factor and every smoothstep edge across the full logical shape. A failure outside the consumer's requested region still fails the run. Mix checks `t` for finiteness and membership in [0,1]. Smoothstep checks finite edges with `edge0 < edge1` before handling the input sample, so an invalid edge takes precedence over an input NaN. Invalid dynamic values report `InvalidArgument` with `FailureReason::InvalidDomain`, `FailureScope::Run`, the input port, offending bit pattern, and global coordinate. No partial output is published.
 
-Public timing excludes generation, compile, freeze and verification. Core timing
-uses the actual reusable InterpolationMath engine with prebuilt raw inputs,
-output stores and a work counter; public allocation, collect and managed work
-admission are excluded. N=1 is an endpoint and reaches clock resolution. Public
-and core are separate measured layers, not a subtraction-derived overhead.
-Milliseconds, median of seven samples:
+Empty output support uses metadata only: it requests no input payload, creates no sample support, and skips sample arithmetic. For nonempty output, every input has Whole support. An input edit dirties the observed output footprint; it does not change the complete-output publication rule.
 
-| Operation | N | Dependency public | Whole public | Core | Whole public min–max |
-|---|---:|---:|---:|---:|---:|
-| smoothstep | 1 | .103292 | .045500 | resolution limited | .040459–.059708 |
-| smoothstep | 16 | .176208 | .085167 | .032041 | .083041–.100833 |
-| smoothstep | 64 | .338500 | .224500 | .131083 | .206792–.240125 |
-| smoothstep | 256 | 1.092710 | .683125 | .516708 | .658666–.688625 |
-| smoothstep | 16384 | 61.040800 | 40.959200 | 33.066700 | 40.704700–41.626700 |
-| mix | 1 | .106084 | .042167 | resolution limited | .038500–.054834 |
-| mix | 16 | 1.718670 | .053875 | .005666 | .042125–.058958 |
-| mix | 64 | 9.478370 | .078250 | .022500 | .067834–.097459 |
-| mix | 256 | 83.201900 | .151208 | .084083 | .130959–.156167 |
-| mix | 16384 | not sampled | 6.325790 | 5.714420 | 6.230500–6.344750 |
+## Memory, work, and failure handling
 
-Smoothstep N=16,384 controlled Payload grew from 138,928 to 531,976 bytes. Mix
-N=256 grew from 9,904 to 15,880; Whole N=16,384 is 531,976. These are not RSS.
-Large legacy mix, 4096², strict and cross-platform performance were not sampled.
+Source Results retain the original typed backing under the execution Root, and the callback's read windows keep those authorized owners alive while computing. The Whole path also allocates the complete packed output of `N × dtype width` bytes and a fixed interpolation workspace. A sparse consumer projection can therefore require work and output storage proportional to the full tensor. Resource accounting or allocation failure aborts publication and releases unpublished scratch and output storage. Cancellation is checked during input-window operations, per sample, during exact arithmetic, and before publication; the callback never publishes a partial tensor. Successful output storage remains owned by the Result.
 
-Two 12-second Instruments runs at N=16,384 used continuous cache-off Whole calls
-and checked the first output; timings above used separate fully checked runs.
-Inclusive ratios overlap and cannot be summed:
+## Current behavior evidence
 
-- Smoothstep: 11,983 execution-chain samples; callback 99.82%, numerical
-  smoothstep 98.45%, collect .03%, ResourceBudget::consume 13.16%. Leading leaves
-  are multiply_fixed<104> (3,724) and fixed-integer subtract (1,433). Memmove
-  appeared 1,084 times; its individual call-site attribution was not established.
-- Mix: 11,989 execution-chain samples; callback 98.65%, numerical mix 89.59%,
-  collect .06%, work admission 3.41%. Leading leaves are set_product/subtract/add
-  (2,431 / 2,419 / 1,763). Remaining cost is directly observed fixed-integer
-  arithmetic; no alternative floating formula is inferred to satisfy the contract.
+The current public Result workflow is [`interpolation.cpp`](../../../examples/numeric_workflow/interpolation.cpp), built as `photospider_numeric_interpolation` and registered as `test_numeric_interpolation_result`. It checks the seven-sample smoothstep-to-mix composition, full per-port support and sparse dirty mapping, sparse projection with global coordinates, Empty coverage, and upstream failure from either mix endpoint. Typed RGB Straight-alpha cases cover invalid unselected alpha and a same-schema valid control. Cache cases distinguish same-Frozen identity reuse from fresh-source completed-result reuse, verify association to current source IDs, and exercise invalidation after endpoint/factor changes. Layout and numeric cases cover negative and unaligned Float64 strides, shifted origins, 65-sample Float32 tails, sNaN endpoint bit copies, caller/worker floating-environment restoration, and resource/cancellation cleanup. A Result retained after context teardown remains readable, and releasing its final owner returns Root resources to zero. The installed consumer builds the same source against the installed SDK.
 
-Ignored local artifacts: `build/interpolation-whole/{scale.cpp,core.cpp,
-build_scale.py,timings.csv,smoothstep.trace,mix.trace}`, exported XML/sample JSON/
-summary files, oracle/manual logs and `ctest.log`. Public smaller fixtures are
-also available through the category benchmark with `apple selected smoothstep`
-and `apple extended mix`, at N=1/256 and its separately documented budgets.
+The separate [`test_numeric_result_math.cpp`](../../../tests/integration/test_numeric_result_math.cpp) fixture retains additional checks: `interpolation_bits_and_batches` covers batch-axis inputs/output shape, negative strides, infinity clamping and NaN payload quieting; `interpolation_boundaries` covers pre-cancellation and additional factor/edge cases. That broader fixture was not rerun for this Result update. Run the current focused test with:
+
+```sh
+ctest --test-dir build/kernel-dev -R '^test_numeric_interpolation_result$' --output-on-failure
+```
+
+The current root Result test passed 1/1, the Apple Silicon default workflow exited successfully, and the installed SDK consumer passed 1/1. The independent IEEE/Fraction oracle passed 5,244 cases for each of the strict and Apple Silicon profiles. These checks do not establish x86 execution, native GPU support or a performance result.

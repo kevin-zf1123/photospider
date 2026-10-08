@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -14,6 +15,7 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/array_profiles.hpp"
 #include "01-numeric/exact_aggregate.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "photospider/execution/resource_allocator.hpp"
@@ -22,12 +24,9 @@
 namespace ps::plugin_internal {
 namespace {
 using numeric_ops::SequenceProfile;
-struct IndexFailure {
-  Status status;
-};
 void checked(Status status) {
   if (!status.ok())
-    throw IndexFailure{std::move(status)};
+    throw status;
 }
 template <class T>
 T taken(Result<T> value) {
@@ -37,18 +36,16 @@ T taken(Result<T> value) {
 void shape_valid(const ValueDescriptor& descriptor) {
   std::uint64_t count = 1;
   if (descriptor.shape.empty() || descriptor.shape.size() > 8)
-    throw IndexFailure{
-        Status{ErrorCode::TypeMismatch,
-               "indexing rank outside 1..8",
-               FailureReason::None,
-               {FailureOrigin::Schema, FailureScope::Unspecified}}};
+    throw Status{ErrorCode::TypeMismatch,
+                 "indexing rank outside 1..8",
+                 FailureReason::None,
+                 {FailureOrigin::Schema, FailureScope::Unspecified}};
   for (auto extent : descriptor.shape) {
     if (!extent || extent > (UINT64_C(1) << 40) / count)
-      throw IndexFailure{
-          Status{ErrorCode::TypeMismatch,
-                 "indexing array exceeds 2^40 elements",
-                 FailureReason::None,
-                 {FailureOrigin::Schema, FailureScope::Unspecified}}};
+      throw Status{ErrorCode::TypeMismatch,
+                   "indexing array exceeds 2^40 elements",
+                   FailureReason::None,
+                   {FailureOrigin::Schema, FailureScope::Unspecified}};
     count *= extent;
   }
 }
@@ -56,125 +53,173 @@ std::uint32_t static_axis(
     const std::map<std::string, ParameterValue>& parameters, std::size_t rank) {
   const auto axis = std::get<std::int64_t>(parameters.at("axis"));
   if (axis < 0 || static_cast<std::uint64_t>(axis) >= rank)
-    throw IndexFailure{
-        numeric_ops::array_parameter_error("indexing axis outside rank")};
+    throw numeric_ops::array_parameter_error("indexing axis outside rank");
   return static_cast<std::uint32_t>(axis);
 }
-Result<Value> execute_concatenate(const OperationInvocation& call,
-                                  SequenceProfile profile) {
-  using Answer = Result<Value>;
-  try {
-    const auto* budget = resource_internal::metadata_budget();
-    const auto work = [&](std::uint64_t amount) {
-      if (call.cancellation.cancelled())
-        return Status{ErrorCode::Cancelled, {}};
-      return budget ? budget->consume({amount}) : Status::success();
-    };
-    const auto& first = call.inputs[0];
-    const auto& shape = call.prepared->traits().outputs[0].fixed_output_shape;
-    const ValueDescriptor descriptor{first.descriptor().element_type, shape};
-    const auto rank = shape.size(),
-               width = Value::element_size(descriptor.element_type);
-    const auto axis = static_axis(call.parameters, rank);
-    std::array<std::uint64_t, 257> prefixes{};
-    for (std::size_t p = 0; p < call.inputs.size(); ++p)
-      prefixes[p + 1] = prefixes[p] + call.inputs[p].descriptor().shape[axis];
-    checked(work(rank + call.inputs.size()));
-    std::vector<std::uint64_t> coordinate(rank, 0), source(rank, 0);
-    const bool view =
-        std::get<std::string>(call.parameters.at("layout")) == "view";
-    if (view) {
-      const auto unavailable = []() {
-        return Answer(Status{
+struct ConcatenateKernel final {
+  SequenceProfile profile;
+  explicit ConcatenateKernel(SequenceProfile selected) : profile(selected) {}
+  Status publish(const ResultProgramPhase& phase, ResultBuilder& builder,
+                 ResultRelation relation) {
+    using namespace numeric_ops;  // NOLINT(build/namespaces)
+    const auto& target = phase.query.output.result_schema->tensors[0];
+    const auto shape = target.sample_shape();
+    const auto rank = shape.size();
+    const auto width = Value::element_size(target.descriptor.element_type);
+    const auto axis = static_axis(phase.query.parameters, rank);
+    const auto ports = phase.query.inputs.size();
+    std::array<uint64_t, 257> prefixes{};
+    for (uint32_t port = 0; port < ports; ++port)
+      prefixes[port + 1] =
+          prefixes[port] +
+          phase.tensors->at({port, 0}).spec().sample_shape()[axis];
+    checked(phase.consume_work(rank + ports));
+    if (std::get<std::string>(phase.query.parameters.at("layout")) == "view") {
+      const auto unavailable = [] {
+        return Status{
             ErrorCode::InvalidArgument,
             "ViewUnavailable: complete concatenation is not one affine owner",
             FailureReason::InvalidDomain,
-            {FailureOrigin::Domain, FailureScope::Run}});
+            {FailureOrigin::Domain, FailureScope::Run}};
       };
-      const auto base = taken(first.byte_address(coordinate));
-      auto strides = first.layout().byte_strides;
+      ResourceVector<ResultTensorReadWindow> windows;
+      windows.reserve(ports);
+      for (uint32_t port = 0; port < ports; ++port) {
+        const auto& input = phase.tensors->at({port, 0});
+        windows.push_back(
+            taken(input.acquire(Region::whole(input.spec().sample_shape()),
+                                phase.query.cancellation)));
+      }
+      const auto owner = windows[0].storage_owner_token();
+      if (!owner)
+        return unavailable();
+      std::vector<uint64_t> zero(rank, 0), unit(rank, 0);
+      std::vector<int64_t> strides(rank, 0);
+      const auto address = [&](const ResultTensorReadWindow& window,
+                               const std::vector<uint64_t>& at) {
+        checked(phase.consume_work(rank + 1));
+        return static_cast<__int128>(
+            reinterpret_cast<uintptr_t>(taken(window.row_run(at)).data));
+      };
+      const auto base = address(windows[0], zero);
       bool axis_known = false;
-      for (const auto& input : call.inputs) {
-        if (input.storage() != first.storage())
-          return unavailable();
-        if (input.descriptor().shape[axis] > 1) {
-          if (axis_known && strides[axis] != input.layout().byte_strides[axis])
+      for (size_t dimension = 0; dimension < rank; ++dimension)
+        if (dimension != axis && shape[dimension] > 1) {
+          unit[dimension] = 1;
+          const auto difference = address(windows[0], unit) - base;
+          unit[dimension] = 0;
+          if (difference < INT64_MIN || difference > INT64_MAX)
             return unavailable();
-          strides[axis] = input.layout().byte_strides[axis];
+          strides[dimension] = static_cast<int64_t>(difference);
+        }
+      for (uint32_t port = 0; port < ports; ++port) {
+        const auto& window = windows[port];
+        if (window.storage_owner_token() != owner)
+          return unavailable();
+        if (window.region().dimensions()[axis].extent > 1) {
+          unit[axis] = 1;
+          const auto difference = address(window, unit) - address(window, zero);
+          unit[axis] = 0;
+          if (difference < INT64_MIN || difference > INT64_MAX ||
+              (axis_known && strides[axis] != difference))
+            return unavailable();
+          strides[axis] = static_cast<int64_t>(difference);
           axis_known = true;
         }
       }
       if (!axis_known) {
-        const __int128 difference =
-            static_cast<__int128>(
-                taken(call.inputs[1].byte_address(coordinate))) -
-            base;
+        const auto difference = address(windows[1], zero) - base;
         if (difference < INT64_MIN || difference > INT64_MAX)
           return unavailable();
-        strides[axis] = static_cast<std::int64_t>(difference);
+        strides[axis] = static_cast<int64_t>(difference);
       }
-      for (std::size_t p = 0; p < call.inputs.size(); ++p) {
-        checked(work(rank + 1));
-        const auto& input = call.inputs[p];
-        if (static_cast<__int128>(taken(input.byte_address(coordinate))) !=
-            static_cast<__int128>(base) +
-                static_cast<__int128>(prefixes[p]) * strides[axis])
+      // Complete inputs must form one global affine map, even when an output
+      // demand would only touch one port. Singleton strides are unconstrained.
+      for (uint32_t port = 0; port < ports; ++port) {
+        const auto start = address(windows[port], zero);
+        if (start !=
+            base + static_cast<__int128>(prefixes[port]) * strides[axis])
           return unavailable();
-        for (std::size_t j = 0; j < rank; ++j)
-          if (j != axis && shape[j] > 1 &&
-              input.layout().byte_strides[j] != strides[j])
-            return unavailable();
+        for (size_t dimension = 0; dimension < rank; ++dimension)
+          if (dimension != axis && shape[dimension] > 1) {
+            unit[dimension] = 1;
+            const auto difference = address(windows[port], unit) - start;
+            unit[dimension] = 0;
+            if (difference != strides[dimension])
+              return unavailable();
+          }
+        auto dimensions = windows[port].region().dimensions();
+        dimensions[axis].offset = prefixes[port];
+        ResultTensorViewTransform transform;
+        transform.source_axes.resize(rank);
+        for (size_t dimension = 0; dimension < rank; ++dimension)
+          transform.source_axes[dimension] = {
+              static_cast<int32_t>(dimension), 0, 1, 1,
+              dimension == axis ? prefixes[port] : 0};
+        auto status = builder.publish_tensor_view(
+            0, Region(std::move(dimensions)), windows[port], transform,
+            relation, {true, true, true, true}, phase.query.cancellation);
+        if (status.code == ErrorCode::InvalidArgument &&
+            status.message.find("ViewUnavailable") != std::string::npos)
+          return unavailable();
+        if (!status.ok())
+          return status;
       }
-      checked(work(1));
-      return Value::from_storage(descriptor, call.output_region,
-                                 {base, std::move(strides)}, first.storage(),
-                                 {}, call.resources);
+      return phase.consume_work(1);
     }
-    auto output = taken(
-        MutableValue::allocate(descriptor, call.output_region, call.allocator));
-    const auto count = taken(call.output_region.element_count());
-    std::array<std::uint8_t, 32> block{};
-    std::size_t buffered = 0;
-    std::uint64_t offset = 0;
-    for (std::uint64_t i = 0; i < count; ++i) {
-      checked(work(rank + 10));
-      const auto found = std::upper_bound(
-          prefixes.begin(), prefixes.begin() + call.inputs.size() + 1,
-          coordinate[axis]);
-      const auto port = static_cast<std::size_t>(found - prefixes.begin() - 1);
-      source = coordinate;
-      source[axis] -= prefixes[port];
-      const auto& input = call.inputs[port];
-      const auto address = taken(input.byte_address(source));
-      std::memcpy(block.data() + buffered, input.bytes().data() + address,
-                  width);
-      buffered += width;
-      if (buffered == block.size()) {
-        numeric_ops::array_copy_block(output.data() + offset, block.data(),
-                                      buffered, profile);
-        offset += buffered;
-        buffered = 0;
-      }
-      for (std::size_t j = rank; j; --j) {
-        if (++coordinate[j - 1] < shape[j - 1])
-          break;
-        coordinate[j - 1] = 0;
-      }
-    }
-    if (buffered)
-      numeric_ops::array_copy_block(output.data() + offset, block.data(),
-                                    buffered, profile);
-    checked(work(1));
-    return std::move(output).publish();
-  } catch (const IndexFailure& failure) {
-    return Answer(failure.status);
-  } catch (const std::bad_alloc&) {
-    return Answer(Status{ErrorCode::ResourceExhausted,
-                         {},
-                         FailureReason::CapacityLimit,
-                         {FailureOrigin::Resource, FailureScope::Run}});
+    ResourceVector<MathTensorReader> readers;
+    readers.reserve(ports);
+    for (uint32_t port = 0; port < ports; ++port)
+      readers.emplace_back(phase.tensors->at({port, 0}),
+                           phase.query.cancellation);
+    return builder.publish_tensor_kernel(
+        0, Region::whole(shape),
+        [&](const auto& writers) {
+          return math_callback(phase, [&]() -> Status {
+            if (writers.size() != 1)
+              return {ErrorCode::OperationFailed,
+                      "concatenate requires one packed writer"};
+            MathTensorWriter writer(writers[0]);
+            std::vector<uint64_t> coordinate(rank, 0), source(rank, 0);
+            std::array<uint8_t, 32> block{};
+            std::array<uint8_t*, 32> destinations{};
+            size_t buffered = 0;
+            const auto flush = [&] {
+              for (size_t lane = 1; lane < buffered / width; ++lane)
+                if (destinations[lane] != destinations[0] + lane * width)
+                  throw Status{ErrorCode::OperationFailed,
+                               "concatenate requires packed output"};
+              array_copy_block(destinations[0], block.data(), buffered,
+                               profile);
+              buffered = 0;
+            };
+            for (uint64_t i = 0, count = taken(target.sample_count());
+                 i < count; ++i) {
+              checked(phase.consume_work(rank + 10));
+              const auto found = std::upper_bound(prefixes.begin(),
+                                                  prefixes.begin() + ports + 1,
+                                                  coordinate[axis]);
+              const auto port =
+                  static_cast<size_t>(found - prefixes.begin() - 1);
+              source = coordinate;
+              source[axis] -= prefixes[port];
+              const auto bits = readers[port].bits(source);
+              std::memcpy(block.data() + buffered, &bits, width);
+              destinations[buffered / width] = writer.address(coordinate);
+              buffered += width;
+              if (buffered == block.size())
+                flush();
+              math_next(coordinate, shape);
+            }
+            if (buffered)
+              flush();
+            return phase.consume_work(1);
+          });
+        },
+        relation, {true, true, true, true}, phase.query.cancellation);
   }
-}
+};
+using ConcatenateProgram = numeric_ops::WholeTensorProgram<ConcatenateKernel>;
 enum class IndexKind { Gather, Replace, Sum, Minimum, Maximum };
 struct IndexPair {
   std::uint64_t key = 0, position = 0;
@@ -182,30 +227,37 @@ struct IndexPair {
 struct IndexState final {
   IndexKind kind;
   SequenceProfile profile;
-  const OperationInvocation& call;
+  const ResultProgramPhase& phase;
   const std::function<Status(std::uint64_t)>& consume;
   std::uint32_t axis;
   ResourceVector<IndexPair> plan, sorting;
   std::vector<std::uint64_t> source_coordinate;
   std::array<std::uint64_t, 256> bins{};
   numeric_ops::ExactAggregate aggregate;
+  std::array<std::optional<numeric_ops::MathTensorReader>, 3> readers;
   IndexState(IndexKind operation, SequenceProfile selected,
-             const OperationInvocation& invocation,
-             const std::function<Status(std::uint64_t)>& work)
+             const ResultProgramPhase& invocation)
       : kind(operation),
         profile(selected),
-        call(invocation),
-        consume(work),
-        axis(static_axis(call.parameters,
-                         call.inputs[0].descriptor().shape.size())),
-        source_coordinate(call.inputs[0].descriptor().shape.size(), 0),
+        phase(invocation),
+        consume(phase.consume_work),
+        axis(static_axis(
+            phase.query.parameters,
+            phase.tensors->at({0, 0}).spec().sample_shape().size())),
+        source_coordinate(
+            phase.tensors->at({0, 0}).spec().sample_shape().size(), 0),
         aggregate(selected,
                   operation == IndexKind::Minimum
                       ? numeric_ops::AggregateKind::Minimum
                   : operation == IndexKind::Maximum
                       ? numeric_ops::AggregateKind::Maximum
                       : numeric_ops::AggregateKind::Sum,
-                  call.inputs[0].descriptor().element_type) {}
+                  phase.tensors->at({0, 0}).spec().descriptor.element_type) {
+    for (uint32_t port = 0; port < (kind == IndexKind::Gather ? 2U : 3U);
+         ++port)
+      readers[port].emplace(phase.tensors->at({port, 0}),
+                            phase.query.cancellation);
+  }
   std::pair<std::size_t, std::size_t> matches(std::uint64_t key) const {
     const auto levels = plan.empty() ? 0U : 64U - __builtin_clzll(plan.size());
     checked(consume(2 * (levels + 1)));
@@ -230,25 +282,23 @@ struct IndexState final {
     return status;
   }
   void resolve_indices() {
-    const auto& indices = call.inputs[1];
-    const auto count = indices.descriptor().shape[0];
-    const auto extent = call.inputs[0].descriptor().shape[axis];
+    const auto count = phase.tensors->at({1, 0}).spec().sample_shape()[0];
+    const auto extent = phase.tensors->at({0, 0}).spec().sample_shape()[axis];
     checked(consume(count));
     plan.reserve(count);
     for (std::uint64_t position = 0; position < count; ++position) {
       if (position % 256 == 0)
         checked(consume(std::min<std::uint64_t>(256, count - position)));
       std::int64_t value = 0;
-      const auto address = taken(indices.byte_address({position}));
-      std::memcpy(&value, indices.bytes().data() + address, 8);
+      const auto bits = readers[1]->bits({position});
+      std::memcpy(&value, &bits, 8);
       if (value < 0 || static_cast<std::uint64_t>(value) >= extent)
-        throw IndexFailure{
-            Status{ErrorCode::InvalidArgument,
-                   "IndexOutOfBounds: position=" + std::to_string(position) +
-                       " index=" + std::to_string(value) +
-                       " extent=" + std::to_string(extent),
-                   FailureReason::InvalidDomain,
-                   {FailureOrigin::Domain, FailureScope::Run}}};
+        throw Status{ErrorCode::InvalidArgument,
+                     "IndexOutOfBounds: position=" + std::to_string(position) +
+                         " index=" + std::to_string(value) +
+                         " extent=" + std::to_string(extent),
+                     FailureReason::InvalidDomain,
+                     {FailureOrigin::Domain, FailureScope::Run}};
       plan.push_back(
           kind == IndexKind::Gather
               ? IndexPair{position, static_cast<std::uint64_t>(value)}
@@ -285,14 +335,8 @@ struct IndexState final {
     ResourceVector<IndexPair>{}.swap(sorting);
   }
   std::uint64_t evaluate(const std::vector<std::uint64_t>& coordinate) {
-    const auto width =
-        Value::element_size(call.inputs[0].descriptor().element_type);
-    const auto read = [&](std::uint32_t port, const auto& sample) {
-      std::uint64_t bits = 0;
-      const auto& value = call.inputs[port];
-      const auto address = taken(value.byte_address(sample));
-      std::memcpy(&bits, value.bytes().data() + address, width);
-      return bits;
+    const auto read = [&](uint32_t port, const auto& sample) {
+      return readers[port]->bits(sample);
     };
     if (kind == IndexKind::Gather) {
       source_coordinate = coordinate;
@@ -317,74 +361,65 @@ struct IndexState final {
     auto result = aggregate.finish(consume);
     if (!result.ok() &&
         result.status().reason == FailureReason::ArithmeticOverflow)
-      throw IndexFailure{attributed(result.status(), coordinate)};
+      throw attributed(result.status(), coordinate);
     return taken(std::move(result));
   }
-  Result<Value> execute() {
+  Status write(const ResourceVector<ResultTensorWriteWindow>& writers) {
+    if (writers.size() != 1)
+      return {ErrorCode::OperationFailed,
+              "indexing requires one packed writer"};
     resolve_indices();
-    auto descriptor = call.inputs[0].descriptor();
-    if (kind == IndexKind::Gather)
-      descriptor.shape[axis] = plan.size();
-    auto output = taken(
-        MutableValue::allocate(descriptor, call.output_region, call.allocator));
-    const auto width = Value::element_size(descriptor.element_type);
-    const auto count = taken(call.output_region.element_count());
-    std::vector<std::uint64_t> coordinate(descriptor.shape.size(), 0);
-    std::array<std::uint8_t, 32> block{};
-    std::array<std::uint64_t, 4> replicas{};
-    std::size_t buffered = 0;
-    std::uint64_t offset = 0;
-    for (std::uint64_t i = 0; i < count; ++i) {
+    const auto& target = phase.query.output.result_schema->tensors[0];
+    const auto shape = target.sample_shape();
+    const auto width = Value::element_size(target.descriptor.element_type);
+    const auto count = taken(target.sample_count());
+    numeric_ops::MathTensorWriter writer(writers[0]);
+    std::vector<uint64_t> coordinate(shape.size(), 0);
+    std::array<uint8_t, 32> block{};
+    std::array<uint8_t*, 32> destinations{};
+    std::array<uint64_t, 4> replicas{};
+    size_t buffered = 0;
+    const auto flush = [&] {
+      for (size_t lane = 1; lane < buffered / width; ++lane)
+        if (destinations[lane] != destinations[0] + lane * width)
+          throw Status{ErrorCode::OperationFailed,
+                       "indexing requires packed output"};
+      numeric_ops::array_copy_block(destinations[0], block.data(), buffered,
+                                    profile);
+      buffered = 0;
+    };
+    for (uint64_t i = 0; i < count; ++i) {
       checked(consume(coordinate.size() + 16));
       const auto bits = evaluate(coordinate);
       numeric_ops::select_words(replicas.data(), bits, bits, 1, profile);
       std::memcpy(block.data() + buffered, replicas.data(), width);
+      destinations[buffered / width] = writer.address(coordinate);
       buffered += width;
-      if (buffered == block.size()) {
-        numeric_ops::array_copy_block(output.data() + offset, block.data(),
-                                      buffered, profile);
-        offset += buffered;
-        buffered = 0;
-      }
-      for (std::size_t axis = coordinate.size(); axis; --axis) {
-        if (++coordinate[axis - 1] < descriptor.shape[axis - 1])
-          break;
-        coordinate[axis - 1] = 0;
-      }
+      if (buffered == block.size())
+        flush();
+      numeric_ops::math_next(coordinate, shape);
     }
     if (buffered)
-      numeric_ops::array_copy_block(output.data() + offset, block.data(),
-                                    buffered, profile);
-    checked(consume(1));
-    return std::move(output).publish();
+      flush();
+    return consume(1);
   }
 };
-Result<Value> execute_index(const OperationInvocation& call, IndexKind kind,
-                            SequenceProfile profile) {
-  using Answer = Result<Value>;
-  try {
-    const auto* budget = resource_internal::metadata_budget();
-    const std::function<Status(std::uint64_t)> consume =
-        [&](std::uint64_t work) {
-          if (call.cancellation.cancelled())
-            return Status{ErrorCode::Cancelled, {}};
-          return budget ? budget->consume({work}) : Status::success();
-        };
-    checked(consume(1));
-    auto allocated = taken(call.allocator.allocate(sizeof(IndexState)));
+struct IndexKernel final {
+  IndexKind kind;
+  SequenceProfile profile;
+  IndexKernel(IndexKind operation, SequenceProfile selected)
+      : kind(operation), profile(selected) {}
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    checked(phase.consume_work(1));
+    auto allocated = taken(phase.allocator.allocate(sizeof(IndexState)));
     std::unique_ptr<IndexState, void (*)(IndexState*)> state(
-        new (allocated.data()) IndexState(kind, profile, call, consume),
+        new (allocated.data()) IndexState(kind, profile, phase),
         [](IndexState* value) { value->~IndexState(); });
-    return state->execute();
-  } catch (const IndexFailure& error) {
-    return Answer(error.status);
-  } catch (const std::bad_alloc&) {
-    return Answer(Status{ErrorCode::ResourceExhausted,
-                         {},
-                         FailureReason::CapacityLimit,
-                         {FailureOrigin::Resource, FailureScope::Run}});
+    return state->write(writers);
   }
-}
+};
+using IndexProgram = numeric_ops::WholeTensorProgram<IndexKernel>;
 OperationDefinition index_operation(const std::string& key, IndexKind kind,
                                     SequenceProfile profile) {
   OperationDefinition operation;
@@ -392,17 +427,18 @@ OperationDefinition index_operation(const std::string& key, IndexKind kind,
   auto& traits = operation.traits;
   traits.input_count = kind == IndexKind::Gather ? 2 : 3;
   traits.input_schema.resize(traits.input_count);
+  for (auto& input : traits.input_schema) {
+    input.kind = OperationPortKind::Result;
+    input.element_type_mask = 15;
+  }
+  traits.input_schema[1].element_type_mask = 0;
   traits.input_schema[1].rank = 1;
   traits.input_schema[1].element_type =
       static_cast<std::uint32_t>(ElementType::Int64);
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = {{"axis", OperationParameterType::Int64}};
-  auto& output = traits.outputs[0];
-  output.key = "values";
-  output.shape_rule = OperationShapeRule::Fixed;
-  output.fixed_output_shape = {1};
-  output.region_rule = OperationRegionRule::Whole;
-  output.requires_dense_output = true;
+  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                       sizeof(IndexProgram));
   traits.workspace_bytes = sizeof(IndexState);
   operation.specialize_metadata = [kind, profile](const auto& inputs,
                                                   const auto& parameters)
@@ -410,33 +446,47 @@ OperationDefinition index_operation(const std::string& key, IndexKind kind,
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
     try {
       checked(numeric_ops::sequence_profile_available(profile));
-      for (const auto& input : inputs)
-        shape_valid(input.descriptor);
-      const auto& source = inputs[0].descriptor;
+      std::vector<ValueDescriptor> descriptors;
+      for (const auto& input : inputs) {
+        const auto& tensor = input.result_schema->tensors[0];
+        descriptors.push_back(
+            {tensor.descriptor.element_type, tensor.sample_shape()});
+        shape_valid(descriptors.back());
+      }
+      if (descriptors[1].shape.size() != 1)
+        return Answer(
+            Status{ErrorCode::TypeMismatch,
+                   "indices requires complete logical rank one",
+                   FailureReason::None,
+                   {FailureOrigin::Schema, FailureScope::Unspecified}});
+      const auto& source = descriptors[0];
       const auto axis = static_axis(parameters, source.shape.size());
       auto output_shape = source.shape;
-      output_shape[axis] = inputs[1].descriptor.shape[0];
+      output_shape[axis] = descriptors[1].shape[0];
       if (kind != IndexKind::Gather &&
-          (inputs[2].descriptor.element_type != source.element_type ||
-           inputs[2].descriptor.shape != output_shape))
+          (descriptors[2].element_type != source.element_type ||
+           descriptors[2].shape != output_shape))
         return Answer(Status{
             ErrorCode::TypeMismatch,
             "scatter update dtype/non-axis extents or index count mismatch",
             FailureReason::None,
             {FailureOrigin::Schema, FailureScope::Unspecified}});
       OperationOutputSpecialization result;
-      result.metadata.descriptor = {
-          source.element_type,
-          kind == IndexKind::Gather ? output_shape : source.shape};
-      shape_valid(result.metadata.descriptor);
+      ValueDescriptor descriptor{source.element_type, kind == IndexKind::Gather
+                                                          ? output_shape
+                                                          : source.shape};
+      shape_valid(descriptor);
+      result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
+          numeric_ops::numeric_tensor_schema(descriptor.element_type,
+                                             descriptor.shape));
       return Answer(
           std::vector<OperationOutputSpecialization>{std::move(result)});
-    } catch (const IndexFailure& failure) {
-      return Answer(failure.status);
+    } catch (const Status& failure) {
+      return Answer(failure);
     }
   };
-  operation.callback = [kind, profile](const OperationInvocation& call) {
-    return execute_index(call, kind, profile);
+  operation.start_result = [kind, profile](const auto&, const auto& allocator) {
+    return ResultContinuation::make<IndexProgram>(allocator, kind, profile);
   };
   return operation;
 }
@@ -453,37 +503,43 @@ OperationDefinition concatenate_operation(const std::string& key,
   traits.repeated_match = false;
   traits.requires_metadata_specialization = true;
   traits.input_schema.resize(1);
+  traits.input_schema[0].kind = OperationPortKind::Result;
+  traits.input_schema[0].element_type_mask = 15;
   traits.parameter_schema = {{"axis", OperationParameterType::Int64},
                              {"layout", OperationParameterType::String}};
-  auto& output = traits.outputs[0];
-  output.key = "values";
-  output.shape_rule = OperationShapeRule::Fixed;
-  output.fixed_output_shape = {1};
-  output.region_rule = OperationRegionRule::Whole;
+  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                       sizeof(ConcatenateProgram));
+  // Four bounded 64-port Need envelopes plus the final publication.
+  traits.outputs[0].maximum_dependency_stages = 5;
   operation.specialize_metadata = [profile](const auto& inputs,
                                             const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
     try {
       checked(numeric_ops::sequence_profile_available(profile));
-      const auto& first = inputs[0].descriptor;
+      const auto& tensor = inputs[0].result_schema->tensors[0];
+      const ValueDescriptor first{tensor.descriptor.element_type,
+                                  tensor.sample_shape()};
       const auto axis = static_axis(parameters, first.shape.size());
       auto descriptor = first;
       descriptor.shape[axis] = 0;
-      for (const auto& input : inputs) {
-        shape_valid(input.descriptor);
-        bool match = input.descriptor.element_type == first.element_type &&
-                     input.descriptor.shape.size() == first.shape.size();
+      for (const auto& metadata : inputs) {
+        const auto& member = metadata.result_schema->tensors[0];
+        const ValueDescriptor input{member.descriptor.element_type,
+                                    member.sample_shape()};
+        shape_valid(input);
+        bool match = input.element_type == first.element_type &&
+                     input.shape.size() == first.shape.size();
         for (std::size_t j = 0; match && j < first.shape.size(); ++j)
           if (j != axis)
-            match &= input.descriptor.shape[j] == first.shape[j];
+            match &= input.shape[j] == first.shape[j];
         if (!match)
           return Answer(
               Status{ErrorCode::TypeMismatch,
                      "concatenate dtype/rank/non-axis extents mismatch",
                      FailureReason::None,
                      {FailureOrigin::Schema, FailureScope::Unspecified}});
-        descriptor.shape[axis] += input.descriptor.shape[axis];
+        descriptor.shape[axis] += input.shape[axis];
       }
       shape_valid(descriptor);
       const auto& layout = std::get<std::string>(parameters.at("layout"));
@@ -491,19 +547,17 @@ OperationDefinition concatenate_operation(const std::string& key,
         return Answer(numeric_ops::array_parameter_error(
             "concatenate layout must be view or dense"));
       OperationOutputSpecialization result;
-      result.metadata.descriptor = descriptor;
-      result.preserve_output_views = layout == "view";
-      result.requires_input_views = layout == "view";
-      if (layout == "view")
-        result.maximum_output_payload_bytes = 0;
+      result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
+          numeric_ops::numeric_tensor_schema(descriptor.element_type,
+                                             descriptor.shape));
       return Answer(
           std::vector<OperationOutputSpecialization>{std::move(result)});
-    } catch (const IndexFailure& failure) {
-      return Answer(failure.status);
+    } catch (const Status& failure) {
+      return Answer(failure);
     }
   };
-  operation.callback = [profile](const OperationInvocation& call) {
-    return execute_concatenate(call, profile);
+  operation.start_result = [profile](const auto&, const auto& allocator) {
+    return ResultContinuation::make<ConcatenateProgram>(allocator, profile);
   };
   return operation;
 }

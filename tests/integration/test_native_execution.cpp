@@ -1,383 +1,534 @@
+#include <array>
 #include <cstring>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "fixtures/native_scale_spirv.h"
 #include "photospider/execution/resource_allocator.hpp"
 #include "photospider/photospider.hpp"
+#include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
+using namespace ps;  // NOLINT(build/namespaces)
 std::uint64_t native_capacity = 0;
-/** @brief A real independently registered GPU operation with exact CPU oracle.
- */
-ps::Result<ps::Value> scale(const ps::OperationInvocation& call) {
-  auto allocated = ps::MutableValue::allocate(
-      call.inputs[0].descriptor(), call.output_region, call.allocator);
-  if (!allocated.ok())
-    return ps::Result<ps::Value>(allocated.status());
-  auto output = allocated.take_value();
-  if (call.backend == ps::Backend::Cpu) {
-    for (std::size_t i = 0; i < output.size() / 4; ++i) {
-      float number;
-      std::memcpy(&number, call.inputs[0].bytes().data() + i * 4, 4);
-      number *= .5F;
-      std::memcpy(output.data() + i * 4, &number, 4);
-    }
-  } else {
-    const char source[] =
-        "#include <metal_stdlib>\nusing namespace metal;\n"
-        "kernel void scale(device const float* a [[buffer(0)]], "
-        "device float* b [[buffer(1)]], uint i [[thread_position_in_grid]])"
-        "{b[i]=a[i]*.5f;}";
-    const auto* api = call.gpu;
-    if (!api)
-      return ps::Result<ps::Value>(ps::Status::failure(
-          ps::ErrorCode::BackendUnavailable, "no native service"));
-    native_capacity = call.inputs[0].storage()->capacity();
-    std::uint64_t input = 0, result = 0;
-    if (api->buffer(api->context, call.inputs[0].bytes().data(),
-                    call.inputs[0].bytes().size(), 0, &input) ||
-        api->buffer(api->context, output.data(), output.size(), 1, &result))
-      return ps::Result<ps::Value>(ps::Status::failure(
-          ps::ErrorCode::OperationFailed, "native binding failed"));
-    ps_gpu_buffer_binding_v11 buffers[] = {
-        {sizeof(ps_gpu_buffer_binding_v11), 0, input, 0,
-         call.inputs[0].bytes().size(), 0},
-        {sizeof(ps_gpu_buffer_binding_v11), 1, result, 0, output.size(), 1}};
-    ps_gpu_dispatch_v11 command{};
-    command.struct_size = sizeof(command);
-    command.source = source;
-    command.source_size = sizeof(source) - 1;
-    if (api->backend == PS_GPU_BACKEND_VULKAN_V11) {
-      command.source = reinterpret_cast<const char*>(kNativeScaleSpirv);
-      command.source_size = sizeof(kNativeScaleSpirv);
-      command.code_format = PS_GPU_CODE_SPIRV_V11;
-    }
-    command.entry = "scale";
-    command.entry_size = 5;
-    command.buffers = buffers;
-    command.buffer_count = 2;
-    command.grid[0] = output.size() / 4;
-    command.grid[1] = command.grid[2] = 1;
-    if (api->execute(api->context, &command, 1))
-      return ps::Result<ps::Value>(ps::Status::failure(
-          ps::ErrorCode::OperationFailed, "native execution failed"));
-  }
-  return std::move(output).publish(call.inputs[0].facets());
+SchemaTemplate schema(const ValueDescriptor& descriptor,
+                      std::vector<ValueFacet> facets = {}) {
+  auto result = multi_result::schema(descriptor.element_type, descriptor.shape);
+  result.id = "test.native.tensor";
+  result.tensors[0].facets = std::move(facets);
+  return result;
 }
-int sticky_resource_before_fallback(const ps::Value& input) {
-  for (bool exhaust : {false, true}) {
-    auto registry = std::make_shared<ps::OperationRegistry>();
-    unsigned cpu_calls = 0;
-    ps::OperationDefinition operation;
-    operation.key = "native.failure";
-    operation.traits.input_count = 1;
-    operation.traits.input_schema.resize(1);
-    operation.traits.supports_gpu = true;
-    operation.traits.allows_cpu_fallback = true;
-    operation.traits.outputs[0].output_element_type = ps::ElementType::Float32;
-    operation.traits.outputs[0].shape_rule =
-        ps::OperationShapeRule::PreserveFirstInput;
-    operation.callback = [&](const ps::OperationInvocation& call) {
-      if (call.backend == ps::Backend::Cpu) {
-        ++cpu_calls;
-        return ps::Result<ps::Value>(call.inputs[0]);
+ResultRef source(const ResourceBudget& root, const Value& backing) {
+  auto builder = multi_result::take(ResultBuilder::start(
+      root, schema(backing.descriptor(), backing.facets()), "native.source"));
+  multi_result::check(builder.bind_descriptor_relation(
+      multi_result::take(ResultRelation::cartesian(root, 1, {}))));
+  multi_result::check(builder.publish_tensor(
+      0, backing.region(), backing.layout(), backing.storage(),
+      multi_result::take(ResultRelation::cartesian(
+          root, backing.region().element_count().take_value(), {})),
+      {true, true, true, true}));
+  return multi_result::take(builder.seal());
+}
+std::vector<float> numbers(const ResultRef& result) {
+  auto facts = multi_result::take(result.descriptor());
+  std::vector<float> values;
+  multi_result::check(facts.tensor_coverage(0).visit(
+      [&](const auto& at) {
+        float number = 0;
+        multi_result::check(result.read_tensor(facts, 0, at, &number, 4));
+        values.push_back(number);
+        return Status::success();
+      },
+      1024));
+  return values;
+}
+ResultRelation identity(const ResultProgramPhase& phase, const Region& box) {
+  const auto shape =
+      phase.query.output.result_schema->tensors[0].sample_shape();
+  std::vector<ResultMappedAxis> axes;
+  for (unsigned axis = 0; axis < shape.size(); ++axis)
+    axes.push_back({static_cast<std::int32_t>(axis), 0, 1, 1});
+  return multi_result::take(
+      ResultRelation::mapped(phase.resources, shape, box, shape, axes,
+                             {0, 1, 0, 1, ResultSupportTarget::Tensor, 0}));
+}
+struct Scale {
+  std::function<void()>* after;
+  bool host, requested = false;
+  Scale(bool host, std::function<void()>* after) : after(after), host(host) {}
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    const auto& spec = phase.query.output.result_schema->tensors[0];
+    const auto demand = phase.query.tensor_outputs.value_or(
+        multi_result::take(Footprint::all(spec.sample_shape())));
+    if (!requested) {
+      requested = true;
+      ResultProgramNeed need;
+      need.tensors.push_back({0, 0, demand, 1});
+      return Result<ResultProgramPoll>(std::move(need));
+    }
+    auto builder = multi_result::take(ResultBuilder::start(
+        phase.resources, *phase.query.output.result_schema,
+        phase.query.semantic_key, {},
+        std::vector<std::uint64_t>(phase.association->begin(),
+                                   phase.association->end())));
+    multi_result::check(builder.bind_descriptor_relation(
+        multi_result::take(ResultRelation::cartesian(phase.resources, 1, {}))));
+    for (const auto& box : demand.boxes()) {
+      if (host) {
+        std::vector<std::uint64_t> probe;
+        for (const auto& dimension : box.dimensions())
+          probe.push_back(dimension.offset);
+        probe.back() += box.dimensions().back().extent - 1;
+        float actual = 0;
+        multi_result::check(phase.read_tensor(0, 0, probe, &actual, 4));
+        if (actual != .25F)
+          return Result<ResultProgramPoll>(Status{
+              ErrorCode::OperationFailed, "host probe differs from oracle"});
+        auto window =
+            multi_result::take(phase.tensors->at({0, 0}).acquire(box));
+        ResultTensorViewTransform transform;
+        for (unsigned axis = 0; axis < spec.sample_shape().size(); ++axis)
+          transform.source_axes.push_back(
+              {static_cast<std::int32_t>(axis), 0, 1, 1});
+        multi_result::check(builder.publish_tensor_view(
+            0, box, window, transform, identity(phase, box),
+            {true, true, true, true}));
+        continue;
       }
-      const auto* root = ps::resource_internal::metadata_budget();
-      if (!root || !call.gpu)
-        return ps::Result<ps::Value>(
-            ps::Status{ps::ErrorCode::Internal, "missing GPU callback root"});
-      if (exhaust)
-        static_cast<void>(root->consume({1048577}));
-      const char source[] =
+      const auto count = multi_result::take(box.element_count());
+      auto output = multi_result::take(phase.allocator.allocate(count * 4));
+      if (phase.query.backend == Backend::Cpu) {
+        auto samples = multi_result::take(
+            Footprint::from_regions(spec.sample_shape(), {box}));
+        std::uint64_t offset = 0;
+        multi_result::check(samples.visit(
+            [&](const auto& at) {
+              float value = 0;
+              multi_result::check(phase.read_tensor(0, 0, at, &value, 4));
+              value *= .5F;
+              std::memcpy(output.data() + offset, &value, 4);
+              offset += 4;
+              return Status::success();
+            },
+            count));
+      } else {
+        auto window =
+            multi_result::take(phase.acquire_native_tensor(0, 0, box));
+        std::vector<std::uint64_t> at;
+        for (const auto& dim : box.dimensions())
+          at.push_back(dim.offset);
+        const auto run = multi_result::take(window.row_run(at));
+        if (run.samples != count || (count > 1 && run.sample_stride_bytes != 4))
+          return Result<ResultProgramPoll>(Status{
+              ErrorCode::BackendUnavailable, "fixture requires dense row"});
+        const auto* api = phase.gpu;
+        std::uint64_t input = 0, result = 0;
+        if (api->buffer(api->context, run.data, count * 4, 0, &input) ||
+            api->buffer(api->context, output.data(), output.size(), 1, &result))
+          return Result<ResultProgramPoll>(phase.gpu_status());
+        const ps_gpu_buffer_binding_v1 buffers[] = {
+            {sizeof(ps_gpu_buffer_binding_v1), 0, input, 0, count * 4, 0},
+            {sizeof(ps_gpu_buffer_binding_v1), 1, result, 0, count * 4, 1}};
+        const char metal[] =
+            "#include <metal_stdlib>\nusing namespace metal;\n"
+            "kernel void scale(device const float* a [[buffer(0)]], "
+            "device float* b [[buffer(1)]], uint i [[thread_position_in_grid]])"
+            "{b[i]=a[i]*.5f;}";
+        ps_gpu_dispatch_v1 command{};
+        command.struct_size = sizeof(command);
+        command.source = metal;
+        command.source_size = sizeof(metal) - 1;
+        if (api->backend == PS_GPU_BACKEND_VULKAN_V1) {
+          command.source = reinterpret_cast<const char*>(kNativeScaleSpirv);
+          command.source_size = sizeof(kNativeScaleSpirv);
+          command.code_format = PS_GPU_CODE_SPIRV_V1;
+        }
+        command.entry = "scale";
+        command.entry_size = 5;
+        command.buffers = buffers;
+        command.buffer_count = 2;
+        command.grid[0] = count;
+        command.grid[1] = command.grid[2] = 1;
+        if (api->execute(api->context, &command, 1))
+          return Result<ResultProgramPoll>(phase.gpu_status());
+        multi_result::check(phase.gpu_status());
+        if (after && *after)
+          (*after)();
+      }
+      std::vector<std::int64_t> strides(spec.sample_shape().size());
+      std::uint64_t stride = 4;
+      for (std::size_t axis = strides.size(); axis-- > 0;) {
+        strides[axis] = stride;
+        stride *= box.dimensions()[axis].extent;
+      }
+      auto storage = std::move(output).freeze();
+      native_capacity = storage->capacity();
+      multi_result::check(builder.publish_tensor(
+          0, box, {0, strides}, std::move(storage), identity(phase, box),
+          {true, true, true, true}));
+    }
+    return Result<ResultProgramPoll>(
+        ResultPublication{multi_result::take(builder.seal()), true});
+  }
+};
+OperationDefinition operation(std::string key, bool host,
+                              std::function<void()>* after = nullptr) {
+  OperationDefinition op;
+  op.key = std::move(key);
+  op.traits.input_count = 1;
+  op.traits.input_schema.resize(1);
+  auto& input = op.traits.input_schema[0];
+  input.kind = OperationPortKind::Result;
+  input.element_type = static_cast<unsigned>(ElementType::Float32);
+  auto& output = op.traits.outputs[0];
+  output = multi_result::output("value", schema({ElementType::Float32, {4}}));
+  output.continuation_bytes = sizeof(Scale);
+  if (host) {
+    output.region_rule = OperationRegionRule::Whole;
+    output.preserve_output_views = true;
+  }
+  output.output_schema.result_schema_id.clear();
+  output.output_schema.result_schema_version = 0;
+  output.output_schema.element_type = input.element_type;
+  op.traits.workspace_bytes = 16384;
+  op.traits.supports_gpu = op.traits.allows_cpu_fallback = !host;
+  op.traits.requires_metadata_specialization = true;
+  op.specialize_metadata = [](const auto& inputs, const auto&) {
+    OperationOutputSpecialization out;
+    out.metadata.result_schema = inputs[0].result_schema;
+    return Result<std::vector<OperationOutputSpecialization>>(
+        std::vector<OperationOutputSpecialization>{out});
+  };
+  op.start_result = [host, after](const auto&, const auto& allocator) {
+    return ResultContinuation::make<Scale>(allocator, host, after);
+  };
+  return op;
+}
+Status typed_native_failure(unsigned mode) {
+  if (mode == 7 || mode == 9)
+    return {ErrorCode::BackendUnavailable,
+            "typed protocol failure",
+            FailureReason::MalformedEnvelope,
+            {FailureOrigin::Protocol, FailureScope::Group}};
+  return {ErrorCode::BackendUnavailable,
+          "typed Run failure",
+          FailureReason::None,
+          {FailureOrigin::Backend, FailureScope::Run}};
+}
+struct NativeFailure {
+  unsigned mode;
+  bool requested = false;
+  explicit NativeFailure(unsigned mode) : mode(mode) {}
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    if (mode == 5 && !requested) {
+      requested = true;
+      ResultProgramNeed need;
+      need.tensors.push_back({0, 0, *phase.query.tensor_outputs, 1});
+      return Result<ResultProgramPoll>(std::move(need));
+    }
+    if (phase.query.backend == Backend::Gpu) {
+      if (mode == 7 || mode == 8)
+        return Result<ResultProgramPoll>(typed_native_failure(mode));
+      if (mode == 1)
+        static_cast<void>(phase.consume_work(1048577));
+      const char metal[] =
           "#include <metal_stdlib>\nusing namespace metal;\n"
-          "kernel void present(uint i [[thread_position_in_grid]]) {}";
-      ps_gpu_dispatch_v11 command{};
-      command.struct_size = sizeof(command);
-      command.source = source;
-      command.source_size = sizeof(source) - 1;
-      command.entry = "missing";
-      command.entry_size = 7;
-      command.grid[0] = command.grid[1] = command.grid[2] = 1;
-      static_cast<void>(call.gpu->execute(call.gpu->context, &command, 1));
-      return ps::Result<ps::Value>(
-          ps::Status{ps::ErrorCode::OperationFailed, "missing entry"});
+          "kernel void present(uint i [[thread_position_in_grid]]){}";
+      ps_gpu_dispatch_v1 dispatch{};
+      dispatch.struct_size = sizeof(dispatch);
+      dispatch.source = metal;
+      dispatch.source_size = sizeof(metal) - 1;
+      // Vulkan rejects MSL as BackendUnavailable; Metal rejects the missing
+      // entry with the same recoverable category. InvalidArgument is not a
+      // CPU-retry trigger.
+      dispatch.entry = "missing";
+      dispatch.entry_size = 7;
+      dispatch.grid[0] = dispatch.grid[1] = dispatch.grid[2] = 1;
+      static_cast<void>(phase.gpu->execute(phase.gpu->context, &dispatch, 1));
+      if (mode == 2)
+        static_cast<void>(phase.consume_work(UINT64_MAX));
+      if (mode == 3) {
+        float ignored = 0;
+        static_cast<void>(phase.read_tensor(99, 0, {0}, &ignored, 4));
+      }
+      if (mode == 4)
+        static_cast<void>(phase.allocator.limited_requested(1).allocate(2));
+      if (mode == 5) {
+        float ignored = 0;
+        static_cast<void>(phase.tensors->at({0, 0}).read({99}, &ignored, 4));
+      }
+      if (mode == 6)
+        throw std::runtime_error("late operation exception");
+      return Result<ResultProgramPoll>(
+          Status{ErrorCode::OperationFailed, "missing native entry"});
+    }
+    auto builder = multi_result::take(
+        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
+                             phase.query.semantic_key));
+    multi_result::check(builder.bind_descriptor_relation(
+        multi_result::take(ResultRelation::cartesian(phase.resources, 1, {}))));
+    const std::array<float, 4> values{7, 7, 7, 7};
+    multi_result::check(builder.publish_tensor(
+        0, Region::whole({4}),
+        {reinterpret_cast<const std::uint8_t*>(values.data()), 16},
+        multi_result::take(ResultRelation::cartesian(phase.resources, 4, {})),
+        {true, true, true, true}));
+    return Result<ResultProgramPoll>(
+        ResultPublication{multi_result::take(builder.seal()), true});
+  }
+};
+int sticky_resource_before_fallback() {
+  for (unsigned mode : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}) {
+    auto registry = std::make_shared<OperationRegistry>();
+    unsigned calls = 0;
+    auto op = operation("native.failure", false);
+    op.start_result = [&](const ResultProgramQuery& query,
+                          const auto& allocator) {
+      if (query.backend == Backend::Cpu)
+        ++calls;
+      if (query.backend == Backend::Gpu && (mode == 9 || mode == 10))
+        return Result<ResultContinuation>(typed_native_failure(mode));
+      return ResultContinuation::make<NativeFailure>(allocator, mode);
     };
-    PS_CHECK(registry->register_operation(std::move(operation)).ok());
+    op.traits.outputs[0].continuation_bytes = sizeof(NativeFailure);
+    PS_CHECK(registry->register_operation(std::move(op)).ok());
     PS_CHECK(registry->freeze().ok());
-    ps::WorkflowDocument document;
-    document.inputs = {
-        {1, "input", input.descriptor(), input.region(), input.layout(), {}}};
-    document.nodes = {
-        {1, "native.failure", {ps::WorkflowInputReference{1}}, {}}};
-    document.outputs = {{"output", 1, "value"}};
-    ps::GraphContext graph(document);
-    ps::PlanningOptions planning;
-    planning.execution_mode = ps::ExecutionMode::NativeGpu;
-    auto compiled = ps::Compiler(registry).compile(graph, planning);
-    PS_CHECK(compiled.ok());
-    ps::ExecutionContextConfig config;
+    ExecutionContextConfig config;
     config.gpu_enabled = true;
-    config.managed_resources = ps::ResourceLimits{};
+    config.managed_resources = ResourceLimits{};
     config.managed_resources->maximum_work = 1048576;
-    ps::ExecutionContext context(registry, config);
-    PS_CHECK(context.gpu_enabled());
-    auto result = context.execute(compiled.value().plan, {{{"input", input}}});
-    if (exhaust) {
+    ExecutionContext context(registry, config);
+    auto input =
+        multi_result::binding(context.resource_budget().take_value(), "input",
+                              1, schema({ElementType::Float32, {4}}));
+    WorkflowDocument doc;
+    doc.inputs = {multi_result::declaration(1, "input", input.result.schema())};
+    doc.nodes = {{1, "native.failure", {WorkflowInputReference{1}}, {}}};
+    doc.outputs = {{"out", 1, "value"}};
+    GraphContext graph(doc);
+    PlanningOptions options;
+    options.execution_mode = ExecutionMode::NativeGpu;
+    auto plan = multi_result::take(Compiler(registry).compile(graph, options));
+    auto result = context.execute(plan.plan, {{input}});
+    if (mode >= 7) {
+      const auto expected = typed_native_failure(mode);
+      PS_CHECK(!result.ok() && calls == 0 &&
+               result.status().code == expected.code &&
+               result.status().reason == expected.reason &&
+               result.status().detail.origin == expected.detail.origin &&
+               result.status().detail.scope == expected.detail.scope);
+    } else if (mode == 1) {
+      PS_CHECK(result.status().code == ErrorCode::ResourceExhausted &&
+               calls == 0);
+    } else if (mode >= 2) {
       PS_CHECK(!result.ok() &&
-               result.status().code == ps::ErrorCode::ResourceExhausted);
-      PS_CHECK(cpu_calls == 0);
+               result.status().code == ErrorCode::BackendUnavailable &&
+               calls == 0);
     } else {
-      PS_CHECK(result.ok() && cpu_calls == 1);
+      PS_CHECK(result.ok() && calls == 1);
       PS_CHECK(result.value().diagnostics.fallback_reasons.size() == 1);
     }
   }
   return 0;
 }
 }  // namespace
-
-int main() {
-  auto registry = std::make_shared<ps::OperationRegistry>();
-  ps::OperationTraits traits;
-  traits.input_count = 1;
-  traits.input_schema.resize(1);
-  traits.outputs[0].output_element_type = ps::ElementType::Float32;
-  traits.outputs[0].shape_rule = ps::OperationShapeRule::PreserveFirstInput;
-  traits.outputs[0].region_rule = ps::OperationRegionRule::Elementwise;
-  traits.supports_gpu = traits.allows_cpu_fallback = true;
-  std::function<void()> after_dispatch;
-  PS_CHECK(registry
-               ->register_operation({"native.scale", traits,
-                                     [&](const ps::OperationInvocation& call) {
-                                       auto result = scale(call);
-                                       if (call.backend == ps::Backend::Gpu &&
-                                           after_dispatch)
-                                         after_dispatch();
-                                       return result;
-                                     }})
-               .ok());
-  traits.supports_gpu = traits.allows_cpu_fallback = false;
-  PS_CHECK(registry
-               ->register_operation({"host.read", traits,
-                                     [](const ps::OperationInvocation& call) {
-                                       return ps::Result<ps::Value>(
-                                           call.inputs[0]);
-                                     }})
-               .ok());
-  PS_CHECK(registry->freeze().ok());
-  ps::WorkflowDocument document;
-  document.inputs = {{1,
-                      "input",
-                      {ps::ElementType::Float32, {4}},
-                      ps::Region::whole({4}),
-                      {0, {4}},
-                      {}}};
-  document.nodes = {
-      {1, "native.scale", {ps::WorkflowInputReference{1}}, {}},
-      {2, "native.scale", {ps::WorkflowNodeOutput{1, "value"}}, {}},
-      {3, "host.read", {ps::WorkflowNodeOutput{2, "value"}}, {}}};
-  document.outputs = {{"result", 3, "value"}};
-  ps::GraphContext graph(document);
-  ps::PlanningOptions options;
-  options.execution_mode = ps::ExecutionMode::NativeGpu;
-  auto compiled = ps::Compiler(registry).compile(graph, options);
-  PS_CHECK(compiled.ok());
-  auto buffer = ps::BufferAllocator().allocate(16).take_value();
-  const float input[] = {0, .25F, .5F, 1};
-  std::memcpy(buffer.data(), input, 16);
-  auto value = ps::Value::from_storage({ps::ElementType::Float32, {4}},
-                                       ps::Region::whole({4}), {0, {4}},
-                                       std::move(buffer).freeze())
-                   .take_value();
-  ps::ExecutionBindings bindings{{{"input", value}}};
-  ps::ExecutionContext cpu(registry);
-  auto fallback = cpu.execute(compiled.value().plan, bindings);
-  PS_CHECK(fallback.ok());
-  PS_CHECK(fallback.value().diagnostics.fallback_reasons.size() == 2);
-  PS_CHECK(fallback.value().diagnostics.native_dispatch_count == 0);
-  ps::ExecutionContextConfig config;
+int main() try {
+  auto registry = std::make_shared<OperationRegistry>();
+  std::function<void()> after;
+  multi_result::check(
+      registry->register_operation(operation("native.scale", false, &after)));
+  multi_result::check(
+      registry->register_operation(operation("host.read", true)));
+  // Execute every Run so this fixture measures native upload retention.
+  auto upload_reuse = operation("native.upload_reuse", false);
+  upload_reuse.traits.cacheable = false;
+  multi_result::check(registry->register_operation(std::move(upload_reuse)));
+  multi_result::check(registry->freeze());
+  ResourceBudget root;
+  auto bytes = multi_result::take(root.allocator().allocate(16));
+  const float inputs[] = {0, .25F, .5F, 1};
+  std::memcpy(bytes.data(), inputs, 16);
+  auto backing = multi_result::take(
+      Value::from_storage({ElementType::Float32, {4}}, Region::whole({4}),
+                          {0, {4}}, std::move(bytes).freeze()));
+  auto input = source(root, backing);
+  WorkflowDocument doc;
+  doc.inputs = {multi_result::declaration(1, "input", input.schema())};
+  doc.nodes = {{1, "native.scale", {WorkflowInputReference{1}}, {}},
+               {2, "native.scale", {WorkflowNodeOutput{1, "value"}}, {}},
+               {3, "host.read", {WorkflowNodeOutput{2, "value"}}, {}}};
+  doc.outputs = {{"result", 3, "value"}};
+  GraphContext graph(doc);
+  PlanningOptions planning;
+  planning.execution_mode = ExecutionMode::NativeGpu;
+  auto compiled =
+      multi_result::take(Compiler(registry).compile(graph, planning));
+  ExecutionContext cpu(registry);
+  ExecutionBindings bindings{
+      {{"input", source(cpu.resource_budget().take_value(), backing)}}};
+  auto fallback = multi_result::take(cpu.execute(compiled.plan, bindings));
+  PS_CHECK(fallback.diagnostics.fallback_reasons.size() == 2 &&
+           fallback.diagnostics.native_dispatch_count == 0);
+  ExecutionContextConfig config;
   config.gpu_enabled = true;
   config.cpu_workers = 2;
   config.collect_scheduler_timing = true;
-  ps::Value retained;
+  ResultRef retained;
   {
-    ps::ExecutionContext execution(registry, config);
+    ExecutionContext execution(registry, config);
     if (!execution.gpu_enabled()) {
-      std::cout << "CPU fallback passed; native execution skipped\n";
+      std::cout << "Result CPU fallback passed; native execution skipped\n";
       return 77;
     }
-    auto result = execution.execute(compiled.value().plan, bindings);
-    if (!result.ok())
-      std::cerr << result.status().message << '\n';
-    PS_CHECK(result.ok());
+    bindings = {
+        {{"input", source(execution.resource_budget().take_value(), backing)}}};
+    auto result =
+        multi_result::take(execution.execute(compiled.plan, bindings));
     const auto queue = execution.scheduler_statistics();
     PS_CHECK(queue.enabled && !queue.cpu.saturated && !queue.gpu.saturated);
-    PS_CHECK(queue.gpu.accepted_callbacks == 2 &&
-             queue.gpu.started_callbacks == 2);
-    PS_CHECK(queue.cpu.accepted_callbacks == 1 &&
-             queue.cpu.started_callbacks == 1);
+    PS_CHECK(queue.gpu.accepted_callbacks == 4 &&
+             queue.gpu.started_callbacks == 4);
+    PS_CHECK(queue.cpu.accepted_callbacks == 5 &&
+             queue.cpu.started_callbacks == 5);
     PS_CHECK(queue.gpu.submission_ns > 0 && queue.gpu.queue_wait_ns > 0);
-    const auto& d = result.value().diagnostics;
+    const auto& d = result.diagnostics;
     PS_CHECK(d.native_dispatch_count == 2 && d.native_submission_count == 2);
     PS_CHECK(d.transfer_count == 1 && d.transfer_bytes == 16);
     PS_CHECK(d.host_access_count == 1);
-    PS_CHECK(d.selected_backends.at({1, 0}) == ps::Backend::Gpu);
-    PS_CHECK(d.selected_backends.at({3, 0}) == ps::Backend::Cpu);
-    retained = result.value().values.at("result");
-    ps::CancellationSource cancellation;
-    after_dispatch = [&] { cancellation.cancel(); };
-    auto cancelled = execution.execute(compiled.value().plan, bindings,
-                                       cancellation.token());
-    PS_CHECK(!cancelled.ok() &&
-             cancelled.status().code == ps::ErrorCode::Cancelled);
-    after_dispatch = [&] { graph.replace(document); };
-    auto stale = execution.execute(compiled.value().plan, bindings);
-    PS_CHECK(!stale.ok() && stale.status().code == ps::ErrorCode::Stale);
-    after_dispatch = {};
-    compiled = ps::Compiler(registry).compile(graph, options);
-    PS_CHECK(execution.execute(compiled.value().plan, bindings).ok());
+    PS_CHECK(d.selected_backends.at({1, 0}) == Backend::Gpu);
+    PS_CHECK(d.selected_backends.at({3, 0}) == Backend::Cpu);
+    retained = result.results.at("result");
+    CancellationSource cancellation;
+    after = [&] { cancellation.cancel(); };
+    PS_CHECK(execution.execute(compiled.plan, bindings, cancellation.token())
+                 .status()
+                 .code == ErrorCode::Cancelled);
+    after = [&] { graph.replace(doc); };
+    PS_CHECK(execution.execute(compiled.plan, bindings).status().code ==
+             ErrorCode::Stale);
+    after = {};
+    compiled = multi_result::take(Compiler(registry).compile(graph, planning));
+    PS_CHECK(execution.execute(compiled.plan, bindings).ok());
   }
-  PS_CHECK(retained.bytes() == fallback.value().values.at("result").bytes());
-  // Generic Value execution must evict retained uploads before reserving again.
-  document.nodes.resize(1);
-  document.outputs = {{"result", 1, "value"}};
-  ps::GraphContext bounded_graph(document);
-  auto bounded_plan = ps::Compiler(registry).compile(bounded_graph, options);
-  PS_CHECK(bounded_plan.ok());
+  PS_CHECK(numbers(retained) == numbers(fallback.results.at("result")));
+  PS_CHECK(sticky_resource_before_fallback() == 0);
+  doc.nodes.resize(1);
+  doc.nodes[0].operation = "native.upload_reuse";
+  doc.outputs = {{"result", 1, "value"}};
+  GraphContext bounded_graph(doc);
+  auto bounded_plan =
+      multi_result::take(Compiler(registry).compile(bounded_graph, planning));
   config.maximum_live_bytes = native_capacity * 3;
   config.result_cache_bytes = native_capacity;
-  ps::ExecutionContext bounded(registry, config);
+  ExecutionContext bounded(registry, config);
+  bindings = {
+      {{"input", source(bounded.resource_budget().take_value(), backing)}}};
   for (int repeat = 0; repeat < 3; ++repeat) {
-    auto result = bounded.execute(bounded_plan.value().plan, bindings);
-    PS_CHECK(result.ok());
-    PS_CHECK(result.value().diagnostics.native_dispatch_count == 1);
-    PS_CHECK(bounded.cache_statistics().retained_bytes == native_capacity);
+    auto run = multi_result::take(bounded.execute(bounded_plan.plan, bindings));
+    PS_CHECK(run.diagnostics.native_dispatch_count == 1);
+    PS_CHECK(run.diagnostics.fallback_reasons.empty());
+    PS_CHECK(run.diagnostics.transfer_count == (repeat == 0 ? 1u : 0u));
+    const auto cache = bounded.cache_statistics();
+    PS_CHECK(cache.retained_bytes == native_capacity);
+    PS_CHECK(cache.native_retained_bytes == native_capacity);
+    PS_CHECK(numbers(run.results.at("result"))[3] == .5F);
   }
-  // Distinct uploads must evict optional native cache before actual admission,
-  // including when only a Device or Shared sublimit is tight.
-  for (auto kind : {ps::ResourceKind::Payload, ps::ResourceKind::Device,
-                    ps::ResourceKind::Shared}) {
+  for (auto kind :
+       {ResourceKind::Payload, ResourceKind::Device, ResourceKind::Shared}) {
     auto tight = config;
-    tight.maximum_live_bytes =
-        kind == ps::ResourceKind::Payload ? native_capacity * 2 : 4096;
+    const auto limit = native_capacity * 2 + sizeof(Scale);
+    tight.maximum_live_bytes = kind == ResourceKind::Payload ? limit : 16384;
     tight.result_cache_bytes = native_capacity * 2;
-    tight.managed_resources = ps::ResourceLimits{};
-    tight.managed_resources->capacity[kind] = native_capacity * 2;
-    ps::ExecutionContext context(registry, tight);
+    tight.managed_resources = ResourceLimits{};
+    tight.managed_resources->capacity[kind] = limit;
+    ExecutionContext context(registry, tight);
     for (int repeat = 0; repeat < 4; ++repeat) {
-      auto bytes = ps::BufferAllocator().allocate(16).take_value();
+      auto changed_bytes = multi_result::take(root.allocator().allocate(16));
       const float first = static_cast<float>(repeat + 1) / 8;
-      std::memcpy(bytes.data(), &first, sizeof(first));
+      std::memcpy(changed_bytes.data(), &first, 4);
+      auto changed_backing = multi_result::take(Value::from_storage(
+          backing.descriptor(), backing.region(), backing.layout(),
+          std::move(changed_bytes).freeze()));
       auto changed =
-          ps::Value::from_storage(value.descriptor(), value.region(),
-                                  value.layout(), std::move(bytes).freeze())
-              .take_value();
-      auto result =
-          context.execute(bounded_plan.value().plan, {{{"input", changed}}});
-      if (!result.ok())
-        std::cerr << result.status().message << '\n';
-      PS_CHECK(result.ok());
-      PS_CHECK(result.value().diagnostics.native_dispatch_count == 1);
-      float actual = 0;
-      std::memcpy(&actual, result.value().values.at("result").bytes().data(),
-                  sizeof(actual));
-      PS_CHECK(actual == first * .5F);
-      const auto stats = context.resource_budget().value().statistics();
-      PS_CHECK(stats.peak[kind] <= native_capacity * 2);
+          source(context.resource_budget().take_value(), changed_backing);
+      auto run = multi_result::take(
+          context.execute(bounded_plan.plan, {{{"input", changed}}}));
+      PS_CHECK(run.diagnostics.native_dispatch_count == 1);
+      PS_CHECK(numbers(run.results.at("result"))[0] == first * .5F);
+      PS_CHECK(context.resource_budget().take_value().statistics().peak[kind] <=
+               limit);
     }
   }
-  // One uploaded allocation can back two Values with distinct semantic facets.
-  auto first = ps::Value::from_storage(value.descriptor(), value.region(),
-                                       value.layout(), value.storage(),
-                                       {{"variant", 1, {1}}})
-                   .take_value();
-  auto second = ps::Value::from_storage(value.descriptor(), value.region(),
-                                        value.layout(), value.storage(),
-                                        {{"variant", 1, {2}}})
-                    .take_value();
-  document.inputs = {{1, "first", first.descriptor(), first.region(),
-                      first.layout(), first.facets()},
-                     {2, "second", second.descriptor(), second.region(),
-                      second.layout(), second.facets()}};
-  document.nodes = {{1, "native.scale", {ps::WorkflowInputReference{1}}, {}},
-                    {2, "native.scale", {ps::WorkflowInputReference{2}}, {}}};
-  document.outputs = {{"first", 1, "value"}, {"second", 2, "value"}};
-  ps::GraphContext facets_graph(document);
-  auto facets_plan = ps::Compiler(registry).compile(facets_graph, options);
-  PS_CHECK(facets_plan.ok());
+  auto first_backing = multi_result::take(Value::from_storage(
+      backing.descriptor(), backing.region(), backing.layout(),
+      backing.storage(), {{"variant", 1, {1}}}));
+  auto second_backing = multi_result::take(Value::from_storage(
+      backing.descriptor(), backing.region(), backing.layout(),
+      backing.storage(), {{"variant", 1, {2}}}));
+  auto first = source(root, first_backing),
+       second = source(root, second_backing);
+  doc.inputs = {multi_result::declaration(1, "first", first.schema()),
+                multi_result::declaration(2, "second", second.schema())};
+  doc.nodes = {{1, "native.scale", {WorkflowInputReference{1}}, {}},
+               {2, "native.scale", {WorkflowInputReference{2}}, {}}};
+  doc.outputs = {{"first", 1, "value"}, {"second", 2, "value"}};
+  GraphContext facets_graph(doc);
+  auto facets_plan =
+      multi_result::take(Compiler(registry).compile(facets_graph, planning));
   config.maximum_live_bytes = 4096;
   config.result_cache_bytes = 0;
-  ps::ExecutionContext facets_context(registry, config);
-  auto facets_result = facets_context.execute(
-      facets_plan.value().plan, {{{"first", first}, {"second", second}}});
-  PS_CHECK(facets_result.ok());
-  PS_CHECK(facets_result.value().diagnostics.transfer_count == 1);
-  PS_CHECK(facets_result.value().values.at("first").facets()[0].payload[0] ==
-           1);
-  PS_CHECK(facets_result.value().values.at("second").facets()[0].payload[0] ==
-           2);
-  // Length prefixes prevent shape/origin/stride field-boundary collisions.
-  auto rank_five =
-      ps::Value::from_storage({ps::ElementType::Float32, {1, 1, 1, 1, 1}},
-                              ps::Region::whole({1, 1, 1, 1, 1}),
-                              {0, {0, 0, 0, 0, 0}}, value.storage())
-          .take_value();
-  auto rank_four =
-      ps::Value::from_storage({ps::ElementType::Float32, {1, 1, 1, 1}},
-                              ps::Region::whole({1, 1, 1, 1}),
-                              {0, {0, 0, 0, 1}, {1, 0, 0, 0}}, value.storage())
-          .take_value();
-  auto ranks_registry = std::make_shared<ps::OperationRegistry>();
-  auto source_traits = ps::OperationTraits{};
-  source_traits.estimated_bytes = value.storage()->capacity();
-  source_traits.outputs[0].output_element_type = ps::ElementType::Float32;
-  source_traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
-  source_traits.outputs[0].fixed_output_shape = rank_five.descriptor().shape;
+  ExecutionContext facets_context(registry, config);
+  first = source(facets_context.resource_budget().take_value(), first_backing);
+  second =
+      source(facets_context.resource_budget().take_value(), second_backing);
+  auto facets_result = multi_result::take(facets_context.execute(
+      facets_plan.plan, {{{"first", first}, {"second", second}}}));
+  PS_CHECK(facets_result.results.at("first")
+               .schema()
+               .tensors[0]
+               .facets[0]
+               .payload[0] == 1);
+  PS_CHECK(facets_result.results.at("second")
+               .schema()
+               .tensors[0]
+               .facets[0]
+               .payload[0] == 2);
+  // Distinct rank/origin/stride layouts sharing backing must not collide.
+  auto rank_five = multi_result::take(Value::from_storage(
+      {ElementType::Float32, {1, 1, 1, 1, 1}}, Region::whole({1, 1, 1, 1, 1}),
+      {0, {0, 0, 0, 0, 0}}, backing.storage()));
+  auto rank_four = multi_result::take(Value::from_storage(
+      {ElementType::Float32, {1, 1, 1, 1}}, Region::whole({1, 1, 1, 1}),
+      {0, {0, 0, 0, 1}, {1, 0, 0, 0}}, backing.storage()));
+  first = source(facets_context.resource_budget().take_value(), rank_five);
+  second = source(facets_context.resource_budget().take_value(), rank_four);
+  doc.inputs = {multi_result::declaration(1, "first", first.schema()),
+                multi_result::declaration(2, "second", second.schema())};
+  GraphContext ranks_graph(doc);
+  auto ranks_plan =
+      multi_result::take(Compiler(registry).compile(ranks_graph, planning));
+  auto ranks = multi_result::take(facets_context.execute(
+      ranks_plan.plan, {{{"first", first}, {"second", second}}}));
   PS_CHECK(
-      ranks_registry
-          ->register_operation({"source.five", source_traits,
-                                [rank_five](const ps::OperationInvocation&) {
-                                  return ps::Result<ps::Value>(rank_five);
-                                }})
-          .ok());
-  source_traits.outputs[0].fixed_output_shape = rank_four.descriptor().shape;
+      ranks.results.at("first").schema().tensors[0].descriptor.shape.size() ==
+      5);
   PS_CHECK(
-      ranks_registry
-          ->register_operation({"source.four", source_traits,
-                                [rank_four](const ps::OperationInvocation&) {
-                                  return ps::Result<ps::Value>(rank_four);
-                                }})
-          .ok());
-  PS_CHECK(ranks_registry
-               ->register_operation(
-                   {"native.scale",
-                    registry->find_traits("native.scale").take_value(), scale})
-               .ok());
-  PS_CHECK(ranks_registry->freeze().ok());
-  document.inputs.clear();
-  document.nodes = {
-      {1, "source.five", {}, {}},
-      {2, "source.four", {}, {}},
-      {3, "native.scale", {ps::WorkflowNodeOutput{1, "value"}}, {}},
-      {4, "native.scale", {ps::WorkflowNodeOutput{2, "value"}}, {}}};
-  document.outputs = {{"first", 3, "value"}, {"second", 4, "value"}};
-  ps::GraphContext ranks_graph(document);
-  auto ranks_plan = ps::Compiler(ranks_registry).compile(ranks_graph, options);
-  PS_CHECK(ranks_plan.ok());
-  ps::ExecutionContext ranks_context(ranks_registry, config);
-  auto ranks_result = ranks_context.execute(ranks_plan.value().plan, {});
-  if (!ranks_result.ok())
-    std::cerr << ranks_result.status().message << '\n';
-  PS_CHECK(ranks_result.ok());
-  PS_CHECK(ranks_result.value().values.at("first").descriptor().shape.size() ==
-           5);
-  PS_CHECK(ranks_result.value().values.at("second").descriptor().shape.size() ==
-           4);
-  PS_CHECK(sticky_resource_before_fallback(value) == 0);
-  std::cout << "native chain: dispatches=2 uploads=1 bytes=16 host_access=1 "
-               "oracle=passed\n";
+      ranks.results.at("second").schema().tensors[0].descriptor.shape.size() ==
+      4);
+  PS_CHECK(ranks.diagnostics.native_dispatch_count == 2 &&
+           ranks.diagnostics.fallback_reasons.empty());
+  PS_CHECK(facets_result.diagnostics.transfer_count == 1);
+  std::cout
+      << "native Result chain: dispatches=2 uploads=1 bytes=16 oracle=passed\n";
   return 0;
+} catch (const std::exception& error) {
+  std::cerr << "native fixture failure: " << error.what() << '\n';
+  return 1;
 }

@@ -9,19 +9,19 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_subset
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+verification_status: focused_result_validation_passed
+repository_commit: current working tree
 ---
 
 # CRV-06D: color_ramp_cielch
 
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member and no fields, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
+
 ## Revised lightness coordinate and implementation boundary
 
-The [2026-09-23 shared scale revision](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
+The [shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
 LUT input axes and output table coordinates. Finite values outside 0..1 remain
 legal. Opponent/chroma scales and arithmetic formulas are unchanged. Runtime
@@ -46,8 +46,10 @@ input-representation mode. The three primitives are implemented separately.
 
 Channels are l=L*/100, C*, h. l accepts finite extensions, C* is finite and nonnegative,
 and white is explicit, default D50. No alpha is present. Hue uses floating radians,
-floating pi multiples or exact Int64 p/q*pi. Denominators are positive; unreduced
-fractions are valid. Preserve the original hue value, its sign and winding count;
+floating pi multiples or exact Int64 p/q*pi. Selected rows require q>0, while an
+unselected generic q<=0 value adds no mathematical-domain error; typed/upstream
+validation still covers all inputs. Unreduced fractions are valid. Preserve the
+original hue value, its sign and winding count;
 there is no modulo reduction, one-turn output range or hue_path parameter.
 
 Input hue remains active even when C*=0, including at direct hit/clamp and when
@@ -66,7 +68,7 @@ exactly through interpolation and any unit conversion, then rounded only at outp
 Inherit the [CIELAB ramp](CRV-06C_color_ramp_cielab.md) for dynamic input/stops,
 finite strictly increasing stops, K=1..65536, clamp/reject default clamp,
 singleton semantics, mixed Float32/Float64 ports, positive extents and logical
-element limits of 2^40. Input rank is 1..7; values has shape input.shape+[3].
+element limits of 2^40. Input rank is 1..7; values has shape sample_shape(input)+[3].
 Floating entrypoints default output dtype to colors dtype; the rational entrypoint
 defaults it to lightness_chroma dtype. Numerator/denominator are Int64[K], with
 the same K as stops and lightness_chroma. No implicit broadcast is performed.
@@ -113,37 +115,38 @@ request partition. Direct hit/clamp/identical-row conversions preserve source fl
 signs, including across positive pi unit conversion. A rational zero numerator
 represents +0. On genuine interpolation, exact zero hue is +0 and nonzero
 underflow retains the mathematical sign. Apply the same direct/identical versus
-mixed zero rules to L/C. All source rows remain validated before shortcuts.
+mixed zero rules to L/C. All selected source rows are validated before shortcuts.
 
 ## Demand, invalidation, resources and failures
 
-All formal strict and accelerated keys use Whole execution. Any nonempty
-request collects complete input, stops and color arrays (and both rational-hue
-integer arrays when present), with complete upstream and typed validation.
-The callback validates every stop, then every position, before color arithmetic.
-Each position still uses exactly one hit/clamp/singleton row or two enclosing
-rows mathematically. Unused generic color rows are not subjected to new numeric
-domain checks; invalid typed data or upstream failures anywhere still fail.
-Empty requests perform static preflight but read no sample payload.
+All formal strict and accelerated keys use Whole Result programs. A nonempty
+Run declares Data, Validation and Descriptor needs (role 13) for every input, so
+typed and upstream validation covers complete tensor members. The executor reads
+authorized windows directly; the callback does not collect or copy complete input
+arrays. It validates all stops, then every input position, before color arithmetic.
+Each position uses one exact hit/clamp/singleton row or two enclosing rows for its
+mathematics. Generic color rows outside all evaluated stencils remain numerically
+unused, while their typed/upstream validation still applies. Empty reads no sample
+payload after static preparation.
 
-The output is one immutable dense Value of shape input.shape+[C]. The final
-channel axis retains complete-color closure, ColorArray identity and owned ICC
-resources where applicable. Public fragments expose the requested complete
-colors while retaining the full output owner. Arbitrary immutable input strides,
-offsets and unaligned storage are supported. Owners survive context teardown.
-Any input edit invalidates the complete recorded output demand. Cache identity
-retains descriptors, parameters, typed validation and resource identities.
-Numeric errors have Run scope; no successful color subset survives a failed
-callback. Upstream, resource and cancellation errors retain their categories.
+The `values` port publishes an immutable `photospider.tensor` v1 Result with
+`samples` shape `sample_shape(input)+[C]`, the ColorArray v1 facet and
+`atomic_trailing_axes=1`. Whole writes publish the full output transactionally;
+the Result retains full certified coverage and global coordinates. Fragments expose
+requested regions while retaining the full output owner. Arbitrary immutable source
+strides, offsets and unaligned storage are supported. Result association records
+source ObjectIds, and selected ColorArray resources remain owned by the output.
+Input edits invalidate complete recorded output demand. Numeric errors have Run
+scope; failed callbacks publish no color subset. Upstream, resource and cancellation
+errors retain their categories.
 
-For N=product(input.shape), lookup work is O(K+N log K), plus actual exact or
-certified arithmetic. Full output payload is N*C*sizeof(dtype), even for a small
-requested region. Account complete collected inputs, fixed admitted arithmetic
-workspace, a ResourceVector stop index with 8K element bytes plus allocator and
-metadata overhead, and retained descriptors/resources. No per-output dependency
-records or point-state array is retained. Work/capacity limits and cancellation
-apply during scans, lookup, arithmetic and before publication; incomplete
-certification fails ResourceExhausted. No reduced-precision fallback is added.
+Lookup work remains O(K+N log K), plus exact or certified arithmetic. Full output
+payload is N*C*sizeof(dtype), even for a small request. Account source owners/windows,
+fixed arithmetic workspace, the Root-owned ResourceVector stop index (8K element
+bytes plus allocator/metadata overhead), output and retained descriptors/resources.
+No per-output dependency records or point-state array is retained. Work/capacity and
+cancellation checks apply during scans, lookup, arithmetic and before publication;
+incomplete certification fails ResourceExhausted. No reduced-precision fallback is added.
 
 C=0 never suppresses hue mathematics or positive-denominator validation for
 selected rational rows. Certified pi conversion retains its fixed precision
@@ -151,7 +154,7 @@ ceiling; a finite large angle does not create an unbounded precision cache.
 
 Malformed statics/descriptions fail preflight with InvalidArgument/InvalidDomain;
 port shapes/dtypes and descriptor mismatch use TypeMismatch. Nonfinite demanded
-floats, negative C, denominator<=0, invalid stops or rejected input positions use
+floats, negative C, selected q<=0, invalid stops or rejected input positions use
 OperationFailed/InvalidDomain at Run scope. Final narrowing
 overflow uses OperationFailed/ArithmeticOverflow. Platform mismatch, resources,
 cancellation, stale and upstream failures retain their established categories.
@@ -194,13 +197,5 @@ and do not replace the existing floating pi-multiple operations.
 - [Operator template](../../00-foundation/spec-template.md).
 
 ## Maintained implementation and validation
-
-This shared CIELCh contract covers three primitives and nine profile keys.
-The public helpers are `color_ramp_cielch_node`,
-`color_ramp_cielch_pi_node` and `color_ramp_cielch_rational_pi_node` in
-[`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp).
-Coordinates and original hue ratios use exact rational interpolation;
-conversion between radian and pi units uses certified pi, with a 4096-bit
-precision ceiling. Equal units cancel symbolically. Every profile returns
-strict bits. See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation)
-and [public workflows](../../../../examples/numeric_workflow/README.md#color-ramps).
+The public helpers `color_ramp_cielch_node`, `color_ramp_cielch_pi_node` and `color_ramp_cielch_rational_pi_node` are declared in [`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp); `color_ramps.cpp` implements their Whole Result programs. Coordinate values and original hue ratios use exact rational interpolation. Cross-unit conversion in either direction multiplies or divides by certified pi, with a 4096-bit precision ceiling; same-unit RationalPi expressions cancel pi symbolically.
+The focused Result CTest, Strict/Apple manual groups, independent Fraction/Machin-pi and RGB rational/root/Decimal oracles, and installed consumer have passed. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation) and [workflow README](../../../../examples/numeric_workflow/README.md#color-ramps) for coverage and unsupported platforms/shapes.

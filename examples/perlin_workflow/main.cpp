@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "result_fixture.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -17,14 +18,9 @@ T take(Result<T> result) {
     throw std::runtime_error(result.status().message);
   return result.take_value();
 }
-WorkflowDocument graph(unsigned count, bool tiled, bool gpu = false) {
+WorkflowDocument graph(const Value& input, bool tiled, bool gpu = false) {
   WorkflowDocument result;
-  result.inputs = {{1,
-                    "coordinates",
-                    {ElementType::Float64, {count, 3}},
-                    Region::whole({count, 3}),
-                    {0, {24, 8}},
-                    {}}};
+  perlin_fixture::declare(&result, input);
   result.nodes = {{1,
                    gpu     ? "noise.perlin2002_3d_v1_strict_gpu"
                    : tiled ? "noise.perlin2002_3d_v1_strict_cpu_tiled"
@@ -59,6 +55,7 @@ int main(int argc, char** argv) try {
   }
   const auto input = take(std::move(input_writer).publish());
   ExecutionOptions options;
+  options.dependencies.maximum_stages = 3 * count + 1;
   options.dependencies.maximum_work = UINT64_C(1000000000);
   options.maximum_dependency_work = UINT64_C(1000000000);
   ExecutionContextConfig config;
@@ -66,15 +63,22 @@ int main(int argc, char** argv) try {
   config.gpu_enabled = false;
   config.managed_resources = ResourceLimits{};
   ExecutionContext reference_context(registry, config);
-  GraphContext reference_graph(graph(count, false));
+  GraphContext reference_graph(graph(input, false));
   auto reference_plan = take(Compiler(registry).compile(reference_graph));
   const auto reference = take(reference_context.execute(
-      reference_plan.plan, {{{"coordinates", input}}}, {}, options));
-  const auto reference_bytes = reference.values.at("values").copy_bytes();
+      reference_plan.plan,
+      perlin_fixture::bind(take(reference_context.resource_budget()), input),
+      {}, options));
+  const auto reference_bytes =
+      numeric_result_fixture::bytes(reference.results.at("values"));
   config.cpu_workers = workers;
   config.gpu_enabled = mode == "gpu";
   ExecutionContext context(registry, config);
-  GraphContext source(graph(count, mode == "tiled", mode == "gpu"));
+  if (mode == "gpu" && !context.gpu_enabled()) {
+    std::cerr << "native GPU unavailable\n";
+    return 77;
+  }
+  GraphContext source(graph(input, mode == "tiled", mode == "gpu"));
   PlanningOptions planning;
   planning.tile_width = tile_width;
   if (mode == "gpu")
@@ -84,35 +88,39 @@ int main(int argc, char** argv) try {
   std::vector<double> timings;
   ExecutionDiagnostics diagnostics;
   const auto budget = take(context.resource_budget());
+  const auto bindings = perlin_fixture::bind(budget, input);
   std::uint64_t work = 0;
   for (unsigned iteration = 0; iteration <= repeat; ++iteration) {
     const auto prior = budget.statistics().issued.work;
     std::uint64_t next = 0;
     const auto start = std::chrono::steady_clock::now();
-    if (mode == "tiled") {
-      diagnostics = take(context.execute_stream(
-          compiled.plan, {{{"coordinates", input}}},
-          [&](const std::string&, ValueView tile) {
-            const auto& span = tile.region().dimensions()[0];
-            if (span.offset != next || span.extent > tile_width ||
-                span.offset + span.extent > count)
-              return Status{ErrorCode::Internal,
-                            "invalid tile order or coverage"};
-            std::memcpy(bytes.data() + span.offset * 8, tile.bytes().data(),
-                        span.extent * 8);
-            next += span.extent;
-            return Status::success();
-          },
-          {}, options));
-      if (next != count)
-        throw std::runtime_error("incomplete tile coverage");
-    } else {
-      auto result = take(context.execute(
-          compiled.plan, {{{"coordinates", input}}}, {}, options));
-      diagnostics = std::move(result.diagnostics);
-      std::memcpy(bytes.data(), result.values.at("values").bytes().data(),
-                  bytes.size());
-    }
+    auto seen = take(Footprint::none({count}));
+    options.result_publication = [&](ValueRef ref, const ResultRef& object) {
+      if (mode != "tiled" || ref.node_id != 1)
+        return Status::success();
+      const auto facts = take(object.descriptor(false));
+      const auto added = take(facts.tensor_coverage(0).subtract(seen));
+      for (const auto& box : added.boxes()) {
+        const auto& span = box.dimensions()[0];
+        if (span.offset != next || span.extent > tile_width ||
+            span.offset + span.extent > count)
+          return Status{ErrorCode::Internal, "invalid tile order or coverage"};
+        auto window = take(object.acquire_tensor(facts, 0, box));
+        auto run = take(window.row_run({span.offset}));
+        if (run.samples != span.extent || run.sample_stride_bytes != 8)
+          return Status{ErrorCode::Internal, "expected packed output tile"};
+        std::memcpy(bytes.data() + span.offset * 8, run.data, span.extent * 8);
+        next += span.extent;
+      }
+      seen = facts.tensor_coverage(0);
+      return Status::success();
+    };
+    auto result = take(context.execute(compiled.plan, bindings, {}, options));
+    diagnostics = std::move(result.diagnostics);
+    if (mode == "tiled" && next != count)
+      throw std::runtime_error("incomplete tile coverage");
+    if (mode != "tiled")
+      bytes = numeric_result_fixture::bytes(result.results.at("values"));
     const auto elapsed = std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - start)
                              .count();
@@ -128,9 +136,9 @@ int main(int argc, char** argv) try {
   }
   std::sort(timings.begin(), timings.end());
   const auto stats = budget.statistics();
-  std::uint64_t compute_calls = 0;
+  std::uint64_t continuation_polls = 0;
   for (const auto& timing : diagnostics.operation_timings)
-    compute_calls += timing.computed_elements != 0;
+    continuation_polls += timing.invocation_count;
   std::cout << "{\"mode\":\"" << mode << "\",\"count\":" << count
             << ",\"tile_width\":" << tile_width << ",\"workers\":" << workers
             << ",\"median_ms\":" << timings[timings.size() / 2]
@@ -140,7 +148,7 @@ int main(int argc, char** argv) try {
             << ",\"native_dispatches\":" << diagnostics.native_dispatch_count
             << ",\"native_submissions\":" << diagnostics.native_submission_count
             << ",\"native_compute_us\":" << diagnostics.native_compute_us
-            << ",\"compute_calls\":" << compute_calls
+            << ",\"continuation_polls\":" << continuation_polls
             << ",\"peak_active_tasks\":" << diagnostics.peak_active_tasks
             << ",\"bitwise_whole_reference\":true}\n";
   return 0;

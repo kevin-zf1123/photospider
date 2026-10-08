@@ -5,17 +5,27 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/sequence_profiles.hpp"
-#include "02-format-color/alpha_lowering.hpp"
-#include "photospider/data/region_runs.hpp"
+#include "02-format-color/result_mapping.hpp"
+#include "data/content_digest.hpp"
 #include "photospider/data/tensor_description.hpp"
 #include "photospider/format/channel.hpp"
 #include "plugin/builtin_operations.hpp"
 #include "plugin/utf8_validation.hpp"
+
+namespace ps::format::detail {
+std::string schema_assertion(const SchemaTemplate& schema) {
+  const auto canonical = schema.canonical();
+  content_internal::Sha256 digest;
+  digest.text("photospider.fmt.result-schema.v1");
+  digest.text(std::string_view(canonical));
+  return digest.finish();
+}
+}  // namespace ps::format::detail
 
 namespace ps::plugin_internal {
 namespace {
@@ -52,7 +62,7 @@ bool supported(ElementType type) {
   return false;
 }
 std::optional<TensorDescription> attached_description(
-    const OperationMetadata& input, Status* failure) {
+    const ResultTensorSpec& input, Status* failure) {
   for (const auto& facet : input.facets) {
     if (facet.key != "photospider.tensor-description")
       continue;
@@ -117,50 +127,27 @@ Result<OperationPreparation> prepare_extraction(
   const auto available = numeric_ops::sequence_profile_available(profile);
   if (!available.ok())
     return Prepared(available);
-  const auto& input = inputs[0];
+  auto valid = tensor_ops::check_tensor(inputs[0]);
+  if (!valid.ok())
+    return Prepared(valid);
+  const auto& input_schema = *inputs[0].result_schema;
+  const auto& input = input_schema.tensors[0];
   const auto& shape = input.descriptor.shape;
   if (!supported(input.descriptor.element_type) || shape.empty() ||
       shape.size() > 8)
     return Prepared(Status{ErrorCode::TypeMismatch,
                            "channel extraction requires a supported tensor"});
-  const auto expected_dtype = parameters.find("expected_source_dtype");
-  const auto expected_shape = parameters.find("expected_source_shape");
-  const auto expected_tensor = parameters.find("expected_source_tensor");
+  const auto expected_schema = parameters.find("expected_source_schema");
   const auto expected_layout = parameters.find("expected_source_layout");
-  const auto assertion_count =
-      static_cast<unsigned>(expected_dtype != parameters.end()) +
-      static_cast<unsigned>(expected_shape != parameters.end()) +
-      static_cast<unsigned>(expected_tensor != parameters.end()) +
-      static_cast<unsigned>(expected_layout != parameters.end());
-  if (assertion_count && assertion_count != 4)
+  if ((expected_schema != parameters.end()) !=
+      (expected_layout != parameters.end()))
     return Prepared(invalid("source metadata assertions must be complete"));
-  if (assertion_count) {
-    std::string actual_shape;
-    for (const auto extent : shape) {
-      if (!actual_shape.empty())
-        actual_shape.push_back(',');
-      actual_shape += std::to_string(extent);
-    }
-    std::string actual_tensor = "none";
-    for (const auto& facet : input.facets)
-      if (facet.key == "photospider.tensor-description") {
-        auto decoded = decode_tensor_description(facet);
-        if (!decoded.ok())
-          return Prepared(decoded.status());
-        auto encoded = tensor_description_parameter(decoded.value());
-        if (!encoded.ok())
-          return Prepared(encoded.status());
-        actual_tensor = encoded.take_value();
-      }
-    if (std::get<std::int64_t>(expected_dtype->second) !=
-            static_cast<std::int64_t>(input.descriptor.element_type) ||
-        std::get<std::string>(expected_shape->second) != actual_shape ||
-        std::get<std::string>(expected_tensor->second) != actual_tensor ||
-        std::get<std::string>(expected_layout->second) !=
-            format::detail::layout_assertion(input.planar_layout))
-      return Prepared(
-          invalid("source descriptor assertion disagrees with input"));
-  }
+  if (expected_schema != parameters.end() &&
+      (std::get<std::string>(expected_schema->second) !=
+           format::detail::schema_assertion(input_schema) ||
+       std::get<std::string>(expected_layout->second) !=
+           format::detail::layout_assertion(input.layout)))
+    return Prepared(invalid("source schema assertion disagrees with input"));
   const auto& mode = std::get<std::string>(parameters.at("metadata_mode"));
   if (mode != "respect" && mode != "raw" && mode != "override")
     return Prepared(invalid("metadata_mode must be respect, raw or override"));
@@ -258,32 +245,37 @@ Result<OperationPreparation> prepare_extraction(
     selected.index = static_cast<std::uint64_t>(index);
   }
   if (parameters.count("expected_inputs") &&
-      alpha_ops::text(parameters, "expected_inputs") !=
-          alpha_ops::source_assertion(inputs))
+      format_result::text(parameters, "expected_inputs") !=
+          format_result::source_assertion(inputs))
     return Prepared(
         invalid("FMT-05B source metadata disagrees with inference"));
   if (parameters.count("output_description") &&
-      (alpha_ops::text(parameters, "authoring_member") != "FMT-05B" ||
+      (format_result::text(parameters, "authoring_member") != "FMT-05B" ||
        !parameters.count("expected_inputs")))
     return Prepared(invalid(
         "complete extraction metadata requires FMT-05B source assertions"));
   OperationOutputSpecialization output;
-  output.metadata.descriptor.element_type = input.descriptor.element_type;
-  output.metadata.descriptor.shape = shape;
+  auto schema = input_schema;
+  auto& output_tensor = schema.tensors[0];
+  output_tensor.facets.clear();
+  output_tensor.layout = {};
+  if (!selected.keepdims &&
+      selected.axis >= shape.size() - input.atomic_trailing_axes)
+    --output_tensor.atomic_trailing_axes;
   if (selected.keepdims)
-    output.metadata.descriptor.shape[selected.axis] = 1;
+    output_tensor.descriptor.shape[selected.axis] = 1;
   else
-    output.metadata.descriptor.shape.erase(
-        output.metadata.descriptor.shape.begin() + selected.axis);
+    output_tensor.descriptor.shape.erase(
+        output_tensor.descriptor.shape.begin() + selected.axis);
   if (description) {
     auto projected = project_description(*description, selected);
     auto encoded = encode_tensor_description(projected);
     if (!encoded.ok())
       return Prepared(encoded.status());
-    output.metadata.facets.push_back(encoded.take_value());
+    output_tensor.facets.push_back(encoded.take_value());
   }
-  if (input.planar_layout) {
-    const auto& original = *input.planar_layout;
+  if (input.layout.spatial) {
+    const auto& original = input.layout;
     const bool structural =
         original.channel_axis && selected.axis == *original.channel_axis;
     if (structural || selected.keepdims) {
@@ -303,229 +295,119 @@ Result<OperationPreparation> prepare_extraction(
           --layout.width_axis;
         layout.channel_axis.reset();
       }
-      output.metadata.planar_layout = std::move(layout);
+      output_tensor.layout = std::move(layout);
     }
   }
   if (parameters.count("output_description")) {
     auto parsed = tensor_description_from_parameter(
-        alpha_ops::text(parameters, "output_description"));
+        format_result::text(parameters, "output_description"));
     if (!parsed.ok())
       return Prepared(parsed.status());
     auto checked =
-        validate_tensor_description(parsed.value(), output.metadata.descriptor);
+        validate_tensor_description(parsed.value(), output_tensor.descriptor);
     if (!checked.ok())
       return Prepared(checked);
-    output.metadata.facets = alpha_ops::output_facets(input, parsed.value());
-    if (output.metadata.planar_layout)
-      output.metadata.planar_layout->groups.clear();
+    output_tensor.facets = input.facets;
+    output_tensor.facets.erase(
+        std::remove_if(output_tensor.facets.begin(), output_tensor.facets.end(),
+                       [](const auto& f) {
+                         return f.key == "photospider.tensor-description" ||
+                                f.key == "photospider.semantic" ||
+                                f.key == "photospider.image" ||
+                                f.key == "photospider.color-array";
+                       }),
+        output_tensor.facets.end());
+    auto encoded = encode_tensor_description(parsed.value());
+    if (!encoded.ok())
+      return Prepared(encoded.status());
+    output_tensor.facets.push_back(encoded.take_value());
+    std::sort(output_tensor.facets.begin(), output_tensor.facets.end(),
+              [](const auto& a, const auto& b) { return a.key < b.key; });
+    if (output_tensor.layout.spatial)
+      output_tensor.layout.groups.clear();
   }
-  auto all = Footprint::all(output.metadata.descriptor.shape);
-  if (!all.ok())
-    return Prepared(all.status());
-  DependencyMappedNeed data;
-  data.port = 0;
-  data.roles = static_cast<std::uint32_t>(DependencyRole::Data);
-  for (std::uint32_t source = 0; source < shape.size(); ++source) {
-    DependencyAxis mapped;
-    if (source == selected.axis) {
-      mapped.observation_axis = -1;
-      mapped.fixed = {selected.index, 1};
-    } else {
-      mapped.observation_axis = static_cast<std::int32_t>(
-          source < selected.axis || selected.keepdims ? source : source - 1);
-    }
-    data.axes.push_back(mapped);
-  }
-  output.static_dependency_pieces =
-      std::vector<DependencyMapPiece>{{all.take_value(), {std::move(data)}}};
-  output.regional_atomic = true;
-  output.preserve_output_views = selected.layout != Layout::Materialize;
-  if (output.preserve_output_views)
-    output.maximum_output_payload_bytes = 0;
+  output.metadata.result_schema =
+      std::make_shared<const SchemaTemplate>(std::move(schema));
   OperationPreparation prepared;
   prepared.outputs.push_back(std::move(output));
   prepared.state = std::make_shared<Preparation>(Preparation{selected});
   return Prepared(std::move(prepared));
 }
 
-std::vector<std::uint64_t> source_coordinate(
-    const std::vector<std::uint64_t>& output, const Selection& selected) {
-  std::vector<std::uint64_t> source(output.size() +
-                                    (selected.keepdims ? 0 : 1));
-  for (std::size_t axis = 0; axis < source.size(); ++axis)
-    source[axis] =
-        axis == selected.axis
-            ? selected.index
-            : output[axis < selected.axis || selected.keepdims ? axis
-                                                               : axis - 1];
-  return source;
+using format_result::require;
+using format_result::take;
+using Poll = Result<ResultProgramPoll>;
+ResultBuilder builder(const ResultProgramPhase& phase, bool empty) {
+  auto result = take(ResultBuilder::start(
+      phase.resources, *phase.query.output.result_schema,
+      phase.query.semantic_key, {},
+      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
+                                                     phase.association->end())
+                        : std::vector<std::uint64_t>{},
+      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
+  require(result.bind_descriptor_relation(take(ResultRelation::cartesian(
+      phase.resources, 1,
+      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+  return result;
 }
-
-Result<std::optional<Value>> mapped_view(
-    const Value& input, const Region& request,
-    const ValueDescriptor& output_descriptor,
-    const std::vector<ValueFacet>& output_facets, const Selection& selected,
-    const ResourceBindings& resources) {
-  using View = Result<std::optional<Value>>;
-  const auto& input_box = input.region().dimensions();
-  const auto source_channel = input_box[selected.axis];
-  if (selected.index < source_channel.offset ||
-      selected.index - source_channel.offset >= source_channel.extent)
-    return View(std::optional<Value>{});
-  std::vector<RegionDimension> clipped = request.dimensions();
-  for (std::size_t axis = 0; axis < input_box.size(); ++axis) {
-    if (axis == selected.axis)
-      continue;
-    const auto output_axis =
-        axis < selected.axis || selected.keepdims ? axis : axis - 1;
-    const auto start =
-        std::max(clipped[output_axis].offset, input_box[axis].offset);
-    const auto end =
-        std::min(clipped[output_axis].offset + clipped[output_axis].extent,
-                 input_box[axis].offset + input_box[axis].extent);
-    if (start >= end)
-      return View(std::optional<Value>{});
-    clipped[output_axis] = {start, end - start};
-  }
-  std::vector<std::uint64_t> origin;
-  origin.reserve(clipped.size());
-  for (const auto& dimension : clipped)
-    origin.push_back(dimension.offset);
-  auto source = source_coordinate(origin, selected);
-  auto address = input.byte_address(source);
-  if (!address.ok())
-    return View(address.status());
-  std::vector<std::int64_t> strides;
-  strides.reserve(clipped.size());
-  for (std::size_t axis = 0; axis < input_box.size(); ++axis) {
-    if (axis == selected.axis) {
-      if (selected.keepdims)
-        strides.push_back(0);
-    } else {
-      strides.push_back(input.layout().byte_strides[axis]);
-    }
-  }
-  auto value = Value::from_storage(
-      output_descriptor, Region(clipped),
-      {address.value(), std::move(strides), std::move(origin)}, input.storage(),
-      output_facets, resources);
-  if (!value.ok())
-    return View(value.status());
-  return View(std::optional<Value>{value.take_value()});
+Poll empty_result(const ResultProgramPhase& phase) try {
+  auto result = builder(phase, true);
+  return Poll(ResultPublication{take(result.seal()), true});
+} catch (const Status& status) {
+  return Poll(status);
 }
-
-Result<ValueFragments> publish_views(const DependencyPhase& phase,
-                                     const Selection& selected) {
-  using Output = Result<ValueFragments>;
-  const auto& descriptor = phase.query.output.descriptor;
-  const auto& facets = phase.query.output.facets;
-  const auto& fragments = phase.inputs[0].fragments();
-  numeric_ops::ArrayPublication publication(
-      phase.query.outputs.boxes().size() * fragments.size(),
-      descriptor.shape.size());
-  std::vector<Value> views;
-  for (const auto& box : phase.query.outputs.boxes()) {
-    for (const auto& fragment : fragments) {
-      auto charged = phase.consume_work(descriptor.shape.size() + 1);
-      if (!charged.ok())
-        return Output(charged);
-      auto mapped = mapped_view(fragment, box, descriptor, facets, selected,
-                                phase.query.resources);
-      if (!mapped.ok())
-        return Output(mapped.status());
-      if (!mapped.value())
-        continue;
-      auto retained = publication.retain(std::move(*mapped.value()));
-      if (!retained.ok())
-        return Output(retained.status());
-      views.push_back(retained.take_value());
-    }
-  }
-  return publication.finish(descriptor, phase.query.outputs, views.data(),
-                            views.size(), phase.sets, facets,
-                            phase.query.resources);
-}
-
-Result<ValueFragments> publish_copies(const DependencyPhase& phase,
-                                      const Selection& selected) {
-  using Output = Result<ValueFragments>;
-  const auto& descriptor = phase.query.output.descriptor;
-  const auto& facets = phase.query.output.facets;
-  const auto width = Value::element_size(descriptor.element_type);
-  auto mapped = publish_views(phase, selected);
-  if (!mapped.ok())
-    return Output(mapped.status());
-  numeric_ops::ArrayPublication publication(phase.query.outputs.boxes().size(),
-                                            descriptor.shape.size());
-  std::vector<Value> values;
-  values.reserve(phase.query.outputs.boxes().size());
-  for (const auto& box : phase.query.outputs.boxes()) {
-    auto allocated = MutableValue::allocate(descriptor, box, phase.allocator);
-    if (!allocated.ok())
-      return Output(allocated.status());
-    auto writer = allocated.take_value();
-    for (const auto& fragment : mapped.value().fragments()) {
-      std::vector<RegionDimension> overlap;
-      overlap.reserve(box.rank());
-      bool intersects = true;
-      for (std::size_t axis = 0; axis < box.rank(); ++axis) {
-        const auto source = fragment.region().dimensions()[axis];
-        const auto destination = box.dimensions()[axis];
-        const auto start = std::max(source.offset, destination.offset);
-        const auto end = std::min(source.offset + source.extent,
-                                  destination.offset + destination.extent);
-        if (start >= end) {
-          intersects = false;
-          break;
-        }
-        overlap.push_back({start, end - start});
-      }
-      if (!intersects)
-        continue;
-      auto status = copy_value_region(
-          fragment, Region(std::move(overlap)), box, writer.data(),
-          box.element_count().value() * width, phase.query.cancellation,
-          [&](std::uint64_t n) {
-            // Retain the original sample-by-sample fuel settlement on failure.
-            for (std::uint64_t i = 0; i < n; ++i) {
-              auto charged = phase.consume_work(box.rank() + width);
-              if (!charged.ok())
-                return charged;
-            }
-            return Status::success();
-          });
-      if (!status.ok())
-        return Output(status);
-    }
-    auto value = std::move(writer).publish(facets, phase.query.resources);
-    if (!value.ok())
-      return Output(value.status());
-    auto retained = publication.retain(value.take_value());
-    if (!retained.ok())
-      return Output(retained.status());
-    values.push_back(retained.take_value());
-  }
-  return publication.finish(descriptor, phase.query.outputs, values.data(),
-                            values.size(), phase.sets, facets,
-                            phase.query.resources);
-}
-
 struct ChannelState final {
   Selection selected;
   bool requested = false;
   explicit ChannelState(Selection value) : selected(value) {}
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
+  Poll poll(const ResultProgramPhase& phase) try {
+    auto scratch =
+        take(phase.resources.reserve(ResourceCapacity::host(8192, 8192)));
+    const auto& output_spec = phase.query.output.result_schema->tensors[0];
+    const auto& input_spec = phase.query.inputs[0].result_schema->tensors[0];
+    const auto output_shape = output_spec.sample_shape();
+    const auto input_shape = input_spec.sample_shape();
+    const auto output = phase.query.tensor_outputs
+                            ? *phase.query.tensor_outputs
+                            : take(Footprint::all(output_shape));
+    const auto axes = format_result::extraction_axes(
+        input_shape.size(), input_spec.batch_axes.size() + selected.axis,
+        selected.index, selected.keepdims);
+    const auto relation = take(ResultRelation::mapped(
+        phase.resources, output_shape, Region::whole(output_shape), input_shape,
+        axes, {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
     if (!requested) {
       requested = true;
-      DependencyNeedBatch batch;
-      batch.static_mapping = true;
-      return Result<DependencyPoll>(std::move(batch));
+      auto support = take(Footprint::none(input_shape));
+      require(relation.project(output, [&](auto, const Footprint* samples) {
+        if (!samples)
+          return Status{ErrorCode::Internal,
+                        "channel extraction mapping absent"};
+        auto united = support.unite(*samples);
+        if (!united.ok())
+          return united.status();
+        support = united.take_value();
+        return Status::success();
+      }));
+      ResultProgramNeed need;
+      need.tensors.push_back({0, 0, std::move(support), 9});
+      return Poll(std::move(need));
     }
-    auto result = selected.layout == Layout::Materialize
-                      ? publish_copies(phase, selected)
-                      : publish_views(phase, selected);
-    return result.ok() ? Result<DependencyPoll>(result.take_value())
-                       : Result<DependencyPoll>(result.status());
+    auto result = builder(phase, false);
+    const auto policy = selected.layout == Layout::View          ? "view"
+                        : selected.layout == Layout::Materialize ? "materialize"
+                                                                 : "auto";
+    require(format_result::planes(output_spec, output, [&](const Region& box) {
+      auto window = phase.tensors->at({0, 0}).acquire(
+          format_result::mapped_region(box, axes), phase.query.cancellation);
+      if (!window.ok())
+        return window.status();
+      return format_result::publish(phase, &result, box, window.value(), axes,
+                                    relation, policy);
+    }));
+    return Poll(ResultPublication{take(result.seal()), true});
+  } catch (const Status& status) {
+    return Poll(status);
   }
 };
 
@@ -535,17 +417,17 @@ OperationDefinition extraction(const std::string& key, bool named,
   definition.key = key;
   auto& traits = definition.traits;
   traits.input_count = 1;
-  traits.input_schema.resize(1);
-  traits.planar_storage_capable = true;
+  OperationPortConstraint port;
+  port.kind = OperationPortKind::Result;
+  port.element_type_mask = 127;
+  traits.input_schema = {port};
   traits.cacheable = false;
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = {
       {"axis", OperationParameterType::Int64, false},
       {"expected_channels", OperationParameterType::Int64, false},
-      {"expected_source_dtype", OperationParameterType::Int64, false},
       {"expected_source_layout", OperationParameterType::String, false},
-      {"expected_source_shape", OperationParameterType::String, false},
-      {"expected_source_tensor", OperationParameterType::String, false},
+      {"expected_source_schema", OperationParameterType::String, false},
       {"keepdims", OperationParameterType::Bool},
       {"layout", OperationParameterType::String},
       {"metadata_mode", OperationParameterType::String},
@@ -563,98 +445,32 @@ OperationDefinition extraction(const std::string& key, bool named,
   }
   auto& output = traits.outputs[0];
   output.key = "values";
-  output.shape_rule = OperationShapeRule::Fixed;
-  output.fixed_output_shape = {1};
+  output.output_schema = port;
+  output.result_schema = tensor_ops::scalar_schema();
   output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
+  output.dependency_version = 2;
   output.continuation_bytes = sizeof(ChannelState);
   output.maximum_dependency_stages = 2;
   definition.prepare_static = [named, profile](const auto& inputs,
                                                const auto& parameters) {
     return prepare_extraction(inputs, parameters, named, profile);
   };
-  definition.start_dependency = [](const DependencyQuery& query,
-                                   const BufferAllocator& allocator) {
+  definition.start_result = [](const ResultProgramQuery& query,
+                               const BufferAllocator& allocator) {
+    if (query.tensor_outputs && query.tensor_outputs->empty())
+      return ResultContinuation::stateless<empty_result>();
     const auto* prepared =
         static_cast<const Preparation*>(query.prepared->state());
-    return DependencyContinuation::make<ChannelState>(allocator,
-                                                      prepared->selection);
-  };
-  definition.planar_callback = [](const PlanarOperationInvocation& call) {
-    if (!call.prepared || !call.prepared->state())
-      return Status{ErrorCode::Internal,
-                    "channel extraction preparation absent"};
-    const auto& selected =
-        static_cast<const Preparation*>(call.prepared->state())->selection;
-    const auto& descriptor = call.inputs[0].descriptor();
-    const auto width = Value::element_size(descriptor.element_type);
-    const auto& layout = *call.output_metadata.planar_layout;
-    const auto y = call.output_region.dimensions()[layout.height_axis];
-    const auto x = call.output_region.dimensions()[layout.width_axis];
-    const auto channels =
-        layout.channel_axis
-            ? call.output_region.dimensions()[*layout.channel_axis]
-            : RegionDimension{0, 1};
-    std::vector<std::uint64_t> at(call.output_region.rank(), 0);
-    std::vector<std::uint64_t> source(descriptor.shape.size());
-    for (std::size_t axis = 0; axis < at.size(); ++axis)
-      at[axis] = call.output_region.dimensions()[axis].offset;
-    // A window certifies its ROI once. Reuse coordinates and copy contiguous
-    // row spans, bounded by both physical tile edges and cancellation work.
-    for (std::uint64_t channel = channels.offset;
-         channel < channels.offset + channels.extent; ++channel) {
-      if (layout.channel_axis)
-        at[*layout.channel_axis] = channel;
-      for (std::uint64_t row = y.offset; row < y.offset + y.extent;) {
-        auto rows = y.offset + y.extent - row;
-        at[layout.height_axis] = row;
-        for (std::uint64_t column = x.offset; column < x.offset + x.extent;) {
-          if (call.cancellation.cancelled())
-            return Status{ErrorCode::Cancelled, "channel extraction cancelled"};
-          at[layout.width_axis] = column;
-          for (std::size_t axis = 0; axis < source.size(); ++axis)
-            source[axis] =
-                axis == selected.axis
-                    ? selected.index
-                    : at[axis < selected.axis || selected.keepdims ? axis
-                                                                   : axis - 1];
-          auto read = call.inputs[0].rectangle_run(source);
-          if (!read.ok())
-            return read.status();
-          auto write = call.output.rectangle_run(at);
-          if (!write.ok())
-            return write.status();
-          const auto& input = read.value();
-          const auto& output = write.value();
-          rows = std::min(rows, std::min(input.rows, output.rows));
-          const auto samples = std::min(input.row.samples, output.row.samples);
-          for (std::uint64_t dy = 0; dy < rows; ++dy) {
-            for (std::uint64_t dx = 0; dx < samples;) {
-              if (call.cancellation.cancelled())
-                return Status{ErrorCode::Cancelled,
-                              "channel extraction cancelled"};
-              const auto count = std::min<std::uint64_t>(1024, samples - dx);
-              std::memcpy(
-                  output.row.data + dy * output.row_stride_bytes + dx * width,
-                  input.row.data + dy * input.row_stride_bytes + dx * width,
-                  count * width);
-              dx += count;
-            }
-          }
-          column += samples;
-        }
-        row += rows;
-      }
-    }
-    return Status::success();
+    return ResultContinuation::make<ChannelState>(allocator,
+                                                  prepared->selection);
   };
   return definition;
 }
 }  // namespace
 
 Result<OperationPreparation> prepare_alpha_extraction(
-    const std::vector<OperationMetadata>& inputs, const alpha_ops::Params& p,
-    numeric_ops::SequenceProfile profile) {
+    const std::vector<OperationMetadata>& inputs,
+    const format_result::Params& p, numeric_ops::SequenceProfile profile) {
   return prepare_extraction(inputs, p, false, profile);
 }
 Status register_channel_extraction(OperationRegistry* registry) {

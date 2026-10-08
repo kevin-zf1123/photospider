@@ -90,6 +90,29 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def append_result(output, rows: list[dict[str, str]], row: dict[str, str],
+                  fieldnames: list[str]) -> None:
+    added = [key for key in row if key not in fieldnames]
+    rows.append(row)
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    if added:
+        fieldnames.extend(added)
+        output.seek(0)
+        output.truncate()
+        writer.writeheader()
+        writer.writerows(rows)
+    else:
+        writer.writerow(row)
+    output.flush()
+
+
+def reported_work_equal(rows: list[dict[str, str]]) -> bool | str:
+    if not rows or any(row.get('managed') != 'on' or
+                       not row.get('issued_work', '').strip() for row in rows):
+        return ''
+    return len({int(row['issued_work']) for row in rows}) == 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--before', type=Path, required=True)
@@ -138,7 +161,7 @@ def main() -> int:
         rows: list[dict[str, str]] = []
         with (args.output / 'commands.log').open('w') as log, \
              (args.output / 'raw.csv').open('w', newline='') as output:
-            writer = None
+            fieldnames: list[str] = []
             for index, case in enumerate(cases(args.suite)):
                 for repeat, variant in enumerate(metadata['order']):
                     active = compilers(args.allow_stopped_compilers)
@@ -162,12 +185,7 @@ def main() -> int:
                     row = dict(case=str(index), position=str(repeat), variant=variant, **parsed[0])
                     if row.get('managed') != case['managed']:
                         raise RuntimeError('driver lacks requested managed-resources instrumentation')
-                    if writer is None:
-                        writer = csv.DictWriter(output, fieldnames=list(row))
-                        writer.writeheader()
-                    writer.writerow(row)
-                    output.flush()
-                    rows.append(row)
+                    append_result(output, rows, row, fieldnames)
                 print(f'validated case {index + 1}/{len(cases(args.suite))}', file=sys.stderr)
         summary = []
         for index, case in enumerate(cases(args.suite)):
@@ -180,7 +198,7 @@ def main() -> int:
                          speedup=medians['before'] / medians['after'],
                          before_process_p50s='/'.join(r['p50_us'] for r in selected['before']),
                          after_process_p50s='/'.join(r['p50_us'] for r in selected['after']),
-                         issued_work_equal=len({r['issued_work'] for r in group}) == 1)
+                         issued_work_equal=reported_work_equal(group))
             summary.append(entry)
         with (args.output / 'summary.csv').open('w', newline='') as output:
             writer = csv.DictWriter(output, fieldnames=list(summary[0]))

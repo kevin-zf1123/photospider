@@ -13,12 +13,9 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: 3d35f5eb
-implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+repository_commit: current working tree
 ---
 
 # CRV-01A: interpolate_linear
@@ -74,11 +71,7 @@ Output values selects Float32 or Float64 through a static dtype parameter,
 defaulting to Float64. Conversion/rounding boundaries and special-value handling
 are specified separately rather than inferred from native mixed-type arithmetic.
 
-All three required ports are generic rank-1 Values, with x/y sharing K and
-query defining N. Accept legal immutable zero/negative strides, nonzero offsets
-and unaligned storage. Output values is a generic Value with shape [N], chosen
-dtype and empty facets; no axis output or implicit physical/color units are
-created. Query values already provide the requested independent coordinates.
+Each input Result contains one tensor member under any schema id and member key; its `sample_shape()` supplies x[K], y[K] and query[N]. Accept legal immutable zero/negative strides, nonzero offsets and unaligned storage. Output port `values` is a Result using schema `photospider.tensor`, member `samples`, shape [N] (or [N,C] for the multi-function forms), and empty facets. Batch dimensions are ordinary sample axes; no axis output or implicit physical/color units are created.
 
 | Static parameter | Type and domain | Constructor default |
 | --- | --- | --- |
@@ -135,12 +128,7 @@ policy rather than NUM-04's IEEE-style successful NaN/Inf outputs.
 
 ## Confirmed requested-data support
 
-For every nonempty request, one CPU Whole callback collects complete x, y and
-query inputs, including recognized typed validation and upstream failures. It
-validates all x knots and all query controls before y arithmetic, evaluates every query and every output column, and returns
-one immutable dense output of shape [N] or [N,C]. Empty reads no payload; static
-metadata validation still applies. Sparse demand restricts publication coverage,
-but does not reduce input collection, computation or the complete output owner.
+For every nonempty request, the Whole Result program requests complete x, y and query inputs with Data, Validation and Descriptor (role 13), including typed validation and upstream failures. It validates all x knots and query controls before y arithmetic, evaluates every query and output column, and publishes a complete dense Result of shape [N] or [N,C]. The Result association records the actual source ObjectIds. Empty reads no payload; static metadata validation still applies. A nonempty local request still computes and stores the complete output. The returned Result may retain complete certified coverage, and sample coordinates remain global rather than being rebased to the request.
 
 The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
 linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
@@ -193,16 +181,12 @@ ArithmeticOverflow, with Run scope and offending port/index where available.
 | Insufficient exact arithmetic/index/output budget | Admission/evaluation; ResourceExhausted with existing resource reason |
 | Wrong accelerated target, upstream failure, typed validation, cancellation or stale input | Preserve baseline capability/host Status and original identity |
 
-Numeric/control failures have Run scope, identify the offending port/index,
-and publish no partial successful Value. An upstream failure may precede the
+Numeric/control failures have Run scope, identify the offending port/index, and publish no partial successful Result. An upstream failure may precede the
 callback's numerical rejection because input collection is complete.
 
-## Acceptance and current verification
+## Acceptance requirements
 
-The public implementation fixture declares separate x/y/query bindings, creates
-one selected versioned node with dtype and out_of_domain, names values, and
-executes full and nonzero/disjoint requests via Compiler/ExecutionContext. It
-must provide a real target/build/run command when implemented. Use the earlier
+Acceptance requirements: the public implementation fixture declares separate x/y/query bindings, creates one selected versioned node with dtype and out_of_domain, names values, and executes full and nonzero/disjoint requests via Compiler/ExecutionContext. Use the earlier
 irregular-spacing fixture [3,1,3] and the three domain-policy outcomes, plus:
 
 - Identity: x=y=[0,1,3], query=[2,0.5] -> [2,0.5].
@@ -223,8 +207,13 @@ irregular-spacing fixture [3,1,3] and the three domain-policy outcomes, plus:
   low work/capacity, cancellation, and owner lifetime after context teardown.
 
 Numerical precision, exact dependency support and resource behavior are separate
-acceptance obligations. The maintained public workflow and independent oracle
-provide the current runtime acceptance evidence for the Proposed key.
+acceptance obligations. These cases remain acceptance requirements; coverage listed below is the current focused evidence and does not imply that every historical or listed acceptance case has been rerun.
+
+## Actual focused validation
+
+`test_numeric_result_math` exercises the Result workflows and independent small-input checks. Coverage includes exact linear and nonlinear PCHIP results, all four operation forms, locally available profiles, Float32/Float64 inputs, knot and clamp signed-zero behavior, typed Whole validation, query/domain error precedence, resource limits, pre-cancellation, source associations and output lifetime. `curve_composition` checks `linspace -> bake_lut1d_pchip` and `resample_linear`.
+
+The current focused command is `cmake --build build/kernel-dev --target test_numeric_result_math -j8` followed by `ctest --test-dir build/kernel-dev -R '^test_numeric_result_math$' --output-on-failure`. Historical manual Value-path fixtures, oracle runs and performance records are not evidence for this Result path.
 
 ## Existing implementation distinction
 
@@ -251,8 +240,13 @@ PCHIP stencils and reduce them to the linear formula. Complete input collection,
 the Whole contract above; mathematical y stencils remain unchanged.
 
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
-contains the shared arithmetic/resource details and actual platform acceptance.
+contains the shared arithmetic/resource details and current validation boundary.
 See [the editable workflow](../../../../examples/numeric_workflow/README.md#explicit-query-curves-crv-01)
-for construction, explicit work budgets, commands and checked expected results.
-The manual target is excluded from default builds and CTest/integration testing.
-Specification status remains Proposed.
+for construction, commands and checked expected results. The shared Result
+manual fixture passed all six groups under direct Strict and Apple runs; the
+strengthened Fraction oracle passed 2,487 bit-exact cases per profile, covering
+all four forms, mixed input/destination dtypes and domain policies. The focused
+CTest selection passed 3/3; the installed package 0.32 consumer passed under
+Strict (CTest 1/1) and direct Apple execution. The bounded eight-row-per-profile
+benchmark smoke passed, with no performance improvement claimed. This
+operation's specification status remains Proposed.

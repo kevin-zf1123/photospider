@@ -9,33 +9,36 @@ operation_keys:
 category: 09-composite
 kind: primitive
 status: Specified
-spec_revision: 0.4.0
 implementation_scope: builtin_operations
-implementation_status: see_implementation_documentation
-verification_status: see_acceptance_evidence
-repository_commit: 66b16339ad2e18a27f22e9e291103b6939f67f1c
-operation_abi: 9
+implementation_status: implemented
+verification_status: result_native_and_opencv_finite_regressions_and_oracle
+result_operation_abi: 2
+operation_api: Result
+workflow_schema: 4
+operation_traits: 21
+kernel_package: "0.30.0"
 backend: CPU
 region_rule: Whole
 numeric_profile: opencv_4_12_ns_f32_planar_v1
-reference_source_blob: 2f2f368fa13da0bc1426b71862205048c6ea0f94
 ---
 
 # PNT-05A: local_inpaint_navier_stokes
 
 ## Implementation backends
 
-The two public operations share the input/output, mask, Whole, Float32 reference,
-error and numerical acceptance contracts below.
+The two public operations share the Result input/output, mask, Whole, Float32
+reference, error and numerical acceptance contracts below. Both expose named
+output port `image` and required static Int64 parameter `radius`.
 
 | Public operation key | Implementation boundary |
 | --- | --- |
-| `image.local_inpaint_navier_stokes_openCV` | OpenCV 4.12.0 `cv::inpaint(..., INPAINT_NS)` on three Float32 planes, with the specified validation, hole zeroing and copy-back |
-| `image.local_inpaint_navier_stokes_native_apple_silicon` | native Apple Silicon implementation in C++/C/ASM/Metal; no OpenCV headers, symbols, calls or linkage in the native implementation or a native-only consumer |
+| `image.local_inpaint_navier_stokes_openCV` | Optional OpenCV 4.12.0 `cv::inpaint(..., INPAINT_NS)` adapter on three Float32 planes |
+| `image.local_inpaint_navier_stokes_native_apple_silicon` | Native CPU implementation; no OpenCV headers, symbols, calls or linkage in this path or a native-only consumer |
 
 Both expose only named output `image` and required Int64 radius. The unsuffixed
 operation is the semantic family, not a third registration or alias.
-Native refers to execution on Apple Silicon; Metal or ASM is optional. A licensed
+The native key identifies the in-tree CPU implementation; it does not select a
+GPU backend. A licensed
 standalone C++ port of the published algorithm is allowed; the OpenCV library
 itself is prohibited in the native variant. A native-only build/consumer must
 be possible with the OpenCV adapter disabled.
@@ -76,16 +79,16 @@ pixel compatibility are outside scope. No implicit algorithm substitution.
 
 The public keys are listed above; each has only the named output port `image`.
 PNT-05 is the existing family; PNT-05A is this concrete profile.
-Use existing operation ABI/traits 9 and the current registry, compiler, allocator
-and execution APIs. No shared ABI extension is required by this specification.
-Accepted public ABI and runtime contracts take precedence over research pages.
+The operations use Result operation ABI 2 with WorkflowDocument 4,
+OperationTraits 22, and Photospider package 0.30.0. There is no GPU backend.
+Accepted public Result and runtime contracts take precedence over research pages.
 
 Normative discrete reference: OpenCV tag `4.12.0`,
-[`modules/photo/src/inpaint.cpp`](https://github.com/opencv/opencv/blob/4.12.0/modules/photo/src/inpaint.cpp),
-blob `2f2f368fa13da0bc1426b71862205048c6ea0f94`. Retain the source license and
-attribution for any port. An independently called pinned OpenCV installation
-is the test oracle. Native computation buffers are host-controlled; the adapter has the allocation and
-cancellation boundaries declared above.
+[`modules/photo/src/inpaint.cpp`](https://github.com/opencv/opencv/blob/4.12.0/modules/photo/src/inpaint.cpp).
+Retain the source license and attribution for any port. An independently called
+OpenCV 4.12.0 installation with the floating-point build flags above is the test
+oracle. Native computation buffers are host-controlled; the adapter has the
+allocation and cancellation boundaries declared above.
 
 Relevant current contracts: [Plugin ABI](../../../kernel-architecture/Plugin-ABI.md),
 [named outputs](../../../kernel-architecture/Multi-Output-Operations.md),
@@ -96,23 +99,29 @@ Relevant current contracts: [Plugin ABI](../../../kernel-architecture/Plugin-ABI
 
 | Order / name | dtype / shape | Semantics | Sample domain |
 | --- | --- | --- | --- |
-| 0 / image | Float32 `[H,W,4]` | typed Image/image-v2; ordered RGBA; linear sRGB primaries, D65; premultiplied alpha; scene or display reference preserved | finite signed/HDR RGB; alpha exactly 1 |
-| 1 / hole_mask | Float32 `[H,W]` | canonical typed coverage; non-color; same logical grid | exactly numeric 0 or 1; both signed zeros are known |
+| 0 / image | Result with one `photospider.image` v1 tensor member `pixels`; Float32 `[H,W,4]` and batch axes `[N,L]` | ordered RGBA; linear sRGB primaries, D65; premultiplied alpha; scene or display reference preserved | finite signed/HDR RGB; alpha exactly 1 |
+| 1 / hole_mask | Result with one `photospider.image` v1 tensor member `pixels`; Float32 `[H,W]` and matching batch axes `[N,L]` | canonical typed coverage; non-color; same logical grid | exactly numeric 0 or 1; both signed zeros are known |
 
-Both inputs are required. No broadcasting, quantization, implicit conversion,
-thresholding or unassociation. `3 <= H,W <= 32768`, `H*W <= 2^31-1`.
-Check padded extents, strides and byte arithmetic separately from these shape
-bounds; actual materialization must also fit the host budget.
+Both Results have exactly one tensor and no fields; both use sample batch axes
+`[N,L]`. The image and mask batch extents and H/W must match exactly. Their
+complete sample shapes are `[N,L,H,W,4]` and `[N,L,H,W]`. No broadcasting,
+quantization, implicit conversion, thresholding or unassociation. Require
+`3 <= H,W <= 32768` and `H*W <= 2^31-1`. Static preparation checks typed
+schemas, facets, semantic profile and shape before continuation start. Runtime
+validation checks all tensor samples. Padded extents, strides, byte arithmetic
+and actual allocation must also fit checked arithmetic and the execution root.
 
-Support every host-valid computed view: padding, byte offset, nonzero storage
-origin, positive/negative/zero strides and shared owners. Read via checked
-origin-relative logical addressing. Direct binding keeps its existing stricter
-host rules; exotic views can be produced by a fixture operation. No input writes,
+Support authorized computed Result views with padding, byte offset, nonzero storage
+origin, positive/negative/zero strides and shared owners. Read through the
+ResultTensorInput window using checked origin-relative logical addressing. Direct
+bindings retain the host's Result binding validation. No input writes,
 borrowed-pointer retention, in-place publication or escaping mutable aliases.
 
-Validate the full logical domain of both inputs, including RGB placeholders
-inside holes and samples outside a requested ROI. Mask 0.5 is invalid for this
-operator even though it is valid coverage. All-zero masks do not skip validation.
+Whole execution requests the full logical domain of both inputs with Data,
+Validation, and Descriptor roles before numerical work. Validate every RGB
+placeholder inside holes, all alpha, and every mask sample across every batch
+plane. Mask 0.5 is invalid for this operator even though it is valid coverage.
+An all-zero mask does not skip validation.
 
 ## 4. Parameters
 
@@ -127,13 +136,15 @@ parameter identity and replanning.
 
 ## 5. Output inference and invariants
 
-Infer Float32 `[H,W,4]` from input 0 and preserve all input image semantic facets,
-including reference. Inference reads descriptors and static parameters only.
-The callback validates the profile's exact channel order and image semantics.
-The result descriptor/Region must match actual coverage and include all channels.
+Static preparation validates both Result schemas, the matching `[N,L]` batch
+axes and `[H,W]` spatial extents, the exact typed image/coverage facets, and the
+radius before execution. It clones input 0's full schema to the output and selects
+`CompleteBundle` publication. The output sample shape is `[N,L,H,W,4]` and it
+preserves the scene/display reference. Static preparation reads no pixel payload.
 
-For input I, mask M and result J, `M(p)=0` implies bitwise equality
-`J(p,c)=I(p,c)` for all channels. All alpha samples are bitwise preserved at 1.
+For input I, mask M and result J, `M(n,l,y,x)=0` implies bitwise equality
+`J(n,l,y,x,c)=I(n,l,y,x,c)` for every channel c. All alpha samples are
+bitwise preserved at 1.
 All-zero M returns bitwise identity after complete validation; immutable sharing
 or copying are both permitted. All-one M fails with OperationFailed. Successful
 results are finite and are not clamped to `[0,1]`. Hole placeholders must not
@@ -154,9 +165,10 @@ the specified numerical/resource/cancellation failure; do not invent an
 unfillable-component rejection. With only one known pixel, the pinned result
 may retain zero work values where its frontier never reaches.
 
-Empty or too-small image shapes are rejected. Empty/invalid output queries keep
-the existing host Region validation; the callback does not invent empty images.
-Nonfinite RGB, alpha other than 1 and nonbinary masks fail even for noop masks.
+Empty or too-small image shapes are rejected. Empty output demand follows the
+Result protocol: it publishes an empty Result without requesting payload or
+entering numerical work. For nonempty demand, nonfinite RGB, alpha other than 1
+and nonbinary masks fail even for all-zero masks.
 
 ## 7. Numerical algorithm
 
@@ -187,18 +199,21 @@ OpenCV allocation/thread settings or create a private thread pool.
 
 ## 8. Publication, dependency and invalidation
 
-Route through named port `image`, publish once after completion, freeze output,
-and release all unpublished buffers on failure. No correspondence, STMap or
-pointer dictionary is returned.
+Route through named port `image`, publish one immutable `CompleteBundle` Result
+after completion, and release unpublished buffers on failure. Descriptor support
+for image and mask is recorded independently. The first Need requests both full
+sample domains with Data, Validation and Descriptor roles; the output relation
+conservatively records Data and Validation support from both complete inputs.
+There is no regional algorithm or transitive halo because newly filled values
+propagate across the plane. A downstream ROI may collect a region from the
+complete output. A change to any input sample dirties the full output; relevant
+schema, facet, resource or parameter changes invalidate or replan.
 
-For each legal nonempty query Q, both numerical and validation demand are
-conservatively Whole: `need_image(Q)=All([H,W,4])` and
-`need_hole_mask(Q)=All([H,W])`. The runtime can materialize Whole and collect an
-ROI. Radius is not a transitive halo because freshly filled values propagate.
-Changing any input sample invalidates the full output conservatively; relevant
-metadata/parameters invalidate or replan. A distant NaN can change success into
-failure. Use existing runtime identities; no custom incomplete cache key.
-No promise of cross-run cache hits or precise dependency certificates is made.
+The image and mask tensors retain their matching `[N,L]` batch axes. Each
+batch plane solves independently; a nonempty request still validates all planes
+before processing any plane. Empty output demand creates an empty Result without
+payload Need or numerical execution. Use existing operation and schema identity;
+do not add a cache key that omits image resources or semantic metadata.
 
 ## 9. Precision and determinism
 
@@ -221,34 +236,38 @@ CPU required; GPU unsupported, following existing host backend policy. Operation
 are reentrant with invocation-local state, immutable inputs and no implicit I/O,
 clock, randomness or mutable cross-call state. No partial successful output.
 
-Let `N=H*W`, `K=count(M=1)`, `P=(H+2)*(W+2)`, `r=radius`. A sequential planar
+Let `N=H*W` samples per batch plane, `B=N_batch*N_layer`,
+`K=count(M=1)`, `P=(H+2)*(W+2)`, and `r=radius`. A sequential planar
 reference design has `O(N+3*N*log(max(N,2))+3*K*(2*r+1)^2)` work and O(N) scratch.
-Checked arithmetic and real allocations determine admission; estimated_bytes
-alone cannot account for untracked library allocations.
+Checked arithmetic and actual allocations determine admission; estimates are not
+RSS bounds.
 
-| Owner / buffer | Conservative proposed bytes |
+| Owner / buffer, per active plane | Bytes |
 | --- | ---: |
-| dense materialized inputs, if newly allocated | 20N |
-| output | 16N |
-| input/output work planes, reused per channel | 8N |
-| UInt8 mask | N |
-| padded state/band/mask/time | 7P |
-| bounded heap, entry `{float T,int32 y,int32 x,int32 order}` | 16P |
+| Result-owned output across batches | `16BN` |
+| phase-allocator native scratch: mask, work plane, state, times, heap | `21N+5P` |
+| phase-allocator OpenCV arrays: mask, source plane, target plane | `9N` total |
+| operation workspace admission | `2 * input_bytes + 65536` |
 
-Assert heap-entry size if using this layout, prove at-most-once insertion and
-checked tie-order capacity. Other bounded host layouts are allowed when the
-same semantics hold and the actual accounting is reported.
-The proposed model is `45N+23P+64 KiB`, excluding collector. At 1080p and 4K it
-is approximately 134.7 and 538.2 MiB. A simultaneous full collector adds 16N.
-These are estimates, not measured peaks or RSS limits. Count actual capacities,
-alignment, extra packing, upstream owners and collectors, deduplicating owners.
-Caller-owned inputs are retained bytes, not fresh allocation charges.
+The native scratch terms are mask `N`, work plane `4N`, padded state `P`,
+padded arrival time `4P`, and 16-byte heap entries occupying `16N`. For 3x3
+dimensions, `21N+5P < 35N`. The OpenCV adapter instead owns a mask of `N`
+bytes and separate source and target planes of `4N` bytes each. Only one
+plane's scratch is live at a time. Result output backing and retained hole-index
+metadata use Root accounting; the phase allocator owns per-plane scratch.
+OpenCV's internal matrices and queue are external allocations; `7P+32N+64KiB`
+is an estimate for the pinned adapter and libc++ vector growth, not a hard bound.
+Result input ancestry, metadata, and collectors retain their normal Root owners.
 
-Observe cancellation at most every 4096 validation/copy/initialization samples;
-in frontier processing, at most every 64 pops or 4096 candidate-loop visits,
-whichever comes first. Also check around large allocations, channel transitions
-and publication. Preserve host Cancelled/Stale priorities. Failed allocations
-return ResourceExhausted without reduced radius, quantization or partial repair.
+The callback prepays validation work based on Result window reads and polls
+cancellation every 512 validation samples. Output copying polls every 1024
+samples; packing/copy-back polls every 4096; native initialization polls every
+1024 positions. Frontier work checks every 64 pops or 4096 candidate visits,
+whichever comes first. Allocations, channel transitions and publication also
+check cancellation. OpenCV cannot be interrupted inside a channel; its adapter
+checks immediately before and after each call. Preserve Cancelled/Stale
+priorities. Failed allocations return ResourceExhausted without reduced radius,
+quantization or partial repair.
 
 ## 11. Acceptance matrix
 
@@ -257,17 +276,17 @@ absent evidence. A test name alone is not proof that every clause is covered.
 
 | ID | Fixture / procedure | Required assertion |
 | --- | --- | --- |
-| T01 | zero mask, including signed zero and invalid samples | bit identity; validation before noop |
+| T01 | zero mask with finite samples and signed-zero coverage | bit identity after complete validation |
 | T02 | 5x5 constant `(0.25,0.5,0.75,1)`, center hole, r=1 | constant hole within tolerance, exact outside/alpha |
 | T03 | change finite placeholders only | bit-identical output |
 | T04 | gradients, asymmetric lines, checkerboards, scratches, holes | per-sample pinned Float32 oracle |
 | T05 | four edges/corners, disjoint holes, one known pixel | pinned native result, no out-of-bounds |
 | T06 | full mask | OperationFailed, no successful result |
-| T07 | 0.5/out-of-range/NaN mask; nonopaque alpha; NaN/Inf RGB | correct errors by entry point |
+| T07 | 0.5/out-of-range/NaN mask; nonopaque alpha; NaN/Inf RGB | host Need Validation errors retain priority; operator-specific invalid-value checks return OperationFailed for direct or generated bindings |
 | T08 | radius 1/32, 0/33, absent/wrong type/unknown parameter | exact closed schema |
-| T09 | size 3, 1/2, upper and overflowing extents | bounds and resource rejection without huge real allocations |
-| T10 | nonzero ROI and different tile geometry | Whole crop equality and global validation |
-| T11 | padded/offset/origin/negative/zero-stride computed inputs | packed equivalence and immutable inputs |
+| T09 | size 3, 1/2, 32768, 32769 and UINT64_MAX extents | bounds and resource rejection without huge real allocations |
+| T10 | nonzero ROI and different tile geometry | Whole crop equality; distant invalid input still fails global validation |
+| T11 | padded/offset/origin/negative/zero-stride Result input windows | packed equivalence and immutable input Results |
 | T12 | repetitions, changed caller rounding mode | deterministic output, restored floating state |
 | T13 | signed/HDR constants and extreme values | no clamp; nonfinite computation fails |
 | T14 | change known pixels, mask, radius, metadata and distant NaN | no stale successful reuse |
@@ -283,9 +302,10 @@ does not independently prove the original algorithm; retain analytic T01–T03.
 
 ## 12. Public workflow and performance protocol
 
-Required workflow: immutable opaque linear RGBA and binary coverage inputs ->
-either public operation above with `radius=3` -> named `image`. Maintain a runnable
-public C++ example and record build/run/check commands in implementation
+Required workflow: two immutable typed Result inputs (opaque linear RGBA and
+binary coverage with matching `[N,L]` batch axes) -> either public operation
+above with `radius=3` -> named `image` output. The public C++ example constructs,
+binds and executes those Results; build/run commands are in the implementation
 documentation.
 
 Compare correctness before interpreting timings. Compared implementations must use
@@ -307,14 +327,14 @@ of a semantically valid speed advantage.
 | Condition / stage | Existing category | Behavior |
 | --- | --- | --- |
 | missing/unknown/type/range parameter, compilation/direct validation | InvalidArgument | no algorithm entry |
-| dtype/shape/semantic mismatch, inference | TypeMismatch; existing direct-binding errors preserved | no conversion |
+| dtype/shape/semantic mismatch in static Result preparation | TypeMismatch; existing direct-binding errors preserved | no conversion |
 | invalid binding/layout/query | existing host error and priority | do not disguise as numerical failure |
-| valid coverage 0.5 or nonopaque samples at callback | OperationFailed | no threshold/clamp |
-| invalid bound coverage/image samples | host InvalidArgument when detected first | preserve earlier failure |
-| full mask, nonfinite RGB or computation | OperationFailed | no successful result |
+| invalid typed value detected by host Need Validation | InvalidArgument | preserve host validation priority |
+| nonbinary coverage, nonopaque alpha, nonfinite RGB or computation rejected by operator checks | OperationFailed | applies to direct and generated bindings; no threshold or clamp |
+| full mask in any batch plane | OperationFailed | no successful result |
 | allocation/budget/representable byte size exhausted | ResourceExhausted | release all unpublished state |
 | cancellation / no longer current | Cancelled / host Stale | preserve host priority |
-| unsupported GPU | BackendUnavailable / existing fallback policy | no algorithm substitution |
+| GPU requested | BackendUnavailable; no GPU backend is registered | no alternative algorithm or CPU fallback |
 | unknown callback exception or invalid publication | OperationFailed, retaining allocation error category | no escaping exception/partial success |
 
 Collected execution has no partially successful ExecutionResult. Already delivered
@@ -331,19 +351,11 @@ algorithm, binary policy, color/alpha, borders, validation/dependency extent,
 determinism or failure semantics require reviewed semantic identity decisions.
 Explanation-only revisions do not automatically require an ABI change.
 
-## 15. Sources and revision record
+## 15. Sources
 
-The user-supplied `op-spec-template.md`, `PNT-05A_local_inpaint_navier_stoke.md`
-and `photospider-op-spec-reference.zip`, plus the referenced conversation
-“规格书内容与示例”, informed revision 0.2.0. Their process suggestions are
-reference material; task authorization comes from the current user request.
-The corrected spelling and discrete numerical profile are normative.
-Reference material alone does not establish runtime or performance success.
-
-Additional primary reference: [OpenCV 4.12 inpaint API](https://docs.opencv.org/4.12.0/d7/d8b/group__photo__inpaint.html).
-Repository family: [keying and paint](../keying-paint.md).
-2026-09-13: froze corrected name, scoped profile, exact acceptance conditions,
-public workflow requirement and numerical reference from the supplied material.
-2026-09-13, revision 0.4.0: present the two backends as built-in operations,
-correct the semantic-family/public-key distinction, and move comparison history
-to the private development report. Numerical acceptance is unchanged.
+The [OpenCV 4.12 inpaint API](https://docs.opencv.org/4.12.0/d7/d8b/group__photo__inpaint.html)
+and tagged [OpenCV source](https://github.com/opencv/opencv/blob/4.12.0/modules/photo/src/inpaint.cpp)
+define the numerical reference. The port license is installed at
+`share/licenses/Photospider/inpaint_ns_license.txt`. See the
+[keying and paint catalog](../keying-paint.md) and
+[Result implementation](../inpaint-ns-implementation.md).

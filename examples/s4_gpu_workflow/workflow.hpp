@@ -8,88 +8,66 @@
 #include "s3_image_workflow/coordinator.hpp"
 
 namespace s4 {
-inline std::uint64_t calls(const ps::ExecutionResult& result,
-                           std::uint64_t node = 0) {
-  std::uint64_t total = 0;
-  for (const auto& timing : result.diagnostics.operation_timings)
-    if (!node || timing.output.node_id == node)
-      total += timing.invocation_count;
-  return total;
-}
 inline ps::ExecutionContextConfig config(ps::ExecutionMode mode,
                                          bool cache = true) {
-  ps::ExecutionContextConfig result{2, mode == ps::ExecutionMode::NativeGpu, 16,
-                                    1024 * 1024, cache ? 256U * 1024U : 0U};
-  return result;
+  return s3::config(mode, cache);
 }
 /** @brief Exercises bounded native result/input retention and S3 edit
  * semantics. */
 inline bool cache_edits(const std::shared_ptr<ps::OperationRegistry>& registry,
                         ps::ExecutionMode mode) {
-  s3::Scene scene(registry, mode);
   ps::ExecutionContext execution(registry, config(mode));
-  auto first = s3::take(execution.execute(scene.freeze(execution, 2)));
+  s3::Scene scene(registry, s3::take(execution.resource_budget()), mode);
+  auto first = s3::complete(execution, scene.freeze(execution, 2));
+  first.frame.check(scene.oracle(2));
   if (mode == ps::ExecutionMode::NativeGpu && !execution.gpu_enabled()) {
-    s3::Frame image(s3::Scene::height, s3::Scene::width);
-    image.blit(first.values.at("result"));
-    image.check(scene.oracle(2));
-    s3::require(first.diagnostics.native_dispatch_count == 0,
-                "unavailable device dispatched");
-    std::cout
-        << "S4Gpu.CacheEdits native=unavailable CPU_fallback_oracle=passed\n";
+    s3::require(first.native_dispatches == 0 && first.fallbacks > 0,
+                "unavailable device must use recorded CPU fallback");
     return false;
   }
-  s3::require(calls(first, 10) == 20, "cold blur tile count");
-  auto warm = s3::take(execution.execute(scene.freeze(execution, 2)));
-  s3::require(calls(warm) == 0 && warm.diagnostics.native_dispatch_count == 0 &&
-                  warm.diagnostics.transfer_bytes == 0,
-              "warm workflow performed work");
-  auto gain = s3::take(execution.execute(scene.freeze(execution, 3)));
-  s3::require(calls(gain, 10) == 0, "gain edit recomputed blur");
-  if (mode == ps::ExecutionMode::NativeGpu && execution.gpu_enabled()) {
-    s3::require(first.diagnostics.native_dispatch_count > 0,
-                "cold chain performed no Metal work");
-    s3::require(gain.diagnostics.native_upload_hits > 0,
-                "retained source buffers not reused");
-    s3::require(execution.cache_statistics().native_retained_bytes > 0,
-                "no native storage retained");
-  }
+  s3::require(s3::calls(first, 10) > 0, "cold blur execution");
+  auto warm = s3::complete(execution, scene.freeze(execution, 2));
+  s3::require(s3::calls(warm) == 0 && warm.native_dispatches == 0 &&
+                  warm.transfers == 0,
+              "warm regional workflow performed work");
+  auto gain = s3::complete(execution, scene.freeze(execution, 3));
+  s3::require(s3::calls(gain, 10) == 0, "gain edit recomputed blur");
+  if (mode == ps::ExecutionMode::NativeGpu)
+    s3::require(first.native_dispatches > 0 &&
+                    execution.cache_statistics().native_retained_bytes > 0,
+                "native cache did not retain GPU results");
   scene.stamp(execution, {4, 5, 2, 1, 0, 0, .5F});
-  auto changed = s3::take(execution.execute(scene.freeze(execution, 3)));
-  s3::require(calls(changed, 10) > 0 && calls(changed, 10) < 20,
-              "local stamp invalidation is not regional");
-  s3::Frame image(s3::Scene::height, s3::Scene::width);
-  image.blit(changed.values.at("result"));
-  image.check(scene.oracle(3));
+  auto changed = s3::complete(execution, scene.freeze(execution, 3));
+  s3::require(s3::calls(changed, 10) > 0 &&
+                  s3::calls(changed, 10) < s3::calls(first, 10),
+              "local stamp must retain unaffected regional blur results");
+  changed.frame.check(scene.oracle(3));
   scene.edit_unrelated_branch();
-  auto unrelated = s3::take(execution.execute(scene.freeze(execution, 3)));
-  s3::require(calls(unrelated) == 0, "unrelated branch invalidated results");
-  if (mode == ps::ExecutionMode::NativeGpu && execution.gpu_enabled()) {
-    auto tiny = s3::take(execution.execute(scene.freeze(execution, 1e-10F)));
-    auto repeated =
-        s3::take(execution.execute(scene.freeze(execution, 1e-10F)));
-    s3::require(!tiny.diagnostics.fallback_reasons.empty() &&
-                    calls(repeated, 20) > 0 && calls(repeated, 30) > 0 &&
-                    calls(repeated, 40) > 0,
-                "fallback ancestry entered Metal result cache");
-    s3::Scene exact_scene(registry);
-    auto exact = s3::take(execution.execute(exact_scene.freeze(execution, 2)));
-    s3::require(
-        calls(exact) > 0 && exact.diagnostics.native_dispatch_count == 0,
-        "CPU exact reused Metal results");
+  auto unrelated = s3::complete(execution, scene.freeze(execution, 3));
+  s3::require(s3::calls(unrelated) == 0,
+              "unrelated branch invalidated results");
+  if (mode == ps::ExecutionMode::NativeGpu) {
+    auto tiny = s3::complete(execution, scene.freeze(execution, 1e-10F));
+    auto repeated = s3::complete(execution, scene.freeze(execution, 1e-10F));
+    s3::require(tiny.fallbacks > 0 && s3::calls(repeated, 20) > 0 &&
+                    s3::calls(repeated, 30) > 0 && s3::calls(repeated, 40) > 0,
+                "fallback ancestry entered native result cache");
+    s3::Scene exact_scene(registry, s3::take(execution.resource_budget()));
+    auto exact = s3::complete(execution, exact_scene.freeze(execution, 2));
+    s3::require(s3::calls(exact) > 0 && exact.native_dispatches == 0,
+                "CPU exact reused Metal results");
   }
   const auto stats = execution.cache_statistics();
-  s3::require(stats.retained_bytes <= 256 * 1024, "cache sublimit exceeded");
+  s3::require(stats.retained_bytes <= config(mode).result_cache_bytes,
+              "cache sublimit exceeded");
   execution.clear_result_cache();
   s3::require(execution.cache_statistics().retained_bytes == 0,
               "cache clear retained entries");
-  auto rebuilt = s3::take(execution.execute(scene.freeze(execution, 3)));
-  image.blit(rebuilt.values.at("result"));
-  image.check(scene.oracle(3));
+  auto rebuilt = s3::complete(execution, scene.freeze(execution, 3));
+  rebuilt.frame.check(scene.oracle(3));
   std::cout << "S4Gpu.CacheEdits warm_dispatches=0 blur_after_gain=0 "
-               "patch_blur_tiles="
-            << calls(changed, 10)
-            << " upload_hits=" << gain.diagnostics.native_upload_hits
+               "patch_blur_polls="
+            << s3::calls(changed, 10)
             << " native_retained_bytes=" << stats.native_retained_bytes
             << " oracle=passed\n";
   return execution.gpu_enabled();
@@ -97,8 +75,8 @@ inline bool cache_edits(const std::shared_ptr<ps::OperationRegistry>& registry,
 inline bool preview_export(
     const std::shared_ptr<ps::OperationRegistry>& registry,
     ps::ExecutionMode mode) {
-  s3::Scene scene(registry, mode);
   ps::ExecutionContext execution(registry, config(mode));
+  s3::Scene scene(registry, s3::take(execution.resource_budget()), mode);
   const auto export_oracle = scene.oracle(2);
   s3::Coordinator app(scene, execution);
   s3::require(app.begin_export(), "export admission");
@@ -131,14 +109,7 @@ inline bool preview_export(
           sample = color[c] + sample * .5F;
         }
       }
-  std::vector<float> actual_input(expected_input.size());
-  s3::require(
-      scene.foreground
-          .read(ps::Region::whole({s3::Scene::height, s3::Scene::width, 4}),
-                reinterpret_cast<std::uint8_t*>(actual_input.data()),
-                actual_input.size() * 4)
-          .ok(),
-      "stroke oracle read");
+  const auto actual_input = s3::samples(scene.foreground);
   s3::require(actual_input == expected_input, "exact ordered stamp oracle");
   app.exported.check(export_oracle);
   app.displayed.check(scene.oracle(4));

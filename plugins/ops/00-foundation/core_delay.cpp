@@ -1,54 +1,46 @@
-#include <vector>
+#include <chrono>
+#include <cstdint>
+#include <thread>
+#include <utility>
 
-#include "00-foundation/core_common.hpp"
+#include "00-foundation/tensor_program.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
 namespace {
-using namespace core_ops;  // NOLINT(build/namespaces)
-
+struct Delay final {
+  tensor_ops::Identity identity{true};
+  std::int64_t milliseconds;
+  bool waited = false;
+  explicit Delay(std::int64_t milliseconds) : milliseconds(milliseconds) {}
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    if (identity.started && !waited) {
+      for (std::int64_t elapsed = 0; elapsed < milliseconds; ++elapsed) {
+        if (phase.query.cancellation.cancelled())
+          return Result<ResultProgramPoll>(
+              Status{ErrorCode::Cancelled, "delay was cancelled"});
+        auto active = phase.consume_work(1);
+        if (!active.ok())
+          return Result<ResultProgramPoll>(active);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      waited = true;
+    }
+    return identity.poll(phase);
+  }
+};
 }  // namespace
 Status register_core_delay(OperationRegistry* registry) {
-  return registry->register_operation(OperationDefinition{
-      "core.delay", preserving([&] {
-        OperationTraits t;
-        t.input_count = 1U;
-        t.deterministic = true;
-        t.side_effect_free = true;
-        t.supports_cpu = true;
-        t.supports_gpu = false;
-        t.allows_cpu_fallback = false;
-        t.estimated_bytes = 0U;
-        t.cacheable = false;
-        t.outputs[0].output_element_type = ElementType::Float64;
-        t.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
-        t.outputs[0].region_rule = OperationRegionRule::Whole;
-        t.outputs[0].halo_radius = 0U;
-        t.parameter_schema = {OperationParameterSpec{
-            "milliseconds", OperationParameterType::Int64, true}};
-        t.outputs[0].fixed_output_shape = {};
-        t.input_schema = std::vector<OperationPortConstraint>(1);
-        t.outputs[0].output_schema = {/* output Value */};
-        return t;
-      }()),
-      [](const OperationInvocation& invocation) -> Result<Value> {
-        auto milliseconds =
-            integer_parameter(invocation.parameters, "milliseconds");
-        if (!milliseconds.ok() || milliseconds.value() < 0 ||
-            milliseconds.value() > 5000) {
-          return Result<Value>(Status::failure(
-              ErrorCode::InvalidArgument,
-              "delay milliseconds must be an int64 in 0..5000"));
-        }
-        for (std::int64_t elapsed = 0; elapsed < milliseconds.value();
-             ++elapsed) {
-          if (invocation.cancellation.cancelled()) {
-            return Result<Value>(
-                Status::failure(ErrorCode::Cancelled, "delay was cancelled"));
-          }
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        return Result<Value>(invocation.inputs.front());
-      }});
+  auto operation = tensor_ops::identity("core.delay", true);
+  operation.traits.cacheable = false;
+  operation.traits.outputs[0].continuation_bytes = sizeof(Delay);
+  operation.traits.parameter_schema = {
+      {"milliseconds", OperationParameterType::Int64, true, true, 0, 5000}};
+  operation.start_result = [](const ResultProgramQuery& query,
+                              const BufferAllocator& allocator) {
+    return ResultContinuation::make<Delay>(
+        allocator, std::get<std::int64_t>(query.parameters.at("milliseconds")));
+  };
+  return registry->register_operation(std::move(operation));
 }
 }  // namespace ps::plugin_internal

@@ -1,102 +1,223 @@
 # 通道与颜色算子
 
-默认 registry 与公开 `format` helper 提供张量通道选择、通道组装、格式转换和元数据更新。除明确执行转换的算子外，这些操作保留样本值。Operation plugin 使用 C ABI 11，planar operation plugin 使用 planar extension ABI 3。[英文镜像](../Channel-and-Color-Operations.md) 描述相同的当前契约。
+当前 default registry 提供 FMT-01 extraction、FMT-02 assembly、FMT-03 editing helpers、FMT-04 alpha association、FMT-05A alpha setting、FMT-06 numeric conversion、FMT-08 metadata assignment、FMT-09 transfer conversion、FMT-10 RGB basis conversion 以及 `channel.literal_like_<profile>`、`channel.scalar_literal_<profile>` Result primitives 和 FMT-11 model conversion，使用 Result operation ABI 2。FMT-05B/C 是基于已注册 operations 的编译期 helper 组合；FMT-10D 是对已注册 A/B/C operations 的公开 graph helper；FMT-11 的 native model conversion 已注册；S helper 降低为 MASK threshold operation。[英文镜像](../Channel-and-Color-Operations.md) 描述相同的当前状态。
 
-下文说明已注册的 operation key 和公开组合 helper。详细目标语义仍由链接的算子规格描述；规格本身不会向默认 registry 添加尚未注册的算子。
+下表区分当前 Result 注册项和仍保持 Proposed 的其他 FMT 契约。
 
-## 当前注册的算子族与存储契约
+## 当前 Result 算子族与保留的 FMT 契约
 
-| 算子族 | 当前 key 与公开 authoring API | 输入 metadata 与执行 |
+| 算子族 | Keys 与公开 authoring API | 当前状态 |
 | --- | --- | --- |
-| 通道选择 | `channel.extract_index_<profile>`、`channel.extract_named_<profile>`、`channel.literal_like_<profile>`；`format::split_channels` | 按需使用 tensor description v4/v5；精确通道依赖；callback 支持 planar |
-| 通道组装与编辑 | `channel.assemble_<profile>`、`channel.concatenate_<profile>`、`channel.assemble_mapped_<profile>`；`format::assemble_channels`、`concatenate_channels`、`assemble_mapped_channels`、`swizzle_channels`、`replace_channels` | Tensor description 与显式通道结构；精确映射依赖；callback 支持 planar |
-| Alpha 关联与编辑 | `alpha.associate_<profile>`、`alpha.unassociate_<profile>`、`alpha.set_<profile>`；helper 见 `photospider/format/alpha.hpp` | Tensor color-group 语义；callback 支持 planar |
-| 数值格式转换 | `numeric.convert_format_strict` | TDM 描述的 encoding/decoder metadata；strict planar dependency 执行 |
-| Metadata 编辑 | `metadata.assign_<profile>`；`format::assign_metadata`、`format::remove_metadata` | Tensor description v4/v5 和 invocation-local 编辑记录；callback 支持 planar |
-| Transfer 转换 | `color.transfer_encode_<profile>`、`color.transfer_decode_<profile>`；定义见 `photospider/format/transfer.hpp` | 显式 transfer/component metadata；planar dependency 执行 |
-| RGB basis 转换 | `color.rgb_to_xyz_<profile>`、`color.xyz_to_rgb_<profile>`、`color.adapt_xyz_white_<profile>`；helper 见 `photospider/format/rgb_basis.hpp` | 显式 RGB/XYZ group、primaries 和 white metadata；planar dependency 执行 |
-| Model 转换 | 二十个 `color.*_<profile>` key，涵盖 XYZ/CIELAB/OKLab、RGB/HSL/HSV、YCbCr、xyY、gray、black/white helper | 显式输入与输出 model 描述；planar dependency 执行 |
+| 通道选择 | Result keys `channel.extract_index_<profile>`、`channel.extract_named_<profile>`；`format::split_channels` | 已注册 Result operation；一个 tensor member 且没有 fields；精确选中通道的 Data + Descriptor support。 |
+| Literal-like fill | `channel.literal_like_<profile>` | 已注册单输入 Result operation；仅请求 Descriptor support，并按 output descriptor 对请求样本重复 prepared raw bits。 |
+| Scalar literal | `channel.scalar_literal_<profile>` | 已注册的无输入 Whole Result primitive；以 prepared native bits 输出 shape `[1]`，供 FMT-03 literal source 使用。 |
+| Metadata 编辑 | Result key `metadata.assign_<profile>`；`format::assign_metadata`、`format::remove_metadata` | 已注册 Result operation；一个 tensor member 且没有 fields；same-coordinate Data + Descriptor，无 Validation/Control 或 planar callback。 |
+| 通道组装与编辑 | `channel.assemble_<profile>`、`channel.concatenate_<profile>`、`channel.assemble_mapped_<profile>`；已安装的 `channel_assembly.hpp`、`channel_editing.hpp` helpers | Result keys 已注册；FMT-03 helpers 展开为 mapped assembly，没有独立 swizzle/replace key。 |
+| Alpha 关联与编辑 | `alpha.associate_<profile>`、`alpha.unassociate_<profile>`、`alpha.set_<profile>`；已安装 `photospider/format/alpha.hpp` helpers | 三个成员各有 strict、Apple Silicon 和 x86-64 CPU profile，共九个 Result ABI 2 keys。FMT-05B/C helpers 编译期组合为已注册的 extraction、literal-like fill、mapped assembly 与 metadata assignment operations。 |
+| 数值格式转换 | `numeric.convert_format_strict` | 单一已注册 strict Result ABI 2 key，覆盖七种 dtype 之间的 49 个转换对。 |
+| Transfer 转换 | `color.transfer_encode_<profile>`、`color.transfer_decode_<profile>`；`photospider/format/transfer.hpp` 提供 `TransferDefinition` codec | encode/decode 各有 strict、Apple Silicon 与 x86-64 CPU Result ABI 2 key，共六个已注册 keys。 |
+| RGB basis 转换 | `color.rgb_to_xyz_<profile>`、`color.xyz_to_rgb_<profile>`、`color.adapt_xyz_white_<profile>`；已安装 `photospider/format/rgb_basis.hpp` helpers | A/B/C 跨三个 profile 共注册九个 Result ABI 2 CPU keys。`format::convert_linear_rgb` 事务式组合已注册 stages，不增加 D key。 |
+| Model 转换 | A-R、T 的 `color.*_<profile>`；FMT-11S helper 降低为 `mask.threshold_channel_<profile>` | 三个 CPU profiles 共 57 个 native model keys；S 不新增 color key。单 tensor Float32/Float64 Result，full sample rank 至多 8；sample count 受 Result schema 可表示范围和执行资源限制约束。 |
 
-上述 profile 家族的 `<profile>` 为 `strict`、`accelerated_apple_silicon` 或 `accelerated_x86_64`；`numeric.convert_format_strict` 仅有 strict 版本。这些 format/color operation definition 设置 `planar_storage_capable` 并提供 planar callback。Callback 按映射请求输入支持，并发布请求的输出窗口。通道编辑使用的 scalar literal provider 是 generic 单样本 Value，本身不是 planar 图像算子。
+带 profile 后缀的 channel extraction、assembly、alpha、metadata、transfer、RGB basis、literal-like fill 和 scalar-literal operations 使用 `strict`、`accelerated_apple_silicon` 或 `accelerated_x86_64`；加速变体要求宿主支持对应能力。Numeric conversion 使用唯一的不带后缀 strict key。Model conversion keys 使用 strict、accelerated_apple_silicon 和 accelerated_x86_64 profiles。当前 Result operations 使用 `start_result` 与 Result tensor protocol。
 
 公开 tensor-description encoder 在不存在 `coordinates` 记录时生成 v4；tensor、component、channel 或 group 含有 `coordinates` 时生成 v5。Decoder 接受版本与 discriminator 一致的 v4/TDM4 和 v5/TDM5；旧版本和 discriminator 失配均拒绝。兼容的 coordinate assertion 按字段合并；同一字段的非空断言不相等时失败。完整 schema 见[张量语义 metadata](Tensor-Semantic-Metadata.zh.md)，model 专用要求见 [FMT-11 model conversion contract](../../../docs/built-in_ops/02-format-color/op_specs/FMT-11_model_conversion_contract.md)。
 
 ## FMT-01 通道提取
 
-`channel.extract_index_{strict,accelerated_apple_silicon,accelerated_x86_64}` 按静态 `index` 提取；`channel.extract_named_` 使用相同 profile 后缀，按 `match=name|role` 命名空间中的唯一精确 `selector` 提取。命名 CPU profile 必须符合宿主能力。所有 profile 对 UInt8、UInt16、Int8、Int16、Int64、Float32、 Float64 执行逐位复制，包括 NaN payload。
+`channel.extract_index_{strict,accelerated_apple_silicon,accelerated_x86_64}` 按静态 `index` 提取；`channel.extract_named_` 使用相同 profile 后缀，在独立的 `match=name|role` 命名空间精确匹配 `selector`。Named CPU profile 必须符合宿主能力。六个 Result key 对 UInt8、UInt16、Int8、Int16、Int64、Float32 和 Float64 保留所有样本位，包括 NaN payload。
 
-输入为 `input`，输出为 `values`。直接节点须提供 `metadata_mode=respect|raw|override`、 `keepdims` 和 `layout=auto|view|materialize`。`axis` 是小于 rank 的非负 Int64； raw 或无描述输入必须显式提供。respect 检查显式轴与 metadata 一致；override 必须提供 `tensor_description_parameter` 编码的 `metadata_override`。rank 为 1..8，移除轴要求 rank >= 2。提取不执行颜色转换、alpha 归一化或浮点运算。
+每个 node 接收只有一个 tensor member 且没有 fields 的 Result，发布 `values` Result。静态参数 `metadata_mode=respect|raw|override`、`axis`、`keepdims` 和 `layout=auto|view|materialize`。`axis` 索引 tensor descriptor，不包括 Result batch prefix；执行时将它平移到完整 sample shape。Respect 将显式 axis 与 TensorDescription 比较。Override 使用 `tensor_description_parameter` 编码的本地描述。Named lookup 要求完整 channel table，不能使用 raw。输入输出保留 batch axes；`keepdims=false` 删除选中的 cell axis，要求 descriptor rank 至少为 2。操作不做颜色转换、alpha 归一化、样本验证或浮点运算。
 
-公开 `TensorDescription` 编解码器使用当前 tensor-description schema，记录轴、有序名称/角色/单位、分量解释与可选 ICC identity。投影保留适用解释和资源，单个分量不获得完整颜色保证。override 仅影响本次调用。`format::split_channels` 展开 A 节点并返回 c0、c1 等句柄，编译时核验所提供的 producer metadata。
+Public authoring interface 从 `photospider/format/channel.hpp` 安装。Runtime 投影选中 component 的 TensorDescription，并按 shape 变化重映射适用 cell-axis metadata。普通提取输出只保留投影后的 TensorDescription facet，不保证保留所有 opaque annotations。单通道不会因此获得 complete-color 或样本有效性保证。`format::split_channels` 为每个通道展开一个 index node，返回 `c0`、`c1` 等句柄；helper 校验声明的完整 schema 和 physical layout。每个生成 node 使用完整 canonical schema 的 domain-separated SHA-256 摘要（64 个小写十六进制字符）和独立的 physical-layout assertion，以便编译时检查 producer。摘要包含 opaque metadata 与 batch axes，不读取样本，也不是样本哈希或有效性证明。
 
-普通 tensor 通过 Dependency fragments 精确请求，支持负 stride 和零 stride。 planar 通道 view 保留源虚拟 backing，仅开放请求 ROI，最后一个 alias 释放后才归还执行准入。物化只提供请求的输出页。raw 空间轴选择执行物化：keepdims 保留 planar 存储，删除空间轴后通过 `ExecutionResult::values` 返回普通 tensor。不可用的强制 view 在执行时返回 `InvalidArgument/InvalidDomain` 和 `ViewUnavailable`。后续普通 tensor 节点通过 regional source 执行。多个具名 planar 根分别执行各自请求的 Region。
+Dependency-v2 以 Data (1) 和 Descriptor (8) 请求精确的选中通道 support，不请求 Validation 或 Control。Dirty mapping 将选中通道变化映射到对应输出坐标；未选通道不使输出变脏。Generic tensor view 支持有效的正、负和零 stride，Result mapper 可以分区并保留多个 backing owner。选取 spatial tensor 的 channel axis 可以保留源 physical owner；切取 spatial height/width 时，auto 会按投影后的 layout materialize，强制 view 返回 `InvalidArgument/InvalidDomain` 和 `ViewUnavailable`。Squeeze 删除 spatial axis 时输出成为 generic layout；keepdims 保留 extent-one spatial layout。物化只复制请求的输出区域，每 256 样本以内检查取消。Empty demand 发布空 Result，不读取 source payload。Result cache 被禁用。
 
-可运行的公开 workflow 位于 [`test_channel_extraction.cpp`](../../../tests/integration/test_channel_extraction.cpp)。首个 fixture 使用 [2,2,4] 的 B/A/R/G 数据并请求第二行，独立检查 alpha [75,99]、 named red [12,13] 和 split c2 [12,13]。其他 oracle 覆盖七种 dtype、rank eight、 CHW/HWC、跨 tile ROI、raw 空间轴结果 [105,106,109,110]、所有权、profile override、取消和不连续根请求。
+[公开 Result workflow](../../../examples/channel_extraction_workflow/README.md) 使用 B/A/R/G UInt8 `[2,2,4]` tensor，只请求 `c2` 第二行 ROI，检查结果 `[12,13]`。`test_channel_extraction` 覆盖 direct index/named、任意轴、七种 dtype、batch/spatial layouts、owner partitions、metadata、resources、取消和限制。
 
 ```sh
-cmake --build build --target test_channel_extraction -j 8
+cmake --build build --target photospider_channel_extraction_workflow test_channel_extraction -j 8
+./build/examples/channel_extraction_workflow/photospider_channel_extraction_workflow
 ctest --test-dir build -R '^test_channel_extraction$' --output-on-failure
 ```
 
-成功表示 exit code 0 且所有 oracle 断言通过。安装消费目标 `photospider_channel_extraction_consumer` 编译运行同一源码。原生宿主 CPU 验证不代表其他 ISA 或 GPU 已验证。原生索引提取的实测结果与 Instruments 热点见 [性能 workflow](../../../examples/channel_extraction_performance/README.md)。混合执行目前逐个重新编译普通 tensor 节点；诊断包含节点时间，但未统一汇总子执行的整次内存峰值，也不代表 RSS。
+当前 Result integration test 和公开 workflow 已在 native CPU 上通过，不代表其他 ISA 或 GPU。旧 [性能 workflow](../../../examples/channel_extraction_performance/README.md) 的 Value/planar 测量不代表当前 Result 执行性能。
 
+
+## Scalar literal primitive
+
+Default registry 注册三个 `channel.scalar_literal_<profile>` CPU keys。这个无输入
+Whole Result operation 输出 generic shape `[1]` tensor，dtype 由调用方指定，payload 为已准备好的小写 hex native bytes。支持 UInt8、UInt16、Int8、Int16、Int64、Float32 和 Float64。它服务 FMT-03 literal sources，不实现 alpha helper。每次运行使用独立准备状态；Empty observation 不保留 payload state。
+
+## Literal-like fill primitive
+
+Default registry 注册三个 `channel.literal_like_<profile>` CPU keys。每个 operation 接收一个含单 tensor member 的 Result，并发布一个含单 tensor member 的 Result。Execution 只请求 Descriptor support（role 8），不读取来源 sample payload。Operation 根据 `bits` 重复同 dtype raw bits；`output_description`、可选 cell-axis `axis` 和 `keepdims` 定义输出 tensor。它保留 batch axes、schema id、tensor key、opaque facets 和 owned resources。完整 sample count 为 `[1, 2^40]`。其可选 `axis` 索引 cell axes，不包含 Result batch prefix。
+
+静态必需参数为 `bits`、`expected_inputs`、`output_description`、`layout`、`authoring_member` 和 `keepdims`；`axis` 可选。`expected_inputs` 使用 `result-v1`、64 字符 schema digest 和单独的 physical-layout assertion。`auto` 与 `materialize` 生成请求字节；非空 forced `view` 返回 `ViewUnavailable`。Empty observation 无状态。此 primitive 可用于 FMT-05B opaque 路径的 lowering，但不是公开 `extract_alpha` helper。
 
 ## FMT-02 通道组装
 
-注册表提供 `channel.assemble`、`channel.concatenate`、 `channel.assemble_mapped` 的 strict、accelerated_apple_silicon 和 accelerated_x86_64 入口；A (`format::assemble_channels`) 插入新通道轴，B (`format::concatenate_channels`) 按输入顺序拼接已有通道轴，C (`format::assemble_mapped_channels`) 按完整目标槽位映射复制来源分量。支持 1..1024 个重复输入， UInt8/UInt16/Int8/Int16/Int64/Float32/Float64 同 dtype 逐位复制，无隐式广播或转换。
+`channel.assemble_<profile>`、`channel.concatenate_<profile>` 和
+`channel.assemble_mapped_<profile>` 各提供 strict、Apple Silicon 与 x86 CPU
+profile。每个 operation 接收 1 到 1024 个 input Results，每个输入含一个 tensor member，
+没有 fields，并发布一个 `values` Result。七种 dtype 按位复制。所有输入的 batch prefix 必须一致；
+非 scalar 来源在通道轴以外的 sample shape 必须相同。完整输入与输出 sample count 不超过 2^40；
+batch axes 与 cell axes 合计的 full sample rank 不超过 8。各成员的 `axis`、`input_axes` 和
+`output_axis` 均索引 cell axes，不包含 batch prefix。输出保留首来源的 schema id、tensor key、
+global metadata 和 publication policy；tensor facets 根据推导出的 TDM 重建，不复制未知 source
+tensor facets。
 
-| 成员 | Helper | 结构约束 |
-| --- | --- | --- |
-| A `channel.assemble_<profile>` | `format::assemble_channels` | 输入 rank 1..7，单分量且 shape 相同；`axis` 在 `[0,rank]` 插入轴。 |
-| B `channel.concatenate_<profile>` | `format::concatenate_channels` | 输入 rank 1..8；各输入通道轴可分别解析，非通道 extent 顺序相同；`output_axis` 在 `[0,rank)`。 |
-| C `channel.assemble_mapped_<profile>` | `format::assemble_mapped_channels` | 显式输入结构和来源/目标映射；每个目标槽恰好映射一次，来源可省略或重复。 |
+A 在相同 component shape 中插入通道轴。B 按输入顺序拼接通道块，每个输入可使用不同通道轴。C 把显式 component/channel selector 映射到完整输出槽位，每个槽位恰有一个来源。所有已连接输入，即使未被映射使用，也执行 Descriptor 检查；Data 仅覆盖请求输出区域内实际映射的来源。操作不广播、不重采样、不转换数值或执行样本域验证。
 
-公开 `format::assemble_channels`、`concatenate_channels`、`assemble_mapped_channels` 位于 `photospider/format/channel_assembly.hpp`，是构造图的 helper，返回可连接的 `WorkflowNodeOutput`。调用方还需添加具名输出，再通过公开 API 编译并执行文档；helper 本身不是执行入口。helper 默认使用 `metadata_mode=respect` 和 `layout=auto`。显式物化输出可由 dense `ExecutionContext::execute` 返回。默认 auto 可能按请求物化来自不同 owner 的 tile，同时保留多个输出片段；dense execute 接受覆盖请求的单个 view，多个片段时返回 `TypeMismatch`，而 `execute_fragments` 返回精确请求的片段。`[2,257]` auto-layout 用例通过 fragmented 执行逐字节验证 514 个样本。直接节点显式填写 metadata mode、layout 和输出轴。B 的 input_axes 使用 `v1;axis;_;axis`；C 的 input_structure 使用 `v1;c;h2;h_`；input_overrides 使用升序唯一序号的 `v1;ordinal:description_hex;...`；mapping 使用 `v1;input,match,selector_hex,destination,component_hex;...`。整数为无前导零的非负十进制，selector 为严格 UTF-8 的小写十六进制，缺失 component 写 `_`。output_description 与 component 描述由公开 codec 编码。所有 String 仍受 8192 字节参数上限约束。来源选择独立于目标语义赋值。
-
-公开 `TensorDescription` codec 使用当前 tensor-description schema；输入须按已安装 package 接受的版本编码。新增逐分量 TensorInterpretation 和显式 TensorColorGroup，包含通道索引、对应分量、解释及内部 alpha 索引。完整颜色组校验模型分量与所需结构字段，组与通道同字段冲突失败。输出目标字段允许局部重解释；未重定义的适用字段继续按 respect 校验。更换模型删除不再适用的旧模型字段，不进行像素转换或生成有效性证明。 ICC 引用必须有真实资源 owner，并由结果保留。raw 保留可投影分量说明，但不消费其语义、不传播冲突的公共网格。完整字段词汇见英文权威文档。
-
-静态 DependencyMapPiece 表达精确 Data 及反向 dirty fan-out。generic 路径支持离散 Footprint 和正/负/零 stride；planar 路径按映射片段请求上游，未选 producer 不执行，重复来源选择去重。内部矩形规划包络只用于调度，payload 请求保持精确。物化输出一次准备并原子发布请求窗口，页面只覆盖实际请求样本。generic/planar 来源可在非通道 shape 一致时组合。
-
-通用张量 view 需要共同 owner 和单一仿射映射；planar view 需要共同根 owner 的连续物理通道、相同空间映射及各来源自己的授权覆盖。auto 在不能证明时物化；强制 view 返回 ViewUnavailable。视图保留 backing 和资源计费到最终 owner 退休。
-
-### 公开 helper 与集成 fixture
-
-`tests/integration/test_channel_assembly.cpp` 是集成测试入口，包含独立样本 oracle。generic concatenate 与 mapped metadata/override/partial-coordinate 的 dense oracle 显式使用 `layout=materialize`。默认 auto 在 `[2,257]` 用例可将不同 owner 的查询分别物化，同时保留多个输出片段；dense execute 接受覆盖请求的单个 view，多个片段时返回 `TypeMismatch`，`execute_fragments` 则逐字节验证全部 514 个样本。`shared_owner_alias_oracle` 将 `[2,3]` 输入拆分后按 `[2,0]` 组装为强制 `[2,2]` view，释放 source binding 后再次逐字节验证 view。测试命令仍选择 `test_channel_assembly`、`test_channel_extraction`、`test_planar_image_workflow` 和 `test_compiler` 四项。C 的跨 tile 用例只发布 [127,130)×[127,130) 的来源通道 0 和 2，目标映射为 [2,0,2]：27 个 UInt8 输出样本仅请求 18 个来源字节，未发布的通道 1 不参与读取。测试还覆盖 dtype/axis、特殊浮点位、stride、元数据赋值与冲突、共享 view、混合图、资源上限、override 和 ICC 生命周期。
-
-安装消费目标 `photospider_channel_assembly_consumer` 使用相同公开测试源码。性能复现、Xcode Instruments 和 WSL Linux/x64 结果见 [性能工作流](../../../examples/channel_assembly_performance/README.md)。
-
+已安装的 `photospider/format/channel_assembly.hpp` helpers 追加静态 graph node，不读取样本。generic retained view 要求整个请求区域由同一 `CpuStorage` owner 和单一 affine 地址式表示。planar view 还须由 ResultBuilder 证明同一根、按输出顺序连续的 planes 和匹配 row pitch。强制 view 缺少证明时返回 `ViewUnavailable`；`auto` 仅在该错误下回退复制。物化只读取请求区域。每次运行拥有独立的 prepared state，Empty observation 不保留 payload state。Need 按每组 64 个处理，最多执行 16 组并进行 publication。1024 输入用例需要显式 64 MiB metadata capacity；默认 16 MiB 会受控地返回资源错误。[性能指南](../../../examples/channel_assembly_performance/README.md) 将历史 Value/planar 表格与当前 Result smoke 区分；未运行完整 Result 矩阵或 profiling。
 
 ## FMT-03 通道编辑
 
-FMT-03A 是 `format::swizzle_channels`，FMT-03B 是 `format::replace_channels`；两者由 `photospider/format/channel_editing.hpp` 导出。两者事务式展开为 `channel.assemble_mapped_<profile>`，不注册独立 swizzle/replace key，也不恢复旧别名。 [最小公开 workflow](../../../examples/channel_editing/README.md)运行偏移 ROI，逐字节检查结果 `[8,21,31,0.5]`。
+已安装的 `format::swizzle_channels` 与 `format::replace_channels` 是 graph authoring helpers，展开为 `channel.assemble_mapped_<profile>`；使用 literal 时还会用 `channel.scalar_literal_<profile>`。没有独立的 native swizzle/replace key。Swizzle 映射非空有序槽位；replace 对原始输入的不同目标同时赋值，空替换列表表示 identity。Literal 使用预先准备的 native bits。所有连接输入，包括未使用输入，都参与 Descriptor 检查；Data 需求遵循有效来源映射。
 
-每个输入包含实际推导 metadata 和显式 channel/component/scalar 结构。输入 0 是 base，确定输出通道轴及非通道网格。A 支持选择、重复、遗漏和填充；B 同时读取原始输入，替换唯一目标，保留未列出的样本和语义。name/role 精确区分大小写且唯一；raw 要求显式轴和 index。七种 dtype、rank 1..8 均逐位保留，包括 NaN payload 和负零。literal 显式携带 dtype 与字节，不经过 Float64，不执行 alpha 算术。
+FMT-03 的所有 nonscalar inputs 必须与 base 具有完全相同的 batch prefix；scalar inputs 是无 batch 的 shape `[1]`。Axis 参数索引 cell axes，不包含 batch prefix。包含 batch 与 cell axes 的 full sample rank 不超过 8。FMT-03 输入断言以 `result-inputs-v1:` 开头，后接 64 个小写 SHA-256 十六进制字符，固定 81 字符。带 domain separation 的摘要覆盖所有连接输入的完整有序 canonical schema 和 physical layout，包括重复及未使用输入。不包含 samples，也不是 samples 有效性的证明。Literal operation 使用 shape `[1]` 和 prepared native bits，并采用 Whole 语义。Scalar row repetition 每次最多复制 256 个 samples，同时计费 work 并检查 cancellation。[公开 workflow](../../../examples/channel_editing/README.md) 展示可运行示例。
 
-A 投影来源组件含义，仅保留唯一完整映射的组及 companion。B 计算完整目标描述，避免 replacement 的额外源字段泄漏。显式组替换重叠或同名组，其余适用组保留。 raw 丢弃与新通道轴不相容的描述，override 仅影响本次调用。全部连接的空间输入均检查坐标兼容性，包括未读取样本的输入；不隐式重采样。
+## FMT-04 alpha 关联
 
-FMT-03 lowerer 将 generic scalar fill 融合到 C 的内部 `s` 来源记录，每个被选择输出坐标映射至 `V[0]`。普通 FMT-02C 的公开 `ChannelSourceStructure` 仍只接受 component/channels。生成节点携带 `authoring_member`、有界无损 `expected_inputs` 断言及 `output_description_complete`，参加正常编译身份计算。 helper 验证输入声明，编译时重新核验 producer metadata。全常量输出仍保留 base Descriptor 检查，但不读取 base Data。
+`format::associate_alpha` 与 `format::unassociate_alpha` 会追加已注册的
+`alpha.associate_<profile>` 和 `alpha.unassociate_<profile>` Result operations。
+每个成员均有 strict、Apple Silicon 和 x86-64 CPU profile。输入为无 fields 的
+single-tensor Result；第二个可选 Result 仅用于 raw 模式显式提供 alpha plane
+或 scalar。Semantic color 与被消费的 alpha 具有 Data 和 Validation support；
+仅 passthrough 的值不会增加额外验证；所有连接输入均请求 Descriptor，且不使用
+Control。公式、raw 模式、layout 与错误规则见 [FMT-04 contract](../../built-in_ops/02-format-color/op_specs/FMT-04_alpha_association_contract.md)。
 
-相同 typed literal 共用一个 `channel.scalar_literal_<profile>` provider。其 Int64 `dtype` 必须是七种有效 ElementType，String `bits` 是精确本机字节序的小写 hex。provider 无输入，输出 generic `[1]`、端口 `values`、空 facets，使用单样本 Whole 语义和标量大小的独立 storage。非法 dtype/宽度/hex 在预检拒绝。扩图按实际唯一 provider 加一个 C 节点计数，使用防冲突 ID，节点上限 65536；标量填充不分配空间中间张量。
+## FMT-05 alpha 提取与移除
 
-generic 的单 owner affine 结果可保留零步幅 scalar view；独立 owner 需物化， canonical image 不能别名 scalar storage。planar 映射路径预留完整输出虚拟跨度，只提供请求页，逻辑 Data 和 valid coverage 不随页或 tile 取整扩大。优化后的标量复制在最多 1024 样本的块内倍增已初始化字节前缀，保留取消/currentness 检查和原子发布，无浮点算术、未请求邻接读取、私有线程池或完成结果缓存。
+已安装的 `photospider/format/alpha.hpp` 提供 `format::extract_alpha` 和
+`format::remove_alpha` 编译期图组合。它们接收无 fields 的 single-tensor
+Result，逐位保留七种支持的 dtype，保留 batch axes，并将 axis 解释为相对
+cell axes 的位置。包含 batch 与 cell axes 的完整 sample rank 不超过 8，
+完整 sample count 不超过 2^40。它们不扫描样本来验证 alpha domain。
 
-`test_channel_editing` 为集成回归；`photospider_channel_editing_consumer` 针对安装公共包运行同一 fixture。[性能结果](../../../examples/channel_editing_performance/README.md) 记录 FP32 128x128、4096x4096 continuous/tiled、稀疏请求、布局、复制与 backing 统计及优化效果。
-
+存在 alpha 时，提取会降低为 `channel.extract_index`；显式 opaque fallback
+降低为只请求 Descriptor support 的 `channel.literal_like`。移除含 channel
+的输入会降低为 mapped assembly；component Gray identity 使用 `metadata.assign`，
+仍请求 Data。helpers 在 compile time 检查来源 schema 与 physical layout。
+FMT-05A `set_alpha` 和 FMT-04 association helpers 使用已注册的
+`alpha.set_<profile>`、`alpha.associate_<profile>` 与
+`alpha.unassociate_<profile>` native keys。历史 Value/planar alpha 测量不构成
+Result 性能证据。
 
 ## FMT-06 数值格式转换
 
-包注册表提供 `numeric.convert_format_strict`，接收一个 `input` 张量，发布同形状、同坐标需求的 `values` 张量。必需的 `dtype` String 可选 `uint8`、 `uint16`、`int8`、`int16`、`int64`、`float32`、`float64`；七种类型的两个方向均可组合。
+`numeric.convert_format_strict` 是唯一已注册的 strict Result ABI 2 key。它接收
+一个只含单 tensor member、没有 fields 的 Result，并发布一个名为 `values`、只含单
+tensor 的 output Result。七种 source/target dtype 共支持 49 个转换对。包含 batch
+与 cell axes 的完整 sample rank 不超过 8；sample count 不超过 2^40。输出保留 Result
+schema identity、tensor key、logical shape 和 batch axes，并更新 tensor dtype 与
+encoding facets；`atomic_trailing_axes` 设为零。
 
-默认 `rescale=true` 按 dtype 选择区间：无符号为 `[0,max]`，有符号为 `[min,max]`，浮点为 `[0,1]`。`rescale=false` 执行数值 cast，且拒绝区间与轴参数。可选的 `source_range`、`target_range` 使用有类型端点 String：`i:<有符号十进制>` 或 `f64:<16位小写十六进制位>`；两个端点用逗号组成一对，完整通道表用分号连接。出现通道表时必须给出非负 Int64 `axis`。来源下界必须小于上界；目标端点可以倒序但不能相等。未请求通道的表项也在静态阶段检查。来源区间外按公式外推；算子不改变 transfer、颜色模型或 alpha 关联。
+Operation 以 Data (role 1) 和 Descriptor (role 8) 请求 source support，不请求
+Validation 或 Control，不扫描未请求 samples，错误保持在请求的 observation scope。
+Axis 参数索引 cell axes，不包含 batch axes。数值规则、typed endpoint 格式与 metadata
+传播见 [FMT-06 contract](../../built-in_ops/02-format-color/op_specs/FMT-06_numeric_conversion_contract.md)。对完整 sample coordinate `q`，channel-table 项由
+`q[batch_prefix_length + axis]` 定位；`axis` 本身是 cell-axis index，不含 Result
+batch prefix。迁移后的 `test_numeric_conversion` suite 已通过 49 个 dtype pairs、随机 numeric oracle、ROI、cold-lookup budget、failure-order、floating-environment 与 same-coordinate identity-view 检查。额外的 batch/view/Empty/bit-stride、ICC resource、并发 plan 复用和最终 payload 释放检查均通过；SME 测试也通过。`test_alpha_numeric_interop` 的四种 inherited/moved 组合通过；这不代表 model-conversion interop 已验证。六项 numeric/alpha/resource focused CTests 均通过。installed numeric-conversion 和 alpha-numeric-interoperability consumers 均通过；standalone performance consumer 已完成 configure/build。13 个串行 Result smoke case 均通过逐位 oracle，但不据此得出 Result 性能结论。
 
-可选 `rounding` 只接受 `ties_even`；`overflow` 为 `reject`（默认）或 `clip`。 `metadata_mode` 为 `respect`（默认）、附带 `metadata_override` 的 `override`、或 `raw`。`layout` 为 `auto`（默认）、`view` 或 `materialize`；仅能对静态证明的同 dtype 恒等映射及合法通用 Value owner 使用 view。平面图像物化请求页。编码与 decoder 元数据随映射更新；不能用二进制浮点精确表示的 decoder 端点使用 schema 定义的有理数表示。只有被请求的样本会触发样本域错误。恒等复制保留 NaN 与有符号零位；非恒等 NaN 遵循 FMT-06 payload 规则。
+仅当完整 declared mapping 是静态 identity，且源 storage 可表示该映射时，same-dtype
+转换才可发布 generic 或 spatial view。只请求一个恒等通道不能使整个变换结果可 view。
+Forced view 无法证明时返回 `ViewUnavailable`；`auto` 执行 materialize。物化在 Root
+budgets 与 cancellation 约束下事务发布请求 target-width samples。Empty demand 无状态。
 
-strict 实现在符合条件的连续平面区段内使用 AArch64 NEON 或运行时检查的 amd64 AVX2，覆盖 UInt8→Float32、 Float32→UInt8 和 Float64→Float32。异常样本及缩窄至次正规数的样本使用精确标量路径。Int64→UInt8 使用精确整数区段内核。ISA 选择保持 strict 数值结果，不单独注册 accelerated 入口。不支持 AVX2 的 amd64 CPU 使用可移植标量实现。
+单一 strict key 使用精确 scalar 转换，并在内部选择 AArch64 NEON、runtime-checked
+amd64 AVX2 和符合条件的 Apple SME Float32→UInt8 路径，均遵守相同数值契约。没有 GPU
+实现。性能指南保留旧 Value/planar 测量与实验，它们不代表当前 Result 性能；当前 Result
+性能尚无结论。
 
-在编译器支持 ACLE、运行时具备 SME/SME_F64F64 且流式向量为 64 字节的 Apple arm64 上，Float32→UInt8 还会将完全位于请求区域内的连续矩形（4,096～65,536 样本）合并为一次 streaming 调用。整数位检查确认整个矩形合法后，再用 binary64 精确乘法与 ties-even 舍入生成输出。检查拒绝时使用既有精确路径；非整行或带行间 padding 的矩形保留逐行路径。工作预算在检查前计入，失败尝试及其回退均计账。内部借用宿主的单调取消标志，至多每 64 样本用原子读取检查一次，期间保持 streaming mode。宿主成功并完成取消/currentness 检查后才发布输出。`PHOTOSPIDER_ENABLE_NUMERIC_CONVERSION_SME` 可关闭此候选； Apple arm64 且编译支持时默认启用。其他转换对继续使用 NEON/AVX2。
+## FMT-09 Transfer 编码与解码
 
-公开 workflow 与字节/元数据检查见 [`test_numeric_conversion.cpp`](../../../tests/integration/test_numeric_conversion.cpp)；全图、单通道与跨 tile 性能复现见 [`numeric conversion benchmark`](../../../examples/numeric_conversion_performance/README.md)。
+Registry 提供 `color.transfer_decode_<profile>` 与
+`color.transfer_encode_<profile>`，分别覆盖 strict、accelerated Apple Silicon
+和 accelerated x86-64 CPU profile。每个 operation 接收一个含单个 Float32 或
+Float64 tensor、无 fields 的 Result，并发布一个名为 `values`、含单个 tensor 的
+output Result。它保留 Result schema identity、tensor key、logical shape 和 batch
+axes，更新 semantic transfer facets，并将 `atomic_trailing_axes` 设为零。包含
+batch 与 cell axes 的完整 sample rank 不超过 8；sample count 不超过 2^40。
+
+Semantic mode 选择明确的 RGB 或 Gray group。参与的颜色 samples 请求 Data 与
+Validation；透传 samples 仅请求 Data。Raw mode 选择显式 components 或所有
+components，仅请求 Data，不做 semantic domain validation。每个连接的输入都请求
+Descriptor support；这些 operations 不请求 Control。`axis` 是 cell-axis index，
+不包含 Result batch prefix。Empty output demand 不保留本次执行状态。
+
+Linear 与 gamma 为 1 的 `power_gamma` 是逐位恒等映射。完整 identity map 可对合法
+generic 或 spatial Result storage 建立 view；semantic 请求仍会验证选中的 samples。
+Forced view 遇到静态非恒等映射时，在 compile/direct preflight 拒绝；identity 的
+physical mapping 无法证明时，在 observation evaluation 返回失败。Auto 仅在非恒等
+变换或物理 view 无法表示时 materialize。物化在 Root budgets 和 cancellation 限制下
+事务发布请求区域，并遵守 Result owner 与 resource 生命周期。数值 workspace 延迟分配；
+简单路径每批最多 1024 samples，通用曲线路径每批最多 64。Strict fallback 与
+floating-environment 行为遵循 NUM。Transfer operations 没有 GPU backend。
+`test_transfer_operations`、`test_transfer_runtime`、`test_transfer_math` 与
+`test_transfer_simd` 已通过；六项 shared FMT 回归测试、`test_result_execution`
+和 `test_shared_results` 也通过。installed-package consumers
+`installed_transfer_operations` 与 `installed_transfer_runtime` 通过 2/2；独立的
+installed-package performance consumer 已 configure/build 成功。集成测试在 strict
+和 Apple Silicon profiles 上完成 16,760 次 golden 尝试；本机不具备 x86-64
+backend，因此跳过该 profile。25 个指定的串行 Result performance smoke case 均通过
+golden gate，每项包含两次 warmup 和一次测量执行。这些结果不代表完整矩阵，也不足以
+得出性能结论。历史 Value/planar 测量与当前 Result 分开记录，见[性能指南](../../../examples/transfer_performance/README.md)。
+
+## FMT-10 RGB 基底与 XYZ
+
+Registry 为 `color.rgb_to_xyz_<profile>`、`color.xyz_to_rgb_<profile>` 和
+`color.adapt_xyz_white_<profile>` 在 strict、accelerated Apple Silicon 与
+accelerated x86-64 profiles 下各注册一个 key，共九个 Result ABI 2 CPU keys。
+每个 operation 接收一个含单个 Float32 或 Float64 tensor、无 fields 的 Result，
+并发布一个名为 `values`、含单个 tensor 的 Result。输出保留 Result schema
+identity、tensor key、logical shape 和 batch axes，更新适用的 semantic facets，
+并将 `atomic_trailing_axes` 设为零。包含 batch 和 cell axes 的完整 sample rank
+最多为 8；sample count 最多为 2^40。已安装的
+`photospider/format/rgb_basis.hpp` 提供静态 codec，以及
+`format::rgb_to_xyz`、`format::xyz_to_rgb`、`format::adapt_xyz_white` 和
+`format::convert_linear_rgb` authoring helpers。
+
+A/B 使用 FMT-10 中的精确矩阵在 RGB 与 XYZ 坐标间转换。C 使用显式的 full
+chromatic adaptation，可选 XYZ Scaling、Bradford、CAT02 或 CAT16。D 不是
+native operation；它的 helper 按 A、可选 C、B 顺序追加 graph stages，保留每个
+stage 的舍入和错误。Transfer、exposure、gamut mapping、alpha association 和
+scene/display conversion 仍由独立 operation 处理。
+
+Semantic operation 选择完整且有序的 RGB 或 XYZ group。非恒等映射按每个请求的
+输出 row 读取三个来源 samples，包括矩阵系数为零的项；这些 samples 请求 Data 与
+Validation。精确 identity matrix 只读取对应的已选 sample，但 semantic mode 仍会
+验证该值。Alpha、AOV 等 bypass components 仅请求对应的 Data。Raw mode 读取显式
+有序 triple，不请求 semantic Validation。所有连接输入也请求 Descriptor support
+(role 8)，不请求 Control。cell axes 不含 Result batch prefix。Empty output demand
+无状态，也不请求 sample Need。
+
+精确 identity matrix 可在合法的 generic 或 spatial Result mapping 上建立 view；
+`materialize` 强制复制。Forced view 对静态非恒等 mapping 在 compile/direct preflight
+拒绝；identity 的 physical representation 无法证明时，在 observation evaluation
+失败。输出在 Root budgets 和 cancellation 约束下事务发布。Result cache 被禁用，
+保留的 owner 遵守 Result 生命周期。没有 GPU 实现。历史 Value/planar 性能记录不代表
+Result 性能，见[性能指南](../../../examples/rgb_basis_performance/README.md)。
+
+`format::convert_linear_rgb` 先完整构建 expansion，并在静态校验成功后才修改
+WorkflowDocument。调用方必须串行化同一个 document 的写入；编译完成的 plan 及其不可变
+prepared state 可以并发执行。D policy 选择 A→B、使用 `preserve_xyz` 的 A→B，或带
+显式 method 的 A→C→B。helper 返回 B 的 `values` edge，不注册 D key。
+`test_rgb_basis_math` 与 `test_rgb_basis` 已通过；integration suite 保留 4,032 项
+independent oracle 检查，并覆盖 batched inputs、三种 Result storage layouts、identity
+views、并发 plan 复用和 owner 释放。65,536-channel identity view 在 512 KiB Metadata
+预算下也通过。`installed_rgb_basis` consumer 与独立 installed-package performance
+consumer build 均通过；size-3 Float32 D case 的 36 个请求元素也通过 strict-reference
+gate。25 个性能 smoke case 通过的是同一实现 strict reference gate，不是 independent
+oracle；完整矩阵和性能结论尚不可得。
 
 ## FMT-08 元数据赋值与删除
 
-注册表提供 `metadata.assign_<profile>` 和事务式 `format::remove_metadata`。样本与逻辑坐标保持不变，patch/replace/cascade 发布独立不可变描述。图像输入输出保持 planar；generic 路径用于非图像数值张量。 [当前 schema 与运行时约定](Tensor-Semantic-Metadata.zh.md) 说明类型化数值编码、采样、profile/配置资源、路径、所有权和错误。 [公开示例](../../../examples/metadata_workflow/README.md) 检查特殊浮点位模式和源不可变性； [性能说明](../../../examples/metadata_performance/README.md) 报告 planar 全图、单通道、跨 tile 区域测量及有界复制优化。
+注册表提供三个 Result CPU key：`metadata.assign_strict`、`metadata.assign_accelerated_apple_silicon` 和 `metadata.assign_accelerated_x86_64`。`format::assign_metadata` 构造 A；`format::remove_metadata` 将 B 事务式降低为 A。输入和输出均是无 fields 的 single-tensor Result；保留 schema id、tensor key、batch axes、descriptor、layout、source publication policy 和样本位。执行以 role 1 和 8 请求同坐标 Data 与 Descriptor support，不请求 Validation 或 Control。操作不扫描样本，并禁用 Result cache。Public header `photospider/format/metadata.hpp` 单独安装。[公开示例](../../../examples/metadata_workflow/README.md) 检查特殊值位模式与源不可变性。五个 focused Result CTest、example 和两个 installed consumer 检查通过；metadata 到 extraction 的 configuration/resource chain 已覆盖；`channel.assemble` 组合尚未覆盖。旧[性能说明](../../../examples/metadata_performance/README.md)测量 Value/planar 执行，不是当前 Result 路径性能证据。
+
+
+## FMT-11 颜色模型转换
+
+FMT-11 的 19 个 native members 在三个 CPU profiles 下注册，共 57 个 model-conversion keys。已安装的 `photospider/format/model_conversion.hpp` helpers 追加一个 key 并返回 `values` port；FMT-11S 追加已注册的 `mask.threshold_channel_<profile>` operation，没有 native color key。所有输入和输出都是无 fields 的单 tensor Result，dtype 为 Float32 或 Float64。完整 sample rank（batch 与 cell axes 合计）最多为 8；sample count 受 Result schema 可表示范围和执行资源限制约束。
+
+`axis` 和 `output_axis` 索引 cell axes，不包含 batch prefix。Q 将选中的三分量缩为一个分量；R 将一个 Gray 分量扩展为三个分量，有现有轴时将该轴的 extent 增加 2；axis-free 输入则插入一个长度为 3 的 cell axis。输出保留 schema id、tensor key 和 batches，更新模型 metadata，并将 `atomic_trailing_axes` 设为零。语义模式下被选中的 samples 请求 Data 与 Validation；raw T 验证 binary selector，raw S 和 bypass samples 只请求 Data，R 的常量输出只需 Descriptor。Empty demand 不保留运行状态。Q 只有在完整映射通过 generic affine 或 canonical spatial Result view 证明时才返回 view；证明失败时 forced view 返回 `ViewUnavailable`，`auto` 则物化。其他转换物化输出，即使请求只包含 bypass 也拒绝 forced view。发布采用事务方式，且未注册 GPU profile。六项 focused checks 和 `installed_model_conversion`、`installed_model_result`、`installed_alpha_model_interop` 三项 installed consumer 检查均已通过。sparse Q view 的测试使用符合 canonical spatial view proof 的预期。

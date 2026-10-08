@@ -32,9 +32,9 @@ struct ExecutionPlanDigest { std::string value; };
 struct PlanCacheKey { std::string value; };
 ```
 
-当前 Workflow 文档 schema 版本为 3。不同 digest 使用不同身份域；Plan cache key 用于可丢弃的派生查找。Compiler 按对应阶段编码封闭文档字段、规范化参数、复制的 operation trait、静态 preparation identity 字段、输入/输出 demand、optimizer identity 和目标能力等信息。运行时地址、分配 ID、计时、取消状态、队列状态和 daemon ID 不纳入 digest。Float 参数身份按复制得到的 binary64 位模式保留，并以小端编码，因此正零和负零不同；schema 允许的非有限 payload 也不规范化。对符号敏感的 operation 因此不会在 semantic、optimized、plan 或 cache identity 阶段发生碰撞。
+当前 WorkflowDocument schema 版本为 5，OperationTraits 版本为 24，package 版本为 0.32.0，operation-plugin C table 为 Result ABI 2。不同 digest 使用不同身份域；Plan cache key 用于可丢弃的派生查找。Compiler 按对应阶段编码封闭文档字段、规范化参数、复制的 operation trait、静态 preparation identity 字段、输入/输出 demand、optimizer identity 和目标能力等信息。运行时地址、分配 ID、计时、取消状态、队列状态和 daemon ID 不纳入 digest。Float 参数身份按复制得到的 binary64 位模式保留，并以小端编码，因此正零和负零不同；schema 允许的非有限 payload 也不规范化。对符号敏感的 operation 因此不会在 semantic、optimized、plan 或 cache identity 阶段发生碰撞。
 
-独立版本轴包括 Workflow 文档 schema、operation trait/ABI schema、semantic IR、optimizer 规则、physical planner、安装 package/API 和 daemon IPC。一个轴改变不表示其他轴兼容。内部 IR 和 plan 是进程内契约，不是 daemon wire format；跨发布版本没有内部读取兼容承诺。每个阶段保留 exact frozen registry 的私有 weak identity，防止 optimizer、planner 或 executor 使用来自另一 registry 的对象，即使 operation key 相同也不行；该运行时身份不进入 digest 或序列化数据。静态 prepared state 和 library pointer 不编码进 digest；按契约需要时，其推导元数据和声明的 workspace 上限会参与阶段身份。
+独立版本轴包括 WorkflowDocument schema、OperationTraits、operation-plugin C ABI、semantic IR、optimizer 规则、physical planner、安装 package/API 和 daemon IPC。WorkflowDocument schema 5、OperationTraits 24、package 0.32.0 与 Result ABI 2 表示当前各自契约；一个轴改变不表示其他轴兼容。内部 IR 和 plan 是进程内契约，不是 daemon wire format；跨发布版本没有内部读取兼容承诺。每个阶段保留 exact frozen registry 的私有 weak identity，防止 optimizer、planner 或 executor 使用来自另一 registry 的对象，即使 operation key 相同也不行；该运行时身份不进入 digest 或序列化数据。静态 prepared state 和 library pointer 不编码进 digest；按契约需要时，其推导元数据和声明的 workspace 上限会参与阶段身份。
 
 缓存命中仍须校验 plan 和 currentness。嵌入方提供的 cache hit 也要重新验证；格式错误或过期的条目作为 miss 处理。阶段身份和校验细节见 [Compiler 和执行](../../kernel-architecture/Compiler-and-Execution.md)。
 

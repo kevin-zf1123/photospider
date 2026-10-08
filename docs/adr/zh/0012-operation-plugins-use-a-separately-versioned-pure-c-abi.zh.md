@@ -17,25 +17,23 @@ startup configuration --> load library --> validate exact table --> copy traits/
                                       host validates/copies output
 ```
 
-Library 自有的表在 destroy callback 执行时仍保持映射。Host 拥有复制后的元数据，并校验通用 `Value` callback 输出。Dependency program 可以保留经授权的输入 owner handle，直到显式释放或状态销毁；每次 poll 的输入/输出指针仍是借用。Planar callback 通过 host 所有的 row buffer 写入，GPU token 会将 allocation 保留到释放或 callback 结束。不同生命周期的完整说明见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。
+Library 自有的表在 destroy callback 执行时仍保持映射。Host 拥有复制后的元数据，并校验 Result schema 与 publication。C++ dependency program 可将已授权的 input owner handle 保留到显式释放或 state 销毁；poll 内的指针仍是借用。Result tensor window 与 native GPU token 会在释放或 callback retirement 前保留 backing owner。生命周期详见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。
 
 ## 3. 契约规约与接口
 
 ```c
-#define PS_OPERATION_ABI_VERSION_11 11U
-uint32_t ps_operation_plugin_get_abi_version(void);
-const ps_operation_plugin_api_v11 *ps_operation_plugin_get_api_v11(void);
+#define PS_RESULT_OPERATION_ABI_VERSION_2 2U
+const ps_result_operation_plugin_api_v2 *
+ps_result_operation_plugin_get_api_v2(void);
 #define PS_DATA_PROVIDER_ABI_VERSION_1 1U
-#define PS_PLANAR_OPERATION_ABI_VERSION_3 3U
-uint32_t ps_data_provider_get_abi_version(void);
 const ps_data_provider_api_v1 *ps_data_provider_get_api_v1(void);
 ```
 
-Operation ABI v11 声明 operation trait、参数和端口 schema、callback、输出契约及 native GPU 服务。独立的 provider ABI v1 发布有界 data-schema 记录。完整结构与执行细节见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。
+Operation-plugin C 契约使用 standalone Result ABI 2 table，声明 Result ports、tensor members、fields、staged callbacks、dependency relations 和 Result publication。Data-provider C table 仍单独使用 ABI 1。旧基础 operation ABI 11 和 planar operation C table 已移除；C++ `Value` 与 dependency API 仍是独立的进程内接口。当前 table 布局与 callback 契约见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。
 
-专用 planar operation 接口单独使用 ABI v3，与 operation ABI v11 一样拥有独立记录和执行契约，详见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。Staged dependency program 使用 host 分配的零初始化 continuation state，并在 `destroy` 中释放关联资源；definition/library lease 会覆盖该状态的生命周期。
+Result callback 借用 query 与 phase-service records。Host 校验 Needs、typed relations、publication coverage、resource limits、cancellation 和 backend fallback 后才发布 Result。GPU allocation tokens 和 owning tensor windows 在 release 或 callback retirement 前保留 backing ownership；普通 service pointers 在 callback 返回后失效。Result ABI 2 不会回退到已移除的 Base C ABI。
 
-Loader 会核对准确的 ABI 版本和结构尺寸、自然对齐、指针与计数配对、记录数量和 key 长度上限、严格 UTF-8 key、算术溢出、封闭 enum/flag 组合、必需 callback、定长输出的稠密可表示性、callback 返回值、输出字节/facet 上限，以及恰好一次的 destroy 所有权。它拒绝尾随结构字节。多记录更新采用 copy-then-swap，因此分配失败或后续记录无效时不会发布部分前缀。刚打开库时取得的 guard 会在可安全读取 destroy callback 后接管它，并在任何拒绝路径关闭库。Unload 前先销毁已发布的 plugin 表。
+Loader 会核对准确的 Result ABI 版本和结构尺寸、自然对齐、指针与计数配对、记录数量和 key 长度上限、严格 UTF-8 key、算术溢出、封闭 enum/flag 组合、必需 callback、input/output schema 约束、parameter/facet 限额及恰好一次的 destroy 所有权。Runtime publication 会校验实际 tensor 和 field coverage。多记录更新采用 copy-then-swap，因此分配失败或后续记录无效时不会发布部分前缀。刚打开库时取得的 guard 会在可安全读取 destroy callback 后接管它，并在任何拒绝路径关闭库。Unload 前先销毁已发布的 plugin 表。
 
 通用 operation callback 同步执行。输入 view 和输出 sink 仅在调用期间借用；接受的通用 Value 输出会在返回前复制或冻结。Sink 第一次发布尝试就占用该 sink，即使校验失败也一样；第二次尝试会留下 sticky violation。Host 先检查 cancellation，然后依次检查 sink 分配失败、malformed image output 和重复发布。若 sink 已经尝试发布后 callback 又返回 backend unavailable，则不会触发 fallback：已接受的输出变成 `OperationFailed`，第一次发布被拒绝时则返回 sink 保留的类型化错误。未知非零返回值变为 `OperationFailed`。只有 GPU attempt 在尚未尝试发布 sink 时明确报告 backend unavailable，且复制的 trait 允许时，才可请求 CPU fallback。
 

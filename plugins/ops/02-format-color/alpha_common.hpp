@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "01-numeric/sequence_profiles.hpp"
+#include "02-format-color/result_mapping.hpp"
 #include "photospider/format/alpha.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -39,18 +40,20 @@ inline bool number(const std::string& s, std::uint64_t* value) {
   const auto result = std::from_chars(s.data(), s.data() + s.size(), *value);
   return result.ec == std::errc{} && result.ptr == s.data() + s.size();
 }
+inline const ResultTensorSpec& tensor(const OperationMetadata& m) {
+  tensor_ops::require(tensor_ops::check_tensor(m));
+  return m.result_schema->tensors[0];
+}
 inline Status shape_valid(const OperationMetadata& m) {
-  if (m.result_schema || m.descriptor.shape.empty() ||
-      m.descriptor.shape.size() > 8) {
-    return mismatch("expected a rank 1..8 tensor");
-  }
-  auto count = Region::whole(m.descriptor.shape).element_count();
-  if (!count.ok()) {
+  auto valid = tensor_ops::check_tensor(m);
+  if (!valid.ok())
+    return valid;
+  const auto& spec = m.result_schema->tensors[0];
+  auto count = spec.sample_count();
+  if (!count.ok())
     return count.status();
-  }
-  if (!count.value() || count.value() > (UINT64_C(1) << 40)) {
+  if (!count.value() || count.value() > (UINT64_C(1) << 40))
     return invalid("logical count is outside [1,2^40]");
-  }
   return Status::success();
 }
 inline Result<std::optional<TensorDescription>> effective_description(
@@ -74,7 +77,7 @@ inline Result<std::optional<TensorDescription>> effective_description(
     }
     d = parsed.take_value();
   } else {
-    for (const auto& facet : m.facets) {
+    for (const auto& facet : tensor(m).facets) {
       if (facet.key != "photospider.tensor-description") {
         continue;
       }
@@ -86,7 +89,7 @@ inline Result<std::optional<TensorDescription>> effective_description(
     }
   }
   if (d) {
-    auto valid = validate_tensor_description(*d, m.descriptor);
+    auto valid = validate_tensor_description(*d, tensor(m).descriptor);
     if (!valid.ok()) {
       return Answer(valid);
     }
@@ -323,28 +326,7 @@ inline Result<TensorDescription> remap_description(
   }
   return Answer(std::move(result));
 }
-inline std::string source_assertion(
-    const std::vector<OperationMetadata>& inputs) {
-  // Same canonical record as FMT-03's expected_inputs. This intentionally
-  // includes ALL facets and physical layout, not only the selected group.
-  std::string out = "v1";
-  for (const auto& input : inputs) {
-    out += ";" +
-           std::to_string(static_cast<unsigned>(input.descriptor.element_type));
-    for (auto extent : input.descriptor.shape) {
-      out += "," + std::to_string(extent);
-    }
-    out += ":" + format::detail::assembly_hex(
-                     format::detail::layout_assertion(input.planar_layout));
-    for (const auto& f : input.facets) {
-      out += ":" + format::detail::assembly_hex(f.key) + "," +
-             std::to_string(f.version) + ",";
-      out += format::detail::assembly_hex(
-          std::string(f.payload.begin(), f.payload.end()));
-    }
-  }
-  return out;
-}
+using format_result::source_assertion;
 inline Status declaration_matches(const WorkflowDocument& document,
                                   const WorkflowInput& input,
                                   const OperationMetadata& metadata) {
@@ -357,9 +339,7 @@ inline Status declaration_matches(const WorkflowDocument& document,
       continue;
     }
     OperationMetadata actual;
-    actual.descriptor = d.descriptor;
-    actual.facets = d.facets;
-    actual.planar_layout = d.planar_layout;
+    actual.result_schema = d.result_schema;
     return source_assertion({actual}) == source_assertion({metadata})
                ? Status::success()
                : invalid("authoring metadata disagrees with input declaration");
@@ -405,7 +385,7 @@ inline numeric_ops::SequenceProfile profile_kind(const std::string& p) {
 }
 inline std::vector<ValueFacet> output_facets(const OperationMetadata& input,
                                              const TensorDescription& d) {
-  auto facets = input.facets;
+  auto facets = tensor(input).facets;
   facets.erase(std::remove_if(facets.begin(), facets.end(),
                               [](const auto& f) {
                                 return f.key ==

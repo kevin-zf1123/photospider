@@ -5,22 +5,22 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_result_abi_2
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-10: linear RGB bases, XYZ and white adaptation
 
 Inherit [FMT-common](FMT_common_contract.md), the NUM numerical/execution baseline,
 [FMT-09 transfer separation](FMT-09_transfer_contract.md),
-[model coverage](FMT_model_conversion_coverage.md) and canonical planar storage.
-The family contains native [A RGB->XYZ](FMT-10A_rgb_to_xyz.md),
-[B XYZ->RGB](FMT-10B_xyz_to_rgb.md), [C adapt XYZ white](FMT-10C_adapt_xyz_white.md)
-and compile-time [D RGB->RGB](FMT-10D_convert_linear_rgb.md).
-[Exact matrix definitions](FMT-10_basis_math.md) are normative. Clarification
-is complete for this scope; no runtime implementation or registration is delivered.
+[model coverage](FMT_model_conversion_coverage.md) and the Result tensor contract.
+The family contains registered [A RGB->XYZ](FMT-10A_rgb_to_xyz.md),
+[B XYZ->RGB](FMT-10B_xyz_to_rgb.md) and [C adapt XYZ white](FMT-10C_adapt_xyz_white.md)
+operations, plus the compile-time [D RGB->RGB](FMT-10D_convert_linear_rgb.md)
+helper. Each native member has strict, accelerated Apple Silicon and accelerated
+x86-64 CPU keys under Result ABI 2. [Exact matrix definitions](FMT-10_basis_math.md)
+remain normative. The specifications remain Proposed; runtime implementation
+status is separate.
 
 ## Purpose and stage boundaries
 
@@ -38,31 +38,39 @@ Neither implies complete CIECAM appearance rendering or a scene/display change.
 All selected XYZ/RGB descriptions must share the same observer convention;
 this family does not convert observers or spectral data.
 
-Existing ColorArray primary presets and exact basis validation are shared
-NUM/CRV infrastructure. They do not implement FMT-10. The old unsuffixed
-RGB/XYZ operations were [removed](FMT_legacy_retirement.md); their old typed,
-Whole or rounded-matrix behavior is not retained as a compatibility interface.
+The installed `photospider/format/rgb_basis.hpp` header exposes static parameter
+codecs and transactional authoring helpers. D resolves real upstream metadata,
+then stages A, optional C and B in a temporary workflow before publishing the
+expansion. Writes to a shared WorkflowDocument must be serialized; compiled plans
+and their immutable preparations can be executed concurrently.
 
 ## Tensor interface and group mapping
 
-Each primitive has one required tensor Value input `input` and one tensor Value
-output `values` under the target generic-metadata/planar contract. D takes an
-input edge and returns one output edge. No Result, resource/matrix input,
-runtime-dependent output shape or dynamic parameter stream is introduced.
+Each native member accepts one input Result containing one Float32 or Float64
+tensor and no fields, then publishes one `values` output Result containing one
+tensor. The output preserves Result schema identity, tensor key, logical shape
+and batch axes, updates semantic TensorDescription facets when applicable, and
+sets `atomic_trailing_axes` to zero. The dtype and complete sample shape remain
+unchanged. Full sample rank, including batch and cell axes, is at most 8; sample
+count is at most 2^40. Raw mode retains input facets unchanged. D accepts a graph
+edge and returns the final B output edge; it creates no native D registry key.
 
-Input/output have the same Float32 or Float64 dtype, rank/extents, channel axis
-and channel count. Semantic calls select one complete ordered three-component
-color group: RGB for A/D, XYZ for B/C. A writes X/Y/Z to the selected R/G/B
-slots; B writes R/G/B to X/Y/Z slots. C/D keep XYZ/RGB roles. The semantic role
-order defines matrix rows/columns even if physical slots are permuted. Reorder
-slots separately through FMT-03. Gray is not silently expanded or reduced.
+Semantic calls select one complete ordered three-component color group: RGB for
+A/D, XYZ for B/C. A writes X/Y/Z to the selected R/G/B slots; B writes R/G/B to
+X/Y/Z slots. C/D keep XYZ/RGB roles. The semantic role order defines matrix
+rows/columns even if physical slots are permuted. `axis` parameters and
+TensorDescription channel axes index cell axes and exclude the Result batch
+prefix. Reorder slots separately through FMT-03. Gray is not silently expanded
+or reduced.
 
 The selected group/axis resolves statically and uniquely. All unrelated groups,
 internal alpha and AOVs copy bit-for-bit. No alpha read, multiplication, hidden
 color removal or whole-pixel opacity validation is introduced. Complete images
-remain straight, same-size across planes and canonical planar. Semantic calls
-reject a premultiplied boundary representation; explicitly unassociate through
-FMT-04B first, or use raw/override for an intentional numeric reinterpretation.
+remain straight, same-size across planes. Both generic and spatial Result tensor
+storage are supported when the requested operation can represent them. Semantic
+calls reject a premultiplied boundary representation; explicitly unassociate
+through FMT-04B first, or use raw/override for an intentional numeric
+reinterpretation.
 
 Raw selects exactly three distinct ordered component indices on an explicit or
 resolved structural axis. A rank-one [3] tensor can use axis=0. Do not infer RGB
@@ -217,21 +225,23 @@ I is not sufficient. A product of separate matrices equaling I does not make
 each constituent identity or erase D's intermediate effects.
 
 Identity dirty support is pointwise. Auto may share a legal read-only backing for
-that native identity; materialize forces requested copies. Forced view fails for
-any nonidentity native transform regardless of an alpha-only query. D forwards
-layout to its expansion; view is valid only when every required constituent
-meets its own identity/backing rule. A nonidentity diagonal XYZ Scaling still
-reads all three source components and cannot use this identity exception.
+that native identity; materialize forces requested copies. Legal identity views
+may use generic or spatial Result storage. Forced view rejects a statically
+nonidentity native transform during compile/direct preflight. A physical mapping
+that cannot be represented as a view fails during observation evaluation. D
+forwards layout to its expansion; every required constituent must meet its own
+identity and backing rule. A nonidentity diagonal XYZ Scaling still reads all
+three source components and cannot use this identity exception.
 
 ## Storage, resources, errors and lifetime
 
-Output has unchanged global coordinates and exact requested produced coverage.
-Missing/unproduced samples stay missing; padding or unsupplied channels are not
-implicit zeros. Shared views publish a distinct output description and scoped
-validation, not blanket validity of their owner's bytes. Materialized images
-reserve the full planar virtual span with the one DAG tile geometry, prepare
-required pages explicitly and retain produced backing under kernel lifetime
-rules. Raw image metadata does not legalize interleaved storage.
+Output coordinates match the input and publication covers exactly the requested
+footprint. Missing/unproduced samples remain missing; padding or unsupplied
+channels are not implicit zeros. A shared view publishes a distinct output
+description and scoped validation, not blanket validity of its owner's bytes.
+Materialized spatial Results use the declared Result layout and prepared coverage;
+generic Results use their admitted tensor storage. Raw metadata does not override
+the physical storage contract.
 
 Resolve/validate static descriptors and exact matrices first; map and acquire
 retained exact source windows; admit output/pages/scratch; copy or evaluate
@@ -253,11 +263,8 @@ unprepared pages or undeclared peers. Release unpublished resources on failure.
 Normal retained owners/read windows outlive producer/context as required; no
 replay, eviction or hidden source reconstruction is introduced.
 
-Initial optional result caching remains disabled pending correct exact coverage
-and validation identity. Future keys include native member, source/target
-resolved geometry, method/policy, numerical profile, units/reference, selectors,
-metadata mode/override, storage/layout and input identity. Do not cache D as a
-fused mathematical matrix while omitting its stage boundaries or failures.
+Result caching is disabled. D must retain its generated stage boundaries and
+failures; a fused product cannot replace the observable A/C/B sequence.
 
 | Condition | Phase | Outcome |
 | --- | --- | --- |
@@ -266,7 +273,8 @@ fused mathematical matrix while omitting its stage boundaries or failures.
 | Required semantic input NaN/Inf | Requested evaluation | OperationFailed / InvalidDomain. |
 | Requested semantic row rounds to nonfinite | Requested evaluation | OperationFailed / ArithmeticOverflow. |
 | Raw nonfinite/sample overflow | Raw evaluation | NUM-defined result. |
-| Unavailable forced view | Normal layout check | InvalidArgument / InvalidDomain; ViewUnavailable. |
+| Forced view of a statically nonidentity mapping | Compile/direct preflight | InvalidArgument / InvalidDomain; ViewUnavailable. |
+| Identity view whose requested physical mapping cannot be proven | Observation evaluation | InvalidArgument / InvalidDomain; ViewUnavailable. |
 | Budget/work, missing coverage, cancellation/currentness or backend failure | Inherited phase | Preserve status and normal observation attribution. |
 
 Failures publish no success for the affected observation, without revoking
@@ -276,13 +284,13 @@ raw mode, same-white handling or a supposed inverse round trip.
 
 ## Support and acceptance
 
-Three proposed default-registry CPU entries per native member use strict,
+Three registered default-registry CPU entries per native member use strict,
 accelerated Apple Silicon and accelerated x86-64 profiles. There is no GPU,
-unsuffixed alias, automatic dispatcher or new backend promise. D chooses one
-explicit profile for its generated native nodes, defaulting to strict at
-construction. Backend availability, precision and fallback reporting inherit NUM.
-Non-image raw tensors use valid generic layouts; images obey planar. Rank/extent
-and dtype boundaries inherit the common target, without reinstating typed Image.
+unsuffixed alias or automatic dispatcher. D chooses one explicit profile for its
+generated native nodes, defaulting to strict at construction. Backend
+availability, precision and fallback reporting inherit NUM. Non-image raw
+Results use valid generic layouts; spatial Results use their declared spatial
+layout. Rank, extent and dtype bounds apply to the complete sample shape.
 
 Use independent exact-rational Gaussian elimination/determinants and dyadic sample
 rounding, plus fixed special-value bit oracles, to verify coefficients and outputs.
@@ -299,11 +307,9 @@ nonidentity zero-coefficient dependencies, D intermediate failure, source
 immutability, retained owner lifetime, low budgets, cancellation, cache-off and
 floating-environment restoration. Members supply concrete analytic fixtures.
 
-Future implementations must provide public compile/execute examples and
-correctness-gated timings for Float32/64 [4096,4096,4], full/one-color/alpha-only
-outputs and y/x=[127,130) with tile size 128, recording source/page state, axes,
-profile/ISA/build, workers, time, backing/reservation and live intermediates.
-No executable behavior or throughput is claimed here. Implementation needs
-canonical RGB/XYZ/unit metadata, bounded exact coefficient support, exact tuple
-requests/publication and new member registrations; current NUM Whole matrix
-execution cannot be substituted while claiming this regional contract.
+Exercise the registered operations through public Result workflows and independent
+coefficient/sample oracles. Preserve coverage for full, partial, disjoint and
+cross-tile requests, Empty demand, identity and materialized paths, D stage
+failures, cancellation, owner release and floating-environment restoration.
+Historical Value/planar measurements are not Result performance evidence; see the
+performance guide for the current evidence boundary.

@@ -7,31 +7,29 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_package_0_23_0
+implementation_status: implemented_cpu_result_abi_2
 clarification_status: complete
-proposed_operation_keys:
+registered_operation_keys:
   - numeric.convert_format_strict
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-06A: convert tensor dtype and numeric interval
 
 Inherit the complete [FMT-06 contract](FMT-06_numeric_conversion_contract.md).
-This is now a native primitive, not a compatibility alias or automatic
-upgrade of unsuffixed numeric.cast or numeric.encode_range. Its default scales
-numeric intervals while converting dtype. Explicit rescale=false gives pure cast.
+The default registry provides `numeric.convert_format_strict` as a native Result
+ABI 2 operation. It takes one single-tensor Result with no fields and publishes one `values` output
+Result containing one tensor. Its default scales numeric intervals while converting dtype;
+explicit `rescale=false` gives a pure numerical cast. The specification remains
+Proposed.
 
 ## Interface and observable behavior
 
 One `input` tensor yields one `values` tensor of required static target dtype.
-Supported target names are uint8, uint16, int8, int16, int64, float32 and float64;
-source types have the same set, subject to native dtype implementation.
+Supported source and target names are uint8, uint16, int8, int16, int64, float32
+and float64.
 Output rank/extents/axes/channel order equal input. One target type covers the
 whole tensor. Inherit rescale, source_range, target_range, conditional axis,
-rounding, overflow, metadata_mode/override and layout from the family. Direct
-parameter serialization must follow its eventual typed-endpoint codec, not
-an invented lossy Double encoding. Defaults are authoring defaults under NUM.
+rounding, overflow, metadata_mode/override and layout from the family. Range endpoint parameters use typed exact encodings; defaults follow NUM.
 
 Choose omitted interval sides from dtype. Explicit pairs or full channel tables
 override only their side. Table selectors are static channel indices on a declared
@@ -40,8 +38,9 @@ endpoints are invalid; reversed targets are allowed. Source bounds increase.
 When rescale=false, interval fields/axis tables are invalid rather than ignored.
 Respect checks explicit source encoding assertions before reading samples.
 
-For requested coordinate q, determine the resolved pair from q[axis] if tabulated,
-otherwise the shared pair. Read only x=input[q]. In strict, compute the exact
+For full sample coordinate q, determine the resolved pair from
+q[batch_prefix_length + axis] if tabulated, otherwise the shared pair. Read only
+x=input[q]. In strict, compute the exact
 affine rational value (or x for pure cast), then round once to the destination.
 Reject/clip finite output overflow after rounding. Original nonfinite input with
 integer target fails; floating NaN mapping and infinity signs follow the family.
@@ -56,12 +55,17 @@ failures stay within their inherited observation scope; required upstream Whole
 failures retain their original broader scope. No error at an unrequested source
 sample is manufactured by this operation.
 
-View requires same dtype and statically identical mapping over the entire tensor,
-plus a legal source owner/layout. A request restricted to one identity channel
-cannot turn a generally transforming output into a forced view. Materialization
-uses target-width planar storage for images and produces only requested coverage.
-Inherit exact arithmetic budget/work, bounded cancellation, owner lifetimes,
-optional-cache restrictions, backend/profile precision and error attribution.
+View requires same dtype and statically identical mapping over the complete
+declared tensor, plus a legal source owner/layout. A request restricted to one
+identity channel cannot turn a generally transforming output into a forced view.
+This identity view is supported for legal generic and spatial Result storage.
+Materialization uses target-width planar storage for images and produces only
+requested coverage.
+The operation requests Data role 1 for source samples and Descriptor role 8 for
+schema; it requests no Validation or Control support. Empty demand is stateless.
+Materialization publishes transactionally under Root budgets and cancellation,
+retains normal source/output owners, and preserves source diagnostics on failure.
+Inherit exact arithmetic budget/work, backend/profile precision and error attribution.
 
 ## Independent numeric fixtures
 
@@ -117,15 +121,25 @@ be less than source_upper. Quantization/clipping is lossy, so do not demand an
 exact arbitrary round trip. Defaults do not inspect data extrema or infer a
 range from names such as alpha, normalized Lab l or red.
 
-## Public workflow acceptance
+## Public workflow and current validation
 
-Conceptual graph: declared input tensor -> convert_numeric_format -> typed,
-encoded output; optionally decode before a native-color/normalized-alpha consumer.
-Implementation must deliver runnable public WorkflowDocument/Compiler/ExecutionContext
-commands and independently check output bytes, shape, metadata and regions.
-Exercise full/offset/disjoint/cross-tile requests, arbitrary channel-axis tables,
-unrequested invalid samples, static invalid bounds, same-type identity views,
-forced-view rejection, low budgets, cancellation and context-independent result
-lifetime. Runtime registration, focused passing tests and measured performance
-are recorded in the linked implementation record and benchmark rather than
-being implied by this proposed specification.
+The public graph is `declared input Result -> numeric.convert_format_strict ->
+typed, encoded output Result`; consumers needing native color coordinates or normalized
+alpha must decode explicitly.
+
+Six focused CTest targets pass: `test_numeric_conversion`,
+`test_numeric_conversion_sme`, `test_alpha_numeric_interop`,
+`test_alpha_operations`, `test_alpha_authoring` and `test_resources`. The numeric
+suite covers 49 dtype pairs, randomized oracles, ROI, cold-lookup budget,
+failure-order, floating-environment and identity views. Additional batch/view/
+Empty/bit-stride, ICC-resource, concurrent-plan-reuse and payload-release checks
+pass. The SME test passes, and `test_alpha_numeric_interop` covers four
+inherited/moved cases.
+
+`installed_numeric_conversion` and `installed_alpha_numeric_interop` pass; the
+standalone numeric-conversion performance consumer configures and builds.
+Thirteen serial Result performance smoke cases pass their bitwise output oracle.
+A debugger-confirmed SME dispatch verifies the Float32→UInt8 tiled path is reached;
+this is dispatch evidence, not a timing conclusion. The full performance matrix has
+not run. Historical Value/planar measurements remain separate from current Result
+behavior.

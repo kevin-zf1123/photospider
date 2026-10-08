@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "photospider/plugin/operation_plugin_api.h"
+#include "photospider/plugin/result_operation_plugin_api.h"
 
 namespace ps::plugin {
 
@@ -14,7 +14,7 @@ namespace ps::plugin {
  * @note This header-only helper adds no second ABI.
  */
 constexpr std::uint32_t element_type_value(
-    ps_operation_element_type_v11 value) noexcept {
+    ps_result_element_type_v2 value) noexcept {
   return static_cast<std::uint32_t>(value);
 }
 

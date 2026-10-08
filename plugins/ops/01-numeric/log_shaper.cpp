@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "01-numeric/exact_shaper.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -21,32 +22,24 @@ struct ShaperState {
   numeric_ops::ExactShaper arithmetic;
   explicit ShaperState(SequenceProfile profile) : arithmetic(profile) {}
 };
-Result<Value> execute_shaper(const OperationInvocation& call, bool inverse,
-                             SequenceProfile profile) {
-  using Answer = Result<Value>;
-  try {
-    const auto* budget = resource_internal::metadata_budget();
-    const std::function<Status(std::uint64_t)> consume = [&](auto amount) {
-      if (call.cancellation.cancelled())
-        return Status{ErrorCode::Cancelled, {}};
-      return budget ? budget->consume({amount}) : Status::success();
-    };
-    auto read = [&](unsigned port, const std::vector<std::uint64_t>& at,
-                    std::uint64_t* bits) {
-      auto status = consume(at.size() + 1);
-      if (!status.ok())
-        return status;
-      auto address = call.inputs[port].byte_address(at);
-      if (!address.ok())
-        return address.status();
-      std::memcpy(
-          bits, call.inputs[port].bytes().data() + address.value(),
-          Value::element_size(call.inputs[port].descriptor().element_type));
-      return Status::success();
-    };
-    const auto descriptor = call.inputs[0].descriptor();
-    const bool narrow = descriptor.element_type == ElementType::Float32;
+struct ShaperPrepared final {
+  bool inverse;
+  SequenceProfile profile;
+};
+struct ShaperKernel final {
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    using namespace numeric_ops;  // NOLINT(build/namespaces)
+    const auto& prepared =
+        *static_cast<const ShaperPrepared*>(phase.query.prepared->state());
+    const auto& tensor = phase.query.output.result_schema->tensors[0];
+    const auto shape = tensor.sample_shape();
+    const bool narrow = tensor.descriptor.element_type == ElementType::Float32;
     const unsigned width = narrow ? 4 : 8;
+    std::array<MathTensorReader, 3> inputs{
+        MathTensorReader(phase.tensors->at({0, 0}), phase.query.cancellation),
+        MathTensorReader(phase.tensors->at({1, 0}), phase.query.cancellation),
+        MathTensorReader(phase.tensors->at({2, 0}), phase.query.cancellation)};
     std::array<std::uint64_t, 2> bounds{};
     std::array<BinaryParts, 2> parts{};
     const auto invalid = [&](unsigned i) {
@@ -57,58 +50,40 @@ Result<Value> execute_shaper(const OperationInvocation& call, bool inverse,
                     {FailureOrigin::Domain, FailureScope::Run}};
     };
     for (unsigned i = 0; i < 2; ++i) {
-      auto status = read(i + 1, {0}, &bounds[i]);
-      if (!status.ok())
-        return Answer(status);
+      math_require(phase.consume_work(2));
+      bounds[i] = inputs[i + 1].bits({0});
       parts[i] = BinaryParts::decode(bounds[i], narrow);
     }
     for (unsigned i = 0; i < 2; ++i)
       if (parts[i].nan || parts[i].infinite || parts[i].negative ||
           !parts[i].magnitude)
-        return Answer(invalid(i));
+        return invalid(i);
     if (parts[0].order_key() >= parts[1].order_key())
-      return Answer(invalid(0));
-    auto scratch = call.allocator.allocate(sizeof(ShaperState));
-    if (!scratch.ok())
-      return Answer(scratch.status());
-    auto buffer = scratch.take_value();
+      return invalid(0);
+    auto scratch = math_take(phase.allocator.allocate(sizeof(ShaperState)));
+    static_assert(alignof(ShaperState) <= alignof(std::max_align_t));
     std::unique_ptr<ShaperState, void (*)(ShaperState*)> state(
-        new (buffer.data()) ShaperState(profile),
+        new (scratch.data()) ShaperState(prepared.profile),
         [](auto* value) { value->~ShaperState(); });
-    auto allocated =
-        MutableValue::allocate(descriptor, call.output_region, call.allocator);
-    if (!allocated.ok())
-      return Answer(allocated.status());
-    auto output = allocated.take_value();
-    std::vector<std::uint64_t> at(descriptor.shape.size(), 0);
-    const auto count = call.output_region.element_count().value();
-    for (std::uint64_t i = 0; i < count; ++i) {
-      std::uint64_t input = 0;
-      auto status = read(0, at, &input);
-      if (!status.ok())
-        return Answer(status);
+    MathTensorWriter writer(writers[0]);
+    std::vector<std::uint64_t> at(shape.size(), 0);
+    for (std::uint64_t i = 0, count = math_take(tensor.sample_count());
+         i < count; ++i) {
+      math_require(phase.consume_work(at.size() + 1));
+      const auto input = inputs[0].bits(at);
       auto result = state->arithmetic.evaluate(
-          input, bounds[0], bounds[1], inverse, narrow, consume,
-          [] { return Status::success(); });
+          input, bounds[0], bounds[1], prepared.inverse, narrow,
+          phase.consume_work, [] { return Status::success(); });
       if (!result.ok())
-        return Answer(result.status());
+        return result.status();
       const auto bits = result.value();
-      std::memcpy(output.data() + i * width, &bits, width);
-      for (auto j = at.size(); j; --j) {
-        if (++at[j - 1] < descriptor.shape[j - 1])
-          break;
-        at[j - 1] = 0;
-      }
+      std::memcpy(writer.address(at), &bits, width);
+      math_next(at, shape);
     }
-    auto status = consume(1);
-    return status.ok() ? std::move(output).publish() : Answer(status);
-  } catch (const std::bad_alloc&) {
-    return Answer(Status{ErrorCode::ResourceExhausted,
-                         {},
-                         FailureReason::CapacityLimit,
-                         {FailureOrigin::Resource, FailureScope::Run}});
+    return phase.consume_work(1);
   }
-}
+};
+using ShaperProgram = numeric_ops::WholeTensorProgram<ShaperKernel>;
 OperationDefinition operation(const std::string& key, bool inverse,
                               SequenceProfile profile) {
   OperationDefinition result;
@@ -116,37 +91,44 @@ OperationDefinition operation(const std::string& key, bool inverse,
   auto& traits = result.traits;
   traits.input_count = 3;
   traits.input_schema.resize(3);
-  for (auto& input : traits.input_schema)
+  for (auto& input : traits.input_schema) {
+    input.kind = OperationPortKind::Result;
     input.element_type_mask = 12;
-  auto& output = traits.outputs[0];
-  output.key = "values";
-  output.shape_rule = OperationShapeRule::PreserveFirstInput;
-  output.output_dtype_rule = OperationDtypeRule::Input;
-  output.region_rule = OperationRegionRule::Whole;
-  output.requires_dense_output = true;
+  }
+  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                       sizeof(ShaperProgram));
   traits.workspace_bytes = sizeof(ShaperState);
   traits.requires_metadata_specialization = true;
-  result.specialize_metadata = [profile](const auto& inputs, const auto&) {
-    using Answer = Result<std::vector<OperationOutputSpecialization>>;
+  result.prepare_static = [inverse, profile](const auto& inputs, const auto&) {
+    using Answer = Result<OperationPreparation>;
     const auto mismatch = [](const char* message) {
       return Status{ErrorCode::TypeMismatch,
                     message,
                     FailureReason::None,
                     {FailureOrigin::Schema, FailureScope::Unspecified}};
     };
-    if (inputs.size() != 3 || inputs[0].descriptor.shape.empty() ||
-        inputs[0].descriptor.shape.size() > 8)
+    if (inputs.size() != 3)
+      return Answer(mismatch("shaper requires three Result inputs"));
+    for (const auto& input : inputs)
+      if (!input.result_schema || !input.result_schema->fields.empty() ||
+          input.result_schema->tensors.size() != 1)
+        return Answer(mismatch("shaper requires one tensor per Result"));
+    const auto& tensor = inputs[0].result_schema->tensors[0];
+    const ValueDescriptor first{tensor.descriptor.element_type,
+                                tensor.sample_shape()};
+    if (first.shape.empty() || first.shape.size() > 8)
       return Answer(mismatch("shaper requires rank-1..8 input and two bounds"));
-    const auto type = inputs[0].descriptor.element_type;
+    const auto type = first.element_type;
     if (type != ElementType::Float32 && type != ElementType::Float64)
       return Answer(mismatch("shaper requires Float32/64"));
     for (unsigned i = 1; i < 3; ++i)
-      if (inputs[i].descriptor.element_type != type ||
-          inputs[i].descriptor.shape != std::vector<std::uint64_t>{1})
+      if (inputs[i].result_schema->tensors[0].descriptor.element_type != type ||
+          inputs[i].result_schema->tensors[0].sample_shape() !=
+              std::vector<std::uint64_t>{1})
         return Answer(
             mismatch("shaper bounds require matching dtype and shape [1]"));
     std::uint64_t count = 1;
-    for (auto extent : inputs[0].descriptor.shape) {
+    for (auto extent : first.shape) {
       if (!extent || extent > (UINT64_C(1) << 40) / count)
         return Answer(mismatch("shaper logical product exceeds 2^40 values"));
       count *= extent;
@@ -155,12 +137,16 @@ OperationDefinition operation(const std::string& key, bool inverse,
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization resolved;
-    resolved.metadata.descriptor = inputs[0].descriptor;
-    return Answer(
-        std::vector<OperationOutputSpecialization>{std::move(resolved)});
+    resolved.metadata.result_schema = std::make_shared<const SchemaTemplate>(
+        numeric_ops::numeric_tensor_schema(type, first.shape));
+    OperationPreparation prepared;
+    prepared.outputs.push_back(std::move(resolved));
+    prepared.state = std::make_shared<const ShaperPrepared>(
+        ShaperPrepared{inverse, profile});
+    return Answer(std::move(prepared));
   };
-  result.callback = [inverse, profile](const OperationInvocation& call) {
-    return execute_shaper(call, inverse, profile);
+  result.start_result = [](const auto&, const auto& allocator) {
+    return ResultContinuation::make<ShaperProgram>(allocator);
   };
   return result;
 }

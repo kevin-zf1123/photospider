@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "01-numeric/uniform_axis.hpp"
+#include "data/lut3d_bake_validation.hpp"
 
 namespace ps {
 namespace {
@@ -142,13 +143,20 @@ Result<SchemaTemplate> lut3d_bake_table_schema(
   auto schema = made.take_value();
   schema.id = "curve.bake_lut3d.table";
   schema.domain.clear();
-  std::uint64_t count = 1;
-  for (auto n : spec.shape) {
+  schema.version = 2;
+  for (auto n : spec.shape)
     schema.domain.push_back({ResultExtentKind::Fixed, n});
-    count *= n;
-  }
-  schema.fields = {
-      {"colors", spec.table_dtype, {ResultExtentKind::Fixed, count}, {3}}};
+  schema.fields.clear();
+  ResultTensorSpec tensor;
+  tensor.key = "colors";
+  tensor.descriptor = {spec.table_dtype,
+                       {spec.shape[0], spec.shape[1], spec.shape[2], 3}};
+  auto facet = encode_color_array(spec.output_description);
+  if (!facet.ok())
+    return Result<SchemaTemplate>(facet.status());
+  tensor.facets = {facet.take_value()};
+  tensor.atomic_trailing_axes = 1;
+  schema.tensors = {std::move(tensor)};
   return Result<SchemaTemplate>(std::move(schema));
 }
 Result<Lut3dBakeDescription> lut3d_bake_description(
@@ -156,7 +164,8 @@ Result<Lut3dBakeDescription> lut3d_bake_description(
   using Answer = Result<Lut3dBakeDescription>;
   if ((schema.id != "curve.bake_lut3d.report" &&
        schema.id != "curve.bake_lut3d.table") ||
-      schema.version != 1 || schema.metadata.size() != 1 ||
+      schema.version != (schema.id == "curve.bake_lut3d.table" ? 2U : 1U) ||
+      schema.metadata.size() != 1 ||
       schema.metadata[0].key != "curve.bake_lut3d.measured" ||
       schema.metadata[0].version != 1)
     return Answer(invalid());
@@ -240,16 +249,25 @@ Result<Lut3dBakeReport> read_lut3d_bake_report(
       return Answer(invalid());
     std::memcpy(fields[field], window.value()->bytes().data(), sizes[field]);
   }
-  auto expected = description.value().extra_points;
+  auto validated = input_internal::validate_lut3d_bake_report_values(
+      description.value(), &report, passed, work);
+  return validated.ok() ? Answer(report) : Answer(validated);
+}
+namespace input_internal {
+Status validate_lut3d_bake_report_values(
+    const Lut3dBakeDescription& description, Lut3dBakeReport* output,
+    std::uint8_t passed, const std::function<Status(std::uint64_t)>& work) {
+  auto& report = *output;
+  auto expected = description.extra_points;
   std::uint64_t centers = 1;
-  for (auto n : description.value().shape)
+  for (auto n : description.shape)
     centers *= n - 1;
   expected += centers;
   const auto malformed = [&] {
-    return Answer(Status{ErrorCode::OperationFailed,
-                         "invalid measured LUT3D report values",
-                         FailureReason::InvalidDomain,
-                         {FailureOrigin::Domain, FailureScope::Group}});
+    return Status{ErrorCode::OperationFailed,
+                  "invalid measured LUT3D report values",
+                  FailureReason::InvalidDomain,
+                  {FailureOrigin::Domain, FailureScope::Group}};
   };
   if (passed > 1 ||
       report.validation_count != static_cast<std::int64_t>(expected) ||
@@ -264,11 +282,11 @@ Result<Lut3dBakeReport> read_lut3d_bake_report(
     auto valid =
         grid.validate({raw(report.axis[3 * i]), raw(report.axis[3 * i + 1]),
                        raw(report.axis[3 * i + 2])},
-                      description.value().shape[i], work);
+                      description.shape[i], work);
     if (!valid.ok()) {
       if (valid.detail.origin == FailureOrigin::Domain)
         valid.detail.scope = FailureScope::Group;
-      return Answer(valid);
+      return valid;
     }
   }
   const auto valid_point = [&](const double* point) {
@@ -292,16 +310,16 @@ Result<Lut3dBakeReport> read_lut3d_bake_report(
             color.model != ColorModel::Oklch) ||
            !(raw(chroma) >> 63) || !(raw(chroma) << 1);
   };
-  if (!valid_chroma(description.value().input_description, report.axis[3]) ||
-      !valid_chroma(description.value().input_description, report.axis[4]))
+  if (!valid_chroma(description.input_description, report.axis[3]) ||
+      !valid_chroma(description.input_description, report.axis[4]))
     return malformed();
   for (unsigned c = 0; c < 3; ++c)
     if (!valid_point(report.max_error_point.data() + 3 * c))
       return malformed();
   if (!report.passed && (!valid_point(report.first_failure_input.data()) ||
-                         !valid_chroma(description.value().output_description,
+                         !valid_chroma(description.output_description,
                                        report.first_failure_reference[1]) ||
-                         !valid_chroma(description.value().output_description,
+                         !valid_chroma(description.output_description,
                                        report.first_failure_lut[1])))
     return malformed();
 
@@ -325,6 +343,7 @@ Result<Lut3dBakeReport> read_lut3d_bake_report(
                     : (report.first_failure_index < 0 ||
                        report.first_failure_index >= report.validation_count))
     return malformed();
-  return Answer(report);
+  return Status::success();
 }
+}  // namespace input_internal
 }  // namespace ps

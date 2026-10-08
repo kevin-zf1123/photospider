@@ -15,8 +15,13 @@
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/numeric/lowpass.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
+#include "result_fixture.hpp"     // NOLINT(build/include_subdir)
 
 namespace {
+using numeric_result_fixture::read;
+using numeric_result_fixture::source_schema;
+using point_math_checks::source;
 void require(bool condition, const char* message) {
   if (!condition)
     throw std::runtime_error(message);
@@ -47,16 +52,10 @@ struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
+  std::vector<ps::Value> sources;
   Fixture(ps::WorkflowNode node, const std::vector<ps::Value>& inputs) {
-    for (std::size_t i = 0; i < inputs.size(); ++i) {
-      const auto& value = inputs[i];
-      const auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1, name, value.descriptor(),
-                                 value.region(), value.layout(),
-                                 value.facets()});
-      bindings.inputs.push_back({name, value});
-    }
+    sources = inputs;
+    numeric_result_fixture::declare_sources(&document, inputs);
     document.outputs = {{"samples", node.id, "samples"}};
     document.nodes = {std::move(node)};
   }
@@ -75,6 +74,8 @@ struct Fixture {
     config.result_cache_bytes = cache ? cache_bytes : 0;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(registry, config);
+    auto bindings = point_math_checks::bindings(take(context.resource_budget()),
+                                                sources, document);
     auto snapshot = context.freeze(plan.value().plan, bindings);
     if (!snapshot.ok())
       return ps::Result<ps::DemandResult>(snapshot.status());
@@ -153,9 +154,8 @@ void oracle(ps::CpuNumericProfile profile) {
     }
     for (unsigned i = 0; i < n; ++i) {
       std::uint64_t actual = 0;
-      require(result.value()
-                  .values.at("samples")
-                  .read({i}, &actual, vt == 4 ? 4 : 8)
+      require(read(result.value().results.at("samples"), {i}, &actual,
+                   vt == 4 ? 4 : 8)
                   .ok(),
               "continuous oracle read");
       if (i)
@@ -173,7 +173,7 @@ void fixtures(ps::CpuNumericProfile profile) {
     auto result = take(
         affine.run({{"samples", region({3}, {ps::Region({{1, 1}})})}}, false));
     std::uint64_t actual = 0;
-    require(result.values.at("samples").read({1}, &actual, 8).ok() &&
+    require(read(result.results.at("samples"), {1}, &actual, 8).ok() &&
                 actual == raw(2.5),
             "affine center exact");
     Fixture inserted(
@@ -182,7 +182,7 @@ void fixtures(ps::CpuNumericProfile profile) {
         {doubles({5}, {0, .5, .75, 1, 2}), doubles({5}, {1, 2, 2.5, 3, 5})});
     auto refined = take(inserted.run(
         {{"samples", region({5}, {ps::Region({{2, 1}})})}}, false));
-    require(refined.values.at("samples").read({2}, &actual, 8).ok() &&
+    require(read(refined.results.at("samples"), {2}, &actual, 8).ok() &&
                 actual == raw(2.5),
             "collinear knot insertion");
     for (bool narrow : {false, true}) {
@@ -196,11 +196,11 @@ void fixtures(ps::CpuNumericProfile profile) {
             take(half.run({{"samples", take(ps::Footprint::all({2}))}}, false));
         for (unsigned i = 0; i < 2; ++i) {
           actual = 0;
-          require(midpoint.values.at("samples")
-                          .read({i}, &actual, narrow ? 4 : 8)
-                          .ok() &&
-                      actual == (magnitude == 1 ? 0U : 2U),
-                  "continuous half-subnormal ties");
+          require(
+              read(midpoint.results.at("samples"), {i}, &actual, narrow ? 4 : 8)
+                      .ok() &&
+                  actual == (magnitude == 1 ? 0U : 2U),
+              "continuous half-subnormal ties");
         }
       }
     }
@@ -216,7 +216,7 @@ void fixtures(ps::CpuNumericProfile profile) {
       for (unsigned i = 0; i < 2; ++i) {
         actual = 0;
         require(
-            preserved.values.at("samples").read({i}, &actual, 8).ok() &&
+            read(preserved.results.at("samples"), {i}, &actual, 8).ok() &&
                 actual ==
                     raw(boundary == ps::numeric::LowpassBoundary::Zero ? 1 : 2),
             "continuous boundary normalization");
@@ -240,22 +240,26 @@ void support_and_failures(ps::CpuNumericProfile profile) {
                 rejected.status().reason == ps::FailureReason::InvalidDomain &&
                 rejected.status().detail.scope == ps::FailureScope::Run,
             "undelivered nonfinite sample fails Whole run");
-    fixture.bindings.inputs[1].value = doubles({4}, {0, 1, 2, 3});
+    fixture.sources[1] = doubles({4}, {0, 1, 2, 3});
     auto result = take(
         fixture.run({{"samples", region({4}, {ps::Region({{1, 1}})})}}, false));
     auto support = take(result.dependencies.source_support());
     require(support.at("input0") == take(ps::Footprint::all({4})) &&
                 support.at("input1") == take(ps::Footprint::all({4})),
             "Whole complete support");
+    require(
+        take(result.results.at("samples").descriptor()).tensor_coverage(0) ==
+            take(ps::Footprint::all({4})),
+        "sparse nonuniform request publishes full Whole coverage");
     require(take(result.dependencies.potential_dirty(
                      "input1", region({4}, {ps::Region({{3, 1}})})))
                     .at("samples") == region({4}, {ps::Region({{1, 1}})}),
             "remote sample dirties Whole output");
     std::uint64_t actual = 0;
-    require(result.values.at("samples").read({1}, &actual, 8).ok() &&
+    require(read(result.results.at("samples"), {1}, &actual, 8).ok() &&
                 actual == raw(1),
             "continuous affine interior result");
-    fixture.bindings.inputs[1].value =
+    fixture.sources[1] =
         array(ps::ElementType::Float64, {4}, {raw(0), raw(1), raw(2), nan});
     fixture.document.nodes[0].parameters["support_radius"] = 1.25;
     auto failed =
@@ -264,7 +268,7 @@ void support_and_failures(ps::CpuNumericProfile profile) {
                 failed.status().reason == ps::FailureReason::InvalidDomain,
             "positive overlap validates previously untouched endpoint");
     fixture.document.nodes[0].parameters["support_radius"] = 1.;
-    fixture.bindings.inputs[0].value =
+    fixture.sources[0] =
         array(ps::ElementType::Float64, {4}, {0, raw(1), raw(2), nan});
     failed =
         fixture.run({{"samples", region({4}, {ps::Region({{1, 1}})})}}, false);
@@ -290,6 +294,8 @@ void support_and_failures(ps::CpuNumericProfile profile) {
 int main(int argc, char** argv) {
   try {
     const std::string selected = argc > 1 ? argv[1] : "strict";
+    require(selected == "strict" || selected == "apple" || selected == "x86",
+            "profile must be strict, apple, or x86");
     const auto profile = selected == "strict" ? ps::CpuNumericProfile::Strict
                          : selected == "apple"
                              ? ps::CpuNumericProfile::AppleSiliconNeon

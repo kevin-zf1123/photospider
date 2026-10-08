@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "01-numeric/exact_ratio.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
@@ -115,108 +116,59 @@ struct RangeMath final {
     return Answer(output);
   }
 };
-Result<Value> execute_range(const OperationInvocation& call, RangeKind kind,
-                            SequenceProfile profile) {
-  using Answer = Result<Value>;
-  const auto* budget = resource_internal::metadata_budget();
-  const std::function<Status(std::uint64_t)> consume = [&](std::uint64_t work) {
-    if (call.cancellation.cancelled())
-      return Status{ErrorCode::Cancelled, {}};
-    return budget ? budget->consume({work}) : Status::success();
-  };
-  auto status = consume(1);
-  if (!status.ok())
-    return Answer(status);
-  const auto& descriptor = call.inputs[0].descriptor();
-  const auto& shape = descriptor.shape;
-  const auto width = Value::element_size(descriptor.element_type);
-  auto allocated =
-      MutableValue::allocate(descriptor, call.output_region, call.allocator);
-  if (!allocated.ok())
-    return Answer(allocated.status());
-  auto output = allocated.take_value();
-  auto storage = call.allocator.allocate(sizeof(RangeMath));
-  if (!storage.ok())
-    return Answer(storage.status());
-  auto scratch = storage.take_value();
-  static_assert(alignof(RangeMath) <= alignof(std::max_align_t));
-  std::unique_ptr<RangeMath, void (*)(RangeMath*)> math(
-      new (scratch.data()) RangeMath(kind, profile),
-      [](RangeMath* value) { value->~RangeMath(); });
-  std::vector<std::uint64_t> coordinate(shape.size(), 0);
-  std::array<const std::uint8_t*, 5> packed{};
-  for (std::size_t port = 0; port < call.inputs.size(); ++port) {
-    const auto& input = call.inputs[port];
-    std::uint64_t stride = width;
-    bool dense = true;
-    for (std::size_t axis = shape.size(); axis; --axis) {
-      if (shape[axis - 1] > 1 && input.layout().byte_strides[axis - 1] !=
-                                     static_cast<std::int64_t>(stride))
-        dense = false;
-      stride *= shape[axis - 1];
-    }
-    if (dense) {
-      auto address = input.byte_address(coordinate);
-      if (!address.ok())
-        return Answer(address.status());
-      packed[port] = input.bytes().data() + address.value();
-    }
-  }
-  const auto count = call.output_region.element_count().value();
-  for (std::uint64_t i = 0; i < count; ++i) {
-    status = consume(call.inputs.size() * shape.size() + 1);
-    if (!status.ok())
-      return Answer(status);
-    for (std::size_t port = 0; port < call.inputs.size(); ++port) {
-      const auto& input = call.inputs[port];
-      const auto* data = packed[port];
-      if (data) {
-        data += i * width;
-      } else {
-        auto address = input.byte_address(coordinate);
-        if (!address.ok())
-          return Answer(address.status());
-        data = input.bytes().data() + address.value();
-      }
-      math->bits[port] = 0;
-      if (width == 8)
-        std::memcpy(&math->bits[port], data, 8);
-      else if (width == 4)
-        std::memcpy(&math->bits[port], data, 4);
-      else
-        math->bits[port] = *data;
-    }
-    auto result = math->evaluate(descriptor.element_type, consume);
-    if (!result.ok()) {
-      auto failure = result.status();
-      if (failure.detail.origin == FailureOrigin::Domain) {
-        failure.message += " coordinate=[";
-        for (std::size_t axis = 0; axis < coordinate.size(); ++axis) {
-          if (axis)
-            failure.message += ',';
-          failure.message += std::to_string(coordinate[axis]);
+struct RangeKernel final {
+  RangeKind kind;
+  SequenceProfile profile;
+  RangeKernel(RangeKind kind, SequenceProfile profile)
+      : kind(kind), profile(profile) {}
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    using namespace numeric_ops;  // NOLINT(build/namespaces)
+    if (writers.size() != 1)
+      return {ErrorCode::OperationFailed, "range requires one packed writer"};
+    const auto& target = phase.query.output.result_schema->tensors[0];
+    const auto shape = target.sample_shape();
+    const auto width = Value::element_size(target.descriptor.element_type);
+    auto scratch = math_take(phase.allocator.allocate(sizeof(RangeMath)));
+    static_assert(alignof(RangeMath) <= alignof(std::max_align_t));
+    std::unique_ptr<RangeMath, void (*)(RangeMath*)> math(
+        new (scratch.data()) RangeMath(kind, profile),
+        [](RangeMath* value) { value->~RangeMath(); });
+    std::array<std::optional<MathTensorReader>, 5> inputs;
+    const auto ports = kind == RangeKind::Clamp ? 3U : 5U;
+    for (unsigned port = 0; port < ports; ++port)
+      inputs[port].emplace(phase.tensors->at({port, 0}),
+                           phase.query.cancellation);
+    MathTensorWriter writer(writers[0]);
+    std::vector<uint64_t> coordinate(shape.size(), 0);
+    for (uint64_t i = 0, count = math_take(target.sample_count()); i < count;
+         ++i) {
+      math_require(phase.consume_work(ports * shape.size() + 1));
+      for (unsigned port = 0; port < ports; ++port)
+        math->bits[port] = inputs[port]->bits(coordinate);
+      auto result =
+          math->evaluate(target.descriptor.element_type, phase.consume_work);
+      if (!result.ok()) {
+        auto failure = result.status();
+        if (failure.detail.origin == FailureOrigin::Domain) {
+          failure.message += " coordinate=[";
+          for (size_t axis = 0; axis < coordinate.size(); ++axis) {
+            if (axis)
+              failure.message += ',';
+            failure.message += std::to_string(coordinate[axis]);
+          }
+          failure.message += ']';
         }
-        failure.message += ']';
+        return failure;
       }
-      return Answer(failure);
+      const auto bits = result.value();
+      std::memcpy(writer.address(coordinate), &bits, width);
+      math_next(coordinate, shape);
     }
-    const auto bits = result.value();
-    auto* destination = output.data() + i * width;
-    if (width == 8)
-      std::memcpy(destination, &bits, 8);
-    else if (width == 4)
-      std::memcpy(destination, &bits, 4);
-    else
-      *destination = static_cast<std::uint8_t>(bits);
-    for (std::size_t axis = shape.size(); axis; --axis) {
-      if (++coordinate[axis - 1] < shape[axis - 1])
-        break;
-      coordinate[axis - 1] = 0;
-    }
+    return phase.consume_work(1);
   }
-  status = consume(1);
-  return status.ok() ? std::move(output).publish() : Answer(status);
-}
+};
+using RangeProgram = numeric_ops::WholeTensorProgram<RangeKernel>;
 OperationDefinition range_operation(const std::string& key, RangeKind kind,
                                     SequenceProfile profile) {
   OperationDefinition operation;
@@ -225,15 +177,12 @@ OperationDefinition range_operation(const std::string& key, RangeKind kind,
   traits.requires_metadata_specialization = true;
   traits.input_count = kind == RangeKind::Clamp ? 3 : 5;
   traits.input_schema.resize(traits.input_count);
-  if (kind == RangeKind::Remap)
-    for (auto& input : traits.input_schema)
-      input.element_type_mask = 12;
-  auto& output = traits.outputs[0];
-  output.key = "values";
-  output.shape_rule = OperationShapeRule::MatchAllInputs;
-  output.output_dtype_rule = OperationDtypeRule::Input;
-  output.region_rule = OperationRegionRule::Whole;
-  output.requires_dense_output = true;
+  for (auto& input : traits.input_schema) {
+    input.kind = OperationPortKind::Result;
+    input.element_type_mask = kind == RangeKind::Clamp ? 15 : 12;
+  }
+  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                       sizeof(RangeProgram));
   traits.workspace_bytes = sizeof(RangeMath);
   operation.specialize_metadata = [profile](const auto& inputs, const auto&)
       -> Result<std::vector<OperationOutputSpecialization>> {
@@ -244,7 +193,9 @@ OperationDefinition range_operation(const std::string& key, RangeKind kind,
                            FailureReason::None,
                            {FailureOrigin::Schema, FailureScope::Unspecified}});
     };
-    const auto& first = inputs[0].descriptor;
+    const auto& selected = inputs[0].result_schema->tensors[0];
+    const ValueDescriptor first{selected.descriptor.element_type,
+                                selected.sample_shape()};
     if (first.shape.empty() || first.shape.size() > 8)
       return mismatch("range requires rank 1..8");
     std::uint64_t count = 1;
@@ -254,19 +205,21 @@ OperationDefinition range_operation(const std::string& key, RangeKind kind,
       count *= extent;
     }
     for (const auto& input : inputs)
-      if (input.descriptor.shape != first.shape ||
-          input.descriptor.element_type != first.element_type)
+      if (input.result_schema->tensors[0].sample_shape() != first.shape ||
+          input.result_schema->tensors[0].descriptor.element_type !=
+              first.element_type)
         return mismatch("range operands require identical shape and dtype");
     auto available = numeric_ops::sequence_profile_available(profile);
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization result;
-    result.metadata.descriptor = first;
+    result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
+        numeric_ops::numeric_tensor_schema(first.element_type, first.shape));
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.callback = [kind, profile](const OperationInvocation& call) {
-    return execute_range(call, kind, profile);
+  operation.start_result = [kind, profile](const auto&, const auto& allocator) {
+    return ResultContinuation::make<RangeProgram>(allocator, kind, profile);
   };
   return operation;
 }

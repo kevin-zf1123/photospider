@@ -1,7 +1,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "photospider/plugin/operation_plugin_api.h"
+#include "./result_registry_fixture.hpp"
 
 #ifndef PS_BAD_PARAMETER_CASE
 #error "PS_BAD_PARAMETER_CASE must select one malformed parameter contract"
@@ -9,62 +9,7 @@
 
 namespace {
 
-/** @brief Explicit generic v3 port schema. */
-const ps_operation_port_constraint_v11 value_port = {
-    sizeof(ps_operation_port_constraint_v11), PS_OPERATION_PORT_VALUE_V11, 0U,
-    0U};  // NOLINT(whitespace/indent_namespace)
-
-/**
- * @brief Never-entered callback for malformed descriptor fixtures.
- * @param user_data Unused descriptor state.
- * @param inputs Unused input array.
- * @param input_count Unused input count.
- * @param parameters Unused parameter array.
- * @param parameter_count Unused parameter count.
- * @param backend Unused backend.
- * @param cancelled Unused cancellation callback.
- * @param cancellation_context Unused cancellation state.
- * @param sink Unused output sink.
- * @param diagnostic Unused diagnostic buffer.
- * @param diagnostic_capacity Unused diagnostic capacity.
- * @return Nonzero because execution is never legal for this fixture.
- * @throws Nothing.
- * @note Host validation must reject before retaining or invoking this callback.
- */
-int execute_never(void* user_data, const ps_operation_value_view_v11* inputs,
-                  std::uint32_t input_count,
-                  const ps_operation_parameter_value_v11* parameters,
-                  std::uint32_t parameter_count, std::uint32_t backend,
-                  ps_operation_cancelled_v11 cancelled,
-                  void* cancellation_context,
-                  const ps_operation_output_sink_v11* sink, char* diagnostic,
-                  std::size_t diagnostic_capacity) {
-  static_cast<void>(user_data);
-  static_cast<void>(inputs);
-  static_cast<void>(input_count);
-  static_cast<void>(parameters);
-  static_cast<void>(parameter_count);
-  static_cast<void>(backend);
-  static_cast<void>(cancelled);
-  static_cast<void>(cancellation_context);
-  static_cast<void>(sink);
-  static_cast<void>(diagnostic);
-  static_cast<void>(diagnostic_capacity);
-  return 1;
-}
-
-/**
- * @brief Accepts exact destroy ownership for one rejected static table.
- * @param operations Original descriptor array.
- * @param operation_count Original descriptor count.
- * @throws Nothing.
- * @note Static fixture memory requires no release.
- */
-void destroy_fixture(const ps_operation_descriptor_v11* operations,
-                     std::uint32_t operation_count) {
-  static_cast<void>(operations);
-  static_cast<void>(operation_count);
-}
+void destroy_fixture(void*) {}
 
 #if PS_BAD_PARAMETER_CASE == 2
 /**
@@ -72,9 +17,9 @@ void destroy_fixture(const ps_operation_descriptor_v11* operations,
  * @return Case-specific malformed parameter descriptor.
  * @throws Nothing.
  */
-ps_operation_parameter_descriptor_v11 make_parameter() noexcept {
-  return {sizeof(ps_operation_parameter_descriptor_v11) - 1U, "value", 5U,
-          PS_OPERATION_PARAMETER_FLOAT64_V11, 1U};
+ps_result_parameter_descriptor_v2 make_parameter() noexcept {
+  return {sizeof(ps_result_parameter_descriptor_v2) - 1U, "value", 5U,
+          PS_RESULT_PARAMETER_FLOAT64_V2, 1U};
 }
 #elif PS_BAD_PARAMETER_CASE == 4
 /**
@@ -82,9 +27,9 @@ ps_operation_parameter_descriptor_v11 make_parameter() noexcept {
  * @return Case-specific malformed parameter descriptor.
  * @throws Nothing.
  */
-ps_operation_parameter_descriptor_v11 make_parameter() noexcept {
-  return {sizeof(ps_operation_parameter_descriptor_v11), "x", 1025U,
-          PS_OPERATION_PARAMETER_FLOAT64_V11, 1U};
+ps_result_parameter_descriptor_v2 make_parameter() noexcept {
+  return {sizeof(ps_result_parameter_descriptor_v2), "x", 1025U,
+          PS_RESULT_PARAMETER_FLOAT64_V2, 1U};
 }
 #else
 /**
@@ -92,23 +37,26 @@ ps_operation_parameter_descriptor_v11 make_parameter() noexcept {
  * @return Structurally valid parameter descriptor.
  * @throws Nothing.
  */
-ps_operation_parameter_descriptor_v11 make_parameter() noexcept {
-  return {sizeof(ps_operation_parameter_descriptor_v11), "value", 5U,
-          PS_OPERATION_PARAMETER_FLOAT64_V11, 1U};
+ps_result_parameter_descriptor_v2 make_parameter() noexcept {
+  return {sizeof(ps_result_parameter_descriptor_v2), "value", 5U,
+          PS_RESULT_PARAMETER_FLOAT64_V2, 1U};
 }
 #endif
 
 /** @brief Case-specific parameter record. */
-const ps_operation_parameter_descriptor_v11 parameter = make_parameter();
+const ps_result_parameter_descriptor_v2 parameter = make_parameter();
 
 #if PS_BAD_PARAMETER_CASE == 5
 /** @brief Exact byte count required for one deliberately misaligned record. */
 // NOLINTBEGIN(whitespace/indent_namespace)
 constexpr std::size_t kStorageSize =
-    sizeof(ps_operation_parameter_descriptor_v11) + 1U;
+    sizeof(ps_result_parameter_descriptor_v2) + 1U;
 // NOLINTEND
 /** @brief Byte storage used to provide a deliberately misaligned pointer. */
-unsigned char misaligned_storage[kStorageSize]{};
+// NOLINTBEGIN(whitespace/indent_namespace)
+alignas(
+    ps_result_parameter_descriptor_v2) unsigned char storage[kStorageSize]{};
+// NOLINTEND
 #endif
 
 /**
@@ -117,12 +65,12 @@ unsigned char misaligned_storage[kStorageSize]{};
  * @throws Nothing.
  * @note The host must validate pointer/count/alignment before dereference.
  */
-const ps_operation_parameter_descriptor_v11* parameter_pointer() noexcept {
+const ps_result_parameter_descriptor_v2* parameter_pointer() noexcept {
 #if PS_BAD_PARAMETER_CASE == 1
   return nullptr;
 #elif PS_BAD_PARAMETER_CASE == 5
-  return reinterpret_cast<const ps_operation_parameter_descriptor_v11*>(
-      misaligned_storage + 1U);
+  return reinterpret_cast<const ps_result_parameter_descriptor_v2*>(storage +
+                                                                    1U);
 #else
   return &parameter;
 #endif
@@ -141,88 +89,16 @@ std::uint32_t parameter_count() noexcept {
 #endif
 }
 
-/**
- * @brief Builds the case-specific malformed operation descriptor.
- * @return Descriptor selecting the configured parameter defect.
- * @throws Nothing.
- * @note No execution callback may be reached for the returned record.
- */
-ps_operation_descriptor_v11 make_descriptor() noexcept {
-  return {sizeof(ps_operation_descriptor_v11),
-          "fixture.bad.parameter",
-          21U,
-          0U,
-          PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
-              PS_OPERATION_FLAG_CPU,
-          sizeof(double),
-          1U,
-          parameter_count(),
-          parameter_pointer(),
-          0U,
-          nullptr,
-          execute_never,
-          nullptr,
-          0,
-          0,
-          0,
-          1,
-          {{sizeof(ps_operation_output_descriptor_v11),
-            "value",
-            5,
-            PS_OPERATION_ELEMENT_FLOAT64_V11,
-            0U,
-            nullptr,
-            PS_OPERATION_SHAPE_SCALAR_V11,
-            PS_OPERATION_REGION_WHOLE_V11,
-            0U,
-            value_port,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            NULL}}};
-}
-
-/** @brief Malformed operation descriptor selected by the compile definition. */
-const ps_operation_descriptor_v11 descriptor = make_descriptor();
-
-/**
- * @brief Builds the complete API table for one malformed descriptor.
- * @return API table referencing `descriptor` and the lifecycle callback.
- * @throws Nothing.
- */
-ps_operation_plugin_api_v11 make_api() noexcept {
-  return {sizeof(ps_operation_plugin_api_v11), 1U, &descriptor,
-          destroy_fixture};
-}
-
-/** @brief Complete API table whose descriptor must fail atomically. */
-const ps_operation_plugin_api_v11 api = make_api();
+const auto descriptor = result_registry_fixture::make_operation(
+    "fixture.bad.parameter", 21U, parameter_pointer(), parameter_count());
+// NOLINTBEGIN(whitespace/indent_namespace)
+const auto api =
+    result_registry_fixture::make_api(&descriptor, destroy_fixture);
+// NOLINTEND
 
 }  // namespace
 
-/**
- * @brief Returns the supported ABI version so descriptor validation runs.
- * @return `PS_OPERATION_ABI_VERSION_11`.
- * @throws Nothing.
- */
-extern "C" PS_OPERATION_EXPORT std::uint32_t
-ps_operation_plugin_get_abi_version(void) {
-  return PS_OPERATION_ABI_VERSION_11;
-}
-
-/**
- * @brief Returns one case-specific malformed API table.
- * @return Process-lifetime static table.
- * @throws Nothing.
- * @note The host must reject it without partial registry publication.
- */
-extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v11*
-ps_operation_plugin_get_api_v11(void) {
+extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v2*
+ps_result_operation_plugin_get_api_v2(void) {
   return &api;
 }

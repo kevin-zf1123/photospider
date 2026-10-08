@@ -4,7 +4,7 @@
 
 ## 1. Scope and ownership
 
-The installed CPU operation factory implements full-domain two-dimensional real FFT operations using mandatory temporary storage and bounded windows. `fft_operation.hpp` exposes the public factory; the coordinator owns Result publication, root resource admission, and input associations. The operation owns two temporary complex generations while transforming; output Results retain their backing and upstream associations independently of the execution context and optional shared cache.
+The installed CPU operation factory implements full-domain two-dimensional real FFT operations using mandatory temporary storage and bounded windows. `fft_operation.hpp` exposes the public factory; the coordinator owns Result publication, Root resource admission, and input associations. The operation owns two temporary complex generations while transforming, and each output Result owns its published backing.
 
 ## 2. Data layout and memory
 
@@ -23,27 +23,36 @@ Spectrum samples are Float64 real/imaginary pairs in the declared slow-to-fast a
 
 | Key | Input | Output |
 | --- | --- | --- |
-| `fft.forward_real` | Facet-free finite Float64 HW | Complete Spectrum |
-| `fft.import_response` | Facet-free Float64 HW2 or HK2 | Complete Spectrum on the explicitly assigned frequency basis |
+| `fft.forward_real` | Result with one unbatched, facet-free Float64 HW tensor and no fields | Complete Spectrum |
+| `fft.import_response` | Result with one unbatched, facet-free Float64 HW2 or HK2 tensor and no fields | Complete Spectrum on the explicitly assigned frequency basis |
 | `fft.multiply` | Two identically described complete Spectra | Complete pointwise complex product |
 | `fft.inverse_real` | Complete Spectrum | Real projection and measured imaginary residual |
+
+The ForwardReal and ImportResponse numeric inputs are validated by their tensor type and exact shape, not by a fixed input Result schema ID. Spectrum inputs to Multiply and InverseReal must match the complete declared Spectrum schema.
 
 `photospider.fft_real_output` stores H*W Float64 pixels and one Float64 `imaginary_residual`. Its `fft_inverse_identity_v1` facet preserves the full Spectrum contract. The residual is `max(abs(imag(inverse/HW)))`; it is a measured diagnostic, not an error certificate.
 
 ## 3. Execution and state machine
 
-The producer checks the complete Spectrum identity before source reads or continuation allocation. Widths 4 and 5 both pack to three columns, so packed sample count alone cannot establish identity. The registry also checks inferred output metadata before starting the producer. Whole-transform dependency support is Conservative; an input edit can dirty every output.
+The producer checks the complete Spectrum identity before source reads or continuation allocation. Widths 4 and 5 both pack to three columns, so packed sample count alone cannot establish identity. The registry also checks inferred output metadata before starting the producer. Whole-transform dependency support is Conservative; an input edit can dirty every output. Relations address tensor samples with Tensor support, field rows with Field support, and metadata with separate Descriptor support. A Spectrum field row stores one real/imaginary pair, so relation counts use complex rows rather than individual Float64 components.
 
 ```text
-real source --forward: spool A -> transform -> transpose A/B -> second axis--> Spectrum
-response Value --import_response: direct bounded copy -----------------------> Spectrum
+variant Result binding
+       |                                      |
+       v                                      v
+pixels source --Need--> Float64 HW Result   response source --Need--> Float64 HW2/HK2 Result
+       |                                      |
+       +-------------------+------------------+
+                           v
+ real source --forward: spool A -> transform -> transpose A/B -> second axis--> Spectrum
+ response Result --import_response: direct bounded copy ----------------------> Spectrum
 Spectrum + Spectrum --multiply: bounded pointwise product -------------------> Spectrum
 Spectrum --inverse: expand half -> transform -> transpose A/B -> project ----> spatial Result
 Spectrum/Result validation ------------------------------------------+-------> publish
                                                                      +-------> reject
 ```
 
-Forward and inverse create two full complex temporary generations, each extended by checked `16*H*W` bytes. Import and multiply do not run the DIF recipe. Create, extend, dependent writes, and draining work are separate coordinator stages. Windows are bounded by `min(user_page_bytes,1024)` and must hold at least one 16-byte complex record. Callback workspace is 4096 bytes; read replies, retained window metadata, output batches, and gather buffers are additionally charged to the root. Transpose, odd-leaf output, and final gathers are batched without overwriting values still needed from the source generation. Each producer is capped by its declared maximum of 1,000,000 dependency stages, `DependencyLimits::maximum_stages` (default 4096), and the root stage budget. An incomplete run publishes no complete Result. Mandatory scratch is released after its last required copy; Result associations and escaped read windows retain backing until their final owner releases it.
+Forward and inverse create two full complex temporary generations, each extended by checked `16*H*W` bytes. Import and multiply do not run the DIF recipe. Create, extend, dependent writes, and draining work are separate coordinator stages. Windows are bounded by `min(user_page_bytes,1024)` and must hold at least one 16-byte complex record. Callback workspace is 4096 bytes; read replies, retained window metadata, output batches, and gather buffers are additionally charged to the Root. Transpose, odd-leaf output, and final gathers are batched without overwriting values still needed from the source generation. Each producer is capped by its declared maximum of 1,000,000 dependency stages, `DependencyLimits::maximum_stages` (default 4096), and the Root stage budget. An incomplete run publishes no complete Result. Mandatory scratch is released after its last required copy. Associations store source ObjectIds and do not retain source payload. A loaded field `CpuStorage` retains its read plan and Result implementation, keeping that field backing readable until the final window is released.
 
 ## 4. Algorithms and math
 

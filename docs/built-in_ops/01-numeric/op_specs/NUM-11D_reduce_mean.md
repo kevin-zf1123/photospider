@@ -13,62 +13,17 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+repository_commit: current working tree
 ---
 
 # NUM-11D: reduce_mean
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Inherit the [NUM baseline](NUM_common_contract.md) and [NUM-11 shared contract](NUM-11_reduction_contract.md). The strict key follows the exact reference; accelerated floating results follow the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md), including its range and fallback rules.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+`numeric.reduce_mean_*` reduces complete groups along required static `axes`. Each Result input has one tensor member at any key. The `values` output is a `photospider.tensor` Result with member `samples`, rank-preserving keepdims shape and empty facets. Input accepts UInt8, Int64, Float32 and Float64. Required static `dtype` is Float32 or Float64; authoring helpers default to Float64. Integer inputs participate exactly and are not first converted to floating point.
 
-Reduce input groups selected by required static axes. Inherit the
-[reduction contract](NUM-11_reduction_contract.md) for input/values ports,
-positive rank-1..8 shapes, size cap, fixed keepdims=true, generic output facets,
-full selected-group support, strided reads, NaN priority/payload conversion,
-invalidation, returned mapping, resources, errors and lifetime. Input supports
-UInt8, Int64, Float32 and Float64. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
+For group size N, calculate the exact total divided by N, then round once to the selected floating destination. Do not round the total or mean at an intermediate step. The first NaN in logical row-major order wins under the shared sign/payload conversion. With no NaN, opposite signed infinities produce the fixed positive quiet NaN; otherwise infinity determines its signed result. For a finite exact zero, return -0 only when every input is -0, otherwise +0. A singleton sNaN is quieted. Narrowing may yield signed infinity; this is a successful numerical result.
 
-## Type and numeric semantics
+For `input=[[1,2,3],[4,5,6]]` and `axes="1"`, Float64 output is `[[2],[5]]`. For Int64 `[2^53+1,2^53+2]`, compute the exact mean before Float64 rounding; pre-casting elements would produce the wrong result. For finite Float64 `[MAX,MAX]`, the mean is MAX despite a naive sum overflow.
 
-Required static String dtype is float32/float64, constructor default float64.
-Direct nodes supply it. Integer source values participate exactly without a
-preliminary floating cast. Compute the mathematical exact sum divided by positive
-group count N, with one final correctly rounded destination conversion. Do not
-round the sum or mean at intermediate steps. Float64 sources narrowed to Float32
-may overflow the output; return the correctly signed infinity successfully.
-
-For nonfinite groups, first apply shared NaN priority/conversion. With no NaN,
-opposite signed infinities yield the fixed positive quiet NaN; otherwise any
-infinity determines its signed result. For finite exact-zero results, return -0
-only when every source element is -0, otherwise +0. A singleton group still
-applies these numeric and dtype-conversion rules, including sNaN quieting.
-
-## Acceptance and implementation distinction
-
-Fixture: input=[[1,2,3],[4,5,6]], axes="1" -> [[2],[5]], shape
-[2,1], in the selected output dtype. The public manual target binds this through
-WorkflowDocument, compiles the selected key and reads values through ExecutionContext. Use
-independent exact grouping and integer/rational/bit-selection oracles. Cover
-singleton groups, non-leading/multiple axes, NaN payload order/conversion,
-signed-zero groups, infinity combinations, subnormals and source dtype extrema.
-
-For Int64 [2^53,2^53+1,2^53+2], evaluate the exact rational mean before
-rounding; no preliminary float conversion is allowed. Also test Int64
-[2^53+1,2^53+2]: the correctly rounded Float64 mean is 2^53+2; casting both
-inputs first would incorrectly yield 2^53. For Float64 [MAX,MAX],
-mean is MAX despite an overflowing naive floating sum. Test both destinations
-and the shared deterministic NaN payload narrowing/expansion.
-
-The formal keys execute Whole and preserve the numerical rules above. See
-[NUM-11 Whole execution](../reductions-whole.md) for current public workflow,
-validation and timing. Earlier regional platform records predate Whole.
+Nonempty requests read and validate the complete input, compute every group and publish the complete output before projection. An unrequested typed failure still fails Whole execution. Empty demand reads no payload or performs no arithmetic. Current fixture coverage and limits are in [NUM-11 Whole execution](../reductions-whole.md).

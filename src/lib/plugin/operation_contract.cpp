@@ -45,7 +45,16 @@ Result<OperationTraits> resolve_operation_traits(
   if (!status.ok())
     return Result<OperationTraits>(status);
   auto result = traits;
-  if (count > 1024 || traits.version != 21)
+  if (std::any_of(traits.outputs.begin(), traits.outputs.end(),
+                  [](const auto& output) {
+                    return output.dependency_version != 2 ||
+                           !output.result_schema;
+                  }) ||
+      std::any_of(traits.input_schema.begin(), traits.input_schema.end(),
+                  [](const auto& input) {
+                    return input.kind != OperationPortKind::Result;
+                  }) ||
+      count > 1024 || traits.version != 24)
     return Result<OperationTraits>(invalid("invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
     if (traits.input_schema.size() != traits.input_count + 1 ||
@@ -83,11 +92,12 @@ Result<OperationTraits> resolve_operation_traits(
 
 Result<OperationMetadata> infer_operation_output(
     const OperationTraits& t, const std::vector<OperationMetadata>& inputs,
-    const std::map<std::string, ParameterValue>& parameters) {
+    const std::map<std::string, ParameterValue>&) {
   if (t.requires_metadata_specialization)
     return Result<OperationMetadata>(invalid(
         "operation template requires registry metadata specialization"));
-  if (t.outputs.size() != 1)
+  if (t.version != 24 || t.outputs.size() != 1 ||
+      t.outputs[0].dependency_version != 2 || !t.outputs[0].result_schema)
     return Result<OperationMetadata>(
         invalid("select one output for singleton inference"));
   const auto mismatch = [](const char* message) {
@@ -125,20 +135,48 @@ Result<OperationMetadata> infer_operation_output(
     if (t.repeated_resolved > inputs.size())
       return mismatch("invalid resolved repetition");
     const auto first = inputs.size() - t.repeated_resolved;
-    for (std::size_t i = first + 1; i < inputs.size(); ++i)
-      if (inputs[i].descriptor.shape != inputs[first].descriptor.shape ||
-          inputs[i].descriptor.element_type !=
-              inputs[first].descriptor.element_type)
+    const auto descriptor = [&](std::size_t i) -> Result<ValueDescriptor> {
+      if (!inputs[i].result_schema)
+        return Result<ValueDescriptor>(inputs[i].descriptor);
+      auto slot =
+          input_internal::resolve_tensor_member(t.input_schema[i], inputs[i]);
+      if (!slot.ok())
+        return Result<ValueDescriptor>(slot.status());
+      const auto& tensor = inputs[i].result_schema->tensors[slot.value()];
+      return Result<ValueDescriptor>(ValueDescriptor{
+          tensor.descriptor.element_type, tensor.sample_shape()});
+    };
+    auto expected = descriptor(first);
+    if (!expected.ok())
+      return Result<OperationMetadata>(expected.status());
+    for (std::size_t i = first + 1; i < inputs.size(); ++i) {
+      auto actual = descriptor(i);
+      if (!actual.ok())
+        return Result<OperationMetadata>(actual.status());
+      if (actual.value().shape != expected.value().shape ||
+          actual.value().element_type != expected.value().element_type)
         return mismatch("homogeneous repeated input descriptors differ");
+    }
   }
   std::vector<std::vector<std::uint64_t>> domains;
-  for (const auto& input : inputs) {
+  for (std::size_t i = 0; i < inputs.size(); ++i) {
+    const auto& input = inputs[i];
     if (!input.result_schema) {
       domains.push_back(input.descriptor.shape);
       continue;
     }
-    if (!input.result_schema->images.empty()) {
-      domains.push_back(input.result_schema->images[0].sample_shape());
+    if (!input.result_schema->tensors.empty()) {
+      if (t.input_schema[i].tensor_key.empty() &&
+          input.result_schema->tensors.size() != 1) {
+        domains.emplace_back();
+        continue;
+      }
+      auto slot =
+          input_internal::resolve_tensor_member(t.input_schema[i], input);
+      if (!slot.ok())
+        return Result<OperationMetadata>(slot.status());
+      domains.push_back(
+          input.result_schema->tensors[slot.value()].sample_shape());
       continue;
     }
     std::vector<std::uint64_t> domain;
@@ -162,241 +200,12 @@ Result<OperationMetadata> infer_operation_output(
     OperationMetadata metadata;
     metadata.result_schema =
         std::make_shared<const SchemaTemplate>(schema.take_value());
-    return Result<OperationMetadata>(std::move(metadata));
+    auto valid = input_internal::validate_port_metadata(
+        t.outputs[0].output_schema, metadata);
+    return valid.ok() ? Result<OperationMetadata>(std::move(metadata))
+                      : Result<OperationMetadata>(valid);
   }
-  OperationMetadata result;
-  result.atomic_trailing_axes = t.outputs[0].atomic_trailing_axes;
-  result.descriptor.element_type = t.outputs[0].output_element_type;
-  if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Input ||
-      t.outputs[0].output_dtype_rule == OperationDtypeRule::WidenNumericInput) {
-    if (t.outputs[0].output_dtype_input >= inputs.size())
-      return mismatch("output dtype input is absent");
-    result.descriptor.element_type =
-        inputs[t.outputs[0].output_dtype_input].descriptor.element_type;
-    if (t.outputs[0].output_dtype_rule ==
-        OperationDtypeRule::WidenNumericInput) {
-      if (result.descriptor.element_type == ElementType::UInt8)
-        return mismatch("numeric widening requires integer or floating input");
-      if (result.descriptor.element_type != ElementType::Int64)
-        result.descriptor.element_type = ElementType::Float64;
-    }
-  } else if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Parameter) {
-    const auto* value =
-        parameter<std::string>(parameters, t.outputs[0].output_dtype_parameter);
-    if (!value)
-      return Result<OperationMetadata>(invalid("missing dtype parameter"));
-    if (*value == "uint8")
-      result.descriptor.element_type = ElementType::UInt8;
-    else if (*value == "int64")
-      result.descriptor.element_type = ElementType::Int64;
-    else if (*value == "float32")
-      result.descriptor.element_type = ElementType::Float32;
-    else if (*value == "float64")
-      result.descriptor.element_type = ElementType::Float64;
-    else
-      return Result<OperationMetadata>(invalid("unknown output dtype"));
-  } else if (t.outputs[0].output_dtype_rule != OperationDtypeRule::Declared) {
-    return Result<OperationMetadata>(invalid("unknown output dtype rule"));
-  }
-  auto& shape = result.descriptor.shape;
-  switch (t.outputs[0].shape_rule) {
-    case OperationShapeRule::Scalar:
-      shape = {1};
-      break;
-    case OperationShapeRule::Fixed:
-      shape = t.outputs[0].fixed_output_shape;
-      break;
-    case OperationShapeRule::PreserveFirstInput:
-    case OperationShapeRule::MatchAllInputs:
-    case OperationShapeRule::Shrink:
-      if (inputs.empty())
-        return mismatch("shape inference requires an input");
-      shape = inputs[0].descriptor.shape;
-      if (t.outputs[0].shape_rule == OperationShapeRule::MatchAllInputs)
-        for (const auto& input : inputs)
-          if (input.descriptor.shape != shape)
-            return mismatch("input shapes differ");
-      if (t.outputs[0].shape_rule == OperationShapeRule::Shrink) {
-        if (shape.size() < 2 || t.outputs[0].spatial_factor < 1 ||
-            t.outputs[0].spatial_factor > 16)
-          return mismatch("invalid shrink shape/factor");
-        for (std::size_t i = 0; i < 2; ++i)
-          shape[i] = shape[i] / t.outputs[0].spatial_factor +
-                     (shape[i] % t.outputs[0].spatial_factor != 0);
-      }
-      break;
-    case OperationShapeRule::Axes:
-      for (const auto& axis : t.outputs[0].output_axes) {
-        std::uint64_t n = axis.constant;
-        switch (axis.source) {
-          case OperationExtentSource::Constant:
-            break;
-          case OperationExtentSource::InputCount:
-            n = inputs.size();
-            break;
-          case OperationExtentSource::InputAxis:
-            if (axis.input >= inputs.size() ||
-                axis.axis >= domains[axis.input].size())
-              return mismatch("output axis references absent input axis");
-            n = domains[axis.input][axis.axis];
-            break;
-          case OperationExtentSource::IndexListCount: {
-            const auto* value =
-                parameter<std::string>(parameters, axis.parameter);
-            if (!value)
-              return Result<OperationMetadata>(
-                  invalid("missing index-list extent parameter"));
-            auto indices = channel_indices_from_parameter(*value);
-            if (!indices.ok())
-              return Result<OperationMetadata>(indices.status());
-            n = indices.value().size();
-            break;
-          }
-          case OperationExtentSource::CeilParameter: {
-            const auto* value = parameter<double>(parameters, axis.parameter);
-            if (!value || !std::isfinite(*value) || *value < 0 ||
-                *value >= std::ldexp(1.0, 64))
-              return Result<OperationMetadata>(
-                  invalid("invalid ceil extent parameter"));
-            n = static_cast<std::uint64_t>(std::ceil(*value));
-            break;
-          }
-          case OperationExtentSource::Parameter: {
-            const auto* value =
-                parameter<std::int64_t>(parameters, axis.parameter);
-            if (!value || *value <= 0)
-              return Result<OperationMetadata>(
-                  invalid("extent parameter must be positive Int64"));
-            n = static_cast<std::uint64_t>(*value);
-            break;
-          }
-          default:
-            return Result<OperationMetadata>(invalid("unknown extent source"));
-        }
-        if (!axis.subtract_parameter.empty()) {
-          const auto* subtract =
-              parameter<std::int64_t>(parameters, axis.subtract_parameter);
-          if (!subtract || *subtract < 0 ||
-              static_cast<std::uint64_t>(*subtract) > n)
-            return Result<OperationMetadata>(
-                invalid("invalid extent subtraction"));
-          n -= static_cast<std::uint64_t>(*subtract);
-        }
-        if (!axis.divisor || !axis.multiplier)
-          return Result<OperationMetadata>(
-              invalid("zero extent divisor/multiplier"));
-        n = n / axis.divisor + (n % axis.divisor != 0);
-        if (n > UINT64_MAX / axis.multiplier)
-          return Result<OperationMetadata>(Status::failure(
-              ErrorCode::ResourceExhausted, "axis multiplier overflows"));
-        n *= axis.multiplier;
-        if (n > UINT64_MAX - axis.offset)
-          return Result<OperationMetadata>(Status::failure(
-              ErrorCode::ResourceExhausted, "axis offset overflows"));
-        shape.push_back(n + axis.offset);
-      }
-      break;
-    default:
-      return Result<OperationMetadata>(invalid("unknown shape rule"));
-  }
-  if (shape.empty() || shape.size() > 8 ||
-      std::any_of(shape.begin(), shape.end(), [](auto n) { return n == 0; }))
-    return mismatch("output requires nonzero rank-1..8 shape");
-  if (result.atomic_trailing_axes > shape.size())
-    return mismatch("tuple grouping exceeds output rank");
-  if (t.outputs[0].shape_rule == OperationShapeRule::Axes ||
-      (t.outputs[0].requires_dense_output &&
-       (t.outputs[0].shape_rule == OperationShapeRule::Fixed ||
-        t.outputs[0].region_rule == OperationRegionRule::Whole))) {
-    auto dense = input_internal::dense_metadata(result.descriptor);
-    if (!dense.ok())
-      return Result<OperationMetadata>(dense.status());
-  }
-  switch (t.outputs[0].output_semantic_rule) {
-    case OperationSemanticRule::Drop:
-      break;
-    case OperationSemanticRule::PreserveInput:
-      if (t.outputs[0].output_semantic_input >= inputs.size())
-        return mismatch("semantic input is absent");
-      result.facets = inputs[t.outputs[0].output_semantic_input].facets;
-      break;
-    case OperationSemanticRule::Establish:
-      result.facets = t.outputs[0].output_facets;
-      break;
-    case OperationSemanticRule::Parameter: {
-      const auto* value = parameter<std::string>(
-          parameters, t.outputs[0].output_semantic_parameter);
-      if (!value)
-        return Result<OperationMetadata>(invalid("missing semantic parameter"));
-      auto semantic = semantic_from_parameter(*value);
-      if (!semantic.ok())
-        return Result<OperationMetadata>(semantic.status());
-      auto facet = encode_semantic(semantic.value());
-      if (!facet.ok())
-        return Result<OperationMetadata>(facet.status());
-      result.facets.push_back(facet.take_value());
-      break;
-    }
-    case OperationSemanticRule::ExtractChannel:
-    case OperationSemanticRule::SwizzleChannels:
-    case OperationSemanticRule::MergeChannelsParameter:
-    case OperationSemanticRule::AssociateAlpha:
-    case OperationSemanticRule::UnassociateAlpha:
-    case OperationSemanticRule::RgbToXyz:
-    case OperationSemanticRule::XyzToRgb:
-    case OperationSemanticRule::XyzToLab:
-    case OperationSemanticRule::LabToXyz:
-    case OperationSemanticRule::SampleExpression:
-    case OperationSemanticRule::YCbCrPlane:
-    case OperationSemanticRule::ApplyLut1d: {
-      auto transformed = contract_internal::infer_transformed_facets(
-          t, inputs, parameters, result.descriptor);
-      if (!transformed.ok())
-        return Result<OperationMetadata>(transformed.status());
-      result.facets = transformed.take_value();
-      break;
-    }
-    default:
-      return Result<OperationMetadata>(invalid("unknown output semantic rule"));
-  }
-  auto status = input_internal::validate_port_metadata(
-      t.outputs[0].output_schema, result);
-  if (!status.ok())
-    return Result<OperationMetadata>(status);
-  for (const auto& facet : result.facets)
-    if (facet.key == "photospider.image" ||
-        facet.key == "photospider.semantic") {
-      auto semantic = decode_semantic(facet);
-      if (!semantic.ok())
-        return Result<OperationMetadata>(semantic.status());
-      status =
-          validate_semantic_descriptor(semantic.value(), result.descriptor);
-      if (!status.ok())
-        return Result<OperationMetadata>(status);
-    }
-  if (result.atomic_trailing_axes &&
-      std::any_of(
-          result.facets.begin(), result.facets.end(),
-          [](const auto& facet) { return facet.key == "photospider.image"; }))
-    return mismatch(
-        "explicit tuple grouping cannot override image observations");
-  if (t.outputs[0].static_dependency_pieces) {
-    auto all = Footprint::all(result.descriptor.shape);
-    if (!all.ok())
-      return Result<OperationMetadata>(all.status());
-    auto observations = operation_observations(result, all.value());
-    if (!observations.ok())
-      return Result<OperationMetadata>(observations.status());
-    std::vector<std::vector<std::uint64_t>> shapes;
-    for (const auto& input : inputs)
-      shapes.push_back(input.descriptor.shape);
-    auto certificate = DependencyCertificate::create_mapped(
-        "static-metadata", observations.value(), shapes,
-        *t.outputs[0].static_dependency_pieces);
-    if (!certificate.ok())
-      return Result<OperationMetadata>(certificate.status());
-  }
-  return Result<OperationMetadata>(std::move(result));
+  return Result<OperationMetadata>(invalid("missing Result output schema"));
 }
 Result<std::vector<OperationMetadata>> infer_operation_outputs(
     const OperationTraits& traits, const std::vector<OperationMetadata>& inputs,
@@ -419,6 +228,12 @@ Status validate_operation_contract(const OperationTraits& t) {
   if (t.outputs.size() != 1)
     return invalid("select one output contract");
   const auto& selected = t.outputs[0];
+  if (selected.dependency_version != 2 || !selected.result_schema ||
+      std::any_of(t.input_schema.begin(), t.input_schema.end(),
+                  [](const auto& input) {
+                    return input.kind != OperationPortKind::Result;
+                  }))
+    return invalid("Result programs require Result input and output schemas");
   if (selected.data_movement != DataMovementKind::None &&
       selected.data_movement != DataMovementKind::BitwiseMapped)
     return invalid("unknown data movement kind");
@@ -427,20 +242,22 @@ Status validate_operation_contract(const OperationTraits& t) {
           DataMovementViewPolicy::RequireView &&
       selected.data_movement_view_policy != DataMovementViewPolicy::Materialize)
     return invalid("unknown data movement view policy");
-  if (selected.data_movement != DataMovementKind::None ||
-      selected.data_movement_view_policy != DataMovementViewPolicy::Auto)
-    return invalid("image data movement belongs to Result continuations");
+  if ((selected.data_movement != DataMovementKind::None ||
+       selected.data_movement_view_policy != DataMovementViewPolicy::Auto) &&
+      (selected.dependency_version != 2 || !selected.result_schema ||
+       selected.data_movement != DataMovementKind::BitwiseMapped))
+    return invalid("bitwise movement requires a mapped Result continuation");
   const bool staged_atomic =
       selected.region_rule == OperationRegionRule::Dependency &&
-      selected.dependency_version == 1;
-  const bool whole =
-      selected.region_rule == OperationRegionRule::Whole &&
-      (selected.dependency_version == 0 || selected.dependency_version == 2);
+      selected.dependency_version == 2;
+  const bool whole = selected.region_rule == OperationRegionRule::Whole &&
+                     selected.dependency_version == 2;
   if (t.cpu_staged_tiles &&
       (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
        selected.dependency_version != 2 ||
-       selected.region_rule != OperationRegionRule::Whole))
-    return invalid("CPU stages require a CPU-only Whole Result continuation");
+       (selected.region_rule != OperationRegionRule::Whole &&
+        selected.region_rule != OperationRegionRule::Dependency)))
+    return invalid("CPU stages require a CPU-only Result continuation");
   if ((selected.regional_atomic || selected.preserve_output_views) &&
       (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
        selected.observation_kind != ObservationKind::Atomic ||
@@ -464,10 +281,14 @@ Status validate_operation_contract(const OperationTraits& t) {
     return invalid(
         "explicit output payload bound requires a CPU Whole or staged view");
 
-  if (t.outputs[0].dependency_version &&
+  const bool whole_result =
+      selected.dependency_version == 2 && whole && !t.joint_contract &&
+      selected.observation_kind == ObservationKind::Atomic &&
+      selected.failure_delivery == FailureDelivery::RequestFailureOnly;
+  if (selected.dependency_version && !whole_result &&
       (!t.deterministic || !t.side_effect_free))
     return invalid(
-        "staged programs require deterministic side-effect-free behavior");
+        "regional programs require deterministic side-effect-free behavior");
   if ((t.outputs[0].observation_kind != ObservationKind::Atomic &&
        t.outputs[0].observation_kind != ObservationKind::RequestRecord) ||
       (t.outputs[0].failure_delivery != FailureDelivery::RequestFailureOnly &&
@@ -501,10 +322,13 @@ Status validate_operation_contract(const OperationTraits& t) {
   if (output.result_schema &&
       (output.dependency_version != 2 ||
        !output.result_schema->validate().ok() ||
-       std::string_view(output.result_schema->id) !=
-           std::string_view(output.output_schema.result_schema_id) ||
-       output.result_schema->version !=
-           output.output_schema.result_schema_version ||
+       (output.output_schema.result_schema_id.empty()
+            ? (!t.requires_metadata_specialization ||
+               !tensor_member_predicate(output.output_schema))
+            : (std::string_view(output.result_schema->id) !=
+                   std::string_view(output.output_schema.result_schema_id) ||
+               output.result_schema->version !=
+                   output.output_schema.result_schema_version)) ||
        output.shape_rule != OperationShapeRule::Scalar ||
        output.output_dtype_rule != OperationDtypeRule::Declared ||
        output.output_semantic_rule != OperationSemanticRule::Drop ||

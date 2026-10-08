@@ -15,13 +15,13 @@
 #include <xmmintrin.h>
 #endif
 
+#include "../support/transfer_result_fixture.hpp"
 #include "fixtures/fmt09_sweep.hpp"
-#include "support/fmt_handoff.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
-using ps::handoff_testing::require;
-using ps::handoff_testing::take;
+using transfer_fixture::require;
+using transfer_fixture::take;
 using Params = std::map<std::string, ParameterValue>;
 std::shared_ptr<OperationRegistry> registry() {
   static auto result = make_default_operation_registry();
@@ -70,30 +70,41 @@ Value make_value(ElementType type, std::vector<std::uint64_t> shape,
   return take(Value::create({type, shape}, Region::whole(shape), layout, bytes,
                             facets));
 }
-Result<ExecutionResult> run(const Value& source, Params params, bool encode,
+Result<ExecutionResult> run(const ResultRef& source, Params params, bool encode,
                             std::optional<Region> roi = {},
-                            const std::string& suffix = "_strict") {
-  WorkflowDocument doc;
-  doc.inputs = {{1, "input", source.descriptor(), source.region(),
-                 source.layout(), source.facets()}};
-  doc.nodes = {
-      {1, key(encode, suffix), {WorkflowInputReference{1}}, std::move(params)}};
-  doc.outputs = {{"result", 1, "values"}};
+                            const std::string& suffix = "_strict",
+                            std::uint64_t tile_extent = 128) {
+  auto doc = transfer_fixture::document(source, key(encode, suffix), params);
   PlanningOptions options;
-  if (roi) {
+  options.tile_height = options.tile_width = tile_extent;
+  if (roi)
     options.output_regions = {{"result", *roi}};
-  }
-  Compiler compiler(registry());
   GraphContext graph(doc);
-  auto plan = compiler.compile(graph, options);
-  if (!plan.ok()) {
+  auto plan = Compiler(registry()).compile(graph, options, source.resources());
+  if (!plan.ok())
     return Result<ExecutionResult>(plan.status());
-  }
   ExecutionOptions execute;
   execute.dependencies.maximum_work = UINT64_MAX;
   execute.maximum_dependency_work = UINT64_MAX;
-  return executor().execute(plan.value().plan, {{{"input", source}}}, {},
-                            execute);
+  return executor().execute(plan.value().plan,
+                            transfer_fixture::bindings(source), {}, execute);
+}
+Result<ExecutionResult> run(const Value& backing, Params params, bool encode,
+                            std::optional<Region> roi = {},
+                            const std::string& suffix = "_strict") {
+  auto source = channel_fixture::publish(take(executor().resource_budget()),
+                                         transfer_fixture::source(backing));
+  return run(source, std::move(params), encode, roi, suffix);
+}
+std::uint64_t read_bits(const ResultRef& result,
+                        const std::vector<std::uint64_t>& at) {
+  std::vector<RegionDimension> dims;
+  for (auto x : at)
+    dims.push_back({x, 1});
+  const auto bytes = channel_fixture::read(result, Region(dims));
+  std::uint64_t bits = 0;
+  std::memcpy(&bits, bytes.data(), bytes.size());
+  return bits;
 }
 std::uint64_t read_bits(const Value& value,
                         const std::vector<std::uint64_t>& at) {
@@ -103,7 +114,8 @@ std::uint64_t read_bits(const Value& value,
               Value::element_size(value.descriptor().element_type));
   return bits;
 }
-double read_double(const Value& value, const std::vector<std::uint64_t>& at) {
+template <class T>
+double read_double(const T& value, const std::vector<std::uint64_t>& at) {
   auto b = read_bits(value, at);
   double d;
   std::memcpy(&d, &b, 8);
@@ -202,7 +214,11 @@ void workflow_golden() {
        {std::string("_strict"), std::string("_accelerated_x86_64"),
         std::string("_accelerated_apple_silicon")}) {
     auto available = registry()->prepare_operation(
-        key(false, suffix), {{{ElementType::Float64, {1}}, {}}}, raw("linear"));
+        key(false, suffix),
+        {transfer_fixture::metadata(channel_fixture::publish(
+            take(executor().resource_budget()),
+            channel_fixture::source({ElementType::Float64, {1}})))},
+        raw("linear"));
     if (!available.ok() &&
         available.status().code == ErrorCode::BackendUnavailable) {
       continue;
@@ -245,7 +261,7 @@ void workflow_golden() {
                          {end - start}, bytes),
               p, t.encode, {}, suffix));
       for (std::size_t i = start; i < end; ++i) {
-        const auto got = read_bits(result.values.at("result"), {i - start}),
+        const auto got = read_bits(result.results.at("result"), {i - start}),
                    expected = cases[i].expected;
         if (suffix == "_strict" || got == expected) {
           require(got == expected, "strict workflow independent golden");
@@ -277,11 +293,12 @@ void semantics() {
   Params encode = {{"group", std::string("color")},
                    {"curve", std::string("srgb")}};
   auto result = take(run(source, encode, true));
-  const auto& out = result.values.at("result");
+  const auto& out = result.results.at("result");
   require(read_double(out, {0, 0, 0}) > 0.4,
           "hidden straight color still encoded");
   require(read_bits(out, {0, 0, 3}) == 0, "alpha copied");
-  auto metadata = take(decode_tensor_description(out.facets()[0]));
+  auto metadata =
+      take(decode_tensor_description(transfer_fixture::spec(out).facets[0]));
   require(metadata.groups[0].interpretation.transfer == "srgb",
           "encoded transfer metadata");
   require(metadata.groups[0].interpretation.primaries == "display-p3" &&
@@ -290,7 +307,8 @@ void semantics() {
           "basis preserved");
   auto decoded = take(run(out, {{"group", std::string("color")}}, false));
   require(
-      take(decode_tensor_description(decoded.values.at("result").facets()[0]))
+      take(decode_tensor_description(
+               transfer_fixture::spec(decoded.results.at("result")).facets[0]))
               .groups[0]
               .interpretation.transfer == "linear",
       "source transfer resolution");
@@ -335,8 +353,9 @@ void semantics() {
   require(run(source, wrong, true).ok(), "explicit metadata override");
   wrong = raw("srgb");
   auto raw_result = take(run(source, wrong, true));
-  require(raw_result.values.at("result").facets()[0].payload ==
-              source.facets()[0].payload,
+  require(transfer_fixture::spec(raw_result.results.at("result"))
+                  .facets[0]
+                  .payload == source.facets()[0].payload,
           "raw metadata bytes retained unverified");
   auto y = make_value(ElementType::Float64, {3}, pack<double>({0., 0.18, 1.}),
                       gray());
@@ -355,10 +374,10 @@ void semantics() {
   y = make_value(ElementType::Float64, {1}, pack<double>({1.}),
                  gray("hlg_oetf"));
   auto high = take(run(y, {{"group", std::string("Y")}}, false));
-  require(read_double(high.values.at("result"), {0}) > 1.,
+  require(read_double(high.results.at("result"), {0}) > 1.,
           "HLG endpoint is not normalized");
   require(
-      !run(high.values.at("result"),
+      !run(high.results.at("result"),
            {{"group", std::string("Y")}, {"curve", std::string("hlg_oetf")}},
            true)
            .ok(),
@@ -366,7 +385,7 @@ void semantics() {
   y = make_value(ElementType::Float32, {1}, pack<float>({1.f}),
                  gray("hlg_oetf"));
   high = take(run(y, {{"group", std::string("Y")}}, false));
-  require(read_bits(high.values.at("result"), {0}) == 0x3f800000,
+  require(read_bits(high.results.at("result"), {0}) == 0x3f800000,
           "HLG Float32 endpoint rounding");
 }
 void selection_and_layout() {
@@ -385,11 +404,11 @@ void selection_and_layout() {
   auto source = make_value(ElementType::Float64, {2, 4}, pack(words), desc);
   Params decode = {{"group", std::string("color")}};
   auto red = take(run(source, decode, false, Region({{0, 2}, {0, 1}})));
-  require(read_double(red.values.at("result"), {0, 0}) > 90,
+  require(read_double(red.results.at("result"), {0, 0}) > 90,
           "R-only ignores invalid G");
   auto alpha = take(run(source, decode, false, Region({{0, 2}, {3, 1}})));
-  require(read_bits(alpha.values.at("result"), {0, 3}) == nz &&
-              read_bits(alpha.values.at("result"), {1, 3}) == snan,
+  require(read_bits(alpha.results.at("result"), {0, 3}) == nz &&
+              read_bits(alpha.results.at("result"), {1, 3}) == snan,
           "alpha exact bits no validation");
   require(!run(source, decode, false).ok(),
           "requested nonfinite G fails semantic");
@@ -398,8 +417,8 @@ void selection_and_layout() {
   p["components"] = std::string("0");
   p["axis"] = std::int64_t{1};
   auto r = take(run(source, p, false));
-  require(read_double(r.values.at("result"), {0, 0}) == 0.25 &&
-              read_bits(r.values.at("result"), {0, 1}) == snan,
+  require(read_double(r.results.at("result"), {0, 0}) == 0.25 &&
+              read_bits(r.results.at("result"), {0, 1}) == snan,
           "raw selective transform/copy");
   for (const auto& bad : {"", "0,0", "-1", "04", "0,", "0,4", "0, 1"}) {
     p["components"] = std::string(bad);
@@ -413,7 +432,7 @@ void selection_and_layout() {
     }
     p["layout"] = std::string("view");
     r = take(run(source, p, false));
-    require(read_bits(r.values.at("result"), {0, 1}) == snan,
+    require(read_bits(r.results.at("result"), {0, 1}) == snan,
             "identity preserves sNaN payload");
   }
   for (unsigned rank = 1; rank <= 8; ++rank) {
@@ -431,7 +450,7 @@ void selection_and_layout() {
       for (unsigned i = 0; i < 4; ++i) {
         at[axis] = i;
         const double expected = i == 0 ? .25 : i == 1 ? .25 : i == 2 ? .75 : 1.;
-        require(read_double(r.values.at("result"), at) == expected,
+        require(read_double(r.results.at("result"), at) == expected,
                 "rank/axis selection");
       }
     }
@@ -447,51 +466,23 @@ void selection_and_layout() {
     auto v = make_value(ElementType::Float64, {3}, bytes, {}, layout);
     p = raw("power_gamma");
     p["gamma"] = 2.;
-    // Workflow external bindings are intentionally whole-dense. Exercise
-    // arbitrary physical layouts through the dependency/fragments protocol.
-    DependencyRequest request;
-    request.inputs = {{v.descriptor(), v.facets()}};
-    request.outputs = take(Footprint::all({3}));
-    request.parameters = p;
-    request.snapshot_identity = "fmt09-strided";
-    request.limits.maximum_work = UINT64_MAX;
-    auto session = take(registry()->start_dependency(key(false), request));
-    take(session->poll());
-    take(
-        session->supply({take(ValueFragments::create(v.descriptor(), v.facets(),
-                                                     request.outputs, {v}))},
-                        request.snapshot_identity));
-    auto final = take(session->poll());
-    const auto& observed = std::get<DependencyResult>(final).value;
+    const auto result = take(run(v, p, false));
+    const auto& observed = result.results.at("result");
     for (unsigned i = 0; i < 3; ++i) {
       double got = 0;
-      take(observed.read({i}, &got, sizeof got));
+      got = read_double(observed, {i});
       const double q = read_double(v, {i});
       require(got == q * q, "strided arithmetic");
     }
   }
 }
-Result<ExecutionResult> planar_run(const PlanarImage& image, Params params,
-                                   bool encode, const Region& roi,
+Result<ExecutionResult> planar_run(const channel_fixture::Source& image,
+                                   Params params, bool encode,
+                                   const Region& roi,
                                    const std::string& suffix = "_strict") {
-  auto doc = ps::handoff_testing::probe_document(image);
-  doc.nodes[0].operation = key(encode, suffix);
-  doc.nodes[0].parameters = std::move(params);
-  PlanningOptions options;
-  options.output_regions = {{"result", roi}};
-  options.tile_width = options.tile_height = image.config().tile_width;
-  Compiler compiler(registry());
-  GraphContext graph(doc);
-  auto plan = compiler.compile(graph, options);
-  if (!plan.ok()) {
-    return Result<ExecutionResult>(plan.status());
-  }
-  ExecutionOptions execute;
-  execute.dependencies.maximum_work = UINT64_MAX;
-  execute.maximum_dependency_work = UINT64_MAX;
-  return executor().execute(plan.value().plan,
-                            ps::handoff_testing::probe_bindings(image), {},
-                            execute);
+  auto source = channel_fixture::publish(take(executor().resource_budget()),
+                                         transfer_fixture::source(image, roi));
+  return run(source, std::move(params), encode, roi, suffix, image.tile_width);
 }
 void planar_cases() {
   for (auto type : {ElementType::Float32, ElementType::Float64}) {
@@ -503,18 +494,20 @@ void planar_cases() {
       PlanarImageConfig config;
       config.order = ImagePlaneOrder::Tiled;
       config.tile_width = config.tile_height = tile;
-      auto image = take(PlanarImage::create(
+      auto image = take(transfer_fixture::spatial_source(
           vd, config, {take(encode_tensor_description(desc))}));
       Region roi({{tile - 1, 3}, {tile - 1, 3}, {0, 1}});
       auto bytes = type == ElementType::Float32
                        ? pack<float>(std::vector<float>(9, .5f))
                        : pack<double>(std::vector<double>(9, .5));
-      take(image.publish(roi, bytes.data(),
-                         bytes.size()));  // No G/B/alpha pages exist.
+      take(transfer_fixture::publish(
+          image, roi, bytes.data(),
+          bytes.size()));  // No G/B/alpha pages exist.
       auto r = take(
           planar_run(image, {{"group", std::string("color")}}, false, roi));
       std::vector<std::uint8_t> observed(9 * width);
-      take(r.images.at("result").read(roi, observed.data(), observed.size()));
+      take(transfer_fixture::read(r.results.at("result"), roi, observed.data(),
+                                  observed.size()));
       for (unsigned i = 1; i < 9; ++i) {
         require(std::memcmp(observed.data(), observed.data() + i * width,
                             width) == 0,
@@ -525,18 +518,19 @@ void planar_cases() {
         evaluated += t.numeric.evaluated_values;
       }
       require(evaluated == 9, "planar diagnostics count requested R only");
-      require(
-          !r.images.at("result")
-               .read(Region({{0, 1}, {0, 1}, {1, 1}}), observed.data(), width)
-               .ok(),
-          "no accidental peer publication");
+      require(!transfer_fixture::read(r.results.at("result"),
+                                      Region({{0, 1}, {0, 1}, {1, 1}}),
+                                      observed.data(), width)
+                   .ok(),
+              "no accidental peer publication");
       // Alpha-only input with no color backing must not require peer windows.
       Region alpha({{tile - 1, 3}, {tile - 1, 3}, {3, 1}});
       std::fill(bytes.begin(), bytes.end(), 0xff);
-      take(image.publish(alpha, bytes.data(), bytes.size()));
+      take(transfer_fixture::publish(image, alpha, bytes.data(), bytes.size()));
       r = take(
           planar_run(image, {{"group", std::string("color")}}, false, alpha));
-      take(r.images.at("result").read(alpha, observed.data(), observed.size()));
+      take(transfer_fixture::read(r.results.at("result"), alpha,
+                                  observed.data(), observed.size()));
       require(bytes == observed, "planar alpha NaN payload copy");
       evaluated = 0;
       for (const auto& t : r.diagnostics.operation_timings) {
@@ -562,7 +556,7 @@ void span_failure_locations() {
         const ValueDescriptor descriptor{
             narrow ? ElementType::Float32 : ElementType::Float64,
             {1, 1030}};
-        auto image = take(PlanarImage::create(
+        auto image = take(transfer_fixture::spatial_source(
             descriptor, config, {take(encode_tensor_description(metadata))}));
         auto bytes = narrow ? pack<float>(std::vector<float>(1030, .5f))
                             : pack<double>(std::vector<double>(1030, .5));
@@ -571,7 +565,8 @@ void span_failure_locations() {
         const auto width = narrow ? 4U : 8U;
         std::memcpy(bytes.data() + bad * width, &bits, width);
         const auto whole = Region::whole(descriptor.shape);
-        take(image.publish(whole, bytes.data(), bytes.size()));
+        take(transfer_fixture::publish(image, whole, bytes.data(),
+                                       bytes.size()));
         auto result =
             planar_run(image, {{"group", std::string("Y")}}, false, whole);
         require(
@@ -604,7 +599,7 @@ void gamma2_semantic_overflow() {
     const auto infinity =
         narrow ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
     for (unsigned i = 0; i < 8; ++i) {
-      require(read_bits(raw_result.values.at("result"), {i}) == infinity,
+      require(read_bits(raw_result.results.at("result"), {i}) == infinity,
               "raw gamma2 overflow must be infinity");
     }
   }
@@ -637,7 +632,7 @@ void special_values() {
           std::memcpy(bytes.data() + i * width, &words[i], width);
         }
         const auto out = take(run(make_value(type, {4}, bytes), p, encode))
-                             .values.at("result");
+                             .results.at("result");
         for (unsigned i = 0; i < 2; ++i) {
           require(read_bits(out, {i}) == (words[i] | (kind ? quiet : 0)),
                   "raw NaN propagation precedes cap branches");
@@ -683,7 +678,7 @@ void special_values() {
           if (kind == 8) {
             std::vector<std::uint8_t> zero(width, 0);
             auto floor = take(run(make_value(type, {1}, zero), p, true))
-                             .values.at("result");
+                             .results.at("result");
             require(negative == read_bits(floor, {0}),
                     "ACEScc inactive log cannot break negative infinity floor");
           } else {
@@ -722,13 +717,14 @@ void planar_axis_and_pitch() {
     config.height_axis = height;
     config.width_axis = width_axis;
     config.row_pitch_bytes = 64;
-    auto image = take(PlanarImage::create(descriptor, config));
+    auto image = take(transfer_fixture::spatial_source(descriptor, config));
     std::vector<double> values(60);
     for (unsigned i = 0; i < 60; ++i) {
       values[i] = (i % 7 + 1) / 8.;
     }
     auto bytes = pack(values);
-    take(image.publish(Region::whole(shape), bytes.data(), bytes.size()));
+    take(transfer_fixture::publish(image, Region::whole(shape), bytes.data(),
+                                   bytes.size()));
     for (unsigned selected_axis = 0; selected_axis < 3; ++selected_axis) {
       Params p = raw("power_gamma");
       p["gamma"] = 2.;
@@ -736,8 +732,8 @@ void planar_axis_and_pitch() {
       p["components"] = std::string("1");
       auto result = take(planar_run(image, p, false, Region::whole(shape)));
       std::vector<double> observed(60);
-      take(result.images.at("result").read(
-          Region::whole(shape),
+      take(transfer_fixture::read(
+          result.results.at("result"), Region::whole(shape),
           reinterpret_cast<std::uint8_t*>(observed.data()), 480));
       for (unsigned i = 0; i < 60; ++i) {
         unsigned rem = i;
@@ -754,154 +750,176 @@ void planar_axis_and_pitch() {
     auto result =
         take(planar_run(image, raw("linear"), false, Region::whole(shape)));
     std::vector<std::uint8_t> copied(bytes.size());
-    take(result.images.at("result").read(Region::whole(shape), copied.data(),
-                                         copied.size()));
+    take(transfer_fixture::read(result.results.at("result"),
+                                Region::whole(shape), copied.data(),
+                                copied.size()));
     require(copied == bytes, "planar raw identity movement");
+  }
+}
+Result<DemandResult> instrumented(
+    const Value& backing, const Params& parameters, bool encode,
+    const Footprint& output, std::shared_ptr<transfer_fixture::Hooks> hooks,
+    CancellationToken cancellation = {}) {
+  auto local = transfer_fixture::registry(key(encode), hooks);
+  ExecutionContext context(local);
+  auto source = channel_fixture::publish(take(context.resource_budget()),
+                                         transfer_fixture::source(backing));
+  GraphContext graph(
+      transfer_fixture::document(source, key(encode), parameters));
+  auto compiled = Compiler(local).compile(graph);
+  if (!compiled.ok())
+    return Result<DemandResult>(compiled.status());
+  auto frozen = take(context.freeze(compiled.value().plan,
+                                    transfer_fixture::bindings(source)));
+  ExecutionOptions options;
+  options.dependencies.maximum_work = options.maximum_dependency_work =
+      UINT64_MAX;
+  return context.execute_fragments(frozen, {{"result", output}}, cancellation,
+                                   options);
+}
+void semantic_need_roles() {
+  const auto nan = std::numeric_limits<double>::quiet_NaN();
+  auto source = make_value(ElementType::Float64, {1, 4},
+                           pack<double>({.5, nan, .75, nan}), rgb(1));
+  for (unsigned channel : {3U, 0U, 1U}) {
+    auto hooks = std::make_shared<transfer_fixture::Hooks>();
+    unsigned roles = 0;
+    hooks->need = [&](const ResultProgramNeed& need) {
+      require(need.tensors.size() == 1, "one source capability");
+      roles = need.tensors[0].roles;
+    };
+    const auto query =
+        take(Footprint::from_regions({1, 4}, {Region({{0, 1}, {channel, 1}})}));
+    auto result = instrumented(
+        source,
+        {{"group", std::string("color")}, {"curve", std::string("linear")}},
+        false, query, hooks);
+    require(roles == (channel == 3 ? 9U : 13U),
+            "bypass Need must not add Validation");
+    if (channel == 1)
+      require(!result.ok() &&
+                  result.status().reason == FailureReason::InvalidDomain,
+              "selected identity still validates");
+    else
+      take(std::move(result));
   }
 }
 void planar_numeric_reporting() {
   for (unsigned mode = 0; mode < 2; ++mode) {
-    auto local = std::make_shared<OperationRegistry>();
-    auto probe = std::make_shared<ps::handoff_testing::Probe>();
-    auto op = ps::handoff_testing::probe_operation(probe);
-    const auto callback = op.planar_callback;
-    op.planar_callback = [callback,
-                          mode](const PlanarOperationInvocation& call) {
+    auto hooks = std::make_shared<transfer_fixture::Hooks>();
+    hooks->before = [mode](const ResultProgramPhase& phase) {
       NumericDiagnostics report;
       report.profile = CpuNumericProfile::Strict;
       report.implementation[0] = 'T';
       report.evaluated_values = 3;
-      take(call.report_numeric(report));
-      if (mode) {
-        report.profile =
-            CpuNumericProfile::Unspecified;  // malformed, deliberately ignored
-                                             // by plugin
-      }
-      static_cast<void>(call.report_numeric(report));
-      return callback(call);
+      take(phase.report_numeric(report));
+      if (mode)
+        report.profile = CpuNumericProfile::Unspecified;
+      static_cast<void>(phase.report_numeric(report));
     };
-    take(local->register_operation(std::move(op)));
-    take(local->freeze());
-    auto image = ps::handoff_testing::probe_image();
-    GraphContext graph(ps::handoff_testing::probe_document(image));
-    auto compiled = take(Compiler(local).compile(graph));
-    ExecutionContext context(local);
-    auto result = context.execute(compiled.plan,
-                                  ps::handoff_testing::probe_bindings(image));
+    hooks->report = [](const NumericDiagnostics&, const ResultProgramPhase&) {
+      return Status::success();
+    };
+    auto source =
+        make_value(ElementType::Float64, {4}, pack<double>({1, 2, 3, 4}));
+    auto result = instrumented(source, raw("linear"), false,
+                               take(Footprint::all({4})), hooks);
     if (mode) {
       require(
           !result.ok() && result.status().code == ErrorCode::InvalidArgument,
-          "malformed planar numeric report must remain sticky");
+          "ignored malformed Result numeric report remains sticky");
     } else {
       auto r = take(std::move(result));
       std::uint64_t count = 0;
-      for (const auto& t : r.diagnostics.operation_timings) {
+      for (const auto& t : r.diagnostics.operation_timings)
         count += t.numeric.evaluated_values;
-      }
-      require(count == 6, "multiple planar reports merge once");
+      require(count == 6, "multiple Result numeric reports merge once");
     }
   }
 }
-
 void direct_protocol() {
   auto source =
-      make_value(ElementType::Float64, {4}, pack<double>({0.2, 0.3, 0.4, 0.5}));
-  DependencyRequest request;
-  request.inputs = {{source.descriptor(), source.facets()}};
-  request.outputs =
-      take(Footprint::from_regions({4}, {Region({{0, 1}}), Region({{3, 1}})}));
-  request.parameters = raw("srgb");
-  request.snapshot_identity = "fmt09-direct";
-  request.limits.maximum_work = UINT64_MAX;
-  auto session = take(registry()->start_dependency(key(true), request));
-  take(session->poll());
-  auto fragments = take(ValueFragments::create(
-      source.descriptor(), source.facets(), request.outputs,
-      {take(source.view(Region({{0, 1}}))),
-       take(source.view(Region({{3, 1}})))}));
-  take(session->supply({fragments}, request.snapshot_identity));
+      make_value(ElementType::Float64, {4}, pack<double>({.2, .3, .4, .5}));
+  auto hooks = std::make_shared<transfer_fixture::Hooks>();
   fenv_t saved;
-  fegetenv(&saved);
-  fesetround(FE_DOWNWARD);
-  feclearexcept(FE_ALL_EXCEPT);
-  feraiseexcept(FE_INVALID);
+  int before = 0, after = 0, round = 0;
 #if defined(__x86_64__)
-  const auto csr = _mm_getcsr();
-  _mm_setcsr(csr | 0x8040U);
-  const auto setcsr = _mm_getcsr();
+  unsigned csr = 0, selected = 0, restored = 0;
 #endif
-  const auto before = fetestexcept(FE_ALL_EXCEPT);
-  auto final = session->poll();
-  const auto after = fetestexcept(FE_ALL_EXCEPT), round = fegetround();
+  hooks->before = [&](const ResultProgramPhase&) {
+    fegetenv(&saved);
+    fesetround(FE_DOWNWARD);
+    feclearexcept(FE_ALL_EXCEPT);
+    feraiseexcept(FE_INVALID);
 #if defined(__x86_64__)
-  const auto restored = _mm_getcsr();
-  _mm_setcsr(csr);
+    csr = _mm_getcsr();
+    _mm_setcsr(csr | 0x8040U);
+    selected = _mm_getcsr();
 #endif
-  fesetenv(&saved);
-  take(std::move(final));
-  require(before == after && round == FE_DOWNWARD, "caller fenv restored");
-#if defined(__x86_64__)
-  require(setcsr == restored, "caller FTZ/DAZ restored");
-#endif
-  require(session->numeric_diagnostics().evaluated_values == 2,
-          "disjoint request evaluates exactly two samples");
-  // Empty still validates static parameters, without sample acquisition.
-  request.outputs = take(Footprint::from_regions({4}, {}));
-  session = take(registry()->start_dependency(key(true), request));
-  auto empty = take(session->poll());
-  require(std::holds_alternative<DependencyResult>(empty),
-          "empty is immediate");
-  request.parameters["gamma"] = 2.;
-  require(!registry()->start_dependency(key(true), request).ok(),
-          "empty static validation");
-  request.parameters.erase("gamma");
-  // Cancellation during MP refinement is observed inside charged operations.
-  request.outputs = take(Footprint::all({4}));
-  request.parameters = raw("pq");
-  CancellationSource cancelled;
-  request.cancellation = cancelled.token();
-  std::uint64_t work = 0;
-  auto charge = [&](std::uint64_t n) {
-    work += n;
-    if (work > 2000) {
-      cancelled.cancel();
-    }
-    return Status::success();
+    before = fetestexcept(FE_ALL_EXCEPT);
   };
-  session = take(registry()->start_dependency(key(false), request,
-                                              BufferAllocator{}, charge));
-  auto first = session->poll();
-  if (first.ok()) {
-    take(session->supply(
-        {take(ValueFragments::create(source.descriptor(), source.facets(),
-                                     request.outputs, {source}))},
-        request.snapshot_identity));
-    auto interrupted = session->poll();
-    require(
-        !interrupted.ok() && interrupted.status().code == ErrorCode::Cancelled,
-        "mid-refinement cancellation");
-  } else {
-    require(first.status().code == ErrorCode::Cancelled, "early cancellation");
-  }
-  request.cancellation = {};
-  request.limits.maximum_work = 100;
-  auto limited = registry()->start_dependency(key(false), request);
-  if (limited.ok()) {
-    auto s = limited.value()->poll();
-    if (s.ok()) {
-      auto supplied = limited.value()->supply(
-          {take(ValueFragments::create(source.descriptor(), source.facets(),
-                                       request.outputs, {source}))},
-          request.snapshot_identity);
-      if (supplied.ok()) {
-        require(!limited.value()->poll().ok(),
-                "fuel exhaustion not numerical fallback");
-      }
-    }
-  } else {
-    require(limited.status().code == ErrorCode::ResourceExhausted,
-            "fuel failure code");
-  }
+  hooks->after = [&](const ResultProgramPhase&) {
+    after = fetestexcept(FE_ALL_EXCEPT);
+    round = fegetround();
+#if defined(__x86_64__)
+    restored = _mm_getcsr();
+    _mm_setcsr(csr);
+#endif
+    fesetenv(&saved);
+  };
+  auto query =
+      take(Footprint::from_regions({4}, {Region({{0, 1}}), Region({{3, 1}})}));
+  auto result = take(instrumented(source, raw("srgb"), true, query, hooks));
+  require(before == after && round == FE_DOWNWARD,
+          "evaluating worker fenv restored");
+#if defined(__x86_64__)
+  require(selected == restored, "evaluating worker FTZ/DAZ restored");
+#endif
+  std::uint64_t evaluated = 0;
+  for (const auto& timing : result.diagnostics.operation_timings)
+    evaluated += timing.numeric.evaluated_values;
+  require(evaluated == 2, "disjoint request evaluates two samples");
+  unsigned windows = 0;
+  hooks = std::make_shared<transfer_fixture::Hooks>();
+  hooks->before = [&](const ResultProgramPhase&) { ++windows; };
+  auto empty = take(instrumented(source, raw("srgb"), true,
+                                 take(Footprint::none({4})), hooks));
+  require(take(empty.results.at("result").descriptor())
+                  .tensor_coverage(0)
+                  .empty() &&
+              !windows,
+          "Empty has no payload phase");
+  auto invalid = raw("srgb");
+  invalid["gamma"] = 2.;
+  require(
+      !instrumented(source, invalid, true, take(Footprint::none({4})), hooks)
+           .ok(),
+      "Empty retains static validation");
+  CancellationSource stop;
+  std::uint64_t work = 0;
+  hooks->charge = [&](std::uint64_t n, const ResultProgramPhase& phase) {
+    work += n;
+    if (work > 2000)
+      stop.cancel();
+    return phase.consume_work(n);
+  };
+  auto cancelled = instrumented(source, raw("pq"), false,
+                                take(Footprint::all({4})), hooks, stop.token());
+  require(!cancelled.ok() && cancelled.status().code == ErrorCode::Cancelled,
+          "MP refinement cancellation");
+  work = 0;
+  hooks->charge = [&](std::uint64_t n, const ResultProgramPhase& phase) {
+    if (n > 100 - work)
+      return Status{ErrorCode::ResourceExhausted, "test refinement work"};
+    work += n;
+    return phase.consume_work(n);
+  };
+  auto limited =
+      instrumented(source, raw("pq"), false, take(Footprint::all({4})), hooks);
+  require(!limited.ok() &&
+              limited.status().code == ErrorCode::ResourceExhausted &&
+              work <= 100,
+          "refinement fuel failure is not numerical fallback");
 }
 }  // namespace
 int main() {
@@ -923,6 +941,7 @@ int main() {
     std::cerr << "planar axes/pitch/reporting\n";
     planar_axis_and_pitch();
     planar_numeric_reporting();
+    semantic_need_roles();
     std::cerr << "direct protocol\n";
     direct_protocol();
     std::cout << "FMT-09 integration: PASS\n";

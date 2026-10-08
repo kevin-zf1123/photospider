@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -17,6 +18,21 @@ namespace {
 using namespace ps;  // NOLINT(build/namespaces)
 using Poll = Result<ResultProgramPoll>;
 const char* selected_fixture = nullptr;
+std::uint64_t root_capacity = 524288;
+std::uint64_t executed_fixtures = 0;
+enum class WireBacking { Dense, Reversed, Split, BroadcastZero };
+const char* backing_name(WireBacking backing) {
+  switch (backing) {
+    case WireBacking::Reversed:
+      return "reversed";
+    case WireBacking::Split:
+      return "split";
+    case WireBacking::BroadcastZero:
+      return "broadcast_zero";
+    default:
+      return "dense";
+  }
+}
 void check(bool valid, const char* detail) {
   if (!valid)
     throw std::runtime_error(detail);
@@ -28,29 +44,41 @@ T take(Result<T> result) {
   return result.take_value();
 }
 struct PackState {
+  explicit PackState(std::shared_ptr<std::atomic<std::uint64_t>> counter)
+      : reads(std::move(counter)) {}
+  std::shared_ptr<std::atomic<std::uint64_t>> reads;
   ResultBuilder builder;
+  ResultTensorReadWindow input;
   std::array<std::uint64_t, 16> rows{};
   unsigned stage = 0, field = 0;
   std::uint64_t position = 0, offset = 128, batch = 0, width = 0;
   Poll poll(const ResultProgramPhase& phase) {
     const auto& schema = *phase.query.output.result_schema;
+    const auto shape =
+        phase.query.inputs[0].result_schema->tensors[0].sample_shape();
     if (stage == 0) {
       stage = 1;
-      auto requested = Footprint::from_regions(
-          phase.query.inputs[0].descriptor.shape, {Region({{0, 128}})});
+      auto requested = Footprint::from_regions(shape, {Region::whole(shape)});
       return requested.ok()
-                 ? Poll(
-                       ResultProgramNeed{{{0, requested.take_value()}}, {}, {}})
+                 ? Poll(ResultProgramNeed{{},
+                                          {},
+                                          {{0, 0, requested.take_value(), 15}}})
                  : Poll(requested.status());
     }
     if (stage == 1) {
+      auto acquired = phase.tensors->at({0, 0}).acquire(
+          Region::whole(shape), phase.query.cancellation);
+      if (!acquired.ok())
+        return Poll(acquired.status());
+      input = acquired.take_value();
+      std::array<std::uint8_t, 128> header{};
+      auto copied = read_wire(phase, 0, header.size(), header.data());
+      if (!copied.ok())
+        return Poll(copied);
       std::uint64_t total = 128;
       for (unsigned i = 0; i < 16; ++i) {
         for (unsigned byte = 0; byte < 8; ++byte) {
-          std::uint8_t value = 0;
-          auto read = phase.read(0, {8ULL * i + byte}, &value, 1);
-          if (!read.ok())
-            return Poll(read);
+          const auto value = header[8 * i + byte];
           rows[i] |= static_cast<std::uint64_t>(value) << (8 * byte);
         }
         if (i >= schema.fields.size()) {
@@ -63,16 +91,20 @@ struct PackState {
           return Poll(Status{ErrorCode::TypeMismatch, "wire count overflow"});
         total += rows[i] * bytes;
       }
-      if (total != phase.query.inputs[0].descriptor.shape[0])
+      if (total != shape[0])
         return Poll(Status{ErrorCode::TypeMismatch, "wire length mismatch"});
-      auto made = ResultBuilder::start(phase.resources, schema,
-                                       phase.query.semantic_key);
+      auto made = ResultBuilder::start(
+          phase.resources, schema, phase.query.semantic_key, {},
+          phase.association
+              ? std::vector<std::uint64_t>(phase.association->begin(),
+                                           phase.association->end())
+              : std::vector<std::uint64_t>{});
       if (!made.ok())
         return Poll(made.status());
       builder = made.take_value();
-      auto relation =
-          ResultRelation::cartesian(phase.resources, 1, {0, 15, 0, total},
-                                    DependencyGuarantee::Conservative);
+      auto relation = ResultRelation::cartesian(
+          phase.resources, 1, {0, 15, 0, total, ResultSupportTarget::Tensor, 0},
+          DependencyGuarantee::Conservative);
       if (!relation.ok())
         return Poll(relation.status());
       auto bound = builder.bind_descriptor_relation(relation.take_value());
@@ -80,41 +112,12 @@ struct PackState {
         return Poll(bound);
       stage = 2;
     }
-    if (stage == 3) {
-      auto allocation = phase.allocator.allocate(batch * width);
-      if (!allocation.ok())
-        return Poll(allocation.status());
-      auto bytes = allocation.take_value();
-      for (std::uint64_t i = 0; i < batch * width; ++i) {
-        auto charged = phase.consume_work(1);
-        if (!charged.ok())
-          return Poll(charged);
-        auto copied = phase.read(0, {offset + i}, bytes.data() + i, 1);
-        if (!copied.ok())
-          return Poll(copied);
-      }
-      if (schema.id == "photospider.path_set" && field == 5) {
-        // The wire's placeholder is rebound to the new immutable object
-        // identity.
-        const auto id = builder.reference().object_id();
-        for (std::uint64_t i = 0; i < batch; ++i)
-          std::memcpy(bytes.data() + i * width + 24, &id, 8);
-      }
-      auto write =
-          builder.prepare_append(field, batch, std::move(bytes).freeze());
-      if (!write.ok())
-        return Poll(write.status());
-      position += batch;
-      offset += batch * width;
-      stage = 2;
-      return Poll(ResultProgramNeed{{}, {}, {write.take_value()}});
-    }
     while (field < schema.fields.size()) {
       width = schema.row_bytes(field).value();
       if (position == rows[field]) {
         auto relation = ResultRelation::cartesian(
             phase.resources, rows[field],
-            {0, 15, 0, phase.query.inputs[0].descriptor.shape[0]},
+            {0, 15, 0, shape[0], ResultSupportTarget::Tensor, 0},
             DependencyGuarantee::Conservative);
         if (!relation.ok())
           return Poll(relation.status());
@@ -131,17 +134,57 @@ struct PackState {
         return Poll(
             Status{ErrorCode::ResourceExhausted, "record window too small"});
       batch = std::min(rows[field] - position, phase.query.page_bytes / width);
-      auto requested =
-          Footprint::from_regions(phase.query.inputs[0].descriptor.shape,
-                                  {Region({{offset, batch * width}})});
-      if (!requested.ok())
-        return Poll(requested.status());
-      stage = 3;
-      return Poll(ResultProgramNeed{{{0, requested.take_value()}}, {}, {}});
+      return append_chunk(phase);
     }
     auto sealed = builder.seal();
     return sealed.ok() ? Poll(ResultPublication{sealed.take_value(), true})
                        : Poll(sealed.status());
+  }
+  Status read_wire(const ResultProgramPhase& phase, std::uint64_t begin,
+                   std::uint64_t count, std::uint8_t* output) {
+    for (std::uint64_t copied = 0; copied < count;) {
+      auto queried = input.row_run({begin + copied});
+      if (!queried.ok())
+        return queried.status();
+      const auto& run = queried.value();
+      const auto length = std::min(count - copied, run.samples);
+      if (!length)
+        return Status{ErrorCode::InvalidArgument, "empty wire read run"};
+      auto charged = phase.consume_work(length);
+      if (!charged.ok())
+        return charged;
+      for (std::uint64_t i = 0; i < length; ++i)
+        output[copied + i] =
+            run.data[static_cast<std::int64_t>(i) * run.sample_stride_bytes];
+      *reads += length;
+      copied += length;
+    }
+    return Status::success();
+  }
+  Poll append_chunk(const ResultProgramPhase& phase) {
+    const auto& schema = *phase.query.output.result_schema;
+    auto allocation = phase.allocator.allocate(batch * width);
+    if (!allocation.ok())
+      return Poll(allocation.status());
+    auto bytes = allocation.take_value();
+    auto copied = read_wire(phase, offset, batch * width, bytes.data());
+    if (!copied.ok())
+      return Poll(copied);
+    if (schema.id == "photospider.path_set" && field == 5) {
+      // The wire's placeholder is rebound to the new immutable object
+      // identity.
+      const auto id = builder.reference().object_id();
+      for (std::uint64_t i = 0; i < batch; ++i)
+        std::memcpy(bytes.data() + i * width + 24, &id, 8);
+    }
+    auto write =
+        builder.prepare_append(field, batch, std::move(bytes).freeze());
+    if (!write.ok())
+      return Poll(write.status());
+    position += batch;
+    offset += batch * width;
+    stage = 2;
+    return Poll(ResultProgramNeed{{}, {write.take_value()}});
   }
 };
 struct InspectState {
@@ -149,34 +192,36 @@ struct InspectState {
   Poll poll(const ResultProgramPhase& phase) {
     if (!waiting) {
       waiting = true;
-      return Poll(ResultProgramNeed{{}, {{0, 0, true, 0}}, {}});
+      return Poll(ResultProgramNeed{{{0, 0, true, 0}}, {}});
     }
     const auto& source = phase.results.at(0);
     const auto descriptor = source.descriptor().value();
     double total = 0;
     for (unsigned i = 0; i < descriptor.field_count(); ++i)
       total += descriptor.rows(i);
-    auto allocated = MutableValue::allocate(
-        {ElementType::Float64, {1}}, Region::whole({1}), phase.allocator);
-    if (!allocated.ok())
-      return Poll(allocated.status());
-    auto bytes = allocated.take_value();
-    std::memcpy(bytes.data(), &total, 8);
-    auto output = std::move(bytes).publish();
-    if (!output.ok())
-      return Poll(output.status());
-    auto fragments = ValueFragments::create({ElementType::Float64, {1}}, {},
-                                            *phase.query.value_outputs,
-                                            {output.take_value()});
-    if (!fragments.ok())
-      return Poll(fragments.status());
+    auto builder = ResultBuilder::start(
+        phase.resources, *phase.query.output.result_schema,
+        phase.query.semantic_key, {}, {source.object_id()});
+    if (!builder.ok())
+      return Poll(builder.status());
+    auto result = builder.take_value();
     auto relation = ResultRelation::cartesian(
-        phase.resources, 1,
-        {0, 15, 0, total ? static_cast<std::uint64_t>(total) : 0},
+        phase.resources, 1, {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0},
         DependencyGuarantee::Conservative);
-    return relation.ok() ? Poll(ResultValuePublication{fragments.take_value(),
-                                                       relation.take_value()})
-                         : Poll(relation.status());
+    if (!relation.ok())
+      return Poll(relation.status());
+    auto status = result.bind_descriptor_relation(relation.value());
+    if (!status.ok())
+      return Poll(status);
+    status = result.publish_tensor(
+        0, Region::whole({1}),
+        ByteView(reinterpret_cast<const std::uint8_t*>(&total), 8),
+        relation.take_value(), {true, true, true, true});
+    if (!status.ok())
+      return Poll(status);
+    auto sealed = result.seal();
+    return sealed.ok() ? Poll(ResultPublication{sealed.take_value(), true})
+                       : Poll(sealed.status());
   }
 };
 struct RefineState {
@@ -187,10 +232,30 @@ struct RefineState {
   std::uint64_t position = 0, batch = 0, count = 0;
   std::int64_t generation = 0, iteration = 0;
   double residual = 0;
+  Result<ResultRelation> source_support(const ResultProgramPhase& phase,
+                                        std::uint64_t rows) const {
+    std::vector<ResultRelation> parts;
+    auto facts = ResultRelation::cartesian(
+        phase.resources, rows, {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0},
+        DependencyGuarantee::Conservative);
+    if (!facts.ok())
+      return facts;
+    parts.push_back(facts.take_value());
+    for (std::uint32_t field = 0; field < descriptor.field_count(); ++field) {
+      auto support = ResultRelation::cartesian(
+          phase.resources, rows,
+          {0, 15, 0, descriptor.rows(field), ResultSupportTarget::Field, field},
+          DependencyGuarantee::Conservative);
+      if (!support.ok())
+        return support;
+      parts.push_back(support.take_value());
+    }
+    return ResultRelation::unite(phase.resources, parts);
+  }
   Poll poll(const ResultProgramPhase& phase) {
     if (stage == 0) {
       stage = 1;
-      return Poll(ResultProgramNeed{{}, {{0, 0, true, 0}}, {}});
+      return Poll(ResultProgramNeed{{{0, 0, true, 0}}, {}});
     }
     if (stage == 1) {
       source = phase.results.at(0);
@@ -210,7 +275,7 @@ struct RefineState {
       if (!read.ok())
         return Poll(read.status());
       stage = 2;
-      return Poll(ResultProgramNeed{{}, {}, {read.take_value()}});
+      return Poll(ResultProgramNeed{{}, {read.take_value()}});
     }
     if (stage == 2) {
       const auto& page =
@@ -231,9 +296,7 @@ struct RefineState {
       if (!made.ok())
         return Poll(made.status());
       builder = made.take_value();
-      auto relation = ResultRelation::cartesian(
-          phase.resources, 1, {0, 15, 0, 3 * count + 2},
-          DependencyGuarantee::Conservative);
+      auto relation = source_support(phase, 1);
       if (!relation.ok())
         return Poll(relation.status());
       auto bound = builder.bind_descriptor_relation(relation.take_value());
@@ -276,7 +339,6 @@ struct RefineState {
       stage = 3;
       return Poll(
           ResultProgramNeed{{},
-                            {},
                             {x.take_value(), a.take_value(), b.take_value()}});
     }
     if (stage == 3 && position < count) {
@@ -289,7 +351,7 @@ struct RefineState {
       if (!a.ok() || !b.ok())
         return Poll(!a.ok() ? a.status() : b.status());
       stage = 4;
-      return Poll(ResultProgramNeed{{}, {}, {a.take_value(), b.take_value()}});
+      return Poll(ResultProgramNeed{{}, {a.take_value(), b.take_value()}});
     }
     if (stage == 3) {
       const auto spec =
@@ -310,12 +372,11 @@ struct RefineState {
       if (!a.ok() || !b.ok())
         return Poll(!a.ok() ? a.status() : b.status());
       stage = 5;
-      return Poll(ResultProgramNeed{{}, {}, {a.take_value(), b.take_value()}});
+      return Poll(ResultProgramNeed{{}, {a.take_value(), b.take_value()}});
     }
     for (unsigned field = 0; field < 5; ++field) {
-      auto relation = ResultRelation::cartesian(
-          phase.resources, field == 0 || field == 4 ? 1 : count,
-          {0, 15, 0, 3 * count + 2}, DependencyGuarantee::Conservative);
+      auto relation =
+          source_support(phase, field == 0 || field == 4 ? 1 : count);
       if (!relation.ok())
         return Poll(relation.status());
       auto status =
@@ -352,6 +413,22 @@ struct Fixture {
     return result;
   }
 };
+SchemaTemplate tensor_schema(const char* id, ElementType type,
+                             std::uint64_t count) {
+  SchemaTemplate schema;
+  schema.id = id;
+  ResultTensorSpec tensor;
+  tensor.key = "samples";
+  tensor.descriptor = {type, {count}};
+  tensor.layout.channel_axis.reset();
+  schema.tensors.push_back(std::move(tensor));
+  return schema;
+}
+void result_port(OperationPortConstraint* port, const SchemaTemplate& schema) {
+  port->kind = OperationPortKind::Result;
+  port->result_schema_id = schema.id;
+  port->result_schema_version = schema.version;
+}
 OperationTraits staged(std::uint64_t bytes) {
   OperationTraits t;
   t.input_count = 1;
@@ -365,20 +442,28 @@ OperationTraits staged(std::uint64_t bytes) {
 }
 void run(const Fixture& fixture, bool expected = true,
          std::uint64_t window = 256, bool refine = false,
-         bool domain_limit = false) {
+         bool domain_limit = false, WireBacking backing = WireBacking::Dense) {
   if (selected_fixture && selected_fixture != fixture.name)
     return;
+  ++executed_fixtures;
+  const auto wire = fixture.wire();
+  const auto input_schema = tensor_schema("example.representation_wire",
+                                          ElementType::UInt8, wire.size());
+  const auto summary_schema =
+      tensor_schema("example.representation_summary", ElementType::Float64, 1);
+  auto reads = std::make_shared<std::atomic<std::uint64_t>>(0);
   auto registry = std::make_shared<OperationRegistry>();
   OperationDefinition pack;
   pack.key = "example.pack";
   pack.traits = staged(sizeof(PackState));
+  result_port(&pack.traits.input_schema[0], input_schema);
   pack.traits.outputs[0].result_schema = fixture.schema;
   pack.traits.outputs[0].output_schema.kind = OperationPortKind::Result;
   pack.traits.outputs[0].output_schema.result_schema_id = fixture.schema.id;
   pack.traits.outputs[0].output_schema.result_schema_version = 1;
-  pack.start_result = [](const ResultProgramQuery&,
-                         const BufferAllocator& allocator) {
-    return ResultContinuation::make<PackState>(allocator);
+  pack.start_result = [reads](const ResultProgramQuery&,
+                              const BufferAllocator& allocator) {
+    return ResultContinuation::make<PackState>(allocator, reads);
   };
   check(registry->register_operation(std::move(pack)).ok(), "register pack");
   OperationDefinition inspect;
@@ -387,7 +472,8 @@ void run(const Fixture& fixture, bool expected = true,
   inspect.traits.input_schema[0].kind = OperationPortKind::Result;
   inspect.traits.input_schema[0].result_schema_id = fixture.schema.id;
   inspect.traits.input_schema[0].result_schema_version = 1;
-  inspect.traits.outputs[0].output_element_type = ElementType::Float64;
+  inspect.traits.outputs[0].result_schema = summary_schema;
+  result_port(&inspect.traits.outputs[0].output_schema, summary_schema);
   inspect.start_result = [](const ResultProgramQuery&,
                             const BufferAllocator& allocator) {
     return ResultContinuation::make<InspectState>(allocator);
@@ -417,14 +503,12 @@ void run(const Fixture& fixture, bool expected = true,
           "register diagonal step");
   }
   check(registry->freeze().ok(), "freeze registry");
-  const auto wire = fixture.wire();
   WorkflowDocument document;
-  document.inputs = {{1,
-                      "source",
-                      {ElementType::UInt8, {wire.size()}},
-                      Region::whole({wire.size()}),
-                      {0, {1}},
-                      {}}};
+  WorkflowInputDeclaration input;
+  input.id = 1;
+  input.name = "source";
+  input.result_schema = std::make_shared<const SchemaTemplate>(input_schema);
+  document.inputs = {input};
   document.nodes = {
       {1, "example.pack", {WorkflowInputReference{1}}, {}},
       {2, "example.inspect", {WorkflowNodeOutput{1, "value"}}, {}}};
@@ -439,25 +523,63 @@ void run(const Fixture& fixture, bool expected = true,
   }
   GraphContext graph(document);
   auto compiled = take(Compiler(registry).compile(graph));
-  auto source = std::make_shared<RegionalSource>();
-  source->descriptor = document.inputs[0].descriptor;
-  std::uint64_t reads = 0;
-  source->read = [&](const Region& region, std::uint8_t* bytes,
-                     std::uint64_t count, const BufferAllocator&,
-                     const CancellationToken&) {
-    ++reads;
-    std::memcpy(bytes, wire.data() + region.dimensions()[0].offset, count);
-    return Result<Region>(region);
-  };
   ExecutionContextConfig config;
   config.managed_resources = ResourceLimits{};
-  config.managed_resources->capacity[ResourceKind::Host] = 65536;
-  config.managed_resources->capacity[ResourceKind::Metadata] = 65536;
+  config.managed_resources->capacity[ResourceKind::Host] = root_capacity;
+  config.managed_resources->capacity[ResourceKind::Metadata] = root_capacity;
   ResourceBudget root;
   ResultRef held, next;
   {
     ExecutionContext context(registry, config);
     root = take(context.resource_budget());
+    auto source_builder =
+        take(ResultBuilder::start(root, input_schema, "example.wire"));
+    check(source_builder
+              .bind_descriptor_relation(
+                  take(ResultRelation::cartesian(root, 1, {})))
+              .ok(),
+          "wire descriptor");
+    const auto publish = [&](const Region& region, ByteView bytes) {
+      check(source_builder
+                .publish_tensor(
+                    0, region, bytes,
+                    take(ResultRelation::cartesian(root, wire.size(), {})),
+                    {true, true, true, true})
+                .ok(),
+            "wire publication");
+    };
+    if (backing == WireBacking::Split) {
+      const auto split = std::uint64_t{64};
+      publish(Region({{0, split}}), ByteView(wire.data(), split));
+      publish(Region({{split, wire.size() - split}}),
+              ByteView(wire.data() + split, wire.size() - split));
+    } else if (backing == WireBacking::Reversed ||
+               backing == WireBacking::BroadcastZero) {
+      const bool broadcast = backing == WireBacking::BroadcastZero;
+      if (broadcast)
+        check(std::all_of(wire.begin(), wire.end(),
+                          [](auto byte) { return byte == 0; }),
+              "broadcast wire must be zero");
+      auto storage =
+          take(root.allocator().allocate(broadcast ? 1 : wire.size()));
+      if (broadcast)
+        storage.data()[0] = 0;
+      else
+        std::reverse_copy(wire.begin(), wire.end(), storage.data());
+      StridedLayout layout{broadcast ? 0 : wire.size() - 1,
+                           {broadcast ? 0 : -1}};
+      check(source_builder
+                .publish_tensor(
+                    0, Region::whole({wire.size()}), layout,
+                    std::move(storage).freeze(),
+                    take(ResultRelation::cartesian(root, wire.size(), {})),
+                    {true, true, true, true})
+                .ok(),
+            "strided wire publication");
+    } else {
+      publish(Region::whole({wire.size()}), ByteView(wire.data(), wire.size()));
+    }
+    auto source = take(source_builder.seal());
     ExecutionOptions options;
     options.maximum_result_window_bytes = window;
     options.maximum_dependency_work = 10000000;
@@ -467,12 +589,25 @@ void run(const Fixture& fixture, bool expected = true,
       return Status::success();
     };
     auto result =
-        context.execute(compiled.plan, {{{"source", {}, source}}}, {}, options);
+        context.execute(compiled.plan, {{{"source", source}}}, {}, options);
+    if (result.ok() != expected) {
+      const auto stats = root.statistics();
+      std::cerr << "Root host peak=" << stats.peak[ResourceKind::Host]
+                << " metadata peak=" << stats.peak[ResourceKind::Metadata]
+                << " payload peak=" << stats.peak[ResourceKind::Payload]
+                << " wire bytes=" << wire.size() << '\n';
+    }
     if (result.ok() != expected)
       throw std::runtime_error(
-          fixture.name + (result.ok()
-                              ? ": unexpected success"
-                              : ": rejected: " + result.status().message));
+          fixture.name +
+          (result.ok() ? ": unexpected success"
+                       : ": rejected: code=" +
+                             std::to_string(
+                                 static_cast<unsigned>(result.status().code)) +
+                             " reason=" +
+                             std::to_string(static_cast<unsigned>(
+                                 result.status().reason)) +
+                             " " + result.status().message));
     check(observed == expected, "validation must precede observation");
     if (!expected) {
       if (domain_limit)
@@ -485,14 +620,39 @@ void run(const Fixture& fixture, bool expected = true,
       std::cout << fixture.name << " rejected before publication\n";
       return;
     }
+    check(reads->load() == wire.size(),
+          "wire bytes are read once across all I/O phases");
     held = result.value().results.at("data");
     if (refine)
       next = result.value().results.at("next");
     std::uint64_t total = 0;
     for (unsigned i = 0; i < fixture.schema.fields.size(); ++i)
       total += fixture.fields[i].size() / fixture.schema.row_bytes(i).value();
-    check(take(result.value().values.at("summary").as_float64()) == total,
+    const auto& summary = result.value().results.at("summary");
+    double actual = 0;
+    check(summary.read_tensor(take(summary.descriptor()), 0, {0}, &actual, 8)
+                  .ok() &&
+              actual == total,
           "active consumer row count");
+    check(held.association().size() == 1 &&
+              held.association()[0] == source.object_id(),
+          "packed Result retains wire source identity");
+    check(summary.association().size() == 1 &&
+              summary.association()[0] == held.object_id(),
+          "summary retains its Result source identity");
+    if (refine) {
+      const auto& next_summary = result.value().results.at("next_summary");
+      actual = 0;
+      check(next_summary
+                    .read_tensor(take(next_summary.descriptor()), 0, {0},
+                                 &actual, 8)
+                    .ok() &&
+                actual == total,
+            "iterated Result summary row count");
+      check(next_summary.association().size() == 1 &&
+                next_summary.association()[0] == next.object_id(),
+            "iterated summary retains its source identity");
+    }
   }
   const auto descriptor = take(held.descriptor());
   // The reference is byte-for-byte fixture data, independently of the
@@ -533,21 +693,30 @@ void run(const Fixture& fixture, bool expected = true,
     check(values == std::array<double, 2>{3, 4},
           "independent diagonal solution");
   }
-  check(root.statistics().peak[ResourceKind::Host] <= 65536,
+  check(root.statistics().peak[ResourceKind::Host] <= root_capacity &&
+            root.statistics().peak[ResourceKind::Metadata] <= root_capacity,
         "root capacity exceeded");
-  const auto retained_disk = root.statistics().live[ResourceKind::Disk];
   auto parent = held.weak();
   held = {};
-  if (refine)
-    check(parent.lock().valid() &&
-              root.statistics().live[ResourceKind::Disk] == retained_disk,
-          "derived iteration retains the complete predecessor backing");
+  check(!parent.lock().valid(),
+        "materialized output association does not retain predecessor payload");
+  if (refine) {
+    const auto facts = take(next.descriptor());
+    auto estimate = take(take(next.prepare_read(facts, 1, 0, 2)).load(window));
+    std::array<double, 2> values{};
+    std::memcpy(values.data(), estimate->bytes().data(), 16);
+    check(values == std::array<double, 2>{3, 4} &&
+              root.statistics().live[ResourceKind::Disk] > 0,
+          "materialized child remains readable after predecessor retirement");
+  }
   next = {};
-  check(!parent.lock().valid(), "final child release retires its predecessor");
   check(root.statistics().live[ResourceKind::Disk] == 0,
         "last result did not release backing");
-  std::cout << fixture.name << " passed; source_reads=" << reads
-            << " window=" << window << '\n';
+  std::cout << fixture.name << " passed; backing=" << backing_name(backing)
+            << " wire_bytes_read=" << reads->load() << " window=" << window
+            << " root_host_peak=" << root.statistics().peak[ResourceKind::Host]
+            << " root_metadata_peak="
+            << root.statistics().peak[ResourceKind::Metadata] << '\n';
 }
 void fixtures() {
   SpectrumSpec spectrum;
@@ -569,6 +738,8 @@ void fixtures() {
   samples[17] = -2;
   frequency.set(0, samples);
   run(frequency, true, 128);
+  run(frequency, true, 128, false, false, WireBacking::Reversed);
+  run(frequency, true, 128, false, false, WireBacking::Split);
   samples[17] = 2;
   frequency.set(0, samples);
   run(frequency, false);
@@ -706,6 +877,8 @@ void fixtures() {
     points.set(2, attributes);
     points.set(3, mapping);
     run(points, true, 128);
+    if (!count)
+      run(points, true, 128, false, false, WireBacking::BroadcastZero);
     if (count) {
       auto limited = points;
       auto limited_spec = point_spec;
@@ -841,10 +1014,24 @@ void fixtures() {
 }
 }  // namespace
 int main(int argc, char** argv) {
-  if (argc == 2)
-    selected_fixture = argv[1];
   try {
+    if (argc > 3)
+      throw std::runtime_error(
+          "usage: representations_workflow [fixture [root_bytes]]");
+    if (argc >= 2)
+      selected_fixture = argv[1];
+    if (argc == 3) {
+      const std::string capacity(argv[2]);
+      if (capacity.empty() ||
+          !std::all_of(capacity.begin(), capacity.end(),
+                       [](char byte) { return byte >= '0' && byte <= '9'; }))
+        throw std::runtime_error(
+            "root_bytes must be an unsigned decimal integer");
+      root_capacity = std::stoull(capacity);
+    }
     fixtures();
+    if (!executed_fixtures)
+      throw std::runtime_error("unknown representation fixture");
     std::cout << "representation workflows PASS\n";
     return 0;
   } catch (const std::exception& error) {

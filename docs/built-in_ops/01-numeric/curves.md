@@ -9,20 +9,23 @@
 anchors/handles/start/end 动态输入，输出 `values` 与 `axis`；输出默认 Float64。
 strict 与 Apple Silicon CPU、x86-64 CPU accelerated 分别命名。以下其他族的建议不覆盖该具体规格。
 
-当前 CRV-01～11 正式 profile 路径已完成 Whole 迁移：公开 helper 使用的
-132 个 Value keys 均为 Whole，包含 CRV-09 的 15 个内部几何 keys；四个
-LUT3D 结构化 Result keys 保留 ResultProtocol2。六个 LUT1D baking、两个
+各族 profile 路径的 Value/Result 类型与 Whole 规则以对应规格行为准，不能
+据此推断 CRV-01～11 全部采用同一种 Result 路径。CRV-09 本轮的 15 个
+几何 profile keys 为 Whole Result，带 role 13 输入验证；pack、measure、
+unpack、gate 四个结构化 keys 为 Result-only 操作。六个 LUT1D baking、两个
 linear shaper、四个 resampling 和一个 LUT3D baking 仍是组合模板。
-旧无后缀 `curve.sample_linear` / `curve.sample_monotone` 不属于正式
-Bézier 接口，也未被重新实现。
+`curve.sample_linear` / `curve.sample_monotone` 是当前 controls-based Result
+接口，接收 `[K,2]` 控制点并与 CRV-02 的 Bézier function sampler 分属不同算子。
+输入 schema、输出和 Region 约定见[基础算子实现](../../kernel-architecture/Basic-Operations.md)。
 
 非空 Whole 请求收集完整输入并计算完整输出，任何输入改动使完整输出失效；
 远端 typed/upstream 错误和规定的数值错误可以导致 Run 失败。数学 stencil、
 零权重选择、颜色身份和每族精度契约保持不变。稀疏请求也需要完整输入/输出
 内存；Empty 不读取 payload。模板的独立输出投影、count=1 不读取 end，
-以及 resampling positions 的独立转发仍按各自契约执行。当前验证为 native
-Clang21 Strict/Apple；WSL/AVX2 和安装消费未针对本次 Whole 修改重跑。
-逐簇公开延迟、数值核心、范围和 Instruments 证据见
+以及 resampling positions 的独立转发仍按各自契约执行。逐簇验证以对应
+workflow README 为准；CRV-09 的 focused Result CTest 与安装消费检查已通过，
+但新路径仅有本机 Strict 测试证据。CRV-09 旧 Value 人工流程、oracle、性能
+测量、x86 与 GPU 尚未验证。逐簇公开延迟、数值核心、范围和 Instruments 证据见
 [实现与性能说明](math-implementation.md)。
 
 ## 表示与目录
@@ -31,17 +34,17 @@ Clang21 Strict/Apple；WSL/AVX2 和安装消费未针对本次 Whole 修改重�
 
 | ID / 提议操作 | 输入 → 输出 | 参数与方法 | 验收 |
 | --- | --- | --- | --- |
-| CRV-01 interpolate family | 单函数 x[K],y[K],query[N]→[N]；多函数 x[K],y[K,C],query[N]→[N,C] | 单／多函数与 linear/PCHIP 共四个独立算子；动态 query、Whole 全输入及完整输出、全局 x 校验、保留数学 y stencil；linear 三版本位一致，PCHIP 加速最终 4 ULP 并保持形状 | [具体规格](op_specs/CRV-01_interpolate.md)，规格 Proposed；十二个 key 已实现并完成公开 workflow 验证，当前三 profile 均精确舍入；旧 sample_linear/monotone 接口单独记录 |
-| CRV-02 bezier_function | anchors/handle offsets+start/end/count → `values[N]`,`axis[3]` | 二次或三次；Whole 完整输入/输出；全局验证 x 单调，按命中段进行 y 数学计算；先解 Bx(t)=x，再取 By(t)；允许尖角和 y 过冲 | [完整规格](op_specs/CRV-02_sample_bezier_function.md)，Proposed；三 profile keys 已实现并通过 public workflow/oracle 验证；默认资源限制下 dense 大请求可能 ResourceExhausted |
-| CRV-03 evaluate_bezier | anchors/handles+segment_indices[N]+t[N]→[N,D] | 同阶二次／三次参数 Bézier；控制点 RN64 重建，strict 整式正确舍入、加速最终 4 ULP；Whole 全输入/输出，保留按段／分量的数学选择 | [具体规格](op_specs/CRV-03_evaluate_bezier.md)，Proposed；三 profile keys 和公开构造器已实现并验证，数学端点选择锚点、完整输入校验、允许回折与退化 |
+| CRV-01 插值族 | Result 输入各含一个 tensor member；schema id 与 member key 可任意。由 `sample_shape()` 取得 x[K]、y[K] 或 y[K,C]、query[N]；输出 `values` 为 `photospider.tensor` schema 的 `samples` member，shape 为 [N] 或 [N,C]，facets 为空 | 单／多函数 linear 与 PCHIP 是四个独立算子。非空 Whole 请求对输入声明 role 13，计算并发布完整输出 coverage；坐标保持全局值，输出 association 记录实际来源 ObjectIds；空请求不读取 payload | [具体规格](op_specs/CRV-01_interpolate.md)，状态 Proposed；12 个 keys 已注册。当前 Result CTest 与安装消费检查通过；旧 Value 路径 oracle/performance 不作为 Result 证据。`curve.sample_linear` / `curve.sample_monotone` 是独立的 controls-based 接口 |
+| CRV-02 Bezier 函数采样 | anchors、relative handles、start、end 为 Result tensor 输入；`sample_shape()` 分别为 [K,2]、[K-1,degree-1,2]、[1]、[1]。输出 `values` 是 `photospider.tensor` v1 / `samples`，[count]；`axis` 同 schema/member，Float64[3]、atomic trailing axis=1 | 二次或三次；Whole role 13 读取 active 输入、先验证全局 x 单调和全部 query，再求 y；count=1 排除 end，Empty 不读 payload；非空输出完整 coverage、global coordinates 和 source ObjectId association | [完整规格](op_specs/CRV-02_sample_bezier_function.md)，Proposed。保留 RN64 控制点重建、精确单调性验证和逆求解；旧 manual/oracle/performance 不代表当前 Result 验证 |
+| CRV-03 参数 Bezier 求值 | anchors、relative handles、segment_indices、t 为 Result tensor 输入；`sample_shape()` 分别为 [K,D]、[K-1,degree-1,D]、[N]、[N]；输出 `values` 为 `photospider.tensor` v1 / `samples`，[N,D] | 二次或三次；Whole role 13 验证全部 segment/t 后逐行逐分量精确求值，保留 D=1 轴；端点只选择锚点，内部使用对应控制点；非空输出完整 coverage，Empty 不读 payload | [具体规格](op_specs/CRV-03_evaluate_bezier.md)，Proposed。保留 RN64 重建、一次最终舍入和 exact polynomial；旧 manual/oracle/performance 不代表当前 Result 验证 |
 | CRV-04 bake_lut1d templates | 六种函数来源+start/end/count→values/axis | 六个独立命名组合模板；作者侧 profile 默认 strict；插值查询固定 Float64；输出按需请求 | [具体规格](op_specs/CRV-04_bake_lut1d.md)，Proposed；六个公开构造器已实现并通过展开图等价验证，不自动保存或冻结，离散误差单独验收 |
-| CRV-05 apply_lut1d family | input+table[L] 或 table[L,C]+axis[3]→同形结果 | 单表与逐通道多表独立；共享动态轴、固定线性插值；数值规则保留；Whole 完整输入/输出，按表项／通道进行数学选择 | [具体规格](op_specs/CRV-05_apply_lut1d.md)，Proposed；六个 profile keys 已实现并验证，支持单点表、反向轴、三种域外策略及六种 baking 消费链 |
-| CRV-06 color_ramp family | input+stops+颜色表（有理色相拆分整数分子/分母）→input.shape+[C] | RGB、CMYK、XYZ、CIELAB、CIELCh(ab)、OKLab、OKLCh、HSL、YCbCr 独立实现；携带通用颜色数组描述 | [具体规格](op_specs/CRV-06_color_ramp.md)，Proposed；九种模型已澄清，LCh/HSL 各三入口，原始 hue 保留圈数 |
-| CRV-07 apply_lut3d | 三分量颜色+table[N0,N1,N2,3]+axis[3,3]→同形颜色 | trilinear/tetrahedral 独立；八种模型，同模型内可改变描述；Whole 完整输入/输出；按各 profile 契约验收 | [具体规格](op_specs/CRV-07_apply_lut3d.md)，Proposed；全局轴校验、非零权重顶点数学选择、完整 ColorArray 输出 |
-| CRV-08 shaper | 数值+共享 lower/upper→同形数值 | linear 正反为 remap 模板，log2 正反为 primitive；IEEE 值、无夹紧；log 加速 4 ULP 且单调 | [具体规格](op_specs/CRV-08_shaper.md)，Proposed；完整公式、端点精确、动态边界校验 |
-| CRV-09 bake_lut3d | 逐颜色 workflow+axis→table/axis/report | 同模型 3D 组合模板；固定网格、全单元中心＋额外点 Measured 验收；报告独立，表通过后发布 | [具体规格](op_specs/CRV-09_bake_lut3d.md)，Proposed；调用者声明逐颜色独立性，非全域误差证明 |
-| CRV-10 invert | x/y/query→反查 x | linear/PCHIP 独立；严格单调 y 升降序、reject/clamp；反解数学曲线，PCHIP 加速按 x 的 4 ULP 验收 | [具体规格](op_specs/CRV-10_invert.md)，Proposed；全局 x/y 校验，3D 逆暂不纳入 |
-| CRV-11 resample signal | positions/values→samples/positions；独立低通保持采样轴 | 四个插值模板；等/不等间距各五种低通核，后者连续折线卷积 | [具体规格](op_specs/CRV-11_resample_signal.md)，Proposed；明确核/边界/精度，低通不保证零混叠 |
+| CRV-05 LUT1D 应用 | `input`、`table`、`axis` 均为单 tensor member 的 Result，schema/key 可任意；形状使用完整 `sample_shape()`（含 batch axes）。Scalar table [L]，多通道 [L,C]，axis Float64[3]；输出 `values` 为 `photospider.tensor` v1 / `samples`，完整输入 shape，facets 为空 | 独立单表与逐通道表；Whole role 13 读取三输入、先校验完整 RN64 均匀轴和全部 query，再执行数学表项选择；完整输出 coverage/global coordinates，association 记录源 ObjectIds；axis grid 由 Root 计费，table 经授权零拷贝窗口读取 | [具体规格](op_specs/CRV-05_apply_lut1d.md)，Proposed；focused CTest 与安装消费测试通过。旧1416-case oracle/manual/benchmark、最大L/C及x86数值执行未重跑 |
+| CRV-06 color_ramp family | `input`、`stops`、`colors`（RationalPi 另有 Int64 分子/分母）均为单 tensor Result，schema/key 可任意；形状来自完整 `sample_shape()`，输出 `values` 为 `photospider.tensor` v1 / `samples`，shape `sample_shape(input)+[C]` | 45 个 profile keys 均为 Whole Result，role 13 验证全部输入；授权窗口直接读取，输出携带 ColorArray v1 facet、atomic trailing axis=1 与完整 coverage；仅被数学选中的 RationalPi 分母要求为正，未选中的 q<=0 不构成数学域错误；typed/upstream 验证仍覆盖完整输入 | [具体规格](op_specs/CRV-06_color_ramp.md)，Proposed / implemented_subset；focused Result CTest、Strict/本机 Apple 数值组和安装消费通过；x86、最大规模与性能未复测。目标要求 Lab/CIELCh l=L*/100；当前 ColorArray v1 运行时仍保留旧隐式 L* 尺度 |
+| CRV-07 三轴 LUT3D | `input`、`table`、`axis` 为单 tensor member 的 Result，可用任意 schema/key；完整 `sample_shape()` 为 input[...,3]、table[N0,N1,N2,3]、axis[3,3]。输出 `values` 为 `photospider.tensor` v1 / `samples`，保持 input shape，使用选定 dtype，携带 ColorArray v1 与 atomic trailing axis=1 | trilinear 与 tetrahedral 独立；Whole role 13 请求三输入，按轴→原始input/query→clamp→表算术顺序验证；正权顶点分别最多8/4；完整ColorArray coverage、global coords与源ObjectId association；Root拥有网格并经授权零拷贝窗口读表 | [具体规格](op_specs/CRV-07_apply_lut3d.md)，Proposed / implemented_subset。focused Result CTest 与安装消费测试通过；ColorArray v1 的 CIELAB L* 单位与新 l=L*/100 契约差距未在本迁移关闭；其他证据边界见 workflow README |
+| CRV-08 标量坐标 Shaper | `input`、`lower`、`upper` 各为单 tensor member 的 Result，可用任意 schema/key；完整 `sample_shape()` 保留 batch axes，bounds 为同 dtype [1]。输出 `values` 为 `photospider.tensor` v1 / `samples`，保持 input shape 与 input dtype，facets 为空 | 线性正反是 Result-based remap/constant 组合模板；log2 正反是六个 Whole Result profile keys。全部校验有限有序 bounds，log2 还要求 lower>0；不夹紧，IEEE special-value、端点和 signed-zero 规则依各式定义 | [具体规格](op_specs/CRV-08_shaper.md)，Proposed；focused Result CTest 与安装消费检查通过。Strict 与本机 Apple profile 有数值证据；x86、GPU、最大规模和性能未验证 |
+| CRV-09 三维 LUT 烘焙 | `bake_lut3d` 将点式同模型颜色变换展开为普通 workflow 节点。动态 axis 与可选 validation_points 是单 tensor Result 输入；采样网格与验证点使用完整 `sample_shape()` | 15 个几何 profile keys 为 Whole Result，role 13 校验完整输入；导出 table 是 `photospider.tensor` v1 / `samples[N0,N1,N2,3]`，带 ColorArray v1 facet 与 atomic trailing axis=1；内部 owned table 是 `curve.bake_lut3d.table` v2 / `colors`；report 是 `curve.bake_lut3d.report` v1 Measured 摘要；表输出受全局质量 gate 限制 | [具体规格](op_specs/CRV-09_bake_lut3d.md)，Proposed / implemented_subset。Result focused CTest 与安装消费测试通过（新 profile 测试使用本机 Strict）；误差只在网格 cell centers 与可选点测量，不是全域界；ColorArray v1 的 CIELAB L* 单位差距未关闭 |
+| CRV-10 反函数 | 三个 Result 输入各含一个任意 schema/key 的 tensor member；`sample_shape()` 为 x[K]、y[K]、query[N]；输出 `values` 为 `photospider.tensor` / `samples`，shape [N]，facets 为空 | 六个 linear/PCHIP profile keys；Whole role 13 读取完整输入，先验证全局 x/y topology 和全部 query；非空请求发布完整 certified coverage，坐标保持全局，association 记录 source ObjectIds | [具体规格](op_specs/CRV-10_invert.md)，Proposed；保留原始数学曲线求逆和 exact PCHIP 格点判定。当前 focused Result 覆盖与旧 manual/oracle/performance 证据边界见规格和 workflow README |
+| CRV-11 resample signal | 重采样模板沿用 CRV-01；uniform `input` 和 nonuniform `positions`/`values` 是单 tensor Result，可用任意有效 schema/key，shape 使用完整 `sample_shape()`；uniform `values` 与 nonuniform `samples` 保持各自输入 shape/dtype | 四个插值模板；15 个 uniform 与 15 个 nonuniform profile keys 均为 Whole Result，role 13 校验所有输入；授权窗口直接读取，完整事务输出并保留原数学与边界规则 | [具体规格](op_specs/CRV-11_resample_signal.md)，Proposed；Result CTest、Strict/本机 Apple 手动流程、独立 oracle 与安装消费通过；x86 数值和性能未复测，低通不保证零混叠 |
 
 ## 插值选择
 

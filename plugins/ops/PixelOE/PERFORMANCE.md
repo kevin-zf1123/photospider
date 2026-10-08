@@ -1,10 +1,12 @@
-# CPU Whole validation and performance
+# PixelOE performance evidence
 
-The CPU Whole plugin uses host-assigned ranges and retains the NEON/AVX2
+The measured CPU Whole, tiled, Metal and Vulkan results below come from the former planar integration path; they are historical and do not establish current Result workflow performance. The current public workflow uses Result operation ABI 2 and Whole Result images. Its `peak_bytes` value is the cumulative execution Root Host peak, not the earlier local managed/scratch ledger; `live_payload` is the positive delta over the bound source Result payload baseline. `work_budget` limits work during execution, while source fixture construction is outside that work limit. Current contract checks pass on CPU, CPU tiled and Metal. Across 126 cases (42 per mode), final CPU, CPU-tiled and Metal outputs match the corresponding earlier CPU/Metal outputs that passed upstream-oracle validation. CPU-tiled coverage is byte comparison, not a separate Torch oracle run. Independent upstream-oracle checks pass 42/42 for CPU and Metal, with maximum absolute errors 3.2186508178710938e-6 and 3.159046173095703e-6. The current Result Vulkan path has not been run. These correctness results provide no speed comparison for the Result path.
+
+The historical CPU Whole plugin used host-assigned ranges and retained the NEON/AVX2
 specializations. A host quota of one is the serial reference configuration.
 Each stage joins before dependent stages begin. Fixed workgroup reduction order,
 stable ordering, palette iterations and ordered dithering are independent of
-worker count. The plugin creates no threads. The tables below establish CPU Whole behavior. CPU tiled and GPU paths have separate correctness and performance evidence; their results do not belong in these CPU comparisons.
+worker count. The plugin created no threads. The tables below record CPU Whole behavior for that earlier path. CPU tiled and GPU paths have separate correctness and performance evidence; their results do not belong in these CPU comparisons.
 
 ## Controlled public workflow measurements
 

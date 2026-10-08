@@ -1,4 +1,5 @@
-// NUM-04 trig acceptance and timings: public execution, callback and raw math.
+// NUM-04 trig acceptance and timings: Result workflow, computation poll and raw
+// math.
 #include <algorithm>
 #include <cfenv>  // NOLINT(build/c++11)
 #include <chrono>
@@ -17,6 +18,7 @@
 #include <vector>
 
 #include "01-numeric/numeric_math_operation.hpp"
+#include "math_benchmark_result.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/numeric/unary.hpp"
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
@@ -75,24 +77,6 @@ ps::Value input_value(const std::vector<float>& values, unsigned layout = 0) {
       {ps::ElementType::Float32, {values.size()}},
       ps::Region::whole({values.size()}), strides, std::move(buffer).freeze()));
 }
-struct Call final {
-  std::vector<ps::Value> inputs;
-  std::vector<ps::Region> demands;
-  std::map<std::string, ps::ParameterValue> parameters;
-  ps::OperationInvocation invocation;
-  explicit Call(const ps::Value& value)
-      : inputs{value},
-        demands{value.region()},
-        invocation(inputs, demands, parameters, ps::Backend::Cpu, {},
-                   value.region()) {}
-};
-std::vector<std::uint32_t> words(const ps::Value& value) {
-  std::vector<std::uint32_t> result(value.descriptor().shape[0]);
-  std::memcpy(result.data(),
-              value.bytes().data() + take(value.byte_address({0})),
-              result.size() * sizeof(std::uint32_t));
-  return result;
-}
 std::uint32_t bits(float f) {
   std::uint32_t result;
   std::memcpy(&result, &f, 4);
@@ -136,7 +120,8 @@ void acceptance(const std::string& path) {
     references.push_back(pair[1]);
   }
   require(!inputs.empty(), "nonempty corpus");
-  const auto op = operation();
+  auto control = std::make_shared<point_math_checks::Control>();
+  math_benchmark_result::Workflow workflow(operation(), control);
   std::uint64_t maximum = 0;
   numeric::CertifiedMath single(selected_profile());
   std::vector<std::uint32_t> partition_reference(inputs.size());
@@ -146,8 +131,8 @@ void acceptance(const std::string& path) {
       std::vector<float> data(inputs.begin() + offset,
                               inputs.begin() + offset + n);
       auto value = input_value(data);
-      Call call(value);
-      const auto out = words(take(op.callback(call.invocation)));
+      workflow.bind(value);
+      const auto out = math_benchmark_result::words(take(workflow.run()));
       for (std::size_t i = 0; i < n; ++i) {
         if (chunk == 1) {
           partition_reference[offset + i] = out[i];
@@ -182,12 +167,13 @@ void acceptance(const std::string& path) {
   for (unsigned layout = 0; layout < 3; ++layout) {
     for (int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
       auto value = input_value(normal, layout);
-      Call call(value);
+      workflow.bind(value);
+      control->rounding = mode;
       std::fesetround(mode);
       std::feclearexcept(FE_ALL_EXCEPT);
       std::feraiseexcept(FE_DIVBYZERO);
       const auto flags = std::fetestexcept(FE_ALL_EXCEPT);
-      const auto out = words(take(op.callback(call.invocation)));
+      const auto out = math_benchmark_result::words(take(workflow.run()));
       require(std::fegetround() == mode &&
                   std::fetestexcept(FE_ALL_EXCEPT) == flags,
               "restore fenv");
@@ -198,6 +184,7 @@ void acceptance(const std::string& path) {
                 "layout/fenv identity");
     }
   }
+  control->rounding.reset();
   std::fesetround(FE_TONEAREST);
   std::feclearexcept(FE_ALL_EXCEPT);
   std::vector<float> resource_inputs(65536, .125f);
@@ -228,7 +215,9 @@ void acceptance(const std::string& path) {
                                resource_inputs.size() * 4);
   // Compute expected admission independently of batch scheduling; fallback
   // refinement is charged by the existing certified engine exactly once.
-  std::vector<float> mixed(inputs.begin(), inputs.begin() + 16);
+  std::vector<float> mixed(
+      inputs.begin(),
+      inputs.begin() + std::min<std::size_t>(16, inputs.size()));
   const auto mixed_value = input_value(mixed);
   std::uint64_t charged = 2 + 2 * mixed.size();
   numeric::CertifiedMath math(selected_profile());
@@ -243,26 +232,24 @@ void acceptance(const std::string& path) {
         },
         [] { return ps::Status::success(); }));
   }
+  workflow.bind(mixed_value);
   for (const bool enough : {true, false}) {
-    ps::ResourceLimits limits;
-    limits.maximum_work = enough ? charged : charged - 1;
-    ps::ResourceBudget budget(limits);
+    control->maximum_work = enough ? charged : charged - 1;
     {
-      ps::ResourceAllocationScope scope(budget);
-      Call call(mixed_value);
-      call.invocation.allocator = budget.allocator();
-      const auto result = op.callback(call.invocation);
+      const auto result = workflow.run();
       if (enough) {
-        require(result.ok() && budget.statistics().issued.work == charged,
-                "fallback admission charged once at exact budget");
+        require(result.ok() && control->work == charged,
+                "Result fallback work charged once at exact callback budget");
       } else {
         require(!result.ok() &&
-                    result.status().code == ps::ErrorCode::ResourceExhausted,
-                "mixed budget rejection threshold");
+                    result.status().code == ps::ErrorCode::ResourceExhausted &&
+                    result.status().reason == ps::FailureReason::WorkLimit &&
+                    control->computation_polls == 1,
+                "Result mixed callback budget rejection threshold");
       }
     }
-    require(budget.statistics().live[ps::ResourceKind::Payload] == 0,
-            "mixed success/failure release");
+    require(workflow.root().statistics().live[ps::ResourceKind::Payload] == 0,
+            "mixed success/failure releases temporary Result payload");
   }
   std::cout << "PASS " << inputs.size()
             << " MPFR cases x 6 partitions, maximum_steps=" << maximum
@@ -271,6 +258,12 @@ void acceptance(const std::string& path) {
 }  // namespace
 int main(int argc, char** argv) {
   try {
+    if (argc == 2 && std::string(argv[1]) == "--timing-scopes") {
+      std::cout << "{\"public\":\"result_workflow\","
+                   "\"core\":\"result_computation_poll\","
+                   "\"raw\":\"simd_kernel\"}\n";
+      return 0;
+    }
     if (argc == 4 && std::string(argv[1]) == "check") {
       select(argv[2]);
       acceptance(argv[3]);
@@ -319,54 +312,23 @@ int main(int argc, char** argv) {
     require(layer != "raw" || (distribution == "normal" && layout == 3),
             "raw measurements require dense normal-domain inputs");
     auto value = input_value(input, layout);
-    std::unique_ptr<ps::ExecutionContext> context;
-    std::optional<ps::FrozenExecution> snapshot;
-    if (layer == "public") {
-      require(layout == 3, "public direct bindings require dense layout");
-      auto registry = std::make_shared<ps::OperationRegistry>();
-      require(registry->register_operation(operation()).ok(),
-              "register measurement");
-      require(registry->freeze().ok(), "freeze measurement registry");
-      ps::WorkflowDocument document;
-      document.inputs = {
-          {1, "x", value.descriptor(), value.region(), value.layout(), {}}};
-      ps::WorkflowNode node;
-      node.id = 1;
-      node.operation = "numeric.trig_measurement";
-      node.inputs = {ps::WorkflowInputReference{1}};
-      document.nodes = {node};
-      document.outputs = {{"values", 1, "values"}};
-      ps::GraphContext graph(document);
-      auto plan = take(ps::Compiler(registry).compile(graph));
-      ps::ExecutionContextConfig config;
-      config.cpu_workers = 1;
-      config.result_cache_bytes = 0;
-      config.maximum_live_bytes = UINT64_C(1) << 30;
-      context = std::make_unique<ps::ExecutionContext>(registry, config);
-      ps::ExecutionBindings bindings;
-      bindings.inputs = {{"x", value}};
-      snapshot = take(context->freeze(plan.plan, bindings));
+    auto control = std::make_shared<point_math_checks::Control>();
+    control->measure_computation = layer == "core";
+    std::unique_ptr<math_benchmark_result::Workflow> workflow;
+    if (layer != "raw") {
+      workflow = std::make_unique<math_benchmark_result::Workflow>(
+          operation(), layer == "core" ? control : nullptr);
+      workflow->bind(value);
     }
-    ps::DemandQuery query{{"values", take(ps::Footprint::all({n}))}};
-    ps::ExecutionOptions options;
-    options.maximum_dependency_work = UINT64_C(1) << 50;
-    options.dependencies.maximum_work = UINT64_C(1) << 50;
-    options.dependencies.sets.maximum_work = UINT64_C(1) << 50;
-    options.maximum_dependency_cache_work = 0;
-    Call call(value);
-    auto op = operation();
     std::vector<double> times;
     std::uint64_t peak = 0, checksum = 0;
     for (unsigned repeat = 0; repeat <= repeats; ++repeat) {
-      ps::Value output;
+      ps::ResultRef output;
       const auto start = std::chrono::steady_clock::now();
-      if (layer == "public") {
-        auto run =
-            take(context->execute_fragments(*snapshot, query, {}, options));
-        output = run.values.at("values").fragments().at(0);
-        peak = std::max(peak, run.diagnostics.peak_live_bytes);
-      } else if (layer == "core") {
-        output = take(op.callback(call.invocation));
+      if (layer != "raw") {
+        output = take(workflow->run());
+        if (layer == "public")
+          peak = std::max(peak, workflow->peak_payload());
       } else {
         ps::input_internal::Float32Environment environment;
         require(selected_kind == 9 ||
@@ -379,9 +341,11 @@ int main(int argc, char** argv) {
         numeric::trig_simd_f32(selected_kind, input.data(), raw.data(), n);
 #endif
       }
-      const auto elapsed = std::chrono::duration<double, std::micro>(
-                               std::chrono::steady_clock::now() - start)
-                               .count();
+      const auto elapsed = layer == "core"
+                               ? control->computation_us
+                               : std::chrono::duration<double, std::micro>(
+                                     std::chrono::steady_clock::now() - start)
+                                     .count();
       if (repeat)
         times.push_back(elapsed);
       if (repeat && argc > 6 && std::string(argv[6]) == "profile")
@@ -391,7 +355,7 @@ int main(int argc, char** argv) {
         out.resize(n);
         std::memcpy(out.data(), raw.data(), n * 4);
       } else {
-        out = words(output);
+        out = math_benchmark_result::words(output);
       }
       verify(input, out);
       checksum += out[n / 2];

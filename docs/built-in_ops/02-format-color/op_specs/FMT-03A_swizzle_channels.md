@@ -9,23 +9,19 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-03A: reorder, select and fill channel slots
 
-Runtime update: FMT-03A/B are implemented as transactional public authoring
-helpers over FMT-02C. Scalar fills are fused into its internal mapped dependency
-plan under the fusion permission below; ordinary FMT-02C authoring still accepts
-only component/channel sources. Typed literals use exact-bit scalar providers.
-See [implementation and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-03-channel-editing)
-and the [measured CPU performance](../../../../examples/channel_editing_performance/README.md).
-Proposed remains the specification decision status.
+Runtime contract: this installed helper expands transactionally into the
+registered FMT-02C Result operation. Scalar literals use prepared native bits
+through the registered `channel.scalar_literal_<profile>` provider. The helper
+has no separate operation key. The specification decision remains Proposed;
+the performance guide records focused Result smokes and labels its earlier Value/planar measurements as historical.
 
 Inherit the complete [FMT-03 family contract](FMT-03_channel_editing_contract.md),
 including its support matrix through FMT-02, resource/error rules and scalar-fill
-lowering. The proposed authoring helper `swizzle_channels` receives a graph,
+lowering. The public authoring helper `swizzle_channels` receives a graph,
 `base` edge, any connected scalar edges, static slot expressions and the family
 parameters. It returns one `values` edge handle. It is not a new native registry
 key or an alias of the old `channel.swizzle` operation.
@@ -40,8 +36,9 @@ several output slots may read the same base channel or scalar. A typed literal
 is an authoring shortcut for an equivalent scalar source. Raw uses explicit
 axis/index selections; literals and connected scalars preserve all sample bits.
 
-For base rank r and shape S with its channel axis removed, output rank remains r
-and shape is insert(S,a,len(slots)). No spatial dimension or channel-axis position
+For base cell rank r and shape S with its channel axis removed, output cell rank
+remains r and shape is insert(S,a,len(slots)). The full sample rank, including
+batch and cell axes, is at most 8. No spatial dimension or channel-axis position
 changes. Do not implicitly keep alpha: it must appear in slots when desired.
 No zero-channel result, implicit constant, squeeze or broadcast is introduced.
 

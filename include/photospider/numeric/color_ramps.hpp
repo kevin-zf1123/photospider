@@ -149,32 +149,38 @@ inline Result<WorkflowNode> node(
 }
 }  // namespace color_ramp_detail
 /** @brief Shared constructor contract for the independent color-ramp
- * primitives. Ordered inputs: input[S], stops[K], colors[K,C]; floating ports
- * independently use Float32/64. S has rank 1..7, K=1..65536 and all logical
- * products <=2^40. Rational-pi constructors split colors into Float32/64 [K,2]
- * and two Int64[K] ports. colors_type is only an authoring hint for default
- * dtype; Compiler checks actual edges. Helpers own statics, perform no I/O and
- * may be used concurrently; invalid options fail
+ * primitives. Ordered inputs are Result tensors `input`, `stops`, `colors`;
+ * each has one tensor member under any schema id/version/key. Their complete
+ * `sample_shape()` values are S, [K] and [K,C]. Floating ports independently
+ * use Float32/64. S has rank 1..7, K=1..65536 and all logical products <=2^40.
+ * Rational-pi constructors use split Float32/64 colors [K,2] and Int64[K]
+ * numerator and denominator inputs; selected rows require positive
+ * denominators. `colors_type` is only an authoring hint for default output
+ * dtype; Compiler checks actual Result edges. Helpers create only graph nodes
+ * and parameters and may be used concurrently; invalid options fail
  * InvalidArgument/InvalidDomain/Schema. Allocation may throw bad_alloc.
- * Descriptor/edge conflicts fail TypeMismatch during compilation. Nonempty
- * runtime requests collect all inputs and validate all finite strictly
- * increasing stops, then every finite position before selected one/two
- * color-row mathematics. Output values is a complete dense S+[C] Value,
- * retaining ColorArray metadata and resources. Component requests close to
- * complete colors; fragments retain the full output owner. Empty reads no
- * sample data. Typed/upstream validation covers whole inputs; any input edit
- * invalidates the complete recorded output demand. Numeric failures have Run
- * scope. Unused generic color rows remain mathematically unused, but
- * upstream/typed failures anywhere are observable. Full-input collect,
- * full-output payload, fixed arithmetic workspace and O(K) stop storage must
- * fit host budgets, including for small requested regions. Exact interpolation
- * rounds only at destination; direct/complete-identical rows keep converted
- * zero signs, mixed exact zeros are +0. RGB alone decodes and encodes transfer
- * with exact alpha; other models interpolate their own coordinates. Polar hue
- * is unwrapped, including zero chroma/saturation, with certified pi unit
- * conversion. No gamut clipping, model conversion, adaptation or ICC CMM. Host
+ * Descriptor/edge conflicts fail TypeMismatch at compilation. Each nonempty
+ * Whole run grants Data, Validation and Descriptor (role 13) for all inputs.
+ * The callback reads authorized windows directly, validates all finite strictly
+ * increasing stops, then every finite position before color arithmetic.
+ * Selected rows define the math, with unused generic rows remaining numerically
+ * unused while typed/upstream validation still covers all inputs. Output port
+ * `values` is a full-shape immutable Result using `photospider.tensor`
+ * v1/member `samples`, shape S+[C], with ColorArray v1 facet and
+ * `atomic_trailing_axes=1`. A component request closes to its full color tuple;
+ * Whole publication retains complete certified coverage, global coordinates and
+ * source Result associations. Empty reads no sample payload. Input edits
+ * invalidate complete recorded output demand. Numeric failures have Run scope.
+ * Source windows, fixed arithmetic workspace, full output and O(K) Root-owned
+ * stop storage must fit host budgets. Exact interpolation rounds only at
+ * destination; direct/complete-identical rows keep converted zero signs, mixed
+ * exact zeros are +0. RGB alone decodes and encodes transfer with exact alpha;
+ * other models interpolate their own coordinates. Polar hue is unwrapped,
+ * including zero chroma/saturation, with certified pi unit conversion. No gamut
+ * clipping, model conversion, adaptation or ICC CMM. Host
  * work/capacity/stage/cancellation bounds apply to every refinement; an
- * unfinished proof fails ResourceExhausted. Immutable outputs outlive contexts.
+ * unfinished proof fails ResourceExhausted. Output owners retain required
+ * ColorArray resources and survive context teardown.
  */
 /** @brief Linear-light RGB/RGBA; default description is three-channel sRGB. */
 inline Result<WorkflowNode> color_ramp_rgb_node(

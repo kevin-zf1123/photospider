@@ -25,7 +25,7 @@
 #include "execution/cancellation_poll.hpp"
 #endif
 
-#include "01-numeric/array_publication.hpp"
+#include "02-format-color/result_mapping.hpp"
 #include "data/exact_numeric.hpp"
 #include "photospider/data/region_runs.hpp"
 #include "photospider/data/tensor_description.hpp"
@@ -125,6 +125,25 @@ std::optional<ElementType> dtype(const std::string& s) {
     if (s == entry.first)
       return entry.second;
   return {};
+}
+const char* dtype_name(ElementType type) {
+  switch (type) {
+    case ElementType::UInt8:
+      return "uint8";
+    case ElementType::UInt16:
+      return "uint16";
+    case ElementType::Int8:
+      return "int8";
+    case ElementType::Int16:
+      return "int16";
+    case ElementType::Int64:
+      return "int64";
+    case ElementType::Float32:
+      return "float32";
+    case ElementType::Float64:
+      return "float64";
+  }
+  return "unknown";
 }
 Rational integer_value(std::uint64_t n, bool negative = false) {
   return {Natural(n), Natural(1), negative, false};
@@ -325,6 +344,8 @@ struct Preparation final {
   ResourceVector<Bounds> bounds;
   std::optional<std::uint32_t> axis;
   bool rescale, clip, identity, materialize;
+  std::string layout;
+  std::optional<std::uint32_t> sample_axis;
   bool fast_u8_f32 = false;
   bool fast_f32_u8 = false;
   bool fast_i64_u8 = false;
@@ -469,14 +490,20 @@ TensorDescription raw_description(TensorDescription description,
 Result<OperationPreparation> prepare(
     const std::vector<OperationMetadata>& inputs, const Parameters& params) {
   using Output = Result<OperationPreparation>;
-  const auto& input = inputs[0];
+  if (inputs.size() != 1)
+    return Output(invalid("one input is required"));
+  auto checked = tensor_ops::check_tensor(inputs[0]);
+  if (!checked.ok())
+    return Output(checked);
+  const auto& input = inputs[0].result_schema->tensors[0];
   const auto& shape = input.descriptor.shape;
+  const auto full_shape = input.sample_shape();
   if (!supported(input.descriptor.element_type) || shape.empty() ||
-      shape.size() > 8)
+      full_shape.size() > 8)
     return Output(Status{ErrorCode::TypeMismatch,
                          "numeric.convert_format requires rank 1..8"});
   std::uint64_t elements = 1;
-  for (const auto extent : shape) {
+  for (const auto extent : full_shape) {
     if (!extent || extent > ((UINT64_C(1) << 40) / elements))
       return Output(Status{ErrorCode::TypeMismatch,
                            "numeric.convert_format exceeds 2^40 elements"});
@@ -507,6 +534,7 @@ Result<OperationPreparation> prepare(
   if (layout != "auto" && layout != "view" && layout != "materialize")
     return Output(invalid("layout must be auto, view or materialize"));
   state->materialize = layout == "materialize";
+  state->layout = layout;
   const bool source_explicit = params.count("source_range");
   const bool target_explicit = params.count("target_range");
   if (!state->rescale &&
@@ -537,6 +565,8 @@ Result<OperationPreparation> prepare(
     if (a < 0 || static_cast<std::uint64_t>(a) >= shape.size())
       return Output(invalid("channel axis outside rank"));
     state->axis = static_cast<std::uint32_t>(a);
+    state->sample_axis =
+        static_cast<std::uint32_t>(input.batch_axes.size() + a);
     const auto count = shape[*state->axis];
     if ((source.size() != 1 && source.size() != count) ||
         (destination.size() != 1 && destination.size() != count))
@@ -589,9 +619,6 @@ Result<OperationPreparation> prepare(
                                              state->bounds[0].identity));
   if (layout == "view" && !state->identity)
     return Output(invalid("ViewUnavailable: mapping is not an identity"));
-  if (layout == "view" && input.planar_layout)
-    return Output(
-        invalid("ViewUnavailable: planar output requires publication"));
 
   const auto metadata_mode =
       params.count("metadata_mode")
@@ -632,14 +659,16 @@ Result<OperationPreparation> prepare(
       description->channel_axis && *state->axis != *description->channel_axis)
     return Output(invalid("range axis conflicts with tensor description"));
   OperationOutputSpecialization output;
-  output.metadata = input;
-  output.metadata.descriptor.element_type = state->target;
-  output.metadata.facets.clear();
+  auto schema = *inputs[0].result_schema;
+  auto& output_tensor = schema.tensors[0];
+  output_tensor.descriptor.element_type = state->target;
+  output_tensor.atomic_trailing_axes = 0;
+  output_tensor.facets.clear();
   // Facet propagation is filled by the metadata pass below. Opaque annotations
   // remain byte identical and retain their resource bindings.
   for (const auto& facet : input.facets)
     if (facet.key != "photospider.tensor-description")
-      output.metadata.facets.push_back(facet);
+      output_tensor.facets.push_back(facet);
   if (metadata_mode != "raw" && state->rescale && !description)
     description.emplace();
   if (description) {
@@ -651,36 +680,18 @@ Result<OperationPreparation> prepare(
     if (!converted.ok())
       return Output(converted.status());
     auto valid = validate_tensor_description(converted.value(),
-                                             output.metadata.descriptor);
+                                             output_tensor.descriptor);
     if (!valid.ok())
       return Output(valid);
     auto encoded = encode_tensor_description(converted.value());
     if (!encoded.ok())
       return Output(encoded.status());
-    output.metadata.facets.push_back(encoded.take_value());
+    output_tensor.facets.push_back(encoded.take_value());
   }
-  if (input.planar_layout) {
-    output.metadata.planar_layout = input.planar_layout;
-    output.metadata.planar_layout->row_pitch_bytes = 0;
-  }
-  auto all = Footprint::all(shape);
-  if (!all.ok())
-    return Output(all.status());
-  DependencyMappedNeed need;
-  need.port = 0;
-  need.roles = static_cast<std::uint32_t>(DependencyRole::Data);
-  for (std::size_t i = 0; i < shape.size(); ++i) {
-    DependencyAxis axis;
-    axis.observation_axis = static_cast<std::int32_t>(i);
-    need.axes.push_back(axis);
-  }
-  output.static_dependency_pieces =
-      std::vector<DependencyMapPiece>{{all.take_value(), {std::move(need)}}};
-  output.regional_atomic = true;
-  output.preserve_output_views =
-      state->identity && !state->materialize && !input.planar_layout;
-  if (output.preserve_output_views)
-    output.maximum_output_payload_bytes = 0;
+  if (output_tensor.layout.spatial && (!state->identity || state->materialize))
+    output_tensor.layout.row_pitch_bytes = 0;
+  output.metadata.result_schema =
+      std::make_shared<const SchemaTemplate>(std::move(schema));
   OperationPreparation result;
   result.outputs.push_back(std::move(output));
   result.state = std::move(state);
@@ -1153,224 +1164,86 @@ std::uint64_t infallible_prefix(const std::uint8_t* source, std::uint64_t count,
   return count;
 }
 
-Result<ValueFragments> publish(const DependencyPhase& phase,
-                               const Preparation& state) {
-  using Output = Result<ValueFragments>;
-  const auto& descriptor = phase.query.output.descriptor;
-  const auto& facets = phase.query.output.facets;
-  // Preserve the first scalar sample's accounted lookup initialization before
-  // admitting u8 spans, including cold calls whose full run fits SIMD.
-  bool u8_lookup_ready = !state.fast_u8_f32;
-  numeric_ops::ArrayPublication publication(phase.query.outputs.boxes().size(),
-                                            descriptor.shape.size());
-  std::vector<Value> values;
-  for (const auto& box : phase.query.outputs.boxes()) {
-    if (state.identity && !state.materialize) {
-      for (const auto& fragment : phase.inputs[0].fragments()) {
-        std::vector<RegionDimension> overlap;
-        bool intersects = true;
-        for (std::size_t a = 0; a < box.rank(); ++a) {
-          const auto x = fragment.region().dimensions()[a];
-          const auto y = box.dimensions()[a];
-          const auto begin = std::max(x.offset, y.offset);
-          const auto end = std::min(x.offset + x.extent, y.offset + y.extent);
-          if (begin >= end) {
-            intersects = false;
-            break;
-          }
-          overlap.push_back({begin, end - begin});
-        }
-        if (!intersects)
-          continue;
-        auto view = fragment.view(Region(std::move(overlap)));
-        if (!view.ok())
-          return Output(view.status());
-        auto mapped = Value::from_storage(
-            descriptor, view.value().region(), view.value().layout(),
-            view.value().storage(), facets, phase.query.resources);
-        if (!mapped.ok())
-          return Output(mapped.status());
-        auto retained = publication.retain(mapped.take_value());
-        if (!retained.ok())
-          return Output(retained.status());
-        values.push_back(retained.take_value());
-      }
-      continue;
-    }
-    auto allocated = MutableValue::allocate(descriptor, box, phase.allocator);
-    if (!allocated.ok())
-      return Output(allocated.status());
-    auto writer = allocated.take_value();
-    const auto target_width = Value::element_size(state.target);
-    for (const auto& fragment : phase.inputs[0].fragments()) {
-      std::vector<RegionDimension> overlap;
-      bool intersects = true;
-      for (std::size_t a = 0; a < box.rank(); ++a) {
-        const auto x = fragment.region().dimensions()[a];
-        const auto y = box.dimensions()[a];
-        const auto begin = std::max(x.offset, y.offset);
-        const auto end = std::min(x.offset + x.extent, y.offset + y.extent);
-        if (begin >= end) {
-          intersects = false;
-          break;
-        }
-        overlap.push_back({begin, end - begin});
-      }
-      if (!intersects)
-        continue;
-      const Region region(std::move(overlap));
-      std::vector<std::uint64_t> at(region.rank());
-      auto status = visit_value_runs(
-          fragment, region, box, 64, state.axis, [&](const ValueReadRun& run) {
-            if (phase.query.cancellation.cancelled())
-              return Status{ErrorCode::Cancelled,
-                            "numeric conversion cancelled"};
-            for (std::uint64_t i = 0; i < run.samples;) {
-              const auto* source =
-                  run.data + static_cast<std::int64_t>(
-                                 static_cast<__int128>(i) * run.stride_bytes);
-              auto* target =
-                  writer.data() + (run.destination_element + i) * target_width;
-              const auto safe =
-                  u8_lookup_ready &&
-                          run.stride_bytes == static_cast<std::int64_t>(
-                                                  sample_width(state.source))
-                      ? infallible_prefix(source, run.samples - i, state)
-                      : 0;
-              const auto count = std::max<std::uint64_t>(1, safe);
-              // Preserve per-sample fuel settlement even when the numeric
-              // instructions run in a span. A rejected charge is not retried.
-              for (std::uint64_t lane = 0; lane < count; ++lane) {
-                auto charged = phase.consume_work(box.rank() + 64);
-                if (!charged.ok())
-                  return charged;
-                if (phase.query.cancellation.cancelled())
-                  return Status{ErrorCode::Cancelled,
-                                "numeric conversion cancelled"};
-              }
-              const auto used =
-                  safe ? convert_span(source, target, safe, state) : 0;
-              for (std::uint64_t lane = used; lane < count; ++lane) {
-                region_run_coordinate(region, run.logical_element + i + lane,
-                                      &at);
-                const auto& bounds =
-                    state.bounds[state.axis ? at[*state.axis] : 0];
-                auto converted = convert_one(
-                    source +
-                        static_cast<std::int64_t>(static_cast<__int128>(lane) *
-                                                  run.stride_bytes),
-                    target + lane * target_width, state, bounds, at);
-                if (!converted.ok())
-                  return converted;
-                u8_lookup_ready = true;
-              }
-              i += count;
-            }
-            return Status::success();
-          });
-      if (!status.ok())
-        return Output(status);
-    }
-    auto value = std::move(writer).publish(facets, phase.query.resources);
-    if (!value.ok())
-      return Output(value.status());
-    auto retained = publication.retain(value.take_value());
-    if (!retained.ok())
-      return Output(retained.status());
-    values.push_back(retained.take_value());
-  }
-  return publication.finish(descriptor, phase.query.outputs, values.data(),
-                            values.size(), phase.sets, facets,
-                            phase.query.resources);
+using tensor_ops::require;
+using tensor_ops::take;
+using Poll = Result<ResultProgramPoll>;
+ResultBuilder result_builder(const ResultProgramPhase& phase, bool empty) {
+  auto builder = take(ResultBuilder::start(
+      phase.resources, *phase.query.output.result_schema,
+      phase.query.semantic_key, {},
+      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
+                                                     phase.association->end())
+                        : std::vector<std::uint64_t>{},
+      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
+  require(builder.bind_descriptor_relation(take(ResultRelation::cartesian(
+      phase.resources, 1,
+      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+  return builder;
 }
-
-struct Continuation final {
-  const Preparation* state;
-  bool requested = false;
-  explicit Continuation(const Preparation* prepared) : state(prepared) {}
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    if (!requested) {
-      requested = true;
-      DependencyNeedBatch batch;
-      batch.static_mapping = true;
-      return Result<DependencyPoll>(std::move(batch));
-    }
-    FloatingEnvironment environment;
-    ExactWorkScope exact_work(&phase.consume_work, &phase.query.cancellation);
-    try {
-      auto result = publish(phase, *state);
-      return result.ok() ? Result<DependencyPoll>(result.take_value())
-                         : Result<DependencyPoll>(result.status());
-    } catch (const ExactWorkFailure& failure) {
-      return Result<DependencyPoll>(failure.status);
-    }
-  }
-};
-
-Status planar(const PlanarOperationInvocation& call) {
-  FloatingEnvironment environment;
-  if (!call.prepared || !call.prepared->state())
-    return Status{ErrorCode::Internal, "numeric conversion preparation absent"};
-  const auto& state = *static_cast<const Preparation*>(call.prepared->state());
-  const auto& output_layout = *call.output_metadata.planar_layout;
-  const auto& dimensions = call.output_region.dimensions();
-  const auto height = output_layout.height_axis;
-  const auto width = output_layout.width_axis;
-  const auto channels = output_layout.channel_axis;
-  std::vector<std::uint64_t> at(dimensions.size());
-  for (std::size_t a = 0; a < at.size(); ++a)
-    at[a] = dimensions[a].offset;
-  const auto channel_start = channels ? dimensions[*channels].offset : 0;
-  const auto channel_end =
-      channels ? channel_start + dimensions[*channels].extent : 1;
-  for (std::uint64_t channel = channel_start; channel < channel_end;
-       ++channel) {
-    if (channels)
-      at[*channels] = channel;
-    for (std::uint64_t row = dimensions[height].offset;
-         row < dimensions[height].offset + dimensions[height].extent;) {
-      at[height] = row;
-      std::uint64_t advanced_rows =
-          dimensions[height].offset + dimensions[height].extent - row;
-      for (std::uint64_t column = dimensions[width].offset;
-           column < dimensions[width].offset + dimensions[width].extent;) {
-        if (call.cancellation.cancelled())
-          return Status{ErrorCode::Cancelled, "numeric conversion cancelled"};
-        at[height] = row;
-        at[width] = column;
-        auto read = call.inputs[0].rectangle_run(at);
-        if (!read.ok())
-          return read.status();
-        auto write = call.output.rectangle_run(at);
-        if (!write.ok())
-          return write.status();
-        const auto& src = read.value();
-        const auto& dst = write.value();
+Poll empty_result(const ResultProgramPhase& phase) try {
+  auto builder = result_builder(phase, true);
+  return Poll(ResultPublication{take(builder.seal()), true});
+} catch (const Status& status) {
+  return Poll(status);
+}
+Status checkpoint(const ResultProgramPhase& phase, std::uint64_t work) {
+  auto status = phase.consume_work(work);
+  if (!status.ok())
+    return status;
+  if (phase.query.cancellation.cancelled())
+    return {ErrorCode::Cancelled, "numeric conversion cancelled"};
+  return Status::success();
+}
+Status convert_window(const ResultProgramPhase& phase, const Preparation& state,
+                      const ResultTensorReadWindow& source_window,
+                      const ResultTensorWriteWindow& writer,
+                      bool* u8_lookup_ready) {
+  const auto& dims = writer.region().dimensions();
+  const auto width_axis = writer.sample_axis();
+  const auto height_axis = source_window.row_axis();
+  std::vector<std::uint64_t> at;
+  for (auto dim : dims)
+    at.push_back(dim.offset);
+  const auto source_width = sample_width(state.source);
+  const auto target_width = sample_width(state.target);
+  const auto height_end =
+      height_axis ? dims[*height_axis].offset + dims[*height_axis].extent : 1;
+  for (;;) {
+    for (std::uint64_t row = height_axis ? dims[*height_axis].offset : 0;
+         row < height_end;) {
+      if (height_axis)
+        at[*height_axis] = row;
+      std::uint64_t advanced_rows = height_end - row;
+      for (std::uint64_t column = dims[width_axis].offset;
+           column < dims[width_axis].offset + dims[width_axis].extent;) {
+        require(checkpoint(phase, 1));
+        if (height_axis)
+          at[*height_axis] = row;
+        at[width_axis] = column;
+        const auto src = take(source_window.rectangle_run(at));
+        const auto dst = take(writer.rectangle_run(at));
         const auto rows = std::min({src.rows, dst.rows, advanced_rows});
         advanced_rows = std::min(advanced_rows, rows);
         const auto samples = std::min(src.row.samples, dst.row.samples);
+        const bool contiguous = src.row.sample_stride_bytes ==
+                                    static_cast<std::int64_t>(source_width) &&
+                                dst.row.sample_stride_bytes ==
+                                    static_cast<std::int64_t>(target_width);
 #if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
-        // A bounded, fully requested contiguous rectangle can be admitted and
-        // converted in one streaming scope. Partial-width/padded windows retain
-        // the row path. Failed admission writes nothing and uses exact
-        // fallback.
         const auto tile_samples = rows * samples;
-        if (state.fast_f32_u8 && tile_samples >= 4096 &&
-            tile_samples <= 65536 && src.row_stride_bytes == samples * 4 &&
-            dst.row_stride_bytes == samples && sme_conversion_available()) {
-          if (call.cancellation.cancelled())
-            return Status{ErrorCode::Cancelled, "numeric conversion cancelled"};
-          if (const auto* budget = resource_internal::metadata_budget()) {
-            auto charged = budget->consume({tile_samples});
-            if (!charged.ok())
-              return charged;
-          }
-          const auto polling =
-              execution_internal::CancellationPoll::borrow(call.cancellation);
+        if (writer.spec().layout.spatial && state.fast_f32_u8 && contiguous &&
+            tile_samples >= 4096 && tile_samples <= 65536 &&
+            src.row_stride_bytes == static_cast<std::int64_t>(samples * 4) &&
+            dst.row_stride_bytes == static_cast<std::int64_t>(samples) &&
+            sme_conversion_available()) {
+          // Admission and conversion poll internally. A rejected tile stores
+          // nothing; bounded row conversion then supplies the exact diagnostic.
+          require(checkpoint(phase, tile_samples));
+          const auto polling = execution_internal::CancellationPoll::borrow(
+              phase.query.cancellation);
           const auto used = format_numeric::sme_f32_u8_tile(
               src.row.data, dst.row.data, tile_samples, polling);
-          if (call.cancellation.cancelled())
-            return Status{ErrorCode::Cancelled, "numeric conversion cancelled"};
+          require(checkpoint(phase, 0));
           if (used == tile_samples) {
             column += samples;
             continue;
@@ -1378,55 +1251,153 @@ Status planar(const PlanarOperationInvocation& call) {
         }
 #endif
         for (std::uint64_t dy = 0; dy < rows; ++dy) {
-          at[height] = row + dy;
-          const auto* source = src.row.data + dy * src.row_stride_bytes;
-          auto* target = dst.row.data + dy * dst.row_stride_bytes;
-          const auto source_width = sample_width(state.source);
-          const auto target_width = sample_width(state.target);
+          if (height_axis)
+            at[*height_axis] = row + dy;
+          const auto* source = src.row.data + static_cast<std::ptrdiff_t>(
+                                                  static_cast<__int128>(dy) *
+                                                  src.row_stride_bytes);
+          auto* target = dst.row.data +
+                         static_cast<std::ptrdiff_t>(static_cast<__int128>(dy) *
+                                                     dst.row_stride_bytes);
           for (std::uint64_t dx = 0; dx < samples;) {
-            if ((dx & 63) == 0 && call.cancellation.cancelled())
-              return Status{ErrorCode::Cancelled,
-                            "numeric conversion cancelled"};
-            if ((dx & 63) == 0) {
-              if (const auto* budget = resource_internal::metadata_budget()) {
-                auto charged = budget->consume({64});
-                if (!charged.ok())
-                  return charged;
+            const auto* input = source + static_cast<std::ptrdiff_t>(
+                                             static_cast<__int128>(dx) *
+                                             src.row.sample_stride_bytes);
+            auto* output = target + static_cast<std::ptrdiff_t>(
+                                        static_cast<__int128>(dx) *
+                                        dst.row.sample_stride_bytes);
+            const auto limit = std::min<std::uint64_t>(64, samples - dx);
+            const auto safe = contiguous && *u8_lookup_ready
+                                  ? infallible_prefix(input, limit, state)
+                                  : 0;
+            const auto count = std::max<std::uint64_t>(1, safe);
+            for (std::uint64_t lane = 0; lane < count; ++lane)
+              require(checkpoint(phase, dims.size() + 64));
+            const auto used =
+                safe ? convert_span(input, output, safe, state) : 0;
+            for (std::uint64_t lane = used; lane < count; ++lane) {
+              at[width_axis] = column + dx + lane;
+              const auto& bounds =
+                  state.bounds[state.sample_axis ? at[*state.sample_axis] : 0];
+              auto status = convert_one(
+                  input +
+                      static_cast<std::ptrdiff_t>(static_cast<__int128>(lane) *
+                                                  src.row.sample_stride_bytes),
+                  output +
+                      static_cast<std::ptrdiff_t>(static_cast<__int128>(lane) *
+                                                  dst.row.sample_stride_bytes),
+                  state, bounds, at);
+              if (!status.ok()) {
+                status.message +=
+                    std::string(" source_dtype=") + dtype_name(state.source) +
+                    " target_dtype=" + dtype_name(state.target) +
+                    " range_index=" +
+                    std::to_string(state.sample_axis ? at[*state.sample_axis]
+                                                     : 0);
+                if (state.axis)
+                  status.message +=
+                      " channel_axis=" + std::to_string(*state.axis) +
+                      " channel=" + std::to_string(at[*state.sample_axis]);
+                return status;
               }
+              *u8_lookup_ready = true;
             }
-            const auto count =
-                std::min<std::uint64_t>(samples - dx, 64 - (dx & 63));
-            const auto vectorized =
-                convert_span(source + dx * source_width,
-                             target + dx * target_width, count, state);
-            dx += vectorized;
-            if (vectorized == count)
-              continue;
-            at[width] = column + dx;
-            const auto& bounds = state.bounds[state.axis ? at[*state.axis] : 0];
-            auto status =
-                convert_one(source + dx * source_width,
-                            target + dx * target_width, state, bounds, at);
-            if (!status.ok())
-              return status;
-            ++dx;
+            dx += count;
           }
         }
         column += samples;
       }
       row += advanced_rows;
     }
+    bool next = false;
+    for (std::size_t axis = dims.size(); axis;) {
+      --axis;
+      if (axis == width_axis || (height_axis && axis == *height_axis))
+        continue;
+      if (++at[axis] < dims[axis].offset + dims[axis].extent) {
+        next = true;
+        break;
+      }
+      at[axis] = dims[axis].offset;
+    }
+    if (!next)
+      return Status::success();
   }
-  return Status::success();
 }
+struct Continuation final {
+  const Preparation* state;
+  bool requested = false;
+  Footprint output;
+  explicit Continuation(const Preparation* prepared) : state(prepared) {}
+  Poll poll(const ResultProgramPhase& phase) try {
+    const auto& tensor = phase.query.output.result_schema->tensors[0];
+    const auto shape = tensor.sample_shape();
+    if (!requested) {
+      requested = true;
+      output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
+                                          : take(Footprint::all(shape));
+      ResultProgramNeed need;
+      need.tensors.push_back({0, 0, output, 9});
+      return Poll(std::move(need));
+    }
+    FloatingEnvironment environment;
+    ExactWorkScope exact_work(&phase.consume_work, &phase.query.cancellation);
+    auto scratch =
+        take(phase.resources.reserve(ResourceCapacity::host(16384, 16384)));
+    auto builder = result_builder(phase, false);
+    std::vector<ResultMappedAxis> axes(shape.size());
+    for (std::size_t i = 0; i < axes.size(); ++i)
+      axes[i].output_axis = static_cast<std::int32_t>(i);
+    const auto relation = take(ResultRelation::unite(
+        phase.resources,
+        {take(ResultRelation::mapped(
+             phase.resources, shape, Region::whole(shape), shape, axes,
+             {0, 1, 0, 0, ResultSupportTarget::Tensor, 0})),
+         take(ResultRelation::cartesian(
+             phase.resources, take(tensor.sample_count()),
+             {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0}))}));
+    bool u8_lookup_ready = !state->fast_u8_f32;
+    require(format_result::planes(tensor, output, [&](const Region& box) {
+      auto window = take(
+          phase.tensors->at({0, 0}).acquire(box, phase.query.cancellation));
+      if (state->identity && !state->materialize)
+        return format_result::publish(phase, &builder, box, window, axes,
+                                      relation, state->layout);
+      return builder.publish_tensor_kernel(
+          0, box,
+          [&](const auto& writers) {
+            try {
+              for (const auto& writer : writers)
+                require(convert_window(phase, *state, window, writer,
+                                       &u8_lookup_ready));
+              return Status::success();
+            } catch (const Status& status) {
+              return status;
+            } catch (const ExactWorkFailure& failure) {
+              return failure.status;
+            }
+          },
+          relation, {true, true, true, true}, phase.query.cancellation);
+    }));
+    require(checkpoint(phase, 1));
+    return Poll(ResultPublication{take(builder.seal()), true});
+  } catch (const Status& status) {
+    return Poll(status);
+  } catch (const ExactWorkFailure& failure) {
+    return Poll(failure.status);
+  }
+};
 
 OperationDefinition conversion() {
   OperationDefinition definition;
   definition.key = "numeric.convert_format_strict";
   auto& traits = definition.traits;
   traits.input_count = 1;
-  traits.input_schema.resize(1);
-  traits.planar_storage_capable = true;
+  OperationPortConstraint port;
+  port.kind = OperationPortKind::Result;
+  port.element_type_mask = 127;
+  traits.input_schema = {port};
+  traits.workspace_bytes = 16384;
   traits.cacheable = false;
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = {
@@ -1442,23 +1413,21 @@ OperationDefinition conversion() {
       {"layout", OperationParameterType::String, false}};
   auto& output = traits.outputs[0];
   output.key = "values";
-  output.shape_rule = OperationShapeRule::Fixed;
-  output.fixed_output_shape = {1};
+  output.output_schema = port;
+  output.result_schema = tensor_ops::scalar_schema();
   output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
+  output.dependency_version = 2;
   output.continuation_bytes = sizeof(Continuation);
   output.maximum_dependency_stages = 2;
   definition.prepare_static = [](const auto& inputs, const auto& params) {
     return prepare(inputs, params);
   };
-  definition.start_dependency = [](const DependencyQuery& query,
-                                   const BufferAllocator& allocator) {
-    const auto* state =
-        static_cast<const Preparation*>(query.prepared->state());
-    return DependencyContinuation::make<Continuation>(allocator, state);
-  };
-  definition.planar_callback = [](const PlanarOperationInvocation& call) {
-    return planar(call);
+  definition.start_result = [](const ResultProgramQuery& query,
+                               const BufferAllocator& allocator) {
+    if (query.tensor_outputs && query.tensor_outputs->empty())
+      return ResultContinuation::stateless<empty_result>();
+    return ResultContinuation::make<Continuation>(
+        allocator, static_cast<const Preparation*>(query.prepared->state()));
   };
   return definition;
 }

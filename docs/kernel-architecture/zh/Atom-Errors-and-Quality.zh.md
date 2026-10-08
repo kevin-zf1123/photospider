@@ -27,7 +27,7 @@ struct AtomObservation final {
   ResourceString name;
   ValueRef output;
   AtomKey key;
-  Result<ValueFragments> outcome;
+  Result<ResultRef> outcome;
   std::optional<QualityReport> quality = {};
 };
 ```
@@ -51,15 +51,37 @@ waiter cancellation -> 该 waiter 的 observation 停止
 
 ## 联合观察执行
 
-`OperationTraits::joint_contract = 2` 接受 1..64 个不同 `AtomKey`。键由声明顺序中的输出编号、1..8 维逻辑观察坐标组成；AtomKey 在受支持的图像观察模型中使用 HW 坐标，未使用的坐标槽为零。 contract 1 按不同输出分组；contract 2 使用完整 `AtomKey` 标识每个观察点。C++ outcome、progress、supply 和 pending-read 接口使用完整键。
+`OperationTraits::joint_contract = 2` 接受 1..64 个不同 `AtomKey`。键由声明顺序中的输出编号和 1..8 维逻辑观察坐标组成。对于 structured Result tensor，坐标使用 tuple-channel 与 atomic trailing axes 合并后的 full-sample 剩余轴；batch axes 仍保留为坐标。未使用的坐标槽为零。Contract 1 按不同输出分组；contract 2 使用完整 `AtomKey` 标识每个观察点。`ResultJointOutcome` 和 Result joint callback phase 使用该键。
 
 每轮仅提供当前 Ready 成员，每个成员必须返回一个 Success、Need 或失败。 宿主在交付任何回复前检查整轮成员集合、payload 元数据、失败范围和质量附件。 未知、重复、遗漏、Waiting 或 Terminal 键都是协议错误。Need 挂起对应成员， 直到其精确授权输入范围被供给。每个成员只终结一次，局部失败不要求兄弟失败。 回调不得保留借用的 phase 或等待上游执行，状态与结果各自拥有已准入存储。
 
-联合 phase 及借用函数对象保存在一个宿主准入的缓冲区中。准备阶段每成员只计一次阶段，真实回调运行在浮点环境内，验证后逐个结束成员，不递归嵌套 Session::poll。 直接宿主可用 member_phase_bytes() 预算共享/成员 scratch 之外的适配空间。 没有 checkpoint 缓存时仍提供经检查的 miss 和纯 block 执行。
+每个 `ResultJointContinuation::poll` 接收就绪成员及其借用的 phase services。Host 在交付成员回复前会校验整组 outcome；callback 返回后，借用的 phase 即失效。Coordinator 会先登记 callback 返回的 Needs，再执行上游读取，并计入共享 workspace 和 Run/Root work，同时保留首个 failure。它不会将不同请求合并为新的语义验证域。Contract-2 group failure 是终局失败；contract 1 仍保留单独的可选准入 fallback。
 
 CPU 协调器收集至多 64 个已有需求坐标，支持同一输出的多个坐标，并在执行上游读取前登记所有 Need。只去重完全相同的 source 传输，不将不同请求合并为新的语义验证域。contract 2 的外层组失败不触发 singleton 重试。contract 1 保留原有可选联合准入失败后的行为。
 
-`ExecutionContext::execute_atoms` 为启用 managed resources 的 CPU Value 依赖计划收集持有资源的 `AtomObservation`。命名输出必须是 Atomic/PerAtomOutcome。 Planar image plan 返回 `TypeMismatch`，所以 HW 坐标仅定义 AtomKey 表示，不表示当前支持 image atom execution。 `maximum_atom_observations` 默认值与硬上限均为 65536，同时受 root 容量和工作量限制。空需求返回空观察集合。普通 `execute` 保持遇错即返回。结构化 Result 使用既有三种发布策略；此接口不增加持久执行状态或 GPU 批次后端。
+`ExecutionContext::execute_atoms(plan, bindings, requested, token, options)` 从受 managed Root 管理的 CPU structured Result dependency plan 收集持有资源的 `AtomObservation`。每个请求 output 必须声明 Atomic、PerAtomOutcome 和 joint contract 2。Coordinator 会先验证所有请求 output 和合计 observation 数量，再创建 Actor 或调用 producer；数量受 `maximum_atom_observations` 和 65,536 硬上限约束。空需求返回空 atom 集合，不启动 producer。
+
+Tensor output 的 `requested` Footprint 与 operation Need 都采用完整 sample shape，batch axes 排在 cell axes 前。Tuple-channel 和 atomic trailing axes 合并为一个 observation；剩余 batch/cell 坐标组成 `AtomKey`。每条记录返回 `Result<ResultRef>`，成功时保留实际 Result 与 dependency evidence。局部 Atom、ValidationDomain 或 Group failure 保留在对应 observation 中，并可携带匹配的 quality report。Protocol、Run、Waiter 和调用级 cancellation failure 则终止整个调用。Contract 2 可将最多 64 个单 observation query 分组，包括同一 output 的不同 Q；关闭分组仍使用单成员 joint callback，group failure 不会回退为 singleton。此接口没有 GPU 路径。其他 Value 执行入口仍独立存在。
+
+### Structured Result direct contract 2
+
+`OperationRegistry::start_result_joint` 也支持 direct CPU Result continuation 的 contract 2。注册时 output 必须为 Atomic，并使用 `PerAtomOutcome` delivery。一次 start 接受 1..64 个不同的 `AtomKey`；多个成员可以指向同一 output，但 coordinate 必须不同，且该 output 的成员共用一个 tensor slot。Direct registry 调用方自行驱动 continuation；`ExecutionContext::execute_atoms` 通过 structured coordinator 供给 Needs、校验 publication 并收集命名 observations。
+
+`result_atom_key(query)` 标识选定 output 的一个逻辑 observation。对于 tensor query，host 将 tuple-channel 与 atomic trailing axes 闭合为一个 observation，并从 key 中省略这些轴。其余 sample axes 按原顺序保留，包括 batch axes；每轴必须选定一个 coordinate。因此 channel samples 不是独立 atoms。`result_observation_domain(query)` 返回这些剩余轴的完整固定 domain，不随请求子集变化。只有 collection 的 output 使用 coordinate 为零的 singleton key 及 singleton domain。
+
+每个 Ready member 返回一个以 `AtomKey` 标识的 `ResultJointOutcome`：Result Need、完整 publication 或 typed failure。Need 不携带 quality evidence。Atom failure 必须指定精确 key。`ValidationDomain` failure 必须使用 Domain 或 Schema origin，且与 output 完整固定 observation domain 一致；它会作用于调用中的匹配 Ready 和 Waiting 成员。Host 会拒绝撤销此前已进入 semantic-terminal 状态的成员的后续 domain failure。
+
+Contract 2 可为成功 publication 或匹配的 Domain failure 附加 `QualityReport`。成功估计必须是通用 Float64 向量，每个 report dimension 对应一个元素；host 读取成员估计，并将认证行与实际值核对。Measured evidence 要求估计有限，但不声称有认证误差界。Measured report 可以附在 Domain failure 上。Report 的 snapshot label 与 joint query 的路由 `snapshot_identity` 相互独立。
+
+Report 必须属于成员的 ResourceBudget，并由 `phase.resources.allocator()` 以及其 phase allocator 或 shared workspace allocator 持有。Continuation 还会验证 phase/member allocator 与 Root 的非空 accounting domain 相同；`BufferAllocator::same_owner` 只比较该 domain，不比较 quota 或 provenance，也不会授予 payload 读取权限。检查 estimate 时发生的读取错误保留原状态。取消会清除 report 并返回成员局部 Cancelled outcome；estimate 非有限或认证行不匹配会设置 `FailureReason::InvalidQuality`。
+
+Direct C Result joint table 也支持 contract 2。它会复制带有有界诊断的 Atom 或 ValidationDomain typed failure record；producer identity 由 host 填写，并执行上文相同的精确 Atom 和固定 domain 规则。共享 poll service 可创建 Measured 与 IntegerDiagonal report，并返回仅在该 callback epoch 有效的 handle；host 会在 callback lease 退休前复制附加的 owning report。Report 可附加到成功 publication，或携带 Measured evidence 的 Domain-origin Atom/ValidationDomain failure。Poll 即使最终返回 Need 也可创建 report，但 Need outcome 不能附加它；未使用的 report 随 lease 退休。Contract 1 不携带 quality evidence。C singleton operation table 仍没有 typed Atom 或 quality attachment。
+
+Structured execution 已会用 contract 1 或 2 调度符合条件的 CPU Result query。Contract 2 可将最多 64 个单 observation query 分组，也可分组同一 output 的不同 query。每个 C2 member 对应一个 output observation，但它的输入 Tensor Need 可以跨多个 observation。如果输入 Need 指向计算型 C2 producer，coordinator 会将 samples 展开为独立的 singleton-atom 请求，最多 `min(65,536, maximum_boxes)` 个，并按每组最多 64 个请求调度，再供给由原始 Results 支持的分片 `ResultTensorInput`。每个 piece 保留原 Result owner、captured descriptor 和获准 samples；coordinator 不创建聚合 Result 或新的 validation domain。其他路径仍支持更宽的 computed Tensor Need。关闭 joint grouping 时，contract 2 仍使用必需的单成员 joint callback；contract-2 group failure 不会回退为多个 singleton callback。Run ledger 按编译后的 producer semantic identity、output 和 tensor slot 保存 ValidationDomain failure 与 semantic-terminal observation。同一 compiled producer 的 semantic alias 共享这项终局记录；failure detail 仍指出实际失败的 workflow node。同一 cohort 内一个 output 只使用一个 tensor slot；其他 slot 的 query 由后续独立 cohort 处理。Ledger 跨 cohort、completed-cache 复用和 Actor 退休继续有效。Domain failure 会传给匹配的 Ready 和 Waiting member，后续 failure 不能撤销此前已终结的 observation。Coordinator 在调用 callback 前为每个 query 分配 payload-free failure 与 quality record，记录终局结果时无需再分配。
+
+复合 capability 只授权各 piece 获准 samples 的并集。单个 Result 支持时，`object_id()` 返回 source identity；多个原始 Result 支持时返回零。零表示没有单一 Result 身份，不授权读取 payload 或调用 `result_descriptor`。Phase association 仍记录每个真实 input port 和 source ObjectId。获取的 windows 可在不复制 payload samples 的前提下组合获准 backing pieces，同时保留所有原始 Result owners，包括由 fields、associations 和 resources 持有的 owner。发布 view 仍要求物理存储构成一个合法 affine 表示，因此不保证任意分片都能发布为一个 view。此展开只处理 tensor Need，不聚合 object 或 field support。Descriptor-only Empty C2 输入和 GPU C2 joint 不属于此路径。
+
+Shared producer entry 会将 quality 与 publication 或 failure 一起保留，供 waiter 读取。Domain failure 的身份和 evidence 会继续向下游传播；成功 transformation 不继承来源 report。带 quality 的 result 不进入 completed-output content retention。Structured Result joint execution 尚无 GPU 路径。
 
 ## 失败身份与范围
 
@@ -103,4 +125,4 @@ const double bound = residual
 
 ## 限制与调用方处理
 
-Atom collection 仅适用于受管 CPU Value dependency plan，并受 observation 数、work 和 root capacity 限制。调用方应把每个失败 outcome 视为带范围的观察错误；普通 `execute` 仍按 fail-fast 处理。质量证据描述数值估计，与依赖完整性相互独立。
+Atom collection 仅适用于受管 CPU structured Result dependency plan，并受 observation 数、work 和 root capacity 限制。调用方应把每个失败 outcome 视为带范围的观察错误；普通 `execute` 仍按 fail-fast 处理。其他 Value 执行入口仍独立可用。质量证据描述数值估计，与依赖完整性相互独立。

@@ -31,28 +31,48 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* name,
                    {}});
 }
 }  // namespace binary_detail
-/** @brief Shared contract of the independently named binary node helpers.
- * Inputs must match dtype and positive rank-1..8 shape, with count <=2^40;
- * output values preserves both with empty facets. There is no implicit cast or
- * broadcast. Nonempty requests collect and validate both full inputs, including
- * NaN^0, then compute a full packed output for consumer projection. Empty skips
- * payload and callback. Any input change invalidates all observed outputs.
- * Shape/dtype errors fail TypeMismatch/Schema; integer overflow anywhere fails
- * the invocation with OperationFailed/ArithmeticOverflow/Run and no Atom key.
- * IEEE nonfinite results succeed. Source/work/capacity/cancellation failures
- * retain their categories. Budget includes both full input collections,
- * complete output and fixed scratch, even for sparse requests. Helpers own
- * metadata and are pure/concurrent-safe; allocation may throw bad_alloc.
- * Invalid id/profile fails InvalidArgument/InvalidDomain/Schema. Runtime
- * results own immutable packed storage beyond context life. Cache witnesses
- * retain both inputs and their exact bits, including NaN payloads. Strict
- * arithmetic is RN-even with gradual underflow and unchanged fenv. Strict
- * pow/angle refinement has a 4096-bit ceiling; unresolved rounding fails
- * ResourceExhausted. Accelerated floating arithmetic follows
- * CpuNumericProfile's final FP32 bound and uses strict fallback when it
- * cannot certify a result. Integer, special and selected algebraic results
- * remain exact. Named profiles require their CPU target. See
- * examples/numeric_workflow for editable workflows and explicit math budgets.
+/** @brief Shared Result-backed contract for the binary node helpers.
+ * Each input Result contains exactly one tensor member in slot 0 and may also
+ * contain fields. Its schema ID and facets may vary. Recognized tensor facets
+ * and spatial metadata still receive full-input typed validation. Numeric NaN
+ * acceptance does not bypass typed constraints such as alpha validity.
+ * Metadata specialization requires matching input dtypes and complete sample
+ * shapes, rank 1..8, positive extents, and at most 2^40 samples. The output is
+ * a Result on port `values`, using schema `photospider.tensor`, tensor key
+ * `samples`, the full logical sample shape, and empty facets. There is no
+ * implicit cast or broadcast.
+ *
+ * A nonempty Whole request needs complete input support with Data, Validation
+ * and Descriptor roles (mask 13). The coordinator supplies authorized tensor
+ * windows, preserving compatible signed and zero strides without requiring
+ * packed input collection. The operation computes and publishes one complete
+ * packed Result; the executor then projects requested coordinates. Empty
+ * requests may use a metadata-only poll, but perform no sample reads or
+ * arithmetic and return empty tensor coverage. Any input change invalidates
+ * all observed output coordinates. Special numerical identities retain both
+ * input obligations.
+ *
+ * Shape or dtype mismatch returns TypeMismatch/Schema. Integer overflow
+ * anywhere fails the invocation with OperationFailed/ArithmeticOverflow/Run
+ * and no Atom key.
+ * IEEE nonfinite results succeed. Source, work, capacity and cancellation
+ * errors retain their categories. The complete output and fixed scratch use
+ * managed resources even for sparse requests. Published Results retain
+ * immutable storage beyond context lifetime, and cache witnesses retain both
+ * input Results and their exact sample bits.
+ *
+ * Strict arithmetic uses round-to-nearest-even with gradual underflow.
+ * Arithmetic preserves the CPU worker's floating environment, and execution
+ * leaves the caller's rounding mode and exception flags unchanged. Directed
+ * pow/angle refinement is capped at 4096 bits and may return ResourceExhausted.
+ * Accelerated arithmetic follows CpuNumericProfile's final FP32 error bound;
+ * bounded binary64 SIMD handles admitted ordinary ranges, with strict fallback
+ * for unresolved cases. Exact integer, special-value and selected algebraic
+ * results retain their defined rules. Named profiles require their CPU target.
+ * Invalid node IDs or profiles return InvalidArgument/InvalidDomain/Schema.
+ * The helpers own their node metadata and are pure and safe for concurrent use;
+ * allocation may throw std::bad_alloc. The numeric_workflow example contains
+ * public Result workflows and oracles.
  */
 /** @brief Exact a+b; UInt8/Int64/Float32/64, checked integer range.
  * @note Uses the shared binary execution/ownership/error contract above.

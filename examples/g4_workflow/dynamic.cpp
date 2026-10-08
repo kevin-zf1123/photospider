@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "../numeric_workflow/result_fixture.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {
@@ -28,7 +29,10 @@ Value data(ElementType type, std::vector<std::uint64_t> shape,
 }
 double first(const ExecutionResult& result, const std::string& name) {
   double value = 0;
-  std::memcpy(&value, result.values.at(name).bytes().data(), sizeof(value));
+  auto status = numeric_result_fixture::read(result.results.at(name.c_str()),
+                                             {0}, &value, sizeof(value));
+  if (!status.ok())
+    throw std::runtime_error(status.message);
   return value;
 }
 void radius_workflow(const std::shared_ptr<OperationRegistry>& registry) {
@@ -37,9 +41,9 @@ void radius_workflow(const std::shared_ptr<OperationRegistry>& registry) {
   const auto radius =
       data(ElementType::Int64, {4}, std::vector<std::int64_t>{0, 0, 0, 0});
   WorkflowDocument document;
-  document.inputs = {
-      {1, "source", source.descriptor(), source.region(), source.layout(), {}},
-      {2, "radius", radius.descriptor(), radius.region(), radius.layout(), {}}};
+  numeric_result_fixture::declare_sources(&document, {source, radius});
+  document.inputs[0].name = "source";
+  document.inputs[1].name = "radius";
   document.nodes = {{1,
                      "numeric.radius_scatter",
                      {WorkflowInputReference{1}, WorkflowInputReference{2}},
@@ -55,21 +59,17 @@ void radius_workflow(const std::shared_ptr<OperationRegistry>& registry) {
   options.output_regions = {{"scatter", Region({{0, 1}})},
                             {"gather", Region({{0, 1}})}};
   auto plan = checked(compiler.compile(graph, options)).plan;
-  InputSnapshotStore store({128, 1});
-  auto old = checked(store.import_value(radius));
-  auto writer = checked(MutableValue::allocate(
-      radius.descriptor(), Region({{3, 1}}), BufferAllocator{}));
-  const std::int64_t three = 3;
-  std::memcpy(writer.data(), &three, 8);
-  auto changed =
-      checked(store.patch(old, checked(std::move(writer).publish())));
-  ExecutionBindings old_bindings{
-      {{"source", source},
-       {"radius", {}, {}, std::make_shared<const InputSnapshot>(old)}}};
-  ExecutionBindings new_bindings{
-      {{"source", source},
-       {"radius", {}, {}, std::make_shared<const InputSnapshot>(changed)}}};
   ExecutionContext execution(registry, {1, false, 8, 2048});
+  const auto root = checked(execution.resource_budget());
+  const auto source_result = numeric_result_fixture::source(root, source);
+  const auto radius_result = numeric_result_fixture::source(root, radius);
+  const auto changed = numeric_result_fixture::source(
+      root,
+      data(ElementType::Int64, {4}, std::vector<std::int64_t>{0, 0, 0, 3}));
+  ExecutionBindings old_bindings{
+      {{"source", source_result}, {"radius", radius_result}}};
+  ExecutionBindings new_bindings{
+      {{"source", source_result}, {"radius", changed}}};
   auto frozen = checked(execution.freeze(plan, old_bindings));
   const auto before = checked(execution.execute(plan, old_bindings));
   const auto after = checked(execution.execute(plan, new_bindings));

@@ -14,7 +14,7 @@
 #endif
 namespace px {
 namespace {
-thread_local const ps_planar_services_v3* argument_services = nullptr;
+thread_local const ps_result_services_v2* argument_services = nullptr;
 bool simd_available() {
   const char* mode = std::getenv("PIXELOE_CPU_SIMD");
   if (mode && std::strcmp(mode, "0") == 0) {
@@ -43,25 +43,26 @@ bool simd_available() {
 void admit_arguments(size_t count) {
   if (!argument_services)
     return;
-  if (count > 64 || !argument_services->consume_work(argument_services->context,
-                                                     4096 + 2048 * count))
+  if (count > 64 || argument_services->consume_work(argument_services->context,
+                                                    4096 + 2048 * count) != 0)
     throw Failure(4, "PixelOE argument construction budget exhausted");
 }
-Context::Context(const ps_planar_services_v3* services)
+Context::Context(const ps_result_services_v2* services)
     : services_(services),
       simd_(services && !services->gpu && simd_available()) {
   if (!services_ || services_->struct_size != sizeof(*services_) ||
       !services_->allocate_scratch || !services_->release_scratch ||
       !services_->cancelled)
-    throw Failure(6, "PixelOE incompatible planar services");
-  if (services_->backend == 2 &&
+    throw Failure(6, "PixelOE incompatible Result services");
+  if (services_->gpu != nullptr &&
       (!services_->gpu || services_->cpu_parallel || !services_->consume_work ||
        services_->gpu->struct_size != sizeof(*services_->gpu) ||
+       services_->gpu->abi_version != PS_GPU_ABI_VERSION_1 ||
        !services_->gpu->buffer || !services_->gpu->execute ||
        !services_->gpu->release))
     throw Failure(6, "PixelOE incompatible GPU services");
   if (services_->cpu_tiles &&
-      (services_->backend != 1 || services_->cpu_parallel || services_->gpu ||
+      (services_->gpu != nullptr || services_->cpu_parallel || services_->gpu ||
        !services_->consume_work ||
        services_->cpu_tiles->struct_size != sizeof(*services_->cpu_tiles) ||
        services_->cpu_tiles->abi_version != PS_CPU_TILES_ABI_VERSION_1 ||
@@ -84,7 +85,7 @@ void Context::check() const {
 void Context::charge(uint64_t units) const {
   check();
   if (services_->consume_work &&
-      !services_->consume_work(services_->context, units))
+      services_->consume_work(services_->context, units) != 0)
     throw Failure(4, "PixelOE work admission failed");
 }
 Array Context::empty(uint64_t count, uint32_t bytes) {
@@ -97,8 +98,10 @@ Array Context::empty(uint64_t count, uint32_t bytes) {
       throw Failure(4, "PixelOE construction work overflow");
     charge(2 * count * bytes + 128);
   }
-  auto* p = services_->allocate_scratch(services_->context, count * bytes);
-  if (!p) {
+  uint8_t* p = nullptr;
+  const int allocated =
+      services_->allocate_scratch(services_->context, count * bytes, &p);
+  if (allocated || !p) {
     throw Failure(4, "PixelOE scratch budget exhausted");
   }
   Array a;

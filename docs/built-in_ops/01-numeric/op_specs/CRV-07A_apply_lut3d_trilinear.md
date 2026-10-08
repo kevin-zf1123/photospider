@@ -13,24 +13,22 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_subset
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+verification_status: focused_result_math_ctest_and_installed_consumer
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+repository_commit: current working tree
 ---
 
 # CRV-07A: apply_lut3d_trilinear
 
 ## Revised lightness coordinate and implementation boundary
 
-The [2026-09-23 shared scale revision](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
+The [current shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
 LUT input axes and output table coordinates. Finite values outside 0..1 remain
 legal. Opponent/chroma scales and arithmetic formulas are unchanged. Runtime
 ColorArray v1 still encodes the old implicit L* units: public metadata, fixtures
-and consumers need explicit migration before this revised target is implemented.
+and consumers need explicit migration before this revised target is fully aligned.
 Historical implementation/test evidence below does not establish that migration;
 no silent old/new unit alias or sample-magnitude inference is permitted.
 
@@ -46,45 +44,54 @@ for all interface, formula, numerical, dependency and acceptance requirements.
 
 ## Interface and semantics
 
-Ordered dynamic ports are input (Float32/Float64[...,3]), table
-(Float32/Float64[N0,N1,N2,3]) and axis (Float64[3,3]); output is named values,
-with input shape and selected floating dtype, default input dtype. Source float
-dtypes may differ. Input rank is 2..8, logical count <=2^40; each table extent
-is 2..256, independently. Each axis row is [start,end,step], with globally
-validated ascending/descending reconstructed Float64 coordinates.
+Ordered dynamic ports are Result inputs: input, table and axis. Each Result has
+one tensor member under any schema id/version and member key; shapes use complete
+`sample_shape()` including batch axes. Input is Float32/Float64 [...,3], rank 2..8
+and logical product <=2^40. Table is Float32/Float64 [N0,N1,N2,3], each Ni=2..256;
+axis is Float64 [3,3], with rows [start,end,step]. Input/table dtypes may differ.
+Output port `values` is an immutable packed Result using `photospider.tensor`
+v1/member `samples`, with the complete input shape, selected Float32/Float64 dtype,
+ColorArray v1 facet and `atomic_trailing_axes=1`. Output retains the declared
+ColorArray description. The default output dtype follows the authoring `input_type`
+hint; the compiler independently validates bound input metadata.
 
-Required static String parameters are input_color_description,
-output_color_description, dtype and out_of_domain (reject/clamp, default reject).
-Input/output models must match among RGB, XYZ, CIELAB, OKLab, CIELCh(ab), OKLCh,
-HSL and YCbCr; descriptions may differ within the chosen model. No alpha or
-four-channel CMYK input is supported. The table's first three axes follow the
-input model channel order and its last axis the output model channel order.
-Lookup uses actual values; no transfer, model conversion or hue normalization
-is performed. Output carries the declared output color description.
+Required static parameters are String `input_color_description`,
+`output_color_description`, `dtype` and `out_of_domain` (reject/clamp, default
+reject). Input/output descriptions use the same supported three-component model;
+descriptions may differ within that model. No alpha or four-channel CMYK input is
+supported. Table grid axes follow input model channel order and its value component
+axis follows the output model channel order. Lookup uses actual coordinates; no
+transfer conversion, model conversion or hue normalization is performed.
 
-Use the product of three local linear weights for each of the eight cell vertices.
-Mathematically use only vertices with exact nonzero weights, at most 8 complete colors.
-Weights and complete weighted sums are exact before one final dtype rounding.
-Strict is correctly rounded; accelerated finite arithmetic follows the shared
-FP32-scaled final-result bound. Single-vertex and all-negative-zero
-mixture rules follow CRV-07; generic zero-weight vertices never affect numerical results; complete typed
-and upstream validation can still fail.
+The method uses the product of three linear weights over the eight cell vertices.
+For each vertex bit vector b in {0,1}^3, its weight is the product of `t_i`
+when `b_i=1` and `1-t_i` otherwise. Mathematically use only exact positive-weight
+vertices, at most 8 complete colors. Weights and complete weighted sums
+are exact before one final destination-type rounding. Strict is correctly
+rounded; accelerated profiles follow the shared FP32-scaled final-result bound.
+CRV-07 defines signed-zero and chroma legality. Generic zero-weight vertices are
+numerically unused, but complete typed/upstream validation still applies.
 
 ## Execution, resources and errors
 
-A request for any component observes the full color. Inherit global axis
-validation, complete Whole input/table reads and mathematical vertex selection,
-typed/upstream closures, dirty witnesses and descriptor-aware cache identity.
-Results retain immutable backing/metadata beyond context lifetime and support
-arbitrary legal source strides. A complete dense Value backs public fragments at global request origins.
+The Whole Result program requests input, table and axis with Data, Validation
+and Descriptor (role 13). Callback numeric checks validate all axes, every
+original input color and query before applying clamp, then perform selected
+vertex mathematics. Typed/upstream errors may precede callback validation and
+cover complete inputs. Requested fragments close to complete three-component
+colors. Output carries ColorArray v1, records actual source ObjectIds, publishes
+full certified coverage with global sample coordinates, and has one all-or-nothing
+Result transaction. Dirty mapping follows recorded output demand; Empty reads no
+payload. Result owners survive context teardown.
 
-Work is axis validation plus per-color lookup and at most 8 vertices of exact
-arithmetic. Budget output, read owners/windows, exact limbs, lookup maps and growth
-overlap as specified by CRV-07. Full-table collect and full-output allocation are required. Host budgets,
-bounded cancellation, cache-off and Run-scoped publication requirements are mandatory.
-Malformed statics, type/description mismatch, invalid demanded colors/grid/domain,
-overflow, resources and unavailable platform keys use the exact CRV-07 error
-phases/categories; a failed callback publishes no partial output.
+Work and resource limits, authorized Root windows, Root-owned 8*sum(Ni)-byte
+grid storage, full packed output allocation, cancellation and error categories
+are inherited from the [CRV-07 contract](CRV-07_apply_lut3d.md). Table samples
+are accessed through authorized zero-copy Root windows; the operation does not
+make a dense copy of the entire source table. Numeric failures have Run scope;
+unpublished output is released on failure. Unsupported platform keys return
+BackendUnavailable, and capacity/work limits fail explicitly without approximate
+results.
 
 ## Workflow and acceptance
 
@@ -103,9 +110,16 @@ outside this Proposed specification.
 ## Maintained implementation
 
 [`apply_lut3d_trilinear_node`](../../../../include/photospider/numeric/lut3d.hpp)
-constructs the registered primitive in
+constructs this Whole Result primitive in
 [`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp).
 All profiles use exact product weights and a single final rounding; only
-positive-weight full vertices participate in the mathematics. See the [shared implementation](CRV-07_apply_lut3d.md#maintained-implementation-and-validation)
-and [public workflow commands](../../../../examples/numeric_workflow/README.md#joint-three-axis-color-luts)
-for numerical/resource bounds and actual validation.
+positive-weight complete vertices participate in the mathematics. See the
+[shared implementation](CRV-07_apply_lut3d.md#maintained-implementation-and-validation)
+for current Result coverage, source-owner and read-window lifetime, focused
+acceptance evidence, and limits on maximum-output, x86, GPU, and historical
+performance claims. The maximum 256^3 table-shape check uses an 8-byte
+zero-stride backing view; it does not execute a maximum-sized output.
+The root manual-fixture CTest passed 1/1 in 1.48 s; a fresh installed consumer
+selection passed 3/3 in 5.71 s, with the LUT3D case taking 2.36 s. Its direct
+Apple run passed all six manual groups. The shared math integration timing is
+reported separately in the [family implementation record](../math-implementation.md#crv-07-joint-three-dimensional-lut-application).

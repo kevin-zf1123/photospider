@@ -13,6 +13,7 @@
 
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_aggregate.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
 #include "photospider/execution/resource_allocator.hpp"
@@ -26,7 +27,7 @@ struct ScanMetadata {
   ValueDescriptor output;
 };
 Result<ScanMetadata> metadata(
-    bool integral, const OperationMetadata& input,
+    bool integral, const ResultTensorSpec& input,
     const std::map<std::string, ParameterValue>& parameters) {
   using Answer = Result<ScanMetadata>;
   const auto mismatch = [](const char* message) {
@@ -35,11 +36,11 @@ Result<ScanMetadata> metadata(
                          FailureReason::None,
                          {FailureOrigin::Schema, FailureScope::Unspecified}});
   };
-  const auto& shape = input.descriptor.shape;
+  const auto shape = input.sample_shape();
   if (shape.size() < (integral ? 2U : 1U) || shape.size() > 8)
     return mismatch("scan requires rank 1..8 (integral rank >=2)");
   ScanMetadata result;
-  result.output = input.descriptor;
+  result.output = {input.descriptor.element_type, shape};
   std::vector<std::uint64_t> axes;
   if (integral) {
     auto parsed = numeric_ops::parse_array_list(
@@ -124,51 +125,67 @@ struct ScanState final {
       : accumulator(profile, numeric_ops::AggregateKind::Sum, source),
         conversion(profile, numeric_ops::AggregateKind::Sum, source) {}
 };
-Result<Value> execute_scan(const OperationInvocation& call, bool integral,
-                           SequenceProfile profile) {
-  using Answer = Result<Value>;
-  try {
-    const auto* budget = resource_internal::metadata_budget();
-    const std::function<Status(std::uint64_t)> work =
-        [&](std::uint64_t amount) {
-          if (call.cancellation.cancelled())
-            return Status{ErrorCode::Cancelled, {}};
-          return budget ? budget->consume({amount}) : Status::success();
-        };
+struct ScanKernel final {
+  bool integral;
+  SequenceProfile profile;
+  ScanKernel(bool rectangle, SequenceProfile selected)
+      : integral(rectangle), profile(selected) {}
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    if (writers.size() != 1)
+      return {ErrorCode::OperationFailed, "scan requires one packed writer"};
+    NumericDiagnostics report;
+    report.profile =
+        static_cast<CpuNumericProfile>(static_cast<unsigned>(profile) + 1);
+    const auto identity = std::snprintf(
+        report.implementation.data(), report.implementation.size(),
+        "photospider.scan-exact/1;accumulator-u64x68;%s",
+        numeric_ops::selection_implementation(profile));
+    if (identity < 0 ||
+        static_cast<std::size_t>(identity) >= report.implementation.size())
+      return {ErrorCode::OperationFailed, "scan diagnostic identity overflow"};
+    const auto finish = [&](Status result) {
+      // Failure attribution precedes optional diagnostics so a rejected report
+      // cannot replace an arithmetic or host failure. Cancelled/work-limited
+      // services may reject this final report; their original status survives.
+      if (!result.ok())
+        numeric_ops::math_record_failure(phase, result);
+      if (phase.report_numeric) {
+        auto reported = phase.report_numeric(report);
+        if (result.ok())
+          return reported;
+      }
+      return result;
+    };
+    const auto& work = phase.consume_work;
     auto status = work(1);
     if (!status.ok())
-      return Answer(status);
-    const auto& input = call.inputs[0];
-    const auto& shape = input.descriptor().shape;
-    auto parsed = metadata(integral, {input.descriptor(), input.facets()},
-                           call.parameters);
+      return finish(std::move(status));
+    const auto& input = phase.tensors->at({0, 0});
+    const auto shape = input.spec().sample_shape();
+    auto parsed = metadata(integral, input.spec(), phase.query.parameters);
     if (!parsed.ok())
-      return Answer(parsed.status());
+      return finish(parsed.status());
     const auto& description = parsed.value();
-    auto allocated = call.allocator.allocate(sizeof(ScanState));
+    auto allocated = phase.allocator.allocate(sizeof(ScanState));
     if (!allocated.ok())
-      return Answer(allocated.status());
+      return finish(allocated.status());
     auto buffer = allocated.take_value();
     std::unique_ptr<ScanState, void (*)(ScanState*)> state(
-        new (buffer.data()) ScanState(profile, input.descriptor().element_type),
+        new (buffer.data())
+            ScanState(profile, input.spec().descriptor.element_type),
         [](ScanState* item) { item->~ScanState(); });
-    auto made = MutableValue::allocate(description.output, call.output_region,
-                                       call.allocator);
-    if (!made.ok())
-      return Answer(made.status());
-    auto output = made.take_value();
+    numeric_ops::MathTensorReader reader(input, phase.query.cancellation);
+    numeric_ops::MathTensorWriter writer(writers[0]);
     std::vector<std::uint64_t> coordinate(shape.size(), 0),
         source(shape.size(), 0);
     const auto read = [&]() -> Status {
       auto charged = work(shape.size() + 1);
       if (!charged.ok())
         return charged;
-      auto at = input.byte_address(source);
-      if (!at.ok())
-        return at.status();
-      std::uint64_t bits = 0;
-      std::memcpy(&bits, input.bytes().data() + at.value(),
-                  Value::element_size(input.descriptor().element_type));
+      const auto bits = reader.bits(source);
+      // Boundary outputs and carry snapshots do not read new inputs.
+      ++report.evaluated_values;
       return state->accumulator.add(bits, work);
     };
     const auto store = [&](bool empty) -> Status {
@@ -189,15 +206,10 @@ Result<Value> execute_scan(const OperationInvocation& call, bool integral,
         }
         return failure;
       }
-      std::uint64_t linear = 0;
-      for (std::size_t j = 0; j < shape.size(); ++j)
-        linear = linear * description.output.shape[j] + coordinate[j];
       std::array<std::uint64_t, 4> replicas{};
       numeric_ops::select_words(replicas.data(), calculated.value(),
                                 calculated.value(), 1, profile);
-      std::memcpy(output.data() + linear * Value::element_size(
-                                               description.output.element_type),
-                  replicas.data(),
+      std::memcpy(writer.address(coordinate), replicas.data(),
                   Value::element_size(description.output.element_type));
       return Status::success();
     };
@@ -211,7 +223,8 @@ Result<Value> execute_scan(const OperationInvocation& call, bool integral,
       inner = static_cast<unsigned>(
           __builtin_ctz(description.mask & ~(1U << outer)));
     }
-    ResourceVector<SumCarry> columns;
+    ResourceVector<SumCarry> columns{
+        ResourceAllocator<SumCarry>(phase.resources)};
     if (integral)
       columns.resize(shape[inner]);
     for (std::uint64_t plane = 0; plane < planes; ++plane) {
@@ -220,27 +233,27 @@ Result<Value> execute_scan(const OperationInvocation& call, bool integral,
         coordinate[outer] = 0;
         status = store(true);
         if (!status.ok())
-          return Answer(status);
+          return finish(std::move(status));
         for (std::uint64_t i = 0; i < shape[outer]; ++i) {
           source = coordinate;
           source[outer] = i;
           status = read();
           if (!status.ok())
-            return Answer(status);
+            return finish(std::move(status));
           coordinate[outer] = i + 1;
           status = work(sizeof(ScanState) / 16 + 1);
           if (!status.ok())
-            return Answer(status);
+            return finish(std::move(status));
           state->conversion = state->accumulator;
           status = store(false);
           if (!status.ok())
-            return Answer(status);
+            return finish(std::move(status));
         }
       } else {
         for (auto& column : columns) {
           status = work(sizeof(SumCarry) / 8 + 1);
           if (!status.ok())
-            return Answer(status);
+            return finish(std::move(status));
           column = SumCarry{};
         }
         coordinate[outer] = 0;
@@ -248,7 +261,7 @@ Result<Value> execute_scan(const OperationInvocation& call, bool integral,
           coordinate[inner] = x;
           status = store(true);
           if (!status.ok())
-            return Answer(status);
+            return finish(std::move(status));
         }
         for (std::uint64_t y = 0; y < shape[outer]; ++y) {
           state->accumulator.reset();
@@ -256,17 +269,17 @@ Result<Value> execute_scan(const OperationInvocation& call, bool integral,
           coordinate[inner] = 0;
           status = store(true);
           if (!status.ok())
-            return Answer(status);
+            return finish(std::move(status));
           for (std::uint64_t x = 0; x < shape[inner]; ++x) {
             source = coordinate;
             source[outer] = y;
             source[inner] = x;
             status = read();
             if (!status.ok())
-              return Answer(status);
+              return finish(std::move(status));
             status = work(512 + 2 * sizeof(SumCarry) / 8);
             if (!status.ok())
-              return Answer(status);
+              return finish(std::move(status));
             auto& row = state->accumulator;
             auto& combined = state->conversion;
             columns[x].load(&combined);
@@ -284,7 +297,7 @@ Result<Value> execute_scan(const OperationInvocation& call, bool integral,
             coordinate[inner] = x + 1;
             status = store(false);
             if (!status.ok())
-              return Answer(status);
+              return finish(std::move(status));
           }
         }
       }
@@ -298,15 +311,10 @@ Result<Value> execute_scan(const OperationInvocation& call, bool integral,
           coordinate[j - 1] = 0;
         }
     }
-    status = work(1);
-    return status.ok() ? std::move(output).publish() : Answer(status);
-  } catch (const std::bad_alloc&) {
-    return Answer(Status{ErrorCode::ResourceExhausted,
-                         {},
-                         FailureReason::CapacityLimit,
-                         {FailureOrigin::Resource, FailureScope::Run}});
+    return finish(work(1));
   }
-}
+};
+using ScanProgram = numeric_ops::WholeTensorProgram<ScanKernel>;
 OperationDefinition scan_operation(const std::string& key, bool integral,
                                    SequenceProfile profile) {
   OperationDefinition operation;
@@ -314,35 +322,37 @@ OperationDefinition scan_operation(const std::string& key, bool integral,
   auto& traits = operation.traits;
   traits.input_count = 1;
   traits.input_schema.resize(1);
+  traits.input_schema[0].kind = OperationPortKind::Result;
+  traits.input_schema[0].element_type_mask = 15;
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = {
       {integral ? "axes" : "axis", integral ? OperationParameterType::String
                                             : OperationParameterType::Int64},
       {"dtype", OperationParameterType::String}};
-  auto& output = traits.outputs[0];
-  output.key = "values";
-  output.shape_rule = OperationShapeRule::Fixed;
-  output.fixed_output_shape = {1};
-  output.region_rule = OperationRegionRule::Whole;
-  output.requires_dense_output = true;
+  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                       sizeof(ScanProgram));
   traits.workspace_bytes = sizeof(ScanState);
   operation.specialize_metadata = [integral, profile](const auto& inputs,
                                                       const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
-    auto resolved = metadata(integral, inputs[0], parameters);
+    auto resolved =
+        metadata(integral, inputs[0].result_schema->tensors[0], parameters);
     if (!resolved.ok())
       return Answer(resolved.status());
     auto available = numeric_ops::sequence_profile_available(profile);
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization result;
-    result.metadata.descriptor = resolved.value().output;
+    const auto& output = resolved.value().output;
+    result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
+        numeric_ops::numeric_tensor_schema(output.element_type, output.shape));
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.callback = [integral, profile](const OperationInvocation& call) {
-    return execute_scan(call, integral, profile);
+  operation.start_result = [integral, profile](const auto&,
+                                               const auto& allocator) {
+    return ResultContinuation::make<ScanProgram>(allocator, integral, profile);
   };
   return operation;
 }

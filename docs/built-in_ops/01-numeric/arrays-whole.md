@@ -1,51 +1,54 @@
 # NUM-03 Whole execution
 
-All six formal constant/broadcast profile keys now execute CPU Whole callbacks.
-Constant View copies one scalar into an independent zero-stride owner; it retains
-its whole-array tuple identity and does not keep an oversized scalar source
-backing. Broadcast View preserves one complete source Value, including original
-strides and storage. Multiple source owners return ViewUnavailable; Dense may
-collect them. Both Dense modes compute and own the complete target before
-consumer projection. Empty reads nothing, all active source data is validated,
-and any source edit invalidates the selected output's complete observations.
+All six `numeric.constant` and `numeric.broadcast` profile keys execute CPU
+Whole Result operations. Constant View copies one scalar into an independent
+zero-stride Result owner; it preserves the whole-array tuple identity without
+retaining an oversized scalar backing. Broadcast View preserves the complete
+source Result owner, including its original strides. If the source has multiple
+owners, View returns `ViewUnavailable`; Dense can collect those owners. Both
+Dense operations publish the complete target before consumer projection. An
+Empty request reads no samples, while nonempty requests validate all active
+source data. A source edit invalidates the complete output observations.
 
 Constant Dense grows an already-filled prefix, then copies blocks of at most
 64 KiB without overlap. Cancellation polls between these byte-bounded blocks.
 Broadcast Dense retains coordinate mapping and 32-byte Scalar/NEON/AVX2 copying
 with exact tails. These are raw bit operations, so exact bit equality applies
 to all three profiles, including sNaN payloads, signed zero and integers.
-No NUM-14 certificate or floating approximation is involved. Whole numeric
-per-atom counters are unavailable.
+No NUM-14 certificate or floating approximation is involved.
 
 ## Public workflow and validation
 
+The current Result behavior is covered by `test_numeric_result_arrays`:
+
 ```sh
-DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric --target photospider_numeric_arrays -j8
-build/clang21-numeric/examples/numeric_workflow/photospider_numeric_arrays _strict
-build/clang21-numeric/examples/numeric_workflow/photospider_numeric_arrays _accelerated_apple_silicon
+cmake --build build/kernel-dev --target test_numeric_result_arrays -j8
+ctest --test-dir build/kernel-dev -R '^test_numeric_result_arrays$' --output-on-failure
 ```
 
-Both runs passed. Independent checks cover all 256 UInt8 values, Int64 extrema,
-Float32/64 special/raw bit patterns, all four fenv modes, negative unaligned
-axis permutations, ordinary/direct/fragment execution, and exact analytic
-broadcast coordinates. `[1048576,1048576]` constant still owns only 8 bytes;
-`[274877906944,3]` broadcast retains three Int64 samples. Structured consumption
-of giant views, escaped-owner lifetime, scalar-copy source release, NaN cache
-identity, Whole dirty/cache invalidation, multi-owner View rejection/Dense
-collection, full typed rejection and Empty all passed. Both dense operators
-reject insufficient full-output/work budgets and release storage on cancellation
-after admitted copying. Existing generic staged allocation/metadata probes remain
-in the manual suite and passed separately from the migrated operators.
+The focused test covers dense output and schema rejection, structured consumption
+of giant views, Result cache rebinding, owner lifetime, raw bit patterns and
+constant/broadcast boundary cases. It checks all 256 UInt8 values, Int64
+extrema, Float32/64 special values, all four floating-point rounding modes, and
+negative unaligned axis permutations. A structured input with one batch axis
+of extent 2 and cell shape `{3}` verifies that the consumer reads the last
+sample using batch coordinate 1 and cell coordinate 2.
+Strict and available accelerated profiles run; on the tested Apple Silicon host,
+the x86 profile reports `BackendUnavailable`. These checks establish correctness
+and ownership behavior, not a current Result performance baseline.
 
-Five focused numeric/dependency/demand/resources/compiler CTests passed, as did
-ClangFormat21/cpplint and scoped independent review. No x86/WSL runtime validation
-was performed for this migration. Dated older platform records are pre-Whole.
+The `photospider_numeric_arrays` executable composes the same Result operations
+with the remaining NUM-03 workflow cases. Its full manual run is separate from
+the focused CTest above; the test command is the targeted validation entry point.
 
-## Public latency and copy core
+## Historical Value Whole latency and copy core
 
-Apple M5, macOS27.0 (26A5425a), Clang21.1.3, O2/RelWithDebInfo,
-`-fno-fast-math -ffp-contract=off`, package0.18/traits16. Before uses the original
-NUM-03 adapter from 18459d2d linked to the same kernel; after uses Whole.
+These measurements describe the earlier Value-backed Whole implementation and
+its Value adapter at package 0.18 / traits 16. They do not measure the current
+Result implementation. The recorded host was Apple M5, macOS 27.0 (26A5425a),
+Clang 21.1.3, O2/RelWithDebInfo, with `-fno-fast-math -ffp-contract=off`.
+The Before column uses the original NUM-03 adapter with the same kernel;
+the Whole column uses the earlier Value Whole path.
 Inputs are frozen before timing, one worker, result/dependency caches off,
 1 GiB controlled payload limit, 2^40 work and 512 MiB dependency-state limit.
 One warmup and seven measured calls per row, every logical output checked
@@ -59,7 +62,7 @@ managed work-ledger overhead. It is not arithmetic-only CPU time.
 
 Milliseconds, median [min,max]:
 
-| Operation/layout, N=16384 | Before public | Whole public | Apple copy core | Scalar copy core median |
+| Operation/layout, N=16384 | Before Value adapter | Value Whole public | Apple copy core | Scalar copy core median |
 | --- | --- | --- | --- | --- |
 | constant/View | .0901 [.0819,.1438] | .0443 [.0284,.0616] | .000375 [.000250,.001750] | .000292 |
 | constant/Dense | .4693 [.4448,.5239] | .0446 [.0352,.0634] | .005250 [.004333,.007792] | .005375 |

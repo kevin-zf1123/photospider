@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -15,6 +16,7 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_bezier.hpp"
 #include "01-numeric/exact_sampling.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -36,8 +38,8 @@ struct BezierState final {
   SequenceProfile profile;
   unsigned degree, count, knots;
   bool clamp;
-  const OperationInvocation& call;
-  const ResourceBudget* budget;
+  const ResultProgramPhase& phase;
+  std::array<std::optional<numeric_ops::MathTensorReader>, 4> readers;
   std::function<Status(std::uint64_t)> consume;
   numeric_ops::ExactSampling sampling;
   std::conditional_t<Values, numeric_ops::ExactBezier, EmptyBezier> arithmetic;
@@ -46,23 +48,26 @@ struct BezierState final {
   std::array<std::uint64_t, 4> x{}, y{}, replicas{};
   ResourceVector<std::uint64_t> topology;
   explicit BezierState(SequenceProfile selected,
-                       const OperationInvocation& invocation)
+                       const ResultProgramPhase& invocation)
       : profile(selected),
-        degree(std::get<std::int64_t>(invocation.parameters.at("degree"))),
-        count(std::get<std::int64_t>(invocation.parameters.at("count"))),
-        knots(Values ? invocation.inputs[0].descriptor().shape[0] : 0),
+        degree(
+            std::get<std::int64_t>(invocation.query.parameters.at("degree"))),
+        count(std::get<std::int64_t>(invocation.query.parameters.at("count"))),
+        knots(Values ? invocation.query.inputs[0]
+                           .result_schema->tensors[0]
+                           .sample_shape()[0]
+                     : 0),
         clamp(std::get<std::string>(
-                  invocation.parameters.at("out_of_domain")) == "clamp"),
-        call(invocation),
-        budget(resource_internal::metadata_budget()),
+                  invocation.query.parameters.at("out_of_domain")) == "clamp"),
+        phase(invocation),
         consume([this](auto amount) { return work(amount); }),
         sampling(selected),
-        arithmetic(selected) {}
-  Status work(std::uint64_t amount) const {
-    if (call.cancellation.cancelled())
-      return {ErrorCode::Cancelled, {}};
-    return budget ? budget->consume({amount}) : Status::success();
+        arithmetic(selected),
+        topology(ResourceAllocator<std::uint64_t>(phase.resources)) {
+    for (const auto& item : *phase.tensors)
+      readers[item.first.first].emplace(item.second, phase.query.cancellation);
   }
+  Status work(std::uint64_t amount) const { return phase.consume_work(amount); }
   Status fail(const BezierPoint* point, const std::string& message,
               FailureReason reason = FailureReason::InvalidDomain) const {
     Status status{ErrorCode::OperationFailed,
@@ -89,13 +94,10 @@ struct BezierState final {
     auto charged = work(at.size() + 1);
     if (!charged.ok())
       return Result<std::uint64_t>(charged);
-    const auto& input = call.inputs[Values ? port : port - 2];
-    std::uint64_t bits = 0;
-    const bool narrow = input.descriptor().element_type == ElementType::Float32;
-    auto address = input.byte_address(at);
-    if (!address.ok())
-      return Result<std::uint64_t>(address.status());
-    std::memcpy(&bits, input.bytes().data() + address.value(), narrow ? 4 : 8);
+    const auto& input = phase.tensors->at({port, 0});
+    const bool narrow =
+        input.spec().descriptor.element_type == ElementType::Float32;
+    auto bits = readers[port]->bits(at);
     auto value = BinaryParts::decode(bits, narrow);
     if (value.nan || value.infinite) {
       std::string message =
@@ -224,16 +226,15 @@ struct BezierState final {
     }
     return Status::success();
   }
-  Result<Value> execute() {
-    using Answer = Result<Value>;
+  Status execute(const ResourceVector<ResultTensorWriteWindow>& writers) {
     auto status = endpoints_ready();
     if (!status.ok())
-      return Answer(status);
+      return status;
     if constexpr (Values) {
       topology.resize(knots + (degree - 1) * (knots - 1));
       status = topology_ready();
       if (!status.ok())
-        return Answer(status);
+        return status;
       // Validate the complete sampling controls before any y arithmetic.
       // Keep only one row of classification state, independent of count.
       for (std::uint64_t i = 0; i < count; ++i) {
@@ -241,50 +242,44 @@ struct BezierState final {
         point.index = i;
         status = classify(&point);
         if (!status.ok())
-          return Answer(status);
+          return status;
       }
     }
-    const auto& resolved = call.prepared->traits().outputs[call.output_index];
-    auto allocated = MutableValue::allocate(
-        {resolved.output_element_type, resolved.fixed_output_shape},
-        call.output_region, call.allocator);
-    if (!allocated.ok())
-      return Answer(allocated.status());
-    auto output = allocated.take_value();
+    numeric_ops::MathTensorWriter output(writers[0]);
     if constexpr (!Values) {
       const std::array<std::uint64_t, 3> axis{
           endpoints[0], count == 1 ? endpoints[0] : endpoints[1], step};
       for (unsigned i = 0; i < 3; ++i) {
         numeric_ops::select_words(replicas.data(), axis[i], axis[i], 1,
                                   profile);
-        std::memcpy(output.data() + i * 8, replicas.data(), 8);
+        std::memcpy(output.address({i}), replicas.data(), 8);
       }
     } else {
-      const bool narrow =
-          std::get<std::string>(call.parameters.at("dtype")) == "float32";
+      const bool narrow = std::get<std::string>(
+                              phase.query.parameters.at("dtype")) == "float32";
       for (std::uint64_t i = 0; i < count; ++i) {
         BezierPoint point;
         point.index = i;
         status = classify(&point);
         if (!status.ok())
-          return Answer(status);
+          return status;
         Result<std::uint64_t> value(
             Status{ErrorCode::Internal, "uninitialized Bezier value"});
         if (point.selected >= 0) {
           auto selected =
               read(0, {static_cast<std::uint64_t>(point.selected), 1}, &point);
           if (!selected.ok())
-            return Answer(selected.status());
+            return selected.status();
           value = sampling.weighted(selected.value(), 0, 1, 0, 1, narrow, false,
                                     consume);
         } else {
           const auto j = point.segment;
           auto first = read(0, {j, 1}, &point);
           if (!first.ok())
-            return Answer(first.status());
+            return first.status();
           auto last = read(0, {j + 1, 1}, &point);
           if (!last.ok())
-            return Answer(last.status());
+            return last.status();
           x[0] = topology[j];
           x[degree] = topology[j + 1];
           y[0] = first.value();
@@ -293,52 +288,50 @@ struct BezierState final {
             x[h + 1] = topology[knots + j * (degree - 1) + h];
             auto offset = read(1, {j, h, 1}, &point);
             if (!offset.ok())
-              return Answer(offset.status());
+              return offset.status();
             auto reconstructed =
                 reconstruct(h ? y[degree] : y[0], offset.value(), &point, j, 1);
             if (!reconstructed.ok())
-              return Answer(reconstructed.status());
+              return reconstructed.status();
             y[h + 1] = reconstructed.value();
           }
           value =
               arithmetic.inverse(x, y, degree, point.query, narrow, consume);
         }
         if (!value.ok())
-          return Answer(value.status());
+          return value.status();
         if (BinaryParts::decode(value.value(), narrow).infinite)
-          return Answer(fail(&point, "Bezier output overflow",
-                             FailureReason::ArithmeticOverflow));
+          return fail(&point, "Bezier output overflow",
+                      FailureReason::ArithmeticOverflow);
         numeric_ops::select_words(replicas.data(), value.value(), value.value(),
                                   1, profile);
-        std::memcpy(output.data() + i * (narrow ? 4 : 8), replicas.data(),
-                    narrow ? 4 : 8);
+        std::memcpy(output.address({i}), replicas.data(), narrow ? 4 : 8);
       }
     }
-    status = work(1);
-    return status.ok() ? std::move(output).publish() : Answer(status);
+    return work(1);
   }
 };
 template <bool Values>
-Result<Value> execute_bezier(const OperationInvocation& call,
-                             SequenceProfile profile) {
-  using Answer = Result<Value>;
-  using State = BezierState<Values>;
-  try {
-    auto allocated = call.allocator.allocate(sizeof(State));
+struct BezierKernel final {
+  SequenceProfile profile;
+  explicit BezierKernel(SequenceProfile selected) : profile(selected) {}
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    if (writers.size() != 1)
+      return {ErrorCode::OperationFailed, "Bezier requires one packed writer"};
+    using State = BezierState<Values>;
+    auto allocated = phase.allocator.allocate(sizeof(State));
     if (!allocated.ok())
-      return Answer(allocated.status());
+      return allocated.status();
     auto buffer = allocated.take_value();
     std::unique_ptr<State, void (*)(State*)> state(
-        new (buffer.data()) State(profile, call),
+        new (buffer.data()) State(profile, phase),
         [](State* value) { value->~State(); });
-    return state->execute();
-  } catch (const std::bad_alloc&) {
-    return Answer(Status{ErrorCode::ResourceExhausted,
-                         {},
-                         FailureReason::CapacityLimit,
-                         {FailureOrigin::Resource, FailureScope::Run}});
+    return state->execute(writers);
   }
-}
+};
+template <bool Values>
+using BezierProgram = numeric_ops::WholeTensorProgram<BezierKernel<Values>>;
 
 OperationDefinition bezier_operation(const std::string& key,
                                      SequenceProfile profile) {
@@ -347,22 +340,24 @@ OperationDefinition bezier_operation(const std::string& key,
   auto& traits = operation.traits;
   traits.input_count = 4;
   traits.input_schema.resize(4);
-  for (auto& input : traits.input_schema)
+  for (auto& input : traits.input_schema) {
+    input.kind = OperationPortKind::Result;
     input.element_type_mask = 12;
+  }
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = {
       {"degree", OperationParameterType::Int64, true, true, 2, 3},
       {"count", OperationParameterType::Int64, true, true, 1, 1048576},
       {"dtype", OperationParameterType::String},
       {"out_of_domain", OperationParameterType::String}};
+  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                       sizeof(BezierProgram<true>));
   auto& values = traits.outputs[0];
-  values.key = "values";
-  values.region_rule = OperationRegionRule::Whole;
-  values.requires_dense_output = true;
   traits.workspace_bytes = sizeof(BezierState<true>);
   traits.outputs.push_back(values);
   auto& axis = traits.outputs[1];
   axis.key = "axis";
+  axis.continuation_bytes = sizeof(BezierProgram<false>);
   operation.specialize_metadata = [profile](const auto& inputs,
                                             const auto& parameters) {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
@@ -370,12 +365,14 @@ OperationDefinition bezier_operation(const std::string& key,
         static_cast<unsigned>(std::get<std::int64_t>(parameters.at("degree")));
     const auto count =
         static_cast<unsigned>(std::get<std::int64_t>(parameters.at("count")));
-    const auto& a = inputs[0].descriptor.shape;
+    const auto a = inputs[0].result_schema->tensors[0].sample_shape();
     if (a.size() != 2 || a[0] < 2 || a[0] > 65536 || a[1] != 2 ||
-        inputs[1].descriptor.shape !=
+        inputs[1].result_schema->tensors[0].sample_shape() !=
             std::vector<std::uint64_t>{a[0] - 1, degree - 1, 2} ||
-        inputs[2].descriptor.shape != std::vector<std::uint64_t>{1} ||
-        inputs[3].descriptor.shape != std::vector<std::uint64_t>{1})
+        inputs[2].result_schema->tensors[0].sample_shape() !=
+            std::vector<std::uint64_t>{1} ||
+        inputs[3].result_schema->tensors[0].sample_shape() !=
+            std::vector<std::uint64_t>{1})
       return Answer(Status{ErrorCode::TypeMismatch,
                            "Bezier anchors/handles/scalar shapes",
                            FailureReason::None,
@@ -390,21 +387,28 @@ OperationDefinition bezier_operation(const std::string& key,
     if (!available.ok())
       return Answer(available);
     std::vector<OperationOutputSpecialization> outputs(2);
-    outputs[0].metadata.descriptor = {
-        dtype == "float32" ? ElementType::Float32 : ElementType::Float64,
-        {count}};
+    outputs[0].metadata.result_schema = std::make_shared<const SchemaTemplate>(
+        numeric_ops::numeric_tensor_schema(
+            dtype == "float32" ? ElementType::Float32 : ElementType::Float64,
+            {count}));
     outputs[0].input_indices = count == 1
                                    ? std::vector<std::uint32_t>{0, 1, 2}
                                    : std::vector<std::uint32_t>{0, 1, 2, 3};
-    outputs[1].metadata.descriptor = {ElementType::Float64, {3}};
-    outputs[1].metadata.atomic_trailing_axes = 1;
+    auto axis_schema =
+        numeric_ops::numeric_tensor_schema(ElementType::Float64, {3});
+    axis_schema.tensors[0].atomic_trailing_axes = 1;
+    outputs[1].metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(std::move(axis_schema));
     outputs[1].input_indices = count == 1 ? std::vector<std::uint32_t>{2}
                                           : std::vector<std::uint32_t>{2, 3};
     return Answer(std::move(outputs));
   };
-  operation.callback = [profile](const OperationInvocation& call) {
-    return call.output_index == 0 ? execute_bezier<true>(call, profile)
-                                  : execute_bezier<false>(call, profile);
+  operation.start_result = [profile](const auto& query, const auto& allocator) {
+    return query.output_index == 0
+               ? ResultContinuation::make<BezierProgram<true>>(allocator,
+                                                               profile)
+               : ResultContinuation::make<BezierProgram<false>>(allocator,
+                                                                profile);
   };
   return operation;
 }

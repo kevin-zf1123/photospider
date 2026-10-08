@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/plugin/planar_operation_plugin_api.h"
+#include "photospider/plugin/result_operation_plugin_api.h"
 namespace px {
 struct Failure : std::runtime_error {
   int code;
@@ -101,7 +101,7 @@ struct Options {
 };
 class Context {
  public:
-  explicit Context(const ps_planar_services_v3* services);
+  explicit Context(const ps_result_services_v2* services);
   ~Context();
   Context(const Context&) = delete;
   Context& operator=(const Context&) = delete;
@@ -129,9 +129,9 @@ class Context {
   std::map<std::string, double> kernel_times;
 
  private:
-  const ps_planar_services_v3* services_;
+  const ps_result_services_v2* services_;
   bool simd_ = false;
-  const ps_planar_services_v3* previous_services_ = nullptr;
+  const ps_result_services_v2* previous_services_ = nullptr;
 };
 // Internal ISA implementation; call only after runtime feature admission.
 bool dispatch_simd(Context&, const char*, std::array<uint32_t, 3>,

@@ -27,6 +27,13 @@ typedef int (*ps_cpu_range_callback_v1)(void* user, uint64_t begin,
  * run partitions [0,count) in grain-sized blocks; grain must be positive.
  * workers=0 uses maximum_workers; otherwise require 1..maximum_workers. A
  * smaller grant limits concurrency, not arithmetic order. count=0 does no work.
+ * Before a nonempty run, the host reserves its job record in Host/Metadata and
+ * one Entries unit, then charges the existing Root `work=count` and
+ * `stages=ceil(count/grain)`. Prior Root work counts toward the limit; failure
+ * is returned before block callbacks start. A zero count creates no job and
+ * charges neither work nor stages. Structured CPU Result Whole polls receive
+ * this borrowed service as `ResultProgramPhase::cpu_parallel`; it schedules
+ * blocks inside that poll, not an independent Result dependency graph.
  * The host may execute fewer simultaneous blocks than the grant. No private
  * pool is created. Cancellation is cooperative between blocks; each block must
  * remain finite and poll its supplied invocation cancellation for long work.

@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "../../examples/numeric_workflow/result_fixture.hpp"
+#include "../../examples/unified_result_workflow/minimal_ops.hpp"
 #include "execution/execution_test_hooks.hpp"
 #include "fixtures/native_vulkan_spirv.hpp"
 #include "photospider/photospider.hpp"
@@ -61,8 +63,7 @@ Result<ExecutionResult> run(const std::shared_ptr<OperationRegistry>& registry,
                             Parameters parameters, bool gpu = true,
                             const CancellationToken& cancellation = {}) {
   WorkflowDocument document;
-  document.inputs = {
-      {1, "input", input.descriptor(), input.region(), input.layout(), {}}};
+  numeric_result_fixture::declare_sources(&document, {input});
   document.nodes = {{1,
                      gpu ? "filter.gaussian_baked64_v1_strict_gpu"
                          : "filter.gaussian_baked64_v1_strict_cpu_whole",
@@ -76,15 +77,16 @@ Result<ExecutionResult> run(const std::shared_ptr<OperationRegistry>& registry,
   auto compiled = Compiler(registry).compile(graph, planning);
   if (!compiled.ok())
     return Result<ExecutionResult>(compiled.status());
-  return context.execute(compiled.value().plan, {{{"input", input}}},
+  return context.execute(compiled.value().plan,
+                         numeric_result_fixture::bind_sources(
+                             context.resource_budget().take_value(), {input}),
                          cancellation);
 }
 int empty_request(const std::shared_ptr<OperationRegistry>& registry,
                   ExecutionContext& context) {
   const auto input = input_value(false, 1, 1, {UINT64_C(0x7ff0000000000001)});
   WorkflowDocument document;
-  document.inputs = {
-      {1, "input", input.descriptor(), input.region(), input.layout(), {}}};
+  numeric_result_fixture::declare_sources(&document, {input});
   document.nodes = {{1,
                      "filter.gaussian_baked64_v1_strict_gpu",
                      {WorkflowInputReference{1}},
@@ -95,34 +97,30 @@ int empty_request(const std::shared_ptr<OperationRegistry>& registry,
   planning.execution_mode = ExecutionMode::NativeGpu;
   auto compiled = Compiler(registry).compile(graph, planning);
   PS_CHECK(compiled.ok());
-  auto frozen = context.freeze(compiled.value().plan, {{{"input", input}}});
+  auto frozen =
+      context.freeze(compiled.value().plan,
+                     numeric_result_fixture::bind_sources(
+                         context.resource_budget().take_value(), {input}));
   PS_CHECK(frozen.ok());
   auto result = context.execute_fragments(
       frozen.value(), {{"output", Footprint::none({1, 1}).take_value()}});
   if (!result.ok())
     std::cerr << result.status().message << '\n';
-  PS_CHECK(result.ok() &&
-           result.value().values.at("output").coverage().empty());
+  PS_CHECK(result.ok() && result.value()
+                              .results.at("output")
+                              .descriptor()
+                              .value()
+                              .tensor_coverage(0)
+                              .empty());
   PS_CHECK(result.value().diagnostics.native_dispatch_count == 0);
   PS_CHECK(result.value().diagnostics.fallback_reasons.empty());
   return 0;
 }
-int native_layout() {
-  auto registry = make_default_operation_registry(false);
-  OperationDefinition source;
-  source.key = "test.gaussian_native_input";
-  source.traits.supports_gpu = true;
-  source.traits.estimated_bytes = 601;
-  auto& output = source.traits.outputs[0];
-  output.key = "input";
-  output.shape_rule = OperationShapeRule::Fixed;
-  output.fixed_output_shape = {2, 5, 7};
-  output.output_element_type = ElementType::Float64;
-  output.region_rule = OperationRegionRule::Whole;
-  source.callback = [](const OperationInvocation& call) -> Result<Value> {
+struct NativeSource {
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& call) {
     auto made = call.allocator.allocate(601);
     if (!made.ok())
-      return Result<Value>(made.status());
+      return Result<ResultProgramPoll>(made.status());
     auto buffer = made.take_value();
     std::uint64_t values[70]{};
     for (unsigned i = 0; i < 70; ++i) {
@@ -130,10 +128,11 @@ int native_layout() {
           static_cast<double>((i * 719U) % 65521U) / 16384. - 2.;
       std::memcpy(&values[i], &value, 8);
     }
-    if (call.backend == Backend::Gpu) {
+    if (call.query.backend == Backend::Gpu) {
       const auto* api = call.gpu;
       if (!api)
-        return Result<Value>(Status{ErrorCode::BackendUnavailable, "no GPU"});
+        return Result<ResultProgramPoll>(
+            Status{ErrorCode::BackendUnavailable, "no GPU"});
       const char shader[] =
           "#include <metal_stdlib>\nusing namespace metal;\n"
           "kernel void produce(device uchar* b [[buffer(0)]], "
@@ -143,13 +142,13 @@ int native_layout() {
           "for(uint k=0;k<8;++k)b[at+k]=uchar(a[i]>>(8*k));}";
       std::uint64_t token = 0;
       if (api->buffer(api->context, buffer.data(), buffer.size(), 1, &token))
-        return Result<Value>(
+        return Result<ResultProgramPoll>(
             Status{ErrorCode::OperationFailed, "source binding"});
-      const ps_gpu_buffer_binding_v11 binding{
-          sizeof(ps_gpu_buffer_binding_v11), 0, token, 0, buffer.size(), 1};
-      ps_gpu_dispatch_v11 dispatch{};
+      const ps_gpu_buffer_binding_v1 binding{
+          sizeof(ps_gpu_buffer_binding_v1), 0, token, 0, buffer.size(), 1};
+      ps_gpu_dispatch_v1 dispatch{};
       dispatch.struct_size = sizeof(dispatch);
-      const bool vulkan = api->backend == PS_GPU_BACKEND_VULKAN_V11;
+      const bool vulkan = api->backend == PS_GPU_BACKEND_VULKAN_V1;
       std::uint64_t vulkan_values[140]{};
       if (vulkan) {
         for (unsigned i = 0; i < 70; ++i)
@@ -159,8 +158,7 @@ int native_layout() {
           vulkan ? reinterpret_cast<const char*>(kGaussianInputSpirv) : shader;
       dispatch.source_size =
           vulkan ? sizeof(kGaussianInputSpirv) : sizeof(shader) - 1;
-      dispatch.code_format =
-          vulkan ? PS_GPU_CODE_SPIRV_V11 : PS_GPU_CODE_MSL_V11;
+      dispatch.code_format = vulkan ? PS_GPU_CODE_SPIRV_V1 : PS_GPU_CODE_MSL_V1;
       dispatch.entry = "produce";
       dispatch.entry_size = 7;
       dispatch.buffers = &binding;
@@ -171,7 +169,7 @@ int native_layout() {
       dispatch.grid[0] = 70;
       dispatch.grid[1] = dispatch.grid[2] = 1;
       if (api->execute(api->context, &dispatch, 1))
-        return Result<Value>(
+        return Result<ResultProgramPoll>(
             Status{ErrorCode::OperationFailed, "source dispatch"});
     } else {
       for (unsigned i = 0; i < 70; ++i)
@@ -179,13 +177,48 @@ int native_layout() {
                         (i % 7) * 8,
                     &values[i], 8);
     }
-    return Value::from_storage(
-        {ElementType::Float64, {2, 5, 7}}, Region::whole({2, 5, 7}),
-        {457, {320, 56, -8}, {1, 2, 3}}, std::move(buffer).freeze());
+    auto builder = numeric_result_fixture::take(
+        ResultBuilder::start(call.resources, *call.query.output.result_schema,
+                             call.query.semantic_key));
+    auto status = builder.bind_descriptor_relation(
+        ResultRelation::cartesian(call.resources, 1, {}).take_value());
+    if (!status.ok())
+      return Result<ResultProgramPoll>(status);
+    status = builder.publish_tensor(
+        0, Region::whole({2, 5, 7}), {457, {320, 56, -8}, {1, 2, 3}},
+        std::move(buffer).freeze(),
+        ResultRelation::cartesian(call.resources, 70, {}).take_value(),
+        {true, true, true, true});
+    if (!status.ok())
+      return Result<ResultProgramPoll>(status);
+    auto result = builder.seal();
+    return result.ok() ? Result<ResultProgramPoll>(
+                             ResultPublication{result.take_value(), true})
+                       : Result<ResultProgramPoll>(result.status());
+  }
+};
+int native_layout() {
+  auto registry = make_default_operation_registry(false);
+  OperationDefinition source;
+  source.key = "test.gaussian_native_input";
+  source.traits = unified_example::traits(0, sizeof(NativeSource));
+  source.traits.supports_gpu = true;
+  auto& output = source.traits.outputs[0];
+  output.key = "input";
+  output.region_rule = OperationRegionRule::Whole;
+  SchemaTemplate schema;
+  schema.id = "test.gaussian.coordinates";
+  ResultTensorSpec tensor;
+  tensor.key = "samples";
+  tensor.descriptor = {ElementType::Float64, {2, 5, 7}};
+  schema.tensors.push_back(std::move(tensor));
+  unified_example::result_output(&output, schema);
+  source.start_result = [](const auto&, const auto& allocator) {
+    return ResultContinuation::make<NativeSource>(allocator);
   };
   PS_CHECK(registry->register_operation(std::move(source)).ok());
   PS_CHECK(registry->freeze().ok());
-  Value retained, reference;
+  ResultRef retained, reference;
   for (bool gpu : {false, true}) {
     auto p = parameters(2, 2, "reflect_whole");
     p["x_axis"] = std::int64_t{2};
@@ -215,12 +248,14 @@ int native_layout() {
              result.value().diagnostics.fallback_reasons.empty());
     if (gpu) {
       PS_CHECK(result.value().diagnostics.native_dispatch_count > 1);
-      retained = result.value().values.at("output");
+      retained = result.value().results.at("output");
+      PS_CHECK(result.value().diagnostics.transfer_count == 0);
     } else {
-      reference = result.value().values.at("output");
+      reference = result.value().results.at("output");
     }
   }
-  PS_CHECK(retained.copy_bytes() == reference.copy_bytes());
+  PS_CHECK(numeric_result_fixture::bytes(retained) ==
+           numeric_result_fixture::bytes(reference));
   return 0;
 }
 int dispatched(const ExecutionResult& result) {
@@ -266,11 +301,11 @@ int main(int argc, char** argv) {
         return 1;
       }
       PS_CHECK(dispatched(result.value()) == 0);
-      const auto& value = result.value().values.at("output");
+      const auto value =
+          numeric_result_fixture::bytes(result.value().results.at("output"));
       for (unsigned i = 0; i < data.size(); ++i) {
         std::uint64_t bits = 0;
-        std::memcpy(&bits, value.bytes().data() + i * (narrow ? 4 : 8),
-                    narrow ? 4 : 8);
+        std::memcpy(&bits, value.data() + i * (narrow ? 4 : 8), narrow ? 4 : 8);
         std::cout << std::hex << bits << ' ';
       }
       std::cout << '\n';
@@ -294,9 +329,10 @@ int main(int argc, char** argv) {
     PS_CHECK(result.ok() && dispatched(result.value()) == 0);
     PS_CHECK(result.value().diagnostics.native_dispatch_count > 1);
     auto reference = run(registry, context, input, p, false);
-    PS_CHECK(reference.ok() &&
-             result.value().values.at("output").copy_bytes() ==
-                 reference.value().values.at("output").copy_bytes());
+    PS_CHECK(reference.ok() && numeric_result_fixture::bytes(
+                                   result.value().results.at("output")) ==
+                                   numeric_result_fixture::bytes(
+                                       reference.value().results.at("output")));
   }
   for (bool narrow : {false, true}) {
     // Cross multiple workgroups and scratch reuse in a partial final batch.
@@ -317,8 +353,9 @@ int main(int argc, char** argv) {
     auto actual = run(registry, context, large_input, p);
     auto expected = run(registry, context, large_input, p, false);
     PS_CHECK(actual.ok() && expected.ok() && dispatched(actual.value()) == 0);
-    PS_CHECK(actual.value().values.at("output").copy_bytes() ==
-             expected.value().values.at("output").copy_bytes());
+    PS_CHECK(
+        numeric_result_fixture::bytes(actual.value().results.at("output")) ==
+        numeric_result_fixture::bytes(expected.value().results.at("output")));
     for (unsigned special = 0; special < 6; ++special) {
       std::vector<std::uint64_t> values(
           35, narrow ? UINT64_C(0x80000001) : UINT64_C(0x8000000000000001));
@@ -350,8 +387,10 @@ int main(int argc, char** argv) {
       PS_CHECK(result.ok() && reference.ok() &&
                dispatched(result.value()) == 0);
       PS_CHECK(result.value().diagnostics.native_dispatch_count == 3);
-      PS_CHECK(result.value().values.at("output").copy_bytes() ==
-               reference.value().values.at("output").copy_bytes());
+      PS_CHECK(
+          numeric_result_fixture::bytes(result.value().results.at("output")) ==
+          numeric_result_fixture::bytes(
+              reference.value().results.at("output")));
     }
   }
   {

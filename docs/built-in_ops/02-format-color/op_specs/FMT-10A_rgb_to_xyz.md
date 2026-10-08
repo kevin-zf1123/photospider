@@ -7,25 +7,28 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_result_abi_2
 clarification_status: complete
-proposed_operation_keys:
+registered_operation_keys:
   - color.rgb_to_xyz_strict
   - color.rgb_to_xyz_accelerated_apple_silicon
   - color.rgb_to_xyz_accelerated_x86_64
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-10A: linear RGB to XYZ
 
 Inherit the complete [FMT-10 family](FMT-10_rgb_basis_contract.md) and
-[exact matrix definitions](FMT-10_basis_math.md). This is a Proposed specification,
-not a registered implementation or an alias of a retired operation.
+[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 2
+operations under the strict, accelerated Apple Silicon and accelerated x86-64
+CPU profiles.
 
 ## Interface and interpretation
 
-One `input` tensor Value produces same-dtype/same-shape `values`. Semantic input
+One input Result with one Float32 or Float64 tensor and no fields produces one
+`values` output Result containing one tensor. The output preserves Result schema
+identity, tensor key, logical shape and batch axes; it updates applicable
+semantic facets and sets `atomic_trailing_axes` to zero. Complete sample rank,
+including batch and cell axes, is at most 8; sample count is at most 2^40. Semantic input
 selects one complete linear RGB group, resolves its primary/white geometry from
 effective metadata and checks any explicit assertions. Raw provides its source
 basis and ordered component triple explicitly. Source transfer decoding and
@@ -54,10 +57,10 @@ zero coefficient or by source alpha=0. No whole-image scan is introduced.
 
 Semantic overflow occurs only for a requested row's rounded result; raw keeps
 NUM special values. Required upstream failures, resource/exact-coefficient
-budgets, cancellation, prepared planar pages and normal owner lifetime inherit
+budgets, cancellation, prepared Result coverage and normal owner lifetime inherit
 the family. No source invalidation or relabel mutates another consumer.
 
-## Independent fixtures and future public workflow
+## Independent fixtures
 
 1. Custom primaries R=(1,0), G=(0,1), B=(0,0), white=(0.25,0.25) are valid
    homogeneous axes with y=0 primaries. They give M=diag(1,1,2). Input [1,-2,3]
@@ -79,8 +82,8 @@ the family. No source invalidation or relabel mutates another consumer.
    preserve positions and exact support. Alpha NaN does not affect requested
    color; hidden nonfinite color still fails at alpha=0.
 
-When implemented, a public graph should bind planar linear RGB plus alpha,
-select a source preset/custom geometry, request X and alpha separately and
-compare to independent rational results. A second graph explicitly puts FMT-09A
-before A for an encoded source. This document supplies no executable example
-using nonexistent APIs and makes no runtime claim.
+Use the installed `format::rgb_to_xyz` helper to append A to a workflow, then
+compile and execute the resulting Result graph. Keep transfer decoding and any
+other required stage explicit before A. Runtime validation status is recorded in
+the linked Result implementation documentation; the mathematical fixtures above
+remain the independent numerical acceptance targets.

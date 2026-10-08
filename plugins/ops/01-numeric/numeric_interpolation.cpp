@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "01-numeric/exact_interpolation.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -77,109 +78,68 @@ struct InterpolationMath final {
     return exact.smoothstep(parts[0], parts[1], parts[2], narrow, consume);
   }
 };
-Result<Value> execute_interpolation(const OperationInvocation& call,
-                                    InterpolationKind kind,
-                                    SequenceProfile profile) {
-  using Answer = Result<Value>;
-  const auto* budget = resource_internal::metadata_budget();
-  const std::function<Status(std::uint64_t)> consume = [&](std::uint64_t work) {
-    if (call.cancellation.cancelled())
-      return Status{ErrorCode::Cancelled, {}};
-    return budget ? budget->consume({work}) : Status::success();
-  };
-  auto status = consume(1);
-  if (!status.ok())
-    return Answer(status);
-  const auto& descriptor = call.inputs[0].descriptor();
-  const auto& shape = descriptor.shape;
-  const auto width = Value::element_size(descriptor.element_type);
-  auto allocated =
-      MutableValue::allocate(descriptor, call.output_region, call.allocator);
-  if (!allocated.ok())
-    return Answer(allocated.status());
-  auto output = allocated.take_value();
-  auto storage = call.allocator.allocate(sizeof(InterpolationMath));
-  if (!storage.ok())
-    return Answer(storage.status());
-  auto scratch = storage.take_value();
-  static_assert(alignof(InterpolationMath) <= alignof(std::max_align_t));
-  std::unique_ptr<InterpolationMath, void (*)(InterpolationMath*)> math(
-      new (scratch.data()) InterpolationMath(kind, profile),
-      [](InterpolationMath* value) { value->~InterpolationMath(); });
-  std::vector<std::uint64_t> coordinate(shape.size(), 0);
-  std::array<const std::uint8_t*, 3> packed{};
-  for (std::size_t port = 0; port < call.inputs.size(); ++port) {
-    const auto& input = call.inputs[port];
-    std::uint64_t stride = width;
-    bool dense = true;
-    for (std::size_t axis = shape.size(); axis; --axis) {
-      if (shape[axis - 1] > 1 && input.layout().byte_strides[axis - 1] !=
-                                     static_cast<std::int64_t>(stride))
-        dense = false;
-      stride *= shape[axis - 1];
-    }
-    if (dense) {
-      auto address = input.byte_address(coordinate);
-      if (!address.ok())
-        return Answer(address.status());
-      packed[port] = input.bytes().data() + address.value();
-    }
-  }
-  const auto count = call.output_region.element_count().value();
-  for (std::uint64_t i = 0; i < count; ++i) {
-    status = consume(call.inputs.size() * shape.size() + 1);
+struct InterpolationKernel final {
+  InterpolationKind kind;
+  SequenceProfile profile;
+  InterpolationKernel(InterpolationKind operation, SequenceProfile selected)
+      : kind(operation), profile(selected) {}
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    using namespace numeric_ops;  // NOLINT(build/namespaces)
+    if (writers.size() != 1)
+      return {ErrorCode::OperationFailed,
+              "interpolation requires one packed writer"};
+    const auto& consume = phase.consume_work;
+    auto status = consume(1);
     if (!status.ok())
-      return Answer(status);
-    for (std::size_t port = 0; port < call.inputs.size(); ++port) {
-      const auto& input = call.inputs[port];
-      const auto* data = packed[port];
-      if (data) {
-        data += i * width;
-      } else {
-        auto address = input.byte_address(coordinate);
-        if (!address.ok())
-          return Answer(address.status());
-        data = input.bytes().data() + address.value();
-      }
-      math->bits[port] = 0;
-      if (width == 8)
-        std::memcpy(&math->bits[port], data, 8);
-      else if (width == 4)
-        std::memcpy(&math->bits[port], data, 4);
-      else
-        math->bits[port] = *data;
-    }
-    auto result = math->evaluate(descriptor.element_type, consume);
-    if (!result.ok()) {
-      auto failure = result.status();
-      if (failure.detail.origin == FailureOrigin::Domain) {
-        failure.message += " coordinate=[";
-        for (std::size_t axis = 0; axis < coordinate.size(); ++axis) {
-          if (axis)
-            failure.message += ',';
-          failure.message += std::to_string(coordinate[axis]);
+      return status;
+    const auto& input = phase.tensors->at({0, 0});
+    const auto shape = input.spec().sample_shape();
+    const auto type = input.spec().descriptor.element_type;
+    const auto width = Value::element_size(type);
+    auto scratch =
+        math_take(phase.allocator.allocate(sizeof(InterpolationMath)));
+    static_assert(alignof(InterpolationMath) <= alignof(std::max_align_t));
+    std::unique_ptr<InterpolationMath, void (*)(InterpolationMath*)> math(
+        new (scratch.data()) InterpolationMath(kind, profile),
+        [](InterpolationMath* value) { value->~InterpolationMath(); });
+    std::array<MathTensorReader, 3> readers{
+        MathTensorReader(input, phase.query.cancellation),
+        MathTensorReader(phase.tensors->at({1, 0}), phase.query.cancellation),
+        MathTensorReader(phase.tensors->at({2, 0}), phase.query.cancellation)};
+    MathTensorWriter writer(writers[0]);
+    std::vector<uint64_t> coordinate(shape.size(), 0);
+    const auto count =
+        math_take(phase.query.output.result_schema->tensors[0].sample_count());
+    for (uint64_t i = 0; i < count; ++i) {
+      status = consume(3 * shape.size() + 1);
+      if (!status.ok())
+        return status;
+      for (size_t port = 0; port < readers.size(); ++port)
+        math->bits[port] = readers[port].bits(coordinate);
+      auto result = math->evaluate(type, consume);
+      if (!result.ok()) {
+        auto failure = result.status();
+        if (failure.detail.origin == FailureOrigin::Domain) {
+          failure.message += " coordinate=[";
+          for (size_t axis = 0; axis < coordinate.size(); ++axis) {
+            if (axis)
+              failure.message += ',';
+            failure.message += std::to_string(coordinate[axis]);
+          }
+          failure.message += ']';
         }
-        failure.message += ']';
+        return failure;
       }
-      return Answer(failure);
+      const auto bits = result.value();
+      std::memcpy(writer.address(coordinate), &bits, width);
+      math_next(coordinate, shape);
     }
-    const auto bits = result.value();
-    auto* destination = output.data() + i * width;
-    if (width == 8)
-      std::memcpy(destination, &bits, 8);
-    else if (width == 4)
-      std::memcpy(destination, &bits, 4);
-    else
-      *destination = static_cast<std::uint8_t>(bits);
-    for (std::size_t axis = shape.size(); axis; --axis) {
-      if (++coordinate[axis - 1] < shape[axis - 1])
-        break;
-      coordinate[axis - 1] = 0;
-    }
+    return consume(1);
   }
-  status = consume(1);
-  return status.ok() ? std::move(output).publish() : Answer(status);
-}
+};
+using numeric_ops::WholeTensorProgram;
+using InterpolationProgram = WholeTensorProgram<InterpolationKernel>;
 OperationDefinition interpolation_operation(const std::string& key,
                                             InterpolationKind kind,
                                             SequenceProfile profile) {
@@ -189,14 +149,12 @@ OperationDefinition interpolation_operation(const std::string& key,
   traits.requires_metadata_specialization = true;
   traits.input_count = 3;
   traits.input_schema.resize(traits.input_count);
-  for (auto& input : traits.input_schema)
+  for (auto& input : traits.input_schema) {
+    input.kind = OperationPortKind::Result;
     input.element_type_mask = 12;
-  auto& output = traits.outputs[0];
-  output.key = "values";
-  output.shape_rule = OperationShapeRule::MatchAllInputs;
-  output.output_dtype_rule = OperationDtypeRule::Input;
-  output.region_rule = OperationRegionRule::Whole;
-  output.requires_dense_output = true;
+  }
+  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                       sizeof(InterpolationProgram));
   traits.workspace_bytes = sizeof(InterpolationMath);
   operation.specialize_metadata = [profile](const auto& inputs, const auto&)
       -> Result<std::vector<OperationOutputSpecialization>> {
@@ -207,7 +165,9 @@ OperationDefinition interpolation_operation(const std::string& key,
                            FailureReason::None,
                            {FailureOrigin::Schema, FailureScope::Unspecified}});
     };
-    const auto& first = inputs[0].descriptor;
+    const auto& member = inputs[0].result_schema->tensors[0];
+    const ValueDescriptor first{member.descriptor.element_type,
+                                member.sample_shape()};
     if (first.shape.empty() || first.shape.size() > 8)
       return mismatch("interpolation requires rank 1..8");
     std::uint64_t count = 1;
@@ -217,20 +177,23 @@ OperationDefinition interpolation_operation(const std::string& key,
       count *= extent;
     }
     for (const auto& input : inputs)
-      if (input.descriptor.shape != first.shape ||
-          input.descriptor.element_type != first.element_type)
+      if (input.result_schema->tensors[0].sample_shape() != first.shape ||
+          input.result_schema->tensors[0].descriptor.element_type !=
+              first.element_type)
         return mismatch(
             "interpolation operands require identical shape and dtype");
     auto available = numeric_ops::sequence_profile_available(profile);
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization result;
-    result.metadata.descriptor = first;
+    result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
+        numeric_ops::numeric_tensor_schema(first.element_type, first.shape));
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.callback = [kind, profile](const OperationInvocation& call) {
-    return execute_interpolation(call, kind, profile);
+  operation.start_result = [kind, profile](const auto&, const auto& allocator) {
+    return ResultContinuation::make<InterpolationProgram>(allocator, kind,
+                                                          profile);
   };
   return operation;
 }

@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -11,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
@@ -25,8 +27,17 @@ Value values(const std::vector<double>& numbers) {
 }
 WorkflowDocument document(std::uint64_t n, std::int64_t block) {
   WorkflowDocument doc;
-  doc.inputs = {
-      {1, "x", {ElementType::Float64, {n}}, Region::whole({n}), {0, {8}}, {}}};
+  WorkflowInputDeclaration input;
+  input.id = 1;
+  input.name = "x";
+  SchemaTemplate schema;
+  schema.id = "test.scan.input";
+  ResultTensorSpec tensor;
+  tensor.key = "samples";
+  tensor.descriptor = {ElementType::Float64, {n}};
+  schema.tensors.push_back(std::move(tensor));
+  input.result_schema = std::make_shared<SchemaTemplate>(std::move(schema));
+  doc.inputs = {input};
   doc.nodes = {{1,
                 "numeric.ordered_scan",
                 {WorkflowInputReference{1}},
@@ -37,151 +48,276 @@ WorkflowDocument document(std::uint64_t n, std::int64_t block) {
 Footprint point(std::uint64_t at, std::uint64_t n) {
   return Footprint::from_regions({n}, {Region({{at, 1}})}).take_value();
 }
-int direct_and_checkpoint_guards() {
-  auto registry = make_default_operation_registry();
-  const auto input = values({1, 2});
-  const std::vector<Value> inputs{input};
-  const std::vector<Region> regions{input.region()};
-  const std::map<std::string, ParameterValue> parameters{
-      {"block_size", INT64_C(1)}};
-  OperationInvocation invocation{inputs,           regions, parameters,
-                                 Backend::Cpu,     {},      input.region(),
-                                 BufferAllocator{}};
-  auto direct = registry->invoke("numeric.ordered_scan", invocation);
-  PS_CHECK(direct.ok());
-  double second = 0;
-  std::memcpy(&second, direct.value().bytes().data() + 8, 8);
-  PS_CHECK(second == 3);
-  DependencyRequest request{{{input.descriptor(), {}}},
-                            parameters,
-                            point(1, 2),
-                            "snapshot"};
-  DependencyCheckpoint saved;
-  DependencyCheckpointServices services;
-  services.identity = "node-a";
-  services.publish = [&](const DependencyCheckpoint& checkpoint) {
-    saved = checkpoint;
-    return Status::success();
-  };
-  for (bool host : {false, true}) {
-    auto session = registry->start_dependency("numeric.ordered_scan", request)
-                       .take_value();
-    for (;;) {
-      auto progress = session->poll(
-          BufferAllocator{}, host ? services : DependencyCheckpointServices{});
-      PS_CHECK(progress.ok());
-      if (const auto* done = std::get_if<DependencyResult>(&progress.value())) {
-        PS_CHECK(done->value.read({1}, &second, 8).ok() && second == 3);
-        break;
+ExecutionContextConfig config(std::uint64_t cache = 512) {
+  ExecutionContextConfig result;
+  result.cpu_workers = 1;
+  result.result_cache_bytes = cache;
+  result.managed_resources = ResourceLimits{};
+  return result;
+}
+ExecutionBindings bindings_for(const ResourceBudget& root,
+                               const std::vector<double>& numbers,
+                               const WorkflowDocument& doc) {
+  return {
+      {{"x", numeric_result_fixture::source(
+                 root, values(numbers), doc.inputs[0].result_schema.get())}}};
+}
+Status read(const ResultRef& result, std::uint64_t index, double* out) {
+  return numeric_result_fixture::read(result, {index}, out, sizeof(*out));
+}
+struct ScanHooks {
+  std::function<Status(const ResultProgramNeed&)> need;
+  unsigned invalid = 0, starts = 0, publishes = 0, restores = 0;
+  bool probe_checkpoints = false;
+  std::uint64_t sequence = 0;
+  ResultRef state, foreign;
+  std::optional<ResultCheckpoint> latest, previous;
+};
+struct ScanProgram {
+  ResultContinuation inner;
+  std::shared_ptr<ScanHooks> hooks;
+  ScanProgram(ResultContinuation program, std::shared_ptr<ScanHooks> observed)
+      : inner(std::move(program)), hooks(std::move(observed)) {}
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    auto forwarded = phase;
+    forwarded.checkpoint_before = [&](std::uint32_t kind,
+                                      std::uint64_t before) {
+      auto found =
+          phase.checkpoint_before(hooks->invalid == 1 ? 0 : kind, before);
+      if (found.ok() && found.value()) {
+        const auto& checkpoint = *found.value();
+        if (checkpoint.phase() != kind || checkpoint.sequence() > before)
+          return Result<std::optional<ResultCheckpoint>>(
+              Status{ErrorCode::OperationFailed, "future checkpoint"});
+        ++hooks->restores;
       }
-      auto pending = session->pending_reads().take_value();
-      auto coverage = Footprint::none({2}).take_value();
-      for (const auto& need : pending)
-        coverage = coverage.unite(need.samples).take_value();
-      PS_CHECK(session
-                   ->supply({ValueFragments::create(input.descriptor(), {},
-                                                    coverage, {input})
-                                 .take_value()},
-                            "snapshot")
-                   .ok());
+      return found;
+    };
+    forwarded.checkpoint_publish = [&](std::uint32_t kind,
+                                       std::uint64_t sequence,
+                                       const ResultRef& state) {
+      auto status =
+          phase.checkpoint_publish(hooks->invalid == 2 ? 0 : kind, sequence,
+                                   hooks->invalid == 3   ? ResultRef{}
+                                   : hooks->invalid == 4 ? hooks->foreign
+                                                         : state);
+      if (status.ok()) {
+        ++hooks->publishes;
+        hooks->sequence = sequence;
+        hooks->state = state;
+        if (!hooks->probe_checkpoints)
+          return status;
+        auto found = phase.checkpoint_before(kind, sequence);
+        if (!found.ok())
+          return found.status();
+        hooks->latest = found.take_value();
+        if (sequence) {
+          auto previous = phase.checkpoint_before(kind, sequence - 1);
+          if (!previous.ok())
+            return previous.status();
+          hooks->previous = previous.take_value();
+        }
+      }
+      return status;
+    };
+    auto result = inner.poll(forwarded);
+    if (result.ok() && hooks->need) {
+      if (const auto* need = std::get_if<ResultProgramNeed>(&result.value())) {
+        auto status = hooks->need(*need);
+        if (!status.ok())
+          return Result<ResultProgramPoll>(status);
+      }
     }
+    return result;
   }
-  PS_CHECK(saved.valid() && saved.sequence() == 1 &&
-           saved.state().as_float64().value() == 3);
-  services.find = [&](std::uint32_t, std::uint64_t) {
-    return Result<std::optional<DependencyCheckpoint>>(saved);
+};
+struct ScanPreparation {
+  std::shared_ptr<const PreparedOperation> inner;
+};
+std::shared_ptr<OperationRegistry> observed_registry(
+    const std::shared_ptr<ScanHooks>& hooks) {
+  auto base = make_default_operation_registry();
+  auto registry = make_default_operation_registry(false);
+  OperationDefinition operation;
+  operation.key = "test.scan";
+  operation.traits = base->find_traits("numeric.ordered_scan").take_value();
+  operation.traits.outputs[0].continuation_bytes += sizeof(ScanProgram);
+  operation.prepare_static = [base](const auto& inputs,
+                                    const auto& parameters) {
+    auto inner =
+        base->prepare_operation("numeric.ordered_scan", inputs, parameters);
+    if (!inner.ok())
+      return Result<OperationPreparation>(inner.status());
+    OperationPreparation prepared;
+    prepared.outputs.resize(1);
+    prepared.outputs[0].metadata.result_schema =
+        std::make_shared<SchemaTemplate>(
+            *inner.value()->traits().outputs[0].result_schema);
+    prepared.state =
+        std::make_shared<ScanPreparation>(ScanPreparation{inner.take_value()});
+    return Result<OperationPreparation>(std::move(prepared));
   };
-  auto hit =
-      registry->start_dependency("numeric.ordered_scan", request).take_value();
-  auto completed = hit->poll(BufferAllocator{}, services);
+  operation.start_result = [base, hooks](const auto& query,
+                                         const auto& allocator) {
+    ++hooks->starts;
+    auto forwarded = query;
+    forwarded.prepared =
+        static_cast<const ScanPreparation*>(query.prepared->state())->inner;
+    auto inner =
+        base->start_result("numeric.ordered_scan", forwarded, allocator);
+    if (!inner.ok())
+      return inner;
+    return ResultContinuation::make<ScanProgram>(allocator, inner.take_value(),
+                                                 hooks);
+  };
+  numeric_result_fixture::require(
+      registry->register_operation(std::move(operation)).ok(), "register scan");
+  numeric_result_fixture::require(registry->freeze().ok(), "freeze scan");
+  return registry;
+}
+int checkpoint_guards() {
+  auto hooks = std::make_shared<ScanHooks>();
+  hooks->probe_checkpoints = true;
+  auto registry = observed_registry(hooks);
+  auto doc = document(2, 1);
+  doc.nodes[0].operation = "test.scan";
+  GraphContext graph(doc);
+  const auto plan = Compiler(registry).compile(graph).take_value().plan;
+  ExecutionContext context(registry, config());
+  auto root = context.resource_budget().take_value();
+  auto demand =
+      context.open_demand(plan, bindings_for(root, {1, 2}, doc)).take_value();
+  auto completed = demand.request({{"y", point(1, 2)}});
+  double second = 0;
   PS_CHECK(completed.ok() &&
-           std::holds_alternative<DependencyResult>(completed.value()));
-  const auto& evidence =
-      std::get<DependencyResult>(completed.value()).certificate;
-  PS_CHECK(evidence && evidence->backward(point(1, 2)).ok());
-  for (unsigned bad = 0; bad < 3; ++bad) {
-    auto invalid = request;
-    auto wrong = services;
-    if (bad == 0)
-      wrong.identity = "node-b";
-    else if (bad == 1)
-      invalid.snapshot_identity = "another-snapshot";
-    else
-      invalid.outputs = point(0, 2);  // Host illegally returns a future state.
-    auto session = registry->start_dependency("numeric.ordered_scan", invalid)
-                       .take_value();
-    PS_CHECK(session->poll(BufferAllocator{}, wrong).status().code ==
-             ErrorCode::InvalidArgument);
+           read(completed.value().results.at("y"), 1, &second).ok() &&
+           second == 3);
+  PS_CHECK(hooks->publishes == 2 && hooks->sequence == 1 &&
+           read(hooks->state, 0, &second).ok() && second == 3);
+  PS_CHECK(hooks->latest && hooks->latest->phase() == 1 &&
+           hooks->latest->sequence() == 1 &&
+           read(hooks->latest->state(), 0, &second).ok() && second == 3);
+  PS_CHECK(hooks->previous && hooks->previous->sequence() == 0 &&
+           read(hooks->previous->state(), 0, &second).ok() && second == 1);
+  auto first = demand.request({{"y", point(0, 2)}});
+  PS_CHECK(first.ok() && read(first.value().results.at("y"), 0, &second).ok() &&
+           second == 1);
+  const auto before_edit = hooks->restores;
+  PS_CHECK(demand.replace_bindings(bindings_for(root, {4, 2}, doc)).ok());
+  auto edited = demand.request({{"y", point(1, 2)}});
+  PS_CHECK(edited.ok() && hooks->restores == before_edit &&
+           read(edited.value().results.at("y"), 1, &second).ok() &&
+           second == 6);
+  // Different static block sizes have separate scopes over the same input.
+  auto other_doc = doc;
+  other_doc.nodes.push_back({9,
+                             "test.scan",
+                             {WorkflowInputReference{1}},
+                             {{"block_size", INT64_C(2)}}});
+  other_doc.outputs.push_back({"other", 9, "value"});
+  GraphContext other_graph(other_doc);
+  auto other_plan = Compiler(registry).compile(other_graph).take_value().plan;
+  const auto starts_before = hooks->starts;
+  const auto publishes_before = hooks->publishes;
+  auto other =
+      context.execute(other_plan, bindings_for(root, {8, 2}, other_doc));
+  PS_CHECK(other.ok() && hooks->restores == before_edit &&
+           read(other.value().results.at("y"), 1, &second).ok() &&
+           second == 10);
+  PS_CHECK(read(other.value().results.at("other"), 1, &second).ok() &&
+           second == 10);
+  PS_CHECK(hooks->starts == starts_before + 2 &&
+           hooks->publishes == publishes_before + 4 &&
+           other.value().results.at("y").object_id() !=
+               other.value().results.at("other").object_id());
+  for (unsigned bad = 1; bad <= 4; ++bad) {
+    auto invalid = std::make_shared<ScanHooks>();
+    invalid->invalid = bad;
+    if (bad == 4)
+      invalid->foreign =
+          numeric_result_fixture::source(ResourceBudget{}, values({3}));
+    auto bad_registry = observed_registry(invalid);
+    GraphContext bad_graph(doc);
+    auto bad_plan = Compiler(bad_registry).compile(bad_graph).take_value().plan;
+    ExecutionContext bad_context(bad_registry, config());
+    auto failed = bad_context.execute(
+        bad_plan,
+        bindings_for(bad_context.resource_budget().take_value(), {1, 2}, doc));
+    PS_CHECK(failed.status().code == ErrorCode::InvalidArgument);
   }
-  auto bounded = request;
-  bounded.limits.sets.maximum_boxes = 8;
-  auto small = registry->start_dependency("numeric.ordered_scan", bounded);
-  PS_CHECK(small.ok());
-  PS_CHECK(small.value()->poll(BufferAllocator{}, services).status().code ==
-           ErrorCode::ResourceExhausted);
-  auto first = BufferAllocator{}.limited(16);
-  auto sibling = BufferAllocator{}.limited(16);
-  auto writer = MutableValue::allocate({ElementType::Float64, {1}},
-                                       Region::whole({1}), first)
-                    .take_value();
-  auto published = std::move(writer).publish().take_value();
-  PS_CHECK(first.owns_allocation(*published.storage()));
-  PS_CHECK(!sibling.owns_allocation(*published.storage()) &&
-           !first.owns(*published.storage()));
+  ExecutionOptions bounded;
+  bounded.maximum_dependency_cache_work = 0;
+  const auto published_before = hooks->publishes;
+  auto uncached =
+      context.execute(plan, bindings_for(root, {4, 2}, doc), {}, bounded);
+  PS_CHECK(uncached.ok() &&
+           read(uncached.value().results.at("y"), 1, &second).ok() &&
+           second == 6);
+  PS_CHECK(hooks->publishes == published_before + 2 &&
+           hooks->restores == before_edit && !hooks->latest &&
+           !hooks->previous);
+  PS_CHECK(uncached.value().diagnostics.block_cache_hits == 0 &&
+           uncached.value().diagnostics.block_cache_misses == 0);
+  const auto owned = numeric_result_fixture::source(root, values({3}));
+  PS_CHECK(owned.owned_by(root) && !owned.owned_by(ResourceBudget{}));
   return 0;
 }
 int exact_reads(bool ancestor) {
-  auto registry = make_default_operation_registry();
   constexpr std::uint64_t n = 256;
+  std::uint64_t samples = 0, next = 0;
+  auto hooks = std::make_shared<ScanHooks>();
+  hooks->need = [&](const ResultProgramNeed& need) {
+    for (const auto& tensor : need.tensors) {
+      if (tensor.input != 0 || tensor.slot != 0 || tensor.roles != 5)
+        return Status{ErrorCode::OperationFailed, "scan Need type"};
+      for (const auto& box : tensor.samples.boxes()) {
+        if (box.dimensions()[0].offset != next)
+          return Status{ErrorCode::OperationFailed, "scan reread prefix"};
+        next += box.dimensions()[0].extent;
+        samples += box.dimensions()[0].extent;
+      }
+    }
+    return Status::success();
+  };
+  auto registry = observed_registry(hooks);
   auto doc = document(n, 16);
+  doc.nodes[0].operation = "test.scan";
   if (ancestor) {
     doc.nodes[0].inputs = {WorkflowNodeOutput{2, "value"}};
     doc.nodes.push_back({2, "core.identity", {WorkflowInputReference{1}}, {}});
   }
   GraphContext graph(doc);
   auto plan = Compiler(registry).compile(graph).take_value().plan;
-  auto source = std::make_shared<RegionalSource>();
-  source->descriptor = {ElementType::Float64, {n}};
-  std::uint64_t samples = 0, next = 0;
-  source->read = [&](const Region& region, std::uint8_t* bytes,
-                     std::uint64_t size, const BufferAllocator&,
-                     const CancellationToken&) {
-    if (region.dimensions()[0].offset != next)
-      return Result<Region>(
-          Status{ErrorCode::OperationFailed, "scan reread prefix"});
-    for (std::uint64_t i = 0; i < size / 8; ++i) {
-      const double value = static_cast<double>(next + 1);
-      std::memcpy(bytes + i * 8, &value, 8);
-      ++next;
-      ++samples;
-    }
-    return Result<Region>(region);
-  };
-  ExecutionContext context(registry, {1, false, 8, 8192});
-  auto result = context.execute(plan, {{{"x", {}, source}}});
+  std::vector<double> numbers(n);
+  for (std::uint64_t i = 0; i < n; ++i)
+    numbers[i] = static_cast<double>(i + 1);
+  ExecutionContext context(registry, config(0));
+  ExecutionOptions options;
+  if (ancestor)
+    options.maximum_dependency_work = 32U * 1024U * 1024U;
+  auto result = context.execute(
+      plan, bindings_for(context.resource_budget().take_value(), numbers, doc),
+      {}, options);
   if (!result.ok())
     std::cerr << result.status().message << '\n';
   PS_CHECK(result.ok() && samples == n);
-  const auto& output = result.value().values.at("y");
+  const auto& output = result.value().results.at("y");
   for (std::uint64_t i = 0; i < n; ++i) {
     double value = 0;
-    std::memcpy(&value, output.bytes().data() + i * 8, 8);
-    PS_CHECK(value == static_cast<double>((i + 1) * (i + 2) / 2));
+    PS_CHECK(read(output, i, &value).ok() &&
+             value == static_cast<double>((i + 1) * (i + 2) / 2));
   }
-  auto certificate = result.value().dependencies.certificate({1, 0});
-  PS_CHECK(certificate.ok());
   for (auto i : {0U, 13U, 255U}) {
+    auto restricted =
+        result.value().dependencies.restrict({{"y", point(i, n)}});
+    PS_CHECK(restricted.ok());
+    auto support = restricted.value().source_support();
     const auto prefix =
         Footprint::from_regions({n}, {Region({{0, i + 1}})}).take_value();
-    auto support = certificate.value().backward(point(i, n));
-    PS_CHECK(support.ok());
-    Footprint fetched = Footprint::none({n}).take_value();
-    for (const auto& need : support.value())
-      if (need.roles & 1)
-        fetched = fetched.unite(need.samples).take_value();
-    PS_CHECK(fetched == prefix);
+    PS_CHECK(support.ok() && support.value().at("x") == prefix);
   }
-  auto dirty = result.value().dependencies.potential_dirty("x", point(13, n));
+  auto dirty = result.value().dependencies.potential_dirty(
+      "x", point(13, n), 7, {}, ResultSupportTarget::Tensor, 0);
   PS_CHECK(
       dirty.ok() &&
       dirty.value().at("y") ==
@@ -190,17 +326,19 @@ int exact_reads(bool ancestor) {
 }
 int edited_prefixes() {
   auto registry = make_default_operation_registry();
-  GraphContext graph(document(4, 2));
+  auto doc = document(4, 2);
+  GraphContext graph(doc);
   auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContext context(registry, {2, false, 8, 4096, 256});
-  ExecutionBindings bindings{{{"x", values({0, 1, 0x1p54, 4})}}};
+  ExecutionContext context(registry, config(256));
+  auto root = context.resource_budget().take_value();
+  auto bindings = bindings_for(root, {0, 1, 0x1p54, 4}, doc);
   auto demand = context.open_demand(plan, bindings).take_value();
   DemandQuery query{
       {"y", Footprint::from_regions({4}, {Region({{1, 3}})}).take_value()}};
   auto initial = demand.request(query);
   PS_CHECK(initial.ok());
   auto frozen = demand.freeze().take_value();
-  bindings.inputs[0].value = values({1, 1, 0x1p54, 4});
+  bindings = bindings_for(root, {1, 1, 0x1p54, 4}, doc);
   auto edit = demand.replace_bindings(bindings);
   PS_CHECK(edit.ok() && edit.value().potential_dirty.at("y") == query.at("y"));
   auto changed = demand.request(query);
@@ -210,9 +348,9 @@ int edited_prefixes() {
            changed.value().diagnostics.block_cache_misses == 2);
   for (unsigned i = 1; i < 4; ++i) {
     double before = 0, after = 0, pinned = 0;
-    PS_CHECK(initial.value().values.at("y").read({i}, &before, 8).ok());
-    PS_CHECK(changed.value().values.at("y").read({i}, &after, 8).ok());
-    PS_CHECK(old.value().values.at("y").read({i}, &pinned, 8).ok());
+    PS_CHECK(read(initial.value().results.at("y"), i, &before).ok());
+    PS_CHECK(read(changed.value().results.at("y"), i, &after).ok());
+    PS_CHECK(read(old.value().results.at("y"), i, &pinned).ok());
     const double expected = i == 1 ? 1 : i == 2 ? 0x1p54 : 0x1p54 + 4;
     PS_CHECK(before == expected && pinned == expected);
     // Incoming 0/1 changes the current block's first output, although its
@@ -223,18 +361,20 @@ int edited_prefixes() {
 }
 int block_reconvergence() {
   auto registry = make_default_operation_registry();
-  GraphContext graph(document(6, 1));
+  auto doc = document(6, 1);
+  GraphContext graph(doc);
   auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContext context(registry, {1, false, 8, 4096, 512});
+  ExecutionContext context(registry, config());
+  auto root = context.resource_budget().take_value();
   std::vector<double> numbers{0, 1, 0x1p54, 4, 5, 6};
   auto demand =
-      context.open_demand(plan, {{{"x", values(numbers)}}}).take_value();
+      context.open_demand(plan, bindings_for(root, numbers, doc)).take_value();
   DemandQuery query{{"y", point(5, 6)}};
   auto initial = demand.request(query);
   PS_CHECK(initial.ok() && initial.value().diagnostics.block_cache_hits == 0 &&
            initial.value().diagnostics.block_cache_misses == 6);
   numbers[0] = 1;
-  PS_CHECK(demand.replace_bindings({{{"x", values(numbers)}}}).ok());
+  PS_CHECK(demand.replace_bindings(bindings_for(root, numbers, doc)).ok());
   auto changed = demand.request(query);
   PS_CHECK(changed.ok() && changed.value().diagnostics.block_cache_hits == 3 &&
            changed.value().diagnostics.block_cache_misses == 3);
@@ -242,24 +382,40 @@ int block_reconvergence() {
   for (const auto number : numbers)
     expected = expected + number;
   double actual = 0;
-  PS_CHECK(changed.value().values.at("y").read({5}, &actual, 8).ok() &&
+  PS_CHECK(read(changed.value().results.at("y"), 5, &actual).ok() &&
            actual == expected);
   auto evidence = changed.value().dependencies.source_support();
   PS_CHECK(evidence.ok() &&
            evidence.value().at("x") == Footprint::all({6}).value());
-  auto dirty = changed.value().dependencies.potential_dirty("x", point(0, 6));
+  auto dirty = changed.value().dependencies.potential_dirty(
+      "x", point(0, 6), 7, {}, ResultSupportTarget::Tensor, 0);
   PS_CHECK(dirty.ok() && dirty.value().at("y") == point(5, 6));
+  context.clear_result_cache();
+  auto retained = demand.request(query);
+  PS_CHECK(retained.ok() &&
+           retained.value().diagnostics.shared_computations == 1 &&
+           retained.value().diagnostics.block_cache_hits == 0 &&
+           retained.value().diagnostics.block_cache_misses == 0);
+  PS_CHECK(read(retained.value().results.at("y"), 5, &actual).ok() &&
+           actual == expected);
+  initial = Result<DemandResult>(DemandResult{});
+  changed = Result<DemandResult>(DemandResult{});
+  retained = Result<DemandResult>(DemandResult{});
   context.clear_result_cache();
   auto cleared = demand.request(query);
   PS_CHECK(cleared.ok() && cleared.value().diagnostics.block_cache_hits == 0 &&
            cleared.value().diagnostics.block_cache_misses == 6);
+  PS_CHECK(read(cleared.value().results.at("y"), 5, &actual).ok() &&
+           actual == expected);
+  cleared = Result<DemandResult>(DemandResult{});
+  context.clear_result_cache();
   ExecutionOptions disabled;
   disabled.maximum_dependency_cache_work = 0;
   auto plain = demand.request(query, {}, disabled);
   PS_CHECK(plain.ok() && plain.value().diagnostics.cache_hits == 0 &&
            plain.value().diagnostics.block_cache_hits == 0 &&
            plain.value().diagnostics.block_cache_misses == 0);
-  PS_CHECK(plain.value().values.at("y").read({5}, &actual, 8).ok() &&
+  PS_CHECK(read(plain.value().results.at("y"), 5, &actual).ok() &&
            actual == expected);
   return 0;
 }
@@ -267,11 +423,13 @@ int errors_and_order() {
   auto registry = make_default_operation_registry();
   const std::vector<double> input{1e16, 1, -1e16, 4, 1, 0x1p54, 2, 3};
   for (auto block : {1, 2, 3, 64}) {
-    GraphContext graph(document(input.size(), block));
+    auto doc = document(input.size(), block);
+    GraphContext graph(doc);
     auto plan = Compiler(registry).compile(graph).take_value().plan;
-    ExecutionContext context(registry, {1, false, 8, 4096, 512});
+    ExecutionContext context(registry, config());
+    auto root = context.resource_budget().take_value();
     auto demand =
-        context.open_demand(plan, {{{"x", values(input)}}}).take_value();
+        context.open_demand(plan, bindings_for(root, input, doc)).take_value();
     for (unsigned warm = 0; warm < 2; ++warm) {
       auto result =
           demand.request({{"y", Footprint::all({input.size()}).take_value()}});
@@ -282,25 +440,28 @@ int errors_and_order() {
       for (std::uint64_t i = 0; i < input.size(); ++i) {
         carry = carry + input[i];
         double value = 0, expected = carry;
-        PS_CHECK(result.value().values.at("y").read({i}, &value, 8).ok());
+        PS_CHECK(read(result.value().results.at("y"), i, &value).ok());
         PS_CHECK(std::memcmp(&value, &expected, 8) == 0);
       }
     }
   }
-  GraphContext graph(document(2, 64));
+  auto doc = document(2, 64);
+  GraphContext graph(doc);
   auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContext context(registry, {1, false, 8, 4096, 64});
+  ExecutionContext context(registry, config(64));
+  auto root = context.resource_budget().take_value();
   auto demand =
       context
           .open_demand(
               plan,
-              {{{"x", values({1, std::numeric_limits<double>::infinity()})}}})
+              bindings_for(root, {1, std::numeric_limits<double>::infinity()},
+                           doc))
           .take_value();
   for (unsigned warm = 0; warm < 2; ++warm) {
     auto first = demand.request({{"y", point(0, 2)}});
     double output = 0;
     PS_CHECK(first.ok() &&
-             first.value().values.at("y").read({0}, &output, 8).ok() &&
+             read(first.value().results.at("y"), 0, &output).ok() &&
              output == 1);
     auto both = demand.request({{"y", Footprint::all({2}).take_value()}});
     PS_CHECK(both.status().code == ErrorCode::OperationFailed &&
@@ -313,7 +474,7 @@ int errors_and_order() {
 }
 }  // namespace
 int main() {
-  PS_CHECK(direct_and_checkpoint_guards() == 0);
+  PS_CHECK(checkpoint_guards() == 0);
   PS_CHECK(exact_reads(false) == 0);
   PS_CHECK(exact_reads(true) == 0);
   PS_CHECK(errors_and_order() == 0);

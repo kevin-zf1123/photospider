@@ -7,26 +7,23 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_result_abi_2
 clarification_status: complete
-proposed_operation_keys:
+registered_operation_keys:
   - color.rgb_to_hsl_strict
   - color.rgb_to_hsl_accelerated_apple_silicon
   - color.rgb_to_hsl_accelerated_x86_64
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-11I: Described RGB to HSL
 
 Inherit the complete [family contract](FMT-11_model_conversion_contract.md),
 [normative mathematics](FMT-11_model_math.md) and
-[relative-coordinate scale](FMT_relative_coordinate_scale.md). These Proposed
-keys/helpers are unimplemented and create no runtime compatibility alias.
+[relative-coordinate scale](FMT_relative_coordinate_scale.md). The specification remains Proposed; this member is registered as a CPU Result operation.
 
 ## Interface and output inference
 
-One `input` tensor Value produces `values`, preserving Float32/Float64 dtype.
+One Result containing a single Float32 or Float64 tensor and no fields produces one `values` Result containing a single tensor.
 Source: relative described linear or encoded RGB. Target: HSL with the same underlying RGB interpretation.
 Preserve shape, channel axis/count and slots; target roles follow the selected source role order.
 Unrelated groups, internal alpha and AOV samples pass through bit-for-bit.
@@ -51,12 +48,10 @@ publication; unrelated unobserved sample errors do not. Preserve upstream scope.
 
 ## Storage, resources and implementation identity
 
-This is a native primitive; internal helper reuse must preserve its declared support, rounding and validation.
-This member materializes transformed output; whole-node forced view is rejected even for a bypass-only request.
-Inherit canonical planar pages, full-image virtual reservation, exact coverage,
-immutable ownership/lifetime, budgeted scratch/refinement and cancellation.
-Costs and CPU profile support are the family contract, not a Whole fallback.
-No implementation or runtime test evidence is claimed here.
+This is a registered native Result primitive. Internal helper reuse preserves its declared support, rounding and validation.
+This member materializes transformed output and rejects forced view even for a bypass-only request.
+The implementation supports generic and spatial layouts. Q permits a physical view when the complete requested mapping is representable; other members materialize and reject forced view. Empty demand is stateless, and publication is transactional.
+The implementation uses Result ABI 2 and the registered CPU profiles.
 
 ## Independent acceptance and conceptual workflow
 
@@ -65,8 +60,5 @@ RGB=(1,0,0) gives (0,1,0.5). RGB=(1,0,-1) fails S but permits H/L. Retain the ac
 Also apply common mixed-region/component, dtype/profile, signed-zero, metadata,
 resource/cancellation and owner-lifetime acceptance where relevant. An independent
 formula oracle must use actual stored floating inputs, not ideal decimal inputs.
-The conceptual workflow is `I -> explicit HSL adjustment -> J`. When implemented, bind a small planar
-input through the public Compiler/ExecutionContext, request selected color and
-bypass components separately, and check values, metadata, support and failures.
-This is a future workflow obligation, not runnable code against nonexistent APIs.
+The conceptual workflow is `I -> explicit HSL adjustment -> J`. The installed public helper appends the native member key to a `WorkflowDocument`; Compiler and execution then evaluate the Result operation. Request selected color and bypass components separately to observe the declared support.
 Primary sources and their compatibility limits are linked in the math supplement.

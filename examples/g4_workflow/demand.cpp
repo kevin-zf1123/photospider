@@ -4,6 +4,7 @@
 #include <utility>
 #include <vector>
 
+#include "../numeric_workflow/result_fixture.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {
@@ -31,9 +32,9 @@ void demand_workflow() {
   auto data = values<double>(ElementType::Float64, {1, 2, 3, 0, 5});
   auto radius = values<std::int64_t>(ElementType::Int64, {0, 0, 0, 0, 0});
   WorkflowDocument document;
-  document.inputs = {
-      {1, "data", data.descriptor(), data.region(), data.layout(), {}},
-      {2, "radius", radius.descriptor(), radius.region(), radius.layout(), {}}};
+  numeric_result_fixture::declare_sources(&document, {data, radius});
+  document.inputs[0].name = "data";
+  document.inputs[1].name = "radius";
   document.nodes = {{1,
                      "numeric.radius_scatter",
                      {WorkflowInputReference{1}, WorkflowInputReference{2}},
@@ -43,19 +44,22 @@ void demand_workflow() {
   GraphContext graph(document);
   auto plan = checked(Compiler(operations).compile(graph)).plan;
   ExecutionContext context(operations, {1, false, 8, 4096});
-  ExecutionBindings bindings{{{"data", data}, {"radius", radius}}};
+  const auto root = checked(context.resource_budget());
+  ExecutionBindings bindings{
+      {{"data", numeric_result_fixture::source(root, data)},
+       {"radius", numeric_result_fixture::source(root, radius)}}};
   auto demand = checked(context.open_demand(plan, bindings));
   const auto q = checked(
       Footprint::from_regions({5}, {Region({{0, 1}}), Region({{4, 1}})}));
   DemandQuery query{{"sum", q}};
   auto before = checked(demand.request(query));
   auto frozen = checked(demand.freeze());
-  bindings.inputs[1].value =
-      values<std::int64_t>(ElementType::Int64, {0, 0, 0, 3, 0});
+  bindings.inputs[1].result = numeric_result_fixture::source(
+      root, values<std::int64_t>(ElementType::Int64, {0, 0, 0, 3, 0}));
   auto control_edit = checked(demand.replace_bindings(bindings));
   require(control_edit.potential_dirty.at("sum") == q);
-  bindings.inputs[0].value =
-      values<double>(ElementType::Float64, {1, 2, 3, 9, 5});
+  bindings.inputs[0].result = numeric_result_fixture::source(
+      root, values<double>(ElementType::Float64, {1, 2, 3, 9, 5}));
   auto data_edit = checked(demand.replace_bindings(bindings));
   require(data_edit.potential_dirty.at("sum") == q);
   auto latest = checked(demand.request(query));
@@ -63,13 +67,19 @@ void demand_workflow() {
   double current[2]{}, prior[2]{};
   for (unsigned i = 0; i < 2; ++i) {
     const std::vector<std::uint64_t> at{i * 4U};
-    require(latest.values.at("sum").read(at, &current[i], 8).ok());
-    require(old.values.at("sum").read(at, &prior[i], 8).ok());
+    require(numeric_result_fixture::read(latest.results.at("sum"), at,
+                                         &current[i], 8)
+                .ok());
+    require(
+        numeric_result_fixture::read(old.results.at("sum"), at, &prior[i], 8)
+            .ok());
   }
   // Direct radius predicate: only source 3 joins source 0/4 at each endpoint.
   require(current[0] == 10 && current[1] == 14 && prior[0] == 1 &&
           prior[1] == 5);
-  require(!latest.values.at("sum").read({2}, current, 8).ok());
+  require(
+      !numeric_result_fixture::read(latest.results.at("sum"), {2}, current, 8)
+           .ok());
   require(latest.generation == 3 && old.generation == 0);
   require(demand.release(query).ok());
   require(checked(demand.replace_bindings(bindings)).coverage.empty());
@@ -77,14 +87,14 @@ void demand_workflow() {
                "generation=3, accumulated_dirty={0,4}, release=ok\n";
 }
 
-void cache_workflow() {
+void radius_retention_workflow() {
   using namespace ps;  // NOLINT(build/namespaces)
   auto data = values<double>(ElementType::Float64, {1, 2, 3, 0, 5});
   auto radius = values<std::int64_t>(ElementType::Int64, {0, 0, 0, 0, 0});
   WorkflowDocument document;
-  document.inputs = {
-      {1, "data", data.descriptor(), data.region(), data.layout(), {}},
-      {2, "radius", radius.descriptor(), radius.region(), radius.layout(), {}}};
+  numeric_result_fixture::declare_sources(&document, {data, radius});
+  document.inputs[0].name = "data";
+  document.inputs[1].name = "radius";
   document.nodes = {{1,
                      "numeric.radius_scatter",
                      {WorkflowInputReference{1}, WorkflowInputReference{2}},
@@ -94,33 +104,43 @@ void cache_workflow() {
   GraphContext graph(document);
   auto plan = checked(Compiler(operations).compile(graph)).plan;
   ExecutionContext context(operations, {1, false, 8, 4096, 2048});
-  ExecutionBindings bindings{{{"data", data}, {"radius", radius}}};
+  const auto root = checked(context.resource_budget());
+  ExecutionBindings bindings{
+      {{"data", numeric_result_fixture::source(root, data)},
+       {"radius", numeric_result_fixture::source(root, radius)}}};
   auto demand = checked(context.open_demand(plan, bindings));
   const auto q = checked(
       Footprint::from_regions({5}, {Region({{0, 1}}), Region({{4, 1}})}));
   const DemandQuery query{{"sum", q}};
-  require(checked(demand.request(query)).diagnostics.cache_hits == 0);
+  auto first = checked(demand.request(query));
   auto warm = checked(demand.request(query));
-  require(warm.diagnostics.cache_hits == 2 &&
+  require(warm.results.at("sum").object_id() ==
+              first.results.at("sum").object_id() &&
           warm.diagnostics.operation_timings.empty());
-  bindings.inputs[0].value =
-      values<double>(ElementType::Float64, {1, 2, 777, 0, 5});
+  bindings.inputs[0].result = numeric_result_fixture::source(
+      root, values<double>(ElementType::Float64, {1, 2, 777, 0, 5}));
   require(checked(demand.replace_bindings(bindings))
               .potential_dirty.at("sum")
               .empty());
-  require(checked(demand.request(query)).diagnostics.cache_hits == 2);
-  bindings.inputs[1].value =
-      values<std::int64_t>(ElementType::Int64, {0, 0, 0, 3, 0});
+  auto unchanged = checked(demand.request(query));
+  require(unchanged.results.at("sum").object_id() !=
+          warm.results.at("sum").object_id());
+  bindings.inputs[1].result = numeric_result_fixture::source(
+      root, values<std::int64_t>(ElementType::Int64, {0, 0, 0, 3, 0}));
   require(
       checked(demand.replace_bindings(bindings)).potential_dirty.at("sum") ==
       q);
   auto changed = checked(demand.request(query));
-  require(changed.diagnostics.cache_hits == 0);
+  require(changed.results.at("sum").object_id() !=
+          unchanged.results.at("sum").object_id());
   // Direct radius predicate: source 3 now contributes zero to both endpoints.
-  double first = 0, last = 0;
-  require(changed.values.at("sum").read({0}, &first, 8).ok());
-  require(changed.values.at("sum").read({4}, &last, 8).ok());
-  require(first == 1 && last == 5);
+  double first_value = 0, last = 0;
+  require(numeric_result_fixture::read(changed.results.at("sum"), {0},
+                                       &first_value, 8)
+              .ok());
+  require(numeric_result_fixture::read(changed.results.at("sum"), {4}, &last, 8)
+              .ok());
+  require(first_value == 1 && last == 5);
   context.clear_result_cache();
   const auto data3 = checked(Footprint::from_regions({5}, {Region({{3, 1}})}));
   require(context.cache_statistics().retained_bytes == 0);
@@ -128,6 +148,6 @@ void cache_workflow() {
       checked(changed.dependencies.potential_dirty("data", data3)).at("sum") ==
       q);
   std::cout
-      << "cache: warm_hits=2, unrelated_edit_hits=2, control_edit_hits=0, "
-         "values=[1,5], cleared_pixels=0, data3_dirty={0,4}\n";
+      << "radius retention: same_frozen_object=yes, warm_operations=0, "
+         "new_generation_recomputed=yes, values=[1,5], data3_dirty={0,4}\n";
 }

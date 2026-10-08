@@ -4,6 +4,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -12,6 +13,8 @@
 
 #include "photospider/numeric/unary.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
+#include "result_fixture.hpp"     // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -280,26 +283,32 @@ void environment() {
                "cancellation PASS\n";
 }
 ps::Value colors(const std::vector<double>& samples) {
-  auto s = description(ps::ColorModel::Rgb);
-  s.association = ps::ColorAssociation::Straight;
   std::vector<std::uint8_t> bytes(samples.size() * 8);
   std::memcpy(bytes.data(), samples.data(), bytes.size());
-  return take(ps::Value::create(
-      {ps::ElementType::Float64, {2, 2, 4}}, ps::Region::whole({2, 2, 4}),
-      {0, {64, 32, 8}}, std::move(bytes), {take(ps::encode_color_array(s))}));
+  return take(ps::Value::create({ps::ElementType::Float64, {2, 2, 4}},
+                                ps::Region::whole({2, 2, 4}), {0, {64, 32, 8}},
+                                std::move(bytes)));
 }
+namespace rf = numeric_result_fixture;
 void public_workflow() {
-  const std::vector<double> samples{-2,  3,  4,  1, -8,  9,  10, 1,
-                                    -12, 13, 14, 1, -16, 17, 18, 1};
-  const auto input = colors(samples);
+  const std::vector<double> values{-2,  3,  4,  1, -8,  9,  10, 1,
+                                   -12, 13, 14, 1, -16, 17, 18, 1};
+  const auto input = colors(values);
   const auto roi = take(ps::Footprint::from_regions(
       {2, 2, 4}, {ps::Region({{1, 1}, {0, 1}, {0, 1}})}));
   const auto complete = take(ps::Footprint::from_regions(
       {2, 2, 4}, {ps::Region({{1, 1}, {0, 1}, {0, 4}})}));
   auto registry = ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  document.inputs = {{1, "colors", input.descriptor(), input.region(),
-                      input.layout(), input.facets()}};
+  rf::declare_sources(&document, {input});
+  document.inputs[0].name = "colors";
+  auto input_schema = *document.inputs[0].result_schema;
+  auto color = description(ps::ColorModel::Rgb);
+  color.association = ps::ColorAssociation::Straight;
+  input_schema.tensors[0].facets = {take(ps::encode_color_array(color))};
+  input_schema.tensors[0].atomic_trailing_axes = 1;
+  document.inputs[0].result_schema =
+      std::make_shared<ps::SchemaTemplate>(std::move(input_schema));
   document.nodes = {
       take(ps::numeric::abs_node(1, ps::WorkflowInputReference{1}))};
   document.outputs = {{"absolute", 1, "values"}};
@@ -310,273 +319,544 @@ void public_workflow() {
   config.result_cache_bytes = 65536;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext context(registry, config);
+  auto root = take(context.resource_budget());
   ps::ExecutionOptions options;
   options.maximum_dependency_work = 10000000;
-  auto snapshot = take(context.freeze(compiled.plan, {{{"colors", input}}}));
+  auto bind = [&](const ps::Value& backing) {
+    return point_math_checks::bindings(root, {backing}, document);
+  };
+  auto snapshot = take(context.freeze(compiled.plan, bind(input)));
   for (bool joint : {false, true}) {
     options.enable_joint = joint;
     auto result = take(
         context.execute_fragments(snapshot, {{"absolute", roi}}, {}, options));
     double actual = 0;
-    require(result.values.at("absolute").read({1, 0, 0}, &actual, 8).ok() &&
-                actual == 12,
-            "public generic NUM consumes rank-three ColorArray");
-    require(result.values.at("absolute").facets().empty(),
+    require(
+        rf::read(result.results.at("absolute"), {1, 0, 0}, &actual, 8).ok() &&
+            actual == 12,
+        "public generic NUM consumes rank-three ColorArray Result");
+    require(result.results.at("absolute").schema().tensors[0].facets.empty(),
             "generic NUM drops color facet");
-    require(take(result.dependencies.source_support()).at("colors") == complete,
-            "source support includes full color only");
+    require(take(result.dependencies.source_support()).at("colors") ==
+                take(ps::Footprint::all({2, 2, 4})),
+            "Whole source support includes all color tuples");
     const auto alpha = take(ps::Footprint::from_regions(
         {2, 2, 4}, {ps::Region({{1, 1}, {0, 1}, {3, 1}})}));
-    require(take(result.dependencies.potential_dirty("colors", alpha))
-                    .at("absolute") == roi,
-            "unread alpha validation participates in dirty");
+    auto dirty =
+        take(result.dependencies.potential_dirty(
+                 "colors", alpha, 4, {}, ps::ResultSupportTarget::Tensor, 0))
+            .at("absolute");
+    require(dirty == roi, "unread alpha validation participates in dirty");
   }
-  auto invalid = samples;
-  invalid[3] = 2;  // Undemanded color stays unread.
-  snapshot =
-      take(context.freeze(compiled.plan, {{{"colors", colors(invalid)}}}));
-  require(context.execute_fragments(snapshot, {{"absolute", roi}}, {}, options)
+  for (unsigned alpha : {3U, 11U}) {
+    auto invalid = values;
+    invalid[alpha] = 2;
+    snapshot = take(context.freeze(compiled.plan, bind(colors(invalid))));
+    require(
+        !context.execute_fragments(snapshot, {{"absolute", roi}}, {}, options)
+             .ok(),
+        "Whole consumer validates both selected and unselected colors");
+  }
+  auto source = point_math_checks::source(
+      root, input, document.inputs[0].result_schema.get());
+  auto facts = take(source.descriptor());
+  auto window = take(source.acquire_tensor(facts, 0, complete.boxes()[0]));
+  auto partial = take(source.acquire_tensor(facts, 0, roi.boxes()[0]));
+  double selected = 0;
+  std::memcpy(&selected, take(partial.row_run({1, 0, 0})).data, 8);
+  require(selected == -12,
+          "Result window retains an exact authorized component");
+  auto rejected =
+      take(ps::ResultBuilder::start(root, source.schema(), "partial.color"));
+  require(rejected
+              .bind_descriptor_relation(
+                  take(ps::ResultRelation::cartesian(root, 1, {})))
               .ok(),
-          "unrelated invalid color remains unread");
-  invalid = samples;
-  invalid[11] = 2;
-  snapshot =
-      take(context.freeze(compiled.plan, {{{"colors", colors(invalid)}}}));
-  require(!context.execute_fragments(snapshot, {{"absolute", roi}}, {}, options)
+          "partial source basis");
+  require(!rejected
+               .publish_tensor(
+                   0, roi.boxes()[0],
+                   {reinterpret_cast<const std::uint8_t*>(&selected), 8},
+                   take(ps::ResultRelation::cartesian(root, 16, {})),
+                   {true, true, true, true})
                .ok(),
-          "selected color alpha rejected through generic consumer");
-  ps::InputSnapshotStoreConfig store_config;
-  store_config.block_size = 1;
-  ps::InputSnapshotStore store(store_config);
-  const auto imported = take(store.import_value(input));
+          "ColorArray publication rejects an incomplete tuple");
+  source = {};
   std::array<double, 4> pixel{};
-  require(imported.read(complete.boxes()[0],
-                        reinterpret_cast<std::uint8_t*>(pixel.data()), 32)
-                  .ok() &&
-              pixel == std::array<double, 4>{-12, 13, 14, 1},
-          "snapshot keeps complete channel blocks");
-  require(!imported
-               .read(roi.boxes()[0],
-                     reinterpret_cast<std::uint8_t*>(pixel.data()), 8)
-               .ok(),
-          "snapshot rejects partial color read");
-  auto all = take(
-      ps::ValueFragments::create(input.descriptor(), input.facets(),
-                                 take(ps::Footprint::all({2, 2, 4})), {input}));
-  require(!all.restrict(roi).ok() && all.restrict(complete).ok(),
-          "fragment boundary keeps complete colors");
-  std::cout << "color workflow: abs(-12)=12, local Data/full-color Validation, "
-               "dirty/cache, joint, snapshot PASS\n";
+  auto row = take(window.row_run({1, 0, 0}));
+  for (unsigned channel = 0; channel < 4; ++channel)
+    std::memcpy(&pixel[channel], row.data + channel * row.sample_stride_bytes,
+                8);
+  require(pixel == std::array<double, 4>{-12, 13, 14, 1},
+          "owned Result window keeps complete tuple after source retirement");
+  std::cout << "color workflow: abs(-12)=12, Whole typed validation, "
+               "dirty/cache, joint, owned windows PASS\n";
 }
-struct ProofProbe {
-  ps::Result<ps::DependencyPoll> poll(const ps::DependencyPhase&) {
-    ps::DependencyNeedBatch need;
-    need.static_mapping = true;
-    return ps::Result<ps::DependencyPoll>(std::move(need));
-  }
-};
-struct HistoryProbe {
+struct ColorProbe {
   unsigned stage = 0;
-  bool wrong = false;
-  explicit HistoryProbe(bool mismatch) : wrong(mismatch) {}
-  ps::Result<ps::DependencyPoll> poll(const ps::DependencyPhase& phase) {
-    ps::DependencyNeedBatch need;
-    ++stage;
-    for (unsigned row = 0; row < 2; ++row) {
-      auto samples = take(ps::Footprint::from_regions(
-          {2, 3}, {ps::Region({{stage == 2 && wrong ? 0 : row, 1}, {0, 3}})}));
-      need.associations.push_back(
-          {{row}, {{0, stage == 1 ? 4U : 1U, std::move(samples), {}}}});
+  bool wrong = false, history = false;
+  ColorProbe(bool mismatch, bool staged_history)
+      : wrong(mismatch), history(staged_history) {}
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
+    const auto shape =
+        phase.query.output.result_schema->tensors[0].sample_shape();
+    const auto query = phase.query.tensor_outputs
+                           ? *phase.query.tensor_outputs
+                           : take(ps::Footprint::all(shape));
+    if (stage < (history ? 2U : 1U)) {
+      ps::ResultProgramNeed need;
+      for (const auto& box : query.boxes()) {
+        const auto row = box.dimensions()[0];
+        const auto validation = history || !wrong ? row : box.dimensions()[1];
+        if (!history || !stage)
+          for (unsigned channel : {0U, 1U})
+            need.tensors.push_back(
+                {0, 0,
+                 take(ps::Footprint::from_regions(
+                     {2, 3},
+                     {ps::Region({validation, {channel, channel ? 2U : 1U}})})),
+                 4});
+        if (!history || stage)
+          need.tensors.push_back(
+              {0, 0,
+               take(ps::Footprint::from_regions(
+                   {2, 3},
+                   {ps::Region(
+                       {history && wrong ? ps::RegionDimension{0, 1} : row,
+                        {0, 1}})})),
+               1});
+      }
+      ++stage;
+      return ps::Result<ps::ResultProgramPoll>(std::move(need));
     }
-    static_cast<void>(phase);
-    return ps::Result<ps::DependencyPoll>(std::move(need));
+    auto builder = take(ps::ResultBuilder::start(
+        phase.resources, *phase.query.output.result_schema,
+        phase.query.semantic_key, {},
+        phase.association
+            ? std::vector<std::uint64_t>(phase.association->begin(),
+                                         phase.association->end())
+            : std::vector<std::uint64_t>{}));
+    require(builder
+                .bind_descriptor_relation(
+                    take(ps::ResultRelation::cartesian(phase.resources, 1, {})))
+                .ok(),
+            "color probe descriptor");
+    for (const auto& box : query.boxes()) {
+      const auto data_axis = history && wrong ? -1 : 0;
+      const auto validation_axis = history || !wrong ? 0 : 1;
+      std::vector<ps::ResultRelation> relations;
+      relations.push_back(take(ps::ResultRelation::mapped(
+          phase.resources, shape, box, {2, 3},
+          {{data_axis, 0, 1, 1}, {-1, 0, 0, 1}},
+          {0, 1, 0, 0, ps::ResultSupportTarget::Tensor, 0})));
+      for (unsigned channel : {0U, 1U})
+        relations.push_back(take(ps::ResultRelation::mapped(
+            phase.resources, shape, box, {2, 3},
+            {{validation_axis, 0, 1, 1}, {-1, channel, 0, channel ? 2U : 1U}},
+            {0, 4, 0, 0, ps::ResultSupportTarget::Tensor, 0})));
+      auto relation =
+          take(ps::ResultRelation::unite(phase.resources, relations));
+      std::vector<double> numbers(take(box.element_count()));
+      auto samples = take(ps::Footprint::from_regions(shape, {box}));
+      unsigned next = 0;
+      require(samples
+                  .visit(
+                      [&](const auto& at) {
+                        return phase.tensors->at({0, 0}).read(
+                            {history && wrong ? 0 : at[0], 0}, &numbers[next++],
+                            8);
+                      },
+                      16)
+                  .ok(),
+              "color probe reads only granted samples");
+      require(builder
+                  .publish_tensor(
+                      0, box,
+                      {reinterpret_cast<const std::uint8_t*>(numbers.data()),
+                       numbers.size() * 8},
+                      relation, {true, true, true, true})
+                  .ok(),
+              "color probe publication");
+    }
+    return ps::Result<ps::ResultProgramPoll>(
+        ps::ResultPublication{take(builder.seal()), true});
   }
 };
-struct JointPartialProbe {
-  ps::Result<std::vector<ps::DependencyAtomOutcome>> poll(
-      const ps::DependencyJointPhase& phase) {
-    std::vector<ps::DependencyAtomOutcome> outcomes;
-    for (const auto* member : phase.members) {
-      const auto key = take(ps::dependency_atom_key(member->query));
-      ps::DependencyNeedBatch need;
-      // First member's envelope is valid; second has only partial Validation.
-      auto samples = take(ps::Footprint::from_regions(
-          {2, 3}, {ps::Region({{key.coordinate[0], 1},
-                               {0, key.coordinate[0] ? 1U : 3U}})}));
-      need.associations.push_back(
-          {{key.coordinate[0]}, {{0, 4, std::move(samples), {}}}});
-      outcomes.push_back(
-          {key, ps::Result<ps::DependencyPoll>(std::move(need))});
+ps::SchemaTemplate probe_schema(
+    const std::vector<std::uint64_t>& shape,
+    const std::vector<ps::ValueFacet>& facets = {}) {
+  ps::SchemaTemplate schema;
+  schema.id = "manual.color_probe";
+  ps::ResultTensorSpec tensor;
+  tensor.key = "samples";
+  tensor.descriptor = {ps::ElementType::Float64, shape};
+  tensor.facets = facets;
+  tensor.atomic_trailing_axes = facets.empty() ? 0 : 1;
+  schema.tensors.push_back(std::move(tensor));
+  return schema;
+}
+ps::OperationDefinition probe_definition(const ps::SchemaTemplate& schema,
+                                         bool wrong, bool history) {
+  ps::OperationDefinition operation;
+  operation.key = "manual.color_probe";
+  operation.traits.input_count = 1;
+  operation.traits.input_schema.resize(1);
+  operation.traits.input_schema[0].kind = ps::OperationPortKind::Result;
+  operation.traits.input_schema[0].result_schema_id = "manual.color_probe";
+  operation.traits.input_schema[0].result_schema_version = 1;
+  auto& output = operation.traits.outputs[0];
+  output.output_schema = operation.traits.input_schema[0];
+  output.result_schema = schema;
+  output.region_rule = ps::OperationRegionRule::Dependency;
+  output.dependency_version = 2;
+  output.continuation_bytes = sizeof(ColorProbe);
+  output.maximum_dependency_stages = 3;
+  operation.start_result = [wrong, history](const auto&,
+                                            const auto& allocator) {
+    return ps::ResultContinuation::make<ColorProbe>(allocator, wrong, history);
+  };
+  return operation;
+}
+ps::Result<ps::DemandResult> run_probe(bool wrong, bool history,
+                                       const ps::Footprint& demand) {
+  const auto facet =
+      take(ps::encode_color_array(description(ps::ColorModel::Xyz)));
+  const auto input_schema = probe_schema({2, 3}, {facet});
+  const auto output_schema =
+      probe_schema(history ? std::vector<std::uint64_t>{2}
+                           : std::vector<std::uint64_t>{2, 2});
+  auto registry = std::make_shared<ps::OperationRegistry>();
+  require(registry->register_operation(
+                      probe_definition(output_schema, wrong, history))
+                  .ok() &&
+              registry->freeze().ok(),
+          "register color Result proof");
+  ps::WorkflowDocument document;
+  ps::WorkflowInputDeclaration input;
+  input.id = 1;
+  input.name = "colors";
+  input.result_schema = std::make_shared<ps::SchemaTemplate>(input_schema);
+  document.inputs = {input};
+  document.nodes = {
+      {1, "manual.color_probe", {ps::WorkflowInputReference{1}}, {}}};
+  document.outputs = {{"values", 1, "value"}};
+  ps::GraphContext graph(document);
+  auto plan = ps::Compiler(registry).compile(graph);
+  if (!plan.ok())
+    return ps::Result<ps::DemandResult>(plan.status());
+  ps::ExecutionContextConfig config;
+  config.cpu_workers = 1;
+  config.managed_resources = ps::ResourceLimits{};
+  ps::ExecutionContext context(registry, config);
+  const auto backing = take(ps::Value::create(
+      {ps::ElementType::Float64, {2, 3}}, ps::Region::whole({2, 3}),
+      {0, {24, 8}}, std::vector<std::uint8_t>(48), {facet}));
+  auto frozen = take(context.freeze(
+      plan.value().plan,
+      point_math_checks::bindings(take(context.resource_budget()), {backing},
+                                  document)));
+  return context.execute_fragments(frozen, {{"values", demand}});
+}
+struct TupleView {
+  bool requested = false;
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
+    const auto shape =
+        phase.query.output.result_schema->tensors[0].sample_shape();
+    auto samples = phase.query.tensor_outputs ? *phase.query.tensor_outputs
+                                              : take(ps::Footprint::all(shape));
+    if (!requested) {
+      requested = true;
+      ps::ResultProgramNeed need;
+      need.tensors.push_back({0, 0, samples, 5});
+      return ps::Result<ps::ResultProgramPoll>(std::move(need));
     }
-    return ps::Result<std::vector<ps::DependencyAtomOutcome>>(
+    auto builder = take(ps::ResultBuilder::start(
+        phase.resources, *phase.query.output.result_schema,
+        phase.query.semantic_key));
+    require(builder
+                .bind_descriptor_relation(take(ps::ResultRelation::cartesian(
+                    phase.resources, 1,
+                    {0, 8, 0, 1, ps::ResultSupportTarget::Descriptor, 0})))
+                .ok(),
+            "tuple view basis");
+    ps::ResultTensorViewTransform transform;
+    transform.source_axes = {{0, 0, 1, 1}, {1, 0, 1, 1}};
+    for (const auto& box : samples.boxes()) {
+      auto window = take(phase.tensors->at({0, 0}).acquire(box));
+      auto relation = take(ps::ResultRelation::mapped(
+          phase.resources, shape, box, shape, transform.source_axes,
+          {0, 5, 0, 0, ps::ResultSupportTarget::Tensor, 0}));
+      require(builder
+                  .publish_tensor_view(0, box, window, transform, relation,
+                                       {true, true, true, true})
+                  .ok(),
+              "typed tuple view publication");
+    }
+    return ps::Result<ps::ResultProgramPoll>(
+        ps::ResultPublication{take(builder.seal()), true});
+  }
+};
+void tuple_output_view() {
+  const auto facet =
+      take(ps::encode_color_array(description(ps::ColorModel::Xyz)));
+  auto schema = probe_schema({2, 3}, {facet});
+  auto operation = probe_definition(schema, false, false);
+  operation.traits.outputs[0].continuation_bytes = sizeof(TupleView);
+  operation.start_result = [](const auto&, const auto& allocator) {
+    return ps::ResultContinuation::make<TupleView>(allocator);
+  };
+  auto registry = std::make_shared<ps::OperationRegistry>();
+  require(registry->register_operation(std::move(operation)).ok() &&
+              registry->freeze().ok(),
+          "register typed tuple view");
+  ps::ResultRef held;
+  ps::ResultTensorReadWindow original;
+  {
+    ps::WorkflowDocument document;
+    ps::WorkflowInputDeclaration input;
+    input.id = 1;
+    input.name = "colors";
+    input.result_schema = std::make_shared<ps::SchemaTemplate>(schema);
+    document.inputs = {input};
+    document.nodes = {
+        {1, "manual.color_probe", {ps::WorkflowInputReference{1}}, {}}};
+    document.outputs = {{"colors", 1, "value"}};
+    ps::GraphContext graph(document);
+    auto plan = take(ps::Compiler(registry).compile(graph)).plan;
+    ps::ExecutionContext context(registry);
+    auto root = take(context.resource_budget());
+    const std::vector<double> values{1, 2, 3, 4, 5, 6};
+    std::vector<std::uint8_t> bytes(48);
+    std::memcpy(bytes.data(), values.data(), bytes.size());
+    auto backing = take(ps::Value::create({ps::ElementType::Float64, {2, 3}},
+                                          ps::Region::whole({2, 3}),
+                                          {0, {24, 8}}, std::move(bytes)));
+    auto bindings = point_math_checks::bindings(root, {backing}, document);
+    original = take(bindings.inputs[0].result.acquire_tensor(
+        take(bindings.inputs[0].result.descriptor()), 0,
+        ps::Region({{1, 1}, {0, 3}})));
+    auto frozen = take(context.freeze(plan, std::move(bindings)));
+    auto query = take(
+        ps::Footprint::from_regions({2, 3}, {ps::Region({{1, 1}, {2, 1}})}));
+    auto result = take(context.execute_fragments(frozen, {{"colors", query}}));
+    held = result.results.at("colors");
+  }
+  auto alias = take(held.acquire_tensor(take(held.descriptor()), 0,
+                                        ps::Region({{1, 1}, {0, 3}})));
+  require(
+      take(alias.row_run({1, 0})).data == take(original.row_run({1, 0})).data &&
+          alias.storage_owner_token() == original.storage_owner_token(),
+      "tuple observation retains zero-copy mapped backing after context "
+      "retirement");
+  double last = 0;
+  require(rf::read(held, {1, 2}, &last, 8).ok() && last == 6,
+          "typed mapped tuple remains readable");
+  std::cout
+      << "color tuple output: grouped Validation, owned zero-copy view PASS\n";
+}
+struct JointPartialProbe {
+  unsigned mode;
+  explicit JointPartialProbe(unsigned mode) : mode(mode) {}
+  ps::Result<ps::ResourceVector<ps::ResultJointOutcome>> poll(
+      const ps::ResultJointPhase& phase) {
+    ps::ResourceVector<ps::ResultJointOutcome> outcomes;
+    for (const auto* member : phase.members) {
+      const auto key = take(ps::result_atom_key(member->query));
+      ps::ResultProgramNeed need;
+      const auto row = key.coordinate[0];
+      if (mode == 2) {
+        for (unsigned channel : {0U, 1U})
+          need.tensors.push_back(
+              {0, 0,
+               take(ps::Footprint::from_regions(
+                   {2, 3},
+                   {ps::Region({{row, 1}, {channel, channel ? 2U : 1U}})})),
+               4});
+      } else {
+        need.tensors.push_back(
+            {0, 0,
+             take(ps::Footprint::from_regions(
+                 {2, 3},
+                 {ps::Region({{row, 1}, {0, mode == 0 && row ? 1U : 3U}})})),
+             4});
+      }
+      outcomes.push_back(
+          {key, ps::Result<ps::ResultProgramPoll>(std::move(need))});
+    }
+    return ps::Result<ps::ResourceVector<ps::ResultJointOutcome>>(
         std::move(outcomes));
   }
 };
-void history_and_joint() {
-  const auto facet =
-      take(ps::encode_color_array(description(ps::ColorModel::Xyz)));
-  for (bool wrong : {false, true}) {
-    auto registry = std::make_shared<ps::OperationRegistry>();
-    ps::OperationDefinition operation;
-    operation.key = "manual.color_history";
-    operation.traits.input_count = 1;
-    operation.traits.input_schema.resize(1);
-    auto& output = operation.traits.outputs[0];
-    output.shape_rule = ps::OperationShapeRule::Fixed;
-    output.fixed_output_shape = {2};
-    output.region_rule = ps::OperationRegionRule::Dependency;
-    output.dependency_version = 1;
-    output.regional_atomic = true;
-    output.continuation_bytes = sizeof(HistoryProbe);
-    output.maximum_dependency_stages = 3;
-    operation.start_dependency = [wrong](const auto&, const auto& allocator) {
-      return ps::DependencyContinuation::make<HistoryProbe>(allocator, wrong);
-    };
-    auto joint_operation = operation;
-    joint_operation.key = "manual.color_joint";
-    joint_operation.traits.outputs[0].regional_atomic = false;
-    joint_operation.traits.outputs[0].failure_delivery =
-        ps::FailureDelivery::PerAtomOutcome;
-    joint_operation.traits.joint_contract = 2;
-    joint_operation.traits.joint_continuation_bytes = sizeof(JointPartialProbe);
-    joint_operation.start_joint = [](const auto&, const auto& allocator) {
-      return ps::DependencyJointContinuation::make<JointPartialProbe>(
-          allocator);
-    };
-    auto registered = registry->register_operation(std::move(operation));
-    if (!registered.ok())
-      throw std::runtime_error("register history probe: " + registered.message);
-    registered = registry->register_operation(std::move(joint_operation));
-    if (!registered.ok())
-      throw std::runtime_error("register joint probe: " + registered.message);
-    require(registry->freeze().ok(), "freeze history probe");
-    ps::DependencyRequest request;
-    request.inputs = {{{ps::ElementType::Float64, {2, 3}}, {facet}}};
-    request.outputs = take(ps::Footprint::all({2}));
-    request.snapshot_identity = "color-history";
-    auto session =
-        take(registry->start_dependency("manual.color_history", request));
-    require(session->poll().ok(), "history first Validation");
-    auto input = take(ps::Value::create(
-        {ps::ElementType::Float64, {2, 3}}, ps::Region::whole({2, 3}),
-        {0, {24, 8}}, std::vector<std::uint8_t>(48), {facet}));
-    auto fragments = take(
-        ps::ValueFragments::create(input.descriptor(), input.facets(),
-                                   take(ps::Footprint::all({2, 3})), {input}));
-    require(session->supply({fragments}, request.snapshot_identity).ok(),
-            "history Validation supply");
-    auto next = session->poll();
-    require(next.ok() != wrong, "same-atom prior Validation only");
-    if (wrong)
-      require(next.status().detail.origin == ps::FailureOrigin::Protocol,
-              "cross-atom history cannot satisfy closure");
-    auto second = request;
-    request.outputs =
-        take(ps::Footprint::from_regions({2}, {ps::Region({{0, 1}})}));
-    second.outputs =
-        take(ps::Footprint::from_regions({2}, {ps::Region({{1, 1}})}));
-    auto joint =
-        take(registry->start_joint("manual.color_joint", {request, second}));
-    auto replies = joint->poll();
+void joint_partial_validation(const ps::ValueFacet& facet, unsigned mode = 0) {
+  ps::ResourceBudget root;
+  ps::ResourceAllocationScope scope(root);
+  ps::SchemaTemplate input_schema;
+  input_schema.id = "manual.color_input";
+  ps::ResultTensorSpec color;
+  color.key = "color";
+  color.descriptor = {ps::ElementType::Float64, {2, 3}};
+  color.facets = {facet};
+  input_schema.tensors.push_back(std::move(color));
+  ps::SchemaTemplate output_schema;
+  output_schema.id = "manual.color_output";
+  ps::ResultTensorSpec number;
+  number.key = "number";
+  number.descriptor = {ps::ElementType::Float64, {2}};
+  output_schema.tensors.push_back(std::move(number));
+  ps::OperationDefinition operation;
+  operation.key = "manual.color_joint";
+  operation.traits.input_count = 1;
+  operation.traits.input_schema.resize(1);
+  operation.traits.input_schema[0].kind = ps::OperationPortKind::Result;
+  operation.traits.input_schema[0].result_schema_id = "manual.color_input";
+  operation.traits.input_schema[0].result_schema_version = 1;
+  auto& output = operation.traits.outputs[0];
+  output.output_schema.kind = ps::OperationPortKind::Result;
+  output.output_schema.result_schema_id = "manual.color_output";
+  output.output_schema.result_schema_version = 1;
+  output.result_schema = output_schema;
+  output.region_rule = ps::OperationRegionRule::Dependency;
+  output.dependency_version = 2;
+  output.continuation_bytes = 256;
+  output.maximum_dependency_stages = 3;
+  output.failure_delivery = ps::FailureDelivery::PerAtomOutcome;
+  operation.traits.joint_contract = 2;
+  operation.traits.joint_continuation_bytes = sizeof(JointPartialProbe);
+  operation.start_result = [](const auto&, const auto&) {
+    return ps::Result<ps::ResultContinuation>(
+        ps::Status{ps::ErrorCode::Internal, "unexpected singleton"});
+  };
+  operation.start_result_joint = [mode](const auto&, const auto& allocator) {
+    return ps::ResultJointContinuation::make<JointPartialProbe>(allocator,
+                                                                mode);
+  };
+  ps::OperationRegistry registry;
+  require(registry.register_operation(std::move(operation)).ok() &&
+              registry.freeze().ok(),
+          "register Result joint validation probe");
+  ps::OperationMetadata input;
+  input.result_schema =
+      std::make_shared<const ps::SchemaTemplate>(input_schema);
+  auto inferred = take(ps::infer_operation_outputs(
+      take(registry.find_traits("manual.color_joint")), {input}, {}));
+  ps::ResultProgramMetadata metadata{{input}, inferred[0]};
+  std::map<std::string, ps::ParameterValue> parameters;
+  ps::ResourceVector<ps::ResultProgramQuery> queries;
+  for (unsigned i = 0; i < 2; ++i) {
+    queries.emplace_back(metadata, parameters);
+    queries.back().semantic_key = "color-joint";
+    queries.back().snapshot_identity = "color-history";
+    queries.back().tensor_outputs =
+        take(ps::Footprint::from_regions({2}, {ps::Region({{i, 1}})}));
+  }
+  auto joint =
+      take(registry.start_result_joint("manual.color_joint", queries, root));
+  auto allocator = root.allocator();
+  auto work = [&](std::uint64_t n) { return root.consume({n}); };
+  ps::ResultObjectInputs inputs;
+  ps::ResourceVector<ps::ResultIoReply> io;
+  ps::ResourceVector<ps::ResultProgramPhase> phases;
+  for (const auto& query : queries)
+    phases.push_back({query, inputs, io, allocator, root, work, {}});
+  ps::ResourceVector<const ps::ResultProgramPhase*> ready;
+  for (const auto& phase : phases)
+    ready.push_back(&phase);
+  const auto payload_before = root.statistics().live[ps::ResourceKind::Payload];
+  auto replies = joint.poll({ready, allocator, work});
+  if (!mode)
     require(
         !replies.ok() &&
             replies.status().detail.origin == ps::FailureOrigin::Protocol &&
             replies.status().detail.scope == ps::FailureScope::Group,
         "joint partial transport fails entire group before any member commit");
+  else
+    require(replies.ok() && replies.value().size() == 2,
+            "joint complete or split tuple transport accepted");
+  require(root.statistics().live[ps::ResourceKind::Payload] == payload_before,
+          "joint partial Validation publishes no payload");
+}
+void history_and_joint() {
+  for (bool wrong : {false, true}) {
+    auto batch = run_probe(wrong, true, take(ps::Footprint::all({2})));
+    require(batch.ok() != wrong,
+            "historical Validation remains per observation in a batch");
+    if (wrong)
+      require(batch.status().detail.origin == ps::FailureOrigin::Protocol,
+              "batch cross-observation Validation rejection");
+    for (unsigned row = 0; row < 2; ++row) {
+      auto next = run_probe(
+          wrong, true,
+          take(ps::Footprint::from_regions({2}, {ps::Region({{row, 1}})})));
+      require(next.ok() == (!wrong || !row),
+              "same-observation prior Validation only");
+      if (!next.ok())
+        require(next.status().detail.origin == ps::FailureOrigin::Protocol,
+                "cross-observation history cannot satisfy closure");
+    }
   }
-  std::cout << "color protocol: historical Validation, cross-atom isolation, "
-               "joint transport preflight PASS\n";
-}
-void grouping_schema() {
-  auto registry = std::make_shared<ps::OperationRegistry>();
-  ps::OperationDefinition operation;
-  operation.key = "manual.color_grouping";
-  operation.traits.input_count = 0;
-  operation.traits.input_schema.clear();
-  auto& output = operation.traits.outputs[0];
-  output.shape_rule = ps::OperationShapeRule::Fixed;
-  output.fixed_output_shape = {2, 2, 3};
-  output.region_rule = ps::OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.continuation_bytes = sizeof(ProofProbe);
-  output.maximum_dependency_stages = 2;
-  output.atomic_trailing_axes = 2;
-  output.output_semantic_rule = ps::OperationSemanticRule::Establish;
-  output.output_facets = {
-      take(ps::encode_color_array(description(ps::ColorModel::Xyz)))};
-  operation.start_dependency = [](const auto&, const auto& allocator) {
-    return ps::DependencyContinuation::make<ProofProbe>(allocator);
-  };
-  require(registry->register_operation(std::move(operation)).ok() &&
-              registry->freeze().ok(),
-          "register invalid grouping template");
-  ps::WorkflowDocument document;
-  document.nodes = {{1, "manual.color_grouping", {}, {}}};
-  document.outputs = {{"colors", 1, "value"}};
-  ps::GraphContext graph(document);
-  auto compiled = ps::Compiler(registry).compile(graph);
-  require(
-      !compiled.ok() && compiled.status().code == ps::ErrorCode::TypeMismatch,
-      "compile rejects ColorArray grouping greater than one");
-  ps::DependencyRequest request;
-  request.outputs = take(ps::Footprint::all({2, 2, 3}));
-  request.snapshot_identity = "bad-grouping";
-  auto direct = registry->start_dependency("manual.color_grouping", request);
-  require(!direct.ok() && direct.status().code == ps::ErrorCode::TypeMismatch,
-          "direct grouping rejection agrees with compile");
-  std::cout << "color grouping: compiler/direct schema parity PASS\n";
-}
-void mapping_proof() {
   const auto facet =
       take(ps::encode_color_array(description(ps::ColorModel::Xyz)));
-  for (bool wrong_axis : {false, true}) {
+  for (unsigned mode = 0; mode < 3; ++mode)
+    joint_partial_validation(facet, mode);
+  std::cout << "color protocol: historical Validation, cross-observation "
+               "isolation, joint transport preflight PASS\n";
+}
+void grouping_schema() {
+  const auto facet =
+      take(ps::encode_color_array(description(ps::ColorModel::Xyz)));
+  for (unsigned grouping : {1U, 2U}) {
     auto registry = std::make_shared<ps::OperationRegistry>();
-    ps::OperationDefinition operation;
-    operation.key = "manual.color_proof";
-    operation.traits.input_count = 1;
-    operation.traits.input_schema.resize(1);
-    auto& output = operation.traits.outputs[0];
-    output.shape_rule = ps::OperationShapeRule::Fixed;
-    output.fixed_output_shape = {2, 2};
-    output.region_rule = ps::OperationRegionRule::Dependency;
-    output.dependency_version = 1;
-    output.continuation_bytes = sizeof(ProofProbe);
-    output.maximum_dependency_stages = 2;
-    // Split Validation maps must be accepted jointly. Wrong-axis coverage has
-    // the same batch fetch union, but cannot validate atom (0,1)'s data row.
-    output.static_dependency_pieces = std::vector<ps::DependencyMapPiece>{
-        {take(ps::Footprint::all({2, 2})),
-         {{0, 1, {{0, {}}, {-1, {0, 1}}}, {}},
-          {0, 4, {{wrong_axis ? 1 : 0, {}}, {-1, {0, 1}}}, {}},
-          {0, 4, {{wrong_axis ? 1 : 0, {}}, {-1, {1, 2}}}, {}}}}};
-    operation.start_dependency = [](const auto&, const auto& allocator) {
-      return ps::DependencyContinuation::make<ProofProbe>(allocator);
+    const auto schema = probe_schema({2, 2, 3}, {facet});
+    auto operation = probe_definition(schema, false, false);
+    operation.traits.input_count = 0;
+    operation.traits.input_schema.clear();
+    operation.traits.requires_metadata_specialization = true;
+    operation.specialize_metadata = [schema, grouping](const auto&,
+                                                       const auto&) {
+      ps::OperationOutputSpecialization specialization;
+      auto result = schema;
+      result.tensors[0].atomic_trailing_axes = grouping;
+      specialization.metadata.result_schema =
+          std::make_shared<ps::SchemaTemplate>(std::move(result));
+      return ps::Result<std::vector<ps::OperationOutputSpecialization>>(
+          std::vector<ps::OperationOutputSpecialization>{specialization});
     };
     require(registry->register_operation(std::move(operation)).ok() &&
                 registry->freeze().ok(),
-            "register color proof fixture");
-    ps::DependencyRequest request;
-    request.inputs = {{{ps::ElementType::Float64, {2, 3}}, {facet}}};
-    request.outputs = take(ps::Footprint::all({2, 2}));
-    request.snapshot_identity = "color-proof";
-    auto session =
-        take(registry->start_dependency("manual.color_proof", request));
-    auto status = session->poll();
-    require(status.ok() != wrong_axis,
-            "per-observation proof distinguishes cross-atom Validation");
-    if (wrong_axis) {
-      require(status.status().detail.origin == ps::FailureOrigin::Protocol,
+            "register grouping specializer");
+    ps::WorkflowDocument document;
+    document.nodes = {{1, "manual.color_probe", {}, {}}};
+    document.outputs = {{"colors", 1, "value"}};
+    ps::GraphContext graph(document);
+    auto compiled = ps::Compiler(registry).compile(graph);
+    auto direct = registry->prepare_operation("manual.color_probe", {}, {});
+    require(compiled.ok() == (grouping == 1) && direct.ok() == compiled.ok(),
+            "compiler/direct Result grouping parity");
+    if (grouping == 2)
+      require(compiled.status().code == ps::ErrorCode::TypeMismatch &&
+                  direct.status().code == ps::ErrorCode::TypeMismatch,
+              "ColorArray observation groups exactly one channel axis");
+  }
+  std::cout << "color grouping: compiler/direct schema parity PASS\n";
+}
+void mapping_proof() {
+  const auto all = take(ps::Footprint::all({2, 2}));
+  for (bool wrong : {false, true}) {
+    auto result = run_probe(wrong, false, all);
+    require(result.ok() != wrong,
+            "per-observation proof distinguishes cross-observation Validation");
+    if (wrong) {
+      require(result.status().detail.origin == ps::FailureOrigin::Protocol,
               "missing closure protocol origin");
-      request.outputs = take(
-          ps::Footprint::from_regions({2, 2}, {ps::Region({{0, 1}, {0, 1}})}));
-      session = take(registry->start_dependency("manual.color_proof", request));
-      require(session->poll().ok(),
-              "bounded row fallback accepts different skeleton on singleton "
-              "domain");
+      require(run_probe(true, false,
+                        take(ps::Footprint::from_regions(
+                            {2, 2}, {ps::Region({{0, 1}, {0, 1}})})))
+                  .ok(),
+              "exact singleton proof accepts different mapping skeleton");
     }
   }
-  std::cout << "color dependency proof: split Validation, cross-atom "
-               "rejection, exact fallback PASS\n";
+  std::cout << "color dependency proof: compact split Validation, "
+               "cross-observation rejection, exact fallback PASS\n";
 }
 }  // namespace
 int main(int argc, char** argv) {
@@ -587,10 +867,24 @@ int main(int argc, char** argv) {
                   << '\n';
       return 0;
     }
+    if (argc == 2 && std::string(argv[1]) == "--joint-validation") {
+      for (unsigned mode = 0; mode < 3; ++mode)
+        joint_partial_validation(
+            take(ps::encode_color_array(description(ps::ColorModel::Xyz))),
+            mode);
+      return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--dependency-proof") {
+      mapping_proof();
+      history_and_joint();
+      grouping_schema();
+      return 0;
+    }
     codec();
     sample_domains();
     environment();
     public_workflow();
+    tuple_output_view();
     mapping_proof();
     history_and_joint();
     grouping_schema();

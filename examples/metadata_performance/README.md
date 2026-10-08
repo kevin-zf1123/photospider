@@ -1,4 +1,40 @@
-# FMT-08 CPU performance
+# Metadata assignment execution example
+
+This executable exercises the public Result workflow for metadata assignment. It builds a Float32 tensor, binds it as a Result input, compiles a requested output region, executes the edit, and checks the resulting metadata and selected sample bits. It is a runnable correctness and accounting example; it does not publish a performance comparison.
+
+Build and run a tiled-view smoke case from the repository root:
+
+```sh
+cmake --build build/kernel-dev --target photospider_metadata_performance -j 8
+./build/kernel-dev/examples/metadata_performance/photospider_metadata_performance \
+  131 tiled view patch roi 1 4 strict
+```
+
+The positional arguments are `size`, `storage`, `layout`, `edit`, `request`, `repeat`, `channels`, and `profile`. Defaults are `512 tiled auto patch full 7 4 strict`. The CLI accepts sizes from 130 through 4096 and channel counts from 4 through 32. `storage` selects `generic`, `tiled`, or `continuous` source construction; `layout` selects `auto`, `view`, or `materialize`; `edit` selects `patch`, `replace`, or `cascade`; and `request` selects `full`, `one`, or `roi`. The ROI is rows `[127,130)`, columns `[126,131)`, and channel 2. For size 131 this requests 15 Float32 samples, or 60 logical bytes, including all four corners checked by the example.
+
+The following small commands cover the source layouts and edit policies. Each command emits one JSON object and exits nonzero if metadata or corner-bit validation fails.
+
+```sh
+./build/kernel-dev/examples/metadata_performance/photospider_metadata_performance \
+  131 tiled view patch roi 1 4 strict
+./build/kernel-dev/examples/metadata_performance/photospider_metadata_performance \
+  131 generic materialize replace roi 1 4 strict
+./build/kernel-dev/examples/metadata_performance/photospider_metadata_performance \
+  131 continuous view cascade roi 1 4 strict
+```
+
+For these inputs, the checks cover 60 requested sample bytes and four ROI corner bit patterns. The measured source Root payload is 655,360 bytes for tiled storage, zero for generic storage, and 327,680 bytes for continuous storage. Generic source bytes are caller-owned and appear as 274,576 referenced bytes. The output adds zero live Root payload for the two views and 60 bytes for the generic materialized request. These are the current tiny-case observations, not estimates for larger images. A view may retain its source owner.
+
+`repeat` controls measured repetitions. The program performs two warmups and then `repeat` serial executions. `compile_us` times compilation once. `prepare_p50_us` reports operation preparation after two warmups. The `public_p50_us` and `public_p95_us` values cover `ExecutionContext::execute`; `core_p50_us` sums operation timing diagnostics from those executions. No timing includes source construction or operation preparation, and these fields alone do not establish a speedup.
+
+The resource fields report Root accounting: `source_root_payload`, `source_root_metadata`, and `source_referenced` describe source admission; `run_live_payload` and `run_live_metadata` describe the output's live Root deltas; `peak_live` is the execution diagnostic peak and includes continuation state. They are not RSS measurements. `source_support_bytes` is the declared dependency support count multiplied by the Float32 sample width; it describes support, not the number of CPU loads. `reported_copy_bytes` is the execution diagnostic. A zero value does not prove that a materialized result copied no bytes.
+
+The retained per-image fields `source_backed`, `source_virtual`, `source_metadata`, `result_backed`, `result_virtual`, and `result_metadata` are `null` because the public Result API does not expose those physical or virtual image counters. `shared_owner` is `true` only when both public Result windows expose the same non-null storage owner token. `null` means this check could not establish shared ownership; it is not a negative result.
+
+The CLI accepts sizes through 4096, but the tiny commands above do not establish that large materialized requests fit the Root limits configured by this executable. `MetadataAssign` uses a default growth limit of 1 GiB; full materialization at large scale has not been validated here. Larger requests require an actual run with their selected source, output region, and resource limits; capacity inspection alone is not an execution result.
+
+## Legacy Value/planar performance record (FMT-08 CPU performance)
+These measurements describe the Value/planar implementation and binaries used for the 2026-09-24 run. They are historical evidence, not performance results for the current Result workflow described above. The JSONL and trace summaries use that older workload and diagnostic schema; current Result output keeps the legacy per-image fields null and does not provide replacements for the old physical backing, virtual span, or per-image metadata counters. Do not compare current null fields with the historical values. The reproduction commands and `run.py` / `summarize_trace.py` describe the recorded workflow; rebuilding the current target does not recreate the old Value/planar binary or its measurements. The artifact paths below identify the original local evidence and may depend on those matching historical binaries and build artifacts.
 
 Measured on 2026-09-24: Apple M5, arm64, macOS 27.2 (26B5091g), Homebrew
 Clang 21.1.3, RelWithDebInfo (`-O2 -g -DNDEBUG`), one host CPU worker, fixed
@@ -14,7 +50,7 @@ No codec/import conversion is timed. Profiling and ordinary timings are separate
 The accepted table was measured without a concurrent build. An earlier contended
 run is excluded from conclusions.
 
-## Planar public execution
+### Planar public execution
 
 `full` requests all HxWxC coordinates; `one` requests one full channel; `roi`
 requests `[127,130) x [126,131) x channel 2`, crossing both 128 boundaries.
@@ -42,7 +78,7 @@ same exact copy/metadata semantics; these independent timing samples do not
 establish a different algorithm or ISA speedup. The x86-64 key is registered and
 wrong-host admission is tested; no x86-64 timing is claimed.
 
-## Optimization and profiler evidence
+### Optimization and profiler evidence
 
 A CPU Profiler recording of the original 4096²x4 tiled copy contained 15,656
 selected execution samples. `copy_spatial_channel_piece` had 14.53% self and
@@ -72,7 +108,7 @@ reduced one 512²x4 full-copy comparison from **43.929 ms -> 4.517 ms** public a
 interleaved images inside the kernel. Public generic execution also computes its
 normal result digest, explaining the public/core difference.
 
-## Backing, coverage and accounting
+### Backing, coverage and accounting
 
 The 4096²x4 source has 256 MiB of provided sample backing and a 256 MiB virtual
 range. A full view keeps that same owner and copies **zero** sample bytes.
@@ -96,7 +132,7 @@ these same per-copy counters; its zero diagnostic fields are N/A, not evidence
 of zero copying. Owner identity, exact output coverage and independent bit checks
 establish which path ran. Raw metadata/virtual/backing/peak values are in JSONL.
 
-## Correctness and reproduction
+### Correctness and reproduction
 
 The benchmark checks independently generated sample words at ROI corners and
 checks the expected description. The integration fixture checks every requested

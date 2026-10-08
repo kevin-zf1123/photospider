@@ -4,7 +4,7 @@
 
 ## 1. Scope and ownership
 
-The statistics API describes integer-coded scalar rasters, sparse histograms, global parameters, and graded output. CPU producers scan immutable Value snapshots and publish mandatory Result backing under the execution root's capacity, work, I/O, and stage budgets. The histogram producer owns its bounded bin counters and temporary state until publication; downstream Results retain their input associations and backing.
+The statistics API describes integer-coded scalar rasters, sparse histograms, global parameters, and graded output. Histogram and Grade read tensor windows from Result inputs; Parameters reads the Histogram Result's fields. Each producer publishes a Result under the execution root's capacity, work, I/O, and stage budgets. A Result's association stores source ObjectIds as facts; it does not retain the referenced source payload.
 
 ## 2. Data layout and memory
 
@@ -21,7 +21,7 @@ Result<SchemaTemplate> statistics_schema(
 Result<double> statistics_mean(std::int64_t total, std::int64_t count);
 ```
 
-`StatisticsSpec` requires positive H and W and 1 to 65536 bins. The raster sample product is bounded by `(INT64_MAX-4095)/8`. Inputs are facet-free Int64 HW values and UInt8 HW masks. A nonzero mask byte selects a sample; selected values must lie in `[0,bins)`. Masked-out values do not participate. The operation does not infer color or apply a transfer function.
+`StatisticsSpec` requires positive H and W and 1 to 65536 bins. The raster sample product is bounded by `(INT64_MAX-4095)/8`. Histogram and Grade numeric inputs are single-tensor Results with no fields, batch axes, or tensor facets. Each tensor has the exact HW shape in `StatisticsSpec`; Histogram takes facet-free Int64 values and a facet-free UInt8 mask, while Grade takes facet-free Int64 values. Parameters consumes a `photospider.integer_histogram` Result, and Grade also consumes the matching `photospider.integer_statistics` Result. A nonzero mask byte selects a sample; selected values must lie in `[0,bins)`. Masked-out values do not participate. The operation does not infer color or apply a transfer function.
 
 | Result schema | Fields and publication |
 | --- | --- |
@@ -31,26 +31,38 @@ Result<double> statistics_mean(std::int64_t total, std::int64_t count);
 
 Histogram IDs are strictly increasing and only positive-count bins are stored. An absent bin means zero after the complete histogram seals. Empty selection yields no rows. Statistics for an empty selection have `[0,0,0]` and a nonsemantic zero mean; a nonempty selection of zeros is valid with mean zero. Physical Result window size is not part of schema identity.
 
+Each statistics output owns its published field storage. A loaded field `CpuStorage` also retains its read plan and Result implementation, so it remains readable after the `ResultRef` and execution context are released. The loaded window keeps its backing live until that window is released; the ObjectId association alone does not keep an upstream Result's payload alive.
+
 ## 3. Execution and state machine
 
 ```text
-Int64 raster + UInt8 mask
+variant Result binding
           |
           v
- histogram producer --complete sparse Result--> parameter producer
-                                                     |
-                                              complete parameters
-                                                     |
-                                          grade producer validates global data
-                                                     |
-                                          bounded output / stable prefixes
+ example source operations --Need--> Int64 and UInt8 tensor Results
+          |                                  |
+          +------------------+---------------+
+                             v
+                  histogram producer
+                             |
+                    sparse Histogram Result
+                             v
+                   parameter producer
+                             |
+                     complete parameters
+                             |
+                    grade producer
+                             |
+                  Float64 Result / stable prefixes
+                             |
+                    streaming Result sink
 ```
 
 The histogram factory checks a necessary request-stage lower bound before binding inputs. With `S=H*ceil(W/512)*ceil(bins/512)`, it must fit the source request polls plus a completion poll. If `S>=1,000,000`, the factory returns `ResourceExhausted`. The implementation uses division checks to avoid overflow. Passing admission is not a reservation: the effective producer limit is also bounded by the dependency option (default 4096 stages) and root stage budget. Later I/O, work, stage, or capacity exhaustion prevents a complete histogram publication.
 
-Histogram and Parameters use CompleteBundle and Conservative Cartesian support. Parameters waits for the complete histogram, then checks sparse IDs, positive counts, totals, integer overflow, and selected count against HW. Grade validates the complete global parameter Result before producing any pixel prefix. Each output pixel depends on its source sample plus shared parameter and descriptor support. Descriptor observations are separate from data rows, even for empty collections. If later pixel work fails, an already published stable prefix remains valid.
+Histogram and Parameters use CompleteBundle and Conservative support expressed through typed Tensor, Field, and Descriptor relations. Parameters waits for the complete histogram, then checks sparse IDs, positive counts, totals, integer overflow, and selected count against HW. Grade validates the complete global parameter Result before producing any pixel prefix. Each output pixel depends on its source sample plus shared parameter fields and descriptor support. Descriptor observations are separate from data rows, even for empty collections. If later pixel work fails, an already published stable prefix remains valid.
 
-Histogram source strips are row-bounded and at most 4096 bytes per field, independently of Result read-window size. Other source reads and Result pages use at most `min(user_page_bytes,4096)`. The 24-byte `count_total_valid` record is indivisible; a smaller selected window fails with `ResourceExhausted`. Histogram counters and temporary state, source/result windows, mandatory backing, and every initialization/reset/scan consume root capacity or work as applicable.
+Histogram source operations receive tensor Needs in row-bounded strips of at most 4096 bytes per field, independently of the selected Result window size. Other source reads and Result field I/O use at most `min(user_page_bytes,4096)`. The 24-byte `count_total_valid` field record is indivisible; a smaller selected window fails with `ResourceExhausted`. Histogram counters and temporary state, source/result windows, mandatory backing, and every initialization/reset/scan consume root capacity or work as applicable.
 
 ## 4. Algorithms and math
 

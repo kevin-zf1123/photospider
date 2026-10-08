@@ -4,88 +4,71 @@
 
 ## 1. Core Summary (TL;DR)
 
-Workflow declarations describe input metadata, while each execution supplies immutable input values or regional sources by exact name. The compiler keeps payload bytes and addresses out of IR, plans, and plan identity, so one plan can run against independent input snapshots. Preflight validates binding names and metadata before source reads, validates directly consumed scalar `Value`s before operation callbacks, and validates each regional-source sample after its read.
+Workflow declarations provide a name and Result schema; each execution binds an owning `ResultRef` under that name. This keeps tensor shape and layout in the Result schema while keeping payload owners out of compiler identity. Every operation executes through the staged Result continuation protocol.
 
 ## 2. Mental Model & Intuition
 
 ```text
 WorkflowDocument                         each execute call
-  declarations + graph                         bindings
-          |                                       |
-          v                                       v
-       analyze -> optimize -> plan         name / metadata preflight
+  names + Result schemas                       Result bindings
+          |                                         |
+          v                                         v
+       analyze -> optimize -> plan           schema/name preflight
                                       +----------+-----------+
                                       |          |           |
-                                   Value   RegionalSource  InputSnapshot
+                                  Result A   Result B   Result C
                                       |          |           |
                                       +----------+-----------+
                                                  v
-                                     callbacks -> named results
+                                      Result continuations
+                                                 |
+                                   certified outputs or failure
 ```
 
-The declaration is a socket specification: it fixes the name and logical type expected at that port. Each `execute` call supplies its own plug. A `Value` retains immutable bytes; a regional source fills host-owned requested storage synchronously; an `InputSnapshot` supplies immutable blocks. Concurrent calls can share a plan while retaining separate binding snapshots.
+A declaration fixes the input name and Result schema expected at a workflow port. Each `execute` call supplies a `ResultRef` with the corresponding schema. The Result retains its tensor backing and resource owners while the execution or any returned view needs them; concurrent calls can reuse one plan with different immutable bindings.
 
 ## 3. Formal Contracts & APIs
 
 ```cpp
-struct PHOTOSPIDER_API WorkflowInputDeclaration final {
+struct WorkflowInputDeclaration final {
   std::uint64_t id = 0;
   std::string name;
-  ValueDescriptor descriptor;
-  Region region;
-  StridedLayout layout;
-  std::vector<ValueFacet> facets;
-  std::optional<PlanarImageLayout> planar_layout = {};
+  std::shared_ptr<const SchemaTemplate> result_schema = {};
 };
 
-using WorkflowInput =
-    std::variant<WorkflowNodeOutput, WorkflowInputReference>;
-
-struct PHOTOSPIDER_API ExecutionBinding final {
+struct ExecutionBinding final {
   std::string name;
-  Value value;
-  std::shared_ptr<const RegionalSource> source = {};
-  std::shared_ptr<const InputSnapshot> snapshot = {};
-  std::shared_ptr<const PlanarImage> image = {};
-};
-struct PHOTOSPIDER_API ExecutionBindings final {
-  std::vector<ExecutionBinding> inputs;
+  ResultRef result = {};
 };
 
-class PHOTOSPIDER_API ExecutionContext final {
- public:
-  Result<ExecutionResult> execute(
-      const ExecutionPlan& plan, ExecutionBindings bindings = {},
-      const CancellationToken& cancellation = CancellationToken(),
-      const ExecutionOptions& options = {});
+struct ExecutionOptions final {
+  std::function<Status(ValueRef, const ResultRef&)> result_publication = {};
+};
+
+struct ExecutionResult final {
+  ResourceMap<ResultRef> results = {};
 };
 ```
 
-The declarations reproduce the current public member and field forms; enclosing headers and unrelated declarations are omitted.
+These excerpts show the public fields relevant to binding and publication. The current `WorkflowDocument` schema is 5. It stores declarations, operation nodes, and named outputs. Declaration ids are unique and nonzero; names are unique, exact, case-sensitive printable ASCII strings of 1 to 128 bytes with no spaces. A document contains at most 4096 declarations, and each declaration is bound exactly once, including declarations unused by the graph.
 
-`WorkflowDocument` schema 3 stores declarations, operation nodes, and named outputs. A node input is tagged as either a producer output or an input declaration reference; node ids and input ids occupy separate namespaces. Declarations use unique nonzero ids and exact, case-sensitive printable ASCII names from 1 to 128 bytes, using bytes `0x21` through `0x7e` with no spaces. A document can declare at most 4096 inputs. Every declaration must be bound exactly once, even when the graph does not consume it.
+A declaration's `result_schema` supplies typed tensor slots, fields, domain, and semantic metadata. Compiler input metadata carries that schema; its Value descriptor and facets stay empty. Tensor shape, batch axes, facets, and physical layout come from each `ResultTensorSpec`. Value may back a typed tensor internally, but it is not an operation input or output contract. Static schema changes require recompilation. Input payload bytes, pointers, and allocation addresses are excluded from semantic and physical-plan identity; schema, traits, normalized output demand, and other compile-time facts determine those identities.
 
-For a dense `Value` binding, the element type, shape, whole logical `Region`, zero byte offset, canonical positive row-major strides, exact byte count, and closed facet set must match the declaration. The descriptor has rank 1 through 8 with nonzero extents. Checked byte sizing requires a positive size representable by both the address arithmetic and host allocation size. Facets are canonicalized by key and compared by key, version, and payload. General `Value` views may use other valid layouts; workflow bindings apply the stricter dense declaration contract.
+`ExecutionBinding` matches one declaration by name and owns a Result reference. The executor validates names as a multiset, so duplicate bindings remain visible and fail validation rather than being silently overwritten. It validates Result schema compatibility before scheduling operation work. The Run retains its binding snapshot and any admitted input owners until callbacks retire. `ExecutionContext::execute` returns named Results in `ExecutionResult::results` after callbacks retire and cancellation and graph-currentness checks allow completion.
 
-For a regional source, the source descriptor and facets match the declaration, and `read` receives an exact nonempty logical `Region` plus host-owned writable bytes. It reports the coverage it filled. The pointers expire when `read` returns, and the source must support concurrent reads without mutation. The executor validates each successfully read sample before using that region; a later bad sample can fail after earlier regions have already been read. A snapshot binding is a kernel-owned immutable block store; `read` and content identity access are bounded by caller-supplied sample limits and cooperative cancellation. Structural image declarations and bindings use `PlanarImageLayout` and `PlanarImage`, whose storage is described in [ADR 0017](0017-cpu-regional-execution-and-storage.md).
-
-`ExecutionBinding` selects exactly one representation. Names are validated as a multiset, so duplicate entries cannot be silently overwritten by map insertion. Bindings and metadata are copied before invocation; `Value` and image/snapshot storage retain their owners. A Run keeps its binding snapshot until admitted work retires. Source callbacks and output sinks receive borrowed pointers or views only for the duration documented by their call.
-
-Compile-time operation parameters remain in `WorkflowNode::parameters`. Runtime scalars are ordinary bound `Value`s and are checked against operation port constraints: a `Float32Scalar` has one Float32 sample, and the finite sample must lie within the inclusive minimum and maximum published by its port. The executor preflights binding names and metadata and validates directly consumed `Float32Scalar` Values before callbacks. Such a port requires a dense `Value`; it rejects `RegionalSource` and `InputSnapshot` bindings for that port. Input payload bytes, pointers, and allocation addresses do not enter semantic, optimized, physical-plan, or plan-cache identity. Static declaration metadata, traits, image layout, and normalized output demand do. `InputSnapshot::content_identity` hashes canonical metadata and exact requested sample bits, excluding allocation, layout, and block geometry.
+`ExecutionOptions::result_publication` is a per-call observer for certified Result prefixes. Each caller has an independent serialized notification stream. A caller may retain the owning `ResultRef` beyond the callback. A prefix is not complete execution success: observer failure stops the Run, while previously certified prefixes remain valid. Callback exceptions are converted to typed execution failures; cancellation and callback retirement follow the Run's existing ordering.
 
 ## 4. Non-Goals & Explicit Boundaries
 
-- Declarations do not load files or retain caller payloads. The kernel exposes no hidden file-loading path.
-- Bindings have no optional/default values and receive no implicit type conversion, resize, layout repacking, or facet coercion.
-- Runtime values do not become compile-time parameters or arbitrary literal nodes.
-- Direct input-to-output passthrough is not a workflow output form; named outputs select operation-node outputs.
-- A `RegionalSource` is a synchronous kernel callback contract, not a provider ABI or codec interface.
-- Structural planar image storage is a distinct declaration/binding representation; planar samples are not asserted to be interleaved dense bytes.
+- Workflow declarations do not load files or retain caller payloads.
+- Bindings have no optional/default values and receive no implicit schema conversion, resize, or layout repacking.
+- Runtime input data does not become compile-time parameters or literal nodes.
+- A workflow output selects an operation-node output; direct input passthrough is not a workflow output form.
+- Result tensor backing layout does not change logical sample authorization. Planar storage is not interleaved storage.
+- The Result C operation table remains ABI 2. This ADR describes the C++ workflow binding contract, not a separate C++ Value operation protocol.
 
 ## 5. Consequences
 
-Malformed declaration metadata and malformed, missing, extra, duplicate, or invalid binding names fail with `InvalidArgument`; dense-size arithmetic that cannot be represented fails with `ResourceExhausted`. A mismatch in declared type, shape, region, layout, facets, or source metadata fails with `TypeMismatch`. Scalar values outside a declared operation interval and bound-image samples rejected by the image-domain validator fail with `InvalidArgument`. The executor checks names, metadata, dense Values, and directly consumed scalar Values before the first operation callback; it validates regional-source samples after each successful regional read and before consuming that region.
+Malformed declarations and missing, extra, duplicate, or invalid binding names fail with `InvalidArgument`; an incompatible Result schema fails with `TypeMismatch`. These checks happen before operation callbacks. A caller can reuse a compiled plan with independent Result bindings, but it must not mutate its binding container while `execute` copies it.
 
-The plan is reusable with independent immutable bindings. The caller must not mutate binding containers while `execute` copies them, and must synchronize any mutable state behind its own source implementation. The kernel may run a source concurrently. Cancellation is cooperative and observed during bounded source/snapshot work and execution. A stale plan is rejected before binding inspection; after valid entry, cancellation takes priority over stale state and ordinary execution failures.
-
-Caller-owned input retention is outside `ExecutionContextConfig::maximum_live_bytes`. Kernel-managed output, scratch, intermediate, and transfer allocations remain accounted until their final owner retires. Returned immutable values may outlive the execution context. Input snapshot storage has its own aggregate store budget; replacing a snapshot creates a new version and leaves older readers valid.
+Cancellation is cooperative. The executor waits for entered callbacks to retire before releasing borrowed phases and owners. A frozen Result producer may remain owned by the context while a live peer still needs it; one waiter's cancellation does not cancel shared work required by another waiter. Input Results retain their own backing owners, while Root-accounted working state, outputs, and transfers remain charged until their last owner retires.

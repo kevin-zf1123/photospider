@@ -5,24 +5,20 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_result_abi_2
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-11: color-model conversions
 
-This family records the confirmed clarification. Decisions below are
-specification requirements, not runtime support. Inherit the
+The family specification remains Proposed. Native members are registered as CPU Result ABI 2 operations; S is a public helper that lowers to the MASK threshold operation. Inherit the
 [FMT common contract](FMT_common_contract.md) and the confirmed
 [model coverage](FMT_model_conversion_coverage.md). Ordinary numerical behavior
 inherits NUM; the [model mathematics](FMT-11_model_math.md) is normative.
 
 ## Confirmed member organization
 
-Each conversion direction is independently specified. The maintainer confirmed
-this allocation on 2026-09-23:
+Each conversion direction is specified independently:
 
 | Member | Direction |
 | --- | --- |
@@ -49,7 +45,7 @@ this allocation on 2026-09-23:
 
 A through R and T are native primitives; S is a compile-time composition. Shared
 math/access implementation is permitted but cannot change the observable member
-semantics. This table does not itself register operation keys.
+semantics. Members A-R and T each have strict, Apple Silicon and x86-64 CPU keys. S is an installed graph helper that appends `mask.threshold_channel_<profile>`; it does not register a color-model key.
 
 ## Boundaries already established
 
@@ -57,8 +53,9 @@ semantics. This table does not itself register operation keys.
   FMT-09, dtype/code scaling to FMT-06, profile-directed CMYK to FMT-12.
 - Conversions compose explicitly. No automatic all-pairs converter, implicit
   transfer, white adaptation, gamut mapping or rendering is introduced.
-- Images remain planar with same-size channel planes and canonical straight
-  colors. Alpha stays inside the tensor; it is not an external persistent link.
+- Color channels retain a shared logical sample shape and canonical straight-color
+  meaning. Generic and spatial tensor storage are supported. Alpha stays inside
+  the tensor; it is not an external persistent link.
 - Metadata describes the values; raw/override follow the common contract.
   Applicable metadata does not certify sample validity.
 
@@ -259,17 +256,11 @@ The required black_value and white_value are finite same-dtype typed constants;
 they may coincide or be reversed. Select their exact stored bits without
 interpolation. Integer code-domain binary data must first be explicitly decoded.
 
-Implementing S requires an admitted MASK-03 primitive with the requested
-planar, Float32/Float64 and exact-region contract, or a formally equivalent
-composition. The MASK specification alone does not establish runtime support.
+S is implemented by the registered `mask.threshold_channel_<profile>` operation. The public FMT-11S helper serializes its statics and appends that operation; normal compilation validates the resulting graph.
 
 ## Static interface and interpretation
 
-Each native member has one required tensor Value port `input` and one `values`
-output. S takes an input edge and yields one edge after static composition.
-No runtime parameter streams or Result schemas are introduced. Dtype remains
-Float32/Float64. Generic ranks/extents/counts and checked arithmetic inherit NUM,
-with the kernel's additional actual image representation limits.
+Each native member accepts one Result containing one tensor and no fields, then publishes one `values` Result containing one tensor. The tensor dtype is Float32 or Float64. Input and output full sample rank, including batch and cell axes, is at most 8. Sample counts follow Result schema representability and execution resource limits. The source channel extent is at most 65536; axis-free R insertion also requires room within the rank limit. Cell-axis parameters exclude the batch prefix. Connected inputs receive Descriptor support (8). Semantic selected samples request Data (1) and Validation (4); raw T additionally validates its binary selector. Raw S and bypass-only samples request Data without Validation. R constant outputs request Descriptor only. Empty demand creates no run payload state.
 
 | Static logical field | Requirement |
 | --- | --- |
@@ -298,8 +289,8 @@ decoding. Luma's underlying RGB transfer does not imply Y' is the transfer of
 the original color's Y. T semantic output uses its binary input's declared Gray
 origin; an undescribed binary source first needs assign/override.
 
-Semantic output rebuilds the selected group and preserves applicable white,
-reference, observer, coordinates, units and remapped internal alpha relations.
+Outputs preserve the source schema id, tensor key and batch prefix. Semantic output rebuilds the selected group and preserves applicable white,
+reference, observer, coordinates, units and remapped internal alpha relations. The output tensor sets `atomic_trailing_axes` to zero.
 No observer/spectral conversion occurs. Another group's conflicting references
 to edited/deleted channels cause a static error; do not silently drop that group.
 Raw keeps applicable unverified descriptions without claiming target conversion;
@@ -335,29 +326,13 @@ outputs have no sample dependency. All descriptors still undergo static checks;
 Empty reads no payload. Bypass alpha/AOV/other groups read only corresponding
 source samples. Required upstream Whole computations retain their own scope.
 
-Q may return a legal same-owner read-only view of its bit-copy mapping, while
-still performing semantic validation. auto materializes when that view cannot
-be represented; forced view then fails. No whole-node static identity is admitted
-for A-P/R/S/T; those arithmetic members materialize and reject forced view,
-even if the particular request selects only copied lightness/Y or bypass alpha.
+Q may return a read-only view when the complete requested mapping is physically representable from a compatible owner. Generic mappings must be affine; spatial mappings must satisfy the Result builder's canonical spatial view proof, so sparse or noncanonical spatial mappings can be unavailable. A forced Q view then returns `ViewUnavailable`; `auto` materializes. Other members materialize output and reject forced view during preflight, including bypass-only requests.
 materialize forces new storage and computes only requested coverage. There is
 no cross-owner view, source mutation or implicit complete-image scan.
 
-Images obey mandatory planar storage, DAG-wide tile geometry, edge-row padding,
-page-aligned tile starts and a full-image virtual reservation. Kernel preparation
-and retained windows cover only required pages; page availability does not
-authorize reading padding or unrelated channels. Publish exact coverage at
-global coordinates; gaps are not zero pixels. Owners and immutable metadata
-survive context teardown while referenced. Failed publication units remain
-unavailable; already valid independent regions follow kernel lifetime/failure
-rules. No eviction, private page-fault evaluation or hidden CPU pool is added.
+The implementation supports generic and spatial tensor layouts. It materializes only requested coverage, preserves source ownership for copied data as permitted by Result, and publishes transactionally. Empty observations are stateless. Each run owns independent state; compiled preparation may be reused concurrently. Resource admission and cancellation follow the Result execution root.
 
-S expands semantic finite-Gray validation, exact hard comparison, typed 0/1
-selection and binary metadata publication, with bypass channels. Its admitted
-constituents must preserve support, bits, validation and failure; raw comparison
-requires the math supplement's NUM semantics. These are future MASK-03/graph
-requirements, not properties of the current Whole threshold. No new universal
-model-convert dispatcher or unsuffixed alias is introduced.
+S expands to the MASK channel-threshold operation with its registered CPU profile. There is no universal model-conversion dispatcher or unsuffixed alias.
 
 ## CPU algorithm, resources and cancellation
 
@@ -388,15 +363,16 @@ owners at final retirement. Preserve upstream/cancellation errors.
 | --- | --- |
 | Invalid/missing parameters, selector, unit, white/NCL data, insertion axis or conflicting metadata | Compile/direct preflight: InvalidArgument / InvalidDomain |
 | Unsupported dtype/model/scale/reference, description mismatch or premultiplied semantic source | Compile/direct preflight: TypeMismatch |
-| Forced view for arithmetic member or impossible Q view | Static layout admission failure under the shared FMT layout contract |
+| Forced view for a member other than Q | Compile/direct preflight: InvalidArgument / InvalidDomain |
+| Q view whose physical mapping cannot cover the complete requested region | Evaluation: ViewUnavailable; `auto` materializes |
 | Nonfinite semantic support, negative semantic chroma, requested singular S or xyY ratio, illegal T selector | Evaluation: OperationFailed / InvalidDomain, requested publication scope and coordinate/component attribution |
 | Rounded nonfinite result from finite semantic arithmetic | Evaluation: OperationFailed / ArithmeticOverflow |
 | Capacity/work/shape overflow, cancellation, stale or upstream failure | Preserve NUM/kernel category, scope and origin |
 
-Implementation needs explicit generic model/unit metadata, normalized CIE
-lightness schema, group remapping, exact component requests and admitted S
-constituents. Legacy ColorArray v1 is not silently relabeled. Member workflows
-are conceptual until public implementations/helpers are registered.
+The implementation uses explicit model and unit metadata, normalized CIE
+lightness, group remapping, exact component requests and the registered S
+constituent. Legacy ColorArray v1 is not silently relabeled. Public helpers are
+available from the installed `photospider/format/model_conversion.hpp` header.
 
 ## Acceptance and remaining boundaries
 

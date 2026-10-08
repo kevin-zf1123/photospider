@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cfenv>  // NOLINT(build/c++11)
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -9,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -29,26 +31,24 @@ std::vector<std::string> keys{native_key
                               "image.local_inpaint_navier_stokes_openCV"
 #endif
 };
-std::vector<ps::Value> inputs(const std::vector<float>& rgb,
-                              const std::vector<float>& mask, int h, int w) {
+std::vector<Input> inputs(const std::vector<float>& rgb,
+                          const std::vector<float>& mask, int h, int w) {
   return {value(rgb, {static_cast<unsigned>(h), static_cast<unsigned>(w), 4},
                 ps::rgba_semantics()),
           value(mask, {static_cast<unsigned>(h), static_cast<unsigned>(w)},
                 ps::coverage_semantics())};
 }
-ps::Result<ps::Value> invoke(
-    const std::string& key, const std::vector<ps::Value>& values,
-    Params params = {{"radius", std::int64_t{3}}},
-    ps::BufferAllocator allocator = ps::BufferAllocator{},
-    ps::CancellationToken token = {}) {
-  const auto registry = ps::make_default_operation_registry();
-  std::vector<ps::Region> regions;
-  for (const auto& v : values)
-    regions.push_back(v.region());
-  return registry->invoke(
-      key, {values, regions, params, ps::Backend::Cpu, token, {}, allocator});
+ps::Result<ps::ResultRef> invoke(const std::string& key,
+                                 const std::vector<Input>& values,
+                                 Params params = {{"radius", std::int64_t{3}}},
+                                 ps::ResourceLimits limits = {},
+                                 ps::CancellationToken token = {}) {
+  auto result = run(key, values, params, {}, token, limits);
+  return result.ok()
+             ? ps::Result<ps::ResultRef>(result.value().results.at("result"))
+             : ps::Result<ps::ResultRef>(result.status());
 }
-void reject(ps::Result<ps::Value> result, ps::ErrorCode code) {
+void reject(ps::Result<ps::ResultRef> result, ps::ErrorCode code) {
   check(!result.ok() && result.status().code == code,
         "rejection code: " + result.status().message);
 }
@@ -154,9 +154,9 @@ void numerical() {
               for (int c = 0; c < 3; ++c)
                 changed[i * 4 + c] = 100.F + c;
             }
-          check(take(invoke(key, inputs(changed, mask, h, w),
-                            {{"radius", std::int64_t{radius}}}))
-                        .copy_bytes() == actual_value.copy_bytes(),
+          check(bytes(take(invoke(key, inputs(changed, mask, h, w),
+                                  {{"radius", std::int64_t{radius}}}))) ==
+                    bytes(actual_value),
                 "placeholder independence");
           ++cases;
         }
@@ -171,7 +171,7 @@ void validation() {
     rgb[0] = -0.F;
     mask[0] = -0.F;
     auto values = inputs(rgb, mask, 5, 5);
-    check(take(invoke(key, values)).copy_bytes() == values[0].copy_bytes(),
+    check(bytes(take(invoke(key, values))) == bytes(values[0]),
           "zero mask bits");
     mask[12] = 1;
     values = inputs(rgb, mask, 5, 5);
@@ -208,30 +208,33 @@ void validation() {
       reject(invoke(key, inputs(tiny, std::vector<float>(size * 5), size, 5)),
              ps::ErrorCode::TypeMismatch);
     }
-    const auto baseline = take(invoke(key, values)).copy_bytes();
+    const auto baseline = bytes(take(invoke(key, values)));
     const auto original = std::fegetround();
     std::fesetround(FE_UPWARD);
-    const auto rounded = take(invoke(key, values)).copy_bytes();
+    const auto rounded = bytes(take(invoke(key, values)));
     check(std::fegetround() == FE_UPWARD, "floating mode restore");
     std::fesetround(original);
     check(rounded == baseline, "rounding independent bits");
-    auto concurrent = std::async(std::launch::async, [&] {
-      return take(invoke(key, values)).copy_bytes();
-    });
-    check(take(invoke(key, values)).copy_bytes() == baseline &&
+    auto concurrent = std::async(
+        std::launch::async, [&] { return bytes(take(invoke(key, values))); });
+    check(bytes(take(invoke(key, values))) == baseline &&
               concurrent.get() == baseline,
           "concurrent outputs");
     ps::CancellationSource cancel;
     cancel.cancel();
     reject(invoke(key, values, {{"radius", std::int64_t{3}}},
-                  ps::BufferAllocator{}, cancel.token()),
+                  ps::ResourceLimits{}, cancel.token()),
            ps::ErrorCode::Cancelled);
     auto display = ps::rgba_semantics();
     display.reference = "display";
     auto display_inputs = values;
     display_inputs[0] = value(rgb, {5, 5, 4}, display);
-    check(take(invoke(key, display_inputs)).facets()[0].payload ==
-              display_inputs[0].facets()[0].payload,
+    check(take(invoke(key, display_inputs))
+                  .schema()
+                  .tensors[0]
+                  .facets[0]
+                  .payload ==
+              display_inputs[0].description.tensors[0].facets[0].payload,
           "display reference preserved");
     auto extreme = rgb;
     for (unsigned i = 0; i < 25; ++i)
@@ -240,10 +243,11 @@ void validation() {
     reject(invoke(key, inputs(extreme, mask, 5, 5)),
            ps::ErrorCode::OperationFailed);
     const auto workflow = take(run(key, values, {{"radius", std::int64_t{3}}}));
-    check(workflow.values.at("result").copy_bytes() == baseline,
+    check(bytes(workflow.results.at("result")) == baseline,
           "public workflow output");
     ps::PlanningOptions roi;
-    roi.output_regions = {{"result", ps::Region({{1, 3}, {1, 2}, {0, 4}})}};
+    roi.output_regions = {
+        {"result", ps::Region({{0, 1}, {0, 1}, {1, 3}, {1, 2}, {0, 4}})}};
     roi.tile_height = 1;
     roi.tile_width = 1;
     auto distant = rgb;
@@ -253,10 +257,19 @@ void validation() {
     check(!invalid_roi.ok() &&
               invalid_roi.status().code == ps::ErrorCode::InvalidArgument,
           "distant invalid pixel rejected for ROI");
-    const auto crop =
-        pixels(take(run(key, values, {{"radius", std::int64_t{3}}}, roi))
-                   .values.at("result"));
-    const auto full = pixels(workflow.values.at("result"));
+    const auto result =
+        take(run(key, values, {{"radius", std::int64_t{3}}}, roi))
+            .results.at("result");
+    const auto window = take(result.acquire_tensor(
+        take(result.descriptor()), 0, roi.output_regions.at("result")));
+    std::vector<float> crop(3 * 2 * 4);
+    for (std::uint64_t y = 0; y < 3; ++y)
+      for (std::uint64_t x = 0; x < 2; ++x)
+        for (std::uint64_t c = 0; c < 4; ++c) {
+          const auto row = take(window.row_run({0, 0, y + 1, x + 1, c}));
+          std::memcpy(&crop[(y * 2 + x) * 4 + c], row.data, 4);
+        }
+    const auto full = pixels(workflow.results.at("result"));
     for (int y = 0; y < 3; ++y)
       for (int x = 0; x < 2; ++x)
         for (int c = 0; c < 4; ++c)
@@ -274,42 +287,70 @@ void cache_policy() {
   mask[12] = 1;
   const auto values = inputs(rgb, mask, 5, 5);
   for (const auto& key : keys) {
-    ps::WorkflowDocument doc;
-    ps::ExecutionBindings bindings;
-    ps::InputSnapshotStore snapshots;
-    for (std::size_t i = 0; i < values.size(); ++i) {
-      const auto name = "input" + std::to_string(i);
-      doc.inputs.push_back({i + 1, name, values[i].descriptor(),
-                            values[i].region(), values[i].layout(),
-                            values[i].facets()});
-      bindings.inputs.push_back({name,
-                                 {},
-                                 {},
-                                 std::make_shared<ps::InputSnapshot>(
-                                     take(snapshots.import_value(values[i])))});
-    }
-    doc.nodes = {
-        {1,
-         key,
-         {ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2}},
-         {{"radius", std::int64_t{3}}}}};
-    doc.outputs = {{"result", 1, "image"}};
     auto registry = ps::make_default_operation_registry();
-    ps::GraphContext graph(doc);
-    auto compiled = take(ps::Compiler(registry).compile(graph));
     ps::ExecutionContextConfig config;
     config.result_cache_bytes = 1024 * 1024;
     ps::ExecutionContext context(registry, config);
-    const auto first = take(context.execute(compiled.plan, bindings));
-    const auto second = take(context.execute(compiled.plan, bindings));
-    check(first.values.at("result").copy_bytes() ==
-              second.values.at("result").copy_bytes(),
-          "cached-context repeated output");
+    auto prepared = prepare(take(context.resource_budget()), key, values,
+                            {{"radius", std::int64_t{3}}});
+    ps::GraphContext graph(prepared.document);
+    auto compiled = take(ps::Compiler(registry).compile(graph));
+    const auto& bindings = prepared.bindings;
+    const auto first =
+        take(context.execute(compiled.plan, bindings, {}, options()));
+    const auto second =
+        take(context.execute(compiled.plan, bindings, {}, options()));
+    check(
+        bytes(first.results.at("result")) == bytes(second.results.at("result")),
+        "cached-context repeated output");
     check(key == native_key ? second.diagnostics.cache_hits > 0
                             : second.diagnostics.cache_hits == 0,
           "native caches while the external-library adapter recomputes");
+    const auto support = take(first.dependencies.source_support());
+    for (unsigned port = 0; port < 2; ++port) {
+      const auto name = "input" + std::to_string(port);
+      const auto shape = values[port].description.tensors[0].sample_shape();
+      check(support.at(name.c_str()) == take(ps::Footprint::all(shape)),
+            "Whole retains both complete input demands");
+      std::vector<ps::RegionDimension> point(shape.size(), {0, 1});
+      const auto changed =
+          take(ps::Footprint::from_regions(shape, {ps::Region(point)}));
+      const auto dirty = take(first.dependencies.potential_dirty(
+          name, changed, 1, {}, ps::ResultSupportTarget::Tensor, 0));
+      check(dirty.at("result") == take(ps::Footprint::all({1, 1, 5, 5, 4})),
+            "Whole dirty propagation covers the complete output");
+    }
+    for (unsigned change = 0; change < 4; ++change) {
+      auto changed_rgb = rgb, changed_mask = mask;
+      auto reference = ps::rgba_semantics();
+      if (change == 0)
+        changed_rgb[0] = .75F;
+      if (change == 1) {
+        changed_mask[12] = 0;
+        changed_mask[0] = 1;
+      }
+      if (change == 3)
+        reference.reference = "display";
+      const auto changed_values = std::vector<Input>{
+          value(changed_rgb, {5, 5, 4}, reference),
+          value(changed_mask, {5, 5}, ps::coverage_semantics())};
+      const Params parameters{{"radius", std::int64_t{change == 2 ? 1 : 3}}};
+      auto update = prepare(take(context.resource_budget()), key,
+                            changed_values, parameters);
+      ps::GraphContext updated_graph(update.document);
+      auto updated_plan = take(ps::Compiler(registry).compile(updated_graph));
+      const auto actual = take(
+          context.execute(updated_plan.plan, update.bindings, {}, options()));
+      const auto expected = take(invoke(key, changed_values, parameters));
+      check(actual.diagnostics.cache_hits == 0 &&
+                bytes(actual.results.at("result")) == bytes(expected),
+            "changed image, mask, radius or reference cannot reuse stale "
+            "completion");
+      check(actual.results.at("result").schema().same_schema(expected.schema()),
+            "changed metadata preserved through cache lookup");
+    }
   }
-  std::cout << "native and OpenCV result cache policy PASS\n";
+  std::cout << "result cache policy backends=" << keys.size() << " PASS\n";
 }
 void resources() {
   std::vector<float> rgb(100, .25F), mask(25);
@@ -317,50 +358,45 @@ void resources() {
   for (unsigned i = 3; i < 100; i += 4)
     rgb[i] = 1;
   const auto values = inputs(rgb, mask, 5, 5);
-  // Native capacities: output 16N + mask N + plane 4N + state P + time 4P +
-  // heap 16N.
-  constexpr std::uint64_t minimum = 37 * 25 + 5 * 49;
-  reject(invoke(native_key, values, {{"radius", std::int64_t{3}}},
-                ps::BufferAllocator{}.limited(minimum - 1)),
-         ps::ErrorCode::ResourceExhausted);
-  check(invoke(native_key, values, {{"radius", std::int64_t{3}}},
-               ps::BufferAllocator{}.limited(minimum))
+  ps::ResourceStatistics measured;
+  {
+    auto success = run(native_key, values, {{"radius", std::int64_t{3}}}, {},
+                       {}, {}, &measured);
+    check(success.ok(), success.status().message);
+  }
+  const auto minimum = measured.peak[ps::ResourceKind::Payload];
+  ps::ResourceLimits limits;
+  limits.capacity[ps::ResourceKind::Payload] = minimum;
+  check(invoke(native_key, values, {{"radius", std::int64_t{3}}}, limits).ok(),
+        "measured native Root payload capacity succeeds");
+  // Exhaust output, then each of the five private native scratch buffers.
+  // These are cumulative payload capacities; source and continuation owners
+  // remain present throughout the callback and are included in the peak.
+  const std::uint64_t trailing[] = {770, 745, 645, 596, 400, 0};
+  for (auto tail : trailing) {
+    limits.capacity[ps::ResourceKind::Payload] = minimum - tail - 1;
+    auto failed = run(native_key, values, {{"radius", std::int64_t{3}}}, {}, {},
+                      limits, &measured);
+    check(!failed.ok() &&
+              failed.status().code == ps::ErrorCode::ResourceExhausted,
+          "native allocation boundary fails with ResourceExhausted");
+    check(measured.live[ps::ResourceKind::Payload] == 0,
+          "failed Result invocation releases source, state and scratch owners");
+  }
+  limits = {};
+  check(run(native_key, inputs(rgb, std::vector<float>(25), 5, 5),
+            {{"radius", std::int64_t{3}}}, {}, {}, {}, &measured)
             .ok(),
-        "exact native payload capacity");
-  for (unsigned fail = 1; fail <= 6; ++fail) {
-    unsigned calls = 0;
-    std::uint64_t live = 0;
-    ps::BufferAllocator allocator(
-        [&](std::uint64_t bytes) -> ps::Result<std::shared_ptr<void>> {
-          if (++calls == fail)
-            return ps::Result<std::shared_ptr<void>>(ps::Status::failure(
-                ps::ErrorCode::ResourceExhausted, "injected"));
-          live += bytes;
-          return ps::Result<std::shared_ptr<void>>(
-              std::shared_ptr<void>(new int, [&, bytes](void* p) {
-                delete static_cast<int*>(p);
-                live -= bytes;
-              }));
-        });
-    reject(invoke(native_key, values, {{"radius", std::int64_t{3}}}, allocator),
-           ps::ErrorCode::ResourceExhausted);
-    check(live == 0, "failure owner cleanup");
-  }
-  for (unsigned stop = 1; stop <= 6; ++stop) {
-    unsigned calls = 0;
-    ps::CancellationSource cancel;
-    ps::BufferAllocator allocator(
-        [&](std::uint64_t) -> ps::Result<std::shared_ptr<void>> {
-          if (++calls == stop)
-            cancel.cancel();
-          return ps::Result<std::shared_ptr<void>>(std::shared_ptr<void>{});
-        });
-    reject(invoke(native_key, values, {{"radius", std::int64_t{3}}}, allocator,
-                  cancel.token()),
-           ps::ErrorCode::Cancelled);
-  }
-  std::cout << "native exact capacity, six allocation failures and six "
-               "allocation cancellation points PASS\n";
+        "measure source, validation and identity work");
+  limits.maximum_work = measured.issued.work;
+  auto failed = run(native_key, values, {{"radius", std::int64_t{3}}}, {}, {},
+                    limits, &measured);
+  check(!failed.ok() &&
+            failed.status().code == ps::ErrorCode::ResourceExhausted &&
+            measured.live[ps::ResourceKind::Payload] == 0,
+        "native algorithm work admission releases all payload");
+  std::cout << "native Root peak=" << minimum
+            << "; six capacity boundaries and work exhaustion PASS\n";
 }
 void layouts() {
   std::vector<float> rgb(100, .25F), mask(25);
@@ -404,22 +440,139 @@ void layouts() {
                 number = x == 2 ? 1.F : 0.F;
               std::memcpy(bytes.data() + address, &number, 4);
             }
-        values[port] = take(ps::Value::create(values[port].descriptor(),
-                                              values[port].region(), layout,
-                                              bytes, values[port].facets()));
+        layout.byte_strides.insert(layout.byte_strides.begin(), {0, 0});
+        if (!layout.origin.empty())
+          layout.origin.insert(layout.origin.begin(), {0, 0});
+        values[port].layout = layout;
+        values[port].data = bytes;
       }
-      const auto image_before = values[0].copy_bytes(),
-                 mask_before = values[1].copy_bytes();
+      const auto image_before = bytes(values[0]),
+                 mask_before = bytes(values[1]);
       const auto result = take(invoke(key, values));
-      check(values[0].copy_bytes() == image_before &&
-                values[1].copy_bytes() == mask_before,
+      check(bytes(values[0]) == image_before && bytes(values[1]) == mask_before,
             "immutable views");
       auto dense = inputs(pixels(values[0]), pixels(values[1]), 5, 5);
-      check(result.copy_bytes() == take(invoke(key, dense)).copy_bytes(),
+      check(bytes(result) == bytes(take(invoke(key, dense))),
             "strided equivalence");
     }
   std::cout << "padded offset origin negative and zero stride invocation views "
                "PASS\n";
+}
+void batch_and_empty() {
+  for (const auto& key : keys) {
+    std::vector<float> rgb(400), mask(100);
+    for (unsigned cell = 0; cell < 4; ++cell)
+      for (unsigned i = 0; i < 25; ++i) {
+        for (unsigned c = 0; c < 4; ++c)
+          rgb[(cell * 25 + i) * 4 + c] = c == 3 ? 1.F : (cell + c + 1) * .125F;
+        mask[cell * 25 + i] = cell && (cell == 1   ? i == 12
+                                       : cell == 2 ? i % 5 == 0
+                                                   : i % 2 == 0);
+      }
+    const auto batched = std::vector<Input>{
+        value(rgb, {5, 5, 4}, ps::rgba_semantics(), {2, 2}),
+        value(mask, {5, 5}, ps::coverage_semantics(), {2, 2})};
+    const auto full = bytes(take(invoke(key, batched)));
+    for (unsigned cell = 0; cell < 4; ++cell) {
+      auto independent = inputs(
+          {rgb.begin() + cell * 100, rgb.begin() + (cell + 1) * 100},
+          {mask.begin() + cell * 25, mask.begin() + (cell + 1) * 25}, 5, 5);
+      const auto reference = bytes(take(invoke(key, independent)));
+      check(!std::memcmp(full.data() + cell * 400, reference.data(), 400),
+            "batch cells retain independent solver order");
+    }
+    auto mismatch = batched;
+    mismatch[1].description.tensors[0].batch_axes = {1, 4};
+    reject(invoke(key, mismatch), ps::ErrorCode::TypeMismatch);
+    auto full_mask = mask;
+    std::fill(full_mask.begin() + 75, full_mask.end(), 1.F);
+    reject(invoke(key, {batched[0], value(full_mask, {5, 5},
+                                          ps::coverage_semantics(), {2, 2})}),
+           ps::ErrorCode::OperationFailed);
+    rgb.back() = std::numeric_limits<float>::quiet_NaN();
+    const auto invalid = std::vector<Input>{
+        value(rgb, {5, 5, 4}, ps::rgba_semantics(), {2, 2}), batched[1]};
+    ps::PlanningOptions planning;
+    planning.output_regions = {
+        {"result", ps::Region({{0, 1}, {0, 1}, {2, 1}, {2, 1}, {0, 4}})}};
+    auto failed = run(key, invalid, {{"radius", std::int64_t{3}}}, planning);
+    check(
+        !failed.ok() && failed.status().code == ps::ErrorCode::InvalidArgument,
+        "ROI validates other batch cells");
+    auto registry = ps::make_default_operation_registry();
+    ps::ExecutionContext context(registry);
+    const auto root = take(context.resource_budget());
+    auto prepared = prepare(root, key, invalid, {{"radius", std::int64_t{3}}});
+    ps::GraphContext graph(prepared.document);
+    auto compiled = take(ps::Compiler(registry).compile(graph));
+    auto frozen = take(context.freeze(compiled.plan, prepared.bindings));
+    const auto before = root.statistics().peak[ps::ResourceKind::Payload];
+    auto empty = take(context.execute_fragments(
+        frozen, {{"result", take(ps::Footprint::none({2, 2, 5, 5, 4}))}}, {},
+        options()));
+    check(take(empty.results.at("result").descriptor())
+                  .tensor_coverage(0)
+                  .empty() &&
+              root.statistics().peak[ps::ResourceKind::Payload] == before,
+          "Empty validates static metadata without reading invalid samples or "
+          "allocating state/payload");
+  }
+  auto registry = ps::make_default_operation_registry();
+  for (auto extent : {std::uint64_t{32768}, std::uint64_t{32769}, UINT64_MAX}) {
+    ps::OperationMetadata image, mask;
+    image.result_schema = std::make_shared<ps::SchemaTemplate>(
+        schema({extent, extent, 4}, ps::rgba_semantics()));
+    mask.result_schema = std::make_shared<ps::SchemaTemplate>(
+        schema({extent, extent}, ps::coverage_semantics()));
+    const auto resolved = registry->resolve_traits(
+        native_key, {image, mask}, {{"radius", std::int64_t{32}}});
+    check(resolved.ok() == (extent == 32768),
+          "static shape boundary without sample allocation");
+  }
+  std::cout << "batch isolation, Empty no-read and static huge metadata PASS\n";
+}
+void active_cancellation() {
+  ps::ResourceBudget observed;
+  bool entered = false;
+  {
+    const unsigned side = 512, count = side * side;
+    std::vector<float> rgb(count * 4, .25F), mask(count, 1);
+    for (unsigned i = 3; i < rgb.size(); i += 4)
+      rgb[i] = 1;
+    mask[0] = 0;
+    auto registry = ps::make_default_operation_registry();
+    ps::ExecutionContext context(registry);
+    observed = take(context.resource_budget());
+    auto prepared = prepare(observed, native_key, inputs(rgb, mask, side, side),
+                            {{"radius", std::int64_t{32}}});
+    ps::GraphContext graph(prepared.document);
+    auto compiled = take(ps::Compiler(registry).compile(graph));
+    ps::CancellationSource stop;
+    const auto before = observed.statistics().issued.work;
+    auto running = std::async(std::launch::async, [&] {
+      return context.execute(compiled.plan, prepared.bindings, stop.token(),
+                             options());
+    });
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline &&
+           running.wait_for(std::chrono::milliseconds(0)) !=
+               std::future_status::ready) {
+      if (observed.statistics().issued.work - before > UINT64_C(1000000000)) {
+        entered = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    stop.cancel();
+    auto result = running.get();
+    check(entered && !result.ok() &&
+              result.status().code == ps::ErrorCode::Cancelled,
+          "cancel after numerical work admission returns no successful Result");
+  }
+  check(observed.statistics().live[ps::ResourceKind::Payload] == 0,
+        "active cancellation releases all Root payload");
+  std::cout << "active native cancellation after algorithm admission PASS\n";
 }
 }  // namespace
 int main() {
@@ -429,6 +582,8 @@ int main() {
     cache_policy();
     resources();
     layouts();
+    batch_and_empty();
+    active_cancellation();
     return 0;
   } catch (const std::exception& e) {
     std::cerr << e.what() << '\n';

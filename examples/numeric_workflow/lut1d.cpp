@@ -19,8 +19,10 @@
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
+#include "result_fixture.hpp"     // NOLINT(build/include_subdir)
 
 namespace {
+namespace rf = numeric_result_fixture;
 void require(bool condition, const char* message) {
   if (!condition)
     throw std::runtime_error(message);
@@ -51,18 +53,15 @@ struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
-  Fixture(ps::WorkflowNode node, const std::vector<ps::Value>& inputs) {
-    for (std::size_t i = 0; i < inputs.size(); ++i) {
-      const auto& value = inputs[i];
-      const auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1, name, value.descriptor(),
-                                 value.region(), value.layout(),
-                                 value.facets()});
-      bindings.inputs.push_back({name, value});
-    }
+  std::vector<ps::Value> backing;
+  Fixture(ps::WorkflowNode node, const std::vector<ps::Value>& inputs)
+      : backing(inputs) {
+    rf::declare_sources(&document, inputs);
     document.outputs = {{"values", node.id, "values"}};
     document.nodes = {std::move(node)};
+  }
+  ps::ExecutionBindings bindings(const ps::ResourceBudget& root) const {
+    return point_math_checks::bindings(root, backing, document);
   }
   ps::Result<ps::DemandResult> run(const ps::DemandQuery& query,
                                    bool cache = true,
@@ -80,7 +79,8 @@ struct Fixture {
     config.result_cache_bytes = cache ? cache_bytes : 0;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(registry, config);
-    auto snapshot = context.freeze(plan.value().plan, bindings);
+    auto snapshot = context.freeze(plan.value().plan,
+                                   bindings(take(context.resource_budget())));
     if (!snapshot.ok())
       return ps::Result<ps::DemandResult>(snapshot.status());
     ps::ExecutionOptions options;
@@ -120,7 +120,7 @@ ps::Footprint region(const std::vector<std::uint64_t>& shape,
 void value(const ps::DemandResult& result, const std::vector<std::uint64_t>& at,
            std::uint64_t expected, unsigned width = 8) {
   std::uint64_t bits = 0;
-  require(result.values.at("values").read(at, &bits, width).ok() &&
+  require(rf::read(result.results.at("values"), at, &bits, width).ok() &&
               bits == expected,
           "LUT1D expected bits");
 }
@@ -196,9 +196,10 @@ void examples(ps::CpuNumericProfile profile) {
   auto result =
       take(mixed.run({{"values", take(ps::Footprint::all({1}))}}, false));
   value(result, {0}, 0x3f000000, 4);
-  require(result.values.at("values").descriptor().element_type ==
-              ps::ElementType::Float32,
-          "constructor defaults to input dtype hint");
+  require(
+      result.results.at("values").schema().tensors[0].descriptor.element_type ==
+          ps::ElementType::Float32,
+      "constructor defaults to input dtype hint");
   std::cout << "scalar/channels analytic, descending, "
                "clamp/extrapolate/singleton and input-dtype default passed\n";
 }
@@ -214,20 +215,24 @@ void axis_and_support(ps::CpuNumericProfile profile) {
   auto bad = local.run({{"values", q}}, false);
   require(!bad.ok() && bad.status().detail.scope == ps::FailureScope::Run,
           "unrequested table channel fails Whole");
-  local.bindings.inputs[1].value = doubles({3, 2}, {0, 10, 1, 9, 2, 8});
+  local.backing[1] = doubles({3, 2}, {0, 10, 1, 9, 2, 8});
   auto result = take(local.run({{"values", q}}, false));
   value(result, {0, 0}, raw(.5));
   value(result, {1, 1}, raw(8));
+  require(take(result.results.at("values").descriptor()).tensor_coverage(0) ==
+              take(ps::Footprint::all({2, 2})),
+          "sparse LUT Result retains full Whole coverage");
   auto support = take(result.dependencies.source_support());
   require(support.at("input0") == take(ps::Footprint::all({2, 2})) &&
               support.at("input1") == take(ps::Footprint::all({3, 2})) &&
               support.at("input2") == take(ps::Footprint::all({3})),
           "Whole LUT complete support");
   for (const auto& source : support)
-    require(
-        take(result.dependencies.potential_dirty(source.first, source.second))
-                .at("values") == q,
-        "complete input edits dirty recorded outputs");
+    require(take(result.dependencies.potential_dirty(
+                     std::string(source.first.begin(), source.first.end()),
+                     source.second))
+                    .at("values") == q,
+            "complete input edits dirty recorded outputs");
   Fixture selected(node(false, profile),
                    {doubles({1}, {0}),
                     array(ps::ElementType::Float64, {3}, {raw(7), nan, nan}),
@@ -275,18 +280,11 @@ void axis_and_support(ps::CpuNumericProfile profile) {
          "collapsed "
          "coordinates, signed-zero and singleton query validation passed\n";
 }
-ps::Value direct(const std::shared_ptr<ps::OperationRegistry>& registry,
-                 const ps::WorkflowNode& authored,
-                 const std::vector<ps::Value>& inputs) {
-  std::vector<ps::Region> demands;
-  for (const auto& v : inputs)
-    demands.push_back(v.region());
-  ps::ResourceBudget budget(ps::ResourceLimits{});
-  ps::ResourceAllocationScope scope(budget);
-  ps::OperationInvocation call(
-      inputs, demands, authored.parameters, ps::Backend::Cpu, {},
-      ps::Region::whole(inputs[0].descriptor().shape), budget.allocator());
-  return take(registry->invoke(authored.operation, call));
+ps::ResultRef execute_result(
+    const ps::WorkflowNode& authored, const std::vector<ps::Value>& inputs,
+    const std::shared_ptr<point_math_checks::Control>& control = {}) {
+  point_math_checks::Workflow workflow(authored, inputs, {}, control);
+  return take(workflow.run()).results.at("values");
 }
 ps::Value reversed_unaligned(const ps::Value& value) {
   const auto bytes = value.bytes();
@@ -307,18 +305,10 @@ ps::Value reversed_unaligned(const ps::Value& value) {
                                       std::move(buffer).freeze()));
 }
 void layouts_and_resources(ps::CpuNumericProfile profile) {
-  auto registry = ps::make_default_operation_registry();
   auto authored = node(true, profile);
   std::vector<ps::Value> dense{doubles({2, 2}, {0, 1, .25, .5}),
                                doubles({2, 2}, {0, 10, 2, 8}),
                                doubles({3}, {0, 1, 1})};
-  ps::DependencyRequest request;
-  for (const auto& input : dense)
-    request.inputs.push_back({input.descriptor(), {}});
-  request.parameters = authored.parameters;
-  request.outputs = region({2, 2}, {ps::Region({{1, 1}, {1, 1}})});
-  request.snapshot_identity = "LUT1D-direct";
-  request.limits.maximum_work = UINT64_C(16) << 30;
   for (unsigned mask = 0; mask < 8; ++mask) {
     auto inputs = dense;
     for (unsigned p = 0; p < 3; ++p)
@@ -330,16 +320,16 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
       require(fesetround(mode) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
                   feraiseexcept(FE_DIVBYZERO) == 0,
               "set LUT fenv");
-      auto result = direct(registry, authored, inputs);
+      auto control = std::make_shared<point_math_checks::Control>();
+      control->rounding = mode;
+      auto result = execute_result(authored, inputs, control);
       std::uint64_t bits = 0;
-      std::memcpy(&bits,
-                  result.bytes().data() + take(result.byte_address({1, 1})), 8);
+      require(rf::read(result, {1, 1}, &bits, 8).ok(), "LUT Result read");
       require(bits == raw(9), "LUT strided bits");
-      auto narrow = direct(
-          registry, node(true, profile, ps::ElementType::Float32), inputs);
+      auto narrow = execute_result(
+          node(true, profile, ps::ElementType::Float32), inputs, control);
       std::uint32_t bits32 = 0;
-      std::memcpy(&bits32,
-                  narrow.bytes().data() + take(narrow.byte_address({1, 1})), 4);
+      require(rf::read(narrow, {1, 1}, &bits32, 4).ok(), "LUT Float32 read");
       require(bits32 == UINT32_C(0x41100000), "LUT Float32 strided/fenv bits");
       require(
           fegetround() == mode && fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO,
@@ -365,39 +355,51 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
       take(ps::Value::from_storage({ps::ElementType::Float64, {3}},
                                    ps::Region::whole({3}), {0, {0}},
                                    zero.storage()))};
-  auto alias_result = direct(registry, authored, aliases);
+  auto alias_result = execute_result(authored, aliases);
   std::uint64_t bits = 0;
-  std::memcpy(
-      &bits,
-      alias_result.bytes().data() + take(alias_result.byte_address({1, 1})), 8);
+  require(rf::read(alias_result, {1, 1}, &bits, 8).ok(), "aliased Result read");
   require(bits == raw(7), "zero-stride all-port singleton LUT");
   Fixture fixture(authored, dense);
+  const auto empty =
+      take(fixture.run({{"values", take(ps::Footprint::none({2, 2}))}}, false));
   require(
-      fixture.run({{"values", take(ps::Footprint::none({2, 2}))}}, false).ok(),
+      take(empty.results.at("values").descriptor()).tensor_coverage(0).empty(),
       "Empty no payload");
+  auto registry = ps::make_default_operation_registry();
+  std::vector<ps::OperationMetadata> metadata;
+  for (const auto& input : dense) {
+    ps::OperationMetadata item;
+    item.result_schema =
+        std::make_shared<ps::SchemaTemplate>(rf::source_schema(input));
+    metadata.push_back(std::move(item));
+  }
   for (unsigned kind = 0; kind < 8; ++kind) {
-    auto bad = request;
+    auto bad = metadata;
+    auto parameters = authored.parameters;
+    const auto descriptor = [&](unsigned port, ps::ValueDescriptor next) {
+      auto schema = *bad[port].result_schema;
+      schema.tensors[0].descriptor = std::move(next);
+      bad[port].result_schema =
+          std::make_shared<ps::SchemaTemplate>(std::move(schema));
+    };
     if (kind == 0)
-      bad.inputs[1].descriptor.shape = {2, 3};
+      descriptor(1, {ps::ElementType::Float64, {2, 3}});
     if (kind == 1)
-      bad.inputs[1].descriptor.shape = {1048577, 2};
+      descriptor(1, {ps::ElementType::Float64, {1048577, 2}});
     if (kind == 2)
-      bad.inputs[2].descriptor.element_type = ps::ElementType::Float32;
+      descriptor(2, {ps::ElementType::Float32, {3}});
     if (kind == 3)
-      bad.inputs[2].descriptor.shape = {2};
+      descriptor(2, {ps::ElementType::Float64, {2}});
     if (kind == 4)
-      bad.parameters.erase("dtype");
+      parameters.erase("dtype");
     if (kind == 5)
-      bad.parameters["out_of_domain"] = std::string("wrap");
+      parameters["out_of_domain"] = std::string("wrap");
     if (kind == 6)
-      bad.inputs[0].descriptor.element_type = ps::ElementType::Int64;
+      descriptor(0, {ps::ElementType::Int64, {2, 2}});
     if (kind == 7)
-      bad.inputs[1].descriptor.shape = {2, UINT64_C(1) << 40};
-    require(
-        !registry
-             ->resolve_traits(authored.operation, bad.inputs, bad.parameters)
-             .ok(),
-        "LUT static schema bounds");
+      descriptor(1, {ps::ElementType::Float64, {2, UINT64_C(1) << 40}});
+    require(!registry->resolve_traits(authored.operation, bad, parameters).ok(),
+            "LUT static Result schema bounds");
   }
   std::cout << "all-port negative/unaligned strides/fenv, "
                "axis/arithmetic work/cancel/Whole release, zero strides and "
@@ -482,7 +484,7 @@ void baking_chains(ps::CpuNumericProfile profile) {
       value(result, {0}, raw(kind < 2 ? .125 : kind == 2 ? .5 : .15625));
     }
     if (kind >= 2) {
-      fixture.bindings.inputs[2].value = inputs[1];
+      fixture.backing[2] = inputs[1];
       auto invalid =
           fixture.run({{"values", take(ps::Footprint::all(shape))}}, false);
       require(!invalid.ok() &&
@@ -493,58 +495,74 @@ void baking_chains(ps::CpuNumericProfile profile) {
   std::cout << "all six baking-to-LUT chains and separate discrete "
                "approximation/axis acceptance passed\n";
 }
-void cache_atoms_and_large(ps::CpuNumericProfile profile) {
+void cache_and_large(ps::CpuNumericProfile profile) {
   Fixture fixture(
       node(false, profile),
       {doubles({1}, {.25}), doubles({3}, {0, 1, 2}), doubles({3}, {0, 1, .5})});
   ps::GraphContext graph(fixture.document);
   auto plan = take(ps::Compiler(fixture.registry).compile(graph));
-  ps::InputSnapshotStore store;
-  for (auto& binding : fixture.bindings.inputs) {
-    binding.snapshot = std::make_shared<const ps::InputSnapshot>(
-        take(store.import_value(binding.value)));
-    binding.value = {};
-  }
   ps::ExecutionContextConfig config;
   config.cpu_workers = 1;
   config.result_cache_bytes = 4 * 1024 * 1024;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext context(fixture.registry, config);
-  auto demand = take(context.open_demand(plan.plan, fixture.bindings));
+  const auto root = take(context.resource_budget());
+  auto bindings = fixture.bindings(root);
+  auto demand = take(context.open_demand(plan.plan, bindings));
   ps::ExecutionOptions options;
   options.maximum_dependency_work = UINT64_C(32) << 30;
   options.dependencies.maximum_work = UINT64_C(16) << 30;
   options.maximum_dependency_cache_work = 128 * 1024 * 1024;
   ps::DemandQuery query{{"values", take(ps::Footprint::all({1}))}};
-  value(take(demand.request(query, {}, options)), {0}, raw(.5));
-  require(take(demand.request(query, {}, options)).diagnostics.cache_hits > 0,
-          "LUT warm cache");
-  fixture.bindings.inputs[0].snapshot =
-      std::make_shared<const ps::InputSnapshot>(
-          take(store.import_value(doubles({1}, {.75}))));
-  require(demand.replace_bindings(fixture.bindings).ok(),
-          "LUT input replacement");
+  const auto preparation = plan.plan.steps()[0].prepared;
+  require(preparation != nullptr, "LUT static preparation");
+  const auto cold = take(demand.request(query, {}, options));
+  value(cold, {0}, raw(.5));
+  const auto repeated = take(demand.request(query, {}, options));
+  require(cold.results.at("values").object_id() ==
+              repeated.results.at("values").object_id(),
+          "same LUT demand retains completed Result");
+  const auto fresh = fixture.bindings(root);
+  const auto warm = take(context.execute_fragments(
+      take(context.freeze(plan.plan, fresh)), query, {}, options));
+  require(warm.diagnostics.cache_hits > 0 &&
+              rf::bytes(cold.results.at("values")) ==
+                  rf::bytes(warm.results.at("values")),
+          "fresh LUT sources reuse verified content");
+  const auto association = warm.results.at("values").association();
+  for (unsigned port = 0; port < 3; ++port)
+    require(
+        std::find(association.begin(), association.end(),
+                  fresh.inputs[port].result.object_id()) != association.end() &&
+            std::find(association.begin(), association.end(),
+                      bindings.inputs[port].result.object_id()) ==
+                association.end(),
+        "cached LUT refreshes source associations");
+  bindings.inputs[0].result =
+      point_math_checks::source(root, doubles({1}, {.75}),
+                                fixture.document.inputs[0].result_schema.get());
+  require(demand.replace_bindings(bindings).ok(), "LUT input replacement");
   auto changed = take(demand.request(query, {}, options));
   value(changed, {0}, raw(1.5));
   require(take(changed.dependencies.source_support()).at("input1") ==
               take(ps::Footprint::all({3})),
           "query replacement retains complete table dependency");
-  fixture.bindings.inputs[1].snapshot =
-      std::make_shared<const ps::InputSnapshot>(
-          take(store.import_value(doubles({3}, {0, 1, 4}))));
-  require(demand.replace_bindings(fixture.bindings).ok(),
-          "LUT table replacement");
+  bindings.inputs[1].result =
+      point_math_checks::source(root, doubles({3}, {0, 1, 4}),
+                                fixture.document.inputs[1].result_schema.get());
+  require(demand.replace_bindings(bindings).ok(), "LUT table replacement");
   value(take(demand.request(query, {}, options)), {0}, raw(2.5));
-  fixture.bindings.inputs[2].snapshot =
-      std::make_shared<const ps::InputSnapshot>(
-          take(store.import_value(doubles({3}, {0, 2, 1}))));
-  require(demand.replace_bindings(fixture.bindings).ok(),
-          "LUT axis replacement");
+  bindings.inputs[2].result =
+      point_math_checks::source(root, doubles({3}, {0, 2, 1}),
+                                fixture.document.inputs[2].result_schema.get());
+  require(demand.replace_bindings(bindings).ok(), "LUT axis replacement");
   changed = take(demand.request(query, {}, options));
   value(changed, {0}, raw(.75));
   require(take(changed.dependencies.source_support()).at("input1") ==
               take(ps::Footprint::all({3})),
           "axis replacement retains complete table dependency");
+  require(plan.plan.steps()[0].prepared == preparation,
+          "LUT source replacement reuses static preparation");
   const auto nan = UINT64_C(0x7ff0000000000042);
   Fixture isolated(node(true, profile), {doubles({1, 2}, {.5, .5}),
                                          array(ps::ElementType::Float64, {2, 2},
@@ -587,9 +605,12 @@ void cache_atoms_and_large(ps::CpuNumericProfile profile) {
       {{"values",
         region({1, columns}, {ps::Region({{0, 1}, {columns - 1, 1}})})}},
       false);
-  require(!rejected_large.ok() &&
-              rejected_large.status().code == ps::ErrorCode::ResourceExhausted,
-          "giant channels require full input/output payload");
+  require(
+      !rejected_large.ok() &&
+          rejected_large.status().code == ps::ErrorCode::ResourceExhausted &&
+          rejected_large.status().reason == ps::FailureReason::CapacityLimit &&
+          rejected_large.status().detail.node_id == 1,
+      "giant channels require full output payload at LUT node");
   const unsigned length = 1048576;
   Fixture full_grid(node(false, profile),
                     {doubles({1}, {0}), doubles({1}, {7}),
@@ -602,28 +623,50 @@ void cache_atoms_and_large(ps::CpuNumericProfile profile) {
       take(full_grid.run({{"values", take(ps::Footprint::all({1}))}}, false,
                          UINT64_C(64) * 1024 * 1024, 0, 16 * 1024 * 1024));
   value(result, {0}, raw(7));
+  require(result.diagnostics.managed_resources &&
+              result.diagnostics.managed_resources
+                      ->peak[ps::ResourceKind::Metadata] >=
+                  static_cast<std::uint64_t>(length) * 8 &&
+              result.diagnostics.managed_resources
+                      ->peak[ps::ResourceKind::Payload] <
+                  static_cast<std::uint64_t>(length) * 8,
+          "maximum LUT grid is Root-accounted without dense table Payload");
   require(take(result.dependencies.source_support()).at("input1") ==
               take(ps::Footprint::all({1})),
           "full grid validation keeps scalar backing for constant table");
   std::cout << "input/table/axis cache replacement, Whole failures, "
                "giant-channel budget and complete maximum-L grid passed\n";
 }
+struct FailedTableSource {
+  unsigned* calls;
+  explicit FailedTableSource(unsigned* count) : calls(count) {}
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase&) {
+    ++*calls;
+    return ps::Result<ps::ResultProgramPoll>(ps::Status{
+        ps::ErrorCode::OperationFailed, "required LUT table producer"});
+  }
+};
 void typed_and_upstream(ps::CpuNumericProfile profile) {
   auto input = array(ps::ElementType::Float32, {1, 1, 4},
                      {0x3e800000, 0, 0, 0x40000000});
   const auto facet = take(ps::encode_semantic(ps::rgba_semantics()));
-  input =
-      take(ps::Value::from_storage(input.descriptor(), input.region(),
-                                   input.layout(), input.storage(), {facet}));
   std::vector<ps::Value> inputs{input, doubles({2}, {0, 2}),
                                 doubles({3}, {0, 1, 1})};
   auto registry = ps::make_default_operation_registry();
   auto authored = node(false, profile);
   Fixture typed(authored, inputs);
+  auto typed_schema = *typed.document.inputs[0].result_schema;
+  typed_schema.tensors[0].facets = {facet};
+  typed_schema.tensors[0].layout.spatial = true;
+  typed_schema.tensors[0].layout.channel_axis = 2;
+  typed.document.inputs[0].result_schema =
+      std::make_shared<ps::SchemaTemplate>(std::move(typed_schema));
   auto failed_typed = typed.run(
       {{"values", region({1, 1, 4}, {ps::Region({{0, 1}, {0, 1}, {0, 1}})})}},
       false);
-  require(!failed_typed.ok(),
+  require(!failed_typed.ok() &&
+              failed_typed.status().code == ps::ErrorCode::InvalidArgument &&
+              failed_typed.status().detail.input_id == 1,
           "full typed Image validation rejects unrequested alpha");
   registry = ps::make_default_operation_registry(false);
   unsigned calls = 0;
@@ -631,13 +674,17 @@ void typed_and_upstream(ps::CpuNumericProfile profile) {
   source.key = "manual.lut_table";
   source.traits.input_count = 0;
   source.traits.input_schema.clear();
-  source.traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
-  source.traits.outputs[0].fixed_output_shape = {2};
-  source.traits.outputs[0].output_element_type = ps::ElementType::Float64;
-  source.callback = [&](const auto&) {
-    ++calls;
-    return ps::Result<ps::Value>(ps::Status{ps::ErrorCode::OperationFailed,
-                                            "required LUT table producer"});
+  auto& output = source.traits.outputs[0];
+  output.region_rule = ps::OperationRegionRule::Whole;
+  output.output_schema.kind = ps::OperationPortKind::Result;
+  auto schema = rf::source_schema(doubles({2}, {0, 2}));
+  output.output_schema.result_schema_id = schema.id;
+  output.output_schema.result_schema_version = schema.version;
+  output.result_schema = std::move(schema);
+  output.continuation_bytes = sizeof(FailedTableSource);
+  output.maximum_dependency_stages = 8;
+  source.start_result = [&](const auto&, const auto& allocator) {
+    return ps::ResultContinuation::make<FailedTableSource>(allocator, &calls);
   };
   require(registry->register_operation(std::move(source)).ok() &&
               registry->freeze().ok(),
@@ -647,29 +694,80 @@ void typed_and_upstream(ps::CpuNumericProfile profile) {
       {doubles({1}, {2}), doubles({2}, {0, 2}), doubles({3}, {0, 1, 2})});
   fixture.registry = registry;
   fixture.document.inputs.erase(fixture.document.inputs.begin() + 1);
-  fixture.bindings.inputs.erase(fixture.bindings.inputs.begin() + 1);
+  fixture.backing.erase(fixture.backing.begin() + 1);
   fixture.document.nodes[0].inputs[1] = ps::WorkflowNodeOutput{2, "value"};
   fixture.document.nodes.push_back({2, "manual.lut_table", {}, {}});
   auto q = ps::DemandQuery{{"values", take(ps::Footprint::all({1}))}};
   auto failed = fixture.run(q, false);
   require(!failed.ok() &&
+              failed.status().code == ps::ErrorCode::OperationFailed &&
               failed.status().message == "required LUT table producer" &&
               calls == 1,
           "Whole table producer precedes invalid axis");
-  fixture.bindings.inputs[1].value = doubles({3}, {0, 1, 1});
+  fixture.backing[1] = doubles({3}, {0, 1, 1});
   failed = fixture.run(q, false);
   require(!failed.ok() &&
+              failed.status().code == ps::ErrorCode::OperationFailed &&
               failed.status().message == "required LUT table producer" &&
               calls == 2,
           "Whole table producer precedes query reject");
-  fixture.bindings.inputs[0].value = doubles({1}, {.5});
+  fixture.backing[0] = doubles({1}, {.5});
   failed = fixture.run(q, false);
   require(!failed.ok() &&
+              failed.status().code == ps::ErrorCode::OperationFailed &&
               failed.status().message == "required LUT table producer" &&
               calls == 3,
           "selected table upstream failure preserved");
   std::cout << "full typed Image validation and complete upstream table "
                "producer order passed\n";
+}
+
+void retained_output(ps::CpuNumericProfile profile) {
+  for (bool channels : {false, true}) {
+    ps::ResourceBudget root;
+    ps::ResultRef output;
+    ps::ResultTensorReadWindow window;
+    std::vector<std::weak_ptr<const ps::CpuStorage>> input_owners;
+    const auto shape = channels ? std::vector<std::uint64_t>{1, 2}
+                                : std::vector<std::uint64_t>{2};
+    {
+      std::vector<ps::Value> inputs{
+          doubles(shape, {.25, .75}),
+          channels ? doubles({2, 2}, {0, 10, 2, 8}) : doubles({2}, {0, 2}),
+          doubles({3}, {0, 1, 1})};
+      for (const auto& input : inputs)
+        input_owners.push_back(input.storage());
+      point_math_checks::Workflow workflow(node(channels, profile), inputs);
+      root = workflow.root;
+      output = take(workflow.run()).results.at("values");
+      window = take(output.acquire_tensor(take(output.descriptor()), 0,
+                                          ps::Region::whole(shape)));
+    }
+    for (const auto& owner : input_owners)
+      require(owner.expired(), "LUT output retires every source backing");
+    require(root.statistics().live[ps::ResourceKind::Payload] == 16,
+            "escaped LUT Result/window share one output owner");
+    double number = 0;
+    require(rf::read(output,
+                     channels ? std::vector<std::uint64_t>{0, 0}
+                              : std::vector<std::uint64_t>{0},
+                     &number, 8)
+                    .ok() &&
+                number == .5,
+            "LUT Result survives source and context retirement");
+    output = {};
+    const auto row =
+        take(window.row_run(channels ? std::vector<std::uint64_t>{0, 1}
+                                     : std::vector<std::uint64_t>{1}));
+    std::memcpy(&number, row.data, 8);
+    require(number == (channels ? 8.5 : 1.5) &&
+                root.statistics().live[ps::ResourceKind::Payload] == 16,
+            "authorized LUT window survives Result release");
+    window = {};
+    point_math_checks::released(root);
+  }
+  std::cout << "source retirement, escaped Result/window, one Payload owner "
+               "and final all-Root release passed\n";
 }
 
 void oracle(ps::CpuNumericProfile profile) {
@@ -730,9 +828,8 @@ void oracle(ps::CpuNumericProfile profile) {
     }
     for (const auto& at : coords) {
       std::uint64_t bits = 0;
-      require(result.value()
-                  .values.at("values")
-                  .read(at, &bits, dtype == 4 ? 4 : 8)
+      require(rf::read(result.value().results.at("values"), at, &bits,
+                       dtype == 4 ? 4 : 8)
                   .ok(),
               "LUT oracle read");
       std::cout << std::hex << bits << ' ';
@@ -744,6 +841,8 @@ void oracle(ps::CpuNumericProfile profile) {
 int main(int argc, char** argv) {
   try {
     const std::string selected = argc > 1 ? argv[1] : "strict";
+    require(selected == "strict" || selected == "apple" || selected == "x86",
+            "profile");
     const auto profile = selected == "strict" ? ps::CpuNumericProfile::Strict
                          : selected == "apple"
                              ? ps::CpuNumericProfile::AppleSiliconNeon
@@ -755,8 +854,9 @@ int main(int argc, char** argv) {
       axis_and_support(profile);
       layouts_and_resources(profile);
       baking_chains(profile);
-      cache_atoms_and_large(profile);
+      cache_and_large(profile);
       typed_and_upstream(profile);
+      retained_output(profile);
     }
     return 0;
   } catch (const std::exception& error) {

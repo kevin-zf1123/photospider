@@ -15,6 +15,7 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_color_coordinate.hpp"
 #include "01-numeric/exact_rgb.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
@@ -68,8 +69,16 @@ Result<OperationPreparation> prepare(
           : 3;
   if (inputs.size() != (rational ? 5U : 3U))
     return Answer(mismatch("color-ramp input count mismatch"));
+  std::vector<ValueDescriptor> descriptors;
   for (std::size_t port = 0; port < inputs.size(); ++port) {
-    const auto& d = inputs[port].descriptor;
+    if (!inputs[port].result_schema ||
+        !inputs[port].result_schema->fields.empty() ||
+        inputs[port].result_schema->tensors.size() != 1)
+      return Answer(mismatch("color-ramp requires one tensor per Result"));
+    const auto& tensor = inputs[port].result_schema->tensors[0];
+    descriptors.push_back(
+        {tensor.descriptor.element_type, tensor.sample_shape()});
+    const auto& d = descriptors.back();
     if ((port < 3 && d.element_type != ElementType::Float32 &&
          d.element_type != ElementType::Float64) ||
         (port >= 3 && d.element_type != ElementType::Int64) ||
@@ -88,14 +97,14 @@ Result<OperationPreparation> prepare(
     if (!port && count > (UINT64_C(1) << 40) / channels)
       return Answer(mismatch("color-ramp output product exceeds 2^40"));
   }
-  const auto knots = inputs[1].descriptor.shape[0];
-  if (!knots || knots > 65536 || inputs[2].descriptor.shape[0] != knots ||
-      inputs[2].descriptor.shape[1] != (rational ? 2 : channels) ||
-      (rational && (inputs[3].descriptor.shape[0] != knots ||
-                    inputs[4].descriptor.shape[0] != knots)))
+  const auto knots = descriptors[1].shape[0];
+  if (!knots || knots > 65536 || descriptors[2].shape[0] != knots ||
+      descriptors[2].shape[1] != (rational ? 2 : channels) ||
+      (rational &&
+       (descriptors[3].shape[0] != knots || descriptors[4].shape[0] != knots)))
     return Answer(
         mismatch("ramp requires matching K=1..65536 and color channels"));
-  for (const auto& facet : inputs[2].facets) {
+  for (const auto& facet : inputs[2].result_schema->tensors[0].facets) {
     if (facet.key != "photospider.color-array")
       continue;
     if (rational)
@@ -146,17 +155,18 @@ Result<OperationPreparation> prepare(
   auto facet = encode_color_array(description);
   if (!facet.ok())
     return Answer(facet.status());
-  auto shape = inputs[0].descriptor.shape;
+  auto shape = descriptors[0].shape;
   shape.push_back(channels);
   OperationPreparation prepared;
   prepared.state = std::move(program);
   prepared.outputs.resize(1);
   auto& output = prepared.outputs[0];
-  output.metadata.descriptor = {
-      dtype == "float32" ? ElementType::Float32 : ElementType::Float64,
-      std::move(shape)};
-  output.metadata.facets = {facet.take_value()};
-  output.metadata.atomic_trailing_axes = 1;
+  auto schema = numeric_ops::numeric_tensor_schema(
+      dtype == "float32" ? ElementType::Float32 : ElementType::Float64, shape);
+  schema.tensors[0].facets = {facet.take_value()};
+  schema.tensors[0].atomic_trailing_axes = 1;
+  output.metadata.result_schema =
+      std::make_shared<const SchemaTemplate>(std::move(schema));
   return Answer(std::move(prepared));
 }
 struct RampPoint {
@@ -169,30 +179,30 @@ struct RampState {
   std::conditional_t<rgb, numeric_ops::ExactRgb,
                      numeric_ops::ExactColorCoordinate>
       arithmetic;
-  const OperationInvocation& call;
-  const ResourceBudget* budget;
+  const ResultProgramPhase& phase;
   std::function<Status(std::uint64_t)> consume;
   std::vector<std::uint64_t> at;
   ResourceVector<std::uint64_t> stops;
-  RampState(const RampProgram* value, const OperationInvocation& invocation)
+  std::array<std::optional<numeric_ops::MathTensorReader>, 5> inputs;
+  RampState(const RampProgram* value, const ResultProgramPhase& invocation)
       : program(value),
         arithmetic(value->profile),
-        call(invocation),
-        budget(resource_internal::metadata_budget()),
-        consume([this](auto amount) { return work(amount); }),
-        at(invocation.inputs[0].descriptor().shape.size(), 0) {}
-  Status work(std::uint64_t amount) const {
-    if (call.cancellation.cancelled())
-      return {ErrorCode::Cancelled, {}};
-    return budget ? budget->consume({amount}) : Status::success();
+        phase(invocation),
+        consume(invocation.consume_work),
+        at(invocation.query.inputs[0]
+               .result_schema->tensors[0]
+               .sample_shape()
+               .size(),
+           0),
+        stops(ResourceAllocator<std::uint64_t>(invocation.resources)) {
+    for (unsigned port = 0; port < (program->rational ? 5U : 3U); ++port)
+      inputs[port].emplace(phase.tensors->at({port, 0}),
+                           phase.query.cancellation);
   }
+  Status work(std::uint64_t amount) const { return consume(amount); }
   void advance() {
-    const auto& shape = call.inputs[0].descriptor().shape;
-    for (auto i = at.size(); i; --i) {
-      if (++at[i - 1] < shape[i - 1])
-        break;
-      at[i - 1] = 0;
-    }
+    numeric_ops::math_next(
+        at, phase.query.inputs[0].result_schema->tensors[0].sample_shape());
   }
   Status failure(unsigned port, std::uint64_t row, const char* message,
                  FailureReason reason = FailureReason::InvalidDomain) const {
@@ -203,19 +213,15 @@ struct RampState {
                   {FailureOrigin::Domain, FailureScope::Run}};
     return status;
   }
-  Result<std::uint64_t> read(
-      unsigned port, const std::vector<std::uint64_t>& coordinate) const {
+  Result<std::uint64_t> read(unsigned port,
+                             const std::vector<std::uint64_t>& coordinate) {
     auto charged = work(coordinate.size() + 1);
     if (!charged.ok())
       return Result<std::uint64_t>(charged);
-    const auto& input = call.inputs[port];
-    std::uint64_t bits = 0;
-    const auto type = input.descriptor().element_type;
+    const auto type =
+        phase.tensors->at({port, 0}).spec().descriptor.element_type;
     const bool narrow = type == ElementType::Float32;
-    auto address = input.byte_address(coordinate);
-    if (!address.ok())
-      return Result<std::uint64_t>(address.status());
-    std::memcpy(&bits, input.bytes().data() + address.value(), narrow ? 4 : 8);
+    auto bits = inputs[port]->bits(coordinate);
     if (type == ElementType::Int64)
       return Result<std::uint64_t>(bits);
     const auto parts = BinaryParts::decode(bits, narrow);
@@ -267,38 +273,38 @@ struct RampState {
     }
     return Status::success();
   }
-  Result<Value> execute() {
-    using Answer = Result<Value>;
-    stops.resize(call.inputs[1].descriptor().shape[0]);
+  Status write(const ResourceVector<ResultTensorWriteWindow>& writers) {
+    using namespace numeric_ops;  // NOLINT(build/namespaces)
+    stops.resize(
+        phase.query.inputs[1].result_schema->tensors[0].sample_shape()[0]);
     for (unsigned row = 0; row < stops.size(); ++row) {
       auto value = read(1, {row});
       if (!value.ok())
-        return Answer(value.status());
+        return value.status();
       stops[row] = value.value();
       if (row && BinaryParts::decode(stops[row - 1], false).order_key() >=
                      BinaryParts::decode(stops[row], false).order_key())
-        return Answer(failure(1, row, "ramp stops require strict increase"));
+        return failure(1, row, "ramp stops require strict increase");
     }
-    const auto count = call.inputs[0].region().element_count().value();
+    const auto count = math_take(
+        phase.query.inputs[0].result_schema->tensors[0].sample_count());
     const auto lower = BinaryParts::decode(stops.front(), false).order_key();
     const auto upper = BinaryParts::decode(stops.back(), false).order_key();
     for (std::uint64_t i = 0; i < count; ++i, advance()) {
       auto query = read(0, at);
       if (!query.ok())
-        return Answer(query.status());
+        return query.status();
       const auto key = BinaryParts::decode(query.value(), false).order_key();
       if (program->reject && (key < lower || key > upper))
-        return Answer(failure(0, at[0], "ramp query outside stops"));
+        return failure(0, at[0], "ramp query outside stops");
     }
-    const auto& resolved = call.prepared->traits().outputs[0];
-    auto allocated = MutableValue::allocate(
-        {resolved.output_element_type, resolved.fixed_output_shape},
-        call.output_region, call.allocator);
-    if (!allocated.ok())
-      return Answer(allocated.status());
-    auto output = allocated.take_value();
-    const bool narrow = resolved.output_element_type == ElementType::Float32;
+    const auto& resolved = phase.query.output.result_schema->tensors[0];
+    const bool narrow =
+        resolved.descriptor.element_type == ElementType::Float32;
     const unsigned width = narrow ? 4 : 8;
+    MathTensorWriter output(writers[0]);
+    auto coordinate = at;
+    coordinate.push_back(0);
     const unsigned source_channels = program->rational ? 2 : program->channels;
     const unsigned hue_channel =
         program->description.model == ColorModel::Hsl ? 0 : 2;
@@ -306,14 +312,14 @@ struct RampState {
       RampPoint point;
       auto status = classify(&point);
       if (!status.ok())
-        return Answer(status);
+        return status;
       std::array<std::array<std::uint64_t, 4>, 2> rows{};
       std::array<std::int64_t, 2> numerator{}, denominator{};
       for (unsigned row = 0; row < point.count; ++row) {
         for (unsigned channel = 0; channel < source_channels; ++channel) {
           auto value = read(2, {point.first + row, channel});
           if (!value.ok())
-            return Answer(value.status());
+            return value.status();
           rows[row][channel] = value.value();
           const auto decoded = BinaryParts::decode(value.value(), false);
           if ((program->description.model == ColorModel::Cmyk &&
@@ -324,22 +330,22 @@ struct RampState {
               ((program->description.model == ColorModel::Cielch ||
                 program->description.model == ColorModel::Oklch) &&
                channel == 1 && decoded.negative && decoded.magnitude))
-            return Answer(failure(2, point.first + row,
-                                  "ramp color component outside model domain"));
+            return failure(2, point.first + row,
+                           "ramp color component outside model domain");
         }
         if (program->rational) {
           auto p = read(3, {point.first + row});
           auto q = read(4, {point.first + row});
           if (!p.ok())
-            return Answer(p.status());
+            return p.status();
           if (!q.ok())
-            return Answer(q.status());
+            return q.status();
           const auto pbits = p.value(), qbits = q.value();
           std::memcpy(&numerator[row], &pbits, 8);
           std::memcpy(&denominator[row], &qbits, 8);
           if (denominator[row] <= 0)
-            return Answer(failure(4, point.first + row,
-                                  "ramp hue denominator must be positive"));
+            return failure(4, point.first + row,
+                           "ramp hue denominator must be positive");
         }
         if constexpr (rgb) {
           if (program->channels == 4) {
@@ -348,17 +354,15 @@ struct RampState {
                 alpha.order_key() >
                     BinaryParts::decode(UINT64_C(0x3ff0000000000000), false)
                         .order_key())
-              return Answer(failure(2, point.first + row,
-                                    "RGB alpha outside [0,1]",
-                                    FailureReason::InvalidAssociation));
+              return failure(2, point.first + row, "RGB alpha outside [0,1]",
+                             FailureReason::InvalidAssociation);
             if (!alpha.magnitude && program->description.association ==
                                         ColorAssociation::Premultiplied) {
               for (unsigned channel = 0; channel < 3; ++channel)
                 if (BinaryParts::decode(rows[row][channel], false).magnitude)
-                  return Answer(
-                      failure(2, point.first + row,
-                              "zero alpha requires zero premultiplied RGB",
-                              FailureReason::InvalidAssociation));
+                  return failure(2, point.first + row,
+                                 "zero alpha requires zero premultiplied RGB",
+                                 FailureReason::InvalidAssociation);
             }
           }
         }
@@ -392,15 +396,15 @@ struct RampState {
         if (!result.ok()) {
           auto status = result.status();
           if (status.code == ErrorCode::OperationFailed)
-            return Answer(
-                failure(2, point.first, status.message.c_str(), status.reason));
-          return Answer(status);
+            return failure(2, point.first, status.message.c_str(),
+                           status.reason);
+          return status;
         }
         for (unsigned channel = 0; channel < program->channels; ++channel) {
           const auto bits = result.value()[channel];
-          std::memcpy(static_cast<std::uint8_t*>(output.data()) +
-                          (i * program->channels + channel) * width,
-                      &bits, width);
+          coordinate.assign(at.begin(), at.end());
+          coordinate.push_back(channel);
+          std::memcpy(output.address(coordinate), &bits, width);
         }
       } else {
         for (unsigned channel = 0; channel < program->channels; ++channel) {
@@ -423,43 +427,38 @@ struct RampState {
                                             numerator, denominator, rational,
                                             direct, pi_power, narrow, consume);
           if (!result.ok())
-            return Answer(result.status());
+            return result.status();
           if (BinaryParts::decode(result.value(), narrow).infinite)
-            return Answer(failure(2, point.first, "ramp output overflow",
-                                  FailureReason::ArithmeticOverflow));
+            return failure(2, point.first, "ramp output overflow",
+                           FailureReason::ArithmeticOverflow);
           const auto bits = result.value();
-          std::memcpy(output.data() + (i * program->channels + channel) * width,
-                      &bits, width);
+          coordinate.assign(at.begin(), at.end());
+          coordinate.push_back(channel);
+          std::memcpy(output.address(coordinate), &bits, width);
         }
       }
     }
-    auto status = work(1);
-    return status.ok() ? std::move(output).publish(resolved.output_facets,
-                                                   call.resources)
-                       : Answer(status);
+    return work(1);
   }
 };
 template <bool rgb>
-Result<Value> execute_ramp(const OperationInvocation& call) {
-  using Answer = Result<Value>;
-  using State = RampState<rgb>;
-  try {
-    auto allocated = call.allocator.allocate(sizeof(State));
-    if (!allocated.ok())
-      return Answer(allocated.status());
-    auto buffer = allocated.take_value();
+struct RampKernel final {
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    using State = RampState<rgb>;
+    auto buffer =
+        numeric_ops::math_take(phase.allocator.allocate(sizeof(State)));
+    static_assert(alignof(State) <= alignof(std::max_align_t));
     std::unique_ptr<State, void (*)(State*)> state(
         new (buffer.data()) State(
-            static_cast<const RampProgram*>(call.prepared->state()), call),
+            static_cast<const RampProgram*>(phase.query.prepared->state()),
+            phase),
         [](auto* value) { value->~State(); });
-    return state->execute();
-  } catch (const std::bad_alloc&) {
-    return Answer(Status{ErrorCode::ResourceExhausted,
-                         {},
-                         FailureReason::CapacityLimit,
-                         {FailureOrigin::Resource, FailureScope::Run}});
+    return state->write(writers);
   }
-}
+};
+template <bool rgb>
+using RampResultProgram = numeric_ops::WholeTensorProgram<RampKernel<rgb>>;
 
 OperationDefinition operation(const std::string& name, ColorModel model,
                               std::optional<ColorHueUnit> hue,
@@ -469,8 +468,10 @@ OperationDefinition operation(const std::string& name, ColorModel model,
   auto& traits = result.traits;
   traits.input_count = hue == ColorHueUnit::RationalPi ? 5 : 3;
   traits.input_schema.resize(traits.input_count);
-  for (unsigned port = 0; port < traits.input_count; ++port)
+  for (unsigned port = 0; port < traits.input_count; ++port) {
+    traits.input_schema[port].kind = OperationPortKind::Result;
     traits.input_schema[port].element_type_mask = port < 3 ? 12 : 2;
+  }
   traits.requires_metadata_specialization = true;
   traits.parameter_schema = {
       {"color_description", OperationParameterType::String},
@@ -482,19 +483,20 @@ OperationDefinition operation(const std::string& name, ColorModel model,
   if (hue)
     traits.parameter_schema.push_back(
         {"output_hue_unit", OperationParameterType::String});
-  auto& output = traits.outputs[0];
-  output.key = "values";
-  output.region_rule = OperationRegionRule::Whole;
-  output.requires_dense_output = true;
+  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                       model == ColorModel::Rgb
+                                           ? sizeof(RampResultProgram<true>)
+                                           : sizeof(RampResultProgram<false>));
   traits.workspace_bytes = model == ColorModel::Rgb ? sizeof(RampState<true>)
                                                     : sizeof(RampState<false>);
   result.prepare_static = [model, hue, profile](const auto& inputs,
                                                 const auto& params) {
     return prepare(model, hue, profile, inputs, params);
   };
-  result.callback = [model](const OperationInvocation& call) {
-    return model == ColorModel::Rgb ? execute_ramp<true>(call)
-                                    : execute_ramp<false>(call);
+  result.start_result = [model](const auto&, const auto& allocator) {
+    return model == ColorModel::Rgb
+               ? ResultContinuation::make<RampResultProgram<true>>(allocator)
+               : ResultContinuation::make<RampResultProgram<false>>(allocator);
   };
   return result;
 }

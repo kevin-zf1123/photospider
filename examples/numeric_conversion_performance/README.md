@@ -1,30 +1,65 @@
-# FMT-06 numeric conversion workflow and performance
+# FMT-06 numeric conversion: Result usage and historical performance
 
-`main.cpp` runs the public `WorkflowDocument` → `Compiler` →
-`ExecutionContext` path with a tiled planar `[size,size,4]` input. It checks
-registry, compile and execution failures. The deterministic input code is
-`(linear_pixel*13 + channel*29) % 256`. The integration test
-`test_numeric_conversion` independently checks conversion bytes, metadata,
-regions, 49 dtype endpoint pairs, NaN bits and rounding boundaries.
-
-Build and run:
+`numeric.convert_format_strict` is a registered Result ABI 2 operation. The current
+performance driver builds its input Result and workflow through the public API,
+compiles the graph, executes the requested coverage, and checks the first result
+through a Result read window. The first execution time is reported separately;
+input construction and compilation occur before the timing loop, and the byte
+oracle runs outside each timed execution.
 
 ```sh
 cmake --build build --target photospider_numeric_conversion_performance test_numeric_conversion -j 8
 ctest --test-dir build -R '^test_numeric_conversion$' --output-on-failure
-build/examples/numeric_conversion_performance/photospider_numeric_conversion_performance 4096 u8-f32 full 3
+build/examples/numeric_conversion_performance/photospider_numeric_conversion_performance 4096 u8-f32 full 3 128
 ```
 
-The positional arguments are `size`, `pair` (`u8-f32`, `f32-u8`, `f64-f32`,
-`i64-u8`), `coverage` (`full`, `channel`, `tile`), repetitions, and optional
-`tile_extent` (`128`, the default, or `256`). `channel`
-requests one complete plane. `tile` requests `[127,130) × [127,130)` on
-channel 1, crossing both tile boundaries at the default tile size. With 256
-tiles, the ROI is `[255,258) × [255,258)`; size must cover that ROI. For `u8-f32`, code 0 maps to 0,
-128 maps to correctly rounded binary32 `128/255`, and 255 maps to 1. The
-unrequested channels have no conversion demand.
+The positional arguments are `size`, `pair`, `coverage`, `repetitions`, and
+`tile_extent`. `pair` accepts `u8-f32`, `f32-u8`, `f64-f32`, or `i64-u8`.
+`coverage` accepts `full`, `channel`, or `tile`; `tile` selects a 3×3 ROI across
+the tile boundary on channel 1. Tile extent is 128 or 256, and the image must be
+large enough for the requested ROI.
 
-## NEON measurements before whole-tile SME on 2026-09-24
+The Result driver emits this CSV schema:
+
+```text
+size,pair,coverage,tile_extent,source_payload_bytes,first_ms,repeat_ms,run_live_payload_bytes,run_live_metadata_bytes,source_logical_bytes,root_peak_host_bytes
+```
+
+`source_payload_bytes` is the Root live-payload baseline after input construction
+and compilation, before execution. `run_live_payload_bytes` and
+`run_live_metadata_bytes` are nonnegative live-resource deltas over that baseline
+while the result is held (zero if live use does not exceed the baseline). `source_logical_bytes` is the requested input support
+count multiplied by the source dtype width; it describes logical support, not
+memory traffic. `root_peak_host_bytes` is the cumulative Root Host peak, including
+setup and the output-oracle read window. The benchmark has no isolated output
+size or process-RSS metric. `first_ms` times the first execution; `repeat_ms` is
+the mean of subsequent executions. The oracle does not contribute to either time.
+
+The migrated `test_numeric_conversion` suite passes 49 dtype pairs, randomized
+oracles, ROI, cold-lookup budget, failure-order, floating-environment and
+same-coordinate identity-view coverage. Additional batch/view/Empty/bit-stride,
+ICC-resource, concurrent-plan-reuse and final-payload-release checks pass; the
+SME test passes. `test_alpha_numeric_interop` passes four inherited/moved cases.
+Thirteen serial Result smoke cases pass their byte oracle, including a
+`size=258, f32-u8, full, tile_extent=256` case. A debugger confirmed dispatch to
+`sme_f32_u8_tile` for a 16,384-sample tile; this confirms dispatch only and is not
+a timing result. Thirteen smoke runs validate output and one confirms SME dispatch; their timings
+are not a full performance result. The full Result performance matrix has not run.
+The installed numeric-conversion and alpha-numeric-interoperability consumers
+pass; the standalone performance consumer configures and builds. The historical
+Value/planar measurements and experiments below
+remain useful as old records, not as current Result performance evidence.
+
+## Historical Value/planar measurements and experiments
+
+The sections below preserve measurements and isolated experiments from the earlier
+Value/planar implementation. Their commands, throughput values, counters, profiler
+traces and test records describe that historical path. They do not measure the
+registered Result implementation described above. Current Result performance has
+no full benchmark conclusion: the 13 serial smoke cases validate output bytes and
+one SME dispatch, but do not establish a performance result.
+
+## Historical Value/planar measurements: NEON stage before whole-tile SME (2026-09-24)
 
 MacBook Pro, Apple M5, 32 GiB RAM, macOS 27.2, Clang 21.1.3,
 RelWithDebInfo, CPU strict profile, one worker, tiled input. To reproduce this

@@ -10,7 +10,7 @@
 #include "execution/native_gpu_metadata.hpp"
 #include "photospider/data/storage.hpp"
 #include "photospider/execution/cancellation.hpp"
-#include "photospider/plugin/operation_plugin_api.h"
+#include "photospider/plugin/native_gpu_api.h"
 
 namespace ps::gpu_internal {
 /** @brief Per-invocation real native work observations. */
@@ -56,16 +56,17 @@ class Device final : public std::enable_shared_from_this<Device> {
                           bool writable);
   Status execute(
       const std::vector<BufferView, NativeAllocator<BufferView>>& views,
-      const ps_gpu_dispatch_v11* commands, std::uint32_t count,
+      const ps_gpu_dispatch_v1* commands, std::uint32_t count,
       const CancellationToken& cancellation, Statistics* statistics,
       const BufferAllocator& command_allocator);
 
  private:
   struct Impl;
   explicit Device(std::unique_ptr<Impl> impl);
-  Result<MutableBuffer> allocate(std::uint64_t size,
-                                 const BufferAllocator::Reserve& reserve,
-                                 std::shared_ptr<const void> domain);
+  Result<MutableBuffer> allocate(
+      std::uint64_t size, const BufferAllocator::Reserve& reserve,
+      std::shared_ptr<const void> domain,
+      const BufferAllocator::AllocationCommit& commit);
   std::unique_ptr<Impl> impl_;
 };
 
@@ -75,7 +76,7 @@ class Invocation final {
  public:
   Invocation(std::shared_ptr<Device> device, CancellationToken cancellation,
              BufferAllocator command_allocator = BufferAllocator());
-  const ps_gpu_service_v11* service() const noexcept { return &service_; }
+  const ps_gpu_service_v1* service() const noexcept { return &service_; }
   const Status& status() const noexcept {
     return thread_violation_.load() ? thread_failure_ : status_;
   }
@@ -85,7 +86,7 @@ class Invocation final {
   static int buffer(void* context, const std::uint8_t* bytes,
                     std::uint64_t size, std::uint32_t writable,
                     std::uint64_t* token) noexcept;
-  static int execute(void* context, const ps_gpu_dispatch_v11* commands,
+  static int execute(void* context, const ps_gpu_dispatch_v1* commands,
                      std::uint32_t count) noexcept;
   static int release(void* context, std::uint64_t token) noexcept;
   bool on_owner_thread() noexcept;
@@ -93,7 +94,7 @@ class Invocation final {
   std::shared_ptr<Device> device_;
   CancellationToken cancellation_;
   BufferAllocator command_allocator_;
-  ps_gpu_service_v11 service_{};
+  ps_gpu_service_v1 service_{};
   std::vector<BufferView, NativeAllocator<BufferView>> views_;
   Status status_;
   Statistics statistics_;

@@ -22,19 +22,22 @@ PHOTOSPIDER_API Result<SchemaTemplate> component_area_schema(
 PHOTOSPIDER_API Result<SchemaTemplate> component_filter_schema(
     const ComponentsSpec& spec);
 /** @brief Ready-to-register components4.labels/area/filter CPU operations.
- * Labels takes facet-free UInt8 HW, where nonzero is foreground. It evaluates
- * four-connectivity over the entire original raster using left/top edges and
- * rank union on a mandatory 32-byte {parent,rank,minimum,area} record per
- * pixel. Resident source, union and output windows are bounded; provisional
- * capacity is charged independently of final component count. IDs are 1+minimum
- * raster position (components_min_pixel_v1), with background zero. Area
- * consumes complete Components and builds a paged sorted index; Filter takes
- * Components plus that index and required Int64 minimum_area. Filter verifies
- * the association and uses bounded binary-search windows. Missing or
- * inconsistent properties fail; dynamic zero count is valid. All outputs use
- * CompleteBundle and Conservative support and own their backing/associations.
- * Only ComponentIdScheme::MinPixel is supported here. Work, stages, windows,
- * temporary backing and maximum_count can fail explicitly within root budgets;
+ * Labels takes a Result with one unbatched, facet-free UInt8 HW tensor and no
+ * fields; shape/type, not a fixed numeric Result schema ID, define the source.
+ * A nonzero byte is foreground. The producer evaluates four-connectivity over
+ * the complete original raster using left/top edges and rank union on a
+ * mandatory 32-byte {parent,rank,minimum,area} record per pixel. Source, union,
+ * and output windows are bounded; provisional capacity is charged independently
+ * of final component count. IDs are 1+minimum raster position
+ * (components_min_pixel_v1), with background zero. Area consumes the complete
+ * Components Result and builds a paged sorted index; Filter takes Components
+ * plus that index and required Int64 minimum_area. Filter verifies their
+ * ObjectId association and uses bounded binary-search windows. Missing or
+ * inconsistent properties fail; dynamic zero count is valid. Results use
+ * CompleteBundle and Conservative support and own their published backing.
+ * Associations store ObjectIds, not source payload ownership. Only
+ * ComponentIdScheme::MinPixel is supported here. Work, stages, windows,
+ * temporary backing and maximum_count can fail explicitly within Root budgets;
  * managed capacity is not a process RSS bound. The representation's count/basis
  * validator alone does not establish connectivity of arbitrary imported labels.
  */

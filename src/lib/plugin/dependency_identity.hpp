@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstring>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "data/content_digest.hpp"
@@ -13,7 +15,9 @@ namespace ps::contract_internal {
 // Optional cache identity work is charged before hashing arbitrary metadata.
 class DependencyTemplateDigest final {
  public:
-  explicit DependencyTemplateDigest(std::uint64_t* work) : work_(work) {}
+  explicit DependencyTemplateDigest(
+      std::uint64_t* work, std::function<bool(std::uint64_t)> admit = {})
+      : work_(work), admit_(std::move(admit)) {}
   void integer(std::uint64_t value) {
     if (charge(1))
       hash_.integer(value);
@@ -21,6 +25,10 @@ class DependencyTemplateDigest final {
   void text(std::string_view value) {
     if (charge(value.size()) && charge(1))
       hash_.text(value);
+  }
+  void schema(const SchemaTemplate& value) {
+    if (charge(value.canonical_size()) && charge(1))
+      hash_.text(value.canonical());
   }
   void bytes(const void* value, std::size_t size) {
     if (charge(size))
@@ -46,11 +54,16 @@ class DependencyTemplateDigest final {
       valid_ = false;
       return false;
     }
+    if (admit_ && !admit_(count)) {
+      valid_ = false;
+      return false;
+    }
     *work_ -= count;
     return true;
   }
   std::uint64_t* work_;
   bool valid_ = true;
+  std::function<bool(std::uint64_t)> admit_;
   content_internal::Sha256 hash_;
 };
 /** @brief Static selected-result DAG contracts without graph/node/step IDs.
@@ -107,7 +120,7 @@ inline std::vector<std::string> dependency_cache_templates(
         const auto& declaration = plan.input_declarations().at(
             std::get<PlanWorkflowInput>(input).declaration_index);
         hash.text(declaration.name);
-        hash.metadata(declaration.descriptor, declaration.facets);
+        hash.schema(*declaration.result_schema);
       }
     }
     keys[index] = hash.finish();

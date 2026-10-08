@@ -7,30 +7,36 @@ kind: composite_workflow
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu
+implementation_status: implemented_subset
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-05B: extract internal alpha or explicitly generate opaque alpha
 
-CPU implementation (2026-09-25): the source package now includes this member/family,
-its public C++ authoring API, correctness fixtures and a
-[performance/review driver](../../../../examples/alpha_performance/README.md).
-`Proposed`/D1 still describe design-review status, not missing executable code.
-Apple Silicon and FreeBSD performance/portability require target-machine review.
+FMT-05B remains Proposed. The public `format::extract_alpha` helper is compiled
+and installed through `photospider/format/alpha.hpp`. It appends an executable
+Result composition over the registered `channel.extract_index_<profile>` key
+when the selected group has alpha. For `missing_alpha=opaque`, it computes the
+exact same-dtype code that decodes to coverage one and uses the registered
+`channel.literal_like_<profile>` Result operation. Neither path adds an alpha
+registry key. The helper accepts and publishes a single-tensor Result without
+fields; it supports UInt8, UInt16, Int8, Int16, Int64, Float32 and Float64, keeps
+the batch prefix, and performs no sample-domain validation.
 
-
-Inherit the complete [FMT-05 contract](FMT-05_alpha_editing_contract.md).
-The implemented C++ authoring helper `extract_alpha` takes a graph and described input
-edge, returning one `values` edge. It expands into conforming extraction or
-constant-generation nodes; it is not a separate native registry entry.
+The cell-axis `axis` excludes the Result batch prefix. The complete sample rank,
+including batch and cell axes, is at most 8, and full sample count is at most
+2^40. Required source assertions bind the complete schema and physical layout.
+The helper is a compile-time composition over registered Result operations; it
+does not add an alpha-specific runtime key. The separate alpha math tests cover
+numeric kernels, not a new native alpha arithmetic key. Historical Value/planar
+measurements are not evidence for the current Result path; no Result performance
+claim is made here. Inherit target alpha semantics
+from the complete [FMT-05 contract](FMT-05_alpha_editing_contract.md).
 
 ## Interface and inference
 
-Inherit group, metadata_mode, conditional metadata_override, axis, layout and
-profile. Static missing_alpha is error by default or opaque explicitly.
+Inherit group, metadata_mode, conditional metadata_override, cell-axis `axis`,
+layout and profile. `axis` excludes the batch prefix. Static missing_alpha is error by default or opaque explicitly.
 Static Bool keepdims defaults to false. Optional static alpha_encoding describes
 only the missing_alpha=opaque fallback and is otherwise invalid. Validate any
 explicit descriptor structurally; an existing alpha is still copied unchanged.
@@ -60,9 +66,8 @@ coverage-one code, fails InvalidArgument/InvalidDomain.
 Do not round to a neighboring code, pass Int64 maximum through Float64 or
 replace missing alpha with the dtype maximum despite an explicit encoding.
 The output alpha component carries the selected decoder and coverage meaning.
-Native dtype/encoding support remains an implementation dependency; there is no
-pending FMT-07 contract after that ID's retirement. Existing integer samples
-retain their own encoding description without normalization.
+The seven listed copy dtypes are supported. FMT-07 remains retired. Existing
+integer samples retain their own encoding description without normalization.
 
 ## Lowering, metadata and regional behavior
 
@@ -78,6 +83,13 @@ encoding descriptions. It has no complete color-group claim or persistent
 relationship to the input image. A view can retain the normal backing owner;
 this is storage ownership, not a semantic alpha attachment. Existing sample
 validity is not certified merely by extraction.
+
+The helper serializes a per-source `result-v1` assertion with a digest of the
+complete canonical schema plus a separate physical-layout assertion. The
+canonical schema includes semantic metadata and spatial axes; the layout
+assertion binds physical storage order and row pitch. Compilation/direct
+preparation checks the producer descriptor, including for forward references.
+Static helper expansion is transactional.
 
 For requested output q, insert the original alpha index at the removed axis
 (or replace its singleton coordinate when keepdims=true) to obtain the sole
@@ -114,7 +126,11 @@ coverage one would require k=0.5, so opaque generation must fail. For a legal-do
 fixture, let code k in [0,9] decode to k/10: the exact opaque code 10 is excluded,
 so fail without clamping to 9. Check both errors before source sample reads.
 
-Conceptual workflow: described image -> B -> alpha component processing.
-Implementation must supply runnable public helper/compile/execute coverage,
-including transactional failures and all layout modes. No runtime result is
-claimed by this Proposed specification.
+The conceptual target workflow is a described image -> B -> alpha component
+processing. `format::extract_alpha` now appends the FMT-05B helper composition. Existing alpha
+uses `channel.extract_index_<profile>`; opaque fallback uses
+`channel.literal_like_<profile>` with exact prepared bits and descriptor-only
+source demand. `test_alpha_authoring` exercises the public compile/execute path and passes.
+The separate `test_channel_literal_like` validates only its primitive. Fourteen
+small alpha performance smoke cases pass their output oracle; no full matrix is
+claimed.

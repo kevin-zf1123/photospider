@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "01-numeric/array_publication.hpp"
+#include "02-format-color/result_mapping.hpp"
 #include "02-format-color/transfer_fast.hpp"
 #include "02-format-color/transfer_math.hpp"
 #include "02-format-color/transfer_prepare.hpp"
@@ -402,19 +402,6 @@ class Runner final {
     return Status::success();
   }
 };
-inline std::optional<Region> intersection(const Region& a, const Region& b) {
-  std::vector<RegionDimension> dimensions;
-  for (std::size_t i = 0; i < a.rank(); ++i) {
-    const auto x = a.dimensions()[i], y = b.dimensions()[i];
-    const auto begin = std::max(x.offset, y.offset),
-               end = std::min(x.offset + x.extent, y.offset + y.extent);
-    if (begin >= end) {
-      return {};
-    }
-    dimensions.push_back({begin, end - begin});
-  }
-  return Region(std::move(dimensions));
-}
 inline Status located(Status status, const std::vector<std::uint64_t>& at) {
   if (status.code == ErrorCode::OperationFailed) {
     status.message += " coordinate=[";
@@ -428,254 +415,225 @@ inline Status located(Status status, const std::vector<std::uint64_t>& at) {
   }
   return status;
 }
-Result<ValueFragments> publish(const DependencyPhase& phase,
-                               const Preparation& state, Runner& runner) {
-  using R = Result<ValueFragments>;
-  const auto& descriptor = phase.query.output.descriptor;
-  const auto& facets = phase.query.output.facets;
-  std::uint64_t facet_bytes = 0;
-  for (const auto& f : facets) {
-    facet_bytes += f.key.size() + f.payload.size() + sizeof(ValueFacet);
-  }
-  numeric_ops::ArrayPublication publication(
-      phase.query.outputs.boxes().size(), descriptor.shape.size(), facet_bytes);
-  std::vector<Value> values;
+using tensor_ops::require;
+using tensor_ops::take;
+using Poll = Result<ResultProgramPoll>;
+ResultBuilder result_builder(const ResultProgramPhase& phase, bool empty) {
+  auto builder = take(ResultBuilder::start(
+      phase.resources, *phase.query.output.result_schema,
+      phase.query.semantic_key, {},
+      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
+                                                     phase.association->end())
+                        : std::vector<std::uint64_t>{},
+      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
+  require(builder.bind_descriptor_relation(take(ResultRelation::cartesian(
+      phase.resources, 1,
+      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+  return builder;
+}
+Poll empty_result(const ResultProgramPhase& phase) try {
+  auto builder = result_builder(phase, true);
+  return Poll(ResultPublication{take(builder.seal()), true});
+} catch (const Status& status) {
+  return Poll(status);
+}
+Status evaluate(const ResultProgramPhase& phase, const Preparation& state,
+                Runner* runner, const ResultTensorReadWindow& source,
+                const Region& region, const ResultTensorWriteWindow* writer) {
+  const auto& dims = region.dimensions();
+  const auto sample_axis = source.sample_axis();
+  std::vector<std::uint64_t> at;
+  for (auto d : dims)
+    at.push_back(d.offset);
   const auto width = state.narrow ? 4U : 8U;
-  for (const auto& box : phase.query.outputs.boxes()) {
-    const bool view = state.program.identity && !state.materialize;
-    std::optional<MutableValue> writer;
-    if (!view) {
-      auto allocated = MutableValue::allocate(descriptor, box, phase.allocator);
-      if (!allocated.ok()) {
-        return R(allocated.status());
-      }
-      writer.emplace(allocated.take_value());
-    }
-    for (const auto& fragment : phase.inputs[0].fragments()) {
-      auto overlap = intersection(fragment.region(), box);
-      if (!overlap) {
-        continue;
-      }
-      const auto& region = *overlap;
-      std::vector<std::uint64_t> at(region.rank());
-      auto status = visit_value_runs(
-          fragment, region, box, 64, state.all ? std::nullopt : state.axis,
-          [&](const ValueReadRun& run) {
-            if (state.axis && !state.all) {
-              region_run_coordinate(region, run.logical_element, &at);
-            }
-            const bool selected =
-                state.selected(state.axis ? at[*state.axis] : 0);
-            auto s = runner.span(
-                run.data, run.stride_bytes,
-                writer ? writer->data() + run.destination_element * width
-                       : nullptr,
-                static_cast<unsigned>(run.samples), selected);
-            if (!s.ok()) {
-              region_run_coordinate(
-                  region, run.logical_element + runner.failed_lane, &at);
-              return located(s, at);
-            }
-            return s;
-          });
-      if (!status.ok()) {
-        return R(status);
-      }
-      if (view) {
-        auto v = fragment.view(region);
-        if (!v.ok()) {
-          return R(v.status());
-        }
-        auto mapped = Value::from_storage(
-            descriptor, region, v.value().layout(), v.value().storage(), facets,
-            phase.query.resources);
-        if (!mapped.ok()) {
-          return R(mapped.status());
-        }
-        auto retained = publication.retain(mapped.take_value());
-        if (!retained.ok()) {
-          return R(retained.status());
-        }
-        values.push_back(retained.take_value());
-      }
-    }
+  for (;;) {
+    if (phase.query.cancellation.cancelled())
+      return {ErrorCode::Cancelled, "FMT-09 cancelled"};
+    const auto read = take(source.row_run(at));
+    const bool split =
+        state.sample_axis && *state.sample_axis == sample_axis && !state.all;
+    const bool selected =
+        state.selected(state.sample_axis ? at[*state.sample_axis] : 0);
+    const bool simple =
+        !selected || state.program.identity ||
+        (state.program.definition.curve == TransferCurve::PowerGamma &&
+         *state.program.definition.gamma == 2);
+    const auto batch = split ? 1U : simple ? 1024U : 64U;
+    auto n =
+        static_cast<unsigned>(std::min<std::uint64_t>(batch, read.samples));
+    n = static_cast<unsigned>(std::min<std::uint64_t>(
+        n,
+        dims[sample_axis].offset + dims[sample_axis].extent - at[sample_axis]));
+    std::uint8_t* target = nullptr;
     if (writer) {
-      auto v = std::move(*writer).publish(facets, phase.query.resources);
-      if (!v.ok()) {
-        return R(v.status());
-      }
-      auto retained = publication.retain(v.take_value());
-      if (!retained.ok()) {
-        return R(retained.status());
-      }
-      values.push_back(retained.take_value());
+      auto write = take(writer->row_run(at));
+      target = write.data;
+      n = static_cast<unsigned>(std::min<std::uint64_t>(n, write.samples));
+      if (write.sample_stride_bytes != static_cast<std::int64_t>(width))
+        n = 1;
     }
+    auto status =
+        runner->span(read.data, read.sample_stride_bytes, target, n, selected);
+    if (!status.ok()) {
+      at[sample_axis] += runner->failed_lane;
+      return located(status, at);
+    }
+    at[sample_axis] += n;
+    if (at[sample_axis] < dims[sample_axis].offset + dims[sample_axis].extent)
+      continue;
+    at[sample_axis] = dims[sample_axis].offset;
+    bool next = false;
+    for (std::size_t axis = dims.size(); axis;) {
+      --axis;
+      if (axis == sample_axis)
+        continue;
+      if (++at[axis] < dims[axis].offset + dims[axis].extent) {
+        next = true;
+        break;
+      }
+      at[axis] = dims[axis].offset;
+    }
+    if (!next)
+      return Status::success();
   }
-  return publication.finish(descriptor, phase.query.outputs, values.data(),
-                            values.size(), phase.sets, facets,
-                            phase.query.resources);
+}
+ResultRelation support(const ResultProgramPhase& phase,
+                       const Preparation& state) {
+  const auto& tensor = phase.query.output.result_schema->tensors[0];
+  const auto shape = tensor.sample_shape();
+  std::vector<ResultMappedAxis> axes(shape.size());
+  for (std::size_t i = 0; i < axes.size(); ++i)
+    axes[i].output_axis = static_cast<std::int32_t>(i);
+  ResourceVector<ResultRelation> relations;
+  for (const auto& span : state.spans) {
+    require(phase.consume_work(shape.size() + 1));
+    relations.push_back(take(ResultRelation::mapped(
+        phase.resources, shape, span.region, shape, axes,
+        {0, span.roles, 0, 0, ResultSupportTarget::Tensor, 0})));
+  }
+  relations.push_back(take(ResultRelation::cartesian(
+      phase.resources, take(tensor.sample_count()),
+      {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
+  while (relations.size() > 1) {
+    ResourceVector<ResultRelation> next;
+    for (std::size_t i = 0; i < relations.size(); i += 16) {
+      require(phase.consume_work(17));
+      std::vector<ResultRelation> group;
+      for (std::size_t j = i; j < std::min(i + 16, relations.size()); ++j)
+        group.push_back(relations[j]);
+      next.push_back(take(ResultRelation::unite(phase.resources, group)));
+    }
+    relations = std::move(next);
+  }
+  return relations.front();
 }
 struct Continuation final {
   const Preparation* state;
   bool requested = false;
+  Footprint output;
   explicit Continuation(const Preparation* s) : state(s) {}
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using R = Result<DependencyPoll>;
+  Poll poll(const ResultProgramPhase& phase) try {
+    const auto& tensor = phase.query.output.result_schema->tensors[0];
     if (!requested) {
       requested = true;
-      DependencyNeedBatch batch;
-      batch.static_mapping = true;
-      return R(std::move(batch));
+      output = phase.query.tensor_outputs
+                   ? *phase.query.tensor_outputs
+                   : take(Footprint::all(tensor.sample_shape()));
+      ResultProgramNeed need;
+      std::uint32_t roles = 9;
+      for (const auto& span : state->spans) {
+        if (!(span.roles & 4))
+          continue;
+        for (const auto& box : output.boxes()) {
+          require(phase.consume_work(box.rank() + 1));
+          bool overlap = true;
+          for (std::size_t axis = 0; axis < box.rank(); ++axis) {
+            const auto a = box.dimensions()[axis];
+            const auto b = span.region.dimensions()[axis];
+            if (a.offset >= b.offset + b.extent ||
+                b.offset >= a.offset + a.extent) {
+              overlap = false;
+              break;
+            }
+          }
+          if (overlap) {
+            roles |= 4;
+            break;
+          }
+        }
+        if (roles & 4)
+          break;
+      }
+      need.tensors.push_back({0, 0, output, roles});
+      return Poll(std::move(need));
     }
     input_internal::Float32Environment environment;
-    if (!environment.active()) {
-      return R(sample_error("floating environment unavailable"));
-    }
+    if (!environment.active())
+      return Poll(sample_error("floating environment unavailable"));
     const std::function<Status(std::uint64_t)> consume = [&](std::uint64_t n) {
-      if (phase.query.cancellation.cancelled()) {
+      if (phase.query.cancellation.cancelled())
         return Status{ErrorCode::Cancelled, "FMT-09 cancelled"};
-      }
       return phase.consume_work(n);
     };
     ExactWorkScope exact(&consume, &phase.query.cancellation);
     execution_internal::WorkConsumer checkpoint(consume);
     Runner runner(*state, phase.allocator, checkpoint, environment.active());
-    auto result = [&]() -> Result<ValueFragments> {
+    auto result = [&]() -> Poll {
       try {
-        return publish(phase, *state, runner);
-      } catch (const ExactWorkFailure& e) {
-        return Result<ValueFragments>(e.status);
+        auto builder = result_builder(phase, false);
+        const auto relation = support(phase, *state);
+        std::vector<ResultMappedAxis> axes(tensor.sample_shape().size());
+        for (std::size_t i = 0; i < axes.size(); ++i)
+          axes[i].output_axis = static_cast<std::int32_t>(i);
+        require(format_result::planes(tensor, output, [&](const Region& box) {
+          auto source = take(
+              phase.tensors->at({0, 0}).acquire(box, phase.query.cancellation));
+          if (state->program.identity && !state->materialize) {
+            const auto prior_views = runner.diagnostics.view_elements;
+            require(evaluate(phase, *state, &runner, source, box, nullptr));
+            runner.diagnostics.view_elements = prior_views;
+            format_result::PublicationCounts counts;
+            auto status =
+                format_result::publish(phase, &builder, box, source, axes,
+                                       relation, state->layout, 0, &counts);
+            runner.diagnostics.view_elements += counts.viewed;
+            runner.diagnostics.copied_elements += counts.copied;
+            return status;
+          }
+          return builder.publish_tensor_kernel(
+              0, box,
+              [&](const auto& writers) {
+                try {
+                  for (const auto& writer : writers)
+                    require(evaluate(phase, *state, &runner, source,
+                                     writer.region(), &writer));
+                  return Status::success();
+                } catch (const Status& status) {
+                  return status;
+                } catch (const ExactWorkFailure& failure) {
+                  return failure.status;
+                }
+              },
+              relation, {true, true, true, true}, phase.query.cancellation);
+        }));
+        require(consume(1));
+        return Poll(ResultPublication{take(builder.seal()), true});
+      } catch (const Status& status) {
+        return Poll(status);
+      } catch (const ExactWorkFailure& failure) {
+        return Poll(failure.status);
       }
     }();
     if (phase.report_numeric) {
-      auto s = phase.report_numeric(runner.diagnostics);
-      if (!s.ok()) {
-        return R(s);
-      }
+      auto status = phase.report_numeric(runner.diagnostics);
+      if (!status.ok())
+        return Poll(status);
     }
-    return result.ok() ? R(result.take_value()) : R(result.status());
+    return result;
+  } catch (const Status& status) {
+    return Poll(status);
   }
 };
-Status planar_run(const PlanarOperationInvocation& call,
-                  const Preparation& state, Runner& runner) {
-  const auto& layout = *call.output_metadata.planar_layout;
-  const auto& dimensions = call.output_region.dimensions();
-  const auto height = layout.height_axis, width_axis = layout.width_axis;
-  const auto channels = layout.channel_axis;
-  std::vector<std::uint64_t> at(dimensions.size());
-  for (std::size_t i = 0; i < at.size(); ++i) {
-    at[i] = dimensions[i].offset;
-  }
-  const auto begin = channels ? dimensions[*channels].offset : 0;
-  const auto end = channels ? begin + dimensions[*channels].extent : 1;
-  const unsigned width = state.narrow ? 4 : 8;
-  for (auto channel = begin; channel < end; ++channel) {
-    if (channels) {
-      at[*channels] = channel;
-    }
-    for (auto row = dimensions[height].offset;
-         row < dimensions[height].offset + dimensions[height].extent;) {
-      at[height] = row;
-      auto advanced =
-          dimensions[height].offset + dimensions[height].extent - row;
-      for (auto column = dimensions[width_axis].offset;
-           column <
-           dimensions[width_axis].offset + dimensions[width_axis].extent;) {
-        at[height] = row;
-        at[width_axis] = column;
-        auto read = call.inputs[0].rectangle_run(at);
-        if (!read.ok()) {
-          return read.status();
-        }
-        auto write = call.output.rectangle_run(at);
-        if (!write.ok()) {
-          return write.status();
-        }
-        const auto& src = read.value();
-        const auto& dst = write.value();
-        const auto rows = std::min({src.rows, dst.rows, advanced});
-        advanced = rows;
-        const auto samples = std::min(src.row.samples, dst.row.samples);
-        if (!rows || !samples) {
-          return Status{ErrorCode::Internal, "FMT-09 empty rectangle run"};
-        }
-        for (std::uint64_t dy = 0; dy < rows; ++dy) {
-          at[height] = row + dy;
-          const auto* source = src.row.data + dy * src.row_stride_bytes;
-          auto* target = dst.row.data + dy * dst.row_stride_bytes;
-          const bool split_selection =
-              state.axis && *state.axis == width_axis && !state.all;
-          const bool selected =
-              state.selected(state.axis ? at[*state.axis] : 0);
-          // Copies need no DAG lane arrays. Amortize host checkpoints over at
-          // most 1024 authorized entries, retaining the contract's stop bound.
-          const bool simple =
-              !selected || state.program.identity ||
-              (state.program.definition.curve == TransferCurve::PowerGamma &&
-               *state.program.definition.gamma == 2);
-          const unsigned batch = !split_selection && simple ? 1024 : 64;
-          for (std::uint64_t dx = 0; dx < samples; dx += batch) {
-            at[width_axis] = column + dx;
-            const auto n = static_cast<unsigned>(
-                std::min<std::uint64_t>(batch, samples - dx));
-            // A raw selection may use a spatial axis rather than the physical
-            // channel axis. Split only that unusual case, without peer reads.
-            if (split_selection) {
-              for (unsigned i = 0; i < n; ++i) {
-                auto s = runner.span(source + (dx + i) * width, width,
-                                     target + (dx + i) * width, 1,
-                                     state.selected(column + dx + i));
-                if (!s.ok()) {
-                  at[width_axis] += i;
-                  return located(s, at);
-                }
-              }
-            } else {
-              auto s = runner.span(source + dx * width, width,
-                                   target + dx * width, n, selected);
-              if (!s.ok()) {
-                at[width_axis] += runner.failed_lane;
-                return located(s, at);
-              }
-            }
-          }
-        }
-        column += samples;
-      }
-      row += advanced;
-    }
-  }
-  return Status::success();
-}
-Status planar(const PlanarOperationInvocation& call) {
-  input_internal::Float32Environment environment;
-  if (!environment.active()) {
-    return sample_error("floating environment unavailable");
-  }
-  if (!call.prepared || !call.prepared->state()) {
-    return Status{ErrorCode::Internal, "FMT-09 preparation missing"};
-  }
-  const auto& state = *static_cast<const Preparation*>(call.prepared->state());
-  if (!call.consume_work) {
-    return Status{ErrorCode::Internal, "FMT-09 planar work service missing"};
-  }
-  const execution_internal::WorkConsumer consume(call.consume_work);
-  ExactWorkScope exact(&consume, &call.cancellation);
-  Runner runner(state, call.allocator, consume, environment.active());
-  Status result;
-  try {
-    result = planar_run(call, state, runner);
-  } catch (const ExactWorkFailure& e) {
-    result = e.status;
-  }
-  if (call.report_numeric) {
-    auto s = call.report_numeric(runner.diagnostics);
-    if (!s.ok()) {
-      return s;
-    }
-  }
-  return result;
-}
 OperationDefinition operation(bool encode, SequenceProfile profile,
                               const char* suffix) {
   OperationDefinition d;
@@ -683,8 +641,10 @@ OperationDefinition operation(bool encode, SequenceProfile profile,
       std::string("color.transfer_") + (encode ? "encode" : "decode") + suffix;
   auto& t = d.traits;
   t.input_count = 1;
-  t.input_schema.resize(1);
-  t.planar_storage_capable = true;
+  OperationPortConstraint port;
+  port.kind = OperationPortKind::Result;
+  port.element_type_mask = 127;
+  t.input_schema = {port};
   t.cacheable = false;
   t.requires_metadata_specialization = true;
   t.workspace_bytes =
@@ -704,21 +664,22 @@ OperationDefinition operation(bool encode, SequenceProfile profile,
       {"layout", OperationParameterType::String, false}};
   auto& out = t.outputs[0];
   out.key = "values";
-  out.shape_rule = OperationShapeRule::Fixed;
-  out.fixed_output_shape = {1};
+  out.output_schema = port;
+  out.result_schema = tensor_ops::scalar_schema();
   out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 1;
+  out.dependency_version = 2;
   out.continuation_bytes = sizeof(Continuation);
   out.maximum_dependency_stages = 2;
   d.prepare_static = [encode, profile](const auto& inputs, const auto& params) {
     return prepare(inputs, params, encode, profile);
   };
-  d.start_dependency = [](const DependencyQuery& query,
-                          const BufferAllocator& allocator) {
-    return DependencyContinuation::make<Continuation>(
+  d.start_result = [](const ResultProgramQuery& query,
+                      const BufferAllocator& allocator) {
+    if (query.tensor_outputs && query.tensor_outputs->empty())
+      return ResultContinuation::stateless<empty_result>();
+    return ResultContinuation::make<Continuation>(
         allocator, static_cast<const Preparation*>(query.prepared->state()));
   };
-  d.planar_callback = planar;
   return d;
 }
 }  // namespace ps::plugin_internal::transfer_ops

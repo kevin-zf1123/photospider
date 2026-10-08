@@ -14,6 +14,7 @@
 
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_curve.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
@@ -32,8 +33,11 @@ Result<ValueDescriptor> metadata(
     bool multi, const std::vector<OperationMetadata>& inputs,
     const std::map<std::string, ParameterValue>& parameters) {
   using Answer = Result<ValueDescriptor>;
+  std::array<ValueDescriptor, 3> descriptors;
   for (unsigned i = 0; i < 3; ++i) {
-    const auto& d = inputs[i].descriptor;
+    const auto& tensor = inputs[i].result_schema->tensors[0];
+    descriptors[i] = {tensor.descriptor.element_type, tensor.sample_shape()};
+    const auto& d = descriptors[i];
     if ((d.element_type != ElementType::Float32 &&
          d.element_type != ElementType::Float64) ||
         d.shape.size() != (multi && i == 1 ? 2U : 1U))
@@ -43,10 +47,10 @@ Result<ValueDescriptor> metadata(
       if (!extent || extent > (UINT64_C(1) << 40))
         return Answer(shape_error("curve extents require 1..2^40"));
   }
-  const auto knots = inputs[0].descriptor.shape[0];
-  const auto count = inputs[2].descriptor.shape[0];
-  const auto columns = multi ? inputs[1].descriptor.shape[1] : 1;
-  if (knots < 2 || knots > 65536 || inputs[1].descriptor.shape[0] != knots ||
+  const auto knots = descriptors[0].shape[0];
+  const auto count = descriptors[2].shape[0];
+  const auto columns = multi ? descriptors[1].shape[1] : 1;
+  if (knots < 2 || knots > 65536 || descriptors[1].shape[0] != knots ||
       columns > (UINT64_C(1) << 40) / knots ||
       columns > (UINT64_C(1) << 40) / count)
     return Answer(
@@ -73,34 +77,34 @@ struct CurveRow {
 struct CurveState final {
   bool pchip, multi;
   SequenceProfile profile;
-  const OperationInvocation& call;
-  const ResourceBudget* budget;
+  const ResultProgramPhase& phase;
+  std::array<std::optional<numeric_ops::MathTensorReader>, 3> readers;
   unsigned policy;
   numeric_ops::ExactCurve arithmetic;
   ResourceVector<std::uint64_t> knots;
   std::array<std::uint64_t, 4> x{}, y{}, replicas{};
   std::vector<std::uint64_t> scalar{0}, ordinate;
   CurveState(bool cubic, bool columns, SequenceProfile selected,
-             const OperationInvocation& invocation)
+             const ResultProgramPhase& invocation)
       : pchip(cubic),
         multi(columns),
         profile(selected),
-        call(invocation),
-        budget(resource_internal::metadata_budget()),
-        policy(std::get<std::string>(call.parameters.at("out_of_domain")) ==
-                       "reject"
+        phase(invocation),
+        policy(std::get<std::string>(
+                   phase.query.parameters.at("out_of_domain")) == "reject"
                    ? 0U
-               : std::get<std::string>(call.parameters.at("out_of_domain")) ==
-                       "clamp"
+               : std::get<std::string>(
+                     phase.query.parameters.at("out_of_domain")) == "clamp"
                    ? 1U
                    : 2U),
         arithmetic(selected),
-        ordinate(multi ? 2 : 1, 0) {}
-  Status work(std::uint64_t amount) const {
-    if (call.cancellation.cancelled())
-      return {ErrorCode::Cancelled, {}};
-    return budget ? budget->consume({amount}) : Status::success();
+        knots(ResourceAllocator<std::uint64_t>(phase.resources)),
+        ordinate(multi ? 2 : 1, 0) {
+    for (unsigned port = 0; port < readers.size(); ++port)
+      readers[port].emplace(phase.tensors->at({port, 0}),
+                            phase.query.cancellation);
   }
+  Status work(std::uint64_t amount) const { return phase.consume_work(amount); }
   Status failure(unsigned port, std::uint64_t index, const char* message,
                  FailureReason reason = FailureReason::InvalidDomain) const {
     return {ErrorCode::OperationFailed,
@@ -115,13 +119,10 @@ struct CurveState final {
     auto status = work(at.size() + 1);
     if (!status.ok())
       return Answer(status);
-    const auto& input = call.inputs[port];
-    auto address = input.byte_address(at);
-    if (!address.ok())
-      return Answer(address.status());
-    const bool narrow = input.descriptor().element_type == ElementType::Float32;
-    std::uint64_t bits = 0;
-    std::memcpy(&bits, input.bytes().data() + address.value(), narrow ? 4 : 8);
+    const auto& input = phase.tensors->at({port, 0});
+    const bool narrow =
+        input.spec().descriptor.element_type == ElementType::Float32;
+    auto bits = readers[port]->bits(at);
     const auto value = BinaryParts::decode(bits, narrow);
     if (value.nan || value.infinite)
       return Answer(failure(port, at[0], "nonfinite curve input"));
@@ -181,23 +182,23 @@ struct CurveState final {
     }
     return Status::success();
   }
-  Result<Value> execute() {
-    using Answer = Result<Value>;
+  Status execute(const ResourceVector<ResultTensorWriteWindow>& writers) {
     auto status = work(1);
     if (!status.ok())
-      return Answer(status);
-    knots.resize(call.inputs[0].descriptor().shape[0]);
+      return status;
+    knots.resize(phase.tensors->at({0, 0}).spec().sample_shape()[0]);
     for (unsigned i = 0; i < knots.size(); ++i) {
       scalar[0] = i;
       auto value = read(0, scalar);
       if (!value.ok())
-        return Answer(value.status());
+        return value.status();
       knots[i] = value.value();
       if (i && BinaryParts::decode(knots[i - 1], false).order_key() >=
                    BinaryParts::decode(knots[i], false).order_key())
-        return Answer(failure(0, i, "curve knots require strict increase"));
+        return failure(0, i, "curve knots require strict increase");
     }
-    const auto& shape = call.prepared->traits().outputs[0].fixed_output_shape;
+    const auto shape =
+        phase.query.output.result_schema->tensors[0].sample_shape();
     // Preserve control rejection before ordinate arithmetic without retaining
     // per-query rows or dependency certificates for the complete output.
     const auto lower = BinaryParts::decode(knots.front(), false).order_key();
@@ -206,19 +207,15 @@ struct CurveState final {
       scalar[0] = i;
       auto query = read(2, scalar);
       if (!query.ok())
-        return Answer(query.status());
+        return query.status();
       const auto key = BinaryParts::decode(query.value(), false).order_key();
       if (!policy && (key < lower || key > upper))
-        return Answer(failure(2, i, "curve query outside domain"));
+        return failure(2, i, "curve query outside domain");
     }
     const bool narrow =
-        std::get<std::string>(call.parameters.at("dtype")) == "float32";
-    auto allocated = MutableValue::allocate(
-        {narrow ? ElementType::Float32 : ElementType::Float64, shape},
-        call.output_region, call.allocator);
-    if (!allocated.ok())
-      return Answer(allocated.status());
-    auto output = allocated.take_value();
+        std::get<std::string>(phase.query.parameters.at("dtype")) == "float32";
+    numeric_ops::MathTensorWriter output(writers[0]);
+    std::vector<std::uint64_t> destination(multi ? 2 : 1, 0);
     const auto columns = multi ? shape[1] : 1;
     const auto width = narrow ? 4U : 8U;
     std::optional<input_internal::Float32Environment> environment;
@@ -231,7 +228,7 @@ struct CurveState final {
       CurveRow row;
       status = classify(i, &row);
       if (!status.ok())
-        return Answer(status);
+        return status;
       for (std::uint64_t column = 0; column < columns; ++column) {
         if (multi)
           ordinate[1] = column;
@@ -239,7 +236,7 @@ struct CurveState final {
           ordinate[0] = row.first + j;
           auto value = read(1, ordinate);
           if (!value.ok())
-            return Answer(value.status());
+            return value.status();
           x[j] = knots[row.first + j];
           y[j] = value.value();
         }
@@ -248,39 +245,42 @@ struct CurveState final {
                                          row.bits, x, y, narrow, consume, {},
                                          environment && environment->active());
         if (!value.ok())
-          return Answer(value.status());
+          return value.status();
         if (BinaryParts::decode(value.value(), narrow).infinite)
-          return Answer(failure(1, row.first, "curve output overflow",
-                                FailureReason::ArithmeticOverflow));
+          return failure(1, row.first, "curve output overflow",
+                         FailureReason::ArithmeticOverflow);
         numeric_ops::select_words(replicas.data(), value.value(), value.value(),
                                   1, profile);
-        std::memcpy(output.data() + (i * columns + column) * width,
-                    replicas.data(), width);
+        destination[0] = i;
+        if (multi)
+          destination[1] = column;
+        std::memcpy(output.address(destination), replicas.data(), width);
       }
     }
-    status = work(1);
-    return status.ok() ? std::move(output).publish() : Answer(status);
+    return work(1);
   }
 };
-Result<Value> execute_curve(const OperationInvocation& call, bool pchip,
-                            bool multi, SequenceProfile profile) {
-  using Answer = Result<Value>;
-  try {
-    auto allocated = call.allocator.allocate(sizeof(CurveState));
+struct CurveKernel final {
+  bool pchip, multi;
+  SequenceProfile profile;
+  CurveKernel(bool cubic, bool columns, SequenceProfile selected)
+      : pchip(cubic), multi(columns), profile(selected) {}
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    if (writers.size() != 1)
+      return {ErrorCode::OperationFailed, "curve requires one packed writer"};
+    auto allocated = phase.allocator.allocate(sizeof(CurveState));
     if (!allocated.ok())
-      return Answer(allocated.status());
+      return allocated.status();
     auto buffer = allocated.take_value();
     std::unique_ptr<CurveState, void (*)(CurveState*)> state(
-        new (buffer.data()) CurveState(pchip, multi, profile, call),
+        new (buffer.data()) CurveState(pchip, multi, profile, phase),
         [](CurveState* value) { value->~CurveState(); });
-    return state->execute();
-  } catch (const std::bad_alloc&) {
-    return Answer(Status{ErrorCode::ResourceExhausted,
-                         {},
-                         FailureReason::CapacityLimit,
-                         {FailureOrigin::Resource, FailureScope::Run}});
+    return state->execute(writers);
   }
-}
+};
+using CurveProgram = numeric_ops::WholeTensorProgram<CurveKernel>;
+
 OperationDefinition curve_operation(const std::string& key, bool pchip,
                                     bool multi, SequenceProfile profile) {
   OperationDefinition operation;
@@ -291,12 +291,12 @@ OperationDefinition curve_operation(const std::string& key, bool pchip,
   traits.input_count = 3;
   traits.input_schema.resize(3);
   traits.requires_metadata_specialization = true;
-  auto& output = traits.outputs[0];
-  output.key = "values";
-  output.shape_rule = OperationShapeRule::Fixed;
-  output.fixed_output_shape = {1};
-  output.region_rule = OperationRegionRule::Whole;
-  output.requires_dense_output = true;
+  for (auto& port : traits.input_schema) {
+    port.kind = OperationPortKind::Result;
+    port.element_type_mask = 12;
+  }
+  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                       sizeof(CurveProgram));
   traits.workspace_bytes = sizeof(CurveState);
   operation.specialize_metadata = [multi, profile](const auto& inputs,
                                                    const auto& parameters) {
@@ -308,13 +308,16 @@ OperationDefinition curve_operation(const std::string& key, bool pchip,
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization resolved;
-    resolved.metadata.descriptor = descriptor.take_value();
+    resolved.metadata.result_schema = std::make_shared<const SchemaTemplate>(
+        numeric_ops::numeric_tensor_schema(descriptor.value().element_type,
+                                           descriptor.value().shape));
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(resolved)});
   };
-  operation.callback = [pchip, multi,
-                        profile](const OperationInvocation& call) {
-    return execute_curve(call, pchip, multi, profile);
+  operation.start_result = [pchip, multi, profile](const auto&,
+                                                   const auto& allocator) {
+    return ResultContinuation::make<CurveProgram>(allocator, pchip, multi,
+                                                  profile);
   };
   return operation;
 }

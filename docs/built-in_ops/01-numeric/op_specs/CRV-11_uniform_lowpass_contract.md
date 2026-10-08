@@ -7,12 +7,10 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+verification_status: focused_result_validation_passed
+repository_commit: current working tree
 ---
 
 # CRV-11: uniformly sampled low-pass family
@@ -68,7 +66,7 @@ exactly under non-zero-padding boundaries; approximate kernel normalization
 cannot introduce DC drift. Host budget exhaustion remains explicit failure.
 
 Skip exact mathematical zero coefficients entirely. Numerical operands are samples reached by
-nonzero taps after boundary mapping; Whole collection still reads all inputs. Input NaN propagates by the first tap in
+nonzero taps after boundary mapping; Whole role-13 validation still covers the complete Result input. Input NaN propagates by the first tap in
 offset order -R..R, preserving payload/sign and quieting sNaN. Otherwise combine
 infinite contributions with coefficient signs: both signs yield canonical quiet
 NaN, one sign yields that infinity. Generated canonical NaN is positive quiet
@@ -110,6 +108,16 @@ relevant kernel except boundary defaults reflect in constructors. No unused
 kernel parameter, output dtype, sample spacing or automatic quality parameter is
 accepted. The only dynamic input is input; the named output is values.
 
+The dynamic port `input` is a Result containing exactly one tensor member and
+no fields. Any structurally valid schema id/version/member key is accepted.
+Use its complete `sample_shape()`, including batch axes, for rank, axis and
+extent checks. Input rank is 1..8, Float32/64, positive extents and a product at
+most 2^40. The `values` output port is an immutable Result using
+`photospider.tensor` v1/member `samples`, with the same full shape and dtype and
+generic facets. The output schema selects its own resources rather than copying
+unrelated source facets/resources. Every nonempty Whole output has full certified
+coverage and retains global coordinates and the source Result association.
+
 Input rank is 1..8 with positive extents and count <=2^40; axis is a nonnegative
 index below rank. Axis length may be one or smaller than the kernel. For N=1,
 reflect/replicate/wrap repeat the sole sample; zero retains virtual +0 padding.
@@ -123,29 +131,31 @@ does not define an invalid kernel. Avoid it or refine at adequate precision.
 
 ## Demand, mapping, resources and error contract
 
-All 15 formal profile keys use Whole. Empty Q reads no input. A nonempty Q
-collects the complete input, including typed/upstream validation, and computes
-one dense output with the original shape/dtype. Full input edits invalidate all
-outputs. Sparse delivery does not reduce collection or computation; upstream or
-typed invalid data outside Q can fail the run. The numerical stencil still skips
-exact zero taps and preserves logical ordering for IEEE values. No mathematical
-radius, wrap mapping, sample selection or NaN/Inf rule changes.
+All 15 formal profile keys use Whole Result programs. A nonempty request declares
+Data, Validation and Descriptor needs (role 13) for the complete input tensor.
+Typed/upstream validation therefore covers the full member, while the callback
+reads authorized Root windows directly without collecting or copying the input.
+The callback computes every output position and preserves the exact zero-tap
+omission, logical tap order and IEEE rules. Empty demand completes static
+preflight without reading sample payload.
 
-Cache identity includes kernel/profile/parameters and complete input witnesses.
-The immutable output owns full packed storage; requested delivery retains global
-origins. Arbitrary strides, offsets and unaligned source access remain supported.
-Owners survive context destruction, and cache-off/partitioning do not alter math.
+The Result writer publishes the complete same-shape/dtype `samples` tensor in one
+transaction, with full certified coverage and global coordinates. Any input edit
+invalidates the complete recorded output demand. Arbitrary strides, offsets and
+unaligned source access remain supported; the Result retains its owner after
+context teardown. Cache-off and request partitioning do not alter mathematical
+values.
 
-For N total elements work is O(N*(2R+1)) plus certified arithmetic. Complete output
-requires N*sizeof(dtype), complete collected inputs are also budgeted. Fixed
-arithmetic workspace, 2R+1 sample bits and accelerated R+1 coefficient enclosures
-are admitted; there are no per-output dependency records. Certified coefficients
-are prepared once per invocation. Sparse requests can now exhaust capacity that
-regional execution accepted. Whole DependencySession numeric/fallback counters
-are unavailable (N/A); strict fallback still executes when certification fails.
+For N total elements, work is O(N*(2R+1)) plus certified arithmetic. The complete
+output requires N*sizeof(dtype); Root source windows, fixed arithmetic workspace,
+2R+1 sample bits, accelerated R+1 coefficient enclosures, and allocator metadata
+are budgeted. No per-output dependency records are retained. Coefficients are
+prepared once per Whole invocation. Sparse requests still require the full output
+and can exhaust capacity. Whole numerical/fallback counters are unavailable.
 
 Poll cancellation during coefficient/refinement work and at least every 64 tap
-contributions or simpler outputs; release temporaries on all terminal paths.
+contributions or simpler outputs. Terminal work/capacity/cancellation failures
+release temporary state; the Result transaction publishes no partial output.
 Invalid shape/axis/radius/parameters fail compile/preflight with
 InvalidArgument/InvalidDomain, and incompatible dtype uses TypeMismatch. A zero
 or nonpositive exact normalizer is InvalidArgument/InvalidDomain; inability to
@@ -211,13 +221,23 @@ this implementation and do not claim SciPy floating-point parity.
 ## Maintained implementation and validation
 
 This shared contract covers five uniform kernels and 15 profile keys; it is not
-itself a registered operation. The public low-pass helpers and implementation use
-exact tap support and certified whole sums. Accelerated keys cache 128-bit
-coefficient enclosures in managed callback state, then bound the complete
-hardware convolution and normalization before final-error acceptance. Unresolved
-coefficients or outputs dispatch strict convolution. Certified strict precision
-is 128..4096 bits and
-may fail `ResourceExhausted`. See the [uniform-lowpass workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
-and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple validation for the Whole revision is recorded in
-that workflow and the math implementation notes. WSL/AVX2 and installed-package
-consumers have not been rerun. Whole numerical/fallback counters are N/A.
+itself a registered operation. Static preparation stores immutable kernel,
+boundary, axis, radius and profile state. The public low-pass helpers and
+implementation use exact tap support and certified whole sums. Accelerated keys
+prepare 128-bit coefficient enclosures in managed per-Whole callback state, then
+bound the complete hardware convolution and normalization before final-error
+acceptance. Unresolved coefficients or outputs dispatch strict convolution.
+Certified strict precision is 128..4096 bits and may fail `ResourceExhausted`.
+The maintained manual workflow passes two groups per profile under Strict and
+Apple. Its independent MPFR oracle has 474 accepted-value cases per profile:
+Strict matches exact reference bits, while Apple applies the shared final FP32
+bound. The focused root CTests `test_numeric_lowpass_result` and
+`test_numeric_lowpass_execution_result` pass, as does the separate shared math
+integration fixture. The installed 0.32.0 consumers pass
+`installed_numeric_lowpass_result` and
+`installed_numeric_lowpass_execution_result` under Strict; direct Apple runs
+pass two uniform groups and four execution groups through the public package.
+No x86 numerical execution, native GPU run, full CTest or Result performance run is recorded. Whole
+numerical/fallback counters are unavailable. See the
+[uniform-lowpass workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
+and [CRV-11 umbrella](CRV-11_resample_signal.md).

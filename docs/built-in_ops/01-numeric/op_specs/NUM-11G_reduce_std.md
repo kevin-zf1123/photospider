@@ -13,49 +13,15 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+repository_commit: current working tree
 ---
 
 # NUM-11G: reduce_std
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Inherit the [NUM baseline](NUM_common_contract.md), [NUM-11 shared contract](NUM-11_reduction_contract.md) and [reduce_variance](NUM-11F_reduce_variance.md) for input dtype, axes, `ddof`, shape, NaN conversion, resources and failure behavior. The strict key follows the exact reference; accelerated floating results follow the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md).
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+`numeric.reduce_std_*` accepts a single-member Result with UInt8, Int64, Float32 or Float64 input. The `values` output is a Float32/Float64 `photospider.tensor` Result member `samples`, with rank-preserving keepdims shape. Static `dtype` and `ddof` are required on direct nodes; authoring helpers default to Float64 and zero.
 
-Inherit [reduce_variance](NUM-11F_reduce_variance.md) for input/values ports,
-all four input dtypes, Float32/Float64 output (default Float64), required axes,
-nonnegative static ddof (default 0), N>ddof compile/preflight validation,
-fixed keepdims, Whole input demand, nonfinite cases, NaN payload mapping,
-resources, errors and ownership. Static dtype/ddof are explicit in direct nodes.
+For finite data, let V be the exact rational variance defined by the variance contract, then return `RN_dtype(sqrt(V))`. Do not round the mean or variance before the square root. A finite constant group yields +0; finite positive results may round to a subnormal, +0 or +Inf. The first NaN follows variance's row-major payload rule. An infinity without a NaN yields the fixed positive quiet NaN before root evaluation.
 
-For finite data, define the exact mathematical variance V as in that contract,
-then return RN_dtype(sqrt(V)). There is no intermediate rounded variance or
-rounded mean. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound. Finite constant groups return +0. Any NaN or infinity
-follows variance's exceptional-value rules before root evaluation.
-
-Use exact moments and a certified correctly rounded rational-square-root method,
-or directed enclosures with exact boundary handling. A rounded native sqrt of
-an already rounded variance is not this operation. Exact positive results may
-round to a subnormal, +0 or +Inf according to output dtype. Charge all moment,
-root/refinement and limb storage/work and return ResourceExhausted if correct
-rounding cannot be established within the budget.
-
-Fixture: input=[1,2,3], axes="0", dtype="float64": ddof=0 yields
-[RN_Float64(sqrt(2/3))], ddof=1 yields [1]. For Float64 [MAX,-MAX] with ddof=0,
-standard deviation is exactly MAX even though rounding its variance to Float64
-would overflow. This fixture detects an incorrect variance-then-sqrt composition.
-Test tiny moments that would prematurely underflow, large common offsets, integer
-sources, exact root boundaries, all NaN/Inf/zero cases, and inherited resource,
-region, cancellation and owner-lifetime behavior using the independent root
-oracle and public manual target. The formal keys execute Whole and preserve the numerical rules above. See
-[NUM-11 Whole execution](../reductions-whole.md) for current public workflow,
-validation and timing. Earlier regional platform records predate Whole.
+For Float64 `[MAX,-MAX]` with `ddof=0`, standard deviation is exactly MAX even though variance rounds to infinity. This distinguishes direct exact-root rounding from a variance-then-sqrt implementation. The exact moments and root refinement are charged to host work and memory budgets; if the final rounding cannot be established within the budget, return the host resource failure. Nonempty Whole demand processes all input values and groups before projection; Empty reads no payload. Current fixture evidence and limits are in [NUM-11 Whole execution](../reductions-whole.md).

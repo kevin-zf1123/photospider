@@ -26,74 +26,14 @@ T take(Result<T> result) {
     throw Failure{result.status()};
   return result.take_value();
 }
-inline void poll(const OperationInvocation& call) {
-  require(!call.cancellation.cancelled(), ErrorCode::Cancelled,
-          "basic operation cancelled");
-}
 inline double finite(double number) {
   require(std::isfinite(number), ErrorCode::OperationFailed,
           "nonfinite basic operation input or intermediate");
   return number;
 }
-inline double parameter(const OperationInvocation& call, const char* key) {
-  return std::get<double>(call.parameters.at(key));
-}
-inline std::uint64_t integer(const OperationInvocation& call, const char* key) {
-  return static_cast<std::uint64_t>(
-      std::get<std::int64_t>(call.parameters.at(key)));
-}
-inline const std::string& text(const OperationInvocation& call,
-                               const char* key) {
-  return std::get<std::string>(call.parameters.at(key));
-}
 inline void choice(const std::string& value, const char* a, const char* b) {
   require(value == a || value == b, ErrorCode::InvalidArgument,
           "unknown basic operation parameter choice");
-}
-template <class T>
-T read(const Value& value, const std::vector<std::uint64_t>& coordinate) {
-  const T result = numeric_internal::read<T>(value, coordinate);
-  finite(result);
-  return result;
-}
-template <class T>
-void store(std::uint8_t* bytes, std::uint64_t index, double number) {
-  finite(number);
-  require(std::abs(number) <= std::numeric_limits<T>::max(),
-          ErrorCode::OperationFailed, "basic output outside dtype range");
-  const T result = static_cast<T>(number);
-  std::memcpy(bytes + index * sizeof(T), &result, sizeof(T));
-}
-inline void store_count(std::uint8_t* bytes, std::uint64_t index,
-                        std::int64_t count) {
-  std::memcpy(bytes + index * 8, &count, 8);
-}
-inline std::int64_t load_count(const std::uint8_t* bytes, std::uint64_t index) {
-  std::int64_t count;
-  std::memcpy(&count, bytes + index * 8, 8);
-  return count;
-}
-inline void same_type(const Value& a, const Value& b) {
-  require(a.descriptor().element_type == b.descriptor().element_type,
-          ErrorCode::TypeMismatch, "basic inputs must share dtype");
-}
-inline void generic(const Value& value) {
-  require(value.facets().empty(), ErrorCode::TypeMismatch,
-          "table or controls require generic array");
-}
-inline void field(const Value& value) {
-  require(value.descriptor().shape.size() == 2, ErrorCode::TypeMismatch,
-          "field requires rank two");
-  if (value.facets().empty())
-    return;
-  require(value.facets().size() == 1, ErrorCode::TypeMismatch,
-          "field requires scalar or coverage semantics");
-  auto s = take(decode_semantic(value.facets()[0]));
-  require(s.kind == SemanticKind::ScalarField ||
-              value.facets()[0].payload ==
-                  take(encode_semantic(coverage_semantics())).payload,
-          ErrorCode::TypeMismatch,
-          "field requires scalar or coverage semantics");
 }
 // Stable convex interpolation uses both distances independently. Scaling only
 // when the interval difference overflows retains subnormal ordinary intervals.
@@ -202,45 +142,5 @@ inline double interpolate(double x, double x0, double x1, double y0,
 }
 inline double blend(double a, double b, double t) {
   return interpolate(t, 0, 1, a, b);
-}
-template <class Function>
-void each(const Region& region, const OperationInvocation& call,
-          Function function) {
-  const auto count = take(region.element_count());
-  const auto& dims = region.dimensions();
-  std::vector<std::uint64_t> coordinate;
-  for (const auto& d : dims)
-    coordinate.push_back(d.offset);
-  for (std::uint64_t i = 0; i < count; ++i) {
-    if ((i & 255U) == 0)
-      poll(call);
-    function(i, coordinate);
-    for (std::size_t axis = dims.size(); axis; --axis) {
-      if (++coordinate[axis - 1] <
-          dims[axis - 1].offset + dims[axis - 1].extent)
-        break;
-      coordinate[axis - 1] = dims[axis - 1].offset;
-    }
-  }
-}
-// Offset without converting the complete logical coordinate to signed integer.
-inline bool shifted(std::uint64_t position, std::int64_t offset,
-                    std::uint64_t length, bool clamp, std::uint64_t* result) {
-  if (offset < 0) {
-    const auto amount = static_cast<std::uint64_t>(-(offset + 1)) + 1;
-    if (amount > position) {
-      *result = 0;
-      return clamp;
-    }
-    *result = position - amount;
-  } else {
-    const auto amount = static_cast<std::uint64_t>(offset);
-    if (amount >= length - position) {
-      *result = length - 1;
-      return clamp;
-    }
-    *result = position + amount;
-  }
-  return true;
 }
 }  // namespace ps::basic_internal

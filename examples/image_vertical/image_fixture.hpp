@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -10,60 +11,94 @@
 #include "photospider/photospider.hpp"
 
 namespace s1_fixture {
-inline ps::ValueFacet profile() {
-  return ps::encode_semantic(ps::rgba_semantics()).take_value();
-}
-inline ps::Value value(std::vector<float> pixels,
-                       std::vector<std::uint64_t> shape = {2, 2, 4},
-                       bool image = true) {
-  std::vector<std::int64_t> strides(shape.size());
-  std::int64_t stride = 4;
-  for (std::size_t i = shape.size(); i > 0; --i) {
-    strides[i - 1] = stride;
-    stride *= static_cast<std::int64_t>(shape[i - 1]);
-  }
-  std::vector<std::uint8_t> bytes(pixels.size() * sizeof(float));
-  std::memcpy(bytes.data(), pixels.data(), bytes.size());
-  auto result = ps::Value::create(
-      {ps::ElementType::Float32, shape}, ps::Region::whole(shape), {0, strides},
-      std::move(bytes),
-      image ? std::vector<ps::ValueFacet>{profile()}
-      : shape.size() == 2
-          ? std::vector<ps::ValueFacet>{ps::encode_semantic(
-                                            ps::coverage_semantics())
-                                            .take_value()}
-          : std::vector<ps::ValueFacet>{});
+template <class T>
+T take(ps::Result<T> result) {
   if (!result.ok())
     throw std::runtime_error(result.status().message);
   return result.take_value();
 }
-inline ps::Value scalar(float number) {
-  return value({number}, {1}, false);
+inline void check(ps::Status status) {
+  if (!status.ok())
+    throw std::runtime_error(status.message);
+}
+inline ps::ValueFacet profile() {
+  return take(ps::encode_semantic(ps::rgba_semantics()));
+}
+inline ps::SchemaTemplate schema(std::vector<std::uint64_t> shape = {2, 2, 4},
+                                 bool image = true) {
+  const bool spatial = image || shape.size() == 2;
+  ps::SchemaTemplate result;
+  result.id = spatial ? "photospider.image" : "example.numeric";
+  ps::ResultTensorSpec tensor;
+  tensor.key = spatial ? "pixels" : "value";
+  tensor.descriptor = {ps::ElementType::Float32, std::move(shape)};
+  if (spatial) {
+    tensor.batch_axes = {1, 1};
+    tensor.layout.spatial = true;
+    if (!image)
+      tensor.layout.channel_axis.reset();
+    tensor.facets = {image
+                         ? profile()
+                         : take(ps::encode_semantic(ps::coverage_semantics()))};
+  }
+  result.tensors.push_back(std::move(tensor));
+  return result;
+}
+inline ps::ResultRef tensor(const ps::ResourceBudget& root,
+                            const std::vector<float>& pixels,
+                            std::vector<std::uint64_t> shape = {2, 2, 4},
+                            bool image = true) {
+  const auto layout = schema(std::move(shape), image);
+  const auto count = take(layout.tensors[0].sample_count());
+  if (pixels.size() != count)
+    throw std::runtime_error("fixture sample count mismatch");
+  auto builder = take(ps::ResultBuilder::start(root, layout, "example.source"));
+  check(builder.bind_descriptor_relation(
+      take(ps::ResultRelation::cartesian(root, 1, {}))));
+  check(builder.publish_tensor(
+      0, ps::Region::whole(layout.tensors[0].sample_shape()),
+      ps::ByteView(reinterpret_cast<const std::uint8_t*>(pixels.data()),
+                   pixels.size() * 4),
+      take(ps::ResultRelation::cartesian(root, count, {})),
+      {true, true, true, true}));
+  return take(builder.seal());
+}
+inline ps::ResultRef scalar(const ps::ResourceBudget& root, float number) {
+  return tensor(root, {number}, {1}, false);
+}
+inline ps::WorkflowInputDeclaration declaration(
+    std::uint64_t id, std::string name, const ps::SchemaTemplate& schema) {
+  ps::WorkflowInputDeclaration input;
+  input.id = id;
+  input.name = std::move(name);
+  input.result_schema = std::make_shared<ps::SchemaTemplate>(schema);
+  return input;
 }
 inline ps::WorkflowInputDeclaration declaration(std::uint64_t id,
                                                 std::string name,
-                                                const ps::Value& input) {
-  return {id,
-          std::move(name),
-          input.descriptor(),
-          input.region(),
-          input.layout(),
-          input.facets()};
+                                                const ps::ResultRef& input) {
+  return declaration(id, std::move(name), input.schema());
 }
-inline ps::ExecutionBindings bindings(bool second = false) {
-  return {{{"image", second ? value({.25F, 0, .125F, .5F, .125F, .25F, .125F, 1,
-                                     .5F, .25F, 0, 1, 0, 0, 0, 0})
-                            : value({.125F, .25F, 0, .5F, .25F, .125F, .125F,
-                                     .5F, 0, .25F, .5F, 1, 0, 0, 0, 0})},
-           {"gain", scalar(second ? .5F : 2)},
-           {"opacity", scalar(second ? .25F : .5F)}}};
+inline std::array<float, 16> input_pixels(bool second) {
+  return second ? std::array<float, 16>{.25F,  0, .125F, .5F,  .125F, .25F,
+                                        .125F, 1, .5F,   .25F, 0,     1,
+                                        0,     0, 0,     0}
+                : std::array<float, 16>{.125F, .25F, 0, .5F,  .25F, .125F,
+                                        .125F, .5F,  0, .25F, .5F,  1,
+                                        0,     0,    0, 0};
+}
+inline ps::ExecutionBindings bindings(const ps::ResourceBudget& root,
+                                      bool second = false) {
+  const auto pixels = input_pixels(second);
+  return {{{"image", tensor(root, {pixels.begin(), pixels.end()})},
+           {"gain", scalar(root, second ? .5F : 2)},
+           {"opacity", scalar(root, second ? .25F : .5F)}}};
 }
 inline ps::WorkflowDocument document() {
-  auto input = bindings();
   ps::WorkflowDocument result;
-  for (std::size_t i = 0; i < input.inputs.size(); ++i)
-    result.inputs.push_back(
-        declaration(i + 1, input.inputs[i].name, input.inputs[i].value));
+  result.inputs = {declaration(1, "image", schema()),
+                   declaration(2, "gain", schema({1}, false)),
+                   declaration(3, "opacity", schema({1}, false))};
   result.nodes = {
       {10,
        "image.exposure_gain",
@@ -78,33 +113,24 @@ inline ps::WorkflowDocument document() {
 }
 inline ps::PlanningOptions demand() {
   ps::PlanningOptions options;
-  options.output_regions.emplace("result",
-                                 ps::Region({{0, 1}, {1, 1}, {0, 4}}));
+  options.execution_mode = ps::ExecutionMode::CpuExact;
+  options.output_regions.emplace(
+      "result", ps::Region({{0, 1}, {0, 1}, {0, 1}, {1, 1}, {0, 4}}));
   return options;
 }
-// Independent, bounded CPU calculation for the exact A/B table. Binary-fraction
-// inputs make both stage results exactly representable even before rounding.
-// No operation callback, registry, or kernel arithmetic participates here.
+// Independent binary-fraction calculation, with a rounded result at each stage.
 inline std::array<float, 16> cpu_reference(bool second) {
-  const auto input = bindings(second);
-  std::array<float, 16> pixels{};
-  std::memcpy(pixels.data(), input.inputs[0].value.bytes().data(),
-              sizeof(pixels));
-  float gain = 0;
-  float opacity = 0;
-  std::memcpy(&gain, input.inputs[1].value.bytes().data(), sizeof(gain));
-  std::memcpy(&opacity, input.inputs[2].value.bytes().data(), sizeof(opacity));
-  for (std::size_t index = 0; index < pixels.size(); ++index) {
+  auto pixels = input_pixels(second);
+  const float gain = second ? .5F : 2, opacity = second ? .25F : .5F;
+  for (std::size_t i = 0; i < pixels.size(); ++i) {
     const float exposed =
-        index % 4 == 3
-            ? pixels[index]
-            : static_cast<float>(static_cast<double>(pixels[index]) * gain);
-    pixels[index] = static_cast<float>(static_cast<double>(exposed) * opacity);
+        i % 4 == 3 ? pixels[i]
+                   : static_cast<float>(static_cast<double>(pixels[i]) * gain);
+    pixels[i] = static_cast<float>(static_cast<double>(exposed) * opacity);
   }
   return pixels;
 }
 inline bool oracle(const ps::ExecutionResult& result, bool second = false) {
-  // Frozen independently rounded binary fractions from ADR0016.
   const std::array<float, 16> expected =
       second ? std::array<float, 16>{1.F / 32, 0,        1.F / 64, 1.F / 8,
                                      1.F / 64, 1.F / 32, 1.F / 64, 1.F / 4,
@@ -114,35 +140,32 @@ inline bool oracle(const ps::ExecutionResult& result, bool second = false) {
                                      .125F, .25F, 0, .25F, .5F,  .5F,
                                      0,     0,    0, 0};
   const auto reference = cpu_reference(second);
-  if (std::memcmp(reference.data(), expected.data(), sizeof(expected)) != 0)
+  if (std::memcmp(reference.data(), expected.data(), sizeof(expected)) != 0 ||
+      result.results.size() != 1 || !result.results.count("result"))
     return false;
-  const auto found = result.values.find("result");
-  if (result.values.size() != 1 || found == result.values.end())
+  const auto& output = result.results.at("result");
+  if (!output.schema().same_schema(schema()))
     return false;
-  const auto& output = found->second;
-  const auto facet = profile();
-  if (!output.valid() ||
-      output.descriptor().element_type != ps::ElementType::Float32 ||
-      output.descriptor().shape != std::vector<std::uint64_t>({2, 2, 4}) ||
-      output.region().empty() || output.region().dimensions()[2].offset != 0 ||
-      output.region().dimensions()[2].extent != 4 ||
-      output.facets().size() != 1 || output.facets()[0].key != facet.key ||
-      output.facets()[0].version != facet.version ||
-      output.facets()[0].payload != facet.payload)
+  const auto descriptor = output.descriptor();
+  if (!descriptor.ok() || descriptor.value().tensor_coverage(0).empty())
     return false;
-  const auto yd = output.region().dimensions()[0],
-             xd = output.region().dimensions()[1];
-  if (output.bytes().size() != yd.extent * xd.extent * 16)
-    return false;
-  for (std::uint64_t y = yd.offset; y < yd.offset + yd.extent; ++y)
-    for (std::uint64_t x = xd.offset; x < xd.offset + xd.extent; ++x)
-      for (std::uint64_t c = 0; c < 4; ++c) {
-        auto address = output.byte_address({y, x, c});
-        if (!address.ok() ||
-            std::memcmp(output.bytes().data() + address.value(),
-                        &expected[(y * 2 + x) * 4 + c], sizeof(float)) != 0)
-          return false;
-      }
-  return true;
+  return descriptor.value()
+      .tensor_coverage(0)
+      .visit(
+          [&](const auto& at) {
+            float actual = 0;
+            auto status =
+                output.read_tensor(descriptor.value(), 0, at, &actual, 4);
+            if (!status.ok())
+              return status;
+            return std::memcmp(&actual,
+                               &expected[(at[2] * 2 + at[3]) * 4 + at[4]],
+                               4) == 0
+                       ? ps::Status::success()
+                       : ps::Status{ps::ErrorCode::OperationFailed,
+                                    "image oracle mismatch"};
+          },
+          16)
+      .ok();
 }
 }  // namespace s1_fixture

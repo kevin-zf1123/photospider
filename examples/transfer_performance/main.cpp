@@ -264,70 +264,87 @@ int main(int argc, char** argv) try {
   }
   WorkflowDocument document;
   ExecutionBindings bindings;
-  std::uint64_t source_backed = 0;
-  if (storage == "generic") {
-    std::vector<std::uint8_t> bytes(size * size * 4 * width);
-    for (std::uint64_t y = 0; y < size; ++y) {
-      for (std::uint64_t x = 0; x < size; ++x) {
-        for (unsigned c = 0; c < 4; ++c) {
-          auto b = sample(y, x, c, false);
-          std::memcpy(bytes.data() + ((y * size + x) * 4 + c) * width, &b,
-                      width);
+  auto registry = make_default_operation_registry();
+  ExecutionContextConfig config;
+  config.cpu_workers = static_cast<std::uint32_t>(workers);
+  config.maximum_live_bytes = UINT64_C(2) << 30;
+  config.managed_resources = ResourceLimits{};
+  config.managed_resources->capacity[ResourceKind::Host] =
+      config.maximum_live_bytes;
+  config.managed_resources->capacity[ResourceKind::Metadata] = UINT64_C(64)
+                                                               << 20;
+  ExecutionContext context(registry, config);
+  const auto root = take(context.resource_budget());
+  SchemaTemplate schema;
+  schema.id = "example.transfer";
+  ResultTensorSpec tensor;
+  tensor.key = "samples";
+  tensor.descriptor = descriptor;
+  tensor.facets = {facet};
+  tensor.layout.spatial = storage != "generic";
+  tensor.layout.order =
+      storage == "tiled" ? ImagePlaneOrder::Tiled : ImagePlaneOrder::Continuous;
+  schema.tensors.push_back(tensor);
+  auto builder = take(ResultBuilder::start(root, schema, "transfer.source", {},
+                                           {}, tile, tile));
+  take(builder.bind_descriptor_relation(
+      take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0}))));
+  auto relation =
+      take(ResultRelation::cartesian(root, size * size * 4, {0, 1, 0, 0}));
+  const auto source_region =
+      storage == "generic" ? Region::whole(descriptor.shape) : roi;
+  take(builder.publish_tensor_kernel(
+      0, source_region,
+      [&](const auto& writers) {
+        for (const auto& writer : writers) {
+          const auto& dims = writer.region().dimensions();
+          const auto axis = writer.sample_axis();
+          std::vector<std::uint64_t> at;
+          for (auto dim : dims)
+            at.push_back(dim.offset);
+          for (;;) {
+            auto run = take(writer.row_run(at));
+            for (std::uint64_t lane = 0; lane < run.samples; ++lane) {
+              auto coordinate = at;
+              coordinate[axis] += lane;
+              const auto bits =
+                  sample(coordinate[0], coordinate[1], coordinate[2], false);
+              std::memcpy(run.data + lane * run.sample_stride_bytes, &bits,
+                          width);
+            }
+            at[axis] += run.samples;
+            if (at[axis] < dims[axis].offset + dims[axis].extent)
+              continue;
+            at[axis] = dims[axis].offset;
+            bool next = false;
+            for (std::size_t i = dims.size(); i;) {
+              --i;
+              if (i == axis)
+                continue;
+              if (++at[i] < dims[i].offset + dims[i].extent) {
+                next = true;
+                break;
+              }
+              at[i] = dims[i].offset;
+            }
+            if (!next)
+              break;
+          }
         }
-      }
-    }
-    StridedLayout layout{0,
-                         {static_cast<std::int64_t>(size * 4 * width),
-                          4 * width, static_cast<std::int64_t>(width)}};
-    document.inputs = {{1,
-                        "source",
-                        descriptor,
-                        Region::whole(descriptor.shape),
-                        layout,
-                        {facet}}};
-    bindings.inputs.push_back(
-        {"source",
-         take(Value::create(descriptor, Region::whole(descriptor.shape), layout,
-                            bytes, {facet}))});
-    source_backed = bytes.size();
-  } else {
-    PlanarImageConfig cfg;
-    cfg.order = storage == "tiled" ? ImagePlaneOrder::Tiled
-                                   : ImagePlaneOrder::Continuous;
-    cfg.tile_width = cfg.tile_height = tile;
-    cfg.maximum_backed_bytes = UINT64_C(1) << 30;
-    auto image = take(PlanarImage::create(descriptor, cfg, {facet}));
-    // Publish only requested input planes/rectangle; peers need not have pages.
-    const auto& d = roi.dimensions();
-    std::vector<std::uint8_t> bytes(d[0].extent * d[1].extent * width);
-    for (auto c = d[2].offset; c < d[2].offset + d[2].extent; ++c) {
-      for (std::uint64_t y = 0; y < d[0].extent; ++y) {
-        for (std::uint64_t x = 0; x < d[1].extent; ++x) {
-          auto b = sample(y + d[0].offset, x + d[1].offset, c, false);
-          std::memcpy(bytes.data() + (y * d[1].extent + x) * width, &b, width);
-        }
-      }
-      take(image.publish(Region({d[0], d[1], {c, 1}}), bytes.data(),
-                         bytes.size()));
-    }
-    document.inputs = {{1,
-                        "source",
-                        descriptor,
-                        Region::whole(descriptor.shape),
-                        {},
-                        {facet},
-                        PlanarImageLayout{cfg.order, 0, 1, 2, 0, {}}}};
-    ExecutionBinding b;
-    b.name = "source";
-    b.image = std::make_shared<const PlanarImage>(image);
-    bindings.inputs.push_back(std::move(b));
-    source_backed = image.backed_bytes();
-  }
+        return Status::success();
+      },
+      relation, {true, true, true, true}));
+  auto source = take(builder.seal());
+  WorkflowInputDeclaration declaration;
+  declaration.id = 1;
+  declaration.name = "source";
+  declaration.result_schema = std::make_shared<SchemaTemplate>(schema);
+  document.inputs = {declaration};
+  bindings.inputs.push_back({"source", source});
   const auto op = "color.transfer_" + direction +
                   (profile == "strict" ? "_strict" : "_accelerated_" + profile);
   document.nodes = {{1, op, {WorkflowInputReference{1}}, params}};
   document.outputs = {{"result", 1, "values"}};
-  auto registry = make_default_operation_registry();
   Compiler compiler(registry);
   GraphContext graph(document);
   PlanningOptions planning;
@@ -338,9 +355,7 @@ int main(int argc, char** argv) try {
   const auto compile_us = us(start);
   std::vector<double> prepare;
   OperationMetadata metadata;
-  metadata.descriptor = descriptor;
-  metadata.facets = {facet};
-  metadata.planar_layout = document.inputs[0].planar_layout;
+  metadata.result_schema = document.inputs[0].result_schema;
   for (std::uint64_t i = 0; i < repeats + 2; ++i) {
     start = Clock::now();
     auto p = take(registry->prepare_operation(op, {metadata}, params));
@@ -348,13 +363,7 @@ int main(int argc, char** argv) try {
       prepare.push_back(us(start));
     }
   }
-  ExecutionContextConfig config;
-  config.cpu_workers = static_cast<std::uint32_t>(workers);
-  config.maximum_live_bytes = UINT64_C(2) << 30;
-  if (budget_mode == "managed") {
-    config.managed_resources = ResourceLimits{};
-  }
-  ExecutionContext context(registry, config);
+  const auto baseline = root.statistics();
   ExecutionOptions options;
   options.maximum_dependency_work = UINT64_MAX;
   options.dependencies.maximum_work = UINT64_MAX;
@@ -363,7 +372,7 @@ int main(int argc, char** argv) try {
   double cold = 0;
   std::uint64_t evaluated = 0, fallbacks = 0, math_calls = 0, copied = 0,
                 views = 0, attempts = 0, read = 0, peak = 0, backed = 0,
-                reserved = 0, metadata_bytes = 0, result_copy = 0;
+                metadata_bytes = 0;
   std::string identity;
   std::uint64_t issued_work = 0;
   for (std::uint64_t i = 0; i < repeats + 2; ++i) {
@@ -400,58 +409,75 @@ int main(int argc, char** argv) try {
       elapsed.push_back(wall);
       callbacks.push_back(callback);
     }
-    read = result.diagnostics.source_read_bytes;
-    result_copy = result.diagnostics.result_copy_bytes;
-    peak = std::max(peak, result.diagnostics.peak_live_bytes);
-    if (storage == "generic") {
-      backed = result.values.at("result").storage()->capacity();
-      reserved = backed;
-    } else {
-      const auto& image = result.images.at("result");
-      backed = image.backed_bytes();
-      reserved = image.reserved_bytes();
-      metadata_bytes = image.metadata_bytes();
-    }
+    read = take(take(result.dependencies.source_support())
+                    .at("source")
+                    .element_count()) *
+           width;
+    const auto usage = root.statistics();
+    backed = usage.live[ResourceKind::Payload] -
+             baseline.live[ResourceKind::Payload];
+    metadata_bytes = usage.live[ResourceKind::Metadata] >
+                             baseline.live[ResourceKind::Metadata]
+                         ? usage.live[ResourceKind::Metadata] -
+                               baseline.live[ResourceKind::Metadata]
+                         : 0;
     // Verification is outside the timed interval and gates the CSV result.
     {
-      const auto& d = roi.dimensions();
-      std::vector<std::uint8_t> row(d[1].extent * width);
-      for (auto c = d[2].offset; c < d[2].offset + d[2].extent; ++c) {
-        for (auto y = d[0].offset; y < d[0].offset + d[0].extent; ++y) {
-          if (storage != "generic") {
-            take(result.images.at("result").read(Region({{y, 1}, d[1], {c, 1}}),
-                                                 row.data(), row.size()));
-          }
-          for (std::uint64_t dx = 0; dx < d[1].extent; ++dx) {
-            auto x = d[1].offset + dx;
-            std::uint64_t got = 0;
-            if (storage == "generic") {
-              const auto& v = result.values.at("result");
-              const auto off = take(v.byte_address({y, x, c}));
-              std::memcpy(&got, v.bytes().data() + off, width);
-            } else {
-              std::memcpy(&got, row.data() + dx * width, width);
-            }
-            if (!equal(got, sample(y, x, c, true), narrow,
-                       profile == "strict" || c == 3)) {
-              throw std::runtime_error("independent golden gate failed");
-            }
-          }
+      const auto& output = result.results.at("result");
+      auto window =
+          take(output.acquire_tensor(take(output.descriptor()), 0, roi));
+      const auto& dims = roi.dimensions();
+      const auto axis = window.sample_axis();
+      std::vector<std::uint64_t> at;
+      for (auto dim : dims)
+        at.push_back(dim.offset);
+      for (;;) {
+        const auto run = take(window.row_run(at));
+        for (std::uint64_t lane = 0; lane < run.samples; ++lane) {
+          auto coordinate = at;
+          coordinate[axis] += lane;
+          std::uint64_t got = 0;
+          std::memcpy(&got, run.data + lane * run.sample_stride_bytes, width);
+          if (!equal(got,
+                     sample(coordinate[0], coordinate[1], coordinate[2], true),
+                     narrow, profile == "strict" || coordinate[2] == 3))
+            throw std::runtime_error("independent golden gate failed");
         }
+        at[axis] += run.samples;
+        if (at[axis] < dims[axis].offset + dims[axis].extent)
+          continue;
+        at[axis] = dims[axis].offset;
+        bool next = false;
+        for (std::size_t j = dims.size(); j;) {
+          --j;
+          if (j == axis)
+            continue;
+          if (++at[j] < dims[j].offset + dims[j].extent) {
+            next = true;
+            break;
+          }
+          at[j] = dims[j].offset;
+        }
+        if (!next)
+          break;
       }
     }
+    peak = root.statistics().peak[ResourceKind::Host];
     // Raw observations are emitted only AFTER this execution passes the gate.
     std::cerr << "SAMPLE," << i << ',' << (i < 2 ? 1 : 0) << ',' << wall << ','
               << callback << ',' << evaluated << ',' << math_calls << ','
-              << issued_work << '\n';
+              << (budget_mode == "managed" ? std::to_string(issued_work)
+                                           : std::string{})
+              << '\n';
   }
-  std::cout << "size,curve,direction,dtype,profile,storage,coverage,mode,tile,"
-               "workers,palette,compile_us,prepare_p50_us,cold_execute_us,"
-               "execute_p50_us,execute_p95_us,callback_sum_p50_us,invocations,"
-               "evaluated,strict_fallbacks,strict_math_calls,copied,views,"
-               "source_read_bytes,result_copy_bytes,source_backed,output_"
-               "backed,output_reserved,output_metadata,peak_live_bytes,"
-               "implementation,corpus,budget,issued_work,verified_executions\n";
+  std::cout
+      << "size,curve,direction,dtype,profile,storage,coverage,mode,tile,"
+         "workers,palette,compile_us,prepare_p50_us,cold_execute_us,"
+         "execute_p50_us,execute_p95_us,callback_sum_p50_us,invocations,"
+         "evaluated,strict_fallbacks,strict_math_calls,copied,views,"
+         "source_logical_bytes,source_payload_bytes,run_live_payload_bytes,"
+         "run_live_metadata_bytes,root_peak_host_bytes,"
+         "implementation,corpus,budget,issued_work,verified_executions\n";
   std::cout << size << ',' << token << ',' << direction << ',' << dtype << ','
             << profile << ',' << storage << ',' << coverage << ',' << mode
             << ',' << tile << ',' << workers << ',' << palette.size() << ','
@@ -459,11 +485,13 @@ int main(int argc, char** argv) try {
             << ',' << percentile(elapsed, .5) << ',' << percentile(elapsed, .95)
             << ',' << percentile(callbacks, .5) << ',' << attempts << ','
             << evaluated << ',' << fallbacks << ',' << math_calls << ','
-            << copied << ',' << views << ',' << read << ',' << result_copy
-            << ',' << source_backed << ',' << backed << ',' << reserved << ','
+            << copied << ',' << views << ',' << read << ','
+            << baseline.live[ResourceKind::Payload] << ',' << backed << ','
             << metadata_bytes << ',' << peak << ',' << '"' << identity << '"'
-            << ',' << corpus << ',' << budget_mode << ',' << issued_work << ','
-            << (repeats + 2) << '\n';
+            << ',' << corpus << ',' << budget_mode << ','
+            << (budget_mode == "managed" ? std::to_string(issued_work)
+                                         : std::string{})
+            << ',' << (repeats + 2) << '\n';
   return 0;
 } catch (const std::exception& e) {
   std::cerr << e.what() << '\n';

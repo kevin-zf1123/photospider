@@ -1,6 +1,7 @@
 #include <fenv.h>  // NOLINT(build/c++11)
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -10,6 +11,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -17,8 +19,12 @@
 #include "photospider/numeric/lowpass.hpp"
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
+#include "result_fixture.hpp"     // NOLINT(build/include_subdir)
 
 namespace {
+using numeric_result_fixture::read;
+using numeric_result_fixture::source_schema;
+using point_math_checks::source;
 void require(bool condition, const char* message) {
   if (!condition)
     throw std::runtime_error(message);
@@ -49,16 +55,10 @@ struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
+  std::vector<ps::Value> sources;
   Fixture(ps::WorkflowNode node, const std::vector<ps::Value>& inputs) {
-    for (std::size_t i = 0; i < inputs.size(); ++i) {
-      const auto& value = inputs[i];
-      const auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1, name, value.descriptor(),
-                                 value.region(), value.layout(),
-                                 value.facets()});
-      bindings.inputs.push_back({name, value});
-    }
+    sources = inputs;
+    numeric_result_fixture::declare_sources(&document, inputs);
     document.outputs = {{"values", node.id, "values"}};
     document.nodes = {std::move(node)};
   }
@@ -77,6 +77,8 @@ struct Fixture {
     config.result_cache_bytes = cache ? cache_bytes : 0;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(registry, config);
+    auto bindings = point_math_checks::bindings(take(context.resource_budget()),
+                                                sources, document);
     auto snapshot = context.freeze(plan.value().plan, bindings);
     if (!snapshot.ok())
       return ps::Result<ps::DemandResult>(snapshot.status());
@@ -103,23 +105,25 @@ ps::Footprint region(const std::vector<std::uint64_t>& shape,
                      std::vector<ps::Region> boxes) {
   return take(ps::Footprint::from_regions(shape, std::move(boxes)));
 }
-ps::ValueFragments direct(
-    const std::shared_ptr<ps::OperationRegistry>& registry,
-    const ps::WorkflowNode& node, const std::vector<ps::Value>& inputs,
-    const ps::Footprint& outputs) {
-  std::vector<ps::Region> demands;
-  for (const auto& input : inputs)
-    demands.push_back(input.region());
-  ps::ResourceBudget budget(ps::ResourceLimits{});
-  ps::ResourceAllocationScope scope(budget);
-  ps::OperationInvocation call(
-      inputs, demands, node.parameters, ps::Backend::Cpu, {},
-      ps::Region::whole(inputs.back().descriptor().shape), budget.allocator());
-  auto output = take(registry->invoke(node.operation, call));
-  auto all = take(ps::ValueFragments::create(
-      output.descriptor(), output.facets(),
-      take(ps::Footprint::all(output.descriptor().shape)), {output}));
-  return take(all.restrict(outputs));
+ps::ResultRef direct(const std::shared_ptr<ps::OperationRegistry>& registry,
+                     const ps::WorkflowNode& node,
+                     const std::vector<ps::Value>& inputs,
+                     const ps::Footprint& outputs,
+                     std::shared_ptr<point_math_checks::Control> control = {}) {
+  Fixture fixture(node, inputs);
+  fixture.registry = registry;
+  if (control) {
+    fixture.registry = ps::make_default_operation_registry(false);
+    fixture.document.nodes[0] = point_math_checks::checked_node(
+        fixture.registry, fixture.document.nodes[0], control);
+    require(fixture.registry->freeze().ok(), "freeze checked lowpass registry");
+  }
+  fixture.document.outputs = {
+      {"filtered", node.id,
+       node.operation.find("nonuniform") != std::string::npos ? "samples"
+                                                              : "values"}};
+  return take(fixture.run({{"filtered", outputs}}, false))
+      .results.at("filtered");
 }
 ps::Value reversed_unaligned(const ps::Value& value) {
   auto bytes = value.bytes();
@@ -179,7 +183,7 @@ void layouts(ps::CpuNumericProfile profile) {
       auto demand = region({2, 3}, {ps::Region({{0, 1}, {1, 1}})});
       auto baseline = direct(registry, node, dense, demand);
       std::uint64_t expected = 0;
-      require(baseline.read({0, 1}, &expected, 8).ok(),
+      require(read(baseline, {0, 1}, &expected, 8).ok(),
               "baseline local signal");
       for (unsigned mask = 0; mask < (1U << dense.size()); ++mask) {
         auto inputs = dense;
@@ -193,9 +197,13 @@ void layouts(ps::CpuNumericProfile profile) {
           require(fesetround(mode) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
                       feraiseexcept(FE_DIVBYZERO) == 0,
                   "set lowpass fenv");
-          auto result = direct(registry, node, inputs, demand);
+          auto control = std::make_shared<point_math_checks::Control>();
+          control->rounding = mode;
+          auto result = direct(registry, node, inputs, demand, control);
+          require(control->computation_polls > 0,
+                  "lowpass worker computation fenv exercised");
           std::uint64_t actual = 0;
-          require(result.read({0, 1}, &actual, 8).ok() && actual == expected,
+          require(read(result, {0, 1}, &actual, 8).ok() && actual == expected,
                   "all-port negative/unaligned lowpass");
           require(fegetround() == mode &&
                       fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO,
@@ -209,7 +217,7 @@ void layouts(ps::CpuNumericProfile profile) {
           {0, {0, 0}}, constant.storage()));
       auto zero = direct(registry, node, dense, demand);
       std::uint64_t actual = 0;
-      require(zero.read({0, 1}, &actual, 8).ok() && actual == raw(-0.),
+      require(read(zero, {0, 1}, &actual, 8).ok() && actual == raw(-0.),
               "zero-stride signed constant");
     }
   std::cout << "ten lowpass families: axis-local negative/unaligned/zero "
@@ -232,12 +240,18 @@ void independent_axis_layout(ps::CpuNumericProfile profile) {
       for (unsigned row = 0; row < 4; ++row)
         for (unsigned column = 0; column < 2; ++column) {
           std::uint64_t actual = 0;
-          require(result.read({row, column}, &actual, 8).ok() &&
+          require(read(result, {row, column}, &actual, 8).ok() &&
                       actual == raw(column ? -2 : 1),
                   "non-last-axis independent two-constant oracle");
         }
     }
 }
+void result_resources(const ps::WorkflowNode& node,
+                      const std::vector<ps::Value>& values,
+                      uint64_t output_bytes) {
+  point_math_checks::resources(node, values, output_bytes);
+}
+
 void resources(ps::CpuNumericProfile profile) {
   auto registry = ps::make_default_operation_registry();
   for (bool continuous : {false, true}) {
@@ -251,12 +265,19 @@ void resources(ps::CpuNumericProfile profile) {
     fixture.document.outputs = {{"filtered", 1, key}};
     auto empty = take(
         fixture.run({{"filtered", take(ps::Footprint::none({3}))}}, false));
-    require(take(empty.dependencies.source_support()).empty(),
+    require(take(empty.dependencies.source_support()).empty() &&
+                take(empty.results.at("filtered").descriptor())
+                    .tensor_coverage(0)
+                    .empty(),
             "Empty lowpass reads none");
-    point_math_checks::resources(node, inputs, 24);
+    result_resources(node, inputs, 24);
     std::vector<ps::OperationMetadata> metadata;
-    for (const auto& input : inputs)
-      metadata.push_back({input.descriptor(), input.facets()});
+    for (const auto& input : inputs) {
+      ps::OperationMetadata m;
+      m.result_schema =
+          std::make_shared<ps::SchemaTemplate>(source_schema(input));
+      metadata.push_back(std::move(m));
+    }
     for (unsigned kind = 0; kind < 5; ++kind) {
       auto parameters = node.parameters;
       auto ports = metadata;
@@ -266,8 +287,12 @@ void resources(ps::CpuNumericProfile profile) {
         parameters["sigma"] = 0.;
       if (kind == 2)
         parameters["unused"] = true;
-      if (kind == 3)
-        ports.back().descriptor.element_type = ps::ElementType::Int64;
+      if (kind == 3) {
+        auto schema =
+            std::make_shared<ps::SchemaTemplate>(*ports.back().result_schema);
+        schema->tensors[0].descriptor.element_type = ps::ElementType::Int64;
+        ports.back().result_schema = std::move(schema);
+      }
       if (kind == 4)
         parameters["boundary"] = std::string("mirror");
       require(!registry->resolve_traits(node.operation, ports, parameters).ok(),
@@ -277,6 +302,15 @@ void resources(ps::CpuNumericProfile profile) {
   std::cout << "Empty/schema, Whole work/output/workspace budgets, active "
                "cancellation and release passed\n";
 }
+struct FailedSource final {
+  unsigned* calls;
+  explicit FailedSource(unsigned* counter) : calls(counter) {}
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase&) {
+    ++*calls;
+    return ps::Result<ps::ResultProgramPoll>(
+        ps::Status{ps::ErrorCode::OperationFailed, "required lowpass source"});
+  }
+};
 void cache_validation_and_owners(ps::CpuNumericProfile profile) {
   for (bool continuous : {false, true}) {
     auto node = authored(continuous, 4, profile);
@@ -289,50 +323,77 @@ void cache_validation_and_owners(ps::CpuNumericProfile profile) {
         {"filtered", 1, continuous ? "samples" : "values"}};
     ps::GraphContext graph(fixture.document);
     auto plan = take(ps::Compiler(fixture.registry).compile(graph));
-    ps::InputSnapshotStore store;
-    for (auto& binding : fixture.bindings.inputs) {
-      binding.snapshot = std::make_shared<const ps::InputSnapshot>(
-          take(store.import_value(binding.value)));
-      binding.value = {};
-    }
+    const auto prepared = plan.plan.steps().back().prepared;
+    require(prepared != nullptr, "immutable lowpass static preparation");
     ps::ExecutionContextConfig config;
     config.cpu_workers = 1;
     config.result_cache_bytes = 1048576;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(fixture.registry, config);
-    auto demand = take(context.open_demand(plan.plan, fixture.bindings));
+    auto root = take(context.resource_budget());
+    auto bindings = point_math_checks::bindings(root, inputs, fixture.document);
+    auto demand = take(context.open_demand(plan.plan, bindings));
     ps::DemandQuery query{{"filtered", region({5}, {ps::Region({{2, 1}})})}};
     ps::ExecutionOptions options;
     options.maximum_dependency_work = UINT64_C(4096) * 1024 * 1024;
     options.dependencies.maximum_work = UINT64_C(2048) * 1024 * 1024;
     options.maximum_dependency_cache_work = 128 * 1024 * 1024;
     auto original = take(demand.request(query, {}, options));
-    require(take(demand.request(query, {}, options)).diagnostics.cache_hits > 0,
-            "warm lowpass cache");
-    fixture.bindings.inputs.back().snapshot =
-        std::make_shared<const ps::InputSnapshot>(
-            take(store.import_value(doubles({5}, {1, -2, 5, 6, 8}))));
-    require(demand.replace_bindings(fixture.bindings).ok(),
-            "replace lowpass values");
+    auto repeated = take(demand.request(query, {}, options));
+    std::uint64_t repeat = 0, first = 0;
+    require(read(repeated.results.at("filtered"), {2}, &repeat, 8).ok() &&
+                read(original.results.at("filtered"), {2}, &first, 8).ok() &&
+                repeat == first &&
+                repeated.results.at("filtered").object_id() ==
+                    original.results.at("filtered").object_id(),
+            "repeated lowpass demand preserves bits");
+    require(
+        take(original.results.at("filtered").descriptor()).tensor_coverage(0) ==
+            take(ps::Footprint::all({5})),
+        "sparse request publishes complete Whole coverage");
+    auto fresh_bindings =
+        point_math_checks::bindings(root, inputs, fixture.document);
+    auto frozen = take(context.freeze(plan.plan, fresh_bindings));
+    auto hit = take(context.execute_fragments(frozen, query, {}, options));
+    require(
+        hit.diagnostics.cache_hits == 1 &&
+            numeric_result_fixture::bytes(hit.results.at("filtered")) ==
+                numeric_result_fixture::bytes(original.results.at("filtered")),
+        "fresh identical sources hit actual lowpass cache");
+    const auto ids = hit.results.at("filtered").association();
+    for (std::size_t i = 0; i < fresh_bindings.inputs.size(); ++i) {
+      require(
+          std::find(ids.begin(), ids.end(),
+                    fresh_bindings.inputs[i].result.object_id()) != ids.end() &&
+              std::find(ids.begin(), ids.end(),
+                        bindings.inputs[i].result.object_id()) == ids.end(),
+          "cached output associates current source Result identities");
+    }
+    bindings.inputs.back().result =
+        source(root, doubles({5}, {1, -2, 5, 6, 8}));
+    require(demand.replace_bindings(bindings).ok(), "replace lowpass values");
     auto changed = take(demand.request(query, {}, options));
+    require(plan.plan.steps().back().prepared == prepared,
+            "values rebind reuses immutable static preparation");
     auto fresh_inputs = inputs;
     fresh_inputs.back() = doubles({5}, {1, -2, 5, 6, 8});
     Fixture fresh(node, fresh_inputs);
     fresh.document.outputs = fixture.document.outputs;
     auto uncached = take(fresh.run(query, false));
     std::uint64_t a = 0, b = 0, old = 0;
-    require(
-        changed.values.at("filtered").read({2}, &a, 8).ok() &&
-            uncached.values.at("filtered").read({2}, &b, 8).ok() && a == b &&
-            original.values.at("filtered").read({2}, &old, 8).ok() && old != a,
-        "cached/uncached replacement bits");
+    require(read(changed.results.at("filtered"), {2}, &a, 8).ok() &&
+                read(uncached.results.at("filtered"), {2}, &b, 8).ok() &&
+                a == b &&
+                read(original.results.at("filtered"), {2}, &old, 8).ok() &&
+                old != a,
+            "cached/uncached replacement bits");
     if (continuous) {
-      fixture.bindings.inputs[0].snapshot =
-          std::make_shared<const ps::InputSnapshot>(
-              take(store.import_value(doubles({5}, {0, .75, 2, 3, 3}))));
-      require(demand.replace_bindings(fixture.bindings).ok(),
+      bindings.inputs[0].result = source(root, doubles({5}, {0, .75, 2, 3, 3}));
+      require(demand.replace_bindings(bindings).ok(),
               "replace remote positions");
       auto invalid = demand.request(query, {}, options);
+      require(plan.plan.steps().back().prepared == prepared,
+              "positions rebind reuses immutable static preparation");
       require(!invalid.ok() &&
                   invalid.status().reason == ps::FailureReason::InvalidDomain,
               "remote topology invalidates warm lowpass");
@@ -340,20 +401,24 @@ void cache_validation_and_owners(ps::CpuNumericProfile profile) {
     auto typed =
         array(ps::ElementType::Float32, {3, 1}, {0, 0x3f000000, 0x40000000});
     const auto coverage = take(ps::encode_semantic(ps::coverage_semantics()));
-    typed = take(ps::Value::from_storage(typed.descriptor(), typed.region(),
-                                         typed.layout(), typed.storage(),
-                                         {coverage}));
     std::vector<ps::Value> typed_inputs;
     if (continuous)
       typed_inputs.push_back(doubles({3}, {0, .75, 2}));
     typed_inputs.push_back(typed);
     Fixture invalid(node, typed_inputs);
     invalid.document.outputs = fixture.document.outputs;
+    auto typed_schema = std::make_shared<ps::SchemaTemplate>(
+        *invalid.document.inputs.back().result_schema);
+    typed_schema->tensors[0].facets = {coverage};
+    invalid.document.inputs.back().result_schema = std::move(typed_schema);
     auto failure = invalid.run(
         {{"filtered", region({3, 1}, {ps::Region({{1, 1}, {0, 1}})})}}, false);
-    require(!failure.ok() && failure.status().message ==
-                                 "sample violates typed semantic domain",
-            "generic lowpass preserves typed payload validation");
+    require(
+        !failure.ok() &&
+            failure.status().code == ps::ErrorCode::InvalidArgument &&
+            failure.status().detail.input_id == (continuous ? 2U : 1U) &&
+            failure.status().message == "sample violates typed semantic domain",
+        "generic lowpass preserves typed payload validation");
 
     auto registry = ps::make_default_operation_registry(false);
     unsigned calls = 0;
@@ -361,13 +426,18 @@ void cache_validation_and_owners(ps::CpuNumericProfile profile) {
     producer.key = "manual.lowpass_source";
     producer.traits.input_count = 0;
     producer.traits.input_schema.clear();
-    producer.traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
-    producer.traits.outputs[0].fixed_output_shape = {5};
-    producer.traits.outputs[0].output_element_type = ps::ElementType::Float64;
-    producer.callback = [&](const auto&) {
-      ++calls;
-      return ps::Result<ps::Value>(ps::Status{ps::ErrorCode::OperationFailed,
-                                              "required lowpass source"});
+    auto& output = producer.traits.outputs[0];
+    output.key = "value";
+    output.output_schema.kind = ps::OperationPortKind::Result;
+    output.output_schema.result_schema_id = "manual.lowpass.input";
+    output.output_schema.result_schema_version = 1;
+    output.result_schema = source_schema(inputs.back());
+    output.dependency_version = 2;
+    output.region_rule = ps::OperationRegionRule::Whole;
+    output.continuation_bytes = sizeof(FailedSource);
+    output.maximum_dependency_stages = 1;
+    producer.start_result = [&](const auto&, const auto& allocator) {
+      return ps::ResultContinuation::make<FailedSource>(allocator, &calls);
     };
     require(registry->register_operation(std::move(producer)).ok() &&
                 registry->freeze().ok(),
@@ -376,44 +446,86 @@ void cache_validation_and_owners(ps::CpuNumericProfile profile) {
     upstream.registry = registry;
     upstream.document.outputs = fixture.document.outputs;
     upstream.document.inputs.pop_back();
-    upstream.bindings.inputs.pop_back();
+    upstream.sources.pop_back();
     upstream.document.nodes[0].inputs.back() =
         ps::WorkflowNodeOutput{2, "value"};
     upstream.document.nodes.push_back({2, "manual.lowpass_source", {}, {}});
+    auto empty_upstream = take(
+        upstream.run({{"filtered", take(ps::Footprint::none({5}))}}, false));
+    require(
+        calls == 0 && take(empty_upstream.results.at("filtered").descriptor())
+                          .tensor_coverage(0)
+                          .empty(),
+        "Empty lowpass does not poll failing source continuation");
     auto rejected = upstream.run(query, false);
     require(!rejected.ok() &&
                 rejected.status().message == "required lowpass source" &&
                 calls == 1,
             "preserve lowpass upstream failure");
 
-    ps::ResourceBudget budget;
-    std::optional<ps::ValueFragments> escaped;
-    {
-      Fixture owner_fixture(node, inputs);
-      owner_fixture.document.outputs = fixture.document.outputs;
-      ps::GraphContext owner_graph(owner_fixture.document);
-      auto owner_plan =
-          take(ps::Compiler(owner_fixture.registry).compile(owner_graph));
-      ps::ExecutionContextConfig owner_config;
-      owner_config.cpu_workers = 1;
-      owner_config.managed_resources = ps::ResourceLimits{};
-      ps::ExecutionContext owner_context(owner_fixture.registry, owner_config);
-      budget = take(owner_context.resource_budget());
-      auto frozen =
-          take(owner_context.freeze(owner_plan.plan, owner_fixture.bindings));
-      auto result =
-          take(owner_context.execute_fragments(frozen, query, {}, options));
-      escaped = result.values.at("filtered");
+    for (auto dtype : {ps::ElementType::Float32, ps::ElementType::Float64}) {
+      ps::ResourceBudget budget;
+      std::optional<ps::ResultRef> escaped;
+      std::optional<ps::ResultTensorReadWindow> window;
+      std::vector<std::weak_ptr<const ps::CpuStorage>> owners;
+      const auto width = ps::Value::element_size(dtype);
+      {
+        std::vector<ps::Value> backing;
+        if (continuous)
+          backing.push_back(doubles({5}, {0, .75, 2, 3, 4}));
+        backing.push_back(array(
+            dtype, {5},
+            dtype == ps::ElementType::Float32
+                ? std::vector<std::uint64_t>{0x3f800000, 0xc0000000, 0x40800000,
+                                             0x40c00000, 0x41000000}
+                : std::vector<std::uint64_t>{raw(1), raw(-2), raw(4), raw(6),
+                                             raw(8)}));
+        for (const auto& value : backing)
+          owners.push_back(value.storage());
+        Fixture owner_fixture(node, backing);
+        owner_fixture.document.outputs = fixture.document.outputs;
+        ps::GraphContext owner_graph(owner_fixture.document);
+        auto owner_plan =
+            take(ps::Compiler(owner_fixture.registry).compile(owner_graph));
+        ps::ExecutionContextConfig owner_config;
+        owner_config.cpu_workers = 1;
+        owner_config.managed_resources = ps::ResourceLimits{};
+        ps::ExecutionContext owner_context(owner_fixture.registry,
+                                           owner_config);
+        budget = take(owner_context.resource_budget());
+        auto owner_bindings = point_math_checks::bindings(
+            budget, owner_fixture.sources, owner_fixture.document);
+        require(budget.statistics().live[ps::ResourceKind::Payload] == 0 &&
+                    budget.statistics().live[ps::ResourceKind::Referenced] > 0,
+                "immutable source backing is Referenced without payload copy");
+        auto frozen =
+            take(owner_context.freeze(owner_plan.plan, owner_bindings));
+        auto result =
+            take(owner_context.execute_fragments(frozen, query, {}, options));
+        escaped = result.results.at("filtered");
+        auto descriptor = take(escaped->descriptor());
+        window =
+            take(escaped->acquire_tensor(descriptor, 0, ps::Region({{2, 1}})));
+      }
+      require(std::all_of(owners.begin(), owners.end(),
+                          [](const auto& owner) { return owner.expired(); }),
+              "source owners retire independently from dense lowpass output");
+      require(budget.statistics().live[ps::ResourceKind::Payload] == 5 * width,
+              "escaped lowpass retains exact full-output payload");
+      std::uint64_t value = 0;
+      require(read(*escaped, {2}, &value, width).ok(),
+              "escaped lowpass readable");
+      escaped.reset();
+      auto row = take(window->row_run({2}));
+      std::uint64_t after = 0;
+      std::memcpy(&after, row.data, width);
+      require(
+          after == value &&
+              budget.statistics().live[ps::ResourceKind::Payload] == 5 * width,
+          "authorized read window retains output after Result release");
+      window.reset();
+      point_math_checks::released(budget);
     }
-    require(budget.statistics().live[ps::ResourceKind::Payload] >= 8 &&
-                budget.statistics().live[ps::ResourceKind::Metadata] > 0,
-            "escaped lowpass retains data and metadata admission");
-    std::uint64_t value = 0;
-    require(escaped->read({2}, &value, 8).ok(), "escaped lowpass readable");
-    escaped.reset();
-    require(budget.statistics().live[ps::ResourceKind::Payload] == 0 &&
-                budget.statistics().live[ps::ResourceKind::Metadata] == 0,
-            "final lowpass owner releases all data and metadata");
   }
   std::cout << "cache replacement, typed/upstream failures and escaped "
                "payload/metadata lifetime passed\n";
@@ -442,7 +554,9 @@ void sparse_large_and_partition_cancel(ps::CpuNumericProfile profile) {
                    : region(shape, {ps::Region({{huge * 2 - 1, 1}})});
     auto result = fixture.run({{"filtered", wanted}}, false);
     require(!result.ok() &&
-                result.status().code == ps::ErrorCode::ResourceExhausted,
+                result.status().code == ps::ErrorCode::ResourceExhausted &&
+                result.status().reason == ps::FailureReason::CapacityLimit &&
+                result.status().detail.node_id == 1,
             "2^40 Whole output rejects small payload budget");
   }
   auto node = authored(true, 4, profile);
@@ -451,7 +565,7 @@ void sparse_large_and_partition_cancel(ps::CpuNumericProfile profile) {
   std::vector<ps::Value> inputs{
       array(ps::ElementType::Float64, {2}, {raw(1), raw(1) + 1}),
       doubles({2}, {0, 1})};
-  point_math_checks::resources(node, inputs, 16);
+  result_resources(node, inputs, 16);
   Fixture extreme(
       authored(true, 4, profile),
       {array(ps::ElementType::Float64, {3},
@@ -465,8 +579,9 @@ void sparse_large_and_partition_cancel(ps::CpuNumericProfile profile) {
   auto result = take(
       extreme.run({{"filtered", region({3}, {ps::Region({{1, 1}})})}}, false));
   std::uint64_t value = 1;
-  require(result.values.at("filtered").read({1}, &value, 8).ok() && value == 0,
-          "exact extreme-width constant cancellation");
+  require(
+      read(result.results.at("filtered"), {1}, &value, 8).ok() && value == 0,
+      "exact extreme-width constant cancellation");
   std::cout << "2^40-element Whole budget rejection, huge-period "
                "cancellation and extreme-width exact constant passed\n";
 }
@@ -475,6 +590,8 @@ void sparse_large_and_partition_cancel(ps::CpuNumericProfile profile) {
 int main(int argc, char** argv) {
   try {
     const std::string selected = argc > 1 ? argv[1] : "strict";
+    require(selected == "strict" || selected == "apple" || selected == "x86",
+            "profile must be strict, apple, or x86");
     const auto profile = selected == "strict" ? ps::CpuNumericProfile::Strict
                          : selected == "apple"
                              ? ps::CpuNumericProfile::AppleSiliconNeon

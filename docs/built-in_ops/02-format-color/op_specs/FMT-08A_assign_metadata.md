@@ -8,44 +8,43 @@ category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
-clarification_status: complete
-proposed_operation_keys:
+verification_status: focused_and_installed_result_tests_passed
+operation_keys:
   - metadata.assign_strict
   - metadata.assign_accelerated_apple_silicon
   - metadata.assign_accelerated_x86_64
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-08A: atomically assign or reinterpret metadata
 
-Runtime update (package 0.22.0): FMT-08A/B are implemented with canonical
-TensorDescription v3, typed encoding/sampling/ICC/OCIO resource descriptions,
-opaque annotations, atomic edits and exact planar/generic-numeric regional
-execution. See the [runtime schema and interfaces](../../../kernel-architecture/Tensor-Semantic-Metadata.md),
-[minimal public workflow](../../../../examples/metadata_workflow/README.md)
-and [measured performance](../../../../examples/metadata_performance/README.md).
-Proposed remains the specification decision status; external FMT-12/13 transform
-engines are not claimed by the metadata/resource implementation.
-
-
 Inherit the complete [FMT-08 contract](FMT-08_metadata_assignment_contract.md).
-These are proposed native registry keys, not aliases for legacy color.assign.
-A publishes an independent immutable output description over unchanged logical
-samples. It is not a validation certificate or a numeric conversion.
+The current CPU registrations use Result operation ABI 2, WorkflowDocument 4,
+OperationTraits 21 and package 0.30.0. The specification status remains
+Proposed. A publishes updated immutable metadata through a Result tensor while
+preserving the logical samples and Result schema. It is neither a validation
+certificate nor a numeric conversion. Focused Result tests pass for metadata
+edits, Result execution/global behavior, resource budgets and image contracts;
+the public example and two installed consumer tests pass. The metadata-to-
+`channel.extract` configuration/resource chain is covered; `channel.assemble`
+composition is not.
 
 ## Interface and inference
 
-Input `input` yields one `values` tensor with the identical logical dtype, shape,
-axes/index order and sample bits. The family defines target dtype/rank support,
-static typed edits/resources, schema paths and authoring defaults. Parameters
+Input `input` is a Result with exactly one tensor member and no fields. Output
+`values` preserves the source schema identity, tensor key, dtype, descriptor,
+batch axes and layout. Its tensor has the same sample bits for every produced
+coordinate. The current supported element types are UInt8, UInt16, Int8, Int16,
+Int64, Float32 and Float64, with rank 1 through 8. Parameters
 are mode, set, conditional description, remove, dependencies, missing and layout.
 Mode patch defaults to editing named semantic fields or opaque annotations, with
 atomic explicit deletions. Mode replace takes a complete registered semantic
 description, retains unspecified opaque annotations and permits only named
 annotation set/remove edits outside that replacement description.
 
-Resolve selectors against the original input. A set of a whole group/subtree
+When an internal node explicitly supplies the optional `expected_source`
+parameter, static preparation compares it with the input schema's canonical
+form. The public helper does not set this parameter. Resolve selectors against
+the original input. A set of a whole group/subtree
 replaces it completely; leaf updates retain unmentioned applicable siblings.
 Reject duplicate/overlapping paths and order-dependent edit combinations. A
 single call can change model/space and remove obsolete fields without publishing
@@ -80,19 +79,22 @@ descriptions and preserves unmentioned annotations. Neither bypasses layout rule
 
 ## Demand, ownership and execution
 
-Descriptor inference uses static metadata, schema and immutable resource inputs,
-not image pixels. A runtime request Q depends on the same source coordinates Q;
-view mode can share backing without loading sample bytes. Materialize copies only
-Q. No complete RGB/alpha sample validation, global scan or arithmetic is added.
-Data dirty mapping is identity; metadata/resource changes invalidate semantic
-inference and affected consumers even when sample bytes are unchanged.
+Static preparation validates the Result schema, tensor description, typed edits,
+resources and complete candidate; it does not read sample values. For output
+footprint Q, Result Need requests Data support Q and Descriptor support for the
+input description, with role mask 9 (Data 1 | Descriptor 8). No Validation or
+Control role is requested. Dependency-v2 maps each output coordinate to the
+same input coordinate. Changed data dirties the corresponding coordinates;
+metadata changes invalidate the result description and its consumers.
 
-Independent output metadata must not mutate a shared source header. Retain normal
-backing/profile/config owners as needed, with the family's budgets and lifetimes;
-no hidden alpha ownership is created. ViewUnavailable and all static/resource/
-coverage/upstream errors follow the family. An optimizer may remove a copy but
-must preserve the description effect. Equal source/output bytes alone do not
-permit reuse of another assigned interpretation's cache entry.
+The Result continuation retains source backing, resource owners and association
+when it publishes a legal view. `auto` falls back to copying only on
+`ViewUnavailable`; `view` reports that failure, and `materialize` always copies
+requested coverage. Copy publication is transactional and polls cancellation at
+most every 256 samples. An empty output request uses a stateless continuation
+and does not request sample payload. The three profiles share these semantics.
+Result caching is disabled. An optimizer must preserve the metadata effect,
+support relation and failure behavior.
 
 ## Independent acceptance fixtures
 
@@ -119,8 +121,8 @@ permit reuse of another assigned interpretation's cache entry.
   binding or an incompatible physical image channel axis through metadata fails.
   Materialize does not turn this into an implicit import or numeric conversion.
 
-Conceptual graph: tensor -> A -> consumers using the assigned interpretation,
-with a second consumer still reading the original tensor. Implementation must
-provide runnable public compile/execute examples and independent byte/descriptor
-checks, partial requests, all layouts, proof/cache separation, resource lifetime,
-low budgets and transactional failures. The implementation and benchmark evidence are linked in the runtime update above.
+The public [metadata workflow](../../../../examples/metadata_workflow/README.md)
+shows Result binding, compilation, execution and exact-byte checks. The old
+[metadata performance workload](../../../../examples/metadata_performance/README.md)
+measures the previous Value/planar implementation and is not current Result
+performance evidence.

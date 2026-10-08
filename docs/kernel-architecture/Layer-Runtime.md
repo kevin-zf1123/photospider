@@ -2,13 +2,13 @@
 
 [Chinese reader version](zh/Layer-Runtime.zh.md).
 
-Layer value types and their pure arithmetic helpers remain available in the C++ API. The Result coordinator rejects `photospider.layer`, `photospider.layer_response`, `photospider.raw_rgba_sum`, `photospider.layer_contributions`, `photospider.weighted_layer_sum`, and `photospider.optional_layer`, as well as any Result facet keyed `photospider.layer`. These packed fields do not satisfy the current planar image storage contract. Use [Tensor storage and region access](../kernel-specs/Tensor-Storage-and-Region-Access.md) for images.
+Layer value types and their pure arithmetic helpers remain available in the C++ API. The Result schema validator rejects `photospider.layer`, `photospider.layer_response`, `photospider.raw_rgba_sum`, `photospider.layer_contributions`, `photospider.weighted_layer_sum`, and `photospider.optional_layer`, as well as any Result facet keyed `photospider.layer`. These schemas do not provide a supported Result image representation. Images use [Result Tensor storage and region access](../kernel-specs/Tensor-Storage-and-Region-Access.md); `PlanarImage` is typed backing for that storage, not a separate public image path.
 
 ## 1. Scope and ownership
 
-`layer.hpp` owns in-memory value contracts and pure calculations. `layer_operation.hpp` still declares factories for the former staged operations, but their Result outputs cannot pass current publication validation. No Layer Result workflow is a supported image storage path. A `LayerPixel` can still be passed directly to the value helpers without creating a Result.
+`layer.hpp` owns in-memory value contracts and pure calculations. It does not expose a Layer operation factory or a runnable Layer Result workflow. A `LayerPixel` can be passed directly to the value helpers without creating a Result.
 
-The planar image owner stores image samples and retains its backing for views. Layer's coverage/emission pair has no planar image owner or Region contract. The two ownership models cannot be substituted by attaching metadata.
+The image pipeline stores samples in Result Tensors and retains field or tensor backing through Result owners and read windows. `PlanarImage` may provide typed backing inside that pipeline. Layer's coverage/emission pair remains an in-memory value and does not define image Tensor storage or Region access.
 
 ## 2. Data layout and memory
 
@@ -35,13 +35,16 @@ Raw sum stores finite `P` and finite nonnegative additive mass `M`; `M=0` requir
 ## 3. Execution and state machine
 
 ```text
-Layer values --pure helpers--> Layer / Response / RawSum values
-      |                                  |
-      +-- former OperationDefinition ---+--> Result coordinator rejects layer schema
-PlanarImage -------------------------------> supported image storage and Region path
+Layer value structs --pure helpers--> Layer / Response / RawSum values
+          |
+          +-- layer_schema descriptions --> Result schema validation rejects
+
+image samples --> Result Tensor storage --> registered image operations
+                         |
+                         +-- optional PlanarImage typed backing
 ```
 
-The Result path ends at coordinator schema validation; it does not reach complete publication. Pure helpers return local values independently of that path. Errors from the helpers remain caller-visible.
+Layer schema descriptions stop at Result schema validation and cannot reach publication. Pure helpers return local values independently of image execution. Errors from the helpers remain caller-visible.
 
 ## 4. Algorithms and math
 
@@ -53,11 +56,13 @@ Pure helpers validate inputs and return a new value without mutating inputs. The
 
 The pure `weighted_layer_leaf` and `weighted_layer_add` helpers do not select an accumulation tree. Callers that combine leaves choose and own their grouping policy.
 
-`SchemaTemplate::validate` returns `TypeMismatch` for the six Result schema IDs and the `photospider.layer` facet. `layer_schema` can construct the field description, but that description cannot pass the current Result validation boundary. The optional work hook to `validate_layer_result` adds an independent work limit; root work and I/O are also charged.
+`SchemaTemplate::validate` returns `TypeMismatch` for the six Result schema IDs and the `photospider.layer` facet. `layer_schema` can construct a description for a pure value contract, but that description cannot pass the Result validation boundary. The optional work hook to `validate_layer_result` adds an independent work limit; Root work and I/O are also charged.
+
+Pure helper behavior is covered by `test_layer` and the installed-package consumer `installed_layer_values`. These checks cover the arithmetic API; they do not exercise a Layer operation, image workflow, or GPU path.
 
 ## 5. Limitations and non-goals
 
-- `make_layer_operation` can construct definitions, but those definitions do not restore Result publication support.
-- Layer is not planar image storage and does not define planar Region access, tiled image execution, or a GPU backend.
+- No `make_layer_operation` factory or Layer image workflow is available.
+- Layer values do not define Result Tensor storage, Region access, tiled image execution, or a GPU backend. `PlanarImage` is typed backing within the Result image path, not a separate public image API.
 - The arithmetic contract supplies no certified numerical error bound or process-RSS bound.
 - The in-memory helpers do not convert color spaces or infer a working space from sample values. Callers handle helper errors including invalid associations, arithmetic overflow, and weighted association underflow.

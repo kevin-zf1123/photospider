@@ -10,19 +10,25 @@ enum class StatisticsOperation : std::uint32_t {
   Grade
 };
 /** @brief Ready-to-register statistics.histogram/parameters/grade CPU stages.
- * Histogram reads immutable Int64 values and UInt8 mask and seals sparse
- * counters. The named bin-range recipe scans once per 512-bin range and admits
- * min(bins,512)*sizeof(Int64) Payload bytes for counters. Source/output windows
- * are bounded, at most 4096 bytes per field. Inputs must support snapshot
- * rereads. Parameters validates the sealed histogram and computes checked
- * integer count/total and a correctly rounded mean. Grade takes values and
- * complete parameters, requires finite nonnegative Float64 parameter "target",
- * valid statistics and mean>0, then publishes Float64 rows as stable prefixes.
- * Grading uses nearest binary64 target/mean and gain*converted_input. Overflow
- * fails explicitly; no CertifiedBound is claimed. Failed/empty statistics are
- * never hidden as an empty graded image. Every Result association is sealed;
- * dependency support is Conservative, with shared global support plus a compact
- * identity relation for each grade sample. Physical windows do not change keys.
+ * All operation inputs and outputs use Result. Histogram takes two bindings:
+ * one Result with one unbatched, facet-free Int64 HW tensor and one with one
+ * unbatched, facet-free UInt8 HW tensor; neither Result has fields. A nonzero
+ * mask byte selects a value, which must be in [0,bins). Histogram seals sparse
+ * Int64 bin/count fields. Its bin-range recipe scans once per 512-bin range
+ * and admits min(bins,512)*sizeof(Int64) Payload bytes for counters. Source
+ * strips are row-bounded to at most 4096 bytes per field; field I/O respects
+ * the selected Result window.
+ * Parameters consumes the Histogram Result and computes checked integer
+ * count/total plus a correctly rounded mean. Grade takes one unbatched,
+ * facet-free Int64 HW tensor Result with no fields and a complete Parameters
+ * Result, requires a finite nonnegative Float64 parameter "target", valid
+ * statistics, and mean>0, then
+ * publishes Float64 rows as stable prefixes. Grading uses nearest-binary64
+ * target/mean and gain*converted_input. Overflow fails explicitly; no
+ * CertifiedBound is claimed. Failed or empty statistics are not published as
+ * an empty graded raster. Typed Tensor, Field, and Descriptor relations provide
+ * Conservative dependency support, including global histogram/parameter
+ * support and per-sample grade support. Physical windows do not change keys.
  * @return A definition, or the schema validation error. Histogram additionally
  * returns ResourceExhausted before source binding when
  * H*ceil(W/512)*ceil(bins/512) >= 1000000: required source polls alone leave no

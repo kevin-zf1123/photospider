@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "../../examples/perlin_workflow/result_fixture.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
@@ -21,43 +22,16 @@ Result<ExecutionResult> run(const Value& input, unsigned workers, bool narrow,
                             double* execute_ms = nullptr) {
   auto registry = make_default_operation_registry(false);
   WorkflowDocument document;
-  auto layout = input.layout();
-  layout.byte_offset = 0;
-  layout.origin.clear();
-  std::int64_t stride = Value::element_size(input.descriptor().element_type);
-  for (std::size_t axis = input.descriptor().shape.size(); axis; --axis) {
-    layout.byte_strides[axis - 1] = stride;
-    stride *= input.descriptor().shape[axis - 1];
-  }
-  document.inputs = {{1,
-                      "coordinates",
-                      input.descriptor(),
-                      Region::whole(input.descriptor().shape),
-                      layout,
-                      {}}};
+  perlin_fixture::declare(&document, input);
   std::map<std::string, ParameterValue> parameters;
   if (!default_dtype)
     parameters["dtype"] = std::string(narrow ? "float32" : "float64");
   document.nodes = {{1, key, {WorkflowInputReference{1}}, parameters}};
   document.outputs = {{"values", 1, "values"}};
   if (source_view) {
-    document.inputs.clear();
     document.nodes[0].inputs = {WorkflowNodeOutput{2, "value"}};
-    OperationDefinition source;
-    source.key = "test.coordinates";
-    auto& output = source.traits.outputs[0];
-    output.shape_rule = OperationShapeRule::Fixed;
-    output.fixed_output_shape = input.descriptor().shape;
-    output.output_element_type = input.descriptor().element_type;
-    output.preserve_output_views = true;
-    source.traits.estimated_bytes = input.bytes().size();
-    source.callback = [input](const OperationInvocation&) {
-      return Result<Value>(input);
-    };
-    auto registered = registry->register_operation(std::move(source));
-    if (!registered.ok())
-      return Result<ExecutionResult>(registered);
-    document.nodes.push_back({2, "test.coordinates", {}, {}});
+    document.nodes.push_back(
+        {2, "core.identity", {WorkflowInputReference{1}}, {}});
   }
   registry->freeze();
   GraphContext graph(document);
@@ -74,9 +48,8 @@ Result<ExecutionResult> run(const Value& input, unsigned workers, bool narrow,
   CancellationSource cancellation;
   if (cancelled)
     cancellation.cancel();
-  ExecutionBindings bindings;
-  if (!source_view)
-    bindings.inputs = {{"coordinates", input}};
+  auto bindings =
+      perlin_fixture::bind(execution.resource_budget().take_value(), input);
   ExecutionOptions options;
   options.dependencies.maximum_work = UINT64_C(1000000000);
   options.maximum_dependency_work = UINT64_C(1000000000);
@@ -130,7 +103,8 @@ int main(int argc, char** argv) {
         auto result =
             run(input, workers, false, false, false, false, false, &elapsed);
         PS_CHECK(result.ok());
-        const auto& bytes = result.value().values.at("values").bytes();
+        const auto bytes =
+            numeric_result_fixture::bytes(result.value().results.at("values"));
         if (reference.empty())
           reference.assign(bytes.begin(), bytes.end());
         PS_CHECK(std::equal(reference.begin(), reference.end(), bytes.begin(),
@@ -162,8 +136,9 @@ int main(int argc, char** argv) {
         return 1;
       }
       std::uint64_t output = 0;
-      const auto& value = result.value().values.at("values");
-      std::memcpy(&output, value.bytes().data(), output_narrow ? 4 : 8);
+      const auto& value = result.value().results.at("values");
+      const auto bytes = numeric_result_fixture::bytes(value);
+      std::memcpy(&output, bytes.data(), output_narrow ? 4 : 8);
       std::cout << std::hex << output << '\n';
     }
     return std::cin.eof() ? 0 : 2;
@@ -180,20 +155,21 @@ int main(int argc, char** argv) {
       if (!result.ok())
         std::cerr << result.status().message << '\n';
       PS_CHECK(result.ok());
-      const auto& value = result.value().values.at("values");
-      PS_CHECK(value.descriptor().shape == std::vector<std::uint64_t>{323});
+      const auto& value = result.value().results.at("values");
+      const auto bytes = numeric_result_fixture::bytes(value);
+      PS_CHECK(value.schema().tensors[0].sample_shape() ==
+               std::vector<std::uint64_t>{323});
       for (unsigned i = 0; i < 323; ++i) {
         std::uint64_t bits = 0;
-        std::memcpy(&bits, value.bytes().data() + i * (narrow ? 4 : 8),
-                    narrow ? 4 : 8);
+        std::memcpy(&bits, bytes.data() + i * (narrow ? 4 : 8), narrow ? 4 : 8);
         // Exact analytic slice x-fade(x) at x=1/4, period 256.
         PS_CHECK(bits == (narrow ? UINT64_C(0x3e160000)
                                  : UINT64_C(0x3fc2c00000000000)));
       }
     }
   }
-  // Direct public registry invocation preserves a legal strided view. Workflow
-  // transport can materialize a producer, so it is tested separately above.
+  // Result bindings and a Result-producing identity both preserve the legal
+  // signed-stride source window.
   for (unsigned i = 0; i < 323; ++i) {
     const double x = .125 + .0625 * (i % 7) + 256. * i;
     std::memcpy(&raw[3 * i], &x, 8);
@@ -208,22 +184,18 @@ int main(int argc, char** argv) {
   PS_CHECK(reversed.ok());
   auto original = run(varied, 1, false);
   PS_CHECK(original.ok());
-  auto registry = make_default_operation_registry();
-  const std::vector<Value> views{view.value()};
-  const std::vector<Region> demands{view.value().region()};
-  const std::map<std::string, ParameterValue> parameters;
-  OperationInvocation call(views, demands, parameters, Backend::Cpu, {},
-                           Region::whole({323}));
-  auto direct = registry->invoke(key, call);
+  auto direct = run(view.value(), 1, false);
   PS_CHECK(direct.ok());
+  const auto original_bytes =
+      numeric_result_fixture::bytes(original.value().results.at("values"));
+  const auto reversed_bytes =
+      numeric_result_fixture::bytes(reversed.value().results.at("values"));
+  const auto direct_bytes =
+      numeric_result_fixture::bytes(direct.value().results.at("values"));
   for (unsigned i = 0; i < 323; ++i) {
-    const auto* expected =
-        original.value().values.at("values").bytes().data() + (322 - i) * 8;
-    PS_CHECK(
-        std::memcmp(reversed.value().values.at("values").bytes().data() + i * 8,
-                    expected, 8) == 0);
-    PS_CHECK(std::memcmp(direct.value().bytes().data() + i * 8, expected, 8) ==
-             0);
+    const auto* expected = original_bytes.data() + (322 - i) * 8;
+    PS_CHECK(std::memcmp(reversed_bytes.data() + i * 8, expected, 8) == 0);
+    PS_CHECK(std::memcmp(direct_bytes.data() + i * 8, expected, 8) == 0);
   }
   auto exhausted = run(input, 4, false, false, true);
   PS_CHECK(!exhausted.ok() &&

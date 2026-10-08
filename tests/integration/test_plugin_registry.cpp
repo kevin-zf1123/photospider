@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -11,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "photospider/compiler/compiler.hpp"
@@ -19,6 +21,8 @@
 #include "photospider/plugin/operation_registry.hpp"
 #include "plugin/dense_layout_validation.hpp"
 #include "plugin/library_test_hooks.hpp"
+#include "support/operation_result_fixture.hpp"
+#include "support/result_diagnostics_fixture.hpp"
 #include "support/test_support.hpp"
 
 #if defined(_WIN32)
@@ -101,6 +105,7 @@
 namespace {
 
 using ps::plugin_testing::LibraryKind;
+using result_diagnostics::verify_cpp_fixed_broadcast;
 
 /** @brief Fixture mode for output-free GPU backend unavailability. */
 constexpr std::uint32_t kGpuBackendUnavailable = 1U;
@@ -110,30 +115,6 @@ constexpr std::uint32_t kDuplicateValidThenSuccess = 6U;
 constexpr std::uint32_t kDuplicateInvalidThenSuccess = 7U;
 /** @brief Fixture mode for null-context rejection followed by valid output. */
 constexpr std::uint32_t kNullContextThenValid = 11U;
-/**
- * @brief Returns the stable adapter diagnostic for a second sink invocation.
- * @return Process-lifetime null-terminated diagnostic bytes.
- * @throws Nothing.
- */
-const char* duplicate_publish_diagnostic() noexcept {
-  return "operation plugin violated output sink at-most-once contract";
-}
-
-/**
- * @brief Standard exception whose borrowed diagnostic pointer is null.
- *
- * @note The type deterministically exercises the C++ embedding callback
- * exception fence without allocating while the exception is raised.
- */
-class NullDiagnosticException final : public std::exception {
- public:
-  /**
-   * @brief Returns no diagnostic bytes for the injected callback failure.
-   * @return Null, intentionally.
-   * @throws Nothing.
-   */
-  [[nodiscard]] const char* what() const noexcept override { return nullptr; }
-};
 
 /**
  * @brief Shared observations for one copy-aware embedding callback.
@@ -148,6 +129,30 @@ struct CopyAwareCallbackState final {
   std::uint32_t copy_count = 0U;
   /** @brief Exact number of callback invocations. */
   std::uint32_t call_count = 0U;
+};
+
+struct CopyAwareOutput final {
+  ps::Result<ps::ResultProgramPoll> poll(
+      const ps::ResultProgramPhase& phase) try {
+    using multi_result::check;
+    using multi_result::take;
+    auto builder = take(ps::ResultBuilder::start(
+        phase.resources, *phase.query.output.result_schema,
+        phase.query.semantic_key));
+    check(builder.bind_descriptor_relation(
+        take(ps::ResultRelation::cartesian(phase.resources, 1, {}))));
+    const double number = 41;
+    check(builder.publish_tensor(
+        0, ps::Region::whole({1}),
+        ps::ByteView(reinterpret_cast<const std::uint8_t*>(&number),
+                     sizeof(number)),
+        take(ps::ResultRelation::cartesian(phase.resources, 1, {})),
+        {true, true, true, true}));
+    return ps::Result<ps::ResultProgramPoll>(
+        ps::ResultPublication{take(builder.seal()), true});
+  } catch (const multi_result::Failure& failure) {
+    return ps::Result<ps::ResultProgramPoll>(failure.status);
+  }
 };
 
 /**
@@ -214,22 +219,41 @@ class CopyAwareCallback final {
   CopyAwareCallback& operator=(CopyAwareCallback&& other) = delete;
 
   /**
-   * @brief Publishes one deterministic scalar while counting callback entry.
-   * @param invocation Validated zero-input invocation.
-   * @return Float64 scalar value 41.
-   * @throws std::bad_alloc If Value construction fails.
+   * @brief Starts a deterministic Result producer while counting entry.
+   * @param query Validated zero-input query.
+   * @param allocator Host continuation allocator.
+   * @return Continuation publishing a Float64 Result sample equal to 41.
    */
-  ps::Result<ps::Value> operator()(
-      const ps::OperationInvocation& invocation) const {
-    static_cast<void>(invocation);
+  ps::Result<ps::ResultContinuation> operator()(
+      const ps::ResultProgramQuery& query,
+      const ps::BufferAllocator& allocator) const {
+    static_cast<void>(query);
     ++state_->call_count;
-    return ps::Result<ps::Value>(ps::Value::from_float64(41.0));
+    return ps::ResultContinuation::make<CopyAwareOutput>(allocator);
   }
 
  private:
   /** @brief Shared deterministic copy/invocation observations. */
   std::shared_ptr<CopyAwareCallbackState> state_;
 };
+
+ps::OperationDefinition copy_aware_definition(
+    std::string key, const std::shared_ptr<CopyAwareCallbackState>& state) {
+  ps::OperationDefinition definition;
+  definition.key = std::move(key);
+  auto& output = definition.traits.outputs[0];
+  output.output_schema.kind = ps::OperationPortKind::Result;
+  output.result_schema = multi_result::schema();
+  output.output_schema.result_schema_id = std::string(output.result_schema->id);
+  output.output_schema.result_schema_version = output.result_schema->version;
+  output.region_rule = ps::OperationRegionRule::Whole;
+  output.dependency_version = 2;
+  output.continuation_bytes = sizeof(CopyAwareOutput);
+  output.maximum_dependency_stages = 1;
+  definition.traits.workspace_bytes = 8;
+  definition.start_result = CopyAwareCallback(state);
+  return definition;
+}
 
 /** @brief Library kind expected by the currently installed test callback. */
 LibraryKind g_expected_library_kind = LibraryKind::Operation;
@@ -621,119 +645,31 @@ int verify_dense_dso_fixture(const char* path, bool should_load,
         PS_CHECK(registry.keys() == std::vector<std::string>({expected_key}));
         auto traits = registry.find_traits(expected_key);
         PS_CHECK(traits.ok());
-        PS_CHECK(traits.value().outputs[0].output_element_type ==
-                 ps::ElementType::UInt8);
-        PS_CHECK(traits.value().outputs[0].shape_rule ==
-                 ps::OperationShapeRule::Fixed);
-        PS_CHECK(traits.value().outputs[0].fixed_output_shape ==
+        const auto& output = traits.value().outputs[0];
+        PS_CHECK(output.output_schema.kind == ps::OperationPortKind::Result);
+        PS_CHECK(output.result_schema.has_value());
+        const auto& schema = *output.result_schema;
+        PS_CHECK(schema.tensors.empty() && schema.fields.size() == 1);
+        PS_CHECK(schema.fields[0].element_type == ps::ElementType::UInt8);
+        const auto& shape = schema.fields[0].record_shape;
+        PS_CHECK(std::vector<std::uint64_t>(shape.begin(), shape.end()) ==
                  expected_shape);
+        const auto bytes = schema.row_bytes(0);
+        PS_CHECK(bytes.ok());
+        PS_CHECK(bytes.value() == (expected_shape.size() == 1
+                                       ? UINT64_C(9223372036854775807)
+                                       : UINT64_C(9223372036854775806)));
       } else {
+        PS_CHECK(loaded.code == ps::ErrorCode::TypeMismatch);
         PS_CHECK(registry.keys().empty());
       }
     }
     PS_CHECK(lifecycle.native_close_count() == 1U);
   }
+  PS_CHECK(
+      observer.counter("ps_operation_dense_limit_fixture_callback_count") == 0);
   PS_CHECK(observer.counter("ps_operation_dense_limit_fixture_destroy_count") ==
            1U);
-  return 0;
-}
-
-/**
- * @brief Verifies one C++ fixed descriptor with a broadcast-only huge shape.
- *
- * The helper registers and freezes an embedding callback, compiles the same
- * graph twice, executes the same plan twice, and proves descriptor identity,
- * admission accounting, and the eight-byte broadcast result stay stable
- * without evaluating the dense logical element product.
- *
- * @param shape Rank-1..8 nonzero fixed output shape.
- * @return Zero when registration, compilation, execution, and exact checks
- * pass; one on the first failed check.
- * @throws std::bad_alloc If test staging allocation fails.
- * @note The callback publishes a zero-stride whole-Region Value backed by one
- * Float64 scalar; this is a C++ embedding contract, not a C DSO layout.
- */
-int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape) {
-  auto registry = std::make_shared<ps::OperationRegistry>();
-  ps::OperationTraits traits;
-  traits.estimated_bytes = sizeof(double);
-  traits.outputs[0].output_element_type = ps::ElementType::Float64;
-  traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
-  traits.outputs[0].fixed_output_shape = shape;
-  PS_CHECK(
-      registry
-          ->register_operation(ps::OperationDefinition{
-              "fixture.fixed_broadcast", traits,
-              [shape](const ps::OperationInvocation&) -> ps::Result<ps::Value> {
-                const double scalar = 19.0;
-                std::vector<std::uint8_t> bytes(sizeof(scalar));
-                std::memcpy(bytes.data(), &scalar, sizeof(scalar));
-                return ps::Value::create(
-                    ps::ValueDescriptor{ps::ElementType::Float64, shape},
-                    ps::Region::whole(shape),
-                    ps::StridedLayout{
-                        0U, std::vector<std::int64_t>(shape.size(), 0)},
-                    std::move(bytes));
-              }})
-          .ok());
-  auto copied_traits = registry->find_traits("fixture.fixed_broadcast");
-  PS_CHECK(copied_traits.ok());
-  PS_CHECK(copied_traits.value().estimated_bytes == sizeof(double));
-  PS_CHECK(copied_traits.value().outputs[0].fixed_output_shape == shape);
-  PS_CHECK(registry->freeze().ok());
-
-  ps::WorkflowDocument document;
-  document.nodes = {ps::WorkflowNode{1U, "fixture.fixed_broadcast", {}, {}}};
-  document.outputs = {ps::WorkflowOutput{"value", 1U, "value"}};
-  ps::GraphContext graph(std::move(document));
-  ps::Compiler compiler(registry);
-  auto first_compilation = compiler.compile(graph);
-  auto second_compilation = compiler.compile(graph);
-  PS_CHECK(first_compilation.ok());
-  PS_CHECK(second_compilation.ok());
-  PS_CHECK(first_compilation.value().semantic.digest().value ==
-           second_compilation.value().semantic.digest().value);
-  PS_CHECK(first_compilation.value().optimized.digest().value ==
-           second_compilation.value().optimized.digest().value);
-  PS_CHECK(first_compilation.value().plan.digest().value ==
-           second_compilation.value().plan.digest().value);
-  PS_CHECK(first_compilation.value().plan.cache_key().value ==
-           second_compilation.value().plan.cache_key().value);
-  PS_CHECK(first_compilation.value().plan.steps().size() == 1U);
-  PS_CHECK(first_compilation.value().plan.steps().front().planned_bytes ==
-           sizeof(double));
-  PS_CHECK(
-      first_compilation.value().plan.steps().front().output_descriptor.shape ==
-      shape);
-
-  ps::ExecutionContextConfig config;
-  config.cpu_workers = 1U;
-  config.maximum_queued_tasks = 1U;
-  config.maximum_live_bytes = 2 * sizeof(double);
-  ps::ExecutionContext execution(registry, config);
-  auto first_result = execution.execute(first_compilation.value().plan);
-  auto second_result = execution.execute(second_compilation.value().plan);
-  PS_CHECK(first_result.ok());
-  PS_CHECK(second_result.ok());
-  PS_CHECK(first_result.value().diagnostics.peak_live_bytes == sizeof(double));
-  PS_CHECK(second_result.value().diagnostics.peak_live_bytes == sizeof(double));
-  PS_CHECK(first_result.value().diagnostics.result_digest ==
-           second_result.value().diagnostics.result_digest);
-  const auto value_entry = first_result.value().values.find("value");
-  PS_CHECK(value_entry != first_result.value().values.end());
-  const ps::Value& value = value_entry->second;
-  PS_CHECK(value.valid());
-  PS_CHECK(value.descriptor().shape == shape);
-  PS_CHECK(value.bytes().size() == sizeof(double));
-  PS_CHECK(value.layout().byte_strides.size() == shape.size());
-  PS_CHECK(std::all_of(value.layout().byte_strides.begin(),
-                       value.layout().byte_strides.end(),
-                       [](std::int64_t stride) { return stride == 0; }));
-  PS_CHECK(value.region().dimensions().size() == shape.size());
-  for (std::size_t axis = 0U; axis < shape.size(); ++axis) {
-    PS_CHECK(value.region().dimensions()[axis].offset == 0U);
-    PS_CHECK(value.region().dimensions()[axis].extent == shape[axis]);
-  }
   return 0;
 }
 
@@ -741,53 +677,62 @@ int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape) {
  * @brief Proves registry snapshots retain immutable callback handles.
  *
  * The first registry receives a copy-aware callable through rvalue
- * registration, arms copy rejection, freezes, and invokes it. The second arms
+ * registration, arms copy rejection, freezes, and starts/polls its Result. The
+ * second arms
  * an independently registered callable before loading a valid DSO into an
  * unfrozen registry. Both paths must copy only owning handles after arm.
  *
- * @return Zero when invoke/load succeed without a callable copy or exception.
+ * @return Zero when start/poll/load succeed without callable copies.
  * @throws std::bad_alloc If test or registry staging allocation fails.
  * @note The valid DSO load also preserves transactional publication and its
  * existing library lifetime anchor; the fixture is fully unloaded on return.
  */
 int verify_immutable_callback_handles() {
-  using ps::Backend;
-  using ps::CancellationToken;
-  using ps::ElementType;
   using ps::ErrorCode;
-  using ps::OperationDefinition;
-  using ps::OperationInvocation;
   using ps::OperationRegistry;
-  using ps::OperationTraits;
   using ps::ParameterValue;
-  using ps::Region;
-  using ps::Value;
 
-  const std::vector<Value> no_inputs;
-  const std::vector<Region> no_demands;
   const std::map<std::string, ParameterValue> no_parameters;
-
+  ps::ResourceBudget root;
+  ps::ResourceAllocationScope scope(root);
   auto invoke_state = std::make_shared<CopyAwareCallbackState>();
   OperationRegistry invoke_registry;
   PS_CHECK(invoke_registry
-               .register_operation(OperationDefinition{
-                   "fixture.copy_aware_invoke", OperationTraits{},
-                   CopyAwareCallback(invoke_state)})
+               .register_operation(copy_aware_definition(
+                   "fixture.copy_aware_invoke", invoke_state))
                .ok());
   invoke_state->reject_copies = true;
   const std::uint32_t invoke_copies_before_arm = invoke_state->copy_count;
   PS_CHECK(invoke_registry.freeze().ok());
+  ps::ResultProgramMetadata metadata;
+  metadata.output.result_schema =
+      std::make_shared<const ps::SchemaTemplate>(multi_result::schema());
+  ps::ResultProgramQuery query(metadata, no_parameters);
+  query.semantic_key = "fixture.copy_aware_invoke";
+  const auto allocator = root.allocator();
+  ps::ResultObjectInputs objects;
+  ps::ResourceVector<ps::ResultIoReply> io;
+  ps::ResultProgramPhase phase{
+      query, objects,
+      io,    allocator,
+      root,  [&](std::uint64_t work) { return root.consume({work}); },
+      {}};
   bool invoke_escaped = false;
   bool invoke_succeeded = false;
   double invoked_value = 0.0;
   try {
-    auto invoked = invoke_registry.invoke(
-        "fixture.copy_aware_invoke",
-        OperationInvocation{no_inputs, no_demands, no_parameters, Backend::Cpu,
-                            CancellationToken()});
-    invoke_succeeded = invoked.ok() && invoked.value().as_float64().ok();
-    if (invoke_succeeded) {
-      invoked_value = invoked.value().as_float64().value();
+    auto started = invoke_registry.start_result("fixture.copy_aware_invoke",
+                                                query, allocator);
+    if (started.ok()) {
+      auto continuation = started.take_value();
+      auto published = continuation.poll(phase);
+      invoke_succeeded =
+          published.ok() &&
+          std::holds_alternative<ps::ResultPublication>(published.value());
+      if (invoke_succeeded) {
+        invoked_value = multi_result::number(
+            std::get<ps::ResultPublication>(published.value()).result);
+      }
     }
   } catch (...) {
     invoke_escaped = true;
@@ -798,13 +743,12 @@ int verify_immutable_callback_handles() {
   PS_CHECK(invoke_state->call_count == 1U);
   PS_CHECK(invoke_state->copy_count == invoke_copies_before_arm);
 
-  const Value unexpected_input = Value::from_float64(1.0);
-  const std::vector<Value> invalid_inputs{unexpected_input};
-  const std::vector<Region> invalid_demands{Region::whole({1U})};
-  auto invalid_input = invoke_registry.invoke(
-      "fixture.copy_aware_invoke",
-      OperationInvocation{invalid_inputs, invalid_demands, no_parameters,
-                          Backend::Cpu, CancellationToken()});
+  auto invalid_metadata = metadata;
+  invalid_metadata.inputs = {metadata.output};
+  ps::ResultProgramQuery invalid_query(invalid_metadata, no_parameters);
+  invalid_query.semantic_key = query.semantic_key;
+  auto invalid_input = invoke_registry.start_result("fixture.copy_aware_invoke",
+                                                    invalid_query, allocator);
   PS_CHECK(!invalid_input.ok());
   PS_CHECK(invalid_input.status().code == ErrorCode::InvalidArgument);
   PS_CHECK(invoke_state->call_count == 1U);
@@ -813,9 +757,8 @@ int verify_immutable_callback_handles() {
   auto load_state = std::make_shared<CopyAwareCallbackState>();
   OperationRegistry load_registry;
   PS_CHECK(load_registry
-               .register_operation(OperationDefinition{
-                   "fixture.copy_aware_load", OperationTraits{},
-                   CopyAwareCallback(load_state)})
+               .register_operation(
+                   copy_aware_definition("fixture.copy_aware_load", load_state))
                .ok());
   load_state->reject_copies = true;
   const std::uint32_t load_copies_before_arm = load_state->copy_count;
@@ -834,302 +777,374 @@ int verify_immutable_callback_handles() {
   return 0;
 }
 
-/**
- * @brief Verifies one direct CPU DSO duplicate-publication invocation.
- * @param registry Loaded mutable or frozen registry owning the fixture.
- * @param observer Independent fixture mapping for counters and sink results.
- * @param key Exact duplicate-publication operation key.
- * @param mode Closed duplicate fixture mode.
- * @param expected_publish_bits Expected first/second sink return encoding.
- * @return Zero when fail-closed status and exact observations match.
- * @throws std::bad_alloc If invocation staging allocates unsuccessfully.
- * @throws std::runtime_error If an exported observation symbol is missing.
- * @note The helper proves the callback ignored its second zero return while the
- * adapter rejected the complete invocation without exposing the first Value.
- */
 int verify_duplicate_sink_invocation(ps::OperationRegistry& registry,
                                      const LibraryObserver& observer,
                                      const char* key, std::uint32_t mode,
                                      std::uint32_t expected_publish_bits) {
-  const ps::Value input = ps::Value::from_float64(3.0);
-  const std::vector<ps::Value> inputs{input};
-  const std::vector<ps::Region> demands{ps::Region::whole({1U})};
-  const std::map<std::string, ps::ParameterValue> parameters;
-  const std::uint32_t cpu_before =
+  const auto cpu_before =
       observer.counter("ps_operation_fixture_cpu_invocation_count", mode);
-  const std::uint32_t gpu_before =
+  const auto gpu_before =
       observer.counter("ps_operation_fixture_gpu_invocation_count", mode);
-  auto result = registry.invoke(
-      key, ps::OperationInvocation{inputs, demands, parameters,
-                                   ps::Backend::Cpu, ps::CancellationToken()});
+  auto result = operation_result::execute(registry, key);
   PS_CHECK(!result.ok());
-  PS_CHECK(result.status().code == ps::ErrorCode::OperationFailed);
-  PS_CHECK(result.status().message == duplicate_publish_diagnostic());
+  PS_CHECK(result.status().code == (mode == kDuplicateInvalidThenSuccess
+                                        ? ps::ErrorCode::InvalidArgument
+                                        : ps::ErrorCode::OperationFailed));
   PS_CHECK(observer.counter("ps_operation_fixture_publish_result_bits", mode) ==
            expected_publish_bits);
   PS_CHECK(observer.counter("ps_operation_fixture_cpu_invocation_count",
-                            mode) == cpu_before + 1U);
+                            mode) == cpu_before + 1);
   PS_CHECK(observer.counter("ps_operation_fixture_gpu_invocation_count",
                             mode) == gpu_before);
   return 0;
 }
-
-/**
- * @brief Proves a null output-sink context does not claim publication state.
- * @param registry Loaded mutable or frozen registry owning the fixture.
- * @param observer Independent fixture mapping for counters and sink results.
- * @return Zero when null returns zero and the following valid publish succeeds.
- * @throws std::bad_alloc If invocation or Value staging allocation fails.
- * @throws std::runtime_error If an exported observation symbol is missing.
- * @note Encoded bits `01` mean null-context rejection followed by acceptance.
- */
 int verify_null_sink_context(ps::OperationRegistry& registry,
                              const LibraryObserver& observer) {
-  const ps::Value input = ps::Value::from_float64(3.0);
-  const std::vector<ps::Value> inputs{input};
-  const std::vector<ps::Region> demands{ps::Region::whole({1U})};
-  const std::map<std::string, ps::ParameterValue> parameters;
-  const std::uint32_t cpu_before = observer.counter(
+  const auto cpu_before = observer.counter(
       "ps_operation_fixture_cpu_invocation_count", kNullContextThenValid);
-  auto result = registry.invoke(
-      "fixture.null_context_then_valid",
-      ps::OperationInvocation{inputs, demands, parameters, ps::Backend::Cpu,
-                              ps::CancellationToken()});
+  auto result =
+      operation_result::execute(registry, "fixture.null_context_then_valid");
   PS_CHECK(result.ok());
-  PS_CHECK(result.value().as_float64().ok());
-  PS_CHECK(result.value().as_float64().value() == 3.0);
+  PS_CHECK(multi_result::number(result.value().results.at("value")) == 3);
   PS_CHECK(observer.counter("ps_operation_fixture_publish_result_bits",
-                            kNullContextThenValid) == 1U);
+                            kNullContextThenValid) == 1);
   PS_CHECK(observer.counter("ps_operation_fixture_cpu_invocation_count",
-                            kNullContextThenValid) == cpu_before + 1U);
+                            kNullContextThenValid) == cpu_before + 1);
   return 0;
 }
 
-/**
- * @brief Verifies fail-closed C++ invocation validation before callback entry.
- *
- * The helper registers callbacks whose entry mutates a counter and, for the
- * descriptor-compatibility cases, deliberately returns an ordinary failure.
- * It then proves default Values, closed-backend violations, and
- * Preserve/Match descriptor contradictions settle before those side effects.
- * A separate callback returns a default Value to retain post-callback output
- * classification as `TypeMismatch`.
- *
- * @return Zero when every status, non-throwing boundary, and callback count
- * matches the invocation contract; one on the first failed check.
- * @throws std::bad_alloc If registry or Value construction cannot allocate.
- * @note Input Regions and demands remain valid in every descriptor case so
- * the regression isolates Value validity and shape-rule prevalidation.
- */
+struct PrevalidatedOutput final {
+  unsigned mode;
+  explicit PrevalidatedOutput(unsigned mode = 0) : mode(mode) {}
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
+    using multi_result::check;
+    using multi_result::take;
+    if (mode == 1)
+      return ps::Result<ps::ResultProgramPoll>(ps::ResultPublication{{}, true});
+    auto schema = *phase.query.output.result_schema;
+    if (mode == 2)
+      schema.tensors[0].descriptor.element_type = ps::ElementType::UInt8;
+    auto builder = take(ps::ResultBuilder::start(phase.resources, schema,
+                                                 phase.query.semantic_key));
+    check(builder.bind_descriptor_relation(
+        take(ps::ResultRelation::cartesian(phase.resources, 1, {}))));
+    const double number = 17;
+    const std::uint8_t byte = 17;
+    if (mode != 3)
+      check(builder.publish_tensor(
+          0, ps::Region::whole({1}),
+          mode == 2
+              ? ps::ByteView(&byte, 1)
+              : ps::ByteView(reinterpret_cast<const std::uint8_t*>(&number),
+                             sizeof(number)),
+          take(ps::ResultRelation::cartesian(phase.resources, 1, {})),
+          {true, true, true, true}));
+    return ps::Result<ps::ResultProgramPoll>(
+        ps::ResultPublication{take(builder.seal()), true});
+  }
+};
+ps::OperationDefinition prevalidation_definition(std::string key,
+                                                 unsigned input_count,
+                                                 unsigned* starts,
+                                                 unsigned mode = 0) {
+  ps::OperationDefinition operation;
+  operation.key = std::move(key);
+  operation.traits.input_count = input_count;
+  operation.traits.input_schema.resize(input_count);
+  for (auto& port : operation.traits.input_schema) {
+    port.kind = ps::OperationPortKind::Result;
+    port.result_schema_id = "test.multi_output";
+    port.result_schema_version = 1;
+  }
+  operation.traits.requires_metadata_specialization = true;
+  operation.traits.outputs = {multi_result::output("value")};
+  operation.traits.outputs[0].region_rule = ps::OperationRegionRule::Whole;
+  operation.prepare_static = [](const auto& inputs, const auto&) {
+    for (const auto& input : inputs) {
+      if (!input.result_schema)
+        return ps::Result<ps::OperationPreparation>(ps::Status{
+            ps::ErrorCode::InvalidArgument, "missing Result metadata"});
+      const auto& tensors = input.result_schema->tensors;
+      if (tensors.size() != 1 ||
+          tensors[0].descriptor.element_type != ps::ElementType::Float64 ||
+          tensors[0].sample_shape() != std::vector<std::uint64_t>{1})
+        return ps::Result<ps::OperationPreparation>(
+            ps::Status{ps::ErrorCode::TypeMismatch, "expected Float64 scalar"});
+    }
+    ps::OperationPreparation preparation;
+    preparation.outputs.resize(1);
+    preparation.outputs[0].metadata.result_schema =
+        std::make_shared<const ps::SchemaTemplate>(multi_result::schema());
+    return ps::Result<ps::OperationPreparation>(std::move(preparation));
+  };
+  operation.start_result = [starts, mode](const auto&, const auto& allocator) {
+    ++*starts;
+    return ps::ResultContinuation::make<PrevalidatedOutput>(allocator, mode);
+  };
+  return operation;
+}
 int verify_cpp_invocation_prevalidation() {
-  using ps::Backend;
-  using ps::CancellationToken;
-  using ps::ElementType;
-  using ps::ErrorCode;
-  using ps::OperationDefinition;
-  using ps::OperationInvocation;
+  using namespace ps;  // NOLINT(build/namespaces)
+  unsigned preserve_starts = 0, match_starts = 0, backend_starts = 0;
+  unsigned default_starts = 0;
+  auto registry = std::make_shared<OperationRegistry>();
+  PS_CHECK(registry
+               ->register_operation(prevalidation_definition(
+                   "fixture.preserve_prevalidation", 1, &preserve_starts))
+               .ok());
+  PS_CHECK(registry
+               ->register_operation(prevalidation_definition(
+                   "fixture.match_prevalidation", 2, &match_starts))
+               .ok());
+  PS_CHECK(registry
+               ->register_operation(prevalidation_definition(
+                   "fixture.backend_prevalidation", 0, &backend_starts))
+               .ok());
+  PS_CHECK(registry
+               ->register_operation(prevalidation_definition(
+                   "fixture.default_output", 0, &default_starts, 1))
+               .ok());
+  PS_CHECK(registry->freeze().ok());
+  ResourceBudget root;
+  const auto allocator = root.allocator();
+  const std::map<std::string, ParameterValue> parameters;
+  const auto metadata = [](ElementType type,
+                           std::vector<std::uint64_t> shape = {1}) {
+    OperationMetadata result;
+    result.result_schema = std::make_shared<const SchemaTemplate>(
+        multi_result::schema(type, std::move(shape)));
+    return result;
+  };
+  ResultProgramMetadata info;
+  info.output = metadata(ElementType::Float64);
+  info.inputs = {metadata(ElementType::UInt8)};
+  ResultProgramQuery query(info, parameters);
+  query.semantic_key = "prevalidation";
+  query.backend = Backend::Gpu;
+  auto gpu = registry->start_result("fixture.preserve_prevalidation", query,
+                                    allocator);
+  PS_CHECK(!gpu.ok() && gpu.status().code == ErrorCode::BackendUnavailable);
+  query.backend = Backend::Cpu;
+  auto preserve = registry->start_result("fixture.preserve_prevalidation",
+                                         query, allocator);
+  PS_CHECK(!preserve.ok() && preserve.status().code == ErrorCode::TypeMismatch);
+  PS_CHECK(preserve_starts == 0);
+  info.inputs = {metadata(ElementType::Float64), metadata(ElementType::UInt8)};
+  auto type =
+      registry->start_result("fixture.match_prevalidation", query, allocator);
+  PS_CHECK(!type.ok() && type.status().code == ErrorCode::TypeMismatch);
+  info.inputs[1] = metadata(ElementType::Float64, {2});
+  auto shape =
+      registry->start_result("fixture.match_prevalidation", query, allocator);
+  PS_CHECK(!shape.ok() && shape.status().code == ErrorCode::TypeMismatch);
+  for (unsigned invalid : {0U, 1U}) {
+    info.inputs = {metadata(ElementType::Float64),
+                   metadata(ElementType::Float64)};
+    info.inputs[invalid] = {};
+    bool escaped = false;
+    Status status;
+    try {
+      auto result = registry->start_result("fixture.match_prevalidation", query,
+                                           allocator);
+      status = result.status();
+    } catch (...) {
+      escaped = true;
+    }
+    PS_CHECK(!escaped && status.code == ErrorCode::TypeMismatch);
+  }
+  PS_CHECK(match_starts == 0);
+  info.inputs.clear();
+  query.backend = static_cast<Backend>(99);
+  auto unknown =
+      registry->start_result("fixture.backend_prevalidation", query, allocator);
+  PS_CHECK(!unknown.ok() &&
+           unknown.status().code == ErrorCode::InvalidArgument);
+  query.backend = Backend::Gpu;
+  auto unsupported =
+      registry->start_result("fixture.backend_prevalidation", query, allocator);
+  PS_CHECK(!unsupported.ok() &&
+           unsupported.status().code == ErrorCode::BackendUnavailable);
+  PS_CHECK(backend_starts == 0);
+  query.backend = Backend::Cpu;
+  auto valid =
+      registry->start_result("fixture.backend_prevalidation", query, allocator);
+  PS_CHECK(valid.ok() && backend_starts == 1);
+  ResultObjectInputs objects;
+  ResourceVector<ResultIoReply> io;
+  ResultProgramPhase phase{query, objects,
+                           io,    allocator,
+                           root,  [&](auto n) { return root.consume({n}); },
+                           {}};
+  auto continuation = valid.take_value();
+  auto published = continuation.poll(phase);
+  PS_CHECK(published.ok() &&
+           std::holds_alternative<ResultPublication>(published.value()));
+  PS_CHECK(multi_result::number(
+               std::get<ResultPublication>(published.value()).result) == 17);
+  WorkflowDocument document;
+  document.nodes = {{1, "fixture.default_output", {}, {}}};
+  document.outputs = {{"value", 1, "value"}};
+  GraphContext graph(document);
+  auto compiled = Compiler(registry).compile(graph);
+  PS_CHECK(compiled.ok());
+  ExecutionContextConfig config;
+  config.managed_resources = ResourceLimits{};
+  ExecutionContext context(registry, config);
+  auto invalid_result = context.execute(compiled.value().plan);
+  PS_CHECK(!invalid_result.ok() &&
+           invalid_result.status().code == ErrorCode::InvalidArgument);
+  PS_CHECK(default_starts == 1);
+  return 0;
+}
+
+int verify_tensor_extent_dso() {
+  const std::array<const char*, 3> paths{
+      PS_OPERATION_TENSOR_EXTENT_FIXTURE_PATH,
+      PS_OPERATION_TENSOR_ZERO_FIXTURE_PATH,
+      PS_OPERATION_TENSOR_RANK_FIXTURE_PATH};
+  const std::vector<std::vector<std::uint64_t>> expected{
+      {UINT64_C(1) << 63U},
+      {(UINT64_C(1) << 63U) + 1},
+      {2, UINT64_C(1) << 62U},
+      {2, (UINT64_C(1) << 62U) + 1},
+      {UINT64_MAX},
+      {UINT64_MAX, UINT64_MAX}};
+  for (std::size_t i = 0; i < paths.size(); ++i) {
+    LibraryObserver observer(paths[i]);
+    PS_CHECK(observer.counter(
+                 "ps_operation_tensor_extent_fixture_destroy_count") == 0);
+    LibraryHookScope lifecycle(LibraryKind::Operation, false, true);
+    {
+      ps::OperationRegistry registry;
+      const auto status = registry.load_plugin(paths[i]);
+      if (i == 0) {
+        PS_CHECK(status.ok());
+        auto traits = registry.find_traits("fixture.tensor.extents");
+        PS_CHECK(traits.ok() && traits.value().outputs.size() == 1);
+        const auto& output = traits.value().outputs[0];
+        PS_CHECK(output.output_schema.kind == ps::OperationPortKind::Result);
+        PS_CHECK(output.result_schema.has_value());
+        const auto& schema = *output.result_schema;
+        PS_CHECK(schema.fields.empty() &&
+                 schema.tensors.size() == expected.size());
+        for (std::size_t tensor = 0; tensor < expected.size(); ++tensor) {
+          const auto& shape = schema.tensors[tensor].descriptor.shape;
+          PS_CHECK(std::vector<std::uint64_t>(shape.begin(), shape.end()) ==
+                   expected[tensor]);
+          PS_CHECK(schema.tensors[tensor].descriptor.element_type ==
+                   (tensor == 4 ? ps::ElementType::Float64
+                                : ps::ElementType::UInt8));
+        }
+      } else {
+        PS_CHECK(status.code == (i == 1 ? ps::ErrorCode::TypeMismatch
+                                        : ps::ErrorCode::InvalidArgument));
+        PS_CHECK(registry.keys().empty());
+      }
+    }
+    PS_CHECK(lifecycle.owner_allocation_count() == 1);
+    PS_CHECK(lifecycle.native_load_count() == 1);
+    PS_CHECK(lifecycle.native_close_count() == 1);
+    PS_CHECK(observer.counter(
+                 "ps_operation_tensor_extent_fixture_callback_count") == 0);
+    PS_CHECK(observer.counter(
+                 "ps_operation_tensor_extent_fixture_destroy_count") == 1);
+  }
+  return 0;
+}
+
+int verify_result_registration() {
   using ps::OperationRegistry;
-  using ps::OperationShapeRule;
-  using ps::OperationTraits;
-  using ps::ParameterValue;
-  using ps::Region;
-  using ps::Result;
-  using ps::StridedLayout;
-  using ps::Value;
-  using ps::ValueDescriptor;
-
-  std::uint32_t preserve_callback_count = 0U;
-  std::uint32_t match_callback_count = 0U;
-  std::uint32_t backend_callback_count = 0U;
-  std::uint32_t default_output_callback_count = 0U;
-  OperationRegistry registry;
-
-  OperationTraits preserve_traits;
-  preserve_traits.input_count = 1U;
-  preserve_traits.input_schema.resize(1);
-  preserve_traits.input_schema[0].element_type =
-      static_cast<std::uint32_t>(ElementType::Float64);
-  preserve_traits.outputs[0].output_element_type = ElementType::Float64;
-  preserve_traits.outputs[0].shape_rule =
-      OperationShapeRule::PreserveFirstInput;
-  PS_CHECK(
-      registry
-          .register_operation(OperationDefinition{
-              "fixture.preserve_prevalidation", preserve_traits,
-              [&preserve_callback_count](
-                  const OperationInvocation&) -> Result<Value> {
-                ++preserve_callback_count;
-                return Result<Value>(ps::Status::failure(
-                    ErrorCode::OperationFailed,
-                    "preserve callback must not run for incompatible input"));
-              }})
-          .ok());
-
-  OperationTraits match_traits;
-  match_traits.input_count = 2U;
-  match_traits.input_schema.resize(2);
-  for (auto& port : match_traits.input_schema)
-    port.element_type = static_cast<std::uint32_t>(ElementType::Float64);
-  match_traits.outputs[0].output_element_type = ElementType::Float64;
-  match_traits.outputs[0].shape_rule = OperationShapeRule::MatchAllInputs;
-  PS_CHECK(
-      registry
-          .register_operation(OperationDefinition{
-              "fixture.match_prevalidation", match_traits,
-              [&match_callback_count](
-                  const OperationInvocation&) -> Result<Value> {
-                ++match_callback_count;
-                return Result<Value>(ps::Status::failure(
-                    ErrorCode::OperationFailed,
-                    "match callback must not run for incompatible inputs"));
-              }})
-          .ok());
-
-  PS_CHECK(registry
-               .register_operation(OperationDefinition{
-                   "fixture.backend_prevalidation", OperationTraits{},
-                   [&backend_callback_count](
-                       const OperationInvocation&) -> Result<Value> {
-                     ++backend_callback_count;
-                     return Result<Value>(Value::from_float64(17.0));
-                   }})
-               .ok());
-  PS_CHECK(registry
-               .register_operation(OperationDefinition{
-                   "fixture.default_output", OperationTraits{},
-                   [&default_output_callback_count](
-                       const OperationInvocation&) -> Result<Value> {
-                     ++default_output_callback_count;
-                     return Result<Value>(Value{});
-                   }})
-               .ok());
-  PS_CHECK(registry.freeze().ok());
-
-  const Value float_scalar = Value::from_float64(3.0);
-  auto uint8_scalar_result = Value::create(
-      ValueDescriptor{ElementType::UInt8, {1U}}, Region::whole({1U}),
-      StridedLayout{0U, {1}}, std::vector<std::uint8_t>{3U});
-  PS_CHECK(uint8_scalar_result.ok());
-  const Value uint8_scalar = uint8_scalar_result.take_value();
-  auto float_vector_result =
-      Value::create(ValueDescriptor{ElementType::Float64, {2U}},
-                    Region::whole({2U}), StridedLayout{0U, {8}},
-                    std::vector<std::uint8_t>(2U * sizeof(double), 0U));
-  PS_CHECK(float_vector_result.ok());
-  const Value float_vector = float_vector_result.take_value();
-  const std::map<std::string, ParameterValue> no_parameters;
-  const std::vector<Region> one_demand{Region::whole({1U})};
-  const std::vector<Region> two_scalar_demands{Region::whole({1U}),
-                                               Region::whole({1U})};
-
-  const std::vector<Value> preserve_inputs{uint8_scalar};
-  auto unsupported_preserve_gpu = registry.invoke(
-      "fixture.preserve_prevalidation",
-      OperationInvocation{preserve_inputs, one_demand, no_parameters,
-                          Backend::Gpu, CancellationToken()});
-  PS_CHECK(!unsupported_preserve_gpu.ok());
-  PS_CHECK(unsupported_preserve_gpu.status().code ==
-           ErrorCode::BackendUnavailable);
-  PS_CHECK(preserve_callback_count == 0U);
-
-  auto preserve_mismatch = registry.invoke(
-      "fixture.preserve_prevalidation",
-      OperationInvocation{preserve_inputs, one_demand, no_parameters,
-                          Backend::Cpu, CancellationToken()});
-  PS_CHECK(!preserve_mismatch.ok());
-  PS_CHECK(preserve_mismatch.status().code == ErrorCode::TypeMismatch);
-  PS_CHECK(preserve_callback_count == 0U);
-
-  const std::vector<Value> type_mismatch_inputs{float_scalar, uint8_scalar};
-  auto type_mismatch = registry.invoke(
-      "fixture.match_prevalidation",
-      OperationInvocation{type_mismatch_inputs, two_scalar_demands,
-                          no_parameters, Backend::Cpu, CancellationToken()});
-  PS_CHECK(!type_mismatch.ok());
-  PS_CHECK(type_mismatch.status().code == ErrorCode::TypeMismatch);
-  PS_CHECK(match_callback_count == 0U);
-
-  const std::vector<Value> shape_mismatch_inputs{float_scalar, float_vector};
-  const std::vector<Region> shape_mismatch_demands{Region::whole({1U}),
-                                                   Region::whole({2U})};
-  auto shape_mismatch = registry.invoke(
-      "fixture.match_prevalidation",
-      OperationInvocation{shape_mismatch_inputs, shape_mismatch_demands,
-                          no_parameters, Backend::Cpu, CancellationToken()});
-  PS_CHECK(!shape_mismatch.ok());
-  PS_CHECK(shape_mismatch.status().code == ErrorCode::TypeMismatch);
-  PS_CHECK(match_callback_count == 0U);
-
-  const std::vector<Value> invalid_first_inputs{Value{}, float_scalar};
-  bool invalid_first_escaped = false;
-  bool invalid_first_ok = true;
-  ErrorCode invalid_first_code = ErrorCode::Ok;
-  try {
-    auto invalid_first = registry.invoke(
-        "fixture.match_prevalidation",
-        OperationInvocation{invalid_first_inputs, two_scalar_demands,
-                            no_parameters, Backend::Cpu, CancellationToken()});
-    invalid_first_ok = invalid_first.ok();
-    invalid_first_code = invalid_first.status().code;
-  } catch (...) {
-    invalid_first_escaped = true;
+  const std::array<const char*, 5U> invalid_operation_utf8_fixtures{
+      PS_OPERATION_INVALID_UTF8_OVERLONG_FIXTURE_PATH,
+      PS_OPERATION_INVALID_UTF8_TRUNCATED_FIXTURE_PATH,
+      PS_OPERATION_INVALID_UTF8_SURROGATE_FIXTURE_PATH,
+      PS_OPERATION_INVALID_UTF8_TOO_LARGE_FIXTURE_PATH,
+      PS_OPERATION_INVALID_UTF8_CONTINUATION_FIXTURE_PATH,
+  };
+  auto unicode_operation_registry = std::make_unique<OperationRegistry>();
+  for (const char* fixture_path : invalid_operation_utf8_fixtures) {
+    LibraryObserver observer(fixture_path);
+    PS_CHECK(observer.counter("ps_operation_utf8_fixture_destroy_count") == 0U);
+    {
+      LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Operation,
+                                 false, true);
+      const auto status = unicode_operation_registry->load_plugin(fixture_path);
+      PS_CHECK(status.code == ps::ErrorCode::InvalidArgument);
+      PS_CHECK(lifecycle.owner_allocation_count() == 1U);
+      PS_CHECK(lifecycle.native_load_count() == 1U);
+      PS_CHECK(lifecycle.native_close_count() == 1U);
+    }
+    PS_CHECK(unicode_operation_registry->keys().empty());
+    PS_CHECK(observer.counter("ps_operation_utf8_fixture_destroy_count") == 1U);
   }
-  PS_CHECK(!invalid_first_escaped);
-  PS_CHECK(!invalid_first_ok);
-  PS_CHECK(invalid_first_code == ErrorCode::InvalidArgument);
-  PS_CHECK(match_callback_count == 0U);
 
-  const std::vector<Value> invalid_last_inputs{float_scalar, Value{}};
-  bool invalid_last_escaped = false;
-  bool invalid_last_ok = true;
-  ErrorCode invalid_last_code = ErrorCode::Ok;
-  try {
-    auto invalid_last = registry.invoke(
-        "fixture.match_prevalidation",
-        OperationInvocation{invalid_last_inputs, two_scalar_demands,
-                            no_parameters, Backend::Cpu, CancellationToken()});
-    invalid_last_ok = invalid_last.ok();
-    invalid_last_code = invalid_last.status().code;
-  } catch (...) {
-    invalid_last_escaped = true;
+  LibraryObserver unicode_operation_observer(PS_OPERATION_UNICODE_FIXTURE_PATH);
+  PS_CHECK(unicode_operation_observer.counter(
+               "ps_operation_utf8_fixture_destroy_count") == 0U);
+  {
+    LibraryHookScope failure(LibraryKind::Operation, true);
+    bool allocation_failed = false;
+    try {
+      static_cast<void>(unicode_operation_registry->load_plugin(
+          PS_OPERATION_UNICODE_FIXTURE_PATH));
+    } catch (const std::bad_alloc&) {
+      allocation_failed = true;
+    }
+    PS_CHECK(allocation_failed);
+    PS_CHECK(failure.owner_allocation_count() == 1U);
+    PS_CHECK(failure.native_close_count() == 1U);
+    PS_CHECK(unicode_operation_registry->keys().empty());
+    PS_CHECK(unicode_operation_observer.counter(
+                 "ps_operation_utf8_fixture_destroy_count") == 1U);
   }
-  PS_CHECK(!invalid_last_escaped);
-  PS_CHECK(!invalid_last_ok);
-  PS_CHECK(invalid_last_code == ErrorCode::InvalidArgument);
-  PS_CHECK(match_callback_count == 0U);
+  PS_CHECK(
+      unicode_operation_registry->load_plugin(PS_OPERATION_UNICODE_FIXTURE_PATH)
+          .ok());
+  const std::string unicode_operation_key = "fixture.\xe5\x80\x8d\xe7\x8e\x87";
+  const std::string unicode_parameter_key = "\xe7\xbc\xa9\xe6\x94\xbe";
+  auto unicode_traits =
+      unicode_operation_registry->find_traits(unicode_operation_key);
+  PS_CHECK(unicode_traits.ok());
+  PS_CHECK(unicode_traits.value().parameter_schema.size() == 1U);
+  PS_CHECK(unicode_traits.value().parameter_schema.front().key ==
+           unicode_parameter_key);
+  PS_CHECK(unicode_traits.value().outputs.size() == 1U);
+  PS_CHECK(unicode_traits.value().outputs.front().output_schema.kind ==
+           ps::OperationPortKind::Result);
+  PS_CHECK(unicode_traits.value().outputs.front().result_schema.has_value());
+  const auto keys = unicode_operation_registry->keys();
+  const std::array<const char*, 5> invalid_parameters{
+      PS_OPERATION_BAD_PARAMETER_POINTER_FIXTURE_PATH,
+      PS_OPERATION_BAD_PARAMETER_SIZE_FIXTURE_PATH,
+      PS_OPERATION_BAD_PARAMETER_COUNT_FIXTURE_PATH,
+      PS_OPERATION_BAD_PARAMETER_BOUNDS_FIXTURE_PATH,
+      PS_OPERATION_BAD_PARAMETER_ALIGNMENT_FIXTURE_PATH};
+  for (const auto* path : invalid_parameters) {
+    LibraryHookScope lifecycle(LibraryKind::Operation, false);
+    const auto status = unicode_operation_registry->load_plugin(path);
+    PS_CHECK(status.code == ps::ErrorCode::InvalidArgument);
+    PS_CHECK(unicode_operation_registry->keys() == keys);
+    PS_CHECK(lifecycle.native_close_count() == 1U);
+  }
+  {
+    LibraryHookScope lifecycle(LibraryKind::Operation, false);
+    const auto duplicate = unicode_operation_registry->load_plugin(
+        PS_OPERATION_UNICODE_FIXTURE_PATH);
+    PS_CHECK(duplicate.code == ps::ErrorCode::InvalidArgument);
+    PS_CHECK(unicode_operation_registry->keys() == keys);
+    PS_CHECK(lifecycle.native_close_count() == 1U);
+    PS_CHECK(unicode_operation_observer.counter(
+                 "ps_operation_utf8_fixture_destroy_count") == 2U);
+  }
+  {
+    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Operation,
+                               false);
+    unicode_operation_registry.reset();
+    PS_CHECK(lifecycle.native_close_count() == 1U);
+  }
+  PS_CHECK(unicode_operation_observer.counter(
+               "ps_operation_utf8_fixture_destroy_count") == 3U);
 
-  const std::vector<Value> no_inputs;
-  const std::vector<Region> no_demands;
-  auto unknown_backend = registry.invoke(
-      "fixture.backend_prevalidation",
-      OperationInvocation{no_inputs, no_demands, no_parameters,
-                          static_cast<Backend>(99U), CancellationToken()});
-  PS_CHECK(!unknown_backend.ok());
-  PS_CHECK(unknown_backend.status().code == ErrorCode::InvalidArgument);
-  PS_CHECK(backend_callback_count == 0U);
-
-  auto unsupported_gpu =
-      registry.invoke("fixture.backend_prevalidation",
-                      OperationInvocation{no_inputs, no_demands, no_parameters,
-                                          Backend::Gpu, CancellationToken()});
-  PS_CHECK(!unsupported_gpu.ok());
-  PS_CHECK(unsupported_gpu.status().code == ErrorCode::BackendUnavailable);
-  PS_CHECK(backend_callback_count == 0U);
-
-  auto valid_cpu =
-      registry.invoke("fixture.backend_prevalidation",
-                      OperationInvocation{no_inputs, no_demands, no_parameters,
-                                          Backend::Cpu, CancellationToken()});
-  PS_CHECK(valid_cpu.ok());
-  PS_CHECK(backend_callback_count == 1U);
-
-  auto default_output =
-      registry.invoke("fixture.default_output",
-                      OperationInvocation{no_inputs, no_demands, no_parameters,
-                                          Backend::Cpu, CancellationToken()});
-  PS_CHECK(!default_output.ok());
-  PS_CHECK(default_output.status().code == ErrorCode::TypeMismatch);
-  PS_CHECK(default_output_callback_count == 1U);
   return 0;
 }
 
@@ -1153,7 +1168,6 @@ int main() {
   using ps::ErrorCode;
   using ps::GraphContext;
   using ps::OperationDefinition;
-  using ps::OperationInvocation;
   using ps::OperationParameterSpec;
   using ps::OperationParameterType;
   using ps::OperationRegistry;
@@ -1164,7 +1178,6 @@ int main() {
   using ps::RegionDimension;
   using ps::Result;
   using ps::StridedLayout;
-  using ps::Value;
   using ps::ValueDescriptor;
   using ps::ValueFacet;
   using ps::WorkflowDocument;
@@ -1272,50 +1285,7 @@ int main() {
     PS_CHECK(lifecycle.native_close_count() == 0U);
   }
 
-  const std::array<const char*, 5U> invalid_operation_utf8_fixtures{
-      PS_OPERATION_INVALID_UTF8_OVERLONG_FIXTURE_PATH,
-      PS_OPERATION_INVALID_UTF8_TRUNCATED_FIXTURE_PATH,
-      PS_OPERATION_INVALID_UTF8_SURROGATE_FIXTURE_PATH,
-      PS_OPERATION_INVALID_UTF8_TOO_LARGE_FIXTURE_PATH,
-      PS_OPERATION_INVALID_UTF8_CONTINUATION_FIXTURE_PATH,
-  };
-  auto unicode_operation_registry = std::make_unique<OperationRegistry>();
-  for (const char* fixture_path : invalid_operation_utf8_fixtures) {
-    LibraryObserver observer(fixture_path);
-    PS_CHECK(observer.counter("ps_operation_utf8_fixture_destroy_count") == 0U);
-    {
-      LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Operation,
-                                 false);
-      PS_CHECK(!unicode_operation_registry->load_plugin(fixture_path).ok());
-      PS_CHECK(lifecycle.owner_allocation_count() == 0U);
-      PS_CHECK(lifecycle.native_close_count() == 1U);
-    }
-    PS_CHECK(unicode_operation_registry->keys().empty());
-    PS_CHECK(observer.counter("ps_operation_utf8_fixture_destroy_count") == 1U);
-  }
-
-  LibraryObserver unicode_operation_observer(PS_OPERATION_UNICODE_FIXTURE_PATH);
-  PS_CHECK(unicode_operation_observer.counter(
-               "ps_operation_utf8_fixture_destroy_count") == 0U);
-  PS_CHECK(
-      unicode_operation_registry->load_plugin(PS_OPERATION_UNICODE_FIXTURE_PATH)
-          .ok());
-  const std::string unicode_operation_key = "fixture.\xe5\x80\x8d\xe7\x8e\x87";
-  const std::string unicode_parameter_key = "\xe7\xbc\xa9\xe6\x94\xbe";
-  auto unicode_traits =
-      unicode_operation_registry->find_traits(unicode_operation_key);
-  PS_CHECK(unicode_traits.ok());
-  PS_CHECK(unicode_traits.value().parameter_schema.size() == 1U);
-  PS_CHECK(unicode_traits.value().parameter_schema.front().key ==
-           unicode_parameter_key);
-  {
-    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Operation,
-                               false);
-    unicode_operation_registry.reset();
-    PS_CHECK(lifecycle.native_close_count() == 1U);
-  }
-  PS_CHECK(unicode_operation_observer.counter(
-               "ps_operation_utf8_fixture_destroy_count") == 1U);
+  PS_CHECK(verify_result_registration() == 0);
 
   LibraryObserver dense_overflow_observer(
       PS_OPERATION_DENSE_OVERFLOW_FIXTURE_PATH);
@@ -1326,15 +1296,19 @@ int main() {
                                false);
     OperationRegistry registry;
     PS_CHECK(
-        !registry.load_plugin(PS_OPERATION_DENSE_OVERFLOW_FIXTURE_PATH).ok());
+        registry.load_plugin(PS_OPERATION_DENSE_OVERFLOW_FIXTURE_PATH).code ==
+        ErrorCode::TypeMismatch);
     PS_CHECK(registry.keys().empty());
     PS_CHECK(lifecycle.native_close_count() == 1U);
   }
   PS_CHECK(dense_overflow_observer.counter(
                "ps_operation_dense_overflow_fixture_destroy_count") == 1U);
+  PS_CHECK(dense_overflow_observer.counter(
+               "ps_operation_dense_overflow_fixture_callback_count") == 0U);
+  PS_CHECK(verify_tensor_extent_dso() == 0);
 
   PS_CHECK(verify_dense_byte_size_contract() == 0);
-  const std::uint64_t maximum_legal_dense_bytes = UINT64_C(1) << 63U;
+  const std::uint64_t maximum_legal_dense_bytes = INT64_MAX;
   PS_CHECK(verify_dense_dso_fixture(PS_OPERATION_DENSE_RANK1_LIMIT_FIXTURE_PATH,
                                     true, "fixture.dense_rank1_limit",
                                     {maximum_legal_dense_bytes}) == 0);
@@ -1343,7 +1317,8 @@ int main() {
            0);
   PS_CHECK(verify_dense_dso_fixture(PS_OPERATION_DENSE_RANK2_LIMIT_FIXTURE_PATH,
                                     true, "fixture.dense_rank2_limit",
-                                    {UINT64_C(2), UINT64_C(1) << 62U}) == 0);
+                                    {UINT64_C(2), (UINT64_C(1) << 62U) - 1}) ==
+           0);
   PS_CHECK(verify_dense_dso_fixture(
                PS_OPERATION_DENSE_RANK2_OVERFLOW_FIXTURE_PATH, false, "", {}) ==
            0);
@@ -1375,28 +1350,7 @@ int main() {
     LibraryObserver bad_version(PS_OPERATION_BAD_FIXTURE_PATH);
     PS_CHECK(bad_version.counter("ps_bad_operation_api_calls") == 0);
     PS_CHECK(!registry.load_plugin(PS_OPERATION_BAD_FIXTURE_PATH).ok());
-    PS_CHECK(bad_version.counter("ps_bad_operation_api_calls") == 0);
-    PS_CHECK(
-        !registry.load_plugin(PS_OPERATION_BAD_PARAMETER_POINTER_FIXTURE_PATH)
-             .ok());
-    PS_CHECK(!registry.load_plugin(PS_OPERATION_BAD_PARAMETER_SIZE_FIXTURE_PATH)
-                  .ok());
-    PS_CHECK(
-        !registry.load_plugin(PS_OPERATION_BAD_PARAMETER_COUNT_FIXTURE_PATH)
-             .ok());
-    PS_CHECK(
-        !registry.load_plugin(PS_OPERATION_BAD_PARAMETER_BOUNDS_FIXTURE_PATH)
-             .ok());
-    PS_CHECK(
-        !registry.load_plugin(PS_OPERATION_BAD_PARAMETER_ALIGNMENT_FIXTURE_PATH)
-             .ok());
-    PS_CHECK(registry
-                 .register_operation(OperationDefinition{
-                     "fixture.source", OperationTraits{},
-                     [](const OperationInvocation&) -> Result<Value> {
-                       return Result<Value>(Value::from_float64(3.0));
-                     }})
-                 .ok());
+    PS_CHECK(bad_version.counter("ps_bad_operation_api_calls") == 1);
     PS_CHECK(registry.freeze().ok());
     PS_CHECK(!registry.load_plugin(PS_OPERATION_FIXTURE_PATH).ok());
     auto traits = registry.find_traits("fixture.double");
@@ -1411,15 +1365,8 @@ int main() {
 
     Compiler plugin_compiler(std::shared_ptr<OperationRegistry>(
         &registry, [](OperationRegistry*) {}));
-    WorkflowDocument plugin_document;
-    plugin_document.nodes = {
-        WorkflowNode{1U, "fixture.source", {}, {}},
-        WorkflowNode{2U,
-                     "fixture.double",
-                     {WorkflowNodeOutput{1U, "value"}},
-                     {{"scale", 2.0}}},
-    };
-    plugin_document.outputs = {WorkflowOutput{"value", 2U, "value"}};
+    auto plugin_document =
+        operation_result::document("fixture.double", {{"scale", 2.0}}, true);
     GraphContext plugin_graph(plugin_document);
     PS_CHECK(plugin_compiler.compile(plugin_graph).ok());
     WorkflowDocument missing_plugin_parameter = plugin_document;
@@ -1435,120 +1382,56 @@ int main() {
     GraphContext wrong_plugin_graph(std::move(wrong_plugin_parameter));
     PS_CHECK(!plugin_compiler.compile(wrong_plugin_graph).ok());
 
-    const Value scalar = Value::from_float64(3.0);
-    auto faceted_input = Value::create(
-        scalar.descriptor(), scalar.region(), scalar.layout(),
-        scalar.copy_bytes(), {ValueFacet{"test.semantic", 2U, {8U, 9U}}});
-    PS_CHECK(faceted_input.ok());
-    std::vector<Value> inputs{faceted_input.take_value()};
-    const std::vector<Region> demands{Region::whole({1U})};
     const std::map<std::string, ParameterValue> parameters{{"scale", 2.0}};
     auto output =
-        registry.invoke("fixture.double",
-                        OperationInvocation{inputs, demands, parameters,
-                                            Backend::Cpu, CancellationToken()});
+        operation_result::execute(registry, "fixture.double", parameters, true);
     PS_CHECK(output.ok());
-    PS_CHECK(output.value().as_float64().ok());
-    PS_CHECK(output.value().as_float64().value() == 6.0);
-    PS_CHECK(output.value().facets().size() == 1U);
-    PS_CHECK(output.value().facets().front().key == "test.semantic");
-    PS_CHECK(output.value().facets().front().payload ==
-             std::vector<std::uint8_t>({8U, 9U}));
-    auto trailing_input = Value::create(
-        scalar.descriptor(), scalar.region(), scalar.layout(),
-        std::vector<std::uint8_t>(scalar.bytes().size() + 1U, 0U));
-    PS_CHECK(trailing_input.ok());
-    std::vector<Value> trailing_inputs{trailing_input.take_value()};
-    auto trailing_rejected = registry.invoke(
-        "fixture.double",
-        OperationInvocation{trailing_inputs, demands, parameters, Backend::Cpu,
-                            CancellationToken()});
-    PS_CHECK(!trailing_rejected.ok());
-    PS_CHECK(trailing_rejected.status().code == ErrorCode::OperationFailed);
+    const auto& result = output.value().results.at("value");
+    PS_CHECK(multi_result::number(result) == 6);
+    const auto& facets = result.schema().tensors[0].facets;
+    PS_CHECK(facets.size() == 1 && facets[0].key == "test.semantic" &&
+             facets[0].version == 2);
+    PS_CHECK(facets[0].payload == std::vector<std::uint8_t>({8, 9}));
+    auto trailing_rejected =
+        operation_result::execute(registry, "fixture.bad_bytes");
+    PS_CHECK(!trailing_rejected.ok() &&
+             trailing_rejected.status().code == ErrorCode::TypeMismatch);
     const std::map<std::string, ParameterValue> no_parameters;
-    const std::uint32_t invalid_dso_gpu_before = operation_observer.counter(
+    const auto gpu_before = operation_observer.counter(
         "ps_operation_fixture_gpu_invocation_count", kGpuBackendUnavailable);
-    const std::uint32_t invalid_dso_cpu_before = operation_observer.counter(
+    const auto cpu_before = operation_observer.counter(
         "ps_operation_fixture_cpu_invocation_count", kGpuBackendUnavailable);
-    PS_CHECK(invalid_dso_gpu_before == 0U);
-    PS_CHECK(invalid_dso_cpu_before == 0U);
-    const std::vector<Value> invalid_plugin_inputs{Value{}};
-    bool invalid_plugin_input_escaped = false;
-    bool invalid_plugin_input_ok = true;
-    ErrorCode invalid_plugin_input_code = ErrorCode::Ok;
-    try {
-      auto invalid_plugin_input = registry.invoke(
-          "fixture.gpu_fallback",
-          OperationInvocation{invalid_plugin_inputs, demands, no_parameters,
-                              Backend::Gpu, CancellationToken()});
-      invalid_plugin_input_ok = invalid_plugin_input.ok();
-      invalid_plugin_input_code = invalid_plugin_input.status().code;
-    } catch (...) {
-      invalid_plugin_input_escaped = true;
+    auto invalid_input = operation_result::start(
+        registry, "fixture.gpu_fallback", no_parameters, Backend::Gpu, true);
+    PS_CHECK(!invalid_input.ok() &&
+             invalid_input.status().code == ErrorCode::TypeMismatch);
+    auto invalid_backend =
+        operation_result::start(registry, "fixture.gpu_fallback", no_parameters,
+                                static_cast<Backend>(99));
+    PS_CHECK(!invalid_backend.ok() &&
+             invalid_backend.status().code == ErrorCode::InvalidArgument);
+    PS_CHECK(
+        operation_observer.counter("ps_operation_fixture_gpu_invocation_count",
+                                   kGpuBackendUnavailable) == gpu_before);
+    PS_CHECK(
+        operation_observer.counter("ps_operation_fixture_cpu_invocation_count",
+                                   kGpuBackendUnavailable) == cpu_before);
+    auto unsupported = operation_result::start(registry, "fixture.double",
+                                               parameters, Backend::Gpu);
+    PS_CHECK(!unsupported.ok() &&
+             unsupported.status().code == ErrorCode::BackendUnavailable);
+    for (const auto& bad : std::vector<std::map<std::string, ParameterValue>>{
+             {},
+             {{"factor", 2.0}},
+             {{"scale", int64_t{2}}}}) {
+      auto rejected = operation_result::start(registry, "fixture.double", bad,
+                                              Backend::Cpu);
+      PS_CHECK(!rejected.ok() &&
+               rejected.status().code == ErrorCode::InvalidArgument);
     }
-    PS_CHECK(!invalid_plugin_input_escaped);
-    PS_CHECK(!invalid_plugin_input_ok);
-    PS_CHECK(invalid_plugin_input_code == ErrorCode::InvalidArgument);
-    PS_CHECK(operation_observer.counter(
-                 "ps_operation_fixture_gpu_invocation_count",
-                 kGpuBackendUnavailable) == invalid_dso_gpu_before);
-    PS_CHECK(operation_observer.counter(
-                 "ps_operation_fixture_cpu_invocation_count",
-                 kGpuBackendUnavailable) == invalid_dso_cpu_before);
-
-    const std::uint32_t unknown_dso_gpu_before = operation_observer.counter(
-        "ps_operation_fixture_gpu_invocation_count", kGpuBackendUnavailable);
-    const std::uint32_t unknown_dso_cpu_before = operation_observer.counter(
-        "ps_operation_fixture_cpu_invocation_count", kGpuBackendUnavailable);
-    auto unknown_plugin_backend = registry.invoke(
-        "fixture.gpu_fallback",
-        OperationInvocation{inputs, demands, no_parameters,
-                            static_cast<Backend>(99U), CancellationToken()});
-    PS_CHECK(!unknown_plugin_backend.ok());
-    PS_CHECK(unknown_plugin_backend.status().code ==
-             ErrorCode::InvalidArgument);
-    PS_CHECK(operation_observer.counter(
-                 "ps_operation_fixture_gpu_invocation_count",
-                 kGpuBackendUnavailable) == unknown_dso_gpu_before);
-    PS_CHECK(operation_observer.counter(
-                 "ps_operation_fixture_cpu_invocation_count",
-                 kGpuBackendUnavailable) == unknown_dso_cpu_before);
-
-    auto known_unsupported_gpu =
-        registry.invoke("fixture.double",
-                        OperationInvocation{inputs, demands, parameters,
-                                            Backend::Gpu, CancellationToken()});
-    PS_CHECK(!known_unsupported_gpu.ok());
-    PS_CHECK(known_unsupported_gpu.status().code ==
-             ErrorCode::BackendUnavailable);
-    auto missing_parameter =
-        registry.invoke("fixture.double",
-                        OperationInvocation{inputs, demands, no_parameters,
-                                            Backend::Cpu, CancellationToken()});
-    PS_CHECK(!missing_parameter.ok());
-    PS_CHECK(missing_parameter.status().code == ErrorCode::InvalidArgument);
-    const std::map<std::string, ParameterValue> unknown_parameters{
-        {"factor", 2.0}};
-    auto unknown_parameter =
-        registry.invoke("fixture.double",
-                        OperationInvocation{inputs, demands, unknown_parameters,
-                                            Backend::Cpu, CancellationToken()});
-    PS_CHECK(!unknown_parameter.ok());
-    PS_CHECK(unknown_parameter.status().code == ErrorCode::InvalidArgument);
-    const std::map<std::string, ParameterValue> wrong_parameters{
-        {"scale", std::int64_t{2}}};
-    auto wrong_parameter =
-        registry.invoke("fixture.double",
-                        OperationInvocation{inputs, demands, wrong_parameters,
-                                            Backend::Cpu, CancellationToken()});
-    PS_CHECK(!wrong_parameter.ok());
-    PS_CHECK(wrong_parameter.status().code == ErrorCode::InvalidArgument);
-    auto bad_facet =
-        registry.invoke("fixture.bad_facet",
-                        OperationInvocation{inputs, demands, no_parameters,
-                                            Backend::Cpu, CancellationToken()});
-    PS_CHECK(!bad_facet.ok());
-    PS_CHECK(bad_facet.status().code == ErrorCode::InvalidArgument);
+    auto bad_facet = operation_result::execute(registry, "fixture.bad_facet");
+    PS_CHECK(!bad_facet.ok() &&
+             bad_facet.status().code == ErrorCode::InvalidArgument);
     PS_CHECK(verify_duplicate_sink_invocation(
                  registry, operation_observer, "fixture.duplicate_success",
                  kDuplicateValidThenSuccess, 2U) == 0);
@@ -1677,6 +1560,8 @@ int main() {
   PS_CHECK(provider_observer.counter(
                "ps_data_provider_fixture_destroy_count") == 3U);
 
+  PS_CHECK(verify_cpp_fixed_broadcast({4}) == 0);
+  PS_CHECK(verify_cpp_fixed_broadcast({UINT64_MAX}, true) == 0);
   PS_CHECK(verify_cpp_fixed_broadcast(
                {std::numeric_limits<std::uint64_t>::max()}) == 0);
   PS_CHECK(verify_cpp_fixed_broadcast(
@@ -1689,105 +1574,37 @@ int main() {
       OperationParameterSpec{"duplicate", OperationParameterType::Float64,
                              true},
   };
-  PS_CHECK(!fencing
-                .register_operation(OperationDefinition{
-                    "fixture.conflicting_schema", conflicting_schema,
-                    [](const OperationInvocation&) -> Result<Value> {
-                      return Result<Value>(Value::from_float64(1.0));
-                    }})
-                .ok());
+  auto conflicting = copy_aware_definition(
+      "fixture.conflicting_schema", std::make_shared<CopyAwareCallbackState>());
+  conflicting.traits.parameter_schema = conflicting_schema.parameter_schema;
+  PS_CHECK(!fencing.register_operation(std::move(conflicting)).ok());
+  unsigned wrong_starts = 0, partial_starts = 0;
   PS_CHECK(fencing
-               .register_operation(OperationDefinition{
-                   "fixture.throw", OperationTraits{},
-                   [](const OperationInvocation&) -> Result<Value> {
-                     throw std::runtime_error("fixture exception");
-                   }})
+               .register_operation(prevalidation_definition(
+                   "fixture.wrong_output", 0, &wrong_starts, 2))
                .ok());
   PS_CHECK(fencing
-               .register_operation(OperationDefinition{
-                   "fixture.null_diagnostic", OperationTraits{},
-                   [](const OperationInvocation&) -> Result<Value> {
-                     throw NullDiagnosticException();
-                   }})
+               .register_operation(prevalidation_definition(
+                   "fixture.partial_output", 0, &partial_starts, 3))
                .ok());
-  PS_CHECK(fencing
-               .register_operation(OperationDefinition{
-                   "fixture.bad_alloc", OperationTraits{},
-                   [](const OperationInvocation&) -> Result<Value> {
-                     throw std::bad_alloc();
-                   }})
-               .ok());
-  PS_CHECK(fencing
-               .register_operation(OperationDefinition{
-                   "fixture.wrong_output", OperationTraits{},
-                   [](const OperationInvocation&) -> Result<Value> {
-                     auto output = Value::create(
-                         ValueDescriptor{ElementType::UInt8, {1U}},
-                         Region::whole({1U}), StridedLayout{0U, {1}},
-                         std::vector<std::uint8_t>{7U});
-                     return output;
-                   }})
-               .ok());
-  PS_CHECK(fencing
-               .register_operation(OperationDefinition{
-                   "fixture.partial_output", OperationTraits{},
-                   [](const OperationInvocation&) -> Result<Value> {
-                     return Value::create(
-                         ValueDescriptor{ElementType::Float64, {1U}},
-                         Region({RegionDimension{0U, 0U}}),
-                         StridedLayout{0U, {8}},
-                         std::vector<std::uint8_t>(sizeof(double), 0U));
-                   }})
-               .ok());
-  fencing.freeze();
-  const std::vector<Value> no_inputs;
-  const std::vector<Region> no_demands;
-  const std::map<std::string, ParameterValue> no_parameters;
-  auto exception = fencing.invoke(
-      "fixture.throw", OperationInvocation{no_inputs, no_demands, no_parameters,
-                                           Backend::Cpu, CancellationToken()});
-  PS_CHECK(!exception.ok());
-  PS_CHECK(exception.status().code == ErrorCode::OperationFailed);
-  bool null_diagnostic_escaped = false;
-  bool null_diagnostic_ok = true;
-  ErrorCode null_diagnostic_code = ErrorCode::Ok;
-  std::string null_diagnostic_message = "unobserved";
-  try {
-    auto null_diagnostic =
-        fencing.invoke("fixture.null_diagnostic",
-                       OperationInvocation{no_inputs, no_demands, no_parameters,
-                                           Backend::Cpu, CancellationToken()});
-    null_diagnostic_ok = null_diagnostic.ok();
-    null_diagnostic_code = null_diagnostic.status().code;
-    null_diagnostic_message = null_diagnostic.status().message;
-  } catch (...) {
-    null_diagnostic_escaped = true;
+  PS_CHECK(fencing.freeze().ok());
+  auto borrowed =
+      std::shared_ptr<OperationRegistry>(&fencing, [](OperationRegistry*) {});
+  ps::ExecutionContextConfig config;
+  config.managed_resources = ps::ResourceLimits{};
+  ps::ExecutionContext context(borrowed, config);
+  for (const char* key : {"fixture.wrong_output", "fixture.partial_output"}) {
+    WorkflowDocument document;
+    document.nodes = {{1, key, {}, {}}};
+    document.outputs = {{"value", 1, "value"}};
+    GraphContext graph(document);
+    auto compiled = Compiler(borrowed).compile(graph);
+    PS_CHECK(compiled.ok());
+    auto failed = context.execute(compiled.value().plan);
+    PS_CHECK(!failed.ok() &&
+             failed.status().code == ErrorCode::InvalidArgument);
+    PS_CHECK(failed.status().detail.origin == ps::FailureOrigin::Protocol);
   }
-  PS_CHECK(!null_diagnostic_escaped);
-  PS_CHECK(!null_diagnostic_ok);
-  PS_CHECK(null_diagnostic_code == ErrorCode::OperationFailed);
-  PS_CHECK(null_diagnostic_message.empty());
-  bool bad_alloc_propagated = false;
-  try {
-    static_cast<void>(
-        fencing.invoke("fixture.bad_alloc",
-                       OperationInvocation{no_inputs, no_demands, no_parameters,
-                                           Backend::Cpu, CancellationToken()}));
-  } catch (const std::bad_alloc&) {
-    bad_alloc_propagated = true;
-  }
-  PS_CHECK(bad_alloc_propagated);
-  auto wrong_output =
-      fencing.invoke("fixture.wrong_output",
-                     OperationInvocation{no_inputs, no_demands, no_parameters,
-                                         Backend::Cpu, CancellationToken()});
-  PS_CHECK(!wrong_output.ok());
-  PS_CHECK(wrong_output.status().code == ErrorCode::TypeMismatch);
-  auto partial_output =
-      fencing.invoke("fixture.partial_output",
-                     OperationInvocation{no_inputs, no_demands, no_parameters,
-                                         Backend::Cpu, CancellationToken()});
-  PS_CHECK(!partial_output.ok());
-  PS_CHECK(partial_output.status().code == ErrorCode::TypeMismatch);
+  PS_CHECK(wrong_starts == 1 && partial_starts == 1);
   return 0;
 }

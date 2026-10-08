@@ -8,22 +8,29 @@
 
 namespace {
 void explain(const ps::ExecutionPlan& plan) {
-  for (const auto& step : plan.physical_steps()) {
-    const char* kind = step.kind == ps::PhysicalStepKind::Upload ? "upload"
-                       : step.kind == ps::PhysicalStepKind::HostAccess
-                           ? "host-access"
-                           : "operation";
-    std::cout << "plan " << kind
-              << " node=" << plan.steps()[step.step_index].node_id
-              << " packed_bytes=" << step.packed_bytes
-              << " capacity_bound=" << step.allocation_bytes << " region=";
-    for (auto d : step.region.dimensions()) {
-      std::cout << d.offset << '+' << d.extent << ' ';
+  for (const auto& step : plan.steps()) {
+    std::cout << "plan result node=" << step.node_id
+              << " operation=" << step.operation << " planned_backend="
+              << (step.backend == ps::Backend::Gpu ? "native_gpu" : "cpu");
+    if (step.output_result_schema) {
+      for (const auto& tensor : step.output_result_schema->tensors) {
+        std::cout << " tensor=" << tensor.key << " sample_shape=";
+        for (auto extent : tensor.sample_shape())
+          std::cout << extent << ',';
+      }
     }
     std::cout << '\n';
   }
+  for (const auto& output : plan.output_regions()) {
+    std::cout << "request output=" << output.first << " region=";
+    for (auto d : output.second.dimensions())
+      std::cout << d.offset << '+' << d.extent << ' ';
+    std::cout << '\n';
+  }
 }
-void report(const ps::ExecutionDiagnostics& d) {
+
+void report(const ps::ExecutionDiagnostics& d,
+            const ps::ResourceStatistics& resources) {
   std::cout << " dispatches=" << d.native_dispatch_count
             << " submissions=" << d.native_submission_count
             << " copied_inputs=" << d.transfer_count
@@ -31,9 +38,10 @@ void report(const ps::ExecutionDiagnostics& d) {
             << " host_access=" << d.host_access_count
             << " result_copy_bytes=" << d.result_copy_bytes
             << " upload_hits=" << d.native_upload_hits
-            << " cache_hits=" << d.cache_hits
-            << " peak_bytes=" << d.peak_live_bytes
-            << " shared_peak_bytes=" << d.shared_peak_live_bytes
+            << " cache_hits=" << d.cache_hits << " root_peak_payload_bytes="
+            << resources.peak[ps::ResourceKind::Payload]
+            << " root_peak_host_bytes="
+            << resources.peak[ps::ResourceKind::Host]
             << " device_us=" << d.native_compute_us
             << " execute_us=" << d.execute_us
             << " fallback_count=" << d.fallback_reasons.size();
@@ -103,12 +111,13 @@ int main(int argc, char** argv) {
       ps::ExecutionContext execution(registry, s4::config(mode, cache));
       native = execution.gpu_enabled();
       if (scenario == "resident-chain") {
-        s3::Scene scene(registry, mode, layout == "whole" ? 128 : 4,
+        s3::Scene scene(registry, s3::take(execution.resource_budget()), mode,
+                        layout == "whole" ? 128 : 4,
                         layout == "whole" ? 128 : 4);
         auto frozen = scene.freeze(execution, 2);
         if (layout == "roi") {
           frozen = s3::take(frozen.for_region(
-              "result", ps::Region({{2, 7}, {3, 9}, {0, 4}})));
+              "result", ps::Region({{0, 1}, {0, 1}, {2, 7}, {3, 9}, {0, 4}})));
         }
         if (show_plan) {
           explain(frozen.plan());
@@ -116,14 +125,15 @@ int main(int argc, char** argv) {
         auto result = s3::take(execution.execute(frozen));
         s4_fixture::Scene oracle;
         oracle.expected = scene.oracle(2);
-        s4_fixture::check(oracle, result.values.at("result"));
+        s4_fixture::check(oracle, result.results.at("result"));
         if (native) {
           s3::require(result.diagnostics.native_dispatch_count > 0,
                       "no native dispatch in cold chain");
         }
         std::cout << "S4Gpu.ResidentChain backend=" << backend
                   << " native=" << native << " layout=" << layout;
-        report(result.diagnostics);
+        report(result.diagnostics,
+               s3::take(execution.resource_budget()).statistics());
         std::cout << " oracle=passed\n";
         for (const auto& reason : result.diagnostics.fallback_reasons) {
           std::cout << "fallback " << reason << '\n';
@@ -138,7 +148,8 @@ int main(int argc, char** argv) {
                   << " oracle=passed\n";
       } else if (scenario == "fallback") {
         s4_fixture::numeric_edges(execution, registry);
-        ps::ExecutionContext disabled(registry);
+        ps::ExecutionContext disabled(registry,
+                                      s4::config(ps::ExecutionMode::CpuExact));
         std::uint64_t fallbacks = 0;
         const auto dispatches = s4_fixture::all_operations(
             disabled, registry, ps::ExecutionMode::NativeGpu, &fallbacks);

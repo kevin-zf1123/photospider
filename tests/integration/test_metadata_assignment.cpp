@@ -79,17 +79,28 @@ struct Fixture final {
   ValueDescriptor descriptor;
   std::vector<ValueFacet> original;
   WorkflowInput input = WorkflowInputReference{1};
+  std::unique_ptr<ExecutionContext> context;
+  SchemaTemplate schema;
+  bool spatial = false;
+  std::optional<Region> coverage;
   explicit Fixture(ValueDescriptor d, std::vector<ValueFacet> facets = {},
                    bool image = false, bool tiled = false,
-                   std::optional<Region> published = {})
-      : descriptor(std::move(d)), original(std::move(facets)) {
+                   std::optional<Region> published = {},
+                   std::optional<ResourceLimits> limits = {},
+                   std::vector<std::uint64_t> batches = {})
+      : descriptor(std::move(d)),
+        original(std::move(facets)),
+        spatial(image),
+        coverage(std::move(published)) {
+    ExecutionContextConfig config;
+    config.managed_resources = limits;
+    context = std::make_unique<ExecutionContext>(registry, config);
     auto count = take(Region::whole(descriptor.shape).element_count());
+    for (auto n : batches)
+      count *= n;
     raw.resize(count * Value::element_size(descriptor.element_type));
-    for (std::size_t i = 0; i < raw.size(); ++i) {
+    for (std::size_t i = 0; i < raw.size(); ++i)
       raw[i] = (i * 73 + 29) & 255;
-    }
-    // Explicit signaling/quiet NaN payloads, -0, +/-Inf, coverage outside
-    // [0,1].
     if (descriptor.element_type == ElementType::Float32 && raw.size() >= 24) {
       const std::array<std::uint32_t, 6> bits{0x7f800001, 0x7fc12345,
                                               0x80000000, 0xff800000,
@@ -101,52 +112,71 @@ struct Fixture final {
       std::memcpy(raw.data(), extremes.data(),
                   std::min(raw.size(), sizeof(extremes)));
     }
-    const auto region = Region::whole(descriptor.shape);
-    document.inputs.push_back(
-        {1, "source", descriptor, region, dense(descriptor), original});
-    if (image) {
-      PlanarImageConfig config;
-      if (descriptor.shape.size() == 2) {
-        config.channel_axis.reset();
-      }
-      config.order =
-          tiled ? ImagePlaneOrder::Tiled : ImagePlaneOrder::Continuous;
-      if (!tiled) {
-        config.row_pitch_bytes =
-            descriptor.shape[1] * Value::element_size(descriptor.element_type) +
-            64;
-      }
-      auto source = take(PlanarImage::create(descriptor, config, original));
-      if (published) {
-        auto value =
-            take(Value::create(descriptor, region, dense(descriptor), raw));
-        std::vector<std::uint8_t> bytes;
-        auto fp = take(Footprint::from_regions(descriptor.shape, {*published}));
-        const auto width = Value::element_size(descriptor.element_type);
-        take(fp.visit(
-            [&](const auto& at) {
-              auto offset = take(value.byte_address(at));
-              bytes.insert(bytes.end(), raw.begin() + offset,
-                           raw.begin() + offset + width);
-              return Status::success();
-            },
-            UINT64_MAX));
-        take(source.publish(*published, bytes.data(), bytes.size()));
-      } else {
-        take(source.publish(region, raw.data(), raw.size()));
-      }
-      document.inputs[0].layout = {};
-      document.inputs[0].planar_layout = PlanarImageLayout{
-          config.order, 0, 1, config.channel_axis, config.row_pitch_bytes, {}};
-      ExecutionBinding binding;
-      binding.name = "source";
-      binding.image = std::make_shared<const PlanarImage>(std::move(source));
-      bindings.inputs.push_back(std::move(binding));
+    schema.id = "metadata.fixture";
+    ResultTensorSpec tensor;
+    tensor.key = "samples";
+    tensor.batch_axes.assign(batches.begin(), batches.end());
+    tensor.descriptor = descriptor;
+    tensor.facets = original;
+    std::sort(tensor.facets.begin(), tensor.facets.end(),
+              [](const auto& a, const auto& b) { return a.key < b.key; });
+    tensor.layout.spatial = image;
+    tensor.layout.order =
+        tiled ? ImagePlaneOrder::Tiled : ImagePlaneOrder::Continuous;
+    if (descriptor.shape.size() == 2)
+      tensor.layout.channel_axis.reset();
+    if (image && !tiled)
+      tensor.layout.row_pitch_bytes =
+          descriptor.shape[1] * Value::element_size(descriptor.element_type) +
+          64;
+    schema.tensors.push_back(std::move(tensor));
+    WorkflowInputDeclaration declaration;
+    declaration.id = 1;
+    declaration.name = "source";
+    declaration.result_schema = std::make_shared<const SchemaTemplate>(schema);
+    document.inputs.push_back(std::move(declaration));
+    bind();
+  }
+  void bind(std::optional<StridedLayout> override_layout = {}) {
+    const auto root = take(context->resource_budget());
+    const auto shape = schema.tensors[0].sample_shape();
+    auto result = take(ResultBuilder::start(root, schema, "metadata.source", {},
+                                            {}, 128, 128, resources));
+    take(result.bind_descriptor_relation(
+        take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0}))));
+    auto relation = take(ResultRelation::cartesian(
+        root, take(schema.tensors[0].sample_count()), {0, 1, 0, 0}));
+    const auto region = coverage.value_or(Region::whole(shape));
+    if (spatial) {
+      take(result.publish_tensor_kernel(
+          0, region,
+          [&](const auto& writers) {
+            const auto width = Value::element_size(descriptor.element_type);
+            for (const auto& writer : writers) {
+              auto fp = take(Footprint::from_regions(shape, {writer.region()}));
+              take(fp.visit(
+                  [&](const auto& at) {
+                    std::uint64_t offset = 0;
+                    for (std::size_t axis = 0; axis < at.size(); ++axis)
+                      offset = offset * shape[axis] + at[axis];
+                    auto row = take(writer.row_run(at));
+                    std::memcpy(row.data, raw.data() + offset * width, width);
+                    return Status::success();
+                  },
+                  UINT64_MAX));
+            }
+            return Status::success();
+          },
+          relation, {true, true, true, true}));
     } else {
-      bindings.inputs.push_back(
-          {"source", take(Value::create(descriptor, region, dense(descriptor),
-                                        raw, original))});
+      auto bytes = take(root.allocator().allocate(raw.size()));
+      std::memcpy(bytes.data(), raw.data(), raw.size());
+      take(result.publish_tensor(
+          0, region,
+          override_layout.value_or(dense({descriptor.element_type, shape})),
+          std::move(bytes).freeze(), relation, {true, true, true, true}));
     }
+    bindings.inputs = {{"source", take(result.seal())}};
   }
   auto build(WorkflowNodeOutput edge,
              const std::optional<Region>& region = {}) {
@@ -162,46 +192,42 @@ struct Fixture final {
   ExecutionResult run(WorkflowNodeOutput edge,
                       const std::optional<Region>& region = {}) {
     auto compiled = take(build(edge, region));
-    ExecutionContextConfig config;
-    config.cpu_workers = 1;
-    ExecutionContext context(registry, config);
-    return take(context.execute(compiled.plan, bindings));
+    ExecutionOptions options;
+    options.maximum_dependency_work = 1000000000;
+    options.dependencies.maximum_work = 1000000000;
+    return take(context->execute(compiled.plan, bindings, {}, options));
   }
   void oracle(const ExecutionResult& result, const Region& region) const {
+    const auto& value = result.results.at("result");
+    const auto facts = take(value.descriptor());
+    auto fp = take(
+        Footprint::from_regions(schema.tensors[0].sample_shape(), {region}));
+    require(facts.tensor_coverage(0) == fp, "exact Result coverage");
+    auto window = take(value.acquire_tensor(facts, 0, region));
     const auto width = Value::element_size(descriptor.element_type);
-    std::vector<std::uint8_t> bytes;
-    if (result.images.count("result")) {
-      bytes.resize(take(region.element_count()) * width);
-      take(result.images.at("result").read(region, bytes.data(), bytes.size()));
-      require(result.images.at("result").valid_samples() ==
-                  take(region.element_count()),
-              "exact image coverage");
-    }
-    std::uint64_t n = 0;
-    auto fp = take(Footprint::from_regions(descriptor.shape, {region}));
     take(fp.visit(
         [&](const auto& at) {
           std::uint64_t source = 0;
-          for (std::size_t a = 0; a < at.size(); ++a) {
-            source = source * descriptor.shape[a] + at[a];
-          }
-          const auto* actual =
-              bytes.empty()
-                  ? result.values.at("result").bytes().data() +
-                        take(result.values.at("result").byte_address(at))
-                  : bytes.data() + n * width;
-          require(!std::memcmp(actual, raw.data() + source * width, width),
+          const auto shape = schema.tensors[0].sample_shape();
+          for (std::size_t a = 0; a < at.size(); ++a)
+            source = source * shape[a] + at[a];
+          const auto actual = take(window.row_run(at));
+          require(!std::memcmp(actual.data, raw.data() + source * width, width),
                   "independent exact-byte oracle");
-          ++n;
           return Status::success();
         },
         UINT64_MAX));
   }
 };
 const std::vector<ValueFacet>& facets(const ExecutionResult& r) {
-  return r.images.count("result") ? r.images.at("result").facets()
-                                  : r.values.at("result").facets();
+  return r.results.at("result").schema().tensors[0].facets;
 }
+const void* owner(const ResultRef& result, const Region& region) {
+  auto window =
+      take(result.acquire_tensor(take(result.descriptor()), 0, region));
+  return window.storage_owner_token();
+}
+
 void edits() {
   auto d = rgb();
   auto f = take(encode_tensor_description(d));
@@ -216,12 +242,14 @@ void edits() {
   require(decoded(facets(result)).groups[0].interpretation.primaries ==
               "display-p3",
           "patch primaries");
-  require(decoded(fixture.bindings.inputs[0].value.facets())
+  require(decoded(fixture.bindings.inputs[0].result.schema().tensors[0].facets)
                   .groups[0]
                   .interpretation.primaries == "srgb",
           "source immutable");
-  require(result.values.at("result").storage().get() ==
-              fixture.bindings.inputs[0].value.storage().get(),
+  require(owner(result.results.at("result"),
+                Region::whole(fixture.descriptor.shape)) ==
+              owner(fixture.bindings.inputs[0].result,
+                    Region::whole(fixture.descriptor.shape)),
           "generic view owner");
   fixture.oracle(result, Region::whole(fixture.descriptor.shape));
   options = {};
@@ -327,8 +355,8 @@ void dtypes_and_layouts() {
         Region roi(dims);
         auto result = f.run(edge, roi);
         f.oracle(result, roi);
-        const bool shared = result.values.at("result").storage().get() ==
-                            f.bindings.inputs[0].value.storage().get();
+        const bool shared = owner(result.results.at("result"), roi) ==
+                            owner(f.bindings.inputs[0].result, roi);
         require(shared == (std::string(policy) != "materialize"),
                 "layout owner contract");
       }
@@ -356,23 +384,19 @@ void dtypes_and_layouts() {
         auto edge = take(format::assign_metadata(f.document, f.input, o));
         auto result = f.run(edge, roi);
         f.oracle(result, roi);
-        require((result.images.at("result").owner_token() ==
-                 f.bindings.inputs[0].image->owner_token()) ==
+        require((owner(result.results.at("result"), roi) ==
+                 owner(f.bindings.inputs[0].result, roi)) ==
                     (std::string(policy) != "materialize"),
                 "planar owner contract");
-        require(result.diagnostics.result_copy_bytes ==
-                    (std::string(policy) == "materialize" ? 48 : 0),
-                "planar copy accounting");
         auto wrong = dims;
         wrong[1] = {0, 1};
         auto compiled = take(f.build(edge, Region(wrong)));
-        ExecutionContext context(f.registry);
-        auto missing = context.execute(compiled.plan, f.bindings);
+        auto missing = f.context->execute(compiled.plan, f.bindings);
         require(!missing.ok(), "view cannot invent missing coverage");
         auto live = take(f.build(edge, roi));
         CancellationSource stop;
         stop.cancel();
-        require(!context.execute(live.plan, f.bindings, stop.token()).ok(),
+        require(!f.context->execute(live.plan, f.bindings, stop.token()).ok(),
                 "cancelled execution");
       }
     }
@@ -382,24 +406,7 @@ void strided() {
   for (auto stride : {std::int64_t{-4}, std::int64_t{0}}) {
     Fixture f({ElementType::Float32, {8}});
     auto layout = StridedLayout{stride < 0 ? 28U : 0U, {stride}};
-    auto source =
-        take(Value::create(f.descriptor, Region::whole({8}), layout, f.raw));
-    f.registry = make_default_operation_registry(false);
-    OperationDefinition producer;
-    producer.key = "test.strided_metadata";
-    producer.traits.outputs[0].output_element_type = ElementType::Float32;
-    producer.traits.outputs[0].shape_rule = OperationShapeRule::Fixed;
-    producer.traits.outputs[0].fixed_output_shape = {8};
-    producer.traits.outputs[0].region_rule = OperationRegionRule::Whole;
-    producer.callback = [source](const OperationInvocation&) {
-      return Result<Value>(source);
-    };
-    take(f.registry->register_operation(std::move(producer)));
-    take(f.registry->freeze());
-    f.document.inputs.clear();
-    f.bindings.inputs.clear();
-    f.document.nodes = {{1, "test.strided_metadata", {}, {}}};
-    f.input = WorkflowNodeOutput{1, "value"};
+    f.bind(layout);
     for (const auto* policy : {"view", "materialize"}) {
       format::MetadataOptions o;
       o.layout = policy;
@@ -407,9 +414,10 @@ void strided() {
           f.run(take(format::assign_metadata(f.document, f.input, o)));
       for (std::uint64_t i = 0; i < 8; ++i) {
         auto expected = stride < 0 ? 28 - i * 4 : 0;
-        auto at = take(result.values.at("result").byte_address({i}));
-        require(!std::memcmp(result.values.at("result").bytes().data() + at,
-                             f.raw.data() + expected, 4),
+        std::uint32_t actual = 0;
+        const auto& value = result.results.at("result");
+        take(value.read_tensor(take(value.descriptor()), 0, {i}, &actual, 4));
+        require(!std::memcmp(&actual, f.raw.data() + expected, 4),
                 "signed/zero stride bits");
       }
     }
@@ -625,7 +633,7 @@ void schema_and_resources() {
   o.description = source;
   auto result = f.run(take(format::assign_metadata(f.document, f.input, o)));
   f.oracle(result, Region::whole(f.descriptor.shape));
-  require(result.values.at("result")
+  require(result.results.at("result")
               .resources()
               .ocio_config(config.identity())
               .ok(),
@@ -634,27 +642,6 @@ void schema_and_resources() {
   auto edge = take(format::assign_metadata(f.document, f.input, o));
   require(!f.build(edge).ok(), "unknown configured space fails");
   f.document.nodes.pop_back();
-  // Existing channel consumers must carry v3 configured interpretation without
-  // treating an empty local accumulator as a relative-coordinate assertion.
-  f.document.nodes.push_back(
-      {999,
-       "channel.extract_index_strict",
-       {WorkflowNodeOutput{f.document.nodes[0].id, "values"}},
-       {{"axis", std::int64_t{2}},
-        {"index", std::int64_t{0}},
-        {"keepdims", false},
-        {"layout", std::string("view")},
-        {"metadata_mode", std::string("respect")}}});
-  auto assembled = take(format::assemble_channels(
-      f.document, {WorkflowNodeOutput{999, "values"}}, 2));
-  auto assembled_result = f.run(assembled);
-  auto assembled_description = decoded(facets(assembled_result));
-  require(assembled_description.channels.size() == 1 &&
-              assembled_description.channels[0]
-                  .interpretation->configured.has_value(),
-          "v3 extraction and assembly preserve configured coordinates");
-  require(assembled_result.values.at("result").resources().config_count() == 1,
-          "v3 consumer chain retains config resource");
   // Root and independent-channel interpretation dependency units cascade
   // without deleting samples or independent labels.
   for (bool root : {false, true}) {
@@ -687,7 +674,7 @@ void schema_and_resources() {
                  : (!metadata.channels[0].interpretation &&
                     metadata.channels[0].name == "retained"),
             "minimal interpretation dependency cleanup");
-    require(observed.values.at("result").resources().size() == 0,
+    require(observed.results.at("result").resources().size() == 0,
             "removed config is not owned by result header");
     c.oracle(observed, Region::whole(c.descriptor.shape));
   }
@@ -766,37 +753,35 @@ void dependency_boundaries() {
               decoded(facets(result)).groups[0].name == "grid-a",
           "cascade only affected sampling group");
   auto compiled = take(f.build(edge));
-  ExecutionContextConfig limited;
-  limited.cpu_workers = 1;
-  limited.managed_resources = ResourceLimits{};
-  limited.managed_resources->capacity[ResourceKind::Metadata] = 1;
-  ExecutionContext low(f.registry, limited);
-  auto failure = low.execute(compiled.plan, f.bindings);
+  Fixture baseline(f.descriptor, f.original);
+  ResourceLimits limits;
+  limits.capacity[ResourceKind::Metadata] =
+      take(baseline.context->resource_budget())
+          .statistics()
+          .peak[ResourceKind::Metadata];
+  Fixture low(f.descriptor, f.original, false, false, {}, limits);
+  auto low_edge =
+      take(format::assign_metadata(low.document, low.input, cascade));
+  auto low_plan = take(low.build(low_edge));
+  auto failure = low.context->execute(low_plan.plan, low.bindings);
   require(
       !failure.ok() && failure.status().code == ErrorCode::ResourceExhausted,
       "metadata capacity admission");
   ExecutionOptions work;
   work.maximum_dependency_work = 1;
-  ExecutionContext normal(f.registry);
-  failure = normal.execute(compiled.plan, f.bindings, {}, work);
+  failure = f.context->execute(compiled.plan, f.bindings, {}, work);
   require(
       !failure.ok() && failure.status().code == ErrorCode::ResourceExhausted,
       "work admission");
-  f.oracle(take(normal.execute(compiled.plan, f.bindings)),
+  f.oracle(take(f.context->execute(compiled.plan, f.bindings)),
            Region::whole(f.descriptor.shape));
   auto source = f.document.nodes[0].parameters;
   OperationMetadata metadata;
-  metadata.descriptor = f.descriptor;
-  metadata.facets = f.original;
+  metadata.result_schema = f.document.inputs[0].result_schema;
   auto traits = take(
       f.registry->resolve_traits("metadata.assign_strict", {metadata}, source));
-  require(!traits.cacheable &&
-              traits.outputs[0].static_dependency_pieces->size() == 1,
-          "no sample-only cache and exact dependency map");
-  const auto& axes =
-      traits.outputs[0].static_dependency_pieces->front().inputs[0].axes;
-  require(axes[0].observation_axis == 0 && axes[0].translation == 0,
-          "identity data and dirty relation");
+  require(!traits.cacheable && traits.outputs[0].dependency_version == 2,
+          "Result dependency program disables sample-only caching");
 #if defined(__aarch64__) && defined(__APPLE__)
   cascade.profile = "accelerated_apple_silicon";
   f.oracle(f.run(take(format::assign_metadata(f.document, f.input, cascade))),
@@ -808,7 +793,7 @@ void dependency_boundaries() {
 #endif
   // Retained config has no source, graph, compiler or execution-context owner.
   ResourceBudget budget;
-  Value surviving;
+  ResultRef surviving;
   ColorProfileIdentity id;
   {
     OcioConfigSnapshot snapshot;
@@ -831,7 +816,7 @@ void dependency_boundaries() {
     surviving = owner
                     .run(take(format::assign_metadata(owner.document,
                                                       owner.input, edit)))
-                    .values.at("result");
+                    .results.at("result");
   }
   require(surviving.resources().ocio_config(id).ok() &&
               budget.statistics().live[ResourceKind::Host] > 0,
@@ -854,6 +839,175 @@ void dependency_boundaries() {
     require(image.build(invalid).status().code == ErrorCode::TypeMismatch,
             "metadata cannot relabel a different physical image axis");
   }
+}
+void result_contract() {
+  for (bool spatial : {false, true}) {
+    for (bool tiled : {false, true}) {
+      Fixture f({ElementType::Float32, {3, 5, 4}}, {}, spatial, tiled, {}, {},
+                {2, 2});
+      const auto shape = f.schema.tensors[0].sample_shape();
+      const Region roi({{0, 2}, {1, 1}, {1, 2}, {2, 2}, {2, 1}});
+      for (const auto* policy : {"auto", "view", "materialize"}) {
+        format::MetadataOptions o;
+        o.layout = policy;
+        o.set = {{"/semantic/component",
+                  TensorChannelDescription{"coverage", "coverage", "ratio"}}};
+        const auto edge = take(format::assign_metadata(f.document, f.input, o));
+        for (const auto& q : {roi, Region::whole(shape)}) {
+          const auto output = f.run(edge, q);
+          f.oracle(output, q);
+          const auto& result = output.results.at("result");
+          require(
+              result.schema().publication == f.schema.publication &&
+                  result.schema().id == f.schema.id &&
+                  result.schema().tensors[0].key == f.schema.tensors[0].key &&
+                  result.schema().tensors[0].batch_axes ==
+                      f.schema.tensors[0].batch_axes,
+              "metadata edit retains schema and publication contract");
+          const auto query = take(Footprint::from_regions(shape, {q}));
+          require(
+              take(output.dependencies.source_support()).at("source") == query,
+              "Data support is exactly Q including batch axes");
+          unsigned visits = 0;
+          take(take(result.tensor_relation(0))
+                   .project(query, [&](auto support, const auto* samples) {
+                     require(
+                         support.input == 0 && support.roles == 1 &&
+                             support.target == ResultSupportTarget::Tensor &&
+                             support.slot == 0 && samples && *samples == query,
+                         "metadata has Data only, no Validation/Control "
+                         "support");
+                     ++visits;
+                     return Status::success();
+                   }));
+          require(visits == 1, "one compact identity support");
+          take(take(result.descriptor_relation())
+                   .visit(0, 100, [&](auto support) {
+                     require(support.roles == 8 &&
+                                 support.target ==
+                                     ResultSupportTarget::Descriptor &&
+                                 support.count == 1,
+                             "static descriptor support is independent");
+                     return Status::success();
+                   }));
+          auto one = q.dimensions();
+          for (auto& d : one)
+            d.extent = 1;
+          auto changed = take(Footprint::from_regions(shape, {Region(one)}));
+          auto dirty = take(output.dependencies.potential_dirty(
+              "source", changed, 1, {}, ResultSupportTarget::Tensor, 0));
+          require(dirty.at("result") == changed, "identity dirty projection");
+          auto association = result.association();
+          require(std::find(association.begin(), association.end(),
+                            f.bindings.inputs[0].result.object_id()) !=
+                      association.end(),
+                  "source Result association retained");
+          require((owner(result, Region(one)) ==
+                   owner(f.bindings.inputs[0].result, Region(one))) ==
+                      (std::string(policy) != "materialize"),
+                  "batch plane view owner contract");
+        }
+      }
+      auto edge = take(format::assign_metadata(f.document, f.input));
+      auto plan = take(f.build(edge));
+      auto frozen = take(f.context->freeze(plan.plan, f.bindings));
+      const auto root = take(f.context->resource_budget());
+      const auto before = root.statistics().peak[ResourceKind::Payload];
+      auto empty = take(f.context->execute_fragments(
+          frozen, {{"result", take(Footprint::none(shape))}}));
+      require(take(empty.results.at("result").descriptor())
+                      .tensor_coverage(0)
+                      .empty() &&
+                  root.statistics().peak[ResourceKind::Payload] == before,
+              "Empty has no Need or continuation/sample Payload");
+    }
+  }
+  Fixture assertion({ElementType::UInt8, {4}});
+  auto edge =
+      take(format::assign_metadata(assertion.document, assertion.input));
+  auto& params = assertion.document.nodes.back().parameters;
+  const auto digest = format::detail::schema_assertion(assertion.schema);
+  const auto layout =
+      format::detail::layout_assertion(assertion.schema.tensors[0].layout);
+  params["expected_source"] = "result-v1:" + std::to_string(digest.size()) +
+                              ":" + digest + ":" +
+                              std::to_string(layout.size()) + ":" + layout;
+  assertion.oracle(assertion.run(edge), Region::whole({4}));
+  params["expected_source"] = std::string("stale");
+  require(!assertion.build(edge).ok(),
+          "static source metadata assertion rejects drift");
+  // Independent backing fragments remain a zero-copy Result view partition.
+  const auto root = take(assertion.context->resource_budget());
+  auto source =
+      take(ResultBuilder::start(root, assertion.schema, "fragmented"));
+  take(source.bind_descriptor_relation(
+      take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0}))));
+  for (std::uint64_t first : {0, 2}) {
+    auto storage = take(root.allocator().allocate(2));
+    std::memcpy(storage.data(), assertion.raw.data() + first, 2);
+    take(source.publish_tensor(
+        0, Region({{first, 2}}), {0, {1}, {first}}, std::move(storage).freeze(),
+        take(ResultRelation::cartesian(root, 4, {0, 1, 0, 0})),
+        {true, true, true, true}));
+  }
+  assertion.bindings.inputs[0].result = take(source.seal());
+  params.erase("expected_source");
+  params["layout"] = std::string("view");
+  auto plan = take(assertion.build(edge));
+  auto fragmented =
+      take(assertion.context->execute(plan.plan, assertion.bindings));
+  assertion.oracle(fragmented, Region::whole({4}));
+  for (std::uint64_t first : {0, 2}) {
+    const Region piece({{first, 2}});
+    require(owner(fragmented.results.at("result"), piece) ==
+                owner(assertion.bindings.inputs[0].result, piece),
+            "fragmented metadata view retains each independent backing owner");
+  }
+  params["layout"] = std::string("auto");
+  assertion.oracle(assertion.run(edge), Region::whole({4}));
+  // Admit source plus the one-byte continuation, but no materialized output.
+  ResourceLimits payload_limit;
+  payload_limit.capacity[ResourceKind::Payload] = 5;
+  Fixture capacity({ElementType::UInt8, {4}}, {}, false, false, {},
+                   payload_limit);
+  format::MetadataOptions view;
+  view.layout = "view";
+  capacity.oracle(capacity.run(take(format::assign_metadata(
+                      capacity.document, capacity.input, view))),
+                  Region::whole({4}));
+  view.layout = "materialize";
+  auto copy_edge =
+      take(format::assign_metadata(capacity.document, capacity.input, view));
+  auto copy_plan = take(capacity.build(copy_edge));
+  auto exhausted = capacity.context->execute(copy_plan.plan, capacity.bindings);
+  require(!exhausted.ok() &&
+              exhausted.status().code == ErrorCode::ResourceExhausted &&
+              take(capacity.context->resource_budget())
+                      .statistics()
+                      .live[ResourceKind::Payload] == 4,
+          "materialization capacity failure rolls back to source-only Payload");
+  // A window keeps the source backing alive after every Result/context retires.
+  std::optional<ResultTensorReadWindow> surviving;
+  ResourceBudget retained;
+  std::array<std::uint8_t, 4> expected{};
+  {
+    Fixture f({ElementType::UInt8, {4}});
+    retained = take(f.context->resource_budget());
+    auto result = f.run(take(format::assign_metadata(f.document, f.input)));
+    const auto& value = result.results.at("result");
+    surviving.emplace(take(
+        value.acquire_tensor(take(value.descriptor()), 0, Region::whole({4}))));
+    std::copy_n(f.raw.begin(), 4, expected.begin());
+  }
+  require(
+      retained.statistics().live[ResourceKind::Payload] == 4 &&
+          !std::memcmp(take(surviving->row_run({0})).data, expected.data(), 4),
+      "owning window survives context and Result teardown");
+  surviving.reset();
+  require(retained.statistics().live[ResourceKind::Payload] == 0,
+          "last view window releases backing");
+  std::cout << "Result batches, exact roles/dirty mapping, Empty, views and "
+               "lifetime passed\n";
 }
 void model_coordinate_edits() {
   for (unsigned location = 0; location < 4; ++location) {
@@ -933,10 +1087,15 @@ void model_coordinate_edits() {
     require(
         take(encode_tensor_description(decoded(facets(result)))).version == 4,
         "removing last coordinate record returns to canonical v4");
-    require(fixture.bindings.inputs[0].value.facets().size() == 1 &&
-                fixture.bindings.inputs[0].value.facets()[0].payload ==
-                    original.payload,
-            "coordinate edits preserve source metadata");
+    require(
+        fixture.bindings.inputs[0].result.schema().tensors[0].facets.size() ==
+                1 &&
+            fixture.bindings.inputs[0]
+                    .result.schema()
+                    .tensors[0]
+                    .facets[0]
+                    .payload == original.payload,
+        "coordinate edits preserve source metadata");
     fixture.oracle(result, Region::whole(descriptor.shape));
   }
   std::cout
@@ -944,6 +1103,7 @@ void model_coordinate_edits() {
 }
 }  // namespace
 int main() try {
+  result_contract();
   model_coordinate_edits();
   edits();
   dtypes_and_layouts();

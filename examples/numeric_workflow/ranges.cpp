@@ -7,14 +7,17 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
+#include "result_fixture.hpp"     // NOLINT(build/include_subdir)
 
 namespace {
+namespace rf = numeric_result_fixture;
 void require(bool condition, const char* message) {
   if (!condition)
     throw std::runtime_error(message);
@@ -40,24 +43,15 @@ void workflow(const std::string& profile) {
                                               UINT64_C(0x3ff0000000000000),
                                               UINT64_C(0x4000000000000000)});
   ps::WorkflowDocument document;
-  document.inputs = {
-      {1, "input", input.descriptor(), input.region(), input.layout(), {}}};
-  ps::ExecutionBindings bindings;
-  bindings.inputs = {{"input", input}};
+  std::vector<ps::Value> backing{input};
   const double bounds[] = {0, 1, 0, 255};
   for (std::uint64_t i = 0; i < 4; ++i) {
     const auto scalar = ps::Value::from_float64(bounds[i]);
-    const auto name = "bound" + std::to_string(i);
-    document.inputs.push_back({i + 2,
-                               name,
-                               scalar.descriptor(),
-                               scalar.region(),
-                               scalar.layout(),
-                               {}});
-    bindings.inputs.push_back({name, scalar});
+    backing.push_back(scalar);
     document.nodes.push_back(take(ps::numeric::broadcast_node(
         i + 1, ps::WorkflowInputReference{i + 2}, {4}, {0})));
   }
+  rf::declare_sources(&document, backing);
   document.nodes.push_back(
       {5,
        "numeric.remap_range" + profile,
@@ -80,13 +74,15 @@ void workflow(const std::string& profile) {
   config.maximum_live_bytes = 262144;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext execution(registry, config);
+  auto bindings = point_math_checks::bindings(take(execution.resource_budget()),
+                                              backing, document);
   auto result = take(execution.execute(plan.plan, bindings));
   const double expected[] = {0, 127.5, 255, 510};
   for (unsigned i = 0; i < 4; ++i) {
     double mapped = 0, clipped = 0;
-    std::memcpy(&mapped, result.values.at("mapped").bytes().data() + i * 8, 8);
-    std::memcpy(&clipped, result.values.at("clipped").bytes().data() + i * 8,
-                8);
+    require(rf::read(result.results.at("mapped"), {i}, &mapped, 8).ok() &&
+                rf::read(result.results.at("clipped"), {i}, &clipped, 8).ok(),
+            "composition Result read");
     require(mapped == expected[i] && clipped == (i == 3 ? 255 : expected[i]),
             "broadcast/remap/clamp composition");
   }
@@ -97,23 +93,45 @@ struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
+  std::vector<ps::Value> backing;
   Fixture(const std::string& operation, const std::string& profile,
-          const std::vector<ps::Value>& values) {
+          std::vector<ps::Value> values)
+      : backing(std::move(values)) {
+    rf::declare_sources(&document, backing);
     ps::WorkflowNode node{1, "numeric." + operation + profile, {}, {}};
-    for (std::size_t i = 0; i < values.size(); ++i) {
-      const auto& value = values[i];
-      const auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1, name, value.descriptor(),
-                                 value.region(), value.layout(),
-                                 value.facets()});
-      bindings.inputs.push_back({name, value});
+    for (std::size_t i = 0; i < backing.size(); ++i)
       node.inputs.push_back(ps::WorkflowInputReference{i + 1});
-    }
-    document.nodes = {node};
+    document.nodes = {std::move(node)};
     document.outputs = {{"values", 1, "values"}};
   }
+  ps::ExecutionBindings bind(const ps::ResourceBudget& root) const {
+    return point_math_checks::bindings(root, backing, document);
+  }
+  ps::Result<ps::ExecutionResult> run() const {
+    ps::GraphContext graph(document);
+    auto compiled = ps::Compiler(registry).compile(graph);
+    if (!compiled.ok())
+      return ps::Result<ps::ExecutionResult>(compiled.status());
+    ps::ExecutionContextConfig config;
+    config.cpu_workers = 1;
+    config.maximum_live_bytes = 262144;
+    config.managed_resources = ps::ResourceLimits{};
+    ps::ExecutionContext context(registry, config);
+    return context.execute(compiled.value().plan,
+                           bind(take(context.resource_budget())));
+  }
 };
+std::vector<ps::OperationMetadata> metadata(
+    const std::vector<ps::Value>& backing) {
+  std::vector<ps::OperationMetadata> result;
+  for (const auto& value : backing) {
+    ps::OperationMetadata input;
+    input.result_schema =
+        std::make_shared<ps::SchemaTemplate>(rf::source_schema(value));
+    result.push_back(std::move(input));
+  }
+  return result;
+}
 void bounds_and_demand(const std::string& profile) {
   const auto nan = UINT64_C(0x7ff0000000000001),
              one = UINT64_C(0x3ff0000000000000),
@@ -136,7 +154,9 @@ void bounds_and_demand(const std::string& profile) {
     ps::ExecutionContext execution(fixture.registry, config);
     const auto sparse = take(ps::Footprint::from_regions(
         {3}, {ps::Region({{0, 1}}), ps::Region({{2, 1}})}));
-    auto frozen = take(execution.freeze(plan.plan, fixture.bindings));
+    const auto root = take(execution.resource_budget());
+    auto bindings = fixture.bind(root);
+    auto frozen = take(execution.freeze(plan.plan, bindings));
     auto failed = execution.execute_fragments(frozen, {{"values", sparse}});
     require(
         !failed.ok() &&
@@ -150,46 +170,73 @@ void bounds_and_demand(const std::string& profile) {
         "invalid bound outside projection outranks source NaN and fails Whole");
     auto empty = take(execution.execute_fragments(
         frozen, {{"values", take(ps::Footprint::none({3}))}}));
-    require(empty.diagnostics.operation_timings.empty(),
-            "Empty skips invalid bounds");
-    fixture.bindings.inputs[1].value = raw(ps::ElementType::Float64, {0, 0, 0});
-    frozen = take(execution.freeze(plan.plan, fixture.bindings));
+    require(take(empty.results.at("values").descriptor())
+                .tensor_coverage(0)
+                .empty(),
+            "Empty skips invalid bounds and publishes no samples");
+    for (const auto& timing : empty.diagnostics.operation_timings)
+      require(timing.computed_elements == 0, "Empty performs no arithmetic");
+    for (const auto& input : take(empty.dependencies.source_support()))
+      require(input.second.empty(), "Empty has no sample support");
+    bindings.inputs[1].result = point_math_checks::source(
+        root, raw(ps::ElementType::Float64, {0, 0, 0}));
+    frozen = take(execution.freeze(plan.plan, bindings));
     auto selected =
         take(execution.execute_fragments(frozen, {{"values", sparse}}));
     const auto support = take(selected.dependencies.source_support());
-    for (std::size_t i = 0; i < values.size(); ++i)
-      require(support.at("input" + std::to_string(i)) ==
-                  take(ps::Footprint::all({3})),
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      const auto name = "input" + std::to_string(i);
+      const auto found = support.find(std::string_view(name));
+      require(found != support.end() &&
+                  found->second == take(ps::Footprint::all({3})),
               "all range ports retain complete support");
-    auto dirty = take(selected.dependencies.potential_dirty(
-        "input1",
-        take(ps::Footprint::from_regions({3}, {ps::Region({{1, 1}})}))));
-    require(dirty.at("values") == sparse,
-            "bound gap dirties every observation");
+    }
+    for (std::size_t i = 0; i < values.size(); ++i) {
+      auto dirty = take(selected.dependencies.potential_dirty(
+          "input" + std::to_string(i),
+          take(ps::Footprint::from_regions({3}, {ps::Region({{1, 1}})}))));
+      require(dirty.at("values") == sparse,
+              "a gap edit on every port dirties all observed output samples");
+    }
   }
   Fixture endpoint("remap_range", profile,
                    {ps::Value::from_float64(0), ps::Value::from_float64(0),
                     ps::Value::from_float64(1), ps::Value::from_float64(0),
                     ps::Value::from_float64(255)});
   unsigned reads = 0;
-  auto source = std::make_shared<ps::RegionalSource>();
-  source->descriptor = endpoint.bindings.inputs[4].value.descriptor();
-  source->read = [&](const auto&, auto*, auto, const auto&, const auto&) {
+  endpoint.registry = ps::make_default_operation_registry(false);
+  ps::OperationDefinition failure;
+  failure.key = "manual.range_failed_source";
+  failure.traits.input_count = 0;
+  failure.traits.input_schema.clear();
+  auto& output = failure.traits.outputs[0];
+  output.output_schema.kind = ps::OperationPortKind::Result;
+  output.result_schema = *endpoint.document.inputs[4].result_schema;
+  output.output_schema.result_schema_id = output.result_schema->id;
+  output.output_schema.result_schema_version = output.result_schema->version;
+  output.dependency_version = 2;
+  output.continuation_bytes = 1;
+  output.maximum_dependency_stages = 1;
+  output.region_rule = ps::OperationRegionRule::Whole;
+  failure.start_result =
+      [&](const auto&, const auto&) -> ps::Result<ps::ResultContinuation> {
     ++reads;
-    return ps::Result<ps::Region>(ps::Status{ps::ErrorCode::OperationFailed,
-                                             "required target-upper source"});
+    return ps::Result<ps::ResultContinuation>(ps::Status{
+        ps::ErrorCode::OperationFailed, "required target-upper source"});
   };
-  endpoint.bindings.inputs[4].value = {};
-  endpoint.bindings.inputs[4].source = source;
-  ps::GraphContext graph(endpoint.document);
-  auto plan = take(ps::Compiler(endpoint.registry).compile(graph));
-  ps::ExecutionContext execution(endpoint.registry);
-  auto failed = execution.execute(plan.plan, endpoint.bindings);
-  require(
-      reads == 1 && failed.status().code == ps::ErrorCode::OperationFailed &&
-          failed.status().message.find("required target-upper") !=
-              std::string::npos,
-      "endpoint still reads all five sources and preserves upstream failure");
+  require(endpoint.registry->register_operation(std::move(failure)).ok() &&
+              endpoint.registry->freeze().ok(),
+          "register range Result source");
+  endpoint.document.inputs.pop_back();
+  endpoint.backing.pop_back();
+  endpoint.document.nodes[0].inputs[4] = ps::WorkflowNodeOutput{2, "value"};
+  endpoint.document.nodes.push_back({2, "manual.range_failed_source", {}, {}});
+  auto failed = endpoint.run();
+  require(!failed.ok() && reads == 1 &&
+              failed.status().code == ps::ErrorCode::OperationFailed &&
+              failed.status().message == "required target-upper source",
+          "endpoint still requires all five sources and preserves upstream "
+          "failure");
   std::cout << "ranges: Whole invalid bounds; all-port full support/dirty "
                "exact; endpoint upstream failure retained\n";
 }
@@ -215,12 +262,11 @@ struct SavedEnvironment {
   ~SavedEnvironment() { fesetenv(&state); }
 };
 void typed_cache_and_environment(const std::string& profile) {
-  auto registry = ps::make_default_operation_registry();
   auto bytes = raw(ps::ElementType::Float32, {0x3f800000, 0, 0, 0x40000000});
   const ps::ValueDescriptor descriptor{ps::ElementType::Float32, {1, 1, 4}};
-  auto invalid_upper = take(ps::Value::from_storage(
-      descriptor, ps::Region::whole({1, 1, 4}), {0, {16, 16, 4}},
-      bytes.storage(), {take(ps::encode_semantic(ps::rgba_semantics()))}));
+  auto invalid_upper =
+      take(ps::Value::from_storage(descriptor, ps::Region::whole({1, 1, 4}),
+                                   {0, {16, 16, 4}}, bytes.storage()));
   auto input =
       take(ps::Value::from_storage(descriptor, invalid_upper.region(),
                                    invalid_upper.layout(), bytes.storage()));
@@ -229,74 +275,132 @@ void typed_cache_and_environment(const std::string& profile) {
       take(ps::Value::from_storage(descriptor, invalid_upper.region(),
                                    invalid_upper.layout(), zeros.storage()));
   const std::vector<ps::Value> values{input, lower, invalid_upper};
-  const std::vector<ps::Region> demands{input.region(), lower.region(),
-                                        invalid_upper.region()};
-  const std::map<std::string, ps::ParameterValue> parameters;
-  ps::OperationInvocation typed(values, demands, parameters, ps::Backend::Cpu,
-                                {}, ps::Region::whole({1, 1, 4}));
-  require(!registry->invoke("numeric.clamp" + profile, typed).ok(),
-          "typed upper requires unselected alpha validation");
+  Fixture typed("clamp", profile, values);
+  ps::ColorArrayDescriptor color;
+  color.model = ps::ColorModel::Rgb;
+  color.association = ps::ColorAssociation::Straight;
+  color.primaries =
+      take(ps::color_primary_coordinates(ps::ColorPrimaryPreset::Srgb))
+          .primaries;
+  color.transfer = ps::ColorTransfer{ps::ColorTransferKind::Linear, {}};
+  auto schema = rf::source_schema(invalid_upper);
+  schema.tensors[0].facets = {take(ps::encode_color_array(color))};
+  schema.tensors[0].atomic_trailing_axes = 1;
+  typed.document.inputs[2].result_schema =
+      std::make_shared<ps::SchemaTemplate>(schema);
+  {
+    ps::GraphContext graph(typed.document);
+    auto plan = take(ps::Compiler(typed.registry).compile(graph));
+    ps::ExecutionContext execution(typed.registry, {1});
+    auto bindings = typed.bind(take(execution.resource_budget()));
+    auto frozen = take(execution.freeze(plan.plan, bindings));
+    const auto green = take(ps::Footprint::from_regions(
+        {1, 1, 4}, {ps::Region({{0, 1}, {0, 1}, {1, 1}})}));
+    auto invalid = execution.execute_fragments(frozen, {{"values", green}});
+    require(!invalid.ok() &&
+                invalid.status().code == ps::ErrorCode::InvalidArgument &&
+                invalid.status().reason == ps::FailureReason::InvalidDomain &&
+                invalid.status().detail.input_id == 3,
+            "typed upper validates unselected alpha before clamp");
+    auto empty = take(execution.execute_fragments(
+        frozen, {{"values", take(ps::Footprint::none({1, 1, 4}))}}));
+    require(take(empty.results.at("values").descriptor())
+                .tensor_coverage(0)
+                .empty(),
+            "Empty skips invalid typed alpha");
+    const auto valid_bytes =
+        raw(ps::ElementType::Float32, {0x3f800000, 0, 0, 0x3f800000});
+    auto valid_upper = take(
+        ps::Value::from_storage(descriptor, invalid_upper.region(),
+                                invalid_upper.layout(), valid_bytes.storage()));
+    bindings.inputs[2].result = point_math_checks::source(
+        take(execution.resource_budget()), valid_upper, &schema);
+    frozen = take(execution.freeze(plan.plan, bindings));
+    auto valid = take(execution.execute_fragments(frozen, {{"values", green}}));
+    std::uint32_t alpha = 0;
+    require(
+        rf::read(valid.results.at("values"), {0, 0, 3}, &alpha, 4).ok() &&
+            alpha == 0x3f800000 &&
+            valid.results.at("values").schema().tensors[0].facets.empty() &&
+            take(valid.results.at("values").descriptor()).tensor_coverage(0) ==
+                take(ps::Footprint::all({1, 1, 4})),
+        "valid typed upper succeeds with full generic output");
+  }
   Fixture fixture("clamp", profile,
                   {ps::Value::from_float64(.5), ps::Value::from_float64(0),
                    ps::Value::from_float64(1)});
-  ps::InputSnapshotStore snapshots;
-  for (auto& binding : fixture.bindings.inputs) {
-    binding.snapshot = std::make_shared<const ps::InputSnapshot>(
-        take(snapshots.import_value(binding.value)));
-    binding.value = {};
-  }
   ps::GraphContext graph(fixture.document);
   auto plan = take(ps::Compiler(fixture.registry).compile(graph));
   ps::ExecutionContextConfig config;
   config.cpu_workers = 1;
   config.result_cache_bytes = 32768;
   config.managed_resources = ps::ResourceLimits{};
-  ps::ExecutionContext execution(fixture.registry, config);
-  auto demand = take(execution.open_demand(plan.plan, fixture.bindings));
-  const ps::DemandQuery query{{"values", take(ps::Footprint::all({1}))}};
-  take(demand.request(query));
-  require(take(demand.request(query)).diagnostics.cache_hits > 0,
-          "range warm cache");
-  fixture.bindings.inputs[2].snapshot =
-      std::make_shared<const ps::InputSnapshot>(
-          take(snapshots.import_value(ps::Value::from_float64(.25))));
-  require(demand.replace_bindings(fixture.bindings).ok(),
-          "replace dynamic upper bound");
-  auto changed = take(demand.request(query));
-  double actual = 0;
-  require(
-      changed.values.at("values").read({0}, &actual, 8).ok() && actual == .25,
-      "changed bound invalidates cached clamp");
+  ps::ResultRef retained;
+  ps::ResourceBudget root;
+  {
+    ps::ExecutionContext execution(fixture.registry, config);
+    root = take(execution.resource_budget());
+    auto bindings = fixture.bind(root);
+    auto demand = take(execution.open_demand(plan.plan, bindings));
+    const ps::DemandQuery query{{"values", take(ps::Footprint::all({1}))}};
+    auto cold = take(demand.request(query));
+    retained = cold.results.at("values");
+    auto shared = take(demand.request(query));
+    require(shared.results.at("values").object_id() == retained.object_id(),
+            "same Frozen shares range Result identity");
+    auto fresh_bindings = fixture.bind(root);
+    auto fresh = take(execution.freeze(plan.plan, fresh_bindings));
+    auto warm = take(execution.execute_fragments(fresh, query));
+    require(warm.diagnostics.cache_hits > 0, "range completed cache hit");
+    ps::ResourceVector<std::uint64_t> identities;
+    for (const auto& binding : fresh_bindings.inputs)
+      identities.push_back(binding.result.object_id());
+    require(warm.results.at("values").association() == identities,
+            "range cache replay associates current source identities");
+    bindings.inputs[2].result =
+        point_math_checks::source(root, ps::Value::from_float64(.25));
+    require(demand.replace_bindings(bindings).ok(),
+            "replace dynamic upper Result bound");
+    auto changed = take(demand.request(query));
+    double actual = 0;
+    require(rf::read(changed.results.at("values"), {0}, &actual, 8).ok() &&
+                actual == .25 && changed.diagnostics.cache_hits == 0,
+            "changed bound invalidates cached clamp");
+  }
+  double held = 0;
+  require(rf::read(retained, {0}, &held, 8).ok() && held == .5 &&
+              root.statistics().live[ps::ResourceKind::Payload] >= 8,
+          "range Result remains readable after context retirement");
+  retained = {};
+  point_math_checks::released(root);
   SavedEnvironment saved;
   const std::vector<ps::Value> tiny{
       raw(ps::ElementType::Float64, {UINT64_C(0x8000000000000001)}),
       ps::Value::from_float64(0), ps::Value::from_float64(2),
       ps::Value::from_float64(0), raw(ps::ElementType::Float64, {1})};
-  std::vector<ps::Region> tiny_demands;
-  for (const auto& value : tiny)
-    tiny_demands.push_back(value.region());
   require(fesetround(FE_UPWARD) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
               feraiseexcept(FE_DIVBYZERO) == 0,
           "set caller fenv");
   const auto flags = fetestexcept(FE_ALL_EXCEPT);
-  ps::OperationInvocation invocation(tiny, tiny_demands, parameters);
-  const auto negative_zero =
-      take(registry->invoke("numeric.remap_range" + profile, invocation));
-  require(fegetround() == FE_UPWARD && fetestexcept(FE_ALL_EXCEPT) == flags,
-          "exact range preserves caller rounding/flags");
+  auto control = std::make_shared<point_math_checks::Control>();
+  control->rounding = FE_UPWARD;
+  point_math_checks::Workflow underflow(
+      {1, "numeric.remap_range" + profile, {}, {}}, tiny, {}, control);
+  const auto negative_zero = take(underflow.run()).results.at("values");
+  require(fegetround() == FE_UPWARD && fetestexcept(FE_ALL_EXCEPT) == flags &&
+              control->computation_polls > 0,
+          "exact range preserves caller and worker rounding/flags");
   std::uint64_t bits = 0;
-  std::memcpy(&bits, negative_zero.bytes().data(), 8);
-  require(bits == (UINT64_C(1) << 63),
+  require(rf::read(negative_zero, {0}, &bits, 8).ok() &&
+              bits == (UINT64_C(1) << 63),
           "nonzero exact underflow retains negative sign");
   std::cout << "ranges: typed closure, bound-cache edit, negative underflow "
                "and caller fenv passed\n";
 }
 void whole_layouts(const std::string& profile) {
-  auto registry = ps::make_default_operation_registry();
   for (const std::string operation : {"clamp", "remap_range"}) {
     for (bool reverse : {false, true}) {
       std::vector<ps::Value> inputs;
-      std::vector<ps::Region> demands;
       for (unsigned port = 0; port < (operation == "clamp" ? 3U : 5U); ++port) {
         auto storage = take(ps::BufferAllocator{}.allocate(65 * 4 + 1));
         for (unsigned i = 0; i < 65; ++i) {
@@ -312,23 +416,18 @@ void whole_layouts(const std::string& profile) {
         inputs.push_back(take(ps::Value::from_storage(
             {ps::ElementType::Float32, {1, 65}}, ps::Region::whole({1, 65}),
             layout, std::move(storage).freeze())));
-        demands.push_back(inputs.back().region());
       }
-      const std::map<std::string, ps::ParameterValue> parameters;
-      ps::OperationInvocation call(inputs, demands, parameters,
-                                   ps::Backend::Cpu, {},
-                                   ps::Region::whole({1, 65}));
-      auto result =
-          take(registry->invoke("numeric." + operation + profile, call));
+      point_math_checks::Workflow workflow(
+          {1, "numeric." + operation + profile, {}, {}}, inputs);
+      auto result = take(workflow.run()).results.at("values");
       for (unsigned i = 0; i < 65; ++i) {
         float expected = (reverse ? 64 - i : i) / 32.0f;
         if (operation == "clamp" && expected > 1)
           expected = 1;
         std::uint32_t actual = 0, want = 0;
         std::memcpy(&want, &expected, 4);
-        std::memcpy(&actual,
-                    result.bytes().data() + take(result.byte_address({0, i})),
-                    4);
+        require(rf::read(result, {0, i}, &actual, 4).ok(),
+                "strided range Result read");
         require(actual == want,
                 "range all-port Float32 tail/origin/stride oracle");
       }
@@ -351,20 +450,15 @@ void schemas_and_layouts(const std::string& profile) {
       take(ps::Value::from_storage(backing.descriptor(), backing.region(),
                                    {1, {0}}, std::move(padded).freeze()));
   const std::vector<ps::Value> inputs{reversed, lower, upper};
-  const std::vector<ps::Region> demands{reversed.region(), lower.region(),
-                                        upper.region()};
-  const std::map<std::string, ps::ParameterValue> parameters;
-  ps::OperationInvocation call(inputs, demands, parameters);
-  auto result = take(registry->invoke("numeric.clamp" + profile, call));
+  point_math_checks::Workflow workflow({1, "numeric.clamp" + profile, {}, {}},
+                                       inputs);
+  auto result = take(workflow.run()).results.at("values");
   const std::int64_t expected[] = {2, 2, 1};
-  require(
-      result.bytes().size() == sizeof(expected) &&
-          std::memcmp(result.bytes().data(), expected, sizeof(expected)) == 0,
-      "clamp handles negative/zero/unaligned source strides");
-  ps::OperationInvocation selected(inputs, demands, parameters,
-                                   ps::Backend::Cpu, {}, ps::Region({{1, 1}}));
-  require(!registry->invoke("numeric.clamp" + profile, selected).ok(),
-          "direct Whole callback rejects partial output");
+  for (std::uint64_t i = 0; i < 3; ++i) {
+    std::int64_t actual = 0;
+    require(rf::read(result, {i}, &actual, 8).ok() && actual == expected[i],
+            "clamp handles negative/zero/unaligned source strides");
+  }
   Fixture projected("clamp", profile,
                     {raw(ps::ElementType::Int64, {3, 2, 1}),
                      raw(ps::ElementType::Int64, {0, 0, 0}),
@@ -372,83 +466,62 @@ void schemas_and_layouts(const std::string& profile) {
   ps::GraphContext graph(projected.document);
   auto plan = take(ps::Compiler(registry).compile(graph));
   ps::ExecutionContext context(registry);
-  auto frozen = take(context.freeze(plan.plan, projected.bindings));
+  auto frozen = take(context.freeze(
+      plan.plan, projected.bind(take(context.resource_budget()))));
   auto projected_result = take(context.execute_fragments(
       frozen, {{"values", take(ps::Footprint::from_regions(
                               {3}, {ps::Region({{1, 1}})}))}}));
   std::int64_t projected_bits = 0;
   require(
-      projected_result.values.at("values").read({1}, &projected_bits, 8).ok() &&
-          projected_bits == 2,
+      rf::read(projected_result.results.at("values"), {1}, &projected_bits, 8)
+              .ok() &&
+          projected_bits == 2 &&
+          take(projected_result.results.at("values").descriptor())
+                  .tensor_coverage(0) == take(ps::Footprint::all({3})),
       "public projection retains global coordinate");
-  ps::DependencyRequest request;
-  request.inputs = {{backing.descriptor(), {}},
-                    {backing.descriptor(), {}},
-                    {{ps::ElementType::Float64, {3}}, {}}};
-  request.outputs = take(ps::Footprint::none({3}));
-  request.snapshot_identity = "range-schema";
-  require(registry->resolve_traits("numeric.clamp" + profile, request.inputs,
-                                   request.parameters)
-                  .status()
-                  .code == ps::ErrorCode::TypeMismatch,
-          "mixed range dtypes reject even for Empty");
-  request.inputs[2] = {backing.descriptor(), {}};
-  request.inputs[1].descriptor.shape = {1};
-  require(registry->resolve_traits("numeric.clamp" + profile, request.inputs,
-                                   request.parameters)
-                  .status()
-                  .code == ps::ErrorCode::TypeMismatch,
-          "range scalar bounds require explicit broadcast");
-  request.inputs[1] = {backing.descriptor(), {}};
-  request.inputs.resize(5, request.inputs[0]);
-  require(registry->resolve_traits("numeric.remap_range" + profile,
-                                   request.inputs, request.parameters)
+  auto schemas =
+      metadata({backing, backing, raw(ps::ElementType::Float64, {0, 0, 0})});
+  std::map<std::string, ps::ParameterValue> parameters;
+  require(
+      registry->resolve_traits("numeric.clamp" + profile, schemas, parameters)
+              .status()
+              .code == ps::ErrorCode::TypeMismatch,
+      "mixed range dtypes reject statically");
+  schemas = metadata({backing, zero_backing, backing});
+  require(
+      registry->resolve_traits("numeric.clamp" + profile, schemas, parameters)
+              .status()
+              .code == ps::ErrorCode::TypeMismatch,
+      "range scalar bounds require explicit broadcast");
+  schemas = metadata({backing, backing, backing, backing, backing});
+  require(registry->resolve_traits("numeric.remap_range" + profile, schemas,
+                                   parameters)
                   .status()
                   .code == ps::ErrorCode::TypeMismatch,
           "integer remap needs explicit cast");
-  request.inputs.resize(3);
-  request.parameters = {{"min", 0.0}};
-  require(registry->resolve_traits("numeric.clamp" + profile, request.inputs,
-                                   request.parameters)
-                  .status()
-                  .code == ps::ErrorCode::InvalidArgument,
-          "new dynamic clamp rejects legacy static min parameter");
-  std::cout << "ranges: negative/zero/unaligned layouts, packed global ROI and "
+  schemas = metadata({backing, backing, backing});
+  parameters = {{"min", 0.0}};
+  require(
+      registry->resolve_traits("numeric.clamp" + profile, schemas, parameters)
+              .status()
+              .code == ps::ErrorCode::InvalidArgument,
+      "dynamic clamp rejects legacy static min parameter");
+  std::cout << "ranges: negative/zero/unaligned layouts, complete Result at "
+               "global coordinates and "
                "schema errors passed\n";
 }
 void oracle(const std::string& profile) {
-  auto registry = ps::make_default_operation_registry();
   std::string operation;
   unsigned dtype = 0;
   std::uint64_t bits[5]{};
   while (std::cin >> operation >> dtype >> std::hex >> bits[0] >> bits[1] >>
          bits[2] >> bits[3] >> bits[4] >> std::dec) {
-    ps::WorkflowDocument document;
-    ps::ExecutionBindings bindings;
-    ps::WorkflowNode node{1, "numeric." + operation + profile, {}, {}};
     const unsigned count = operation == "clamp" ? 3 : 5;
-    for (unsigned i = 0; i < count; ++i) {
-      const auto value = raw(static_cast<ps::ElementType>(dtype), {bits[i]});
-      const auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1,
-                                 name,
-                                 value.descriptor(),
-                                 value.region(),
-                                 value.layout(),
-                                 {}});
-      bindings.inputs.push_back({name, value});
-      node.inputs.push_back(ps::WorkflowInputReference{i + 1});
-    }
-    document.nodes = {node};
-    document.outputs = {{"values", 1, "values"}};
-    ps::GraphContext graph(document);
-    auto plan = take(ps::Compiler(registry).compile(graph));
-    ps::ExecutionContextConfig config;
-    config.cpu_workers = 1;
-    config.maximum_live_bytes = 262144;
-    config.managed_resources = ps::ResourceLimits{};
-    ps::ExecutionContext execution(registry, config);
-    auto result = execution.execute(plan.plan, bindings);
+    std::vector<ps::Value> backing;
+    for (unsigned i = 0; i < count; ++i)
+      backing.push_back(raw(static_cast<ps::ElementType>(dtype), {bits[i]}));
+    Fixture fixture(operation, profile, std::move(backing));
+    auto result = fixture.run();
     if (!result.ok()) {
       require(result.status().code == ps::ErrorCode::InvalidArgument &&
                   result.status().reason == ps::FailureReason::InvalidDomain,
@@ -457,8 +530,12 @@ void oracle(const std::string& profile) {
       continue;
     }
     std::uint64_t output = 0;
-    const auto& value = result.value().values.at("values");
-    std::memcpy(&output, value.bytes().data(), value.bytes().size());
+    const auto& value = result.value().results.at("values");
+    require(
+        rf::read(value, {0}, &output,
+                 ps::Value::element_size(static_cast<ps::ElementType>(dtype)))
+            .ok(),
+        "range oracle Result read");
     std::cout << std::hex << output << std::dec << '\n';
   }
 }

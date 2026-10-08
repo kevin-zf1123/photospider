@@ -17,11 +17,11 @@
 #include <vector>
 
 #include "data/input_validation.hpp"
-#include "photospider/plugin/operation_plugin_api.h"
+#include "execution/result_callback_scope.hpp"
 #include "plugin/builtin_operations.hpp"
-#include "plugin/dense_layout_validation.hpp"
-#include "plugin/dependency_plugin.hpp"
+#include "plugin/operation_exception.hpp"
 #include "plugin/operation_resources.hpp"
+#include "plugin/result_payload_bound.hpp"
 #include "plugin/result_plugin.hpp"
 #include "plugin/utf8_validation.hpp"
 
@@ -37,6 +37,59 @@
 
 namespace ps {
 namespace {
+
+Result<ResultProgramPoll> empty_tensor_result(const ResultProgramPhase& phase) {
+  const auto stopped = [&]() {
+    if (phase.failure_latch) {
+      auto status = phase.failure_latch->snapshot();
+      if (!status.ok())
+        return status;
+    }
+    if (phase.failure && phase.failure->load() != ErrorCode::Ok)
+      return Status{phase.failure->load(), {}};
+    return phase.query.cancellation.cancelled()
+               ? Status{ErrorCode::Cancelled, {}}
+               : Status::success();
+  };
+  auto active = stopped();
+  if (!active.ok())
+    return Result<ResultProgramPoll>(active);
+  const auto& schema = *phase.query.output.result_schema;
+  if (phase.query.tensor_slot >= schema.tensors.size() ||
+      phase.query.tensor_outputs->shape() !=
+          schema.tensors[phase.query.tensor_slot].sample_shape())
+    return Result<ResultProgramPoll>(
+        Status{ErrorCode::InvalidArgument, "invalid Empty tensor query"});
+  auto started = ResultBuilder::start(
+      phase.resources, schema, phase.query.semantic_key, {}, {},
+      phase.query.tile_height, phase.query.tile_width, phase.query.resources);
+  if (!started.ok())
+    return Result<ResultProgramPoll>(started.status());
+  auto builder = started.take_value();
+  auto basis = ResultRelation::cartesian(phase.resources, 1, {});
+  if (!basis.ok())
+    return Result<ResultProgramPoll>(basis.status());
+  auto bound = builder.bind_descriptor_relation(basis.take_value());
+  if (!bound.ok())
+    return Result<ResultProgramPoll>(bound);
+  auto sealed = builder.seal();
+  active = stopped();
+  if (!active.ok())
+    return Result<ResultProgramPoll>(active);
+  return sealed.ok() ? Result<ResultProgramPoll>(
+                           ResultPublication{sealed.take_value(), true})
+                     : Result<ResultProgramPoll>(sealed.status());
+}
+bool empty_tensor_query(const ResultProgramQuery& query) {
+  return query.output.result_schema &&
+         query.output.result_schema->fields.empty() && query.tensor_outputs &&
+         query.tensor_outputs->empty() && query.prepared &&
+         query.output_index < query.prepared->traits().outputs.size() &&
+         (query.prepared->traits()
+                  .outputs[query.output_index]
+                  .observation_kind == ObservationKind::RequestRecord ||
+          query.prepared->traits().joint_contract == 2);
+}
 
 /**
  * @brief Returns whether a public key is bounded canonical strict UTF-8.
@@ -74,7 +127,6 @@ class OperationLibrary final {
    */
   OperationLibrary(OperationLibrary&& other) noexcept
       : handle_(std::exchange(other.handle_, nullptr)),
-        api_(std::exchange(other.api_, nullptr)),
         result_api_(std::exchange(other.result_api_, nullptr)) {}
 
   /**
@@ -87,12 +139,6 @@ class OperationLibrary final {
     if (result_api_ && result_api_->destroy) {
       try {
         result_api_->destroy(result_api_->context);
-      } catch (...) {
-      }
-    }
-    if (api_ && api_->destroy) {
-      try {
-        api_->destroy(api_->operations, api_->operation_count);
       } catch (...) {
       }
     }
@@ -145,18 +191,8 @@ class OperationLibrary final {
    */
   [[nodiscard]] void* handle() const noexcept { return handle_; }
 
-  /**
-   * @brief Attaches an API table whose exact structure prefix is readable.
-   * @param api Mapped API table, possibly carrying malformed later fields.
-   * @throws Nothing.
-   * @note A nonnull destroy callback becomes part of rollback immediately.
-   */
-  void attach_api(const ps_operation_plugin_api_v11* api) noexcept {
-    api_ = api;
-  }
-
   void attach_result_api(
-      const ps_result_operation_plugin_api_v1* api) noexcept {
+      const ps_result_operation_plugin_api_v2* api) noexcept {
     result_api_ = api;
   }
 
@@ -164,8 +200,7 @@ class OperationLibrary final {
   /** @brief Platform native library handle. */
   void* handle_ = nullptr;
   /** @brief Mapped immutable plugin API table. */
-  const ps_operation_plugin_api_v11* api_ = nullptr;
-  const ps_result_operation_plugin_api_v1* result_api_ = nullptr;
+  const ps_result_operation_plugin_api_v2* result_api_ = nullptr;
 };
 
 /**
@@ -222,113 +257,6 @@ void* find_symbol(void* handle, const char* name) noexcept {
 #else
   return dlsym(handle, name);
 #endif
-}
-
-/**
- * @brief Converts one C element value into the public C++ enum.
- * @param type Numeric C ABI element value.
- * @return ElementType or a validation failure.
- * @throws std::bad_alloc If a diagnostic allocation fails.
- * @note Unknown numeric values fail closed.
- */
-Result<ElementType> decode_element_type(std::uint32_t type) {
-  switch (type) {
-    case PS_OPERATION_ELEMENT_UINT8_V11:
-      return Result<ElementType>(ElementType::UInt8);
-    case PS_OPERATION_ELEMENT_INT64_V11:
-      return Result<ElementType>(ElementType::Int64);
-    case PS_OPERATION_ELEMENT_FLOAT32_V11:
-      return Result<ElementType>(ElementType::Float32);
-    case PS_OPERATION_ELEMENT_FLOAT64_V11:
-      return Result<ElementType>(ElementType::Float64);
-    case PS_OPERATION_ELEMENT_INT8_V11:
-      return Result<ElementType>(ElementType::Int8);
-    case PS_OPERATION_ELEMENT_UINT16_V11:
-      return Result<ElementType>(ElementType::UInt16);
-    case PS_OPERATION_ELEMENT_INT16_V11:
-      return Result<ElementType>(ElementType::Int16);
-    default:
-      return Result<ElementType>(Status::failure(
-          ErrorCode::TypeMismatch, "plugin output uses unknown element type"));
-  }
-}
-
-/**
- * @brief Decodes one closed C ABI output-shape inference rule.
- * @param value Numeric version-nine rule.
- * @return Typed rule or invalid-argument failure.
- * @throws std::bad_alloc If a failure diagnostic allocation fails.
- * @note Unknown values fail closed.
- */
-Result<OperationShapeRule> decode_shape_rule(std::uint32_t value) {
-  switch (value) {
-    case PS_OPERATION_SHAPE_AXES_V11:
-      return Result<OperationShapeRule>(OperationShapeRule::Axes);
-    case PS_OPERATION_SHAPE_SHRINK_V11:
-      return Result<OperationShapeRule>(OperationShapeRule::Shrink);
-    case PS_OPERATION_SHAPE_SCALAR_V11:
-      return Result<OperationShapeRule>(OperationShapeRule::Scalar);
-    case PS_OPERATION_SHAPE_PRESERVE_FIRST_V11:
-      return Result<OperationShapeRule>(OperationShapeRule::PreserveFirstInput);
-    case PS_OPERATION_SHAPE_MATCH_INPUTS_V11:
-      return Result<OperationShapeRule>(OperationShapeRule::MatchAllInputs);
-    case PS_OPERATION_SHAPE_FIXED_V11:
-      return Result<OperationShapeRule>(OperationShapeRule::Fixed);
-    default:
-      return Result<OperationShapeRule>(
-          Status::failure(ErrorCode::InvalidArgument,
-                          "operation plugin shape rule is unknown"));
-  }
-}
-
-/**
- * @brief Decodes one closed C ABI Region propagation rule.
- * @param value Numeric version-nine rule.
- * @return Typed rule or invalid-argument failure.
- * @throws std::bad_alloc If a failure diagnostic allocation fails.
- * @note Unknown values fail closed.
- */
-Result<OperationRegionRule> decode_region_rule(std::uint32_t value) {
-  switch (value) {
-    case PS_OPERATION_REGION_DEPENDENCY_V11:
-      return Result<OperationRegionRule>(OperationRegionRule::Dependency);
-    case PS_OPERATION_REGION_SHRINK_V11:
-      return Result<OperationRegionRule>(OperationRegionRule::Shrink);
-    case PS_OPERATION_REGION_WHOLE_V11:
-      return Result<OperationRegionRule>(OperationRegionRule::Whole);
-    case PS_OPERATION_REGION_ELEMENTWISE_V11:
-      return Result<OperationRegionRule>(OperationRegionRule::Elementwise);
-    case PS_OPERATION_REGION_HALO_V11:
-      return Result<OperationRegionRule>(OperationRegionRule::Halo);
-    default:
-      return Result<OperationRegionRule>(
-          Status::failure(ErrorCode::InvalidArgument,
-                          "operation plugin Region rule is unknown"));
-  }
-}
-
-/**
- * @brief Decodes one closed C ABI source-parameter type.
- * @param value Numeric operation ABI v11 parameter type.
- * @return Typed parameter kind or invalid-argument failure.
- * @throws std::bad_alloc If a failure diagnostic allocation fails.
- * @note Unknown numeric values fail before registry publication.
- */
-Result<OperationParameterType> decode_parameter_type(std::uint32_t value) {
-  switch (value) {
-    case PS_OPERATION_PARAMETER_INT64_V11:
-      return Result<OperationParameterType>(OperationParameterType::Int64);
-    case PS_OPERATION_PARAMETER_FLOAT64_V11:
-      return Result<OperationParameterType>(OperationParameterType::Float64);
-    case PS_OPERATION_PARAMETER_BOOL_V11:
-      return Result<OperationParameterType>(OperationParameterType::Bool);
-    case PS_OPERATION_PARAMETER_STRING_V11:
-      return Result<OperationParameterType>(OperationParameterType::String);
-    default:
-      return Result<OperationParameterType>(
-          Status::failure(ErrorCode::InvalidArgument,
-                          "operation plugin parameter type is unknown"));
-  }
 }
 
 /**
@@ -453,12 +381,13 @@ Status validate_selected_traits(const OperationTraits& traits) {
                           traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.outputs[0].fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 21U ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 24U ||
+      traits.outputs[0].dependency_version != 2 ||
       (!traits.supports_cpu && !traits.supports_gpu) || !known_shape ||
       !known_region ||
       (traits.share_blocks_across_outputs &&
        (!traits.deterministic || !traits.side_effect_free ||
-        traits.outputs[0].dependency_version != 1 ||
+        traits.outputs[0].dependency_version != 2 ||
         traits.outputs[0].observation_kind != ObservationKind::Atomic ||
         traits.outputs[0].regional_atomic ||
         traits.outputs[0].static_dependency_pieces)) ||
@@ -554,327 +483,6 @@ Status validate_traits(const OperationTraits& traits) {
                              "outputs must share an execution protocol");
   }
   return Status::success();
-}
-
-/**
- * @brief Precomputes one callback's statically expected output descriptor.
- * @param traits Frozen operation traits.
- * @param inputs Exact invocation inputs.
- * @return Expected descriptor, `InvalidArgument` for a default input Value,
- * `TypeMismatch` for Preserve/Match incompatibility, or `Internal` for an
- * impossible published trait invariant.
- * @throws std::bad_alloc If descriptor or diagnostic storage cannot allocate.
- * @note The result is computed before callback entry and reused for output
- * validation. Preserve/Match registration already forbids zero inputs; this
- * helper still fails closed if that private invariant is violated.
- */
-Result<OperationMetadata> expected_callback_output_descriptor(
-    const OperationTraits& traits, const std::vector<Value>& inputs,
-    const std::map<std::string, ParameterValue>& parameters,
-    const std::vector<OperationMetadata>& complete_metadata = {}) {
-  if (!complete_metadata.empty())
-    return infer_operation_output(traits, complete_metadata, parameters);
-  std::vector<OperationMetadata> metadata;
-  for (const auto& value : inputs) {
-    if (!value.valid())
-      return Result<OperationMetadata>(
-          Status::failure(ErrorCode::InvalidArgument, "invalid input Value"));
-    metadata.push_back({value.descriptor(), value.facets()});
-  }
-  return infer_operation_output(traits, metadata, parameters);
-}
-
-/**
- * @brief Validates a callback output against a precomputed descriptor.
- * @param expected Descriptor validated before callback entry.
- * @param output Published callback output, possibly default-invalid.
- * @return Success or type/shape/whole-Region mismatch.
- * @throws std::bad_alloc If a failure diagnostic allocation fails.
- * @note The current executor publishes complete Values only, so output Region
- * must cover the complete descriptor. A default output remains a safe
- * `TypeMismatch` rather than an accessor exception.
- */
-Status validate_callback_output(const ValueDescriptor& expected,
-                                const Value& output, const Region& demand) {
-  if (!output.valid() ||
-      output.descriptor().element_type != expected.element_type ||
-      output.descriptor().shape != expected.shape) {
-    return Status::failure(ErrorCode::TypeMismatch,
-                           "operation output contradicts static descriptor");
-  }
-  if (!output.view(demand).ok())
-    return Status::failure(ErrorCode::TypeMismatch,
-                           "operation output does not cover demand");
-  return Status::success();
-}
-
-/**
- * @brief Canonical dense layout derived from one logical shape.
- * @note The byte count and signed strides are checked before publication.
- */
-struct DenseLayout final {
-  /** @brief Row-major signed byte stride for every axis. */
-  std::vector<std::int64_t> byte_strides;
-  /** @brief Complete dense logical byte count. */
-  std::uint64_t byte_size = 0U;
-};
-
-/**
- * @brief Builds canonical contiguous strides and byte count for one shape.
- * @param shape Nonzero rank-general extents.
- * @param element_size Physical scalar width.
- * @return Dense layout or signed-stride, uint64 product, signed final-offset,
- * or host allocation-size representability failure.
- * @throws std::bad_alloc If result allocation fails.
- * @note Axis order is row-major with the final axis contiguous. Every product
- * uses division-guarded uint64 arithmetic; the complete byte count must be
- * positive, have `byte_size - 1 <= INT64_MAX`, and fit host `size_t`.
- */
-Result<DenseLayout> dense_layout(const std::vector<std::uint64_t>& shape,
-                                 std::size_t element_size) {
-  DenseLayout layout;
-  layout.byte_strides.resize(shape.size(), 0);
-  std::uint64_t stride = element_size;
-  for (std::size_t reverse = shape.size(); reverse > 0U; --reverse) {
-    const std::size_t axis = reverse - 1U;
-    if (stride >
-        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
-      return Result<DenseLayout>(Status::failure(
-          ErrorCode::ResourceExhausted, "contiguous stride exceeds int64"));
-    }
-    layout.byte_strides[axis] = static_cast<std::int64_t>(stride);
-    if (shape[axis] != 0U &&
-        stride > std::numeric_limits<std::uint64_t>::max() / shape[axis]) {
-      return Result<DenseLayout>(
-          Status::failure(ErrorCode::ResourceExhausted,
-                          "contiguous byte size overflows uint64"));
-    }
-    stride *= shape[axis];
-  }
-  if (!plugin_internal::dense_byte_size_representable<std::size_t>(stride)) {
-    return Result<DenseLayout>(
-        Status::failure(ErrorCode::ResourceExhausted,
-                        "contiguous byte range is not host-addressable"));
-  }
-  layout.byte_size = stride;
-  return Result<DenseLayout>(std::move(layout));
-}
-
-/**
- * @brief State used by one C ABI output sink invocation.
- *
- * @note The sink records the first publication attempt before validation,
- * accepts at most one complete output, records every later call as a sticky
- * invocation-local contract violation, and retains no DSO pointer.
- */
-struct OutputSinkState final {
-  /** @brief Published output when validation succeeds. */
-  Result<Value> result{Status::failure(ErrorCode::OperationFailed,
-                                       "operation did not publish output")};
-  /** @brief True after the first sink call, whether accepted or rejected. */
-  bool published = false;
-  /** @brief True after any second or later call with this invocation state. */
-  bool duplicate_publish_attempted = false;
-  ValueDescriptor descriptor;
-  Region region;
-  BufferAllocator allocator;
-  std::optional<MutableValue> allocation;
-  std::vector<MutableBuffer> scratch;
-  Status allocation_failure;
-  ResourceBindings resources;
-};
-
-/** @brief Allocates exact regional output; exceptions never cross the C ABI. */
-std::uint8_t* allocate_plugin_output(void* context) noexcept {
-  auto* state = static_cast<OutputSinkState*>(context);
-  if (!state || state->published || !state->allocation_failure.ok())
-    return nullptr;
-  try {
-    if (!state->allocation) {
-      auto value = MutableValue::allocate(state->descriptor, state->region,
-                                          state->allocator);
-      if (!value.ok()) {
-        state->allocation_failure = value.status();
-        return nullptr;
-      }
-      state->allocation.emplace(value.take_value());
-    }
-    return state->allocation->data();
-  } catch (...) {
-    state->allocation_failure.code = ErrorCode::ResourceExhausted;
-    return nullptr;
-  }
-}
-/** @brief Holds scratch until callback retirement, including failed
- * publication. */
-std::uint8_t* allocate_plugin_scratch(void* context,
-                                      std::uint64_t size) noexcept {
-  auto* state = static_cast<OutputSinkState*>(context);
-  if (!state || state->published || !state->allocation_failure.ok())
-    return nullptr;
-  try {
-    auto buffer = state->allocator.allocate(size);
-    if (!buffer.ok()) {
-      state->allocation_failure = buffer.status();
-      return nullptr;
-    }
-    state->scratch.push_back(buffer.take_value());
-    return state->scratch.back().data();
-  } catch (...) {
-    state->allocation_failure.code = ErrorCode::ResourceExhausted;
-    return nullptr;
-  }
-}
-
-/**
- * @brief C callback that copies and validates one DSO output.
- * @param context Pointer to `OutputSinkState`.
- * @param element_type Numeric C ABI element type.
- * @param shape Rank-sized shape array.
- * @param rank Rank in 1..8.
- * @param facets Bounded candidate facet array.
- * @param facet_count Number of candidate facet records.
- * @param data Complete contiguous payload bytes.
- * @param byte_size Exact payload size.
- * @return One on first-call success and zero for null state, validation/
- * allocation failure, or every duplicate call.
- * @throws Nothing; this C ABI sink is `noexcept`.
- * @note Null state has no side effect. A duplicate only sets the sticky flag
- * and never replaces the first `Result`; every allocating/throwing operation
- * remains inside the first-call exception fence.
- */
-int publish_plugin_output(void* context, std::uint32_t element_type,
-                          const std::uint64_t* shape, std::uint32_t rank,
-                          const ps_operation_facet_view_v11* facets,
-                          std::uint32_t facet_count, const std::uint8_t* data,
-                          std::uint64_t byte_size) noexcept {
-  auto* state = static_cast<OutputSinkState*>(context);
-  if (!state) {
-    return 0;
-  }
-  if (state->published) {
-    state->duplicate_publish_attempted = true;
-    return 0;
-  }
-  state->published = true;
-  try {
-    if (!shape ||
-        reinterpret_cast<std::uintptr_t>(shape) % alignof(std::uint64_t) !=
-            0U ||
-        rank == 0U || rank > 8U || facet_count > 64U ||
-        (facet_count != 0U &&
-         (!facets || reinterpret_cast<std::uintptr_t>(facets) %
-                             alignof(ps_operation_facet_view_v11) !=
-                         0U)) ||
-        (byte_size != 0U && !data) ||
-        byte_size > static_cast<std::uint64_t>(
-                        std::numeric_limits<std::size_t>::max())) {
-      state->result = Result<Value>(
-          Status::failure(ErrorCode::InvalidArgument,
-                          "plugin output pointers/rank are invalid"));
-      return 0;
-    }
-    auto decoded_type = decode_element_type(element_type);
-    if (!decoded_type.ok()) {
-      state->result = Result<Value>(decoded_type.status());
-      return 0;
-    }
-    std::vector<std::uint64_t> owned_shape(shape, shape + rank);
-    if (std::any_of(owned_shape.begin(), owned_shape.end(),
-                    [](std::uint64_t extent) { return extent == 0U; })) {
-      state->result = Result<Value>(Status::failure(
-          ErrorCode::InvalidArgument, "plugin output shape contains zero"));
-      return 0;
-    }
-    if (owned_shape != state->descriptor.shape ||
-        decoded_type.value() != state->descriptor.element_type) {
-      auto candidate =
-          dense_layout(owned_shape, Value::element_size(decoded_type.value()));
-      if (!candidate.ok()) {
-        state->result = Result<Value>(candidate.status());
-        return 0;
-      }
-      state->result = Result<Value>(Status::failure(
-          ErrorCode::TypeMismatch, "plugin output descriptor differs"));
-      return 0;
-    }
-    std::vector<std::uint64_t> extents;
-    for (const auto dim : state->region.dimensions())
-      extents.push_back(dim.extent);
-    auto layout =
-        dense_layout(extents, Value::element_size(decoded_type.value()));
-    if (!layout.ok()) {
-      state->result = Result<Value>(layout.status());
-      return 0;
-    }
-    DenseLayout owned_layout = layout.take_value();
-    if (owned_layout.byte_size != byte_size) {
-      state->result = Result<Value>(Status::failure(
-          ErrorCode::TypeMismatch, "plugin output byte size mismatches shape"));
-      return 0;
-    }
-    std::vector<ValueFacet> owned_facets;
-    owned_facets.reserve(facet_count);
-    for (std::uint32_t index = 0U; index < facet_count; ++index) {
-      const ps_operation_facet_view_v11& facet = facets[index];
-      if (facet.struct_size != sizeof(ps_operation_facet_view_v11) ||
-          !facet.key || facet.key_size == 0U || facet.key_size > 256U ||
-          facet.version == 0U || facet.payload_size > 64U * 1024U ||
-          (facet.payload_size != 0U && !facet.payload)) {
-        state->result = Result<Value>(Status::failure(
-            ErrorCode::InvalidArgument, "plugin output facet is malformed"));
-        return 0;
-      }
-      ValueFacet owned;
-      owned.key.assign(facet.key, facet.key_size);
-      owned.version = facet.version;
-      if (facet.payload_size != 0U) {
-        owned.payload.assign(facet.payload, facet.payload + facet.payload_size);
-      }
-      owned_facets.push_back(std::move(owned));
-    }
-    if (!state->allocation_failure.ok()) {
-      state->result = Result<Value>(state->allocation_failure);
-      return 0;
-    }
-    if (!state->allocation) {
-      auto allocation = MutableValue::allocate(state->descriptor, state->region,
-                                               state->allocator);
-      if (!allocation.ok()) {
-        state->result = Result<Value>(allocation.status());
-        return 0;
-      }
-      state->allocation.emplace(allocation.take_value());
-    }
-    if (data != state->allocation->data())
-      std::memcpy(state->allocation->data(), data,
-                  static_cast<std::size_t>(byte_size));
-    state->result = std::move(*state->allocation)
-                        .publish(std::move(owned_facets), state->resources);
-    return state->result.ok() ? 1 : 0;
-  } catch (const std::bad_alloc&) {
-    Status failure;
-    failure.code = ErrorCode::ResourceExhausted;
-    state->result = Result<Value>(std::move(failure));
-    return 0;
-  } catch (...) {
-    Status failure;
-    failure.code = ErrorCode::Internal;
-    state->result = Result<Value>(std::move(failure));
-    return 0;
-  }
-}
-
-/**
- * @brief C cancellation bridge for one operation invocation.
- * @param context Pointer to an immutable CancellationToken.
- * @return Nonzero when cancellation was requested.
- * @throws Nothing.
- * @note The pointer is callback-local and never retained by the host.
- */
-int plugin_cancelled(void* context) noexcept {
-  const auto* token = static_cast<const CancellationToken*>(context);
-  return token && token->cancelled() ? 1 : 0;
 }
 
 }  // namespace
@@ -1030,40 +638,38 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   const Status traits_status = validate_traits(definition.traits);
   if (!traits_status.ok())
     return traits_status;
-  const bool staged = definition.traits.outputs[0].dependency_version == 1;
   const bool structured = definition.traits.outputs[0].dependency_version == 2;
   if (!valid_key(definition.key) ||
       definition.traits.requires_metadata_specialization !=
           (static_cast<bool>(definition.specialize_metadata) ||
            static_cast<bool>(definition.prepare_static)) ||
       (definition.specialize_metadata && definition.prepare_static) ||
-      (definition.prepare_static &&
-       ((!staged && !structured &&
-         std::any_of(definition.traits.outputs.begin(),
-                     definition.traits.outputs.end(),
-                     [](const auto& output) {
-                       return output.region_rule != OperationRegionRule::Whole;
-                     })) ||
-        !definition.traits.deterministic ||
-        !definition.traits.side_effect_free)) ||
-      (structured ? (!definition.start_result || definition.start_dependency ||
-                     definition.callback)
-       : staged   ? (!definition.start_dependency || definition.callback ||
-                   definition.start_result)
-                  : (!definition.callback || definition.start_dependency ||
-                   definition.start_result || definition.validate_dependency)))
+      (definition.prepare_static && (!definition.traits.deterministic ||
+                                     !definition.traits.side_effect_free)) ||
+      !definition.start_result)
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation definition is malformed");
-  if (static_cast<bool>(definition.start_joint) !=
+  if (static_cast<bool>(definition.start_result_joint) !=
           (definition.traits.joint_contract != 0) ||
       definition.traits.joint_contract > 2 ||
-      (definition.start_joint &&
-       (!staged ||
+      (definition.start_result_joint &&
+       (!structured || !definition.traits.joint_contract ||
         (definition.traits.joint_contract == 1 &&
          definition.traits.outputs.size() < 2) ||
-        !definition.traits.joint_continuation_bytes)) ||
-      (!definition.start_joint && (definition.traits.joint_continuation_bytes ||
-                                   definition.traits.joint_workspace_bytes)))
+        !definition.traits.joint_continuation_bytes ||
+        std::any_of(
+            definition.traits.outputs.begin(), definition.traits.outputs.end(),
+            [&](const auto& output) {
+              return output.output_schema.kind != OperationPortKind::Result ||
+                     output.observation_kind != ObservationKind::Atomic ||
+                     output.failure_delivery !=
+                         (definition.traits.joint_contract == 2
+                              ? FailureDelivery::PerAtomOutcome
+                              : FailureDelivery::RequestFailureOnly);
+            }))) ||
+      (!definition.start_result_joint &&
+       (definition.traits.joint_continuation_bytes ||
+        definition.traits.joint_workspace_bytes)))
     return Status{ErrorCode::InvalidArgument, "invalid joint contract"};
   auto immutable_definition =
       std::make_shared<const OperationDefinition>(std::move(definition));
@@ -1080,82 +686,6 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   impl_->definitions.emplace(immutable_key, immutable_definition);
   return Status::success();
 }
-
-namespace {
-template <class T>
-bool records(const T* pointer, std::uint32_t count, std::uint32_t limit) {
-  return count <= limit && ((count == 0) == (pointer == nullptr)) &&
-         (!pointer ||
-          reinterpret_cast<std::uintptr_t>(pointer) % alignof(T) == 0);
-}
-bool copy_text(const char* pointer, std::uint32_t size, std::string* output) {
-  if (!records(pointer, size, 1024))
-    return false;
-  if (pointer)
-    output->assign(pointer, size);
-  return true;
-}
-bool copy_facets(const ps_operation_facet_view_v11* pointer,
-                 std::uint32_t count, std::vector<ValueFacet>* output) {
-  if (!records(pointer, count, 64))
-    return false;
-  for (std::uint32_t i = 0; i < count; ++i) {
-    const auto& f = pointer[i];
-    if (f.struct_size != sizeof(f) || !records(f.key, f.key_size, 256) ||
-        !f.key_size || !records(f.payload, f.payload_size, 65536))
-      return false;
-    ValueFacet result{std::string(f.key, f.key_size), f.version, {}};
-    if (f.payload_size)
-      result.payload.assign(f.payload, f.payload + f.payload_size);
-    output->push_back(std::move(result));
-  }
-  return input_internal::canonicalize_facets(output).ok();
-}
-bool copy_contract(const ps_operation_contract_v11* c, OperationTraits* t) {
-  if (!c)
-    return true;
-  if (reinterpret_cast<std::uintptr_t>(c) %
-          alignof(ps_operation_contract_v11) ||
-      c->struct_size != sizeof(*c) || c->repeated_match > 1 ||
-      c->dtype_rule > PS_OPERATION_DTYPE_PARAMETER_V11 ||
-      !records(c->axes, c->axis_count, 8) ||
-      !copy_text(c->dtype_parameter, c->dtype_parameter_size,
-                 &t->outputs[0].output_dtype_parameter) ||
-      !copy_text(c->semantic_parameter, c->semantic_parameter_size,
-                 &t->outputs[0].output_semantic_parameter) ||
-      !copy_facets(c->output_facets, c->output_facet_count,
-                   &t->outputs[0].output_facets))
-    return false;
-  t->outputs[0].output_dtype_rule =
-      static_cast<OperationDtypeRule>(c->dtype_rule);
-  t->outputs[0].output_dtype_input = c->dtype_input;
-  t->repeated_minimum = c->repeated_minimum;
-  t->repeated_maximum = c->repeated_maximum;
-  t->repeated_match = c->repeated_match != 0;
-  t->outputs[0].output_semantic_rule =
-      static_cast<OperationSemanticRule>(c->semantic_rule);
-  t->outputs[0].output_semantic_input = c->semantic_input;
-  for (std::uint32_t i = 0; i < c->axis_count; ++i) {
-    const auto& a = c->axes[i];
-    OperationExtent axis;
-    if (a.struct_size != sizeof(a) ||
-        !copy_text(a.parameter, a.parameter_size, &axis.parameter))
-      return false;
-    axis.source = static_cast<OperationExtentSource>(a.source);
-    axis.constant = a.constant;
-    axis.input = a.input;
-    axis.axis = a.axis;
-    axis.offset = a.offset;
-    if (!copy_text(a.subtract_parameter, a.subtract_parameter_size,
-                   &axis.subtract_parameter))
-      return false;
-    axis.divisor = a.divisor;
-    axis.multiplier = a.multiplier;
-    t->outputs[0].output_axes.push_back(std::move(axis));
-  }
-  return true;
-}
-}  // namespace
 
 /**
  * @brief Implements validated transactional operation DSO loading.
@@ -1181,14 +711,17 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     if (find_symbol(pending_library.handle(), symbol))
       return Status{ErrorCode::TypeMismatch,
                     "image plugins require the Result ABI"};
-  using ResultApiFunction = const ps_result_operation_plugin_api_v1* (*)();
+  if (find_symbol(pending_library.handle(),
+                  "ps_result_operation_plugin_get_api_v1"))
+    return Status{ErrorCode::TypeMismatch, "Result plugins require ABI 2"};
+  using ResultApiFunction = const ps_result_operation_plugin_api_v2* (*)();
   ResultApiFunction result_api_function = nullptr;
   void* result_symbol = find_symbol(pending_library.handle(),
-                                    "ps_result_operation_plugin_get_api_v1");
+                                    "ps_result_operation_plugin_get_api_v2");
   std::memcpy(&result_api_function, &result_symbol,
               sizeof(result_api_function));
   if (result_api_function) {
-    const ps_result_operation_plugin_api_v1* table = nullptr;
+    const ps_result_operation_plugin_api_v2* table = nullptr;
     try {
       table = result_api_function();
     } catch (...) {
@@ -1196,11 +729,16 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     }
     if (!table ||
         reinterpret_cast<std::uintptr_t>(table) %
-            alignof(ps_result_operation_plugin_api_v1) ||
-        table->struct_size != sizeof(*table) || table->abi_version != 1)
+            alignof(ps_result_operation_plugin_api_v2) ||
+        table->struct_size != sizeof(*table) ||
+        table->abi_version != PS_RESULT_OPERATION_ABI_VERSION_2)
       return Status{ErrorCode::InvalidArgument,
                     "unsupported Result API version or size"};
     pending_library.attach_result_api(table);
+#if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
+    plugin_testing::invoke_before_owner_allocation(
+        plugin_testing::LibraryKind::Operation);
+#endif
     auto owner = std::make_shared<OperationLibrary>(std::move(pending_library));
     auto imported = plugin_internal::import_result_plugin(table, owner);
     if (!imported.ok())
@@ -1227,552 +765,8 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     return Status::success();
   }
 
-  using VersionFunction = std::uint32_t (*)();
-  using ApiFunction = const ps_operation_plugin_api_v11* (*)();
-  VersionFunction version = nullptr;
-  ApiFunction get_api = nullptr;
-  void* version_symbol = find_symbol(pending_library.handle(),
-                                     "ps_operation_plugin_get_abi_version");
-  static_assert(sizeof(version) == sizeof(version_symbol),
-                "function/data pointer sizes must match on supported targets");
-  std::memcpy(&version, &version_symbol, sizeof(version));
-  if (!version) {
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "operation plugin ABI version is unsupported");
-  }
-  const ps_operation_plugin_api_v11* api = nullptr;
-  try {
-    if (version() != PS_OPERATION_ABI_VERSION_11) {
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "operation plugin ABI version is unsupported");
-    }
-    void* api_symbol = find_symbol(pending_library.handle(),
-                                   "ps_operation_plugin_get_api_v11");
-    std::memcpy(&get_api, &api_symbol, sizeof(get_api));
-    if (!get_api)
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "operation plugin API entry is missing");
-    api = get_api();
-  } catch (const std::bad_alloc&) {
-    throw;
-  } catch (...) {
-    return Status::failure(
-        ErrorCode::OperationFailed,
-        "operation plugin ABI entry point raised an exception");
-  }
-  if (!api ||
-      reinterpret_cast<std::uintptr_t>(api) %
-              alignof(ps_operation_plugin_api_v11) !=
-          0U ||
-      api->struct_size != sizeof(ps_operation_plugin_api_v11)) {
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "operation plugin API table is malformed");
-  }
-  pending_library.attach_api(api);
-  if (api->operation_count == 0U || api->operation_count > 1024U ||
-      !api->operations ||
-      reinterpret_cast<std::uintptr_t>(api->operations) %
-              alignof(ps_operation_descriptor_v11) !=
-          0U ||
-      !api->destroy) {
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "operation plugin API table is malformed");
-  }
-#if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
-  plugin_testing::invoke_before_owner_allocation(
-      plugin_testing::LibraryKind::Operation);
-#endif
-  // Transfer destroy-before-unload ownership only after the heap lease exists.
-  // Allocation failure leaves the stack owner intact for exact rollback.
-  auto library = std::make_shared<OperationLibrary>(std::move(pending_library));
-
-  if (find_symbol(library->handle(), "ps_operation_plugin_get_planar_api_v1") ||
-      find_symbol(library->handle(), "ps_operation_plugin_get_planar_api_v2") ||
-      find_symbol(library->handle(), "ps_operation_plugin_get_planar_api_v3"))
-    return Status{ErrorCode::InvalidArgument,
-                  "Planar callback modules require the Result ABI"};
-  std::vector<std::shared_ptr<OperationDefinition>> staged;
-  staged.reserve(api->operation_count);
-  for (std::uint32_t index = 0; index < api->operation_count; ++index) {
-    const ps_operation_descriptor_v11& descriptor = api->operations[index];
-    if (descriptor.struct_size != sizeof(ps_operation_descriptor_v11) ||
-        descriptor.output_count == 0 ||
-        descriptor.output_count > PS_OPERATION_MAX_OUTPUTS_V11 ||
-        !descriptor.key || descriptor.key_size == 0U ||
-        descriptor.key_size > 1024U ||
-        (static_cast<bool>(descriptor.execute) ==
-         static_cast<bool>(descriptor.dependency_program)) ||
-        descriptor.input_count > 1024U || descriptor.cacheable > 1U ||
-        descriptor.input_schema_count > 1024 ||
-        ((descriptor.input_schema_count == 0) !=
-         (descriptor.input_schema == nullptr)) ||
-        (descriptor.input_schema &&
-         reinterpret_cast<std::uintptr_t>(descriptor.input_schema) %
-                 alignof(ps_operation_port_constraint_v11) !=
-             0) ||
-        descriptor.outputs[0].output_rank > 8U ||
-        ((descriptor.outputs[0].output_rank == 0U) !=
-         (descriptor.outputs[0].output_shape == nullptr)) ||
-        (descriptor.outputs[0].output_shape &&
-         reinterpret_cast<std::uintptr_t>(descriptor.outputs[0].output_shape) %
-                 alignof(std::uint64_t) !=
-             0U) ||
-        descriptor.parameter_count > 128U ||
-        ((descriptor.parameter_count == 0U) !=
-         (descriptor.parameters == nullptr)) ||
-        (descriptor.parameters &&
-         reinterpret_cast<std::uintptr_t>(descriptor.parameters) %
-                 alignof(ps_operation_parameter_descriptor_v11) !=
-             0U) ||
-        (descriptor.flags &
-         ~(PS_OPERATION_FLAG_DETERMINISTIC |
-           PS_OPERATION_FLAG_SIDE_EFFECT_FREE | PS_OPERATION_FLAG_CPU |
-           PS_OPERATION_FLAG_GPU | PS_OPERATION_FLAG_CPU_FALLBACK)) != 0U) {
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "operation plugin descriptor is malformed");
-    }
-    OperationDefinition definition;
-    definition.key.assign(descriptor.key, descriptor.key_size);
-    if (!valid_key(definition.key) ||
-        std::any_of(staged.begin(), staged.end(), [&](const auto& candidate) {
-          return candidate->key == definition.key;
-        })) {
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "operation plugin key is invalid or duplicated");
-    }
-    auto copy_port = [](const ps_operation_port_constraint_v11& source,
-                        OperationPortConstraint* target) {
-      if (source.struct_size != sizeof(ps_operation_port_constraint_v11))
-        return false;
-      target->kind = static_cast<OperationPortKind>(source.kind);
-      std::memcpy(&target->minimum, &source.minimum_bits, sizeof(float));
-      std::memcpy(&target->maximum, &source.maximum_bits, sizeof(float));
-      if (const auto* m = source.semantic) {
-        if (reinterpret_cast<std::uintptr_t>(m) %
-                alignof(ps_operation_semantic_constraint_v11) ||
-            m->struct_size != sizeof(*m) ||
-            !copy_facets(m->facets, m->facet_count, &target->facets))
-          return false;
-        target->semantic_kind = m->semantic_kind;
-        target->element_type = m->element_type;
-        target->rank = m->rank;
-        target->element_type_mask = m->element_type_mask;
-      }
-      return true;
-    };
-    definition.traits.input_schema.resize(descriptor.input_schema_count);
-    for (std::size_t i = 0; i < descriptor.input_schema_count; ++i) {
-      if (!copy_port(descriptor.input_schema[i],
-                     &definition.traits.input_schema[i]))
-        return Status::failure(ErrorCode::InvalidArgument,
-                               "invalid input port size");
-    }
-    definition.traits.input_count = descriptor.input_count;
-    definition.traits.deterministic =
-        (descriptor.flags & PS_OPERATION_FLAG_DETERMINISTIC) != 0U;
-    definition.traits.side_effect_free =
-        (descriptor.flags & PS_OPERATION_FLAG_SIDE_EFFECT_FREE) != 0U;
-    definition.traits.supports_cpu =
-        (descriptor.flags & PS_OPERATION_FLAG_CPU) != 0U;
-    definition.traits.supports_gpu =
-        (descriptor.flags & PS_OPERATION_FLAG_GPU) != 0U;
-    definition.traits.allows_cpu_fallback =
-        (descriptor.flags & PS_OPERATION_FLAG_CPU_FALLBACK) != 0U;
-    definition.traits.estimated_bytes = descriptor.estimated_bytes;
-    definition.traits.workspace_bytes = descriptor.workspace_bytes;
-    definition.traits.workspace_input_multiplier =
-        descriptor.workspace_input_multiplier;
-    definition.traits.cacheable = descriptor.cacheable != 0U;
-    definition.traits.outputs.clear();
-    for (std::uint32_t oi = 0; oi < descriptor.output_count; ++oi) {
-      const auto& output = descriptor.outputs[oi];
-      if (output.struct_size != sizeof(output) || !output.key ||
-          output.key_size == 0 || output.key_size > 128 ||
-          output.output_rank > 8 ||
-          !records(output.output_shape, output.output_rank, 8) ||
-          output.project_inputs > 1 ||
-          !records(output.input_indices, output.input_index_count, 1024) ||
-          (!output.project_inputs && output.input_index_count))
-        return Status::failure(ErrorCode::InvalidArgument,
-                               "malformed C output record");
-      OperationTraits copied = definition.traits;
-      copied.outputs = {OperationOutputTraits{}};
-      auto& target = copied.outputs[0];
-      target.key.assign(output.key, output.key_size);
-      if (output.project_inputs) {
-        target.input_indices.emplace();
-        if (output.input_index_count)
-          target.input_indices->assign(
-              output.input_indices,
-              output.input_indices + output.input_index_count);
-      }
-      if (!copy_port(output.output_schema, &target.output_schema) ||
-          !copy_text(output.halo_radius_parameter,
-                     output.halo_radius_parameter_size,
-                     &target.halo_radius_parameter) ||
-          !copy_text(output.spatial_factor_parameter,
-                     output.spatial_factor_parameter_size,
-                     &target.spatial_factor_parameter) ||
-          !copy_contract(output.contract, &copied))
-        return Status::failure(ErrorCode::InvalidArgument,
-                               "malformed C output contract");
-      if (oi == 0) {
-        definition.traits.repeated_minimum = copied.repeated_minimum;
-        definition.traits.repeated_maximum = copied.repeated_maximum;
-        definition.traits.repeated_match = copied.repeated_match;
-      } else if (definition.traits.repeated_minimum !=
-                     copied.repeated_minimum ||
-                 definition.traits.repeated_maximum !=
-                     copied.repeated_maximum ||
-                 definition.traits.repeated_match != copied.repeated_match) {
-        return Status::failure(ErrorCode::InvalidArgument,
-                               "inconsistent shared repeated inputs");
-      }
-      auto element = decode_element_type(output.output_element_type);
-      auto shape = decode_shape_rule(output.shape_rule);
-      auto region = decode_region_rule(output.region_rule);
-      if (!element.ok() || !shape.ok() || !region.ok())
-        return Status::failure(ErrorCode::InvalidArgument,
-                               "invalid C output type/shape/region");
-      target.output_element_type = element.value();
-      target.shape_rule = shape.value();
-      target.region_rule = region.value();
-      target.halo_radius = output.halo_radius;
-      target.observation_kind =
-          static_cast<ObservationKind>(output.observation_kind);
-      target.failure_delivery =
-          static_cast<FailureDelivery>(output.failure_delivery);
-      target.requires_dense_output = !descriptor.dependency_program;
-      if (output.output_rank)
-        target.fixed_output_shape.assign(
-            output.output_shape, output.output_shape + output.output_rank);
-      if (target.requires_dense_output &&
-          target.shape_rule == OperationShapeRule::Fixed &&
-          !dense_layout(target.fixed_output_shape,
-                        Value::element_size(target.output_element_type))
-               .ok())
-        return Status::failure(ErrorCode::InvalidArgument,
-                               "C output is not densely representable");
-      definition.traits.outputs.push_back(std::move(target));
-    }
-    definition.traits.parameter_schema.reserve(descriptor.parameter_count);
-    for (std::uint32_t parameter_index = 0U;
-         parameter_index < descriptor.parameter_count; ++parameter_index) {
-      const ps_operation_parameter_descriptor_v11& parameter =
-          descriptor.parameters[parameter_index];
-      if (parameter.struct_size !=
-              sizeof(ps_operation_parameter_descriptor_v11) ||
-          !parameter.key || parameter.key_size == 0U ||
-          parameter.key_size > 1024U || parameter.required > 1U ||
-          parameter.bounded > 1U) {
-        return Status::failure(
-            ErrorCode::InvalidArgument,
-            "operation plugin parameter descriptor is malformed");
-      }
-      auto parameter_type = decode_parameter_type(parameter.type);
-      if (!parameter_type.ok()) {
-        return parameter_type.status();
-      }
-      OperationParameterSpec copied;
-      copied.key.assign(parameter.key, parameter.key_size);
-      copied.type = parameter_type.value();
-      copied.required = parameter.required != 0U;
-      copied.bounded = parameter.bounded != 0U;
-      copied.minimum = parameter.minimum;
-      copied.maximum = parameter.maximum;
-      definition.traits.parameter_schema.push_back(std::move(copied));
-    }
-    std::sort(definition.traits.parameter_schema.begin(),
-              definition.traits.parameter_schema.end(),
-              [](const OperationParameterSpec& left,
-                 const OperationParameterSpec& right) {
-                return left.key < right.key;
-              });
-    if (descriptor.dependency_program) {
-      const auto prepared = plugin_internal::prepare_dependency_plugin(
-          &definition, descriptor.dependency_program, descriptor.user_data,
-          library);
-      if (!prepared.ok())
-        return prepared;
-    }
-    const Status traits_status = validate_traits(definition.traits);
-    if (!traits_status.ok()) {
-      return traits_status;
-    }
-    if (definition.traits.outputs[0].requires_dense_output &&
-        definition.traits.outputs[0].shape_rule == OperationShapeRule::Fixed) {
-      auto fixed_layout =
-          dense_layout(definition.traits.outputs[0].fixed_output_shape,
-                       Value::element_size(
-                           definition.traits.outputs[0].output_element_type));
-      if (!fixed_layout.ok()) {
-        return Status::failure(
-            ErrorCode::InvalidArgument,
-            "operation plugin fixed output is not densely representable");
-      }
-    }
-    staged.push_back(
-        std::make_shared<OperationDefinition>(std::move(definition)));
-  }
-
-  for (std::uint32_t index = 0; index < api->operation_count; ++index) {
-    const ps_operation_descriptor_v11* descriptor = &api->operations[index];
-    if (descriptor->dependency_program)
-      continue;
-    staged[index]->callback =
-        [library, descriptor, traits = staged[index]->traits](
-            const OperationInvocation& invocation) -> Result<Value> {
-      auto selected = select_operation_output(traits, invocation.output_index);
-      if (!selected.ok())
-        return Result<Value>(selected.status());
-      if (invocation.input_demands.size() != invocation.inputs.size()) {
-        return Result<Value>(
-            Status::failure(ErrorCode::InvalidArgument,
-                            "plugin invocation input/demand count mismatch"));
-      }
-      std::uint32_t plugin_backend = 0U;
-      switch (invocation.backend) {
-        case Backend::Cpu:
-          plugin_backend = 1U;
-          break;
-        case Backend::Gpu:
-          plugin_backend = 2U;
-          break;
-        default:
-          return Result<Value>(
-              Status::failure(ErrorCode::InvalidArgument,
-                              "plugin invocation backend is unknown"));
-      }
-      std::vector<ps_operation_value_view_v11> views;
-      std::vector<std::vector<ps_operation_facet_view_v11>> facet_views;
-      std::vector<std::vector<std::uint64_t>> demand_offsets;
-      std::vector<std::vector<std::uint64_t>> storage_origins;
-      std::vector<std::vector<std::uint64_t>> region_offsets, region_extents;
-      std::vector<std::vector<std::uint64_t>> demand_extents;
-      views.reserve(invocation.inputs.size());
-      facet_views.reserve(invocation.inputs.size());
-      demand_offsets.reserve(invocation.inputs.size());
-      demand_extents.reserve(invocation.inputs.size());
-      for (std::size_t input_index = 0U; input_index < invocation.inputs.size();
-           ++input_index) {
-        const Value& input = invocation.inputs[input_index];
-        const Region& demand = invocation.input_demands[input_index];
-        if (!input.valid()) {
-          return Result<Value>(
-              Status::failure(ErrorCode::InvalidArgument,
-                              "plugin invocation input Value is invalid"));
-        }
-        const ValueDescriptor& input_descriptor = input.descriptor();
-        if (!input.view(demand).ok())
-          return Result<Value>(Status::failure(ErrorCode::TypeMismatch,
-                                               "input does not cover demand"));
-        const std::uint64_t logical_bytes = input.bytes().size();
-        auto& input_facets = facet_views.emplace_back();
-        input_facets.reserve(input.facets().size());
-        for (const ValueFacet& facet : input.facets()) {
-          input_facets.push_back(ps_operation_facet_view_v11{
-              sizeof(ps_operation_facet_view_v11), facet.key.data(),
-              static_cast<std::uint32_t>(facet.key.size()), facet.version,
-              facet.payload.empty() ? nullptr : facet.payload.data(),
-              static_cast<std::uint32_t>(facet.payload.size())});
-        }
-        ps_operation_value_view_v11 view{};
-        view.struct_size = sizeof(view);
-        view.element_type =
-            static_cast<std::uint32_t>(input_descriptor.element_type);
-        view.input_index = invocation.input_indices.empty()
-                               ? static_cast<std::uint32_t>(input_index)
-                               : invocation.input_indices[input_index];
-        view.rank = static_cast<std::uint32_t>(input_descriptor.shape.size());
-        view.byte_size = logical_bytes;
-        view.shape = input_descriptor.shape.data();
-        auto& offsets = demand_offsets.emplace_back();
-        auto& extents = demand_extents.emplace_back();
-        offsets.reserve(demand.rank());
-        extents.reserve(demand.rank());
-        for (const RegionDimension& dimension : demand.dimensions()) {
-          offsets.push_back(dimension.offset);
-          extents.push_back(dimension.extent);
-        }
-        view.demand_offsets = offsets.data();
-        view.demand_extents = extents.data();
-        view.data = input.bytes().data();
-        auto& origin = storage_origins.emplace_back(input.layout().origin);
-        if (origin.empty())
-          origin.resize(input_descriptor.shape.size(), 0);
-        auto& coverage_offsets = region_offsets.emplace_back();
-        auto& coverage_extents = region_extents.emplace_back();
-        for (const auto dim : input.region().dimensions()) {
-          coverage_offsets.push_back(dim.offset);
-          coverage_extents.push_back(dim.extent);
-        }
-        view.storage_origin = origin.data();
-        view.byte_strides = input.layout().byte_strides.data();
-        view.region_offsets = coverage_offsets.data();
-        view.region_extents = coverage_extents.data();
-        view.byte_offset = input.layout().byte_offset;
-        view.facet_count = static_cast<std::uint32_t>(input_facets.size());
-        view.facets = input_facets.empty() ? nullptr : input_facets.data();
-        views.push_back(view);
-      }
-      std::vector<ps_operation_parameter_value_v11> parameter_views;
-      parameter_views.reserve(invocation.parameters.size());
-      for (const auto& parameter : invocation.parameters) {
-        ps_operation_parameter_value_v11 view{};
-        view.struct_size = sizeof(view);
-        view.key = parameter.first.data();
-        view.key_size = static_cast<std::uint32_t>(parameter.first.size());
-        if (const auto* value = std::get_if<std::int64_t>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_INT64_V11;
-          view.int64_value = *value;
-        } else if (const auto* value = std::get_if<double>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_FLOAT64_V11;
-          view.float64_value = *value;
-        } else if (const auto* value = std::get_if<bool>(&parameter.second)) {
-          view.type = PS_OPERATION_PARAMETER_BOOL_V11;
-          view.bool_value = *value ? 1U : 0U;
-        } else {
-          const std::string& string_value =
-              std::get<std::string>(parameter.second);
-          view.type = PS_OPERATION_PARAMETER_STRING_V11;
-          view.string_value = string_value.data();
-          view.string_size = static_cast<std::uint32_t>(string_value.size());
-        }
-        parameter_views.push_back(view);
-      }
-      OutputSinkState output;
-      auto resolved = resolve_operation_traits(
-          selected.value(),
-          invocation.input_metadata.empty() ? invocation.inputs.size()
-                                            : invocation.input_metadata.size(),
-          invocation.parameters);
-      if (!resolved.ok())
-        return Result<Value>(resolved.status());
-      auto expected = expected_callback_output_descriptor(
-          resolved.value(), invocation.inputs, invocation.parameters,
-          invocation.input_metadata);
-
-      if (!expected.ok())
-        return Result<Value>(expected.status());
-      output.descriptor = expected.value().descriptor;
-      output.region = invocation.output_region;
-      output.allocator = invocation.allocator;
-      output.resources = invocation.resources;
-      std::vector<std::uint64_t> output_offsets, output_extents;
-      for (const auto dim : output.region.dimensions()) {
-        output_offsets.push_back(dim.offset);
-        output_extents.push_back(dim.extent);
-      }
-      auto packed = dense_layout(
-          output_extents, Value::element_size(output.descriptor.element_type));
-      if (!packed.ok())
-        return Result<Value>(packed.status());
-      ps_operation_output_sink_v11 sink{};
-      sink.struct_size = sizeof(sink);
-      sink.context = &output;
-      sink.publish = publish_plugin_output;
-      sink.output_rank =
-          static_cast<std::uint32_t>(output.descriptor.shape.size());
-      sink.output_shape = output.descriptor.shape.data();
-      sink.output_offsets = output_offsets.data();
-      sink.output_extents = output_extents.data();
-      sink.output_byte_size = packed.value().byte_size;
-      sink.allocate_output = allocate_plugin_output;
-      sink.allocate_scratch = allocate_plugin_scratch;
-      sink.gpu = invocation.gpu;
-      sink.output_index = invocation.output_index;
-      std::vector<ps_operation_facet_view_v11> output_facets;
-      for (const auto& f : expected.value().facets)
-        output_facets.push_back(
-            {sizeof(ps_operation_facet_view_v11), f.key.data(),
-             static_cast<std::uint32_t>(f.key.size()), f.version,
-             f.payload.empty() ? nullptr : f.payload.data(),
-             static_cast<std::uint32_t>(f.payload.size())});
-      sink.output_element_type =
-          static_cast<std::uint32_t>(output.descriptor.element_type);
-      sink.output_facet_count =
-          static_cast<std::uint32_t>(output_facets.size());
-      sink.output_facets =
-          output_facets.empty() ? nullptr : output_facets.data();
-      char diagnostic[4097]{};
-      const int code = descriptor->execute(
-          descriptor->user_data, views.data(),
-          static_cast<std::uint32_t>(views.size()),
-          parameter_views.empty() ? nullptr : parameter_views.data(),
-          static_cast<std::uint32_t>(parameter_views.size()), plugin_backend,
-          plugin_cancelled,
-          const_cast<CancellationToken*>(&invocation.cancellation), &sink,
-          diagnostic, sizeof(diagnostic));
-      diagnostic[sizeof(diagnostic) - 1U] = '\0';
-      if (invocation.cancellation.cancelled()) {
-        return Result<Value>(
-            Status::failure(ErrorCode::Cancelled, "operation was cancelled"));
-      }
-      if (!output.allocation_failure.ok())
-        return Result<Value>(output.allocation_failure);
-      if (output.duplicate_publish_attempted) {
-        return Result<Value>(Status::failure(
-            ErrorCode::OperationFailed,
-            "operation plugin violated output sink at-most-once contract"));
-      }
-      if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11 &&
-          output.published) {
-        if (!output.result.ok()) {
-          return output.result;
-        }
-        return Result<Value>(Status::failure(
-            ErrorCode::OperationFailed,
-            "operation plugin published output before reporting backend "
-            "unavailable"));
-      }
-      if (code != PS_OPERATION_RESULT_SUCCESS_V11) {
-        ErrorCode error_code = ErrorCode::OperationFailed;
-        const char* default_diagnostic = "operation plugin callback failed";
-        if (code == PS_OPERATION_RESULT_CANCELLED_V11) {
-          error_code = ErrorCode::Cancelled;
-          default_diagnostic = "operation plugin callback was cancelled";
-        } else if (code == PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11) {
-          error_code = ErrorCode::BackendUnavailable;
-          default_diagnostic = "operation plugin backend is unavailable";
-        }
-        return Result<Value>(
-            Status::failure(error_code, diagnostic[0] ? std::string(diagnostic)
-                                                      : default_diagnostic));
-      }
-      return output.result;
-    };
-  }
-
-  std::vector<Impl::DefinitionHandle> immutable_staged;
-  immutable_staged.reserve(staged.size());
-  for (auto& definition : staged) {
-    immutable_staged.emplace_back(std::move(definition));
-  }
-
-  std::map<std::string, Impl::DefinitionHandle> replacement;
-  {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (impl_->frozen) {
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "operation registry froze during plugin load");
-    }
-    for (const Impl::DefinitionHandle& definition : immutable_staged) {
-      if (impl_->definitions.count(definition->key) != 0U) {
-        return Status::failure(ErrorCode::InvalidArgument,
-                               "operation plugin collides with registered key");
-      }
-    }
-    replacement = impl_->definitions;
-    for (const Impl::DefinitionHandle& definition : immutable_staged) {
-      const auto inserted = replacement.emplace(definition->key, definition);
-      if (!inserted.second) {
-        return Status::failure(ErrorCode::Internal,
-                               "operation plugin staging duplicated a key");
-      }
-    }
-    impl_->definitions.swap(replacement);
-  }
-  return Status::success();
+  return Status{ErrorCode::InvalidArgument,
+                "operation plugin must expose Result ABI 2"};
 }
 
 /**
@@ -1907,8 +901,7 @@ OperationRegistry::prepare_operation(
         auto& metadata = specialization.metadata;
         if (specialization.input_indices) {
           if (output.region_rule != OperationRegionRule::Whole ||
-              output.dependency_version || traits.supports_gpu ||
-              output.result_schema)
+              output.dependency_version != 2 || traits.supports_gpu)
             return Answer(
                 Status{ErrorCode::InvalidArgument,
                        "specialized input projection requires CPU Whole"});
@@ -1926,9 +919,10 @@ OperationRegistry::prepare_operation(
           if (!output.result_schema || !metadata.result_schema ||
               output.dependency_version != 2 ||
               output.output_schema.kind != OperationPortKind::Result ||
-              output.result_schema->id != metadata.result_schema->id ||
-              output.result_schema->version !=
-                  metadata.result_schema->version ||
+              (!output.output_schema.result_schema_id.empty() &&
+               (output.result_schema->id != metadata.result_schema->id ||
+                output.result_schema->version !=
+                    metadata.result_schema->version)) ||
               metadata.descriptor.element_type != ElementType::UInt8 ||
               !metadata.descriptor.shape.empty() || !metadata.facets.empty() ||
               metadata.atomic_trailing_axes || specialization.regional_atomic ||
@@ -1936,19 +930,34 @@ OperationRegistry::prepare_operation(
               specialization.requires_input_views ||
               specialization.maximum_output_payload_bytes ||
               specialization.static_dependency_pieces ||
-              specialization.data_movement != DataMovementKind::None ||
-              specialization.data_movement_view_policy !=
-                  DataMovementViewPolicy::Auto)
+              (specialization.data_movement != DataMovementKind::None &&
+               specialization.data_movement !=
+                   DataMovementKind::BitwiseMapped) ||
+              (specialization.data_movement_view_policy !=
+                   DataMovementViewPolicy::Auto &&
+               specialization.data_movement_view_policy !=
+                   DataMovementViewPolicy::RequireView &&
+               specialization.data_movement_view_policy !=
+                   DataMovementViewPolicy::Materialize))
             return Answer(
                 Status{ErrorCode::TypeMismatch,
                        "Result specialization must preserve its registered "
                        "kind/id/version",
                        FailureReason::None,
                        {FailureOrigin::Schema, FailureScope::Unspecified}});
-          auto valid = metadata.result_schema->validate();
+          auto valid = input_internal::validate_port_metadata(
+              output.output_schema, metadata);
           if (!valid.ok())
             return Answer(valid);
           output.result_schema = *metadata.result_schema;
+          output.output_schema.result_schema_id =
+              std::string(metadata.result_schema->id);
+          output.output_schema.result_schema_version =
+              metadata.result_schema->version;
+          if (specialization.data_movement != DataMovementKind::None)
+            output.data_movement = specialization.data_movement;
+          output.data_movement_view_policy =
+              specialization.data_movement_view_policy;
           continue;
         }
         output.shape_rule = OperationShapeRule::Fixed;
@@ -2042,6 +1051,19 @@ Status OperationRegistry::validate_prepared(
     if (found == impl_->definitions.end() || found->second != stored.definition)
       return stale();
   }
+  return prepared.validate_inputs(inputs, parameters);
+}
+
+Status PreparedOperation::validate_inputs(
+    const std::vector<OperationMetadata>& inputs,
+    const std::map<std::string, ParameterValue>& parameters) const {
+  const auto stale = [] {
+    return Status{ErrorCode::Stale, "prepared operation static inputs changed"};
+  };
+  const auto& stored = *impl_;
+  if (inputs.size() != stored.inputs.size() ||
+      parameters.size() != stored.parameters.size())
+    return stale();
   for (std::size_t i = 0; i < inputs.size(); ++i) {
     const auto& a = inputs[i];
     const auto& b = stored.inputs[i];
@@ -2053,6 +1075,16 @@ Status OperationRegistry::validate_prepared(
             static_cast<bool>(b.result_schema) ||
         (a.result_schema && !a.result_schema->same_schema(*b.result_schema)))
       return stale();
+    if (a.result_schema) {
+      for (std::size_t slot = 0; slot < a.result_schema->tensors.size();
+           ++slot) {
+        const auto& left = a.result_schema->tensors[slot].layout;
+        const auto& right = b.result_schema->tensors[slot].layout;
+        if (left.order != right.order ||
+            left.row_pitch_bytes != right.row_pitch_bytes)
+          return stale();
+      }
+    }
   }
   auto b = stored.parameters.begin();
   for (const auto& a : parameters) {
@@ -2072,73 +1104,33 @@ Status OperationRegistry::validate_prepared(
   }
   return Status::success();
 }
-
-Status OperationRegistry::validate_dependency_metadata(
-    const std::string& key, const std::vector<OperationMetadata>& inputs,
-    const std::map<std::string, ParameterValue>& parameters) const {
-  Impl::DefinitionHandle definition;
-  {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    const auto found = impl_->definitions.find(key);
-    if (found == impl_->definitions.end())
-      return Status{ErrorCode::NotFound, {}};
-    definition = found->second;
-  }
-  return DependencySession::validate_static(definition->validate_dependency,
-                                            inputs, parameters);
-}
-Result<std::shared_ptr<DependencySession>> OperationRegistry::start_dependency(
-    const std::string& key, DependencyRequest request,
-    const BufferAllocator& allocator,
-    std::function<Status(std::uint64_t)> consume_root_work) const {
-  Impl::DefinitionHandle definition;
-  {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    const auto found = impl_->definitions.find(key);
-    if (found == impl_->definitions.end())
-      return Result<std::shared_ptr<DependencySession>>(Status::failure(
-          ErrorCode::NotFound, "dependency operation not registered"));
-    definition = found->second;
-  }
-  if (!request.prepared) {
-    auto prepared = prepare_operation(key, request.inputs, request.parameters);
-    if (!prepared.ok())
-      return Result<std::shared_ptr<DependencySession>>(prepared.status());
-    request.prepared = prepared.take_value();
-  } else {
-    auto status = validate_prepared(*request.prepared, key, request.inputs,
-                                    request.parameters);
-    if (!status.ok())
-      return Result<std::shared_ptr<DependencySession>>(status);
-  }
-  const auto traits = request.prepared->traits();
-  for (const auto& input : request.inputs)
-    if (input_internal::structural_image_metadata(input))
-      return Result<std::shared_ptr<DependencySession>>(
-          Status::failure(ErrorCode::TypeMismatch,
-                          "image dependency input requires Result schema"));
-  auto selected = select_operation_output(traits, request.output_index);
+Status PreparedOperation::validate_result_query(
+    const ResultProgramQuery& query) const {
+  auto status = validate_inputs(query.inputs, query.parameters);
+  if (!status.ok())
+    return status;
+  auto selected = select_operation_output(traits(), query.output_index);
   if (!selected.ok())
-    return Result<std::shared_ptr<DependencySession>>(selected.status());
-  auto inferred = infer_operation_output(selected.value(), request.inputs,
-                                         request.parameters);
+    return selected.status();
+  auto inferred =
+      infer_operation_output(selected.value(), query.inputs, query.parameters);
   if (!inferred.ok())
-    return Result<std::shared_ptr<DependencySession>>(inferred.status());
-  if (input_internal::structural_image_metadata(inferred.value()))
-    return Result<std::shared_ptr<DependencySession>>(
-        Status::failure(ErrorCode::TypeMismatch,
-                        "image dependency output requires Result schema"));
-  return DependencySession::create(
-      "registry-" + std::to_string(impl_->identity) + ":" + key, traits,
-      definition->start_dependency, definition->validate_dependency,
-      std::move(request), allocator, definition, 0,
-      std::move(consume_root_work));
+    return inferred.status();
+  const auto& expected = inferred.value();
+  if (query.backend != Backend::Cpu || !expected.result_schema ||
+      !query.output.result_schema ||
+      !expected.result_schema->same_schema(*query.output.result_schema) ||
+      expected.descriptor.shape != query.output.descriptor.shape ||
+      expected.descriptor.element_type !=
+          query.output.descriptor.element_type ||
+      !input_internal::same_facets(expected.facets, query.output.facets))
+    return Status{ErrorCode::Stale, "Result joint poll metadata changed"};
+  return Status::success();
 }
 
-Result<ResultContinuation> OperationRegistry::start_result(
-    const std::string& key, const ResultProgramQuery& query,
-    const BufferAllocator& allocator) const {
-  using Answer = Result<ResultContinuation>;
+Result<ResultProgramQuery> OperationRegistry::prepare_result_query(
+    const std::string& key, const ResultProgramQuery& query) const {
+  using Answer = Result<ResultProgramQuery>;
   Impl::DefinitionHandle definition;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -2156,12 +1148,28 @@ Result<ResultContinuation> OperationRegistry::start_result(
         !query.page_bytes)
       return Answer(
           Status{ErrorCode::InvalidArgument, "invalid structured start"});
-    auto resolved = resolve_traits(key, query.inputs, query.parameters);
-    if (!resolved.ok())
-      return Answer(resolved.status());
+    if (query.backend != Backend::Cpu && query.backend != Backend::Gpu)
+      return Answer(
+          Status{ErrorCode::InvalidArgument, "invalid Result backend"});
+    if ((query.backend == Backend::Cpu && !definition->traits.supports_cpu) ||
+        (query.backend == Backend::Gpu && !definition->traits.supports_gpu))
+      return Answer(Status{ErrorCode::BackendUnavailable,
+                           "operation does not support the requested backend"});
+    auto prepared = query.prepared;
+    if (!prepared) {
+      auto created = prepare_operation(key, query.inputs, query.parameters);
+      if (!created.ok())
+        return Answer(created.status());
+      prepared = created.take_value();
+    } else {
+      auto status =
+          validate_prepared(*prepared, key, query.inputs, query.parameters);
+      if (!status.ok())
+        return Answer(status);
+    }
+    const auto& resolved = prepared->traits();
     auto selected =
-        select_operation_output(resolved.value(), query.output_index)
-            .take_value();
+        select_operation_output(resolved, query.output_index).take_value();
     auto expected =
         infer_operation_output(selected, query.inputs, query.parameters);
     if (!expected.ok())
@@ -2173,60 +1181,289 @@ Result<ResultContinuation> OperationRegistry::start_result(
                     input_internal::structural_image_metadata))
       return Answer(Status{ErrorCode::TypeMismatch,
                            "image structured output requires Result schema"});
-    if (static_cast<bool>(metadata.result_schema) !=
-            static_cast<bool>(query.output.result_schema) ||
+    if (!metadata.result_schema || !query.output.result_schema ||
         metadata.descriptor.shape != query.output.descriptor.shape ||
         metadata.descriptor.element_type !=
             query.output.descriptor.element_type ||
         !input_internal::same_facets(metadata.facets, query.output.facets) ||
-        (metadata.result_schema &&
-         !metadata.result_schema->same_schema(*query.output.result_schema)) ||
-        (metadata.result_schema
-             ? query.value_outputs.has_value()
-             : !query.value_outputs || !query.value_outputs->valid() ||
-                   query.value_outputs->shape() != metadata.descriptor.shape))
+        !metadata.result_schema->same_schema(*query.output.result_schema))
       return Answer(Status{ErrorCode::TypeMismatch,
                            "structured start metadata mismatch"});
-    auto checked = DependencySession::validate_static(
-        definition->validate_dependency, query.inputs, query.parameters,
-        query.cancellation);
+    if (query.cancellation.cancelled())
+      return Answer(Status{ErrorCode::Cancelled, {}});
+    auto admitted = plugin_internal::admit_operation_resources(
+        query.resources, query.inputs, query.output);
+    if (!admitted.ok())
+      return Answer(admitted.status());
+    auto normalized = query;
+    normalized.prepared = std::move(prepared);
+    normalized.resources = admitted.take_value();
+
+    return Answer(std::move(normalized));
+  } catch (...) {
+    return Answer(plugin_internal::current_operation_exception());
+  }
+}
+
+Result<ResultContinuation> OperationRegistry::start_result(
+    const std::string& key, const ResultProgramQuery& query,
+    const BufferAllocator& allocator) const {
+  using Answer = Result<ResultContinuation>;
+  Impl::DefinitionHandle definition;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto found = impl_->definitions.find(key);
+    if (found == impl_->definitions.end())
+      return Answer(Status{ErrorCode::NotFound, {}});
+    definition = found->second;
+  }
+  try {
+    auto checked = prepare_result_query(key, query);
     if (!checked.ok())
-      return Answer(checked);
+      return Answer(checked.status());
+    auto normalized = checked.take_value();
+    const auto& selected =
+        normalized.prepared->traits().outputs[query.output_index];
     auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
     auto scoped = allocator.limited(
-        selected.outputs[0].continuation_bytes, [failure](ErrorCode code) {
+        selected.continuation_bytes, [failure](ErrorCode code) {
           auto expected = ErrorCode::Ok;
           failure->compare_exchange_strong(expected, code);
         });
-    auto admitted_resources = plugin_internal::admit_operation_resources(
-        query.resources, query.inputs, query.output);
-    if (!admitted_resources.ok())
-      return Answer(admitted_resources.status());
-    auto normalized = query;
-    normalized.resources = admitted_resources.take_value();
-    if (normalized.value_outputs) {
-      auto closed = input_internal::color_output_samples(
-          normalized.output, *normalized.value_outputs);
-      if (!closed.ok())
-        return Answer(closed.status());
-      normalized.value_outputs = closed.take_value();
-    }
-    auto started = definition->start_result(normalized, scoped);
+    if (query.cancellation.cancelled())
+      return Answer(Status{ErrorCode::Cancelled, {}});
+    auto started = [&]() -> Answer {
+      try {
+        return empty_tensor_query(normalized)
+                   ? ResultContinuation::stateless<empty_tensor_result>()
+                   : definition->start_result(normalized, scoped);
+      } catch (...) {
+        return Answer(plugin_internal::current_operation_exception());
+      }
+    }();
+    if (query.cancellation.cancelled())
+      return Answer(Status{ErrorCode::Cancelled, {}});
     if (failure->load() != ErrorCode::Ok)
       return Answer(Status{failure->load(), {}});
     if (!started.ok())
       return started;
     auto state = started.take_value();
-    if (!state.valid() || !scoped.owns_allocation(state.storage_))
+    if (!state.valid() ||
+        (state.destroy_ && !scoped.owns_allocation(state.storage_)))
       return Answer(Status{ErrorCode::InvalidArgument,
                            "structured state must use host allocation"});
     state.definition_ = definition;
+    state.prepared_ = normalized.prepared;
     state.resources_ = normalized.resources;
+    state.payload_limit_ = selected.maximum_output_payload_bytes;
     return Answer(std::move(state));
-  } catch (const std::bad_alloc&) {
-    return Answer(Status{ErrorCode::ResourceExhausted, {}});
   } catch (...) {
-    return Answer(Status{ErrorCode::OperationFailed, {}});
+    return Answer(plugin_internal::current_operation_exception());
+  }
+}
+
+Result<ResultJointContinuation> OperationRegistry::start_result_joint(
+    const std::string& key, const ResourceVector<ResultProgramQuery>& queries,
+    const ResourceBudget& resources) const {
+  return start_result_joint_impl(key, queries, resources,
+                                 resources.allocator());
+}
+Result<ResultJointContinuation> OperationRegistry::start_result_joint_compiled(
+    const std::string& key, const ResourceVector<ResultProgramQuery>& queries,
+    const ResourceBudget& resources, const BufferAllocator& allocator) const {
+  return start_result_joint_impl(key, queries, resources, allocator);
+}
+Result<ResultJointContinuation> OperationRegistry::start_result_joint_impl(
+    const std::string& key, const ResourceVector<ResultProgramQuery>& queries,
+    const ResourceBudget& resources,
+    const BufferAllocator& state_allocator) const {
+  using Answer = Result<ResultJointContinuation>;
+  Impl::DefinitionHandle definition;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto found = impl_->definitions.find(key);
+    if (found == impl_->definitions.end())
+      return Answer(Status{ErrorCode::NotFound, {}});
+    definition = found->second;
+  }
+  if (!definition->start_result_joint ||
+      queries.size() < (definition->traits.joint_contract == 2 ? 1U : 2U) ||
+      queries.size() > 64 || queries.front().snapshot_identity.empty() ||
+      queries.front().snapshot_identity.size() > 4096)
+    return Answer(
+        Status{ErrorCode::InvalidArgument, "invalid Result joint start"});
+  try {
+    ErrorCode metadata_failure = ErrorCode::Ok;
+    ResourceAllocationScope scope(resources, &metadata_failure);
+    ResourceVector<ResultProgramQuery> normalized;
+    ResourceVector<ResultJointContinuation::Member> members;
+    std::uint64_t seen = 0;
+    std::shared_ptr<const PreparedOperation> prepared;
+    for (const auto& query : queries) {
+      if (query.backend != Backend::Cpu || query.output_index >= 64 ||
+          (definition->traits.joint_contract == 1 &&
+           (seen & (std::uint64_t{1} << query.output_index))) ||
+          !query.output.result_schema ||
+          query.snapshot_identity != queries.front().snapshot_identity)
+        return Answer(
+            Status{ErrorCode::InvalidArgument, "invalid Result joint member"});
+      seen |= std::uint64_t{1} << query.output_index;
+      auto candidate = query;
+      if (candidate.cancellation.cancelled())
+        candidate.cancellation = {};
+      if (candidate.prepared) {
+        auto valid = validate_prepared(*candidate.prepared, key, query.inputs,
+                                       query.parameters);
+        if (!valid.ok())
+          return Answer(valid);
+      }
+      if (prepared)
+        candidate.prepared = prepared;
+      auto checked = prepare_result_query(key, candidate);
+      if (!checked.ok())
+        return Answer(checked.status());
+      auto selected = checked.take_value();
+      selected.cancellation = query.cancellation;
+      if (!prepared)
+        prepared = selected.prepared;
+      // All members must name the same immutable static invocation.
+      auto shared =
+          validate_prepared(*prepared, key, query.inputs, query.parameters);
+      if (!shared.ok())
+        return Answer(shared);
+      if (query.tensor_slot >= query.output.result_schema->tensors.size() &&
+          !query.output.result_schema->tensors.empty())
+        return Answer(
+            Status{ErrorCode::InvalidArgument, "invalid joint tensor slot"});
+      if (query.tensor_outputs &&
+          (!query.tensor_outputs->valid() ||
+           query.output.result_schema->tensors.empty() ||
+           query.tensor_outputs->shape() !=
+               query.output.result_schema->tensors[query.tensor_slot]
+                   .sample_shape()))
+        return Answer(
+            Status{ErrorCode::InvalidArgument, "invalid joint output demand"});
+      if (!selected.output.result_schema->tensors.empty()) {
+        const auto& tensor =
+            selected.output.result_schema->tensors[selected.tensor_slot];
+        FootprintLimits limits;
+        limits.consume_work = [&](std::uint64_t amount) {
+          return resources.consume(ResourceWork{amount});
+        };
+        auto demand = selected.tensor_outputs
+                          ? Result<Footprint>(*selected.tensor_outputs)
+                          : Footprint::all(tensor.sample_shape(), limits);
+        if (!demand.ok())
+          return Answer(demand.status());
+        auto closed = tensor.close_samples(demand.value(), limits);
+        if (!closed.ok())
+          return Answer(closed.status());
+        const auto& samples = closed.value();
+        const auto tuple = input_internal::tuple_channel_axis(tensor.descriptor,
+                                                              tensor.facets);
+        if (samples.boxes().size() != 1 || samples.empty())
+          return Answer(Status{ErrorCode::InvalidArgument,
+                               "joint member requires one observation"});
+        const auto shape = tensor.sample_shape();
+        const auto& dimensions = samples.boxes()[0].dimensions();
+        for (std::size_t axis = 0; axis < shape.size(); ++axis) {
+          const bool grouped =
+              axis >= shape.size() - tensor.atomic_trailing_axes ||
+              (tuple && axis == *tuple + tensor.batch_axes.size());
+          if (!grouped && dimensions[axis].extent != 1)
+            return Answer(Status{ErrorCode::InvalidArgument,
+                                 "joint member requires one observation"});
+        }
+        selected.tensor_outputs = closed.take_value();
+      }
+      ResultJointContinuation::Member member;
+      auto atom = result_atom_key(selected);
+      if (!atom.ok())
+        return Answer(atom.status());
+      member.key = atom.take_value();
+      if (std::any_of(members.begin(), members.end(), [&](const auto& prior) {
+            return prior.key.output_index == member.key.output_index &&
+                   prior.tensor_slot != query.tensor_slot;
+          }))
+        return Answer(Status{ErrorCode::InvalidArgument,
+                             "Result joint output mixes tensor slots"});
+      if (std::any_of(members.begin(), members.end(), [&](const auto& prior) {
+            return prior.key == member.key;
+          }))
+        return Answer(Status{ErrorCode::InvalidArgument,
+                             "duplicate Result joint atom key"});
+      member.tensor_slot = query.tensor_slot;
+      member.semantic_key.assign(query.semantic_key.data(),
+                                 query.semantic_key.size());
+      member.snapshot_identity.assign(query.snapshot_identity.data(),
+                                      query.snapshot_identity.size());
+      if (query.tensor_outputs) {
+        auto captured = Footprint::from_regions(query.tensor_outputs->shape(),
+                                                query.tensor_outputs->boxes());
+        if (!captured.ok())
+          return Answer(captured.status());
+        member.requested_outputs = captured.take_value();
+      }
+      member.outputs = selected.tensor_outputs;
+      member.prepared = selected.prepared;
+      const auto& output =
+          selected.prepared->traits().outputs[query.output_index];
+      member.payload_limit = output.maximum_output_payload_bytes;
+      member.resources = selected.resources;
+      member.cancellation = query.cancellation;
+      members.push_back(std::move(member));
+      if (!query.cancellation.cancelled())
+        normalized.push_back(std::move(selected));
+    }
+    if (normalized.empty())
+      return Answer(Status{ErrorCode::Cancelled, {}});
+    auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
+    auto callback_latch = std::make_shared<plugin_internal::FailureLatch>();
+    auto allocator = state_allocator.limited(
+        prepared->traits().joint_continuation_bytes,
+        [failure, callback_latch](ErrorCode code) {
+          auto expected = ErrorCode::Ok;
+          failure->compare_exchange_strong(expected, code);
+          callback_latch->record(Status{code, {}});
+        });
+    ErrorCode callback_failure = ErrorCode::Ok;
+    input_internal::Float32Environment environment;
+    if (!environment.active())
+      return Answer(Status{ErrorCode::OperationFailed,
+                           "joint floating environment unavailable"});
+    auto started = [&] {
+      execution_internal::ResultCallbackScope callback(&callback_failure,
+                                                       callback_latch.get());
+      try {
+        return definition->start_result_joint(normalized, allocator);
+      } catch (...) {
+        return Answer(plugin_internal::current_operation_exception());
+      }
+    }();
+    auto sticky = callback_latch->snapshot();
+    if (!sticky.ok())
+      return Answer(sticky);
+    if (callback_failure != ErrorCode::Ok || metadata_failure != ErrorCode::Ok)
+      return Answer(Status{callback_failure != ErrorCode::Ok ? callback_failure
+                                                             : metadata_failure,
+                           {}});
+    if (failure->load() != ErrorCode::Ok)
+      return Answer(Status{failure->load(), {}});
+    if (!started.ok())
+      return started;
+    auto state = started.take_value();
+    if (!state.valid() || !state.destroy_ ||
+        !allocator.owns_allocation(state.storage_))
+      return Answer(Status{ErrorCode::InvalidArgument,
+                           "Result joint state must use host allocation"});
+    state.definition_ = definition;
+    state.root_ = resources;
+    state.members_ = std::move(members);
+    state.workspace_bytes_ = prepared->traits().joint_workspace_bytes;
+    state.contract_ = prepared->traits().joint_contract;
+    return Answer(std::move(state));
+  } catch (...) {
+    return Answer(plugin_internal::current_operation_exception());
   }
 }
 
@@ -2257,10 +1494,25 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
                     input_internal::structural_image_metadata))
       return Answer(Status{ErrorCode::TypeMismatch,
                            "image structured output requires Result schema"});
+    auto prepared = query.prepared;
+    if (!prepared)
+      return Answer(
+          Status{ErrorCode::Stale, "compiled Result lacks prepared operation"});
+    auto sealed =
+        validate_prepared(*prepared, key, query.inputs, query.parameters);
+    if (!sealed.ok())
+      return Answer(sealed);
+    const auto& resolved = prepared->traits();
+    if (query.output_index >= resolved.outputs.size() ||
+        resolved.outputs[query.output_index].dependency_version != 2)
+      return Answer(Status{ErrorCode::Stale,
+                           "compiled Result preparation protocol mismatch"});
     // Metadata and static validation were checked by Compiler. The context
     // verifies the plan belongs to this frozen registry before entering here.
+    if (query.cancellation.cancelled())
+      return Answer(Status{ErrorCode::Cancelled, {}});
     auto scoped = allocator.limited(
-        definition->traits.outputs[query.output_index].continuation_bytes,
+        resolved.outputs[query.output_index].continuation_bytes,
         [failure](ErrorCode code) {
           auto expected = ErrorCode::Ok;
           failure->compare_exchange_strong(expected, code);
@@ -2271,490 +1523,36 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
       return Answer(admitted_resources.status());
     auto normalized = query;
     normalized.resources = admitted_resources.take_value();
-    if (normalized.value_outputs) {
-      auto closed = input_internal::color_output_samples(
-          normalized.output, *normalized.value_outputs);
-      if (!closed.ok())
-        return Answer(closed.status());
-      normalized.value_outputs = closed.take_value();
-    }
-    auto started = definition->start_result(normalized, scoped);
+    if (query.cancellation.cancelled())
+      return Answer(Status{ErrorCode::Cancelled, {}});
+    auto started = [&]() -> Answer {
+      try {
+        return empty_tensor_query(normalized)
+                   ? ResultContinuation::stateless<empty_tensor_result>()
+                   : definition->start_result(normalized, scoped);
+      } catch (...) {
+        return Answer(plugin_internal::current_operation_exception());
+      }
+    }();
+    if (query.cancellation.cancelled())
+      return Answer(Status{ErrorCode::Cancelled, {}});
     if (failure->load() != ErrorCode::Ok)
       return Answer(Status{failure->load(), {}});
     if (!started.ok())
       return started;
     auto state = started.take_value();
-    if (!state.valid() || !scoped.owns_allocation(state.storage_))
+    if (!state.valid() ||
+        (state.destroy_ && !scoped.owns_allocation(state.storage_)))
       return Answer(Status{ErrorCode::InvalidArgument,
                            "structured state must use host allocation"});
     state.definition_ = definition;
+    state.prepared_ = normalized.prepared;
     state.resources_ = normalized.resources;
+    const auto& output = resolved.outputs[query.output_index];
+    state.payload_limit_ = output.maximum_output_payload_bytes;
     return Answer(std::move(state));
-  } catch (const std::bad_alloc&) {
-    return Answer(Status{ErrorCode::ResourceExhausted, {}});
   } catch (...) {
-    return Answer(Status{ErrorCode::OperationFailed, {}});
-  }
-}
-
-Result<std::shared_ptr<DependencyJointSession>> OperationRegistry::start_joint(
-    const std::string& key, std::vector<DependencyRequest> requests,
-    const BufferAllocator& allocator,
-    std::function<Status(std::uint64_t)> consume_root_work) const {
-  Impl::DefinitionHandle definition;
-  {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    const auto found = impl_->definitions.find(key);
-    if (found == impl_->definitions.end())
-      return Result<std::shared_ptr<DependencyJointSession>>(
-          Status{ErrorCode::NotFound, {}});
-    definition = found->second;
-  }
-  if (requests.empty())
-    return Result<std::shared_ptr<DependencyJointSession>>(
-        Status{ErrorCode::InvalidArgument, "empty joint requests"});
-  auto prepared = requests[0].prepared;
-  if (!prepared) {
-    auto created =
-        prepare_operation(key, requests[0].inputs, requests[0].parameters);
-    if (!created.ok())
-      return Result<std::shared_ptr<DependencyJointSession>>(created.status());
-    prepared = created.take_value();
-  }
-  for (auto& request : requests) {
-    auto status =
-        validate_prepared(*prepared, key, request.inputs, request.parameters);
-    if (!status.ok()) {
-      if (!request.prepared)
-        status = Status{ErrorCode::InvalidArgument,
-                        "incompatible joint static member"};
-      return Result<std::shared_ptr<DependencyJointSession>>(status);
-    }
-    if (request.prepared) {
-      status = validate_prepared(*request.prepared, key, request.inputs,
-                                 request.parameters);
-      if (!status.ok())
-        return Result<std::shared_ptr<DependencyJointSession>>(status);
-    }
-    request.prepared = prepared;
-  }
-  return DependencyJointSession::create(
-      "registry-" + std::to_string(impl_->identity) + ":" + key,
-      prepared->traits(), definition->start_joint,
-      definition->validate_dependency, std::move(requests), allocator,
-      definition, std::move(consume_root_work));
-}
-
-/**
- * @brief Implements validated, exception-fenced operation invocation.
- * @copydetails OperationRegistry::invoke
- */
-Result<Value> OperationRegistry::invoke(
-    const std::string& key, const OperationInvocation& invocation) const {
-  return invoke_current(key, invocation, {});
-}
-
-Result<Value> OperationRegistry::invoke_current(
-    const std::string& key, const OperationInvocation& invocation,
-    const std::function<bool()>& current) const {
-  Impl::DefinitionHandle definition;
-  {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    const auto iterator = impl_->definitions.find(key);
-    if (iterator == impl_->definitions.end()) {
-      return Result<Value>(Status::failure(ErrorCode::NotFound,
-                                           "operation key is not registered"));
-    }
-    definition = iterator->second;
-  }
-  const auto image_port = [](const OperationPortConstraint& port) {
-    return port.kind == OperationPortKind::RgbaFloat32 ||
-           port.kind == OperationPortKind::Float32Mask;
-  };
-  bool image =
-      std::any_of(definition->traits.input_schema.begin(),
-                  definition->traits.input_schema.end(), image_port) ||
-      std::any_of(
-          definition->traits.outputs.begin(), definition->traits.outputs.end(),
-          [&](const auto& output) { return image_port(output.output_schema); });
-  for (const auto& value : invocation.inputs) {
-    if (value.valid()) {
-      for (const auto& facet : value.facets()) {
-        image = image || facet.key == "photospider.image" ||
-                (facet.key == "photospider.color-array" &&
-                 value.descriptor().shape.size() >= 3);
-        if (facet.key == "photospider.semantic") {
-          auto semantic = decode_semantic(facet);
-          image =
-              image || (semantic.ok() &&
-                        (semantic.value().kind == SemanticKind::ImagePlane ||
-                         semantic.value().kind == SemanticKind::Mask));
-        }
-      }
-    }
-  }
-  if (image)
-    return Result<Value>(
-        Status::failure(ErrorCode::TypeMismatch,
-                        "legacy image Value callback lacks planar storage"));
-  if (definition->traits.outputs[0].dependency_version)
-    return invoke_dependency_current(key, invocation, current);
-  const auto metadata_count = invocation.input_metadata.empty()
-                                  ? invocation.inputs.size()
-                                  : invocation.input_metadata.size();
-  if ((!definition->traits.repeated_maximum &&
-       metadata_count != definition->traits.input_count) ||
-      (definition->traits.repeated_maximum &&
-       (metadata_count < definition->traits.input_count +
-                             definition->traits.repeated_minimum ||
-        metadata_count > definition->traits.input_count +
-                             definition->traits.repeated_maximum))) {
-    return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
-                                         "operation input count mismatch"));
-  }
-  if (invocation.input_demands.size() != invocation.inputs.size()) {
-    return Result<Value>(
-        Status::failure(ErrorCode::InvalidArgument,
-                        "operation input demand count does not match inputs"));
-  }
-  std::vector<std::uint32_t> positions = invocation.input_indices;
-  if (positions.empty()) {
-    for (std::uint32_t i = 0; i < invocation.inputs.size(); ++i)
-      positions.push_back(i);
-  }
-  if (positions.size() != invocation.inputs.size())
-    return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
-                                         "input index count mismatch"));
-  std::vector<bool> seen(metadata_count, false);
-  for (auto port : positions) {
-    if (port >= metadata_count || seen[port])
-      return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
-                                           "invalid original input index"));
-    seen[port] = true;
-  }
-  for (std::size_t index = 0U; index < invocation.inputs.size(); ++index) {
-    if (!invocation.inputs[index].valid()) {
-      return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
-                                           "operation input Value is invalid"));
-    }
-    const Status demand_status = invocation.input_demands[index].validate(
-        invocation.inputs[index].descriptor().shape);
-    if (!demand_status.ok()) {
-      return Result<Value>(demand_status);
-    }
-    for (std::size_t axis = 0; axis < invocation.input_demands[index].rank();
-         ++axis) {
-      const auto needed = invocation.input_demands[index].dimensions()[axis];
-      const auto supplied =
-          invocation.inputs[index].region().dimensions()[axis];
-      if (supplied.offset > needed.offset ||
-          supplied.offset + supplied.extent < needed.offset + needed.extent)
-        return Result<Value>(Status::failure(
-            ErrorCode::TypeMismatch, "input Value does not cover its demand"));
-    }
-  }
-  const Status parameter_status =
-      validate_operation_parameters(definition->traits, invocation.parameters);
-  if (!parameter_status.ok()) {
-    return Result<Value>(parameter_status);
-  }
-  if (invocation.cancellation.cancelled()) {
-    return Result<Value>(
-        Status::failure(ErrorCode::Cancelled, "operation was cancelled"));
-  }
-  switch (invocation.backend) {
-    case Backend::Cpu:
-    case Backend::Gpu:
-      break;
-    default:
-      return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
-                                           "operation backend is unknown"));
-  }
-  if ((invocation.backend == Backend::Cpu &&
-       !definition->traits.supports_cpu) ||
-      (invocation.backend == Backend::Gpu &&
-       !definition->traits.supports_gpu)) {
-    return Result<Value>(Status::failure(ErrorCode::BackendUnavailable,
-                                         "operation backend is unavailable"));
-  }
-  auto complete_metadata = invocation.input_metadata;
-  if (complete_metadata.empty()) {
-    complete_metadata.resize(metadata_count);
-    for (std::size_t i = 0; i < invocation.inputs.size(); ++i)
-      complete_metadata[positions[i]] = {invocation.inputs[i].descriptor(),
-                                         invocation.inputs[i].facets()};
-  }
-  if (std::any_of(complete_metadata.begin(), complete_metadata.end(),
-                  input_internal::structural_image_metadata))
-    return Result<Value>(Status::failure(ErrorCode::TypeMismatch,
-                                         "image input requires Result schema"));
-  auto prepared = invocation.prepared;
-  if (prepared) {
-    auto valid = validate_prepared(*prepared, key, complete_metadata,
-                                   invocation.parameters);
-    if (!valid.ok())
-      return Result<Value>(valid);
-  } else {
-    auto result =
-        prepare_operation(key, complete_metadata, invocation.parameters);
-    if (!result.ok())
-      return Result<Value>(result.status());
-    prepared = result.take_value();
-  }
-  auto selected =
-      select_operation_output(prepared->traits(), invocation.output_index);
-  if (!selected.ok())
-    return Result<Value>(selected.status());
-  auto resolved_shape = selected.take_value();
-  auto expected_output = expected_callback_output_descriptor(
-      resolved_shape, invocation.inputs, invocation.parameters,
-      complete_metadata);
-  if (!expected_output.ok()) {
-    return Result<Value>(expected_output.status());
-  }
-  if (input_internal::structural_image_metadata(expected_output.value()))
-    return Result<Value>(Status::failure(
-        ErrorCode::TypeMismatch, "image output requires Result schema"));
-  const auto& included = resolved_shape.outputs[0].input_indices;
-  const auto active = [&](std::uint32_t port) {
-    return !included || std::find(included->begin(), included->end(), port) !=
-                            included->end();
-  };
-  for (std::uint32_t port = 0; port < metadata_count; ++port)
-    if (active(port) && !seen[port])
-      return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
-                                           "missing projected input"));
-  const auto stop = [&]() noexcept {
-    if (invocation.cancellation.cancelled())
-      return ErrorCode::Cancelled;
-    return current && !current() ? ErrorCode::Stale : ErrorCode::Ok;
-  };
-  for (std::size_t i = 0; i < invocation.inputs.size(); ++i) {
-    const auto original = positions[i];
-    if (!invocation.input_metadata.empty()) {
-      const auto& expected = invocation.input_metadata[original];
-      if (invocation.inputs[i].descriptor().shape !=
-              expected.descriptor.shape ||
-          invocation.inputs[i].descriptor().element_type !=
-              expected.descriptor.element_type ||
-          !input_internal::same_facets(invocation.inputs[i].facets(),
-                                       expected.facets))
-        return Result<Value>(Status::failure(
-            ErrorCode::TypeMismatch, "projected input metadata mismatch"));
-    }
-    if (!active(original))
-      continue;
-    const auto& port = resolved_shape.input_schema[original];
-    const auto status = input_internal::validate_port_value(
-        port, invocation.inputs[i], ErrorCode::InvalidArgument, stop);
-    if (!status.ok())
-      return Result<Value>(status);
-    if ((port.kind == OperationPortKind::Float32Scalar &&
-         !input_internal::whole_region(invocation.input_demands[i], {1})) ||
-        (port.kind == OperationPortKind::RgbaFloat32 &&
-         !input_internal::image_demand(invocation.input_demands[i]))) {
-      return Result<Value>(
-          Status::failure(ErrorCode::InvalidArgument,
-                          "port demand violates scalar or image coverage"));
-    }
-  }
-  try {
-    // Image callbacks share the host's nearest/gradual-underflow contract.
-    std::optional<input_internal::Float32Environment> environment;
-    if (resolved_shape.outputs[0].output_schema.kind !=
-        OperationPortKind::Value) {
-      environment.emplace();
-      if (!environment->active())
-        return Result<Value>(Status::failure(
-            ErrorCode::OperationFailed, "cannot set binary32 environment"));
-    }
-    std::vector<Value> projected_inputs;
-    std::vector<Region> projected_demands;
-    std::vector<std::uint32_t> projected_positions;
-    for (std::size_t i = 0; i < invocation.inputs.size(); ++i)
-      if (active(positions[i])) {
-        projected_inputs.push_back(invocation.inputs[i]);
-        projected_demands.push_back(invocation.input_demands[i]);
-        projected_positions.push_back(positions[i]);
-      }
-    OperationInvocation normalized(
-        projected_inputs, projected_demands, invocation.parameters,
-        invocation.backend, invocation.cancellation, invocation.output_region,
-        invocation.allocator);
-    auto resources = invocation.resources;
-    for (const auto& input : invocation.inputs) {
-      auto joined = resources.unite(input.resources());
-      if (!joined.ok())
-        return Result<Value>(joined.status());
-      resources = joined.take_value();
-    }
-    auto admitted_resources = plugin_internal::admit_operation_resources(
-        resources, complete_metadata, expected_output.value());
-    if (!admitted_resources.ok())
-      return Result<Value>(admitted_resources.status());
-    normalized.resources = admitted_resources.take_value();
-    normalized.gpu = invocation.gpu;
-    if (invocation.backend == Backend::Cpu &&
-        resolved_shape.outputs[0].region_rule == OperationRegionRule::Whole)
-      normalized.cpu_parallel = invocation.cpu_parallel;
-    normalized.output_index = invocation.output_index;
-    normalized.prepared = std::move(prepared);
-    normalized.input_indices = projected_positions;
-    normalized.input_metadata = std::move(complete_metadata);
-    if (normalized.output_region.rank() == 0)
-      normalized.output_region =
-          Region::whole(expected_output.value().descriptor.shape);
-    if (normalized.output_region.empty() ||
-        !normalized.output_region
-             .validate(expected_output.value().descriptor.shape)
-             .ok())
-      return Result<Value>(Status::failure(ErrorCode::InvalidArgument,
-                                           "invalid operation output demand"));
-    auto closed_region = input_internal::color_output_region(
-        expected_output.value().descriptor, expected_output.value().facets,
-        normalized.output_region);
-    if (!closed_region.ok())
-      return Result<Value>(closed_region.status());
-    normalized.output_region = closed_region.take_value();
-    if (!input_internal::complete_tuple_channels(
-            expected_output.value().descriptor, expected_output.value().facets,
-            normalized.output_region))
-      return Result<Value>(Status::failure(
-          ErrorCode::InvalidArgument, "image output requires all channels"));
-    auto resolved = resolved_shape;
-    if (!resolved.outputs[0].halo_radius_parameter.empty())
-      resolved.outputs[0].halo_radius = static_cast<std::uint32_t>(
-          std::get<std::int64_t>(invocation.parameters.at(
-              resolved.outputs[0].halo_radius_parameter)));
-    if (resolved.outputs[0].region_rule == OperationRegionRule::Whole &&
-        !input_internal::whole_region(normalized.output_region,
-                                      expected_output.value().descriptor.shape))
-      return Result<Value>(Status::failure(
-          ErrorCode::InvalidArgument, "Whole operation requires whole output"));
-    for (std::size_t i = 0; i < invocation.inputs.size(); ++i) {
-      if (!active(positions[i]))
-        continue;
-      const auto required = input_internal::derive_input_demand(
-          resolved, normalized.output_region,
-          expected_output.value().descriptor.shape,
-          invocation.inputs[i].descriptor().shape,
-          resolved.input_schema[positions[i]].kind);
-      if (!required.ok())
-        return Result<Value>(required.status());
-      for (std::size_t axis = 0; axis < required.value().rank(); ++axis) {
-        const auto needed = required.value().dimensions()[axis];
-        const auto supplied = invocation.input_demands[i].dimensions()[axis];
-        if (supplied.offset > needed.offset ||
-            supplied.offset + supplied.extent < needed.offset + needed.extent)
-          return Result<Value>(Status::failure(
-              ErrorCode::InvalidArgument,
-              "input demand omits required output/halo coverage"));
-      }
-    }
-    std::shared_ptr<std::atomic<ErrorCode>> view_allocation_failure;
-    if (resolved.outputs[0].preserve_output_views ||
-        resolved.outputs[0].maximum_output_payload_bytes) {
-      auto count = normalized.output_region.element_count();
-      const auto width =
-          Value::element_size(expected_output.value().descriptor.element_type);
-      if (!count.ok() || count.value() > UINT64_MAX / width)
-        return Result<Value>(Status{ErrorCode::ResourceExhausted, {}});
-      const auto payload =
-          resolved.outputs[0].maximum_output_payload_bytes.value_or(
-              count.value() * width);
-      if (payload > UINT64_MAX - resolved.workspace_bytes)
-        return Result<Value>(Status{ErrorCode::ResourceExhausted, {}});
-      view_allocation_failure =
-          std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
-      const auto observe = [failure = view_allocation_failure](ErrorCode code) {
-        auto expected = ErrorCode::Ok;
-        failure->compare_exchange_strong(expected, code);
-      };
-      normalized.allocator =
-          normalized.backend == Backend::Gpu
-              ? normalized.allocator.limited_requested(
-                    payload + resolved.workspace_bytes, observe)
-              : normalized.allocator.limited(payload + resolved.workspace_bytes,
-                                             observe);
-    }
-    auto result = definition->callback(normalized);
-    if (view_allocation_failure &&
-        view_allocation_failure->load() != ErrorCode::Ok)
-      return Result<Value>(
-          Status{view_allocation_failure->load(),
-                 {},
-                 FailureReason::CapacityLimit,
-                 {FailureOrigin::Resource, FailureScope::Run}});
-    if (result.ok() && resolved.outputs[0].maximum_output_payload_bytes) {
-      const bool borrowed =
-          std::any_of(projected_inputs.begin(), projected_inputs.end(),
-                      [&](const auto& input) {
-                        return input.storage() == result.value().storage();
-                      });
-      if (!borrowed && result.value().bytes().size() >
-                           *resolved.outputs[0].maximum_output_payload_bytes)
-        return Result<Value>(
-            Status{ErrorCode::ResourceExhausted,
-                   "Whole output payload bound exceeded",
-                   FailureReason::CapacityLimit,
-                   {FailureOrigin::Resource, FailureScope::Run}});
-    }
-    if (!result.ok()) {
-      return result;
-    }
-    Status output_status =
-        validate_callback_output(expected_output.value().descriptor,
-                                 result.value(), normalized.output_region);
-    const bool exact_facets = resolved_shape.outputs[0].output_schema.kind !=
-                                  OperationPortKind::Value ||
-                              resolved_shape.outputs[0].output_semantic_rule !=
-                                  OperationSemanticRule::Drop;
-    const bool facets_match =
-        !output_status.ok() ||
-        (exact_facets
-             ? input_internal::same_facets(expected_output.value().facets,
-                                           result.value().facets())
-             : std::none_of(result.value().facets().begin(),
-                            result.value().facets().end(), [](const auto& f) {
-                              return input_internal::typed_facet(f.key);
-                            }));
-    if (output_status.ok() && !facets_match)
-      output_status =
-          Status::failure(ErrorCode::OperationFailed,
-                          "output facets contradict inferred semantics");
-    if (resolved_shape.outputs[0].output_schema.kind !=
-            OperationPortKind::Value ||
-        !expected_output.value().facets.empty()) {
-      if (output_status.ok())
-        output_status = input_internal::validate_port_value(
-            resolved_shape.outputs[0].output_schema, result.value(),
-            ErrorCode::OperationFailed, stop);
-      if (!output_status.ok() && output_status.code != ErrorCode::Cancelled &&
-          output_status.code != ErrorCode::Stale &&
-          output_status.code != ErrorCode::ResourceExhausted)
-        output_status.code = ErrorCode::OperationFailed;
-    }
-    if (!output_status.ok())
-      return Result<Value>(output_status);
-    if (!result.value().resources().size())
-      return result;
-    auto compatible = normalized.resources.unite(result.value().resources());
-    if (!compatible.ok())
-      return Result<Value>(compatible.status());
-    const auto& value = result.value();
-    return Value::from_storage(value.descriptor(), value.region(),
-                               value.layout(), value.storage(), value.facets(),
-                               normalized.resources);
-  } catch (const std::bad_alloc&) {
-    throw;
-  } catch (const std::exception& error) {
-    const char* diagnostic = error.what();
-    return Result<Value>(Status::failure(ErrorCode::OperationFailed,
-                                         diagnostic ? diagnostic : ""));
-  } catch (...) {
-    return Result<Value>(
-        Status::failure(ErrorCode::OperationFailed,
-                        "operation raised a nonstandard exception"));
+    return Answer(plugin_internal::current_operation_exception());
   }
 }
 

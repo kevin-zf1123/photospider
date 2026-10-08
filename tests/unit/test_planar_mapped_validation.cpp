@@ -99,7 +99,7 @@ void successful_copy_and_view() {
     require(validations == 1, "exact piece not validated once");
     const auto region = Region::whole(image.descriptor().shape);
     auto input = take(image.acquire(region));
-    auto output = take(result.images.at("result").acquire(region));
+    auto output = take(result.tensors.at("result").acquire(region));
     for (unsigned y = 0; y < 3; ++y)
       for (unsigned x = 0; x < 5; ++x)
         for (unsigned c = 0; c < 2; ++c) {
@@ -123,7 +123,7 @@ void auto_copy_fallback() {
   auto compiled = take(Compiler(registry).compile(graph));
   ExecutionContext execution(registry);
   auto result = take(execution.execute(compiled.plan, probe_bindings(image)));
-  const auto& output_image = result.images.at("result");
+  const auto& output_image = result.tensors.at("result");
   require(validations == 1 &&
               output_image.config().order == ImagePlaneOrder::Continuous &&
               result.diagnostics.result_copy_bytes == 30,

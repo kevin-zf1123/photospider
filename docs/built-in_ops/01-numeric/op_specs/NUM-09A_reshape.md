@@ -12,7 +12,7 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-impl
+repository_branch: ops-specs
 repository_commit: current working tree
 ---
 
@@ -29,8 +29,11 @@ registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
 Change shape while preserving the row-major logical element sequence, regardless
-of physical input strides. Input `input` and output `values` have the same dtype,
-UInt8, Int64, Float32 or Float64. Every element is copied or aliased bit-for-bit,
+of physical input strides. Input `input` is a single-tensor Result with any
+schema id/member key. Its complete `sample_shape()` has rank 1..8, positive
+extents and at most 2^40 elements. The output `values` is a Result tensor with
+the same dtype, UInt8, Int8, UInt16, Int16, Int64, Float32 or Float64. Every
+element is copied or aliased bit-for-bit,
 including signaling NaNs, payloads, infinities and signed zeros. No arithmetic,
 implicit cast or NaN quieting occurs. All three CPU versions are bitwise equivalent.
 
@@ -38,10 +41,11 @@ Static String `shape` is a required canonical comma-separated list of positive
 decimal extents, rank 1..8, with product equal to the input logical element count.
 There is no -1 inference, zero extent, automatic axis insertion or order parameter.
 Static String `layout` is auto/view/dense; constructors write auto by default,
-and direct nodes specify it. Input rank is also 1..8 with positive extents.
-Input/output logical element count is at most 2^40. Output facets are empty;
-no image-axis, color or other semantic metadata is inferred for the new shape.
-Recognized input facets retain their actual-read validation obligations.
+and direct nodes specify it. Input/output logical element count is at most 2^40.
+The published Result uses `photospider.tensor` v1/member `samples`; the target
+shape is its complete ordinary-axis shape. Output facets and batch-axis metadata
+are empty. Recognized input facets retain their actual-read validation
+obligations.
 
 ## Exact coordinate mapping and support
 
@@ -51,22 +55,26 @@ Let input shape be I and target shape O. For an output coordinate o, define
     s[j] = floor(k / product_{m>j} I[m]) mod I[j]
 
 The mapping defines numerical selection; execution uses CPU Whole for all formal
-profile keys. Every nonempty request collects and validates the complete active
-input and computes the complete output before projection. Empty reads nothing.
-Every active source edit invalidates the complete output, and any source, typed,
-resource or domain failure affects the Run. Output key/shape/dtype and tuple
-identity are unchanged; legacy unsuffixed keys are separate implementations.
+profile keys. The compiler validates the static shape and schema before runtime.
+On nonempty work, the program requests the source with a full Tensor Need using
+Data, Validation and Descriptor roles (role 13), which triggers typed-payload
+validation. It publishes the complete Result
+in global output coordinates. A query `Q` limits observed dependencies and
+downstream reads; it does not produce a packed ROI Result. Edits to observed
+source support invalidate the recorded dependency. Empty output has empty
+coverage and support. Source, typed, resource and domain failures remain visible
+to the Run.
 
 ## Layout decision and lifetime
 
-View requires one affine owner for the complete input and complete output.
-Compatible fragments of the same owner may be joined after proving their address
-maps. Multiple owners fail Domain/Run InvalidArgument/InvalidDomain with
-ViewUnavailable. Auto may collect multiple owners and falls back to one complete
-packed output when reshape is not affine. Dense always copies the complete
-output. A sparse request cannot make a globally non-affine View succeed.
-Negative/zero strides and singleton axes remain legal. Reshape proves maximal
-contiguous source chunks and target axis boundaries without enumerating pixels.
+View requires one affine owner for the complete input and output. Compatible
+fragments of the same owner may join after an address-map proof. Multiple owners
+make explicit View unavailable. Auto materializes a complete packed output only
+when a view is unavailable; Dense always materializes it. A sparse query
+cannot make a globally non-affine View succeed. Negative and zero strides and
+singleton axes remain legal. Reshape proves maximal contiguous source chunks
+and target axis boundaries without enumerating elements. Published views retain
+their source storage and resources after context retirement.
 
 Views retain input storage/resources until final release, including oversized
 source backings. New dense output owns N*dtype_size bytes, even for partial
@@ -75,13 +83,14 @@ handles unavailable views; it never hides validation, budget or cancellation err
 
 ## Resources and errors
 
-View mapping is O(rank) after input preparation; Dense is O(N*rank) with a fixed
-state and bounded coordinate vectors (rank<=8). Same-owner fragment joining is
-bounded by fragment count and rank and consumes host work. Collecting inputs may
-own their complete packed payloads. The fixed state and complete output capacity
-are admitted; cancellation/work checks occur per copied element and before
-publication. No partial failed output is published. Malformed schema remains a
-compile/preflight error. Layout availability is evaluated at Run time.
+View mapping is O(rank) after the authorized input window is available; Dense is
+O(N*rank) with bounded coordinate vectors (rank<=8). Same-owner fragment
+joining is bounded by fragment count and rank and consumes host work. The
+program reads authorized source windows and admits the complete packed output
+capacity; it does not collect the complete source into a second input buffer.
+Cancellation and work checks run during copied elements and before publication.
+No partial failed output is published. Malformed schema is a compile/preflight
+error. Layout availability is evaluated at Run time.
 
 ## Acceptance and current status
 
@@ -92,8 +101,9 @@ input, reversed axes, zero strides, unaligned offsets and owner-fragmented sourc
 Check whole versus regional logical equality and explicit view success/failure,
 auto fallback and dense results without comparing incidental physical addresses.
 
-All nine formal profile keys use Whole. Layout operations remain cacheable=false
-because content caches cannot witness physical owner/stride partitions. Current
-workflow, independent oracle, resource validation and measured performance are in
-[NUM-09 Whole execution](../layouts-whole.md). Earlier 2026-09-14 regional
-strict/Apple/WSL checks predate this implementation and are not Whole acceptance.
+All nine formal profile keys use Whole and disable cross-run content caching
+because content alone does not establish physical owner/stride identity;
+same-Run sharing remains available. The current Result workflow, oracle and
+resource checks are in [NUM-09 Whole execution](../layouts-whole.md). The timing
+table there is historical Value Whole evidence, not a measurement of this Result
+implementation.

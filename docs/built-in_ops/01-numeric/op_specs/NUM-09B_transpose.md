@@ -12,7 +12,7 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-impl
+repository_branch: ops-specs
 repository_commit: current working tree
 ---
 
@@ -28,9 +28,11 @@ Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
-Permute logical axes of input `input`. Output `values` has the same dtype and
-rank, with empty facets. Support UInt8/Int64/Float32/Float64, positive rank-1..8
-shapes and logical element count <=2^40. Preserve all element bits including
+Permute logical axes of input `input`, a single-tensor Result with any schema
+id/member key. Its complete `sample_shape()` includes batch axes and has positive
+extents, rank 1..8 and logical element count <=2^40. Output `values` is a Result
+tensor with the same dtype and rank. Supported dtypes are UInt8, Int8, UInt16,
+Int16, Int64, Float32 and Float64. Preserve all element bits including
 signaling NaNs, infinities and signed zeros. No image/color/axis semantic metadata
 is inferred; actual-read typed input validation remains required.
 
@@ -46,20 +48,29 @@ default auto, with the complete-output policy from
 
 For input shape I and permutation p, output shape O[j]=I[p[j]]. At output
 coordinate o, read s with s[p[j]]=o[j]. This exact bijection maps each output
-rectangle to its axis-permuted input rectangle numerically. The formal Whole
-execution reads and validates the complete input for any nonempty request,
-invalidates the complete output on any input edit, and publishes the complete
-output before projection. Empty reads nothing. Source/typed/domain failures are
-Run-wide. A View permutes strides of one complete affine input owner; compatible
-same-owner fragments may join. Multiple owners fail explicit View and can be
-collected by Auto/Dense. Dense owns all output elements. Negative/zero strides
-remain valid and raw bits are unchanged.
+rectangle to its axis-permuted input rectangle numerically. The compiler
+validates static shape, schema and permutation metadata before runtime. For
+nonempty work, the Whole program requests the complete input with a Tensor Need
+using Data, Validation and Descriptor roles (role 13), which triggers
+typed-payload validation. It publishes a complete
+`photospider.tensor`/`samples` Result
+with ordinary axes and empty facets/batch metadata. Publication uses global
+output coordinates. A query `Q` limits observed dependencies and downstream
+reads rather than packing the output to an ROI. Empty output has empty coverage
+and support. Source, typed and domain failures remain visible to the Run.
 
-Compile shape inference must parse and validate the node's permutation before
-execution. A registry-wide fixed permutation does not implement this parameterized
-operation. Dtype inference uses input; output descriptor remains independent of
-runtime layout choices. All three platform profiles preserve identical values
-and obey explicit layout rules.
+A View permutes strides of one affine input owner; compatible same-owner
+fragments may join after address-map proof. Multiple owners make explicit View
+unavailable. Auto materializes a complete packed output only for an unavailable
+view; Dense always materializes it. Other failures do not trigger Auto
+collection. Negative and zero strides remain valid and raw bits are unchanged.
+Published views retain source storage and resources after context retirement.
+
+Compile-time shape inference parses and validates the node's permutation.
+A registry-wide fixed permutation does not implement this parameterized
+operation. Dtype inference uses input; output schema remains independent of
+runtime layout choices. All three CPU profiles preserve identical values and
+obey explicit layout rules.
 
 ## Resources, errors and acceptance
 
@@ -77,6 +88,8 @@ permutation [2,0,1] yields shape [4,2,3], with values[k,i,j]=100*i+10*j+k.
 Use an independent coordinate oracle and source-read logs. Cover identity and
 all rank-2/rank-3 permutations, reverse/zero input strides, fragmented owners,
 sNaN payloads, view/auto/dense choices, disjoint requests and inverse dirty sets.
-The nine formal profile keys use CPU Whole; legacy unsuffixed keys remain
-separate. See [NUM-09 Whole execution](../layouts-whole.md) for current public
-workflow, validation and performance. Earlier regional validation predates Whole.
+The nine formal profile keys use CPU Whole and disable cross-run content caching
+because content alone does not prove physical owner/stride identity; same-Run
+sharing remains available. See [NUM-09 Whole execution](../layouts-whole.md) for
+the current Result workflow and validation. Timing data there describes the
+earlier Value Whole implementation, not this Result path.

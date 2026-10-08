@@ -12,7 +12,7 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-impl
+repository_branch: ops-specs
 repository_commit: current working tree
 ---
 
@@ -28,17 +28,21 @@ Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
-Slice input `input` without changing rank, using dynamic Int64[rank] inputs
-`starts` and `steps`. Required static String `counts` is a canonical list of
-positive per-axis output extents, fixing output `values` shape at compilation.
+Slice input `input` without changing rank, using dynamic Int64[rank] Result
+inputs `starts` and `steps`. The source is a single-tensor Result with any schema
+id/member key; its complete `sample_shape()` includes batch axes. Required
+static String `counts` is a canonical list of positive per-axis output extents,
+fixing output `values` shape at compilation.
 For output coordinate o, read source s[j]=starts[j]+o[j]*steps[j]. Negative
 steps support reverse traversal. Starts/steps numeric values can change between
 executions while counts remains static.
 
-Support four input dtypes UInt8/Int64/Float32/Float64, with identical output
-dtype and bit-preserved elements including signaling NaNs. Input/output shapes
-have rank 1..8, positive extents and logical element count <=2^40. Output facets
-are empty, with actual-read typed input validation retained. No implicit cast,
+Support UInt8, Int8, UInt16, Int16, Int64, Float32 and Float64, with identical
+output dtype and bit-preserved elements including signaling NaNs. Input/output
+shapes have rank 1..8, positive extents and logical element count <=2^40. The
+output is a `photospider.tensor`/`samples` Result whose full shape is ordinary
+axes; facets and batch-axis metadata are empty. Actual-read typed input
+validation remains required. No implicit cast,
 rank squeezing, omitted axes, Python end-index interpretation or empty slice is
 provided. All three CPU profiles preserve identical values.
 
@@ -54,25 +58,32 @@ when the actual requested output subset would have valid source coordinates.
 
 A singleton count ignores that axis's step numerically. If all counts are one,
 static projection excludes the complete step port, including a failing producer;
-metadata is still checked. Otherwise Whole collects all steps, starts and source
-before callback. An unused step entry can then cause an upstream/typed failure.
-Source gaps and unselected coordinates are included in full-input preparation.
-Empty reads nothing. Any active input edit invalidates the complete output;
-control/domain/typed/upstream failures are Run-wide. Endpoint validation still
-uses widened arithmetic and covers the full slice.
+static schema and parameter checks still run. Otherwise the Whole program
+requests the active source, starts and steps through full Tensor Needs using
+Data, Validation and Descriptor roles (role 13), which trigger typed-payload
+validation. An unused step entry can then cause an upstream/typed failure.
+Source gaps and unselected coordinates remain part of the complete input
+preparation. The program publishes a complete Result with global output coordinates; `Q` limits
+observed dependencies and downstream reads, not publication shape. Empty output
+has empty coverage and support. Edits to observed input support invalidate the
+recorded dependency. Endpoint validation still uses widened arithmetic and
+covers the full slice.
 
 ## Layout, resources and errors
 
 Required String layout is auto/view/dense, default auto in the helper. Inherit
 [reshape's complete-output policy](NUM-09A_reshape.md). View requires one affine
-input and output owner; same-owner compatible fragments may join, while multiple
-owners fail View and may be collected for Auto/Dense. Slice strides equal
-source_stride[j]*steps[j] for count>1, and zero for singleton outputs. Widened
-stride overflow makes a view unavailable; Dense can still copy valid logical
-coordinates. Auto never hides upstream/validation/resource/cancellation errors.
-Dense allocates N*dtype_size output bytes and may collect all source/control
-payloads even for sparse demand; fixed state and O(rank) controls are admitted.
-Mapping costs O(N*rank), with cancellation/work checks per element and publication.
+input/output owner; same-owner compatible fragments may join after address-map
+proof. Multiple owners make explicit View unavailable. Auto materializes a
+complete packed output only for an unavailable view; Dense always materializes
+it. Slice strides equal `source_stride[j] * steps[j]` for counts greater
+than one and zero for singleton outputs. Widened stride overflow makes a view
+unavailable; Dense can still copy valid logical coordinates. Auto never hides
+upstream, validation, resource or cancellation errors. Dense allocates
+`N * dtype_size` output bytes. The program reads source and control data through
+authorized windows rather than collecting complete input payloads into second
+buffers. Mapping costs O(N*rank), with cancellation and work checks during
+computation and publication.
 
 Invalid counts/rank/type/layout is a compile/preflight error. Invalid dynamic
 starts/used steps or any full-domain endpoint outside the source axis fails with
@@ -91,7 +102,8 @@ its upstream would fail; numerical selection is starts while Whole reads the sou
 positive/negative steps, signed-zero/sNaN data, dynamic control changes, singleton
 axes, metadata limits, source strides/owners, auto/view/dense and disjoint reads.
 
-All formal profiles use Whole. Current workflow, independent numerical/physical
-layout oracles and resource/performance results are recorded in
-[NUM-09 Whole execution](../layouts-whole.md). Earlier regional validation does
-not establish current Whole behavior.
+All formal profiles use Whole and disable cross-run content caching because
+content does not prove physical owner/stride identity; same-Run sharing remains
+available. The current Result workflow and oracle are recorded in
+[NUM-09 Whole execution](../layouts-whole.md). Timing there is historical Value
+Whole evidence, not a performance measurement of this Result implementation.

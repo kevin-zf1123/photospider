@@ -6,13 +6,15 @@ one warmup and seven measured runs; every timed output is checked afterwards.
 """
 import subprocess
 import sys
+from timing_scopes import timing_scopes
 
 
 def main():
     binary, output = sys.argv[1:3]
     prefix = ['taskset', '-c', sys.argv[3]] if len(sys.argv)>3 else []
+    scopes = timing_scopes(binary)
     with open(output, 'w') as log:
-        log.write('backend,layer,N,range,repetitions,median_us,min_us,max_us,peak_payload_bytes,checksum\n')
+        log.write('backend,layer,N,range,repetitions,median_us,min_us,max_us,peak_payload_bytes,checksum,timing_scope\n')
         workloads = [(n, r) for n in (1, 65, 256, 16384, 262144, 4194304) for r in ('10', '80')]
         workloads += [(65, 'mixed'), (4097, 'mixed')]
         for n, span in workloads:
@@ -21,9 +23,10 @@ def main():
                     continue
                 result = subprocess.run(prefix+[binary,layer,str(n),span,'7'],
                                         check=True, text=True,capture_output=True)
-                log.write(result.stdout)
+                row = result.stdout.strip() + ',' + scopes[layer] + '\n'
+                log.write(row)
                 log.flush()
-                print(result.stdout, end='', flush=True)
+                print(row, end='', flush=True)
 
 
 if __name__ == '__main__':

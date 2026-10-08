@@ -1,27 +1,32 @@
 # Paged labels → area index → filter
 
-This installed-public-API example registers `components4.labels`,
-`components4.area` and `components4.filter`, then executes UInt8 mask source →
-compiled DAG → a binary pixel sink. An independent breadth-first traversal
-checks every label, component `[id,area,min]` row and filtered pixel. The oracle
-uses ordinary caller-owned vectors; those reference buffers are not part of the
-product's managed-capacity measurements.
+This public-API example registers `components4.labels`, `components4.area`, and `components4.filter`. It binds an immutable HW mask Result directly. The compiled DAG publishes Complete Components, area-index, and filtered Results. A sink checks the filtered pixels and publishes a one-tensor Float64 Result. An independent breadth-first traversal checks every label, component `[id,area,min]` row, and filtered pixel. The oracle uses ordinary caller-owned vectors, outside the product's managed-capacity accounting. C++ fixture variants select the bound mask contents and backing layout; they are not graph inputs or source operations.
 
 ```sh
-cmake --build build/issue257-shared --target photospider_components_workflow test_component_contract -j 8
-ctest --test-dir build/issue257-shared -R '^(test_component_contract|example_components_workflow)$' --output-on-failure
+cmake --build build/kernel-dev --target photospider_components_workflow test_component_contract -j 8
+ctest --test-dir build/kernel-dev -R '^(test_component_contract|example_components_workflow)$' --output-on-failure
 ```
 
 An isolated consumer of an installed package:
 
 ```sh
-cmake --install build/issue257-shared --prefix "$PWD/out/phase-a-delivery/install"
-cmake -S examples/components_workflow -B out/phase-a-delivery/components-consumer \
-  -DCMAKE_PREFIX_PATH="$PWD/out/phase-a-delivery/install"
-cmake --build out/phase-a-delivery/components-consumer -j 8
-out/phase-a-delivery/components-consumer/photospider_components_workflow
-out/phase-a-delivery/components-consumer/photospider_components_workflow --large
+cmake --install build/kernel-dev --prefix "$PWD/out/components-install"
+cmake -S examples/components_workflow -B out/components-consumer \
+  -DCMAKE_PREFIX_PATH="$PWD/out/components-install"
+cmake --build out/components-consumer -j 8
+out/components-consumer/photospider_components_workflow
+out/components-consumer/photospider_components_workflow --large
 ```
+
+The standalone CMake project requires a compatible Photospider 0.30 package.
+
+## Result inputs and ownership
+
+Labels accepts one unbatched, facet-free UInt8 HW tensor Result with no fields. It validates the tensor type and shape without fixing the numeric input Result schema ID. Area consumes a complete Components Result; Filter consumes matching Components and area-index Results. Fixture setup creates caller-owned mask backing with `BufferAllocator`, imports it through `root.reference()`, and binds the immutable Result. Ordinary, negative-stride, and constant zero-stride layouts use the same tensor schema. The foreign-index case binds a second, distinct `other_mask` Result to check association identity.
+
+Area copies its `(id,area)` rows into its own Result fields. Result associations store source ObjectIds and do not retain source payload. A loaded field `CpuStorage` retains its read plan and Result implementation; the bytes remain readable after the Result wrapper and execution context are gone, and their backing is released with the final loaded window.
+
+Fixture setup creates the full caller-owned mask backing with `BufferAllocator`; `root.reference()` charges those bytes to Referenced. Host and Payload peaks exclude these input bytes. The Root Referenced cap is `2*H*W` bytes for the bound mask Results. Host and Metadata capacities are 1 MiB when `H*W<=65,536` and 4 MiB otherwise, and Payload is 32 KiB. The executable prints `referenced_peak`, checks Host and Payload peaks against their configured limits, and confirms live Referenced and Disk usage return to zero after the last field window is released. These are fixture limits, not constraints imposed by the operation factory.
 
 ## Independent expected results
 
@@ -79,29 +84,13 @@ self-roots** in 8128 logical UF bytes, rounded for disk admission. The design's
 65 temporary run components are a different illustrative counting schedule.
 Provisional storage is not inferred from the final one-row component table.
 
-The executable covers 32/64/256-byte windows, 528 isolated components with a
-paged binary-search area index, and a 100×100 connected input. Its 80,000-byte
-labels and 320,000-byte private UF exceed the **65,536-byte managed Host limit**.
-The default run also checks a 100x100 connected fixture at a 20000-stage
-producer limit; `--stage-regression` runs it alone. The earlier per-record
-poll implementation exhausts that limit.
+The executable covers 32/64/256-byte windows, 528 isolated components with a paged binary-search area index, and a 100×100 connected input. The connected fixture contains 80,000 bytes of labels and 320,000 bytes of private union-find records. The default cases use 1 MiB each for Root Host and Metadata. The default run also uses a 20,000-stage per-continuation limit for a 100×100 connected fixture; `--stage-regression` stops after this case.
 
-`--large` runs a 1000x1000 all-background image (K=0, maximum_count=0) and an
-all-foreground image (K=1, maximum_count=1). The latter has the sole component
-row `[1,1000000,0]`; threshold 1000000 preserves every pixel. Both run with
-1024-byte windows, the same 65536-byte managed Host limit, finite 200-million
-work budget and one-million-stage producer limit. All labels, area rows and
-filtered bytes are checked against independent BFS. Their local managed Host
-peaks were 38393 and 39209 bytes. Printed `issued_stages` counts coordinator
-actions across the DAG, not any individual producer's polls. Actual page
-padding writes and the complete association validator consume additional I/O
-and work, beyond logical field sizes.
+`--large` configures a 1000x1000 all-background image (`K=0`, `maximum_count=0`) and an all-foreground image (`K=1`, `maximum_count=1`). The latter has the sole component row `[1,1000000,0]`; threshold 1000000 preserves every pixel. Both use 1024-byte windows, 4 MiB Host/Metadata limits, a 32 KiB Payload cap, 200 million Run work units, and a one-million-stage per-continuation limit. The independent BFS reference checks all labels, area rows, and filtered bytes. Printed `issued_stages` counts coordinator actions across the DAG, not any individual producer's polls. Actual page-padding writes and the complete association validator consume additional I/O and work beyond logical field sizes.
 
-Duplicate labels nodes must start once with the optional cache disabled. The
-final filter read window retains labels and area after the context and output
-ResultRefs are destroyed, and final release reclaims backing. Count/page/work/
-disk failures, cancellation after temporary writes and stale plans check
-Disk/Payload cleanup. A foreign index from a same-shaped labelset is rejected.
+The run reports Root Host, Payload, Referenced, and aggregate `issued_stages` counters. The stage count is coordinator activity across the workflow, not an individual continuation's poll count. Root counters are not process RSS. Components operations use CPU stages; this example makes no GPU claim.
+
+Duplicate Labels nodes start once with the optional dependency cache disabled. Result associations store source ObjectIds but do not retain source payload. A loaded filter field window retains its own read plan, Result implementation, and backing after the Result wrapper and context retire; releasing the final window reclaims that field storage. Count/page/work/Disk failures, cancellation at Labels publication after Disk backing exists, and stale plans cover cleanup; a stale plan is rejected before any operation starts. A foreign index from a same-shaped labelset is rejected.
 
 `test_component_contract` additionally injects short, reordered and corrupted
 indices through public callbacks. It checks complete index validation,
@@ -111,3 +100,5 @@ does not prove connectivity of an arbitrary imported labelset.
 
 These are managed-capacity and exact fixture checks, not process RSS bounds.
 See [the runtime contract](../../docs/kernel-architecture/Paged-Components.md).
+
+Default cases passed locally and through the installed 0.30 consumer. The local `--large` empty and connected cases also passed the independent label, area-row, and filter checks; installed validation covered the default workflow only. Their Root Host peaks were 244,437 and 236,485 bytes, Payload peaks were 9,600 and 9,624 bytes, Referenced peak was 1,000,000 bytes for each case, and aggregate `issued_stages` were 150,929 and 213,400. These counters are managed Root usage, not process RSS.

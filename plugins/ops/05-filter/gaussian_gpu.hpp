@@ -14,6 +14,7 @@ inline constexpr std::uint64_t kGaussianGpuMaximumLanes = 256;
 inline constexpr auto kGaussianGpuWorkspace = kGaussianGpuMaximumLanes * 5472;
 // Coefficients are borrowed through synchronous completion. All sample math,
 // normalization and final IEEE rounding execute on device.
-Result<Value> execute_gaussian_gpu(const OperationInvocation& call,
-                                   const GaussianGpuKernel& kernel);
+Result<MutableBuffer> execute_gaussian_gpu(const ResultProgramPhase& phase,
+                                           const ResultTensorReadWindow& window,
+                                           const GaussianGpuKernel& kernel);
 }  // namespace ps::plugin_internal

@@ -120,6 +120,19 @@ void notify_callback_body_finished() noexcept {
   if (hooks && hooks->callback_body_finished)
     hooks->callback_body_finished();
 }
+/** @brief Dispatches the private pre-adoption handoff fault hook. */
+void notify_structured_handoff_ready() {
+  const auto* hooks = g_hooks.load(std::memory_order_acquire);
+  if (hooks && hooks->structured_handoff_ready)
+    hooks->structured_handoff_ready();
+}
+
+/** @brief Dispatches the post-I/O, pre-retention test failure hook. */
+void notify_structured_io_completed() {
+  const auto* hooks = g_hooks.load(std::memory_order_acquire);
+  if (hooks && hooks->structured_io_completed)
+    hooks->structured_io_completed();
+}
 
 /** @brief Implements the private successful-checkpoint publication boundary. */
 void notify_checkpoint_published() noexcept {

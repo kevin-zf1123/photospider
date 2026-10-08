@@ -29,7 +29,7 @@ class OperationRegistry;
 struct ExecutionContextConfig;
 ```
 
-这些公共 C++ 类型定义 kernel 面向调用方的数据模型。Operation 与 data-provider 的 C 接口分别声明在 `photospider/plugin/operation_plugin_api.h` 和 `photospider/plugin/data_provider_api.h`。Plugin 通过定宽记录和借用缓冲区传递数据；第三方对象与异常留在 plugin 内部。安装包要求 C++ 运行时和 Threads；可选 native backend 与集成由构建选项控制。
+这些公共 C++ 类型定义 kernel 面向调用方的数据模型。Result operation 与 data-provider 的 C 接口分别声明在 `photospider/plugin/result_operation_plugin_api.h` 和 `photospider/plugin/data_provider_api.h`。Operation plugin 通过定宽 Result 记录和借用缓冲区传递数据；第三方对象与异常留在 plugin 内部。安装包要求 C++ 运行时和 Threads；可选 native backend 与集成由构建选项控制。
 
 ## 4. 非目标与明确边界
 - Kernel 不定义文件发现、文档解析、持久化、编解码、UI、网络或加密服务。

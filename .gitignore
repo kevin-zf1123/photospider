@@ -70,6 +70,7 @@
 !examples/inpaint_ns_workflow/CMakeLists.txt
 !examples/g4_gpu_workflow/
 !examples/g4_gpu_workflow/*.cpp
+!examples/g4_gpu_workflow/*.hpp
 !examples/g4_gpu_workflow/*.c
 !examples/g4_gpu_workflow/*.md
 !examples/g4_gpu_workflow/CMakeLists.txt
@@ -111,10 +112,6 @@
 !examples/statistics_workflow/*.cpp
 !examples/statistics_workflow/*.md
 !examples/statistics_workflow/CMakeLists.txt
-!examples/layer_workflow/
-!examples/layer_workflow/*.cpp
-!examples/layer_workflow/*.md
-!examples/layer_workflow/CMakeLists.txt
 !examples/representations_workflow/
 !examples/representations_workflow/*.cpp
 !examples/representations_workflow/*.md
@@ -198,6 +195,7 @@ __pycache__/
 !/examples/atom_outcomes_workflow/
 !/examples/atom_outcomes_workflow/CMakeLists.txt
 !/examples/atom_outcomes_workflow/main.cpp
+!/examples/atom_outcomes_workflow/operations.hpp
 !/examples/atom_outcomes_workflow/README.md
 
 # Private numeric math adapter; builders supply the ignored upstream source.
@@ -206,6 +204,12 @@ __pycache__/
 !third_party/photospider_sleef.c
 !third_party/IK_LLAMA_LICENSE.txt
 /third_party/sleef/
+
+!examples/channel_extraction_workflow/
+!examples/channel_extraction_workflow/*.cpp
+!examples/channel_extraction_workflow/*.hpp
+!examples/channel_extraction_workflow/*.md
+!examples/channel_extraction_workflow/CMakeLists.txt
 
 !examples/channel_extraction_performance/
 !examples/channel_extraction_performance/*.cpp
@@ -230,6 +234,7 @@ __pycache__/
 
 !examples/channel_editing/
 !examples/channel_editing/*.cpp
+!examples/channel_editing/*.hpp
 !examples/channel_editing/*.md
 !examples/channel_editing/CMakeLists.txt
 !examples/channel_editing_performance/
@@ -298,6 +303,7 @@ __pycache__/
 !examples/dynamic_scheduler/CMakeLists.txt
 !examples/perlin_workflow/
 !examples/perlin_workflow/*.cpp
+!examples/perlin_workflow/*.hpp
 !examples/perlin_workflow/*.md
 !examples/perlin_workflow/CMakeLists.txt
 
@@ -318,3 +324,5 @@ __pycache__/
 !examples/unified_result_workflow/*.cpp
 !examples/unified_result_workflow/CMakeLists.txt
 !examples/unified_result_workflow/*.md
+!examples/shared/
+!examples/shared/*.hpp

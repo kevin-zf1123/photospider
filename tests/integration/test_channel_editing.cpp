@@ -10,179 +10,11 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "support/channel_result_fixture.hpp"
 
 namespace {
-using namespace ps;  // NOLINT(build/namespaces)
-void require(bool okay, const std::string& message) {
-  if (!okay)
-    throw std::runtime_error(message);
-}
-template <class T>
-T take(Result<T> result) {
-  if (!result.ok())
-    throw std::runtime_error(result.status().message);
-  return result.take_value();
-}
-StridedLayout dense(const ValueDescriptor& d) {
-  StridedLayout layout;
-  layout.byte_strides.resize(d.shape.size());
-  std::int64_t stride = Value::element_size(d.element_type);
-  for (std::size_t i = d.shape.size(); i-- > 0;) {
-    layout.byte_strides[i] = stride;
-    stride *= d.shape[i];
-  }
-  return layout;
-}
-std::vector<std::uint8_t> bytes(const ValueDescriptor& d, unsigned seed) {
-  const auto size = take(Region::whole(d.shape).element_count()) *
-                    Value::element_size(d.element_type);
-  std::vector<std::uint8_t> result(size);
-  for (std::size_t i = 0; i < result.size(); ++i)
-    result[i] = (i * 73 + seed * 37) & 255;
-  return result;
-}
-struct Fixture final {
-  WorkflowDocument document;
-  ExecutionBindings bindings;
-  std::vector<std::vector<std::uint8_t>> raw;
-  std::vector<ValueDescriptor> descriptors;
-  WorkflowInput add(ValueDescriptor descriptor,
-                    std::vector<ValueFacet> facets = {},
-                    ResourceBindings resources = {}) {
-    const auto id = document.inputs.size() + 1;
-    const auto name = "input" + std::to_string(id);
-    auto data = bytes(descriptor, id);
-    document.inputs.push_back({id, name, descriptor,
-                               Region::whole(descriptor.shape),
-                               dense(descriptor), facets});
-    bindings.inputs.push_back(
-        {name,
-         take(Value::create(descriptor, Region::whole(descriptor.shape),
-                            dense(descriptor), data, facets, resources))});
-    raw.push_back(data);
-    descriptors.push_back(descriptor);
-    return WorkflowInputReference{id};
-  }
-  WorkflowInput image(ValueDescriptor descriptor, PlanarImageConfig config,
-                      const std::vector<Region>& published = {}) {
-    const auto id = document.inputs.size() + 1;
-    const auto name = "input" + std::to_string(id);
-    auto data = bytes(descriptor, id);
-    auto source = take(PlanarImage::create(descriptor, config));
-    if (published.empty()) {
-      require(source
-                  .publish(Region::whole(descriptor.shape), data.data(),
-                           data.size())
-                  .ok(),
-              "publish");
-    } else {
-      for (const auto& region : published) {
-        auto value =
-            take(Value::create(descriptor, Region::whole(descriptor.shape),
-                               dense(descriptor), data));
-        std::vector<std::uint8_t> packed;
-        auto fp = take(Footprint::from_regions(descriptor.shape, {region}));
-        const auto width = Value::element_size(descriptor.element_type);
-        auto status = fp.visit(
-            [&](const auto& at) {
-              auto offset = take(value.byte_address(at));
-              packed.insert(packed.end(), data.begin() + offset,
-                            data.begin() + offset + width);
-              return Status::success();
-            },
-            UINT64_MAX);
-        require(status.ok(), "pack fixture");
-        require(source.publish(region, packed.data(), packed.size()).ok(),
-                "partial publish");
-      }
-    }
-    document.inputs.push_back(
-        {id,
-         name,
-         descriptor,
-         Region::whole(descriptor.shape),
-         {},
-         {},
-         PlanarImageLayout{config.order, config.height_axis, config.width_axis,
-                           config.channel_axis, config.row_pitch_bytes,
-                           config.groups}});
-    ExecutionBinding binding;
-    binding.name = name;
-    binding.image = std::make_shared<const PlanarImage>(source);
-    bindings.inputs.push_back(binding);
-    raw.push_back(data);
-    descriptors.push_back(descriptor);
-    return WorkflowInputReference{id};
-  }
-};
-ExecutionResult run(Fixture& f, WorkflowNodeOutput output,
-                    const std::optional<Region>& roi = {},
-                    std::shared_ptr<OperationRegistry> registry = {}) {
-  f.document.outputs = {{"result", output.source_node, output.source_port}};
-  if (!registry)
-    registry = make_default_operation_registry();
-  GraphContext graph(f.document);
-  Compiler compiler(registry);
-  PlanningOptions options;
-  if (roi)
-    options.output_regions = {{"result", *roi}};
-  ResourceBindings resources;
-  for (const auto& binding : f.bindings.inputs)
-    if (binding.value.valid())
-      resources = take(resources.unite(binding.value.resources()));
-  auto compiled = take(compiler.compile(graph, options, resources));
-  ExecutionContextConfig config;
-  config.cpu_workers = 1;
-  ExecutionContext context(registry, config);
-  return take(context.execute(compiled.plan, f.bindings));
-}
-void check_oracle(const ExecutionResult& result, const Fixture& f,
-                  std::uint32_t output_axis,
-                  const std::vector<std::optional<std::uint32_t>>& source_axes,
-                  const std::vector<std::pair<unsigned, unsigned>>& mapping,
-                  const Region& requested) {
-  const bool image = result.images.count("result");
-  const auto& descriptor = image ? result.images.at("result").descriptor()
-                                 : result.values.at("result").descriptor();
-  const auto width = Value::element_size(descriptor.element_type);
-  std::vector<std::uint8_t> packed;
-  if (image) {
-    packed.resize(take(requested.element_count()) * width);
-    require(result.images.at("result")
-                .read(requested, packed.data(), packed.size())
-                .ok(),
-            "read image");
-  }
-  std::uint64_t linear = 0;
-  auto footprint = take(Footprint::from_regions(descriptor.shape, {requested}));
-  auto status = footprint.visit(
-      [&](const auto& coordinate) {
-        const auto selected = mapping.at(coordinate[output_axis]);
-        auto at = coordinate;
-        at.erase(at.begin() + output_axis);
-        if (source_axes[selected.first])
-          at.insert(at.begin() + *source_axes[selected.first], selected.second);
-        if (f.descriptors[selected.first].shape ==
-            std::vector<std::uint64_t>{1})
-          at = {0};
-        std::uint64_t source = 0;
-        for (std::size_t i = 0; i < at.size(); ++i)
-          source = source * f.descriptors[selected.first].shape[i] + at[i];
-        const auto* observed =
-            image
-                ? packed.data() + linear * width
-                : result.values.at("result").bytes().data() +
-                      take(result.values.at("result").byte_address(coordinate));
-        require(
-            std::memcmp(observed, f.raw[selected.first].data() + source * width,
-                        width) == 0,
-            "independent byte oracle");
-        ++linear;
-        return Status::success();
-      },
-      UINT64_MAX);
-  require(status.ok(), "oracle traversal");
-}
+using namespace ps;                // NOLINT(build/namespaces)
+using namespace assembly_fixture;  // NOLINT(build/namespaces)
 std::vector<format::ChannelEditInput> edit_inputs(
     const Fixture& f,
     const std::vector<format::ChannelEditStructure>& structures) {
@@ -190,9 +22,7 @@ std::vector<format::ChannelEditInput> edit_inputs(
   for (std::size_t i = 0; i < f.document.inputs.size(); ++i) {
     const auto& d = f.document.inputs[i];
     OperationMetadata m;
-    m.descriptor = d.descriptor;
-    m.facets = d.facets;
-    m.planar_layout = d.planar_layout;
+    m.result_schema = d.result_schema;
     result.push_back({WorkflowInputReference{d.id}, m, structures[i]});
   }
   return result;
@@ -265,8 +95,8 @@ void metadata() {
       f.document, {inputs[0]},
       {source(0, 2), source(0, 1), source(0, 0), source(0, 3)}));
   auto result = run(f, edge);
-  auto d =
-      take(decode_tensor_description(result.values.at("result").facets()[0]));
+  auto d = take(decode_tensor_description(
+      result.results.at("result").schema().tensors[0].facets[0]));
   require(d.channels[0].role == "blue" && d.groups.size() == 1 &&
               d.groups[0].indices == std::vector<std::uint64_t>({2, 1, 0}) &&
               d.groups[0].alpha == 3,
@@ -274,14 +104,16 @@ void metadata() {
   edge = take(format::swizzle_channels(f.document, {inputs[0]},
                                        {source(0), source(0), source(0, 2)}));
   result = run(f, edge);
-  d = take(decode_tensor_description(result.values.at("result").facets()[0]));
+  d = take(decode_tensor_description(
+      result.results.at("result").schema().tensors[0].facets[0]));
   require(d.groups.empty() && d.channels[0].role == "red",
           "duplicate drops group");
   edge = take(format::replace_channels(
       f.document, inputs,
       {{{"role", "red"}, source(1)}, {{"name", "A"}, source(2)}}));
   result = run(f, edge);
-  d = take(decode_tensor_description(result.values.at("result").facets()[0]));
+  d = take(decode_tensor_description(
+      result.results.at("result").schema().tensors[0].facets[0]));
   require(d.channels[0].role == "red" &&
               d.channels[0].interpretation->model == "rgb" &&
               d.channels[3].role == "alpha" && !d.channels[3].interpretation &&
@@ -322,21 +154,20 @@ void planar_and_scalar() {
     auto result = run(f, edge, roi);
     check_oracle(result, f, 2, {2, {}, {}}, {{1, 0}, {0, 1}, {0, 2}, {2, 0}},
                  roi);
-    require(result.diagnostics.source_read_bytes == 112,
-            "sparse base/external/scalar exact reads");
+    require(source_bytes(result, f) == 112,
+            "sparse base/external/scalar exact sample support");
     const Region alpha({{127, 3}, {127, 3}, {3, 1}});
     for (const std::uint32_t bits :
          {0x80000000U, 0x7fc01234U, 0xff812345U, 0x3f000000U}) {
       std::vector<std::uint8_t> bytes(4);
       std::memcpy(bytes.data(), &bits, 4);
       f.raw[2] = bytes;
-      f.bindings.inputs[2].value = take(Value::create(
-          {ElementType::Float32, {1}}, Region::whole({1}), {0, {4}}, bytes));
+      f.rebind(2);
       result = run(f, edge, alpha);
       check_oracle(result, f, 2, {2, {}, {}}, {{1, 0}, {0, 1}, {0, 2}, {2, 0}},
                    alpha);
-      require(result.diagnostics.source_read_bytes == 4,
-              "scalar only reads no base pixels");
+      require(source_bytes(result, f) == 4,
+              "scalar sample support excludes base pixels");
     }
     options.layout = "view";
     edge = take(format::replace_channels(f.document, inputs,
@@ -357,8 +188,8 @@ void planar_and_scalar() {
     result = run(f, edge, Region({{127, 3}, {127, 3}, {0, 2}}));
     check_oracle(result, f, 2, {2, {}, {}}, {{2, 0}, {2, 0}},
                  Region({{127, 3}, {127, 3}, {0, 2}}));
-    require(result.diagnostics.source_read_bytes == 0,
-            "literal provider reads no base");
+    require(source_bytes(result, f) == 0,
+            "literal provider requires no base sample support");
   }
 }
 void dependencies_and_errors() {
@@ -377,33 +208,33 @@ void dependencies_and_errors() {
   auto prepared = take(registry->prepare_operation(
       node.operation, {inputs[0].metadata, inputs[1].metadata},
       node.parameters));
-  auto cert = take(DependencyCertificate::create_mapped(
-      "oracle", take(Footprint::all({2, 4})), {{2, 4}, {1}},
-      *prepared->traits().outputs[0].static_dependency_pieces));
+  auto complete = run(f, edge);
   auto alpha =
       take(Footprint::from_regions({2, 4}, {Region({{1, 1}, {3, 1}})}));
-  auto needs = take(cert.backward(alpha));
-  require(needs.size() == 1 && needs[0].port == 1 &&
-              take(needs[0].samples.element_count()) == 1,
+  auto partial = run(f, edge, alpha.boxes()[0]);
+  auto needs = take(partial.dependencies.source_support());
+  require(take(needs.at("input2").element_count()) == 1 &&
+              (!needs.count("input1") || needs.at("input1").empty()),
           "scalar backward exact");
-  auto dirty =
-      take(cert.transpose({1,
-                           static_cast<std::uint32_t>(DependencyRole::Data),
-                           take(Footprint::all({1})),
-                           {}}));
+  auto dirty = take(complete.dependencies.potential_dirty(
+                        "input2", take(Footprint::all({1})), 1, {},
+                        ResultSupportTarget::Tensor, 0))
+                   .at("result");
   require(take(dirty.element_count()) == 2,
           "scalar dirty full spatial only selected slot");
   auto overwritten =
       take(Footprint::from_regions({2, 4}, {Region({{0, 2}, {3, 1}})}));
-  require(take(take(cert.transpose(
-                        {0,
-                         static_cast<std::uint32_t>(DependencyRole::Data),
-                         overwritten,
-                         {}}))
-                   .element_count()) == 0,
-          "overwritten base not dirty");
+  require(
+      take(complete.dependencies.potential_dirty(
+               "input1", overwritten, 1, {}, ResultSupportTarget::Tensor, 0))
+          .at("result")
+          .empty(),
+      "overwritten base not dirty");
   auto wrong = inputs;
-  wrong[0].metadata.descriptor.shape[0] = 3;
+  auto wrong_schema = *wrong[0].metadata.result_schema;
+  wrong_schema.tensors[0].descriptor.shape[0] = 3;
+  wrong[0].metadata.result_schema =
+      std::make_shared<const SchemaTemplate>(wrong_schema);
   const auto before = f.document.nodes.size();
   require(
       !format::swizzle_channels(f.document, wrong, {source(1)}, options).ok(),
@@ -421,7 +252,8 @@ void dependencies_and_errors() {
       take(format::replace_channels(f.document, inputs, {}, options));
   auto forwarded = inputs;
   forwarded[0].input = producer;
-  forwarded[0].metadata.descriptor.shape[0] = 3;
+  forwarded[0].metadata.result_schema =
+      std::make_shared<const SchemaTemplate>(wrong_schema);
   auto stale = take(
       format::swizzle_channels(f.document, forwarded, {source(1)}, options));
   f.document.outputs = {{"result", stale.source_node, "values"}};
@@ -436,6 +268,7 @@ void dependencies_and_errors() {
   CancellationSource stop;
   stop.cancel();
   ExecutionContext context(registry);
+  f.bind_to(context);
   require(
       context.execute(compiled.plan, f.bindings, stop.token()).status().code ==
           ErrorCode::Cancelled,
@@ -473,8 +306,8 @@ void regression_boundaries() {
       {replacement(0, 0), replacement(1, 0, 1), replacement(2, 0, 2)},
       options));
   auto result = run(f, edge);
-  auto output =
-      take(decode_tensor_description(result.values.at("result").facets()[0]));
+  auto output = take(decode_tensor_description(
+      result.results.at("result").schema().tensors[0].facets[0]));
   require(output.groups.size() == 2, "explicit group retains unrelated group");
   // Actual generated-node count, not repeated literal occurrence count.
   Fixture limit;
@@ -552,29 +385,32 @@ void dynamic_and_resource() {
   GraphContext graph(f.document);
   auto plan = take(compiler.compile(graph)).plan;
   ExecutionContext context(registry);
+  f.bind_to(context);
   for (std::uint32_t bits : {0x80000000U, 0x7fc01234U, 0x3f000000U}) {
     std::memcpy(f.raw[1].data(), &bits, 4);
-    f.bindings.inputs[1].value = take(Value::create(
-        {ElementType::Float32, {1}}, Region::whole({1}), {0, {4}}, f.raw[1]));
+    f.rebind(1);
     auto result = take(context.execute(plan, f.bindings));
     check_oracle(result, f, 1, {1, {}}, {{1, 0}, {1, 0}},
                  Region::whole({2, 2}));
-    const auto& value = result.values.at("result");
-    require(value.layout().byte_strides == std::vector<std::int64_t>({0, 0}),
-            "generic constant view has scalar-sized zero-stride storage");
+    const auto& value = result.results.at("result");
+    auto window = take(value.acquire_tensor(take(value.descriptor()), 0,
+                                            Region::whole({2, 2})));
+    require(
+        take(window.row_run({0, 0})).data == take(window.row_run({1, 1})).data,
+        "generic constant view has scalar-sized zero-stride storage");
   }
-  Value retained;
+  ResultRef retained;
   {
     ExecutionContext temporary(registry);
-    retained = take(temporary.execute(plan, f.bindings)).values.at("result");
+    f.bind_to(temporary);
+    retained = take(temporary.execute(plan, f.bindings)).results.at("result");
   }
   auto saved_bindings = f.bindings;
   f.bindings.inputs.clear();
   const float half = .5f;
-  require(
-      std::memcmp(retained.bytes().data() + take(retained.byte_address({1, 1})),
-                  &half, sizeof(half)) == 0,
-      "scalar view survives execution context");
+  require(std::memcmp(read(retained, Region({{1, 1}, {1, 1}})).data(), &half,
+                      sizeof(half)) == 0,
+          "scalar view survives execution context");
   f.bindings = saved_bindings;
   Fixture owners;
   owners.add({ElementType::Float32, {2, 4}});
@@ -599,12 +435,10 @@ void dynamic_and_resource() {
   auto copied = run(owners, multi);
   check_oracle(copied, owners, 1, {1, {}, {}}, {{1, 0}, {2, 0}},
                Region::whole({2, 2}));
-  ExecutionContextConfig limited;
-  limited.cpu_workers = 1;
-  limited.managed_resources = ResourceLimits{};
-  limited.managed_resources->maximum_work = 1;
-  ExecutionContext short_work(registry, limited);
-  require(short_work.execute(plan, f.bindings).status().code ==
+  f.bind_to(context);
+  ExecutionOptions work;
+  work.maximum_dependency_work = 1;
+  require(context.execute(plan, f.bindings, {}, work).status().code ==
               ErrorCode::ResourceExhausted,
           "work budget enforced");
   graph.replace(f.document);
@@ -628,8 +462,8 @@ void literals_and_override() {
     options.metadata_mode = "raw";
     auto edge = take(format::swizzle_channels(
         f.document, edit_inputs(f, {{false, 1}}), {literal}, options));
-    auto value = run(f, edge).values.at("result");
-    require(std::memcmp(value.bytes().data() + take(value.byte_address({1, 0})),
+    auto value = run(f, edge).results.at("result");
+    require(std::memcmp(read(value, Region({{1, 1}, {0, 1}})).data(),
                         bits.data(), bits.size()) == 0,
             "typed literal preserves every dtype and Int64 minimum");
   }
@@ -649,7 +483,7 @@ void literals_and_override() {
                                             {{0, {"name", "B"}, {}}}, options));
   auto result = run(f, edge);
   check_oracle(result, f, 1, {1}, {{0, 2}}, Region::whole({2, 1}));
-  require(f.bindings.inputs[0].value.facets().empty(),
+  require(facets(f.bindings.inputs[0].result).empty(),
           "override leaves source unchanged");
   auto unused_plane = inputs;
   unused_plane.push_back(inputs[0]);
@@ -673,7 +507,7 @@ void literals_and_override() {
                   .ok() &&
               bad.document.nodes.empty(),
           "unused scalar shape must be [1]");
-  Value surviving;
+  ResultRef surviving;
   std::vector<std::uint8_t> expected;
   {
     Fixture temporary;
@@ -685,11 +519,10 @@ void literals_and_override() {
         temporary.document,
         edit_inputs(temporary, {{false, 1}, {false, {}, true}}), {source(1)},
         options));
-    surviving = run(temporary, view).values.at("result");
+    surviving = run(temporary, view).results.at("result");
   }
-  require(std::memcmp(
-              surviving.bytes().data() + take(surviving.byte_address({1, 0})),
-              expected.data(), 4) == 0,
+  require(std::memcmp(read(surviving, Region({{1, 1}, {0, 1}})).data(),
+                      expected.data(), 4) == 0,
           "scalar view outlives every input and context owner");
 }
 }  // namespace

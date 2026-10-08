@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "../../examples/numeric_workflow/icc_fixture.hpp"
+#include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
@@ -37,40 +39,23 @@ Value input_value(bool narrow, const std::vector<std::uint64_t>& shape,
     std::memcpy(writer.data() + i * width, &bits[i], width);
   return std::move(writer).publish().take_value();
 }
-Result<Value> run(const Value& input, Parameters parameters, unsigned workers,
-                  ResourceLimits limits = {},
-                  CancellationToken cancellation = {}, bool producer = false,
-                  bool tiled = false) {
+Result<ResultRef> run(const Value& input, Parameters parameters,
+                      unsigned workers, ResourceLimits limits = {},
+                      CancellationToken cancellation = {},
+                      bool producer = false, bool tiled = false) {
   auto registry = make_default_operation_registry(false);
   WorkflowDocument document;
-  document.inputs = {{1, "input", input.descriptor(), input.region(),
-                      input.layout(), input.facets()}};
+  numeric_result_fixture::declare_sources(&document, {input});
   document.nodes = {{1,
                      tiled ? "filter.gaussian_baked64_v1_strict_cpu_tiled"
                            : "filter.gaussian_baked64_v1_strict_cpu_whole",
                      {WorkflowInputReference{1}},
                      std::move(parameters)}};
   document.outputs = {{"output", 1, "output"}};
-  ExecutionBindings bindings{{{"input", input}}};
   if (producer) {
-    OperationDefinition source;
-    source.key = "test.gaussian_input";
-    auto& output = source.traits.outputs[0];
-    output.output_element_type = input.descriptor().element_type;
-    output.shape_rule = OperationShapeRule::Fixed;
-    output.fixed_output_shape = input.descriptor().shape;
-    output.preserve_output_views = true;
-    source.traits.estimated_bytes = input.bytes().size();
-    source.callback = [input](const OperationInvocation&) {
-      return Result<Value>(input);
-    };
-    auto registered = registry->register_operation(std::move(source));
-    if (!registered.ok())
-      return Result<Value>(registered);
-    document.inputs.clear();
-    bindings.inputs.clear();
     document.nodes[0].inputs = {WorkflowNodeOutput{2, "value"}};
-    document.nodes.push_back({2, "test.gaussian_input", {}, {}});
+    document.nodes.push_back(
+        {2, "core.identity", {WorkflowInputReference{1}}, {}});
   }
   registry->freeze();
   GraphContext graph(document);
@@ -78,7 +63,7 @@ Result<Value> run(const Value& input, Parameters parameters, unsigned workers,
   planning.tile_width = planning.tile_height = 2;
   auto compiled = Compiler(registry).compile(graph, planning);
   if (!compiled.ok())
-    return Result<Value>(compiled.status());
+    return Result<ResultRef>(compiled.status());
   ExecutionContextConfig config;
   config.gpu_enabled = false;
   config.cpu_workers = workers;
@@ -87,21 +72,216 @@ Result<Value> run(const Value& input, Parameters parameters, unsigned workers,
   ExecutionOptions options;
   options.dependencies.maximum_work = UINT64_C(1000000000000);
   options.maximum_dependency_work = UINT64_C(1000000000000);
-  auto result =
-      context.execute(compiled.value().plan, bindings, cancellation, options);
-  return result.ok() ? Result<Value>(result.value().values.at("output"))
-                     : Result<Value>(result.status());
+  auto bindings = numeric_result_fixture::bind_sources(
+      context.resource_budget().take_value(), {input});
+  auto result = context.execute(compiled.value().plan, std::move(bindings),
+                                cancellation, options);
+  return result.ok() ? Result<ResultRef>(result.value().results.at("output"))
+                     : Result<ResultRef>(result.status());
 }
-std::uint64_t word(const Value& value, unsigned index) {
+std::uint64_t word(const ResultRef& value, unsigned index) {
   std::uint64_t result = 0;
-  const auto width = Value::element_size(value.descriptor().element_type);
-  std::memcpy(&result, value.bytes().data() + index * width, width);
+  const auto width =
+      Value::element_size(value.schema().tensors[0].descriptor.element_type);
+  std::memcpy(&result,
+              numeric_result_fixture::bytes(value).data() + index * width,
+              width);
   return result;
 }
 double number(std::uint64_t bits) {
   double value;
   std::memcpy(&value, &bits, 8);
   return value;
+}
+int typed_results() {
+  using numeric_result_fixture::take;
+  for (bool image : {false, true}) {
+    ResultRef retained, empty;
+    ColorProfileIdentity identity;
+    std::vector<std::uint8_t> expected;
+    for (bool tiled : {false, true}) {
+      auto registry = make_default_operation_registry();
+      ExecutionContextConfig config;
+      config.cpu_workers = 4;
+      config.gpu_enabled = false;
+      config.managed_resources = ResourceLimits{};
+      ExecutionContext context(registry, config);
+      const auto root = take(context.resource_budget());
+      SchemaTemplate schema;
+      schema.id = image ? "photospider.image" : "test.gaussian.cmyk";
+      ResultTensorSpec tensor;
+      tensor.key = "pixels";
+      tensor.batch_axes = {2, 1};
+      tensor.descriptor = {ElementType::Float32, {3, 5, 4}};
+      tensor.layout.spatial = image;
+      ResourceBindings resources;
+      if (image) {
+        tensor.facets = {take(encode_semantic(rgba_semantics()))};
+      } else {
+        auto bytes = numeric_fixture::fixture();
+        auto profile =
+            take(IccProfile::import({bytes.data(), bytes.size()}, root));
+        identity = profile.identity();
+        resources = take(ResourceBindings::create({profile}, root));
+        ColorArrayDescriptor color;
+        color.model = ColorModel::Cmyk;
+        color.reference = ColorReference::ProfileRelative;
+        color.white.reset();
+        color.profile = identity;
+        tensor.facets = {take(encode_color_array(color))};
+      }
+      schema.tensors.push_back(tensor);
+      const auto shape = tensor.sample_shape();
+      const auto count = take(tensor.sample_count());
+      auto builder = take(ResultBuilder::start(root, schema, "gaussian.typed",
+                                               {}, {}, 2, 2, resources));
+      PS_CHECK(builder
+                   .bind_descriptor_relation(
+                       take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
+                   .ok());
+      std::vector<float> values(count);
+      for (unsigned i = 0; i < count; ++i)
+        values[i] = i % 4 == 3 ? .5F : static_cast<float>(i % 11) / 16;
+      PS_CHECK(
+          builder
+              .publish_tensor(
+                  0, Region::whole(shape),
+                  ByteView(reinterpret_cast<const std::uint8_t*>(values.data()),
+                           count * 4),
+                  take(ResultRelation::cartesian(root, count, {0, 1, 0, 0})),
+                  {true, true, true, true})
+              .ok());
+      auto input = take(builder.seal());
+      WorkflowDocument document;
+      WorkflowInputDeclaration declaration;
+      declaration.id = 1;
+      declaration.name = "input";
+      declaration.result_schema = std::make_shared<SchemaTemplate>(schema);
+      document.inputs.push_back(declaration);
+      auto p = parameters(1, 1);
+      p["x_axis"] = std::int64_t{3};
+      p["y_axis"] = std::int64_t{2};
+      document.nodes = {{1,
+                         tiled ? "filter.gaussian_baked64_v1_strict_cpu_tiled"
+                               : "filter.gaussian_baked64_v1_strict_cpu_whole",
+                         {WorkflowInputReference{1}},
+                         p}};
+      document.outputs = {{"output", 1, "output"}};
+      PlanningOptions planning;
+      planning.tile_height = planning.tile_width = 2;
+      ExecutionBindings bindings{{{"input", input}}};
+      ExecutionOptions options;
+      options.dependencies.maximum_work = UINT64_C(1000000000000);
+      options.maximum_dependency_work = UINT64_C(1000000000000);
+      GraphContext graph(document);
+      auto plan = take(Compiler(registry).compile(graph, planning, resources));
+      retained = take(context.execute(plan.plan, bindings, {}, options))
+                     .results.at("output");
+      auto output_schema = retained.schema();
+      output_schema.publication = schema.publication;
+      PS_CHECK(output_schema.same_schema(schema));
+      const auto actual = numeric_result_fixture::bytes(retained);
+      if (!tiled)
+        expected = actual;
+      PS_CHECK(actual == expected);
+      if (!image)
+        PS_CHECK(retained.resources().icc_profile(identity).ok());
+      if (tiled) {
+        auto frozen = take(context.freeze(plan.plan, bindings));
+        const auto q = take(Footprint::from_regions(
+            shape, {Region({{1, 1}, {0, 1}, {1, 1}, {2, 1}, {1, 1}})}));
+        auto roi = take(context.execute_fragments(frozen, {{"output", q}}, {},
+                                                  options))
+                       .results.at("output");
+        auto facts = take(roi.descriptor());
+        PS_CHECK(take(facts.tensor_coverage(0).element_count()) == 4);
+        for (unsigned c = 0; c < 4; ++c) {
+          std::uint32_t bits = 0;
+          PS_CHECK(roi.read_tensor(facts, 0, {1, 0, 1, 2, c}, &bits, 4).ok());
+          PS_CHECK(
+              !std::memcmp(&bits, expected.data() + ((15 + 7) * 4 + c) * 4, 4));
+        }
+        unsigned data_samples = 0, validation_samples = 0;
+        PS_CHECK(
+            take(roi.tensor_relation(0))
+                .project(q,
+                         [&](ResultSupport support, const Footprint* samples) {
+                           if (!samples)
+                             return Status{ErrorCode::Internal,
+                                           "missing shaped support"};
+                           if (support.roles & 1)
+                             data_samples += take(samples->element_count());
+                           if (support.roles & 4)
+                             validation_samples +=
+                                 take(samples->element_count());
+                           return Status::success();
+                         })
+                .ok());
+        PS_CHECK(data_samples == 9 && validation_samples == 36);
+        for (unsigned poison_index : {0U, (15U + 7U) * 4U}) {
+          auto poisoned_values = values;
+          const std::uint32_t nan = 0x7fc00123;
+          std::memcpy(&poisoned_values[poison_index], &nan, 4);
+          auto poisoned = take(ResultBuilder::start(
+              root, schema, "gaussian.poison", {}, {}, 2, 2, resources));
+          PS_CHECK(poisoned
+                       .bind_descriptor_relation(take(
+                           ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
+                       .ok());
+          PS_CHECK(poisoned
+                       .publish_tensor(
+                           0, Region::whole(shape),
+                           ByteView(reinterpret_cast<const std::uint8_t*>(
+                                        poisoned_values.data()),
+                                    count * 4),
+                           take(ResultRelation::cartesian(root, count,
+                                                          {0, 1, 0, 0})),
+                           {true, true, true, true})
+                       .ok());
+          ExecutionBindings bad_bindings{{{"input", take(poisoned.seal())}}};
+          auto bad_frozen = take(context.freeze(plan.plan, bad_bindings));
+          auto checked = context.execute_fragments(bad_frozen, {{"output", q}},
+                                                   {}, options);
+          if (!poison_index) {
+            PS_CHECK(checked.ok());
+          } else {
+            PS_CHECK(!checked.ok() &&
+                     checked.status().code == ErrorCode::InvalidArgument);
+          }
+          PS_CHECK(
+              context
+                  .execute_fragments(bad_frozen,
+                                     {{"output", take(Footprint::none(shape))}},
+                                     {}, options)
+                  .ok());
+        }
+        empty = take(context.execute_fragments(
+                         frozen, {{"output", take(Footprint::none(shape))}}, {},
+                         options))
+                    .results.at("output");
+      }
+      if (image) {
+        document.nodes.push_back({2,
+                                  "image.split_horizontal",
+                                  {WorkflowNodeOutput{1, "output"}},
+                                  {{"split_x", std::int64_t{2}}}});
+        document.outputs = {{"left", 2, "left"}};
+        GraphContext chain(document);
+        auto compiled = take(Compiler(registry).compile(chain, planning));
+        auto left = take(context.execute(compiled.plan, bindings, {}, options))
+                        .results.at("left");
+        PS_CHECK(left.schema().tensors[0].sample_shape() ==
+                 std::vector<std::uint64_t>({2, 1, 3, 2, 4}));
+      }
+    }
+    PS_CHECK(numeric_result_fixture::bytes(retained) == expected);
+    PS_CHECK(take(empty.descriptor()).tensor_coverage(0).empty());
+    if (!image) {
+      PS_CHECK(retained.resources().icc_profile(identity).ok());
+      PS_CHECK(empty.resources().icc_profile(identity).ok());
+    }
+  }
+  return 0;
 }
 }  // namespace
 int main(int argc, char** argv) {
@@ -131,6 +311,7 @@ int main(int argc, char** argv) {
     }
     return std::cin.eof() ? 0 : 2;
   }
+  PS_CHECK(typed_results() == 0);
   auto input = input_value(true, {1, 3}, {0x3f800000, 0x40000000, 0x40800000});
   const std::array<const char*, 5> boundaries{"constant", "clamp", "wrap",
                                               "reflect_half", "reflect_whole"};
@@ -152,10 +333,19 @@ int main(int argc, char** argv) {
   auto exceptional =
       input_value(true, {1, 3}, {0xff800123, 0x7f800456, 0x80000000});
   auto copied = run(exceptional, parameters(0, 0), 4);
-  PS_CHECK(copied.ok() &&
-           copied.value().copy_bytes() == exceptional.copy_bytes());
+  PS_CHECK(copied.ok() && numeric_result_fixture::bytes(copied.value()) ==
+                              exceptional.copy_bytes());
   auto arithmetic = run(exceptional, parameters(1, 0), 4);
   PS_CHECK(arithmetic.ok() && word(arithmetic.value(), 0) == 0x7fc00456);
+  auto singleton_parameters = parameters(1, 0);
+  singleton_parameters["sigma_x"] = .01;
+  for (bool tiled : {false, true}) {
+    auto singleton =
+        run(exceptional, singleton_parameters, 4, {}, {}, false, tiled);
+    PS_CHECK(singleton.ok() && word(singleton.value(), 0) == 0xffc00123 &&
+             word(singleton.value(), 1) == 0x7fc00456 &&
+             word(singleton.value(), 2) == 0x80000000);
+  }
   for (const auto* name : {"sigma_x", "sigma_y", "radius_x", "boundary"}) {
     auto p = parameters();
     p.erase(name);
@@ -185,16 +375,19 @@ int main(int argc, char** argv) {
   auto serial = run(batch, batch_parameters, 1);
   auto parallel = run(batch, batch_parameters, 4);
   PS_CHECK(serial.ok() && parallel.ok());
-  PS_CHECK(serial.value().copy_bytes() == parallel.value().copy_bytes());
+  PS_CHECK(numeric_result_fixture::bytes(serial.value()) ==
+           numeric_result_fixture::bytes(parallel.value()));
   for (unsigned plane = 0; plane < 2; ++plane) {
     std::vector<std::uint64_t> slice(batch_bits.begin() + plane * 35,
                                      batch_bits.begin() + (plane + 1) * 35);
     auto separate =
         run(input_value(false, {5, 7}, slice), parameters(2, 1, "wrap"), 4);
     PS_CHECK(separate.ok());
-    PS_CHECK(std::memcmp(separate.value().bytes().data(),
-                         parallel.value().bytes().data() + plane * 35 * 8,
-                         35 * 8) == 0);
+    PS_CHECK(
+        std::memcmp(numeric_result_fixture::bytes(separate.value()).data(),
+                    numeric_result_fixture::bytes(parallel.value()).data() +
+                        plane * 35 * 8,
+                    35 * 8) == 0);
   }
   std::vector<std::uint8_t> reversed_bytes(80);
   const std::uint32_t reversed_words[] = {0x40800000, 0x40000000, 0x3f800000};

@@ -9,27 +9,26 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
 clarification_status: complete
-proposed_operation_keys:
+registered_operation_keys:
   - alpha.set_strict
   - alpha.set_accelerated_apple_silicon
   - alpha.set_accelerated_x86_64
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-05A: set or add an internal alpha plane
 
-CPU implementation (2026-09-25): the source package now includes this member/family,
-its public C++ authoring API, correctness fixtures and a
-[performance/review driver](../../../../examples/alpha_performance/README.md).
-`Proposed`/D1 still describe design-review status, not missing executable code.
-Apple Silicon and FreeBSD performance/portability require target-machine review.
+The default registry provides `alpha.set_<profile>` for the three CPU profiles.
+The operation uses Result ABI 2; the specification remains Proposed. Focused native alpha tests and fourteen small benchmark smoke cases pass; no full matrix is claimed. It preserves
+straight color samples while assigning or inserting the selected group's alpha
+channel.
 
 
 Inherit the complete [FMT-05 contract](FMT-05_alpha_editing_contract.md).
-These are implemented native CPU entries, not aliases of the retired operations.
-This member preserves straight color bytes and establishes the selected group's
-alpha at a declared channel inside the result tensor.
+The key takes one or two single-tensor Results without fields. It preserves straight
+color bytes and establishes the selected group's alpha at a declared channel
+inside the result tensor. Nonscalar batch prefixes must match exactly; scalar
+alpha is unbatched `[1]`. The complete sample rank, including batch and cell axes,
+is at most 8 and full sample count is at most 2^40.
 
 ## Ports and static parameters
 
@@ -98,12 +97,14 @@ channels read only their original mapped samples. No old-alpha read is required
 unless it is explicitly selected as a source or retained/requested elsewhere.
 A's new-alpha dirty map includes the validation dependency of selected colors.
 
-Auto/view/materialize obey the family. A view still checks these required samples
-before publishing success. Failed validation cannot become a successful copy.
-External owners cannot be silently combined into a multi-owner image. Only
+Auto/view/materialize obey the family. A generic view requires the complete
+declared map to have one `CpuStorage` owner, one affine address expression and
+in-bounds spans. Spatial views are limited to an internal identity map. A view
+still performs required sample validation before success. Auto copies only after
+physical `ViewUnavailable`; validation failures retain their status and diagnostic. Only
 requested output coverage is published; alpha read for R validation does not by
-itself publish the output alpha plane. Use the family's resource, bounded-copy,
-cancellation, cache and diagnostic rules; arithmetic profiles do not relax copies
+itself publish the output alpha plane. Materialization publishes transactionally under Root budgets and cancellation;
+Empty observations retain no run payload state. Use the family's diagnostic rules; arithmetic profiles do not relax copies
 or finite/range predicates.
 
 ## Independent acceptance
@@ -124,6 +125,6 @@ gives shape [2,2] with rows [7,0.5] and [9,0.5].
 Request only a selected color and change scalar alpha from valid to invalid:
 color bytes are unchanged but the observation must fail revalidation. Test view
 and materialize equivalence, ViewUnavailable, source failure and cancellation.
-Conceptual workflow: image + explicit alpha source -> A -> straight image.
-Implementation must provide actual public commands and sample/metadata checks;
-these fixtures do not claim an implemented registry entry.
+Conceptual workflow: image + explicit alpha source -> A -> image with the
+selected alpha relationship. The registered key is `alpha.set_<profile>`; the
+specification remains Proposed.

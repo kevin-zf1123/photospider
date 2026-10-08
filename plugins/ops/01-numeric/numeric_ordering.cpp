@@ -14,6 +14,7 @@
 
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_quantile.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/stable_order.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/data/semantic.hpp"
@@ -52,120 +53,95 @@ struct OrderingState final {
   numeric_ops::ExactQuantile arithmetic;
   explicit OrderingState(SequenceProfile profile) : arithmetic(profile) {}
 };
-Result<Value> execute_ordering(const OperationInvocation& call, bool quantile,
-                               SequenceProfile profile) {
-  using Answer = Result<Value>;
-  try {
-    const auto* budget = resource_internal::metadata_budget();
-    const std::function<Status(std::uint64_t)> work =
-        [&](std::uint64_t amount) {
-          if (call.cancellation.cancelled())
-            return Status{ErrorCode::Cancelled, {}};
-          return budget ? budget->consume({amount}) : Status::success();
-        };
-    auto status = work(1);
-    if (!status.ok())
-      return Answer(status);
-    const auto& input = call.inputs[0];
-    const auto& shape = input.descriptor().shape;
-    auto selected = ordering_axis(input.descriptor(), call.parameters);
-    if (!selected.ok())
-      return Answer(selected.status());
-    const auto axis = selected.value();
+struct OrderingKernel final {
+  bool quantile;
+  SequenceProfile profile;
+  OrderingKernel(bool quantile, SequenceProfile profile)
+      : quantile(quantile), profile(profile) {}
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    using namespace numeric_ops;  // NOLINT(build/namespaces)
+    if (writers.size() != 1)
+      return {ErrorCode::OperationFailed,
+              "ordering requires one packed writer"};
+    const auto& input = phase.tensors->at({0, 0});
+    const auto shape = input.spec().sample_shape();
+    const auto type = input.spec().descriptor.element_type;
+    const auto& output = phase.query.output.result_schema->tensors[0];
+    const auto target = output.descriptor.element_type;
+    const auto axis =
+        math_take(ordering_axis({type, shape}, phase.query.parameters));
     const auto count = shape[axis];
-    const auto type = input.descriptor().element_type;
-    auto output_shape = shape;
-    auto target = call.output_index == 1 ? ElementType::Int64 : type;
-    numeric_ops::QuantilePosition position;
-    if (quantile) {
-      output_shape[axis] = 1;
-      target = std::get<std::string>(call.parameters.at("dtype")) == "float32"
-                   ? ElementType::Float32
-                   : ElementType::Float64;
-      if (count > 1) {
-        const auto& probability = call.inputs[1];
-        auto at = probability.byte_address({0});
-        if (!at.ok())
-          return Answer(at.status());
-        std::uint64_t bits = 0;
-        std::memcpy(&bits, probability.bytes().data() + at.value(),
-                    Value::element_size(probability.descriptor().element_type));
-        auto found = numeric_ops::quantile_position(
-            bits, probability.descriptor().element_type, count);
-        if (!found.ok()) {
-          auto failure = found.status();
-          std::array<char, 128> message{};
-          std::snprintf(message.data(), message.size(),
-                        "InvalidQuantileProbability: port=1 bits=0x%016" PRIx64
-                        "; require finite q in [0,1]",
-                        bits);
-          failure.message = message.data();
-          failure.detail.scope = FailureScope::Run;
-          return Answer(failure);
-        }
-        position = found.value();
+    QuantilePosition position;
+    if (quantile && count > 1) {
+      MathTensorReader probability(phase.tensors->at({1, 0}),
+                                   phase.query.cancellation);
+      const auto bits = probability.bits({0});
+      auto found = quantile_position(
+          bits, phase.tensors->at({1, 0}).spec().descriptor.element_type,
+          count);
+      if (!found.ok()) {
+        auto failure = found.status();
+        std::array<char, 128> message{};
+        std::snprintf(message.data(), message.size(),
+                      "InvalidQuantileProbability: port=1 bits=0x%016" PRIx64
+                      "; require finite q in [0,1]",
+                      bits);
+        failure.message = message.data();
+        failure.detail.scope = FailureScope::Run;
+        return failure;
       }
+      position = found.value();
     }
-    auto scratch = call.allocator.allocate(sizeof(OrderingState));
-    if (!scratch.ok())
-      return Answer(scratch.status());
-    auto buffer = scratch.take_value();
+    auto buffer = math_take(phase.allocator.allocate(sizeof(OrderingState)));
     std::unique_ptr<OrderingState, void (*)(OrderingState*)> state(
         new (buffer.data()) OrderingState(profile),
         [](OrderingState* item) { item->~OrderingState(); });
-    auto allocated = MutableValue::allocate({target, output_shape},
-                                            call.output_region, call.allocator);
-    if (!allocated.ok())
-      return Answer(allocated.status());
-    auto output = allocated.take_value();
-    std::vector<std::uint64_t> coordinate(shape.size(), 0),
-        source(shape.size(), 0);
-    std::uint64_t lines = 1;
-    for (std::size_t j = 0; j < shape.size(); ++j)
-      if (j != axis)
-        lines *= shape[j];
-    const auto read = [&](std::uint64_t index, std::uint64_t* bits) {
+    MathTensorReader reader(input, phase.query.cancellation);
+    MathTensorWriter writer(writers[0]);
+    std::vector<uint64_t> coordinate(shape.size(), 0), source(shape.size(), 0);
+    uint64_t lines = 1;
+    for (size_t axis_index = 0; axis_index < shape.size(); ++axis_index)
+      if (axis_index != axis)
+        lines *= shape[axis_index];
+    const auto& work = phase.consume_work;
+    auto status = work(1);
+    if (!status.ok())
+      return status;
+    const auto read = [&](uint64_t index, uint64_t* bits) {
       auto charged = work(shape.size() + 1);
       if (!charged.ok())
         return charged;
       source = coordinate;
       source[axis] = index;
-      auto at = input.byte_address(source);
-      if (!at.ok())
-        return at.status();
-      *bits = 0;
-      std::memcpy(bits, input.bytes().data() + at.value(),
-                  Value::element_size(type));
+      *bits = reader.bits(source);
       return Status::success();
     };
     for (std::uint64_t line = 0; line < lines; ++line) {
       auto permutation =
           state->ordering.build(count, type, profile, work, read);
       if (!permutation.ok())
-        return Answer(permutation.status());
+        return (permutation.status());
       const auto& indices = permutation.value();
       const auto store = [&](std::uint64_t bits) {
-        std::uint64_t offset = 0;
-        for (std::size_t j = 0; j < output_shape.size(); ++j)
-          offset = offset * output_shape[j] + coordinate[j];
         std::array<std::uint64_t, 4> replicas{};
         numeric_ops::select_words(replicas.data(), bits, bits, 1, profile);
-        std::memcpy(output.data() + offset * Value::element_size(target),
-                    replicas.data(), Value::element_size(target));
+        std::memcpy(writer.address(coordinate), replicas.data(),
+                    Value::element_size(target));
         return work(1);
       };
       if (!quantile) {
         for (std::uint64_t j = 0; j < count; ++j) {
           coordinate[axis] = j;
           std::uint64_t bits = indices[j];
-          if (call.output_index == 0) {
+          if (phase.query.output_index == 0) {
             status = read(indices[j], &bits);
             if (!status.ok())
-              return Answer(status);
+              return (status);
           }
           status = store(bits);
           if (!status.ok())
-            return Answer(status);
+            return (status);
         }
       } else {
         std::uint64_t nan_begin = count;
@@ -176,7 +152,7 @@ Result<Value> execute_ordering(const OperationInvocation& call, bool quantile,
             std::uint64_t bits = 0;
             status = read(indices[middle], &bits);
             if (!status.ok())
-              return Answer(status);
+              return (status);
             if (numeric_ops::BinaryParts::decode(bits,
                                                  type == ElementType::Float32)
                     .nan)
@@ -190,7 +166,7 @@ Result<Value> execute_ordering(const OperationInvocation& call, bool quantile,
         if (nan_begin < count) {
           status = read(indices[nan_begin], &bits);
           if (!status.ok())
-            return Answer(status);
+            return (status);
           bits = numeric_ops::converted_nan(bits, type, target);
         } else {
           std::uint64_t a = 0, b = 0;
@@ -198,16 +174,16 @@ Result<Value> execute_ordering(const OperationInvocation& call, bool quantile,
           if (status.ok() && position.fractional())
             status = read(indices[position.index + 1], &b);
           if (!status.ok())
-            return Answer(status);
+            return (status);
           auto calculated =
               state->arithmetic.finish(a, b, type, target, position, work);
           if (!calculated.ok())
-            return Answer(calculated.status());
+            return (calculated.status());
           bits = calculated.value();
         }
         status = store(bits);
         if (!status.ok())
-          return Answer(status);
+          return (status);
       }
       coordinate[axis] = 0;
       for (std::size_t j = shape.size(); j; --j)
@@ -217,15 +193,10 @@ Result<Value> execute_ordering(const OperationInvocation& call, bool quantile,
           coordinate[j - 1] = 0;
         }
     }
-    status = work(1);
-    return status.ok() ? std::move(output).publish() : Answer(status);
-  } catch (const std::bad_alloc&) {
-    return Answer(Status{ErrorCode::ResourceExhausted,
-                         {},
-                         FailureReason::CapacityLimit,
-                         {FailureOrigin::Resource, FailureScope::Run}});
+    return work(1);
   }
-}
+};
+using OrderingProgram = numeric_ops::WholeTensorProgram<OrderingKernel>;
 OperationDefinition ordering_operation(const std::string& key, bool quantile,
                                        SequenceProfile profile) {
   OperationDefinition operation;
@@ -233,6 +204,10 @@ OperationDefinition ordering_operation(const std::string& key, bool quantile,
   auto& traits = operation.traits;
   traits.input_count = quantile ? 2 : 1;
   traits.input_schema.resize(traits.input_count);
+  for (auto& input : traits.input_schema) {
+    input.kind = OperationPortKind::Result;
+    input.element_type_mask = 15;
+  }
   if (quantile) {
     traits.input_schema[1].rank = 1;
     traits.input_schema[1].element_type_mask = 12;
@@ -245,24 +220,26 @@ OperationDefinition ordering_operation(const std::string& key, bool quantile,
         {"dtype", OperationParameterType::String});
   traits.outputs.resize(quantile ? 1 : 2);
   for (std::size_t j = 0; j < traits.outputs.size(); ++j) {
-    auto& output = traits.outputs[j];
-    output.key = j ? "indices" : "values";
-    output.shape_rule = OperationShapeRule::Fixed;
-    output.fixed_output_shape = {1};
-    output.region_rule = OperationRegionRule::Whole;
-    output.requires_dense_output = true;
+    numeric_ops::set_whole_tensor_output(
+        traits, j ? ElementType::Int64 : ElementType::Float64,
+        sizeof(OrderingProgram), j);
+    traits.outputs[j].key = j ? "indices" : "values";
   }
   operation.specialize_metadata = [quantile, profile](const auto& inputs,
                                                       const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
-    auto axis = ordering_axis(inputs[0].descriptor, parameters);
+    const auto& source = inputs[0].result_schema->tensors[0];
+    const ValueDescriptor descriptor{source.descriptor.element_type,
+                                     source.sample_shape()};
+    auto axis = ordering_axis(descriptor, parameters);
     if (!axis.ok())
       return Answer(axis.status());
-    auto shape = inputs[0].descriptor.shape;
-    auto type = inputs[0].descriptor.element_type;
+    auto shape = descriptor.shape;
+    auto type = descriptor.element_type;
     if (quantile) {
-      if (inputs[1].descriptor.shape != std::vector<std::uint64_t>{1})
+      if (inputs[1].result_schema->tensors[0].sample_shape() !=
+          std::vector<std::uint64_t>{1})
         return Answer(shape_error("quantile q requires scalar [1]"));
       const auto& dtype = std::get<std::string>(parameters.at("dtype"));
       if (dtype != "float32" && dtype != "float64")
@@ -275,15 +252,20 @@ OperationDefinition ordering_operation(const std::string& key, bool quantile,
     if (!available.ok())
       return Answer(available);
     std::vector<OperationOutputSpecialization> results(quantile ? 1 : 2);
-    results[0].metadata.descriptor = {type, shape};
+    results[0].metadata.result_schema = std::make_shared<const SchemaTemplate>(
+        numeric_ops::numeric_tensor_schema(type, shape));
     if (!quantile)
-      results[1].metadata.descriptor = {ElementType::Int64, shape};
-    if (quantile && inputs[0].descriptor.shape[axis.value()] == 1)
+      results[1].metadata.result_schema =
+          std::make_shared<const SchemaTemplate>(
+              numeric_ops::numeric_tensor_schema(ElementType::Int64, shape));
+    if (quantile && descriptor.shape[axis.value()] == 1)
       results[0].input_indices = std::vector<std::uint32_t>{0};
     return Answer(std::move(results));
   };
-  operation.callback = [quantile, profile](const OperationInvocation& call) {
-    return execute_ordering(call, quantile, profile);
+  operation.start_result = [quantile, profile](const auto&,
+                                               const auto& allocator) {
+    return ResultContinuation::make<OrderingProgram>(allocator, quantile,
+                                                     profile);
   };
   return operation;
 }

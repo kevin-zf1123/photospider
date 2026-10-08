@@ -10,8 +10,8 @@
 
 #include "03-generation/perlin_exact.hpp"
 #include "03-generation/perlin_spirv.hpp"
+#include "execution/result_native.hpp"
 #include "perlin_shader.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/execution/resource_allocator.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -62,17 +62,22 @@ VulkanArguments pack_vulkan(const Arguments& args) {
   return result;
 }
 }  // namespace
-Result<Value> execute_perlin_gpu(const OperationInvocation& call) {
-  using Answer = Result<Value>;
-  const auto* api = call.gpu;
-  if (!api || call.backend != Backend::Gpu)
+Result<MutableBuffer> execute_perlin_gpu(const ResultProgramPhase& phase,
+                                         const ResultTensorReadWindow& window) {
+  using Answer = Result<MutableBuffer>;
+  const auto* api = phase.gpu;
+  if (!api || phase.query.backend != Backend::Gpu)
     return Answer(Status{ErrorCode::BackendUnavailable,
                          "Perlin requires native GPU services"});
-  const bool vulkan = api->backend == PS_GPU_BACKEND_VULKAN_V11;
-  if (!vulkan && api->backend != PS_GPU_BACKEND_METAL_V11)
+  const bool vulkan = api->backend == PS_GPU_BACKEND_VULKAN_V1;
+  if (!vulkan && api->backend != PS_GPU_BACKEND_METAL_V1)
     return Answer(Status{ErrorCode::BackendUnavailable,
                          "Perlin native backend is unsupported"});
-  const auto& input = call.inputs[0];
+  auto uploaded = execution_internal::ResultNativeScope::input(
+      window, phase.consume_work, phase.query.cancellation);
+  if (!uploaded.ok())
+    return Answer(uploaded.status());
+  const auto input = uploaded.take_value();
   const auto width = Value::element_size(input.descriptor().element_type);
   Arguments args{};
   args.input_narrow = width == 4;
@@ -85,13 +90,12 @@ Result<Value> execute_perlin_gpu(const OperationInvocation& call) {
     args.origin[axis] =
         input.layout().origin.empty() ? 0 : input.layout().origin[axis];
   }
-  const auto* budget = resource_internal::metadata_budget();
   const auto consume = [&](std::uint64_t amount) {
-    if (call.cancellation.cancelled())
+    if (phase.query.cancellation.cancelled())
       return Status{ErrorCode::Cancelled, "Perlin GPU cancelled"};
-    return budget ? budget->consume({amount}) : Status::success();
+    return phase.consume_work(amount);
   };
-  const auto count = call.output_region.element_count().value();
+  const auto count = input.region().element_count().value() / 3;
   unsigned q = 0;
   // Pure admission: decode the immutable input bits to choose limb capacity
   // and bound device work. All polynomial and output rounding runs on device.
@@ -122,24 +126,23 @@ Result<Value> execute_perlin_gpu(const OperationInvocation& call) {
   }
   const unsigned words = q <= 31 ? 16 : q <= 63 ? 32 : 544;
   const auto batch = std::min<std::uint64_t>(count, q <= 63 ? 256 : 4);
-  auto descriptor = input.descriptor();
-  descriptor.shape.pop_back();
-  const auto dtype = call.parameters.find("dtype");
-  const bool narrow = dtype != call.parameters.end() &&
-                      std::get<std::string>(dtype->second) == "float32";
-  descriptor.element_type =
-      narrow ? ElementType::Float32 : ElementType::Float64;
+  const bool narrow =
+      phase.query.output.result_schema->tensors[0].descriptor.element_type ==
+      ElementType::Float32;
+  auto charged = consume(count * (narrow ? 4 : 8));
+  if (!charged.ok())
+    return Answer(charged);
   auto allocated =
-      MutableValue::allocate(descriptor, call.output_region, call.allocator);
+      execution_internal::ResultNativeScope::output(count * (narrow ? 4 : 8));
   if (!allocated.ok())
     return Answer(allocated.status());
   auto output = allocated.take_value();
   if (!count)
-    return std::move(output).publish();
+    return Answer(std::move(output));
   auto status = consume(batch * 17 * words);
   if (!status.ok())
     return Answer(status);
-  auto made = call.allocator.allocate(batch * 17 * words * 4);
+  auto made = phase.allocator.allocate(batch * 17 * words * 4);
   if (!made.ok())
     return Answer(made.status());
   auto scratch = made.take_value();
@@ -150,21 +153,21 @@ Result<Value> execute_perlin_gpu(const OperationInvocation& call) {
       api->buffer(api->context, scratch.data(), scratch.size(), 1, &tokens[2]))
     return Answer(
         Status{ErrorCode::OperationFailed, "Perlin GPU binding failed"});
-  const ps_gpu_buffer_binding_v11 bindings[] = {
-      {sizeof(ps_gpu_buffer_binding_v11), 0, tokens[0], 0, input.bytes().size(),
+  const ps_gpu_buffer_binding_v1 bindings[] = {
+      {sizeof(ps_gpu_buffer_binding_v1), 0, tokens[0], 0, input.bytes().size(),
        0},
-      {sizeof(ps_gpu_buffer_binding_v11), 1, tokens[1], 0, output.size(), 1},
-      {sizeof(ps_gpu_buffer_binding_v11), 2, tokens[2], 0, scratch.size(), 1}};
+      {sizeof(ps_gpu_buffer_binding_v1), 1, tokens[1], 0, output.size(), 1},
+      {sizeof(ps_gpu_buffer_binding_v1), 2, tokens[2], 0, scratch.size(), 1}};
   args.words = words;
   args.output_narrow = narrow;
-  ps_gpu_dispatch_v11 command{};
+  ps_gpu_dispatch_v1 command{};
   command.struct_size = sizeof(command);
   command.source =
       vulkan ? reinterpret_cast<const char*>(generation_ops::kPerlinSpirv)
              : generation_ops::kPerlinShader;
   command.source_size = vulkan ? sizeof(generation_ops::kPerlinSpirv)
                                : sizeof(generation_ops::kPerlinShader) - 1;
-  command.code_format = vulkan ? PS_GPU_CODE_SPIRV_V11 : PS_GPU_CODE_MSL_V11;
+  command.code_format = vulkan ? PS_GPU_CODE_SPIRV_V1 : PS_GPU_CODE_MSL_V1;
   command.entry = "perlin_exact";
   command.entry_size = 12;
   command.buffers = bindings;
@@ -185,7 +188,7 @@ Result<Value> execute_perlin_gpu(const OperationInvocation& call) {
     return Answer(status);
   std::array<Arguments, maximum_cohort> arguments{};
   std::array<VulkanArguments, maximum_cohort> vulkan_arguments;
-  std::array<ps_gpu_dispatch_v11, maximum_cohort> commands{};
+  std::array<ps_gpu_dispatch_v1, maximum_cohort> commands{};
   for (std::uint64_t begin = 0; begin < count;) {
     unsigned issued = 0;
     const unsigned cohort = q <= 63 ? maximum_cohort : 1;
@@ -211,6 +214,6 @@ Result<Value> execute_perlin_gpu(const OperationInvocation& call) {
                            "Perlin native GPU dispatch failed"});
   }
   status = consume(0);
-  return status.ok() ? std::move(output).publish() : Answer(status);
+  return status.ok() ? Answer(std::move(output)) : Answer(status);
 }
 }  // namespace ps::plugin_internal

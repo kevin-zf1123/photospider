@@ -13,13 +13,18 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+repository_commit: current working tree
 ---
 
 # NUM-10D: scatter_sum
+
+The strict key follows its exact numeric reference. Accelerated floating
+results follow the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md)
+where arithmetic applies; raw copies and discrete results remain exact.
+
+Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
+registration, shared execution and acceptance requirements. The rules below
+specify the NUM-10 behavior.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -31,12 +36,15 @@ Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
-Inherit the [scatter contract](NUM-10_scatter_contract.md) in full: base/indices/
-updates port order, static axis, same value dtype/non-axis dimensions, four
-supported dtypes, generic dense output, global index validation, numerical contributor
-selection, index invalidation, errors, resources and immutable ownership. Integer
-results remain exact; accelerated floating results obey the shared final FP32
-bound. Input base is never modified.
+Inherit the [scatter contract](NUM-10_scatter_contract.md) for ports, shapes,
+Whole demand, index validation, storage and shared exceptional-value rules.
+Every input is a Result with exactly one tensor member at an unrestricted key;
+its `sample_shape()` includes batch axes. The `values` output is a Result using
+`photospider.tensor` / `samples`, with full ordinary output shape and no facets
+or batch topology. Nonempty demand reads complete `base`, `indices` and `updates`
+with data, validation and descriptor support (role 13); Empty demand reads no
+payload and performs no sample arithmetic. The kernel computes the complete
+output before consumer projection. The base is immutable.
 
 ## Update semantics
 
@@ -47,11 +55,11 @@ is based only on the final result; floating overflow returns signed infinity.
 Use an exact accumulator or certified equivalent, with actual limb/work capacity
 charged to host budgets. No unordered floating atomic accumulation is allowed.
 
-If no update matches, copy base without arithmetic, including sNaN bits. For
-aggregate variants with matching updates, use the shared exceptional-value
-priority and zero rules. Whole reads and validates complete base/updates/indices, while only the
-specified contributors enter arithmetic. Unselected upstream/typed failures
-can fail the Run. The complete output is computed before consumer projection.
+If no update matches, copy base without arithmetic, including signaling-NaN
+bits. For aggregate variants with matching updates, use the shared exceptional
+value priority and zero rules. Only matching contributors enter arithmetic, but
+an upstream or typed-validation failure from any active input can fail Whole
+preparation.
 
 ## Acceptance and implementation status
 
@@ -66,7 +74,9 @@ For Int64, base=INT64_MAX with matching updates [1,-1] must return INT64_MAX
 without a partial-sum overflow failure. The same grouping principle applies to
 finite floating cancellation; compare exact sums with one final rounding.
 
-All formal profile keys use CPU Whole. Current public workflows, independent
-coordinate/contributor/Fraction oracles, failure/resource checks and performance
-are in [NUM-10 Whole execution](../indexing-whole.md). Earlier 2026-09-14
-regional strict/Apple/WSL and installed checks predate this migration.
+The public workflow checks all four scatter variants, exact cancellation and
+final integer overflow. The existing `test_numeric_result_math` integration
+fixture contains additional scatter cases; it was not rerun for this Result
+migration and does not establish a complete dtype/backend matrix. See
+[NUM-10 Whole execution](../indexing-whole.md) for runnable commands and
+evidence boundaries.

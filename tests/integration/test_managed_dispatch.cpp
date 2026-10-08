@@ -1,111 +1,163 @@
 #include <cstring>
+#include <iostream>
 #include <memory>
 #include <utility>
+#include <vector>
 
+#include "../../examples/atom_outcomes_workflow/operations.hpp"
 #include "photospider/photospider.hpp"
+#include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
+using multi_result::check;
+using multi_result::take;
 struct Counts {
-  unsigned start = 0, poll = 0, callback = 0, source = 0;
+  unsigned start = 0, poll = 0, source = 0;
 };
 struct State {
   Counts* counts;
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
+  bool input, requested = false;
+  State(Counts* counts, bool input) : counts(counts), input(input) {}
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     ++counts->poll;
-    auto made =
-        MutableValue::allocate(phase.query.output.descriptor,
-                               phase.query.outputs.boxes()[0], phase.allocator);
-    if (!made.ok())
-      return Result<DependencyPoll>(made.status());
-    auto output = made.take_value();
-    const double v = 19;
-    std::memcpy(output.data(), &v, 8);
-    auto value = std::move(output).publish().take_value();
-    auto fragments = ValueFragments::create(phase.query.output.descriptor, {},
-                                            phase.query.outputs, {value});
-    return fragments.ok() ? Result<DependencyPoll>(fragments.take_value())
-                          : Result<DependencyPoll>(fragments.status());
+    if (input && !requested) {
+      requested = true;
+      ResultProgramNeed need;
+      need.tensors.push_back({0, 0, take(Footprint::all({1})), 1});
+      return Result<ResultProgramPoll>(std::move(need));
+    }
+    if (input) {
+      double number = 0;
+      check(phase.read_tensor(0, 0, {0}, &number, sizeof(number)));
+      if (number != 7)
+        return Result<ResultProgramPoll>(
+            Status{ErrorCode::Internal, "source read"});
+    }
+    auto builder = take(ResultBuilder::start(
+        phase.resources, *phase.query.output.result_schema,
+        phase.query.semantic_key, {},
+        std::vector<std::uint64_t>(phase.association->begin(),
+                                   phase.association->end())));
+    check(builder.bind_descriptor_relation(
+        take(ResultRelation::cartesian(phase.resources, 1, {}))));
+    const double number = 19;
+    check(builder.publish_tensor(
+        0, Region::whole({1}),
+        {reinterpret_cast<const std::uint8_t*>(&number), sizeof(number)},
+        take(ResultRelation::cartesian(
+            phase.resources, 1,
+            input ? ResultSupport{0, 1, 0, 1, ResultSupportTarget::Tensor, 0}
+                  : ResultSupport{})),
+        {true, true, true, true}));
+    return Result<ResultProgramPoll>(
+        ResultPublication{take(builder.seal()), true});
   }
 };
+struct JointState {
+  Counts* counts;
+  Result<ResultProgramPoll> member(const ResultProgramPhase& phase) {
+    return Result<ResultProgramPoll>(atom_result::publish(phase, 19, 0, false));
+  }
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    ++counts->poll;
+    return member(phase);
+  }
+  Result<ResourceVector<ResultJointOutcome>> poll(
+      const ResultJointPhase& phase) {
+    ++counts->poll;
+    ResourceVector<ResultJointOutcome> replies;
+    for (const auto* item : phase.members)
+      replies.push_back({take(result_atom_key(item->query)), member(*item)});
+    return Result<ResourceVector<ResultJointOutcome>>(std::move(replies));
+  }
+};
+OperationDefinition operation(Counts* counts, bool input) {
+  OperationDefinition op;
+  op.key = "dispatch_probe";
+  op.traits.cacheable = false;
+  op.traits.input_count = input ? 1 : 0;
+  op.traits.input_schema.resize(op.traits.input_count);
+  if (input) {
+    op.traits.input_schema[0].kind = OperationPortKind::Result;
+    op.traits.input_schema[0].tensor_key = "number";
+  }
+  op.traits.outputs = {multi_result::output("value")};
+  op.traits.outputs[0].region_rule = OperationRegionRule::Whole;
+  op.traits.outputs[0].continuation_bytes = sizeof(State);
+  op.start_result = [counts, input](const auto&, const auto& allocator) {
+    ++counts->start;
+    return ResultContinuation::make<State>(allocator, counts, input);
+  };
+  return op;
+}
 int stages(unsigned mode, std::uint64_t maximum, std::uint64_t queue) {
   Counts count;
   auto registry = std::make_shared<OperationRegistry>();
-  OperationDefinition op;
-  op.key = "dispatch_probe";
-  auto& out = op.traits.outputs[0];
-  out.output_element_type = ElementType::Float64;
-  out.shape_rule = OperationShapeRule::Fixed;
-  out.fixed_output_shape = {1};
-  if (mode == 0 || mode == 3) {
-    if (mode == 3) {
-      op.traits.input_count = 1;
-      op.traits.input_schema.resize(1);
-    }
-    op.callback = [&](const OperationInvocation& call) {
-      ++count.callback;
-      auto made = MutableValue::allocate({ElementType::Float64, {1}},
-                                         Region::whole({1}), call.allocator);
-      if (!made.ok())
-        return Result<Value>(made.status());
-      auto bytes = made.take_value();
-      const double v = 19;
-      std::memcpy(bytes.data(), &v, 8);
-      return std::move(bytes).publish();
-    };
-  } else {
-    out.region_rule = OperationRegionRule::Dependency;
-    out.dependency_version = 1;
-    out.continuation_bytes = sizeof(State);
-    out.maximum_dependency_stages = 4;
-    out.failure_delivery = FailureDelivery::PerAtomOutcome;
-    op.start_dependency = [&](const DependencyQuery&,
-                              const BufferAllocator& allocator) {
+  auto op = operation(&count, mode == 1 || mode == 3);
+  if (mode == 1)
+    op.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  if (mode == 2) {
+    op = atom_result::operation(0, "dispatch_probe");
+    op.traits.cacheable = false;
+    op.traits.input_count = 0;
+    op.traits.input_schema.clear();
+    op.traits.outputs[0].result_schema = atom_result::schema(1);
+    op.traits.outputs[0].continuation_bytes = sizeof(JointState);
+    op.traits.joint_continuation_bytes = sizeof(JointState);
+    op.start_result = [&](const auto&, const auto& allocator) {
       ++count.start;
-      return DependencyContinuation::make<State>(allocator, State{&count});
+      return ResultContinuation::make<JointState>(allocator,
+                                                  JointState{&count});
+    };
+    op.start_result_joint = [&](const auto&, const auto& allocator) {
+      ++count.start;
+      return ResultJointContinuation::make<JointState>(allocator,
+                                                       JointState{&count});
     };
   }
-  PS_CHECK(registry->register_operation(std::move(op)).ok());
-  PS_CHECK(registry->freeze().ok());
+  check(registry->register_operation(std::move(op)));
+  if (mode == 3) {
+    auto source = operation(&count, false);
+    source.key = "source";
+    source.traits.outputs[0].continuation_bytes = sizeof(multi_result::Program);
+    source.traits.workspace_bytes = 8;
+    source.start_result = [&](const auto&, const auto& allocator) {
+      ++count.source;
+      return ResultContinuation::make<multi_result::Program>(allocator, -1, 7);
+    };
+    check(registry->register_operation(std::move(source)));
+  }
+  check(registry->freeze());
   WorkflowDocument doc;
   doc.nodes = {{1, "dispatch_probe", {}, {}}};
   doc.outputs = {{"value", 1, "value"}};
-  ExecutionBindings bindings;
-  if (mode == 3) {
-    doc.inputs = {{7,
-                   "source",
-                   {ElementType::Float64, {1}},
-                   Region::whole({1}),
-                   {0, {8}},
-                   {}}};
-    doc.nodes[0].inputs = {WorkflowInputReference{7}};
-    auto source = std::make_shared<RegionalSource>();
-    source->descriptor = doc.inputs[0].descriptor;
-    source->read = [&](const Region& region, std::uint8_t* bytes, std::uint64_t,
-                       const BufferAllocator&, const CancellationToken&) {
-      ++count.source;
-      const double v = 7;
-      std::memcpy(bytes, &v, 8);
-      return Result<Region>(region);
-    };
-    bindings = {{{"source", {}, source}}};
-  }
-  GraphContext graph(doc);
-  auto plan = Compiler(registry).compile(graph);
-  PS_CHECK(plan.ok());
   ExecutionContextConfig config;
   config.cpu_workers = 1;
+  config.result_cache_bytes = 0;
   config.managed_resources = ResourceLimits{};
   config.managed_resources->maximum_stages = maximum;
   config.managed_resources->capacity[ResourceKind::Queue] = queue;
   ExecutionContext context(registry, config);
-  auto root = context.resource_budget().take_value();
+  auto root = take(context.resource_budget());
+  ExecutionBindings bindings;
+  if (mode == 1) {
+    doc.inputs = {multi_result::declaration(7, "source")};
+    doc.nodes[0].inputs = {WorkflowInputReference{7}};
+    bindings.inputs.push_back(multi_result::binding(root, "source", 7));
+  }
+  if (mode == 3) {
+    doc.nodes = {{7, "source", {}, {}},
+                 {1, "dispatch_probe", {WorkflowNodeOutput{7, "value"}}, {}}};
+  }
+  GraphContext graph(doc);
+  auto plan = take(Compiler(registry).compile(graph));
   const auto execute = [&] {
-    return mode == 2 ? context.execute_atoms(
-                           plan.value().plan, bindings,
-                           {{"value", Footprint::all({1}).take_value()}})
-                     : context.execute(plan.value().plan, bindings);
+    return mode == 2
+               ? context.execute_atoms(plan.plan, bindings,
+                                       {{"value", take(Footprint::all({1}))}})
+               : context.execute(plan.plan, bindings);
   };
   const auto failed = [&](const Result<ExecutionResult>& result) {
     if (!result.ok())
@@ -118,91 +170,116 @@ int stages(unsigned mode, std::uint64_t maximum, std::uint64_t queue) {
   auto result = execute();
   if (!maximum || !queue) {
     PS_CHECK(failed(result));
-    PS_CHECK(count.start == 0 && count.poll == 0 && count.callback == 0 &&
-             count.source == 0);
+    PS_CHECK(count.start == 0 && count.poll == 0 && count.source == 0);
     PS_CHECK(root.statistics().issued.stages == 0);
   } else {
+    if (!result.ok())
+      std::cerr << "mode=" << mode
+                << " code=" << static_cast<int>(result.status().code)
+                << " stages=" << root.statistics().issued.stages
+                << " start=" << count.start << " poll=" << count.poll
+                << " source=" << count.source << " " << result.status().message
+                << '\n';
     PS_CHECK(result.ok());
     if (mode == 2)
       PS_CHECK(result.value().atoms.at(0).outcome.ok());
+    else
+      PS_CHECK(multi_result::number(result.value().results.at("value")) == 19);
     PS_CHECK(root.statistics().issued.stages == maximum);
-    const auto before =
-        count.start + count.poll + count.callback + count.source;
+    const auto before = count.start + count.poll + count.source;
     result = execute();
     PS_CHECK(failed(result));
-    PS_CHECK(count.start + count.poll + count.callback + count.source ==
-             before);
+    PS_CHECK(count.start + count.poll + count.source == before);
     PS_CHECK(root.statistics().issued.stages == maximum);
   }
   PS_CHECK(root.statistics().live[ResourceKind::Queue] == 0);
   return 0;
 }
+struct SourceState {
+  bool throwing;
+  Result<ResultProgramPoll> poll(const ResultProgramPhase&) {
+    if (throwing)
+      throw 7;
+    return Result<ResultProgramPoll>(
+        Status{ErrorCode::OperationFailed,
+               "source failed",
+               FailureReason::ShortIo,
+               {FailureOrigin::Io, FailureScope::Group}});
+  }
+};
 int source_failure() {
-  auto registry = std::make_shared<OperationRegistry>();
-  PS_CHECK(
-      registry
-          ->register_operation(make_statistics_operation(
-                                   StatisticsOperation::Histogram, {1, 1, 8})
-                                   .take_value())
-          .ok());
-  PS_CHECK(registry->freeze().ok());
-  WorkflowDocument doc;
-  doc.inputs = {{7,
-                 "pixels",
-                 {ElementType::Int64, {1, 1}},
-                 Region::whole({1, 1}),
-                 {0, {8, 8}},
-                 {}},
-                {8,
-                 "mask",
-                 {ElementType::UInt8, {1, 1}},
-                 Region::whole({1, 1}),
-                 {0, {1, 1}},
-                 {}}};
-  doc.nodes = {{11,
-                "statistics.histogram",
-                {WorkflowInputReference{7}, WorkflowInputReference{8}},
-                {}}};
-  doc.outputs = {{"hist", 11, "value"}};
-  GraphContext graph(doc);
-  auto plan = Compiler(registry).compile(graph).take_value();
   for (bool throwing : {false, true}) {
-    auto source = std::make_shared<RegionalSource>();
-    source->descriptor = doc.inputs[0].descriptor;
-    source->read = [throwing](const Region&, std::uint8_t*, std::uint64_t,
-                              const BufferAllocator&,
-                              const CancellationToken&) -> Result<Region> {
-      if (throwing)
-        throw 7;
-      return Result<Region>(
-          Status{ErrorCode::OperationFailed, "source failed"});
+    unsigned callbacks = 0;
+    auto registry = std::make_shared<OperationRegistry>();
+    auto source = operation(nullptr, false);
+    source.key = "source";
+    source.traits.outputs[0].continuation_bytes = sizeof(SourceState);
+    source.start_result = [throwing](const auto&, const auto& allocator) {
+      return ResultContinuation::make<SourceState>(allocator,
+                                                   SourceState{throwing});
     };
-    auto mask = MutableValue::allocate(doc.inputs[1].descriptor,
-                                       Region::whole({1, 1}), BufferAllocator{})
-                    .take_value();
-    mask.data()[0] = 1;
-    ExecutionContextConfig config;
-    config.managed_resources = ResourceLimits{};
-    ExecutionContext context(registry, config);
-    auto result = context.execute(
-        plan.plan, {{{"pixels", {}, source},
-                     {"mask", std::move(mask).publish().take_value()}}});
-    PS_CHECK(!result.ok());
-    const auto& status = result.status();
-    PS_CHECK(status.code == ErrorCode::OperationFailed);
-    PS_CHECK(status.detail.input_id == 7 && status.detail.node_id == 0);
-    PS_CHECK(status.detail.origin == FailureOrigin::Io &&
-             status.detail.scope == FailureScope::Group);
+    check(registry->register_operation(std::move(source)));
+    auto downstream = operation(nullptr, true);
+    downstream.start_result = [&](const auto&, const auto& allocator) {
+      struct Need {
+        unsigned* callbacks;
+        bool requested = false;
+        Result<ResultProgramPoll> poll(const ResultProgramPhase&) {
+          if (!requested) {
+            requested = true;
+            ResultProgramNeed need;
+            need.tensors.push_back({0, 0, take(Footprint::all({1})), 1});
+            return Result<ResultProgramPoll>(std::move(need));
+          }
+          ++*callbacks;
+          return Result<ResultProgramPoll>(
+              Status{ErrorCode::Internal, "unexpected source delivery"});
+        }
+      };
+      return ResultContinuation::make<Need>(allocator, Need{&callbacks});
+    };
+    check(registry->register_operation(std::move(downstream)));
+    check(registry->freeze());
+    WorkflowDocument doc;
+    doc.nodes = {{7, "source", {}, {}},
+                 {11, "dispatch_probe", {WorkflowNodeOutput{7, "value"}}, {}}};
+    doc.outputs = {{"hist", 11, "value"}};
+    GraphContext graph(doc);
+    auto plan = take(Compiler(registry).compile(graph));
+    ExecutionContext context(registry);
+    auto result = context.execute(plan.plan);
+    PS_CHECK(!result.ok() && callbacks == 0);
+    PS_CHECK(result.status().code == ErrorCode::OperationFailed);
+    PS_CHECK(result.status().detail.node_id == 7);
+    if (!throwing)
+      PS_CHECK(result.status().detail.origin == FailureOrigin::Io &&
+               result.status().detail.scope == FailureScope::Group &&
+               result.status().reason == FailureReason::ShortIo);
+    else
+      PS_CHECK(result.status().reason == FailureReason::HostException);
+    PS_CHECK(take(context.resource_budget())
+                 .statistics()
+                 .live[ResourceKind::Queue] == 0);
   }
   return 0;
 }
 }  // namespace
-int main() {
+int main() try {
   for (unsigned mode = 0; mode < 4; ++mode) {
     PS_CHECK(stages(mode, 0, 1) == 0);
     PS_CHECK(stages(mode, 10, 0) == 0);
-    PS_CHECK(stages(mode, mode == 0 ? 1 : 2, 1) == 0);
+    // Every physical Result start and poll is admitted separately. A direct
+    // publication needs two dispatches; a tensor Need adds a third. The
+    // upstream source in mode 3 contributes its own start/publication pair.
+    PS_CHECK(stages(mode,
+                    mode == 0 || mode == 2 ? 2
+                    : mode == 1            ? 3
+                                           : 5,
+                    1) == 0);
   }
   PS_CHECK(source_failure() == 0);
   return 0;
+} catch (const std::exception& error) {
+  std::cerr << error.what() << '\n';
+  return 1;
 }

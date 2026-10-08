@@ -18,8 +18,7 @@
 #include "photospider/execution/data_movement.hpp"
 #include "photospider/plugin/cpu_parallel_api.h"
 #include "photospider/plugin/cpu_tiles_api.h"
-#include "photospider/plugin/dependency_program.hpp"
-#include "photospider/plugin/operation_plugin_api.h"
+#include "photospider/plugin/native_gpu_api.h"
 #include "photospider/plugin/result_program.hpp"
 
 namespace ps {
@@ -36,8 +35,8 @@ enum class OperationShapeRule : std::uint32_t {
   MatchAllInputs = 3U,
   /**
    * @brief Output uses the descriptor's explicit bounded logical fixed shape.
-   * @note The rule does not require a dense byte product; C++ callbacks may
-   * publish a valid strided or zero-stride broadcast Value.
+   * @note The rule does not require a dense byte product; internal tensor
+   * backing may use a valid strided or zero-stride broadcast layout.
    */
   Fixed = 4U,
   /** @brief Ceil-divide the first spatial input by a static factor. */
@@ -94,9 +93,12 @@ struct PHOTOSPIDER_API OperationParameterSpec final {
   double maximum = 0;
 };
 
-/** @brief Closed input/output semantic port vocabulary. */
+/** @brief Closed schema-constraint vocabulary for operation ports.
+ * Current operation registration requires the `Result` kind for every input
+ * and output. Other enumerators are not accepted as standalone port forms.
+ */
 enum class OperationPortKind : std::uint32_t {
-  /** @brief Generic Value with ordinary shape and Region rules. */
+  /** @brief Generic descriptor predicate applied to typed Result backing. */
   Value = 1,
   /** @brief Complete Float32 {1}, generic or dimensionless scalar/signal.
    * @note Runtime bounds apply before each consumer. Computed views may have
@@ -115,20 +117,14 @@ enum class OperationPortKind : std::uint32_t {
 };
 /**
  * @brief Copied compile-time port contract included in stage identities.
- * @note Scalars require Float32 {1} and a finite inclusive interval. Facets
- * are absent or exactly one dimensionless Scalar/single-sample Signal; the
- * signal's sampling-axis domain/unit is retained independently of sample units.
- * Direct bindings retain dense preflight; computed views use logical
- * addressing. Other kinds require positive-zero bound bits. RgbaFloat32 uses
- * the canonical photospider.image v2 descriptor returned by rgba_semantics();
- * Float32Mask uses typed coverage_semantics(). Typed ports constrain kind/exact
- * facets, dtype and rank, using Whole or a staged dependency program. Output
- * facets are inferred independently from dtype/shape. Invalid computed numbers
- * fail OperationFailed before consumer entry, including cache hits; direct
- * numeric binding errors remain InvalidArgument.
+ * @note The Result schema is the port value. These predicates validate its
+ * tensor descriptor and semantic facets before callback entry. Typed ports
+ * constrain kind, exact facets, dtype and rank; scalar constraints also apply
+ * their finite inclusive interval. The compiler includes the resolved schema
+ * in stage identity.
  */
 struct PHOTOSPIDER_API OperationPortConstraint final {
-  /** @brief Closed port kind; scalar output is unsupported. */
+  /** @brief Port schema kind; registered operations must select `Result`. */
   OperationPortKind kind = OperationPortKind::Value;
   /** @brief Finite inclusive binary32 lower bound for scalar ports. */
   float minimum = 0.0F;
@@ -148,10 +144,31 @@ struct PHOTOSPIDER_API OperationPortConstraint final {
    * exclusive.
    */
   std::uint32_t element_type_mask = 0;
-  /** @brief Required fixed schema identity for Result ports; empty otherwise.
+  /** @brief Fixed Result schema identity. An empty identity accepts any input
+   * schema matching the tensor-member predicate. On C++ outputs, an empty id
+   * with version zero requires metadata specialization and a tensor-member
+   * predicate; named members are allowed, while omitted tensor_key requires
+   * one tensor. C ABI output schemas remain fixed.
    */
   std::string result_schema_id = {};
   std::uint32_t result_schema_version = 0;
+  /** @brief Named Result tensor member constrained by dtype/rank/facets above.
+   * Empty with a dtype/rank/facet predicate selects the sole tensor member;
+   * multiple tensors require a key. Without member predicates the complete
+   * fixed representation is selected. An omitted schema identity accepts any
+   * valid representation satisfying the member predicate. For output
+   * constraints, an empty identity may be resolved from a complete metadata
+   * specialization prototype; input constraints use it to accept any matching
+   * input schema.
+   */
+  std::string tensor_key = {};
+  /** @brief Require a recognized semantic facet, including ColorArray. */
+  bool requires_semantics = false;
+  /** @brief Require a complete dimensionless Float32 scalar tensor with full
+   * sample shape {1}; finite samples must satisfy [minimum,maximum] before
+   * consumer entry, including cached producers. Signed/zero strides are valid.
+   */
+  bool scalar_bounds = false;
 };
 
 /** @brief Output dtype selection, independent of output shape. */
@@ -258,8 +275,9 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
   std::uint32_t halo_radius = 0U;
   /**
    * @brief Explicit nonzero rank-1..8 logical shape used only by `Fixed`.
-   * @note C++ embedding callbacks may materialize it through any valid Value
-   * layout, including a zero-stride broadcast whose dense product overflows.
+   * @note The descriptor need not have a representable dense byte product.
+   * Internal tensor backing may use a valid strided or zero-stride broadcast
+   * layout.
    */
   std::vector<std::uint64_t> fixed_output_shape;
   OperationPortConstraint output_schema;
@@ -296,34 +314,43 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
    * uses the singleton observation domain {1}. Included in contract identities.
    */
   std::uint32_t atomic_trailing_axes = 0;
-  /** @brief Optional actual new output payload bound for a CPU Whole or staged
-   * view. Unset reserves requested element bytes. A set bound replaces that
-   * dense lower bound; workspace, metadata and referenced owners remain
-   * accounted. The allocator still enforces this bound and failures remain
-   * sticky.
+  /** @brief Optional bound on newly owned output payload.
+   * For Result publications, the host checks the complete Result's physical
+   * owners, deduplicates them, and excludes backing still owned by exposed
+   * inputs or authorized tensor grants, including private backing prepared for
+   * a structured Whole view. The bound keeps weak source references and does
+   * not retain input payload. Each prefix publication is checked as a whole
+   * Result. Workspace, metadata, and referenced resources remain separately
+   * accounted. Exceeding the bound returns ResourceExhausted/CapacityLimit;
+   * contract-2 joint execution scopes that failure to the member. This
+   * publication check does not prevent a trusted callback from allocating
+   * against the Root before publication.
    */
   std::optional<std::uint64_t> maximum_output_payload_bytes = {};
-  /** @brief Disjoint complete CPU dependency pieces in observation coordinates.
-   * Coverage partitions the full inferred observation domain. Present pieces
-   * permit a multi-observation Atomic session without row enumeration. The
-   * program requests the complete static mapping once, then publishes its exact
-   * requested coverage. Dynamic requests, checkpoints, GPU and joint callbacks
-   * are excluded from this path.
+  /** @brief Legacy static dependency-map metadata.
+   * Current operation registration rejects nonempty values; staged dependency
+   * execution uses the Result Need and relation contracts instead.
    */
   std::optional<std::vector<DependencyMapPiece>> static_dependency_pieces = {};
-  /** @brief Runs one normalized regional Atomic request without splitting it
-   * into samples. Each dynamic Need stage supplies complete bounded atom rows.
-   * Observations remain individual samples; successful certificates retain
-   * exact associations. CPU staged, non-joint programs only; checkpoints and
-   * pure-block services are unavailable. Included in all contract identities.
+  /** @brief Marks a CPU, non-joint staged Result output as regional Atomic.
+   * The selected query remains governed by the Result continuation and its
+   * Need/publication contract. Included in operation identities.
    */
   bool regional_atomic = false;
-  /** @brief Preserves returned immutable views at ordinary/direct collectors.
-   * New payload is admitted on actual allocation, bounded by requested bytes
-   * unless maximum_output_payload_bytes replaces that bound. Borrowed owners
-   * remain charged independently. CPU Whole or staged non-joint execution only.
-   * Whole prefers a covering affine input owner, collecting only when needed.
-   * This permits auto view/copy choices without dense precharge.
+  /** @brief Allows publication to preserve a compatible immutable input view.
+   * Ordinary/direct collectors retain their existing view behavior. In
+   * compiled structured CPU Whole Result execution, the coordinator prepares
+   * each payload-authorized Tensor Need after validation and before the next
+   * computation poll. It proves an affine view for each authorized box; Auto
+   * may collect only when that view is unavailable. Collection uses
+   * Root-accounted private input backing retained by the ResultTensorInput.
+   * Borrowed owners remain charged independently, and the output payload cap
+   * does not prevent Root allocations before publication. This property does
+   * not make direct ResultProgramPhase calls fulfill Needs automatically.
+   * Joint and GPU view preparation are outside this path. The C Result ABI
+   * exposes corresponding output policy flags, and its compiled structured
+   * CPU Whole path uses this preparation. It permits view/copy choices without
+   * dense precharge.
    * With planar_exact_dependencies this is narrower: the complete Data map
    * must be an identity map from planar input port 0. The executor proves that
    * map, invokes a validate-only callback, and publishes a same-owner alias.
@@ -331,23 +358,33 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
    * non-port-0 maps materialize in Auto and fail in RequireView.
    */
   bool preserve_output_views = false;
-  /** @brief CPU Whole requires one affine backing owner per active input.
-   * Requires preserve_output_views. Compatible same-owner fragments may form
-   * one view. If an input needs collection across owner
-   * fragments, execution returns InvalidArgument/InvalidDomain ViewUnavailable
-   * before callback. Direct calls already supply one Value per input. This
-   * property is part of compiled identity; it does not limit typed validation.
+  /** @brief Requires affine input views for the selected Whole view path.
+   * Requires preserve_output_views. For structured Result execution, every
+   * authorized Need box must map to one compatible affine owner; compatible
+   * fragments from that owner may form one view. If a box cannot be represented
+   * as a view, the coordinator returns InvalidArgument/InvalidDomain
+   * ViewUnavailable before the computation callback. With this flag unset,
+   * Auto may collect only for that unavailable-view case. Direct Result phases
+   * do not automatically prepare Need-backed views. This property is part of
+   * compiled identity; it does not limit typed validation.
    */
   bool requires_input_views = false;
-  /** @brief Zero for synchronous callback, one for the staged read protocol. */
-  std::uint32_t dependency_version = 0;
+  /** @brief Result execution protocol version. The supported value is 2;
+   * other values are rejected during registration.
+   */
+  std::uint32_t dependency_version = 2;
   /** @brief Host-allocated state bound and finite poll limit for staged code.
    */
   std::uint64_t continuation_bytes = 0;
   std::uint32_t maximum_dependency_stages = 0;
-  /** @brief Alternative structured output template, resolved by the compiler.
-   * Result ports use this schema; scalar dtype/shape fields remain defaults and
-   * do not describe a placeholder Value. Requires structured protocol 2.
+  /** @brief Complete structured Result output prototype, resolved by compiler.
+   * Scalar dtype/shape fields remain defaults and do not describe tensor
+   * backing. Requires Result protocol 2. For metadata-derived C++ outputs,
+   * the prototype remains complete; the output constraint may leave schema
+   * id/version empty only when metadata specialization is required and a
+   * tensor-member predicate is present. Inference returns the concrete schema,
+   * which replaces the prototype in resolved traits. Fixed-schema outputs
+   * retain their id/version.
    */
   std::optional<SchemaTemplate> result_schema = {};
   /** @brief Explicit bitwise value relation; never inferred from read needs.
@@ -365,56 +402,81 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
  * @note Traits are copied into semantic IR; callback/DSO identities are not.
  */
 struct PHOTOSPIDER_API OperationTraits final {
-  /** @brief Whole-dependency CPU orchestration submits bounded computation
-   * tiles to the host pool. Coordinator and tile callbacks have separate
-   * service permissions; host range parallelism is reserved for Whole calls.
+  /** @brief CPU Result orchestration submits bounded computation stages to
+   * the host tile service for Whole or protocol-2 Result execution. Coordinator
+   * and tile callbacks have separate service permissions. Host range
+   * parallelism remains available to Whole calls.
    */
   bool cpu_staged_tiles = false;
-  /** @brief Optional CPU joint contract version, zero disables grouping. */
+  /** @brief Optional CPU Result joint contract version; zero disables grouping.
+   */
   std::uint32_t joint_contract = 0;
   /** @brief Shared host-owned state capacity, charged once per group. */
   std::uint64_t joint_continuation_bytes = 0;
   /** @brief Additional shared scratch bound per joint poll. */
   std::uint64_t joint_workspace_bytes = 0;
-  /** @brief Opts pure staged outputs into one internal block namespace.
-   * DependencyPhase::block transitions must then be independent of selected
-   * output metadata/index unless explicitly encoded in incoming state or mode.
-   * The host keys all resolved output contracts, static parameters, input
-   * metadata and current supplied bytes. Public outputs and certificates remain
-   * independent. Retention is optional and budgeted; misses recompute,
-   * including with caching disabled. This does not synchronize concurrent
-   * producers or promise a single evaluation per Run. Available only to pure
-   * Atomic dependency-v1 operations; default preserves output-scoped block
-   * keys.
+  /** @brief Opts pure staged outputs into a shared internal block namespace.
+   * `ResultProgramPhase::block` transitions must then be independent of
+   * selected output index or output-specific metadata unless that distinction
+   * is encoded in incoming state or mode. The host keys the operation and all
+   * resolved output contracts, backend, execution mode, static parameters and
+   * actual input metadata, then keys each block by kind, range, mode, incoming
+   * state and currently supplied tensor content. Public outputs, checkpoints
+   * and completed-result caches remain independent. A hit returns only block
+   * state; current Needs and dependency evidence remain tied to the selected
+   * output. Retention is optional and budgeted; misses recompute. This does not
+   * synchronize concurrent producers or promise one evaluation per Run.
+   * Available only to pure deterministic Atomic Result-v2 operations, with no
+   * regional-atomic outputs or static dependency pieces.
+   * The default preserves output-scoped block keys.
    */
   bool share_blocks_across_outputs = false;
 
   /** @brief Exact input count, or fixed prefix count for a repeated template.
    */
   std::uint32_t input_count = 0;
-  /** @brief Equal inputs/parameters produce equal output bytes. */
+  /** @brief Equal inputs/parameters produce equal output bytes.
+   * @note Dependency-v2 Result programs require both purity traits except for
+   * Whole, non-joint Atomic outputs with RequestFailureOnly delivery. That
+   * Whole case may be non-pure only when `cacheable` is false.
+   */
   bool deterministic = true;
-  /** @brief Callback has no externally visible side effect. */
+  /** @brief Callback has no externally visible side effect.
+   * The non-pure Whole Result exception is documented on `deterministic`.
+   */
   bool side_effect_free = true;
   /** @brief CPU implementation is available. At least one backend is required.
    */
   bool supports_cpu = true;
   /** @brief Local GPU implementation is available. May be GPU-only. */
   bool supports_gpu = false;
-  /** @brief Recoverable GPU failure may execute CPU; requires both backends. */
+  /** @brief Allow CPU retry for a recoverable GPU `BackendUnavailable`.
+   *
+   * This requires both CPU and GPU implementations plus deterministic and
+   * side-effect-free traits. A retry candidate must be an unqualified
+   * `BackendUnavailable` with reason None, origin unspecified or Backend, and
+   * scope unspecified or Group. Poll retry also requires a retry-safe attempt
+   * with no published output, mandatory I/O, checkpoint or block callback,
+   * native dispatch, or field I/O, and clear cancellation, stale-plan, and
+   * host-stop checks. A separate host-service retry veto rejects replay after
+   * later typed resource, protocol, callback, observer, or other nonretryable
+   * failures while preserving the first reported status. Other errors do not
+   * fall back. Root work and stage accounting are retained. Fallback-tainted
+   * results do not enter optional checkpoint, block, or completed-result
+   * caches.
+   */
   bool allows_cpu_fallback = false;
   /**
    * @brief Declared output-capacity bound, raised to packed bytes when
    * representable.
    * @note Non-densely-representable generic outputs use this bound with at
    * least one element. Workspace and potential transfers are accounted
-   * separately. Ordinary Value CPU steps use complete working-set reservations;
-   * native Value GPU steps admit actual backing capacity per allocation.
-   * Dependency programs and planar callbacks apply their own phase quotas.
+   * separately. Result callbacks use their declared continuation and workspace
+   * limits in addition to Root resource admission.
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 21U;
+  std::uint32_t version = 24U;
   /** @brief Registered template requires pure per-node metadata resolution.
    * Free inference rejects templates. OperationRegistry::resolve_traits
    * clears this flag only after validated specialization.
@@ -428,8 +490,8 @@ struct PHOTOSPIDER_API OperationTraits final {
   std::vector<OperationPortConstraint> input_schema;
   /** @brief Maximum scratch bytes per invocation, excluding output.
    * Resolved traits include the checked static preparation increment.
-   * Structural planar callbacks count live requested bytes; the root accounts
-   * actual native backing capacity separately.
+   * Result callbacks account actual backing capacity separately from the
+   * declared workspace bound.
    */
   std::uint64_t workspace_bytes = 0;
   /** @brief Additional scratch bound per demanded input byte, in 0..16. */
@@ -521,84 +583,35 @@ PHOTOSPIDER_API Result<Region> operation_dirty_region(
     const OperationTraits& traits,
     const std::map<std::string, ParameterValue>& parameters);
 
-/**
- * @brief Immutable invocation passed to a registered operation callback.
- *
- * @note Input Values, parameters, and token remain valid for the callback only.
+/** @brief Maps sample coverage to its logical Atomic observation domain.
+ * Closes ColorArray channel tuples or configured trailing tuple axes; Color
+ * boxes must contain complete channels. This is geometry only and grants no
+ * input-read permission.
  */
-struct PHOTOSPIDER_API OperationInvocation final {
-  /** @brief Creates a borrowed invocation; an empty output Region resolves to
-   * Whole. */
-  OperationInvocation(const std::vector<Value>& values,
-                      const std::vector<Region>& demands,
-                      const std::map<std::string, ParameterValue>& params,
-                      Backend selected = Backend::Cpu,
-                      CancellationToken token = {}, Region output = {},
-                      BufferAllocator allocation = BufferAllocator())
-      : inputs(values),
-        input_demands(demands),
-        parameters(params),
-        backend(selected),
-        cancellation(std::move(token)),
-        output_region(std::move(output)),
-        allocator(std::move(allocation)) {}
-  /** @brief Ordered immutable input Values. */
-  const std::vector<Value>& inputs;
-  /** @brief Planned logical demand for each corresponding input Value. */
-  const std::vector<Region>& input_demands;
-  /** @brief Canonically ordered source parameters. */
-  const std::map<std::string, ParameterValue>& parameters;
-  /**
-   * @brief Actual physical backend for this attempt, including CPU fallback.
-   * @note Only `Cpu` and `Gpu` are accepted at invocation.
-   */
-  Backend backend = Backend::Cpu;
-  /** @brief Cooperative cancellation observation. */
-  CancellationToken cancellation;
-  /** @brief Exact logical output requested by this invocation. */
-  Region output_region;
-  /** @brief Original declaration-order selected output; defaults to value. */
-  std::uint32_t output_index = 0;
-  /** @brief Original input indices for supplied projected inputs. */
-  std::vector<std::uint32_t> input_indices;
-  /** @brief Complete static input metadata when runtime inputs are projected.
-   * Empty selects descriptors from the complete supplied input vector.
-   */
-  std::vector<OperationMetadata> input_metadata;
-  /** @brief Host allocator for output and scratch, valid for callback duration.
-   */
-  BufferAllocator allocator;
-  /** @brief Borrowed native services; valid only during this invocation. */
-  const ps_gpu_service_v11* gpu = nullptr;
-  /** @brief Borrowed host range service, CPU Whole only. Synchronous blocks
-   * share the context worker quota; unavailable for direct/tile/GPU calls. */
-  const ps_cpu_parallel_service_v1* cpu_parallel = nullptr;
-  /** @brief Explicit immutable resource owners for static output identities.
-   * Input Value owners are also admitted by invoke. No dynamic sample port.
-   */
-  ResourceBindings resources = {};
-  /** @brief Optional immutable preparation for synchronous execution.
-   * A supplied handle must match this registry, key, complete metadata and
-   * exact static parameter bits; a preparation seal mismatch returns Stale
-   * before the callback. Ordinary invocation validation can reject first.
-   * The executor supplies the plan owner. Direct calls without a handle prepare
-   * once. The normalized callback may borrow state() for the call lifetime.
-   */
-  std::shared_ptr<const PreparedOperation> prepared;
-};
+PHOTOSPIDER_API Result<Footprint> operation_observations(
+    const OperationMetadata& output, const Footprint& samples,
+    const FootprintLimits& limits = {});
+/** @brief Expands logical observation coverage to complete sample coverage.
+ * Closes ColorArray channels or configured trailing tuple axes; validates the
+ * output metadata and observation domain. This mapping grants no read access.
+ */
+PHOTOSPIDER_API Result<Footprint> observation_samples(
+    const OperationMetadata& output, const Footprint& observations,
+    const FootprintLimits& limits = {});
 
-/** @brief Function signature for one synchronous operation invocation. */
-using CallbackSignature = Result<Value>(const OperationInvocation&);
-/** @brief Type-erased callable implementing `CallbackSignature`. */
-using OperationCallback = std::function<CallbackSignature>;
-
-/** @brief Owned per-node Value or structured Result metadata.
- * Result specialization requires protocol 2 and preserves the registered schema
- * id/version and Result port kind. It may resolve fields/domain/semantic
- * metadata through the validated closed SchemaTemplate vocabulary. Value-only
- * physical bounds/flags and tuple metadata must remain absent for a Result.
- * Specialization cannot alter input/parameter schemas, output names, callback
- * kinds, failure delivery or resource workspaces of the registered definition.
+/** @brief Owned per-node Result metadata and its typed backing descriptor.
+ * Result specialization requires protocol 2 and preserves the Result port kind.
+ * Fixed-schema outputs preserve the registered schema id/version. A C++
+ * metadata-derived output may resolve a concrete id/version when its registered
+ * constraint leaves them empty, requires metadata specialization, and provides
+ * a nonempty tensor-member predicate. The predicate may name a member or omit
+ * tensor_key to require a sole tensor. Inference returns the concrete schema,
+ * which the registry validates before compiler publication. C ABI output
+ * schemas remain fixed. Specialization may resolve fields/domain/semantic
+ * metadata via the closed SchemaTemplate vocabulary. Input and output metadata
+ * carry Result schemas; standalone descriptor fields stay empty. Specialization
+ * cannot alter inputs, parameters, output names, callback kinds, failure
+ * delivery or workspaces.
  */
 struct OperationOutputSpecialization final {
   OperationMetadata metadata;
@@ -678,6 +691,11 @@ class PHOTOSPIDER_API PreparedOperation final {
 
  private:
   friend class OperationRegistry;
+  friend class ResultJointContinuation;
+  Status validate_result_query(const ResultProgramQuery& query) const;
+  Status validate_inputs(
+      const std::vector<OperationMetadata>& inputs,
+      const std::map<std::string, ParameterValue>& parameters) const;
   struct Impl;
   explicit PreparedOperation(std::shared_ptr<const Impl> impl);
   std::shared_ptr<const Impl> impl_;
@@ -696,23 +714,29 @@ struct PHOTOSPIDER_API OperationDefinition final {
   std::string key;
   /** @brief Immutable compiler-visible semantic traits. */
   OperationTraits traits;
-  /** @brief Required synchronous implementation callback. */
-  OperationCallback callback;
-  /** @brief Alternative staged implementation; exactly one callback/start. */
-  DependencyStart start_dependency = {};
-  /** @brief Optional pure static validation, also applied to Empty queries. */
-  DependencyValidator validate_dependency = {};
-  /** @brief Optional Atomic joint implementation; singleton start remains
-   * required. */
-  DependencyJointStart start_joint = {};
   /** @brief Alternative structured stage protocol 2; exclusive with callbacks.
    */
   ResultProgramStart start_result = {};
+  /** @brief Optional contract-1 or contract-2 CPU joint callback for Results.
+   * Every declared output must be Result/Atomic. Contract 1 requires
+   * RequestFailureOnly and at least two outputs; contract 2 requires
+   * PerAtomOutcome and may use one output. Tensor members for the same output
+   * must select one tensor slot. Contract 1 keys members by distinct output
+   * index; contract 2 uses distinct AtomKeys and can name different coordinates
+   * of one output. The callback owns one shared continuation state and returns
+   * a local Result Need, publication, or typed failure for each member. The
+   * direct registry API does not fulfill Needs. Structured CPU execution
+   * schedules contracts 1 and 2; singleton `start_result` remains required.
+   * With optional grouping disabled, contract 2 still uses its required
+   * one-member joint callback. This does not provide native GPU contract 2.
+   */
+  ResultJointStart start_result_joint = {};
   /** @brief Required exactly for a metadata-specialized traits template. */
   OperationMetadataSpecializer specialize_metadata = {};
-  /** @brief Pure static Value/dependency-v1 preparation; mutually exclusive
-   * with specialize_metadata and requires_metadata_specialization must be true.
-   * Supported only for deterministic side-effect-free operations.
+  /** @brief Pure static metadata preparation for this operation definition.
+   * Mutually exclusive with specialize_metadata; when present,
+   * requires_metadata_specialization must be true. Supported only for
+   * deterministic, side-effect-free operations.
    */
   OperationPreparer prepare_static = {};
 };
@@ -774,11 +798,10 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @param definition Complete owned definition.
    * @return Success or validation/duplicate/frozen failure.
    * @throws std::bad_alloc If registry allocation fails without mutation.
-   * @note At least one backend and its callback protocol are mandatory. A
-   * GPU-only operation rejects CPU planning/invocation and cannot enable CPU
-   * fallback. Fixed traits
-   * validate only the logical descriptor; callback output validation applies
-   * the published Value's actual layout and backing bytes. Passing an rvalue
+   * @note At least one backend and a Result callback protocol are mandatory. A
+   * GPU-only operation rejects CPU planning and cannot enable CPU fallback.
+   * Fixed traits validate the logical schema; publication validation checks
+   * the Result schema, authorized coverage and backing bytes. Passing an rvalue
    * transfers the callable into immutable registry ownership before locking.
    */
   [[nodiscard]] Status register_operation(OperationDefinition definition);
@@ -791,9 +814,10 @@ class PHOTOSPIDER_API OperationRegistry final {
    * `NotFound` when the exact valid path cannot be loaded, or another complete
    * ABI/descriptor validation failure.
    * @throws std::bad_alloc If staging allocation fails without publication.
-   * @note Path rejection precedes the platform loader. Synchronous Fixed C
-   * sinks require a dense domain. Staged C programs validate actual output
-   * fragments, without requiring the entire logical domain to fit densely.
+   * @note Path rejection precedes the platform loader. The loader accepts
+   * only the exact Result operation ABI 2 entry point and full table layout;
+   * missing, older, and planar-only C entries are rejected. Result modules
+   * publish validated tensor/field coverage through the structured contract.
    * No signature, trust-store, sandbox, or process isolation is applied.
    */
   [[nodiscard]] Status load_plugin(const std::string& path);
@@ -821,14 +845,6 @@ class PHOTOSPIDER_API OperationRegistry final {
    * @throws std::bad_alloc If a failure diagnostic allocation fails.
    * @note The returned value grants no callback or registry mutation access.
    */
-  /** @brief Starts a validated optional CPU joint group; unsupported returns
-   * BackendUnavailable. Members are copied; allocator owns shared state once.
-   */
-  Result<std::shared_ptr<DependencyJointSession>> start_joint(
-      const std::string& key, std::vector<DependencyRequest> requests,
-      const BufferAllocator& allocator = BufferAllocator{},
-      std::function<Status(std::uint64_t)> consume_root_work = {}) const;
-
   [[nodiscard]] Result<OperationTraits> find_traits(
       const std::string& key) const;
   /** @brief Resolves a registered template against complete static inputs.
@@ -857,56 +873,49 @@ class PHOTOSPIDER_API OperationRegistry final {
       const std::string& key, const std::vector<OperationMetadata>& inputs,
       const std::map<std::string, ParameterValue>& parameters) const;
 
-  /**
-   * @brief Invokes one operation through its exception fence.
-   * @param key Exact registered operation key.
-   * @param invocation Borrowed invocation, validated before any callback.
-   * @return Requested regional Value; `InvalidArgument` for a default input
-   * Value, unknown backend, or malformed counts/demands/parameters;
-   * `BackendUnavailable` for a known unsupported backend; `TypeMismatch` for
-   * Preserve/Match input incompatibility or invalid generic callback output; or
-   * the callback's typed failure.
-   * @throws std::bad_alloc Only for process resource exhaustion before a
-   * recoverable result can be constructed.
-   * @note Validation preserves lookup, count, demand, parameter, cancellation,
-   * backend-vocabulary, capability, and descriptor order. Every input is
-   * checked for validity before descriptor access. The expected output
-   * descriptor is computed before callback entry and reused afterward, so an
-   * incompatible Preserve/Match invocation cannot run user or DSO code.
-   * Callback exceptions other than bad_alloc become `OperationFailed`; a
-   * standard exception with a null diagnostic becomes an empty message.
-   * Output demand is checked against the Whole/image-channel rule. Supplied
-   * demands must cover the output-derived requirement, including resolved
-   * static halo and mask spatial shape, and input Values must cover those
-   * demands. Invalid coverage never enters the callback or its allocator.
-   * Image/scalar ports additionally validate regional metadata, facets,
-   * finite scalar intervals and premultiplied pixel domains before callback
-   * entry. Malformed computed image outputs are OperationFailed; explicit
-   * cancellation/resource failures keep their categories. Image scopes save
-   * and restore the thread floating environment for binary32 semantics.
-   * Lookup copies only an immutable owning handle under the registry mutex;
-   * callback copy/execution never runs there, and a DSO lease remains alive
-   * through callback completion.
+  /** @brief Starts a CPU contract-1 or contract-2 Result continuation.
+   * Contract 1 accepts 2..64 distinct output indices and requires Atomic
+   * Result outputs with RequestFailureOnly delivery. Contract 2 accepts 1..64
+   * distinct AtomKeys and requires PerAtomOutcome; different coordinates may
+   * name one output, but its tensor slot must stay fixed. In both contracts,
+   * queries share one immutable static invocation and nonempty
+   * `snapshot_identity` (at most 4096 bytes), and request CPU. Each tensor Q
+   * closes over tuple and atomic trailing axes to one nonempty observation;
+   * other axes have extent one. The registry retains definition, prepared
+   * invocation, keys, cancellation tokens, and Root. It filters cancelled
+   * members before invoking the callback, so the callback subset may contain
+   * one member. Later polls revalidate raw Q and prepared metadata.
+   * This direct entry starts the callback only; the host must fulfill Needs
+   * and publish dependency evidence. Its later poll phases and member
+   * ResourceBudgets must belong to the continuation Root, and their allocators
+   * must share its accounting domain. Structured CPU execution supplies Need
+   * fulfillment and dependency-evidence services for contracts 1 and 2. With
+   * optional joint grouping disabled, contract 2 still uses its required
+   * one-member joint callback. This does not provide native GPU contract-2
+   * execution.
    */
-  [[nodiscard]] Result<Value> invoke(
-      const std::string& key, const OperationInvocation& invocation) const;
-
-  /** @brief Starts one validated atomic observation or complete terminal query.
-   * @note Uses the frozen definition and host allocator. Default request-only
-   * failure delivery rejects multi-observation atomic starts before callbacks.
-   * The returned handle owns state/definition; it has no upstream scheduler.
-   * consume_root_work, when supplied by a host, precharges every issued work
-   * unit against the current root before the operation runs. It must remain
-   * valid through session retirement; failures are sticky and never refunded.
-   */
-  Result<std::shared_ptr<DependencySession>> start_dependency(
-      const std::string& key, DependencyRequest request,
-      const BufferAllocator& allocator = BufferAllocator{},
-      std::function<Status(std::uint64_t)> consume_root_work = {}) const;
+  Result<ResultJointContinuation> start_result_joint(
+      const std::string& key, const ResourceVector<ResultProgramQuery>& queries,
+      const ResourceBudget& resources) const;
 
   /** @brief Starts a validated structured continuation in host-owned state.
-   * Query metadata must match full compiler inference. Allocation and callback
-   * exceptions are fenced, and a definition lease survives through retirement.
+   * Query metadata must match full compiler inference. The backend enum and
+   * operation capability are checked first: an invalid enum returns
+   * InvalidArgument, and an unsupported CPU/GPU capability returns
+   * BackendUnavailable before a continuation is created. Allocation and
+   * callback exceptions are fenced, and a definition lease survives through
+   * continuation destruction. Cancellation is checked before and after the
+   * operation start factory; cancellation observed after factory entry takes
+   * precedence over allocator failure, factory status, or an invalid returned
+   * continuation. Any returned state is destroyed before start returns. CPU
+   * retry policy belongs to the structured executor, not this
+   * direct start API. For a C++ terminal RequestRecord or contract-2 joint
+   * output with an Empty tensor query and no fields, the registry returns a
+   * stateless host continuation after static checks and resource admission.
+   * Its later poll checks failure and cancellation before sealing an Empty
+   * Result; producer callbacks and input reads are skipped. Ordinary Atomic
+   * Empty outputs and outputs with fields still run their producer. This fast
+   * path does not create an AtomObservation or validation-ledger finality.
    */
   Result<ResultContinuation> start_result(
       const std::string& key, const ResultProgramQuery& query,
@@ -926,31 +935,21 @@ class PHOTOSPIDER_API OperationRegistry final {
       const std::string& key, const ResultProgramQuery& query,
       const BufferAllocator& allocator,
       std::shared_ptr<std::atomic<ErrorCode>> failure) const;
+  Result<ResultJointContinuation> start_result_joint_compiled(
+      const std::string& key, const ResourceVector<ResultProgramQuery>& queries,
+      const ResourceBudget& resources, const BufferAllocator& allocator) const;
+  Result<ResultJointContinuation> start_result_joint_impl(
+      const std::string& key, const ResourceVector<ResultProgramQuery>& queries,
+      const ResourceBudget& resources, const BufferAllocator& allocator) const;
   friend class ExecutionContext;
   friend class Compiler;
+  Result<ResultProgramQuery> prepare_result_query(
+      const std::string& key, const ResultProgramQuery& query) const;
   Status validate_prepared(
       const PreparedOperation& prepared, const std::string& key,
       const std::vector<OperationMetadata>& inputs,
       const std::map<std::string, ParameterValue>& parameters) const;
-  Status validate_dependency_metadata(
-      const std::string& key, const std::vector<OperationMetadata>& inputs,
-      const std::map<std::string, ParameterValue>& parameters) const;
 
-  /**
-   * @brief Internal Run entry with periodic graph-currentness observation.
-   * @param key Registered key.
-   * @param invocation Immutable callback inputs and cancellation.
-   * @param current Empty for direct embedding calls; otherwise Run currentness.
-   * @return The public invoke result with Cancelled/Stale scan interruption.
-   * @throws std::bad_alloc Under the same rules as invoke.
-   * @note The probe is never retained in registry or compiled stage state.
-   */
-  [[nodiscard]] Result<Value> invoke_current(
-      const std::string& key, const OperationInvocation& invocation,
-      const std::function<bool()>& current) const;
-  Result<Value> invoke_dependency_current(
-      const std::string& key, const OperationInvocation& invocation,
-      const std::function<bool()>& current) const;
   /** @brief Opaque synchronized registry and DSO ownership state. */
   struct Impl;
   /** @brief Unique private state. */

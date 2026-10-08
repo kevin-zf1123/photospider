@@ -18,13 +18,18 @@ namespace ps::format {
  * representation, including negative zero, is carried unchanged to the node.
  * The compiler rejects NaN/Inf and dtype mismatch before any sample request. */
 using ModelConstant = std::variant<float, double>;
-/** @brief FMT-11 native model statics. Only applicable fields may be supplied.
- * Defaults are respect/auto/auto/strict; hue units, raw selectors/whites, the
- * forward NCL matrix, threshold and two-level constants are never inferred.
- * Explicit unit strings are radian or pi_multiple. NCL presets are bt601,
- * bt709 and bt2020_ncl, independent of the underlying RGB basis/transfer.
- * Reference bypasses numerical fast filters; scalar suppresses batch SIMD;
- * auto enables profile-admitted SIMD and independently certified fast filters.
+/** @brief Static options for native FMT-11 model conversions.
+ *
+ * Each helper appends a registered CPU Result operation with one input Result
+ * containing one Float32 or Float64 tensor and returns its `values` output.
+ * `axis` and `output_axis` index cell axes; the Result batch prefix is
+ * excluded. Defaults are respect/auto/auto/strict; hue units, raw
+ * selectors/whites, the forward NCL matrix, threshold and two-level constants
+ * are never inferred. Explicit unit strings are radian or pi_multiple. NCL
+ * presets are bt601, bt709 and bt2020_ncl, independent of the underlying RGB
+ * basis/transfer. Reference bypasses numerical fast filters; scalar suppresses
+ * batch SIMD; auto enables profile-admitted SIMD and independently certified
+ * fast filters.
  */
 struct ModelConversionOptions final {
   std::string metadata_mode = "respect", layout = "auto", algorithm = "auto",
@@ -129,8 +134,8 @@ inline Result<WorkflowNodeOutput> append(
 }
 }  // namespace model_detail
 
-// Public helpers expand explicit operation keys; no universal runtime model
-// converter or implicit adaptation/transfer/dtype conversion is registered.
+// Public helpers append their explicit registered operation keys. They do not
+// insert implicit adaptation, transfer conversion or dtype conversion.
 #define PHOTOSPIDER_MODEL_HELPER(name, key)                                \
   inline Result<WorkflowNodeOutput> name(                                  \
       WorkflowDocument& document, WorkflowInput input,                     \
@@ -155,13 +160,11 @@ PHOTOSPIDER_MODEL_HELPER(xyz_to_xyy, "color.xyz_to_xyy")
 PHOTOSPIDER_MODEL_HELPER(xyy_to_xyz, "color.xyy_to_xyz")
 PHOTOSPIDER_MODEL_HELPER(color_to_gray, "color.color_to_gray")
 PHOTOSPIDER_MODEL_HELPER(gray_to_color, "color.gray_to_color")
-/** @brief FMT-11S compile-time expansion into the admitted generic MASK-03
- * threshold constituent. Finite validation, exact mixed-width comparison,
- * typed 0/1 selection and binary provenance publication are fused in that
- * constituent. There is no native color.gray_to_black_white key, and the old
- * Whole Float32 mask.threshold is never used. Bypass channels remain bit
- * copies.
- */
+/** @brief Append the registered `mask.threshold_channel_<profile>` operation.
+ *
+ * This helper serializes the FMT-11S parameters and appends one MASK operation;
+ * it does not register a native color-model key. The compiler validates the
+ * resulting graph. Bypass channels retain the FMT-11 contract. */
 PHOTOSPIDER_MODEL_HELPER(gray_to_black_white, "mask.threshold_channel")
 PHOTOSPIDER_MODEL_HELPER(black_white_to_gray, "color.black_white_to_gray")
 #undef PHOTOSPIDER_MODEL_HELPER

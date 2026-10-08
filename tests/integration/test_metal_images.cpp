@@ -1,222 +1,249 @@
-#include <cstring>
+#include <cstdint>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "photospider/photospider.hpp"
 #include "s4_gpu_workflow/image_fixture.hpp"
 
 namespace {
-/** @brief Publishes a legal native image with unaligned samples or channel
- * origin.
- */
-ps::Result<ps::Value> padded_image(const ps::OperationInvocation& call,
-                                   bool channel_origin) {
-  if (call.backend == ps::Backend::Cpu)
-    return ps::Result<ps::Value>(call.inputs[0]);
-  auto allocated = call.allocator.allocate(channel_origin ? 16 : 17);
-  if (!allocated.ok())
-    return ps::Result<ps::Value>(allocated.status());
-  auto output = allocated.take_value();
-  const auto* api = call.gpu;
-  std::uint64_t input_token = 0, output_token = 0;
-  if (api->buffer(api->context, call.inputs[0].bytes().data(), 16, 0,
-                  &input_token) ||
-      api->buffer(api->context, output.data(), output.size(), 1, &output_token))
-    return ps::Result<ps::Value>(ps::Status::failure(
-        ps::ErrorCode::OperationFailed, "padded image binding"));
-  const char shader[] =
-      "#include <metal_stdlib>\nusing namespace metal;\n"
-      "kernel void pad(device const uchar* a [[buffer(0)]], "
-      "device uchar* b [[buffer(1)]], constant uint& shift [[buffer(2)]], "
-      "uint i [[thread_position_in_grid]]){b[i+shift]=a[i];}";
-  ps_gpu_buffer_binding_v11 buffers[] = {
-      {sizeof(ps_gpu_buffer_binding_v11), 0, input_token, 0, 16, 0},
-      {sizeof(ps_gpu_buffer_binding_v11), 1, output_token, 0, output.size(),
-       1}};
-  ps_gpu_dispatch_v11 command{};
-  command.struct_size = sizeof(command);
-  command.source = shader;
-  command.source_size = sizeof(shader) - 1;
-  command.entry = "pad";
-  command.entry_size = 3;
-  command.buffers = buffers;
-  command.buffer_count = 2;
-  const std::uint32_t shift = channel_origin ? 0 : 1;
-  command.constants = &shift;
-  command.constant_size = sizeof(shift);
-  command.constant_index = 2;
-  command.grid[0] = 16;
-  command.grid[1] = command.grid[2] = 1;
-  if (api->execute(api->context, &command, 1))
-    return ps::Result<ps::Value>(ps::Status::failure(
-        ps::ErrorCode::OperationFailed, "padded image dispatch"));
-  const auto layout = channel_origin
-                          ? ps::StridedLayout{4, {16, 16, 4}, {0, 0, 1}}
-                          : ps::StridedLayout{1, {16, 16, 4}};
-  return ps::Value::from_storage(
-      call.inputs[0].descriptor(), call.output_region, layout,
-      std::move(output).freeze(), call.inputs[0].facets());
-}
-/** @brief Native predecessors may expose unaligned bytes; opacity must fall
- * back.
- */
-void check_native_alignment(const std::shared_ptr<ps::OperationRegistry>& base,
-                            bool channel_origin = false) {
-  auto registry = std::make_shared<ps::OperationRegistry>();
-  auto traits = base->find_traits("image.opacity").take_value();
-  s4_fixture::require(
-      registry
-          ->register_operation({"image.opacity", traits,
-                                [base](const ps::OperationInvocation& call) {
-                                  auto forwarded = call;
-                                  forwarded.prepared.reset();
-                                  return base->invoke("image.opacity",
-                                                      forwarded);
-                                }})
-          .ok(),
-      "opacity registration");
-  traits.input_count = 1;
-  traits.input_schema.resize(1);
-  s4_fixture::require(
-      registry
-          ->register_operation(
-              {"test.pad", traits,
-               [channel_origin](const ps::OperationInvocation& call) {
-                 return padded_image(call, channel_origin);
-               }})
-          .ok(),
-      "pad registration");
-  s4_fixture::require(registry->freeze().ok(), "alignment freeze");
-  auto image = s1_fixture::value({1, 1, 1, 1}, {1, 1, 4});
-  auto factor = s1_fixture::scalar(.5F);
-  ps::WorkflowDocument document;
-  document.inputs = {s1_fixture::declaration(1, "image", image),
-                     s1_fixture::declaration(2, "factor", factor)};
-  document.nodes = {
-      {1, "test.pad", {ps::WorkflowInputReference{1}}, {}},
-      {2,
-       "image.opacity",
-       {ps::WorkflowNodeOutput{1, "value"}, ps::WorkflowInputReference{2}},
-       {}}};
-  document.outputs = {{"result", 2, "value"}};
-  ps::GraphContext graph(document);
-  ps::PlanningOptions planning;
-  planning.execution_mode = ps::ExecutionMode::NativeGpu;
-  auto compiled = ps::Compiler(registry).compile(graph, planning);
-  s4_fixture::require(compiled.ok(), "alignment compile");
-  ps::ExecutionContextConfig config;
-  config.gpu_enabled = true;
-  ps::ExecutionContext execution(registry, config);
-  auto result = execution.execute(compiled.value().plan,
-                                  {{{"image", image}, {"factor", factor}}});
-  s4_fixture::require(result.ok(), "alignment execution");
-  float actual[4];
-  std::memcpy(actual, result.value().values.at("result").bytes().data(), 16);
-  for (auto number : actual)
-    s4_fixture::require(number == .5F, "unaligned native image was misread");
-  s4_fixture::require(
-      result.value().diagnostics.native_dispatch_count == 1 &&
-          result.value().diagnostics.fallback_reasons.size() == 1,
-      "unaligned native successor did not fall back");
+using s1_fixture::check;
+using s1_fixture::take;
+using s4_fixture::require;
+using Poll = ps::Result<ps::ResultProgramPoll>;
+struct NativeImage {
+  bool channel_origin;
+  explicit NativeImage(bool origin) : channel_origin(origin) {}
+  Poll poll(const ps::ResultProgramPhase& call) {
+    const auto* api = call.gpu;
+    if (!api || api->backend != PS_GPU_BACKEND_METAL_V1)
+      return Poll(
+          ps::Status{ps::ErrorCode::BackendUnavailable, "requires Metal"});
+    auto output = take(call.allocator.allocate(channel_origin ? 16 : 17));
+    std::uint64_t token = 0;
+    require(
+        api->buffer(api->context, output.data(), output.size(), 1, &token) == 0,
+        "native image buffer binding");
+    const char shader[] =
+        "#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void pad(device uchar* b [[buffer(0)]], "
+        "constant uint& shift [[buffer(1)]], "
+        "uint i [[thread_position_in_grid]]){"
+        "uint bits=0x3f800000u; b[i+shift]=uchar(bits>>(8*(i%4)));}";
+    const ps_gpu_buffer_binding_v1 binding{
+        sizeof(ps_gpu_buffer_binding_v1), 0, token, 0, output.size(), 1};
+    ps_gpu_dispatch_v1 command{};
+    command.struct_size = sizeof(command);
+    command.source = shader;
+    command.source_size = sizeof(shader) - 1;
+    command.code_format = PS_GPU_CODE_MSL_V1;
+    command.entry = "pad";
+    command.entry_size = 3;
+    command.buffers = &binding;
+    command.buffer_count = 1;
+    const std::uint32_t shift = channel_origin ? 0 : 1;
+    command.constants = &shift;
+    command.constant_size = sizeof(shift);
+    command.constant_index = 1;
+    command.grid[0] = 16;
+    command.grid[1] = command.grid[2] = 1;
+    const auto submitted = api->execute(api->context, &command, 1);
+    const auto released = api->release(api->context, token);
+    require(submitted == 0 && released == 0, "native image dispatch/release");
+    const auto layout =
+        channel_origin
+            ? ps::StridedLayout{4, {16, 16, 16, 16, 4}, {0, 0, 0, 0, 1}}
+            : ps::StridedLayout{1, {16, 16, 16, 16, 4}};
+    auto builder = take(ps::ResultBuilder::start(
+        call.resources, *call.query.output.result_schema,
+        call.query.semantic_key));
+    check(builder.bind_descriptor_relation(
+        take(ps::ResultRelation::cartesian(call.resources, 1, {}))));
+    check(builder.publish_tensor(
+        0, ps::Region::whole({1, 1, 1, 1, 4}), layout,
+        std::move(output).freeze(),
+        take(ps::ResultRelation::cartesian(call.resources, 4, {})),
+        {true, true, true, true}));
+    return Poll(ps::ResultPublication{take(builder.seal()), true});
+  }
+};
+void check_native_alignment(bool channel_origin) {
+  auto registry = ps::make_default_operation_registry(false);
+  ps::OperationDefinition source;
+  source.key = "test.native_image";
+  source.traits.input_count = 0;
+  source.traits.supports_cpu = false;
+  source.traits.supports_gpu = true;
+  source.traits.workspace_bytes = 64;
+  auto& out = source.traits.outputs[0];
+  out.output_schema.kind = ps::OperationPortKind::Result;
+  out.output_schema.result_schema_id = "photospider.image";
+  out.output_schema.result_schema_version = 1;
+  out.result_schema = s1_fixture::schema({1, 1, 4});
+  out.dependency_version = 2;
+  out.region_rule = ps::OperationRegionRule::Whole;
+  out.continuation_bytes = sizeof(NativeImage);
+  out.maximum_dependency_stages = 1;
+  source.start_result = [channel_origin](const auto&, const auto& allocator) {
+    return ps::ResultContinuation::make<NativeImage>(allocator, channel_origin);
+  };
+  check(registry->register_operation(std::move(source)));
+  check(registry->freeze());
+  ps::ResultRef retained;
+  {
+    ps::ExecutionContextConfig config;
+    config.gpu_enabled = true;
+    config.managed_resources = ps::ResourceLimits{};
+    ps::ExecutionContext execution(registry, config);
+    const auto root = take(execution.resource_budget());
+    const auto factor = s1_fixture::scalar(root, .5F);
+    ps::WorkflowDocument document;
+    document.inputs = {s1_fixture::declaration(1, "factor", factor)};
+    document.nodes = {
+        {1, "test.native_image", {}, {}},
+        {2,
+         "image.opacity",
+         {ps::WorkflowNodeOutput{1, "value"}, ps::WorkflowInputReference{1}},
+         {}}};
+    document.outputs = {{"result", 2, "value"}, {"source", 1, "value"}};
+    ps::GraphContext graph(document);
+    ps::PlanningOptions planning;
+    planning.execution_mode = ps::ExecutionMode::NativeGpu;
+    auto compiled = take(ps::Compiler(registry).compile(graph, planning));
+    auto result =
+        take(execution.execute(compiled.plan, {{{"factor", factor}}}));
+    const auto& published = result.results.at("source");
+    const auto window = take(published.acquire_tensor(
+        take(published.descriptor()), 0, ps::Region::whole({1, 1, 1, 1, 4})));
+    const auto row = take(window.row_run({0, 0, 0, 0, 0}));
+    require(reinterpret_cast<std::uintptr_t>(row.data) % 4 ==
+                (channel_origin ? 0 : 1),
+            "native source must retain its sample alignment");
+    const auto samples = s4_fixture::samples(published);
+    require(samples == std::vector<float>({1, 1, 1, 1}),
+            "native producer bytes or origin mapping changed");
+    const auto& diagnostics = result.diagnostics;
+    const auto expected_backend =
+        channel_origin ? ps::Backend::Gpu : ps::Backend::Cpu;
+    require(
+        diagnostics.native_dispatch_count == (channel_origin ? 2 : 1) &&
+            diagnostics.transfer_count == 0 &&
+            diagnostics.fallback_reasons.size() == (channel_origin ? 0 : 1) &&
+            diagnostics.selected_backends.at(
+                compiled.plan.steps().back().result_ref()) == expected_backend,
+        "native alignment admission/fallback changed");
+    std::cout << "layout channel_origin=" << channel_origin
+              << " native_dispatches=" << diagnostics.native_dispatch_count
+              << " transfers=" << diagnostics.transfer_count
+              << " fallbacks=" << diagnostics.fallback_reasons.size() << '\n';
+    retained = result.results.at("result");
+  }
+  require(
+      s4_fixture::samples(retained) == std::vector<float>({.5F, .5F, .5F, .5F}),
+      "native image mapping or context retirement lost output samples");
 }
 void check_domain_failures(
     ps::ExecutionContext& execution,
     const std::shared_ptr<ps::OperationRegistry>& operations,
     ps::ExecutionMode mode) {
   ps::Compiler compiler(operations);
+  const auto root = take(execution.resource_budget());
+  unsigned rejected_samples = 0, rejected_schemas = 0;
   for (unsigned kind = 0; kind < 8; ++kind) {
-    auto scene = s4_fixture::scene(kind);
+    auto scene = s4_fixture::scene(root, kind);
     ps::GraphContext graph(scene.document);
     ps::PlanningOptions options;
     options.execution_mode = mode;
-    auto compiled = compiler.compile(graph, options);
-    s4_fixture::require(compiled.ok(), compiled.status().message);
-    // All public entry paths must reject invalid samples before consumption.
-    // Values keep valid metadata so these are numeric, not descriptor errors.
+    auto compiled = take(compiler.compile(graph, options));
     for (unsigned failure = 0; failure < 5; ++failure) {
       auto bindings = scene.bindings;
-      const auto& original = bindings.inputs[0].value;
-      auto bytes = original.copy_bytes();
-      float invalid = failure == 0   ? std::numeric_limits<float>::quiet_NaN()
-                      : failure == 1 ? std::numeric_limits<float>::infinity()
-                      : failure == 2 ? -1.F
-                                     : 1.25F;
-      const auto offset = kind == 6 || failure < 2 ? 0 : 12;
-      std::memcpy(bytes.data() + offset, &invalid, 4);
+      const auto& original = bindings.inputs[0].result;
+      auto pixels = s4_fixture::samples(original);
+      const float invalid =
+          failure == 0   ? std::numeric_limits<float>::quiet_NaN()
+          : failure == 1 ? std::numeric_limits<float>::infinity()
+          : failure == 2 ? -1.F
+                         : 1.25F;
+      pixels[kind == 6 || failure < 2 ? 0 : 3] = invalid;
       if (failure == 4 && kind != 6) {
-        const float zero = 0, hidden = -1;
-        std::memcpy(bytes.data(), &hidden, 4);
-        std::memcpy(bytes.data() + 12, &zero, 4);
+        pixels[0] = -1;
+        pixels[3] = 0;
       }
-      auto value = ps::Value::create(original.descriptor(), original.region(),
-                                     original.layout(), std::move(bytes),
-                                     original.facets());
-      s4_fixture::require(value.ok(), value.status().message);
-      bindings.inputs[0].value = value.take_value();
-      auto rejected = execution.execute(compiled.value().plan, bindings);
-      s4_fixture::require(
-          rejected.status().code == ps::ErrorCode::InvalidArgument,
-          "invalid image/mask samples reached operation");
+      bindings.inputs[0].result = s1_fixture::tensor(
+          root, pixels, original.schema().tensors[0].descriptor.shape,
+          kind != 6);
+      const auto before = root.statistics().live[ps::ResourceKind::Payload];
+      auto rejected = execution.execute(compiled.plan, bindings);
+      require(!rejected.ok() &&
+                  rejected.status().code == ps::ErrorCode::InvalidArgument,
+              "invalid image/mask samples reached operation");
+      require(root.statistics().live[ps::ResourceKind::Payload] == before,
+              "invalid image execution retained temporary payload");
+      ++rejected_samples;
     }
     for (std::size_t input = 0; input < scene.document.inputs.size(); ++input) {
-      if (scene.document.inputs[input].descriptor.shape.size() == 1)
+      const auto& original = *scene.document.inputs[input].result_schema;
+      if (!original.tensors[0].layout.spatial)
         continue;
       auto document = scene.document;
-      document.inputs[input].facets.clear();
+      auto altered = std::make_shared<ps::SchemaTemplate>(original);
+      document.inputs[input].result_schema = altered;
+      altered->tensors[0].facets.clear();
       ps::GraphContext missing(document);
-      s4_fixture::require(compiler.compile(missing, options).status().code ==
-                              ps::ErrorCode::TypeMismatch,
-                          "untyped spatial input accepted");
-      if (scene.document.inputs[input].descriptor.shape.size() != 3)
+      require(compiler.compile(missing, options).status().code ==
+                  ps::ErrorCode::TypeMismatch,
+              "untyped spatial input accepted");
+      ++rejected_schemas;
+      if (original.tensors[0].descriptor.shape.size() != 3)
         continue;
       auto straight = ps::rgba_semantics();
       straight.association = "straight";
-      document.inputs[input].facets = {
-          ps::encode_semantic(straight).take_value()};
+      altered->tensors[0].facets = {take(ps::encode_semantic(straight))};
       ps::GraphContext wrong_association(document);
-      s4_fixture::require(
-          compiler.compile(wrong_association, options).status().code ==
-              ps::ErrorCode::TypeMismatch,
-          "straight image accepted by premultiplied operation");
-      document.inputs[input].facets = {{"photospider.image", 1, {}}};
+      require(compiler.compile(wrong_association, options).status().code ==
+                  ps::ErrorCode::TypeMismatch,
+              "straight image accepted by premultiplied operation");
+      altered->tensors[0].facets = {{"photospider.image", 1, {}}};
       ps::GraphContext old_image(document);
-      s4_fixture::require(compiler.compile(old_image, options).status().code ==
-                              ps::ErrorCode::InvalidArgument,
-                          "image-v1 metadata accepted");
+      require(compiler.compile(old_image, options).status().code ==
+                  ps::ErrorCode::InvalidArgument,
+              "malformed image metadata accepted");
+      rejected_schemas += 2;
     }
   }
+  std::cout << "domain rejected_samples=" << rejected_samples
+            << " rejected_schemas=" << rejected_schemas << '\n';
 }
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
-    auto operations = argc > 1 ? std::make_shared<ps::OperationRegistry>()
-                               : ps::make_default_operation_registry();
-    if (argc > 1) {
-      s4_fixture::require(operations->load_plugin(argv[1]).ok(),
-                          "plugin load failed");
-      s4_fixture::require(operations->freeze().ok(), "plugin freeze failed");
-    }
-    ps::ExecutionContextConfig config;
-    config.gpu_enabled = true;
-    ps::ExecutionContext execution(operations, config);
-    ps::ExecutionContext cpu(operations);
-    s4_fixture::all_operations(cpu, operations, ps::ExecutionMode::CpuExact);
-    check_domain_failures(cpu, operations, ps::ExecutionMode::CpuExact);
-    check_domain_failures(execution, operations, ps::ExecutionMode::NativeGpu);
-    const auto dispatches = s4_fixture::all_operations(
-        execution, operations, ps::ExecutionMode::NativeGpu);
-    s4_fixture::numeric_edges(execution, operations);
-    if (!execution.gpu_enabled()) {
-      std::cout << "CPU fallback oracle passed; native hardware skipped\n";
+    const bool native = argc == 2 && std::string(argv[1]) == "--native-only";
+#if !defined(__APPLE__)
+    if (native) {
+      std::cout << "native Metal fixture unavailable on this platform\n";
       return 77;
     }
-    check_native_alignment(operations);
-    check_native_alignment(operations, true);
-    std::cout << "all_operations=8 dispatches=" << dispatches
-              << " signed_hdr=passed fallback=0 oracle=passed\n";
+#endif
+    auto operations = ps::make_default_operation_registry();
+    ps::ExecutionContextConfig config;
+    config.gpu_enabled = native;
+    config.managed_resources = ps::ResourceLimits{};
+    ps::ExecutionContext execution(operations, config);
+    if (native && !execution.gpu_enabled())
+      return 77;
+    check_domain_failures(
+        execution, operations,
+        native ? ps::ExecutionMode::NativeGpu : ps::ExecutionMode::CpuExact);
+    if (native) {
+      check_native_alignment(false);
+      check_native_alignment(true);
+    }
+    std::cout << "Result image domain/layout contracts passed native=" << native
+              << '\n';
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

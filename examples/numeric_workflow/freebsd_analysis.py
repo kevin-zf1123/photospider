@@ -7,15 +7,17 @@ The CSV keeps one row per complete process (one warmup plus seven samples).
 import csv
 import subprocess
 import sys
+from timing_scopes import timing_scopes
 
 
 def main():
     current, baseline, exp = sys.argv[1:4]
+    scopes = {binary: timing_scopes(binary) for binary in (current, baseline, exp)}
     stream = open(sys.argv[4], 'w', newline='') if len(sys.argv) > 4 else sys.stdout
     writer = csv.writer(stream)
     writer.writerow(['phase', 'round', 'backend', 'distribution', 'layout',
                      'function', 'layer', 'N', 'span', 'repetitions',
-                     'median_us', 'min_us', 'max_us', 'peak_payload_bytes', 'checksum'])
+                     'median_us', 'min_us', 'max_us', 'peak_payload_bytes', 'checksum', 'timing_scope'])
 
     def trig(phase, name, layer, n, backend='current', distribution='normal', layout=3, run=0):
         span = '.25' if name in ('sinpi', 'cospi') else '1'
@@ -23,7 +25,7 @@ def main():
         command = [executable, name, layer, str(n), span, '7', 'measure',
                    distribution, str(layout)]
         result = subprocess.run(command, text=True, capture_output=True, timeout=120, check=True)
-        writer.writerow([phase, run, backend, distribution, layout] + next(csv.reader([result.stdout.strip()])))
+        writer.writerow([phase, run, backend, distribution, layout] + next(csv.reader([result.stdout.strip()])) + [scopes[executable][layer]])
         stream.flush()
 
     names = ('sin', 'cos', 'sinpi', 'cospi', 'sinc', 'sincpi')
@@ -55,13 +57,13 @@ def main():
                 result = subprocess.check_output([exp, layer, str(n), span, '7'], text=True, timeout=120)
                 fields = next(csv.reader([result.strip()]))
                 fields[0] = 'exp'
-                writer.writerow(['exp', 0, 'current', 'normal', 3] + fields)
+                writer.writerow(['exp', 0, 'current', 'normal', 3] + fields + [scopes[exp][layer]])
                 stream.flush()
     for layer in ('public', 'core'):
         result = subprocess.check_output([exp, layer, '4097', 'mixed', '7'], text=True, timeout=120)
         fields = next(csv.reader([result.strip()]))
         fields[0] = 'exp'
-        writer.writerow(['exp', 0, 'current', 'mixed', 3] + fields)
+        writer.writerow(['exp', 0, 'current', 'mixed', 3] + fields + [scopes[exp][layer]])
         stream.flush()
     if stream is not sys.stdout:
         stream.close()

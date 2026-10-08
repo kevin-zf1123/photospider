@@ -8,111 +8,84 @@ category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-clarification_status: complete
-proposed_operation_keys:
+verification_status: focused_ctest_installed_consumer_and_example_passed
+operation_keys:
   - channel.extract_index_strict
   - channel.extract_index_accelerated_apple_silicon
   - channel.extract_index_accelerated_x86_64
-repository_branch: ops-specs
-repository_commit: d49d1840
-inspection_commit: d49d1840
 ---
 
-# FMT-01A: extract a channel by index
+# FMT-01A: extract a cell axis by index
 
-Runtime update: the CPU registrations and public split helper are implemented.
-See the [implementation and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-01-channel-extraction)
-for current storage behavior, validation commands and the measured performance scope.
-Proposed is retained as the specification decision status.
+Inherit [FMT-01](FMT-01_channel_extraction_contract.md) for the Result schema,
+cell-axis coordinates, layouts, metadata projection, demand, ownership and
+errors. The FMT specification remains Proposed. This registered primitive
+copies one indexed cell-axis element to each requested output coordinate.
 
+## Ports and parameters
 
-Inherit the complete [FMT-01 family contract](FMT-01_channel_extraction_contract.md)
-for ports, shape inference, metadata modes, exact mapping, regional support,
-layout, ownership, resources, errors and acceptance. These are proposed keys;
-the removed `channel.extract` Whole typed-HWC node is a historical baseline,
-not an alias or a conforming implementation of these entries.
-Registration targets the default operation registry. The family supplies the
-support matrix, reference/optimized algorithm, performance acceptance plan and
-shared implementation dependencies; the selector and fixtures below specialize it.
+Input `input` and output `values` are Results with one tensor member and no
+fields. The output preserves source dtype, schema id, tensor key, batch axes and
+publication policy. It removes the selected cell axis by default, or retains it
+with extent one when `keepdims=true`. The batch prefix is never changed.
 
-## Interface and meaning
+The direct node requires static `axis`, `index`, `keepdims`, `layout`, and
+`metadata_mode` parameters. `axis` is an index into the tensor descriptor, not
+the complete sample shape. `index` is zero-based and must be less than that
+cell-axis extent. `axis` may be omitted only when the effective
+`photospider.tensor-description` identifies exactly one `channel_axis`; raw mode
+always needs an explicit axis. A direct axis assertion that disagrees with
+respect-mode metadata fails.
 
-Input `input` is a tensor; output `values` is a same-dtype single-component tensor.
-The common static parameters are `metadata_mode`, optional `axis`, conditional
-`metadata_override`, `keepdims` and `layout`. Add required static Int64 `index`:
-0<=index<input.shape[resolved_axis]. Index is zero-based, has no default, and
-accepts neither negative-from-end shorthand nor clamping/wrapping. It is a
-channel position, not a channel count, layer number or numeric input port.
+`metadata_mode` is `respect`, `raw` or `override`; `metadata_override` is
+required exactly in override mode. `layout` is `auto`, `view` or `materialize`.
+The public `ChannelExtractOptions` defaults to respect, keepdims false, auto
+layout and strict CPU profile. The three registry profiles use the same exact
+bit-copy mapping; there is no GPU implementation.
 
-All target FMT dtypes and positive rank-1..8 shapes are covered, subject to the
-shared element/resource bounds. Keepdims=false removes the selected axis and
-requires rank>=2; true retains it with extent 1. Untagged data works with an
-explicit axis. A raw invocation ignores semantic axis selection and needs axis;
-an ordinary conflicting designation fails unless override is explicit.
+## Mapping and metadata projection
 
-Set k=index in the family coordinate formula. Return each selected element
-bit-for-bit, including nonfinite float values. No sample-domain color validation
-is required: this node selects stored bytes, even if a selected alpha is outside
-[0,1]. Applicable descriptions remain unvalidated component descriptions.
-An already failing required producer still cannot supply a successful value.
+For complete sample coordinates, preserve each batch coordinate and fix the
+cell coordinate on axis `batch_rank + axis` to `index`. Remove the cell axis
+from the output shape when keepdims is false; otherwise replace its extent with
+one. Copy every requested value exactly, without arithmetic or sample-domain
+validation. NaN payloads, infinities, signed zero and integer extrema are
+preserved.
 
-## Dependency and storage specialization
+If the selected axis is the described channel axis, project the selected
+component's name, role, unit and applicable interpretation. A retained singleton
+axis receives a one-entry channel table. After squeezing it, carry a component
+description without claiming the result still has a channel axis. Other color
+groups that depend on the removed channel axis are not projected as complete
+groups. A/B do not promise to retain arbitrary opaque annotations.
 
-For requested output Q, input Data is exactly Q with the selected source axis
-inserted/fixed at index. There is no Control payload or additional sample
-Validation domain. Structural metadata participates in descriptor inference and
-propagation. Data changes on other source channels do not dirty this output;
-selected-channel changes project to the same nonchannel positions. Both request
-and dirty rules preserve nonzero global origins and disjoint gaps.
+## Data demand and storage
 
-An input can expose requested components through owned views/read windows.
-`materialize` copies only requested elements; image results use the kernel's
-full-image virtual reservation with page backing provided on demand. `auto`
-performs only the family-defined fallback. Resource accounting separates logical
-Nq*d sample volume from the complete virtual span, the union of backed pages,
-retained source pages and window/metadata overhead. Mapping/copy work is
-O(Nq*rank+F*rank), plus page preparation and actual upstream work. Tile geometry
-comes from the DAG and does not vary by extraction node.
+For an output footprint Q, the Result continuation requests only the mapped
+source support and the source descriptor. Its Need role mask is 9: Data (1) and
+Descriptor (8), with no Validation or Control role. Dependency-v2 maps dirty
+selected-channel samples back to the same non-channel output coordinates;
+changes to unselected channels do not dirty this output. An Empty request
+publishes an empty Result without reading payload.
 
-## Independent fixtures and public workflow requirement
+Generic Result tensors can expose valid positive-, negative- or zero-stride
+views. The mapper can preserve authorized backing partitions, including views
+with multiple owners. Selecting a spatial tensor's declared channel axis can
+retain the source physical owner and channel plane. Slicing a spatial height or
+width axis materializes in auto mode and fails under forced view. Materialized
+copies cover only the requested output and check cancellation within runs of at
+most 256 samples. The primitive disables Result caching.
 
-Use source shape [2,2,4], explicit axis=2, and logical samples:
+## Example and validation
 
-```
-[[[10,20,30,.25], [11,21,31,.5]],
- [[12,22,32,.75], [13,23,33,1]]]
-```
+For the B/A/R/G sample tensor in the [public Result workflow](../../../../examples/channel_extraction_workflow/README.md),
+axis 2 and index 2 select the red values. A request for the second row returns
+`[12,13]`; the source stores the same samples at coordinates `[1,0,2]` and
+`[1,1,2]`.
 
-For index=1, keepdims=false, output shape [2,2] and values are
-`[[20,21],[22,23]]`. Keepdims=true gives shape [2,2,1] with the same four values.
-A request only for output (1,0) reads only source (1,0,1) and returns 22.
-Changing source (1,0,2) must not invalidate this result; changing (1,0,1) must.
-For source [4], index=2, keepdims=true yields [1] containing its third value;
-the same call with keepdims=false fails preflight without reading samples.
-
-The conceptual public workflow is `bound tensor -> FMT-01A -> named result`.
-Implementation delivery must supply an actual WorkflowDocument/Compiler/
-ExecutionContext example with bindings, parameters, an offset ROI and checked
-output. Do not publish this conceptual node as runnable until its registry entry
-and shared metadata migration exist. Legacy extraction tests are reusable inputs,
-not evidence that this target has executed.
-
-The independent oracle enumerates output integer coordinates, inserts index at
-axis and compares source/output byte sequences using a separate stride evaluator.
-It must not call the production selector or metadata projector. Cover:
-
-- Axis-first/middle/last and rank-eight shapes, index 0/C-1, C=1, keepdims both
-  ways, and equal semantic data under different logical axis descriptions of planar storage.
-- Every supported dtype and exact signed-zero/NaN payload/Inf bit fixtures;
-  unrelated malformed color samples remain unread with a regional raw producer.
-- Full-domain requests versus offset/disjoint ROI/tile partitions, varying the
-  common tile configuration between DAGs while keeping one geometry within each
-  DAG. Include tile edges and reject independently mismatched image block settings.
-- Generic negative/zero strides, unaligned samples and owner-fragment boundaries;
-  planar-image tile/page boundaries within one address-space owner; forced
-  view availability, auto fallback, requested-page materialization and no full-input gather.
-- Index/axis errors, metadata assertions/overrides, low capacity/work/stage,
-  bounded cancellation, cache-off and view survival after context destruction.
-
-No new numerical computation or tolerance is introduced: all successful profiles
-compare exact bytes. No implementation or runtime tests were run for this spec.
+The current `test_channel_extraction` integration test passed 483 arbitrary-axis
+bit-copy cases and additional batch, planar, fragmented-view, metadata, resource
+and limit checks. The public split workflow also passed and confirmed that only
+the requested handle executes. This does not claim a cross-family workflow
+through channel assembly. The older [performance workload](../../../../examples/channel_extraction_performance/README.md)
+measures the Value/planar path; it is not current Result performance evidence.

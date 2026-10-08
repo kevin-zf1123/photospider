@@ -6,12 +6,14 @@
 #include <map>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_lut3d.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/uniform_axis.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
@@ -62,7 +64,9 @@ Result<OperationPreparation> prepare(
   if (inputs.size() != 3)
     return Answer(type_error("LUT3D requires input, table, axis"));
   for (unsigned port = 0; port < 3; ++port) {
-    const auto& descriptor = inputs[port].descriptor;
+    const auto& tensor = inputs[port].result_schema->tensors[0];
+    const ValueDescriptor descriptor{tensor.descriptor.element_type,
+                                     tensor.sample_shape()};
     if ((descriptor.element_type != ElementType::Float64 &&
          (port == 2 || descriptor.element_type != ElementType::Float32)) ||
         (port == 0 &&
@@ -81,8 +85,8 @@ Result<OperationPreparation> prepare(
     }
   }
   for (unsigned axis = 0; axis < 3; ++axis)
-    if (inputs[1].descriptor.shape[axis] < 2 ||
-        inputs[1].descriptor.shape[axis] > 256)
+    if (inputs[1].result_schema->tensors[0].sample_shape()[axis] < 2 ||
+        inputs[1].result_schema->tensors[0].sample_shape()[axis] > 256)
       return Answer(numeric_ops::array_parameter_error(
           "LUT3D axis extent must be 2..256"));
   auto input_facet = encode_color_array(a),
@@ -93,7 +97,7 @@ Result<OperationPreparation> prepare(
     return Answer(output_facet.status());
   for (unsigned port = 0; port < 2; ++port) {
     const auto& expected = port ? output_facet.value() : input_facet.value();
-    for (const auto& facet : inputs[port].facets)
+    for (const auto& facet : inputs[port].result_schema->tensors[0].facets)
       if (facet.key == "photospider.color-array" &&
           (facet.version != expected.version ||
            facet.payload != expected.payload))
@@ -108,11 +112,13 @@ Result<OperationPreparation> prepare(
       Lut3dProgram{a.model, profile, tetrahedral, domain == "clamp"});
   prepared.outputs.resize(1);
   auto& output = prepared.outputs[0];
-  output.metadata.descriptor = {
+  auto schema = numeric_ops::numeric_tensor_schema(
       dtype == "float32" ? ElementType::Float32 : ElementType::Float64,
-      inputs[0].descriptor.shape};
-  output.metadata.facets = {output_facet.take_value()};
-  output.metadata.atomic_trailing_axes = 1;
+      inputs[0].result_schema->tensors[0].sample_shape());
+  schema.tensors[0].facets = {output_facet.take_value()};
+  schema.tensors[0].atomic_trailing_axes = 1;
+  output.metadata.result_schema =
+      std::make_shared<const SchemaTemplate>(std::move(schema));
   return Answer(std::move(prepared));
 }
 struct Lut3dPoint {
@@ -124,27 +130,31 @@ struct Lut3dState {
   const Lut3dProgram* program;
   std::array<numeric_ops::UniformAxis, 3> axes;
   numeric_ops::ExactLut3d arithmetic;
-  const OperationInvocation& call;
-  const ResourceBudget* budget;
+  const ResultProgramPhase& phase;
+  std::array<std::optional<numeric_ops::MathTensorReader>, 3> readers;
   std::function<Status(std::uint64_t)> consume;
-  std::vector<std::uint64_t> position;
-  Lut3dState(const Lut3dProgram* value, const OperationInvocation& invocation)
+  std::vector<std::uint64_t> shape, position;
+  Lut3dState(const Lut3dProgram* value, const ResultProgramPhase& invocation)
       : program(value),
         axes{numeric_ops::UniformAxis(value->profile),
              numeric_ops::UniformAxis(value->profile),
              numeric_ops::UniformAxis(value->profile)},
         arithmetic(value->profile),
-        call(invocation),
-        budget(resource_internal::metadata_budget()),
+        phase(invocation),
         consume([this](auto amount) { return work(amount); }),
-        position(invocation.inputs[0].descriptor().shape.size() - 1, 0) {}
-  Status work(std::uint64_t amount) const {
-    if (call.cancellation.cancelled())
-      return {ErrorCode::Cancelled, {}};
-    return budget ? budget->consume({amount}) : Status::success();
+        shape(invocation.query.inputs[0]
+                  .result_schema->tensors[0]
+                  .sample_shape()),
+        position(shape.size() - 1, 0) {
+    for (auto& axis : axes)
+      axis.knots = ResourceVector<std::uint64_t>(
+          ResourceAllocator<std::uint64_t>(phase.resources));
+    for (unsigned port = 0; port < readers.size(); ++port)
+      readers[port].emplace(phase.tensors->at({port, 0}),
+                            phase.query.cancellation);
   }
+  Status work(std::uint64_t amount) const { return phase.consume_work(amount); }
   void advance() {
-    const auto& shape = call.inputs[0].descriptor().shape;
     for (auto i = position.size(); i; --i) {
       if (++position[i - 1] < shape[i - 1])
         break;
@@ -159,17 +169,14 @@ struct Lut3dState {
             {FailureOrigin::Domain, FailureScope::Run}};
   }
   Result<std::uint64_t> read(unsigned port,
-                             const std::vector<std::uint64_t>& at) const {
+                             const std::vector<std::uint64_t>& at) {
     auto charged = work(at.size() + 1);
     if (!charged.ok())
       return Result<std::uint64_t>(charged);
-    const auto& input = call.inputs[port];
-    const bool narrow = input.descriptor().element_type == ElementType::Float32;
-    std::uint64_t bits = 0;
-    auto address = input.byte_address(at);
-    if (!address.ok())
-      return Result<std::uint64_t>(address.status());
-    std::memcpy(&bits, input.bytes().data() + address.value(), narrow ? 4 : 8);
+    const auto& input = phase.tensors->at({port, 0});
+    const bool narrow =
+        input.spec().descriptor.element_type == ElementType::Float32;
+    auto bits = readers[port]->bits(at);
     const auto parts = BinaryParts::decode(bits, narrow);
     if (parts.nan || parts.infinite)
       return Result<std::uint64_t>(
@@ -259,46 +266,44 @@ struct Lut3dState {
     point->support = support.take_value();
     return Status::success();
   }
-  Result<Value> execute() {
-    using Answer = Result<Value>;
+  Status execute(const ResourceVector<ResultTensorWriteWindow>& writers) {
     for (unsigned axis = 0; axis < 3; ++axis) {
       std::array<std::uint64_t, 3> values{};
       for (unsigned j = 0; j < 3; ++j) {
         auto value = read(2, {axis, j});
         if (!value.ok())
-          return Answer(value.status());
+          return value.status();
         values[j] = value.value();
       }
       auto status = axes[axis].validate(
-          values, call.inputs[1].descriptor().shape[axis], consume);
+          values,
+          phase.query.inputs[1].result_schema->tensors[0].sample_shape()[axis],
+          consume);
       if (!status.ok())
-        return Answer(status.code == ErrorCode::OperationFailed
-                          ? failure(status.message, status.reason)
-                          : status);
+        return status.code == ErrorCode::OperationFailed
+                   ? failure(status.message, status.reason)
+                   : status;
     }
-    const auto count = call.inputs[0].region().element_count().value() / 3;
+    const auto count =
+        phase.query.output.result_schema->tensors[0].sample_count().value() / 3;
     // Preserve complete query/domain validation before selected table
     // arithmetic.
     for (std::uint64_t i = 0; i < count; ++i, advance()) {
       Lut3dPoint point;
       auto status = classify(&point, false);
       if (!status.ok())
-        return Answer(status);
+        return status;
     }
-    const auto& resolved = call.prepared->traits().outputs[0];
-    auto allocated = MutableValue::allocate(
-        {resolved.output_element_type, resolved.fixed_output_shape},
-        call.output_region, call.allocator);
-    if (!allocated.ok())
-      return Answer(allocated.status());
-    auto output = allocated.take_value();
-    const bool narrow = resolved.output_element_type == ElementType::Float32;
+    numeric_ops::MathTensorWriter output(writers[0]);
+    const bool narrow =
+        phase.query.output.result_schema->tensors[0].descriptor.element_type ==
+        ElementType::Float32;
     const unsigned width = narrow ? 4 : 8;
     for (std::uint64_t row = 0; row < count; ++row, advance()) {
       Lut3dPoint point;
       auto status = classify(&point);
       if (!status.ok())
-        return Answer(status);
+        return status;
       std::array<std::array<std::uint64_t, 3>, 8> colors{};
       for (unsigned i = 0; i < point.support.count; ++i) {
         auto at = vertex(point, i);
@@ -307,51 +312,51 @@ struct Lut3dState {
           at.back() = channel;
           auto value = read(1, at);
           if (!value.ok())
-            return Answer(value.status());
+            return value.status();
           colors[i][channel] = value.value();
         }
         auto valid = validate_color(colors[i], 1);
         if (!valid.ok())
-          return Answer(valid);
+          return valid;
       }
       auto values =
           arithmetic.evaluate(cell(point), point.query, program->tetrahedral,
                               colors, narrow, consume);
       if (!values.ok())
-        return Answer(values.status());
+        return values.status();
+      auto output_at = position;
+      output_at.push_back(0);
       for (unsigned channel = 0; channel < 3; ++channel) {
+        output_at.back() = channel;
         if (BinaryParts::decode(values.value()[channel], narrow).infinite)
-          return Answer(failure("LUT3D output overflow",
-                                FailureReason::ArithmeticOverflow));
-        std::memcpy(output.data() + (row * 3 + channel) * width,
-                    &values.value()[channel], width);
+          return failure("LUT3D output overflow",
+                         FailureReason::ArithmeticOverflow);
+        std::memcpy(output.address(output_at), &values.value()[channel], width);
       }
     }
-    auto status = work(1);
-    return status.ok() ? std::move(output).publish(resolved.output_facets,
-                                                   call.resources)
-                       : Answer(status);
+    return work(1);
   }
 };
-Result<Value> execute_lut3d(const OperationInvocation& call) {
-  using Answer = Result<Value>;
-  try {
-    auto allocated = call.allocator.allocate(sizeof(Lut3dState));
+struct Lut3dKernel final {
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    if (writers.size() != 1 || !phase.query.prepared ||
+        !phase.query.prepared->state())
+      return {ErrorCode::OperationFailed,
+              "LUT3D requires a prepared packed writer"};
+    auto allocated = phase.allocator.allocate(sizeof(Lut3dState));
     if (!allocated.ok())
-      return Answer(allocated.status());
+      return allocated.status();
     auto buffer = allocated.take_value();
     std::unique_ptr<Lut3dState, void (*)(Lut3dState*)> state(
         new (buffer.data()) Lut3dState(
-            static_cast<const Lut3dProgram*>(call.prepared->state()), call),
+            static_cast<const Lut3dProgram*>(phase.query.prepared->state()),
+            phase),
         [](auto* value) { value->~Lut3dState(); });
-    return state->execute();
-  } catch (const std::bad_alloc&) {
-    return Answer(Status{ErrorCode::ResourceExhausted,
-                         {},
-                         FailureReason::CapacityLimit,
-                         {FailureOrigin::Resource, FailureScope::Run}});
+    return state->execute(writers);
   }
-}
+};
+using Lut3dResultProgram = numeric_ops::WholeTensorProgram<Lut3dKernel>;
 
 OperationDefinition operation(const std::string& key, bool tetrahedral,
                               SequenceProfile profile) {
@@ -360,6 +365,8 @@ OperationDefinition operation(const std::string& key, bool tetrahedral,
   auto& traits = result.traits;
   traits.input_count = 3;
   traits.input_schema.resize(3);
+  for (auto& input : traits.input_schema)
+    input.kind = OperationPortKind::Result;
   traits.input_schema[0].element_type_mask = 12;
   traits.input_schema[1].element_type_mask = 12;
   traits.input_schema[2].element_type_mask = 4;
@@ -369,16 +376,16 @@ OperationDefinition operation(const std::string& key, bool tetrahedral,
       {"output_color_description", OperationParameterType::String},
       {"dtype", OperationParameterType::String},
       {"out_of_domain", OperationParameterType::String}};
-  auto& output = traits.outputs[0];
-  output.key = "values";
-  output.region_rule = OperationRegionRule::Whole;
-  output.requires_dense_output = true;
+  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                       sizeof(Lut3dResultProgram));
   traits.workspace_bytes = sizeof(Lut3dState);
   result.prepare_static = [tetrahedral, profile](const auto& inputs,
                                                  const auto& parameters) {
     return prepare(tetrahedral, profile, inputs, parameters);
   };
-  result.callback = execute_lut3d;
+  result.start_result = [](const auto&, const auto& allocator) {
+    return ResultContinuation::make<Lut3dResultProgram>(allocator);
+  };
   return result;
 }
 }  // namespace

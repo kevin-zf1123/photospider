@@ -103,7 +103,7 @@ void underflow(px::Context& c) {
       check(data<uint32_t>(dst)[ch] == data<uint32_t>(dst)[0],
             "inconsistent native underflow");
     }
-    std::cout << (c.gpu_backend() == PS_GPU_BACKEND_VULKAN_V11
+    std::cout << (c.gpu_backend() == PS_GPU_BACKEND_VULKAN_V1
                       ? "vulkan_native_fp32_underflow="
                       : "metal_native_fp32_underflow=")
               << (preserved ? "preserved" : "flushed") << '\n';
@@ -332,7 +332,7 @@ void ordered(px::Context& c) {
                 {"height", 1},
                 {"width", 1}});
   };
-  if (c.gpu_backend() == PS_GPU_BACKEND_VULKAN_V11) {
+  if (c.gpu_backend() == PS_GPU_BACKEND_VULKAN_V1) {
     // Vulkan OpFDiv permits 2.5 ULP, while comparisons are exact. Infer the
     // transition from adjacent thresholds; require one monotone palette switch
     // within the native addition and division bounds. CPU/Metal retain their
@@ -619,38 +619,40 @@ void fixed_sums(px::Context& c) {
   }
 }
 struct Memory {
-  const ps::OperationInvocation& call;
+  const ps::ResultProgramPhase& call;
   ps::ResourceBudget budget;
   std::map<uint8_t*, ps::MutableBuffer> blocks;
 };
-ps::Result<ps::Value> run(const ps::OperationInvocation& call,
-                          const ps::ResourceBudget& budget) {
+ps::Result<ps::ResultProgramPoll> run(const ps::ResultProgramPhase& call,
+                                      const ps::ResourceBudget& budget) {
   Memory memory{call, budget, {}};
-  ps_planar_services_v3 services{};
+  ps_result_services_v2 services{};
   services.struct_size = sizeof(services);
+  services.abi_version = PS_RESULT_OPERATION_ABI_VERSION_2;
   services.context = &memory;
-  services.backend = call.gpu ? 2 : 1;
   services.gpu = call.gpu;
   services.cancelled = [](void* p) {
-    return static_cast<Memory*>(p)->call.cancellation.cancelled() ? 1 : 0;
+    return static_cast<Memory*>(p)->call.query.cancellation.cancelled() ? 1 : 0;
   };
   services.consume_work = [](void* p, uint64_t units) {
-    return static_cast<Memory*>(p)->budget.consume({units}).ok() ? 1 : 0;
+    return static_cast<Memory*>(p)->budget.consume({units}).ok() ? 0 : 4;
   };
-  services.allocate_scratch = [](void* p, uint64_t bytes) -> uint8_t* {
+  services.allocate_scratch = [](void* p, uint64_t bytes,
+                                 uint8_t** destination) -> int {
     auto& m = *static_cast<Memory*>(p);
     auto buffer = m.call.allocator.allocate(bytes);
     if (!buffer.ok()) {
-      return nullptr;
+      return 4;
     }
     auto value = buffer.take_value();
     auto* address = value.data();
     std::memset(address, 0, bytes);
     m.blocks.emplace(address, std::move(value));
-    return address;
+    *destination = address;
+    return 0;
   };
   services.release_scratch = [](void* p, uint8_t* bytes) {
-    return static_cast<Memory*>(p)->blocks.erase(bytes) ? 1 : 0;
+    return static_cast<Memory*>(p)->blocks.erase(bytes) ? 0 : 6;
   };
   {
     px::Environment environment;
@@ -666,14 +668,37 @@ ps::Result<ps::Value> run(const ps::OperationInvocation& call,
     fixed_sums(context);
   }
   check(memory.blocks.empty(), "stage scratch owner leak");
-  auto output =
-      ps::MutableValue::allocate({ps::ElementType::Float32, {1}},
-                                 ps::Region::whole({1}), call.allocator)
+  auto builder =
+      ps::ResultBuilder::start(call.resources, *call.query.output.result_schema,
+                               call.query.semantic_key)
           .take_value();
+  auto relation = ps::ResultRelation::cartesian(call.resources, 1, {0, 1, 0, 0})
+                      .take_value();
+  check(builder.bind_descriptor_relation(relation).ok(), "stage descriptor");
   const float value = 1;
-  std::memcpy(output.data(), &value, 4);
-  return std::move(output).publish();
+  check(builder
+            .publish_tensor(
+                0, ps::Region::whole({1}),
+                ps::ByteView(reinterpret_cast<const uint8_t*>(&value), 4),
+                relation, {true, true, true, true})
+            .ok(),
+        "stage Result publication");
+  return ps::Result<ps::ResultProgramPoll>(
+      ps::ResultPublication{builder.seal().take_value(), true});
 }
+struct StageProgram {
+  uint32_t expected_backend;
+  explicit StageProgram(uint32_t backend) : expected_backend(backend) {}
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
+    if (expected_backend &&
+        (!phase.gpu || phase.gpu->backend != expected_backend))
+      return ps::Result<ps::ResultProgramPoll>(
+          ps::Status{ps::ErrorCode::BackendUnavailable,
+                     "stage profile requires its named native backend"});
+    return run(phase, phase.resources);
+  }
+};
+
 }  // namespace
 int main(int argc, char** argv) try {
   const std::string backend = argc > 1 ? argv[1] : "cpu";
@@ -681,8 +706,8 @@ int main(int argc, char** argv) try {
         "unknown backend");
   const bool gpu = backend != "cpu";
   const uint32_t expected_backend = backend == "vulkan"
-                                        ? PS_GPU_BACKEND_VULKAN_V11
-                                    : gpu ? PS_GPU_BACKEND_METAL_V11
+                                        ? PS_GPU_BACKEND_VULKAN_V1
+                                    : gpu ? PS_GPU_BACKEND_METAL_V1
                                           : 0;
   auto registry = std::make_shared<ps::OperationRegistry>();
   ps::ResourceBudget budget;
@@ -692,18 +717,28 @@ int main(int argc, char** argv) try {
   operation.traits.supports_gpu = gpu;
   operation.traits.workspace_bytes = 8 << 20;
   auto& output = operation.traits.outputs[0];
-  output.output_element_type = ps::ElementType::Float32;
-  output.shape_rule = ps::OperationShapeRule::Fixed;
-  output.fixed_output_shape = {1};
-  operation.callback = [&](const ps::OperationInvocation& call) {
-    if (expected_backend &&
-        (!call.gpu || call.gpu->backend != expected_backend))
-      return ps::Result<ps::Value>(
-          ps::Status{ps::ErrorCode::BackendUnavailable,
-                     "stage profile requires its named native backend"});
-    return run(call, budget);
+  output.output_schema.kind = ps::OperationPortKind::Result;
+  output.output_schema.result_schema_id = "test.pixeloe.stage";
+  output.output_schema.result_schema_version = 1;
+  ps::SchemaTemplate schema;
+  schema.id = "test.pixeloe.stage";
+  ps::ResultTensorSpec tensor;
+  tensor.key = "passed";
+  tensor.descriptor = {ps::ElementType::Float32, {1}};
+  schema.tensors.push_back(tensor);
+  output.result_schema = schema;
+  output.region_rule = ps::OperationRegionRule::Whole;
+  output.dependency_version = 2;
+  output.continuation_bytes = sizeof(StageProgram);
+  output.maximum_dependency_stages = 1;
+  operation.start_result = [expected_backend](
+                               const ps::ResultProgramQuery&,
+                               const ps::BufferAllocator& allocator) {
+    return ps::ResultContinuation::make<StageProgram>(allocator,
+                                                      expected_backend);
   };
-  check(registry->register_operation(std::move(operation)).ok(), "register");
+  const auto registered = registry->register_operation(std::move(operation));
+  check(registered.ok(), registered.message.c_str());
   check(registry->freeze().ok(), "freeze");
   ps::WorkflowDocument document;
   document.nodes = {{1, "test.pixeloe_stages", {}, {}}};

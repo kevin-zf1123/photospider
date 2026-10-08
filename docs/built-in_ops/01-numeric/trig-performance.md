@@ -1,7 +1,7 @@
-# Certified SIMD trigonometric kernels, 2026-09-24
+# Certified SIMD trigonometric kernels
 
-This update follows the NUM/CRV batch commit `6786cb93`. It accelerates the
-existing Float32 NUM-04 profiles on macOS ARM NEON and Linux x86 AVX2/FMA.
+The SIMD implementation accelerates the existing Float32 NUM-04 profiles on
+macOS ARM NEON and Linux x86 AVX2/FMA.
 The public definitions, four ordered-step bound, exact special/landmark rules,
 and strict default remain unchanged. Float64 inputs keep their existing paths;
 these Float32 certificates are not used as NUM-01 RN64 AST enclosures or as
@@ -83,14 +83,14 @@ error in the sincpi corpus is not a proof of correct rounding for every input;
 the maintained guarantee is the analytic bound above and the public four-step
 contract.
 
-## Comparable performance
+## Historical performance measurements
 
-The baseline is a complete source archive of `6786cb93`, including the preceding
-batch improvements, built with its own test kernel. Both variants use the same
-`trig_benchmark.cpp`, the same private operation factory/key and the same public
-WorkflowDocument execution path. The baseline defines
-`PHOTOSPIDER_TRIG_BASELINE` only to disable the unavailable raw polynomial mode.
-There is no mixing of old inline headers with the current kernel archive.
+The table records a pre-Result A/B run. Its baseline and new executable used
+their own matching source and test-kernel builds and the same Value-based
+WorkflowDocument fixture. The baseline disabled the unavailable raw polynomial
+mode. These measurements retain their original implementation and timing
+boundaries; they are historical records rather than a current Result-path
+performance comparison.
 
 Hosts: Apple M5, macOS 27.2, Homebrew Clang 21.1.3, macOS 27.0 SDK in both
 compared builds; Intel i9-12900, Ubuntu WSL kernel 5.15.167.4, Clang 18.1.3,
@@ -99,14 +99,14 @@ object uses -O3, and fast-math remains disabled. An initial macOS baseline
 selected a different SDK; it was rebuilt with the current sysroot and the
 complete macOS timing sequence was rerun for the table below.
 
-One warmup plus seven measured samples, medians, seed 404. Public runs use one
-CPU worker, result cache off, a 1 GiB public live-byte ceiling, dependency work
-limits 2^50 and zero dependency cache-proof work. Compile/freeze and complete
-output smoke checks are outside timing. The optional managed resource ledger
-is unset in timing; budget behavior is tested separately. Input is uniform in
-[-1,1], except sinpi/cospi in [-1/4,1/4]. Public includes execute/collect; core
-includes callback allocation/gather/store; raw includes only preallocated SIMD
-arrays and the environment scope. Profiler recordings are separate from timing.
+One warmup plus seven measured samples, medians, seed 404. Historical public
+runs use one CPU worker, result cache off, a 1 GiB public live-byte ceiling,
+dependency work limits 2^50 and zero dependency cache-proof work. Compile/freeze
+and complete output smoke checks are outside timing. Input is uniform in
+[-1,1], except sinpi/cospi in [-1/4,1/4]. Historical public includes
+execute/collect; historical core includes callback allocation, gather, and
+store; raw includes only preallocated SIMD arrays and the environment scope.
+Profiler recordings are separate from timing.
 
 Public medians at N=1,048,576, milliseconds:
 
@@ -124,7 +124,7 @@ For wide sincpi, N=262,144 with inputs in [-1024,1024]:
 - M5: 51.545 ms -> 1.037 ms (49.71x).
 - Linux: 88.555 ms -> 1.548 ms (57.20x).
 
-At N=1,048,576, current raw kernel medians were:
+At N=1,048,576, historical medians for the new raw kernel were:
 
 | Function | M5 raw ms | Linux raw ms |
 | --- | ---: | ---: |
@@ -135,18 +135,19 @@ At N=1,048,576, current raw kernel medians were:
 | sinc | 0.191 | 0.177 |
 | sincpi | 2.175 | 1.825 |
 
-The raw/core/public CSV also covers N=4,096 and 262,144. Fixed baseline-first
-process order, WSL scheduling variance and one timing sequence per host limit
-small-difference claims. Speedups describe these admitted ordinary workloads;
-they are not full-domain or all-CRV performance claims. Raw has no old-backend
-comparison and cannot isolate the polynomial's cost relative to SLEEF alone.
+The historical raw/core/public CSV also covers N=4,096 and 262,144. Fixed
+baseline-first process order, WSL scheduling variance, and one timing sequence
+per host limit small-difference claims. Speedups describe these admitted
+ordinary workloads; they are not full-domain or all-CRV performance claims. Raw
+has no old-backend comparison and cannot isolate the polynomial's cost relative
+to SLEEF alone.
 
 The gain combines SIMD batching, narrower arithmetic for five kernels and
 removal of per-element dynamic interval certification in favor of the proved
 static domain. Sinc additionally avoids division, and sincpi avoids repeated
 sine/cosine enclosures and division interval propagation.
 
-## Memory and profiling
+## Historical memory and profiling
 
 At N=1,048,576, reported public managed Payload peak is 8,599,440 bytes for
 sin/cos in both variants. These operators retain the existing 2,624-byte maximum
@@ -171,7 +172,40 @@ WSL hardware counters were unavailable in the preceding exp investigation
 (`perf_event_open` returned EPERM); this update makes no instruction/cycle or
 microarchitectural attribution from Linux timings.
 
-## Validation and reproduction
+## Current Result-path acceptance
+
+The current benchmark runs the production kernels through a Result workflow.
+Each corpus completed across six partitions and passed layout,
+floating-environment, resource, and cancellation checks on the tested host and
+profile. These are correctness results, not a new performance campaign or a
+multi-platform timing claim.
+
+| Function | Corpus cases per partition | Partitions | Maximum observed distance |
+| --- | ---: | ---: | ---: |
+| sin | 4,742 | 6 | 1 step |
+| cos | 4,742 | 6 | 1 step |
+| sinpi | 4,742 | 6 | 2 steps |
+| cospi | 4,742 | 6 | 1 step |
+| sinc | 4,742 | 6 | 1 step |
+| sincpi | 10,333 | 6 | 0 steps |
+
+The production exp kernel also passed 20,503 cases across six partitions with a
+maximum distance of two steps; its layout, floating-environment, resource, and
+cancellation checks passed. A zero observed distance is a corpus result, not a
+claim of correct rounding over the full input domain.
+
+The current timing smoke set completed 21 public/core/raw runs across exp and
+the six trigonometric functions, covering unaligned public input, reverse core
+input, and a 65-sample tail. The three CSV drivers also emitted valid timing
+scope fields for their checked workloads. These checks establish that the
+current timers execute and label their rows; they are not a performance
+regression campaign or a platform matrix.
+
+## Historical validation and reproduction
+
+The validation results below record the earlier implementation and its
+platform runs. They remain useful for the historical tables and analytic
+certificate, but do not establish a current platform-wide performance result.
 
 Each platform passed 4,742 independent MPFR cases for each of sin/cos/sinpi/
 cospi/sinc and 10,333 sincpi cases, each repeated with partitions
@@ -191,38 +225,66 @@ on both hosts; the independent public unary oracle used MPFR 4.2.2 locally and
 4.2.1 on WSL. No full release, sanitizer or installed-consumer matrix was run.
 
 ```sh
-cmake -S . -B build
-cmake --build build --target photospider_numeric_trig_benchmark \
-  photospider_numeric_math_batch photospider_numeric_unary -j 8
+cmake -S . -B build/kernel-dev
+cmake --build build/kernel-dev --target photospider_numeric_trig_benchmark -j 8
 python3 oracle/ops/numeric/trig_bound.py
 python3 oracle/ops/numeric/trig_oracle.py build/trig-corpus
 for f in sin cos sinpi cospi sinc sincpi; do
-  build/examples/numeric_workflow/photospider_numeric_trig_benchmark \
+  build/kernel-dev/examples/numeric_workflow/photospider_numeric_trig_benchmark \
     check "$f" "build/trig-corpus/$f.bin"
 done
+build/kernel-dev/examples/numeric_workflow/photospider_numeric_trig_benchmark --timing-scopes
 python3 examples/numeric_workflow/trig_measure.py \
-  build/examples/numeric_workflow/photospider_numeric_trig_benchmark
+  build/kernel-dev/examples/numeric_workflow/photospider_numeric_trig_benchmark
 ```
 
-For baseline comparison, archive `6786cb93` into an ignored source directory,
-provide the same pinned `third_party/sleef` source, and add the current
-`trig_benchmark.cpp` as an executable linked to that tree's
-`photospider_test_kernel`, with private include paths `plugins/ops` and
-`src/lib`, C++17, `-fno-fast-math -frounding-math -ffp-contract=off`, and
-`PHOTOSPIDER_TRIG_BASELINE=1`. Match the compiler, SDK/sysroot and feature options
-from the current build's CMakeCache. Supply that separate executable as the
-second argument to `trig_measure.py`; on Linux prefix Python with `taskset -c 2`.
+The current executable reports `public=result_workflow`,
+`core=result_computation_poll`, and `raw=simd_kernel` from `--timing-scopes`.
+`trig_measure.py` records each executable's declaration in the `timing_scope`
+column. An older executable that lacks this query is marked `unknown`; rows with
+unknown or different scopes must not be treated as comparable. In particular,
+the current computation-poll core timer cannot be compared directly with the
+historical direct-callback core rows above. To add a current core measurement
+for a specific workload, run the benchmark directly, for example:
+
+```sh
+build/kernel-dev/examples/numeric_workflow/photospider_numeric_trig_benchmark \
+  sin core 1048576 1 7 measure normal 3
+```
+
+Current public and core runs publish source `Value` backing as a Result under
+the execution Root, reuse the compiled plan and static preparation for the same
+input schema, and freeze a fresh binding for each source Result. Cache is off
+and one CPU worker is used. The public timer surrounds `Workflow::run`. It
+includes its `ExecutionContext::execute` call, coordinator work, continuation
+factory and initial Need, digest calculation, host publication, and the small
+wrapper that reads Root statistics and extracts the `ResultRef`. Benchmark
+operation definition creation and registration, source construction/publication,
+compile and static preparation, freeze, and readback are outside it. The core
+timer measures only `ResultContinuation::poll` for a worker phase with supplied
+tensors, including the checked `consume_work` observer and Result publication.
+It excludes continuation factory setup, initial Need, coordinator work, source
+admission, compile/freeze, and readback. Raw retains its SIMD timer. Public peak
+Payload is the Root's managed Payload peak, including Root-owned state, scratch,
+and output; immutable caller input storage is accounted as Referenced. It is not
+RSS. Core and raw peak values are `N/A`, meaning unmeasured.
+
+An old baseline can still be passed to `trig_measure.py` to record its rows, but
+its legacy `core` scope is not a paired current-core measurement. Do not infer a
+speedup from rows whose `timing_scope` values differ or are `unknown`. No new
+large timing campaign is reported here. On Linux prefix the measurement script
+with `taskset -c 2` when CPU affinity is needed.
 
 Raw CSV, corpus, logs, baseline source/build and traces are ignored under
 `build/num04-exp/trig-*`. WSL counterparts are under
 `/home/alex/photospider-num04-exp-20260924/`. The retained baseline build is a
 measurement artifact, not a selectable production backend.
 
-## FreeBSD follow-up (2026-09-25)
+## FreeBSD follow-up
 
-A separate [FreeBSD Clang 22 experiment](freebsd-performance.md) passed the same
-trigonometric corpora and reports comparable public/core/raw timings plus actual
-process instruction/cycle counters. It uses an isolated libc++ 22 runtime because
-the base system standard library lacks floating `from_chars`; both compared
-builds explicitly use the same compiler and runtime. Earlier macOS/Linux tables
+A separate [FreeBSD Clang 22 experiment](freebsd-performance.md) records another
+platform's historical trigonometric timings and process instruction/cycle
+counters. It uses an isolated libc++ 22 runtime because the base system standard
+library lacks floating `from_chars`; its reported timer scopes should be checked
+before comparing rows with current Result measurements. The macOS/Linux tables
 above retain their original compiler/platform scope.

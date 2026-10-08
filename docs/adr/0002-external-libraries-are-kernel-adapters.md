@@ -29,7 +29,7 @@ class OperationRegistry;
 struct ExecutionContextConfig;
 ```
 
-These public C++ types define the kernel-facing data model. The operation and data-provider C interfaces are declared in `photospider/plugin/operation_plugin_api.h` and `photospider/plugin/data_provider_api.h`. Plugins pass fixed-width records and borrowed buffers; third-party objects and exceptions stay inside the plugin. The installed kernel's required external runtime dependency is C++ and Threads; optional native backends and integrations are build choices.
+These public C++ types define the kernel-facing data model. The Result operation and data-provider C interfaces are declared in `photospider/plugin/result_operation_plugin_api.h` and `photospider/plugin/data_provider_api.h`. Operation plugins pass fixed-width Result records and borrowed buffers; third-party objects and exceptions stay inside the plugin. The installed kernel's required external runtime dependency is C++ and Threads; optional native backends and integrations are build choices.
 
 ## 4. Non-Goals & Explicit Boundaries
 - The kernel does not define file discovery, document parsing, persistence, codecs, UI, networking, or cryptographic services.

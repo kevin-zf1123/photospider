@@ -7,11 +7,9 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_handoff_pending_platform_review
+implementation_status: implemented_cpu_result_abi_2
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
-proposed_operation_keys:
+registered_operation_keys:
   - color.transfer_decode_strict
   - color.transfer_decode_accelerated_apple_silicon
   - color.transfer_decode_accelerated_x86_64
@@ -20,13 +18,19 @@ proposed_operation_keys:
 # FMT-09A: decode transfer
 
 Inherit the complete [FMT-09 contract](FMT-09_transfer_contract.md) and
-[scalar definitions](FMT-09_transfer_math.md). These keys are registered native primitives in the development handoff,
-not aliases of any removed color operator. See the [handoff](../../../development/FMT-09-handoff.md)
-for test evidence and platform-review boundaries.
+[scalar definitions](FMT-09_transfer_math.md). This direction has strict,
+accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 2 keys. The
+specification remains Proposed.
 
 ## Interface and observable behavior
 
-One Float32/Float64 `input` produces same-dtype, same-shape `values`. Respect and
+One input Result with one tensor member and no fields produces one `values`
+output Result containing one tensor. The member uses Float32 or Float64, retains
+its dtype, shape and axis positions, and preserves Result schema identity, tensor
+key and batch axes. Semantic output updates transfer facets; raw output retains
+the input facets. Both set `atomic_trailing_axes` to zero. Complete sample rank,
+including batch and cell axes, is at most 8; sample count is at most 2^40. Axis
+indices refer to cell axes and exclude the Result batch prefix. Respect and
 override select one static RGB/Gray group; raw uses explicit component selection.
 A may resolve the complete curve and parameters from source metadata. Explicit
 assertions must match unless override is selected. Raw always specifies them.
@@ -53,10 +57,12 @@ invalid samples, output overflow, resource and cancellation outcomes follow the
 family table. Whole upstream failures keep their original scope.
 
 Auto/view/materialize and exact produced coverage follow the family. Only
-linear/gamma=1 can use a legal whole-result view; identity still validates
-requested semantic inputs. Nonidentity D materializes requested coverage in
-canonical planar storage for images. Intrinsic zero/cap branches still depend
-on the requested source sample and cannot erase validation or dirty witnesses.
+linear/gamma=1 can use a legal whole-map generic or spatial Result view; identity
+still validates requested semantic inputs. Nonidentity conversion materializes
+requested coverage. Intrinsic zero/cap branches still depend on the requested
+source sample and cannot erase validation or dirty witnesses. A forced view of a
+statically nonidentity map fails in compile/direct preflight; an identity view
+whose physical mapping cannot be proven fails during observation evaluation.
 
 ## Independent acceptance fixtures
 
@@ -88,9 +94,6 @@ on the requested source sample and cannot erase validation or dirty witnesses.
    even for an alpha-only query. Check raw nonidentity NUM special values and
    unchanged-but-unverified metadata separately.
 
-A future public example should bind a tagged sRGB planar RGB+alpha image, request
-one color component and then alpha independently, and compare to an independent
-scalar oracle. Include the absolute PQ and HLG endpoint cases above. An explicit
-D -> basis/reference stage -> E workflow checks composition, not an automatically
-selected converter. The correctness-gated executable is in `examples/transfer_performance`;
-local smoke results are not target-platform performance certification.
+Keep the curve's scalar definition separate from RGB basis conversion and scene/display
+reference conversion. An explicit D -> basis/reference stage -> E workflow composes
+these operations; the registry does not choose such a chain automatically.

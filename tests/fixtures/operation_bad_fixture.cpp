@@ -1,35 +1,22 @@
 #include <atomic>
 #include <cstdint>
 
+#include "photospider/plugin/result_operation_plugin_api.h"
+
 namespace {
 std::atomic<std::uint32_t> calls{0};
-}
+// NOLINTBEGIN(whitespace/indent_namespace)
+const ps_result_operation_plugin_api_v2 api{sizeof(api), 1,       nullptr,
+                                            0,           nullptr, nullptr};
+// NOLINTEND
+}  // namespace
 
-#include "photospider/plugin/operation_plugin_api.h"
-
-/**
- * @brief Returns an intentionally unsupported operation ABI version.
- * @return Nine, rejected before the ABI10 API lookup.
- * @throws Nothing.
- * @note Version validation must reject before reading an API table.
- */
-extern "C" PS_OPERATION_EXPORT std::uint32_t
-ps_operation_plugin_get_abi_version(void) {
-  return 9U;
-}
-
-/**
- * @brief Returns no API table for the unsupported-version fixture.
- * @return Null.
- * @throws Nothing.
- * @note A correct host never calls this after the version mismatch.
- */
-extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v11*
-ps_operation_plugin_get_api_v11(void) {
+extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v2*
+ps_result_operation_plugin_get_api_v2(void) {
   ++calls;
-  return nullptr;
+  return &api;
 }
 
-extern "C" PS_OPERATION_EXPORT std::uint32_t ps_bad_operation_api_calls(void) {
+extern "C" PS_RESULT_EXPORT std::uint32_t ps_bad_operation_api_calls(void) {
   return calls.load();
 }

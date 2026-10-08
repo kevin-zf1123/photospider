@@ -42,6 +42,67 @@ std::uint64_t raw(double value) {
   std::memcpy(&word, &value, 8);
   return word;
 }
+ps::SchemaTemplate source_schema(const ps::Value& value) {
+  ps::SchemaTemplate schema;
+  schema.id = "benchmark.input";
+  ps::ResultTensorSpec tensor;
+  tensor.key = "data";
+  tensor.descriptor = value.descriptor();
+  tensor.facets = value.facets();
+  for (const auto& facet : tensor.facets)
+    if (facet.key == "photospider.color-array")
+      tensor.atomic_trailing_axes = 1;
+  schema.tensors.push_back(std::move(tensor));
+  return schema;
+}
+ps::ResultRef source(const ps::ResourceBudget& root, const ps::Value& value,
+                     const ps::SchemaTemplate& schema) {
+  auto builder = take(ps::ResultBuilder::start(
+      root, schema, "benchmark.source", {}, {}, 128, 128, value.resources()));
+  require(builder
+              .bind_descriptor_relation(
+                  take(ps::ResultRelation::cartesian(root, 1, {})))
+              .ok(),
+          "benchmark source descriptor");
+  // Immutable caller storage is admitted as Referenced without copying it
+  // into the execution Root's Payload capacity.
+  require(builder
+              .publish_tensor(
+                  0, value.region(), value.layout(), value.storage(),
+                  take(ps::ResultRelation::cartesian(
+                      root, take(schema.tensors[0].sample_count()), {})),
+                  {true, true, true, true})
+              .ok(),
+          "benchmark source Result publication");
+  return take(builder.seal());
+}
+ps::ExecutionBindings bind_sources(const ps::ResourceBudget& root,
+                                   const std::vector<ps::Value>& sources,
+                                   const ps::WorkflowDocument& document) {
+  ps::ExecutionBindings bindings;
+  for (std::size_t i = 0; i < sources.size(); ++i)
+    bindings.inputs.push_back(
+        {document.inputs[i].name,
+         source(root, sources[i], *document.inputs[i].result_schema)});
+  return bindings;
+}
+std::uint64_t read_bits(const ps::ResultRef& result,
+                        const ps::ResultDescriptor& descriptor,
+                        const std::vector<std::uint64_t>& at,
+                        std::size_t width) {
+  std::vector<ps::RegionDimension> dimensions;
+  for (auto coordinate : at)
+    dimensions.push_back({coordinate, 1});
+  const auto window = take(
+      result.acquire_tensor(descriptor, 0, ps::Region(std::move(dimensions))));
+  const auto row = take(window.row_run(at));
+  require(
+      width == ps::Value::element_size(window.spec().descriptor.element_type),
+      "benchmark sample width");
+  std::uint64_t bits = 0;
+  std::memcpy(&bits, row.data, width);
+  return bits;
+}
 ps::Value array(ps::ElementType type, const std::vector<std::uint64_t>& shape,
                 const std::vector<std::uint64_t>& words) {
   const auto width = ps::Value::element_size(type);
@@ -69,7 +130,7 @@ struct Case {
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
+  std::vector<ps::Value> sources;
   ps::ResourceBindings resources;
   std::string cluster, operation;
   std::vector<std::uint64_t> shape, expected;
@@ -77,9 +138,9 @@ struct Case {
   ps::WorkflowInput add(const ps::Value& value) {
     const auto id = document.inputs.size() + 1;
     const auto name = "input" + std::to_string(id);
-    document.inputs.push_back({id, name, value.descriptor(), value.region(),
-                               value.layout(), value.facets()});
-    bindings.inputs.push_back({name, value});
+    document.inputs.push_back(
+        {id, name, std::make_shared<ps::SchemaTemplate>(source_schema(value))});
+    sources.push_back(value);
     return ps::WorkflowInputReference{id};
   }
   void node(ps::WorkflowNode value) {
@@ -112,8 +173,8 @@ Case fixture(unsigned operation, std::uint64_t n,
   switch (operation) {
     case 0: {
       auto start = values(1, 0), end = values(1, n - 1);
-      c.node(take(linspace_node(1, {start, {ps::ElementType::Float64, {1}}},
-                                {end, {ps::ElementType::Float64, {1}}}, n,
+      c.node(take(linspace_node(1, {start, c.document.inputs[0].result_schema},
+                                {end, c.document.inputs[1].result_schema}, n,
                                 ps::ElementType::Float64, profile)));
       for (std::uint64_t i = 0; i < n; ++i)
         c.expected.push_back(raw(i));
@@ -328,9 +389,9 @@ Case extended_fixture(const std::string& key, std::uint64_t n,
   };
   if (key == "numeric.arange") {
     auto start = values(1, 0), step = values(1, 1);
-    c.node(
-        take(arange_node(1, {start, {T::Float64, {1}}},
-                         {step, {T::Float64, {1}}}, n, T::Float64, profile)));
+    c.node(take(arange_node(1, {start, c.document.inputs[0].result_schema},
+                            {step, c.document.inputs[1].result_schema}, n,
+                            T::Float64, profile)));
     for (std::uint64_t i = 0; i < n; ++i)
       c.expected.push_back(raw(i));
   } else if (key == "numeric.broadcast") {
@@ -696,7 +757,7 @@ std::string shape_text(const std::vector<std::uint64_t>& shape) {
 void measure(const Case& c, const std::string& profile) {
   auto wanted = take(ps::Footprint::all(c.shape));
   ps::ResourceBudget budget;
-  ps::ValueFragments retained;
+  ps::ResultRef retained;
   std::vector<std::int64_t> times;
   std::uint64_t source_elements = 0, evaluated = 0, fallbacks = 0;
   bool source_support_available = false, numeric_available = false;
@@ -714,7 +775,8 @@ void measure(const Case& c, const std::string& profile) {
         128 * 1024 * 1024;
     ps::ExecutionContext context(c.registry, config);
     budget = take(context.resource_budget());
-    auto frozen = take(context.freeze(compiled.plan, c.bindings));
+    auto bindings = bind_sources(budget, c.sources, c.document);
+    auto frozen = take(context.freeze(compiled.plan, bindings));
     ps::ExecutionOptions options;
     options.maximum_dependency_work = UINT64_C(64) << 30;
     options.dependencies.maximum_work = UINT64_C(32) << 30;
@@ -757,14 +819,15 @@ void measure(const Case& c, const std::string& profile) {
       if (repeat)
         for (const auto& entry : callbacks)
           callback_times[entry.first].push_back(entry.second);
-      require(result.values.at("result").descriptor().element_type == c.dtype,
-              "benchmark output dtype");
+      const auto& output_result = result.results.at("result");
+      require(
+          output_result.schema().tensors[0].descriptor.element_type == c.dtype,
+          "benchmark output dtype");
+      const auto descriptor = take(output_result.descriptor());
       std::vector<std::uint64_t> at(c.shape.size(), 0);
       const auto width = ps::Value::element_size(c.dtype);
       for (auto expected : c.expected) {
-        std::uint64_t actual = 0;
-        require(result.values.at("result").read(at, &actual, width).ok() &&
-                    actual == expected,
+        require(read_bits(output_result, descriptor, at, width) == expected,
                 "benchmark analytic output bits");
         for (std::size_t axis = at.size(); axis; --axis) {
           if (++at[axis - 1] < c.shape[axis - 1])
@@ -773,16 +836,16 @@ void measure(const Case& c, const std::string& profile) {
         }
       }
       if (c.cluster == "NUM-11" || c.cluster == "NUM-13")
-        require(evaluated == c.document.inputs[0].descriptor.shape[0],
+        require(evaluated == c.document.inputs[0]
+                                 .result_schema->tensors[0]
+                                 .descriptor.shape[0],
                 "streaming accumulator input accounting");
-      retained = result.values.at("result");
+      retained = output_result;
     }
   }
-  std::uint64_t escaped = 0;
-  require(retained.read(std::vector<std::uint64_t>(c.shape.size(), 0), &escaped,
-                        ps::Value::element_size(c.dtype))
-                  .ok() &&
-              escaped == c.expected.front(),
+  require(read_bits(retained, take(retained.descriptor()),
+                    std::vector<std::uint64_t>(c.shape.size(), 0),
+                    ps::Value::element_size(c.dtype)) == c.expected.front(),
           "benchmark escaped output read");
   std::sort(times.begin(), times.end());
   const auto stats = budget.statistics();
@@ -790,7 +853,7 @@ void measure(const Case& c, const std::string& profile) {
   for (const auto& input : c.document.inputs) {
     if (!inputs.empty())
       inputs += ';';
-    inputs += shape_text(input.descriptor.shape);
+    inputs += shape_text(input.result_schema->tensors[0].descriptor.shape);
   }
   std::cout << c.cluster << ',' << c.operation << ',' << profile << ','
             << inputs << ',' << shape_text(c.shape) << ','

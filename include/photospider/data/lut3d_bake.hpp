@@ -18,7 +18,8 @@ enum class Lut3dInterpolation : std::uint32_t {
  * bound. shape extents are 2..256; extras is 0..1048576. Tolerances are finite
  * and nonnegative. Colors use the same supported three-component model. Dtypes
  * are Float32/64 and recipe_identity identifies the expanded source graph and
- * its compiler metadata.
+ * its compiler metadata. The owned table schema is version 2 and contains one
+ * `colors` tensor [N0,N1,N2,3] with the selected dtype and ColorArray v1 facet.
  */
 struct Lut3dBakeDescription {
   std::array<std::uint64_t, 3> shape{2, 2, 2};
@@ -55,10 +56,11 @@ struct Lut3dBakeReport {
  */
 PHOTOSPIDER_API Result<SchemaTemplate> lut3d_bake_schema(
     const Lut3dBakeDescription& description);
-/** @brief Owned internal sampled-table schema associated with its measured
- * report. CompleteBundle colors rows retain the exact converted table dtype;
- * the observation domain is the three-dimensional grid. No quality pass is
- * implied by this intermediate. Use bake_lut3d's gated table for application.
+/** @brief Owned sampled-table Result schema associated with its measured
+ * report. Version 2 has one `colors` tensor [N0,N1,N2,3], the converted dtype,
+ * ColorArray v1 facet and one atomic trailing component axis. No quality pass
+ * is implied by this intermediate. Use bake_lut3d's gated table for
+ * application.
  */
 PHOTOSPIDER_API Result<SchemaTemplate> lut3d_bake_table_schema(
     const Lut3dBakeDescription& description);
@@ -66,9 +68,19 @@ PHOTOSPIDER_API Result<SchemaTemplate> lut3d_bake_table_schema(
 PHOTOSPIDER_API Result<Lut3dBakeDescription> lut3d_bake_description(
     const SchemaTemplate& schema);
 /** @brief Reads a sealed report through explicit owned Result read windows.
- * Does not start a producer. Result and windows own backing after context
- * teardown. maximum_window must admit a complete field (at most 72 bytes).
- * Optional consume_work accounts bounded schema/axis/field validation.
+ * Obtain the report Result from `ExecutionContext::execute()`; its fixed fields
+ * are not requested with generic tensor footprints by `execute_fragments()`.
+ * Does not start a producer. The report association records observed input
+ * ObjectIds in port order; its first entries identify axis, grid and owned
+ * table Results, with owners observed from later source batches following.
+ * Entry 2 identifies the owned table. Result and windows own backing after
+ * context teardown. maximum_window must admit a complete field (at most 72
+ * bytes); a smaller field window fails with ResourceExhausted/CapacityLimit.
+ * The helper applies the same pure field validation as the gate. It always
+ * reads the report's 11 fixed fields, including for a Result with no tensor
+ * coverage. Empty coverage skips payload validation for the owned-table tensor,
+ * not report field reads. Optional consume_work accounts bounded
+ * schema/axis/field validation.
  * Cancellation/I/O/capacity errors propagate; malformed fields fail
  * OperationFailed/InvalidDomain. Thread-safe for an immutable sealed Result.
  * Caller-owned returned arrays require no retained context or callback.

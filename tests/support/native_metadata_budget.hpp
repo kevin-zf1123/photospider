@@ -33,7 +33,7 @@ inline ps::ResourceLease fill(const ps::ResourceBudget& root,
   }
   return root.reserve(capacity).take_value();
 }
-inline int check(ps_gpu_dispatch_v11 dispatch) {
+inline int check(ps_gpu_dispatch_v1 dispatch) {
   using namespace ps;  // NOLINT(build/namespaces)
   using gpu_internal::Device;
   using gpu_internal::Invocation;
@@ -68,7 +68,7 @@ inline int check(ps_gpu_dispatch_v11 dispatch) {
       const auto* api = invocation.service();
       std::uint64_t token = 0;
       PS_CHECK(api->buffer(api->context, bytes.data(), 4, 1, &token) == 0);
-      ps_gpu_buffer_binding_v11 binding{sizeof(binding), 0, token, 0, 4, 1};
+      ps_gpu_buffer_binding_v1 binding{sizeof(binding), 0, token, 0, 4, 1};
       dispatch.buffers = &binding;
       dispatch.buffer_count = 1;
       device->clear_pipeline_cache();
@@ -127,7 +127,7 @@ inline int check(ps_gpu_dispatch_v11 dispatch) {
       const auto* api = invocation.service();
       std::uint64_t token = 0;
       PS_CHECK(api->buffer(api->context, bytes.data(), 4, 1, &token) == 0);
-      ps_gpu_buffer_binding_v11 binding{sizeof(binding), 0, token, 0, 4, 1};
+      ps_gpu_buffer_binding_v1 binding{sizeof(binding), 0, token, 0, 4, 1};
       dispatch.buffers = &binding;
       std::memset(bytes.data(), 0, 4);
       execution_testing::ExecutionTestHooks hooks;

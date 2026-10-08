@@ -8,9 +8,15 @@
 #include "photospider/format/channel_assembly.hpp"
 
 namespace ps::format {
-/** @brief FMT-03 explicit source kind. Exactly one of scalar/component/channels
- * is selected: scalar and component are mutually exclusive and forbid axis;
- * channels has both flags false, with optional metadata-resolved axis. */
+/** @brief Static source structure for one FMT-03 input.
+ *
+ * Select exactly one of `scalar`, `component`, or channel-tensor structure.
+ * Scalar and component structures have no axis. A channel tensor has both
+ * flags false and may assert its channel axis; metadata resolves an omitted
+ * axis except in raw mode, which requires an explicit axis. Axis indices
+ * address cell axes and exclude the Result batch prefix; the complete sample
+ * rank is at most 8.
+ */
 struct ChannelEditStructure final {
   bool component = false;
   std::optional<std::uint32_t> axis;
@@ -52,30 +58,39 @@ struct ChannelReplacement final {
   ChannelSelector destination;
   ChannelEditSource source;
 };
-/** @brief FMT-03A expands a nonempty ordered slot list to FMT-02C.
- * Input 0 establishes the base axis/grid. Other inputs must be explicit
- * scalars. Options inherit FMT-02 metadata/layout/profile semantics. Default
- * descriptions follow selected base components; only uniquely remapped complete
- * groups survive. No samples are read. All supplied input descriptors are
- * checked, even unused. Invalid structure/selectors return InvalidArgument;
- * shape/dtype mismatch returns TypeMismatch. Graph/metadata capacity returns a
- * bounded preflight failure. Expansion is transactional (also on bad_alloc);
- * callers must serialize writes to document. Returned edge and declarations are
- * owned by document. Execution preserves exact bits, regional support,
- * immutable ownership and cancellation; no completed-result cache or new
- * swizzle operation key is introduced.
+/** @brief Append FMT-03A as an ordered channel-slot mapping.
+ *
+ * Input 0 establishes the base cell-channel axis and sample grid. Axis indices
+ * exclude the Result batch prefix. Every nonscalar input has the same batch
+ * prefix as the base; scalar inputs are unbatched shape `[1]`. Complete sample
+ * rank, including batch and cell axes, is at most 8. Additional inputs are
+ * explicit scalar sources. The nonempty `slots` list can select, omit, or
+ * repeat base channels and can select scalar/literal sources. The helper reads
+ * no samples; all connected input descriptors, including unused inputs, are
+ * checked when the generated graph is compiled and executed. Invalid structure
+ * or selectors return `InvalidArgument`; incompatible shape or dtype returns
+ * `TypeMismatch`. Expansion is transactional on returned errors and allocation
+ * exceptions. Callers serialize document writes. The returned edge is owned by
+ * the document. Execution copies exact bits over requested regions and honors
+ * cancellation.
  */
 PHOTOSPIDER_API Result<WorkflowNodeOutput> swizzle_channels(
     WorkflowDocument& document, const std::vector<ChannelEditInput>& inputs,
     const std::vector<ChannelEditSource>& slots,
     const ChannelAssemblyOptions& options = {});
-/** @brief FMT-03B replaces unique destinations; an empty list is identity.
- * Sources read original inputs simultaneously. Unlisted destinations retain
- * samples and semantics; replacements inherit destination semantics. Explicit
- * target fields may change only listed slots; invalidated old groups are
- * dropped. External component/channel/scalar sources use explicit structure,
- * exact grids and the base dtype. Other preflight, exception, ownership,
- * thread, cache and execution contracts match swizzle_channels.
+/** @brief Append FMT-03B simultaneous assignments to original base slots.
+ *
+ * Destinations are unique; an empty `replacements` list is identity. Axis
+ * declarations in source structures index cell axes and exclude the Result
+ * batch prefix. Every
+ * nonscalar source has the base batch prefix; scalar sources are unbatched
+ * shape `[1]`. Complete sample rank, including batch and cell axes, is at most
+ * 8. Every source reads the original immutable inputs. Unlisted destinations
+ * retain their samples and semantics; replacements inherit destination
+ * semantics, subject to explicit target fields. External component, channel and
+ * scalar sources require explicit structure, the exact sample grid and the base
+ * dtype. Transaction, exception, ownership and execution guarantees match
+ * `swizzle_channels`.
  */
 PHOTOSPIDER_API Result<WorkflowNodeOutput> replace_channels(
     WorkflowDocument& document, const std::vector<ChannelEditInput>& inputs,

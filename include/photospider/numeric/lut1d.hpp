@@ -42,11 +42,17 @@ inline Status invalid(const char* message) {
           {FailureOrigin::Schema, FailureScope::Unspecified}};
 }
 inline Status endpoints(const SequenceInput& start, const SequenceInput& end) {
-  for (const auto* value : {&start, &end})
-    if (value->descriptor.shape != std::vector<std::uint64_t>{1} ||
-        (value->descriptor.element_type != ElementType::Float32 &&
-         value->descriptor.element_type != ElementType::Float64))
+  for (const auto* value : {&start, &end}) {
+    if (!value->result_schema || !value->result_schema->validate().ok() ||
+        value->result_schema->tensors.size() != 1)
+      return invalid(
+          "LUT baking endpoints require a sole tensor Result schema");
+    const auto& member = value->result_schema->tensors[0];
+    if (member.sample_shape() != std::vector<std::uint64_t>{1} ||
+        (member.descriptor.element_type != ElementType::Float32 &&
+         member.descriptor.element_type != ElementType::Float64))
       return invalid("LUT baking endpoints require Float32/64 [1]");
+  }
   return Status::success();
 }
 inline Result<BakedLut1d> append(WorkflowDocument* document,
@@ -240,29 +246,42 @@ inline Result<BakedLut1d> bake_lut1d_pchip_multi(
                                      dtype, domain, profile, true, true);
 }
 /** @brief Shared contract for scalar and per-channel LUT1D application.
- * Input is Float32/64 rank 1..8, table is independent Float32/64 [L] or
- * [L,C], axis is Float64[3]; L=1..1048576 and products <=2^40. Channels use
- * the final input axis, including rank-1 [C] and C=1. Output values preserves
- * input shape with empty facets. input_type is an authoring hint used only for
- * the default output dtype; Compiler validates the actual graph edges.
- * Helpers are pure/concurrent-safe and own metadata; allocation may throw
- * bad_alloc. Invalid authoring parameters fail InvalidArgument/InvalidDomain.
- * Runtime collects all three inputs, validates the complete endpoint-weighted
- * RN64 grid, then all queries before table arithmetic. Whole computes and owns
- * the complete output even for sparse demand. Math knot/clamp/singleton selects
- * one table entry; other paths select two. Generic entries outside all
- * evaluated stencils are numerically unused; complete typed/source validation
- * still applies. Singleton axes require bit-identical endpoints and +0 step.
- * Every query is validated even for constant tables. Numeric domain/overflow
- * failures have Run scope; typed/upstream/resource/cancellation failures
- * preserve their identities. Descending axes and all CurveDomain policies
- * retain their formulas. Exact selection preserves zero sign; exact linear zero
- * is -0 only for two -0 ends. Strict rounds once; accelerated retains
- * CpuNumericProfile's final FP32 bound. Caller fenv is preserved. Whole owners
- * survive context teardown; any active input edit invalidates output demand.
- * Empty reads nothing. Grid, exact scratch, collected inputs and complete
- * output consume host budgets. No approximation guarantee relative to the
- * table's generating function is inferred.
+ * Input, table and axis are Results, each with one tensor member under any
+ * schema id/version/key. Their complete sample_shape() values include batch
+ * axes. Input sample_shape has rank 1..8; its extents are positive and its
+ * logical product is <=2^40. Table sample_shape is [L] or [L,C], axis is
+ * Float64[3], and input/table independently accept Float32/64. L is
+ * 1..1048576 and products are <=2^40. Channels use the final input axis,
+ * including rank-1 [C] and C=1. Output `values` uses photospider.tensor v1 /
+ * member samples, preserves the complete input shape in immutable packed
+ * samples, and has empty facets. `input_type` is an authoring hint used only
+ * for default output dtype; compiler validates actual graph edges. Helpers own
+ * node metadata and may be used concurrently; allocation may throw bad_alloc.
+ * Invalid authoring parameters fail InvalidArgument/InvalidDomain.
+ *
+ * Whole execution requests input, table and axis with Data, Validation and
+ * Descriptor (role 13). It validates the full endpoint-weighted RN64 grid, then
+ * validates all queries before table arithmetic. It computes the complete
+ * output even for sparse demand and returns full certified coverage in global
+ * sample coordinates. Output association records actual source ObjectIds. Math
+ * knot/clamp/singleton selects one table entry; other paths select two. Generic
+ * entries outside evaluated stencils are numerically unused; complete typed and
+ * upstream validation still applies. Singleton axes require bit-identical
+ * endpoints and +0 step. Every query is validated even for constant tables.
+ * Numeric domain/overflow failures have Run scope; typed/upstream/resource/
+ * cancellation failures preserve their identities. Descending axes and all
+ * CurveDomain policies retain their formulas. Exact selection preserves zero
+ * sign; exact linear zero is -0 only for two -0 ends. Strict rounds once;
+ * accelerated retains CpuNumericProfile's final FP32 bound. Caller fenv is
+ * preserved. Output Result owners survive context teardown; any active input
+ * edit invalidates the recorded demand. Empty reads no payload.
+ *
+ * `UniformAxis` stores the reconstructed Float64 grid in a Root-owned 8*L-byte
+ * buffer. Input/table reads use authorized zero-copy Root windows; the
+ * operation does not densify the entire source table. Root resources account
+ * retained owners and windows. Grid, exact scratch and complete output use host
+ * budgets. No approximation guarantee relative to the table's generating
+ * function is inferred.
  */
 /** @brief Applies one scalar table to every requested input element. */
 inline Result<WorkflowNode> apply_lut1d_node(

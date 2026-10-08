@@ -7,23 +7,16 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-03: channel reordering and replacement
 
-Runtime update: FMT-03A/B are implemented as transactional public authoring
-helpers over FMT-02C. Scalar fills are fused into its internal mapped dependency
-plan under the fusion permission below; ordinary FMT-02C authoring still accepts
-only component/channel sources. Typed literals use exact-bit scalar providers.
-See [implementation and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-03-channel-editing)
-and the [measured CPU performance](../../../../examples/channel_editing_performance/README.md).
-Proposed remains the specification decision status.
-
-Implementation update: package 0.20.0 [removes the legacy format/color code](FMT_legacy_retirement.md).
-Descriptions of old registrations below record the inspected baseline only;
-those keys and pixel callbacks are no longer available. The target decision remains Proposed; the CPU implementation is recorded above.
+Runtime contract: FMT-03A/B are installed public authoring helpers over the
+registered FMT-02C Result operation. Scalar sources use prepared native bits
+through the registered `channel.scalar_literal_<profile>` operation. There is
+no native swizzle or replace key. The FMT specification decision remains
+Proposed. The performance guide distinguishes current Result smoke coverage
+from historical Value/planar measurements; it reports no full Result matrix.
 
 This operator-local draft inherits [FMT-common](FMT_common_contract.md), its
 NUM numerical baseline and the accepted
@@ -31,7 +24,7 @@ NUM numerical baseline and the accepted
 The purpose is to edit a base tensor's channel arrangement or selected channels.
 The clarified members are [A swizzle](FMT-03A_swizzle_channels.md) and
 [B replacement](FMT-03B_replace_channels.md), both compile-time authoring
-compositions. The target is Proposed; this document registers no runtime operation.
+compositions. The specification remains Proposed; current runtime status is described above.
 
 ## Relationship to earlier families
 
@@ -53,24 +46,10 @@ channel-count change does not authorize a new per-operator tile geometry,
 cross-owner image storage or implicit packed output. Interpretation and actual
 byte mapping remain separate.
 
-## Inspected implementation baseline
-
-The legacy
-`channel.swizzle`
-registers a rank-three Float32/Float64 tensor, a static String `indices`, and an
-output whose final extent is the index-list length. The
-callback copies source
-element bytes in that order. Repeated selections are supported; implicit
-constants and arbitrary-axis replacement are not established by that code.
-Package 0.19 rejects its legacy image invocation path. Generic non-image behavior
-is separate evidence and is not a conforming implementation of the new family.
-
-[NUM-03A constant](../../01-numeric/op_specs/NUM-03A_constant.md) accepts a typed
-scalar Value of shape [1] and repeats its exact bits. It is distinct from a
-static untyped floating literal. Any FMT constant design inheriting it must
-state how the scalar is supplied. Inherit its numerical copy semantics only;
-its Whole/dense layout and legacy metadata validation do not supersede the
-current FMT consumer/storage contract.
+FMT-03 inherits exact scalar bit-copy semantics from the current numeric contract.
+Connected scalar Results have shape `[1]`; authored literals are encoded as
+native-order bytes with an explicit dtype. Result execution and storage follow
+the FMT-02 mapping contract below.
 
 ## Confirmed decisions
 
@@ -86,6 +65,13 @@ current FMT consumer/storage contract.
 | Implementation identity | Compile-time swizzle/replace interfaces lowered to FMT-02C and conforming constant sources, without duplicate native copy operators. | Confirmed |
 
 ## Established behavior and inherited execution rules
+
+FMT-03 emits `expected_inputs` as `result-inputs-v1:` followed by 64 lowercase
+hexadecimal SHA-256 characters (81 characters total). The digest uses domain
+separation and covers the complete ordered canonical schema and physical layout
+for every connected input, including repeated and unused inputs. It hashes no
+sample payload and is not a validity proof. The zero-input Whole literal path
+uses output shape `[1]` and prepared native bits.
 
 A takes a base tensor and a static ordered output-slot list. Each slot selects
 a base component or an explicit constant. It may reorder, omit or repeat source
@@ -124,8 +110,11 @@ All output paths retain the DAG's common tile geometry and exact valid coverage.
 
 ## Logical interface and shape
 
-Both authoring interfaces return one tensor handle `values`. The primary input
-is `base`, a positive rank-1..8 tensor with an explicitly resolved channel axis a.
+Both authoring interfaces return one tensor handle `values`. Input 0 is a Result containing one tensor, `base`, with a positive cell rank and
+an explicitly resolved cell-axis a. Every other nonscalar input Result also
+contains one tensor.
+Axis parameters index cell axes and exclude the Result batch prefix. The full
+sample rank, including batch and cell axes, is at most 8.
 Let its channel extent be C and let S be the ordered shape with axis a removed.
 Axis resolution follows FMT-01/02: attached effective metadata or a static axis,
 no HWC/CHW guess, ordinary assertions must match, and raw requires an explicit
@@ -154,7 +143,8 @@ their original effective input descriptions before any replacement or output
 reinterpretation. Source reuse and swaps always read original inputs; the list
 is not a sequence of in-place assignments. Raw uses index selectors only.
 
-All inputs, including scalars, have the base dtype. Selected target types are
+Every nonscalar input has exactly the base batch prefix; scalar inputs are
+unbatched shape `[1]` values. All inputs, including scalars, have the base dtype. Selected target types are
 UInt8, UInt16, Int8, Int16, Int64, Float32 and Float64; missing native widths are
 implementation dependencies. Counts/products and resource limits follow the
 shared NUM/FMT contracts, including the 2^40-element logical bound. No implicit
@@ -167,7 +157,7 @@ The shared metadata/map encoding must exist before implementation.
 
 | Field | Meaning / default |
 | --- | --- |
-| `axis` | Optional static Int64 in [0,base_rank); required when effective metadata has no unique channel axis or mode is raw. |
+| `axis` | Optional static Int64 cell-axis index in [0,base_cell_rank); required when effective metadata has no unique channel axis or mode is raw. Batch axes are excluded. |
 | `metadata_mode` | respect by default; raw/override follow FMT-common. |
 | `input_overrides` | Conditional static per-input effective descriptions, only in override mode. Do not change physical storage. |
 | `output_description` | Optional explicit component/group definitions. Assigning target semantics does not move samples or alter their bytes. |
@@ -309,8 +299,10 @@ charges its actual pages. Account retained ancestry, simultaneous inputs/output,
 window metadata and literal/scalar owners independently of logical copied bytes.
 
 Poll cancellation/currentness at most every 1024 metadata/map/copy entries and
-before publication, or the tighter inherited primitive bound. Use host scheduling
-for disjoint destinations; no private thread pool or mutable constant cache.
+before publication, or the tighter inherited primitive bound. Scalar row
+replication batches at most 256 samples per copy call while charging work and
+checking cancellation. Use host scheduling for disjoint destinations; no private
+thread pool or mutable constant cache.
 No result is published partially on failed observation. Generated pages and
 leases retire with their final owners. Inherit FMT-02's optional sample-only
 cache restriction and capacity/work/source failure attribution.
@@ -318,7 +310,7 @@ cache restriction and capacity/work/source failure attribution.
 | Failure | Phase | Outcome |
 | --- | --- | --- |
 | Empty A slots, duplicate B targets, invalid axis/index/name/role, malformed literal/source kind or contradictory target description | Authoring/compile/direct preflight | InvalidArgument / InvalidDomain, schema origin. |
-| Rank/dtype/nonchannel-shape mismatch, scalar shape other than [1] | Preflight | TypeMismatch / None. |
+| Full sample rank above 8, batch-prefix mismatch, cell-rank/dtype/nonchannel-shape mismatch, or scalar batch/shape other than unbatched [1] | Preflight | TypeMismatch / None. |
 | Checked count/graph/map/metadata/work capacity, unavailable forced view or backend | Inherited phase | Preserve FMT-02/NUM/kernel status and diagnostic. |
 | Missing source coverage, required producer failure, cancellation or stale plan | Requested observation | Preserve original failure category/scope; no fabricated success. |
 

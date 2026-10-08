@@ -5,7 +5,88 @@ Package 0.21.0, measured 2026-09-24 from the `ops-impl` working tree based on
 specification decision status is unchanged. The public source fixture and
 registry/helper contract are in [Channel and color operations](../../docs/kernel-architecture/Channel-and-Color-Operations.md#fmt-02-channel-assembly).
 
-## Reproduce
+The latency and memory tables below record the earlier Value/planar driver.
+They are historical measurements and do not describe the current Result ABI 2
+operations. Current Result usage and metric interpretation are documented separately below.
+
+
+## Current Result driver
+
+The driver now runs the registered FMT-02 Result operation through the public
+`WorkflowDocument`, `Compiler` and `ExecutionContext` APIs. It keeps the existing
+argument order: `size member storage request layout repetitions profile`. For
+example, a small strict assembly smoke is:
+
+```sh
+cmake --build build --target photospider_channel_assembly_performance -j 8
+./build/examples/channel_assembly_performance/photospider_channel_assembly_performance \
+  130 A tiled roi materialize 1 strict
+```
+
+`A`, `B`, `C` and `view` select component assembly, ordered channel concatenation,
+mapped assembly, and split-then-assembly from a shared Result owner. The program
+checks the requested samples against an independent byte oracle. The benchmark
+uses one CPU worker and no custom thread pool. The FMT-02 profile names select
+the matching Result key.
+
+The current CSV reports `source_logical_bytes` as the sum of
+`Footprint.element_count() * sizeof(float)` over each bound input in the public
+`run.dependencies.source_support()` map. Both drivers use Float32 sources, so this is the exact logical input demand,
+not measured physical I/O or bytes copied. `source_payload_bytes` and
+`source_metadata_bytes` are Root live payload and metadata immediately after
+source setup and before benchmark runs. `run_live_payload_bytes` and
+`run_live_metadata_bytes` are the Root live-resource deltas above that source
+baseline while the current execution result is still alive. They include all
+resources retained under the Root at the sampling point, not an isolated output
+allocation. `root_peak_payload_bytes` and `root_peak_metadata_bytes` are Root
+lifetime cumulative peaks. They include source setup and earlier runs, and the
+first-run oracle window can contribute; these are not per-run peaks. These are
+managed capacities, not RSS. The CSV columns are `size`, `dtype`,
+`member`, `storage`, `request`, `layout`, `profile`, `repetitions`, `compile_us`,
+`first_us`, `p50_us`, `p95_us`, `core_p50_us`, `source_logical_bytes`,
+`source_payload_bytes`, `source_metadata_bytes`, `run_live_payload_bytes`,
+`run_live_metadata_bytes`, `root_peak_payload_bytes`, and
+`root_peak_metadata_bytes`. The Result API does not report output virtual
+reservation or a distinct copied-byte counter.
+
+The latency and memory tables, profiler traces and workload details below are
+historical Value/planar-driver measurements. Fields such as `copied_bytes`,
+`output_virtual` and modeled-output totals describe that driver and are not
+fields in the current Result CSV.
+
+
+### Current Result smoke coverage
+
+The current Result driver was built and run in 11 small strict-profile smoke
+cases, each with one measured repetition after two warmups. Every case passed
+the independent byte oracle. This is focused execution evidence, not the former
+full performance matrix or profiling evidence.
+
+| Member | Smoke configuration |
+| --- | --- |
+| A | `130 A tiled roi materialize` |
+| B | `128 B continuous one auto` |
+| C | `130 C tiled roi auto` |
+| Shared-owner view | `128 view tiled full view` |
+
+The other seven cases cover FMT-03 editing and are listed in its [performance guide](../channel_editing_performance/README.md). Across the 11 runs, the shared-owner view case reports zero additional live payload. No 4096x4096 Result run, complete matrix, or new Result profile has been measured.
+
+
+## Full Result matrix
+
+The standalone example target also builds against the installed public kernel package:
+
+```sh
+cmake --install build/kernel-dev --prefix build/kernel-dev/consumer-install
+cmake -S examples/channel_assembly_performance -B build/channel-assembly-performance-consumer \
+  -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/consumer-install" \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build/channel-assembly-performance-consumer --target photospider_channel_assembly_performance -j 8
+```
+
+The installed-package target builds successfully. The following command runs the
+current Result matrix. Only the smoke cases above were run for this update; the
+full matrix and profiler were not run.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
@@ -59,7 +140,7 @@ x86_64 on WSL. Tiled physical rows have pitch 512 bytes; continuous FP32 rows
 have pitch width*4 bytes. Physical tile geometry remains 128x128 in the DAG.
 These are measurements of the two hosts, not a controlled CPU comparison.
 
-## Final serial latency
+## Historical Value/planar serial latency
 
 All values below are **microseconds**, shown as p50 / p95. FP32 is explicit in
 the raw CSV `dtype` column. All 24 cases passed on each host.
@@ -99,7 +180,7 @@ The WSL page-batching series moved A/tiled/full from 53.136 ms to 49.091 ms
 p50; this smaller median difference is less decisive than the syscall-count
 reduction below. No separate speedup is claimed for the revision-token change.
 
-## Copy and memory accounting
+## Historical Value/planar copy and memory accounting
 
 The following are final macOS examples. MiB values describe controlled capacities,
 not RSS; virtual reservation, supplied backing and logical samples are separate.
@@ -217,7 +298,7 @@ so it is not a measured CPU bottleneck. The mprotect count reduction is the
 independently checkable page-batching result. Benchmark times come only from the
 untraced serial matrix.
 
-## Validation and artifacts
+## Historical Value/planar validation and artifacts
 
 Both macOS and WSL pass the seven focused tests: channel assembly, channel
 extraction, planar workflow, compiler, Value, resources and execution demand.

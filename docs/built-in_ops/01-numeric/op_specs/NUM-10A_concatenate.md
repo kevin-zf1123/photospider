@@ -13,85 +13,84 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+repository_commit: current working tree
 ---
 
 # NUM-10A: concatenate
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+The strict key follows its exact numeric reference. Accelerated floating
+results follow the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md)
+where arithmetic applies; raw copies and discrete results remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+registration, shared execution and acceptance requirements. The rules below
+specify the NUM-10 behavior.
 
-Concatenate an ordered sequence of 2..256 input arrays along a static axis.
-Inputs are named input_0 through input_(K-1), in that order. All share one dtype
-(UInt8, Int64, Float32 or Float64) and rank 1..8, with positive extents and equal
-lengths on every non-concatenation axis. Output `values` retains dtype/rank and
-has empty facets. Concatenation-axis length is the checked sum of input lengths;
-output logical element count must not exceed 2^40.
+Concatenate an ordered sequence of 2..256 Results along a static axis. Every
+input Result contains exactly one tensor member; its key is unrestricted. All
+members share one dtype (UInt8, Int64, Float32 or Float64), rank 1..8, and equal
+extents on every non-concatenation axis. Their `sample_shape()` includes any
+batch prefix. Each input and the output has at most 2^40 elements. The output
+port `values` is a Result with schema `photospider.tensor`, member `samples`,
+and the complete ordinary output shape. It has no facets or batch topology.
 
-Required static Int64 `axis` is a nonnegative index less than rank, with no
-negative-index shorthand. Required static String `layout` is view/dense;
-constructors write view by default and direct nodes specify it. There are no
-other numeric parameters, implicit casts, broadcasting or inserted axes.
-Input metadata is validated for every port before execution even when that
-port is not requested later. Element bits, including sNaNs, are preserved across
-all three bitwise-equivalent CPU profiles; no arithmetic quieting is performed.
+`axis` is a required static Int64 in `[0, rank)`. `layout` is a required static
+String with values `view` and `dense`. There are no casts, broadcasting, or
+inserted axes. The selected output extent is the checked sum of input extents.
+All element bits, including signaling NaNs, are copied without arithmetic.
 
-## Exact mapping and dependencies
+## Mapping and demand
 
-Let L[k] be input k's axis length and P[k]=sum_{j<k} L[j], with P[0]=0.
-For output o, select the unique k with P[k]<=o[axis]<P[k]+L[k], and read input k
-at s[axis]=o[axis]-P[k], s[j]=o[j] otherwise. Prefix offsets depend only on static
-metadata, not input samples. Positive axis lengths make this partition unique.
+Let `L[k]` be input k's extent on the concatenation axis and
+`P[k] = sum(L[j] for j < k)`, with `P[0] = 0`. For output coordinate `o`,
+choose the unique input `k` where `P[k] <= o[axis] < P[k] + L[k]`. Read that
+input at `s[axis] = o[axis] - P[k]` and `s[j] = o[j]` for every other axis.
 
-Every nonempty request reads and validates all inputs before callback, including
-ports outside the consumer projection. Any source edit invalidates the complete
-output; upstream/typed failures affect the Run. Empty reads nothing. Numerical
-selection still uses the prefix mapping above and preserves raw bits.
+Static schemas and parameters are checked during specialization. For nonempty
+Whole demand, the program requests every input with complete data, validation and
+descriptor support (role 13), triggering typed-payload validation before
+publication. A request that selects one output slab still prepares every port.
+An active source edit dirties the complete output; Empty demand reads no payload
+and performs no sample copying. Port reuse does not change the ordered mapping.
 
-## Storage and resources
+## Layout and resource rules
 
-View requires the complete output to fit one affine owner. All inputs must share
-that storage and have compatible offsets/strides across prefix boundaries.
-Compatible same-owner fragments may join; multiple owners or non-affine mapping
-fail Domain/Run InvalidArgument/InvalidDomain with ViewUnavailable. Dense
-collects as needed and owns N*dtype_size bytes for the complete output, including
-for sparse demand. The helper still defaults to View; independent allocations
-should select Dense explicitly. No writable or fabricated cross-owner view is
-published. Views retain the complete source backing/resources.
+Dense copies the complete output into packed owned storage, costing
+`N * element_size` bytes. View proves that all complete inputs form one global
+affine map over the same physical owner. Compatible same-owner fragments may
+join; singleton dimensions do not constrain strides, and the implementation can
+infer a stride from neighboring anchors when the concatenation axis is
+singleton in every input. Negative and zero global strides are valid when the
+complete mapping is affine. The proof covers all inputs regardless of consumer
+projection. An independent owner or incompatible map returns Domain/Run
+`ViewUnavailable`; choose Dense when copying is intended. The view retains its
+source storage owners and allocates no output payload. Both layouts read through
+authorized input windows; Dense does not first pack each complete input.
 
-Prefix storage is bounded by256 ports; coordinate state by rank8. Dense mapping
-costs O(N*(rank+log K)) with raw block copies. Host work/cancellation checks occur
-per output and before publication. Collected full inputs and full output are
-charged. Concatenate is cacheable=false because content identity cannot witness
-physical View availability. Budget/upstream failures never trigger a fallback.
+Viewability depends on physical storage and cannot be established from content
+identity, so concatenate is not content-cacheable. Dense and View share checked
+static shape inference and Whole source support. The continuation accumulates
+owning input capabilities in a Root-accounted map across Need envelopes, while
+each poll borrows its phase tensor map only for that call. Each Need contains at
+most 64 original ports; the five-stage bound allows four Need envelopes and the
+final publication for 256 inputs. Work and cancellation are charged during
+mapping and copying. A failed publication exposes no partial output.
 
-## Errors, acceptance and implementation gaps
+## Errors and acceptance
 
-Compile/preflight rejects input count, dtype/rank/non-axis shape mismatch,
-invalid axis/layout, sum/product overflow or output size above 2^40. Runtime
-upstream/typed-validation/resource/cancellation errors retain their existing
-Status categories. Failure publishes no partial output for that observation.
+Preflight rejects fewer than two or more than 256 inputs, dtype/rank/non-axis
+shape mismatch, invalid axis or layout, and output element count above 2^40.
+Source, typed-validation, resource and cancellation failures preserve their
+status categories. `ViewUnavailable` reports a physical View geometry failure;
+it does not imply that Dense copying is invalid.
 
-Conceptual fixture: A=[[1,2],[3,4]], B=[[5],[6]], axis=1 produces
-[[1,2,5],[3,4,6]]. Independent prefix-coordinate mapping and raw-bit copying
-are the oracle. A request solely in B's output slab still reads A and fails if A's
-upstream fails. Cover slab-crossing/disjoint requests, all dtypes/sNaN bits,
-non-leading axes, owner fragmentation, negative strides, repeated use of the same
-input object, metadata cap, view/dense equality, source invalidation, cancellation
-and output lifetime after context destruction. The public WorkflowDocument manual target and independent oracle below
-provide executable acceptance for these behavior boundaries.
-
-All formal profile keys use CPU Whole. Current public workflows, independent
-coordinate/contributor/Fraction oracles, failure/resource checks and performance
-are in [NUM-10 Whole execution](../indexing-whole.md). Earlier 2026-09-14
-regional strict/Apple/WSL and installed checks predate this migration.
+The public workflow test checks a same-owner affine view and Dense result,
+independent owners, unselected input failures and escaped Result/window lifetime.
+The existing `test_numeric_result_math` integration fixture separately contains
+singleton-fragment stride inference, a negative global stride, reordered inputs
+under partial demand, Empty demand and 65-/256-input repeated-reference cases.
+That broader fixture was not rerun for this Result migration. The multi-envelope
+cases should not be read as current `indexing.cpp` default-workflow coverage.
+Neither test covers every dtype, owner arrangement or concatenate geometry. See
+[NUM-10 Whole execution](../indexing-whole.md) for the current test entry and
+evidence boundary.

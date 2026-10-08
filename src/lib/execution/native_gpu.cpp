@@ -26,6 +26,7 @@ Invocation::Invocation(std::shared_ptr<Device> device,
       views_(NativeAllocator<BufferView>(device_ ? device_->metadata()
                                                  : nullptr)) {
   service_ = {sizeof(service_),
+              PS_GPU_ABI_VERSION_1,
               this,
               buffer,
               execute,
@@ -43,19 +44,19 @@ int Invocation::fail(Status status) noexcept {
   if (status_.ok())
     status_ = std::move(status);
   if (status_.code == ErrorCode::Cancelled)
-    return PS_OPERATION_RESULT_CANCELLED_V11;
+    return PS_GPU_RESULT_CANCELLED_V1;
   if (status_.code == ErrorCode::BackendUnavailable)
-    return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11;
-  return PS_OPERATION_RESULT_FAILURE_V11;
+    return PS_GPU_RESULT_BACKEND_UNAVAILABLE_V1;
+  return PS_GPU_RESULT_FAILURE_V1;
 }
 int Invocation::buffer(void* context, const std::uint8_t* bytes,
                        std::uint64_t size, std::uint32_t writable,
                        std::uint64_t* token) noexcept {
   if (!context)
-    return PS_OPERATION_RESULT_FAILURE_V11;
+    return PS_GPU_RESULT_FAILURE_V1;
   auto& self = *static_cast<Invocation*>(context);
   if (!self.on_owner_thread())
-    return PS_OPERATION_RESULT_FAILURE_V11;
+    return PS_GPU_RESULT_FAILURE_V1;
   try {
     if (!self.status().ok())
       return self.fail(self.status());
@@ -79,47 +80,47 @@ int Invocation::buffer(void* context, const std::uint8_t* bytes,
     self.views_[index] = view.take_value();
     self.views_[index].generation = generation;
     *token = (std::uint64_t{generation} << 32) | (index + 1);
-    return PS_OPERATION_RESULT_SUCCESS_V11;
+    return PS_GPU_RESULT_SUCCESS_V1;
   } catch (...) {
     self.status_.code = ErrorCode::ResourceExhausted;
-    return PS_OPERATION_RESULT_FAILURE_V11;
+    return PS_GPU_RESULT_FAILURE_V1;
   }
 }
-int Invocation::execute(void* context, const ps_gpu_dispatch_v11* commands,
+int Invocation::execute(void* context, const ps_gpu_dispatch_v1* commands,
                         std::uint32_t count) noexcept {
   if (!context)
-    return PS_OPERATION_RESULT_FAILURE_V11;
+    return PS_GPU_RESULT_FAILURE_V1;
   auto& self = *static_cast<Invocation*>(context);
   if (!self.on_owner_thread())
-    return PS_OPERATION_RESULT_FAILURE_V11;
+    return PS_GPU_RESULT_FAILURE_V1;
   try {
     if (!self.status().ok())
       return self.fail(self.status());
     auto status =
         self.device_->execute(self.views_, commands, count, self.cancellation_,
                               &self.statistics_, self.command_allocator_);
-    return status.ok() ? PS_OPERATION_RESULT_SUCCESS_V11
+    return status.ok() ? PS_GPU_RESULT_SUCCESS_V1
                        : self.fail(std::move(status));
   } catch (const std::bad_alloc&) {
     self.status_.code = ErrorCode::ResourceExhausted;
-    return PS_OPERATION_RESULT_FAILURE_V11;
+    return PS_GPU_RESULT_FAILURE_V1;
   } catch (...) {
     self.status_.code = ErrorCode::OperationFailed;
-    return PS_OPERATION_RESULT_FAILURE_V11;
+    return PS_GPU_RESULT_FAILURE_V1;
   }
 }
 int Invocation::release(void* context, std::uint64_t token) noexcept {
   if (!context)
-    return PS_OPERATION_RESULT_FAILURE_V11;
+    return PS_GPU_RESULT_FAILURE_V1;
   auto& self = *static_cast<Invocation*>(context);
   if (!self.on_owner_thread())
-    return PS_OPERATION_RESULT_FAILURE_V11;
+    return PS_GPU_RESULT_FAILURE_V1;
   const auto index = static_cast<std::uint32_t>(token);
   if (!index || index > self.views_.size() || !self.views_[index - 1].storage ||
       self.views_[index - 1].generation != token >> 32)
     return self.fail(Status{ErrorCode::InvalidArgument, {}});
   self.views_[index - 1].storage.reset();
-  return PS_OPERATION_RESULT_SUCCESS_V11;
+  return PS_GPU_RESULT_SUCCESS_V1;
 }
 #if !defined(PHOTOSPIDER_HAS_METAL) && !defined(PHOTOSPIDER_HAS_VULKAN)
 struct Device::Impl {};
@@ -161,7 +162,7 @@ Result<BufferView> Device::view(const std::uint8_t*, std::uint64_t, bool) {
 }
 Status Device::execute(
     const std::vector<BufferView, NativeAllocator<BufferView>>&,
-    const ps_gpu_dispatch_v11*, std::uint32_t, const CancellationToken&,
+    const ps_gpu_dispatch_v1*, std::uint32_t, const CancellationToken&,
     Statistics*, const BufferAllocator&) {
   return Status::failure(ErrorCode::BackendUnavailable,
                          "native GPU is unavailable");

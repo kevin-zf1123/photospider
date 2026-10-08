@@ -4,7 +4,7 @@
 
 ## 1. 模块边界与职责
 
-`TensorDescription` 描述逻辑 tensor、channel、axis、color group、encoding、sampling、profile 和 configured space。它不拥有样本存储、不认证样本值，也不隐含图像布局。`ResourceBindings` 持有 metadata 引用的不可变 ICC profile 与冻结 OCIO snapshot。Value 持有不可变 facet；view 还可能独立保留较早的样本 backing。
+`TensorDescription` 描述逻辑 tensor、channel、axis、color group、encoding、sampling、profile 和 configured space。它不拥有样本存储、不认证样本值，也不隐含图像布局。`ResourceBindings` 持有 metadata 引用的不可变 ICC profile 与冻结 OCIO snapshot。Result 持有不可变 schema 和 facets；Result view 可独立保留 source backing 与 resource owners，不依赖 metadata header 的生命周期。
 
 ## 2. 核心数据结构与内存布局
 
@@ -45,11 +45,11 @@ Stored 端点必须递增；decoded 端点必须不同，也可以递减。Store
 
 Color coordinates 可记录空值或 `relative`/`absolute` scale、可选描述性 observer、灰度解释（`linear_y`、`encoded_luma`、`cielab_l`、`oklab_l`）以及可选有限 binary64 NCL 系数 `[Kr,Kb]`。空字段表示未作断言。`relative-v1` 将 CIELAB/CIELCh lightness 存为 `L*/100`，a/b/chroma 保持不变，XYZ 继续使用 Y=1 reference scale；它不是范围裁剪。ICC/OCIO-native convention 指资源定义的坐标。上述字段均不证明样本有限性、alpha 合法性或预乘约束。
 
-`photospider.tensor-description` facet 上限为 4096 字节。文本为严格 UTF-8，最长 128 字节；最多 128 个 group，每组最多 64 个 component。Canonical 小端 codec 保留整数与 IEEE binary64 位、表顺序、显式 presence byte 和资源身份。版本 4 保持既有含义；版本 5 增加 model-coordinate 记录。tensor、component、channel 或 group 任一层存在 coordinates（包括显式存在但为空的记录）时使用 v5，否则使用 v4。旧版本、版本与 discriminator 不匹配、非 canonical 编码及尾随字节均被拒绝。Opaque annotation 是独立 Value facet，受宿主最多 64 个 facet、每个 64 KiB、总计 1 MiB 的限制。
+`photospider.tensor-description` facet 上限为 4096 字节。文本为严格 UTF-8，最长 128 字节；最多 128 个 group，每组最多 64 个 component。Canonical 小端 codec 保留整数与 IEEE binary64 位、表顺序、显式 presence byte 和资源身份。版本 4 保持既有含义；版本 5 增加 model-coordinate 记录。tensor、component、channel 或 group 任一层存在 coordinates（包括显式存在但为空的记录）时使用 v5，否则使用 v4。旧版本、版本与 discriminator 不匹配、非 canonical 编码及尾随字节均被拒绝。Opaque annotation 是 Result tensor 上独立的 facet，受宿主最多 64 个 facet、每个 64 KiB、总计 1 MiB 的限制。
 
 ## 3. 调度与状态机
 
-`ps::format::assign_metadata` 先检查编辑语法、类型、选项、路径重叠和有界事务编码，再追加一个节点。Compiler 随后解析源相关 selectors 并校验完整候选。运行时保留逐坐标数据依赖，并通过合法 view 或复制后的输出发布新 metadata。
+`ps::format::assign_metadata` 先检查编辑语法、类型、选项、路径重叠和有界事务编码，再追加一个节点。Compiler 随后解析源相关 selectors 并校验完整候选。当前注册使用 Result operation ABI 2、WorkflowDocument 5、OperationTraits 24 和 package 0.32.0。每个输入 Result 恰有一个 tensor member 且没有 fields。内部 node 可以提供可选 canonical schema assertion；public helper 不会设置它。
 
 ```text
 authoring：校验编辑语法 -> 编码有界事务 -> 追加节点
@@ -80,9 +80,11 @@ Result<WorkflowNodeOutput> remove_metadata(
     const MetadataOptions& = {});
 ```
 
-默认值为 `mode=patch`、`dependencies=error`、`missing=error`、`layout=auto`、`profile=strict`。注册的 CPU profile 为 `strict`、`accelerated_apple_silicon`、`accelerated_x86_64`；在各自后端准入规则下，它们产生相同 metadata 和样本位。Replace 要求完整 `description`（可为空），保留 opaque annotations，且只允许编辑 annotation。Patch 禁止填写 `description`。`remove_metadata` 通过同一 authoring 路径降低为仅删除的 patch。无效 authoring 不改变 document。源相关 selectors 和目标结构在 compile 阶段校验。
+默认值为 `mode=patch`、`dependencies=error`、`missing=error`、`layout=auto`、`profile=strict`。注册的 CPU profile 为 `strict`、`accelerated_apple_silicon`、`accelerated_x86_64`；在各自后端准入规则下，它们产生相同 metadata 和样本位。Replace 要求完整 `description`（可为空），保留 opaque annotations，且只允许编辑 annotation。Patch 禁止填写 `description`。`remove_metadata` 通过同一 authoring 路径降低为仅删除的 patch。无效 authoring 不改变 document。源相关 selectors 和目标结构在 compile 阶段校验。输出 schema 保留 source schema id、tensor key、descriptor、batch axes 和 physical layout，只更新 semantic 及被编辑的 annotation facets。
 
-每个输出坐标依赖相同输入坐标。Metadata/resource 校验不增加像素 Validation 或 Control support；data dirty 映射为 identity。Auto/view 在 view 合法时通过保留输入 backing 发布更新后的不可变 metadata。Materialize 分配并复制请求的输出样本。Generic execution 允许合法正、负和零 stride。Continuous/tiled planar execution 保留物理 owner 和 DAG tile geometry。直接 planar invocation 使用调用方提供的 writer，因此强制 view 会返回 `ViewUnavailable`；编译后的公共执行可以发布 retained image view。Copy run 不跨越 request、fragment 或物理 tile 边界；region-copy 路径最多每 1024 个样本检查一次取消/currentness。
+对输出 footprint Q，Result continuation 使用 role mask 9（Data 1 | Descriptor 8）请求 Q 的 Data support 及 source description 的 Descriptor support，不请求像素 Validation 或 Control support。Dependency-v2 将每个输出坐标映射到相同输入坐标，因此输入样本变化会使对应输出样本变脏。Empty 输出需求使用 stateless continuation 发布空 Result，不请求 payload。
+
+当请求映射可表示时，`auto` 和 `view` 发布 Result view，保留 source backing、resources 和 association。只有返回 `ViewUnavailable` 时 `auto` 才 materialize；强制 `view` 返回该错误。`materialize` 为请求的输出 coverage 分配空间，并通过 transactional writer 逐位复制样本。复制每 256 个样本以内检查取消。通用 tensor 在 Result view 有效时支持正、负和零 stride。Spatial layout 可保留源 physical owner 与 DAG tile geometry。该 operation 保留 source publication policy 并禁用 Result cache。
 
 ## 4. 算法与数学
 
@@ -114,4 +116,4 @@ OCIO snapshot 包含显式 config 字节、完整排序的逻辑文件映射、�
 - 静态 authoring 受 facet 和 transaction 限制；其 preparation path 没有运行时 cancellation token。运行时资源准入使用对应的根预算与取消检查。
 - Metadata 编辑会禁用 sample-only cache reuse，因为输出 identity 包含 metadata。
 
-资源准入、复制或 hash 失败会阻止发布并释放未发布 owner。Result header 可以移除资源引用，而旧 view 仍持有样本 backing；删除 facet 不保证所有祖先分配立即释放。公共 workflow 见 [metadata_workflow](../../../examples/metadata_workflow/README.md)，性能 workload 见 [metadata_performance](../../../examples/metadata_performance/README.md)。
+资源准入、复制或 hash 失败会阻止发布并释放未发布 owner。Result header 可以移除资源引用，而旧 view 仍持有样本 backing；删除 facet 不保证所有祖先分配立即释放。当前 Result focused CTest 5/5 通过，public workflow 通过，installed consumer 的 2/2 检查通过。这些测试没有覆盖与 `channel.extract` 或 `channel.assemble` 的跨家族组合。旧 [metadata_performance](../../../examples/metadata_performance/README.md) 测量 Value/planar 执行，不是这些 Result operation 的性能证据。

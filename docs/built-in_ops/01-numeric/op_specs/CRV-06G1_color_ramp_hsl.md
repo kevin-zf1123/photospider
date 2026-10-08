@@ -13,15 +13,15 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+verification_status: focused_result_validation_passed
+repository_commit: current working tree
 ---
 
 # CRV-06G1: color_ramp_hsl
+
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member and no fields, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -35,7 +35,7 @@ This independent HSL ramp uses floating radian source hue.
 The ordered dynamic inputs are input, stops, colors; output is named values.
 colors is Float32/Float64[K,3], ordered H, S, L.
 input and stops independently accept Float32/Float64. stops is [K] with
-1<=K<=65536; input has rank 1..7, and values has shape input.shape+[3].
+1<=K<=65536; input has rank 1..7, and values has shape sample_shape(input)+[3].
 All logical element limits, matching K and finite-value rules come from the
 [complete HSL contract](CRV-06G_color_ramp_hsl.md).
 
@@ -56,9 +56,9 @@ Exact hit/clamp directly converts the original hue; no source hue is discarded
 because saturation is zero. A mismatched platform is not silently redirected.
 
 Inherit CRV-06G's complete-color observation expansion, global stops validation,
-Whole collection and one/two selected-row mathematics, descriptor matching, whole-input dirty support,
-immutable arbitrary-stride input, packed output mapping, owners beyond context
-lifetime, capacity/work/stage accounting, cancellation and cache-off behavior.
+Whole Result validation and one/two selected-row mathematics, descriptor matching, whole-input dirty support,
+authorized source windows, full-shape transactional output, owner lifetime,
+capacity/work/stage accounting and cancellation are inherited from the family contract.
 Unused generic hue is mathematically ignored; complete typed validation still applies; a selected nonfinite hue fails even if S=0.
 Failure categories and complete-color publication follow the shared contract,
 including ResourceExhausted on unfinished certified arithmetic.
@@ -78,16 +78,13 @@ The maintained public workflow and current validation boundary are documented be
 
 ## Maintained implementation and validation
 
-Public [`color_ramp_hsl_node`](../../../../include/photospider/numeric/color_ramps.hpp)
-constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
-implements its Whole complete-output execution.
-
-Coordinates and original hue ratios use exact rational interpolation.
-Conversion between radian and pi units uses a certified pi enclosure with
-a 4096-bit precision ceiling; equal units cancel symbolically. All profiles
-return strict bits. Unresolved unit conversion returns ResourceExhausted.
-
-See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation),
-[mathematical machinery](../math-implementation.md#crv-06-colorarray-and-color-ramps)
-and [public workflow commands](../../../../examples/numeric_workflow/README.md#color-ramps)
-for resource limits and actual validation.
+The public helper `color_ramp_hsl_node` is declared in
+[`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp).
+`color_ramps.cpp` prepares immutable model/unit/profile state and executes the
+Whole Result operation. Original hue values use exact rational interpolation;
+Cross-unit conversion in either direction multiplies or divides by certified pi,
+with a 4096-bit precision ceiling. Same-unit RationalPi expressions cancel pi
+symbolically. Focused Result CTest, Strict/Apple manual groups, independent numerical oracles
+and installed-consumer checks pass. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation)
+and [workflow README](../../../../examples/numeric_workflow/README.md#color-ramps)
+for evidence scope and untested platforms/shapes.

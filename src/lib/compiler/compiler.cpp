@@ -170,27 +170,12 @@ void append_descriptor(DigestBuilder* digest,
 /** @brief Encodes canonical declaration metadata without runtime payload. */
 void append_declarations(
     DigestBuilder* digest,
-    const std::vector<WorkflowInputDeclaration>& declarations) noexcept {
+    const std::vector<WorkflowInputDeclaration>& declarations) {
   digest->integer(declarations.size());
   for (const auto& declaration : declarations) {
     digest->integer(declaration.id);
     digest->text(declaration.name);
-    append_descriptor(digest, declaration.descriptor);
-    append_region(digest, declaration.region);
-    digest->integer(declaration.layout.byte_offset);
-    digest->integer(declaration.layout.byte_strides.size());
-    for (auto stride : declaration.layout.byte_strides)
-      digest->integer(static_cast<std::uint64_t>(stride));
-    digest->integer(static_cast<bool>(declaration.result_schema));
-    if (declaration.result_schema)
-      digest->text(declaration.result_schema->canonical());
-    digest->integer(declaration.facets.size());
-    for (const auto& facet : declaration.facets) {
-      digest->text(facet.key);
-      digest->integer(facet.version);
-      digest->integer(facet.payload.size());
-      digest->bytes(facet.payload.data(), facet.payload.size());
-    }
+    digest->text(declaration.result_schema->canonical());
   }
 }
 
@@ -317,7 +302,7 @@ std::string physical_digest(
     append_region(&digest, requested.second);
   }
   const auto image_storage = [&](const SchemaTemplate& schema) {
-    for (const auto& image : schema.images) {
+    for (const auto& image : schema.tensors) {
       digest.integer(static_cast<std::uint32_t>(image.layout.order));
       digest.integer(image.layout.row_pitch_bytes);
     }
@@ -372,93 +357,6 @@ std::string physical_digest(
   return digest.finish();
 }
 
-/** @brief Builds explicit native access steps from validated logical producers.
- */
-Result<std::vector<PhysicalStep>> native_access_plan(
-    std::vector<PlanStep>* steps,
-    const std::vector<WorkflowInputDeclaration>& declarations,
-    const std::map<std::string, std::size_t>& outputs,
-    const std::map<std::string, Region>& output_regions) {
-  std::vector<PhysicalStep> result;
-  std::uint64_t complete = 0;
-  for (std::size_t i = 0; i < steps->size(); ++i) {
-    auto& step = (*steps)[i];
-    if (step.planned_bytes > UINT64_MAX - complete)
-      return Result<std::vector<PhysicalStep>>(
-          Status::failure(ErrorCode::ResourceExhausted,
-                          "native complete working set overflows"));
-    complete += step.planned_bytes;
-    for (std::size_t port = 0; port < step.inputs.size(); ++port) {
-      const auto& input = step.inputs[port];
-      const auto* producer = std::get_if<PlanStepInput>(&input);
-      const auto backend =
-          producer ? (*steps)[producer->step_index].backend : Backend::Cpu;
-      if (backend == step.backend)
-        continue;
-      const auto& descriptor =
-          producer ? (*steps)[producer->step_index].output_descriptor
-                   : declarations[std::get<PlanWorkflowInput>(input)
-                                      .declaration_index]
-                         .descriptor;
-      auto count = step.input_demands[port].element_count();
-      const auto width = Value::element_size(descriptor.element_type);
-      if (!count.ok() || count.value() > UINT64_MAX / width)
-        return Result<std::vector<PhysicalStep>>(Status::failure(
-            ErrorCode::ResourceExhausted, "native transfer size overflows"));
-      const auto bytes = count.value() * width;
-      const auto capacity = step.backend == Backend::Gpu ? bytes : 0;
-      result.push_back({step.backend == Backend::Gpu
-                            ? PhysicalStepKind::Upload
-                            : PhysicalStepKind::HostAccess,
-                        i,
-                        port,
-                        input,
-                        backend,
-                        step.backend,
-                        descriptor,
-                        step.input_demands[port],
-                        bytes,
-                        capacity,
-                        {}});
-    }
-    result.push_back({PhysicalStepKind::Operation,
-                      i,
-                      0,
-                      PlanStepInput{i},
-                      step.backend,
-                      step.backend,
-                      step.output_descriptor,
-                      step.output_demand,
-                      0,
-                      step.planned_bytes,
-                      {}});
-  }
-  for (const auto& output : outputs) {
-    const auto& step = (*steps)[output.second];
-    if (step.backend == Backend::Gpu)
-      result.push_back({PhysicalStepKind::HostAccess, output.second, 0,
-                        PlanStepInput{output.second}, Backend::Gpu,
-                        Backend::Cpu, step.output_descriptor,
-                        output_regions.at(output.first), 0, 0, output.first});
-  }
-  for (auto& action : result) {
-    auto packed = action.descriptor;
-    for (std::size_t axis = 0; axis < packed.shape.size(); ++axis)
-      packed.shape[axis] = action.region.dimensions()[axis].extent;
-    auto dense = input_internal::dense_metadata(packed);
-    if (!dense.ok()) {
-      if (action.destination_backend == Backend::Gpu)
-        return Result<std::vector<PhysicalStep>>(dense.status());
-      continue;
-    }
-    action.packed_bytes = dense.value().bytes;
-    action.packed_layout = dense.value().layout;
-    for (auto d : action.region.dimensions())
-      action.packed_layout.origin.push_back(d.offset);
-  }
-  return Result<std::vector<PhysicalStep>>(std::move(result));
-}
-
 /**
  * @brief Builds a domain-separated disposable plan-cache lookup key.
  * @param plan Canonical physical-plan digest text.
@@ -471,39 +369,6 @@ std::string plan_cache_key(const std::string& plan) {
   digest.text("plan-cache-key-v15");
   digest.text(plan);
   return digest.finish();
-}
-
-/**
- * @brief Merges two valid demands into their conservative bounding Region.
- * @param left First logical demand.
- * @param right Second logical demand.
- * @param shape Common descriptor shape.
- * @return Bounding Region or a typed containment/rank failure.
- * @throws std::bad_alloc If result or diagnostic allocation fails.
- * @note The result may contain extra coordinates but never escapes `shape`.
- */
-Result<Region> merge_regions(const Region& left, const Region& right,
-                             const std::vector<std::uint64_t>& shape) {
-  const Status left_status = left.validate(shape);
-  const Status right_status = right.validate(shape);
-  if (!left_status.ok()) {
-    return Result<Region>(left_status);
-  }
-  if (!right_status.ok()) {
-    return Result<Region>(right_status);
-  }
-  std::vector<RegionDimension> dimensions;
-  dimensions.reserve(shape.size());
-  for (std::size_t axis = 0U; axis < shape.size(); ++axis) {
-    const RegionDimension& left_axis = left.dimensions()[axis];
-    const RegionDimension& right_axis = right.dimensions()[axis];
-    const std::uint64_t start = std::min(left_axis.offset, right_axis.offset);
-    const std::uint64_t left_end = left_axis.offset + left_axis.extent;
-    const std::uint64_t right_end = right_axis.offset + right_axis.extent;
-    const std::uint64_t end = std::max(left_end, right_end);
-    dimensions.push_back(RegionDimension{start, end - start});
-  }
-  return Result<Region>(Region(std::move(dimensions)));
 }
 
 /**
@@ -547,14 +412,35 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(
     return Result<ExecutionPlan>(
         Status::failure(ErrorCode::Stale, "tile parent is stale"));
   const auto named = outputs_.find(name);
-  if (named == outputs_.end() || requested_region.empty() ||
-      !requested_region.validate(steps_[named->second].output_descriptor.shape)
-           .ok())
+  if (named == outputs_.end())
+    return Result<ExecutionPlan>(
+        Status{ErrorCode::InvalidArgument, "unknown tile output"});
+  const auto& step = steps_[named->second];
+  const auto* tensor = step.output_result_schema &&
+                               step.output_result_schema->tensors.size() == 1
+                           ? &step.output_result_schema->tensors[0]
+                           : nullptr;
+  const auto shape =
+      tensor ? tensor->sample_shape() : step.output_descriptor.shape;
+  if (requested_region.empty() || !requested_region.validate(shape).ok())
     return Result<ExecutionPlan>(Status::failure(ErrorCode::InvalidArgument,
                                                  "invalid named tile Region"));
-  auto closed_region = input_internal::color_output_region(
-      steps_[named->second].output_descriptor,
-      steps_[named->second].output_facets, requested_region);
+  Result<Region> closed_region(requested_region);
+  if (tensor) {
+    auto samples = Footprint::from_regions(shape, {requested_region});
+    if (!samples.ok())
+      return Result<ExecutionPlan>(samples.status());
+    auto closed = tensor->close_samples(samples.value());
+    if (!closed.ok())
+      return Result<ExecutionPlan>(closed.status());
+    if (closed.value().boxes().size() != 1)
+      return Result<ExecutionPlan>(Status{ErrorCode::InvalidArgument,
+                                          "tile closure requires one Region"});
+    closed_region = Result<Region>(closed.value().boxes()[0]);
+  } else {
+    closed_region = input_internal::color_output_region(
+        step.output_descriptor, step.output_facets, requested_region);
+  }
   if (!closed_region.ok())
     return Result<ExecutionPlan>(closed_region.status());
   const auto region = closed_region.take_value();
@@ -567,9 +453,9 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(
       return Result<ExecutionPlan>(Status::failure(
           ErrorCode::InvalidArgument, "tile exceeds requested output"));
   }
-  if (!input_internal::complete_tuple_channels(
-          steps_[named->second].output_descriptor,
-          steps_[named->second].output_facets, region))
+  if (!tensor && !input_internal::complete_tuple_channels(
+                     steps_[named->second].output_descriptor,
+                     steps_[named->second].output_facets, region))
     return Result<ExecutionPlan>(Status::failure(
         ErrorCode::InvalidArgument, "tile must contain all image channels"));
   ExecutionPlan tile = *this;
@@ -588,120 +474,8 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(
           Status::failure(ErrorCode::Stale, "dependency template changed"));
     return Result<ExecutionPlan>(std::move(tile));
   }
-  std::vector<std::optional<Region>> demands(steps_.size());
-  demands[named->second] = region;
-  for (std::size_t reverse = steps_.size(); reverse > 0; --reverse) {
-    const auto i = reverse - 1;
-    if (!demands[i])
-      continue;
-    auto& step = tile.steps_[i];
-    auto closed_demand = input_internal::color_output_region(
-        step.output_descriptor, step.output_facets, *demands[i]);
-    if (!closed_demand.ok())
-      return Result<ExecutionPlan>(closed_demand.status());
-    demands[i] = closed_demand.take_value();
-    if (!input_internal::complete_tuple_channels(
-            step.output_descriptor, step.output_facets, *demands[i]))
-      return Result<ExecutionPlan>(
-          Status::failure(ErrorCode::InvalidArgument,
-                          "propagated tile demand omits image channels"));
-    step.output_demand = step.whole_boundary
-                             ? Region::whole(step.output_descriptor.shape)
-                             : *demands[i];
-    step.input_demands.clear();
-    for (std::size_t port = 0; port < step.inputs.size(); ++port) {
-      const auto* producer = std::get_if<PlanStepInput>(&step.inputs[port]);
-      const auto& descriptor =
-          producer ? steps_[producer->step_index].output_descriptor
-                   : input_declarations_[std::get<PlanWorkflowInput>(
-                                             step.inputs[port])
-                                             .declaration_index]
-                         .descriptor;
-      auto demand = input_internal::derive_input_demand(
-          step.traits, step.output_demand, step.output_descriptor.shape,
-          descriptor.shape, step.traits.input_schema[port].kind);
-      if (!demand.ok())
-        return Result<ExecutionPlan>(demand.status());
-      step.input_demands.push_back(demand.value());
-      if (producer && !demand.value().empty()) {
-        auto& prior = demands[producer->step_index];
-        if (prior) {
-          auto merged = merge_regions(*prior, demand.value(), descriptor.shape);
-          if (!merged.ok())
-            return Result<ExecutionPlan>(merged.status());
-          prior = merged.take_value();
-        } else {
-          prior = demand.take_value();
-        }
-      }
-    }
-    ValueDescriptor packed = step.output_descriptor;
-    for (std::size_t axis = 0; axis < packed.shape.size(); ++axis)
-      packed.shape[axis] = step.output_demand.dimensions()[axis].extent;
-    auto dense = input_internal::dense_metadata(packed);
-    if (!dense.ok() && step.traits.outputs[0].output_schema.kind ==
-                           OperationPortKind::RgbaFloat32)
-      return Result<ExecutionPlan>(dense.status());
-    step.planned_bytes = std::max(
-        step.traits.estimated_bytes,
-        step.traits.outputs[0].maximum_output_payload_bytes.value_or(
-            step.traits.outputs[0].preserve_output_views ? 0
-            : dense.ok()                                 ? dense.value().bytes
-                         : static_cast<std::uint64_t>(
-                               Value::element_size(packed.element_type))));
-    std::uint64_t workspace = step.traits.workspace_bytes;
-    for (std::size_t port = 0; port < step.inputs.size() &&
-                               step.traits.workspace_input_multiplier != 0;
-         ++port) {
-      const auto* producer = std::get_if<PlanStepInput>(&step.inputs[port]);
-      const auto type =
-          producer ? steps_[producer->step_index].output_descriptor.element_type
-                   : input_declarations_[std::get<PlanWorkflowInput>(
-                                             step.inputs[port])
-                                             .declaration_index]
-                         .descriptor.element_type;
-      auto count = step.input_demands[port].element_count();
-      const auto factor =
-          Value::element_size(type) * step.traits.workspace_input_multiplier;
-      if (!count.ok() || count.value() > (UINT64_MAX - workspace) / factor)
-        return Result<ExecutionPlan>(Status::failure(
-            ErrorCode::ResourceExhausted, "tile workspace overflows"));
-      workspace += count.value() * factor;
-    }
-    if (workspace > UINT64_MAX - step.planned_bytes)
-      return Result<ExecutionPlan>(Status::failure(
-          ErrorCode::ResourceExhausted, "tile output/workspace overflows"));
-    step.planned_bytes += workspace;
-  }
-  std::vector<PlanStep> pruned;
-  std::vector<std::size_t> mapping(steps_.size());
-  for (std::size_t i = 0; i < steps_.size(); ++i) {
-    if (!demands[i])
-      continue;
-    mapping[i] = pruned.size();
-    auto step = std::move(tile.steps_[i]);
-    for (auto& input : step.inputs)
-      if (auto* producer = std::get_if<PlanStepInput>(&input))
-        producer->step_index = mapping[producer->step_index];
-    pruned.push_back(std::move(step));
-  }
-  tile.steps_ = std::move(pruned);
-  tile.outputs_ = {{name, mapping[named->second]}};
-  tile.output_regions_ = {{name, region}};
-  auto access = native_access_plan(&tile.steps_, tile.input_declarations_,
-                                   tile.outputs_, tile.output_regions_);
-  if (!access.ok())
-    return Result<ExecutionPlan>(access.status());
-  tile.physical_steps_ = access.take_value();
-  tile.digest_.value = physical_digest(
-      tile.optimized_digest_.value, tile.steps_, tile.outputs_,
-      tile.input_declarations_, tile.output_regions_, tile.tile_height_,
-      tile.tile_width_, tile.execution_mode_, tile.physical_steps_);
-  tile.cache_key_.value = plan_cache_key(tile.digest_.value);
-  if (!current())
-    return Result<ExecutionPlan>(
-        Status::failure(ErrorCode::Stale, "graph changed while deriving tile"));
-  return Result<ExecutionPlan>(std::move(tile));
+  return Result<ExecutionPlan>(Status{ErrorCode::InvalidArgument,
+                                      "plan has no Result dependency network"});
 }
 
 /**
@@ -727,7 +501,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
         Status::failure(ErrorCode::Stale, "graph snapshot is stale"));
   }
   const WorkflowDocument& document = snapshot.document();
-  if (document.schema_version != 4U || document.nodes.empty() ||
+  if (document.schema_version != 5U || document.nodes.empty() ||
       document.nodes.size() > 65536U || document.outputs.empty() ||
       document.outputs.size() > 4096U || document.inputs.size() > 4096U) {
     return Result<SemanticGraphIR>(
@@ -770,8 +544,8 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
     const auto status = input_internal::validate_declaration(&declaration);
     if (!status.ok())
       return Result<SemanticGraphIR>(status);
-    auto admitted = admit_resources(declaration.facets);
-    if (admitted.ok() && declaration.result_schema) {
+    Status admitted;
+    if (declaration.result_schema) {
       auto subset = declaration.result_schema->select_resources(resources);
       if (!subset.ok())
         return Result<SemanticGraphIR>(subset.status());
@@ -879,7 +653,8 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
   semantic.input_declarations_ = declarations;
   std::map<ValueRef, std::vector<ValueFacet>> output_facets;
   std::map<ValueRef, bool> effective_atomic;
-  std::map<std::uint64_t, std::pair<float, float>> scalar_intervals;
+  std::map<std::pair<std::uint64_t, std::string>, std::pair<float, float>>
+      scalar_intervals;
   semantic.nodes_.reserve(document.nodes.size());
   std::map<ValueRef, ValueDescriptor> output_by_value;
   std::map<ValueRef, std::shared_ptr<const SchemaTemplate>> result_schemas;
@@ -925,12 +700,12 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
       } else {
         const auto id = std::get<WorkflowInputReference>(input).input_id;
         const auto& declaration = declarations[declaration_by_id.at(id)];
-        descriptor = declaration.descriptor;
-        facets = declaration.facets;
         result_schema = declaration.result_schema;
-        if (port.kind == OperationPortKind::Float32Scalar) {
+        if (port.kind == OperationPortKind::Float32Scalar ||
+            port.scalar_bounds) {
           auto inserted = scalar_intervals.emplace(
-              id, std::make_pair(port.minimum, port.maximum));
+              std::make_pair(id, port.tensor_key),
+              std::make_pair(port.minimum, port.maximum));
           auto& interval = inserted.first->second;
           interval.first = std::max(interval.first, port.minimum);
           interval.second = std::min(interval.second, port.maximum);
@@ -973,12 +748,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
                                           node.parameters);
     if (!output.ok())
       return Result<SemanticGraphIR>(output.status());
-    if (node.traits.outputs[0].dependency_version) {
-      const auto validated = operations_->validate_dependency_metadata(
-          node.operation, input_descriptors, node.parameters);
-      if (!validated.ok())
-        return Result<SemanticGraphIR>(validated);
-    }
     for (std::uint32_t oi = 0; oi < node.traits.outputs.size(); ++oi) {
       const auto& contract = node.traits.outputs[oi];
       const auto& metadata = output.value()[oi];
@@ -1281,8 +1050,10 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     const auto& step = plan.steps_[i];
     if (step.traits.joint_contract && step.backend == Backend::Cpu &&
         step.traits.outputs[0].observation_kind == ObservationKind::Atomic &&
-        step.traits.outputs[0].failure_delivery ==
-            FailureDelivery::PerAtomOutcome)
+        (step.traits.outputs[0].failure_delivery ==
+             FailureDelivery::PerAtomOutcome ||
+         (step.traits.outputs[0].dependency_version == 2 &&
+          step.traits.joint_contract == 1)))
       groups[step.node_id].push_back(i);
   }
   for (auto& group : groups)
@@ -1306,16 +1077,16 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       auto& step = plan.steps_[output.second];
       const auto requested = options.output_regions.find(output.first);
       if (step.output_result_schema) {
-        if (!step.output_result_schema->images.empty()) {
+        if (!step.output_result_schema->tensors.empty()) {
           const auto shape =
-              step.output_result_schema->images[0].sample_shape();
+              step.output_result_schema->tensors[0].sample_shape();
           auto region = requested == options.output_regions.end()
                             ? Region::whole(shape)
                             : requested->second;
           auto samples = Footprint::from_regions(shape, {region});
           if (!samples.ok())
             return Result<ExecutionPlan>(samples.status());
-          auto closed = step.output_result_schema->images[0].close_samples(
+          auto closed = step.output_result_schema->tensors[0].close_samples(
               samples.value());
           if (!closed.ok() || closed.value().boxes().size() != 1)
             return Result<ExecutionPlan>(Status{ErrorCode::InvalidArgument,
@@ -1356,7 +1127,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
     plan.cache_key_.value = plan_cache_key(plan.digest_.value);
     plan.current_check_ = optimized.current_check_;
     plan.operation_registry_ = operations_;
-    if (plan.structured_network()) {
+    if (plan.dependency_network()) {
       for (auto& step : plan.steps_) {
         auto metadata = std::make_shared<ResultProgramMetadata>();
         metadata->output = {step.output_descriptor, step.output_facets,
@@ -1374,7 +1145,7 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
                 plan.input_declarations_[std::get<PlanWorkflowInput>(input)
                                              .declaration_index];
             metadata->inputs.push_back(
-                {source.descriptor, source.facets, source.result_schema});
+                {ValueDescriptor{}, {}, source.result_schema});
           }
         }
         step.structured_metadata = std::move(metadata);
@@ -1388,174 +1159,8 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
           Status::failure(ErrorCode::Stale, "dependency template changed"));
     return Result<ExecutionPlan>(std::move(plan));
   }
-  std::vector<std::optional<Region>> demand_by_step(plan.steps_.size());
-  for (const auto& requested : options.output_regions) {
-    if (plan.outputs_.count(requested.first) == 0U) {
-      return Result<ExecutionPlan>(
-          Status::failure(ErrorCode::InvalidArgument,
-                          "planning options name an unknown workflow output"));
-    }
-  }
-  for (const auto& output : plan.outputs_) {
-    const PlanStep& step = plan.steps_[output.second];
-    Region demand = Region::whole(step.output_descriptor.shape);
-    const auto requested = options.output_regions.find(output.first);
-    if (requested != options.output_regions.end()) {
-      const Status status =
-          requested->second.validate(step.output_descriptor.shape);
-      if (!status.ok() || requested->second.empty()) {
-        return Result<ExecutionPlan>(Status::failure(
-            ErrorCode::InvalidArgument,
-            "planned workflow output Region is empty or out of bounds"));
-      }
-      auto closed = input_internal::color_output_region(
-          step.output_descriptor, step.output_facets, requested->second);
-      if (!closed.ok())
-        return Result<ExecutionPlan>(closed.status());
-      demand = closed.take_value();
-      if (!input_internal::complete_tuple_channels(
-              step.output_descriptor, step.output_facets, demand)) {
-        return Result<ExecutionPlan>(
-            Status::failure(ErrorCode::InvalidArgument,
-                            "image demand must include all channels"));
-      }
-    }
-    if (demand_by_step[output.second].has_value()) {
-      auto merged = merge_regions(demand_by_step[output.second].value(), demand,
-                                  step.output_descriptor.shape);
-      if (!merged.ok()) {
-        return Result<ExecutionPlan>(merged.status());
-      }
-      demand_by_step[output.second] = merged.take_value();
-    } else {
-      demand_by_step[output.second] = std::move(demand);
-    }
-  }
-  for (std::size_t reverse = plan.steps_.size(); reverse > 0U; --reverse) {
-    const std::size_t step_index = reverse - 1U;
-    PlanStep& step = plan.steps_[step_index];
-    if (!demand_by_step[step_index].has_value()) {
-      demand_by_step[step_index] = Region::whole(step.output_descriptor.shape);
-    }
-    auto closed_demand = input_internal::color_output_region(
-        step.output_descriptor, step.output_facets,
-        demand_by_step[step_index].value());
-    if (!closed_demand.ok())
-      return Result<ExecutionPlan>(closed_demand.status());
-    step.output_demand = closed_demand.take_value();
-    if (!input_internal::complete_tuple_channels(
-            step.output_descriptor, step.output_facets, step.output_demand)) {
-      return Result<ExecutionPlan>(
-          Status::failure(ErrorCode::InvalidArgument,
-                          "propagated image demand must include all channels"));
-    }
-    step.input_demands.reserve(step.inputs.size());
-    for (std::size_t input_position = 0U; input_position < step.inputs.size();
-         ++input_position) {
-      const auto& input = step.inputs[input_position];
-      const auto* producer = std::get_if<PlanStepInput>(&input);
-      const auto& descriptor =
-          producer ? plan.steps_[producer->step_index].output_descriptor
-                   : plan.input_declarations_[std::get<PlanWorkflowInput>(input)
-                                                  .declaration_index]
-                         .descriptor;
-      auto input_demand = input_internal::derive_input_demand(
-          step.traits, step.output_demand, step.output_descriptor.shape,
-          descriptor.shape, step.traits.input_schema[input_position].kind);
-      if (!input_demand.ok())
-        return Result<ExecutionPlan>(input_demand.status());
-      step.input_demands.push_back(input_demand.value());
-      if (!producer || input_demand.value().empty())
-        continue;
-      const std::size_t producer_index = producer->step_index;
-      if (demand_by_step[producer_index].has_value()) {
-        auto merged = merge_regions(demand_by_step[producer_index].value(),
-                                    input_demand.value(), descriptor.shape);
-        if (!merged.ok()) {
-          return Result<ExecutionPlan>(merged.status());
-        }
-        demand_by_step[producer_index] = merged.take_value();
-      } else {
-        demand_by_step[producer_index] = input_demand.take_value();
-      }
-    }
-  }
-  std::uint64_t complete_working_set = 0;
-  for (auto& step : plan.steps_) {
-    ValueDescriptor packed = step.output_descriptor;
-    const auto coverage =
-        step.whole_boundary ? Region::whole(packed.shape) : step.output_demand;
-    for (std::size_t axis = 0; axis < packed.shape.size(); ++axis)
-      packed.shape[axis] = coverage.dimensions()[axis].extent;
-    auto dense = input_internal::dense_metadata(packed);
-    if (!dense.ok() && step.traits.outputs[0].output_schema.kind ==
-                           OperationPortKind::RgbaFloat32)
-      return Result<ExecutionPlan>(dense.status());
-    step.planned_bytes = std::max(
-        step.traits.estimated_bytes,
-        step.traits.outputs[0].maximum_output_payload_bytes.value_or(
-            step.traits.outputs[0].preserve_output_views ? 0
-            : dense.ok()                                 ? dense.value().bytes
-                         : static_cast<std::uint64_t>(
-                               Value::element_size(packed.element_type))));
-    std::uint64_t workspace = step.traits.workspace_bytes;
-    for (std::size_t i = 0; i < step.inputs.size(); ++i) {
-      if (step.traits.workspace_input_multiplier == 0)
-        break;
-      const auto* producer = std::get_if<PlanStepInput>(&step.inputs[i]);
-      const auto& descriptor =
-          producer ? plan.steps_[producer->step_index].output_descriptor
-                   : plan.input_declarations_[std::get<PlanWorkflowInput>(
-                                                  step.inputs[i])
-                                                  .declaration_index]
-                         .descriptor;
-      auto count = step.input_demands[i].element_count();
-      const auto width = Value::element_size(descriptor.element_type);
-      const auto factor = width * step.traits.workspace_input_multiplier;
-      if (!count.ok() || count.value() > (UINT64_MAX - workspace) / factor)
-        return Result<ExecutionPlan>(Status::failure(
-            ErrorCode::ResourceExhausted, "workspace byte bound overflows"));
-      workspace += count.value() * factor;
-    }
-    if (workspace > UINT64_MAX - step.planned_bytes)
-      return Result<ExecutionPlan>(Status::failure(
-          ErrorCode::ResourceExhausted, "step working set overflows"));
-    step.planned_bytes += workspace;
-    if (step.planned_bytes > UINT64_MAX - complete_working_set)
-      return Result<ExecutionPlan>(Status::failure(
-          ErrorCode::ResourceExhausted, "complete working set overflows"));
-    complete_working_set += step.planned_bytes;
-  }
-  for (const auto& output : plan.outputs_) {
-    const auto requested = options.output_regions.find(output.first);
-    const auto& step = plan.steps_[output.second];
-    auto closed = input_internal::color_output_region(
-        step.output_descriptor, step.output_facets,
-        requested == options.output_regions.end()
-            ? Region::whole(step.output_descriptor.shape)
-            : requested->second);
-    if (!closed.ok())
-      return Result<ExecutionPlan>(closed.status());
-    plan.output_regions_.emplace(output.first, closed.take_value());
-  }
-  auto access = native_access_plan(&plan.steps_, plan.input_declarations_,
-                                   plan.outputs_, plan.output_regions_);
-  if (!access.ok())
-    return Result<ExecutionPlan>(access.status());
-  plan.physical_steps_ = access.take_value();
-  plan.optimized_digest_ = optimized.digest();
-  plan.digest_.value = physical_digest(
-      plan.optimized_digest_.value, plan.steps_, plan.outputs_,
-      plan.input_declarations_, plan.output_regions_, plan.tile_height_,
-      plan.tile_width_, plan.execution_mode_, plan.physical_steps_);
-  plan.cache_key_.value = plan_cache_key(plan.digest_.value);
-  plan.current_check_ = optimized.current_check_;
-  plan.operation_registry_ = operations_;
-  if (!plan.current()) {
-    return Result<ExecutionPlan>(
-        Status::failure(ErrorCode::Stale, "graph changed during planning"));
-  }
-  return Result<ExecutionPlan>(std::move(plan));
+  return Result<ExecutionPlan>(Status{ErrorCode::InvalidArgument,
+                                      "plan has no Result dependency network"});
 }
 
 /**

@@ -7,9 +7,9 @@
 #include <utility>
 #include <vector>
 
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/exact_predicate.hpp"
 #include "01-numeric/exact_sampling.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/data/lut3d_bake.hpp"
 #include "photospider/plugin/operation_registry.hpp"
@@ -129,15 +129,25 @@ inline std::vector<OperationParameterSpec> report_parameters() {
       {"extra_count", OperationParameterType::Int64, true, true, 0, 1048576});
   return result;
 }
+inline bool sole_tensor(const OperationMetadata& input) {
+  return input.result_schema && input.result_schema->fields.empty() &&
+         input.result_schema->tensors.size() == 1;
+}
+inline ValueDescriptor tensor_descriptor(const OperationMetadata& input) {
+  const auto& tensor = input.result_schema->tensors[0];
+  return {tensor.descriptor.element_type, tensor.sample_shape()};
+}
 inline Status color_metadata(const OperationMetadata& input,
                              const ColorArrayDescriptor& color) {
-  auto valid = validate_color_array_descriptor(color, input.descriptor);
+  if (!sole_tensor(input))
+    return mismatch("bake requires one tensor member");
+  auto valid = validate_color_array_descriptor(color, tensor_descriptor(input));
   if (!valid.ok())
     return valid;
   auto expected = encode_color_array(color);
   if (!expected.ok())
     return expected.status();
-  for (const auto& facet : input.facets)
+  for (const auto& facet : input.result_schema->tensors[0].facets)
     if (facet.key == "photospider.color-array" &&
         (facet.version != expected.value().version ||
          facet.payload != expected.value().payload))
@@ -161,14 +171,14 @@ inline bool model_valid(ColorModel model,
 inline Result<std::uint64_t> read(const ResultProgramPhase& phase,
                                   unsigned port,
                                   const std::vector<std::uint64_t>& at) {
-  auto charged =
-      phase.consume_work(phase.values.at(port).fragments().size() + at.size());
+  auto charged = phase.consume_work(at.size() + 1);
   if (!charged.ok())
     return Result<std::uint64_t>(charged);
+  const auto& input = phase.tensors->at({port, 0});
   const bool narrow =
-      phase.query.inputs[port].descriptor.element_type == ElementType::Float32;
+      input.spec().descriptor.element_type == ElementType::Float32;
   std::uint64_t bits = 0;
-  auto status = phase.read(port, at, &bits, narrow ? 4 : 8);
+  auto status = input.read(at, &bits, narrow ? 4 : 8, phase.query.cancellation);
   if (!status.ok())
     return Result<std::uint64_t>(status);
   auto parts = BinaryParts::decode(bits, narrow);
@@ -180,7 +190,8 @@ inline Result<Footprint> all(const ResultProgramPhase& phase, unsigned port) {
   FootprintLimits limits;
   limits.cancellation = phase.query.cancellation;
   limits.consume_work = phase.consume_work;
-  return Footprint::all(phase.query.inputs[port].descriptor.shape, limits);
+  return Footprint::all(tensor_descriptor(phase.query.inputs[port]).shape,
+                        limits);
 }
 inline Result<ResultRelation> global_relation(
     const ResultProgramPhase& phase, std::uint64_t rows,

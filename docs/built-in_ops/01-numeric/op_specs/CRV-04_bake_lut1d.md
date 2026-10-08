@@ -76,21 +76,9 @@ node performs the selected final table conversion.
 | [CRV-04E linear multi](CRV-04E_bake_lut1d_linear_multi.md) | NUM-02A linspace -> CRV-01C | Interpolator values / linspace axis |
 | [CRV-04F PCHIP multi](CRV-04F_bake_lut1d_pchip_multi.md) | NUM-02A linspace -> CRV-01D | Interpolator values / linspace axis |
 
-Authoring names in individual files identify templates, not OperationRegistry
-keys. Expansion creates ordinary WorkflowDocument nodes with distinct node IDs,
-explicit static parameters, declared dynamic edges and named WorkflowOutput
-port references. profile maps to key suffix _strict,
-_accelerated_apple_silicon or _accelerated_x86_64 for every expanded node.
-It adds no profile parameter to their operation schemas. Constructors allocate
-collision-free node identifiers under the host's normal authoring convention.
+Authoring names in individual files identify templates, not OperationRegistry keys. Expansion creates ordinary WorkflowDocument nodes with distinct node IDs, explicit static parameters, declared dynamic edges and named WorkflowOutput port references. Profile maps to key suffix `_strict`, `_accelerated_apple_silicon` or `_accelerated_x86_64` for every expanded node. It adds no profile parameter to the operation schemas. Constructors reserve existing and referenced node IDs, allocate the lowest unused positive IDs and enforce the 65,536-node document limit. They construct all nodes before mutating the caller's graph, so invalid authoring leaves the graph unchanged. The caller declares Result-backed workflow inputs and binds Results that satisfy the declared schemas; static schema hints do not replace compiler validation of bound Results.
 
-Construction performs no numerical evaluation. values and axis remain independently
-demanded outputs with optional ordinary host joint execution. A caller requesting
-a complete table explicitly requests the entire values output and whichever axis
-data it needs. The template does not save a file, freeze a result, attach persistent
-identity or force evaluation during construction. Dynamic control changes use
-normal invalidation/reexecution. All exported arrays are generic Values; consumers
-must enforce their own LUT domain, ordering, channel and dtype compatibility.
+Construction only authors metadata and node references. The returned `BakedLut1d` contains `WorkflowNodeOutput` references for `values` and `axis`; its `outputs` method creates caller-named `WorkflowOutput` declarations. The caller chooses the demand and executes the graph through the ordinary Result workflow. Baked outputs are generic Result tensors; consumers validate their own LUT domain, ordering, channel and dtype requirements.
 
 ## Inherited semantic differences
 
@@ -118,78 +106,25 @@ interpolation error relative to a continuous function.
 
 ## Demand, resources, errors and lifetime
 
-All expanded formal source outputs now use CPU Whole. A nonempty values request
-computes the complete baked table and retains its full output owner, even when
-only a few cells are returned. Interpolation bakes materialize the complete
-Float64 linspace query array (8*count bytes) before the complete interpolation
-output (count*C*dtype bytes). Account simultaneous source owners, query/table
-buffers and each source's fixed workspace through the same host resource root.
-There is no additional opaque bake primitive, cache, runtime function object or
-pairing certificate.
+All expanded formal source outputs use CPU Whole. A nonempty `values` request computes the complete baked table and returns its full certified coverage, even when the caller requests only a subset. Interpolation templates first materialize the complete Float64 linspace query array (`8*count` bytes), then the complete interpolation output (`count*C*dtype_size` bytes), in addition to active source owners and source-specific workspace. The host accounts these allocations through the same Root resource budget. A sparse request does not reduce the Whole output owner or numerical work.
 
-Axis remains an independent Float64[3] output: axis-only does not execute the
-expression coefficients, Bezier controls or interpolation x/y. Count=1 still
-omits end payload. For count>1, even a request for only the first value collects
-end and computes the full grid. Each source retains its mathematical formula,
-selection/NaN/typed rules and numeric allowance; complete active input collection
-can propagate previously unrequested upstream/typed failures. Numeric failures
-have their source Whole Run scope. Any active source edit invalidates recorded
-values demand; function controls never dirty axis. Empty reads no payload.
-Output names, generic shapes/dtypes, C=1, explicit exports and post-context
-immutable ownership remain unchanged. Cache-off retains active ownership.
+`axis` is an independent Float64 `[3]` Result. Axis-only demand does not execute expression coefficients, Bezier controls or interpolation x/y. For `count=1`, expanded sources omit the end payload; for larger counts, even a first-value demand collects end and computes the complete grid. Each source preserves its formula, selection, typed validation and numeric allowance. Active Result inputs retain complete typed and upstream validation, so a failure outside the requested numerical region can still fail the Whole Run. Arithmetic errors retain the producing source operation's Run scope. Empty demand returns empty coverage without polling a value producer or reading payload. Any metadata processing needed to construct and seal that empty Result remains part of ordinary execution.
 
-Missing authoring parameters or invalid profile fail template construction with
-InvalidArgument; missing required runtime bindings and invalid expanded-node
-schemas fail existing compiler/preflight validation. Numerical, backend, resource,
-cancellation, stale and upstream errors retain their producing node/input,
-reason and scope. Do not rename a source failure into a generic BakeFailed
-enum or claim per-observation isolation unavailable to the compiled plan.
-Cancellation reaches every expanded node under ordinary scheduling; failed
-observations publish no partial successful Value. Earlier independent outcomes
-retain host terminal semantics.
+The Result association records active source ObjectIds, and dependency support maps the requested output region back to its source support. Editing a source invalidates the values demand according to that recorded mapping; function controls do not dirty the independent axis. Repeating an identical demand retains its completed Result identity. Equal-content source Results can reuse cached computation while the newly returned association points to the current active sources. For interpolation templates, the table Result directly associates with x, y and the current linspace query Result; that query Result and the separate axis Result associate with the current endpoint Results. The one-node expression/Bezier fixtures assert exactly two fresh-source cache hits for `values` and `axis`; interpolation fixtures export `query_values` and assert exactly three. Replacing bindings can therefore reuse static `PreparedOperation` objects while producing outputs for the new inputs.
+
+The fixture's source arrays are local `Value` backing used to publish immutable source Results. It binds those Results through `ExecutionBindings`; execution returns `DemandResult.results`, and reads use Result tensor access. Baked `values` and `axis` have independent immutable Result owners. Their authorized read windows retain the corresponding Root allocations after the Result handles, source backing and execution context retire. Releasing the final window returns the corresponding live Root resources to zero.
+
+The expanded source operations own numerical evaluation, validation, Result publication and source-level failures; the execution host owns scheduling, active associations, cache identity, shared resource admission and cancellation. If a Whole output exceeds the caller's resource budget, execution returns its resource failure before publishing partial table contents. Callers should budget for the full query and table, and should request `axis` only when needed.
 
 ## Acceptance and implementation boundary
 
-For every template, construct both the generated graph and the explicit graph
-listed above through public WorkflowDocument APIs. Compare output descriptors,
-requested result bits/tolerances, read witnesses, errors and dirty support for
-each profile. Test all outputs alone/jointly, full/partial requests, changed dynamic
-inputs, count=1 with failing end, source-specific domain constraints, mixed dtype,
-cache-off, low root budget, cancellation and exported-owner lifetime.
+For every template and CPU profile, construct the generated graph and its explicit WorkflowDocument expansion through the public authoring APIs. Compare output schemas and coverage, requested Result bits, analytic fixture values, source support and dirty mapping. Exercise both table dtypes and the four demand modes: full values, axis-only, joint values and axis, and sparse values. Keep template-equivalence checks distinct from the numeric oracles that validate the underlying samplers and interpolators.
 
-Check source sampler fixtures as well as downstream approximation explicitly:
-sampling x^2 at [0,0.5,1] yields [0,0.25,1], but a later piecewise-linear LUT
-evaluation at 0.25 yields 0.125 rather than the continuous value 0.0625. This is
-expected discretization error, not a failure of correctly rounded sample values.
-No file should be created and no input producer run by template construction.
+Behavior coverage includes count one with a failing end producer, count greater than one with a failing end producer, empty demand with a real failing source continuation, source-specific equal-endpoint/domain rules, independent axis demand, mixed endpoint/table dtypes, fresh-source cache hits and current associations, repeated-demand Result identity, static preparation reuse after binding changes, work/payload rejection, cancellation after computation starts and recovery. Test reversed, unaligned and scalar zero-stride source layouts across every input port, and verify caller and worker floating-environment preservation. Exercise source owner retirement, independent values/axis ownership, Result and read-window lifetime, and release of all Root resources. A sparse million-row PCHIP request under a 1 MiB Payload budget returns `ResourceExhausted / CapacityLimit` at node 1 before the complete linspace query Result can be admitted; this checks full-query admission and does not claim successful maximum-size execution. Injected computation WorkLimit and cancellation also return with live Payload at zero.
 
-The six maintained constructors live in `photospider/numeric/lut1d.hpp` and
-append ordinary nodes to a caller-owned WorkflowDocument. `BakedLut1d` returns
-values/axis node references plus an `outputs()` method for explicit workflow
-exports, with caller-selectable labels. The constructor does not change existing
-output declarations. It reserves existing node IDs and producer references in
-the graph and supplied edges, then selects the lowest free positive IDs. It
-checks the 65536-node limit and constructs both nodes before mutation; invalid
-parameters and allocation failure leave graph contents unchanged. Compiler
-still validates actual metadata/bindings and all graph-wide constraints.
+The maintained `examples/numeric_workflow/baking.cpp` fixture declares Result schemas, binds immutable source Results backed by local `Value` storage and runs both generated and hand-authored graphs through `ExecutionContext`. For each profile it compares 48 graph pairs (six templates by two table dtypes by four demand modes) and separately checks the analytic values encoded in its fixtures. Its numeric oracle is separate. The fixture's seven groups also exercise source failure ordering, cache and association behavior, preparation reuse, authoring boundaries, layouts, cancellation and Result ownership. Direct Strict and Apple runs each passed all seven groups. The focused root CTest selection passed `test_numeric_baking_result` and `test_numeric_result_math` 2/2 in 5.22 seconds (0.38 and 4.83 seconds). The freshly compiled consumer against the reinstalled 0.32.0 package passed the installed baking/inverse/LUT3D selection 3/3 in 5.71 seconds, with 2.39 seconds for baking; its direct Apple run passed all seven groups. These CTest durations include work from concurrent CPU tests and are not performance measurements. These results document this implementation run and do not change the Proposed status of this contract. x86 and successful maximum-physical-size sampling were not run.
 
-Current native Clang 21 strict/Apple runs pass six manual groups. Each profile
-compares 48 generated/explicit graph pairs across six templates, both dtypes and
-four demand modes, with independent analytic fixture values and exact dependency
-comparison. Every expanded output is asserted Whole. Tests cover independent
-axis, count=1 failing end, count>1 full end collection, source-specific domains,
-cache replacement, named exports, authoring rollback/ID limits, work/payload
-failure and recovery. Arbitrary signed/unaligned/scalar-zero source layouts are
-imported through InputSnapshotStore before execution; primitive direct-layout
-checks remain in the source suites. Live cancellation after work begins verifies
-release of template intermediates. The million-row sparse multi-PCHIP case is
-now a complete-output budget rejection at 1 MiB.
-
-No additional numeric primitive is introduced. Numerical arithmetic/oracles for
-the underlying operations remain in NUM-01/02 and CRV-01/02; graph equivalence
-alone is not their numerical proof. Native public and callback-chain timing,
-budgets and Instruments evidence are in math-implementation. Other platforms and
-installed consumers were not rerun for this migration.
+No additional numeric primitive is introduced. Numerical arithmetic and independent numeric oracles for the underlying operations remain in NUM-01/02 and CRV-01/02; generated/explicit graph equivalence alone does not prove their numerical contracts. Historical package 0.18 Value-path measurements are retained in the implementation notes as history and do not measure the current Result path. Other platforms and native GPU behavior require their own direct evidence.
 
 See the maintained [public example and commands](../../../../examples/numeric_workflow/README.md#lut1d-baking-templates-crv-04).
 The source specifications remain Proposed independently of implementation.

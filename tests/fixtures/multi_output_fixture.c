@@ -1,63 +1,91 @@
-#include <string.h>
+#include <stddef.h>
 
-#include "photospider/plugin/operation_plugin_api.h"
+#include "photospider/plugin/result_operation_plugin_api.h"
 
-static int execute(void* user, const ps_operation_value_view_v11* inputs,
-                   uint32_t count,
-                   const ps_operation_parameter_value_v11* parameters,
-                   uint32_t parameter_count, uint32_t backend,
-                   ps_operation_cancelled_v11 cancelled, void* cancel_context,
-                   const ps_operation_output_sink_v11* sink, char* diagnostic,
-                   size_t diagnostic_capacity) {
+static const ps_result_tensor_spec_v2 tensor = {
+    .struct_size = sizeof(tensor),
+    .key = "number",
+    .key_size = 6,
+    .element_type = PS_RESULT_ELEMENT_FLOAT64_V2,
+    .rank = 1,
+    .shape = {1},
+    .channel_axis = PS_RESULT_NO_CHANNEL_V2};
+static const ps_result_schema_v2 schema = {
+    .struct_size = sizeof(schema),
+    .id = "test.multi_output",
+    .id_size = 17,
+    .version = 1,
+    .publication = PS_RESULT_COMPLETE_BUNDLE_V2,
+    .tensors = &tensor,
+    .tensor_count = 1};
+static const ps_result_output_v2 outputs[] = {
+    {.struct_size = sizeof(ps_result_output_v2),
+     .key = "first",
+     .key_size = 5,
+     .port = {.struct_size = sizeof(ps_result_port_v2),
+              .kind = PS_RESULT_OBJECT_V2,
+              .schema = &schema},
+     .execution = PS_RESULT_WHOLE_V2},
+    {.struct_size = sizeof(ps_result_output_v2),
+     .key = "second",
+     .key_size = 6,
+     .port = {.struct_size = sizeof(ps_result_port_v2),
+              .kind = PS_RESULT_OBJECT_V2,
+              .schema = &schema},
+     .execution = PS_RESULT_WHOLE_V2}};
+static int publish(void* user, void* state, const ps_result_query_v2* query,
+                   const ps_result_services_v2* services) {
   (void)user;
-  (void)inputs;
-  (void)count;
-  (void)parameters;
-  (void)parameter_count;
-  (void)backend;
-  (void)cancelled;
-  (void)cancel_context;
-  (void)diagnostic;
-  (void)diagnostic_capacity;
-  double number = 10.0 + sink->output_index;
-  return sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT64_V11,
-                       sink->output_shape, sink->output_rank, NULL, 0,
-                       (const uint8_t*)&number, sizeof(number))
-             ? PS_OPERATION_RESULT_SUCCESS_V11
-             : PS_OPERATION_RESULT_FAILURE_V11;
+  (void)state;
+  const double number = 10.0 + query->output_index;
+  const ps_result_region_v2 whole = {.struct_size = sizeof(whole),
+                                     .rank = 1,
+                                     .extent = {1}};
+  if (services->begin_result(services->context) ||
+      services->bind_descriptor(services->context, NULL, 0, PS_RESULT_EXACT_V2))
+    return 1;
+  if (!(query->requested_kind == 2 && query->requested_count == 0) &&
+      services->publish_tensor(services->context, 0, &whole,
+                               (const uint8_t*)&number, sizeof(number), NULL, 0,
+                               PS_RESULT_EXACT_V2, PS_RESULT_FINAL_V2))
+    return 1;
+  return services->publish_result(services->context, 1) ? 1
+                                                        : PS_RESULT_PUBLISH_V2;
 }
-static ps_operation_descriptor_v11 descriptor;
-static void destroy(const ps_operation_descriptor_v11* records,
-                    uint32_t count) {
-  (void)records;
-  (void)count;
+static int start(void* user, void* state, const ps_result_query_v2* query,
+                 const ps_result_services_v2* services) {
+  (void)user;
+  (void)state;
+  (void)query;
+  (void)services;
+  return 0;
 }
-static const ps_operation_plugin_api_v11 api = {
-    sizeof(ps_operation_plugin_api_v11), 1, &descriptor, destroy};
-PS_OPERATION_EXPORT uint32_t ps_operation_plugin_get_abi_version(void) {
-  return PS_OPERATION_ABI_VERSION_11;
+static void destroy_state(void* user, void* state) {
+  (void)user;
+  (void)state;
 }
-PS_OPERATION_EXPORT const ps_operation_plugin_api_v11*
-ps_operation_plugin_get_api_v11(void) {
-  memset(&descriptor, 0, sizeof(descriptor));
-  descriptor.struct_size = sizeof(descriptor);
-  descriptor.key = "test.c_results";
-  descriptor.key_size = 14;
-  descriptor.flags = PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
-                     PS_OPERATION_FLAG_SIDE_EFFECT_FREE;
-  descriptor.cacheable = 1;
-  descriptor.execute = execute;
-  descriptor.output_count = 2;
-  for (uint32_t i = 0; i < 2; ++i) {
-    ps_operation_output_descriptor_v11* output = &descriptor.outputs[i];
-    output->struct_size = sizeof(*output);
-    output->key = i ? "second" : "first";
-    output->key_size = i ? 6 : 5;
-    output->output_element_type = PS_OPERATION_ELEMENT_FLOAT64_V11;
-    output->shape_rule = PS_OPERATION_SHAPE_SCALAR_V11;
-    output->region_rule = PS_OPERATION_REGION_WHOLE_V11;
-    output->output_schema.struct_size = sizeof(output->output_schema);
-    output->output_schema.kind = PS_OPERATION_PORT_VALUE_V11;
-  }
+static void destroy(void* context) {
+  (void)context;
+}
+static const ps_result_operation_v2 operation = {
+    .struct_size = sizeof(operation),
+    .key = "test.c_results",
+    .key_size = 14,
+    .flags = PS_RESULT_FLAG_CPU_V2 | PS_RESULT_FLAG_DETERMINISTIC_V2 |
+             PS_RESULT_FLAG_SIDE_EFFECT_FREE_V2,
+    .outputs = outputs,
+    .output_count = 2,
+    .maximum_stages = 1,
+    .start = start,
+    .poll = publish,
+    .destroy = destroy_state};
+static const ps_result_operation_plugin_api_v2 api = {
+    .struct_size = sizeof(api),
+    .abi_version = PS_RESULT_OPERATION_ABI_VERSION_2,
+    .operations = &operation,
+    .operation_count = 1,
+    .destroy = destroy};
+PS_RESULT_EXPORT const ps_result_operation_plugin_api_v2*
+ps_result_operation_plugin_get_api_v2(void) {
   return &api;
 }

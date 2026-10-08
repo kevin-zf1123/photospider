@@ -65,7 +65,7 @@ class ExecutionContext {
 
 `PlanarImageLayout` 定义 height、width、可选 channel 轴、component group、row pitch，以及 continuous 或 tiled 物理顺序。逻辑轴顺序不代表物理存储交错排列。`PlanarImage` 持有已发布且不可变的样本；写入方通过未发布的 write window 写入，并在完成区域后提交。`PlanarPageBudget` 分别计量图像已 backing 的 page 与最大虚拟地址预留。page owner 及计账 lease 可在 execution context 销毁后继续存活。普通 `execute_stream` 入口接收 Value 区域输出；plan 需要结构化 planar 输出时会返回 `TypeMismatch`，planar 执行使用结构化图像结果路径。
 
-当前 operation plugin 接口使用 operation ABI 11，planar operation 接口使用 ABI 3。普通 C 接口定义在 [`operation_plugin_api.h`](../../../include/photospider/plugin/operation_plugin_api.h)，独立 planar 接口定义在 [`planar_operation_plugin_api.h`](../../../include/photospider/plugin/planar_operation_plugin_api.h)。callback 通过注册表选定版本的 ABI 接收已校验元数据、请求区域和宿主服务。注册表会在调用插件 callback 前拒绝 ABI 不匹配。宿主边界会隔离 callback 异常。
+Operation plugin 使用 [`result_operation_plugin_api.h`](../../../include/photospider/plugin/result_operation_plugin_api.h) 声明的 standalone Result C ABI 2。旧 Base C operation table 和 planar operation table 已移除；regional C++ `Value` API 仍独立存在。Result callback 接收已校验 metadata、requested tensor coverage 和 host services；registry 在导入前拒绝缺失或不匹配的 Result table，host boundary 会隔离 callback exception。
 
 `ExecutionContextConfig` 限制 CPU worker 数量、等待 callback 数量、受控活动字节和可选 cache。普通 callback 在 worker 开始执行时释放等待槽位；`CPU_STAGES` job 会保留准入，直到所有已提交 tile 退出且 job 从队列摘除。因此等待上限已满时，即使 staged job 正在运行，也可能阻止另一项提交。共享 scheduler 队列见[并行执行模型](../../kernel-architecture/Parallel-Execution-Model.md)。`maximum_live_bytes` 计入受控计算 payload，包括区域读取、宿主管理的输出、scratch、中间数据和传输。该限制不是进程 RSS，也不计调用方执行前已拥有的输入存储。分配 payload 前先预留预算，计账 lease 会保留到最后一个 storage owner 释放。
 

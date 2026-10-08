@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "../channel_extraction_workflow/source.hpp"
 #include "02-format-color/model_math.hpp"
 #include "02-format-color/model_simd.hpp"
 #include "photospider/photospider.hpp"
@@ -139,8 +140,10 @@ struct Report {
   double prepare_us = 0, compile_us = 0;
   std::vector<double> timings;
   m::MathCounters counters{};
-  std::uint64_t work = 0, checksum = 0, peak = 0, planned = 0, copy_bytes = 0,
-                tiles = 0, source_bytes = 0;
+  std::uint64_t work = 0, checksum = 0, peak = 0, live_payload = 0,
+                live_metadata = 0, source_bytes = 0, source_payload = 0,
+                root_work = 0, evaluated = 0, copied = 0, viewed = 0,
+                math_calls = 0, fallbacks = 0;
 };
 void run_math(const Options& o, m::MathConfig config, Report& r) {
   input_internal::Float32Environment environment;
@@ -237,43 +240,31 @@ void run_graph(const Options& o, const m::MathConfig& math, Report& r) {
   }
   WorkflowDocument document;
   ExecutionBindings bindings;
-  StridedLayout strides{
-      0,
-      {static_cast<std::int64_t>(o.width * channels * bytes_per),
-       static_cast<std::int64_t>(channels * bytes_per),
-       static_cast<std::int64_t>(bytes_per)}};
-  if (o.mode == "planar") {
-    PlanarImageConfig config;
-    config.order = ImagePlaneOrder::Tiled;
-    config.tile_height = config.tile_width = o.tile;
-    config.height_axis = 0;
-    config.width_axis = 1;
-    config.channel_axis = 2;
-    auto image = take(PlanarImage::create(descriptor, config));
-    checked(image.publish(Region::whole(descriptor.shape), bytes.data(),
-                          bytes.size()));
-    ExecutionBinding binding;
-    binding.name = "source";
-    binding.image = std::make_shared<const PlanarImage>(image);
-    bindings.inputs.push_back(std::move(binding));
-    document.inputs = {{1,
-                        "source",
-                        descriptor,
-                        Region::whole(descriptor.shape),
-                        {},
-                        {},
-                        PlanarImageLayout{config.order, 0, 1, 2, 0, {}}}};
-  } else {
-    auto value = take(Value::create(descriptor, Region::whole(descriptor.shape),
-                                    strides, std::move(bytes)));
-    bindings.inputs.push_back({"source", value});
-    document.inputs = {{1,
-                        "source",
-                        descriptor,
-                        Region::whole(descriptor.shape),
-                        strides,
-                        {}}};
-  }
+  auto registry = make_default_operation_registry();
+  ExecutionContextConfig config;
+  config.cpu_workers = static_cast<std::uint32_t>(o.workers);
+  config.maximum_live_bytes = UINT64_C(8) << 30;
+  config.managed_resources = ResourceLimits{};
+  config.managed_resources->capacity[ResourceKind::Host] =
+      config.maximum_live_bytes;
+  config.managed_resources->capacity[ResourceKind::Metadata] = UINT64_C(64)
+                                                               << 20;
+  ExecutionContext context(registry, config);
+  const auto root = take(context.resource_budget());
+  ResultTensorLayout layout;
+  layout.spatial = o.mode == "planar";
+  layout.order = ImagePlaneOrder::Tiled;
+  auto input = channel_fixture::source(descriptor, {}, layout);
+  input.tile_height = input.tile_width = o.tile;
+  input.bytes = std::move(bytes);
+  auto source = channel_fixture::publish(root, input);
+  auto declaration = channel_fixture::declaration(input);
+  declaration.id = 1;
+  declaration.name = "source";
+  document.inputs = {declaration};
+  bindings.inputs = {{"source", source}};
+  input = {};
+  r.source_payload = root.statistics().live[ResourceKind::Payload];
   Params params{{"metadata_mode", std::string("raw")},
                 {"layout", std::string("materialize")},
                 {"algorithm", o.algorithm},
@@ -314,7 +305,6 @@ void run_graph(const Options& o, const m::MathConfig& math, Report& r) {
                      {WorkflowInputReference{1}},
                      params}};
   document.outputs = {{"result", 1, "values"}};
-  auto registry = make_default_operation_registry();
   GraphContext graph(document);
   Compiler compiler(registry);
   PlanningOptions planning;
@@ -327,49 +317,53 @@ void run_graph(const Options& o, const m::MathConfig& math, Report& r) {
   const auto begin = Clock::now();
   auto plan = take(compiler.compile(graph, planning));
   r.compile_us = micros(begin);
-  ExecutionContextConfig config;
-  config.cpu_workers = static_cast<std::uint32_t>(o.workers);
-  ExecutionContext context(registry, config);
   ExecutionOptions options;
   options.dependencies.maximum_work = o.work;
   options.maximum_dependency_work = o.work;
+  const auto baseline = root.statistics();
   for (std::uint64_t i = 0; i < o.warmup + o.repeats; ++i) {
+    const auto work_before = root.statistics().issued.work;
     const auto start = Clock::now();
     auto result = take(context.execute(plan.plan, bindings, {}, options));
     const auto elapsed = micros(start);
+    const auto issued_work = root.statistics().issued.work - work_before;
     if (i < o.warmup)
       continue;
     r.timings.push_back(elapsed);
-    const auto& d = result.diagnostics;
-    r.peak = std::max(r.peak, d.peak_live_bytes);
-    r.planned = std::max(r.planned, d.planned_peak_bytes);
-    r.copy_bytes += d.result_copy_bytes;
-    r.tiles += d.tile_count;
-    r.source_bytes += d.source_read_bytes;
-    // Observe every requested output bit outside the execution timer. A
-    // first-pixel checksum can silently miss corruption in the rest of a tile.
-    std::vector<std::uint8_t> packed;
-    if (o.mode == "planar") {
-      packed.resize(take(roi.element_count()) * bytes_per);
-      checked(
-          result.images.at("result").read(roi, packed.data(), packed.size()));
+    r.root_work += issued_work;
+    const auto usage = root.statistics();
+    r.live_payload =
+        std::max(r.live_payload, usage.live[ResourceKind::Payload] -
+                                     baseline.live[ResourceKind::Payload]);
+    r.live_metadata = std::max(r.live_metadata,
+                               usage.live[ResourceKind::Metadata] >
+                                       baseline.live[ResourceKind::Metadata]
+                                   ? usage.live[ResourceKind::Metadata] -
+                                         baseline.live[ResourceKind::Metadata]
+                                   : 0);
+    r.source_bytes += take(take(result.dependencies.source_support())
+                               .at("source")
+                               .element_count()) *
+                      bytes_per;
+    for (const auto& timing : result.diagnostics.operation_timings) {
+      r.evaluated += timing.numeric.evaluated_values;
+      r.copied += timing.numeric.copied_elements;
+      r.viewed += timing.numeric.view_elements;
+      r.math_calls += timing.numeric.strict_math_calls;
+      r.fallbacks += timing.numeric.strict_fallbacks;
     }
+    const auto& output = result.results.at("result");
+    const auto window =
+        take(output.acquire_tensor(take(output.descriptor()), 0, roi));
     const auto width = o.roi_width ? o.roi_width : o.width;
     for (std::uint64_t y = 0; y < o.height; ++y)
       for (std::uint64_t x = 0; x < width; ++x)
         for (std::uint64_t c = 0; c < output_channels; ++c) {
           std::uint64_t value = 0;
-          if (o.mode == "planar") {
-            const auto offset =
-                ((y * width + x) * output_channels + c) * bytes_per;
-            std::memcpy(&value, packed.data() + offset, bytes_per);
-          } else {
-            const auto& output = result.values.at("result");
-            const auto offset = take(output.byte_address({y, x, c}));
-            std::memcpy(&value, output.bytes().data() + offset, bytes_per);
-          }
+          std::memcpy(&value, take(window.row_run({y, x, c})).data, bytes_per);
           r.checksum = hash(r.checksum, value);
         }
+    r.peak = root.statistics().peak[ResourceKind::Host];
   }
 }
 }  // namespace
@@ -404,19 +398,30 @@ int main(int argc, char** argv) {
     std::cout << "member,dtype,profile,algorithm,mode,width,height,roi_width,"
                  "repeats,workers,tile,prepare_us,compile_us,median_us,min_us,"
                  "pixels_per_second,accepted,reference,refinements,math_work,"
-                 "peak_buffer_bytes,planned_bytes,copy_bytes,tiles,source_read_"
-                 "bytes,checksum,warmup,max_us,p90_us,timings_us\n"
+                 "root_peak_host_bytes,run_live_payload_bytes,run_live_"
+                 "metadata_bytes,source_payload_bytes,"
+                 "source_logical_bytes,issued_work,numeric_evaluated,numeric_"
+                 "copied,numeric_views,strict_math_calls,strict_fallbacks,"
+                 "checksum,warmup,max_us,p90_us,timings_us\n"
               << o.member << ',' << o.dtype << ',' << o.profile << ','
               << o.algorithm << ',' << o.mode << ',' << o.width << ','
               << o.height << ',' << o.roi_width << ',' << o.repeats << ','
               << o.workers << ',' << o.tile << ',' << std::setprecision(10)
               << r.prepare_us << ',' << r.compile_us << ',' << median << ','
               << sorted.front() << ',' << (count * 1000000. / median) << ','
-              << r.counters.accepted << ',' << r.counters.reference << ','
-              << r.counters.refinements << ',' << r.work << ',' << r.peak << ','
-              << r.planned << ',' << r.copy_bytes << ',' << r.tiles << ','
-              << r.source_bytes << ',' << r.checksum << ',' << o.warmup << ','
-              << sorted.back() << ','
+              << (o.mode == "math" ? std::to_string(r.counters.accepted) : "")
+              << ','
+              << (o.mode == "math" ? std::to_string(r.counters.reference) : "")
+              << ','
+              << (o.mode == "math" ? std::to_string(r.counters.refinements)
+                                   : "")
+              << ',' << (o.mode == "math" ? std::to_string(r.work) : "") << ',';
+    for (const auto value :
+         {r.peak, r.live_payload, r.live_metadata, r.source_payload,
+          r.source_bytes, r.root_work, r.evaluated, r.copied, r.viewed,
+          r.math_calls, r.fallbacks})
+      std::cout << (o.mode == "math" ? "" : std::to_string(value)) << ',';
+    std::cout << r.checksum << ',' << o.warmup << ',' << sorted.back() << ','
               << sorted[(9 * sorted.size() + 9) / 10 - 1] << ',';
     for (std::size_t i = 0; i < r.timings.size(); ++i) {
       if (i)

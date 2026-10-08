@@ -53,30 +53,48 @@ inline Result<WorkflowNode> rational(std::uint64_t id, const char* name,
   return Result<WorkflowNode>(std::move(authored));
 }
 }  // namespace unary_detail
-/** @brief Shared contract of independently named unary node constructors.
- * Every helper returns owned metadata and is pure/concurrent-safe; allocation
- * may throw bad_alloc. Invalid id/profile/dtype parameters fail InvalidArgument
- * /InvalidDomain/Schema. Runtime input rank is 1..8 with positive extents and
- * count <=2^40. Output values preserves shape with empty facets. Ordinary unary
- * operations preserve dtype; support is stated per helper. Every nonempty
- * request collects and validates complete inputs and computes one complete
- * packed output; the executor projects requested coordinates. Empty skips
- * payload and callback. Any input change invalidates all observed outputs.
- * Integer overflow or invalid rational denominators anywhere fail the
- * invocation with Run scope, no Atom key. Shape/dtype errors fail
- * TypeMismatch/Schema. IEEE nonfinite results succeed; typed, source, work,
- * capacity and cancellation failures keep their categories. Full input
- * collections, full output and fixed scratch consume the budget even for sparse
- * requests. Results own immutable storage beyond context lifetime. Strict math
- * is RN-even with gradual underflow and unchanged caller fenv. Directed
- * refinement has a 4096-bit ceiling and can fail ResourceExhausted. Accelerated
+/** @brief Shared contract for the Result-backed unary node constructors.
+ * Each helper returns an owned WorkflowNode; invalid IDs, profiles or rational
+ * output dtypes return InvalidArgument/InvalidDomain/Schema, and allocation may
+ * throw std::bad_alloc. Each input Result must have exactly one tensor member,
+ * a supported numeric tensor in slot 0; its schema may also contain fields.
+ * No fixed input schema ID or image facet is required. Recognized tensor
+ * facets and spatial metadata still undergo full-input validation. Allowing a
+ * numeric NaN does not bypass an invalid typed value such as an alpha sample.
+ * Metadata specialization requires all input sample shapes and dtypes to
+ * match, with rank 1..8, positive extents and at most 2^40 samples.
+ * Unary output schema is `photospider.tensor` with a `samples` tensor of the
+ * same shape and empty facets. Ordinary unary operations preserve dtype;
+ * support is stated by each helper. Rational helpers take matching Int64 input
+ * tensors and use an explicit Float32/Float64 output dtype.
+ *
+ * A nonempty Whole request needs the complete input tensor with Data,
+ * Validation and Descriptor roles (mask 13). The coordinator provides
+ * authorized Result tensor windows, preserving compatible signed or zero
+ * strides without requiring packed input collection. The operation validates
+ * and computes the complete packed output; the executor projects requested
+ * coordinates afterward. Empty Result requests retain static admission and
+ * validation but skip payload reads and computation, returning empty tensor
+ * coverage. Any input change can invalidate all observed output coordinates.
+ * Integer overflow or an invalid rational denominator anywhere fails the
+ * invocation at Run scope without an Atom key. Shape or dtype mismatch returns
+ * TypeMismatch/Schema. IEEE nonfinite results succeed; source, work, capacity
+ * and cancellation errors retain their categories. Full output and fixed
+ * scratch consume managed resources even for sparse output requests. Published
+ * Results retain immutable storage beyond context lifetime.
+ *
+ * Strict math uses round-to-nearest-even with gradual underflow. Arithmetic
+ * preserves the CPU worker's floating environment, and the execution call
+ * leaves the caller's rounding mode and exception flags unchanged. Directed
+ * transcendental refinement is capped at 4096 bits and may return
+ * ResourceExhausted when it cannot prove the result. Accelerated
  * arithmetic follows CpuNumericProfile's final FP32 error bound; bounded
  * binary64 SIMD kernels handle admitted ordinary ranges, with strict fallback
- * for unresolved cases. Special/algebraic paths remain exact. Per-value numeric
- * counters are unavailable (N/A) for Whole callbacks. Named profiles require
- * their CPU target. The accompanying numeric_workflow example shows explicit
- * math work/state budgets, public execution, oracle commands and checkable
- * expected results.
+ * for unresolved cases. Special and algebraic paths keep their exact rules.
+ * The execution layer reports computed output elements separately from
+ * per-value fallback counters, which this Whole callback does not emit. Named
+ * profiles require their corresponding CPU target. The accompanying
+ * numeric_workflow example contains public Result execution and oracle checks.
  */
 /** @brief Absolute value; UInt8/Int64/Float32/64, Int64 minimum overflows.
  * @note Uses the shared unary helper execution/ownership/error contract above.

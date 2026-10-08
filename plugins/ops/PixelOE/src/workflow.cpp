@@ -53,6 +53,8 @@ int main(int argc, char** argv) try {
   std::string input_file, output_file, operation = "pixeloe.pixelize";
   int repeat = 1, warmup = 0;
   uint32_t workers = 1;
+  uint64_t frames = 1, layers = 1;
+  bool empty = false;
   uint64_t budget = 8ULL << 30;
   uint64_t work_budget = UINT64_MAX;
   int64_t cancel_after_us = -1;
@@ -62,7 +64,13 @@ int main(int argc, char** argv) try {
     std::string a = argv[i];
     auto split = a.find('=');
     auto key = a.substr(0, split), val = a.substr(split + 1);
-    if (key == "backend") {
+    if (key == "frames") {
+      frames = std::stoull(val);
+    } else if (key == "layers") {
+      layers = std::stoull(val);
+    } else if (key == "empty") {
+      empty = val == "true";
+    } else if (key == "backend") {
       if (val != "cpu" && val != "gpu" && val != "vulkan" && val != "cpu_tiled")
         throw std::runtime_error(
             "backend must be cpu, cpu_tiled, gpu or vulkan");
@@ -108,11 +116,11 @@ int main(int argc, char** argv) try {
       }
     }
   }
-  if (!w || !h || w > UINT32_MAX || h > UINT32_MAX ||
-      w > (UINT32_MAX / 12) / h || repeat <= 0 || warmup < 0 ||
-      cancel_after_us < -1)
+  if (!frames || !layers || frames > 4096 / layers || !w || !h ||
+      w > UINT32_MAX || h > UINT32_MAX || w > (UINT32_MAX / 12) / h ||
+      repeat <= 0 || warmup < 0 || cancel_after_us < -1)
     throw std::runtime_error("invalid workflow dimensions or run counts");
-  std::vector<float> samples(h * w * 3);
+  std::vector<float> samples(frames * layers * h * w * 3);
   if (!input_file.empty()) {
     std::ifstream in(input_file, std::ios::binary);
     in.read(reinterpret_cast<char*>(samples.data()), samples.size() * 4);
@@ -120,20 +128,20 @@ int main(int argc, char** argv) try {
       throw std::runtime_error("raw FP32 HWC input read failed");
     }
   } else {
-    for (uint64_t y = 0; y < h; ++y) {
-      for (uint64_t x = 0; x < w; ++x) {
-        for (uint32_t c = 0; c < 3; ++c) {
-          samples[(y * w + x) * 3 + c] =
-              static_cast<float>((x * 17 + y * 31 + c * 71 + (x * y) % 113) %
-                                 256) /
-              255.0f;
+    for (uint64_t batch = 0; batch < frames * layers; ++batch)
+      for (uint64_t y = 0; y < h; ++y) {
+        for (uint64_t x = 0; x < w; ++x) {
+          for (uint32_t c = 0; c < 3; ++c) {
+            samples[(batch * h * w + y * w + x) * 3 + c] =
+                static_cast<float>(
+                    (batch * 43 + x * 17 + y * 31 + c * 71 + (x * y) % 113) %
+                    256) /
+                255.0f;
+          }
         }
       }
-    }
   }
   ps::ValueDescriptor descriptor{ps::ElementType::Float32, {h, w, 3}};
-  ps::PlanarImageConfig config;
-  config.maximum_backed_bytes = budget;
   std::vector<ps::ValueFacet> facets;
   if (!metadata_mode.empty()) {
     ps::TensorDescription d;
@@ -180,24 +188,25 @@ int main(int argc, char** argv) try {
     }
     facets.push_back(encoded.take_value());
   }
-  auto image = ps::PlanarImage::create(descriptor, config, facets).take_value();
-  require(image.publish(ps::Region::whole(descriptor.shape),
-                        reinterpret_cast<uint8_t*>(samples.data()),
-                        samples.size() * 4));
-  samples.clear();
-  samples.shrink_to_fit();
+  ps::SchemaTemplate schema;
+  schema.id = "photospider.image";
+  ps::ResultTensorSpec tensor;
+  tensor.key = "pixels";
+  tensor.batch_axes = {frames, layers};
+  tensor.descriptor = descriptor;
+  tensor.facets = facets;
+  tensor.layout.spatial = true;
+  schema.tensors.push_back(tensor);
   auto registry = std::make_shared<ps::OperationRegistry>();
   require(registry->load_plugin(argv[1]));
   require(registry->freeze());
   ps::WorkflowDocument document;
-  document.inputs = {
-      {1,
-       "image",
-       descriptor,
-       ps::Region::whole(descriptor.shape),
-       {},
-       facets,
-       ps::PlanarImageLayout{ps::ImagePlaneOrder::Tiled, 0, 1, 2, 0, {}}}};
+  ps::WorkflowInputDeclaration declaration;
+  declaration.id = 1;
+  declaration.name = "image";
+  declaration.result_schema =
+      std::make_shared<const ps::SchemaTemplate>(schema);
+  document.inputs.push_back(std::move(declaration));
   if (gpu && (operation == "pixeloe.pixelize" ||
               operation == "pixeloe.expanded" || operation == "pixeloe.weight"))
     operation += vulkan ? "_vulkan_native_fp32" : "_metal_native_fp32";
@@ -213,7 +222,7 @@ int main(int argc, char** argv) try {
       gpu ? ps::ExecutionMode::NativeGpu : ps::ExecutionMode::CpuExact;
   if (roi) {
     planning.output_regions = {
-        {"result", ps::Region({{1, 3}, {2, 4}, {0, 3}})}};
+        {"result", ps::Region({{0, 1}, {0, 1}, {1, 3}, {2, 4}, {0, 3}})}};
   }
   auto plan = ps::Compiler(registry).compile(graph, planning);
   if (!plan.ok()) {
@@ -226,11 +235,47 @@ int main(int argc, char** argv) try {
       budget;
   execution_config.managed_resources->capacity[ps::ResourceKind::Device] =
       budget;
-  execution_config.managed_resources->maximum_work = work_budget;
+  execution_config.managed_resources->maximum_work = UINT64_MAX;
   ps::ExecutionContext execution(registry, execution_config);
+  const auto root = execution.resource_budget().take_value();
+  auto builder =
+      ps::ResultBuilder::start(root, schema, "pixeloe.source").take_value();
+  require(builder.bind_descriptor_relation(
+      ps::ResultRelation::cartesian(root, 1, {0, 8, 0, 0}).take_value()));
+  require(builder.publish_tensor(
+      0, ps::Region::whole(tensor.sample_shape()),
+      ps::ByteView(reinterpret_cast<const uint8_t*>(samples.data()),
+                   samples.size() * 4),
+      ps::ResultRelation::cartesian(root, samples.size(), {0, 1, 0, 0})
+          .take_value(),
+      {true, true, true, true}));
+  auto image = builder.seal().take_value();
+  samples.clear();
+  samples.shrink_to_fit();
   ps::ExecutionBindings bindings;
-  bindings.inputs.push_back(
-      {"image", {}, {}, {}, std::make_shared<const ps::PlanarImage>(image)});
+  bindings.inputs.push_back({"image", image});
+  const auto baseline_payload =
+      root.statistics().live[ps::ResourceKind::Payload];
+  auto captured = execution.freeze(plan.value().plan, bindings);
+  if (!captured.ok())
+    throw std::runtime_error(captured.status().message);
+  ps::OperationMetadata input_metadata;
+  input_metadata.result_schema =
+      std::make_shared<const ps::SchemaTemplate>(schema);
+  auto traits = registry->resolve_traits(operation, {input_metadata}, params)
+                    .take_value();
+  const auto output_shape =
+      traits.outputs[0].result_schema->tensors[0].sample_shape();
+  const auto demand =
+      empty ? ps::Footprint::none(output_shape).take_value()
+      : roi ? ps::Footprint::from_regions(
+                  output_shape,
+                  {ps::Region({{0, 1}, {0, 1}, {1, 3}, {2, 4}, {0, 3}})})
+                  .take_value()
+            : ps::Footprint::all(output_shape).take_value();
+  ps::ExecutionOptions execution_options;
+  execution_options.maximum_dependency_work = work_budget;
+  execution_options.dependencies.maximum_work = work_budget;
   std::vector<double> ms;
   uint64_t peak = 0;
   ps::ExecutionDiagnostics diagnostics;
@@ -262,7 +307,8 @@ int main(int argc, char** argv) try {
       }
     } join_timer{timer};
     auto run =
-        execution.execute(plan.value().plan, bindings, cancellation.token());
+        execution.execute_fragments(captured.value(), {{"result", demand}},
+                                    cancellation.token(), execution_options);
     const auto returned = std::chrono::steady_clock::now();
     if (timer.joinable())
       timer.join();
@@ -276,8 +322,8 @@ int main(int argc, char** argv) try {
     if (!run.ok()) {
       const auto stats = execution.resource_budget().value().statistics();
       std::cerr << "error_code=" << static_cast<int>(run.status().code)
-                << " elapsed_ms=" << elapsed
-                << " live_payload=" << stats.live[ps::ResourceKind::Payload]
+                << " elapsed_ms=" << elapsed << " live_payload="
+                << (stats.live[ps::ResourceKind::Payload] - baseline_payload)
                 << " issued_work=" << stats.issued.work << "\n";
       throw std::runtime_error("execute: " + run.status().message);
     }
@@ -285,25 +331,57 @@ int main(int argc, char** argv) try {
       ms.push_back(elapsed);
     }
     diagnostics = run.value().diagnostics;
-    if (tiled &&
+    if (!empty && tiled &&
         (!diagnostics.cpu_stage_count || !diagnostics.cpu_tile_callback_count ||
          diagnostics.native_dispatch_count))
       throw std::runtime_error(
           "PixelOE CPU tiled requires actual host tile callbacks");
-    if (gpu && (!diagnostics.native_dispatch_count ||
-                !diagnostics.fallback_reasons.empty()))
+    if (!empty && gpu &&
+        (!diagnostics.native_dispatch_count ||
+         !diagnostics.fallback_reasons.empty()))
       throw std::runtime_error(
           "PixelOE GPU requires native dispatch without fallback");
-    peak = std::max(peak, diagnostics.peak_live_bytes);
-    if (i == repeat - 1) {
-      const auto& out = run.value().images.at("result");
-      auto region = roi ? ps::Region({{1, 3}, {2, 4}, {0, 3}})
-                        : ps::Region::whole(out.descriptor().shape);
+    if (empty) {
+      const auto& out = run.value().results.at("result");
+      if (!out.descriptor().take_value().tensor_coverage(0).empty() ||
+          diagnostics.native_dispatch_count || diagnostics.cpu_stage_count ||
+          !run.value().dependencies.source_support().take_value().empty() ||
+          root.statistics().live[ps::ResourceKind::Payload] != baseline_payload)
+        throw std::runtime_error(
+            "Empty PixelOE read samples or produced payload");
+    }
+    peak = std::max(peak, root.statistics().peak[ps::ResourceKind::Host]);
+    if (!empty && i == repeat - 1) {
+      const auto& out = run.value().results.at("result");
+      const auto& spec = out.schema().tensors[0];
+      const auto region = ps::Region::whole(spec.sample_shape());
       result.resize(region.element_count().value());
-      require(out.read(region, reinterpret_cast<uint8_t*>(result.data()),
-                       result.size() * 4));
-      std::cout << "output=" << out.descriptor().shape[1] << "x"
-                << out.descriptor().shape[0] << "x" << out.descriptor().shape[2]
+      auto captured = out.descriptor().take_value();
+      auto window = out.acquire_tensor(captured, 0, region).take_value();
+      for (uint64_t frame = 0; frame < frames; ++frame)
+        for (uint64_t layer = 0; layer < layers; ++layer)
+          for (uint64_t y = 0; y < spec.descriptor.shape[0]; ++y)
+            for (uint64_t ch = 0; ch < spec.descriptor.shape[2]; ++ch)
+              for (uint64_t x = 0; x < spec.descriptor.shape[1];) {
+                auto row =
+                    window.row_run({frame, layer, y, x, ch}).take_value();
+                const auto count =
+                    std::min(row.samples, spec.descriptor.shape[1] - x);
+                for (uint64_t lane = 0; lane < count; ++lane)
+                  std::memcpy(&result[((((frame * layers + layer) *
+                                             spec.descriptor.shape[0] +
+                                         y) *
+                                            spec.descriptor.shape[1] +
+                                        x + lane) *
+                                       spec.descriptor.shape[2]) +
+                                      ch],
+                              row.data + static_cast<int64_t>(lane) *
+                                             row.sample_stride_bytes,
+                              4);
+                x += count;
+              }
+      std::cout << "output=" << spec.descriptor.shape[1] << "x"
+                << spec.descriptor.shape[0] << "x" << spec.descriptor.shape[2]
                 << " ";
     }
   }

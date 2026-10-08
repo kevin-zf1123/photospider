@@ -1,83 +1,27 @@
 # NUM-02 Whole execution
 
-The public `linspace_node` and `arange_node` helpers select six formal profile
-keys in `numeric_sequences.cpp`. Both outputs now use CPU Whole callbacks with
-bounded `SequenceMath` workspace. The exact dyadic arithmetic, direct Float32
-rounding, Int64 range checks and Scalar/NEON/AVX2 limb engines are preserved.
-NUM-14's finite-Float32 four-term certificate is not used.
+The six formal `numeric.linspace_*` and `numeric.arange_*` keys take Result inputs and publish two independently selectable Result outputs, `values` and `axis`. Each input Result contains exactly one tensor member at any key, with complete `sample_shape()` `[1]`. The values output uses `photospider.tensor` / `samples` and shape `[count]`. Axis uses the same schema and member key with shape `[3]`; `atomic_trailing_axes=1` makes the three components one atomic observation. Both outputs use ordinary axes and drop facets and batch topology.
 
-The selected values output computes all count elements; axis independently
-computes its three-component tuple. Static count=1 excludes end/step entirely
-from runtime input collection; otherwise both scalar inputs are required. A
-numeric failure anywhere in values fails that Whole output, including for a
-single-element consumer. Active input changes invalidate the full selected
-output. Empty performs no callback. Output owner size is count*4/8 bytes or
-24 axis bytes, plus 1112 bytes of arithmetic workspace on this ARM64 build.
-Per-atom numeric diagnostics are unavailable for Whole.
+## Input demand and output selection
 
-## Runnable public checks
+For a nonempty selected output, the Whole program requests full active scalar windows with Data, Validation and Descriptor roles (role 13). It reads those authorized windows and computes the entire selected output through a packed Result writer. The published Result retains its complete object and global sample coordinates; a consumer query does not turn it into a packed ROI Result. Selecting a single values index does not reduce the sequence computation. Selecting one axis component closes demand over all three components. Values and axis remain independent: an axis overflow does not invalidate already successful values, and an axis-only request does not allocate values.
+
+Static `count=1` changes the active port set. Both outputs use `start` only; `end` for linspace and `step` for arange receive no runtime Need and do not contribute a Descriptor relation. The declared second input still undergoes complete static schema checks during specialization and seal. For `count>1`, both inputs are required even for endpoint-only output coverage. Empty selected outputs request no payload and perform no sample arithmetic.
+
+The public `numeric::SequenceInput` holds a workflow input reference and an immutable single-tensor Result schema hint, not input payload. The authoring helpers `linspace_node` and `arange_node` create runnable Result workflows with explicit count and dtype parameters. Linspace defaults to Float64; arange chooses Int64 for two Int64 schemas and Float64 otherwise, with explicit dtype available.
+
+## Arithmetic and memory
+
+Linspace computes each sample from exact binary-rational endpoints and its ordinal, then rounds directly to Float32 or Float64. Arange computes exact `start + index * step`; integer mode checks only the final Int64 result, while floating mode rounds once to the selected dtype. Neither operation constructs samples by adding a rounded step. Axis is a three-value atomic tuple: linspace reports `[start,end,step]`; arange reports `[start,last,step]`. Its floating components use Float64 and its integer components use Int64.
+
+The kernels use a bounded `SequenceMath` workspace admitted through the phase allocator. Values own `count * sizeof(dtype)` payload bytes, while axis owns 24 bytes. The host resource ledger charges input windows, output, scratch and work. Cancellation and resource failures release unpublished output; a failure in an unselected output does not revoke an independently successful selected output. These managed payload sizes are not an RSS bound.
+
+## Current behavior checks
+
+Run the focused public Result sequence fixture with:
 
 ```sh
-DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric --target photospider_numeric_sequences -j8
-build/clang21-numeric/examples/numeric_workflow/photospider_numeric_sequences strict
-build/clang21-numeric/examples/numeric_workflow/photospider_numeric_sequences apple_silicon
-python3 oracle/ops/numeric/sequence_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_sequences strict
-python3 oracle/ops/numeric/sequence_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_sequences apple_silicon
+ctest --test-dir build/kernel-dev -R '^test_numeric_sequences_result$' --output-on-failure
 ```
 
-Both native profiles passed the public workflows and 960 independent
-Fraction/IEEE cases per profile. Checks include values `[0,.25,.5,.75,1]`, axis
-`[0,1,.25]`, Int64 above 2^53, extreme cancellation, direct Float32 midpoint
-rounding, signed zero, count=1 failing-source exclusion, count>1 eager failure,
-axis-only overflow, tuple projection, unaligned negative-stride scalar layout,
-fenv restoration, cache invalidation, escaped owners, pre-cancel and cancellation
-after admitted arithmetic. Independent work/output/scratch limits reject and
-release all unpublished storage. The oracle accounts for whole-array overflow
-using exact affine extrema. No x86 runtime result is claimed for this change.
-
-Focused `test_numeric_operations`, `test_dependency_sampling`,
-`test_execution_demand`, `test_resources` and `test_compiler` passed.
-ClangFormat 21 and cpplint passed for changed C++.
-
-## Measured performance
-
-Local Apple M5, macOS 27.0 (26A5425a), Clang 21.1.3, RelWithDebInfo/O2,
-`-fno-fast-math -ffp-contract=off`, native Apple Silicon profile, Float64.
-Kernel package 0.17/traits15; before uses the unchanged sequence adapter from
-8996f526 linked against the same current kernel, after uses Whole. This isolates
-the adapter; it is not a comparison of two full historic kernel builds.
-
-Public timing starts after graph compilation, registry creation and input
-freeze. One CPU worker, result/dependency caches off, 1 GiB payload limit,
-2^40 dependency work and 512 MiB dependency-state limit. Each row has one warmup
-and seven samples; every output is checked against exact dyadic `i/8` outside
-timing. Core timing calls the actual `SequenceMath::rounded` without execution,
-allocation or collection. Times are milliseconds, median [min,max].
-
-| Operation/count | Before public | Whole public | Numerical core |
-| --- | --- | --- | --- |
-| linspace/1 | .0803 [.0734,.1078] | .0381 [.0338,.0605] | .000375 [.000333,.000583] |
-| linspace/256 | 67.81 [65.49,72.96] | .1998 [.1938,.2165] | .1546 [.1537,.1853] |
-| linspace/16384 | failed before obtaining samples | 11.039 [10.493,11.059] | 10.643 [10.626,10.679] |
-| arange/1 | .0806 [.0723,.0975] | .0343 [.0329,.0463] | .000375 [.000333,.000459] |
-| arange/256 | 65.19 [63.85,66.14] | .2070 [.2038,.2457] | .1546 [.1533,.1580] |
-| arange/16384 | not sampled | 10.553 [10.520,11.046] | 10.021 [9.925,10.088] |
-
-N=16/64 and complete ranges are in the raw CSV. Full-request peak owned payload
-at N=256 changes from 3160 to 3168 bytes; Whole N=16384 is 132192 bytes.
-Small consumer requests now own full output capacity even when returned coverage
-is smaller. Initial timings overlapped an independent oracle process and are
-local observations, not statistically isolated hardware comparisons.
-
-A 12-second Instruments Time Profiler capture of Whole linspace N=16384 contains
-11994 execution-chain CPU samples: 9869 (82.28%) include
-`ExactSequence::rounded_bits`, 831 (6.93%) include `sequence_multiply`, and only
-3 (0.025%) include collect. Leaf samples are 6145 in rounded_bits and 3724 in
-its bit accessor. These observed stacks identify exact rounding as the remaining
-hot path; inclusive percentages overlap and inline callback names are incomplete.
-No claim assigns all memmove samples to collection.
-
-Raw local files: `build/num-whole-remaining/timings.csv`, `scale.cpp`, `core.cpp`,
-`build_scale.py`, `sequences.trace`, `sequences.xml`, `sequences-samples.json`,
-`profile-summary.txt`, and strict/Apple oracle logs. Drivers use public workflow
-execution for latency and a separately checked numerical core for arithmetic.
+Coverage includes strict and available Apple Silicon workflows, values and axis selection, atomic tuple closure, Int64 precision above 2^53, extreme cancellation, Float32 direct-rounding cases, signed zero, caller floating-environment restoration, axis-only overflow, failure from an unrequested values overflow, Empty and pre-cancellation. Projection tests cover count-one exclusion of a failing second producer, static validation of the excluded input, and count-two required-producer failure. Resource tests cover work-limit rollback. A step change from 0.5 to 1 recomputes all 256 values; the last value is 255 and `computed_elements` is 256. After context retirement, a retained Result keeps at least 2048 Payload bytes live until its final owner is released, after which all Root resource dimensions return to zero. The latest root and installed consumer CTests each passed 1/1; the complete `apple_silicon` workflow also exited successfully. The independent Fraction/IEEE oracle passed 960 cases each for `strict` and `apple_silicon`; each case checks one selected global output index from Whole execution and is not evidence of ROI-local arithmetic. The x86 backend unavailable path is checked, not x86 execution. No performance result is claimed. The configured installed consumer is registered as `installed_numeric_sequences_result`.

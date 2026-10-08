@@ -30,11 +30,12 @@ minimum, maximum, pow, atan2 and atan2pi. Each receives strict, Apple Silicon CP
 accelerated and x86-64 CPU accelerated keys under the common NUM version rule.
 There is no generic function-mode dispatcher.
 
-Both inputs must have exactly the same shape and dtype; output shape is preserved.
-Use explicit broadcast and cast operations for shape/type adaptation. The
-operator-specific files decide supported dtypes and output dtype, mathematical
-rules, integer overflow and any permitted accelerated approximation. All are
-Proposed; specification acceptance is independent of implementation status.
+Both inputs must have exactly the same full sample shape and dtype; output
+shape is preserved as ordinary sample axes. Use explicit broadcast and cast
+operations for shape/type adaptation. The operator-specific files decide
+supported dtypes and output dtype, mathematical rules, integer overflow and
+any permitted accelerated approximation. These specifications remain Proposed;
+that status is independent of implementation status.
 
 | Spec | Supported dtypes | Accelerated quality |
 | --- | --- | --- |
@@ -80,29 +81,34 @@ Confirmed operator-specific decisions:
 ## Interface, demand and execution
 
 Each operation has named inputs `a`, `b` and output `values`, except atan2/atan2pi
-use `y` and `x` in that order. Rank is 1..8 with positive
-extents; input shapes and dtypes match exactly. Output dtype follows the operator
-file, and output facets are empty. No implicit broadcast, cast or unit inference
-occurs. Compile/preflight rejects unsupported dtype, mismatched shape or unknown
-static parameters before reading numeric inputs.
+use `y` and `x` in that order. Each bound input Result contains exactly one
+tensor member in slot 0 and may also contain fields. The Result schema IDs may
+differ. Input rank is 1..8, extents are positive, and the full sample shapes
+and dtypes match. Typed tensor facets and spatial metadata receive full-input
+validation. The `values` output is a Result using schema `photospider.tensor`,
+tensor key `samples`, the complete input sample shape as ordinary axes, and
+empty facets. Output batch topology is dropped. No implicit broadcast, cast or
+unit inference occurs.
 
-Every nonempty request collects and validates both complete inputs and computes
-one complete packed owned output through a synchronous Whole callback. Empty Q
-reads neither input and invokes no callback. Any changed source coordinate
-invalidates all observed output coordinates. Special numerical identities retain
-both input obligations. Typed validation covers complete inputs before arithmetic.
+Compile/preflight rejects unsupported dtype, mismatched shape or unknown static
+parameters before numeric reads. A nonempty Whole request needs complete input
+support with Data, Validation and Descriptor roles (mask 13). The coordinator
+supplies authorized tensor windows, including legal signed and zero strides;
+the operation does not require a packed copy of either input. It validates and
+computes the complete packed output Result, after which the executor projects
+requested coordinates. Empty requests may use a metadata-only poll, but perform
+no sample reads or arithmetic and produce empty tensor coverage. A change to
+either input invalidates all observed output coordinates. Special numeric
+identities retain both input obligations.
 
-Read arbitrary legal immutable strides/offsets, including zero/negative strides,
-unaligned elements and shifted origins. The executor projects the complete output
-to the consumer's global coordinates. Integer overflow anywhere, including outside
-Q, fails the complete invocation with Run scope and no Atom key. Failure releases
-all unpublished output and scratch; already terminal observations keep their owners.
-
-Inherit [NUM-04 execution conventions](NUM-04_unary_contract.md) for fenv,
-rounding, ownership and cancellation. Capacity includes both full input collections,
-N*b complete output bytes and one fixed arithmetic workspace. Work is O(N) for
-simple operations plus explicitly charged refinement. Sparse requests may cost
-more work and memory. Numeric per-value/fallback counters are N/A on this path.
+Integer overflow anywhere, including outside the requested coordinates, fails
+the invocation with OperationFailed/ArithmeticOverflow/Run and no Atom key.
+Failure releases unpublished output and scratch; published Results retain their
+immutable storage beyond context lifetime. Inherit [NUM-04 execution conventions](NUM-04_unary_contract.md)
+for floating environment, rounding, ownership and cancellation. Output and
+fixed scratch use managed resources even for sparse requests. Work is O(N) for
+simple operations plus explicitly charged refinement; sparse requests may cost
+more work and memory.
 
 Acceptance uses independent exact integer/rational or high-precision mathematical
 oracles, not the implementation helper. Exercise all supported dtypes, signed
@@ -112,39 +118,27 @@ A conceptual WorkflowDocument fixture binds both arrays, compiles a selected key
 and reads requested values through ExecutionContext. Implementation delivery
 provides actual runnable public fixtures and results as documented below.
 
-## Current implementation comparison
-
-Current add/subtract/multiply/divide use same-shape Float32/Float64 arrays, Whole
-execution and a finite-only arithmetic helper. Current minimum/maximum use
-Elementwise registration but also reject nonfinite data via their shared reader.
-None of those legacy names establishes the newly proposed versioned contracts.
-
-- [Current arithmetic helper](../../../../plugins/ops/01-numeric/numeric_algorithms.hpp).
-- [Current minimum](../../../../plugins/ops/01-numeric/numeric_minimum.cpp).
-- [Current maximum](../../../../plugins/ops/01-numeric/numeric_maximum.cpp).
-- [Unary IEEE-style conventions](NUM-04_unary_contract.md).
-- [NUM category](../core.md).
-
 ## Maintained implementation
 
 All 27 keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
 with independently named constructors in `photospider/numeric/binary.hpp`.
-The shared Whole adapter retains and validates both complete inputs, including
-when a numeric identity determines a result.
-Floating elementary operations use controlled correctly rounded hardware
-arithmetic after exact special-value classification, with exact fallback; integer
-operations retain checked exact arithmetic. Accelerated ordinary positive-base
-power and angle results use SLEEF binary64 enclosures within the shared admitted
-ranges. atan2pi divides an angle enclosure by an enclosed pi. Only rejected
-candidates dispatch the certified strict backend . See [math implementation](../math-implementation.md) for
+The shared Whole Result implementation validates both complete inputs, even
+when a numeric identity determines a result. Floating elementary operations
+use controlled correctly rounded hardware arithmetic after exact special-value
+classification, with exact fallback; integer operations retain checked exact
+arithmetic. Accelerated ordinary positive-base power and angle results use
+SLEEF binary64 enclosures within the shared admitted ranges. `atan2pi` divides
+an angle enclosure by an enclosed pi. Rejected candidates use the certified
+strict backend. See [math implementation](../math-implementation.md) for
 rounding, scratch, work accounting and unresolved-refinement limits.
 
 The [public example and commands](../../../../examples/numeric_workflow/README.md)
-include this operation, an editable add/multiply composition, independent
-integer/Fraction/MPFR oracles and direct error/resource checks. The manual target
-is excluded from default builds and has no CTest/integration registration.
-
-The combined family passed 14,174 independent cases per profile on native
-Clang strict/Apple and Ubuntu WSL Clang strict/AVX2, plus expanded manual and
-local installed-consumer checks. [Measured validation scope](../math-implementation.md#num-05-validation-and-native-timing)
-records oracle versions, native timings and limitations.
+include an editable add/multiply composition, independent integer/Fraction/MPFR
+oracles and direct error/resource checks. `test_numeric_binary_result` covers
+the strict Result workflow; the installed consumer exercises the same example
+source through `Photospider::kernel`. Strict and Apple example runs each passed
+14,174 independent integer/Fraction/MPFR cases. The installed consumer test also
+passed. These checks establish CPU behavior, not GPU support. Earlier
+measurements in [the NUM-05 validation record](../math-implementation.md#num-05-validation-and-native-timing)
+belong to the former Value/callback path and do not measure current Result
+execution performance.

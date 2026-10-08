@@ -80,7 +80,7 @@ def generate(slangc, root, out):
             definitions.append(f'static const GpuParameter parameters_{entry}[] = {{' + ',\n'.join(parameters) + '};')
             records.append(f'{{"{entry}", source_{entry}, sizeof(source_{entry})-1, '
                            f'{{{", ".join(map(str, group))}}}, {constant_index}, {constant_size}, '
-                           f'parameters_{entry}, {len(parameters)}, PS_GPU_BACKEND_METAL_V11, PS_GPU_CODE_MSL_V11}}')
+                           f'parameters_{entry}, {len(parameters)}, PS_GPU_BACKEND_METAL_V1, PS_GPU_CODE_MSL_V1}}')
             vk_definitions, vk_record = generate_vulkan(slangc, root, out, module, entry, ep)
             definitions.extend(vk_definitions)
             records.append(vk_record)

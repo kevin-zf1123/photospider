@@ -5,23 +5,19 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_handoff_pending_platform_review
+implementation_status: implemented_cpu_result_abi_2
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-09: transfer encoding and decoding
 
 Inherit [FMT-common](FMT_common_contract.md), the NUM numerical/execution baseline,
 [model coverage](FMT_model_conversion_coverage.md) and
-[canonical image/codec boundary](FMT_codec_boundary.md). The family contains
-[A decode](FMT-09A_decode_transfer.md) and [B encode](FMT-09B_encode_transfer.md),
-both registered native primitives in this development handoff. Their exact scalar definitions are normative in
-[FMT-09 mathematics](FMT-09_transfer_math.md). Clarification is complete for the
-selected scope. Implementation, codec choices, local test evidence and outstanding
-platform review are recorded in [the handoff](../../../development/FMT-09-handoff.md).
-The mathematical requirements and Proposed specification status are unchanged.
+[canonical image/codec boundary](FMT_codec_boundary.md). The family contains [A decode](FMT-09A_decode_transfer.md) and
+[B encode](FMT-09B_encode_transfer.md). Each direction has strict, accelerated
+Apple Silicon and accelerated x86-64 CPU Result ABI 2 keys. Their exact scalar
+definitions are normative in [FMT-09 mathematics](FMT-09_transfer_math.md). The
+specification remains Proposed; registration and implementation status are separate.
 
 ## Purpose and responsibilities
 
@@ -77,10 +73,14 @@ math remains in NUM.
 
 ## Tensor interface and static parameters
 
-One required tensor Value input `input` produces one tensor Value output
-`values` under the target generic-metadata/planar contract. No Result schema,
-resource port, optional data input or runtime-dependent shape is introduced.
-Both retain the same Float32 or Float64 dtype, rank/extents, axis positions and channel order.
+One input Result with one tensor member and no fields produces one `values`
+output Result containing one tensor. The member must use Float32 or Float64; the
+output retains the dtype, logical shape, axes and channel order. Complete sample
+rank, including batch and cell axes, is at most 8; sample count is at most 2^40.
+The operation preserves Result schema identity, tensor key, logical shape and
+batch axes. It updates semantic transfer facets and sets `atomic_trailing_axes`
+to zero. No additional resource port, optional data input or runtime-dependent
+shape is introduced.
 Rank and extent validity inherit NUM/kernel. No implicit broadcasting, casting,
 axis movement, range scaling or integer decoding occurs. In semantic mode,
 non-native numeric storage encoding, including Float32 carrying 0..255 codes,
@@ -91,8 +91,9 @@ all modes.
 
 Semantic respect/override mode processes one explicitly selected RGB or Gray
 group. A Gray group without a channel axis is its one component; an explicit
-channel axis can occupy any structurally valid position. The group selector and
-axis interpretation resolve statically and uniquely. Gray must describe the
+channel axis can occupy any structurally valid position. `axis` indexes a cell
+axis and excludes the Result batch prefix. The group selector and axis
+interpretation resolve statically and uniquely. Gray must describe the
 curve-compatible native quantity; normalized CIELAB l, YCbCr or CMYK components do not
 become linear color by selection. Other groups, alpha and AOVs pass through
 bit-for-bit. Complete images stay straight with internal alpha.
@@ -123,10 +124,10 @@ means smooth, and conflicts with a rounded_10bit source unless overridden.
 B's target defaults never repair or overwrite an inconsistent source implicitly.
 Mode, curve, variant and layout are closed String choices in authoring;
 group and raw selectors are typed static metadata/axis selectors, with bounded
-integer indices. The development implementation encodes complete transfer identities in bounded
-`fmt09-v1:` records inside tensor-description-v4 and exposes a public
-TransferDefinition codec. Raw selectors use a bounded canonical index String.
-See the handoff for the exact serialization, units and remaining review items.
+integer indices. The public `TransferDefinition` codec encodes complete transfer identities in
+bounded `fmt09-v1:` records for tensor-description metadata. Parameter-free
+curves use their canonical identifier; parameterized records preserve exact
+Float64 parameter bits. Raw selectors use a bounded canonical index string.
 
 ## Curve identity, metadata and reference checks
 
@@ -158,14 +159,18 @@ and semantic-domain checks, using NUM formula outcomes. It retains still-applica
 source descriptions without previous validity guarantees and does not change
 transfer metadata to claim a valid color conversion. Intrinsic curve branches,
 including PQ/1886 max and ACES cap/floor, still execute. Static parameter checks
-and physical storage constraints apply in every mode.
+and physical storage constraints apply in every mode. Raw execution retains the
+input facets byte-for-byte and does not assert that samples represent valid
+color or the result of a semantic transfer conversion.
 
 ## Exact requests, validation and invalidation
 
 Let Q be requested output coordinates and T their intersection with participating
-components. Data is input[Q]. Semantic Validation covers input[T] and finite
-rounded transformed results; no unrequested component or alpha sample is read.
-There is no per-pixel Control dependence. All required static descriptions and
+components. Descriptor support (role 8) covers the connected input Result.
+Pass-through components and raw selections request Data (role 1); semantic
+participating components request Data plus Validation (roles 1 and 4). Semantic
+Validation covers input[T] and finite rounded transformed results; no unrequested
+component or alpha sample is read. There is no Control dependence. All required static descriptions and
 parameters are checked regardless of requested pixels, including Empty requests.
 An Empty request does not acquire sample windows or run arithmetic.
 
@@ -185,44 +190,47 @@ failed observation is introduced.
 ## Identity, storage, resources and errors
 
 Linear and gamma=1 are static bit-copy identities, including raw NaN payloads and
-signed zero. Semantic identity still checks requested participating samples and
-publishes the appropriate output metadata. Auto may share a legal read-only
-owner only when the whole transformation is a static bit identity; forced view
-otherwise fails. A request limited to alpha does not turn a nonidentity curve
-into a view-capable operation. Constant/cap branches are not static identities.
+signed zero. Semantic identity still validates the selected samples and publishes
+the appropriate transfer metadata. Auto may share a legal read-only owner when
+the complete declared transformation is a static identity. This applies to legal
+generic and spatial Result storage. A request limited to alpha does not make a
+nonidentity transformation viewable; constant/cap branches are not static
+identities. Forced view rejects a statically nonidentity mapping during compile
+or direct preflight, and rejects an identity whose requested physical mapping
+cannot be proven during observation evaluation.
 
-All other curves materialize requested coverage in a new result owner. Materialize
-forces this even for identities. Canonical images reserve their complete virtual
-span under the one DAG tile geometry; only required pages receive backing.
-Valid edge rows, tile-width padding, page alignment, explicit preparation and
-retention follow kernel storage. Generic non-image raw tensors use their admitted
-tensor storage. A shared view publishes only the admitted result coverage and
-its actual validation scope, not blanket validity of the backing.
+All nonidentity curves materialize requested coverage in a new Result owner.
+`materialize` forces this even for identities. Result storage and publication
+follow the declared generic or spatial layout; only requested coverage is
+produced. A shared view publishes only admitted Result coverage and its actual
+validation scope, not blanket validity of the backing.
 
-Resolve static selectors/metadata first, map exact input demand, acquire retained
-read windows, admit output/scratch/pages, evaluate or copy requested coordinates,
-then check cancellation/currentness before publication. Owners and produced
-coverage survive the normal producer/context lifetime. No eviction, replay,
-external alpha provenance or unpublished source recovery is added.
+Preparation resolves selectors, metadata and the immutable curve program without
+retaining per-run payload state. During execution, map exact input demand, acquire
+read windows, admit output pages and lazily allocate numerical workspace, then
+check cancellation/currentness before publication. Owners and produced coverage
+survive the normal producer/context lifetime. Empty output demand is stateless.
 
 For N requested samples, rank r and F windows, addressing costs O(N*r+F*r), plus
 static metadata and curve arithmetic. Strict transcendental/coefficient work and
 scratch must be charged and bounded under NUM; exhaustion fails without silently
 switching to approximate math. No per-pixel metadata or eager full-image payload
 scan is allowed. SIMD must not read padding, peer channels or unprepared pages.
-Poll cancellation/currentness at most every 1024 visited entries and inside
-bounded multiprecision refinement, as well as before publication. Release
+Poll cancellation/currentness within bounded runs of at most 1024 visited entries,
+inside bounded multiprecision refinement and before publication. Simple copy,
+identity and gamma=2 spans can process up to 1024 samples per run; the general
+curve path batches at most 64 samples. Numerical workspace is allocated lazily
+through the observation allocator, and identity/copy paths need no math workspace.
+The floating-point environment is established for execution and restored on exit.
+Accelerated profiles retain strict fallback and NUM diagnostics. Release
 unpublished buffers/pages/scratch on failure. Deduplicate retained owners when
 accounting for actual backing, windows, outputs and numeric workspace; virtual
 address reservation, logical bytes and resident backing are distinct metrics.
 
-Initial optional result caching remains disabled until it can preserve exact
-coverage, metadata and validation identity. A future cache key must include
-source identity, direction, curve/version/variant, all parameters, group/raw
-selection, effective metadata/mode, dtype/layout and CPU numerical profile.
-Do not share raw/semantic validity or merge distinct 709/2020 descriptions merely
-because one selected coefficient set is numerically equal. NUM backend selection,
-fallback diagnostics, exact copy rules and precision bounds remain unchanged.
+Result caching is disabled. Raw and semantic validity are separate, and distinct
+709/2020 transfer descriptions remain distinct even when a coefficient set is
+numerically equal. NUM backend selection, fallback diagnostics, exact copy rules
+and precision bounds remain unchanged.
 
 | Condition | Phase | Outcome |
 | --- | --- | --- |
@@ -230,7 +238,8 @@ fallback diagnostics, exact copy rules and precision bounds remain unchanged.
 | Unsupported dtype/model, incompatible units/reference, wrong source transfer state or structural layout | Static preflight | TypeMismatch / None. |
 | Requested semantic input nonfinite or outside curve domain | Requested evaluation | OperationFailed / InvalidDomain. |
 | Finite semantic formula rounds to a nonfinite result | Requested evaluation | OperationFailed / ArithmeticOverflow. |
-| Forced view of nonidentity or unrepresentable backing | Normal layout check | InvalidArgument / InvalidDomain; ViewUnavailable. |
+| Forced view of a statically nonidentity mapping | Compile/direct preflight | InvalidArgument / InvalidDomain; ViewUnavailable. |
+| Forced view of an identity mapping whose physical representation cannot express the requested view | Observation evaluation | InvalidArgument / InvalidDomain; ViewUnavailable. |
 | Raw domain/nonfinite/overflow arithmetic | Raw evaluation | NUM-defined result, except static parameter failures. |
 | Resource/work, missing coverage, cancellation/currentness or backend failure | Inherited phase | Preserve existing status; no semantic fallback hides it. |
 
@@ -240,7 +249,7 @@ fallback diagnostics, exact copy rules and precision bounds remain unchanged.
 | --- | --- | --- |
 | Numeric profiles | Three default-registry CPU entries per direction: strict, accelerated Apple Silicon and accelerated x86-64. NUM defines their precision, ISA checks and explicit fallback reporting. | No automatic profile dispatcher, unsuffixed alias or GPU implementation. |
 | Samples | Float32/Float64; same dtype throughout one tensor. Semantic RGB/compatible Gray; explicit raw components. | Integer decoding, Float16, mixed per-channel dtype or implicit complex math. |
-| Storage | Canonical planar images and valid generic non-image raw tensor layouts. Shape/axes unchanged. | Interleaved images, per-node tile geometry or metadata-only storage adaptation. |
+| Storage | Legal generic and spatial Result tensor layouts; shape and axes unchanged. | Interleaved image semantics, per-node tile geometry or metadata-only storage adaptation. |
 | Demand | Exact per-output-coordinate Data and dirty mapping, selected-component Validation, static Descriptor dependence; no halo or pixel Control read. | Whole fallback claimed as exact FMT support. |
 | Publication | Exact Q coverage at unchanged global coordinates with ordinary retained immutable owner/read windows. | Unrequested samples as implicit zero, whole-owner sample-validity certificates or hidden recovery. |
 | Determinism | Static curve/reference/parameters and explicit NUM numerical profile. | Display-device queries, implicit environment/view settings or external color engines. |
@@ -266,12 +275,9 @@ Whole upstream failures, exact dirty support, Empty, source immutability,
 view/materialize equality, retained owner lifetime, budgets/cancellation and
 floating-environment restoration. A view must not bypass identity validation.
 
-The development handoff provides public compile/execute examples and correctness-gated
-benchmarks for Float32/64 [4096,4096,4] planar inputs, full/R-only/alpha-only
-requests and sparse tile-crossing ROIs. Record concrete profile/ISA/build,
-workers, page state, time, logical bytes, reserved span, backing and scratch.
-No runtime throughput or conformance result is claimed by this specification.
-Implementation needs canonical group/transfer/unit metadata, exact partial
-component dispatch/publication, curve kernels and bounded strict math support.
-The existing ColorArray codec and bounded planar CPU subset are not conformance
-evidence. Future camera-log variants need their own clarification.
+Validate the Result operations with independent high-precision references,
+partial-component and ROI requests, Empty demand, identity views, owner lifetime,
+resource limits, cancellation and floating-environment restoration. Historical
+Value/planar measurements do not establish Result performance. Future camera-log
+variants require separately specified transfer definitions; they are outside
+these registered keys.

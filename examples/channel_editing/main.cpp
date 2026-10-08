@@ -4,9 +4,10 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include "photospider/photospider.hpp"
+#include "channel_extraction_workflow/source.hpp"
 
 namespace {
 template <class T>
@@ -17,6 +18,9 @@ T checked(ps::Result<T> result) {
 }
 }  // namespace
 int main() try {
+  auto registry = ps::make_default_operation_registry();
+  ps::ExecutionContext context(registry);
+  const auto root = checked(context.resource_budget());
   ps::WorkflowDocument document;
   ps::ExecutionBindings bindings;
   std::vector<ps::format::ChannelEditInput> inputs;
@@ -24,23 +28,16 @@ int main() try {
                        const std::vector<std::uint64_t>& shape,
                        const std::vector<float>& samples,
                        ps::format::ChannelEditStructure structure) {
-    ps::ValueDescriptor descriptor{ps::ElementType::Float32, shape};
-    ps::StridedLayout layout;
-    layout.byte_strides.resize(shape.size());
-    std::int64_t stride = sizeof(float);
-    for (std::size_t i = shape.size(); i-- > 0;) {
-      layout.byte_strides[i] = stride;
-      stride *= shape[i];
-    }
-    std::vector<std::uint8_t> bytes(samples.size() * sizeof(float));
-    std::memcpy(bytes.data(), samples.data(), bytes.size());
+    auto source = channel_fixture::source({ps::ElementType::Float32, shape});
+    std::memcpy(source.bytes.data(), samples.data(), source.bytes.size());
     const auto id = document.inputs.size() + 1;
-    const auto region = ps::Region::whole(shape);
-    document.inputs.push_back({id, name, descriptor, region, layout, {}});
-    bindings.inputs.push_back(
-        {name, checked(ps::Value::create(descriptor, region, layout, bytes))});
+    auto declaration = channel_fixture::declaration(source);
+    declaration.id = id;
+    declaration.name = name;
     ps::OperationMetadata metadata;
-    metadata.descriptor = descriptor;
+    metadata.result_schema = declaration.result_schema;
+    document.inputs.push_back(std::move(declaration));
+    bindings.inputs.push_back({name, channel_fixture::publish(root, source)});
     inputs.push_back({ps::WorkflowInputReference{id}, metadata, structure});
   };
   add("base", {1, 2, 4}, {10, 20, 30, .4f, 11, 21, 31, .6f}, {false, 2});
@@ -55,19 +52,18 @@ int main() try {
                                     {{"index", "3"}, {2, {"index", "0"}, {}}}},
                                    options));
   document.outputs = {{"edited", edge.source_node, "values"}};
-  auto registry = ps::make_default_operation_registry();
   ps::Compiler compiler(registry);
   ps::GraphContext graph(document);
   ps::PlanningOptions planning;
   planning.output_regions = {{"edited", ps::Region({{0, 1}, {1, 1}, {0, 4}})}};
   auto compiled = checked(compiler.compile(graph, planning));
-  ps::ExecutionContext context(registry);
   auto result = checked(context.execute(compiled.plan, bindings));
-  const auto& value = result.values.at("edited");
+  const auto& value = result.results.at("edited");
+  const auto bytes =
+      channel_fixture::read(value, ps::Region({{0, 1}, {1, 1}, {0, 4}}));
   const std::array<float, 4> expected{8, 21, 31, .5f};
   for (std::uint64_t c = 0; c < 4; ++c) {
-    const auto address = checked(value.byte_address({0, 1, c}));
-    if (std::memcmp(value.bytes().data() + address, &expected[c],
+    if (std::memcmp(bytes.data() + c * sizeof(float), &expected[c],
                     sizeof(float)))
       throw std::runtime_error("independent expected-byte check failed");
   }

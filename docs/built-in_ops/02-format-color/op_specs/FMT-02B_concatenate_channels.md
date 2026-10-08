@@ -13,18 +13,18 @@ implemented_operation_keys:
   - channel.concatenate_strict
   - channel.concatenate_accelerated_apple_silicon
   - channel.concatenate_accelerated_x86_64
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-02B: concatenate existing channel axes
 
-Implementation: package 0.21.0 registers A/B/C CPU profiles with exact byte
-mapping, tensor-description v2, canonical static parameters, and legal retained
-views. See the [public API and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-02-channel-assembly)
-and [performance workflow](../../../../examples/channel_assembly_performance/README.md).
-Decision status remains Proposed; implementation facts below supersede the
-historical inspection's missing-runtime statements.
+Runtime contract: A/B/C are registered as twelve Result operation ABI 2 CPU
+keys: `assemble`, `concatenate`, `assemble_mapped`, and `scalar_literal`, each
+with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
+The public authoring helpers are installed in
+`photospider/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
+specification decision remains Proposed; implementation status is recorded
+separately. The performance guide records focused Result smokes and labels its earlier
+Value/planar measurements as historical; no full Result matrix is reported.
 
 
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md).
@@ -44,10 +44,14 @@ Neither metadata nor physical tiling changes this coordinate rule.
 
 ## Interface and regional specialization
 
-Ordered repeated inputs `inputs[0..n)` produce one `values` tensor. n>=1; all
-inputs and output have the same rank 1..8 and dtype. Parameters are static
+Ordered inputs `inputs[0..n)` are single-tensor Results and produce one
+`values` tensor. The family allows 1..1024 inputs. All inputs and output have
+the same cell rank 1..8 and dtype; batch plus cell rank is at most 8. Parameters
+are static
 `metadata_mode`, conditional `input_overrides`, optional `output_description`,
-`layout`, optional per-input `input_axes`, and required `output_axis` in [0,r).
+`layout`, optional per-input cell-axis `input_axes`, and required cell-axis
+`output_axis` in [0,r). These indices exclude the Result batch prefix; complete
+sample rank, including batch and cell axes, is at most 8.
 The family defines axis assertions, raw requirements, dtype/count/arity limits,
 metadata consistency and the complete support matrix.
 

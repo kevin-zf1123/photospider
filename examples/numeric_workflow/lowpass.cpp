@@ -17,8 +17,13 @@
 #include "accuracy.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
+#include "result_fixture.hpp"     // NOLINT(build/include_subdir)
 
 namespace {
+using numeric_result_fixture::read;
+using numeric_result_fixture::source_schema;
+using point_math_checks::source;
 void require(bool condition, const char* message) {
   if (!condition)
     throw std::runtime_error(message);
@@ -49,16 +54,10 @@ struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
+  std::vector<ps::Value> sources;
   Fixture(ps::WorkflowNode node, const std::vector<ps::Value>& inputs) {
-    for (std::size_t i = 0; i < inputs.size(); ++i) {
-      const auto& value = inputs[i];
-      const auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1, name, value.descriptor(),
-                                 value.region(), value.layout(),
-                                 value.facets()});
-      bindings.inputs.push_back({name, value});
-    }
+    sources = inputs;
+    numeric_result_fixture::declare_sources(&document, inputs);
     document.outputs = {{"values", node.id, "values"}};
     document.nodes = {std::move(node)};
   }
@@ -77,6 +76,8 @@ struct Fixture {
     config.result_cache_bytes = cache ? cache_bytes : 0;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(registry, config);
+    auto bindings = point_math_checks::bindings(take(context.resource_budget()),
+                                                sources, document);
     auto snapshot = context.freeze(plan.value().plan, bindings);
     if (!snapshot.ok())
       return ps::Result<ps::DemandResult>(snapshot.status());
@@ -142,9 +143,8 @@ void oracle(ps::CpuNumericProfile profile) {
     }
     for (unsigned i = 0; i < n; ++i) {
       std::uint64_t actual = 0;
-      require(result.value()
-                  .values.at("values")
-                  .read({i}, &actual, type == 4 ? 4 : 8)
+      require(read(result.value().results.at("values"), {i}, &actual,
+                   type == 4 ? 4 : 8)
                   .ok(),
               "lowpass oracle read");
       if (i)
@@ -166,7 +166,7 @@ void fixtures(ps::CpuNumericProfile profile) {
     auto result = take(
         impulse.run({{"values", region({5}, {ps::Region({{2, 1}})})}}, false));
     std::uint64_t actual = 0;
-    require(result.values.at("values").read({2}, &actual, 8).ok() &&
+    require(read(result.results.at("values"), {2}, &actual, 8).ok() &&
                 numeric_accuracy(actual, expected[kernel], profile),
             "certified full-kernel impulse fixture");
     for (auto boundary : {ps::numeric::LowpassBoundary::Reflect,
@@ -179,7 +179,7 @@ void fixtures(ps::CpuNumericProfile profile) {
           constant.run({{"values", take(ps::Footprint::all({3}))}}, false));
       for (unsigned i = 0; i < 3; ++i) {
         actual = 0;
-        require(preserved.values.at("values").read({i}, &actual, 8).ok() &&
+        require(read(preserved.results.at("values"), {i}, &actual, 8).ok() &&
                     actual == raw(-0.),
                 "constant -0 including short signal boundaries");
       }
@@ -200,10 +200,13 @@ void support_and_ieee(ps::CpuNumericProfile profile) {
   require(take(result.dependencies.source_support()).at("input0") ==
               take(ps::Footprint::all({3})),
           "Whole collection preserves exactzero arithmetic selection");
+  require(take(result.results.at("values").descriptor()).tensor_coverage(0) ==
+              take(ps::Footprint::all({3})),
+          "sparse uniform request publishes full Whole coverage");
   std::uint64_t actual = 0;
-  require(
-      result.values.at("values").read({1}, &actual, 8).ok() && actual == raw(7),
-      "Hann R1 identity");
+  require(read(result.results.at("values"), {1}, &actual, 8).ok() &&
+              actual == raw(7),
+          "Hann R1 identity");
   Fixture zero_ends(
       authored(1, 2, .25, 0, ps::numeric::LowpassBoundary::Zero, profile),
       {array(ps::ElementType::Float64, {5},
@@ -218,7 +221,7 @@ void support_and_ieee(ps::CpuNumericProfile profile) {
       {array(ps::ElementType::Float64, {3}, {snan, inf, negative_nan})});
   auto propagated = take(
       nan_order.run({{"values", region({3}, {ps::Region({{0, 1}})})}}, false));
-  require(propagated.values.at("values").read({0}, &actual, 8).ok() &&
+  require(read(propagated.results.at("values"), {0}, &actual, 8).ok() &&
               actual == (negative_nan | UINT64_C(0x8000000000000)),
           "reflected first logical negative tap NaN, even tiny Gaussian");
   Fixture mixed_inf(
@@ -227,7 +230,7 @@ void support_and_ieee(ps::CpuNumericProfile profile) {
              {inf, 0, inf | (UINT64_C(1) << 63)})});
   auto mixed = take(
       mixed_inf.run({{"values", region({3}, {ps::Region({{1, 1}})})}}, false));
-  require(mixed.values.at("values").read({1}, &actual, 8).ok() &&
+  require(read(mixed.results.at("values"), {1}, &actual, 8).ok() &&
               actual == (inf | UINT64_C(0x8000000000000)),
           "mixed signed infinities canonical NaN");
   Fixture wrapped(
@@ -249,6 +252,8 @@ void support_and_ieee(ps::CpuNumericProfile profile) {
 int main(int argc, char** argv) {
   try {
     const std::string selected = argc > 1 ? argv[1] : "strict";
+    require(selected == "strict" || selected == "apple" || selected == "x86",
+            "profile must be strict, apple, or x86");
     const auto profile = selected == "strict" ? ps::CpuNumericProfile::Strict
                          : selected == "apple"
                              ? ps::CpuNumericProfile::AppleSiliconNeon

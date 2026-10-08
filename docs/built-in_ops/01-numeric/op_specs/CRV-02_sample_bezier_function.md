@@ -13,12 +13,9 @@ status: Proposed
 spec_revision: 0.2.0
 document_maturity: D1_draft
 implementation_status: implemented
-verification_status: manual_public_workflows_and_independent_oracle
+verification_status: focused_result_math_ctest_and_installed_consumer
 repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+repository_commit: current working tree
 ---
 
 # CRV-02: sample_bezier_function
@@ -34,9 +31,8 @@ registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
 This specification records the Bezier anchor/handle generator and its
-numerical, execution and acceptance contracts. The public implementation is
-available while the specification status remains Proposed; implementation
-availability does not change the design acceptance status.
+numerical, execution and acceptance contracts. The registered implementation
+uses Result inputs and outputs; the specification status remains Proposed.
 
 ## Confirmed purpose and input model
 
@@ -79,11 +75,14 @@ All keys use this ordered input layout:
 | 2 `start` | Float32/Float64 `[1]` | Sampling start |
 | 3 `end` | Float32/Float64 `[1]` | Sampling end, undemanded for count=1 |
 
-Array dtypes and scalar dtypes may differ. Accept immutable logical layouts,
-including signed/zero strides, offsets and unaligned storage; do not reinterpret
-physical row order as anchor order. Use generic Value-port metadata validation
-for attached facets, validate complete collected recognized typed data, and drop
-facets on output. No unit conversion is performed.
+Each input is a Result containing one tensor member under any schema id/version
+and member key. Shape rules apply to its complete `sample_shape()`, including
+batch axes. Array dtypes and scalar dtypes may differ. Accept immutable logical
+layouts, including signed/zero strides, offsets and unaligned storage; do not
+reinterpret physical row order as anchor order. Result metadata validates the
+single tensor member and its dtype/shape; complete recognized typed data is
+validated for each active input. Outputs use `photospider.tensor` v1, member
+`samples`, and empty facets. No unit conversion is performed.
 
 | Static parameter | Type/domain | Authoring default |
 | --- | --- | --- |
@@ -102,12 +101,15 @@ values are rejected before runtime input reads, including axis-only requests.
 The maintainer selected NUM-01's sampling/output contract unchanged: dynamic
 Float32/Float64 `[1]` start/end inputs, static count in `[1,1048576]`, increasing
 or decreasing endpoint-inclusive grids, and N=1 at start with no end read.
-Output `values[N]` selects Float32 or Float64, default Float64; output
-`axis[3]` is Float64 `[start,end,step]` or `[start,start,0]` for N=1. Both are
-generic arrays with empty facets, and units are interpreted by downstream users.
+Output port `values` is a Result using schema `photospider.tensor` v1 and member
+`samples`, shape [N], selected Float32/Float64 dtype (default Float64), and empty
+facets. Output port `axis` is a Result using the same schema/member, Float64
+shape [3], `atomic_trailing_axes=1`, and empty facets; its samples are
+`[start,end,step]` or `[start,start,0]` for N=1. The output association records
+the actual active source ObjectIds. Units are interpreted by downstream users.
 Coordinate rounding and local duplicate-coordinate checks follow NUM-01.
 
-Anchors and handles are dynamic upstream Value inputs with compile-time shapes.
+Anchors and handles are dynamic Result inputs with metadata-defined shapes.
 Changing their values or start/end reuses the compiled plan; changing degree,
 K, count or output dtype requires compilation. The control data defines the
 curve independently of the requested sampling interval.
@@ -120,12 +122,13 @@ sampling positions originally requested. Tangent extrapolation is not selected.
 
 ## Dependency and validation decisions
 
-Values uses one CPU Whole callback. For every nonempty values request, collect
-complete anchors and handles plus start and, only when count>1, end. Recognized
-typed validation and upstream failures apply to all collected components. Validate
-all x topology, then every generated coordinate/domain/adjacent-separation control
-before y arithmetic. Evaluate all count outputs and allocate one complete dense
-values owner, even for sparse demand. Empty reads no payload.
+The Whole Result program requests complete active inputs with Data, Validation
+and Descriptor (role 13). For nonempty `values`, it collects complete anchors,
+handles, start and, only when count>1, end. Recognized typed validation and
+upstream failures apply to all collected components. It validates all x topology,
+then every generated coordinate/domain/adjacent-separation control before y
+arithmetic. It evaluates all count outputs and publishes a complete dense Result,
+even for a local request. Empty reads no payload.
 
 Mathematical selection remains local: exact anchor/clamp uses that anchor y;
 interior evaluation uses the selected segment's anchor y and relative y handles.
@@ -133,15 +136,20 @@ Generic y outside every evaluated stencil is not additionally finite-checked.
 All output samples are evaluated, so an invalid otherwise-unrequested sample can
 fail the complete values Run. Failure publishes no partial successful values.
 Axis independently collects start/end only (start for count=1), computes its
-24-byte tuple and never validates control payloads or per-coordinate separation.
-Static descriptors of all four edges are still validated for either output.
+24-byte tuple and never reads control payloads or validates per-coordinate
+separation. Static metadata of all four input edges is still validated for either
+output. Count=1 specialization excludes end from both output dependencies; for
+values it requests anchors, handles and start, while axis requests only start.
 
 Any collected anchor/handle edit invalidates the recorded values demand; controls
 never dirty axis. Start/end affect both outputs, except that count=1 ignores end.
 Complete immutable input versions, profile, metadata and parameters remain in
 cache identity. Both outputs retain their existing names, dtypes, empty facets
 and independent identity; there is no new pairing object. Returned owners survive
-context destruction. Sparse publication coverage retains the complete owner.
+context destruction. A nonempty local request computes the complete dense
+output and the returned Result certifies full coverage in global sample
+coordinates; coordinates are not rebased to the request. Each output publishes
+through its own all-or-nothing Result transaction.
 
 ## Numerical versions
 
@@ -252,8 +260,8 @@ with independent exact-rational de Casteljau evaluation during clarification.
 
 1. Validate complete static metadata. Resolve Whole input projections separately
    for values and axis, omitting end only when count=1.
-2. Collect all active input Values with typed validation. Axis evaluates sampling
-   endpoints and publishes its tuple independently.
+2. Collect active Result inputs with typed validation (role 13). Axis evaluates
+   sampling endpoints and publishes its tuple independently.
 3. Values validates the global x topology with RN64 reconstructed controls and
    exact derivative tests. A budgeted x index requires O(K*degree) storage.
 4. Validate every generated coordinate and its adjacent separation before y
@@ -299,12 +307,13 @@ silently simplified to the old linear/PCHIP operators.
 
 ## Demand, dirty mapping and returned ownership
 
-Values uses one CPU Whole callback. For every nonempty values request, collect
-complete anchors and handles plus start and, only when count>1, end. Recognized
-typed validation and upstream failures apply to all collected components. Validate
-all x topology, then every generated coordinate/domain/adjacent-separation control
-before y arithmetic. Evaluate all count outputs and allocate one complete dense
-values owner, even for sparse demand. Empty reads no payload.
+The Whole Result program requests complete active inputs with Data, Validation
+and Descriptor (role 13). For nonempty `values`, it collects complete anchors,
+handles, start and, only when count>1, end. Recognized typed validation and
+upstream failures apply to all collected components. It validates all x topology,
+then every generated coordinate/domain/adjacent-separation control before y
+arithmetic. It evaluates all count outputs and publishes a complete dense Result,
+even for a local request. Empty reads no payload.
 
 Mathematical selection remains local: exact anchor/clamp uses that anchor y;
 interior evaluation uses the selected segment's anchor y and relative y handles.
@@ -312,15 +321,20 @@ Generic y outside every evaluated stencil is not additionally finite-checked.
 All output samples are evaluated, so an invalid otherwise-unrequested sample can
 fail the complete values Run. Failure publishes no partial successful values.
 Axis independently collects start/end only (start for count=1), computes its
-24-byte tuple and never validates control payloads or per-coordinate separation.
-Static descriptors of all four edges are still validated for either output.
+24-byte tuple and never reads control payloads or validates per-coordinate
+separation. Static metadata of all four input edges is still validated for either
+output. Count=1 specialization excludes end from both output dependencies; for
+values it requests anchors, handles and start, while axis requests only start.
 
 Any collected anchor/handle edit invalidates the recorded values demand; controls
 never dirty axis. Start/end affect both outputs, except that count=1 ignores end.
 Complete immutable input versions, profile, metadata and parameters remain in
 cache identity. Both outputs retain their existing names, dtypes, empty facets
 and independent identity; there is no new pairing object. Returned owners survive
-context destruction. Sparse publication coverage retains the complete owner.
+context destruction. A nonempty local request computes the complete dense
+output and the returned Result certifies full coverage in global sample
+coordinates; coordinates are not rebased to the request. Each output publishes
+through its own all-or-nothing Result transaction.
 
 ## Resources, work and cancellation
 
@@ -416,10 +430,10 @@ be labeled a CertifiedBound QualityReport without the required kernel evidence.
 | B13 | Every x mutation invalidates old values witnesses; any y mutation invalidates recorded values demand; axis ignores all controls; count=1 ignores end changes |
 | B14 | Strict rounding near flat x tangencies, steep y, exact zeros and halfway output cases; acceleration must bound y error or execute strict fallback |
 | B15 | Identical complete-output admission for small ROI and full demand, forced topology/root capacity/work failures, cancellation and recovery, cache-off and release of unpublished objects |
-| B16 | Multiple consumers, output Values surviving context destruction, final-owner release and no mutable input/registry leakage across concurrent runs |
+| B16 | Multiple consumers, output Results surviving context destruction, final-owner release and no mutable input/registry leakage across concurrent runs |
 | B17 | Strict cross-platform result bits; accelerated <=4 ULP on each declared CPU profile; incompatible-platform rejection and explicit profile identity |
 
-### Maintained public workflow
+### Public workflow fixture
 
 The public fixture is implemented through `sample_bezier_function_node` in
 `photospider/numeric/bezier.hpp`:
@@ -438,62 +452,46 @@ request values indices {0,1,8} -> {0:0, 1:0.5, 8:1}
 request axis -> [0,1,0.125]
 ```
 
-It runs through WorkflowDocument input declarations/bindings, Compiler and
-ExecutionContext and checks read coverage, axis bytes, failures and binding
-changes. The maintained command and oracle are in the numeric workflow README;
-this specification does not replace the public workflow with an internal solver
-call.
+The public workflow fixture uses WorkflowDocument input declarations and Result
+bindings, compiles the graph with `Compiler`, executes it through
+`ExecutionContext`, and reads the published Result outputs. The maintained
+manual example is `examples/numeric_workflow/bezier.cpp`; it uses Result
+declarations, bindings and outputs, with Value objects only as immutable source
+backing. The independent `bezier_oracle.py` validates the public operation
+against Fraction/de Casteljau/Euclid-Sturm cases. Strict and Apple each pass 382
+numerical/error cases plus four full-output capacity-rejection cases. The
+maximum-count cases verify `CapacityLimit` rejection at the operation node under
+a 1 MiB Payload budget; they do not execute a successful million-sample result.
+Current commands and detailed evidence are in the numeric workflow README. The
+public workflow remains the validation entry point; this specification does not
+replace it with an internal solver call.
 
-Benchmark both degrees using available native profiles, recording input size,
-budget, cache/workers, versions and sample ranges. The maintained bounded public
-benchmark uses K=2/64 and N=17/129; separate maximum-count cases validate complete
-output budget rejection. Larger numeric/performance runs are additional coverage,
-not claimed by these measurements. Report public and callback timing separately,
+Benchmark acceptance covers both degrees and available native profiles, recording
+input size, budget, cache/workers, versions and sample ranges. The current bounded
+Result benchmark covers K=2/64, N=17/129, Whole/ROI demand and three repetitions;
+it reports `execute_fragments` timing with poll and computed-element counts.
+Historical bounded Value-path measurements remain separate and are not comparable
+to this Result timing. Maximum-count requests verify complete-output capacity
+rejection, not successful million-sample execution. Larger numeric and performance
+runs are additional coverage. Report public and callback timing separately,
 include near-flat x and cancellation fixtures, and mark unavailable Whole numeric
 counters N/A. Correctness is required before performance sampling.
 
 ## Current implementation and verification
 
-The maintained implementation registers the three profile keys in
-`plugins/ops/01-numeric/bezier_function.cpp`. It performs exact x topology and
-monotonicity validation, RN64 control reconstruction, an inverse solver with
-up to 8192 fractional bits of dyadic refinement, exact polynomial/Horner
-evaluation and direct output rounding. The polynomial workspace is 40,960 bits with a 96-slot arena;
-the static live-slot bound is at most 44. All profiles use the same exact mathematical path with scalar/NEON/AVX2 integer
-helpers; the numerical contract retains the shared accelerated allowance.
-Whole eliminates per-sample dependency certificates and staged read windows.
-Fixed state is allocator-owned; topology has 8*(K+(degree-1)*(K-1)) element bytes
-plus metadata overhead. Complete values cost b*count; axis costs 24 bytes. The
-common operation workspace declaration conservatively bounds the larger values
-state even for axis, whose actual callback allocates only its smaller state.
+The maintained implementation registers the three profile keys in `plugins/ops/01-numeric/bezier_function.cpp` as Whole Result operations. Each input is a sole tensor member under any schema id/version/key; shapes derive from `sample_shape()`. Output ports use `photospider.tensor` v1 / `samples`, with `values[count]` and atomic Float64 `axis[3]`, empty facets and source associations. Input needs use role 13. For count=1, the values dependency omits end and the axis dependency contains only start. Nonempty requests return full certified coverage in global sample coordinates; Empty reads no payload. It performs exact x topology and monotonicity validation, RN64 control reconstruction, an inverse solver with up to 8192 fractional bits of dyadic refinement, exact polynomial/Horner evaluation and direct output rounding. The polynomial workspace is 40,960 bits with a 96-slot arena; the static live-slot bound is at most 44. All profiles use the same exact mathematical path with scalar/NEON/AVX2 integer helpers; the numerical contract retains the shared accelerated allowance. Whole eliminates per-sample dependency certificates and staged read windows. Fixed state is allocator-owned; topology has 8*(K+(degree-1)*(K-1)) element bytes plus metadata overhead. Complete values cost b*count; axis costs 24 bytes. The common operation workspace declaration conservatively bounds the larger values state even for axis, whose actual callback allocates only its smaller state.
 
-Public workflows cover independent axis and count=1 input projection, full-input
-support and typed validation, Run errors, mathematical knot/clamp selection,
-cache replacement, arbitrary layouts, fenv, work/cancellation/output/workspace
-limits and owner release. The Fraction/de Casteljau/Euclid-Sturm oracle evaluates
-complete small outputs before selecting observed indices. Four maximum-count
-cases explicitly check full-output rejection under a 1 MiB payload budget;
-they no longer claim successful sparse execution under that budget.
-See the numeric workflow README and math implementation for current commands,
-actual validation and native public/core sampling. Other-platform historical
-validation is not a current Whole validation claim.
+The manual Result fixture is `examples/numeric_workflow/bezier.cpp`; the root `test_numeric_bezier_result` and installed `installed_numeric_bezier_result` consumer build that same source. Strict and Apple runs passed all six groups. The fixture exercises Result declarations, bindings and reads; count-one and axis dependency projection; sparse full-output coverage; same-demand identity; content-cache reuse with current source associations; static preparation reuse after binding changes; layouts across all ports; caller and worker floating environments; typed input validation; work, cancellation, output and scratch limits; upstream errors; and owner retirement. The fixture verifies complete Whole coverage in global sample coordinates and that the source ObjectIds in each Result association match the active bindings. All four source owners can retire while `values` and `axis` windows retain 48 Payload bytes; releasing the values window leaves the 24-byte axis readable, and releasing the final window returns all Root usage to zero. Empty demand reads no input payload and executes no numeric kernel; the runtime can still poll metadata and seal the Result. `axis` reads start/end only, with count=1 excluding end; it does not read controls. For `values`, generic y data outside the mathematical stencil is not scanned, while recognized typed validation covers each active input. The maximum-count oracle cases verify rejection of the complete dense output under a 1 MiB Payload budget at the operation node; they are capacity checks, not successful million-element numeric runs.
 
-## Existing implementation comparison
+The independent `bezier_oracle.py` passed 382 Fraction/de Casteljau/Euclid-Sturm numeric and error cases for each Strict and Apple profile, plus four maximum-count capacity-rejection cases per profile. The focused root CTest run passed `test_numeric_result_math` and `test_numeric_bezier_result` 2/2 in 4.99 seconds (4.39 seconds and 0.60 seconds respectively). The installed package 0.32.0 consumer compiled the same manual fixture and passed `installed_numeric_bezier_result` 1/1 under Strict in 0.71 seconds; its direct Apple invocation passed all six groups. Independent code and contract review found no unresolved blocker or required change. Focused manual and installed commands, as well as fixture coverage, are maintained in the [numeric workflow README](../../../../examples/numeric_workflow/README.md#bezier-function-sampling-crv-02). The separate `test_numeric_result_math` integration target covers `bezier_workflows`, `bezier_boundaries`, `bezier_projection` and `bezier_resources`; its 22 golden words include six function outputs and sixteen CRV-03 parametric outputs. These shared integration cases do not mean `parametric.cpp` was migrated by this manual-workflow change. x86 and maximum physical K/N execution were not tested.
 
-At `30478d33`, the registry provides `curve.sample_linear` and
-`curve.sample_monotone`, with generic Float32/Float64 `[K,2]` controls, K>=2.
-Both interpolate the input points, require strictly increasing control x, use
-static increasing `domain_min/domain_max`, and return one Whole `[count]`
-generic array. `curve.sample_monotone` computes PCHIP slopes, not Bezier handles.
-These operations do not implement the selected CRV-02 input model.
+The benchmark results in the table above describe the earlier Value adapter and prepared complete-Value callback, not the current Result workflow. The manual Result benchmark passed 16 regular rows under each profile across degree 2/3, K=2/64, N=17/129 and Whole/ROI demand, using Float64 and three repetitions. Each row reported two continuation polls and N computed elements; Root Payload peaks were 523,368 bytes at N=17 and 524,264 bytes at N=129. Each profile also passed two stress rows, reporting two polls, one computed element and a 523,240 byte Root Payload peak. The timer measures `execute_fragments` with cache and dependency-cache proof disabled. It includes coordinator discovery, polling, computation, publication and digest, while excluding source construction, compilation, freeze, readback and output checks. It reports continuation polls, computed elements, Root Payload peak and `timing_scope=result_execute_fragments`. Whole diagnostics do not expose per-value root-solver or fallback counters, so those fields remain N/A. Regular and stress cases are bounded behavior and timing-scope smoke checks; they do not establish a performance improvement.
 
-Sources inspected:
+## Related operation distinction
 
-- [Linear registration](../../../../plugins/ops/01-numeric/curve_sample_linear.cpp).
-- [PCHIP registration](../../../../plugins/ops/01-numeric/curve_sample_monotone.cpp).
-- [Current shared curve implementation](../../../../plugins/ops/01-numeric/curve_common.hpp).
-- [Current integration tests](../../../../tests/integration/test_basic_operations.cpp).
-- [Current implementation contract](../../../kernel-architecture/Basic-Operations.md).
+The explicit-anchor/relative-handle model here is separate from control-point
+operations such as `curve.sample_linear` or `curve.sample_monotone`; those do not
+provide this Bezier handle contract.
 
 ## Related specifications
 

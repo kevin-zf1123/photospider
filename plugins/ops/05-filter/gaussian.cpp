@@ -9,10 +9,12 @@
 #include <utility>
 #include <vector>
 
-#include "01-numeric/array_publication.hpp"
+#include "00-foundation/image_program.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "05-filter/gaussian_coefficients.hpp"
 #include "05-filter/gaussian_exact.hpp"
 #include "05-filter/gaussian_gpu.hpp"
+#include "data/result_window_access.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -46,12 +48,6 @@ Parameters parameters(const std::map<std::string, ParameterValue>& values) {
       : mode == "wrap"         ? Boundary::Wrap
       : mode == "reflect_half" ? Boundary::Half
                                : Boundary::Whole};
-}
-Status charge(const CancellationToken& cancellation, std::uint64_t amount) {
-  if (cancellation.cancelled())
-    return {ErrorCode::Cancelled, "Gaussian cancelled"};
-  const auto* budget = resource_internal::metadata_budget();
-  return budget ? budget->consume({amount}) : Status::success();
 }
 // Wide index arithmetic covers an Int64 radius plus the complete logical
 // coordinate. Repeated boundary taps retain their original kernel order.
@@ -119,36 +115,11 @@ Status generate(PreparedKernel& work,
   }
   return Status::success();
 }
-int prepare_block(void* user, std::uint64_t, std::uint64_t,
-                  std::uint32_t) noexcept {
-  auto& work = *static_cast<PreparedKernel*>(user);
-  try {
-    const auto consume = [&](std::uint64_t amount) {
-      return charge(work.cancellation, amount);
-    };
-    work.status = generate(work, consume);
-  } catch (const Status& status) {
-    work.status = status;
-  } catch (const std::bad_alloc&) {
-    work.status.code = ErrorCode::ResourceExhausted;
-  } catch (...) {
-    work.status.code = ErrorCode::OperationFailed;
-  }
-  return work.status.ok()                                   ? 0
-         : work.status.code == ErrorCode::Cancelled         ? 2
-         : work.status.code == ErrorCode::ResourceExhausted ? 4
-                                                            : 1;
-}
 struct Slot final {
   GaussianExact math;
   Status status{};
   bool normalized = false;
-};
-struct Work final {
-  const OperationInvocation& call;
-  const PreparedKernel& kernel;
-  Slot* slots;
-  std::uint8_t* output;
+  std::vector<std::uint64_t> coordinate, source;
 };
 Result<std::uint64_t> point_work(const Parameters& p, std::uint64_t nx,
                                  std::uint64_t ny, std::size_t rank) {
@@ -203,62 +174,95 @@ Result<std::uint64_t> evaluate_point(
     }
   return slot->math.finish(consume);
 }
+using numeric_ops::math_require;
+using numeric_ops::math_take;
+struct InputRead final {
+  ResultTensorReadWindow window;
+  std::optional<Value> affine;
+};
+struct Work final {
+  const ResultProgramPhase& phase;
+  const PreparedKernel& kernel;
+  const ResourceVector<InputRead>& inputs;
+  const std::vector<std::uint64_t>& shape;
+  const Region& output_region;
+  Slot* slots;
+  std::uint8_t* output;
+  std::uint64_t per_sample, lookup_work;
+  bool narrow;
+};
 Status calculate(Work& work, std::uint64_t begin, std::uint64_t end,
                  Slot* slot) {
-  const auto& input = work.call.inputs[0];
-  const auto& shape = input.descriptor().shape;
-  const auto& layout = input.layout();
+  const auto& shape = work.shape;
   const auto& p = work.kernel.p;
   const auto rank = shape.size();
-  const bool narrow = input.descriptor().element_type == ElementType::Float32;
-  const auto width = narrow ? 4U : 8U;
+  const auto width = work.narrow ? 4U : 8U;
   const auto* kx = work.kernel.x + p.rx - work.kernel.rx;
   const auto* ky = work.kernel.y + p.ry - work.kernel.ry;
   const auto nx = 2 * work.kernel.rx + 1, ny = 2 * work.kernel.ry + 1;
-  auto bound = point_work(p, nx, ny, rank);
-  if (!bound.ok())
-    return bound.status();
-  const auto per_sample = bound.value();
-  if (end - begin > UINT64_MAX / per_sample)
-    return {ErrorCode::ResourceExhausted, "Gaussian range work overflow"};
-  std::uint64_t credit = static_cast<std::uint64_t>(per_sample) * (end - begin);
-  auto admitted = charge(work.call.cancellation, credit);
-  if (!admitted.ok())
-    return admitted;
+  std::uint64_t credit = work.per_sample * (end - begin);
   const auto consume = [&](std::uint64_t amount) {
-    if (work.call.cancellation.cancelled())
+    if (work.phase.query.cancellation.cancelled())
       return Status{ErrorCode::Cancelled, "Gaussian cancelled"};
     if (amount > credit)
       return Status{ErrorCode::Internal, "Gaussian work bound exceeded"};
     credit -= amount;
     return Status::success();
   };
+  auto& coordinate = slot->coordinate;
+  auto& source = slot->source;
   for (auto index = begin; index < end; ++index) {
     auto status = consume(rank * 4 + 1);
     if (!status.ok())
       return status;
-    std::array<std::uint64_t, 8> coordinate{};
     auto remainder = index;
     for (std::size_t axis = rank; axis-- > 0;) {
-      coordinate[axis] = remainder % shape[axis];
-      remainder /= shape[axis];
+      const auto d = work.output_region.dimensions()[axis];
+      coordinate[axis] = d.offset + remainder % d.extent;
+      remainder /= d.extent;
     }
-    const auto read = [&](std::uint64_t y, std::uint64_t x) {
-      __int128 address = layout.byte_offset;
-      for (std::size_t axis = 0; axis < rank; ++axis) {
-        const auto at = axis == p.y ? y : axis == p.x ? x : coordinate[axis];
-        const auto origin = layout.origin.empty() ? 0 : layout.origin[axis];
-        address +=
-            (static_cast<__int128>(at) - origin) * layout.byte_strides[axis];
+    source = coordinate;
+    const auto read = [&](std::uint64_t y,
+                          std::uint64_t x) -> Result<std::uint64_t> {
+      auto charged = consume(work.lookup_work);
+      if (!charged.ok())
+        return Result<std::uint64_t>(charged);
+      source[p.y] = y;
+      source[p.x] = x;
+      for (const auto& input : work.inputs) {
+        bool contains = true;
+        for (std::size_t axis = 0; axis < rank; ++axis) {
+          const auto d = input.window.region().dimensions()[axis];
+          contains &=
+              source[axis] >= d.offset && source[axis] - d.offset < d.extent;
+        }
+        if (!contains)
+          continue;
+        std::uint64_t bits = 0;
+        if (input.affine) {
+          const auto& layout = input.affine->layout();
+          std::uint64_t offset = layout.byte_offset;
+          for (std::size_t axis = 0; axis < rank; ++axis)
+            offset += (source[axis] -
+                       (layout.origin.empty() ? 0 : layout.origin[axis])) *
+                      static_cast<std::uint64_t>(layout.byte_strides[axis]);
+          std::memcpy(&bits, input.affine->bytes().data() + offset, width);
+        } else {
+          auto row = input.window.row_run(source);
+          if (!row.ok())
+            return Result<std::uint64_t>(row.status());
+          std::memcpy(&bits, row.value().data, width);
+        }
+        return Result<std::uint64_t>(bits);
       }
-      std::uint64_t result = 0;
-      std::memcpy(&result,
-                  input.bytes().data() + static_cast<std::size_t>(address),
-                  width);
-      return Result<std::uint64_t>(result);
+      return Result<std::uint64_t>(
+          Status{ErrorCode::InvalidArgument,
+                 "Gaussian read exceeds authorized halo",
+                 FailureReason::UnauthorizedRead,
+                 {FailureOrigin::Protocol, FailureScope::Group}});
     };
     auto result = evaluate_point(slot, p, kx, nx, ky, ny, shape,
-                                 coordinate.data(), read, narrow, consume);
+                                 coordinate.data(), read, work.narrow, consume);
     if (!result.ok())
       return result.status();
     const auto bits = result.value();
@@ -284,344 +288,297 @@ int block(void* user, std::uint64_t begin, std::uint64_t end,
          : status.code == ErrorCode::ResourceExhausted ? 4
                                                        : 1;
 }
-Result<Value> execute(const OperationInvocation& call) {
-  using Answer = Result<Value>;
-  const auto p = parameters(call.parameters);
-  const auto nx = 2 * p.rx + 1, ny = 2 * p.ry + 1;
-  auto charged = charge(call.cancellation, nx + ny);
-  if (!charged.ok())
-    return Answer(charged);
-  auto storage = call.allocator.allocate((nx + ny) * 8);
-  if (!storage.ok())
-    return Answer(storage.status());
-  auto coefficients = storage.take_value();
-  storage = call.allocator.allocate(sizeof(GaussianCoefficients));
-  if (!storage.ok())
-    return Answer(storage.status());
-  auto arena = storage.take_value();
-  auto* x = reinterpret_cast<std::uint64_t*>(coefficients.data());
-  PreparedKernel kernel{call.cancellation, p, x, x + nx, arena.data()};
-  const auto* parallel = call.cpu_parallel;
-  const auto prepared = parallel ? parallel->run(parallel->context, 1, 1, 1,
-                                                 prepare_block, &kernel)
-                                 : prepare_block(&kernel, 0, 1, 0);
-  if (!kernel.status.ok())
-    return Answer(kernel.status);
-  if (prepared)
-    return Answer(Status{
-        prepared == 2 ? ErrorCode::Cancelled : ErrorCode::OperationFailed,
-        "Gaussian kernel preparation failed"});
-  arena = {};
-  if (call.backend == Backend::Gpu)
-    return execute_gaussian_gpu(
-        call, {coefficients.data(), coefficients.size(), (p.rx - kernel.rx) * 8,
-               (nx + p.ry - kernel.ry) * 8, 2 * kernel.rx + 1,
-               2 * kernel.ry + 1, p.cval, p.x, p.y,
-               static_cast<std::uint32_t>(p.boundary), !p.rx && !p.ry});
-  auto output = MutableValue::allocate(call.inputs[0].descriptor(),
-                                       call.output_region, call.allocator);
-  if (!output.ok())
-    return Answer(output.status());
-  auto writer = output.take_value();
-  const auto count = call.output_region.element_count().value();
-  const auto grant = static_cast<unsigned>(
-      std::min<std::uint64_t>(count, parallel ? parallel->maximum_workers : 1));
-  storage = call.allocator.allocate(grant * sizeof(Slot));
-  if (!storage.ok())
-    return Answer(storage.status());
-  auto scratch = storage.take_value();
+int tile(void* user, const ps_cpu_tile_v1* region) noexcept {
+  return block(user, region->begin[0], region->end[0], region->slot);
+}
+Result<MutableBuffer> compute_cpu(const ResultProgramPhase& phase,
+                                  const PreparedKernel& kernel,
+                                  const Region& region) {
+  using Answer = Result<MutableBuffer>;
+  const auto& input = phase.tensors->at({0, 0});
+  const auto shape = input.spec().sample_shape();
+  ResourceVector<InputRead> windows{
+      ResourceAllocator<InputRead>(phase.resources)};
+  std::uint64_t lookup_work =
+      input.coverage().boxes().size() * (shape.size() + 1);
+  for (const auto& box : input.coverage().boxes()) {
+    auto window = math_take(input.acquire(box, phase.query.cancellation));
+    auto affine = execution_internal::ResultWindowAccess::affine(window);
+    if (!affine.ok() && affine.status().code != ErrorCode::NotFound)
+      return Answer(affine.status());
+    const auto cost =
+        affine.ok()
+            ? shape.size() * 4 + 1
+            : math_take(
+                  execution_internal::ResultWindowAccess::read_work(window));
+    if (cost > UINT64_MAX - lookup_work)
+      return Answer(Status{ErrorCode::ResourceExhausted, {}});
+    lookup_work += cost;
+    windows.push_back({std::move(window),
+                       affine.ok() ? std::optional<Value>(affine.take_value())
+                                   : std::nullopt});
+  }
+  const auto count = math_take(region.element_count());
+  const auto nx = 2 * kernel.rx + 1, ny = 2 * kernel.ry + 1;
+  const auto core = math_take(point_work(kernel.p, nx, ny, shape.size()));
+  const auto per_sample = static_cast<unsigned __int128>(core) +
+                          static_cast<unsigned __int128>(nx) * ny * lookup_work;
+  if (per_sample > UINT64_MAX || count > UINT64_MAX / per_sample)
+    return Answer(
+        Status{ErrorCode::ResourceExhausted, "Gaussian work overflow"});
+  math_require(
+      phase.consume_work(count * static_cast<std::uint64_t>(per_sample)));
+  const bool narrow =
+      input.spec().descriptor.element_type == ElementType::Float32;
+  auto output =
+      math_take(phase.resources.allocator().allocate(count * (narrow ? 4 : 8)));
+  const auto workers = phase.cpu_parallel ? phase.cpu_parallel->maximum_workers
+                       : phase.cpu_tiles  ? phase.cpu_tiles->maximum_workers
+                                          : 1;
+  const auto grant =
+      static_cast<unsigned>(std::min<std::uint64_t>(count, workers));
+  math_require(
+      phase.consume_work(grant * ((sizeof(Slot) + 7) / 8 + shape.size() * 2)));
+  auto scratch = math_take(phase.allocator.allocate(grant * sizeof(Slot)));
+  auto metadata = math_take(phase.resources.reserve(ResourceCapacity::host(
+      grant * shape.size() * 16, grant * shape.size() * 16)));
   auto* slots = reinterpret_cast<Slot*>(scratch.data());
   unsigned constructed = 0;
   struct Destroy {
     Slot* slots;
     unsigned& count;
     ~Destroy() {
-      for (unsigned i = 0; i < count; ++i)
-        slots[i].~Slot();
+      while (count)
+        slots[--count].~Slot();
     }
   } destroy{slots, constructed};
-  static_assert((sizeof(Slot) + 7) / 8 <= 1024);
-  for (unsigned i = 0; i < grant; ++i) {
-    charged = charge(call.cancellation, (sizeof(Slot) + 7) / 8);
-    if (!charged.ok())
-      return Answer(charged);
-    new (slots + i) Slot;
-    ++constructed;
+  while (constructed < grant) {
+    auto& slot = *new (slots + constructed++) Slot;
+    slot.coordinate.resize(shape.size());
+    slot.source.resize(shape.size());
   }
-  Work work{call, kernel, slots, writer.data()};
-  const auto code =
-      parallel ? parallel->run(parallel->context, count, 4, grant, block, &work)
-               : block(&work, 0, count, 0);
+  Work work{phase,         kernel,
+            windows,       shape,
+            region,        slots,
+            output.data(), static_cast<std::uint64_t>(per_sample),
+            lookup_work,   narrow};
+  int code = 0;
+  if (phase.cpu_tiles) {
+    const ps_cpu_tile_stage_v1 stage{sizeof(ps_cpu_tile_stage_v1),
+                                     {count, 1, 1},
+                                     {4, 1, 1},
+                                     grant};
+    code = phase.cpu_tiles->run(phase.cpu_tiles->context, &stage, tile, &work);
+  } else if (phase.cpu_parallel) {
+    code = phase.cpu_parallel->run(phase.cpu_parallel->context, count, 4, grant,
+                                   block, &work);
+  } else {
+    code = block(&work, 0, count, 0);
+  }
   for (unsigned i = 0; i < grant; ++i)
     if (!slots[i].status.ok())
       return Answer(slots[i].status);
   if (code)
-    return Answer(
-        Status{code == 2 ? ErrorCode::Cancelled : ErrorCode::OperationFailed,
-               "Gaussian host range failed"});
-  return std::move(writer).publish(call.inputs[0].facets(),
-                                   call.inputs[0].resources());
+    return Answer(Status{code == 2   ? ErrorCode::Cancelled
+                         : code == 4 ? ErrorCode::ResourceExhausted
+                                     : ErrorCode::OperationFailed,
+                         "Gaussian CPU stage failed"});
+  return Answer(std::move(output));
 }
-struct AxisSupport final {
-  std::array<RegionDimension, 2> spans{};
-  unsigned count = 1;
-};
-AxisSupport axis_support(RegionDimension centers, std::uint64_t radius,
-                         std::uint64_t extent, Boundary boundary) {
-  AxisSupport result;
-  if (boundary != Boundary::Wrap) {
-    // Reflection adds no point outside the clipped symmetric support. Every
-    // interior point is already an unreflected tap of one requested center.
-    const auto lower = centers.offset > radius ? centers.offset - radius : 0;
-    const auto end = centers.offset + centers.extent;
-    const auto upper = radius >= extent - end ? extent : end + radius;
-    result.spans[0] = {lower, upper - lower};
-    return result;
-  }
-  const auto length = static_cast<unsigned __int128>(centers.extent) +
-                      2 * static_cast<unsigned __int128>(radius);
-  if (length >= extent) {
-    result.spans[0] = {0, extent};
-    return result;
-  }
-  auto first = (static_cast<__int128>(centers.offset) - radius) % extent;
-  if (first < 0)
-    first += extent;
-  const auto start = static_cast<std::uint64_t>(first);
-  const auto count = static_cast<std::uint64_t>(length);
-  const auto part = std::min(count, extent - start);
-  result.spans[0] = {start, part};
-  if (part != count) {
-    result.count = 2;
-    result.spans[1] = {0, count - part};
-  }
-  return result;
-}
-Result<Footprint> support(const Region& samples,
-                          const std::vector<std::uint64_t>& shape,
-                          const Parameters& p, std::uint64_t rx,
-                          std::uint64_t ry, const FootprintLimits& limits) {
-  const auto xs =
-      axis_support(samples.dimensions()[p.x], rx, shape[p.x], p.boundary);
-  const auto ys =
-      axis_support(samples.dimensions()[p.y], ry, shape[p.y], p.boundary);
-  std::vector<Region> boxes;
-  boxes.reserve(xs.count * ys.count);
-  for (unsigned y = 0; y < ys.count; ++y)
-    for (unsigned x = 0; x < xs.count; ++x) {
-      auto dimensions = samples.dimensions();
-      dimensions[p.x] = xs.spans[x];
-      dimensions[p.y] = ys.spans[y];
-      boxes.emplace_back(std::move(dimensions));
-    }
-  return Footprint::from_regions(shape, boxes, limits);
-}
-struct GaussianTile final {
+struct GaussianProgram final {
+  bool tiled, gpu, initialized = false, waiting = false,
+                   descriptor_requested = false;
+  Parameters p;
   std::shared_ptr<const CpuStorage> coefficients;
-  Parameters p{};
   std::uint64_t rx = 0, ry = 0;
-  Result<DependencyPoll> prepare(const DependencyPhase& phase) {
-    using Answer = Result<DependencyPoll>;
-    p = parameters(phase.query.parameters);
-    const auto nx = 2 * p.rx + 1, ny = 2 * p.ry + 1;
-    auto status = phase.consume_work(nx + ny);
-    if (!status.ok())
-      return Answer(status);
-    auto made = phase.allocator.allocate((nx + ny) * 8);
-    if (!made.ok())
-      return Answer(made.status());
-    auto table = made.take_value();
-    made = phase.allocator.allocate(sizeof(GaussianCoefficients));
-    if (!made.ok())
-      return Answer(made.status());
-    auto arena = made.take_value();
-    auto* x = reinterpret_cast<std::uint64_t*>(table.data());
-    PreparedKernel kernel{phase.query.cancellation, p, x, x + nx, arena.data()};
-    status = generate(kernel, phase.consume_work);
-    if (!status.ok())
-      return Answer(status);
-    rx = kernel.rx;
-    ry = kernel.ry;
-    coefficients = std::move(table).freeze();
-    arena = {};
-
-    const auto& shape = phase.query.output.descriptor.shape;
-    const auto count = phase.query.observations.element_count().value();
-    // Admit temporary vector element capacity before constructing associations.
-    // Footprint and final batch owners independently retain their own metadata.
-    dependency_internal::MetadataBytes bytes;
-    bytes.add(count, sizeof(AtomCertificate) + sizeof(DependencyNeed) +
-                         8 * sizeof(Region) + shape.size() * 256);
-    auto owner = dependency_internal::metadata_owner(bytes.bytes);
-    status = phase.consume_work(count * (shape.size() * 16 + 64));
-    if (!status.ok())
-      return Answer(status);
-    std::vector<AtomCertificate> rows;
-    rows.reserve(count);
-    status = phase.query.observations.visit(
-        [&](const std::vector<std::uint64_t>& at) {
-          auto checked = phase.consume_work(0);
-          if (!checked.ok())
-            return checked;
-          std::vector<RegionDimension> dimensions;
-          dimensions.reserve(at.size());
-          for (auto coordinate : at)
-            dimensions.push_back({coordinate, 1});
-          auto atom = Footprint::from_regions(phase.query.observations.shape(),
-                                              {Region(std::move(dimensions))},
-                                              phase.sets);
-          if (!atom.ok())
-            return atom.status();
-          auto samples =
-              observation_samples(phase.query.output, atom.value(), phase.sets);
-          if (!samples.ok())
-            return samples.status();
-          auto needed =
-              support(samples.value().boxes()[0], shape, p, rx, ry, phase.sets);
-          if (!needed.ok())
-            return needed.status();
-          rows.push_back({at,
-                          {{0,
-                            static_cast<std::uint32_t>(DependencyRole::Data),
-                            needed.take_value(),
-                            {}}}});
-          return Status::success();
-        },
-        phase.sets.maximum_work, phase.query.cancellation);
-    if (!status.ok())
-      return Answer(status);
-    return Answer(DependencyNeedBatch(std::move(rows)));
-  }
-  Result<DependencyPoll> poll(const DependencyPhase& phase) try {
-    using Answer = Result<DependencyPoll>;
-    if (!coefficients)
-      return prepare(phase);
-    const auto& descriptor = phase.query.output.descriptor;
-    const auto& shape = descriptor.shape;
-    const auto rank = shape.size();
-    const bool narrow = descriptor.element_type == ElementType::Float32;
-    const auto width = narrow ? 4U : 8U;
-    const auto* table =
-        reinterpret_cast<const std::uint64_t*>(coefficients->bytes().data());
-    const auto* kx = table + p.rx - rx;
-    const auto* ky = table + 2 * p.rx + 1 + p.ry - ry;
-    const auto nx = 2 * rx + 1, ny = 2 * ry + 1;
-    const auto count = phase.query.outputs.element_count().value();
-    auto bound = point_work(p, nx, ny, rank);
-    if (!bound.ok())
-      return Answer(bound.status());
-    const auto lookup_work = (static_cast<unsigned __int128>(
-                                  phase.inputs[0].coverage().boxes().size()) +
-                              phase.inputs[0].fragments().size()) *
-                                 (rank + 1) +
-                             4 * rank + 2;
-    const auto sample_work =
-        static_cast<unsigned __int128>(bound.value()) +
-        static_cast<unsigned __int128>(nx) * ny * lookup_work;
-    if (sample_work > UINT64_MAX || count > UINT64_MAX / sample_work)
-      return Answer(
-          Status{ErrorCode::ResourceExhausted, "Gaussian tile work overflow"});
-    std::uint64_t credit = count * static_cast<std::uint64_t>(sample_work);
-    auto status = phase.consume_work(credit);
-    if (!status.ok())
-      return Answer(status);
-    const auto consume = [&](std::uint64_t amount) {
-      if (phase.query.cancellation.cancelled())
-        return Status{ErrorCode::Cancelled, "Gaussian tile cancelled"};
-      if (amount > credit)
-        return Status{ErrorCode::Internal, "Gaussian tile work bound exceeded"};
-      credit -= amount;
-      return Status::success();
-    };
-    auto lookup_limits = phase.sets;
-    lookup_limits.cancellation = phase.query.cancellation;
-    lookup_limits.consume_work = consume;
-    status = phase.consume_work((sizeof(Slot) + 7) / 8);
-    if (!status.ok())
-      return Answer(status);
-    auto made = phase.allocator.allocate(sizeof(Slot));
-    if (!made.ok())
-      return Answer(made.status());
-    auto scratch = made.take_value();
-    auto* slot = new (scratch.data()) Slot;
-    struct Destroy {
-      Slot* value;
-      ~Destroy() { value->~Slot(); }
-    } destroy{slot};
-    auto coordinate_owner =
-        dependency_internal::metadata_owner(2 * rank * sizeof(std::uint64_t));
-    std::vector<std::uint64_t> coordinate(rank), source(rank);
-    dependency_internal::MetadataBytes facet_bytes;
-    for (const auto& facet : phase.query.output.facets)
-      facet_bytes.add(sizeof(ValueFacet) + facet.key.capacity() + 1 +
-                      facet.payload.capacity());
-    numeric_ops::ArrayPublication publication(
-        phase.query.outputs.boxes().size(), rank, facet_bytes.bytes);
-    ResourceVector<Value> values;
-    values.reserve(phase.query.outputs.boxes().size());
-    for (const auto& box : phase.query.outputs.boxes()) {
-      auto allocated = MutableValue::allocate(descriptor, box, phase.allocator);
-      if (!allocated.ok())
-        return Answer(allocated.status());
-      auto output = allocated.take_value();
-      for (std::size_t axis = 0; axis < rank; ++axis)
-        coordinate[axis] = box.dimensions()[axis].offset;
-      const auto elements = box.element_count().value();
-      for (std::uint64_t i = 0; i < elements; ++i) {
-        status = phase.consume_work(0);
-        if (!status.ok())
-          return Answer(status);
-        status = consume(rank * 4 + 1);
-        if (!status.ok())
-          return Answer(status);
-        source = coordinate;
-        const auto read = [&](std::uint64_t y,
-                              std::uint64_t x) -> Result<std::uint64_t> {
-          source[p.y] = y;
-          source[p.x] = x;
-          std::uint64_t bits = 0;
-          auto loaded =
-              phase.inputs[0].read(source, &bits, width, lookup_limits);
-          if (!loaded.ok()) {
-            if (loaded.code == ErrorCode::InvalidArgument) {
-              loaded.reason = FailureReason::UnauthorizedRead;
-              loaded.detail.origin = FailureOrigin::Protocol;
-              loaded.detail.scope = FailureScope::Atom;
-            }
-            return Result<std::uint64_t>(phase.report_failure(loaded));
-          }
-          return Result<std::uint64_t>(bits);
-        };
-        auto result = evaluate_point(slot, p, kx, nx, ky, ny, shape,
-                                     coordinate.data(), read, narrow, consume);
-        if (!result.ok())
-          return Answer(result.status());
-        const auto bits = result.value();
-        std::memcpy(output.data() + i * width, &bits, width);
-        for (std::size_t axis = rank; axis-- > 0;) {
-          const auto& dimension = box.dimensions()[axis];
-          if (++coordinate[axis] < dimension.offset + dimension.extent)
-            break;
-          coordinate[axis] = dimension.offset;
-        }
-      }
-      auto value = std::move(output).publish(phase.query.output.facets,
-                                             phase.query.resources);
-      if (!value.ok())
-        return Answer(value.status());
-      auto retained = publication.retain(value.take_value());
-      if (!retained.ok())
-        return Answer(retained.status());
-      values.push_back(retained.take_value());
+  Footprint outputs;
+  ResultRelation data, witness;
+  std::optional<ResultBuilder> builder;
+  Region current;
+  std::size_t box = 0;
+  std::array<std::uint64_t, 8> next{};
+  GaussianProgram(bool tiles, bool device, Parameters values)
+      : tiled(tiles), gpu(device), p(values) {}
+  bool next_region(const ResultProgramPhase& phase) {
+    if (box >= outputs.boxes().size())
+      return false;
+    const auto& spec = phase.query.output.result_schema->tensors[0];
+    const auto tuple =
+        input_internal::tuple_channel_axis(spec.descriptor, spec.facets);
+    const auto& bounds = outputs.boxes()[box].dimensions();
+    std::vector<RegionDimension> dims;
+    for (std::size_t axis = 0; axis < bounds.size(); ++axis) {
+      const bool atomic = axis >= bounds.size() - spec.atomic_trailing_axes ||
+                          (tuple && axis == *tuple + spec.batch_axes.size());
+      const auto extent = !tiled || atomic ? bounds[axis].extent
+                          : axis == p.x    ? phase.query.tile_width
+                          : axis == p.y    ? phase.query.tile_height
+                                           : 1;
+      dims.push_back({bounds[axis].offset + next[axis],
+                      std::min(extent, bounds[axis].extent - next[axis])});
     }
-    auto result = publication.finish(
-        descriptor, phase.query.outputs, values.data(), values.size(),
-        phase.sets, phase.query.output.facets, phase.query.resources);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
+    current = Region(std::move(dims));
+    for (std::size_t axis = bounds.size(); axis-- > 0;) {
+      next[axis] += current.dimensions()[axis].extent;
+      if (next[axis] < bounds[axis].extent)
+        return true;
+      next[axis] = 0;
+    }
+    ++box;
+    return true;
+  }
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
+    using Answer = Result<ResultProgramPoll>;
+    auto metadata = math_take(
+        phase.resources.reserve(ResourceCapacity::host(16384, 16384)));
+    const auto& schema = *phase.query.output.result_schema;
+    const auto shape = schema.tensors[0].sample_shape();
+    if (!initialized) {
+      initialized = true;
+      outputs = phase.query.tensor_outputs ? *phase.query.tensor_outputs
+                                           : math_take(Footprint::all(shape));
+      builder.emplace(math_take(ResultBuilder::start(
+          phase.resources, schema, phase.query.semantic_key, {}, {},
+          phase.query.tile_height, phase.query.tile_width,
+          phase.query.resources)));
+      math_require(builder->bind_descriptor_relation(math_take(
+          ResultRelation::cartesian(phase.resources, 1,
+                                    {0, 8, 0, outputs.empty() ? 0U : 1U,
+                                     ResultSupportTarget::Descriptor, 0}))));
+      if (outputs.empty())
+        return Answer(ResultPublication{math_take(builder->seal()), true});
+      const auto nx = 2 * p.rx + 1, ny = 2 * p.ry + 1;
+      math_require(phase.consume_work(nx + ny));
+      auto table = math_take(phase.allocator.allocate((nx + ny) * 8));
+      auto arena =
+          math_take(phase.allocator.allocate(sizeof(GaussianCoefficients)));
+      auto* x = reinterpret_cast<std::uint64_t*>(table.data());
+      PreparedKernel kernel{phase.query.cancellation, p, x, x + nx,
+                            arena.data()};
+      math_require(generate(kernel, phase.consume_work));
+      rx = kernel.rx;
+      ry = kernel.ry;
+      coefficients = std::move(table).freeze();
+      if (tiled) {
+        std::vector<std::uint64_t> radii(shape.size());
+        radii[p.x] = rx;
+        radii[p.y] = ry;
+        data = math_take(ResultRelation::neighborhood(
+            phase.resources, shape, radii, p.boundary == Boundary::Wrap,
+            {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
+        const auto& input = phase.query.inputs[0].result_schema->tensors[0];
+        const auto tuple =
+            input_internal::tuple_channel_axis(input.descriptor, input.facets);
+        if (tuple)
+          radii[*tuple + input.batch_axes.size()] =
+              shape[*tuple + input.batch_axes.size()] - 1;
+        for (std::size_t axis = shape.size() - input.atomic_trailing_axes;
+             axis < shape.size(); ++axis)
+          radii[axis] = shape[axis] - 1;
+        auto validation = math_take(ResultRelation::neighborhood(
+            phase.resources, shape, radii, p.boundary == Boundary::Wrap,
+            {0, 4, 0, 0, ResultSupportTarget::Tensor, 0}));
+        witness = math_take(
+            ResultRelation::unite(phase.resources, {data, validation}));
+      } else {
+        witness = math_take(ResultRelation::cartesian(
+            phase.resources, math_take(schema.tensors[0].sample_count()),
+            {0, 5, 0, math_take(schema.tensors[0].sample_count()),
+             ResultSupportTarget::Tensor, 0}));
+      }
+    }
+    if (waiting) {
+      waiting = false;
+      const auto nx = 2 * p.rx + 1;
+      const auto* x =
+          reinterpret_cast<const std::uint64_t*>(coefficients->bytes().data());
+      PreparedKernel kernel{phase.query.cancellation,
+                            p,
+                            const_cast<std::uint64_t*>(x),
+                            const_cast<std::uint64_t*>(x + nx),
+                            nullptr,
+                            rx,
+                            ry};
+      auto computed =
+          gpu ? execute_gaussian_gpu(
+                    phase,
+                    math_take(phase.tensors->at({0, 0}).acquire(
+                        Region::whole(shape), phase.query.cancellation)),
+                    {coefficients->bytes().data(), coefficients->bytes().size(),
+                     (p.rx - rx) * 8, (nx + p.ry - ry) * 8, 2 * rx + 1,
+                     2 * ry + 1, p.cval, p.x, p.y,
+                     static_cast<std::uint32_t>(p.boundary), !p.rx && !p.ry})
+              : compute_cpu(phase, kernel, current);
+      auto buffer = math_take(std::move(computed));
+      StridedLayout layout;
+      layout.origin.resize(shape.size());
+      layout.byte_strides.resize(shape.size());
+      std::int64_t stride =
+          Value::element_size(schema.tensors[0].descriptor.element_type);
+      for (std::size_t axis = shape.size(); axis-- > 0;) {
+        layout.origin[axis] = current.dimensions()[axis].offset;
+        layout.byte_strides[axis] = stride;
+        stride *= current.dimensions()[axis].extent;
+      }
+      math_require(builder->publish_tensor(
+          0, current, layout, std::move(buffer).freeze(), witness,
+          {true, true, true, true}, phase.query.cancellation));
+      if (tiled && box < outputs.boxes().size())
+        return Answer(ResultPublication{builder->reference(), false});
+    }
+    if (next_region(phase)) {
+      waiting = true;
+      auto needed = math_take(Footprint::all(shape));
+      if (tiled) {
+        auto requested = math_take(Footprint::from_regions(shape, {current}));
+        FootprintLimits limits;
+        limits.cancellation = phase.query.cancellation;
+        limits.consume_work = phase.consume_work;
+        math_require(data.project(
+            requested,
+            [&](auto, const Footprint* samples) {
+              if (!samples)
+                return Status{ErrorCode::Internal,
+                              "Gaussian neighborhood lost shape"};
+              needed = *samples;
+              return Status::success();
+            },
+            limits));
+      }
+      ResultProgramNeed need;
+      need.tensors.push_back(
+          {0, 0, std::move(needed), descriptor_requested ? 5U : 13U});
+      descriptor_requested = true;
+      return Answer(std::move(need));
+    }
+    return Answer(ResultPublication{math_take(builder->seal()), true});
   } catch (const Status& status) {
-    return Result<DependencyPoll>(status);
+    return Result<ResultProgramPoll>(status);
   }
 };
+
+Result<ResultProgramPoll> empty_result(const ResultProgramPhase& phase) {
+  using Answer = Result<ResultProgramPoll>;
+  if (!phase.query.tensor_outputs || !phase.query.tensor_outputs->empty())
+    return Answer(Status{ErrorCode::InvalidArgument,
+                         "empty Gaussian continuation demand changed"});
+  auto builder = ResultBuilder::start(
+      phase.resources, *phase.query.output.result_schema,
+      phase.query.semantic_key, {}, {}, phase.query.tile_height,
+      phase.query.tile_width, phase.query.resources);
+  if (!builder.ok())
+    return Answer(builder.status());
+  auto relation = ResultRelation::cartesian(phase.resources, 1, {});
+  if (!relation.ok())
+    return Answer(relation.status());
+  auto output = builder.take_value();
+  auto status = output.bind_descriptor_relation(relation.take_value());
+  if (!status.ok())
+    return Answer(status);
+  auto result = output.seal();
+  return result.ok() ? Answer(ResultPublication{result.take_value(), true})
+                     : Answer(result.status());
+}
 }  // namespace
 Status register_gaussian(OperationRegistry* registry) {
   for (unsigned mode = 0; mode < 3; ++mode) {
@@ -633,13 +590,15 @@ Status register_gaussian(OperationRegistry* registry) {
     auto& traits = operation.traits;
     traits.input_count = 1;
     traits.input_schema.resize(1);
+    traits.input_schema[0].kind = OperationPortKind::Result;
     traits.input_schema[0].element_type_mask = 12;
     traits.requires_metadata_specialization = true;
     traits.supports_cpu = !gpu;
     traits.supports_gpu = gpu;
-    traits.workspace_bytes =
-        sizeof(GaussianCoefficients) +
-        (gpu ? kGaussianGpuWorkspace : (tiled ? 1 : 64) * sizeof(Slot));
+    traits.allows_cpu_fallback = false;
+    traits.cpu_staged_tiles = tiled;
+    traits.workspace_bytes = sizeof(GaussianCoefficients) +
+                             (gpu ? kGaussianGpuWorkspace : 64 * sizeof(Slot));
     for (const auto* name : {"sigma_x", "sigma_y", "cval"})
       traits.parameter_schema.push_back(
           {name, OperationParameterType::Float64, true});
@@ -648,27 +607,27 @@ Status register_gaussian(OperationRegistry* registry) {
           {name, OperationParameterType::Int64, true});
     traits.parameter_schema.push_back(
         {"boundary", OperationParameterType::String, true});
+    numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                         sizeof(GaussianProgram));
     auto& output = traits.outputs[0];
     output.key = "output";
-    output.shape_rule = OperationShapeRule::Fixed;
-    output.fixed_output_shape = {1};
+    output.output_schema.result_schema_id.clear();
+    output.output_schema.result_schema_version = 0;
+    output.output_schema.element_type_mask = 12;
     output.region_rule =
         tiled ? OperationRegionRule::Dependency : OperationRegionRule::Whole;
-    if (tiled) {
-      output.dependency_version = 1;
-      output.continuation_bytes = sizeof(GaussianTile);
-      output.maximum_dependency_stages = 2;
-      output.requires_dense_output = false;
-      operation.start_dependency = [](const DependencyQuery&,
-                                      const BufferAllocator& allocator) {
-        return DependencyContinuation::make<GaussianTile>(allocator);
-      };
-    }
+    output.maximum_dependency_stages = tiled ? 1048576 : 2;
     operation.prepare_static =
         [tiled](const auto& inputs,
                 const auto& values) -> Result<OperationPreparation> {
       using Answer = Result<OperationPreparation>;
-      const auto& descriptor = inputs[0].descriptor;
+      const auto& schema = *inputs[0].result_schema;
+      if (!schema.fields.empty() || schema.tensors.size() != 1)
+        return Answer(
+            Status{ErrorCode::TypeMismatch, "Gaussian requires one tensor"});
+      const ValueDescriptor descriptor{
+          schema.tensors[0].descriptor.element_type,
+          schema.tensors[0].sample_shape()};
       const auto rank = descriptor.shape.size();
       if (rank < 2 || rank > 8)
         return Answer(
@@ -720,18 +679,32 @@ Status register_gaussian(OperationRegistry* registry) {
                              "Gaussian kernel size overflow"});
       OperationPreparation result;
       OperationOutputSpecialization specialization;
-      specialization.metadata = inputs[0];
-      specialization.regional_atomic = tiled;
+      auto result_schema = schema;
+      result_schema.publication = tiled ? PublishPolicy::IndependentChunks
+                                        : PublishPolicy::CompleteBundle;
+      specialization.metadata.result_schema =
+          std::make_shared<const SchemaTemplate>(std::move(result_schema));
+      result.state = std::make_shared<const Parameters>(p);
       result.outputs.push_back(std::move(specialization));
       result.additional_workspace_bytes = (nx + ny) * 8;
       return Answer(std::move(result));
     };
-    if (!tiled)
-      operation.callback = execute;
+    operation.start_result = [tiled, gpu](const ResultProgramQuery& query,
+                                          const BufferAllocator& allocator) {
+      if (query.tensor_outputs && query.tensor_outputs->empty())
+        return ResultContinuation::stateless<empty_result>();
+      if (!query.prepared || !query.prepared->state())
+        return Result<ResultContinuation>(
+            Status{ErrorCode::Internal, "missing Gaussian preparation"});
+      return ResultContinuation::make<GaussianProgram>(
+          allocator, tiled, gpu,
+          *static_cast<const Parameters*>(query.prepared->state()));
+    };
     auto status = registry->register_operation(std::move(operation));
     if (!status.ok())
       return status;
   }
-  return Status::success();
+  return image_ops::register_image_algorithm(
+      registry, "image.gaussian_blur", image_ops::ImageAlgorithm::Gaussian);
 }
 }  // namespace ps::plugin_internal

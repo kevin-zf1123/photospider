@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "../support/transfer_result_fixture.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
@@ -46,16 +47,6 @@ double number(std::uint64_t raw, bool narrow) {
   std::memcpy(&f, &raw, 8);
   return f;
 }
-StridedLayout dense(const ValueDescriptor& d) {
-  StridedLayout result;
-  result.byte_strides.resize(d.shape.size());
-  std::int64_t stride = Value::element_size(d.element_type);
-  for (std::size_t a = d.shape.size(); a-- > 0;) {
-    result.byte_strides[a] = stride;
-    stride *= d.shape[a];
-  }
-  return result;
-}
 struct Fixture {
   ValueDescriptor descriptor;
   std::vector<std::uint64_t> raw;
@@ -81,67 +72,28 @@ Result<ExecutionResult> execute(const Fixture& f, const std::string& key,
     std::memcpy(bytes.data() + i * width, &f.raw[i], width);
   WorkflowDocument doc;
   ExecutionBindings bindings;
-  if (f.planar) {
-    PlanarImageConfig config;
-    config.order = ImagePlaneOrder::Tiled;
-    config.tile_height = config.tile_width = 128;
-    config.height_axis = 0;
-    config.width_axis = 1;
-    config.channel_axis = f.channel_axis;
-    auto made = PlanarImage::create(f.descriptor, config, facets);
-    if (!made.ok())
-      return Answer(made.status());
-    auto image = made.take_value();
-    auto source =
-        take(Value::create(f.descriptor, Region::whole(f.descriptor.shape),
-                           dense(f.descriptor), bytes, facets));
-    const auto regions =
-        f.published.empty()
-            ? std::vector<Region>{Region::whole(f.descriptor.shape)}
-            : f.published;
-    for (const auto& region : regions) {
-      std::vector<std::uint8_t> packed;
-      auto fp = take(Footprint::from_regions(f.descriptor.shape, {region}));
-      auto visited = fp.visit(
-          [&](const auto& at) {
-            auto address = source.byte_address(at);
-            if (!address.ok())
-              return address.status();
-            packed.insert(packed.end(), bytes.begin() + address.value(),
-                          bytes.begin() + address.value() + width);
-            return Status::success();
-          },
-          UINT64_MAX);
-      if (!visited.ok())
-        return Answer(visited);
-      auto status = image.publish(region, packed.data(), packed.size());
-      if (!status.ok())
-        return Answer(status);
-    }
-    doc.inputs = {
-        {1,
-         "source",
-         f.descriptor,
-         Region::whole(f.descriptor.shape),
-         {},
-         facets,
-         PlanarImageLayout{config.order, 0, 1, f.channel_axis, 0, {}}}};
-    ExecutionBinding binding;
-    binding.name = "source";
-    binding.image = std::make_shared<const PlanarImage>(image);
-    bindings.inputs.push_back(std::move(binding));
-  } else {
-    auto value = Value::create(f.descriptor, Region::whole(f.descriptor.shape),
-                               dense(f.descriptor), bytes, facets);
-    if (!value.ok())
-      return Answer(value.status());
-    doc.inputs = {{1, "source", f.descriptor, Region::whole(f.descriptor.shape),
-                   dense(f.descriptor), facets}};
-    bindings.inputs.push_back({"source", value.take_value()});
-  }
+  auto registry = make_default_operation_registry();
+  ExecutionContextConfig context_config;
+  context_config.cpu_workers = 1;
+  ExecutionContext context(registry, context_config);
+  ResultTensorLayout layout;
+  layout.spatial = f.planar;
+  layout.order = ImagePlaneOrder::Tiled;
+  if (f.planar)
+    layout.channel_axis = f.channel_axis;
+  auto input = channel_fixture::source(f.descriptor, facets, layout);
+  input.bytes = bytes;
+  if (!f.published.empty())
+    input.coverage = f.published;
+  const auto source =
+      channel_fixture::publish(take(context.resource_budget()), input);
+  auto declaration = channel_fixture::declaration(input);
+  declaration.id = 1;
+  declaration.name = "source";
+  doc.inputs = {declaration};
+  bindings.inputs = {{"source", source}};
   doc.nodes = {{1, key, {WorkflowInputReference{1}}, std::move(params)}};
   doc.outputs = {{"result", 1, "values"}};
-  auto registry = make_default_operation_registry();
   GraphContext graph(doc);
   Compiler compiler(registry);
   PlanningOptions planning;
@@ -151,64 +103,29 @@ Result<ExecutionResult> execute(const Fixture& f, const std::string& key,
   auto compiled = compiler.compile(graph, planning);
   if (!compiled.ok())
     return Answer(compiled.status());
-  ExecutionContextConfig context_config;
-  context_config.cpu_workers = 1;
-  ExecutionContext context(registry, context_config);
-  if (!f.planar && key.find("color.color_to_gray_") == 0 &&
+  auto result =
+      context.execute(compiled.value().plan, bindings, {}, execution_options);
+  if (result.ok() && !f.planar && key.find("color.color_to_gray_") == 0 &&
       (!doc.nodes[0].parameters.count("layout") ||
        std::get<std::string>(doc.nodes[0].parameters.at("layout")) !=
            "materialize")) {
-    auto frozen = context.freeze(compiled.value().plan, bindings);
-    if (!frozen.ok())
-      return Answer(frozen.status());
-    const auto& shape =
-        compiled.value().plan.steps().back().output_descriptor.shape;
-    const auto region = roi.value_or(Region::whole(shape));
-    auto footprint = Footprint::from_regions(shape, {region});
-    if (!footprint.ok())
-      return Answer(footprint.status());
-    auto result = context.execute_fragments(
-        frozen.value(), {{"result", footprint.take_value()}}, {},
-        execution_options);
-    if (!result.ok())
-      return Answer(result.status());
-    // Q views must retain the original owner rather than a silent copy.
-    for (const auto& fragment : result.value().values.at("result").fragments())
-      if (fragment.storage() != bindings.inputs[0].value.storage())
-        return Answer(
-            Status{ErrorCode::Internal, "Q did not preserve the source owner"});
-    auto collected =
-        result.value().values.at("result").collect(region, BufferAllocator{});
-    if (!collected.ok())
-      return Answer(collected.status());
-    ExecutionResult output;
-    output.values.emplace("result", collected.take_value());
-    output.diagnostics = result.value().diagnostics;
-    return Answer(std::move(output));
+    const auto& out = result.value().results.at("result");
+    const auto region =
+        roi.value_or(Region::whole(out.schema().tensors[0].sample_shape()));
+    if (channel_fixture::owner(out, region) !=
+        channel_fixture::owner(source, Region::whole(f.descriptor.shape)))
+      return Answer(
+          Status{ErrorCode::Internal, "Q did not preserve source owner"});
   }
-  return context.execute(compiled.value().plan, bindings, {},
-                         execution_options);
+  return result;
 }
 std::uint64_t read(const ExecutionResult& result,
                    const std::vector<std::uint64_t>& at) {
   std::uint64_t bits = 0;
-  if (result.images.count("result")) {
-    const auto& image = result.images.at("result");
-    std::vector<RegionDimension> dimensions;
-    for (const auto c : at)
-      dimensions.push_back({c, 1});
-    std::vector<std::uint8_t> data(
-        Value::element_size(image.descriptor().element_type));
-    auto status = image.read(Region(dimensions), data.data(), data.size());
-    if (!status.ok())
-      throw std::runtime_error(status.message);
-    std::memcpy(&bits, data.data(), data.size());
-  } else {
-    const auto& value = result.values.at("result");
-    const auto address = take(value.byte_address(at));
-    std::memcpy(&bits, value.bytes().data() + address,
-                Value::element_size(value.descriptor().element_type));
-  }
+  const auto& value = result.results.at("result");
+  transfer_fixture::take(value.read_tensor(
+      take(value.descriptor()), 0, at, &bits,
+      Value::element_size(value.schema().tensors[0].descriptor.element_type)));
   return bits;
 }
 TensorDescription described(const std::string& model, std::uint32_t axis,
@@ -384,7 +301,7 @@ int main() {
       for (unsigned c = 0; c < 5; ++c)
         PS_CHECK(read(q.value(), {0, c}) == f.raw[mapping[c]]);
       auto qd = take(decode_tensor_description(
-          q.value().values.at("result").facets().back()));
+          q.value().results.at("result").schema().tensors[0].facets.back()));
       PS_CHECK(qd.groups[0].indices == std::vector<std::uint64_t>{1});
       PS_CHECK(qd.groups[0].alpha == 4);
       PS_CHECK(qd.groups[0].interpretation.coordinates->gray_kind ==
@@ -453,8 +370,11 @@ int main() {
       auto absolute_binary = execute(absolute, "mask.threshold_channel_strict",
                                      {{"threshold", .5}});
       PS_CHECK(absolute_binary.ok());
-      auto bd = take(decode_tensor_description(
-          absolute_binary.value().values.at("result").facets().back()));
+      auto bd = take(decode_tensor_description(absolute_binary.value()
+                                                   .results.at("result")
+                                                   .schema()
+                                                   .tensors[0]
+                                                   .facets.back()));
       PS_CHECK(bd.groups[0].components[0].unit == "1");
       PS_CHECK(bd.groups[0].interpretation.coordinates->scale == "absolute");
       absolute.description = bd;
@@ -462,8 +382,11 @@ int main() {
       auto absolute_gray =
           execute(absolute, "color.black_white_to_gray_strict", levels);
       PS_CHECK(absolute_gray.ok());
-      auto gd = take(decode_tensor_description(
-          absolute_gray.value().values.at("result").facets().back()));
+      auto gd = take(decode_tensor_description(absolute_gray.value()
+                                                   .results.at("result")
+                                                   .schema()
+                                                   .tensors[0]
+                                                   .facets.back()));
       PS_CHECK(gd.groups[0].components[0].unit == "cd/m2");
       binary.raw[1] = bits(.5, narrow);
       PS_CHECK(
@@ -521,13 +444,17 @@ int main() {
       if (!sparse.ok())
         std::cerr << "sparse planar: " << sparse.status().message << '\n';
       PS_CHECK(sparse.ok() && read(sparse.value(), {2, 132, 1}) == one);
-      // Forced planar Q views are not representable by the current image
-      // contract. Fail explicitly rather than silently materializing a copy.
+      // This permuted channel mapping exceeds the canonical spatial view.
       auto image_view = execute(image, "color.color_to_gray_strict",
                                 {{"layout", std::string("view")}},
                                 Region({{1, 2}, {126, 7}, {1, 1}}));
       PS_CHECK(!image_view.ok() &&
-               image_view.status().code == ErrorCode::InvalidArgument);
+               image_view.status().code == ErrorCode::InvalidArgument &&
+               image_view.status().message.find("ViewUnavailable") !=
+                   std::string::npos);
+      auto image_auto = execute(image, "color.color_to_gray_strict", {},
+                                Region({{1, 2}, {126, 7}, {1, 1}}));
+      PS_CHECK(image_auto.ok() && read(image_auto.value(), {2, 132, 1}) == one);
       // Planar matrix blocks include 64-lane boundaries, vector tails and tile
       // edges.
       image.description.reset();
@@ -573,22 +500,27 @@ int main() {
       const std::array<float, 9> samples{NAN, 1, NAN, NAN, 2, NAN, NAN, 3, NAN};
       std::vector<std::uint8_t> data(sizeof(samples));
       std::memcpy(data.data(), samples.data(), data.size());
-      auto source = take(
-          Value::create(d, Region::whole(d.shape), dense(d), std::move(data)));
+      auto backing = channel_fixture::source(d);
+      backing.bytes = data;
+      auto registry = make_default_operation_registry();
+      ExecutionContextConfig config;
+      config.cpu_workers = 1;
+      ExecutionContext context(registry, config);
+      auto source =
+          channel_fixture::publish(take(context.resource_budget()), backing);
       auto p = raw(1);
       p["white_x"] = .25;
       p["white_y"] = .25;
       WorkflowDocument doc;
-      doc.inputs = {{1, "source", d, Region::whole(d.shape), dense(d), {}}};
+      auto declaration = channel_fixture::declaration(backing);
+      declaration.id = 1;
+      declaration.name = "source";
+      doc.inputs = {declaration};
       doc.nodes = {
           {1, "color.xyz_to_cielab_strict", {WorkflowInputReference{1}}, p}};
       doc.outputs = {{"result", 1, "values"}};
-      auto registry = make_default_operation_registry();
       GraphContext graph(doc);
       auto compiled = take(Compiler(registry).compile(graph));
-      ExecutionContextConfig config;
-      config.cpu_workers = 1;
-      ExecutionContext context(registry, config);
       auto frozen = take(context.freeze(compiled.plan, {{{"source", source}}}));
       auto q = take(Footprint::from_regions(
           d.shape, {Region({{0, 1}, {0, 1}}), Region({{2, 1}, {0, 1}})}));
@@ -596,27 +528,38 @@ int main() {
       if (!answer.ok())
         std::cerr << "disjoint: " << answer.status().message << '\n';
       PS_CHECK(answer.ok() &&
-               answer.value().values.at("result").coverage() == q);
+               take(answer.value().results.at("result").descriptor())
+                       .tensor_coverage(0) == q);
       float value = 0;
-      PS_CHECK(
-          answer.value().values.at("result").read({0, 0}, &value, 4).ok() &&
-          value == 1);
-      PS_CHECK(
-          !answer.value().values.at("result").read({1, 0}, &value, 4).ok());
+      PS_CHECK(answer.value()
+                   .results.at("result")
+                   .read_tensor(
+                       take(answer.value().results.at("result").descriptor()),
+                       0, {0, 0}, &value, 4)
+                   .ok() &&
+               value == 1);
+      PS_CHECK(!answer.value()
+                    .results.at("result")
+                    .read_tensor(
+                        take(answer.value().results.at("result").descriptor()),
+                        0, {1, 0}, &value, 4)
+                    .ok());
       auto unrelated =
           take(Footprint::from_regions(d.shape, {Region({{0, 1}, {0, 1}})}));
-      auto dirty = take(
-          answer.value().dependencies.potential_dirty("source", unrelated));
+      auto dirty = take(answer.value().dependencies.potential_dirty(
+          "source", unrelated, 7, {}, ResultSupportTarget::Tensor, 0));
       PS_CHECK(dirty.at("result").empty());
       auto luminance =
           take(Footprint::from_regions(d.shape, {Region({{0, 1}, {1, 1}})}));
-      dirty = take(
-          answer.value().dependencies.potential_dirty("source", luminance));
+      dirty = take(answer.value().dependencies.potential_dirty(
+          "source", luminance, 7, {}, ResultSupportTarget::Tensor, 0));
       PS_CHECK(dirty.at("result") == unrelated);
       auto empty = context.execute_fragments(
           frozen, {{"result", take(Footprint::none(d.shape))}});
       PS_CHECK(empty.ok() &&
-               empty.value().values.at("result").coverage().empty());
+               take(empty.value().results.at("result").descriptor())
+                   .tensor_coverage(0)
+                   .empty());
       CancellationSource cancellation;
       PS_CHECK(cancellation.cancel());
       auto stopped = context.execute_fragments(frozen, {{"result", q}},

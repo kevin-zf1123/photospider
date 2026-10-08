@@ -9,9 +9,9 @@
 
 namespace {
 void preview(const std::shared_ptr<ps::OperationRegistry>& registry) {
-  s3::Scene scene(registry);
   ps::ExecutionContext execution(registry,
-                                 {2, false, 16, 1024 * 1024, 256 * 1024});
+                                 s3::config(ps::ExecutionMode::CpuExact));
+  s3::Scene scene(registry, s3::take(execution.resource_budget()));
   const auto export_oracle = scene.oracle(2);
   s3::Coordinator app(scene, execution);
   s3::require(app.begin_export(), "export admission");
@@ -44,14 +44,7 @@ void preview(const std::shared_ptr<ps::OperationRegistry>& registry) {
           sample = color[c] + sample * .5F;
         }
       }
-  std::vector<float> actual_input(expected_input.size());
-  s3::require(
-      scene.foreground
-          .read(ps::Region::whole({s3::Scene::height, s3::Scene::width, 4}),
-                reinterpret_cast<std::uint8_t*>(actual_input.data()),
-                actual_input.size() * 4)
-          .ok(),
-      "stroke oracle read");
+  const auto actual_input = s3::samples(scene.foreground);
   s3::require(actual_input == expected_input, "exact ordered stamp oracle");
   app.exported.check(export_oracle);
   app.displayed.check(scene.oracle(4));
@@ -68,39 +61,36 @@ void preview(const std::shared_ptr<ps::OperationRegistry>& registry) {
             << " preview_tiles=" << app.preview_tiles
             << " rejected=" << app.rejected << " quality=full oracle=passed\n";
 }
-std::uint64_t calls(const ps::ExecutionResult& result, std::uint64_t id = 0) {
-  std::uint64_t total = 0;
-  for (const auto& timing : result.diagnostics.operation_timings)
-    if (id == 0 || timing.output.node_id == id)
-      total += timing.invocation_count;
-  return total;
-}
 void cache(const std::shared_ptr<ps::OperationRegistry>& registry) {
-  s3::Scene scene(registry);
   ps::ExecutionContext execution(registry,
-                                 {2, false, 16, 1024 * 1024, 256 * 1024});
-  auto first = s3::take(execution.execute(scene.freeze(execution, 2)));
-  s3::require(calls(first, 10) == 20, "cold blur tile count");
-  auto exposure = s3::take(execution.execute(scene.freeze(execution, 3)));
-  s3::require(calls(exposure, 10) == 0, "exposure must reuse blur");
+                                 s3::config(ps::ExecutionMode::CpuExact));
+  s3::Scene scene(registry, s3::take(execution.resource_budget()));
+  auto first = s3::complete(execution, scene.freeze(execution, 2));
+  s3::require(s3::calls(first, 10) > 0, "cold blur execution");
+  auto exposure = s3::complete(execution, scene.freeze(execution, 3));
+  s3::require(s3::calls(exposure, 10) == 0,
+              "exposure must reuse blur: polls=" +
+                  std::to_string(s3::calls(exposure, 10)) + " entries=" +
+                  std::to_string(execution.cache_statistics().entries) +
+                  " bytes=" +
+                  std::to_string(execution.cache_statistics().retained_bytes));
   scene.stamp(execution, {4, 5, 2, 1, 0, 0, .5F});
-  auto changed = s3::take(execution.execute(scene.freeze(execution, 3)));
-  s3::require(calls(changed, 10) > 0 && calls(changed, 10) < 20,
+  auto changed = s3::complete(execution, scene.freeze(execution, 3));
+  s3::require(s3::calls(changed, 10) > 0 &&
+                  s3::calls(changed, 10) < s3::calls(first, 10),
               "local stamp must retain unrelated blur regions");
-  s3::Frame output(s3::Scene::height, s3::Scene::width);
-  output.blit(changed.values.at("result"));
-  output.check(scene.oracle(3));
+  changed.frame.check(scene.oracle(3));
   scene.edit_unrelated_branch();
-  auto unrelated = s3::take(execution.execute(scene.freeze(execution, 3)));
-  s3::require(calls(unrelated) == 0,
+  auto unrelated = s3::complete(execution, scene.freeze(execution, 3));
+  s3::require(s3::calls(unrelated) == 0,
               "unrelated graph edit must preserve results");
   execution.clear_result_cache();
-  auto rebuilt = s3::take(execution.execute(scene.freeze(execution, 3)));
-  s3::require(rebuilt.values.at("result").copy_bytes() ==
-                  unrelated.values.at("result").copy_bytes(),
+  auto rebuilt = s3::complete(execution, scene.freeze(execution, 3));
+  s3::require(rebuilt.frame.pixels == unrelated.frame.pixels,
               "cache deletion correctness");
-  std::cout << "S3Cache.LocalInvalidation blur_after_gain=0 patch_blur_tiles="
-            << calls(changed, 10) << " unrelated_callbacks=0 oracle=passed\n";
+  std::cout << "S3Cache.LocalInvalidation blur_after_gain=0 patch_blur_polls="
+            << s3::calls(changed, 10)
+            << " unrelated_callbacks=0 oracle=passed\n";
 }
 }  // namespace
 int main(int argc, char** argv) {

@@ -4,6 +4,7 @@
 #include <utility>
 #include <vector>
 
+#include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "data/content_digest.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
@@ -107,23 +108,44 @@ int generic_snapshots() {
   // Public compile/execute and frozen capture consume generic snapshots.
   auto registry = make_default_operation_registry();
   WorkflowDocument document;
-  document.inputs = {
-      {1, "input", f64.descriptor(), f64.region(), f64.layout(), {}}};
+  numeric_result_fixture::declare_sources(&document, {f64});
+  document.inputs[0].name = "input";
   document.nodes = {{1, "numeric.mean", {WorkflowInputReference{1}}, {}}};
   document.outputs = {{"result", 1, "value"}};
   GraphContext graph(document);
   Compiler compiler(registry);
   auto plan = compiler.compile(graph).take_value().plan;
   ExecutionContext execution(registry, {1, false, 8, 65536, 8192});
-  auto frozen =
-      execution
-          .freeze(
-              plan,
-              {{{"input", {}, {}, std::make_shared<InputSnapshot>(floating)}}})
+  // Snapshot bytes remain internal backing; the public binding owns a Result.
+  std::vector<std::uint8_t> frozen_bytes(f64.bytes().size());
+  PS_CHECK(floating.read(f64.region(), frozen_bytes.data(), frozen_bytes.size())
+               .ok());
+  auto backing = Value::create(f64.descriptor(), f64.region(), f64.layout(),
+                               std::move(frozen_bytes))
+                     .take_value();
+  const auto root = execution.resource_budget().take_value();
+  auto input_builder =
+      ResultBuilder::start(root, *document.inputs[0].result_schema,
+                           "snapshot.input")
           .take_value();
+  PS_CHECK(input_builder
+               .bind_descriptor_relation(
+                   ResultRelation::cartesian(root, 1, {}).take_value())
+               .ok());
+  PS_CHECK(
+      input_builder
+          .publish_tensor(0, backing.region(), backing.layout(),
+                          root.reference(backing.storage()).take_value(),
+                          ResultRelation::cartesian(root, 2, {}).take_value(),
+                          {true, true, true, true})
+          .ok());
+  auto input = input_builder.seal().take_value();
+  auto frozen = execution.freeze(plan, {{{"input", input}}}).take_value();
+  input = {};
+  input_builder = {};
+  backing = {};
   auto result = execution.execute(frozen);
-  PS_CHECK(result.ok() &&
-           result.value().values.at("result").as_float64().value() == 0);
+  PS_CHECK(result.ok() && test::named_scalar(result.value(), "result") == 0);
   return 0;
 }
 }  // namespace

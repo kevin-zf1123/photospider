@@ -1,115 +1,122 @@
-#include <string.h>
+#include "./expression_contract_fixture.h"
 
-#include "photospider/plugin/operation_plugin_api.h"
+#include <stdlib.h>
 
-static int execute(void* user, const ps_operation_value_view_v11* inputs,
-                   uint32_t count,
-                   const ps_operation_parameter_value_v11* parameters,
-                   uint32_t parameter_count, uint32_t backend,
-                   ps_operation_cancelled_v11 cancelled, void* cancel_context,
-                   const ps_operation_output_sink_v11* sink, char* diagnostic,
-                   size_t diagnostic_capacity) {
+static const ps_result_parameter_descriptor_v2 parameters[] = {
+    {sizeof(ps_result_parameter_descriptor_v2), "expression", 10,
+     PS_RESULT_PARAMETER_STRING_V2, 1, 0, 0, 0},
+    {sizeof(ps_result_parameter_descriptor_v2), "count", 5,
+     PS_RESULT_PARAMETER_INT64_V2, 1, 0, 0, 0},
+    {sizeof(ps_result_parameter_descriptor_v2), "start", 5,
+     PS_RESULT_PARAMETER_FLOAT64_V2, 1, 0, 0, 0},
+    {sizeof(ps_result_parameter_descriptor_v2), "step", 4,
+     PS_RESULT_PARAMETER_FLOAT64_V2, 1, 0, 0, 0}};
+static const ps_result_port_v2 input = {
+    .struct_size = sizeof(input),
+    .kind = PS_RESULT_OBJECT_V2,
+    .element_type = PS_RESULT_ELEMENT_FLOAT64_V2,
+    .rank = 1};
+static int start(void* user, void* state, const ps_result_query_v2* query,
+                 const ps_result_services_v2* services) {
   (void)user;
-  (void)inputs;
-  (void)parameters;
-  (void)parameter_count;
-  (void)diagnostic;
-  (void)diagnostic_capacity;
-  if (count != 1 || backend != 1)
-    return PS_OPERATION_RESULT_FAILURE_V11;
-  if (cancelled(cancel_context))
-    return PS_OPERATION_RESULT_CANCELLED_V11;
-  uint8_t* bytes = sink->allocate_output(sink->context);
-  if (!bytes)
-    return PS_OPERATION_RESULT_FAILURE_V11;
-  memset(bytes, 0, (size_t)sink->output_byte_size);
-  return sink->publish(sink->context, sink->output_element_type,
-                       sink->output_shape, sink->output_rank,
-                       sink->output_facets, sink->output_facet_count, bytes,
-                       sink->output_byte_size)
-             ? PS_OPERATION_RESULT_SUCCESS_V11
-             : PS_OPERATION_RESULT_FAILURE_V11;
+  (void)query;
+  *(uint32_t*)state = 0;
+  return services->cancelled(services->context) ? 2 : 0;
 }
-static const ps_operation_parameter_descriptor_v11 parameters[] = {
-    {sizeof(ps_operation_parameter_descriptor_v11), "expression", 10,
-     PS_OPERATION_PARAMETER_STRING_V11, 1, 0, 0, 0},
-    {sizeof(ps_operation_parameter_descriptor_v11), "count", 5,
-     PS_OPERATION_PARAMETER_INT64_V11, 1, 0, 0, 0},
-    {sizeof(ps_operation_parameter_descriptor_v11), "start", 5,
-     PS_OPERATION_PARAMETER_FLOAT64_V11, 1, 0, 0, 0},
-    {sizeof(ps_operation_parameter_descriptor_v11), "step", 4,
-     PS_OPERATION_PARAMETER_FLOAT64_V11, 1, 0, 0, 0}};
-static const ps_operation_semantic_constraint_v11 input = {
-    sizeof(ps_operation_semantic_constraint_v11),
-    0,
-    PS_OPERATION_ELEMENT_FLOAT64_V11,
-    1,
-    0,
-    NULL,
-    0};
-static const ps_operation_port_constraint_v11 ports[] = {
-    {sizeof(ps_operation_port_constraint_v11), PS_OPERATION_PORT_VALUE_V11, 0,
-     0, &input}};
-static const ps_operation_extent_v11 axes[] = {
-    {sizeof(ps_operation_extent_v11), PS_OPERATION_EXTENT_PARAMETER_V11, 1,
-     "count", 5, 0, 0, 0, NULL, 0, 1, 1}};
-static const ps_operation_contract_v11 contract = {
-    .struct_size = sizeof(ps_operation_contract_v11),
-    .axis_count = 1,
-    .axes = axes,
-    .semantic_rule = PS_OPERATION_SEMANTIC_SAMPLE_EXPRESSION_V11,
-    .semantic_parameter = "expression",
-    .semantic_parameter_size = 10};
-static const char key[] = "fixture.expression_contract";
-static const ps_operation_descriptor_v11 operations[] = {
-    {sizeof(ps_operation_descriptor_v11),
-     key,
-     sizeof(key) - 1,
-     1,
-     PS_OPERATION_FLAG_CPU | PS_OPERATION_FLAG_DETERMINISTIC |
-         PS_OPERATION_FLAG_SIDE_EFFECT_FREE,
-     0,
-     1,
-     4,
-     parameters,
-     1,
-     ports,
-     execute,
-     0,
-     0,
-     0,
-     0,
-     1,
-     {{sizeof(ps_operation_output_descriptor_v11),
-       "value",
-       5,
-       PS_OPERATION_ELEMENT_FLOAT32_V11,
-       0,
-       0,
-       PS_OPERATION_SHAPE_AXES_V11,
-       PS_OPERATION_REGION_WHOLE_V11,
-       0,
-       {sizeof(ps_operation_port_constraint_v11), PS_OPERATION_PORT_TYPED_V11,
-        0, 0, NULL},
-       0,
-       0,
-       0,
-       0,
-       &contract,
-       0,
-       0,
-       0,
-       0,
-       NULL}}}};
-static void destroy(const ps_operation_descriptor_v11* values, uint32_t count) {
-  (void)values;
-  (void)count;
+static int poll(void* user, void* state, const ps_result_query_v2* query,
+                const ps_result_services_v2* services) {
+  (void)user;
+  const int empty = query->requested_kind == 2 && query->requested_count == 0;
+  const uint64_t coefficients = query->inputs[0].schema->tensors[0].shape[0];
+  if (!empty && !(*(uint32_t*)state)++) {
+    const ps_result_region_v2 source = {.struct_size = sizeof(source),
+                                        .rank = 1,
+                                        .extent = {coefficients}};
+    return services->need_tensor(services->context, 0, 0, 1, &source, 1)
+               ? 1
+               : PS_RESULT_NEED_V2;
+  }
+  if (services->begin_result(services->context) ||
+      services->bind_descriptor(services->context, NULL, 0, PS_RESULT_EXACT_V2))
+    return 1;
+  if (!empty) {
+    uint64_t relation = 0;
+    if (services->make_tensor_cartesian(services->context, 0, 0, 0, 1, 0,
+                                        coefficients, PS_RESULT_CONSERVATIVE_V2,
+                                        &relation))
+      return 1;
+    const float zeros[64] = {0};
+    const uint64_t count = query->output->port.schema->tensors[0].shape[0];
+    for (uint64_t begin = 0; begin < count; begin += 64) {
+      if (services->cancelled(services->context))
+        return 2;
+      const uint64_t size = count - begin < 64 ? count - begin : 64;
+      ps_result_region_v2 box = {.struct_size = sizeof(box),
+                                 .rank = 1,
+                                 .offset = {begin},
+                                 .extent = {size}};
+      if (services->consume_work(services->context, size) ||
+          services->publish_tensor_with_relation(
+              services->context, 0, &box, (const uint8_t*)zeros,
+              size * sizeof(float), relation, PS_RESULT_FINAL_V2))
+        return 1;
+    }
+    if (services->release_relation(services->context, relation))
+      return 1;
+  }
+  return services->publish_result(services->context, 1) ? 1
+                                                        : PS_RESULT_PUBLISH_V2;
 }
-static const ps_operation_plugin_api_v11 api = {
-    sizeof(ps_operation_plugin_api_v11), 1, operations, destroy};
-uint32_t ps_operation_plugin_get_abi_version(void) {
-  return PS_OPERATION_ABI_VERSION_11;
+static void destroy_state(void* user, void* state) {
+  (void)user;
+  (void)state;
 }
-const ps_operation_plugin_api_v11* ps_operation_plugin_get_api_v11(void) {
-  return &api;
+struct Bundle {
+  ps_result_operation_plugin_api_v2 api;
+  ps_result_operation_v2 operation;
+  ps_result_output_v2 output;
+};
+static void destroy(void* context) {
+  free(context);
+}
+PS_RESULT_EXPORT const ps_result_operation_plugin_api_v2*
+ps_result_operation_plugin_get_api_v2(void) {
+  const ps_result_port_v2* prototype = fixture_expression_prototype();
+  if (!prototype)
+    return NULL;
+  struct Bundle* bundle = (struct Bundle*)calloc(1, sizeof(struct Bundle));
+  if (!bundle)
+    return NULL;
+  bundle->output = (ps_result_output_v2){.struct_size = sizeof(bundle->output),
+                                         .key = "value",
+                                         .key_size = 5,
+                                         .port = *prototype,
+                                         .input_count = UINT32_MAX,
+                                         .execution = PS_RESULT_WHOLE_V2};
+  bundle->operation = (ps_result_operation_v2){
+      .struct_size = sizeof(bundle->operation),
+      .key = "fixture.expression_contract",
+      .key_size = 27,
+      .flags = PS_RESULT_FLAG_CPU_V2 | PS_RESULT_FLAG_DETERMINISTIC_V2 |
+               PS_RESULT_FLAG_SIDE_EFFECT_FREE_V2,
+      .inputs = &input,
+      .input_count = 1,
+      .outputs = &bundle->output,
+      .output_count = 1,
+      .parameters = parameters,
+      .parameter_count = 4,
+      .state_bytes = sizeof(uint32_t),
+      .maximum_stages = 2,
+      .resolve_metadata = fixture_expression_metadata,
+      .start = start,
+      .poll = poll,
+      .destroy = destroy_state};
+  bundle->api = (ps_result_operation_plugin_api_v2){
+      .struct_size = sizeof(bundle->api),
+      .abi_version = PS_RESULT_OPERATION_ABI_VERSION_2,
+      .operations = &bundle->operation,
+      .operation_count = 1,
+      .context = bundle,
+      .destroy = destroy};
+  return &bundle->api;
 }

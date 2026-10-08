@@ -35,6 +35,9 @@ void append_port(Digest* digest, const OperationPortConstraint& port) noexcept {
   append_facets(digest, port.facets);
   digest->text(port.result_schema_id);
   digest->integer(port.result_schema_version);
+  digest->text(port.tensor_key);
+  digest->integer(port.requires_semantics);
+  digest->integer(port.scalar_bounds);
 }
 
 /**

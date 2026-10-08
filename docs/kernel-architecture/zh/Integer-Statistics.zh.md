@@ -4,7 +4,7 @@
 
 ## 1. 模块边界与职责
 
-统计 API 描述整数编码的标量 raster、稀疏直方图、全局参数和调色输出。CPU producer 扫描不可变 Value 快照，并在执行根的容量、work、I/O 与 stage 预算下发布必需 Result backing。直方图 producer 在发布前持有有界 bin 计数器和临时状态；下游 Result 保留输入关联及其 backing。
+统计 API 描述整数编码的标量 raster、稀疏直方图、全局参数和调色输出。Histogram 与 Grade 从 Result 输入读取 tensor window；Parameters 读取 Histogram Result 的字段。各 producer 在执行根的容量、work、I/O 与 stage 预算下发布 Result。Result 的 association 只存储源 ObjectId 事实，不保活所引用的源 payload。
 
 ## 2. 核心数据结构与内存布局
 
@@ -21,7 +21,7 @@ Result<SchemaTemplate> statistics_schema(
 Result<double> statistics_mean(std::int64_t total, std::int64_t count);
 ```
 
-`StatisticsSpec` 要求 H、W 为正数，bins 为 1 到 65536。Raster 样本数受限于 `(INT64_MAX-4095)/8`。输入是无 facet 的 Int64 HW 值和 UInt8 HW mask。mask 字节非零时选中对应样本；选中值必须在 `[0,bins)` 内。mask 排除的值不参与统计。operation 不推断颜色，也不应用传递函数。
+`StatisticsSpec` 要求 H、W 为正数，bins 为 1 到 65536。Raster 样本数受限于 `(INT64_MAX-4095)/8`。Histogram 与 Grade 的数值输入是单 tensor Result，不含 fields、batch axes 或 tensor facets；tensor shape 必须与 `StatisticsSpec` 中的 HW 完全一致。Histogram 接收无 facet 的 Int64 值和 UInt8 mask；Grade 接收无 facet 的 Int64 值。Parameters 消费 `photospider.integer_histogram` Result，Grade 还接收匹配的 `photospider.integer_statistics` Result。mask 字节非零时选中对应样本；选中值必须在 `[0,bins)` 内。mask 排除的值不参与统计。operation 不推断颜色，也不应用传递函数。
 
 | Result schema | 字段与发布方式 |
 | --- | --- |
@@ -31,26 +31,38 @@ Result<double> statistics_mean(std::int64_t total, std::int64_t count);
 
 Histogram ID 严格递增，且只保存计数为正的 bin。完整 histogram seal 后，缺少的 bin 表示零。空选择没有数据行。空统计量为 `[0,0,0]` 和不具语义的零 mean；非空且全为零的选择仍然有效，mean 为零。物理 Result window 大小不进入 schema identity。
 
+每个统计输出拥有自己发布的 field storage。已加载的 field `CpuStorage` 还会保留其 read plan 和 Result 实现，因此即使 `ResultRef` 与 execution context 已释放，窗口仍可读取。已加载窗口会让自己的 backing 保持存活，直到窗口释放；ObjectId association 本身不会保活上游 Result 的 payload。
+
 ## 3. 调度与状态机
 
 ```text
-Int64 raster + UInt8 mask
+variant Result binding
           |
           v
- histogram producer --完整稀疏 Result--> parameter producer
-                                               |
-                                        完整参数 Result
-                                               |
-                                      grade producer 校验全局参数
-                                               |
-                                      有界输出 / stable prefixes
+ example source operations --Need--> Int64 和 UInt8 tensor Results
+          |                                  |
+          +------------------+---------------+
+                             v
+                  histogram producer
+                             |
+                    稀疏 Histogram Result
+                             v
+                   parameter producer
+                             |
+                       完整参数
+                             |
+                    grade producer
+                             |
+                  Float64 Result / stable prefixes
+                             |
+                    streaming Result sink
 ```
 
 Histogram factory 在绑定输入前检查必要 request-stage 下界。令 `S=H*ceil(W/512)*ceil(bins/512)`；source request polls 加一个 completion poll 必须能够放入 stage 上限。`S>=1,000,000` 时工厂返回 `ResourceExhausted`。实现使用除法检查以避免溢出。通过准入不代表资源已预留；有效 producer 上限还受到 dependency option（默认 4096 stages）和根 stage budget 的约束。后续 I/O、work、stage 或容量耗尽会阻止完整 histogram 发布。
 
-Histogram 和 Parameters 使用 CompleteBundle 及 Conservative Cartesian support。Parameters 等待完整 histogram，再检查稀疏 ID、正计数、总和、整数溢出及选中计数是否超过 HW。Grade 在产生任何像素 prefix 前校验完整全局参数 Result。每个输出像素依赖其 source 样本、共享参数和 descriptor support。Descriptor observation 与数据行分离，空集合也如此。后续像素处理失败时，已发布的 stable prefix 仍有效。
+Histogram 和 Parameters 使用 CompleteBundle，并通过 typed Tensor、Field 和 Descriptor relation 表达 Conservative support。Parameters 等待完整 histogram，再检查稀疏 ID、正计数、总和、整数溢出及选中计数是否超过 HW。Grade 在产生任何像素 prefix 前校验完整全局参数 Result。每个输出像素依赖其 source 样本、共享参数字段和 descriptor support。Descriptor observation 与数据行分离，空集合也如此。后续像素处理失败时，已发布的 stable prefix 仍有效。
 
-Histogram source strip 按行截断，每个字段最多 4096 字节，且不受 Result read-window 大小影响。其他 source 读取和 Result page 最多使用 `min(user_page_bytes,4096)`。24 字节 `count_total_valid` 记录不可拆分；所选 window 小于 24 字节时返回 `ResourceExhausted`。Histogram counter/临时状态、source/result window、必需 backing，以及每次初始化、重置、扫描，分别消耗适用的根容量或 work。
+Histogram source operation 收到 tensor Need，source strip 按行截断，每个字段最多 4096 字节，且不受所选 Result window 大小影响。其他 source 读取和 Result field I/O 最多使用 `min(user_page_bytes,4096)`。24 字节 `count_total_valid` field record 不可拆分；所选 window 小于 24 字节时返回 `ResourceExhausted`。Histogram counter/临时状态、source/result window、必需 backing，以及每次初始化、重置、扫描，分别消耗适用的根容量或 work。
 
 ## 4. 算法与数学
 

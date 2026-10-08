@@ -51,29 +51,28 @@ struct ExecutionContextConfig {
 };
 ```
 
-安装后的 C operation plugin 接口为 operation ABI 11。其 output sink 提供调用级 `ps_gpu_service_v11`；独立版本化的结构化 planar operation extension 为 ABI 3。
+Result operation callback 使用 operation ABI 2。Native GPU service 在独立的 C header `photospider/plugin/native_gpu_api.h` 中使用 ABI 1；C Result service 与 C++ Result phase 会为当前 invocation 提供该表。包含 native GPU header 不要求包含 operation plugin header。
 
 ```c
-typedef struct ps_gpu_service_v11 {
-  uint32_t struct_size;
-  void *context;
-  int (*buffer)(void *context, const uint8_t *bytes, uint64_t byte_size,
-                uint32_t writable, uint64_t *token);
-  int (*execute)(void *context, const ps_gpu_dispatch_v11 *commands,
-                 uint32_t command_count);
-  int (*release)(void *context, uint64_t token);
-  uint32_t backend;
-  uint64_t minimum_buffer_offset_alignment;
-} ps_gpu_service_v11;
+#include <photospider/plugin/native_gpu_api.h>
+
+static int execute_native(const ps_gpu_service_v1 *gpu,
+                          const ps_gpu_dispatch_v1 *commands,
+                          uint32_t command_count) {
+  if (!gpu || gpu->struct_size != sizeof(*gpu) ||
+      gpu->abi_version != PS_GPU_ABI_VERSION_1)
+    return PS_GPU_RESULT_FAILURE_V1;
+  return gpu->execute(gpu->context, commands, command_count);
+}
 ```
 
 `NativeGpu` 为声明支持的 GPU 实现选择放置。没有 GPU 实现的步骤在存在 CPU 实现时使用 CPU；若所选要求没有可用实现，规划返回 `BackendUnavailable`。该模式不选择数值 profile。operation 参数和 traits 定义可接受的值、精度和回退权限。
 
 主机以不透明的调用级 token 借出缓冲区。token 仅指向主机拥有的有界输入、输出或 scratch 视图。输入保持只读；输出和 scratch 分配计入 execution context 的受控缓冲区预算。插件为 Metal 提供 MSL，为 Vulkan 提供 SPIR-V。主机校验记录并拥有设备及 pipeline 状态；service 指针和 token 仅在 callback 生命周期内有效。`execute` 接受有界命令批次，并在已提交工作排空后返回，包括取消和错误路径。成功的非空 GPU callback 必须报告真实 native dispatch。
 
-context 只有一个 GPU worker lane，service 以同步方式提交命令。完成后的共享主机/设备存储可在访问状态转换后由 CPU 读取，该过程不意味着额外的 device-to-host copy。即使 context 结束，`Value` 也可能继续持有原生分配所有者和预算租约。Native result key 包含执行模式、所选 backend 和原生实现身份。GPU 回退会使该结果及其后代不具备 native result-cache 资格；owner 与复用规则见[缓存模型](../../kernel-architecture/Cache-Model.md)。
+context 只有一个 GPU worker lane，service 以同步方式提交命令。完成后的共享主机/设备存储可在访问状态转换后由 CPU 读取，该过程不意味着额外的 device-to-host copy。Result 可以在 context 结束后继续持有原生分配 owner 和预算租约。Native result key 包含执行模式、所选 backend 和原生实现身份。GPU 回退会使该结果及其后代不具备 native result-cache 资格；owner 与复用规则见[缓存模型](../../kernel-architecture/Cache-Model.md)。
 
-对通用 operation ABI，仅当 GPU 尝试在发布前返回 `BackendUnavailable`、operation 同时支持 CPU、traits 允许回退，且取消/currentness 仍允许继续时，运行期才会回退。内核先释放失败的 GPU continuation 及其临时所有者，再在 CPU 上重启同一个 observation。已提交设备执行错误会终止 Run。planar GPU extension 契约范围更窄：仅 Whole 执行，必须产生原生工作，且不执行 CPU 回退。
+对 Result operation callback，仅当 GPU 尝试在发布前返回 `BackendUnavailable`、operation 同时支持 CPU、traits 允许回退，且取消/currentness 仍允许继续时，运行期才会回退。内核先释放失败的 GPU continuation 及其临时所有者，再在 CPU 上重启同一个 observation。已提交设备执行错误会终止 Run。
 
 ## 4. 负面清单与边界（Non-Goals & Explicit Boundaries）
 
@@ -81,8 +80,7 @@ context 只有一个 GPU worker lane，service 以同步方式提交命令。完
 - 内核不保证 CPU、Metal 与 Vulkan 间自动数值等价。各算子定义自己的数值契约。
 - 原生 GPU callback 是受信任的进程内代码。记录校验不会隔离 shader，也不能防止恶意代码危害进程。
 - 设备句柄、队列所有权和 pipeline 管理归主机负责。插件不保留 service 指针或调用级 token。
-- 本契约不保证跨图节点的 planar 输出页驻留设备，不提供远程 GPU、自动测量式放置或多设备调度器。
-- planar extension 不支持分阶段 GPU 执行、joint dependency 结果或 CPU 回退。
+- 本契约不保证跨图节点的输出页驻留设备，不提供远程 GPU、自动测量式放置或多设备调度器。
 
 ## 5. 后果与代价（Consequences）
 
@@ -90,4 +88,4 @@ Execution context 按原生分配的实际容量计量 GPU 输入副本、输出
 
 设备不可用时，GPU-only operation 无法运行。允许 CPU 实现的 operation 可在 GPU 于发布前报告不可用时使用 CPU 路径。普通 operation 错误和已提交的设备错误会返回调用方，内核不会将其作为 CPU 工作自动重试。调用方可以查看 fallback 原因和实际 dispatch/submission 计数，区分设备工作与 CPU 执行。
 
-同步 lane 明确了缓冲区寿命和发布顺序，但较长的 GPU callback 会占用 lane，直到其命令排空。取消会停止新准入，并等待已提交命令退出后再释放 callback 资源。当前 plugin 边界是 operation ABI 11 和 planar ABI 3；插件必须匹配这些接口。
+同步 lane 明确了缓冲区寿命和发布顺序，但较长的 GPU callback 会占用 lane，直到其命令排空。取消会停止新准入，并等待已提交命令退出后再释放 callback 资源。Result operation ABI 2 与 native GPU service ABI 1 是独立的 plugin 边界。按 `native_gpu_api.h` 编译的 C module 必须在该 header 变化后重新构建；不提供旧 GPU service alias。

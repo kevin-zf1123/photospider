@@ -8,23 +8,42 @@
 #include "photospider/core/numeric_diagnostics.hpp"
 
 namespace ps::numeric {
-/** @brief Authors y=M*x+b with exact products/sum and one RN-even conversion.
- * Inputs share Float32/64 dtype: vectors [...,Cin], matrix [Cout,Cin], bias
- * [Cout], with Cin/Cout in 2..4 and vector rank 1..8. Input/output counts are
- * <=2^40. Output values [...,Cout] has empty facets. There are no parameters,
- * casts or implicit broadcast; singular matrices are valid. Nonempty requests
- * use Whole execution: validate all inputs and compute the complete output.
- * Partial consumers project that result; any input change invalidates all
- * observed outputs. Empty requests skip computation.
+/** @brief Authors a Whole Result operation for y=M*x+b.
+ * The `vectors`, `matrix`, and `bias` input edges each reference one Result
+ * tensor member under any member key. Their sample shapes are [...,Cin],
+ * [Cout,Cin], and [Cout]; all dtypes match and are Float32 or Float64, Cin/Cout
+ * are in 2..4, and vector rank is 1..8. Input and output logical counts are at
+ * most 2^40. The `values` output is a Result with `photospider.tensor` schema,
+ * tensor member `samples`, shape [...,Cout], no facets, and no batch topology.
+ * The returned node has no parameters, casts, implicit broadcast, inverse, or
+ * homogeneous-coordinate division; singular matrices are valid.
+ *
+ * Nonempty demand validates Data, Validation, and Descriptor for every full
+ * input and computes a complete dense output. Sparse and partial consumers
+ * project that output; a change to any input dirties every observed output.
+ * Empty demand publishes empty tensor coverage without matrix arithmetic.
+ * Products and their sum with bias are exact before one RN-even conversion.
  * Source NaN priority is vector components, selected matrix row, then bias.
- * Otherwise zero*infinity or opposite infinities produce positive qNaN. Finite
- * exact zero is negative only when every product and bias is negative zero.
- * Shape/dtype failures are TypeMismatch/Schema; source, validation, budget and
- * cancellation errors retain their categories. Overflow to infinity succeeds.
- * The helper is pure/concurrent-safe, returns owned node metadata, may throw
- * bad_alloc, and rejects invalid id/profile with InvalidArgument/Schema.
- * Published runtime storage survives context retirement. Full output storage
- * and fixed callback scratch must fit the host resource budget.
+ * A zero-times-infinity product or opposite infinities produce positive qNaN.
+ * Finite exact zero is negative only when every product and bias are negative
+ * zero; overflow to infinity succeeds.
+ *
+ * Shape and dtype failures return TypeMismatch/Schema. Source, typed validation,
+ * budget, and cancellation failures retain their categories, and failed work
+ * publishes no partial output. Full output storage and fixed callback scratch
+ * must fit the host resource budget. Published Result storage owns its lifetime
+ * beyond context retirement.
+ *
+ * @param id Nonzero workflow node identifier.
+ * @param vectors Workflow reference for the vectors Result input.
+ * @param matrix Workflow reference for the matrix Result input.
+ * @param bias Workflow reference for the bias Result input.
+ * @param profile Registered strict or accelerated CPU numeric profile.
+ * @return A WorkflowNode with the three ordered Result input edges, or
+ *   InvalidArgument/Schema when `id` is zero or `profile` is unsupported.
+ *
+ * This helper creates node metadata without mutating shared state and is safe
+ * for concurrent use. Allocation failure may throw `std::bad_alloc`.
  */
 inline Result<WorkflowNode> matrix_transform_node(
     std::uint64_t id, WorkflowInput vectors, WorkflowInput matrix,

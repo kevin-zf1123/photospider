@@ -2,6 +2,7 @@
 
 #include <fenv.h>  // NOLINT(build/c++11)
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -14,8 +15,10 @@
 
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
+#include "result_fixture.hpp"     // NOLINT(build/include_subdir)
 
 namespace {
+namespace rf = numeric_result_fixture;
 void require(bool condition, const char* message) {
   if (!condition)
     throw std::runtime_error(message);
@@ -46,16 +49,10 @@ struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
-  Fixture(ps::WorkflowNode node, const std::vector<ps::Value>& inputs) {
-    for (std::size_t i = 0; i < inputs.size(); ++i) {
-      const auto& value = inputs[i];
-      const auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1, name, value.descriptor(),
-                                 value.region(), value.layout(),
-                                 value.facets()});
-      bindings.inputs.push_back({name, value});
-    }
+  std::vector<ps::Value> backing;
+  Fixture(ps::WorkflowNode node, const std::vector<ps::Value>& inputs)
+      : backing(inputs) {
+    rf::declare_sources(&document, inputs);
     document.outputs = {{"values", node.id, "values"}};
     document.nodes = {std::move(node)};
   }
@@ -74,7 +71,10 @@ struct Fixture {
     config.result_cache_bytes = cache ? cache_bytes : 0;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(registry, config);
-    auto snapshot = context.freeze(plan.value().plan, bindings);
+    auto snapshot =
+        context.freeze(plan.value().plan,
+                       point_math_checks::bindings(
+                           take(context.resource_budget()), backing, document));
     if (!snapshot.ok())
       return ps::Result<ps::DemandResult>(snapshot.status());
     ps::ExecutionOptions options;
@@ -130,9 +130,8 @@ void oracle(ps::CpuNumericProfile profile) {
         throw std::runtime_error(result.status().message);
     } else {
       std::uint64_t bits = 0;
-      require(result.value()
-                  .values.at("values")
-                  .read({index}, &bits, ps::Value::element_size(dtype))
+      require(rf::read(result.value().results.at("values"), {index}, &bits,
+                       ps::Value::element_size(dtype))
                   .ok(),
               "calculus oracle read");
       std::cout << std::hex << bits << std::dec << '\n';
@@ -165,7 +164,7 @@ void examples(ps::CpuNumericProfile profile) {
                     0x3ff0000000000000, 0x4000000000000000, 0x4008000000000000};
       for (unsigned j = 0; j < 3; ++j) {
         std::uint64_t bits = 0;
-        require(result.values.at("values").read({j}, &bits, 8).ok() &&
+        require(rf::read(result.results.at("values"), {j}, &bits, 8).ok() &&
                     bits == expected[j],
                 "calculus fixture/lifetime");
       }
@@ -185,8 +184,11 @@ void sparse_and_step(ps::CpuNumericProfile profile) {
        array(Type::Float64, {1}, {0x3ff0000000000000})});
   auto center = take(ps::Footprint::from_regions({3}, {ps::Region({{1, 1}})}));
   auto answer = take(derivative.run({{"values", center}}));
+  require(take(answer.results.at("values").descriptor()).tensor_coverage(0) ==
+              take(ps::Footprint::all({3})),
+          "sparse derivative Result retains complete Whole coverage");
   std::uint64_t bits = 0;
-  require(answer.values.at("values").read({1}, &bits, 8).ok() &&
+  require(rf::read(answer.results.at("values"), {1}, &bits, 8).ok() &&
               bits == 0x4000000000000000,
           "unused center NaN ignored");
   require(
@@ -212,10 +214,9 @@ void sparse_and_step(ps::CpuNumericProfile profile) {
                   std::string::npos &&
               failed.status().detail.scope == ps::FailureScope::Run,
           "invalid step fails even initial-only projection for N>1");
-  integral.bindings.inputs[1].value =
-      array(Type::Float64, {1}, {0x3ff0000000000000});
+  integral.backing[1] = array(Type::Float64, {1}, {0x3ff0000000000000});
   auto raw = take(integral.run({{"values", zero}}));
-  require(raw.values.at("values").read({0}, &bits, 8).ok() &&
+  require(rf::read(raw.results.at("values"), {0}, &bits, 8).ok() &&
               bits == 0x7ff0000000000042,
           "output zero preserves raw initial sNaN after full preparation");
   require(take(raw.dependencies.source_support()).at("input0") ==
@@ -224,6 +225,17 @@ void sparse_and_step(ps::CpuNumericProfile profile) {
   std::cout << "Whole support/dirty, center NaN arithmetic exclusion, raw "
                "initial and Run step failure passed\n";
 }
+struct FailedSource final {
+  unsigned* calls;
+  bool step;
+  FailedSource(unsigned* count, bool is_step) : calls(count), step(is_step) {}
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase&) {
+    ++*calls;
+    return ps::Result<ps::ResultProgramPoll>(ps::Status{
+        ps::ErrorCode::OperationFailed,
+        step ? "required step producer" : "required samples producer"});
+  }
+};
 void failure_order(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
   auto registry = ps::make_default_operation_registry(false);
@@ -236,14 +248,19 @@ void failure_order(ps::CpuNumericProfile profile) {
     failure.traits.input_count = 0;
     failure.traits.input_schema.clear();
     auto& output = failure.traits.outputs[0];
-    output.shape_rule = ps::OperationShapeRule::Fixed;
-    output.fixed_output_shape = {kind == 0 ? 3U : 1U};
-    output.output_element_type = Type::Float64;
-    failure.callback = [&, kind](const auto&) {
-      ++calls[kind == 1 ? 1 : 0];
-      return ps::Result<ps::Value>(ps::Status{
-          ps::ErrorCode::OperationFailed,
-          kind == 1 ? "required step producer" : "required samples producer"});
+    output.region_rule = ps::OperationRegionRule::Whole;
+    output.output_schema.kind = ps::OperationPortKind::Result;
+    auto schema = rf::source_schema(
+        array(Type::Float64, {kind == 0 ? 3U : 1U},
+              std::vector<std::uint64_t>(kind == 0 ? 3U : 1U)));
+    output.output_schema.result_schema_id = schema.id;
+    output.output_schema.result_schema_version = schema.version;
+    output.result_schema = std::move(schema);
+    output.continuation_bytes = sizeof(FailedSource);
+    output.maximum_dependency_stages = 8;
+    failure.start_result = [&, kind](const auto&, const auto& allocator) {
+      return ps::ResultContinuation::make<FailedSource>(
+          allocator, &calls[kind == 1 ? 1 : 0], kind == 1);
     };
     require(registry->register_operation(std::move(failure)).ok(),
             "register calculus failed producers");
@@ -259,8 +276,7 @@ void failure_order(ps::CpuNumericProfile profile) {
     fixture.registry = registry;
     fixture.document.inputs.erase(fixture.document.inputs.begin(),
                                   fixture.document.inputs.begin() + 2);
-    fixture.bindings.inputs.erase(fixture.bindings.inputs.begin(),
-                                  fixture.bindings.inputs.begin() + 2);
+    fixture.backing.erase(fixture.backing.begin(), fixture.backing.begin() + 2);
     fixture.document.nodes[0].inputs[0] = ps::WorkflowNodeOutput{2, "value"};
     fixture.document.nodes[0].inputs[1] = ps::WorkflowNodeOutput{3, "value"};
     fixture.document.nodes.push_back(
@@ -270,16 +286,28 @@ void failure_order(ps::CpuNumericProfile profile) {
          {}});
     fixture.document.nodes.push_back({3, "manual.calculus_step", {}, {}});
     calls = {};
+    auto empty =
+        take(fixture.run({{"values", take(ps::Footprint::none({count}))}}));
+    require(
+        calls == std::array<unsigned, 2>{0, 0} &&
+            take(empty.results.at("values").descriptor())
+                .tensor_coverage(0)
+                .empty(),
+        "Empty calculus excludes failed producers and publishes no samples");
     auto result = fixture.run(
         {{"values",
           take(ps::Footprint::from_regions({count}, {ps::Region({{0, 1}})}))}});
     if (singleton) {
       auto answer = take(std::move(result));
       std::uint64_t bits = 0;
-      require(answer.values.at("values").read({0}, &bits, 8).ok() &&
+      require(rf::read(answer.results.at("values"), {0}, &bits, 8).ok() &&
                   bits == 0xfff0000000000042 &&
                   calls == std::array<unsigned, 2>{0, 0},
               "N1 excludes failed samples/step and copies raw initial");
+      const auto support = take(answer.dependencies.source_support());
+      require(support.size() == 1 &&
+                  support.at("input2") == take(ps::Footprint::all({1})),
+              "N1 records only initial support");
     } else {
       require(!result.ok() && calls[0] > 0,
               "N>1 zero projection still reads complete samples");
@@ -296,7 +324,7 @@ void failure_order(ps::CpuNumericProfile profile) {
       Fixture fixture(authored(integral, profile), inputs);
       fixture.registry = registry;
       fixture.document.inputs.erase(fixture.document.inputs.begin());
-      fixture.bindings.inputs.erase(fixture.bindings.inputs.begin());
+      fixture.backing.erase(fixture.backing.begin());
       fixture.document.nodes[0].inputs[0] = ps::WorkflowNodeOutput{2, "value"};
       fixture.document.nodes.push_back({2, "manual.calculus_samples", {}, {}});
       const auto previous = calls[0];
@@ -313,7 +341,6 @@ void failure_order(ps::CpuNumericProfile profile) {
 
 void strides_and_resources(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
-  auto registry = ps::make_default_operation_registry();
   for (bool integral : {false, true}) {
     auto node = authored(integral, profile);
     auto samples =
@@ -333,19 +360,16 @@ void strides_and_resources(ps::CpuNumericProfile profile) {
       inputs.push_back(take(
           ps::Value::from_storage({Type::Float64, {1}}, ps::Region::whole({1}),
                                   {0, {-8}}, control.storage())));
-    std::vector<ps::Region> regions;
-    for (const auto& value : inputs)
-      regions.push_back(value.region());
     fenv_t saved;
     require(fegetenv(&saved) == 0, "save calculus fenv");
     for (auto mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
       require(fesetround(mode) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
                   feraiseexcept(FE_DIVBYZERO) == 0,
               "calculus fenv prepare");
-      ps::OperationInvocation invocation(inputs, regions, node.parameters,
-                                         ps::Backend::Cpu, {},
-                                         ps::Region::whole({3}));
-      auto result = take(registry->invoke(node.operation, invocation));
+      auto checked = std::make_shared<point_math_checks::Control>();
+      checked->rounding = mode;
+      point_math_checks::Workflow workflow(node, inputs, {}, checked);
+      auto result = take(workflow.run()).results.at("values");
       const std::vector<std::uint64_t> expected =
           integral
               ? std::vector<std::uint64_t>{0, 0xbff8000000000000,
@@ -354,7 +378,7 @@ void strides_and_resources(ps::CpuNumericProfile profile) {
                     0x4008000000000000, 0x4000000000000000, 0x3ff0000000000000};
       for (unsigned j = 0; j < 3; ++j) {
         std::uint64_t bits = 0;
-        std::memcpy(&bits, result.bytes().data() + j * 8, 8);
+        require(rf::read(result, {j}, &bits, 8).ok(), "strided Result read");
         require(bits == expected[j], "negative source/control strides");
       }
       require(
@@ -362,10 +386,6 @@ void strides_and_resources(ps::CpuNumericProfile profile) {
           "calculus environment unchanged");
     }
     require(fesetenv(&saved) == 0, "restore calculus fenv");
-    ps::DependencyRequest request;
-    for (const auto& value : inputs)
-      request.inputs.push_back({value.descriptor(), {}});
-    request.snapshot_identity = "calculus-resource";
     Fixture empty(node,
                   {samples, array(Type::Float64, {1}, {0xbff0000000000000})});
     if (integral) {
@@ -377,10 +397,8 @@ void strides_and_resources(ps::CpuNumericProfile profile) {
             "Empty calculus skips inputs");
     ps::CancellationSource stopped;
     stopped.cancel();
-    ps::OperationInvocation cancelled(inputs, regions, node.parameters,
-                                      ps::Backend::Cpu, stopped.token(),
-                                      ps::Region::whole({3}));
-    require(registry->invoke(node.operation, cancelled).status().code ==
+    point_math_checks::Workflow cancelled(node, inputs);
+    require(cancelled.run(stopped.token()).status().code ==
                 ps::ErrorCode::Cancelled,
             "calculus pre-cancelled");
     auto large = array(Type::Float64, {16384},
@@ -390,20 +408,21 @@ void strides_and_resources(ps::CpuNumericProfile profile) {
     if (integral)
       large_inputs.push_back(array(Type::Float64, {1}, {0}));
     point_math_checks::resources(node, large_inputs);
-    request.cancellation = {};
     for (unsigned kind = 0; kind < 3; ++kind) {
-      auto bad = request;
+      Fixture bad(node, inputs);
+      auto schema = *bad.document.inputs[kind == 0 ? 0 : 1].result_schema;
       if (kind == 0)
-        bad.inputs[0].descriptor.shape = {integral ? 0U : 1U};
+        schema.tensors[0].descriptor.shape = {integral ? 0U : 1U};
       if (kind == 1)
-        bad.inputs[1].descriptor.element_type = Type::Float32;
+        schema.tensors[0].descriptor.element_type = Type::Float32;
       if (kind == 2)
-        bad.inputs[1].descriptor.shape = {2};
-      auto result =
-          registry->resolve_traits(node.operation, bad.inputs, bad.parameters);
+        schema.tensors[0].descriptor.shape = {2};
+      bad.document.inputs[kind == 0 ? 0 : 1].result_schema =
+          std::make_shared<ps::SchemaTemplate>(std::move(schema));
+      auto result = bad.run({{"values", take(ps::Footprint::all({3}))}});
       require(
           !result.ok() && result.status().code == ps::ErrorCode::TypeMismatch,
-          "calculus schema");
+          "calculus Result schema");
     }
   }
   for (bool integral : {false, true})
@@ -424,14 +443,12 @@ void strides_and_resources(ps::CpuNumericProfile profile) {
       std::vector<ps::Value> inputs{source, step};
       if (integral)
         inputs.push_back(array(Type::Float64, {1}, {0}));
-      std::vector<ps::Region> regions;
-      for (const auto& value : inputs)
-        regions.push_back(value.region());
-      ps::OperationInvocation call(inputs, regions, node.parameters);
-      auto result = take(registry->invoke(node.operation, call));
+      point_math_checks::Workflow workflow(node, inputs);
+      auto result = take(workflow.run()).results.at("values");
       for (unsigned i = 0; i < 3; ++i) {
         double actual = 0;
-        std::memcpy(&actual, result.bytes().data() + 8 * i, 8);
+        require(rf::read(result, {i}, &actual, 8).ok(),
+                "unaligned Result read");
         const double expected = integral ? (zero     ? 2 * i
                                             : i == 0 ? 0
                                             : i == 1 ? 1.5
@@ -444,23 +461,21 @@ void strides_and_resources(ps::CpuNumericProfile profile) {
   const auto facet = take(ps::encode_semantic(ps::rgba_semantics()));
   for (bool integral : {false, true}) {
     const auto raw = array(Type::Float32, {3}, {0, 0, 0});
-    auto bad = take(ps::Value::from_storage(
-        raw.descriptor(), raw.region(), raw.layout(), raw.storage(), {facet}));
-    std::vector<ps::Value> inputs{bad, array(Type::Float32, {1}, {0x3f800000})};
+    std::vector<ps::Value> inputs{raw, array(Type::Float32, {1}, {0x3f800000})};
     if (integral)
       inputs.push_back(array(Type::Float32, {1}, {0}));
-    std::vector<ps::Region> regions;
-    for (const auto& input : inputs)
-      regions.push_back(input.region());
-    auto node = authored(integral, profile);
-    ps::OperationInvocation call(inputs, regions, node.parameters);
-    require(!registry->invoke(node.operation, call).ok(),
+    Fixture bad(authored(integral, profile), inputs);
+    auto schema = *bad.document.inputs[0].result_schema;
+    schema.tensors[0].facets = {facet};
+    bad.document.inputs[0].result_schema =
+        std::make_shared<ps::SchemaTemplate>(std::move(schema));
+    require(!bad.run({{"values", take(ps::Footprint::all({3}))}}).ok(),
             "incompatible recognized typed metadata rejects rank-one calculus");
   }
   std::cout << "negative source/control strides and fenv, Empty/schema, "
                "arithmetic WorkLimit/cancellation and payload release passed\n";
 }
-void streaming(ps::CpuNumericProfile profile) {
+void sparse_integral(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
   Fixture fixture(authored(true, profile),
                   {array(Type::Float64, {4096},
@@ -471,17 +486,17 @@ void streaming(ps::CpuNumericProfile profile) {
       {4096}, {ps::Region({{0, 1}}), ps::Region({{64, 1}}),
                ps::Region({{129, 1}}), ps::Region({{4095, 1}})}));
   auto result = take(fixture.run({{"values", demand}}, false));
+  require(take(result.results.at("values").descriptor()).tensor_coverage(0) ==
+              take(ps::Footprint::all({4096})),
+          "sparse integral Result retains complete Whole coverage");
   for (std::uint64_t index : {0, 64, 129, 4095}) {
     double value = 0;
-    require(result.values.at("values").read({index}, &value, 8).ok() &&
+    require(rf::read(result.results.at("values"), {index}, &value, 8).ok() &&
                 value == static_cast<double>(index + 2),
-            "streamed cumulative integral");
+            "sparse cumulative integral");
   }
   auto changed =
       take(ps::Footprint::from_regions({4096}, {ps::Region({{64, 1}})}));
-  auto positive = take(ps::Footprint::from_regions(
-      {4096}, {ps::Region({{64, 1}}), ps::Region({{129, 1}}),
-               ps::Region({{4095, 1}})}));
   require(take(result.dependencies.potential_dirty("input0", changed))
                   .at("values") == demand,
           "inclusive integral suffix dirty");
@@ -495,6 +510,45 @@ void streaming(ps::CpuNumericProfile profile) {
           "initial all outputs");
   std::cout << "4096 inputs and complete integral output, sparse projection "
                "and Whole dirty passed\n";
+}
+void retained_output(ps::CpuNumericProfile profile) {
+  for (bool integral : {false, true}) {
+    ps::ResourceBudget root;
+    ps::ResultRef output;
+    ps::ResultTensorReadWindow window;
+    std::weak_ptr<const ps::CpuStorage> input_owner;
+    {
+      std::vector<ps::Value> inputs{
+          array(ps::ElementType::Float64, {3},
+                {0, 0x3ff0000000000000, 0x4000000000000000}),
+          array(ps::ElementType::Float64, {1}, {0x3ff0000000000000})};
+      if (integral)
+        inputs.push_back(array(ps::ElementType::Float64, {1}, {0}));
+      input_owner = inputs[0].storage();
+      point_math_checks::Workflow workflow(authored(integral, profile), inputs);
+      root = workflow.root;
+      output = take(workflow.run()).results.at("values");
+      window = take(output.acquire_tensor(take(output.descriptor()), 0,
+                                          ps::Region::whole({3})));
+    }
+    require(input_owner.expired(), "calculus output retires source backing");
+    require(root.statistics().live[ps::ResourceKind::Payload] == 24,
+            "escaped calculus Result/window share one output owner");
+    double number = 0;
+    require(
+        rf::read(output, {1}, &number, 8).ok() && number == (integral ? .5 : 1),
+        "calculus Result survives source and context retirement");
+    output = {};
+    const auto row = take(window.row_run({2}));
+    std::memcpy(&number, row.data, 8);
+    require(number == (integral ? 2 : 1) &&
+                root.statistics().live[ps::ResourceKind::Payload] == 24,
+            "authorized calculus window survives Result release");
+    window = {};
+    point_math_checks::released(root);
+  }
+  std::cout << "source retirement, escaped Result/window, one Payload owner "
+               "and final all-Root release passed\n";
 }
 }  // namespace
 int main(int argc, char** argv) {
@@ -513,7 +567,8 @@ int main(int argc, char** argv) {
       sparse_and_step(profile);
       failure_order(profile);
       strides_and_resources(profile);
-      streaming(profile);
+      sparse_integral(profile);
+      retained_output(profile);
     }
     return 0;
   } catch (const std::exception& error) {

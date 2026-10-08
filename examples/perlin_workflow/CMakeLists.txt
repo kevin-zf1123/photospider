@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   project(PhotospiderPerlinWorkflow LANGUAGES CXX)
-  find_package(Photospider 0.28 CONFIG REQUIRED COMPONENTS kernel)
+  find_package(Photospider 0.32 CONFIG REQUIRED COMPONENTS kernel)
 endif()
 add_executable(photospider_perlin_workflow main.cpp)
 target_link_libraries(photospider_perlin_workflow PRIVATE Photospider::kernel)

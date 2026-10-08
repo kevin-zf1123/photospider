@@ -9,13 +9,65 @@
 #include <stdexcept>
 #include <utility>
 
+#include "execution/resource_observation.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 
 namespace ps {
 namespace {
 thread_local const ResourceBudget* metadata_root = nullptr;
 thread_local ErrorCode* metadata_error = nullptr;
+thread_local execution_internal::ResourcePayloadScope* payload_scope = nullptr;
 }  // namespace
+namespace execution_internal {
+PayloadObservation::Snapshot PayloadObservation::peaks() const noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return {peak_, peak_reserved_};
+}
+PayloadObservation::Snapshot PayloadObservation::live_bytes() const noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return {live_, reserved_};
+}
+ResourcePayloadScope::ResourcePayloadScope(const ResourceBudget& root,
+                                           PayloadCapture capture) noexcept
+    : root_(root), capture_(std::move(capture)), previous_(payload_scope) {
+  payload_scope = this;
+}
+ResourcePayloadScope::~ResourcePayloadScope() noexcept {
+  payload_scope = previous_;
+}
+PayloadCapture ResourcePayloadScope::capture(
+    const ResourceBudget& root) noexcept {
+  return capture_owner(root.impl_.get());
+}
+PayloadCapture ResourcePayloadScope::capture_owner(const void* root) noexcept {
+  for (auto* scope = payload_scope; scope; scope = scope->previous_)
+    if (scope->root_.impl_.get() == root)
+      return scope->capture_;
+  return {};
+}
+void ResourcePayloadAccess::update(const PayloadCapture& capture,
+                                   std::uint64_t reserved_add,
+                                   std::uint64_t reserved_remove,
+                                   std::uint64_t actual_add,
+                                   std::uint64_t actual_remove) noexcept {
+  const auto apply =
+      [&](const std::shared_ptr<PayloadObservation>& observation) {
+        if (!observation)
+          return;
+        std::lock_guard<std::mutex> lock(observation->mutex_);
+        observation->reserved_ += reserved_add;
+        observation->reserved_ -= reserved_remove;
+        observation->live_ += actual_add;
+        observation->live_ -= actual_remove;
+        observation->peak_ = std::max(observation->peak_, observation->live_);
+        observation->peak_reserved_ =
+            std::max(observation->peak_reserved_, observation->reserved_);
+      };
+  apply(capture.run);
+  if (capture.producer != capture.run)
+    apply(capture.producer);
+}
+}  // namespace execution_internal
 namespace resource_internal {
 const ResourceBudget* metadata_budget() noexcept {
   return metadata_root;
@@ -79,6 +131,37 @@ struct ResourceBudget::Impl {
   std::mutex mutex;
   ResourceLimits limits;
   ResourceStatistics stats;
+  std::function<void(const ResourceCapacity&)> reclaimer;
+  void reclaim(const ResourceCapacity& capacity) {
+    thread_local bool active = false;
+    if (active)
+      return;
+    std::function<void(const ResourceCapacity&)> callback;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (fits(capacity))
+        return;
+      callback = reclaimer;
+    }
+    if (!callback)
+      return;
+    // Reference retirement takes this gate. A caller already holding it must
+    // preflight reclamation outside the gate rather than retire its own alias.
+    std::unique_lock<std::mutex> admission(reference_admission,
+                                           std::try_to_lock);
+    if (!admission.owns_lock())
+      return;
+    admission.unlock();
+    active = true;
+    struct Restore {
+      bool& flag;
+      ~Restore() { flag = false; }
+    } restore{active};
+    try {
+      callback(capacity);
+    } catch (...) {
+    }
+  }
   std::atomic<std::uint64_t> issued_work{0};
   bool admit_work(std::uint64_t amount) {
     if (!amount)
@@ -111,6 +194,8 @@ struct ResourceBudget::Impl {
 struct ResourceLease::Impl {
   std::shared_ptr<ResourceBudget::Impl> root;
   ResourceCapacity amount;
+  execution_internal::PayloadCapture observation;
+  std::uint64_t committed_payload = 0;
   bool quarantined = false;
   ~Impl() {
     if (!root)
@@ -119,9 +204,48 @@ struct ResourceLease::Impl {
     if (!quarantined) {
       for (std::size_t i = 0; i < amount.values.size(); ++i)
         root->stats.live.values[i] -= amount.values[i];
+      execution_internal::ResourcePayloadAccess::update(
+          observation, 0, amount[ResourceKind::Payload], 0, committed_payload);
     }
   }
 };
+namespace execution_internal {
+void ResourcePayloadAccess::commit(ResourceLease& lease,
+                                   std::uint64_t bytes) noexcept {
+  if (!lease.impl_ || !bytes)
+    return;
+  auto& impl = *lease.impl_;
+  std::lock_guard<std::mutex> lock(impl.root->mutex);
+  if (impl.quarantined)
+    return;
+  // A native provider can allocate more than its preflight capacity and then
+  // fail validation. Its real allocation still contributes to this peak.
+  impl.committed_payload += bytes;
+  update(impl.observation, 0, 0, bytes, 0);
+}
+void ResourcePayloadAccess::withdraw(ResourceLease& lease,
+                                     std::uint64_t bytes) noexcept {
+  if (!lease.impl_ || !bytes)
+    return;
+  auto& impl = *lease.impl_;
+  std::lock_guard<std::mutex> lock(impl.root->mutex);
+  if (impl.quarantined || bytes > impl.committed_payload)
+    return;
+  impl.committed_payload -= bytes;
+  update(impl.observation, 0, 0, 0, bytes);
+}
+void ResourcePayloadAccess::commit_owner(const std::shared_ptr<void>& owner,
+                                         std::uint64_t bytes) noexcept {
+  ResourceLease lease;
+  lease.impl_ = std::static_pointer_cast<ResourceLease::Impl>(owner);
+  commit(lease, bytes);
+}
+}  // namespace execution_internal
+namespace resource_internal {
+void commit_payload(ResourceLease& lease, std::uint64_t bytes) noexcept {
+  execution_internal::ResourcePayloadAccess::commit(lease, bytes);
+}
+}  // namespace resource_internal
 struct ResourceBudget::Impl::Reference {
   ResourceLease lease;
   std::shared_ptr<Impl> root;
@@ -174,9 +298,14 @@ Result<ResourceLease> ResourceBudget::reserve(ResourceCapacity capacity) const {
     return failure();
   capacity[ResourceKind::Host] += overhead;
   capacity[ResourceKind::Metadata] += overhead;
-  std::lock_guard<std::mutex> lock(impl_->mutex);
-  if (!impl_->fits(capacity))
-    return failure();
+  std::unique_lock<std::mutex> lock(impl_->mutex);
+  if (!impl_->fits(capacity)) {
+    lock.unlock();
+    impl_->reclaim(capacity);
+    lock.lock();
+    if (!impl_->fits(capacity))
+      return failure();
+  }
   // Admission and fallible owner construction are one serialized transaction.
   // No resource can be published until construction succeeds.
   try {
@@ -184,12 +313,23 @@ Result<ResourceLease> ResourceBudget::reserve(ResourceCapacity capacity) const {
     impl_->add(capacity);
     owner->root = impl_;
     owner->amount = capacity;
+    if (capacity[ResourceKind::Payload]) {
+      owner->observation =
+          execution_internal::ResourcePayloadScope::capture(*this);
+      execution_internal::ResourcePayloadAccess::update(
+          owner->observation, capacity[ResourceKind::Payload], 0, 0, 0);
+    }
     ResourceLease lease;
     lease.impl_ = std::move(owner);
     return Result<ResourceLease>(std::move(lease));
   } catch (const std::bad_alloc&) {
     return failure();
   }
+}
+void ResourceBudget::set_reclaimer(
+    std::function<void(const ResourceCapacity&)> reclaim) const {
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->reclaimer = std::move(reclaim);
 }
 ResourceCapacity ResourceLease::capacity() const {
   if (!impl_)
@@ -205,20 +345,35 @@ Status ResourceLease::grow(ResourceCapacity additional) {
     return Status::failure(ErrorCode::Stale, "invalid resource lease");
   if (!coherent(additional))
     return Status::failure(ErrorCode::InvalidArgument, "inconsistent growth");
-  std::lock_guard<std::mutex> lock(impl_->root->mutex);
+  std::unique_lock<std::mutex> lock(impl_->root->mutex);
   if (impl_->quarantined)
     return Status::failure(ErrorCode::Stale, "quarantined resource lease");
-  if (!impl_->root->fits(additional))
-    return exhausted();
+  if (!impl_->root->fits(additional)) {
+    lock.unlock();
+    impl_->root->reclaim(additional);
+    lock.lock();
+    if (impl_->quarantined)
+      return Status::failure(ErrorCode::Stale, "quarantined resource lease");
+    if (!impl_->root->fits(additional))
+      return exhausted();
+  }
   impl_->root->add(additional);
+  if (!impl_->amount[ResourceKind::Payload] &&
+      additional[ResourceKind::Payload] && !impl_->observation.run &&
+      !impl_->observation.producer)
+    impl_->observation =
+        execution_internal::ResourcePayloadScope::capture_owner(
+            impl_->root.get());
   for (std::size_t i = 0; i < additional.values.size(); ++i)
     impl_->amount.values[i] += additional.values[i];
+  execution_internal::ResourcePayloadAccess::update(
+      impl_->observation, additional[ResourceKind::Payload], 0, 0, 0);
   return Status::success();
 }
 Status ResourceLease::add_shared_payload(std::uint64_t bytes) {
   if (!impl_)
     return Status::failure(ErrorCode::Stale, "invalid resource lease");
-  std::lock_guard<std::mutex> lock(impl_->root->mutex);
+  std::unique_lock<std::mutex> lock(impl_->root->mutex);
   if (impl_->quarantined)
     return Status::failure(ErrorCode::Stale, "quarantined resource lease");
   const auto payload = impl_->amount[ResourceKind::Payload];
@@ -229,8 +384,19 @@ Status ResourceLease::add_shared_payload(std::uint64_t bytes) {
   ResourceCapacity additional;
   additional[ResourceKind::Device] = bytes;
   additional[ResourceKind::Shared] = bytes;
-  if (!impl_->root->fits(additional))
-    return exhausted();
+  if (!impl_->root->fits(additional)) {
+    lock.unlock();
+    impl_->root->reclaim(additional);
+    lock.lock();
+    if (impl_->quarantined)
+      return Status::failure(ErrorCode::Stale, "quarantined resource lease");
+    if (bytes > impl_->amount[ResourceKind::Payload] -
+                    impl_->amount[ResourceKind::Shared])
+      return Status::failure(ErrorCode::InvalidArgument,
+                             "native classification exceeds reserved payload");
+    if (!impl_->root->fits(additional))
+      return exhausted();
+  }
   impl_->root->add(additional);
   impl_->amount[ResourceKind::Device] += bytes;
   impl_->amount[ResourceKind::Shared] += bytes;
@@ -250,12 +416,15 @@ Status ResourceLease::shrink(ResourceCapacity released) {
     remaining.values[i] -= released.values[i];
   }
   if (!coherent(remaining) || remaining[ResourceKind::Host] < sizeof(Impl) ||
-      remaining[ResourceKind::Metadata] < sizeof(Impl))
+      remaining[ResourceKind::Metadata] < sizeof(Impl) ||
+      remaining[ResourceKind::Payload] < impl_->committed_payload)
     return Status::failure(ErrorCode::InvalidArgument,
                            "inconsistent lease shrink");
   for (std::size_t i = 0; i < released.values.size(); ++i)
     impl_->root->stats.live.values[i] -= released.values[i];
   impl_->amount = remaining;
+  execution_internal::ResourcePayloadAccess::update(
+      impl_->observation, 0, released[ResourceKind::Payload], 0, 0);
   return Status::success();
 }
 void ResourceLease::quarantine() noexcept {
@@ -370,6 +539,30 @@ Result<std::shared_ptr<const CpuStorage>> ResourceBudget::reference(
       ResourceCapacity::host(sizeof(Impl::Reference), sizeof(Impl::Reference));
   capacity[ResourceKind::Referenced] = storage->capacity();
   capacity[ResourceKind::Entries] = 1;
+  auto complete = capacity;
+  complete[ResourceKind::Host] += lease_metadata_bytes();
+  complete[ResourceKind::Metadata] += lease_metadata_bytes();
+  bool fits = false;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    fits = impl_->fits(complete);
+  }
+  if (!fits) {
+    admission.unlock();
+    impl_->reclaim(complete);
+    admission.lock();
+    for (;;) {
+      retiring = false;
+      {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        if (auto existing = find())
+          return Answer(std::move(existing));
+      }
+      if (!retiring)
+        break;
+      impl_->reference_changed.wait(admission);
+    }
+  }
   auto admitted = reserve(capacity);
   if (!admitted.ok())
     return Answer(admitted.status());
@@ -409,6 +602,8 @@ BufferAllocator ResourceBudget::allocator() const {
   };
   BufferAllocator result(reserve(false), impl_);
   result.native_shared_reserve_ = reserve(true);
+  result.allocation_committed_ =
+      execution_internal::ResourcePayloadAccess::commit_owner;
   return result;
 }
 }  // namespace ps

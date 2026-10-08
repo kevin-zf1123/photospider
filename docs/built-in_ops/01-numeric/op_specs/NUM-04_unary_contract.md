@@ -83,20 +83,29 @@ all profiles; native platform NaN propagation is not the specification.
 
 ## Common interface and execution
 
-Each node has one generic numeric Value input `input` and one generic Value
-output `values`. Shape is preserved exactly, with rank 1..8 and positive extents
-under the current Value/Region representation. Dtype support/output mapping is
-declared by the individual operator. No implicit integer/float conversion,
-shape change, physical units or color/alpha inference is introduced. Output
-facets are empty. Input facets retain existing metadata and actually observed
-typed-semantic validation; an invalid typed NaN does not become valid just
-because generic numeric NaNs are allowed by the arithmetic profile.
+Each node consumes numeric tensor data from a Result input and publishes a
+Result on output port `values`. Each input Result contains exactly one tensor
+member in slot 0 and may also contain fields. Its schema ID and facets may vary.
+Recognized tensor facets and spatial metadata still undergo full-input typed
+validation; numeric NaN acceptance does not bypass typed constraints such as
+alpha validity. The tensor sample shape has rank 1..8, positive extents, and at
+most 2^40 elements. The
+individual operation declares its accepted dtypes and output mapping. No
+implicit integer/float conversion, shape change, physical units or color/alpha
+inference is introduced. The output schema is `photospider.tensor`, with tensor
+key `samples`, the preserved shape, and empty facets.
 
-Every nonempty request uses synchronous Whole execution. Data support and typed
-validation cover each complete input, including gaps outside the consumer's
-projection. Empty requests read no payload and invoke no callback. Any changed
-input coordinate invalidates all observed output coordinates. Metadata inference
-still depends only on metadata and the static profile.
+Metadata specialization checks the input tensor dtype and shape. A nonempty
+request uses Whole execution and requires Data, Validation and Descriptor
+support for every input sample, including samples outside the consumer's
+projection. The coordinator supplies authorized tensor windows; compatible
+strided storage remains usable without requiring a full packed input copy. The
+operation writes a complete packed Result, then the executor projects the
+requested coordinates. Empty Result queries still undergo static validation and
+resource admission, then return empty tensor coverage without reading input
+payload or running arithmetic. Any changed input coordinate invalidates all
+observed output coordinates. Metadata inference depends only on schema metadata
+and the static profile.
 
 Integer overflow and invalid rational denominators fail the complete invocation
 with Run scope and no Atom key, including when outside the consumer projection.
@@ -123,13 +132,15 @@ IEEE classifications, signed-zero rules and NaN payload handling remain exact
 even if finite numeric results permit a tolerance. Platform-specific keys on
 unsupported hosts return BackendUnavailable, without silent key replacement.
 
-For N full logical elements and destination size b, output capacity is N*b,
-even for a one-element consumer. Full collected input owners and one fixed
-arithmetic workspace are additional live capacity. Account output, scratch and
-all refinement work through the worker allocator/resource scope. Managed limits
-are capacity accounting, not an RSS guarantee. Simple transforms cost O(N).
-Poll cancellation before reads, within long refinement and before publication.
-Sparse requests may therefore use substantially more memory and work.
+For N full logical elements and destination size b, the complete output backing
+uses N*b bytes, even for a one-element consumer. Authorized input windows retain
+or read the source Result backing; the operation does not first collect every
+input into a packed array. The complete output and fixed arithmetic workspace
+still use the worker's managed resources. Account output, scratch and all
+refinement work through the worker resource scope. Managed limits account
+capacities, not RSS. Simple transforms cost O(N). Poll cancellation before
+reads, within long refinement and before publication. Sparse requests may
+therefore use substantially more memory and work.
 
 Cache identities include operation/profile version, input metadata and exact
 observed bits, including NaN payload/sign. Required validation and upstream
@@ -168,23 +179,45 @@ floating pi-multiple functions remain separate. Reduced common-angle denominator
 
 ## Maintained implementation and validation
 
-The maintained keys are registered in `plugins/ops/01-numeric/numeric_unary.cpp`
-and exposed through `photospider/numeric/unary.hpp`. Bit-level special cases
-precede controlled hardware elementary arithmetic. Strict transcendental results
-use directed Q128..Q4096 enclosures. Accelerated ordinary results use private
-SLEEF binary64 kernels and conservative final-error checks within the
-[admitted ranges](NUM_accelerated_contract.md#image-budget-and-extended-domains).
-Pi and rational-pi arguments undergo exact quadrant reduction before approximation.
-Rejected candidates use strict evaluation . Unresolved
-strict rounding may return `ResourceExhausted`. Nonempty requests use Whole execution with full-input typed validation,
-complete packed output allocation and Run-scoped arithmetic errors. Empty requests
-read no payload. Per-value fallback/evaluation diagnostics are unavailable (N/A)
-on this callback path; numerical fallback behavior is unchanged.
+The 66 maintained unary keys are registered in `plugins/ops/01-numeric/numeric_unary.cpp`
+and exposed through `photospider/numeric/unary.hpp`. The helpers author Result
+workflows. Each input port accepts a Result with a supported numeric tensor in
+slot 0; metadata specialization requires matching input dtype and complete
+sample shape. It does not require a particular input schema ID or image facet.
+Every nonempty request uses a Whole continuation, requests the complete input
+with Data, Validation and Descriptor roles, and reads through authorized tensor
+windows. Compatible signed and zero strides remain readable without requiring
+input packing. The operation validates all samples and writes one complete
+packed Result output; the executor applies the requested projection afterward.
+The output schema is `photospider.tensor` with tensor key `samples` and empty
+facets. Ordinary unary operations preserve dtype; rational pi helpers use their
+explicit Float32/Float64 output selection.
+
+Metadata specialization requires rank 1..8, positive extents, matching sample
+shapes and at most 2^40 samples. Shape and dtype mismatch return
+`TypeMismatch/Schema`. Arithmetic overflow or an invalid rational denominator
+anywhere fails the Whole invocation with Run scope and no Atom key. IEEE
+nonfinite results succeed. Empty requests still undergo static validation and
+resource admission, then return empty tensor coverage without payload reads or
+computation. Results retain immutable backing beyond context lifetime.
+
+Bit-level special cases precede controlled hardware elementary arithmetic.
+Strict transcendental results use directed Q128..Q4096 enclosures. Accelerated
+ordinary results use private SLEEF binary64 kernels and conservative final-error
+checks within the [admitted ranges](NUM_accelerated_contract.md#image-budget-and-extended-domains).
+Pi and rational-pi arguments undergo exact quadrant reduction before
+approximation. Rejected candidates use strict evaluation; unresolved rounding
+may return `ResourceExhausted`. Per-value fallback counters are not emitted by
+this Whole callback; execution-level computed-element diagnostics are separate.
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
-cover this operation. The combined NUM-04 family suite passed 7,524 independent
-integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.0-p12; revalidated 2026-09-21)
-and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
-local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
-record the scope and limitations. Manual targets have no CTest/integration
-registration; MPFR is used only by the independent Python oracle.
+document the constructors, Result bindings, manual checks and oracle entry
+points. The root registers `test_numeric_unary_result`, which runs the strict
+Result workflow; the testing build includes the manual target through the
+`test_numeric_result_math` dependency. Current strict and Apple C++ checks and
+the independent 7,524-case integer/Fraction/MPFR oracle for each profile passed
+with MPFR 4.2.2. The installed `Photospider::kernel` consumer also passed
+`installed_numeric_unary_result` (1/1). MPFR is used only by the independent
+Python oracle. The [historical validation and
+native timing](../math-implementation.md#num-04-validation-and-native-timing)
+remain scoped to the runs documented there.

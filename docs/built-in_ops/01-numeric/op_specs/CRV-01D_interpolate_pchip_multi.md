@@ -13,12 +13,9 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: 3d35f5eb
-implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+repository_commit: current working tree
 ---
 
 # CRV-01D: interpolate_pchip_multi
@@ -53,12 +50,7 @@ node. Each port has one dtype, so y columns share that array's dtype; x, y and
 query may independently use Float32/Float64. Outputs select Float32/Float64,
 default Float64, with empty facets.
 
-For every nonempty request, one CPU Whole callback collects complete x, y and
-query inputs, including recognized typed validation and upstream failures. It
-validates all x knots and all query controls before y arithmetic, evaluates every query and every output column, and returns
-one immutable dense output of shape [N] or [N,C]. Empty reads no payload; static
-metadata validation still applies. Sparse demand restricts publication coverage,
-but does not reduce input collection, computation or the complete output owner.
+For every nonempty request, the Whole Result program requests complete x, y and query inputs with Data, Validation and Descriptor (role 13), including typed validation and upstream failures. It validates all x knots and query controls before y arithmetic, evaluates every query and output column, and publishes a complete dense Result of shape [N] or [N,C]. The Result association records the actual source ObjectIds. Empty reads no payload; static metadata validation still applies. A nonempty local request still computes and stores the complete output. The returned Result may retain complete certified coverage, and sample coordinates remain global rather than being rebased to the request.
 
 The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
 linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
@@ -152,8 +144,13 @@ PCHIP stencils and reduce them to the linear formula. Complete input collection,
 the Whole contract above; mathematical y stencils remain unchanged.
 
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
-contains the shared arithmetic/resource details and actual platform acceptance.
+contains the shared arithmetic/resource details and current validation boundary.
 See [the editable workflow](../../../../examples/numeric_workflow/README.md#explicit-query-curves-crv-01)
-for construction, explicit work budgets, commands and checked expected results.
-The manual target is excluded from default builds and CTest/integration testing.
-Specification status remains Proposed.
+for construction, commands and checked expected results. The shared Result
+manual fixture passed all six groups under direct Strict and Apple runs; the
+strengthened Fraction oracle passed 2,487 bit-exact cases per profile, covering
+all four forms, mixed input/destination dtypes and domain policies. The focused
+CTest selection passed 3/3; the installed package 0.32 consumer passed under
+Strict (CTest 1/1) and direct Apple execution. The bounded eight-row-per-profile
+benchmark smoke passed, with no performance improvement claimed. This
+operation's specification status remains Proposed.

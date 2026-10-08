@@ -1,6 +1,6 @@
 # 混合模式与图层合成
 
-2026-09-13：`make_layer_operation` 已提供 assemble、over、coverage opacity、front/behind emission、flatten、Response、RawSum 和 weighted reduce/finalize 链。使用固定 linear-sRGB D65 的 paged Result，详见[Layer runtime](../../kernel-architecture/Layer-Runtime.md)与[示例](../../../examples/layer_workflow/README.md)。raw mass、coverage alpha、averaging weight 分开；W=0 输出 OptionalLayer 无有效样本；关联下溢明确失败。
+`LayerPixel`、`LayerResponsePixel`、`RawRgbaSumPixel`、contribution 和 weighted-sum 值类型及其纯计算 helper 保留在 C++ 数据 API，详见[Layer runtime](../../kernel-architecture/Layer-Runtime.md)。当前没有 Layer operation factory、Result 图像路径或可运行示例。`layer_schema` 可构造描述，但 `SchemaTemplate::validate` 拒绝六种 Layer Result schema ID 和 `photospider.layer` facet。本文 blend 与 group 语义保持 Proposed；不代表注册或发布能力。raw mass、coverage alpha 和 averaging weight 仍是不同的值语义，W=0 表示 OptionalLayer 无有效样本，关联下溢明确失败。
 
 已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
 
@@ -25,7 +25,7 @@
 
 `c_out=(1-a)c_b+(1-b)c_s+a*b*f(B,S)`，`alpha_out=a+b-a*b`。
 
-这一定义适用于普通coverage颜色，不自动涵盖alpha=0而RGB非零的emission数据。`image.source_over` 和 `image.mix` 已实现；Layer 的 over、raw plus 与 emission 另按下述已实现契约使用，其余艺术模式仍为提议。
+这一定义适用于普通coverage颜色，不自动涵盖alpha=0而RGB非零的emission数据。`image.source_over` 和 `image.mix` 是已注册 operation；`layer_over`、`raw_rgba_plus` 与 `layer_emit` 是独立的纯值 helper，不是图像 operation。其余艺术混合模式仍为提议。
 
 ## 逐通道混合
 
@@ -51,7 +51,7 @@
 | BLN-16 hard_mix | threshold(vivid_light,.5)的独立提议版本 | (B=0,S=1)输出0；与B+S>=1版本不同，商业fill/opacity待核验，D2 |
 | BLN-17 darker_color / lighter_color | 根据指定L*/Y选择整组B或S | 避免逐通道min/max产生新的颜色 |
 | BLN-18 dissolve | 以a为概率选择源coverage的seeded随机模式 | seed=0、全局像素坐标；彩色合成与时间稳定性单列 |
-| BLN-19 emission_add | `RGBout=RGBb+gain*E`，alpha按显式keep_background | 已有 Layer 独立 E 与 `layer.emit_front/emit_behind`；BLN-19 的单一 RGB/keep-alpha 形式不是这些 key 的替代契约 |
+| BLN-19 emission_add | `RGBout=RGBb+gain*E`，alpha按显式keep_background | 纯值 helper `layer_emit` 保留独立 E；BLN-19 的单一 RGB/keep-alpha 形式既不替代该值契约，也不表示当前有 operation key |
 | BLN-20 premul_mix | `(1-t)*A+t*B`对全部premul分量，t∈[0,1] | 同一图像原版与调色版插值可保alpha；不是将调色副本source-over回原图 |
 
 BLN-03..10、15的有界公式可对照W3C；扩展模式11..19为本规格明确选择的数学版本，未宣称Photoshop bit identity。Adobe官方模式说明用于功能名覆盖，不作为未公开数值算法证明。[^w3c][^adobe]

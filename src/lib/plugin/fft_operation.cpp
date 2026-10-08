@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -98,9 +99,13 @@ Status inputs(Op op, const SpectrumSpec& spec,
           height, op == Op::ForwardReal ? width : columns};
       if (op == Op::ImportResponse)
         shape.push_back(2);
-      if (input.result_schema ||
-          input.descriptor.element_type != ElementType::Float64 ||
-          input.descriptor.shape != shape || !input.facets.empty())
+      if (!input.result_schema || !input.result_schema->fields.empty() ||
+          input.result_schema->tensors.size() != 1)
+        return invalid("FFT source requires one Result tensor");
+      const auto& tensor = input.result_schema->tensors[0];
+      if (tensor.descriptor.element_type != ElementType::Float64 ||
+          tensor.descriptor.shape != shape || !tensor.facets.empty() ||
+          !tensor.batch_axes.empty())
         return invalid(
             "FFT source shape/type must match complete transform identity");
     } else if (!input.result_schema || !schema.ok() ||
@@ -178,21 +183,25 @@ struct State {
     std::array<ResultRelation, 4> parts;
     unsigned used = 0;
     for (unsigned i = 0; i < p.query.inputs.size(); ++i) {
-      auto made =
-          ResultRelation::cartesian(p.resources, outputs,
-                                    {i, input[i].valid() ? 7U : 15U, 0,
-                                     op == Op::ForwardReal ? n : stored * 2},
-                                    DependencyGuarantee::Conservative);
+      const bool tensor = op == Op::ForwardReal || op == Op::ImportResponse;
+      auto made = ResultRelation::cartesian(
+          p.resources, outputs,
+          {i, 7, 0,
+           tensor ? (op == Op::ForwardReal ? n : stored * 2)
+                  : descriptors[i].rows(0),
+           tensor ? ResultSupportTarget::Tensor : ResultSupportTarget::Field,
+           0},
+          DependencyGuarantee::Conservative);
       if (!made.ok())
         return made;
       parts[used++] = made.take_value();
-      if (input[i].valid()) {
-        made = ResultRelation::cartesian(p.resources, outputs, {i, 8, 0, 1},
-                                         DependencyGuarantee::Conservative);
-        if (!made.ok())
-          return made;
-        parts[used++] = made.take_value();
-      }
+      made = ResultRelation::cartesian(
+          p.resources, outputs,
+          {i, 8, 0, 1, ResultSupportTarget::Descriptor, 0},
+          DependencyGuarantee::Conservative);
+      if (!made.ok())
+        return made;
+      parts[used++] = made.take_value();
     }
     auto capacity = p.resources.reserve(ResourceCapacity::host(
         used * sizeof(ResultRelation), used * sizeof(ResultRelation)));
@@ -264,12 +273,15 @@ struct State {
                                                    {position % columns, batch}};
     if (response)
       dimensions.push_back({0, 2});
-    auto requested = Footprint::from_regions(p.query.inputs[0].descriptor.shape,
-                                             {Region(std::move(dimensions))});
+    auto requested = Footprint::from_regions(
+        p.query.inputs[0].result_schema->tensors[0].sample_shape(),
+        {Region(std::move(dimensions))});
     if (!requested.ok())
       return Poll(requested.status());
     stage = response ? SimpleReady : SourceReady;
-    return Poll(ResultProgramNeed{{{0, requested.take_value()}}, {}, {}});
+    ResultProgramNeed need;
+    need.tensors.push_back({0, 0, requested.take_value(), 15});
+    return Poll(std::move(need));
   }
   Result<MutableBuffer> values(const ResultProgramPhase& p, bool response) {
     auto memory = p.allocator.allocate(batch * 16);
@@ -287,7 +299,7 @@ struct State {
                                                      position % columns + i};
         if (response)
           coordinate.push_back(c);
-        auto status = p.read(0, coordinate, &value[c], 8);
+        auto status = p.read_tensor(0, 0, coordinate, &value[c], 8);
         if (!status.ok())
           return Result<MutableBuffer>(status);
       }
@@ -351,7 +363,6 @@ struct State {
           stage = Created;
           return Poll(ResultProgramNeed{
               {},
-              {},
               {ResultCreateTemporary{}, ResultCreateTemporary{}}});
         }
         case Created:
@@ -359,7 +370,6 @@ struct State {
           b = std::get<TemporaryStorage>(p.io.at(1));
           stage = Extended;
           return Poll(ResultProgramNeed{{},
-                                        {},
                                         {ResultExtendTemporary{a, n * 16},
                                          ResultExtendTemporary{b, n * 16}}});
         case Extended:
@@ -382,7 +392,7 @@ struct State {
           if (!read.ok())
             return Poll(read.status());
           stage = SourceReady;
-          return Poll(ResultProgramNeed{{}, {}, {read.take_value()}});
+          return Poll(ResultProgramNeed{{}, {read.take_value()}});
         }
         case SourceReady: {
           Result<MutableBuffer> memory(Status{ErrorCode::Internal, {}});
@@ -413,7 +423,6 @@ struct State {
           position += batch;
           stage = Source;
           return Poll(ResultProgramNeed{
-              {},
               {},
               {ResultWriteTemporary{a, offset, std::move(buffer).freeze()}}});
         }
@@ -537,7 +546,6 @@ struct State {
           stage = LeafReady;
           return Poll(ResultProgramNeed{
               {},
-              {},
               {ResultReadTemporary{a, offset * 16, batch * 16}}});
         }
         case LeafReady: {
@@ -607,7 +615,6 @@ struct State {
           stage = LeafWritten;
           return Poll(ResultProgramNeed{
               {},
-              {},
               {ResultWriteTemporary{b, offset, std::move(slab).freeze()}}});
         }
         case LeafWritten:
@@ -645,7 +652,6 @@ struct State {
           position += batch;
           stage = TransposeWritten;
           return Poll(ResultProgramNeed{
-              {},
               {},
               {ResultWriteTemporary{a, offset, std::move(buffer).freeze()}}});
         }
@@ -705,7 +711,7 @@ struct State {
             return Poll(write.status());
           fill = 0;
           stage = OutputWritten;
-          return Poll(ResultProgramNeed{{}, {}, {write.take_value()}});
+          return Poll(ResultProgramNeed{{}, {write.take_value()}});
         }
         case OutputWritten:
           stage = Output;
@@ -753,7 +759,7 @@ struct State {
             return Poll(write.status());
           position += batch;
           stage = SimpleWritten;
-          return Poll(ResultProgramNeed{{}, {}, {write.take_value()}});
+          return Poll(ResultProgramNeed{{}, {write.take_value()}});
         }
         case SimpleWritten:
           stage = Simple;
@@ -768,7 +774,7 @@ struct State {
           if (!write.ok())
             return Poll(write.status());
           stage = Finish;
-          return Poll(ResultProgramNeed{{}, {}, {write.take_value()}});
+          return Poll(ResultProgramNeed{{}, {write.take_value()}});
         }
         case Finish:
           return finish(p);
@@ -859,10 +865,25 @@ Result<OperationDefinition> make_fft_operation(Op operation,
       port.result_schema_id = "photospider.spectrum";
       port.result_schema_version = 1;
     }
+  } else {
+    auto& port = traits.input_schema[0];
+    port.kind = OperationPortKind::Result;
+    port.element_type = static_cast<std::uint32_t>(ElementType::Float64);
+    port.rank = operation == Op::ForwardReal ? 2 : 3;
   }
-  definition.validate_dependency = [operation, spectrum](const auto& metadata,
-                                                         const auto&) {
-    return inputs(operation, spectrum, metadata);
+  traits.requires_metadata_specialization = true;
+  definition.specialize_metadata =
+      [operation, spectrum, schema = *out.result_schema](
+          const auto& metadata,
+          const auto&) -> Result<std::vector<OperationOutputSpecialization>> {
+    auto status = inputs(operation, spectrum, metadata);
+    if (!status.ok())
+      return Result<std::vector<OperationOutputSpecialization>>(status);
+    OperationOutputSpecialization output;
+    output.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(schema);
+    return Result<std::vector<OperationOutputSpecialization>>(
+        std::vector<OperationOutputSpecialization>{std::move(output)});
   };
   definition.start_result = [operation, spectrum](
                                 const ResultProgramQuery& query,

@@ -11,11 +11,17 @@
 #include <utility>
 #include <vector>
 
+#include "../shared/result_source.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
 using Poll = Result<ResultProgramPoll>;
+using Failure = example_result::Failure;
+void require(Status status) {
+  if (!status.ok())
+    throw Failure(std::move(status));
+}
 void check(bool ok, const char* message) {
   if (!ok)
     throw std::runtime_error(message);
@@ -23,9 +29,7 @@ void check(bool ok, const char* message) {
 template <class T>
 T take(Result<T> result) {
   if (!result.ok())
-    throw std::runtime_error(
-        "code=" + std::to_string(static_cast<int>(result.status().code)) +
-        ": " + result.status().message);
+    throw Failure(result.status());
   return result.take_value();
 }
 std::int64_t sample(std::uint64_t i, unsigned variant) {
@@ -45,40 +49,49 @@ bool selected(std::uint64_t i, unsigned variant) {
   return variant != 2 && variant != 11 && (variant != 1 || i % 3 != 0) &&
          (variant != 5 || i != 0);
 }
-std::shared_ptr<RegionalSource> source(StatisticsSpec spec, bool mask,
-                                       unsigned variant) {
-  auto result = std::make_shared<RegionalSource>();
-  result->descriptor = {mask ? ElementType::UInt8 : ElementType::Int64,
-                        {spec.height, spec.width}};
-  result->read = [spec, mask, variant](
-                     const Region& region, std::uint8_t* output,
-                     std::uint64_t bytes, const BufferAllocator&,
-                     const CancellationToken&) -> Result<Region> {
-    if (bytes > 4096)
-      return Result<Region>(Status{ErrorCode::OperationFailed,
-                                   "source strip exceeds 4096 bytes"});
-    const auto& r = region.dimensions();
-    std::uint64_t offset = 0;
-    for (auto y = r[0].offset; y < r[0].offset + r[0].extent; ++y)
-      for (auto x = r[1].offset; x < r[1].offset + r[1].extent; ++x) {
-        const auto index = y * spec.width + x;
-        const auto width = mask ? 1U : 8U;
-        if (offset + width > bytes)
-          return Result<Region>(
-              Status{ErrorCode::InvalidArgument, "source bounds"});
-        if (mask) {
-          output[offset] = selected(index, variant) ? 255 : 0;
-        } else {
-          const auto value = sample(index, variant);
-          std::memcpy(output + offset, &value, 8);
-        }
-        offset += width;
-      }
-    return offset == bytes ? Result<Region>(region)
-                           : Result<Region>(Status{ErrorCode::InvalidArgument,
-                                                   "source byte count"});
-  };
+SchemaTemplate tensor_schema(ElementType type,
+                             std::vector<std::uint64_t> shape) {
+  SchemaTemplate result;
+  result.id = "photospider.tensor";
+  ResultTensorSpec tensor;
+  tensor.key = "samples";
+  tensor.descriptor = {type, std::move(shape)};
+  result.tensors.push_back(std::move(tensor));
   return result;
+}
+OperationOutputTraits tensor_output(const SchemaTemplate& schema,
+                                    std::uint64_t state_bytes,
+                                    std::uint32_t stages) {
+  OperationOutputTraits output;
+  output.key = "value";
+  output.output_schema.kind = OperationPortKind::Result;
+  output.output_schema.result_schema_id = std::string(schema.id);
+  output.output_schema.result_schema_version = schema.version;
+  output.result_schema = schema;
+  output.region_rule = OperationRegionRule::Dependency;
+  output.dependency_version = 2;
+  output.continuation_bytes = state_bytes;
+  output.maximum_dependency_stages = stages;
+  return output;
+}
+ExecutionBindings bindings(const ResourceBudget& root,
+                           const StatisticsSpec& spec, unsigned variant) {
+  auto pixels = example_result::input(
+      root, "pixels",
+      tensor_schema(ElementType::Int64, {spec.height, spec.width}),
+      [variant](std::uint64_t i, std::uint8_t* bytes) {
+        const auto value = sample(i, variant);
+        std::memcpy(bytes, &value, 8);
+      },
+      variant == 12);
+  auto mask = example_result::input(
+      root, "mask",
+      tensor_schema(ElementType::UInt8, {spec.height, spec.width}),
+      [variant](std::uint64_t i, std::uint8_t* bytes) {
+        *bytes = selected(i, variant) ? 255 : 0;
+      },
+      variant == 12, variant == 13);
+  return {{std::move(pixels), std::move(mask)}};
 }
 // A downstream DAG sink requests successive certified prefixes while grade is
 // active. Its independent reference uses small exact integer count/total.
@@ -90,14 +103,14 @@ struct Sink {
   ResultRef input;
   Sink(std::uint64_t n, unsigned v, long double average, bool* observed)
       : count(n), variant(v), mean(average), streamed(observed) {}
-  Poll poll(const ResultProgramPhase& p) {
+  Poll poll(const ResultProgramPhase& p) try {
     if (stage == 0) {
       batch = std::min(count - row,
                        std::min<std::uint64_t>(4096, p.query.page_bytes) / 8);
       if (!batch)
         return Poll(Status{ErrorCode::ResourceExhausted, "sink window"});
       stage = 1;
-      return Poll(ResultProgramNeed{{}, {{0, 0, false, row + batch}}, {}});
+      return Poll(ResultProgramNeed{{{0, 0, false, row + batch}}, {}});
     }
     if (stage == 1) {
       input = p.results.at(0);
@@ -110,7 +123,7 @@ struct Sink {
       if (!plan.ok())
         return Poll(plan.status());
       stage = 2;
-      return Poll(ResultProgramNeed{{}, {}, {plan.take_value()}});
+      return Poll(ResultProgramNeed{{}, {plan.take_value()}});
     }
     auto fuel = p.consume_work(batch);
     if (!fuel.ok())
@@ -129,32 +142,28 @@ struct Sink {
       stage = 0;
       return poll(p);
     }
-    auto memory = MutableValue::allocate(p.query.output.descriptor,
-                                         Region::whole({1}), p.allocator);
-    if (!memory.ok())
-      return Poll(memory.status());
-    auto output = memory.take_value();
+    auto builder = take(ResultBuilder::start(
+        p.resources, *p.query.output.result_schema, p.query.semantic_key, {},
+        std::vector<std::uint64_t>(p.association->begin(),
+                                   p.association->end())));
+    require(builder.bind_descriptor_relation(take(ResultRelation::cartesian(
+        p.resources, 1, {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0}))));
     const auto value = static_cast<double>(count);
-    std::memcpy(output.data(), &value, 8);
-    auto published = std::move(output).publish({});
-    if (!published.ok())
-      return Poll(published.status());
-    const auto held = published.take_value();
-    auto fragments = ValueFragments::create_view(
-        p.query.output.descriptor, {}, *p.query.value_outputs, &held, 1);
-    if (!fragments.ok())
-      return Poll(fragments.status());
-    auto relation = ResultRelation::cartesian(
-        p.resources, 1, {0, 7, 0, count}, DependencyGuarantee::Conservative);
-    if (!relation.ok())
-      return Poll(relation.status());
-    return Poll(
-        ResultValuePublication{fragments.take_value(), relation.take_value()});
+    auto relation = take(ResultRelation::cartesian(
+        p.resources, 1, {0, 7, 0, count, ResultSupportTarget::Field, 0},
+        DependencyGuarantee::Conservative));
+    require(builder.publish_tensor(
+        0, Region::whole({1}),
+        {reinterpret_cast<const std::uint8_t*>(&value), 8}, relation,
+        {true, true, true, true}));
+    return Poll(ResultPublication{take(builder.seal()), true});
+  } catch (const Failure& error) {
+    return Poll(error.status);
   }
 };
 void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
          bool grade = true, std::uint64_t work = 10000000,
-         std::uint64_t host = 65536, std::uint64_t height = 1,
+         std::uint64_t host = 1048576, std::uint64_t height = 1,
          std::uint64_t disk = UINT64_MAX, std::uint32_t stages = 100000,
          bool stage_exhausted = false) {
   const StatisticsSpec spec{height, n / height,
@@ -196,14 +205,8 @@ void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
   traits.input_schema[0].kind = OperationPortKind::Result;
   traits.input_schema[0].result_schema_id = "photospider.graded_scalar";
   traits.input_schema[0].result_schema_version = 1;
-  auto& out = traits.outputs[0];
-  out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 2;
-  out.continuation_bytes = sizeof(Sink);
-  out.maximum_dependency_stages = 1000000;
-  out.output_element_type = ElementType::Float64;
-  out.shape_rule = OperationShapeRule::Fixed;
-  out.fixed_output_shape = {1};
+  traits.outputs = {tensor_output(tensor_schema(ElementType::Float64, {1}),
+                                  sizeof(Sink), 1000000)};
   const long double mean = count ? static_cast<long double>(total) / count : 0;
   sink.start_result = [n, variant, mean, &streamed](const auto&,
                                                     const auto& allocator) {
@@ -212,18 +215,13 @@ void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
   };
   check(registry->register_operation(std::move(sink)).ok(), "register sink");
   WorkflowDocument doc;
-  doc.inputs = {{1,
-                 "pixels",
-                 {ElementType::Int64, {spec.height, spec.width}},
-                 Region::whole({spec.height, spec.width}),
-                 {0, {static_cast<std::int64_t>(spec.width * 8), 8}},
-                 {}},
-                {2,
-                 "mask",
-                 {ElementType::UInt8, {spec.height, spec.width}},
-                 Region::whole({spec.height, spec.width}),
-                 {0, {static_cast<std::int64_t>(spec.width), 1}},
-                 {}}};
+  doc.inputs = {
+      example_result::declaration(
+          1, "pixels",
+          tensor_schema(ElementType::Int64, {spec.height, spec.width})),
+      example_result::declaration(
+          2, "mask",
+          tensor_schema(ElementType::UInt8, {spec.height, spec.width}))};
   doc.nodes = {
       {1,
        "statistics.histogram",
@@ -258,6 +256,8 @@ void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
     config.managed_resources->capacity[ResourceKind::Host] = host;
     config.managed_resources->capacity[ResourceKind::Metadata] = host;
     config.managed_resources->capacity[ResourceKind::Disk] = disk;
+    config.managed_resources->capacity[ResourceKind::Payload] = 32768;
+    config.managed_resources->capacity[ResourceKind::Referenced] = 18 * n;
     ExecutionContext context(registry, config);
     root = take(context.resource_budget());
     ExecutionOptions options;
@@ -266,8 +266,9 @@ void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
     options.dependencies.maximum_stages = stages;
     CancellationSource cancellation;
     if (variant == 9) {
-      options.result_publication = [&](ValueRef, const ResultRef&) {
-        cancellation.cancel();
+      options.result_publication = [&](ValueRef output, const ResultRef&) {
+        if (output.node_id == 1)
+          cancellation.cancel();
         return Status::success();
       };
     }
@@ -277,15 +278,15 @@ void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
       prior_doc.outputs = {{"parameters", 2, "value"}};
       GraphContext prior_graph(prior_doc);
       auto prior_plan = take(Compiler(registry).compile(prior_graph));
-      prior = take(context.execute(prior_plan.plan,
-                                   {{{"pixels", {}, source(spec, false, 0)},
-                                     {"mask", {}, source(spec, true, 0)}}},
-                                   {}, options));
+      prior = take(context.execute(prior_plan.plan, bindings(root, spec, 0), {},
+                                   options));
     }
-    result = context.execute(compiled.plan,
-                             {{{"pixels", {}, source(spec, false, variant)},
-                               {"mask", {}, source(spec, true, variant)}}},
-                             cancellation.token(), options);
+    try {
+      result = context.execute(compiled.plan, bindings(root, spec, variant),
+                               cancellation.token(), options);
+    } catch (const Failure& failure) {
+      result = Result<ExecutionResult>(failure.status);
+    }
     if (variant == 6 && result.ok()) {
       check(prior.results.at("parameters").object_id() !=
                 result.value().results.at("parameters").object_id(),
@@ -308,7 +309,7 @@ void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
     if (stage_exhausted)
       check(result.status().code == ErrorCode::ResourceExhausted &&
                 result.status().message == "structured stage limit",
-            "source polls still need a final consumption/publication poll");
+            "histogram still needs a final consumption/publication poll");
     else if (variant == 9)
       check(result.status().code == ErrorCode::Cancelled,
             "cancel after histogram publication");
@@ -319,12 +320,22 @@ void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
       check(result.status().reason == FailureReason::InvalidDomain,
             "domain reason");
     check(root.statistics().live[ResourceKind::Disk] == 0 &&
-              root.statistics().live[ResourceKind::Payload] == 0,
+              root.statistics().live[ResourceKind::Payload] == 0 &&
+              root.statistics().live[ResourceKind::Referenced] == 0,
           "failed workflow releases backing and payload");
     std::cout << "rejected n=" << n << " variant=" << variant
               << " window=" << window << ": " << result.status().message
               << '\n';
     return;
+  }
+  if (!result.ok()) {
+    const auto stats = root.statistics();
+    std::cerr << "statistics run n=" << n << " variant=" << variant
+              << " host_peak=" << stats.peak[ResourceKind::Host]
+              << " metadata_peak=" << stats.peak[ResourceKind::Metadata]
+              << " payload_peak=" << stats.peak[ResourceKind::Payload]
+              << " Entries=" << stats.peak[ResourceKind::Entries]
+              << " stages=" << stats.issued.stages << '\n';
   }
   auto output = take(std::move(result));
   check(starts[0] == (variant == 6 ? 2U : 1U) &&
@@ -366,29 +377,55 @@ void run(std::uint64_t n, std::uint64_t window, unsigned variant = 0,
   auto witness = take(params.descriptor_relation());
   check(witness.guarantee() == DependencyGuarantee::Conservative,
         "support must remain Conservative");
-  check(take(witness.intersects(0, {{0, 8, 0, 1}}, 64)).value_or(false),
+  check(take(witness.intersects(
+                 0, {{0, 8, 0, 1, ResultSupportTarget::Descriptor, 0}}, 64))
+            .value_or(false),
         "empty descriptor invalidation");
   witness = {};
   if (grade)
     check(n <= window / 8 || streamed, "sink must consume active prefixes");
   auto weak = hist.weak();
+  auto weak_parameters = params.weak();
+  const auto histogram_id = hist.object_id();
   output = {};
+  const auto histogram_disk = root.statistics().live[ResourceKind::Disk];
   hist = {};
-  check(weak.lock().valid(),
-        "parameters own histogram after context and outputs");
+  if (!reference.empty())
+    check(root.statistics().live[ResourceKind::Disk] < histogram_disk,
+          "retiring copied histogram releases its backing");
+  const auto association = params.association();
+  check(!weak.lock().valid() &&
+            std::find(association.begin(), association.end(), histogram_id) !=
+                association.end(),
+        "copied parameters retain histogram facts without source payload");
   params = {};
-  check(weak.lock().valid(), "parameter windows retain histogram association");
+  check(!weak_parameters.lock().valid(),
+        "captured Result view retires independently of loaded field windows");
+  check(root.statistics().live[ResourceKind::Disk] > 0,
+        "field windows retain mandatory backing");
+  std::array<std::int64_t, 3> retained;
+  std::memcpy(retained.data(), record->bytes().data(), 24);
+  double retained_mean = 0;
+  std::memcpy(&retained_mean, mean_page->bytes().data(), 8);
+  check(retained == actual && retained_mean == actual_mean,
+        "field windows survive result and context retirement");
   record.reset();
   mean_page.reset();
-  check(!weak.lock().valid(), "last result/window owner retires histogram");
   check(root.statistics().live[ResourceKind::Disk] == 0,
         "last window releases mandatory disk");
+  check(root.statistics().live[ResourceKind::Referenced] == 0,
+        "statistics input backing released");
   check(root.statistics().peak[ResourceKind::Host] <= host,
         "managed host capacity");
+  check(root.statistics().peak[ResourceKind::Payload] <= 32768,
+        "statistics working payload capacity");
   std::cout << "passed n=" << n << " variant=" << variant
             << " window=" << window << " bins=" << reference.size()
             << " count=" << count << " total=" << total
             << " host_peak=" << root.statistics().peak[ResourceKind::Host]
+            << " payload_peak=" << root.statistics().peak[ResourceKind::Payload]
+            << " referenced_peak="
+            << root.statistics().peak[ResourceKind::Referenced]
             << " issued_stages=" << root.statistics().issued.stages << '\n';
 }
 }  // namespace
@@ -405,20 +442,21 @@ int main(int argc, char** argv) {
     std::cout << "rejected 2048x2048 bins=65536 before source binding: "
               << rejected.status().message << '\n';
     // Empty 2x513/B513: two strips per row, two passes, then one final poll.
-    run(1026, 24, 11, false, 10000000, 65536, 2, UINT64_MAX, 9);
-    run(1026, 24, 11, false, 10000000, 65536, 2, UINT64_MAX, 8, true);
+    run(1026, 24, 11, false, 10000000, 1048576, 2, UINT64_MAX, 9);
+    run(1026, 24, 11, false, 10000000, 1048576, 2, UINT64_MAX, 8, true);
     if (argc == 2 && std::string(argv[1]) == "--stage-admission")
       return 0;
     if (argc == 2 && std::string(argv[1]) == "--large") {
-      run(40000, 24, 8, true, 100000000, 65536, 200, 1ULL << 30, 1000000);
+      run(40000, 24, 8, true, 1000000000, 4194304, 200, 1ULL << 30, 1000000);
       return 0;
     }
-    run(1000, 24, 8, true, 10000000, 65536, 25, 1ULL << 30, 5000);
+    run(1000, 24, 8, true, 10000000, 1048576, 25, 1ULL << 30, 5000);
     if (argc == 2 && std::string(argv[1]) == "--stage-regression")
       return 0;
     check(argc == 1,
           "usage: photospider_statistics_workflow "
           "[--large|--stage-regression|--stage-admission]");
+    run(4096, 24);
     for (auto n : {1U, 17U, 1003U})
       for (auto window : {64U, 256U, 4096U})
         run(n, window);
@@ -430,21 +468,28 @@ int main(int argc, char** argv) {
     run(17, 64, 4);
     run(17, 64, 5);
     // Retain the first Run's owned results while executing the next snapshot.
-    // Admit both metadata sets; the single-Run fixtures retain their 64 KiB
-    // cap.
-    run(17, 64, 6, true, 10000000, 131072);
+    // Admit both metadata sets; single-Run source DAGs retain a 1 MiB cap.
+    run(17, 64, 6, true, 10000000, 2097152);
     run(17, 16);
     run(17, 64, 0, true, 10);
     run(17, 64, 0, true, 10000000, 1024);
-    run(65537, 256);
+    run(65537, 256, 0, true, 100000000);
     run(1003, 64, 7);
-    run(1008, 64, 0, true, 10000000, 65536, 3);
-    run(17, 64, 0, true, 10000000, 65536, 1, 4096);
+    run(1008, 64, 0, true, 10000000, 1048576, 3);
+    run(17, 64, 0, true, 10000000, 1048576, 1, 4096);
     run(17, 64, 9);
     run(129, 64, 8);
     run(17, 64, 10);
     run(17, 64, 11, false);
+    run(17, 64, 12);
+    run(17, 64, 13);
     return 0;
+  } catch (const Failure& error) {
+    std::cerr << "statistics failure code="
+              << static_cast<int>(error.status.code)
+              << " reason=" << static_cast<int>(error.status.reason) << " "
+              << error.what() << '\n';
+    return 1;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     return 1;

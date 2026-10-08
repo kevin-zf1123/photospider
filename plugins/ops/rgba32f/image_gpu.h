@@ -7,10 +7,33 @@
 #include <string.h>
 
 #include "image_shader.h" /* NOLINT(build/include_subdir) */
-#include "photospider/plugin/operation_plugin_api.h"
+#include "photospider/plugin/native_gpu_api.h"
 
 // C11 code is intentionally also includable from the C++ built-in adapter.
 // NOLINTBEGIN(readability/casting)
+
+typedef struct ps_image_buffer_view {
+  uint32_t rank;
+  const uint64_t* shape;
+  const uint8_t* data;
+  uint64_t byte_size, byte_offset;
+  const int64_t* byte_strides;
+  const uint64_t* storage_origin;
+  const uint64_t* demand_offsets;
+  const uint64_t* demand_extents;
+} ps_image_buffer_view;
+typedef struct ps_image_gpu_output {
+  void* context;
+  uint32_t output_rank;
+  const uint64_t* output_shape;
+  const uint64_t* output_offsets;
+  const uint64_t* output_extents;
+  uint64_t output_byte_size;
+  const ps_gpu_service_v1* gpu;
+  uint8_t* (*allocate_output)(void*);
+  uint8_t* (*allocate_scratch)(void*, uint64_t);
+  int (*publish)(void*, const uint8_t*, uint64_t);
+} ps_image_gpu_output;
 
 /* Must match ImageParameters in the shader, including integer alignment. */
 typedef struct ps_image_gpu_parameters {
@@ -21,7 +44,7 @@ typedef struct ps_image_gpu_parameters {
 
 /* The host proves this complete scalar view address, including signed strides
  * and origins beyond INT64_MAX. Scalar parameters are read on the CPU. */
-static float ps_image_scalar(const ps_operation_value_view_v11* value) {
+static float ps_image_scalar(const ps_image_buffer_view* value) {
   const int64_t stride = value->byte_strides[0];
   const uint64_t magnitude =
       stride < 0 ? UINT64_C(0) - (uint64_t)stride : (uint64_t)stride;
@@ -33,8 +56,8 @@ static float ps_image_scalar(const ps_operation_value_view_v11* value) {
   return number;
 }
 /* Host validation has established positive native view strides and coverage. */
-static float ps_gpu_image_sample(const ps_operation_value_view_v11* v,
-                                 uint64_t y, uint64_t x, uint64_t c) {
+static float ps_gpu_image_sample(const ps_image_buffer_view* v, uint64_t y,
+                                 uint64_t x, uint64_t c) {
   const uint64_t offset =
       v->byte_offset +
       (y - v->storage_origin[0]) * (uint64_t)v->byte_strides[0] +
@@ -51,7 +74,7 @@ static int ps_gpu_number_supported(float number, float minimum) {
          (number == 0 || fabsf(number) >= minimum);
 }
 static void ps_gpu_image_geometry(ps_image_gpu_parameters* p, uint32_t base,
-                                  const ps_operation_value_view_v11* v) {
+                                  const ps_image_buffer_view* v) {
   p->geometry[base] = v->byte_offset;
   p->geometry[base + 1] = v->storage_origin[0];
   p->geometry[base + 2] = v->storage_origin[1];
@@ -60,17 +83,33 @@ static void ps_gpu_image_geometry(ps_image_gpu_parameters* p, uint32_t base,
   p->geometry[base + 5] = v->rank == 3 ? (uint64_t)v->byte_strides[2] : 0;
 }
 
+static int ps_image_release_buffers(const ps_gpu_service_v1* api,
+                                    const ps_gpu_buffer_binding_v1* buffers,
+                                    uint32_t count, int result) {
+  while (count) {
+    const int released = api->release(api->context, buffers[--count].token);
+    if (!result)
+      result = released;
+  }
+  return result;
+}
+
 /* Shared C/C++ operation implementation. Host owns every buffer; this helper
  * performs no publication until successful native completion and pixel checks.
  */
-static int ps_execute_gpu_image(
-    uint32_t kind, const ps_operation_value_view_v11* inputs, uint32_t count,
-    const ps_operation_parameter_value_v11* parameters,
-    uint32_t parameter_count, ps_operation_cancelled_v11 cancelled,
-    void* cancellation_context, const ps_operation_output_sink_v11* sink) {
+static int ps_execute_gpu_image(uint32_t kind,
+                                const ps_image_buffer_view* inputs,
+                                uint32_t count, uint32_t radius,
+                                const double* coefficients, uint32_t factor,
+                                ps_gpu_cancelled_v1 cancelled,
+                                void* cancellation_context,
+                                const ps_image_gpu_output* sink) {
   if (!sink || !sink->gpu || !inputs || count == 0 || kind > 7)
-    return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11;
-  const ps_gpu_service_v11* api = sink->gpu;
+    return PS_GPU_RESULT_BACKEND_UNAVAILABLE_V1;
+  const ps_gpu_service_v1* api = sink->gpu;
+  if (api->struct_size != sizeof(*api) ||
+      api->abi_version != PS_GPU_ABI_VERSION_1)
+    return PS_GPU_RESULT_BACKEND_UNAVAILABLE_V1;
   ps_image_gpu_parameters p = {{0}, {0}, 0, 0, 1, 0};
   p.kind = kind;
   p.geometry[0] = sink->output_offsets[0];
@@ -83,26 +122,39 @@ static int ps_execute_gpu_image(
   p.geometry[7] = inputs[0].demand_offsets[0];
   p.geometry[8] = inputs[0].demand_extents[0];
   for (uint32_t i = 0; i < count; ++i) {
-    const ps_operation_value_view_v11* v = &inputs[i];
+    const ps_image_buffer_view* v = &inputs[i];
     if (v->rank == 1)
       continue;
     if (v->byte_offset % 4 || v->shape[0] > UINT32_MAX ||
         v->shape[1] > UINT32_MAX)
-      return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11;
+      return PS_GPU_RESULT_BACKEND_UNAVAILABLE_V1;
     for (uint32_t axis = 0; axis < v->rank; ++axis)
       if (v->byte_strides[axis] < 0 || v->byte_strides[axis] % 4 ||
           v->storage_origin[axis] > v->demand_offsets[axis])
-        return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11;
+        return PS_GPU_RESULT_BACKEND_UNAVAILABLE_V1;
     for (uint64_t y = v->demand_offsets[0];
          y < v->demand_offsets[0] + v->demand_extents[0]; ++y) {
       if (cancelled && cancelled(cancellation_context))
-        return PS_OPERATION_RESULT_CANCELLED_V11;
+        return PS_GPU_RESULT_CANCELLED_V1;
       for (uint64_t x = v->demand_offsets[1];
-           x < v->demand_offsets[1] + v->demand_extents[1]; ++x)
+           x < v->demand_offsets[1] + v->demand_extents[1]; ++x) {
+        float pixel[4] = {0};
+        for (uint64_t c = 0; c < (v->rank == 3 ? 4U : 1U); ++c) {
+          pixel[c] = ps_gpu_image_sample(v, y, x, c);
+          if (!isfinite(pixel[c]))
+            return PS_GPU_RESULT_FAILURE_V1;
+        }
+        if ((v->rank == 2 && (pixel[0] < 0 || pixel[0] > 1)) ||
+            (v->rank == 3 &&
+             (pixel[3] < 0 || pixel[3] > 1 ||
+              (pixel[3] == 0 &&
+               (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)))))
+          return PS_GPU_RESULT_FAILURE_V1;
         for (uint64_t c = 0; c < (v->rank == 3 ? 4U : 1U); ++c)
-          if (!ps_gpu_number_supported(ps_gpu_image_sample(v, y, x, c),
+          if (!ps_gpu_number_supported(pixel[c],
                                        kind == 3 && i == 1 ? 1e-8F : 1e-20F))
-            return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11;
+            return PS_GPU_RESULT_BACKEND_UNAVAILABLE_V1;
+      }
     }
   }
   ps_gpu_image_geometry(&p, 9, &inputs[0]);
@@ -111,28 +163,20 @@ static int ps_execute_gpu_image(
   if (kind == 0 || kind == 1) {
     p.values[0] = ps_image_scalar(&inputs[1]);
     if (!ps_gpu_number_supported(p.values[0], 1e-8F))
-      return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11;
+      return PS_GPU_RESULT_BACKEND_UNAVAILABLE_V1;
   }
   if (kind == 7) {
     for (uint32_t i = 0; i < 7; ++i)
       p.values[i] = ps_image_scalar(&inputs[i + 1]);
     for (uint32_t i = 3; i < 7; ++i)
       if (!ps_gpu_number_supported(p.values[i], 1e-8F))
-        return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11;
+        return PS_GPU_RESULT_BACKEND_UNAVAILABLE_V1;
   }
-  double sigma = 0;
-  for (uint32_t i = 0; i < parameter_count; ++i) {
-    const ps_operation_parameter_value_v11* v = &parameters[i];
-    if (v->key_size == 6 && memcmp(v->key, "radius", 6) == 0)
-      p.radius = (uint32_t)v->int64_value;
-    if (v->key_size == 5 && memcmp(v->key, "sigma", 5) == 0)
-      sigma = v->float64_value;
-    if (v->key_size == 6 && memcmp(v->key, "factor", 6) == 0)
-      p.factor = (uint32_t)v->int64_value;
-  }
+  p.radius = radius;
+  p.factor = factor;
   uint8_t* output = sink->allocate_output(sink->context);
   if (!output)
-    return PS_OPERATION_RESULT_FAILURE_V11;
+    return PS_GPU_RESULT_FAILURE_V1;
   uint8_t* scratch = output;
   uint8_t* extra = output;
   uint64_t scratch_size = sink->output_byte_size, extra_size = scratch_size;
@@ -142,15 +186,11 @@ static int ps_execute_gpu_image(
     scratch_size = p.geometry[8] * p.geometry[3] * 16;
     scratch = sink->allocate_scratch(sink->context, scratch_size);
     if (!scratch || !extra)
-      return PS_OPERATION_RESULT_FAILURE_V11;
-    double total = 0;
-    for (int tap = -(int)p.radius; tap <= (int)p.radius; ++tap)
-      total += exp(-(double)(tap * tap) / (2 * sigma * sigma));
+      return PS_GPU_RESULT_FAILURE_V1;
     for (int tap = -(int)p.radius; tap <= (int)p.radius; ++tap) {
-      const double coefficient =
-          exp(-(double)(tap * tap) / (2 * sigma * sigma)) / total;
+      const double coefficient = coefficients[tap + (int)p.radius];
       if (coefficient != 0 && coefficient < 1e-8)
-        return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11;
+        return PS_GPU_RESULT_BACKEND_UNAVAILABLE_V1;
       const float weight = (float)coefficient;
       memcpy(extra + (tap + (int)p.radius) * 4, &weight, 4);
     }
@@ -158,10 +198,10 @@ static int ps_execute_gpu_image(
     extra_size = p.geometry[2] * 16;
     extra = sink->allocate_scratch(sink->context, extra_size);
     if (!extra)
-      return PS_OPERATION_RESULT_FAILURE_V11;
+      return PS_GPU_RESULT_FAILURE_V1;
     for (uint64_t row = 0; row < p.geometry[2]; ++row) {
       if (cancelled && cancelled(cancellation_context))
-        return PS_OPERATION_RESULT_CANCELLED_V11;
+        return PS_GPU_RESULT_CANCELLED_V1;
       uint64_t span[2] = {p.geometry[3], 0};
       const double dy = (double)(p.geometry[0] + row) + .5 - p.values[1];
       for (uint64_t col = 0; col < p.geometry[3]; ++col) {
@@ -175,7 +215,7 @@ static int ps_execute_gpu_image(
       memcpy(extra + row * 16, span, 16);
     }
   }
-  ps_gpu_buffer_binding_v11 buffers[5];
+  ps_gpu_buffer_binding_v1 buffers[5];
   const uint8_t* addresses[5] = {
       inputs[0].data,
       (kind == 3 || kind == 4) ? inputs[1].data : inputs[0].data, output,
@@ -193,11 +233,11 @@ static int ps_execute_gpu_image(
     int result = api->buffer(api->context, addresses[i], sizes[i],
                              buffers[i].writable, &buffers[i].token);
     if (result)
-      return result;
+      return ps_image_release_buffers(api, buffers, i, result);
   }
   ps_image_gpu_parameters params[2] = {p, p};
   params[1].pass = 1;
-  ps_gpu_dispatch_v11 commands[2];
+  ps_gpu_dispatch_v1 commands[2];
   memset(commands, 0, sizeof(commands));
   for (uint32_t i = 0; i < (kind == 2 ? 2U : 1U); ++i) {
     commands[i].struct_size = sizeof(commands[i]);
@@ -216,29 +256,32 @@ static int ps_execute_gpu_image(
   }
   int code = api->execute(api->context, commands, kind == 2 ? 2 : 1);
   if (code)
-    return code;
+    return ps_image_release_buffers(api, buffers, 5, code);
   for (uint64_t offset = 0; offset < sink->output_byte_size;
        offset += p.geometry[4] * 4) {
     if ((offset % 4096) == 0 && cancelled && cancelled(cancellation_context))
-      return PS_OPERATION_RESULT_CANCELLED_V11;
+      return ps_image_release_buffers(api, buffers, 5,
+                                      PS_GPU_RESULT_CANCELLED_V1);
     float pixel[4] = {0};
     memcpy(pixel, output + offset, p.geometry[4] * 4);
     /* RGB may be signed/HDR; only coverage and alpha are bounded. */
     for (uint64_t c = 0; c < p.geometry[4]; ++c)
       if (!isfinite(pixel[c]))
-        return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11;
+        return ps_image_release_buffers(api, buffers, 5,
+                                        PS_GPU_RESULT_BACKEND_UNAVAILABLE_V1);
     if ((p.geometry[4] == 1 && (pixel[0] < 0 || pixel[0] > 1)) ||
         (p.geometry[4] == 4 &&
          (pixel[3] < 0 || pixel[3] > 1 ||
           (pixel[3] == 0 &&
            (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)))))
-      return PS_OPERATION_RESULT_BACKEND_UNAVAILABLE_V11;
+      return ps_image_release_buffers(api, buffers, 5,
+                                      PS_GPU_RESULT_BACKEND_UNAVAILABLE_V1);
   }
-  return sink->publish(sink->context, PS_OPERATION_ELEMENT_FLOAT32_V11,
-                       sink->output_shape, sink->output_rank, inputs[0].facets,
-                       inputs[0].facet_count, output, sink->output_byte_size)
-             ? PS_OPERATION_RESULT_SUCCESS_V11
-             : PS_OPERATION_RESULT_FAILURE_V11;
+  const int published =
+      sink->publish(sink->context, output, sink->output_byte_size)
+          ? PS_GPU_RESULT_SUCCESS_V1
+          : PS_GPU_RESULT_FAILURE_V1;
+  return ps_image_release_buffers(api, buffers, 5, published);
 }
 // NOLINTEND
 #endif  // PLUGINS_OPS_RGBA32F_IMAGE_GPU_H_

@@ -51,29 +51,28 @@ struct ExecutionContextConfig {
 };
 ```
 
-The installed C operation plugin interface is operation ABI 11. Its output sink provides an invocation-local `ps_gpu_service_v11`; the separately versioned structural planar operation extension is ABI 3.
+Result operation callbacks use operation ABI 2. Native GPU services have an independent ABI 1 in the standalone C header `photospider/plugin/native_gpu_api.h`; C Result services and C++ Result phases expose this table for the current invocation. Including the native GPU header does not require the operation plugin header.
 
 ```c
-typedef struct ps_gpu_service_v11 {
-  uint32_t struct_size;
-  void *context;
-  int (*buffer)(void *context, const uint8_t *bytes, uint64_t byte_size,
-                uint32_t writable, uint64_t *token);
-  int (*execute)(void *context, const ps_gpu_dispatch_v11 *commands,
-                 uint32_t command_count);
-  int (*release)(void *context, uint64_t token);
-  uint32_t backend;
-  uint64_t minimum_buffer_offset_alignment;
-} ps_gpu_service_v11;
+#include <photospider/plugin/native_gpu_api.h>
+
+static int execute_native(const ps_gpu_service_v1 *gpu,
+                          const ps_gpu_dispatch_v1 *commands,
+                          uint32_t command_count) {
+  if (!gpu || gpu->struct_size != sizeof(*gpu) ||
+      gpu->abi_version != PS_GPU_ABI_VERSION_1)
+    return PS_GPU_RESULT_FAILURE_V1;
+  return gpu->execute(gpu->context, commands, command_count);
+}
 ```
 
 `NativeGpu` selects GPU implementations that declare support. A step without a GPU implementation uses its CPU implementation when available; planning fails with `BackendUnavailable` when the selected requirements leave no supported implementation. The mode does not select a numeric profile. Operation parameters and traits define accepted values, precision and fallback permission.
 
 The host lends buffers as opaque invocation-local tokens. Tokens refer only to bounded host-owned input, output or scratch views. Inputs remain read-only; output and scratch allocation use the execution context's controlled-buffer budget. The plugin supplies MSL for Metal or SPIR-V for Vulkan. The host validates records, owns device and pipeline state, and keeps service pointers and tokens valid only for the callback. `execute` accepts a bounded batch and returns after submitted work drains, including cancellation and errors. A successful nonempty GPU callback must report native dispatch work.
 
-The context has one GPU worker lane and the service submits synchronously. Completed shared host/device storage can be read by the CPU after the access transition; this path does not imply an extra device-to-host copy. Values may retain native allocation owners and budget leases after the context retires. Native result keys include execution mode, selected backend and native implementation identity. A GPU fallback marks that result and its descendants ineligible for native result-cache entries; see the [cache model](../kernel-architecture/Cache-Model.md) for owner and reuse rules.
+The context has one GPU worker lane and the service submits synchronously. Completed shared host/device storage can be read by the CPU after the access transition; this path does not imply an extra device-to-host copy. Results may retain native allocation owners and budget leases after the context retires. Native result keys include execution mode, selected backend and native implementation identity. A GPU fallback marks that result and its descendants ineligible for native result-cache entries; see the [cache model](../kernel-architecture/Cache-Model.md) for owner and reuse rules.
 
-For the generic operation ABI, runtime fallback occurs only when a GPU attempt returns `BackendUnavailable` before publication, the operation also supports CPU, its traits permit fallback, and cancellation/currentness still allow work. The kernel retires the failed GPU continuation and its temporary owners before restarting the same observation on CPU. Submitted device execution errors terminate the Run. The planar GPU extension has a narrower contract: it is Whole-only, must perform native work, and does not use CPU fallback.
+For Result operation callbacks, runtime fallback occurs only when a GPU attempt returns `BackendUnavailable` before publication, the operation also supports CPU, its traits permit fallback, and cancellation/currentness still allow work. The kernel retires the failed GPU continuation and its temporary owners before restarting the same observation on CPU. Submitted device execution errors terminate the Run.
 
 ## 4. Non-goals and explicit boundaries
 
@@ -81,8 +80,7 @@ For the generic operation ABI, runtime fallback occurs only when a GPU attempt r
 - The kernel does not provide automatic numeric-equivalence guarantees across CPU, Metal and Vulkan. Each operation owns its numerical contract.
 - Native GPU callbacks are trusted process code. Record validation does not sandbox shader execution or protect the process from malicious code.
 - Device handles, queue ownership and pipeline management remain host-owned. Plugins do not retain service pointers or invocation tokens.
-- This contract does not promise device-resident planar output pages across graph nodes, a remote GPU, automatic measured placement or a multi-device scheduler.
-- The planar extension does not support staged GPU execution, joint dependency results or CPU fallback.
+- This contract does not promise device-resident output pages across graph nodes, a remote GPU, automatic measured placement or a multi-device scheduler.
 
 ## 5. Consequences
 
@@ -90,4 +88,4 @@ The execution context accounts for native input copies, outputs, scratch and sta
 
 Device absence prevents GPU-only operations from running. An operation with a permitted CPU implementation may use that path when the GPU reports pre-publication unavailability. Ordinary operation failures and submitted device errors are returned to the caller; the kernel does not retry them as CPU work. Callers can inspect fallback reasons and actual dispatch/submission counters to distinguish device work from CPU execution.
 
-The synchronous lane makes buffer lifetime and publication ordering explicit, but one long GPU callback occupies the lane until its commands drain. Cancellation stops new admission and waits for submitted commands to retire before the callback releases its resources. Operation ABI 11 and planar ABI 3 are the current plugin boundaries; plugins must match these interfaces.
+The synchronous lane makes buffer lifetime and publication ordering explicit, but one long GPU callback occupies the lane until its commands drain. Cancellation stops new admission and waits for submitted commands to retire before the callback releases its resources. Result operation ABI 2 and native GPU service ABI 1 are independent plugin boundaries. C modules that compile against `native_gpu_api.h` must be rebuilt when that header changes; no older GPU-service alias is provided.

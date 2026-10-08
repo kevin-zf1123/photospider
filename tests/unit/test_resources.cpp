@@ -2,7 +2,10 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -227,19 +230,68 @@ int referenced_owner() {
   PS_CHECK(third.ok());
   return 0;
 }
+SchemaTemplate resource_schema() {
+  SchemaTemplate schema;
+  schema.id = "test.resource_scalar";
+  ResultTensorSpec tensor;
+  tensor.key = "number";
+  tensor.descriptor = {ElementType::Float64, {1}};
+  schema.tensors.push_back(std::move(tensor));
+  return schema;
+}
+OperationOutputTraits result_output(const SchemaTemplate& schema,
+                                    std::uint64_t state = 0) {
+  OperationOutputTraits output;
+  output.output_schema.kind = OperationPortKind::Result;
+  output.output_schema.result_schema_id = schema.id;
+  output.output_schema.result_schema_version = schema.version;
+  output.result_schema = schema;
+  output.continuation_bytes = state;
+  output.maximum_dependency_stages = 2;
+  return output;
+}
+struct ResourceScalar {
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    using Poll = Result<ResultProgramPoll>;
+    auto made =
+        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
+                             phase.query.semantic_key);
+    if (!made.ok())
+      return Poll(made.status());
+    auto builder = made.take_value();
+    auto relation = ResultRelation::cartesian(phase.resources, 1, {});
+    if (!relation.ok())
+      return Poll(relation.status());
+    auto status = builder.bind_descriptor_relation(relation.value());
+    if (!status.ok())
+      return Poll(status);
+    auto buffer = phase.allocator.allocate(8);
+    if (!buffer.ok())
+      return Poll(buffer.status());
+    auto storage = buffer.take_value();
+    const double number = 19;
+    std::memcpy(storage.data(), &number, 8);
+    status = builder.publish_tensor(
+        0, Region::whole({1}), {0, {8}}, std::move(storage).freeze(),
+        relation.take_value(), {true, true, true, true});
+    if (!status.ok())
+      return Poll(status);
+    auto sealed = builder.seal();
+    return sealed.ok() ? Poll(ResultPublication{sealed.take_value(), true})
+                       : Poll(sealed.status());
+  }
+};
 int execution_owner() {
   auto registry = std::make_shared<OperationRegistry>();
   OperationDefinition definition;
   definition.key = "resource_scalar";
-  definition.callback = [](const OperationInvocation& invocation) {
-    auto made = MutableValue::allocate(
-        {ElementType::Float64, {1}}, Region::whole({1}), invocation.allocator);
-    if (!made.ok())
-      return Result<Value>(made.status());
-    auto writer = made.take_value();
-    double x = 19;
-    std::memcpy(writer.data(), &x, 8);
-    return std::move(writer).publish();
+  definition.traits.workspace_bytes = 8;
+  definition.traits.outputs[0] =
+      result_output(resource_schema(), sizeof(ResourceScalar));
+  definition.traits.cacheable = false;
+  definition.start_result = [](const ResultProgramQuery&,
+                               const BufferAllocator& allocator) {
+    return ResultContinuation::make<ResourceScalar>(allocator);
   };
   PS_CHECK(registry->register_operation(definition).ok());
   PS_CHECK(registry->freeze().ok());
@@ -251,14 +303,19 @@ int execution_owner() {
   PS_CHECK(compiled.ok());
   auto config = ExecutionContextConfig{};
   config.cpu_workers = 1;
-  config.managed_resources = limits(16384);
+  config.managed_resources = limits(65536);
   auto context = std::make_unique<ExecutionContext>(registry, config);
   auto root = context->resource_budget().take_value();
-  Value held;
+  ResultRef held;
   {
     auto result = context->execute(compiled.value().plan);
+    if (!result.ok())
+      std::cerr << result.status().message
+                << " code=" << static_cast<unsigned>(result.status().code)
+                << " reason=" << static_cast<unsigned>(result.status().reason)
+                << "\n";
     PS_CHECK(result.ok());
-    held = result.value().values.at("value");
+    held = result.value().results.at("value");
   }
   const auto retained = root.statistics().live[ResourceKind::Host];
   PS_CHECK(retained >= 8);
@@ -267,7 +324,10 @@ int execution_owner() {
   auto file = TemporaryStorage::create(root).take_value();
   PS_CHECK(file.append_zeroed(32768).ok());
   context.reset();
-  PS_CHECK(held.as_float64().value() == 19);
+  double number = 0;
+  PS_CHECK(held.read_tensor(held.descriptor().take_value(), 0, {0}, &number, 8)
+               .ok());
+  PS_CHECK(number == 19);
   held = {};
   alias = {};
   file = {};
@@ -275,6 +335,7 @@ int execution_owner() {
     PS_CHECK(live == 0);
   return 0;
 }
+
 int normalized_work() {
   auto l = limits(8192);
   l.maximum_work = 3;
@@ -293,6 +354,12 @@ int allocator_ownership() {
   {
     ResourceVector<std::uint64_t> first{ResourceAllocator<std::uint64_t>(root)};
     first.assign(16, 7);
+    ResourceBudget other(limits(4096));
+    ResourceVector<std::uint64_t> empty{
+        ResourceAllocator<std::uint64_t>(other)};
+    empty = first;
+    PS_CHECK(empty == first && empty.get_allocator().owned_by(root));
+    PS_CHECK(other.statistics().live[ResourceKind::Host] == 0);
     const auto original = root.statistics().live[ResourceKind::Host];
     auto copy = first;
     PS_CHECK(copy == first &&
@@ -401,7 +468,7 @@ int concurrent_references() {
 int dependency_metadata_owners() {
   ResourceBudget root(ResourceLimits{});
   DependencyCertificate retained;
-  DependencyNeedBatch batch;
+  DependencyCertificate batch;
   {
     ResourceAllocationScope scope(root);
     auto coverage = Footprint::all({2}).take_value();
@@ -413,7 +480,7 @@ int dependency_metadata_owners() {
                    "metadata-owner", coverage, {{2}},
                    {{{0}, {{0, 1, first, {}}}}, {{1}, {{0, 1, second, {}}}}})
                    .take_value();
-    batch = DependencyNeedBatch(retained.rows());
+    batch = retained;
   }
   const auto baseline = root.statistics().live[ResourceKind::Metadata];
   PS_CHECK(baseline > 0);
@@ -434,7 +501,7 @@ int dependency_metadata_owners() {
     PS_CHECK(renamed.identity() == "long-capacity");
     PS_CHECK(root.statistics().live[ResourceKind::Metadata] >= before + 4096);
     auto batch_copy = batch;
-    PS_CHECK(batch_copy.associations.size() == 2);
+    PS_CHECK(batch_copy.rows().size() == 2);
     auto low_limits = limits(1);
     low_limits.capacity[ResourceKind::Metadata] = 1;
     ResourceBudget low(low_limits);
@@ -458,152 +525,240 @@ int dependency_metadata_owners() {
   PS_CHECK(root.statistics().live[ResourceKind::Metadata] == 0);
   return 0;
 }
-struct RegionalMetadataProbe {
-  bool requested = false;
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    if (!requested) {
-      requested = true;
-      DependencyNeedBatch
-          batch;  // Deliberately use the public mutable builder.
-      auto status = phase.query.outputs.visit(
-          [&](const auto& coordinate) {
-            auto point =
-                Footprint::from_regions({2}, {Region({{coordinate[0], 1}})});
-            if (!point.ok())
-              return point.status();
-            batch.associations.push_back(
-                {coordinate, {{0, 1, point.take_value(), {}}}});
+struct PieceWorkProbe {
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    using Poll = Result<ResultProgramPoll>;
+    ResultProgramNeed need;
+    const auto outputs = phase.query.tensor_outputs.value();
+    FootprintLimits sets;
+    sets.consume_work = phase.consume_work;
+    for (std::uint32_t input = 0; input < 2; ++input) {
+      auto map = ResultRelation::mapped(
+          phase.resources, {64}, Region({{32 * input, 32}}), {32},
+          {{0, 0, 1, 1, 32 * input}},
+          {input, 1, 0, 0, ResultSupportTarget::Tensor, 0});
+      if (!map.ok())
+        return Poll(map.status());
+      auto status = map.value().project(
+          outputs,
+          [&](ResultSupport support, const Footprint* samples) {
+            if (!samples)
+              return Status{ErrorCode::Internal, "mapped footprint is missing"};
+            need.tensors.push_back(
+                {support.input, support.slot, *samples, support.roles});
             return Status::success();
           },
-          2);
-      return status.ok() ? Result<DependencyPoll>(std::move(batch))
-                         : Result<DependencyPoll>(status);
+          sets);
+      if (!status.ok())
+        return Poll(status);
     }
-    return Result<DependencyPoll>(phase.inputs[0]);
+    return Poll(std::move(need));
   }
 };
 int static_piece_work() {
-  auto registry = make_default_operation_registry(false);
+  auto registry = std::make_shared<OperationRegistry>();
   OperationDefinition definition;
-  definition.key = "test.static_piece_work";
+  definition.key = "test.piece_work";
   definition.traits.input_count = 128;
   definition.traits.input_schema.resize(128);
-  auto& output = definition.traits.outputs[0];
-  output.shape_rule = OperationShapeRule::Fixed;
-  output.fixed_output_shape = {64};
-  output.output_element_type = ElementType::Int64;
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.continuation_bytes = sizeof(RegionalMetadataProbe);
-  output.maximum_dependency_stages = 2;
-  output.static_dependency_pieces = std::vector<DependencyMapPiece>{
-      {Footprint::from_regions({64}, {Region({{0, 32}})}).take_value(),
-       {{0, 1, {{0, {}, 0}}, {}}}},
-      {Footprint::from_regions({64}, {Region({{32, 32}})}).take_value(),
-       {{1, 1, {{0, {}, -32}}, {}}}}};
+  for (auto& input : definition.traits.input_schema) {
+    input.kind = OperationPortKind::Result;
+    input.tensor_key = "number";
+  }
+  auto schema = resource_schema();
+  schema.tensors[0].descriptor = {ElementType::Int64, {64}};
+  definition.traits.outputs[0] = result_output(schema, sizeof(PieceWorkProbe));
+  definition.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
   unsigned starts = 0;
-  definition.start_dependency = [&](const auto&, const auto& allocator) {
+  definition.start_result = [&](const auto&, const auto& allocator) {
     ++starts;
-    return DependencyContinuation::make<RegionalMetadataProbe>(allocator);
+    return ResultContinuation::make<PieceWorkProbe>(allocator);
   };
   PS_CHECK(registry->register_operation(std::move(definition)).ok());
   PS_CHECK(registry->freeze().ok());
-  DependencyRequest request;
-  request.inputs.resize(128, {{ElementType::Int64, {32}}, {}});
-  request.snapshot_identity = "piece-work";
+  auto input_schema = resource_schema();
+  input_schema.tensors[0].descriptor = {ElementType::Int64, {32}};
+  ResultProgramMetadata metadata;
+  metadata.inputs.resize(128);
+  for (auto& input : metadata.inputs)
+    input.result_schema = std::make_shared<const SchemaTemplate>(input_schema);
+  metadata.output.result_schema =
+      std::make_shared<const SchemaTemplate>(schema);
+  const std::map<std::string, ParameterValue> parameters;
+  ResultProgramQuery query(metadata, parameters);
+  query.semantic_key = "piece-work";
   std::vector<Region> boxes;
   for (std::uint64_t i = 0; i < 20; ++i)
     boxes.emplace_back(std::vector<RegionDimension>{{3 * i, 1}});
-  request.outputs = Footprint::from_regions({64}, boxes).take_value();
-  request.limits.maximum_work = 50;
-  std::uint64_t prior_work = 0;
-  request.limits.sets.consume_work = [&](std::uint64_t amount) {
-    prior_work += amount;
-    return Status::success();
-  };
-  auto stopped = registry->start_dependency("test.static_piece_work", request);
-  PS_CHECK(stopped.status().reason == FailureReason::WorkLimit);
-  PS_CHECK(starts == 0);
-  PS_CHECK(prior_work > 0);
-  request.outputs = Footprint::all({64}).take_value();
-  request.limits.maximum_work = 10000;
-  std::uint64_t root_work = 0;
-  auto limited = registry->start_dependency(
-      "test.static_piece_work", request, BufferAllocator{},
-      [&](std::uint64_t amount) {
-        root_work += amount;
-        return root_work > 200 ? Status{ErrorCode::ResourceExhausted,
-                                        "root work", FailureReason::WorkLimit}
-                               : Status::success();
-      });
-  PS_CHECK(limited.status().reason == FailureReason::WorkLimit);
-  PS_CHECK(starts == 0);
-  auto accepted = registry->start_dependency("test.static_piece_work", request);
-  PS_CHECK(accepted.ok() && starts == 1);
+  query.tensor_outputs = Footprint::from_regions({64}, boxes).take_value();
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    ResourceLimits bound;
+    bound.maximum_work = mode == 1 ? 5 : UINT64_MAX;
+    ResourceBudget root(bound);
+    auto allocator = root.allocator();
+    auto continuation =
+        registry->start_result("test.piece_work", query, allocator)
+            .take_value();
+    ResultObjectInputs objects;
+    ResourceVector<ResultIoReply> io;
+    std::uint64_t actor_work = 0;
+    ResultProgramPhase phase{query,
+                             objects,
+                             io,
+                             allocator,
+                             root,
+                             [&](std::uint64_t amount) {
+                               actor_work += amount;
+                               if (mode == 0 && actor_work > 5)
+                                 return Status{ErrorCode::ResourceExhausted,
+                                               "actor work",
+                                               FailureReason::WorkLimit};
+                               return root.consume({amount});
+                             },
+                             {}};
+    auto result = continuation.poll(phase);
+    if (mode < 2) {
+      PS_CHECK(!result.ok() &&
+               result.status().reason == FailureReason::WorkLimit);
+      PS_CHECK(actor_work > 0);
+    } else {
+      if (!result.ok())
+        std::cerr << result.status().message
+                  << " code=" << static_cast<unsigned>(result.status().code)
+                  << " reason=" << static_cast<unsigned>(result.status().reason)
+                  << "\n";
+      PS_CHECK(result.ok());
+      const auto& need = std::get<ResultProgramNeed>(result.value());
+      PS_CHECK(!need.tensors.empty());
+      std::array<std::vector<Region>, 2> observed;
+      for (const auto& tensor : need.tensors) {
+        PS_CHECK(tensor.input < 2 && tensor.slot == 0 && tensor.roles == 1);
+        observed[tensor.input].insert(observed[tensor.input].end(),
+                                      tensor.samples.boxes().begin(),
+                                      tensor.samples.boxes().end());
+      }
+      std::array<std::vector<Region>, 2> expected;
+      for (std::uint64_t i = 0; i < 20; ++i) {
+        const auto coordinate = 3 * i;
+        expected[coordinate / 32].emplace_back(
+            std::vector<RegionDimension>{{coordinate % 32, 1}});
+      }
+      for (unsigned input = 0; input < 2; ++input)
+        PS_CHECK(Footprint::from_regions({32}, observed[input]).take_value() ==
+                 Footprint::from_regions({32}, expected[input]).take_value());
+    }
+    PS_CHECK(starts == mode + 1);
+  }
   return 0;
 }
+struct RegionalMetadataProbe {
+  bool requested = false;
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    if (!requested) {
+      requested = true;
+      ResultProgramNeed need;
+      need.results.push_back({0, 0, true, 0});
+      need.results.push_back({0, 1, true, 0});
+      return Result<ResultProgramPoll>(std::move(need));
+    }
+    return Result<ResultProgramPoll>(
+        ResultPublication{phase.results.at(0), true});
+  }
+};
 int regional_scope_retention() {
-  auto registry = make_default_operation_registry(false);
+  auto registry = std::make_shared<OperationRegistry>();
+  auto schema = resource_schema();
+  schema.tensors.clear();
+  schema.fields = {{"first", ElementType::Int64, {}, {}},
+                   {"second", ElementType::Int64, {}, {}}};
   OperationDefinition definition;
   definition.key = "test.regional_metadata";
   definition.traits.input_count = 1;
   definition.traits.input_schema.resize(1);
-  auto& output = definition.traits.outputs[0];
-  output.shape_rule = OperationShapeRule::MatchAllInputs;
-  output.output_dtype_rule = OperationDtypeRule::Input;
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.regional_atomic = true;
-  output.preserve_output_views = true;
-  output.maximum_output_payload_bytes = 0;
-  output.continuation_bytes = sizeof(RegionalMetadataProbe);
-  output.maximum_dependency_stages = 2;
-  definition.start_dependency = [](const auto&, const auto& allocator) {
-    return DependencyContinuation::make<RegionalMetadataProbe>(allocator);
+  definition.traits.input_schema[0].kind = OperationPortKind::Result;
+  definition.traits.input_schema[0].result_schema_id = schema.id;
+  definition.traits.input_schema[0].result_schema_version = schema.version;
+  definition.traits.outputs[0] =
+      result_output(schema, sizeof(RegionalMetadataProbe));
+  definition.start_result = [](const auto&, const auto& allocator) {
+    return ResultContinuation::make<RegionalMetadataProbe>(allocator);
   };
   PS_CHECK(registry->register_operation(std::move(definition)).ok());
   PS_CHECK(registry->freeze().ok());
   ResourceBudget root(ResourceLimits{});
-  std::shared_ptr<DependencySession> session;
-  DependencyRequest request;
-  request.inputs = {{{ElementType::Int64, {2}}, {}}};
-  request.outputs = Footprint::all({2}).take_value();
-  request.snapshot_identity = "scope-retention";
+  ResultProgramMetadata metadata;
+  metadata.inputs.resize(1);
+  metadata.inputs[0].result_schema =
+      std::make_shared<const SchemaTemplate>(schema);
+  metadata.output.result_schema = metadata.inputs[0].result_schema;
+  const std::map<std::string, ParameterValue> parameters;
+  ResultProgramQuery query(metadata, parameters);
+  query.semantic_key = "scope-retention";
+  auto allocator = root.allocator();
+  ResultContinuation continuation;
   {
     ResourceAllocationScope scope(root);
-    session = registry
-                  ->start_dependency("test.regional_metadata", request,
-                                     root.allocator())
-                  .take_value();
+    continuation =
+        registry->start_result("test.regional_metadata", query, allocator)
+            .take_value();
   }
-  // Poll outside the start scope, then retain its mutable-built event beyond
-  // the Session. The host must reseal it under the retained metadata root.
-  std::optional<DependencyProgress> pending(
-      session->poll(root.allocator()).take_value());
-  PS_CHECK(std::get<DependencyNeedBatch>(*pending).associations.size() == 2);
-  auto buffer = root.allocator().allocate(16).take_value();
-  auto input =
-      Value::from_storage({ElementType::Int64, {2}}, Region::whole({2}),
-                          {0, {8}}, std::move(buffer).freeze())
-          .take_value();
-  auto fragments =
-      ValueFragments::create(input.descriptor(), {}, request.outputs, {input})
-          .take_value();
-  PS_CHECK(session->supply({fragments}, request.snapshot_identity).ok());
-  auto done = session->poll(root.allocator()).take_value();
-  auto certificate = std::get<DependencyResult>(done).certificate;
-  done = DependencyNeedBatch{};
-  session.reset();
-  fragments = {};
-  input = {};
+  ResultObjectInputs objects;
+  ResourceVector<ResultIoReply> io;
+  ResultProgramPhase phase{
+      query, objects,
+      io,    allocator,
+      root,  [&](std::uint64_t amount) { return root.consume({amount}); },
+      {}};
+  std::optional<ResultProgramPoll> pending;
+  {
+    // Direct hosts establish the poll's metadata allocation domain explicitly.
+    ResourceAllocationScope scope(root);
+    pending.emplace(continuation.poll(phase).take_value());
+  }
+  PS_CHECK(std::get<ResultProgramNeed>(*pending).results.size() == 2);
+  PS_CHECK(
+      std::get<ResultProgramNeed>(*pending).results.get_allocator().owned_by(
+          root));
+  ResultRelation relation;
+  {
+    auto builder =
+        ResultBuilder::start(root, schema, query.semantic_key).take_value();
+    PS_CHECK(builder
+                 .bind_descriptor_relation(
+                     ResultRelation::cartesian(root, 1, {}).take_value())
+                 .ok());
+    const std::int64_t number = 7;
+    for (unsigned field = 0; field < 2; ++field) {
+      PS_CHECK(
+          builder
+              .append(
+                  field, 1,
+                  ByteView(reinterpret_cast<const std::uint8_t*>(&number), 8))
+              .ok());
+      PS_CHECK(builder
+                   .publish(field, 1,
+                            ResultRelation::cartesian(root, 1, {}).take_value(),
+                            {true, true, true, true})
+                   .ok());
+    }
+    objects.emplace(0, builder.seal().take_value());
+    auto done = continuation.poll(phase).take_value();
+    relation =
+        std::get<ResultPublication>(done).result.relation(0).take_value();
+  }
+  continuation = {};
+  objects.clear();
   PS_CHECK(root.statistics().live[ResourceKind::Payload] == 0);
   PS_CHECK(root.statistics().live[ResourceKind::Metadata] > 0);
+  const auto with_need = root.statistics().live[ResourceKind::Metadata];
   pending.reset();
   PS_CHECK(root.statistics().live[ResourceKind::Metadata] > 0);
-  certificate = {};
+  PS_CHECK(root.statistics().live[ResourceKind::Metadata] < with_need);
+  relation = {};
   PS_CHECK(root.statistics().live[ResourceKind::Metadata] == 0);
   return 0;
 }
+
 int mixed_certificate_roots() {
   ResourceBudget root(ResourceLimits{});
   const auto left =

@@ -90,7 +90,7 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
   auto output = allocator.allocate(queries.size() * 16).take_value();
   gpu_internal::Invocation invocation(device, {});
   const auto* service = invocation.service();
-  std::array<ps_gpu_buffer_binding_v11, 4> buffers{};
+  std::array<ps_gpu_buffer_binding_v1, 4> buffers{};
   const std::uint8_t* pointers[]{atlas.payload.bytes().data(),
                                  atlas.directory.bytes().data(), indices.data(),
                                  output.data()};
@@ -102,7 +102,7 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
     PS_CHECK(service->buffer(service->context, pointers[i], sizes[i], i == 3,
                              &token) == 0);
     buffers[i] = {
-        sizeof(ps_gpu_buffer_binding_v11), i, token, 0, sizes[i], i == 3};
+        sizeof(ps_gpu_buffer_binding_v1), i, token, 0, sizes[i], i == 3};
   }
   std::array<std::uint64_t, 20> config{};
   config[0] = shape.size();
@@ -113,7 +113,7 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
     config[4 + axis] = shape[axis];
     config[12 + axis] = atlas.tile_shape[axis];
   }
-  ps_gpu_dispatch_v11 command{};
+  ps_gpu_dispatch_v1 command{};
   command.struct_size = sizeof(command);
   command.source = shader;
   command.source_size = sizeof(shader) - 1;

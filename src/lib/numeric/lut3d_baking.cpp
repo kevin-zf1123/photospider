@@ -40,28 +40,11 @@ std::string prefix(const WorkflowDocument& document, std::size_t count) {
   for (const auto& input : document.inputs) {
     digest.integer(input.id);
     digest.text(input.name);
-    digest.integer(static_cast<unsigned>(input.descriptor.element_type));
-    digest.integer(input.descriptor.shape.size());
-    for (auto n : input.descriptor.shape)
-      digest.integer(n);
-    digest.integer(input.region.dimensions().size());
-    for (auto dimension : input.region.dimensions()) {
-      digest.integer(dimension.offset);
-      digest.integer(dimension.extent);
-    }
-    digest.integer(input.layout.byte_offset);
-    digest.integer(input.layout.origin.size());
-    for (auto origin : input.layout.origin)
-      digest.integer(origin);
-    digest.integer(input.layout.byte_strides.size());
-    for (auto stride : input.layout.byte_strides)
-      digest.integer(stride);
-    digest.integer(input.facets.size());
-    for (const auto& facet : input.facets) {
-      digest.text(facet.key);
-      digest.integer(facet.version);
-      digest.integer(facet.payload.size());
-      digest.bytes(facet.payload.data(), facet.payload.size());
+    digest.integer(static_cast<bool>(input.result_schema));
+    if (input.result_schema) {
+      auto canonical = input.result_schema->canonical();
+      digest.integer(canonical.size());
+      digest.bytes(canonical.data(), canonical.size());
     }
   }
   digest.integer(document.outputs.size());
@@ -123,20 +106,24 @@ Result<ElementType> source_type(const SemanticGraphIR& graph,
       continue;
     for (const auto& value : node.outputs)
       if (value.key == output.source_port) {
-        if (value.result_schema || value.descriptor.shape != descriptor.shape ||
-            (value.descriptor.element_type != ElementType::Float32 &&
-             value.descriptor.element_type != ElementType::Float64))
+        if (!value.result_schema || !value.result_schema->fields.empty() ||
+            value.result_schema->tensors.size() != 1)
+          break;
+        const auto& tensor = value.result_schema->tensors[0];
+        if (tensor.sample_shape() != descriptor.shape ||
+            (tensor.descriptor.element_type != ElementType::Float32 &&
+             tensor.descriptor.element_type != ElementType::Float64))
           break;
         auto expected = encode_color_array(color);
         if (!expected.ok())
           return Result<ElementType>(expected.status());
-        for (const auto& facet : value.facets)
+        for (const auto& facet : tensor.facets)
           if (facet.key == "photospider.color-array" &&
               (facet.version != expected.value().version ||
                facet.payload != expected.value().payload))
             return Result<ElementType>(
                 type_error("source color description mismatch"));
-        return Result<ElementType>(value.descriptor.element_type);
+        return Result<ElementType>(tensor.descriptor.element_type);
       }
   }
   return Result<ElementType>(

@@ -12,6 +12,7 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/comparison_profiles.hpp"
 #include "01-numeric/exact_predicate.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
@@ -132,93 +133,56 @@ struct ComparisonMath final {
     }
   }
 };
-Result<Value> execute_comparison(const OperationInvocation& call,
-                                 Comparison kind, SequenceProfile profile) {
-  using Answer = Result<Value>;
-  const auto* budget = resource_internal::metadata_budget();
-  const auto consume = [&](std::uint64_t work) {
-    if (call.cancellation.cancelled())
-      return Status{ErrorCode::Cancelled, {}};
-    return budget ? budget->consume({work}) : Status::success();
-  };
-  auto status = consume(1);
-  if (!status.ok())
-    return Answer(status);
-  const auto type = call.inputs[0].descriptor().element_type;
-  const auto width = Value::element_size(type);
-  const auto& shape = call.inputs[0].descriptor().shape;
-  auto allocated = MutableValue::allocate({ElementType::UInt8, shape},
-                                          call.output_region, call.allocator);
-  if (!allocated.ok())
-    return Answer(allocated.status());
-  auto output = allocated.take_value();
-  auto storage = call.allocator.allocate(sizeof(ComparisonMath));
-  if (!storage.ok())
-    return Answer(storage.status());
-  auto scratch = storage.take_value();
-  static_assert(alignof(ComparisonMath) <= alignof(std::max_align_t));
-  std::unique_ptr<ComparisonMath, void (*)(ComparisonMath*)> math(
-      new (scratch.data()) ComparisonMath(kind, profile),
-      [](ComparisonMath* value) { value->~ComparisonMath(); });
-  std::vector<std::uint64_t> coordinate(shape.size(), 0);
-  std::array<const std::uint8_t*, 2> packed{};
-  for (unsigned port = 0; port < 2; ++port) {
-    const auto& input = call.inputs[port];
-    std::uint64_t stride = width;
-    bool dense = true;
-    for (std::size_t axis = shape.size(); axis; --axis) {
-      if (shape[axis - 1] > 1 && input.layout().byte_strides[axis - 1] !=
-                                     static_cast<std::int64_t>(stride))
-        dense = false;
-      stride *= shape[axis - 1];
-    }
-    if (dense) {
-      auto address = input.byte_address(coordinate);
-      if (!address.ok())
-        return Answer(address.status());
-      packed[port] = input.bytes().data() + address.value();
-    }
-  }
-  const auto count = call.output_region.element_count().value();
-  for (std::uint64_t begin = 0; begin < count; begin += 4) {
-    const auto lanes =
-        static_cast<unsigned>(std::min<std::uint64_t>(4, count - begin));
-    status = consume(
-        lanes * (2 * shape.size() + (kind == Comparison::IsClose ? 1024 : 16)));
-    if (!status.ok())
-      return Answer(status);
-    for (unsigned lane = 0; lane < lanes; ++lane) {
-      for (unsigned port = 0; port < 2; ++port) {
-        const auto& input = call.inputs[port];
-        const auto* data = packed[port];
-        if (data) {
-          data += (begin + lane) * width;
-        } else {
-          auto address = input.byte_address(coordinate);
-          if (!address.ok())
-            return Answer(address.status());
-          data = input.bytes().data() + address.value();
-        }
-        auto& bits = port ? math->right[lane] : math->left[lane];
-        bits = 0;
-        if (width == 8)
-          std::memcpy(&bits, data, 8);
-        else if (width == 4)
-          std::memcpy(&bits, data, 4);
-        else
-          bits = *data;
+struct ComparisonKernel final {
+  Comparison kind;
+  SequenceProfile profile;
+  ComparisonKernel(Comparison kind, SequenceProfile profile)
+      : kind(kind), profile(profile) {}
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    using namespace numeric_ops;  // NOLINT(build/namespaces)
+    const auto& spec = phase.query.inputs[0].result_schema->tensors[0];
+    const auto shape = spec.sample_shape();
+    const auto count = math_take(spec.sample_count());
+    auto memory = math_take(phase.allocator.allocate(sizeof(ComparisonMath)));
+    auto* arithmetic = new (memory.data()) ComparisonMath(kind, profile);
+    const auto destroy = [](ComparisonMath* value) {
+      value->~ComparisonMath();
+    };
+    std::unique_ptr<ComparisonMath, decltype(destroy)> guard(arithmetic,
+                                                             destroy);
+    MathTensorReader first(phase.tensors->at({0, 0}), phase.query.cancellation),
+        second(phase.tensors->at({1, 0}), phase.query.cancellation);
+    if (writers.size() != 1)
+      return {ErrorCode::OperationFailed,
+              "comparison requires one packed writer"};
+    MathTensorWriter writer(writers[0]);
+    std::vector<uint64_t> at(shape.size(), 0);
+    for (uint64_t begin = 0; begin < count; begin += 4) {
+      const auto lanes =
+          static_cast<unsigned>(std::min<uint64_t>(4, count - begin));
+      auto charged = phase.consume_work(
+          lanes *
+          (2 * shape.size() + (kind == Comparison::IsClose ? 1024 : 16)));
+      if (!charged.ok())
+        return charged;
+      std::array<uint8_t*, 4> destinations{};
+      std::array<uint8_t, 4> answers{};
+      for (unsigned lane = 0; lane < lanes; ++lane) {
+        arithmetic->left[lane] = first.bits(at);
+        arithmetic->right[lane] = second.bits(at);
+        destinations[lane] = writer.address(at);
+        math_next(at, shape);
       }
-      for (std::size_t axis = shape.size(); axis; --axis) {
-        if (++coordinate[axis - 1] < shape[axis - 1])
-          break;
-        coordinate[axis - 1] = 0;
-      }
+      arithmetic->evaluate(spec.descriptor.element_type, lanes,
+                           phase.query.parameters, answers.data());
+      for (unsigned lane = 0; lane < lanes; ++lane)
+        *destinations[lane] = answers[lane];
     }
-    math->evaluate(type, lanes, call.parameters, output.data() + begin);
+    return phase.consume_work(1);
   }
-  status = consume(1);
-  return status.ok() ? std::move(output).publish() : Answer(status);
-}
+};
+using ComparisonProgram = numeric_ops::WholeTensorProgram<ComparisonKernel>;
 OperationDefinition comparison(const std::string& key, Comparison kind,
                                SequenceProfile profile) {
   OperationDefinition operation;
@@ -227,32 +191,31 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
   traits.requires_metadata_specialization = true;
   traits.input_count = 2;
   traits.input_schema.resize(2);
-  if (kind == Comparison::IsClose) {
-    for (auto& input : traits.input_schema)
-      input.element_type_mask = 12;
+  for (auto& input : traits.input_schema) {
+    input.kind = OperationPortKind::Result;
+    input.element_type_mask = kind == Comparison::IsClose ? 12 : 15;
+  }
+  if (kind == Comparison::IsClose)
     traits.parameter_schema = {{"atol", OperationParameterType::Float64},
                                {"rtol", OperationParameterType::Float64}};
-  }
-  auto& output = traits.outputs[0];
-  output.key = "values";
-  output.output_element_type = ElementType::UInt8;
-  output.shape_rule = OperationShapeRule::MatchAllInputs;
-  output.region_rule = OperationRegionRule::Whole;
-  output.requires_dense_output = true;
+  numeric_ops::set_whole_tensor_output(traits, ElementType::UInt8,
+                                       sizeof(ComparisonProgram));
   traits.workspace_bytes = sizeof(ComparisonMath);
   operation.specialize_metadata = [kind, profile](const auto& inputs,
                                                   const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
     using Answer = Result<std::vector<OperationOutputSpecialization>>;
-    const auto& first = inputs[0].descriptor;
-    if (first.shape != inputs[1].descriptor.shape ||
-        first.element_type != inputs[1].descriptor.element_type)
+    const auto& first = inputs[0].result_schema->tensors[0];
+    const auto& second = inputs[1].result_schema->tensors[0];
+    const auto shape = first.sample_shape();
+    if (shape != second.sample_shape() ||
+        first.descriptor.element_type != second.descriptor.element_type)
       return Answer(Status{ErrorCode::TypeMismatch,
                            "comparison inputs must match shape and dtype",
                            FailureReason::None,
                            {FailureOrigin::Schema, FailureScope::Unspecified}});
     std::uint64_t count = 1;
-    for (auto extent : first.shape) {
+    for (auto extent : shape) {
       if (!extent || extent > (UINT64_C(1) << 40) / count)
         return Answer(
             Status{ErrorCode::TypeMismatch,
@@ -276,123 +239,69 @@ OperationDefinition comparison(const std::string& key, Comparison kind,
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization result;
-    result.metadata.descriptor = {ElementType::UInt8, first.shape};
+    result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
+        numeric_ops::numeric_tensor_schema(ElementType::UInt8, shape));
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.callback = [kind, profile](const OperationInvocation& call) {
-    return execute_comparison(call, kind, profile);
+  operation.start_result = [kind, profile](const auto&, const auto& allocator) {
+    return ResultContinuation::make<ComparisonProgram>(allocator, kind,
+                                                       profile);
   };
   return operation;
 }
-std::uint64_t selection_word(std::uint8_t condition, std::uint64_t when_true,
-                             std::uint64_t when_false) {
-  return condition ? when_true : when_false;
-}
-Result<Value> execute_selection(const OperationInvocation& call) {
-  using Answer = Result<Value>;
-  const auto* budget = resource_internal::metadata_budget();
-  const auto consume = [&](std::uint64_t work) {
-    if (call.cancellation.cancelled())
-      return Status{ErrorCode::Cancelled, {}};
-    return budget ? budget->consume({work}) : Status::success();
-  };
-  auto status = consume(1);
-  if (!status.ok())
-    return Answer(status);
-  const auto& descriptor = call.inputs[1].descriptor();
-  const auto& shape = descriptor.shape;
-  const auto width = Value::element_size(descriptor.element_type);
-  auto allocated =
-      MutableValue::allocate(descriptor, call.output_region, call.allocator);
-  if (!allocated.ok())
-    return Answer(allocated.status());
-  auto output = allocated.take_value();
-  std::vector<std::uint64_t> coordinate(shape.size(), 0);
-  std::array<const std::uint8_t*, 3> packed{};
-  for (unsigned port = 0; port < 3; ++port) {
-    const auto& input = call.inputs[port];
-    const auto source_width = port ? width : 1;
-    std::uint64_t stride = source_width;
-    bool dense = true;
-    for (std::size_t axis = shape.size(); axis; --axis) {
-      if (shape[axis - 1] > 1 && input.layout().byte_strides[axis - 1] !=
-                                     static_cast<std::int64_t>(stride))
-        dense = false;
-      stride *= shape[axis - 1];
+struct SelectionKernel final {
+  explicit SelectionKernel(SequenceProfile) {}
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    using namespace numeric_ops;  // NOLINT(build/namespaces)
+    const auto& output = phase.query.output.result_schema->tensors[0];
+    const auto& shape = output.descriptor.shape;
+    const auto count = math_take(output.sample_count());
+    const auto width = Value::element_size(output.descriptor.element_type);
+    std::array<MathTensorReader, 3> inputs{
+        MathTensorReader(phase.tensors->at({0, 0}), phase.query.cancellation),
+        MathTensorReader(phase.tensors->at({1, 0}), phase.query.cancellation),
+        MathTensorReader(phase.tensors->at({2, 0}), phase.query.cancellation)};
+    if (writers.size() != 1)
+      return {ErrorCode::OperationFailed,
+              "selection requires one packed writer"};
+    MathTensorWriter writer(writers[0]);
+    std::vector<uint64_t> at(shape.size(), 0);
+    for (uint64_t i = 0; i < count; ++i) {
+      auto charged = phase.consume_work(32 + width + 3 * shape.size());
+      if (!charged.ok())
+        return charged;
+      // Both complete branches remain required even for a constant condition.
+      const std::array<uint64_t, 3> bits{inputs[0].bits(at), inputs[1].bits(at),
+                                         inputs[2].bits(at)};
+      if (bits[0] > 1)
+        return {ErrorCode::InvalidArgument,
+                "InvalidCondition: port=0 byte=" + std::to_string(bits[0]) +
+                    " linear_index=" + std::to_string(i),
+                FailureReason::InvalidDomain,
+                {FailureOrigin::Domain, FailureScope::Run}};
+      const auto selected = bits[0] ? bits[1] : bits[2];
+      std::memcpy(writer.address(at), &selected, width);
+      math_next(at, shape);
     }
-    if (dense) {
-      auto address = input.byte_address(coordinate);
-      if (!address.ok())
-        return Answer(address.status());
-      packed[port] = input.bytes().data() + address.value();
-    }
+    return phase.consume_work(1);
   }
-  const auto count = call.output_region.element_count().value();
-  for (std::uint64_t i = 0; i < count; ++i) {
-    status = consume(32 + width + 3 * shape.size());
-    if (!status.ok())
-      return Answer(status);
-    std::array<std::uint64_t, 3> bits{};
-    for (unsigned port = 0; port < 3; ++port) {
-      const auto& input = call.inputs[port];
-      const auto source_width = port ? width : 1;
-      const auto* data = packed[port];
-      if (data) {
-        data += i * source_width;
-      } else {
-        auto address = input.byte_address(coordinate);
-        if (!address.ok())
-          return Answer(address.status());
-        data = input.bytes().data() + address.value();
-      }
-      if (source_width == 8)
-        std::memcpy(&bits[port], data, 8);
-      else if (source_width == 4)
-        std::memcpy(&bits[port], data, 4);
-      else
-        bits[port] = *data;
-    }
-    if (bits[0] > 1)
-      return Answer(
-          Status{ErrorCode::InvalidArgument,
-                 "InvalidCondition: port=0 byte=" + std::to_string(bits[0]) +
-                     " linear_index=" + std::to_string(i),
-                 FailureReason::InvalidDomain,
-                 {FailureOrigin::Domain, FailureScope::Run}});
-    const auto selected =
-        selection_word(static_cast<std::uint8_t>(bits[0]), bits[1], bits[2]);
-    auto* destination = output.data() + i * width;
-    if (width == 8)
-      std::memcpy(destination, &selected, 8);
-    else if (width == 4)
-      std::memcpy(destination, &selected, 4);
-    else
-      *destination = static_cast<std::uint8_t>(selected);
-    for (std::size_t axis = shape.size(); axis; --axis) {
-      if (++coordinate[axis - 1] < shape[axis - 1])
-        break;
-      coordinate[axis - 1] = 0;
-    }
-  }
-  status = consume(1);
-  return status.ok() ? std::move(output).publish() : Answer(status);
-}
+};
+using SelectionProgram = numeric_ops::WholeTensorProgram<SelectionKernel>;
 OperationDefinition selection(const std::string& key, SequenceProfile profile) {
   OperationDefinition operation;
   operation.key = key;
   auto& traits = operation.traits;
   traits.input_count = 3;
   traits.input_schema.resize(3);
-  traits.input_schema[0].element_type =
-      static_cast<std::uint32_t>(ElementType::UInt8);
-  auto& output = traits.outputs[0];
-  output.key = "values";
-  output.shape_rule = OperationShapeRule::MatchAllInputs;
-  output.output_dtype_rule = OperationDtypeRule::Input;
-  output.output_dtype_input = 1;
-  output.region_rule = OperationRegionRule::Whole;
-  output.requires_dense_output = true;
+  for (auto& input : traits.input_schema) {
+    input.kind = OperationPortKind::Result;
+    input.element_type_mask = 15;
+  }
+  traits.input_schema[0].element_type_mask = 1;
+  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                       sizeof(SelectionProgram));
   traits.requires_metadata_specialization = true;
   operation.specialize_metadata = [profile](const auto& inputs, const auto&)
       -> Result<std::vector<OperationOutputSpecialization>> {
@@ -403,13 +312,13 @@ OperationDefinition selection(const std::string& key, SequenceProfile profile) {
                            FailureReason::None,
                            {FailureOrigin::Schema, FailureScope::Unspecified}});
     };
-    const auto& shape = inputs[0].descriptor.shape;
+    const auto shape = inputs[0].result_schema->tensors[0].sample_shape();
+    const auto& left = inputs[1].result_schema->tensors[0];
+    const auto& right = inputs[2].result_schema->tensors[0];
     if (shape.empty() || shape.size() > 8)
       return mismatch("select requires rank 1..8");
-    if (inputs[1].descriptor.element_type !=
-            inputs[2].descriptor.element_type ||
-        inputs[1].descriptor.shape != shape ||
-        inputs[2].descriptor.shape != shape)
+    if (left.descriptor.element_type != right.descriptor.element_type ||
+        left.sample_shape() != shape || right.sample_shape() != shape)
       return mismatch("select branch dtypes and all shapes must match");
     std::uint64_t count = 1;
     for (auto extent : shape) {
@@ -421,11 +330,15 @@ OperationDefinition selection(const std::string& key, SequenceProfile profile) {
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization result;
-    result.metadata.descriptor = inputs[1].descriptor;
+    result.metadata.result_schema = std::make_shared<const SchemaTemplate>(
+        numeric_ops::numeric_tensor_schema(left.descriptor.element_type,
+                                           shape));
     return Answer(
         std::vector<OperationOutputSpecialization>{std::move(result)});
   };
-  operation.callback = execute_selection;
+  operation.start_result = [profile](const auto&, const auto& allocator) {
+    return ResultContinuation::make<SelectionProgram>(allocator, profile);
+  };
   return operation;
 }
 }  // namespace

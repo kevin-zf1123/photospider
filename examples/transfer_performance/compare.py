@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Serial, correctness-gated ABBA comparisons; Python standard library only.
 
-Pass two separately built *revision-2 CLI* drivers. For an original kernel,
-compile this revision's main.cpp against the original headers and library.
-No golden result, clock sample or backend failure is silently skipped.
+Pass two separately built drivers that implement the same revision-2 Result CLI
+and CSV protocol. The current Result driver cannot be compiled against the older
+Value/planar implementation. No golden result, clock sample or backend failure
+is silently skipped.
 """
 import argparse
 import csv
@@ -80,7 +81,7 @@ def main():
         'apple_silicon' if platform.system() == 'Darwin' and platform.machine() in ('arm64', 'aarch64') else 'x86_64'))
     parser.add_argument('--cpu', type=int, help='Linux affinity or FreeBSD cpuset; unsupported on macOS')
     parser.add_argument('--include-4k', action='store_true')
-    parser.add_argument('--managed', action='store_true', help='Both inputs must contain the fixed planar budget service')
+    parser.add_argument('--managed', action='store_true', help='Report issued work from both Result drivers; Root capacity limits apply in either mode')
     parser.add_argument('--case', action='append', help='Run only a named case; may be repeated')
     parser.add_argument('--all-curves', action='store_true')
     parser.add_argument('--corpus-table', type=Path)
@@ -164,7 +165,7 @@ def main():
                 _, iteration, warmup, wall, callback, evaluated, math_calls, work = line.split(',')
                 row = dict(case=case, variant=variant, order=order, iteration=int(iteration),
                            warmup=int(warmup), wall_us=float(wall), callback_us=float(callback),
-                           evaluated=int(evaluated), strict_math_calls=int(math_calls), issued_work=int(work))
+                           evaluated=int(evaluated), strict_math_calls=int(math_calls), issued_work=int(work) if work else None)
                 if row['iteration'] != seen or row['warmup'] != int(seen < 2):
                     raise RuntimeError(f'{stem}: noncontiguous or mislabeled execution samples')
                 samples.append(row)

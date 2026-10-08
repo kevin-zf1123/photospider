@@ -244,7 +244,7 @@ int workflow() {
   PS_CHECK(run.value().diagnostics.tile_count == 4);
   PS_CHECK(run.value().diagnostics.peak_live_bytes > 0);
   PS_CHECK(!run.value().diagnostics.plan_digest.empty());
-  auto result = run.value().images.at("result");
+  auto result = run.value().tensors.at("result");
   PS_CHECK(result.config().order == ImagePlaneOrder::Tiled);
   PS_CHECK(result.valid_samples() == samples.size());
   std::vector<float> output(samples.size());
@@ -265,7 +265,7 @@ int workflow() {
   PS_CHECK(component_plan.ok());
   auto component_run = execution.execute(component_plan.value().plan, bindings);
   PS_CHECK(component_run.ok());
-  const auto& component = component_run.value().images.at("result");
+  const auto& component = component_run.value().tensors.at("result");
   PS_CHECK(component.valid_samples() == 9);
   std::vector<float> green_samples(9);
   PS_CHECK(component
@@ -479,12 +479,12 @@ int workflow() {
   auto first_run = small_context.execute(small_plan.plan, small_bindings);
   PS_CHECK(first_run.ok());
   small_bindings.inputs[0].image = std::make_shared<const PlanarImage>(
-      first_run.value().images.at("result"));
+      first_run.value().tensors.at("result"));
   auto second_run = small_context.execute(small_plan.plan, small_bindings);
   PS_CHECK(second_run.ok());
   float observed = 0;
   PS_CHECK(second_run.value()
-               .images.at("result")
+               .tensors.at("result")
                .read(small_region, reinterpret_cast<std::uint8_t*>(&observed),
                      sizeof(observed))
                .ok());
@@ -625,17 +625,6 @@ int workflow() {
          std::make_shared<const PlanarImage>(fresh_source)});
     PS_CHECK(cycling_context.execute(small_plan.plan, fresh_binding).ok());
   }
-
-  auto legacy_layer = make_layer_operation(LayerOperation::Opacity);
-  PS_CHECK(legacy_layer.ok());
-  OperationRegistry layer_registry;
-  PS_CHECK(layer_registry.register_operation(legacy_layer.take_value()).code ==
-           ErrorCode::InvalidArgument);
-  auto layer_layout = layer_schema(LayerRepresentation::Layer).take_value();
-  PS_CHECK(layer_layout.validate().code == ErrorCode::TypeMismatch);
-  PS_CHECK(ResultBuilder::start(ResourceBudget{}, layer_layout, "legacy")
-               .status()
-               .code == ErrorCode::TypeMismatch);
 
   auto failure_registry = std::make_shared<OperationRegistry>();
   const auto failure_traits =

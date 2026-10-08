@@ -1,3 +1,8 @@
+cmake_minimum_required(VERSION 3.21)
+project(PhotospiderMetadataWorkflow LANGUAGES CXX)
+if(NOT TARGET Photospider::kernel)
+  find_package(Photospider 0.32 CONFIG REQUIRED COMPONENTS kernel)
+endif()
 add_executable(photospider_metadata_workflow main.cpp)
 target_link_libraries(photospider_metadata_workflow PRIVATE Photospider::kernel)
 target_compile_features(photospider_metadata_workflow PRIVATE cxx_std_17)

@@ -6,12 +6,10 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+verification_status: focused_result_validation_passed
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+repository_commit: current working tree
 ---
 
 # CRV-08: scalar coordinate shapers
@@ -48,12 +46,16 @@ underlying primitive. The logarithmic pair need their own nonlinear contracts.
 
 The following numerical and execution clauses complete this initial clarification.
 
-All four interfaces expose dynamic input plus lower[1], upper[1], all sharing
-Float32 or Float64 dtype. Bounds are shared across the entire input, finite and
-strictly ordered lower<upper; values retains input shape/dtype as generic numeric
-data. Linear templates explicitly broadcast scalar boundaries. The inverse
-linear template must enforce bound order too, rather than inherit remap_range's
-more permissive target-bound behavior.
+All four interfaces expose Result inputs `input`, `lower` and `upper`. Each input
+has one tensor member under any schema id/version/key; use the full
+`sample_shape()`, including batch axes. `input` has Float32/Float64 dtype, rank
+1..8, positive extents and at most 2^40 elements. Bounds are same-dtype scalar
+tensors of shape [1]. The output port `values` is an immutable Result using
+`photospider.tensor` v1/member `samples`, with input shape/dtype and empty facets.
+Bounds are finite, shared across the input and strictly ordered lower<upper.
+Linear templates explicitly broadcast scalar boundaries. The inverse linear
+template enforces bound order rather than inheriting remap_range's more
+permissive target-bound behavior.
 
 The log2 pair requires 0<lower<upper. Forward is
 (log2(x)-log2(lower))/(log2(upper)-log2(lower)); inverse is
@@ -93,22 +95,28 @@ requested output batch to repair an invalid implementation.
 
 ## Shared execution contract
 
-Input rank is 1..8, all extents positive and logical count <=2^40. Ordered ports
-are input, lower, upper; output values retains input dtype/shape with empty
-facets. There is no output dtype conversion parameter. All six log primitive
-keys execute through Whole; the linear templates reuse Whole NUM remap/constant
-nodes, including the inverse scalar order guard. Nonempty requests collect
-complete input and both scalar bounds, including typed/upstream validation,
-before numerical evaluation. Bounds precede input IEEE handling inside callbacks;
-upstream collection failures can precede callback bound checks. Empty Q reads
-no dynamic payload. Any input or bound change dirties the complete recorded
+Each Result input has one tensor under an arbitrary schema id/version/key.
+`sample_shape()` includes all batch and cell axes. Bounds have shape [1] and the
+same dtype as `input`; output port `values` uses `photospider.tensor` v1/member
+`samples`, preserving input shape and dtype with empty facets. There is no output
+dtype conversion parameter. All six log primitive keys execute with Whole Result
+programs. The linear templates expand to the existing Whole Result remap and
+constant nodes, including the inverse scalar order guard.
+
+A nonempty request requires Data, Validation and Descriptor (role 13) for all
+three inputs, including complete typed/upstream validation. The log Result
+program reads authorized windows directly; it does not collect the full input
+through a Value or make a copy of that input. Bounds are checked before input
+IEEE handling inside the callback; typed/upstream failures can occur first.
+Empty reads no payload. Any input or bound change dirties the complete recorded
 output demand. Numeric bound errors have Run scope and publish no output.
 
 Static log2 primitive keys select strict/apple_silicon/x86_64 independently;
 there is no runtime mode parameter. Linear authoring templates take static
 profile=strict/apple_silicon/x86_64, default strict, and expand the corresponding
-NUM operation keys. No template computation occurs at construction and no result
-is automatically materialized or persisted.
+NUM operation keys. Log `prepare_static` records the direction and profile in
+immutable state, which the Whole callback reuses. No template computation occurs
+at construction and no result is automatically materialized or persisted.
 
 Log forward checks bounds before source special values; NaN quieting and generated
 canonical NaN bits follow NUM-04. Forward x=lower gives +0 and x=upper gives 1.
@@ -117,20 +125,20 @@ bits, t=1 gives upper bits; other finite t yields a positive exact result, round
 with gradual underflow. Linear zero/endpoint/payload semantics are exactly those
 of remap_range, not newly redefined by the template.
 
-Return a complete immutable dense Value; public fragments retain its full owner
-and expose the requested region. Ownership lasts
-beyond context teardown. Source arbitrary legal offsets, unaligned access and
-negative/zero strides are supported. Cache identity includes source/bound witnesses,
-profile and template expansion identity. Cache-off and fragmented requests have
-the same values, metadata and failure scope as joint requests.
+The Result program publishes a complete immutable `samples` tensor; public
+fragments expose requested regions while retaining the Result owner beyond
+context teardown. Authorized windows support legal offsets, unaligned access and
+negative/zero strides. Cache identity includes source/bound witnesses, profile
+and template expansion identity. Cache-off and fragmented requests have the
+same values, metadata and failure scope as joint requests.
 
-For M=product(input.shape), output payload is M*sizeof(dtype); basic work is O(M)
-plus certified numerical refinement for log functions. Account source windows,
-owners, broadcast views, template intermediates, output capacity, exact arithmetic
-and overlapping scratch growth under host capacity/work limits. Even small
-requests allocate full output and collect full input. Log callbacks retain fixed
-admitted exact state plus an O(rank) coordinate counter, with no per-output
-point or dependency records. Poll cancellation at
+For M=product(input.sample_shape()), output payload is M*sizeof(dtype); basic
+work is O(M) plus certified numerical refinement for log functions. Account
+authorized input windows, owners, broadcast views, template intermediates, full
+output capacity, exact arithmetic and overlapping scratch growth under host
+capacity/work limits. Even a small public request requires the full Whole output.
+Log callbacks retain fixed admitted exact state plus an O(rank) coordinate
+counter, with no per-output point or dependency records. Poll cancellation at
 least every 64 simple samples and during each extended arithmetic refinement.
 Release temporary state on all terminal paths and publish no partial failed run.
 
@@ -195,11 +203,13 @@ expression with a strict certified scalar fallback and preserves monotonicity an
 independence. Refinement precision is bounded to 128..4096; unresolved capacity or
 rounding returns `ResourceExhausted`.
 
-See [the shaper workflow README](../../../../examples/numeric_workflow/README.md)
-and [math implementation](../math-implementation.md) for the target command and
-shared fixture. Native Clang 21 strict/Apple each pass 4,196 independent
-Fraction/directed MPFR-4.2.0-p12 cases. Six manual groups cover all four forms,
-including public budget/cancellation and failing source execution. Focused
-numeric/compiler CTests, ClangFormat 21, cpplint and scoped review pass.
-No new x86 or installed-package run is claimed. This manual target has no
-integration-test registration.
+The focused `test_numeric_result_math` CTest passes 1/1 and covers the Result
+workflows, boundaries, prepared-state rebinding and cancellation, plus the
+existing authoring checks. The six manual fixture groups pass under Strict and
+the local Apple profile. The independent Fraction/directed-MPFR 4.2.2 oracle
+passes 4,196 cases under each profile against the Result probe. The installed
+consumer test passes 1/1 for public log forward/inverse composition, linear
+inverse wiring and output reads after context teardown. See [the workflow
+README](../../../../examples/numeric_workflow/README.md) for reproducible
+commands. These results do not cover x86 numerical execution, GPU execution,
+maximum-size shapes or performance.

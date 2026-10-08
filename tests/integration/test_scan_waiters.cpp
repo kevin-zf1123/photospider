@@ -5,9 +5,11 @@
 #include <cstring>
 #include <future>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <vector>
 
+#include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "execution/execution_test_hooks.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
@@ -59,8 +61,12 @@ Footprint point(unsigned index) {
 int shared(bool long_first, bool cancel_owner, bool finite, bool warm) {
   auto registry = make_default_operation_registry();
   WorkflowDocument doc;
-  doc.inputs = {
-      {1, "x", {ElementType::Float64, {2}}, Region::whole({2}), {0, {8}}, {}}};
+  WorkflowInputDeclaration declaration;
+  declaration.id = 1;
+  declaration.name = "x";
+  declaration.result_schema = std::make_shared<SchemaTemplate>(
+      numeric_result_fixture::source_schema(input(finite)));
+  doc.inputs = {declaration};
   doc.nodes = {{1,
                 "numeric.ordered_scan",
                 {WorkflowInputReference{1}},
@@ -68,9 +74,14 @@ int shared(bool long_first, bool cancel_owner, bool finite, bool warm) {
   doc.outputs = {{"y", 1, "value"}};
   GraphContext graph(doc);
   auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContext context(registry, {2, false, 8, 4096, warm ? 64U : 0U});
-  auto demand =
-      context.open_demand(plan, {{{"x", input(finite)}}}).take_value();
+  ExecutionContextConfig config;
+  config.cpu_workers = 2;
+  config.result_cache_bytes = warm ? 64 : 0;
+  config.managed_resources = ResourceLimits{};
+  ExecutionContext context(registry, config);
+  auto root = context.resource_budget().take_value();
+  auto source = numeric_result_fixture::source(root, input(finite));
+  auto demand = context.open_demand(plan, {{{"x", source}}}).take_value();
   if (warm)
     PS_CHECK(demand.request({{"y", point(0)}}).ok());
   Gate gate;
@@ -110,7 +121,12 @@ int shared(bool long_first, bool cancel_owner, bool finite, bool warm) {
     } else {
       double actual = 0;
       PS_CHECK(result.ok() &&
-               result.value().values.at("y").read({i}, &actual, 8).ok() &&
+               result.value()
+                   .results.at("y")
+                   .read_tensor(
+                       result.value().results.at("y").descriptor().take_value(),
+                       0, {i}, &actual, 8)
+                   .ok() &&
                actual == (i ? 3 : 1));
       auto support = result.value().dependencies.source_support();
       PS_CHECK(support.ok());
@@ -120,11 +136,15 @@ int shared(bool long_first, bool cancel_owner, bool finite, bool warm) {
   }
   return 0;
 }
-int warm_short_first(bool cancel_short, bool finite) {
+int warm_short_first(bool cancel_short, bool finite, bool retain_result) {
   auto registry = make_default_operation_registry();
   WorkflowDocument doc;
-  doc.inputs = {
-      {1, "x", {ElementType::Float64, {2}}, Region::whole({2}), {0, {8}}, {}}};
+  WorkflowInputDeclaration declaration;
+  declaration.id = 1;
+  declaration.name = "x";
+  declaration.result_schema = std::make_shared<SchemaTemplate>(
+      numeric_result_fixture::source_schema(input(finite)));
+  doc.inputs = {declaration};
   doc.nodes = {{1,
                 "numeric.ordered_scan",
                 {WorkflowInputReference{1}},
@@ -132,31 +152,56 @@ int warm_short_first(bool cancel_short, bool finite) {
   doc.outputs = {{"y", 1, "value"}};
   GraphContext graph(doc);
   auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContext context(registry, {2, false, 8, 4096, 64});
-  auto demand =
-      context.open_demand(plan, {{{"x", input(finite)}}}).take_value();
+  ExecutionContextConfig config;
+  config.cpu_workers = 2;
+  config.result_cache_bytes = 64;
+  config.maximum_dependency_cache_metadata = retain_result ? 65536 : 1;
+  config.managed_resources = ResourceLimits{};
+  ExecutionContext context(registry, config);
+  auto root = context.resource_budget().take_value();
+  auto source = numeric_result_fixture::source(root, input(finite));
+  auto demand = context.open_demand(plan, {{{"x", source}}}).take_value();
   PS_CHECK(demand.request({{"y", point(0)}}).ok());
   CancellationSource stop;
   if (cancel_short)
     stop.cancel();
-  // The short observation is already completed in cache. It has no active
-  // checkpoint callback to hold; submit it first and preserve its own outcome.
+  // A completed content block may be reused after the previous Run retires.
+  // Submit the short observation first and preserve its own outcome.
   auto short_result = demand.request({{"y", point(0)}}, stop.token());
   auto long_result = demand.request({{"y", point(1)}});
   if (cancel_short) {
     PS_CHECK(short_result.status().code == ErrorCode::Cancelled);
   } else {
     double value = 0;
-    PS_CHECK(short_result.ok() &&
-             short_result.value().diagnostics.cache_hits == 1 &&
-             short_result.value().values.at("y").read({0}, &value, 8).ok() &&
-             value == 1);
+    PS_CHECK(short_result.ok());
+    const auto& diagnostics = short_result.value().diagnostics;
+    if (retain_result) {
+      PS_CHECK(diagnostics.shared_computations == 1 &&
+               diagnostics.operation_timings.empty());
+    } else {
+      PS_CHECK(diagnostics.block_cache_hits == 1 &&
+               diagnostics.block_cache_misses == 0);
+    }
+    PS_CHECK(
+        short_result.value()
+            .results.at("y")
+            .read_tensor(
+                short_result.value().results.at("y").descriptor().take_value(),
+                0, {0}, &value, 8)
+            .ok() &&
+        value == 1);
   }
   if (finite) {
     double value = 0;
-    PS_CHECK(long_result.ok() &&
-             long_result.value().values.at("y").read({1}, &value, 8).ok() &&
-             value == 3);
+    PS_CHECK(
+        long_result.ok() &&
+        long_result.value()
+            .results.at("y")
+            .read_tensor(
+                long_result.value().results.at("y").descriptor().take_value(),
+                0, {1}, &value, 8)
+            .ok() &&
+        value == 3);
   } else {
     PS_CHECK(long_result.status().code == ErrorCode::OperationFailed &&
              long_result.status().message == "nonfinite scan input 1");
@@ -173,7 +218,8 @@ int main() {
   }
   for (bool cancel : {false, true})
     for (bool finite : {false, true})
-      PS_CHECK(warm_short_first(cancel, finite) == 0);
+      for (bool retain_result : {false, true})
+        PS_CHECK(warm_short_first(cancel, finite, retain_result) == 0);
   PS_CHECK(shared(true, false, false, true) == 0);
   PS_CHECK(shared(true, true, false, true) == 0);
   return 0;

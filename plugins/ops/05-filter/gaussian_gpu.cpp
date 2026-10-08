@@ -8,8 +8,8 @@
 #include <utility>
 
 #include "05-filter/gaussian_spirv.hpp"
+#include "execution/result_native.hpp"
 #include "gaussian_shader.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/execution/resource_allocator.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -63,38 +63,45 @@ constexpr std::uint64_t tap_work = 100000;
 constexpr std::uint64_t finish_work = 131072;
 constexpr std::uint64_t initialize_work = 4096;
 }  // namespace
-Result<Value> execute_gaussian_gpu(const OperationInvocation& call,
-                                   const GaussianGpuKernel& kernel) {
-  using Answer = Result<Value>;
-  const auto* api = call.gpu;
-  if (!api || call.backend != Backend::Gpu)
+Result<MutableBuffer> execute_gaussian_gpu(const ResultProgramPhase& phase,
+                                           const ResultTensorReadWindow& window,
+                                           const GaussianGpuKernel& kernel) {
+  using Answer = Result<MutableBuffer>;
+  const auto* api = phase.gpu;
+  if (!api || phase.query.backend != Backend::Gpu)
     return Answer(Status{ErrorCode::BackendUnavailable,
                          "Gaussian requires native GPU services"});
-  const bool vulkan = api->backend == PS_GPU_BACKEND_VULKAN_V11;
-  if (!vulkan && api->backend != PS_GPU_BACKEND_METAL_V11)
+  const bool vulkan = api->backend == PS_GPU_BACKEND_VULKAN_V1;
+  if (!vulkan && api->backend != PS_GPU_BACKEND_METAL_V1)
     return Answer(Status{ErrorCode::BackendUnavailable,
                          "Gaussian native backend is unsupported"});
-  const auto* budget = resource_internal::metadata_budget();
   const auto consume = [&](std::uint64_t amount) {
-    if (call.cancellation.cancelled())
+    if (phase.query.cancellation.cancelled())
       return Status{ErrorCode::Cancelled, "Gaussian GPU cancelled"};
-    return budget ? budget->consume({amount}) : Status::success();
+    return phase.consume_work(amount);
   };
-  const auto& input = call.inputs[0];
-  auto allocated = MutableValue::allocate(input.descriptor(),
-                                          call.output_region, call.allocator);
+  auto uploaded = execution_internal::ResultNativeScope::input(
+      window, phase.consume_work, phase.query.cancellation);
+  if (!uploaded.ok())
+    return Answer(uploaded.status());
+  const auto input = uploaded.take_value();
+  const auto count = input.region().element_count().value();
+  const auto width = Value::element_size(input.descriptor().element_type);
+  auto charged = consume(count * width);
+  if (!charged.ok())
+    return Answer(charged);
+  auto allocated = execution_internal::ResultNativeScope::output(count * width);
   if (!allocated.ok())
     return Answer(allocated.status());
   auto output = allocated.take_value();
-  const auto count = call.output_region.element_count().value();
   if (!count)
-    return std::move(output).publish(input.facets(), input.resources());
+    return Answer(std::move(output));
   const auto lanes =
       std::min<std::uint64_t>(vulkan ? 64 : kGaussianGpuMaximumLanes, count);
   auto status = consume(lanes * (8 + 10 * 136));
   if (!status.ok())
     return Answer(status);
-  auto allocated_scratch = call.allocator.allocate(lanes * (8 + 10 * 136) * 4);
+  auto allocated_scratch = phase.allocator.allocate(lanes * (8 + 10 * 136) * 4);
   if (!allocated_scratch.ok())
     return Answer(allocated_scratch.status());
   auto scratch = allocated_scratch.take_value();
@@ -107,15 +114,15 @@ Result<Value> execute_gaussian_gpu(const OperationInvocation& call,
       api->buffer(api->context, scratch.data(), scratch.size(), 1, &tokens[3]))
     return Answer(
         Status{ErrorCode::OperationFailed, "Gaussian GPU binding failed"});
-  const ps_gpu_buffer_binding_v11 bindings[] = {
-      {sizeof(ps_gpu_buffer_binding_v11), 0, tokens[0], 0, input.bytes().size(),
+  const ps_gpu_buffer_binding_v1 bindings[] = {
+      {sizeof(ps_gpu_buffer_binding_v1), 0, tokens[0], 0, input.bytes().size(),
        0},
-      {sizeof(ps_gpu_buffer_binding_v11), 1, tokens[1], 0, output.size(), 1},
-      {sizeof(ps_gpu_buffer_binding_v11), 2, tokens[2],
+      {sizeof(ps_gpu_buffer_binding_v1), 1, tokens[1], 0, output.size(), 1},
+      {sizeof(ps_gpu_buffer_binding_v1), 2, tokens[2],
        vulkan ? 0 : kernel.x_offset, vulkan ? kernel.bytes : kernel.nx * 8, 0},
-      {sizeof(ps_gpu_buffer_binding_v11), 3, tokens[2],
+      {sizeof(ps_gpu_buffer_binding_v1), 3, tokens[2],
        vulkan ? 0 : kernel.y_offset, vulkan ? kernel.bytes : kernel.ny * 8, 0},
-      {sizeof(ps_gpu_buffer_binding_v11), 4, tokens[3], 0, scratch.size(), 1}};
+      {sizeof(ps_gpu_buffer_binding_v1), 4, tokens[3], 0, scratch.size(), 1}};
   Arguments args{};
   args.offset = input.layout().byte_offset;
   args.nx = kernel.nx;
@@ -134,14 +141,14 @@ Result<Value> execute_gaussian_gpu(const OperationInvocation& call,
     args.origin[axis] =
         input.layout().origin.empty() ? 0 : input.layout().origin[axis];
   }
-  ps_gpu_dispatch_v11 command{};
+  ps_gpu_dispatch_v1 command{};
   command.struct_size = sizeof(command);
   command.source =
       vulkan ? reinterpret_cast<const char*>(filter_ops::kGaussianSpirv)
              : filter_ops::kGaussianShader;
   command.source_size = vulkan ? sizeof(filter_ops::kGaussianSpirv)
                                : sizeof(filter_ops::kGaussianShader) - 1;
-  command.code_format = vulkan ? PS_GPU_CODE_SPIRV_V11 : PS_GPU_CODE_MSL_V11;
+  command.code_format = vulkan ? PS_GPU_CODE_SPIRV_V1 : PS_GPU_CODE_MSL_V1;
   command.entry = "gaussian_exact";
   command.entry_size = 14;
   command.buffers = bindings;
@@ -163,7 +170,7 @@ Result<Value> execute_gaussian_gpu(const OperationInvocation& call,
     return Answer(status);
   std::array<Arguments, maximum_cohort> arguments{};
   std::array<VulkanArguments, maximum_cohort> vulkan_arguments;
-  std::array<ps_gpu_dispatch_v11, maximum_cohort> commands{};
+  std::array<ps_gpu_dispatch_v1, maximum_cohort> commands{};
   for (std::uint64_t begin = 0; begin < count;) {
     args.begin = begin;
     args.count = static_cast<std::uint32_t>(std::min(lanes, count - begin));
@@ -198,8 +205,6 @@ Result<Value> execute_gaussian_gpu(const OperationInvocation& call,
     begin += args.count;
   }
   status = consume(0);
-  return status.ok()
-             ? std::move(output).publish(input.facets(), input.resources())
-             : Answer(status);
+  return status.ok() ? Answer(std::move(output)) : Answer(status);
 }
 }  // namespace ps::plugin_internal

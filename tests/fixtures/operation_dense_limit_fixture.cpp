@@ -1,231 +1,120 @@
 #include <atomic>
 #include <cstdint>
 
-#include "photospider/plugin/operation_plugin_api.h"
+#include "./result_registry_fixture.hpp"
 
 #ifndef PS_DENSE_LIMIT_CASE
-#error "PS_DENSE_LIMIT_CASE must select one dense-layout boundary fixture"
+#error "PS_DENSE_LIMIT_CASE must select one packed-record boundary fixture"
 #endif
 
 namespace {
-
-/** @brief Explicit generic v3 port schema. */
-const ps_operation_port_constraint_v11 value_port = {
-    sizeof(ps_operation_port_constraint_v11), PS_OPERATION_PORT_VALUE_V11, 0U,
-    0U};  // NOLINT(whitespace/indent_namespace)
-
-/** @brief Maximum signed 64-bit value expressed without signed addition. */
-constexpr std::uint64_t kInt64Maximum = UINT64_C(9223372036854775807);
-/** @brief First byte count whose final zero-based byte index is `INT64_MAX`. */
-constexpr std::uint64_t kMaximumLegalDenseBytes = kInt64Maximum + UINT64_C(1);
-/** @brief One quarter of the uint64 range used by rank-two boundaries. */
-constexpr std::uint64_t kTwoToTheSixtyTwo = UINT64_C(1) << 62U;
-/** @brief First rank-two last extent whose dense total exceeds the limit. */
-constexpr std::uint64_t kRank2Bad = kTwoToTheSixtyTwo + UINT64_C(1);
-/** @brief Number of exact destroy callbacks observed by this fixture image. */
-std::atomic<std::uint32_t> destroy_count{0U};
+constexpr std::uint64_t kSignedLimit = UINT64_C(1) << 63U;
+constexpr std::uint64_t kQuarterRange = UINT64_C(1) << 62U;
+std::atomic<std::uint32_t> destroy_count{0};
+std::atomic<std::uint32_t> callback_count{0};
 
 #if PS_DENSE_LIMIT_CASE == 1
-/** @brief Legal rank-one shape whose final byte index is exactly INT64_MAX. */
-const std::uint64_t primary_shape[] = {kMaximumLegalDenseBytes};
-/** @brief Unique key for the legal rank-one boundary descriptor. */
+const std::uint64_t primary_shape[] = {kSignedLimit - 1};
 constexpr char kPrimaryKey[] = "fixture.dense_rank1_limit";
 #elif PS_DENSE_LIMIT_CASE == 2
-/** @brief Rank-one shape whose final byte index exceeds INT64_MAX by one. */
-const std::uint64_t primary_shape[] = {kMaximumLegalDenseBytes + UINT64_C(1)};
-/** @brief Unique key for the rejected rank-one boundary descriptor. */
+const std::uint64_t primary_shape[] = {kSignedLimit};
 constexpr char kPrimaryKey[] = "fixture.dense_rank1_overflow";
 #elif PS_DENSE_LIMIT_CASE == 3
-/** @brief Legal rank-two shape with total bytes exactly INT64_MAX plus one. */
-const std::uint64_t primary_shape[] = {UINT64_C(2), kTwoToTheSixtyTwo};
-/** @brief Unique key for the legal rank-two boundary descriptor. */
+const std::uint64_t primary_shape[] = {2, kQuarterRange - 1};
 constexpr char kPrimaryKey[] = "fixture.dense_rank2_limit";
 #elif PS_DENSE_LIMIT_CASE == 4
-/** @brief Rank-two shape whose total last-byte offset exceeds INT64_MAX. */
-const std::uint64_t primary_shape[] = {UINT64_C(2), kRank2Bad};
-/** @brief Unique key for the rejected rank-two boundary descriptor. */
+const std::uint64_t primary_shape[] = {2, kQuarterRange};
 constexpr char kPrimaryKey[] = "fixture.dense_rank2_overflow";
 #elif PS_DENSE_LIMIT_CASE == 5
-/** @brief Legal first shape used to prove no prefix publication. */
-const std::uint64_t primary_shape[] = {UINT64_C(1)};
-/** @brief Unique key for the staged legal prefix descriptor. */
+const std::uint64_t primary_shape[] = {1};
 constexpr char kPrimaryKey[] = "fixture.dense_multi_valid";
-/** @brief Invalid second shape that rejects the complete descriptor table. */
-const std::uint64_t secondary_shape[] = {kMaximumLegalDenseBytes + UINT64_C(1)};
-/** @brief Unique key for the invalid second descriptor. */
+const std::uint64_t secondary_shape[] = {kSignedLimit};
 constexpr char kSecondaryKey[] = "fixture.dense_multi_invalid";
 #else
 #error "PS_DENSE_LIMIT_CASE must be in 1..5"
 #endif
 
-/**
- * @brief Provides a callback that descriptor validation must not invoke.
- * @param user_data Unused descriptor state.
- * @param inputs Unused input array for this zero-input descriptor.
- * @param input_count Expected zero input count.
- * @param parameters Unused parameter array.
- * @param parameter_count Expected zero parameter count.
- * @param backend Selected local backend.
- * @param cancelled Host cancellation observer.
- * @param cancellation_context Host cancellation state.
- * @param sink Host output sink.
- * @param diagnostic Writable diagnostic buffer.
- * @param diagnostic_capacity Diagnostic buffer capacity.
- * @return Ordinary failure if a fixture descriptor is ever invoked.
- * @throws Nothing.
- * @note These DSOs validate registration boundaries only.
- */
-int execute_unreachable(void* user_data,
-                        const ps_operation_value_view_v11* inputs,
-                        std::uint32_t input_count,
-                        const ps_operation_parameter_value_v11* parameters,
-                        std::uint32_t parameter_count, std::uint32_t backend,
-                        ps_operation_cancelled_v11 cancelled,
-                        void* cancellation_context,
-                        const ps_operation_output_sink_v11* sink,
-                        char* diagnostic,
-                        std::size_t diagnostic_capacity) noexcept {
-  static_cast<void>(user_data);
-  static_cast<void>(inputs);
-  static_cast<void>(input_count);
-  static_cast<void>(parameters);
-  static_cast<void>(parameter_count);
-  static_cast<void>(backend);
-  static_cast<void>(cancelled);
-  static_cast<void>(cancellation_context);
-  static_cast<void>(sink);
-  if (diagnostic && diagnostic_capacity != 0U) {
-    diagnostic[0] = '\0';
-  }
-  return PS_OPERATION_RESULT_FAILURE_V11;
+int never(void*, void*, const ps_result_query_v2*,
+          const ps_result_services_v2*) {
+  ++callback_count;
+  return 1;
 }
-
-/**
- * @brief Builds one fixed UInt8 descriptor for an exact logical shape.
- * @param key Process-lifetime canonical operation key.
- * @param key_size Key byte count excluding terminator.
- * @param shape Process-lifetime rank-sized shape.
- * @param rank Shape rank in one or two.
- * @return Complete operation ABI v3 descriptor.
- * @throws Nothing.
- */
-ps_operation_descriptor_v11 make_descriptor(const char* key,
-                                            std::uint32_t key_size,
-                                            const std::uint64_t* shape,
-                                            std::uint32_t rank) noexcept {
-  return {sizeof(ps_operation_descriptor_v11),
-          key,
-          key_size,
-          0U,
-          PS_OPERATION_FLAG_DETERMINISTIC | PS_OPERATION_FLAG_SIDE_EFFECT_FREE |
-              PS_OPERATION_FLAG_CPU,
-          UINT64_C(1),
-          1U,
-          0U,
-          nullptr,
-          0U,
-          nullptr,
-          execute_unreachable,
-          nullptr,
-          0,
-          0,
-          0,
-          1,
-          {{sizeof(ps_operation_output_descriptor_v11),
-            "value",
-            5,
-            PS_OPERATION_ELEMENT_UINT8_V11,
-            rank,
-            shape,
-            PS_OPERATION_SHAPE_FIXED_V11,
-            PS_OPERATION_REGION_WHOLE_V11,
-            0U,
-            value_port,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            NULL}}};
+ps_result_field_spec_v2 make_field(const std::uint64_t* shape,
+                                   std::uint32_t rank) {
+  ps_result_field_spec_v2 field{};
+  field.struct_size = sizeof(field);
+  field.key = "record";
+  field.key_size = 6;
+  field.element_type = PS_RESULT_ELEMENT_UINT8_V2;
+  field.record_rank = rank;
+  for (std::uint32_t axis = 0; axis < rank; ++axis)
+    field.record_shape[axis] = shape[axis];
+  field.rows.kind = PS_RESULT_EXTENT_FIXED_V2;
+  field.rows.value = 1;
+  field.rows.divisor = 1;
+  return field;
 }
-
+ps_result_schema_v2 make_schema(const ps_result_field_spec_v2* field) {
+  ps_result_schema_v2 schema{};
+  schema.struct_size = sizeof(schema);
+  schema.id = "fixture.record";
+  schema.id_size = 14;
+  schema.version = 1;
+  schema.publication = PS_RESULT_COMPLETE_BUNDLE_V2;
+  schema.fields = field;
+  schema.field_count = 1;
+  return schema;
+}
+ps_result_operation_v2 make_operation(const char* key, std::uint32_t size,
+                                      const ps_result_output_v2* output) {
+  auto operation =
+      result_registry_fixture::make_operation(key, size, nullptr, 0, output);
+  operation.start = never;
+  operation.poll = never;
+  return operation;
+}
+// NOLINTBEGIN(whitespace/indent_namespace)
+const auto primary =
+    make_field(primary_shape, sizeof(primary_shape) / sizeof(primary_shape[0]));
+const auto primary_schema = make_schema(&primary);
+const auto primary_output =
+    result_registry_fixture::make_output(&primary_schema);
 #if PS_DENSE_LIMIT_CASE == 5
-/** @brief Two descriptors whose invalid suffix must roll back the valid prefix.
- */
-const ps_operation_descriptor_v11 descriptors[] = {
-    make_descriptor(kPrimaryKey, sizeof(kPrimaryKey) - 1U, primary_shape, 1U),
-    make_descriptor(kSecondaryKey, sizeof(kSecondaryKey) - 1U, secondary_shape,
-                    1U)};
+const auto secondary = make_field(secondary_shape, 1);
+const auto secondary_schema = make_schema(&secondary);
+const auto secondary_output =
+    result_registry_fixture::make_output(&secondary_schema);
+const ps_result_operation_v2 descriptors[] = {
+    make_operation(kPrimaryKey, sizeof(kPrimaryKey) - 1, &primary_output),
+    make_operation(kSecondaryKey, sizeof(kSecondaryKey) - 1,
+                   &secondary_output)};
 #else
-/** @brief Single descriptor for one exact dense-layout boundary case. */
-const ps_operation_descriptor_v11 descriptors[] = {
-    make_descriptor(kPrimaryKey, sizeof(kPrimaryKey) - 1U, primary_shape,
-                    sizeof(primary_shape) / sizeof(primary_shape[0]))};
+const ps_result_operation_v2 descriptors[] = {
+    make_operation(kPrimaryKey, sizeof(kPrimaryKey) - 1, &primary_output)};
 #endif
-
-/** @brief Exact descriptor count published by this fixture case. */
-constexpr std::uint32_t kCount = sizeof(descriptors) / sizeof(*descriptors);
-
-/**
- * @brief Records exact release of the static descriptor table.
- * @param operations Original descriptor array.
- * @param operation_count Original descriptor count.
- * @throws Nothing.
- * @note Static records require no allocation release.
- */
-void destroy_fixture(const ps_operation_descriptor_v11* operations,
-                     std::uint32_t operation_count) noexcept {
-  if (operations == descriptors && operation_count == kCount) {
-    destroy_count.fetch_add(1U, std::memory_order_relaxed);
-  }
+// NOLINTEND
+int context_marker;
+void destroy_fixture(void* context) {
+  if (context == &context_marker)
+    ++destroy_count;
 }
-
-/**
- * @brief Builds the immutable fixture API table.
- * @return Complete version-three API table for the selected case.
- * @throws Nothing.
- */
-ps_operation_plugin_api_v11 make_api() noexcept {
-  return {sizeof(ps_operation_plugin_api_v11), kCount, descriptors,
-          destroy_fixture};
-}
-
-/** @brief Static API table owning the selected descriptor array. */
-const ps_operation_plugin_api_v11 api = make_api();
-
+// NOLINTBEGIN(whitespace/indent_namespace)
+const ps_result_operation_plugin_api_v2 api = {
+    sizeof(api),     PS_RESULT_OPERATION_ABI_VERSION_2,
+    descriptors,     sizeof(descriptors) / sizeof(descriptors[0]),
+    &context_marker, destroy_fixture};
+// NOLINTEND
 }  // namespace
 
-/**
- * @brief Returns the supported operation ABI version.
- * @return `PS_OPERATION_ABI_VERSION_11`.
- * @throws Nothing.
- */
-extern "C" PS_OPERATION_EXPORT std::uint32_t
-ps_operation_plugin_get_abi_version(void) {
-  return PS_OPERATION_ABI_VERSION_11;
-}
-
-/**
- * @brief Returns the selected dense-limit descriptor table.
- * @return Process-lifetime immutable API table.
- * @throws Nothing.
- */
-extern "C" PS_OPERATION_EXPORT const ps_operation_plugin_api_v11*
-ps_operation_plugin_get_api_v11(void) {
+extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v2*
+ps_result_operation_plugin_get_api_v2(void) {
   return &api;
 }
-
-/**
- * @brief Returns the observed descriptor-table destroy count.
- * @return Monotonic destroy count within this fixture image.
- * @throws Nothing.
- * @note Test-only symbol outside the operation ABI table.
- */
-extern "C" PS_OPERATION_EXPORT std::uint32_t
+extern "C" PS_RESULT_EXPORT std::uint32_t
 ps_operation_dense_limit_fixture_destroy_count(void) {
-  return destroy_count.load(std::memory_order_relaxed);
+  return destroy_count.load();
+}
+extern "C" PS_RESULT_EXPORT std::uint32_t
+ps_operation_dense_limit_fixture_callback_count(void) {
+  return callback_count.load();
 }

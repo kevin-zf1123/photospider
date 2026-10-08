@@ -7,31 +7,24 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-04: explicit alpha representation boundary adapters
 
-CPU implementation (2026-09-25): the source package now includes this member/family,
-its public C++ authoring API, correctness fixtures and a
-[performance/review driver](../../../../examples/alpha_performance/README.md).
-`Proposed`/D1 still describe design-review status, not missing executable code.
-Apple Silicon and FreeBSD performance/portability require target-machine review.
+The default registry provides `alpha.associate_<profile>` and
+`alpha.unassociate_<profile>` for `strict`, `accelerated_apple_silicon`, and
+`accelerated_x86_64`. Each uses Result ABI 2. Semantic calls bind one Result; raw
+plane/scalar calls may bind a second Result. The family and its members remain
+Proposed; status records design acceptance separately from implementation.
 
-
-Implementation update: package 0.20.0 [removes the legacy format/color code](FMT_legacy_retirement.md).
-Descriptions of old registrations below record the inspected baseline only;
-those keys and pixel callbacks are no longer available. The current generic CPU
-implementation uses the keys below, not the retired typed-image registrations.
 
 Inherit [FMT-common](FMT_common_contract.md), its NUM baseline and the
 [kernel storage contract](../../../kernel-specs/Tensor-Storage-and-Region-Access.md).
 Members [A associate](FMT-04A_associate_alpha.md) and
-[B unassociate](FMT-04B_unassociate_alpha.md) are default-registry CPU
-primitives. The 2026-09-23 decisions replace the former dual-state canonical
-image interface and persistent external alpha bindings. No runtime registration
-or migration is performed by this specification text itself.
+[B unassociate](FMT-04B_unassociate_alpha.md) are registered Result CPU
+operations with three profile keys each. The contract replaces persistent
+external alpha bindings with explicit graph inputs and keeps canonical images
+straight.
 
 ## Purpose and confirmed boundary
 
@@ -74,13 +67,15 @@ Alpha must be finite in [0,1] when consumed by semantic color conversion.
 
 ## Ports, shape and static parameters
 
-Input `input` and output `values` have the same shape and Float32/Float64 dtype.
+Input `input` and output `values` have the same shape and Float32/Float64 dtype. A call connects one source Result and optionally one explicit alpha Result for raw plane/scalar modes; each connected Result contains exactly one tensor and no fields. Nonscalar batch prefixes match exactly; scalar weights are unbatched shape `[1]`. The complete sample rank, including batch and cell axes, is at most 8 and full sample count is at most 2^40.
 In semantic modes the input has a declared channel axis, selected RGB indices
 or a Gray index, and a distinct internal alpha index outside those color indices.
 Resolve index/name/role selectors by the FMT-01 exact unique namespace rules.
-There is no HWC assumption. Let S erase the channel axis. Rank 1..8, positive
-extents and checked 2^40 logical-count rules inherit NUM/FMT. A rank-one channel
-vector is legal and retains its rank; no rank-zero tensor is produced.
+There is no HWC assumption. A channel axis contains at most 65,536 slots. Let S
+erase the channel axis. The complete sample rank includes batch and cell axes and
+is at most 8; each full input/output sample count is at most 2^40 with positive
+extents. A rank-one channel vector is legal
+and retains its rank; no rank-zero tensor is produced.
 
 | Parameter | Definition / default |
 | --- | --- |
@@ -98,10 +93,15 @@ no implicit squeeze, broadcast or resizing occurs. Empty S uses internal/scalar
 raw weights rather than rank-zero external planes. Structure, selectors, group
 state and source kinds are static; input samples may change between executions.
 
-Each member has strict, Apple Silicon and x86-64 CPU profile entries. Arithmetic
-outputs are materialized; there is no auto/view switch or alpha=1 view guarantee.
-No integer alpha normalization, GPU implementation or mixed-dtype promotion is
-implied. Integer-coded inputs require explicit numeric decoding/casting.
+Every connected input receives Descriptor support. Semantic color and consumed
+alpha samples receive Data and Validation support; pass-through-only values do
+not gain sample validation. Raw arithmetic uses Data without semantic-domain
+Validation. There is no Control support. Each member has strict, Apple Silicon
+and x86-64 CPU profile entries. Association and unassociation always materialize;
+they have no layout parameter. They publish transactionally under Root budgets,
+check cancellation and retain no run payload state for Empty output. There is no
+integer alpha normalization, GPU implementation or mixed-dtype promotion.
+Integer-coded inputs require explicit numeric decoding/casting.
 
 ## Mathematical reference and numeric profiles
 
@@ -205,10 +205,13 @@ Data and Validation dependencies.
    Infer unchanged shape/dtype and target interpretation; reject invalid static
    relationships without scanning samples.
 2. Compute exact Q/T input support; admit and acquire its immutable read windows.
-3. Reserve result storage and prepare needed pages before work. Copy unselected
-   bytes or evaluate the semantic/raw formula for each requested coordinate.
-4. Check cancellation/currentness and publish only successful requested coverage.
-   Publish internal channel references, never external alpha bindings.
+3. Admit Root resources and prepare needed destination state. A forced view first
+   proves that the complete declared map has one legal owner and affine relation.
+   Materialization copies or evaluates only requested coordinates.
+4. Check cancellation/currentness and publish successful coverage transactionally.
+   Preserve source status/diagnostics on failure and publish no payload state for
+   Empty observations. Publish internal channel references, never external alpha
+   bindings.
 
 Materialized image-shaped boundary payloads use the same planar storage rules;
 changing a semantic label does not legalize interleaving or bypass image storage.
@@ -232,12 +235,8 @@ external-binding ancestry, eviction, producer replay or private thread pool is
 introduced. Poll cancellation/currentness at most every 1024 entries/samples and
 before publication. Release unpublished resources on failure.
 
-Initial optional result caching remains disabled pending a conforming cache for
-exact coverage, ordinary input identity and representation metadata. Future cache
-identity includes mode, profile, selectors, effective representation and ordinary
-inputs; semantic/raw or canonical/boundary results cannot alias under a key that
-omits their different formula, failures or metadata. There is no alpha-origin
-snapshot mechanism to reconstruct.
+Result caching is disabled. Each run consumes its declared input Results and
+metadata; no external alpha snapshot or origin relation is stored.
 
 ## Errors and support limits
 
@@ -256,7 +255,7 @@ Strict and named CPU profiles retain NUM arithmetic guarantees and identical
 semantic validity decisions. No legacy typed-image behavior is accepted as a
 compatibility implementation.
 
-## Acceptance and implementation dependencies
+## Validation coverage and limits
 
 Use independent exact binary-rational strict rounding, NUM bit/special-value
 oracles and finite-set Data/Validation/dirty mapping. Members specify analytic
@@ -276,13 +275,16 @@ Benchmark Float32 [4096,4096,4] internal-alpha inputs, transparent/opaque/tiny
 alpha, full/R-only/alpha-only output and y/x=[127,130) at tile size 128. Record
 axes, profile/ISA/build, workers, source/page state, time statistics, bytes,
 virtual span, backing, ordinary retained owners and scratch/metadata peaks.
-Correctness gates timing; this document claims no throughput or runtime result.
+Correctness gates timing. Eight focused CTest targets pass, including
+`test_alpha_operations` and `test_alpha_authoring`; the native operation suite
+covers 16 groups. Fourteen small benchmark smoke cases pass their output oracle,
+including named Apple Silicon SIMD, Float64 reference, and zero-copy Set/extract/
+remove observations. The full performance matrix has not run. Historical
+Value/planar timing records remain separate from Result measurements.
 
-Implementation needs generic group/boundary metadata, same-tensor alpha mapping,
-exact partial-region dependency and publication, materialized planar callbacks
-and the proposed member registrations. Deliver actual public compile/execute
-examples with independently checked expected output. The removed legacy
-alpha.associate/alpha.unassociate implementations used typed Image paths
-and binary64 intermediates; neither their historical tests nor the current planar CPU
-subset implements this spec. Previous arithmetic-only checks do not establish
-the revised boundary or missing-alpha coverage behavior.
+The native CPU implementation provides the registered Result members described
+above. Acceptance still requires independent checks of bit patterns, semantic
+domain failures, partial-region dependencies, transactional publication, Root
+resource limits, cancellation and retained-owner lifetime. The current native run covers `test_alpha_operations`, `test_alpha_authoring`,
+`test_alpha_math`, and five reused primitive test targets. Historical Value/planar
+runs do not establish Result operation validation.

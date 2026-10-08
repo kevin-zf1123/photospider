@@ -7,25 +7,28 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_result_abi_2
 clarification_status: complete
-proposed_operation_keys:
+registered_operation_keys:
   - color.xyz_to_rgb_strict
   - color.xyz_to_rgb_accelerated_apple_silicon
   - color.xyz_to_rgb_accelerated_x86_64
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-10B: XYZ to linear RGB
 
 Inherit the complete [FMT-10 family](FMT-10_rgb_basis_contract.md) and
-[exact matrix definitions](FMT-10_basis_math.md). This is a Proposed specification,
-not a registered implementation or an alias of a retired operation.
+[exact matrix definitions](FMT-10_basis_math.md). This specification remains Proposed; the keys are registered Result ABI 2
+operations under the strict, accelerated Apple Silicon and accelerated x86-64
+CPU profiles.
 
 ## Interface and white handling
 
-One `input` tensor Value produces unchanged dtype/shape `values`. Select a
+One input Result with one Float32 or Float64 tensor and no fields produces one
+`values` output Result containing one tensor. The output preserves Result schema
+identity, tensor key, logical shape and batch axes; it updates applicable
+semantic facets and sets `atomic_trailing_axes` to zero. Complete sample rank,
+including batch and cell axes, is at most 8; sample count is at most 2^40. Select a
 complete XYZ group in semantic mode, or an explicit ordered raw triple. Target
 RGB basis geometry is required. Construct its exact normalized M and use M^-1;
 there is no implicit transfer, adaptation, exposure or gamut constraint.
@@ -54,7 +57,7 @@ requests. Negative/out-of-gamut RGB is legal; requested nonfinite semantic
 input/output fails without clipping. Resource, cancellation and ownership rules
 remain those of the family.
 
-## Independent fixtures and future public workflow
+## Independent fixtures
 
 1. The A custom-axis basis with white=(0.25,0.25) has inverse diag(1,1,0.5).
    XYZ [1,-2,6] maps to RGB [1,-2,3] exactly in both dtypes.
@@ -73,7 +76,7 @@ remain those of the family.
    and requires no XYZ samples. Dirty changes to any selected XYZ component
    invalidate all observed nonidentity RGB rows at that pixel.
 
-A future public workflow uses B's explicit target geometry and, for unequal
-whites, either explicit preserve_xyz or a preceding C node. Connect FMT-09B
-separately if encoded RGB is needed. No installed API or conformance result is
-claimed by this Proposed member.
+Use the installed `format::xyz_to_rgb` helper to append B. For unequal whites,
+choose explicit `preserve_xyz` or append C before B. Connect FMT-09B separately
+when encoded RGB is required. The independent fixtures remain the numerical
+acceptance targets for this Proposed member.

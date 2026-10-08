@@ -172,7 +172,7 @@ void native_operations() {
         require(completed.diagnostics.operation_timings.back()
                         .numeric.evaluated_values == 7,
                 "exact callback numeric diagnostics were lost");
-        auto output = completed.images.at("result");
+        auto output = completed.tensors.at("result");
         const bool alias = mapping == Mapping::Identity &&
                            policy != DataMovementViewPolicy::Materialize;
         require((output.owner_token() == first.owner_token()) == alias,

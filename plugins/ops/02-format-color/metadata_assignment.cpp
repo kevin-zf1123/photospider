@@ -7,15 +7,15 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-#include "01-numeric/array_publication.hpp"
+#include "00-foundation/tensor_program.hpp"
 #include "01-numeric/sequence_profiles.hpp"
-#include "02-format-color/alpha_common.hpp"
-#include "photospider/data/region_runs.hpp"
-#include "photospider/execution/data_movement.hpp"
+#include "02-format-color/result_mapping.hpp"
 #include "photospider/format/metadata.hpp"
+#include "photospider/numeric/workflow_authoring.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::metadata_internal {
@@ -1064,12 +1064,16 @@ Result<OperationPreparation> prepare(
     return Answer(available);
   }
   options(params);
+  auto valid = plugin_internal::tensor_ops::check_tensor(inputs.at(0));
+  if (!valid.ok())
+    return Answer(valid);
+  const auto& input_schema = *inputs[0].result_schema;
+  const auto& input = input_schema.tensors[0];
   if (params.count("expected_source") &&
-      plugin_internal::alpha_ops::text(params, "expected_source") !=
-          plugin_internal::alpha_ops::source_assertion(inputs))
+      option(params, "expected_source", "") !=
+          plugin_internal::format_result::source_assertion(inputs))
     return Answer(
         invalid("authoring source metadata disagrees with inference"));
-  const auto& input = inputs.at(0);
   TensorDescription source;
   Tree original;
   original.fields["annotations"] = Tree{};
@@ -1430,8 +1434,8 @@ Result<OperationPreparation> prepare(
   if (!status.ok()) {
     return Answer(status);
   }
-  if (input.planar_layout && target.channel_axis &&
-      target.channel_axis != input.planar_layout->channel_axis) {
+  if (input.layout.spatial && target.channel_axis &&
+      target.channel_axis != input.layout.channel_axis) {
     return Answer(Status{ErrorCode::TypeMismatch,
                          "metadata.assign: target channel axis disagrees with "
                          "physical planar layout"});
@@ -1441,10 +1445,11 @@ Result<OperationPreparation> prepare(
     return Answer(facet.status());
   }
   OperationOutputSpecialization output;
-  output.metadata = input;
-  output.metadata.facets.clear();
+  auto schema = input_schema;
+  auto& output_facets = schema.tensors[0].facets;
+  output_facets.clear();
   if (!semantics.fields.empty()) {
-    output.metadata.facets.push_back(facet.take_value());
+    output_facets.push_back(facet.take_value());
   }
   const auto& annotations = candidate.fields.at("annotations");
   object(annotations);
@@ -1461,38 +1466,12 @@ Result<OperationPreparation> prepare(
     }
     annotation.version = static_cast<std::uint32_t>(version);
     annotation.payload.assign(payload.bytes.begin(), payload.bytes.end());
-    output.metadata.facets.push_back(std::move(annotation));
+    output_facets.push_back(std::move(annotation));
   }
-  std::sort(output.metadata.facets.begin(), output.metadata.facets.end(),
+  std::sort(output_facets.begin(), output_facets.end(),
             [](const auto& a, const auto& b) { return a.key < b.key; });
-  DependencyMappedNeed need;
-  need.port = 0;
-  need.roles = static_cast<std::uint32_t>(DependencyRole::Data);
-  for (std::size_t a = 0; a < input.descriptor.shape.size(); ++a) {
-    DependencyAxis axis;
-    axis.observation_axis = static_cast<std::int32_t>(a);
-    need.axes.push_back(axis);
-  }
-  auto all = Footprint::all(input.descriptor.shape);
-  if (!all.ok()) {
-    return Answer(all.status());
-  }
-  output.static_dependency_pieces =
-      std::vector<DependencyMapPiece>{{all.take_value(), {std::move(need)}}};
-  output.regional_atomic = true;
-  output.preserve_output_views =
-      option(params, "layout", "auto") != "materialize";
-  if (output.preserve_output_views) {
-    output.maximum_output_payload_bytes = 0;
-  }
-  if (output.metadata.planar_layout) {
-    output.data_movement = DataMovementKind::BitwiseMapped;
-    const auto policy = option(params, "layout", "auto");
-    output.data_movement_view_policy =
-        policy == "materialize" ? DataMovementViewPolicy::Materialize
-        : policy == "view"      ? DataMovementViewPolicy::RequireView
-                                : DataMovementViewPolicy::Auto;
-  }
+  output.metadata.result_schema =
+      std::make_shared<const SchemaTemplate>(std::move(schema));
   OperationPreparation prepared;
   prepared.outputs.push_back(std::move(output));
   return Answer(std::move(prepared));
@@ -1500,96 +1479,64 @@ Result<OperationPreparation> prepare(
   return Result<OperationPreparation>(invalid(e.what()));
 }
 
-Result<ValueFragments> evaluate(const DependencyPhase& phase,
-                                bool materialize) {
-  using Answer = Result<ValueFragments>;
-  const auto& out = phase.query.output;
-  const auto width = Value::element_size(out.descriptor.element_type);
-  const auto& fragments = phase.inputs[0].fragments();
-  std::uint64_t facet_bytes = out.facets.capacity() * sizeof(ValueFacet);
-  for (const auto& facet : out.facets) {
-    facet_bytes += facet.key.capacity() + facet.payload.capacity();
-  }
-  plugin_internal::numeric_ops::ArrayPublication publication(
-      phase.query.outputs.boxes().size() * fragments.size(),
-      out.descriptor.shape.size(), facet_bytes);
-  std::vector<Value> values;
-  for (const auto& box : phase.query.outputs.boxes()) {
-    for (const auto& fragment : fragments) {
-      auto dims = box.dimensions();
-      bool hit = true;
-      for (std::size_t d = 0; d < dims.size(); ++d) {
-        const auto s = fragment.region().dimensions()[d];
-        const auto begin = std::max(dims[d].offset, s.offset);
-        const auto end =
-            std::min(dims[d].offset + dims[d].extent, s.offset + s.extent);
-        if (begin >= end) {
-          hit = false;
-          break;
-        }
-        dims[d] = {begin, end - begin};
-      }
-      if (!hit) {
-        continue;
-      }
-      auto status = phase.consume_work(dims.size() + 1);
-      if (!status.ok()) {
-        return Answer(status);
-      }
-      Region region(dims);
-      auto view = Value::from_storage(out.descriptor, region, fragment.layout(),
-                                      fragment.storage(), out.facets,
-                                      phase.query.resources);
-      if (!view.ok()) {
-        return Answer(view.status());
-      }
-      Value value = view.take_value();
-      if (materialize) {
-        auto allocated =
-            MutableValue::allocate(out.descriptor, region, phase.allocator);
-        if (!allocated.ok()) {
-          return Answer(allocated.status());
-        }
-        auto writer = allocated.take_value();
-        status = copy_value_region(
-            value, region, region, writer.data(),
-            region.element_count().value() * width, phase.query.cancellation,
-            [&](std::uint64_t n) {
-              return phase.consume_work(n * (region.rank() + width));
-            });
-        if (!status.ok())
-          return Answer(status);
-        auto published =
-            std::move(writer).publish(out.facets, phase.query.resources);
-        if (!published.ok()) {
-          return Answer(published.status());
-        }
-        value = published.take_value();
-      }
-      auto retained = publication.retain(std::move(value));
-      if (!retained.ok()) {
-        return Answer(retained.status());
-      }
-      values.push_back(retained.take_value());
-    }
-  }
-  return publication.finish(out.descriptor, phase.query.outputs, values.data(),
-                            values.size(), phase.sets, out.facets,
-                            phase.query.resources);
+using plugin_internal::tensor_ops::require;
+using plugin_internal::tensor_ops::take;
+using Poll = Result<ResultProgramPoll>;
+ResultBuilder builder(const ResultProgramPhase& phase, bool empty) {
+  auto result = take(ResultBuilder::start(
+      phase.resources, *phase.query.output.result_schema,
+      phase.query.semantic_key, {},
+      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
+                                                     phase.association->end())
+                        : std::vector<std::uint64_t>{},
+      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
+  require(result.bind_descriptor_relation(take(ResultRelation::cartesian(
+      phase.resources, 1,
+      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+  return result;
+}
+Poll empty_result(const ResultProgramPhase& phase) try {
+  auto result = builder(phase, true);
+  return Poll(ResultPublication{take(result.seal()), true});
+} catch (const Status& status) {
+  return Poll(status);
 }
 struct State final {
-  bool materialize = false, requested = false;
-  explicit State(bool copy) : materialize(copy) {}
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
+  bool requested = false;
+  Poll poll(const ResultProgramPhase& phase) try {
+    auto scratch =
+        take(phase.resources.reserve(ResourceCapacity::host(8192, 8192)));
+    const auto& tensor = phase.query.output.result_schema->tensors[0];
+    const auto shape = tensor.sample_shape();
+    const auto output = phase.query.tensor_outputs
+                            ? *phase.query.tensor_outputs
+                            : take(Footprint::all(shape));
     if (!requested) {
       requested = true;
-      DependencyNeedBatch batch;
-      batch.static_mapping = true;
-      return Result<DependencyPoll>(std::move(batch));
+      ResultProgramNeed need;
+      need.tensors.push_back({0, 0, output, 9});
+      return Poll(std::move(need));
     }
-    auto result = evaluate(phase, materialize);
-    return result.ok() ? Result<DependencyPoll>(result.take_value())
-                       : Result<DependencyPoll>(result.status());
+    auto result = builder(phase, false);
+    std::vector<ResultMappedAxis> axes(shape.size());
+    for (std::size_t axis = 0; axis < axes.size(); ++axis)
+      axes[axis].output_axis = static_cast<std::int32_t>(axis);
+    const auto relation = take(ResultRelation::mapped(
+        phase.resources, shape, Region::whole(shape), shape, axes,
+        {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
+    const auto policy = option(phase.query.parameters, "layout", "auto");
+    require(plugin_internal::format_result::planes(
+        tensor, output, [&](const Region& box) {
+          auto window =
+              phase.tensors->at({0, 0}).acquire(box, phase.query.cancellation);
+          if (!window.ok())
+            return window.status();
+          return plugin_internal::format_result::publish(
+              phase, &result, box, window.value(), axes, relation, policy);
+        }));
+    return Poll(ResultPublication{take(result.seal()), true});
+  } catch (const Status& status) {
+    return Poll(status);
   }
 };
 OperationDefinition definition(
@@ -1599,8 +1546,10 @@ OperationDefinition definition(
   op.key = key;
   auto& t = op.traits;
   t.input_count = 1;
-  t.input_schema.resize(1);
-  t.planar_storage_capable = true;
+  OperationPortConstraint port;
+  port.kind = OperationPortKind::Result;
+  port.element_type_mask = 127;
+  t.input_schema = {port};
   t.cacheable = false;
   t.requires_metadata_specialization = true;
   for (const auto* p : {"mode", "edits", "dependencies", "missing", "layout",
@@ -1609,38 +1558,20 @@ OperationDefinition definition(
   }
   auto& out = t.outputs[0];
   out.key = "values";
-  out.shape_rule = OperationShapeRule::Fixed;
-  out.fixed_output_shape = {1};
+  out.output_schema = port;
+  out.result_schema = plugin_internal::tensor_ops::scalar_schema();
   out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 1;
+  out.dependency_version = 2;
   out.continuation_bytes = sizeof(State);
   out.maximum_dependency_stages = 2;
   op.prepare_static = [profile](const auto& inputs, const auto& params) {
     return prepare(inputs, params, profile);
   };
-  op.start_dependency = [](const DependencyQuery& q,
-                           const BufferAllocator& allocator) {
-    return DependencyContinuation::make<State>(
-        allocator, option(q.parameters, "layout", "auto") == "materialize");
-  };
-  op.planar_callback = [](const PlanarOperationInvocation& call) {
-    if (option(call.parameters, "layout", "auto") == "view") {
-      return invalid(
-          "ViewUnavailable: direct planar output has a caller-owned writer");
-    }
-    const auto& c = call.inputs[0].config();
-    PlanarImageLayout layout{c.order,        c.height_axis,     c.width_axis,
-                             c.channel_axis, c.row_pitch_bytes, c.groups};
-    DependencyMappedNeed map;
-    for (std::size_t a = 0; a < call.output_region.rank(); ++a) {
-      DependencyAxis axis;
-      axis.observation_axis = static_cast<std::int32_t>(a);
-      map.axes.push_back(axis);
-    }
-    return copy_planar_region(
-        call.output_region, map, &call.inputs[0], nullptr, call.output, layout,
-        Value::element_size(call.inputs[0].descriptor().element_type),
-        call.cancellation);
+  op.start_result = [](const ResultProgramQuery& query,
+                       const BufferAllocator& allocator) {
+    if (query.tensor_outputs && query.tensor_outputs->empty())
+      return ResultContinuation::stateless<empty_result>();
+    return ResultContinuation::make<State>(allocator);
   };
   return op;
 }

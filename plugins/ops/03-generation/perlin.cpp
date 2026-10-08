@@ -2,28 +2,30 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <map>
+#include <memory>
 #include <new>
 #include <string>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
-#include "01-numeric/array_publication.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "03-generation/perlin_exact.hpp"
 #include "03-generation/perlin_gpu.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "data/result_window_access.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
 namespace {
 using generation_ops::PerlinCoordinate;
 using generation_ops::PerlinExact;
+using numeric_ops::math_require;
+using numeric_ops::math_take;
 struct PerlinSlot final {
   PerlinExact<8> small;
   PerlinExact<16> normal;
   PerlinExact<272> full;
   Status failure;
+  std::vector<std::uint64_t> coordinate;
 };
 Result<std::uint64_t> sample(PerlinSlot* slot,
                              const std::array<PerlinCoordinate, 3>& coordinates,
@@ -51,281 +53,200 @@ Result<std::uint64_t> sample(PerlinSlot* slot,
          : q <= 63 ? slot->normal.evaluate(coordinates, narrow, local)
                    : slot->full.evaluate(coordinates, narrow, local);
 }
+using Decoded = std::array<PerlinCoordinate, 3>;
 struct PerlinWork final {
-  const OperationInvocation& call;
+  const ResultProgramPhase& phase;
+  const ResultTensorReadWindow& input;
+  const Region& output_region;
   PerlinSlot* slots;
+  const Decoded* decoded;
+  const Value* affine;
   std::uint8_t* output;
-  bool output_narrow;
+  bool narrow;
 };
-Status calculate(PerlinWork& work, std::uint64_t begin, std::uint64_t end,
-                 PerlinSlot* slot) {
-  const auto& input = work.call.inputs[0];
-  const auto& shape = input.descriptor().shape;
-  const auto& layout = input.layout();
-  const auto source_width =
-      Value::element_size(input.descriptor().element_type);
-  const auto output_width = work.output_narrow ? 4U : 8U;
-  const auto* budget = resource_internal::metadata_budget();
-  const auto consume = [&](std::uint64_t units) {
-    if (work.call.cancellation.cancelled())
-      return Status{ErrorCode::Cancelled, "Perlin cancelled"};
-    return budget ? budget->consume({units}) : Status::success();
-  };
-  // Immutable validated layouts may have negative/broadcast strides and a
-  // nonzero logical origin. Wide address arithmetic avoids signed overflow;
-  // Value validation already proves every accessed coordinate fits storage.
-  for (auto index = begin; index < end; ++index) {
-    auto status = consume(3 * shape.size());
-    if (!status.ok())
-      return status;
-    auto linear = index;
-    __int128 address = layout.byte_offset;
-    for (std::size_t axis = shape.size() - 1; axis; --axis) {
-      const auto coordinate = linear % shape[axis - 1];
-      linear /= shape[axis - 1];
-      const auto origin = layout.origin.empty() ? 0 : layout.origin[axis - 1];
-      address += (static_cast<__int128>(coordinate) - origin) *
-                 layout.byte_strides[axis - 1];
-    }
-    if (!layout.origin.empty())
-      address -= static_cast<__int128>(layout.origin.back()) *
-                 layout.byte_strides.back();
-    std::array<PerlinCoordinate, 3> coordinates;
-    for (unsigned axis = 0; axis < 3; ++axis) {
-      const auto at =
-          address + static_cast<__int128>(axis) * layout.byte_strides.back();
-      std::uint64_t raw = 0;
-      std::memcpy(&raw, input.bytes().data() + static_cast<std::size_t>(at),
-                  source_width);
-      auto decoded = PerlinCoordinate::decode(raw, source_width == 4);
-      if (!decoded.ok())
-        return decoded.status();
-      coordinates[axis] = decoded.value();
-    }
-    auto result = sample(slot, coordinates, work.output_narrow, consume,
-                         work.call.cancellation);
-    if (!result.ok())
-      return result.status();
-    const auto raw = result.value();
-    std::memcpy(work.output + index * output_width, &raw, output_width);
+Result<Decoded> decode(const PerlinWork& work, std::uint64_t index,
+                       std::vector<std::uint64_t>& at) {
+  const auto& dims = work.output_region.dimensions();
+  for (std::size_t axis = dims.size(); axis-- > 0;) {
+    at[axis] = dims[axis].offset + index % dims[axis].extent;
+    index /= dims[axis].extent;
   }
-  return Status::success();
+  const auto width =
+      Value::element_size(work.input.spec().descriptor.element_type);
+  Decoded coordinates;
+  for (unsigned axis = 0; axis < 3; ++axis) {
+    at.back() = axis;
+    std::uint64_t bits = 0;
+    if (work.affine) {
+      const auto& layout = work.affine->layout();
+      __int128 offset = layout.byte_offset;
+      for (std::size_t d = 0; d < at.size(); ++d)
+        offset += (static_cast<__int128>(at[d]) -
+                   (layout.origin.empty() ? 0 : layout.origin[d])) *
+                  layout.byte_strides[d];
+      std::memcpy(
+          &bits, work.affine->bytes().data() + static_cast<std::size_t>(offset),
+          width);
+    } else {
+      auto run = work.input.row_run(at);
+      if (!run.ok())
+        return Result<Decoded>(run.status());
+      std::memcpy(&bits, run.value().data, width);
+    }
+    auto part = PerlinCoordinate::decode(bits, width == 4);
+    if (!part.ok())
+      return Result<Decoded>(part.status());
+    coordinates[axis] = part.take_value();
+  }
+  return Result<Decoded>(coordinates);
 }
-int perlin_block(void* user, std::uint64_t begin, std::uint64_t end,
-                 std::uint32_t slot) noexcept {
-  auto& work = *static_cast<PerlinWork*>(user);
-  auto& failure = work.slots[slot].failure;
+int perlin_block(void* raw, std::uint64_t begin, std::uint64_t end,
+                 std::uint32_t slot_index) noexcept {
+  auto& work = *static_cast<PerlinWork*>(raw);
+  auto& slot = work.slots[slot_index];
   try {
-    failure = calculate(work, begin, end, &work.slots[slot]);
+    const auto consume = [&](std::uint64_t units) {
+      return work.decoded ? Status::success() : work.phase.consume_work(units);
+    };
+    for (auto index = begin; index < end; ++index) {
+      if (work.phase.query.cancellation.cancelled()) {
+        slot.failure = {ErrorCode::Cancelled, "Perlin cancelled"};
+        break;
+      }
+      Result<Decoded> coordinates = work.decoded
+                                        ? Result<Decoded>(work.decoded[index])
+                                        : decode(work, index, slot.coordinate);
+      if (!coordinates.ok()) {
+        slot.failure = coordinates.status();
+        break;
+      }
+      auto result = sample(&slot, coordinates.value(), work.narrow, consume,
+                           work.phase.query.cancellation);
+      if (!result.ok()) {
+        slot.failure = result.status();
+        break;
+      }
+      const auto bits = result.value();
+      std::memcpy(work.output + index * (work.narrow ? 4 : 8), &bits,
+                  work.narrow ? 4 : 8);
+    }
   } catch (const std::bad_alloc&) {
-    failure.code = ErrorCode::ResourceExhausted;
+    slot.failure = {ErrorCode::ResourceExhausted, {}};
   } catch (...) {
-    failure.code = ErrorCode::OperationFailed;
+    slot.failure = {ErrorCode::OperationFailed, {}};
   }
-  return failure.ok()                                   ? 0
-         : failure.code == ErrorCode::Cancelled         ? 2
-         : failure.code == ErrorCode::ResourceExhausted ? 4
-         : failure.code == ErrorCode::InvalidArgument   ? 6
-                                                        : 1;
+  return slot.failure.ok()                                   ? 0
+         : slot.failure.code == ErrorCode::Cancelled         ? 2
+         : slot.failure.code == ErrorCode::ResourceExhausted ? 4
+         : slot.failure.code == ErrorCode::InvalidArgument   ? 6
+                                                             : 1;
 }
-bool output_narrow(const std::map<std::string, ParameterValue>& parameters) {
-  const auto found = parameters.find("dtype");
-  return found != parameters.end() &&
-         std::get<std::string>(found->second) == "float32";
+int perlin_tile(void* raw, const ps_cpu_tile_v1* tile) noexcept {
+  return perlin_block(raw, tile->begin[0], tile->end[0], tile->slot);
 }
-struct PerlinTile final {
-  PerlinSlot arithmetic;
-  bool requested = false;
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    if (!requested) {
-      requested = true;
-      DependencyNeedBatch batch;
-      batch.static_mapping = true;
-      return Result<DependencyPoll>(std::move(batch));
-    }
-    using Answer = Result<DependencyPoll>;
-    using Decoded = std::array<PerlinCoordinate, 3>;
-    static_assert(std::is_trivially_destructible_v<Decoded>);
-    const auto width =
-        Value::element_size(phase.query.inputs[0].descriptor.element_type);
-    const auto& descriptor = phase.query.output.descriptor;
-    const bool narrow = descriptor.element_type == ElementType::Float32;
-    const auto rank = descriptor.shape.size();
-    const auto count = phase.query.outputs.element_count().value();
-    if (count > SIZE_MAX / sizeof(Decoded))
-      return Answer(
-          Status{ErrorCode::ResourceExhausted, "Perlin tile scratch overflow"});
-    auto allocated = phase.allocator.allocate(count * sizeof(Decoded));
-    if (!allocated.ok())
-      return Answer(allocated.status());
-    auto scratch = allocated.take_value();
-    auto* decoded = reinterpret_cast<Decoded*>(scratch.data());
-    auto owner =
-        dependency_internal::metadata_owner((rank + 1) * sizeof(std::uint64_t));
-    std::vector<std::uint64_t> source(rank + 1);
-    // Include the actual authorization and fragment search geometry in the
-    // prepaid bound. Reads debit this local credit and poll cancellation,
-    // avoiding one shared resource-budget lock per fragment candidate.
-    const auto input_rank = static_cast<unsigned __int128>(rank) + 1;
-    const auto lookup_work = (static_cast<unsigned __int128>(
-                                  phase.inputs[0].coverage().boxes().size()) +
-                              phase.inputs[0].fragments().size()) *
-                                 (input_rank + 1) +
-                             4 * input_rank + 2;
-    const auto lookup_total =
-        3 * static_cast<unsigned __int128>(count) * lookup_work;
-    const auto total = lookup_total + count * (3 * input_rank + 3);
-    if (total > UINT64_MAX)
-      return Answer(Status{ErrorCode::ResourceExhausted,
-                           "Perlin tile lookup work overflow"});
-    auto status = phase.consume_work(static_cast<std::uint64_t>(total));
-    if (!status.ok())
-      return Answer(status);
-    auto lookup_credit = static_cast<std::uint64_t>(lookup_total);
-    auto lookup_limits = phase.sets;
-    lookup_limits.cancellation = phase.query.cancellation;
-    lookup_limits.consume_work = [&](std::uint64_t units) {
-      if (units > lookup_credit)
-        return Status{ErrorCode::Internal, "Perlin lookup work bound exceeded"};
-      lookup_credit -= units;
-      return Status::success();
-    };
-    std::uint64_t next = 0, credit = 0;
-    for (const auto& box : phase.query.outputs.boxes()) {
-      const auto size = box.element_count().value();
-      if (size > phase.sets.maximum_work)
-        return Answer(
-            Status{ErrorCode::ResourceExhausted, "Perlin tile visit limit"});
-      for (std::size_t axis = 0; axis < rank; ++axis)
-        source[axis] = box.dimensions()[axis].offset;
-      for (std::uint64_t i = 0; i < size; ++i) {
-        if (!(next % 64)) {
-          status = phase.consume_work(0);
-          if (!status.ok())
-            return Answer(status);
-        }
-        if (phase.query.cancellation.cancelled())
-          return Answer(Status{ErrorCode::Cancelled, "Perlin tile cancelled"});
-        Decoded coordinates;
-        unsigned q = 0;
-        for (unsigned axis = 0; axis < 3; ++axis) {
-          source.back() = axis;
-          std::uint64_t raw = 0;
-          status = phase.inputs[0].read(source, &raw, width, lookup_limits);
-          if (!status.ok()) {
-            if (status.code == ErrorCode::InvalidArgument) {
-              status.reason = FailureReason::UnauthorizedRead;
-              status.detail.origin = FailureOrigin::Protocol;
-              status.detail.scope = FailureScope::Atom;
-            }
-            return Answer(phase.report_failure(status));
-          }
-          auto part = PerlinCoordinate::decode(raw, width == 4);
-          if (!part.ok())
-            return Answer(part.status());
-          coordinates[axis] = part.value();
-          q = std::max(q, coordinates[axis].denominator_bits);
-        }
-        const auto charge = q <= 31   ? PerlinExact<8>::work_bound(q)
-                            : q <= 63 ? PerlinExact<16>::work_bound(q)
-                                      : PerlinExact<272>::work_bound(q);
-        if (charge > UINT64_MAX - credit)
-          return Answer(Status{ErrorCode::ResourceExhausted,
-                               "Perlin tile work overflow"});
-        credit += charge;
-        new (decoded + next++) Decoded(coordinates);
-        for (std::size_t axis = rank; axis-- > 0;) {
-          const auto& dimension = box.dimensions()[axis];
-          if (++source[axis] < dimension.offset + dimension.extent)
-            break;
-          source[axis] = dimension.offset;
-        }
-      }
-    }
-    status = phase.consume_work(credit);
-    if (!status.ok())
-      return Answer(status);
-    const auto prepaid = [&](std::uint64_t units) {
-      if (units > credit)
-        return Status{ErrorCode::Internal, "Perlin tile work bound exceeded"};
-      credit -= units;
-      return Status::success();
-    };
-    numeric_ops::ArrayPublication publication(
-        phase.query.outputs.boxes().size(), rank);
-    ResourceVector<Value> values;
-    values.reserve(phase.query.outputs.boxes().size());
-    next = 0;
-    for (const auto& box : phase.query.outputs.boxes()) {
-      auto allocated = MutableValue::allocate(descriptor, box, phase.allocator);
-      if (!allocated.ok())
-        return Answer(allocated.status());
-      auto writer = allocated.take_value();
-      const auto size = box.element_count().value();
-      for (std::uint64_t i = 0; i < size; ++i, ++next) {
-        if (!(next % 64)) {
-          status = phase.consume_work(0);
-          if (!status.ok())
-            return Answer(status);
-        }
-        auto result = sample(&arithmetic, decoded[next], narrow, prepaid,
-                             phase.query.cancellation);
-        if (!result.ok())
-          return Answer(result.status());
-        const auto bits = result.value();
-        std::memcpy(writer.data() + i * (narrow ? 4 : 8), &bits,
-                    narrow ? 4 : 8);
-      }
-      auto value = std::move(writer).publish();
-      if (!value.ok())
-        return Answer(value.status());
-      auto retained = publication.retain(value.take_value());
-      if (!retained.ok())
-        return Answer(retained.status());
-      values.push_back(retained.take_value());
-    }
-    auto result = publication.finish(descriptor, phase.query.outputs,
-                                     values.data(), values.size(), phase.sets);
-    return result.ok() ? Answer(result.take_value()) : Answer(result.status());
-  }
-};
-Result<Value> execute_whole(const OperationInvocation& call) {
-  using Answer = Result<Value>;
-  auto descriptor = call.inputs[0].descriptor();
-  descriptor.shape.pop_back();
-  const bool narrow = output_narrow(call.parameters);
-  descriptor.element_type =
-      narrow ? ElementType::Float32 : ElementType::Float64;
-  auto allocated =
-      MutableValue::allocate(descriptor, call.output_region, call.allocator);
+Result<MutableBuffer> compute_cpu(const ResultProgramPhase& phase,
+                                  const ResultTensorReadWindow& input,
+                                  const Region& region, bool tiled) {
+  using Answer = Result<MutableBuffer>;
+  const auto count = math_take(region.element_count());
+  const bool narrow =
+      phase.query.output.result_schema->tensors[0].descriptor.element_type ==
+      ElementType::Float32;
+  auto affine = execution_internal::ResultWindowAccess::affine(input);
+  if (!affine.ok() && affine.status().code != ErrorCode::NotFound)
+    return Answer(affine.status());
+  const auto lookup =
+      affine.ok()
+          ? input.region().rank()
+          : math_take(execution_internal::ResultWindowAccess::read_work(input));
+  if (lookup > (UINT64_MAX - 3) / 3 || count > UINT64_MAX / (3 * lookup + 3))
+    return Answer(Status{ErrorCode::ResourceExhausted, {}});
+  auto charged = phase.consume_work(count * (3 * lookup + 3));
+  if (!charged.ok())
+    return Answer(charged);
+  auto allocated_output =
+      phase.resources.allocator().allocate(count * (narrow ? 4 : 8));
+  if (!allocated_output.ok())
+    return allocated_output;
+  auto output = allocated_output.take_value();
+  const auto workers = phase.cpu_parallel ? phase.cpu_parallel->maximum_workers
+                       : phase.cpu_tiles  ? phase.cpu_tiles->maximum_workers
+                                          : 1;
+  const auto grant =
+      static_cast<unsigned>(std::min<std::uint64_t>(count, workers));
+  auto allocated = phase.allocator.allocate(grant * sizeof(PerlinSlot));
   if (!allocated.ok())
     return Answer(allocated.status());
-  auto output = allocated.take_value();
-  const auto count = call.output_region.element_count().value();
-  if (!count)
-    return std::move(output).publish();
-  const auto grant = static_cast<std::uint32_t>(std::min<std::uint64_t>(
-      count, call.cpu_parallel ? call.cpu_parallel->maximum_workers : 1));
-  auto allocated_scratch = call.allocator.allocate(grant * sizeof(PerlinSlot));
-  if (!allocated_scratch.ok())
-    return Answer(allocated_scratch.status());
-  auto scratch = allocated_scratch.take_value();
+  auto scratch = allocated.take_value();
+  auto metadata = phase.resources.reserve(ResourceCapacity::host(
+      grant * input.region().rank() * 8, grant * input.region().rank() * 8));
+  if (!metadata.ok())
+    return Answer(metadata.status());
   auto* slots = reinterpret_cast<PerlinSlot*>(scratch.data());
-  for (unsigned i = 0; i < grant; ++i)
-    new (slots + i) PerlinSlot;
+  unsigned constructed = 0;
   struct Destroy {
     PerlinSlot* slots;
-    unsigned count;
+    unsigned& count;
     ~Destroy() {
-      for (unsigned i = 0; i < count; ++i)
-        slots[i].~PerlinSlot();
+      while (count)
+        slots[--count].~PerlinSlot();
     }
-  } destroy{slots, grant};
-  PerlinWork work{call, slots, output.data(), narrow};
-  const auto* parallel = call.cpu_parallel;
-  const auto code = parallel ? parallel->run(parallel->context, count, 8, grant,
-                                             perlin_block, &work)
-                             : perlin_block(&work, 0, count, 0);
+  } destroy{slots, constructed};
+  for (; constructed < grant;) {
+    new (slots + constructed) PerlinSlot;
+    slots[constructed++].coordinate.resize(input.region().rank());
+  }
+  PerlinWork work{phase,         input,
+                  region,        slots,
+                  nullptr,       affine.ok() ? &affine.value() : nullptr,
+                  output.data(), narrow};
+  MutableBuffer decoded_storage;
+  if (tiled) {
+    auto made = phase.allocator.allocate(count * sizeof(Decoded));
+    if (!made.ok())
+      return Answer(made.status());
+    decoded_storage = made.take_value();
+    auto* decoded = reinterpret_cast<Decoded*>(decoded_storage.data());
+    std::uint64_t credit = 0;
+    for (std::uint64_t i = 0; i < count; ++i) {
+      if (!(i % 64)) {
+        auto status = phase.consume_work(0);
+        if (!status.ok())
+          return Answer(status);
+      }
+      auto coordinates = decode(work, i, slots[0].coordinate);
+      if (!coordinates.ok())
+        return Answer(coordinates.status());
+      new (decoded + i) Decoded(coordinates.take_value());
+      unsigned q = 0;
+      for (const auto& coordinate : decoded[i])
+        q = std::max(q, coordinate.denominator_bits);
+      const auto units = q <= 31   ? PerlinExact<8>::work_bound(q)
+                         : q <= 63 ? PerlinExact<16>::work_bound(q)
+                                   : PerlinExact<272>::work_bound(q);
+      if (units > UINT64_MAX - credit)
+        return Answer(Status{ErrorCode::ResourceExhausted, {}});
+      credit += units;
+    }
+    auto status = phase.consume_work(credit);
+    if (!status.ok())
+      return Answer(status);
+    work.decoded = decoded;
+  }
+  int code = 0;
+  if (phase.cpu_tiles) {
+    const ps_cpu_tile_stage_v1 stage{sizeof(ps_cpu_tile_stage_v1),
+                                     {count, 1, 1},
+                                     {8, 1, 1},
+                                     grant};
+    code = phase.cpu_tiles->run(phase.cpu_tiles->context, &stage, perlin_tile,
+                                &work);
+  } else if (phase.cpu_parallel) {
+    code = phase.cpu_parallel->run(phase.cpu_parallel->context, count, 8, grant,
+                                   perlin_block, &work);
+  } else {
+    code = perlin_block(&work, 0, count, 0);
+  }
   for (unsigned i = 0; i < grant; ++i)
     if (!slots[i].failure.ok())
       return Answer(slots[i].failure);
@@ -333,11 +254,124 @@ Result<Value> execute_whole(const OperationInvocation& call) {
     return Answer(Status{code == 2   ? ErrorCode::Cancelled
                          : code == 4 ? ErrorCode::ResourceExhausted
                                      : ErrorCode::OperationFailed,
-                         "Perlin host range failed"});
-  return std::move(output).publish();
+                         "Perlin host stage failed"});
+  return Answer(std::move(output));
 }
+struct PerlinProgram final {
+  bool tiled, gpu, initialized = false, waiting = false,
+                   descriptor_requested = false;
+  Footprint outputs;
+  std::optional<ResultBuilder> builder;
+  ResultRelation relation;
+  Region current;
+  std::size_t box = 0;
+  std::array<std::uint64_t, 8> next{};
+  explicit PerlinProgram(bool tiles, bool device) : tiled(tiles), gpu(device) {}
+  bool next_region(const ResultProgramPhase& phase) {
+    if (box >= outputs.boxes().size())
+      return false;
+    const auto& bounds = outputs.boxes()[box].dimensions();
+    std::vector<RegionDimension> dims;
+    for (std::size_t axis = 0; axis < bounds.size(); ++axis) {
+      const auto extent = !tiled                      ? bounds[axis].extent
+                          : axis + 1 == bounds.size() ? phase.query.tile_width
+                          : axis + 2 == bounds.size() ? phase.query.tile_height
+                                                      : 1;
+      dims.push_back({bounds[axis].offset + next[axis],
+                      std::min(extent, bounds[axis].extent - next[axis])});
+    }
+    current = Region(std::move(dims));
+    for (std::size_t axis = bounds.size(); axis-- > 0;) {
+      next[axis] += current.dimensions()[axis].extent;
+      if (next[axis] < bounds[axis].extent)
+        return true;
+      next[axis] = 0;
+    }
+    ++box;
+    return true;
+  }
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
+    using Answer = Result<ResultProgramPoll>;
+    auto metadata =
+        math_take(phase.resources.reserve(ResourceCapacity::host(8192, 8192)));
+    const auto& schema = *phase.query.output.result_schema;
+    const auto shape = schema.tensors[0].sample_shape();
+    if (!initialized) {
+      initialized = true;
+      outputs = phase.query.tensor_outputs ? *phase.query.tensor_outputs
+                                           : math_take(Footprint::all(shape));
+      builder.emplace(math_take(ResultBuilder::start(
+          phase.resources, schema, phase.query.semantic_key)));
+      math_require(builder->bind_descriptor_relation(math_take(
+          ResultRelation::cartesian(phase.resources, 1,
+                                    {0, 8, 0, outputs.empty() ? 0U : 1U,
+                                     ResultSupportTarget::Descriptor, 0}))));
+      const auto source_shape =
+          phase.query.inputs[0].result_schema->tensors[0].sample_shape();
+      if (tiled) {
+        std::vector<ResultMappedAxis> axes(shape.size() + 1);
+        for (std::size_t axis = 0; axis < shape.size(); ++axis)
+          axes[axis].output_axis = axis;
+        axes.back().extent = 3;
+        relation = math_take(ResultRelation::mapped(
+            phase.resources, shape, Region::whole(shape), source_shape, axes,
+            {0, 5, 0, 0, ResultSupportTarget::Tensor, 0}));
+      } else {
+        relation = math_take(ResultRelation::cartesian(
+            phase.resources, math_take(schema.tensors[0].sample_count()),
+            {0, 5, 0,
+             math_take(phase.query.inputs[0]
+                           .result_schema->tensors[0]
+                           .sample_count()),
+             ResultSupportTarget::Tensor, 0}));
+      }
+    }
+    if (waiting) {
+      waiting = false;
+      auto source = current.dimensions();
+      source.push_back({0, 3});
+      auto window = math_take(phase.tensors->at({0, 0}).acquire(
+          Region(std::move(source)), phase.query.cancellation));
+      auto computed = gpu ? execute_perlin_gpu(phase, window)
+                          : compute_cpu(phase, window, current, tiled);
+      auto buffer = math_take(std::move(computed));
+      StridedLayout layout;
+      std::int64_t stride =
+          Value::element_size(schema.tensors[0].descriptor.element_type);
+      layout.byte_strides.resize(shape.size());
+      layout.origin.resize(shape.size());
+      for (std::size_t axis = shape.size(); axis-- > 0;) {
+        layout.byte_strides[axis] = stride;
+        layout.origin[axis] = current.dimensions()[axis].offset;
+        stride *= current.dimensions()[axis].extent;
+      }
+      math_require(builder->publish_tensor(
+          0, current, layout, std::move(buffer).freeze(), relation,
+          {true, true, true, true}, phase.query.cancellation));
+      if (tiled && box < outputs.boxes().size()) {
+        return Answer(ResultPublication{builder->reference(), false});
+      }
+    }
+    if (next_region(phase)) {
+      waiting = true;
+      auto dims = current.dimensions();
+      dims.push_back({0, 3});
+      ResultProgramNeed need;
+      need.tensors.push_back(
+          {0, 0,
+           math_take(Footprint::from_regions(
+               phase.query.inputs[0].result_schema->tensors[0].sample_shape(),
+               {Region(std::move(dims))})),
+           descriptor_requested ? 5U : 13U});
+      descriptor_requested = true;
+      return Answer(std::move(need));
+    }
+    return Answer(ResultPublication{math_take(builder->seal()), true});
+  } catch (const Status& status) {
+    return Result<ResultProgramPoll>(status);
+  }
+};
 }  // namespace
-
 Status register_perlin(OperationRegistry* registry) {
   for (unsigned mode = 0; mode < 3; ++mode) {
     const bool tiled = mode == 1, gpu = mode == 2;
@@ -348,46 +382,38 @@ Status register_perlin(OperationRegistry* registry) {
     auto& traits = operation.traits;
     traits.input_count = 1;
     traits.input_schema.resize(1);
+    traits.input_schema[0].kind = OperationPortKind::Result;
     traits.input_schema[0].element_type_mask = 12;
     traits.requires_metadata_specialization = true;
     traits.supports_cpu = !gpu;
     traits.supports_gpu = gpu;
     traits.allows_cpu_fallback = false;
-    traits.workspace_bytes = gpu     ? kPerlinGpuWorkspace
-                             : tiled ? 0
-                                     : 64 * sizeof(PerlinSlot);
-    // Three Float32 coordinates are the smallest input representation.
-    // Reserve every decoded coordinate before starting the arithmetic pass.
-    traits.workspace_input_multiplier =
-        tiled ? (sizeof(std::array<PerlinCoordinate, 3>) + 11) / 12 : 0;
+    traits.cpu_staged_tiles = tiled;
+    traits.workspace_bytes =
+        gpu ? kPerlinGpuWorkspace : 64 * sizeof(PerlinSlot);
+    traits.workspace_input_multiplier = tiled ? 6 : 0;
     traits.parameter_schema = {
         {"dtype", OperationParameterType::String, false}};
-    auto& output = traits.outputs[0];
-    output.key = "values";
-    output.shape_rule = OperationShapeRule::Fixed;
-    output.fixed_output_shape = {1};
-    output.region_rule =
-        tiled ? OperationRegionRule::Dependency : OperationRegionRule::Whole;
+    numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                         sizeof(PerlinProgram));
     if (tiled) {
-      output.dependency_version = 1;
-      output.continuation_bytes = sizeof(PerlinTile);
-      output.maximum_dependency_stages = 2;
-      operation.start_dependency = [](const DependencyQuery&,
-                                      const BufferAllocator& allocator) {
-        return DependencyContinuation::make<PerlinTile>(allocator);
-      };
+      traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+      traits.outputs[0].maximum_dependency_stages = 1048576;
     }
-    output.requires_dense_output = !tiled;
     operation.specialize_metadata = [tiled](const auto& inputs,
                                             const auto& parameters)
         -> Result<std::vector<OperationOutputSpecialization>> {
       using Answer = Result<std::vector<OperationOutputSpecialization>>;
-      const auto& descriptor = inputs[0].descriptor;
-      if (descriptor.shape.size() < 2 || descriptor.shape.back() != 3)
+      const auto& input = *inputs[0].result_schema;
+      if (!input.fields.empty() || input.tensors.size() != 1)
+        return Answer(
+            Status{ErrorCode::TypeMismatch, "Perlin requires one tensor"});
+      auto shape = input.tensors[0].sample_shape();
+      if (shape.size() < 2 || shape.size() > 8 || shape.back() != 3)
         return Answer(Status{ErrorCode::TypeMismatch,
                              "Perlin requires coordinates[S...,3]"});
       std::uint64_t count = 1;
-      for (const auto extent : descriptor.shape) {
+      for (auto extent : shape) {
         if (!extent || extent > (UINT64_C(1) << 40) / count)
           return Answer(Status{ErrorCode::ResourceExhausted,
                                "Perlin coordinates exceed 2^40 elements"});
@@ -399,37 +425,27 @@ Status register_perlin(OperationRegistry* registry) {
           std::get<std::string>(dtype->second) != "float64")
         return Answer(Status{ErrorCode::InvalidArgument,
                              "Perlin dtype must be float32 or float64"});
+      shape.pop_back();
+      auto schema = numeric_ops::numeric_tensor_schema(
+          dtype != parameters.end() &&
+                  std::get<std::string>(dtype->second) == "float32"
+              ? ElementType::Float32
+              : ElementType::Float64,
+          shape);
+      if (tiled)
+        schema.publication = PublishPolicy::IndependentChunks;
       OperationOutputSpecialization result;
-      result.metadata.descriptor = descriptor;
-      result.metadata.descriptor.shape.pop_back();
-      result.metadata.descriptor.element_type = output_narrow(parameters)
-                                                    ? ElementType::Float32
-                                                    : ElementType::Float64;
-      if (tiled) {
-        DependencyMappedNeed coordinates;
-        coordinates.port = 0;
-        coordinates.roles =
-            static_cast<std::uint32_t>(DependencyRole::Data) |
-            static_cast<std::uint32_t>(DependencyRole::Validation);
-        for (std::size_t axis = 0;
-             axis < result.metadata.descriptor.shape.size(); ++axis)
-          coordinates.axes.push_back({static_cast<std::int32_t>(axis), {}, 0});
-        coordinates.axes.push_back({-1, {0, 3}, 0});
-        auto all = Footprint::all(result.metadata.descriptor.shape);
-        if (!all.ok())
-          return Answer(all.status());
-        result.static_dependency_pieces = std::vector<DependencyMapPiece>{
-            {all.take_value(), {std::move(coordinates)}}};
-        result.regional_atomic = true;
-      }
+      result.metadata.result_schema =
+          std::make_shared<const SchemaTemplate>(std::move(schema));
       return Answer(
           std::vector<OperationOutputSpecialization>{std::move(result)});
     };
-    if (!tiled)
-      operation.callback = gpu ? execute_perlin_gpu : execute_whole;
-    auto registered = registry->register_operation(std::move(operation));
-    if (!registered.ok())
-      return registered;
+    operation.start_result = [tiled, gpu](const auto&, const auto& allocator) {
+      return ResultContinuation::make<PerlinProgram>(allocator, tiled, gpu);
+    };
+    auto status = registry->register_operation(std::move(operation));
+    if (!status.ok())
+      return status;
   }
   return Status::success();
 }

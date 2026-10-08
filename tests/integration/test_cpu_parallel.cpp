@@ -11,6 +11,7 @@
 
 #include "photospider/execution/resource_allocator.hpp"
 #include "photospider/photospider.hpp"
+#include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
@@ -26,6 +27,7 @@ struct Work {
   Shared* shared;
   std::uint64_t* output;
   const ps_cpu_parallel_service_v1* service;
+  std::uint64_t count;
 };
 int block(void* user, std::uint64_t begin, std::uint64_t end,
           std::uint32_t slot) {
@@ -58,8 +60,9 @@ int block(void* user, std::uint64_t begin, std::uint64_t end,
     // The ignored invalid service call must still fail the enclosing callback.
     (void)work.service->run(work.service->context, 1, 1, 1, block, user);
   }
-  if (shared.mode == 4) {
-    if ((begin != 0 && begin != UINT64_MAX - 1) || end <= begin)
+  if (shared.mode == 4 || shared.mode == 7) {
+    if ((begin != 0 && begin != work.count - 1) || end <= begin ||
+        end > work.count)
       code = 1;
   } else {
     for (auto i = begin; i < end; ++i)
@@ -75,51 +78,76 @@ std::shared_ptr<OperationRegistry> registry(Shared* shared) {
   operation.key = "parallel.probe";
   operation.traits.cacheable = false;
   operation.traits.workspace_bytes = 257 * 8;
-  operation.traits.outputs[0].output_element_type = ElementType::Int64;
-  operation.traits.outputs[0].shape_rule = OperationShapeRule::Fixed;
-  operation.traits.outputs[0].fixed_output_shape = {1};
-  operation.callback = [shared](const OperationInvocation& call) {
-    if (!call.cpu_parallel)
-      return Result<Value>(Status{ErrorCode::Internal, "no service"});
-    if (shared->mode == 6) {
-      const auto* budget = resource_internal::metadata_budget();
-      if (!budget)
-        return Result<Value>(
-            Status{ErrorCode::Internal, "missing callback root"});
-      // A swallowed resource failure must still prevent successful publication.
-      static_cast<void>(budget->consume({UINT64_MAX}));
+  auto output = multi_result::output(
+      "value", multi_result::schema(ElementType::Int64, {1}));
+  output.region_rule = OperationRegionRule::Whole;
+  operation.traits.outputs = {output};
+  struct Program {
+    Shared* shared;
+    explicit Program(Shared* state) : shared(state) {}
+    Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+      using multi_result::check;
+      using multi_result::take;
+      if (!phase.cpu_parallel)
+        return Result<ResultProgramPoll>(
+            Status{ErrorCode::Internal, "no service"});
+      if (shared->mode == 6) {
+        const auto* budget = resource_internal::metadata_budget();
+        if (!budget)
+          return Result<ResultProgramPoll>(
+              Status{ErrorCode::Internal, "missing callback root"});
+        static_cast<void>(budget->consume({UINT64_MAX}));
+      }
+      auto made = phase.allocator.allocate(257 * 8);
+      if (!made.ok())
+        return Result<ResultProgramPoll>(made.status());
+      auto scratch = made.take_value();
+      const auto* service = phase.cpu_parallel;
+      const bool large = shared->mode == 4 || shared->mode == 7;
+      std::uint64_t count = 257;
+      if (large) {
+        const auto issued = phase.resources.statistics().issued.work;
+        if (issued > UINT64_MAX - 4096)
+          return Result<ResultProgramPoll>(
+              Status{ErrorCode::ResourceExhausted, "range preparation"});
+        // Leave fuel for sealing and publishing after the synchronous range.
+        count = shared->mode == 7 ? UINT64_MAX : UINT64_MAX - issued - 4096;
+      }
+      Work work{shared, reinterpret_cast<std::uint64_t*>(scratch.data()),
+                service, count};
+      const int before = std::fegetround();
+      std::fesetround(FE_DOWNWARD);
+      const int code =
+          service->run(service->context, count, large ? count - 1 : 7,
+                       shared->grant, block, &work);
+      const bool restored = std::fegetround() == FE_DOWNWARD;
+      std::fesetround(before);
+      if (!restored)
+        return Result<ResultProgramPoll>(
+            Status{ErrorCode::Internal, "FP restore"});
+      if (!code && !large) {
+        for (unsigned i = 0; i < 257; ++i)
+          if (work.output[i] != i * 17 + 3)
+            return Result<ResultProgramPoll>(
+                Status{ErrorCode::Internal, "range coverage"});
+      }
+      auto builder = take(ResultBuilder::start(
+          phase.resources, *phase.query.output.result_schema,
+          phase.query.semantic_key));
+      check(builder.bind_descriptor_relation(
+          take(ResultRelation::cartesian(phase.resources, 1, {}))));
+      const std::int64_t value = 257;
+      check(builder.publish_tensor(
+          0, Region::whole({1}),
+          {reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)},
+          take(ResultRelation::cartesian(phase.resources, 1, {})),
+          {true, true, true, true}));
+      return Result<ResultProgramPoll>(
+          ResultPublication{take(builder.seal()), true});
     }
-    auto made = call.allocator.allocate(257 * 8);
-    if (!made.ok())
-      return Result<Value>(made.status());
-    auto scratch = made.take_value();
-    Work work{shared, reinterpret_cast<std::uint64_t*>(scratch.data()),
-              call.cpu_parallel};
-    const auto* service = call.cpu_parallel;
-    const int before = std::fegetround();
-    std::fesetround(FE_DOWNWARD);
-    const bool large = shared->mode == 4;
-    const int code =
-        service->run(service->context, large ? UINT64_MAX : 257,
-                     large ? UINT64_MAX - 1 : 7, shared->grant, block, &work);
-    const bool restored = std::fegetround() == FE_DOWNWARD;
-    std::fesetround(before);
-    if (!restored)
-      return Result<Value>(Status{ErrorCode::Internal, "FP restore"});
-    // Deliberately ignore worker and nested errors; host sticky failures win.
-    if (!code && !large) {
-      for (unsigned i = 0; i < 257; ++i)
-        if (work.output[i] != i * 17 + 3)
-          return Result<Value>(Status{ErrorCode::Internal, "range coverage"});
-    }
-    auto made_output = MutableValue::allocate(
-        {ElementType::Int64, {1}}, Region::whole({1}), call.allocator);
-    if (!made_output.ok())
-      return Result<Value>(made_output.status());
-    auto output = made_output.take_value();
-    const std::int64_t value = 257;
-    std::memcpy(output.data(), &value, 8);
-    return std::move(output).publish();
+  };
+  operation.start_result = [shared](const auto&, const auto& allocator) {
+    return ResultContinuation::make<Program>(allocator, shared);
   };
   if (!registry->register_operation(std::move(operation)).ok() ||
       !registry->freeze().ok())
@@ -157,7 +185,7 @@ int run(unsigned workers, unsigned mode, unsigned grant, unsigned simultaneous,
     PS_CHECK(future.wait_for(std::chrono::seconds(10)) ==
              std::future_status::ready);
     auto result = future.get();
-    if (mode == 2 || mode == 6 || exhausted) {
+    if (mode == 2 || mode == 6 || mode == 7 || exhausted) {
       PS_CHECK(!result.ok());
       PS_CHECK(result.status().code == ErrorCode::ResourceExhausted);
     } else if (mode == 5) {
@@ -170,6 +198,13 @@ int run(unsigned workers, unsigned mode, unsigned grant, unsigned simultaneous,
       if (!result.ok())
         std::cerr << result.status().message << '\n';
       PS_CHECK(result.ok());
+      const auto& output = result.value().results.at("output");
+      std::int64_t value = 0;
+      PS_CHECK(output
+                   .read_tensor(multi_result::take(output.descriptor()), 0, {0},
+                                &value, sizeof(value))
+                   .ok() &&
+               value == 257);
     }
   }
   PS_CHECK(shared.active == 0);
@@ -182,14 +217,14 @@ int run(unsigned workers, unsigned mode, unsigned grant, unsigned simultaneous,
     PS_CHECK(shared.peak == 1);
   if (mode == 4)
     PS_CHECK(shared.blocks == 2);
-  if (exhausted)
+  if (exhausted || mode == 7)
     PS_CHECK(shared.blocks == 0);
   auto resources = context.resource_budget().take_value().statistics();
   PS_CHECK(resources.live[ResourceKind::Queue] == 0);
   return 0;
 }
 }  // namespace
-int main() {
+int main() try {
   PS_CHECK(run(1, 0, 0, 1) == 0);
   PS_CHECK(run(4, 1, 0, 1) == 0);
   PS_CHECK(run(4, 0, 1, 1) == 0);
@@ -199,8 +234,12 @@ int main() {
   PS_CHECK(run(4, 2, 0, 1) == 0);
   PS_CHECK(run(4, 3, 0, 1) == 0);
   PS_CHECK(run(4, 4, 0, 1) == 0);
+  PS_CHECK(run(4, 7, 0, 1) == 0);
   PS_CHECK(run(4, 5, 0, 1) == 0);
   PS_CHECK(run(4, 6, 0, 1) == 0);
   PS_CHECK(run(4, 0, 0, 1, true) == 0);
   return 0;
+} catch (const std::exception& error) {
+  std::cerr << error.what() << '\n';
+  return 1;
 }

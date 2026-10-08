@@ -13,51 +13,15 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+repository_commit: current working tree
 ---
 
 # NUM-11C: reduce_maximum
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Inherit the [NUM baseline](NUM_common_contract.md) and [NUM-11 shared contract](NUM-11_reduction_contract.md). The strict key follows the exact reference. Floating selection and special-value behavior are exact in all profiles.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+`numeric.reduce_maximum_*` reduces complete groups along required static `axes`. Its single Result input contains exactly one tensor member at any key. The `values` Result uses schema `photospider.tensor` and member `samples`; it preserves input dtype and rank, replaces reduced extents with one, and drops facets. There is no dtype parameter.
 
-Reduce input groups selected by required static axes. Inherit the
-[reduction contract](NUM-11_reduction_contract.md) for input/values ports,
-positive rank-1..8 shapes, size cap, fixed keepdims=true, generic output facets,
-full selected-group support, strided reads, NaN priority/payload conversion,
-invalidation, returned mapping, resources, errors and lifetime. Input supports
-UInt8, Int64, Float32 and Float64. All three CPU profiles are bitwise equivalent.
+Select the numeric maximum with infinities in ordinary extended order. Int64 comparison remains integer comparison, including values above 2^53. The first NaN in logical row-major order wins, preserving its sign and payload while setting the quiet bit. A singleton sNaN is quieted. For mixed signed zeros, return +0; same-sign zeros retain their sign.
 
-## Type and numeric semantics
-
-Output preserves input dtype with no dtype parameter. Select the numerical
-maximum of the group, treating infinities in the ordinary extended order.
-Use exact integer comparison, including Int64 values beyond 2^53. Propagate the
-first NaN by the shared rule, without ignoring it. On a singleton group, sNaN
-is still quieted; this is a numeric reducer, not a copying shortcut.
-
-For mixed zeros, return +0; same-sign zeros retain their sign. Nonzero
-ties have the same representable value, so no rounding tolerance is needed.
-
-## Acceptance and implementation distinction
-
-Fixture: input=[[1,2,3],[4,5,6]], axes="1" -> [[3],[6]], shape
-[2,1], in the selected output dtype. The public manual target binds this through
-WorkflowDocument, compiles the selected key and reads values through ExecutionContext. Use
-independent exact grouping and integer/rational/bit-selection oracles. Cover
-singleton groups, non-leading/multiple axes, NaN payload order/conversion,
-signed-zero groups, infinity combinations, subnormals and source dtype extrema.
-
-The formal keys execute Whole and preserve the numerical rules above. See
-[NUM-11 Whole execution](../reductions-whole.md) for current public workflow,
-validation and timing. Earlier regional platform records predate Whole.
+For `input=[[1,2,3],[4,5,6]]` and `axes="1"`, the result is `[[3],[6]]` with shape `[2,1]`. For every nonempty Whole request, the kernel reads and validates the complete input and computes every output group before consumer projection. A typed-validation failure in an unrequested group still fails the request. Empty demand reads no payload and performs no comparisons. Current fixture coverage and limits are in [NUM-11 Whole execution](../reductions-whole.md).

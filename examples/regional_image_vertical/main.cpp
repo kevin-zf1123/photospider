@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "image_vertical/image_fixture.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {
@@ -18,29 +19,9 @@ void require(bool condition, const std::string& detail) {
   if (!condition)
     throw std::runtime_error(detail);
 }
+using s1_fixture::take;
 ValueFacet profile() {
-  return ps::encode_semantic(ps::rgba_semantics()).take_value();
-}
-Value value(const std::vector<float>& pixels,
-            const std::vector<std::uint64_t>& shape, bool image) {
-  std::vector<std::int64_t> strides(shape.size());
-  std::int64_t stride = 4;
-  for (std::size_t i = shape.size(); i > 0; --i) {
-    strides[i - 1] = stride;
-    stride *= static_cast<std::int64_t>(shape[i - 1]);
-  }
-  std::vector<std::uint8_t> bytes(pixels.size() * 4);
-  std::memcpy(bytes.data(), pixels.data(), bytes.size());
-  auto made = Value::create(
-      {ElementType::Float32, shape}, Region::whole(shape), {0, strides},
-      std::move(bytes),
-      image ? std::vector<ValueFacet>{profile()}
-      : shape.size() == 2
-          ? std::vector<ValueFacet>{encode_semantic(coverage_semantics())
-                                        .take_value()}
-          : std::vector<ValueFacet>{});
-  require(made.ok(), made.status().message);
-  return made.take_value();
+  return s1_fixture::profile();
 }
 struct Fixture {
   std::uint64_t height = 7, width = 11;
@@ -62,22 +43,23 @@ struct Fixture {
         mask.push_back(uniform ? .5F : static_cast<float>((x + 2 * y) % 3) / 2);
       }
   }
-  ExecutionBindings bindings() const {
+  ExecutionBindings bindings(const ResourceBudget& root) const {
     const std::vector<std::uint64_t> shape{height, width, 4};
-    return {{{"foreground", value(foreground, shape, true)},
-             {"background", value(background, shape, true)},
-             {"mask", value(mask, {height, width}, false)},
-             {"gain", value({gain}, {1}, false)}}};
+    return {{{"foreground", s1_fixture::tensor(root, foreground, shape)},
+             {"background", s1_fixture::tensor(root, background, shape)},
+             {"mask", s1_fixture::tensor(root, mask, {height, width}, false)},
+             {"gain", s1_fixture::scalar(root, gain)}}};
   }
   WorkflowDocument document() const {
     WorkflowDocument document;
-    const auto bound = bindings();
-    for (std::size_t i = 0; i < bound.inputs.size(); ++i) {
-      const auto& input = bound.inputs[i];
-      document.inputs.push_back({i + 1, input.name, input.value.descriptor(),
-                                 input.value.region(), input.value.layout(),
-                                 input.value.facets()});
-    }
+    document.inputs = {
+        s1_fixture::declaration(1, "foreground",
+                                s1_fixture::schema({height, width, 4})),
+        s1_fixture::declaration(2, "background",
+                                s1_fixture::schema({height, width, 4})),
+        s1_fixture::declaration(3, "mask",
+                                s1_fixture::schema({height, width}, false)),
+        s1_fixture::declaration(4, "gain", s1_fixture::schema({1}, false))};
     document.nodes = {
         {10,
          "image.gaussian_blur",
@@ -140,134 +122,179 @@ struct Fixture {
     return output;
   }
 };
-void check(ValueView output, const std::vector<float>& expected,
+void check(const ResultRef& output, const std::vector<float>& expected,
            std::uint64_t width, bool exact) {
-  const auto yd = output.region().dimensions()[0],
-             xd = output.region().dimensions()[1];
-  require(output.facets().size() == 1 &&
-              output.facets()[0].payload == profile().payload,
+  const auto& tensor = output.schema().tensors[0];
+  require(tensor.facets.size() == 1 &&
+              tensor.facets[0].payload == profile().payload,
           "image profile changed");
-  for (std::uint64_t y = yd.offset; y < yd.offset + yd.extent; ++y)
-    for (std::uint64_t x = xd.offset; x < xd.offset + xd.extent; ++x)
-      for (std::uint64_t c = 0; c < 4; ++c) {
-        auto address = output.byte_address({y, x, c});
-        require(address.ok(), "invalid output view");
+  const auto descriptor = take(output.descriptor());
+  s1_fixture::check(descriptor.tensor_coverage(0).visit(
+      [&](const auto& at) {
         float actual = 0;
-        std::memcpy(&actual, output.bytes().data() + address.value(), 4);
-        const float reference = expected[(y * width + x) * 4 + c];
+        auto status = output.read_tensor(descriptor, 0, at, &actual, 4);
+        if (!status.ok())
+          return status;
+        const float reference = expected[(at[2] * width + at[3]) * 4 + at[4]];
         require(exact ? std::memcmp(&actual, &reference, 4) == 0
                       : std::abs(actual - reference) <=
                             1e-6 + 1e-5 * std::abs(reference),
-                "S2Image.RegionAndTiles oracle mismatch at " +
-                    std::to_string(y) + "," + std::to_string(x));
-      }
+                "regional image oracle mismatch");
+        return Status::success();
+      },
+      UINT64_MAX));
 }
-std::vector<float> pixels(const Value& output) {
-  std::vector<float> result(output.bytes().size() / 4);
-  std::memcpy(result.data(), output.bytes().data(), output.bytes().size());
-  return result;
+std::vector<float> pixels(const ResultRef& output) {
+  std::vector<float> values;
+  auto descriptor = take(output.descriptor());
+  s1_fixture::check(descriptor.tensor_coverage(0).visit(
+      [&](const auto& at) {
+        float value = 0;
+        auto status = output.read_tensor(descriptor, 0, at, &value, 4);
+        if (status.ok())
+          values.push_back(value);
+        return status;
+      },
+      UINT64_MAX));
+  return values;
 }
-void direct_invocation(const std::shared_ptr<OperationRegistry>& operations) {
-  const auto image = value(std::vector<float>(36, .5F), {3, 3, 4}, true);
-  const auto gain = value({2}, {1}, false);
-  const std::map<std::string, ParameterValue> none;
-  std::vector<Value> inputs{image, gain};
-  std::vector<Region> demands{image.region(), gain.region()};
-  unsigned allocations = 0;
-  BufferAllocator allocator([&](std::uint64_t) {
-    ++allocations;
-    return Result<std::shared_ptr<void>>(std::make_shared<int>(0));
-  });
-  OperationInvocation channels(inputs, demands, none, Backend::Cpu, {},
-                               Region({{0, 1}, {0, 1}, {0, 1}}), allocator);
-  require(operations->invoke("image.exposure_gain", channels).status().code ==
-              ErrorCode::InvalidArgument,
-          "direct partial-channel output must fail before allocation");
-  require(allocations == 0, "partial output entered callback");
+ResultRef affine(const ResourceBudget& root, const SchemaTemplate& schema,
+                 const Region& region, StridedLayout layout,
+                 const std::vector<float>& values) {
+  auto storage = take(root.allocator().allocate(values.size() * 4));
+  std::memcpy(storage.data(), values.data(), values.size() * 4);
+  auto builder = take(ResultBuilder::start(root, schema, "example.affine"));
+  s1_fixture::check(builder.bind_descriptor_relation(
+      take(ResultRelation::cartesian(root, 1, {}))));
+  const auto count = schema.tensors[0].sample_count();
+  auto witness = take(ResultRelation::cartesian(
+      root, count.ok() ? count.value() : UINT64_MAX, {}));
+  s1_fixture::check(builder.publish_tensor(
+      0, region, std::move(layout), std::move(storage).freeze(),
+      std::move(witness), {true, true, true, true}));
+  return take(builder.seal());
+}
+void input_windows(const std::shared_ptr<OperationRegistry>& operations) {
+  ExecutionContextConfig config;
+  config.gpu_enabled = false;
+  config.managed_resources = ResourceLimits{};
+  ExecutionContext execution(operations, config);
+  const auto root = take(execution.resource_budget());
+  const auto schema = s1_fixture::schema({3, 3, 4});
+  auto run = [&](const ResultRef& source, const std::string& operation,
+                 const Region& demand,
+                 const std::map<std::string, ParameterValue>& parameters,
+                 bool exposure) {
+    WorkflowDocument document;
+    document.inputs = {s1_fixture::declaration(1, "image", source)};
+    WorkflowNode node{1, operation, {WorkflowInputReference{1}}, parameters};
+    ExecutionBindings bindings{{{"image", source}}};
+    if (exposure) {
+      auto gain = s1_fixture::scalar(root, 2);
+      document.inputs.push_back(s1_fixture::declaration(2, "gain", gain));
+      bindings.inputs.push_back({"gain", gain});
+      node.inputs.push_back(WorkflowInputReference{2});
+    }
+    document.nodes.push_back(std::move(node));
+    document.outputs = {
+        {"result", 1,
+         operation == "image.split_horizontal" ? "full" : "value"}};
+    GraphContext graph(document);
+    PlanningOptions options;
+    options.output_regions = {{"result", demand}};
+    auto compiled = Compiler(operations).compile(graph, options);
+    if (!compiled.ok())
+      return Result<ExecutionResult>(compiled.status());
+    return execution.execute(compiled.value().plan, std::move(bindings));
+  };
+  const auto whole = Region::whole(schema.tensors[0].sample_shape());
   for (bool broadcast : {true, false}) {
-    auto unusual = Value::create(
-        image.descriptor(), image.region(),
-        broadcast
-            ? StridedLayout{0, {0, 0, 4}, {UINT64_C(1) << 63, UINT64_MAX, 0}}
-            : StridedLayout{0, {-48, -16, 4}, {2, 2, 0}},
-        broadcast ? std::vector<std::uint8_t>(image.bytes().begin(),
-                                              image.bytes().begin() + 16)
-                  : image.copy_bytes(),
-        image.facets());
-    require(unusual.ok(), unusual.status().message);
-    inputs = {unusual.take_value(), gain};
-    OperationInvocation strided(inputs, demands, none);
-    auto exposed = operations->invoke("image.exposure_gain", strided);
-    require(exposed.ok(), exposed.status().message);
-    const auto output = pixels(exposed.value());
-    for (std::size_t index = 0; index < output.size(); ++index)
-      require(output[index] == (index % 4 == 3 ? .5F : 1.F),
-              "broadcast/reversed C view");
+    auto source = affine(root, schema, whole,
+                         broadcast ? StridedLayout{0, {0, 0, 0, 0, 4}}
+                                   : StridedLayout{128, {0, 0, -48, -16, 4}},
+                         std::vector<float>(broadcast ? 4 : 36, .5F));
+    auto result = take(run(source, "image.exposure_gain", whole, {}, true));
+    const auto samples = pixels(result.results.at("result"));
+    for (std::size_t i = 0; i < samples.size(); ++i)
+      require(samples[i] == (i % 4 == 3 ? .5F : 1.F),
+              "broadcast/reversed Result input");
+    auto closed =
+        take(run(source, "image.exposure_gain",
+                 Region({{0, 1}, {0, 1}, {0, 1}, {0, 1}, {0, 1}}), {}, true));
+    require(pixels(closed.results.at("result")) ==
+                std::vector<float>({1, 1, 1, .5F}),
+            "Result image demand closes over the complete RGBA tuple");
   }
-  inputs = {image};
-  demands = {Region({{1, 1}, {0, 3}, {0, 4}})};
-  const std::map<std::string, ParameterValue> parameters{
-      {"radius", static_cast<std::int64_t>(1)},
-      {"sigma", 1.0}};
-  OperationInvocation halo(inputs, demands, parameters, Backend::Cpu, {},
-                           Region({{1, 1}, {1, 1}, {0, 4}}), allocator);
-  require(operations->invoke("image.gaussian_blur", halo).status().code ==
-              ErrorCode::InvalidArgument,
-          "direct Gaussian must reject insufficient halo");
-  require(allocations == 0, "insufficient halo entered callback");
-  inputs[0] = image.view(demands[0]).take_value();
-  demands[0] = image.region();
-  require(operations->invoke("image.gaussian_blur", halo).status().code ==
-              ErrorCode::TypeMismatch,
-          "input Value must cover its claimed demand");
-  inputs[0] = image;
-  require(operations->invoke("image.gaussian_blur", halo).ok(),
-          "direct valid halo");
-  auto far_edge = Value::create(
-      {ElementType::Float32, {UINT64_MAX, 1, 4}},
-      Region({{UINT64_MAX - 4, 4}, {0, 1}, {0, 4}}), {0, {0, 0, 4}},
-      std::vector<std::uint8_t>(image.bytes().begin(),
-                                image.bytes().begin() + 16),
-      {profile()});
-  require(far_edge.ok(), far_edge.status().message);
-  inputs = {far_edge.take_value()};
-  demands = {inputs[0].region()};
-  const std::map<std::string, ParameterValue> far_parameters{
-      {"radius", static_cast<std::int64_t>(3)},
-      {"sigma", 1.0}};
-  OperationInvocation far(inputs, demands, far_parameters, Backend::Cpu, {},
-                          Region({{UINT64_MAX - 1, 1}, {0, 1}, {0, 4}}));
-  auto far_result = operations->invoke("image.gaussian_blur", far);
-  require(far_result.ok(), far_result.status().message);
-  require(pixels(far_result.value()) == std::vector<float>(4, .5F),
-          "large logical edge clamp");
-  inputs = {image, value(std::vector<float>(6, 1), {2, 3}, false)};
-  demands = {image.region(), inputs[1].region()};
-  OperationInvocation mask(inputs, demands, none);
-  require(operations->invoke("image.mask", mask).status().code ==
-              ErrorCode::TypeMismatch,
-          "direct mask shape mismatch");
+  const Region row({{0, 1}, {0, 1}, {1, 1}, {0, 3}, {0, 4}});
+  const Region center({{0, 1}, {0, 1}, {1, 1}, {1, 1}, {0, 4}});
+  const std::map<std::string, ParameterValue> parameters{{"radius", int64_t{1}},
+                                                         {"sigma", 1.0}};
+  auto short_source = affine(root, schema, row, {0, {0, 0, 0, 0, 4}},
+                             std::vector<float>(4, .5F));
+  require(
+      !run(short_source, "image.gaussian_blur", center, parameters, false).ok(),
+      "Gaussian must reject unpublished halo");
+  auto source = affine(root, schema, whole, {0, {0, 0, 0, 0, 4}},
+                       std::vector<float>(4, .5F));
+  require(run(source, "image.gaussian_blur", center, parameters, false).ok(),
+          "complete Gaussian halo");
+  auto huge = s1_fixture::schema({UINT64_MAX, 1, 4});
+  const Region last_rows({{0, 1}, {0, 1}, {UINT64_MAX - 4, 4}, {0, 1}, {0, 4}});
+  auto far = affine(root, huge, last_rows, {0, {0, 0, 0, 0, 4}},
+                    std::vector<float>(4, .5F));
+  auto edge =
+      take(run(far, "image.gaussian_blur",
+               Region({{0, 1}, {0, 1}, {UINT64_MAX - 1, 1}, {0, 1}, {0, 4}}),
+               {{"radius", int64_t{3}}, {"sigma", 1.0}}, false));
+  require(pixels(edge.results.at("result")) == std::vector<float>(4, .5F),
+          "uint64 edge clamp");
+  auto last_box =
+      affine(root, huge,
+             Region({{0, 1}, {0, 1}, {UINT64_MAX - 15, 15}, {0, 1}, {0, 4}}),
+             {0, {0, 0, 0, 0, 4}}, std::vector<float>(4, .5F));
+  auto downsampled =
+      take(run(last_box, "image.downsample_box",
+               Region({{0, 1}, {0, 1}, {UINT64_MAX / 16, 1}, {0, 1}, {0, 4}}),
+               {{"factor", int64_t{16}}}, false));
+  require(
+      pixels(downsampled.results.at("result")) == std::vector<float>(4, .5F),
+      "downsample clips its final uint64 box without multiplication overflow");
+  const auto tall = s1_fixture::schema({128, 129, 4});
+  auto tall_source =
+      affine(root, tall, Region::whole(tall.tensors[0].sample_shape()),
+             {0, {0, 0, 0, 0, 4}}, std::vector<float>(4, .5F));
+  auto split = take(run(tall_source, "image.split_horizontal",
+                        Region::whole(tall.tensors[0].sample_shape()),
+                        {{"split_x", int64_t{64}}}, false));
+  require(pixels(split.results.at("result")) ==
+              std::vector<float>(128 * 129 * 4, .5F),
+          "retained CPU output can exceed the transient workspace limit");
 }
 void numerical(const std::shared_ptr<OperationRegistry>& operations) {
   Compiler compiler(operations);
-  ExecutionContext execution(operations, {2, false, 16, 1024 * 1024});
+  ExecutionContextConfig config;
+  config.gpu_enabled = false;
+  config.managed_resources = ResourceLimits{};
+  ExecutionContext execution(operations, config);
+  const auto root = take(execution.resource_budget());
   for (bool uniform : {true, false}) {
     Fixture fixture(uniform);
     GraphContext graph(fixture.document());
     auto compiled = compiler.compile(graph);
     require(compiled.ok(), compiled.status().message);
-    auto full = execution.execute(compiled.value().plan, fixture.bindings());
+    auto full =
+        execution.execute(compiled.value().plan, fixture.bindings(root));
     require(full.ok(), full.status().message);
-    check(ValueView(full.value().values.at("result")), fixture.oracle(),
-          fixture.width, false);
-    const auto reference = pixels(full.value().values.at("result"));
+    check(full.value().results.at("result"), fixture.oracle(), fixture.width,
+          false);
+    const auto reference = pixels(full.value().results.at("result"));
     if (uniform) {
       for (std::size_t i = 0; i < reference.size(); ++i)
         require(reference[i] == (i % 4 == 3 ? .625F : .3125F),
                 "hand-computed uniform fixture");
     }
     for (const auto& geometry :
-         {std::make_pair(1, 1), std::make_pair(2, 3), std::make_pair(5, 7),
+         {std::make_pair(1, 1), std::make_pair(2, 4), std::make_pair(4, 8),
           std::make_pair(128, 128)}) {
       for (bool roi : {false, true}) {
         PlanningOptions options;
@@ -275,33 +302,40 @@ void numerical(const std::shared_ptr<OperationRegistry>& operations) {
         options.tile_width = geometry.second;
         if (roi)
           options.output_regions = {
-              {"result", Region({{1, 5}, {2, 7}, {0, 4}})}};
+              {"result", Region({{0, 1}, {0, 1}, {1, 5}, {2, 7}, {0, 4}})}};
         auto planned = compiler.plan(compiled.value().optimized, options);
         require(planned.ok(), planned.status().message);
-        auto output = execution.execute(planned.value(), fixture.bindings());
+        auto output =
+            execution.execute(planned.value(), fixture.bindings(root));
         require(output.ok(), output.status().message);
-        check(ValueView(output.value().values.at("result")), reference,
-              fixture.width, true);
-        check(ValueView(output.value().values.at("result")), fixture.oracle(),
+        check(output.value().results.at("result"), reference, fixture.width,
+              true);
+        check(output.value().results.at("result"), fixture.oracle(),
               fixture.width, false);
-        auto streamed = execution.execute_stream(
-            planned.value(), fixture.bindings(),
-            [&](const std::string& name, ValueView tile) {
-              require(name == "result", "output name");
-              check(tile, reference, fixture.width, true);
-              return Status::success();
-            });
-        require(streamed.ok(), streamed.status().message);
-        require(streamed.value().operation_timings.size() == 4 &&
-                    streamed.value().peak_active_tasks <= 2,
-                "bounded task diagnostics");
+        unsigned publications = 0;
+        ExecutionOptions observe;
+        observe.result_publication = [&](const auto& name,
+                                         const ResultRef& result) {
+          if (name.node_id == 40) {
+            check(result, reference, fixture.width, true);
+            ++publications;
+          }
+          return Status::success();
+        };
+        auto observed = execution.execute(planned.value(),
+                                          fixture.bindings(root), {}, observe);
+        require(observed.ok(), observed.status().message);
+        require(publications == 1 &&
+                    observed.value().diagnostics.operation_timings.size() == 4,
+                "Result publication observer and operation diagnostics");
       }
     }
     fixture.gain = .5F;
-    auto second = execution.execute(compiled.value().plan, fixture.bindings());
+    auto second =
+        execution.execute(compiled.value().plan, fixture.bindings(root));
     require(second.ok(), second.status().message);
-    check(ValueView(second.value().values.at("result")), fixture.oracle(),
-          fixture.width, false);
+    check(second.value().results.at("result"), fixture.oracle(), fixture.width,
+          false);
   }
   Fixture fixture;
   for (const auto& parameter :
@@ -329,15 +363,17 @@ void numerical(const std::shared_ptr<OperationRegistry>& operations) {
   for (float bad : {-1.F, 1.01F, std::numeric_limits<float>::infinity(),
                     std::numeric_limits<float>::quiet_NaN()}) {
     fixture.mask[0] = bad;
-    auto output = execution.execute(compiled.value().plan, fixture.bindings());
+    auto output =
+        execution.execute(compiled.value().plan, fixture.bindings(root));
     require(!output.ok() && output.status().code == ErrorCode::InvalidArgument,
             "mask interval");
   }
   for (int axis = 0; axis < 2; ++axis) {
     auto mismatch = fixture.document();
     auto& input = mismatch.inputs[axis == 0 ? 1 : 2];
-    --input.descriptor.shape[0];
-    input.region = Region::whole(input.descriptor.shape);
+    auto schema = std::make_shared<SchemaTemplate>(*input.result_schema);
+    --schema->tensors[0].descriptor.shape[0];
+    input.result_schema = std::move(schema);
     GraphContext invalid_graph(mismatch);
     require(!compiler.compile(invalid_graph).ok(),
             "background/mask shape mismatch");
@@ -357,9 +393,9 @@ void numerical(const std::shared_ptr<OperationRegistry>& operations) {
   auto impulse_plan = compiler.compile(impulse_graph, impulse_options);
   require(impulse_plan.ok(), impulse_plan.status().message);
   auto impulse_result =
-      execution.execute(impulse_plan.value().plan, impulse.bindings());
+      execution.execute(impulse_plan.value().plan, impulse.bindings(root));
   require(impulse_result.ok(), impulse_result.status().message);
-  check(ValueView(impulse_result.value().values.at("result")), impulse.oracle(),
+  check(impulse_result.value().results.at("result"), impulse.oracle(),
         impulse.width, false);
   // Radius can exceed both image axes and the tile; clamp remains image-local.
   Fixture wide_halo(true);
@@ -368,102 +404,88 @@ void numerical(const std::shared_ptr<OperationRegistry>& operations) {
   GraphContext wide_graph(wide_halo.document());
   PlanningOptions options;
   options.tile_height = options.tile_width = 1;
-  options.output_regions = {{"result", Region({{0, 1}, {0, 1}, {0, 4}})}};
+  options.output_regions = {
+      {"result", Region({{0, 1}, {0, 1}, {0, 1}, {0, 1}, {0, 4}})}};
   auto wide_plan = compiler.compile(wide_graph, options);
   require(wide_plan.ok(), wide_plan.status().message);
-  auto wide = execution.execute(wide_plan.value().plan, wide_halo.bindings());
+  auto wide =
+      execution.execute(wide_plan.value().plan, wide_halo.bindings(root));
   require(wide.ok(), wide.status().message);
-  const auto reference = pixels(wide.value().values.at("result"));
+  const auto reference = pixels(wide.value().results.at("result"));
   require(reference == std::vector<float>({.3125F, .3125F, .3125F, .625F}),
           "radius 64 clamp");
 }
 
 void large_source(const std::shared_ptr<OperationRegistry>& operations) {
-  Fixture fixture(true);
-  auto document = fixture.document();
-  const std::uint64_t side = 65536;
-  ExecutionBindings bindings;
-  for (auto& input : document.inputs) {
-    if (input.name == "gain") {
-      bindings.inputs.push_back({input.name, value({2}, {1}, false)});
-      continue;
-    }
-    const bool mask = input.name == "mask";
-    input.descriptor.shape = mask ? std::vector<std::uint64_t>{side, side}
-                                  : std::vector<std::uint64_t>{side, side, 4};
-    input.region = Region::whole(input.descriptor.shape);
-    input.layout =
-        mask ? StridedLayout{0, {static_cast<std::int64_t>(side * 4), 4}}
-             : StridedLayout{0, {static_cast<std::int64_t>(side * 16), 16, 4}};
-    auto source = std::make_shared<RegionalSource>();
-    source->descriptor = input.descriptor;
-    source->facets = input.facets;
-    const bool background = input.name == "background";
-    source->read = [mask, background](
-                       const Region& region, std::uint8_t* destination,
-                       std::uint64_t bytes, const BufferAllocator&,
-                       const CancellationToken&) {
-      for (std::uint64_t offset = 0; offset < bytes; offset += 4) {
-        const float sample = mask || offset % 16 == 12 ? .5F
-                             : background              ? .25F
-                                                       : .125F;
-        std::memcpy(destination + offset, &sample, 4);
+  auto run = [&](uint64_t limit) -> Result<uint64_t> {
+    ExecutionContextConfig config;
+    config.gpu_enabled = false;
+    config.managed_resources = ResourceLimits{};
+    config.managed_resources->capacity[ResourceKind::Payload] = limit;
+    ExecutionContext execution(operations, config);
+    const auto root = take(execution.resource_budget());
+    Fixture fixture(true);
+    auto document = fixture.document();
+    const uint64_t side = 65536;
+    ExecutionBindings bindings;
+    for (auto& input : document.inputs) {
+      if (input.name == "gain") {
+        bindings.inputs.push_back({input.name, s1_fixture::scalar(root, 2)});
+        continue;
       }
-      return Result<Region>(region);
-    };
-    bindings.inputs.push_back({input.name, {}, source});
-  }
-  GraphContext graph(document);
-  Compiler compiler(operations);
-  PlanningOptions options;
-  options.tile_height = 2;
-  options.tile_width = 3;
-  options.output_regions = {{"result", Region({{100, 5}, {200, 7}, {0, 4}})}};
-  auto compiled = compiler.compile(graph, options);
-  require(compiled.ok(), compiled.status().message);
-  auto sink = [](const std::string&, ValueView tile) {
-    for (std::size_t offset = 0; offset < tile.bytes().size(); offset += 4) {
-      float number = 0;
-      std::memcpy(&number, tile.bytes().data() + offset, 4);
-      require(number == (offset % 16 == 12 ? .625F : .3125F),
+      const bool mask = input.name == "mask", back = input.name == "background";
+      const auto schema =
+          s1_fixture::schema(mask ? std::vector<uint64_t>{side, side}
+                                  : std::vector<uint64_t>{side, side, 4},
+                             !mask);
+      input.result_schema = std::make_shared<SchemaTemplate>(schema);
+      auto source =
+          affine(root, schema, Region::whole(schema.tensors[0].sample_shape()),
+                 mask ? StridedLayout{0, {0, 0, 0, 0}}
+                      : StridedLayout{0, {0, 0, 0, 0, 4}},
+                 mask   ? std::vector<float>{.5F}
+                 : back ? std::vector<float>{.25F, .25F, .25F, .5F}
+                        : std::vector<float>{.125F, .125F, .125F, .5F});
+      bindings.inputs.push_back({input.name, std::move(source)});
+    }
+    GraphContext graph(document);
+    PlanningOptions options;
+    options.tile_height = 2;
+    options.tile_width = 4;
+    const Region roi({{0, 1}, {0, 1}, {100, 5}, {200, 7}, {0, 4}});
+    options.output_regions = {{"result", roi}};
+    auto compiled = take(Compiler(operations).compile(graph, options));
+    auto output = execution.execute(compiled.plan, bindings);
+    if (!output.ok())
+      return Result<uint64_t>(output.status());
+    const auto samples = pixels(output.value().results.at("result"));
+    require(samples.size() == 5 * 7 * 4, "large source ROI coverage");
+    for (size_t i = 0; i < samples.size(); ++i)
+      require(samples[i] == (i % 4 == 3 ? .625F : .3125F),
               "large source oracle");
-    }
-    return Status::success();
+    auto supports = take(output.value().dependencies.source_support());
+    require(take(supports.at("foreground").element_count()) == 11 * 13 * 4,
+            "Gaussian source support stays inside ROI halo");
+    return Result<uint64_t>(root.statistics().peak[ResourceKind::Payload]);
   };
-  ExecutionContext execution(operations, {2, false, 16, 16384});
-  auto stream = execution.execute_stream(compiled.value().plan, bindings, sink);
-  require(stream.ok(), stream.status().message);
-  const auto& stats = stream.value();
-  require(stats.tile_count == 9 && stats.source_read_count == 27 &&
-              stats.source_read_bytes < 12000 && stats.peak_live_bytes < 8192,
-          "ROI must bound source reads and live storage");
-  ExecutionContext exact(operations, {2, false, 16, stats.planned_peak_bytes});
-  require(exact.execute_stream(compiled.value().plan, bindings, sink).ok(),
-          "exact scene reservation");
-  ExecutionContext short_budget(operations,
-                                {2, false, 16, stats.planned_peak_bytes - 1});
-  auto failed =
-      short_budget.execute_stream(compiled.value().plan, bindings, sink);
+  const auto peak = take(run(1024 * 1024));
+  require(peak < 16384,
+          "large logical source must use bounded payload storage");
+  require(run(peak).ok(), "exact observed payload budget");
+  auto failed = run(peak - 1);
   require(!failed.ok() && failed.status().code == ErrorCode::ResourceExhausted,
-          "one byte short scene reservation");
-  std::cout << "S2Image.RegionAndTiles tiles=" << stats.tile_count
-            << " source_bytes=" << stats.source_read_bytes
-            << " planned_peak=" << stats.planned_peak_bytes
-            << " actual_peak=" << stats.peak_live_bytes << " oracle=passed\n";
+          "one byte below observed payload budget");
+  std::cout << "regional Result image ROI=5x7 logical_source=65536x65536 "
+               "peak_payload="
+            << peak << " oracle=passed\n";
 }
+
 }  // namespace
-int main(int argc, char** argv) {
+int main(int argc, char**) {
   try {
-    require(argc <= 2,
-            "usage: photospider_regional_image_vertical [trusted-module]");
-    auto operations = argc == 2 ? std::make_shared<ps::OperationRegistry>()
-                                : ps::make_default_operation_registry();
-    if (argc == 2) {
-      const auto status = operations->load_plugin(argv[1]);
-      require(status.ok(), status.message);
-      operations->freeze();
-    }
-    direct_invocation(operations);
+    require(argc == 1, "usage: photospider_regional_image_vertical");
+    auto operations = ps::make_default_operation_registry();
+    input_windows(operations);
     numerical(operations);
     large_source(operations);
     return 0;

@@ -71,25 +71,56 @@ Kernel tests cover:
   cleanup;
 - Value/Region/strided-layout/facet/buffer negative contracts;
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime,
-  including C operation ABI 11 typed parameter schemas, demand views, and
-  deterministic owner-allocation failure with exact destroy/close counts. A
-  copy-aware C++ embedding callable is registered by rvalue, armed to reject
-  later copies, then survives freeze/invoke and a valid DSO load into an
-  unfrozen registry with one invocation and no increased copy count. This
-  proves registry/map/staging snapshots copy only immutable owning handles and
-  keep DSO leases exact. A callback that throws `std::runtime_error` or a
-  standard exception with null `what()` is fenced as `OperationFailed` with the
-  exact or empty message, while `std::bad_alloc` remains observable by the
-  embedding caller and input/parameter/output classification stays unchanged;
-- operation-invocation prevalidation with a default-invalid Value in the first
-  and final input position, a successful callback returning a default-invalid
-  output, and an unknown backend against both C++ and a real GPU-capable DSO.
-  Invalid inputs and unknown backends return `InvalidArgument` without a
-  callback or CPU/GPU DSO counter increment; a known unsupported GPU remains
-  `BackendUnavailable`. Preserve output-type conflicts and Match input
-  type/shape conflicts return `TypeMismatch` before deliberately failing,
-  side-effecting callbacks can run, while callback output `Value{}` remains
-  post-entry `TypeMismatch`;
+  including Result operation ABI 2 typed parameter schemas, demand views, and
+  deterministic owner-allocation failure with exact destroy/close counts. The
+  copy-aware C++ embedding test registers an rvalue callable that supplies a
+  Result continuation factory, then arms it to reject copies. After registry
+  freeze, `start_result` and `poll` publish a Float64 value of 41 with exactly
+  one factory call and no additional callable copy. A Result query with an
+  extra input is rejected as `InvalidArgument` without another factory call.
+  Loading a valid Result DSO into a separate unfrozen registry also succeeds
+  without copying or invoking the registered callable, and checks transactional
+  DSO loading. These checks cover immutable callable handles;
+- `test_prepared_workspace` covers Whole and Dependency-v2 Result
+  continuations. Static preparation adds 0 or 4096 bytes to a 16-byte workspace
+  declaration, and two executions of one compiled plan do not prepare it again.
+  The UInt8 output is respectively 0 or 17. A 2048-byte Payload limit rejects
+  the 4096-byte case with `ResourceExhausted`, and an additional workspace
+  request that overflows `UINT64_MAX` is rejected during preparation. Successful
+  and failed executions release their Root Payload allocations;
+- `test_result_exceptions` checks direct and compiled Result scalar, contract-1,
+  and contract-2 start/poll boundaries. A standard exception becomes
+  `OperationFailed` with `HostException` and its `what()` text (empty when null);
+  `std::bad_alloc` becomes `ResourceExhausted`, and a non-standard exception
+  becomes `OperationFailed` with the fixed `HostException` diagnostic. An
+  earlier allocation failure remains authoritative over a later exception, a
+  throwing failure observer cannot replace the producer's selected failure, a
+  failed joint poll stays latched without another callback, and Root Payload
+  returns to zero after the direct and workflow cases;
+- `test_backend_admission` exercises Result registration and startup. It rejects
+  an operation with no supported backend and a CPU-fallback declaration with
+  no CPU target. For a GPU-only operation, direct startup and CPU compilation
+  return `BackendUnavailable`; native-GPU planning succeeds, but a
+  GPU-disabled context rejects execution before entering its factory. A
+  GPU-targeted dual-backend operation with CPU fallback instead enters only its
+  CPU factory in that context, publishes UInt8 value 17, and records one
+  fallback reason with zero GPU factory entries.
+  `tests/consumer/CMakeLists.txt` registers the same sources as
+  `installed_result_exceptions` and `installed_result_backend_admission`;
+- Result invocation prevalidation in `test_plugin_registry`: direct
+  `start_result` rejects an unsupported GPU backend before checking malformed
+  input metadata. Missing Result schema in the first or final input slot
+  returns `TypeMismatch`; the fixture's `prepare_static` checks the expected
+  single Float64 tensor and shape. Rejected metadata does not enter the
+  operation factory. Compiled callbacks that return an invalid Result, the
+  wrong output tensor type, or incomplete tensor coverage fail with
+  `InvalidArgument` and Protocol detail. Other in-process Value APIs remain
+  separate;
+- `test_result_diagnostics` exercises exact and saturated `computed_elements`
+  for full-coverage zero-stride Result publication. The shared fixture also
+  runs from `test_plugin_registry`. Both focused tests passed locally; the
+  imported-kernel consumer registers `installed_result_diagnostics`, which
+  also passed;
 - exact operation/provider library path validation before native loading: an
   explicit-length valid fixture path followed by embedded NUL and suffix is
   `InvalidArgument`, publishes no operation key/provider schema, and reaches
@@ -330,13 +361,7 @@ with 64-byte and 256-byte windows. Resource tests cover retained Result owners
 and bounded metadata. The focused suite completed in approximately three
 seconds.
 
-The native C fixture dispatched once on Metal and read back 4. The native
-GPU tests also exercise two invalid service modes and preserve their sticky
-errors. The base-ABI numeric GPU-to-Result fixture checked an affine view with
-4000 backing bytes transferred as 4 bytes to one sample, and a zero-stride
-broadcast view with 4 backing bytes transferred as 4000 bytes to 1000 samples.
-A 500-unit work limit rejected the broadcast copy with `ResourceExhausted`. The native CTest returns 77 when compatible hardware is absent;
-the final run on this host used Metal and was not skipped.
+Native GPU tests use the separate native GPU service ABI with Result operation callbacks. They exercise dispatch, readback, sticky service errors, and bounded tensor-window transfers. The native CTest returns 77 when compatible hardware is absent; hardware execution must be reported separately from CPU fallback.
 
 To reproduce the core set, build the test executables and run their CTest cases:
 

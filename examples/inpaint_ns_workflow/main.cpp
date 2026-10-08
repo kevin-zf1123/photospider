@@ -23,12 +23,13 @@ int main(int argc, char** argv) {
     auto result =
         take(run(key, {input, value(mask, {5, 5}, ps::coverage_semantics())},
                  {{"radius", std::int64_t{3}}}));
-    const auto output = result.values.at("result");
+    const auto output = result.results.at("result");
     const auto actual = pixels(output);
     for (unsigned i = 0; i < 100; ++i)
       check(std::isfinite(actual[i]) && std::abs(actual[i] - image[i]) < 1e-6,
             "constant oracle");
-    check(output.facets()[0].payload == input.facets()[0].payload,
+    check(output.schema().tensors[0].facets[0].payload ==
+              input.description.tensors[0].facets[0].payload,
           "preserved image semantics");
     std::cout << key << " named image: 5x5 RGBA; center=" << actual[48] << ','
               << actual[49] << ',' << actual[50] << ',' << actual[51]

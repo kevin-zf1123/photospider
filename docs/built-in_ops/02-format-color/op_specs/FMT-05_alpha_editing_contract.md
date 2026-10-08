@@ -5,28 +5,50 @@ kind: shared_operator_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_cpu
+implementation_status: implemented_subset
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-05: internal alpha editing, extraction and removal
 
-CPU implementation (2026-09-25): the source package now includes this member/family,
-its public C++ authoring API, correctness fixtures and a
-[performance/review driver](../../../../examples/alpha_performance/README.md).
-`Proposed`/D1 still describe design-review status, not missing executable code.
-Apple Silicon and FreeBSD performance/portability require target-machine review.
+FMT-05 remains Proposed. The installed `photospider/format/alpha.hpp` exposes
+`format::set_alpha`, `format::extract_alpha`, and `format::remove_alpha`.
+`set_alpha` appends the registered `alpha.set_<profile>` Result operation;
+B/C compile into compositions of registered channel extraction, literal-like
+fill, mapped assembly and metadata assignment operations. FMT-04 association
+operations are also registered. The profiles are `strict`,
+`accelerated_apple_silicon`, and `accelerated_x86_64`.
 
+All FMT-05B/C inputs and outputs use the single-tensor Result ABI with no fields,
+support the seven native copy dtypes, preserve the batch prefix, and avoid
+sample-domain validation. Axes are cell-relative and exclude the Result batch
+prefix. The complete sample rank, including batch and cell axes, is at most 8;
+full sample count is at most 2^40. Native FMT-04/FMT-05A operations execute as Result ABI 2 operations. B/C are
+compile-time compositions over registered Result operations. Historical
+Value/planar measurements do not describe the current Result path; the migrated
+performance driver is described separately and has no result claim here.
 
 Inherit [FMT-common](FMT_common_contract.md), its NUM baseline and the
 [kernel storage contract](../../../kernel-specs/Tensor-Storage-and-Region-Access.md).
-The canonical straight-image decision of 2026-09-23 supersedes the former
-premultiplied editing policies and persistent external alpha bindings.
-This document specifies target behavior; it registers no runtime operation.
+The canonical straight-image contract uses internal alpha references and keeps
+external sources as explicit graph inputs.
+FMT-05A uses `alpha.set_<profile>`.
 Members are [A set](FMT-05A_set_alpha.md), [B extract](FMT-05B_extract_alpha.md)
 and [C remove](FMT-05C_remove_alpha.md).
+
+FMT-05A requests selected source colors as Data and Validation. For those color
+outputs, the new alpha source adds a separate Validation-only dependency. The
+published alpha channel requests its source as Data and Validation. FMT-04 semantic color and consumed alpha operands each use
+Data and Validation; pass-through-only samples do not gain sample validation.
+All connected inputs receive Descriptor support; no Control support is declared.
+Raw association uses arithmetic Data without semantic-domain Validation. A channel
+axis contains at most 65,536 slots. The operation preserves
+source Status and diagnostics on failure, publishes materialized output
+transactionally under Root budgets and cancellation, and is stateless for Empty
+observations. Generic views require a complete single-owner affine proof;
+spatial set views are limited to internal identity mappings. Auto copies only on
+physical `ViewUnavailable`.
+
 
 ## Purpose and representation
 
@@ -55,7 +77,7 @@ straight images; this family does not silently accept or normalize them.
 | Topic | Selected contract |
 | --- | --- |
 | Members | A set/add; B extract; C remove; one group per invocation. |
-| Identity | A native primitive; B/C compile-time compositions of conforming channel operations, constants and metadata edits. |
+| Identity | A uses the registered `alpha.set_<profile>` Result operation. B/C are executable compile-time compositions of registered channel operations, constants and metadata edits. |
 | Representation | Canonical straight image, with any alpha in the same tensor. No external persistent binding. |
 | A source | Same-tensor selected channel, matching explicit external component plane, or explicit shape-[1] scalar. No implicit broadcast of a plane. |
 | A placement | Preserve an existing alpha position by default; otherwise explicit channel position. New alpha has no guessed last-channel placement. |
@@ -74,14 +96,15 @@ straight images; this family does not silently accept or normalize them.
 
 ## Common interface and support
 
-A has `input`, optional explicit `alpha`, and one `values` output. B/C are
-compile-time helpers taking a graph and `input` edge, returning one `values`
-edge. All outputs preserve input dtype. A accepts Float32/Float64, with external
+A has `input`, optional explicit `alpha`, and one `values` output. Its helper is
+available and lowers to the registered `alpha.set_<profile>` operation. B/C are
+public compile-time helpers taking a graph, a single-tensor `input` Result edge
+and inferred `OperationMetadata`, and returning one `values` edge. Their Result
+paths are executable through existing registered operations. All outputs
+preserve input dtype. A accepts Float32/Float64, with external
 alpha/scalar matching exactly; it interprets alpha directly in [0,1]. Integer
 codes require explicit decoding/casting before A. B/C copy existing samples of
-UInt8, UInt16, Int8, Int16, Int64, Float32 or Float64. Missing native widths and
-integer metadata codecs are explicit implementation prerequisites, not automatic
-new runtime support. No implicit precision promotion or range conversion occurs.
+UInt8, UInt16, Int8, Int16, Int64, Float32 or Float64. Integer-coded A inputs require explicit numeric decoding before use. No implicit precision promotion or range conversion occurs.
 
 B opaque generates a same-dtype code that decodes exactly to mathematical
 coverage one. Optional static alpha_encoding specifies the fallback output's
@@ -109,13 +132,15 @@ dtypes are implementation prerequisites; FMT-07 is no longer a prerequisite.
 | group | Required explicit group identity; exact unique resolution in effective metadata. Do not infer a group from channel count. |
 | metadata_mode | respect by default, or explicit override. This semantic family has no raw mode; raw channel edits use FMT-01/02/03. |
 | metadata_override | Effective input description only with override; source identity remains immutable and actual shape/storage cannot be overridden. |
-| axis | Optional Int64 assertion of the effective input channel axis, nonnegative and within rank; absent for a component Gray input. |
+| axis | Optional Int64 assertion of the effective cell-channel axis, nonnegative and within cell rank; excludes the batch prefix and is absent for a component Gray input. |
 | layout | auto by default; view/materialize explicit, with the rules below. |
 | profile | B/C helper selection: strict by default, accelerated_apple_silicon or accelerated_x86_64. A selects the corresponding proposed primitive key. |
 
 All structural parameters and group/channel maps are static. Samples may differ
-between executions. Rank stays in 1..8 with checked positive extents and the NUM
-2^40 logical-element bound; inserting an axis requires input rank <=7. The same
+between executions. Cell axes are indexed relative to the Result batch prefix. The complete sample
+rank, including batch and cell axes, stays at most 8; full sample count is at
+most 2^40 with checked positive extents. When insertion adds a cell axis, the full input sample rank must be at most 7
+so the output rank remains at most 8. The same
 spatial axes, origin and grid survive channel surgery. Static coordinate conflicts
 require explicit override, never automatic transposition/resampling. Strict and
 accelerated outputs are bit-identical; predicates, metadata and failures remain
@@ -165,8 +190,8 @@ validation or establish another canonical image state.
 
 | Requested observation | Required sample support and validation |
 | --- | --- |
-| A new alpha | Read new alpha at the mapped position (scalar index zero if selected); validate finite [0,1]. No color/old-alpha samples. |
-| A selected group color | Read exactly that source component and new alpha; validate finite color and finite [0,1] alpha, then copy the color bits. Alpha=0 permits nonzero hidden straight color. |
+| A new alpha | Read new alpha at the mapped position as Data and Validation (scalar index zero when selected); validate finite [0,1]. No color/old-alpha samples. |
+| A selected group color | Read exactly that source component as Data and Validation; add Validation-only support from its new alpha source. Validate finite color and finite [0,1] alpha, then copy the color bits. Alpha=0 permits nonzero hidden straight color. |
 | A unrelated channel/group | Read only its remapped source component; no selected-group color/alpha validation. |
 | B actual alpha | Read only the selected internal alpha positions; exact bits, no added coverage-domain validation. |
 | B opaque fallback | Generate the preflight-resolved exact opaque code for requested positions; no source pixel reads. |
@@ -186,33 +211,24 @@ whole image. Required upstream Whole work retains its original scope.
 
 ## Layout selection
 
-All three members accept static layout=auto (default), view or materialize,
-with the same representability rules as FMT-01/02. Auto returns a legal read-only
-view only when all output mappings can be proven to belong to one admissible
-owner; otherwise it materializes requested coverage. View requires that proof
-and fails rather than silently copying. Materialize reserves a new owned result
-and copies/generates only requested samples. Layout changes neither metadata,
-numerical validity obligations nor required source failures.
+FMT-05A exposes `layout=auto|view|materialize`. A generic forced view requires
+the entire declared output map to use one `CpuStorage` owner, one affine address
+expression and in-bounds spans. The spatial path is limited to an internal
+identity map. FMT-05B/C pass layout policy to their registered Result primitives;
+a forced view follows each primitive's representability rules. A forced view
+reports `ViewUnavailable` when the physical proof fails.
 
-A must perform its exact requested alpha/color validation before publishing a
-successful view observation. Pre-existing source validity/coverage or bitwise
-identity cannot skip that obligation. It must not expose unvalidated observations
-as newly successful output merely because the underlying owner has those bytes.
-Auto likewise cannot fall back from a semantic validation failure to copying.
+`auto` uses a legal view when the full requested map is proven; it materializes
+only on physical `ViewUnavailable`. It preserves semantic, descriptor and source
+failures with their original status and diagnostic. Materialization prepares and
+publishes requested coverage transactionally under Root budgets and cancellation.
+Empty observations retain no run payload state. All policies preserve validation
+obligations, metadata semantics and required source failures.
 
-Independent external alpha planes and scalar expansion ordinarily require
-materialization. An equivalent same-owner source view can be used only if the
-complete result mapping satisfies the existing image storage and view rules.
-A valid R-only request does not authorize inventing a different layout that
-cannot represent this operator's declared full logical output. Shared alpha
-retention, channel removal or insertion also requires an explicit legal map.
-There is no multi-owner concatenation or implicit virtual-page aliasing feature.
-
-B's existing alpha extraction and C's remaining-channel mapping may be views.
-B opaque generation cannot present fabricated image pixels as a view; use auto
-or materialize. C's missing_alpha=identity still respects layout: view may return
-the unchanged input mapping, while materialize creates a new owned copy of the
-requested observations. Identity is not permission to ignore a forced layout.
+B extraction and C channel mapping can use existing Result views when those
+operations prove the requested mapping. Opaque B generation cannot view generated
+pixels. C component Gray identity still obeys `metadata.assign` layout behavior;
+channel-bearing C follows mapped assembly's view and materialization rules.
 
 ## Ownership, partial results and failures
 
@@ -321,29 +337,20 @@ static errors have no invented pixel coordinate. B/C do not introduce NaN/Inf
 or coverage-range errors for copies. Missing source coverage remains missing,
 not an implicit zero. Required upstream failures keep their original scope.
 
-## Implementation acceptance and performance
+## Validation and performance evidence
 
-Members supply analytic fixtures and independent coordinate/byte oracles.
-Implementation must provide runnable public compile/execute workflows and inspect
-both output samples and descriptors, not only a visual preview. Cover arbitrary
-channel axes, component Gray, shared/private alpha, disjoint/cross-tile requests,
-all three layouts, exact A validation dependencies, absent-alpha fallbacks,
-integer extraction without scaling, view lifetime after context retirement,
-transactional helper failure, low budgets and cancellation. Report unsupported
-native dtypes and backends instead of silently substituting representations.
+Focused integration coverage should inspect output samples, descriptors, Data and
+Validation support, and failure rollback. The native FMT-04/FMT-05A implementation
+has a dedicated Result integration test; the B/C authoring compositions have
+separate integration coverage. Numeric alpha math tests do not establish Result
+operation behavior. The latest native validation passes eight focused CTest
+targets: `test_alpha_operations`, `test_alpha_authoring`, `test_alpha_math`, and
+five reused primitive tests. Fourteen small performance smoke cases pass their
+output oracle; the full performance matrix has not run. Installed-consumer
+validation remains separate.
 
-Measure Float32 [4096,4096,4] set/extract/remove with same-owner and independent
-alpha sources, scalar A, opaque B and shared-alpha C. Compare full output,
-selected-color-only, alpha-only and y/x=[127,130) at tile size 128. Record selected
-layout/profile, build/ISA, workers, input/page state, runtime statistics, copied
-and validation bytes, virtual span, provided backing, retained-owner and scratch
-peaks. Require correctness before timing; no throughput is promised.
-
-Generic group/encoding metadata, exact partial-region shape changes, constant
-image generation and view validation/publication are implementation dependencies.
-Legacy typed-image/Layer paths and existing generic copy tests do not implement
-this target on their own. The new generic CPU implementation and test/benchmark
-entry points are linked above. Design review is still pending. In particular,
-FMT-05A planar view selection is conservative: only internal identity mappings
-are optimized as views; other auto layouts materialize and forced views fail
-with ViewUnavailable. No target-machine throughput is claimed.
+The migrated alpha performance driver uses the Result API and reports dependency
+support and Root resource counters. Its CSV fields and accounting boundaries are
+documented in the [performance guide](../../../../examples/alpha_performance/README.md).
+Historical Value/planar measurements are not Result performance evidence. No
+throughput claim is made here without measured Result runs.

@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "photospider/photospider.hpp"
@@ -69,41 +70,62 @@ int main(int argc, char** argv) try {
                     : dtype == "fp64" ? ElementType::Float64
                                       : ElementType::UInt8;
   const auto width = Value::element_size(type);
-  PlanarImageConfig config;
-  config.order =
-      storage == "tiled" ? ImagePlaneOrder::Tiled : ImagePlaneOrder::Continuous;
-  config.maximum_backed_bytes = 1024ULL * 1024 * 1024;
-  const ValueDescriptor descriptor{type, {size, size, 4}};
-  auto source = checked(PlanarImage::create(descriptor, config));
-  auto setup = Clock::now();
-  {
-    std::vector<std::uint8_t> plane(size * size * width);
-    for (std::uint64_t c = 0; c < 4; ++c) {
-      for (std::uint64_t y = 0; y < size; ++y)
-        for (std::uint64_t x = 0; x < size; ++x)
-          sample(plane.data() + (y * size + x) * width, type, bits(y, x, c));
-      checked(source.publish(Region({{0, size}, {0, size}, {c, 1}}),
-                             plane.data(), plane.size()));
-    }
-  }
-  std::cerr << "source_ready setup_us=" << elapsed(setup)
-            << " source_backed=" << source.backed_bytes()
-            << " source_metadata=" << source.metadata_bytes()
-            << " page=" << source.page_size() << '\n';
   auto registry = make_default_operation_registry();
   Compiler compiler(registry);
   ExecutionContextConfig context_config;
   context_config.cpu_workers = 1;
   context_config.maximum_live_bytes = 2ULL * 1024 * 1024 * 1024;
   ExecutionContext execution(registry, context_config);
+  const auto root = checked(execution.resource_budget());
+  SchemaTemplate schema;
+  schema.id = "benchmark.channel";
+  ResultTensorSpec tensor;
+  tensor.key = "samples";
+  tensor.descriptor = {type, {size, size, 4}};
+  tensor.layout.spatial = true;
+  tensor.layout.order =
+      storage == "tiled" ? ImagePlaneOrder::Tiled : ImagePlaneOrder::Continuous;
+  schema.tensors.push_back(std::move(tensor));
+  auto setup = Clock::now();
+  auto builder =
+      checked(ResultBuilder::start(root, schema, "benchmark.source"));
+  checked(builder.bind_descriptor_relation(
+      checked(ResultRelation::cartesian(root, 1, {0, 8, 0, 0}))));
+  checked(builder.publish_tensor_kernel(
+      0, Region::whole({size, size, 4}),
+      [&](const auto& writers) {
+        for (const auto& writer : writers) {
+          const auto& dims = writer.region().dimensions();
+          for (std::uint64_t c = dims[2].offset;
+               c < dims[2].offset + dims[2].extent; ++c)
+            for (std::uint64_t y = dims[0].offset;
+                 y < dims[0].offset + dims[0].extent; ++y)
+              for (std::uint64_t x = dims[1].offset;
+                   x < dims[1].offset + dims[1].extent;) {
+                auto row = writer.row_run({y, x, c});
+                if (!row.ok())
+                  return row.status();
+                for (std::uint64_t i = 0; i < row.value().samples; ++i)
+                  sample(row.value().data + i * width, type, bits(y, x + i, c));
+                x += row.value().samples;
+              }
+        }
+        return Status::success();
+      },
+      checked(ResultRelation::cartesian(root, size * size * 4, {0, 1, 0, 0})),
+      {true, true, true, true}));
+  auto source = checked(builder.seal());
+  const auto source_capacity = root.statistics().live;
+  std::cerr << "source_ready setup_us=" << elapsed(setup)
+            << " root_payload=" << source_capacity[ResourceKind::Payload]
+            << " root_metadata=" << source_capacity[ResourceKind::Metadata]
+            << '\n';
   WorkflowDocument document;
-  document.inputs = {{1,
-                      "image",
-                      descriptor,
-                      Region::whole(descriptor.shape),
-                      {},
-                      {},
-                      PlanarImageLayout{config.order, 0, 1, 2, 0, {}}}};
+  WorkflowInputDeclaration input;
+  input.id = 1;
+  input.name = "image";
+  input.result_schema = std::make_shared<const SchemaTemplate>(schema);
+  document.inputs.push_back(std::move(input));
   document.nodes = {{1,
                      "channel.extract_index_" + profile,
                      {WorkflowInputReference{1}},
@@ -121,7 +143,7 @@ int main(int argc, char** argv) try {
   options.output_regions = {{"plane", region}};
   ExecutionBinding binding;
   binding.name = "image";
-  binding.image = std::make_shared<const PlanarImage>(source);
+  binding.result = source;
   ExecutionBindings bindings;
   bindings.inputs.push_back(binding);
   if (argc > 8) {
@@ -132,7 +154,8 @@ int main(int argc, char** argv) try {
   }
   std::cout << "size,storage,dtype,layout,profile,roi,repetitions,compile_us,"
                "first_us,p50_us,p95_us,callback_p50_us,source_logical_bytes,"
-               "output_backed,output_virtual,output_metadata,peak_live_bytes\n";
+               "run_live_payload_bytes,run_live_metadata_bytes,root_peak_"
+               "payload_bytes,root_peak_metadata_bytes\n";
   const std::vector<std::string> layouts =
       requested_layout == "all"
           ? std::vector<std::string>{"auto", "view", "materialize"}
@@ -145,11 +168,15 @@ int main(int argc, char** argv) try {
     const auto compile_us = elapsed(start);
     std::vector<double> times, callback;
     double first_us = 0;
-    std::uint64_t backed = 0, virt = 0, metadata = 0, peak = 0,
+    std::uint64_t payload = 0, metadata = 0, peak = 0, peak_metadata = 0,
                   source_bytes = 0;
+    ExecutionOptions execution_options;
+    execution_options.maximum_dependency_work = UINT64_C(1000000000000000);
+    execution_options.dependencies.maximum_work = UINT64_C(1000000000000000);
     for (unsigned i = 0; i < repetitions + 2; ++i) {
       start = Clock::now();
-      auto run = checked(execution.execute(compiled.plan, bindings));
+      auto run = checked(
+          execution.execute(compiled.plan, bindings, {}, execution_options));
       const auto duration = elapsed(start);
       if (i == 0)
         first_us = duration;
@@ -160,15 +187,22 @@ int main(int argc, char** argv) try {
           core += timing.duration_us;
         callback.push_back(core);
       }
-      const auto& output = run.images.at("plane");
-      backed = output.backed_bytes();
-      virt = output.reserved_bytes();
-      metadata = output.metadata_bytes();
-      peak = std::max(peak, run.diagnostics.peak_live_bytes);
-      source_bytes = run.diagnostics.source_read_bytes;
+      const auto& output = run.results.at("plane");
+      const auto resources = root.statistics();
+      payload = resources.live[ResourceKind::Payload] -
+                source_capacity[ResourceKind::Payload];
+      metadata = resources.live[ResourceKind::Metadata] -
+                 source_capacity[ResourceKind::Metadata];
+      peak = resources.peak[ResourceKind::Payload];
+      peak_metadata = resources.peak[ResourceKind::Metadata];
+      source_bytes = checked(checked(run.dependencies.source_support())
+                                 .at("image")
+                                 .element_count()) *
+                     width;
       // Independent coordinate oracle, once outside the timed interval.
       if (i == 0) {
-        auto window = checked(output.acquire(region));
+        auto window = checked(
+            output.acquire_tensor(checked(output.descriptor()), 0, region));
         std::uint8_t expected[8]{};
         const auto y = region.dimensions()[0], x = region.dimensions()[1];
         for (std::uint64_t row = y.offset; row < y.offset + y.extent; ++row)
@@ -176,7 +210,9 @@ int main(int argc, char** argv) try {
             auto run = checked(window.row_run({row, column}));
             for (std::uint64_t j = 0; j < run.samples; ++j) {
               sample(expected, type, bits(row, column + j, 1));
-              if (std::memcmp(run.data + j * width, expected, width))
+              if (std::memcmp(run.data + static_cast<std::ptrdiff_t>(
+                                             j * run.sample_stride_bytes),
+                              expected, width))
                 throw std::runtime_error("byte oracle mismatch");
             }
             column += run.samples;
@@ -192,8 +228,8 @@ int main(int argc, char** argv) try {
               << compile_us << ',' << first_us << ',' << percentile(times, .5)
               << ',' << percentile(times, .95) << ','
               << percentile(callback, .5) << ',' << source_bytes << ','
-              << backed << ',' << virt << ',' << metadata << ',' << peak
-              << std::endl;
+              << payload << ',' << metadata << ',' << peak << ','
+              << peak_metadata << std::endl;
   }
   return 0;
 } catch (const std::exception& error) {

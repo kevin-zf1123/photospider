@@ -9,57 +9,19 @@
 
 #include "01-numeric/exact_bake_error.hpp"
 #include "01-numeric/lut3d_bake_common.hpp"
+#include "data/dependency_metadata.hpp"
+#include "data/lut3d_bake_validation.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
 namespace {
 using namespace bake_ops;  // NOLINT(build/namespaces)
 enum class Kind { Pack, Measure, Unpack, Gate };
-constexpr std::uint64_t kPackBytes = 64 * 1024;
 constexpr std::uint64_t kMeasureRows = 64;
-constexpr std::uint64_t kMeasureBytes = 3 * kMeasureRows * 3 * sizeof(double);
-// Grow an authorized rectangle over complete inner rows/planes in logical
-// order. Small page limits still split the innermost row.
-Region pack_window(const ValueDescriptor& descriptor, std::uint64_t first,
-                   std::uint64_t page_bytes, std::uint64_t* count) {
-  const auto at = coordinate(first * 3, descriptor.shape);
-  const auto capacity = std::min(page_bytes, kPackBytes) /
-                        (3 * Value::element_size(descriptor.element_type));
-  const auto& shape = descriptor.shape;
-  std::vector<RegionDimension> dimensions{{at[0], 1},
-                                          {at[1], 1},
-                                          {at[2], 0},
-                                          {0, 3}};
-  dimensions[2].extent = std::min(capacity, shape[2] - at[2]);
-  *count = dimensions[2].extent;
-  if (!at[2] && *count == shape[2]) {
-    dimensions[1].extent = std::min(shape[1] - at[1], capacity / shape[2]);
-    *count *= dimensions[1].extent;
-    if (!at[1] && dimensions[1].extent == shape[1]) {
-      dimensions[0].extent = std::min(shape[0] - at[0], capacity / *count);
-      *count *= dimensions[0].extent;
-    }
-  }
-  return Region(std::move(dimensions));
-}
-Result<Value> collect_window(const ResultProgramPhase& phase, unsigned port,
-                             const Region& region) {
-  FootprintLimits limits;
-  limits.cancellation = phase.query.cancellation;
-  limits.consume_work = phase.consume_work;
-  return phase.values.at(port).collect(region, phase.allocator, limits);
-}
-Result<Value> collect_rows(const ResultProgramPhase& phase, unsigned port,
-                           std::uint64_t first, std::uint64_t count) {
-  const auto& descriptor = phase.query.inputs[port].descriptor;
-  const auto at = coordinate(first * 3, descriptor.shape);
-  auto dimensions = Region::whole(descriptor.shape).dimensions();
-  for (std::size_t i = 0; i < dimensions.size(); ++i)
-    dimensions[i] = {at[i], 1};
-  dimensions[dimensions.size() - 2].extent = count;
-  dimensions.back() = {0, 3};
-  return collect_window(phase, port, Region(std::move(dimensions)));
-}
+struct BakeProgram {
+  ColorModel input_model, output_model;
+  std::uint64_t atol, rtol;
+};
 Lut3dBakeDescription placeholder() {
   Lut3dBakeDescription result;
   result.recipe_identity.assign(64, '0');
@@ -103,9 +65,9 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
     return Answer(facet.status());
   OperationOutputSpecialization output;
   if (kind == Kind::Pack) {
-    if (inputs[0].result_schema ||
-        inputs[0].descriptor.element_type != table.element_type ||
-        inputs[0].descriptor.shape != table.shape)
+    if (!sole_tensor(inputs[0]) ||
+        tensor_descriptor(inputs[0]).element_type != table.element_type ||
+        tensor_descriptor(inputs[0]).shape != table.shape)
       return Answer(mismatch("owned bake table shape/dtype"));
     auto valid = color_metadata(inputs[0], spec.output_description);
     if (!valid.ok())
@@ -128,9 +90,10 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
           return Answer(mismatch("measurement owned table schema"));
         continue;
       }
-      if (inputs[port].result_schema ||
-          inputs[port].descriptor.element_type != expected[port].element_type ||
-          inputs[port].descriptor.shape != expected[port].shape)
+      if (!sole_tensor(inputs[port]) ||
+          tensor_descriptor(inputs[port]).element_type !=
+              expected[port].element_type ||
+          tensor_descriptor(inputs[port]).shape != expected[port].shape)
         return Answer(mismatch("measurement port shape/dtype"));
       if (port) {
         auto checked =
@@ -151,87 +114,22 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
          !inputs[1].result_schema->same_schema(report_schema.value())))
       return Answer(mismatch(
           "gated report must describe this exact bake recipe/dtype/method"));
-    output.metadata.descriptor = table;
-    output.metadata.facets = {facet.take_value()};
+    auto schema =
+        numeric_ops::numeric_tensor_schema(table.element_type, table.shape);
+    schema.tensors[0].facets = {facet.take_value()};
+    schema.tensors[0].atomic_trailing_axes = 1;
+    output.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(std::move(schema));
   }
   return Answer(std::vector<OperationOutputSpecialization>{std::move(output)});
 }
-struct PackState {
-  unsigned stage = 0;
-  std::shared_ptr<const dependency_internal::MetadataOwner> phase_metadata;
-  std::uint64_t row = 0, batch = 0;
-  ResultBuilder builder;
-  Poll need(const ResultProgramPhase& phase) {
-    const auto& descriptor = phase.query.inputs[0].descriptor;
-    auto window = pack_window(descriptor, row, phase.query.page_bytes, &batch);
-    if (!batch)
-      return Poll(Status{ErrorCode::ResourceExhausted,
-                         "bake color exceeds Result window",
-                         FailureReason::CapacityLimit});
-    auto support = Footprint::from_regions(descriptor.shape, {window});
-    if (!support.ok())
-      return Poll(support.status());
-    stage = 1;
-    return Poll(ResultProgramNeed{{{0, support.take_value()}}, {}, {}});
-  }
-  Poll poll(const ResultProgramPhase& phase) {
-    phase_metadata.reset();
-    phase_metadata = dependency_internal::metadata_owner(65536);
-    const auto& descriptor = phase.query.inputs[0].descriptor;
-    const auto count = elements(descriptor) / 3;
-    if (!stage) {
-      auto made = ResultBuilder::start(
-          phase.resources, *phase.query.output.result_schema,
-          phase.query.semantic_key,
-          {count, count * 3 * Value::element_size(descriptor.element_type)});
-      if (!made.ok())
-        return Poll(made.status());
-      builder = made.take_value();
-      auto relation =
-          ResultRelation::cartesian(phase.resources, 1, {0, 5, 0, count * 3});
-      if (!relation.ok())
-        return Poll(relation.status());
-      auto bound = builder.bind_descriptor_relation(relation.take_value());
-      if (!bound.ok())
-        return Poll(bound);
-      return need(phase);
-    }
-    if (stage == 1) {
-      auto window =
-          pack_window(descriptor, row, phase.query.page_bytes, &batch);
-      auto collected = collect_window(phase, 0, window);
-      if (!collected.ok())
-        return Poll(collected.status());
-      auto append =
-          builder.prepare_append(0, batch, collected.value().storage());
-      if (!append.ok())
-        return Poll(append.status());
-      stage = 2;
-      return Poll(ResultProgramNeed{{}, {}, {append.take_value()}});
-    }
-    row += batch;
-    if (row < count)
-      return need(phase);
-    auto relation =
-        ResultRelation::cartesian(phase.resources, count, {0, 5, 0, count * 3});
-    if (!relation.ok())
-      return Poll(relation.status());
-    auto published = builder.publish(0, count, relation.take_value(),
-                                     {true, true, true, true});
-    if (!published.ok())
-      return Poll(published);
-    auto complete = builder.seal();
-    return complete.ok() ? Poll(ResultPublication{complete.take_value(), true})
-                         : Poll(complete.status());
-  }
-};
 struct MeasureState {
   unsigned stage = 0;
   std::shared_ptr<const dependency_internal::MetadataOwner> phase_metadata;
   std::uint64_t row = 0, batch = 0;
   Lut3dBakeReport report;
   numeric_ops::ExactBakeError arithmetic;
-  ResultRef table;
+  ResultTensorInput table;
   ColorModel input_model = ColorModel::Rgb, output_model = ColorModel::Rgb;
   std::uint64_t atol = 0, rtol = 0;
   ResultBuilder builder;
@@ -239,28 +137,23 @@ struct MeasureState {
                                   std::uint64_t count) {
     std::vector<ResultSupport> supports;
     for (unsigned i = 0; i < 6; ++i) {
-      if (i == 2) {
-        auto facts = table.descriptor();
-        if (!facts.ok())
-          return Result<ResultRelation>(facts.status());
-        supports.push_back({2, 5, 0, facts.value().rows(0) * 3});
-        supports.push_back({2, 8, 0, 1});
-      } else {
-        supports.push_back(
-            {i, 5, 0, elements(phase.query.inputs[i].descriptor)});
-      }
+      supports.push_back({i, 5, 0,
+                          elements(tensor_descriptor(phase.query.inputs[i])),
+                          ResultSupportTarget::Tensor, 0});
+      supports.push_back({i, 8, 0, 1, ResultSupportTarget::Descriptor, 0});
     }
     return global_relation(phase, count, supports);
   }
   Poll need(const ResultProgramPhase& phase) {
     batch = std::min<std::uint64_t>(
-        kMeasureRows, phase.query.inputs[3].descriptor.shape[0] - row);
+        kMeasureRows, tensor_descriptor(phase.query.inputs[3]).shape[0] - row);
     ResultProgramNeed need;
     for (unsigned port : {3U, 4U, 5U}) {
-      auto region = rows(phase.query.inputs[port].descriptor, row, batch);
+      auto region =
+          rows(tensor_descriptor(phase.query.inputs[port]), row, batch);
       if (!region.ok())
         return Poll(region.status());
-      need.values.push_back({port, region.take_value()});
+      need.tensors.push_back({port, 0, region.take_value(), 13});
     }
     stage = 2;
     return Poll(std::move(need));
@@ -269,30 +162,26 @@ struct MeasureState {
     phase_metadata.reset();
     phase_metadata = dependency_internal::metadata_owner(65536);
     if (!stage) {
-      // The sealed schema is immutable for this continuation. Retain only the
-      // POD fields needed by the numerical loop, without another owning copy.
-      auto decoded = lut3d_bake_description(*phase.query.output.result_schema);
-      if (!decoded.ok())
-        return Poll(decoded.status());
-      input_model = decoded.value().input_description.model;
-      output_model = decoded.value().output_description.model;
-      atol = raw(decoded.value().atol);
-      rtol = raw(decoded.value().rtol);
+      const auto& program =
+          *static_cast<const BakeProgram*>(phase.query.prepared->state());
+      input_model = program.input_model;
+      output_model = program.output_model;
+      atol = program.atol;
+      rtol = program.rtol;
       ResultProgramNeed need;
       // A source may ignore generated colors entirely. The complete original
       // grid therefore remains an explicit global validation prerequisite.
-      for (unsigned port : {0U, 1U}) {
+      for (unsigned port : {0U, 1U, 2U}) {
         auto support = all(phase, port);
         if (!support.ok())
           return Poll(support.status());
-        need.values.push_back({port, support.take_value()});
+        need.tensors.push_back({port, 0, support.take_value(), 13});
       }
-      need.results.push_back({2, 0, true, 0});
       stage = 1;
       return Poll(std::move(need));
     }
     if (stage == 1) {
-      table = phase.results.at(2);
+      table = phase.tensors->at({2, 0});
       for (unsigned i = 0; i < 9; ++i) {
         auto value = read(phase, 0, {i / 3, i % 3});
         if (!value.ok())
@@ -300,17 +189,11 @@ struct MeasureState {
         const auto bits = value.value();
         std::memcpy(&report.axis[i], &bits, 8);
       }
-      report.validation_count = phase.query.inputs[3].descriptor.shape[0];
+      report.validation_count =
+          tensor_descriptor(phase.query.inputs[3]).shape[0];
       return need(phase);
     }
     if (stage == 2) {
-      std::array<Value, 3> windows;
-      for (unsigned p = 0; p < 3; ++p) {
-        auto collected = collect_rows(phase, p + 3, row, batch);
-        if (!collected.ok())
-          return Poll(collected.status());
-        windows[p] = collected.take_value();
-      }
       for (std::uint64_t i = 0; i < batch; ++i) {
         auto work = phase.consume_work(9);
         if (!work.ok())
@@ -320,20 +203,13 @@ struct MeasureState {
         std::array<std::uint64_t, 3> point{}, reference{}, value{};
         const std::array<std::array<std::uint64_t, 3>*, 3> targets{
             &point, &reference, &value};
-        for (unsigned p = 0; p < 3; ++p) {
-          const bool narrow =
-              windows[p].descriptor().element_type == ElementType::Float32;
-          const unsigned width = narrow ? 4 : 8;
+        for (unsigned p = 0; p < 3; ++p)
           for (unsigned c = 0; c < 3; ++c) {
-            std::uint64_t bits = 0;
-            std::memcpy(&bits, windows[p].bytes().data() + (i * 3 + c) * width,
-                        width);
-            const auto parts = BinaryParts::decode(bits, narrow);
-            if (parts.nan || parts.infinite)
-              return Poll(domain("nonfinite bake source color"));
-            (*targets[p])[c] = promote(bits, narrow);
+            auto bits = read(phase, p + 3, {row + i, c});
+            if (!bits.ok())
+              return Poll(bits.status());
+            (*targets[p])[c] = bits.value();
           }
-        }
         if (!model_valid(input_model, point) ||
             !model_valid(output_model, reference) ||
             !model_valid(output_model, value))
@@ -441,50 +317,143 @@ struct MeasureState {
                        : Poll(sealed.status());
   }
 };
-struct UnpackState {
-  bool gate;
+struct TensorViewState {
+  bool gate, pack;
   unsigned stage = 0;
-  std::shared_ptr<const dependency_internal::MetadataOwner> phase_metadata;
-  ResultRef table, report;
-  ResultDescriptor descriptor;
-  std::shared_ptr<const dependency_internal::MetadataOwner> construction;
-  std::unique_ptr<numeric_ops::ArrayPublication> publication;
-  ResourceVector<MutableValue> outputs;
+  ResultRef report;
   numeric_ops::ExactBakeError arithmetic;
-  std::uint64_t box = 0, offset = 0, batch = 0;
-  explicit UnpackState(bool gated) : gate(gated) {}
-  Poll next(const ResultProgramPhase& phase) {
-    const auto& region = phase.query.value_outputs->boxes()[box];
-    const auto& logical = phase.query.output.descriptor.shape;
-    auto rest = offset;
-    std::array<std::uint64_t, 4> at{};
-    for (unsigned i = 4; i; --i) {
-      at[i - 1] = region.dimensions()[i - 1].offset +
-                  rest % region.dimensions()[i - 1].extent;
-      rest /= region.dimensions()[i - 1].extent;
-    }
-    const auto bytes_per_row =
-        3 * Value::element_size(phase.query.output.descriptor.element_type);
-    batch = std::min(
-        region.dimensions()[2].offset + region.dimensions()[2].extent - at[2],
-        phase.query.page_bytes / bytes_per_row);
-    if (!batch)
-      return Poll(Status{ErrorCode::ResourceExhausted,
-                         "bake table row exceeds Result window",
-                         FailureReason::CapacityLimit});
-    const auto first = (at[0] * logical[1] + at[1]) * logical[2] + at[2];
-    auto read = table.prepare_read(descriptor, 0, first, batch);
-    if (!read.ok())
-      return Poll(read.status());
+  Footprint output;
+  Lut3dBakeReport fields;
+  explicit TensorViewState(bool gated, bool packing)
+      : gate(gated), pack(packing) {}
+  Poll need_table(const ResultProgramPhase& phase) {
     stage = 4;
-    return Poll(ResultProgramNeed{{}, {}, {read.take_value()}});
+    ResultProgramNeed need;
+    auto samples = all(phase, 0);
+    if (!samples.ok())
+      return Poll(samples.status());
+    need.tensors.push_back({0, 0, samples.take_value(), 13});
+    return Poll(std::move(need));
   }
-  Poll poll(const ResultProgramPhase& phase) {
-    phase_metadata.reset();
-    phase_metadata = dependency_internal::metadata_owner(65536);
+  Poll publish(const ResultProgramPhase& phase) {
+    using namespace numeric_ops;  // NOLINT(build/namespaces)
+    const auto& schema = *phase.query.output.result_schema;
+    const auto& shape = schema.tensors[0].sample_shape();
+    auto builder = math_take(ResultBuilder::start(
+        phase.resources, schema, phase.query.semantic_key, {},
+        phase.association
+            ? std::vector<std::uint64_t>(phase.association->begin(),
+                                         phase.association->end())
+            : std::vector<std::uint64_t>{}));
+    auto descriptor = math_take(
+        ResultRelation::cartesian(phase.resources, 1,
+                                  {0, 8, 0, output.empty() ? 0U : 1U,
+                                   ResultSupportTarget::Descriptor, 0}));
+    if (gate) {
+      auto support = math_take(
+          ResultRelation::cartesian(phase.resources, 1,
+                                    {1, 8, 0, output.empty() ? 0U : 1U,
+                                     ResultSupportTarget::Descriptor, 0}));
+      descriptor = math_take(
+          ResultRelation::unite(phase.resources, {descriptor, support}));
+    }
+    math_require(builder.bind_descriptor_relation(std::move(descriptor)));
+    if (!output.empty()) {
+      const auto& input = phase.tensors->at({0, 0});
+      if (gate && (report.association().size() < 3 ||
+                   report.association()[2] != input.object_id()))
+        return Poll(Status{ErrorCode::OperationFailed,
+                           "bake report/table object mismatch",
+                           FailureReason::InvalidAssociation});
+      auto window =
+          math_take(input.acquire(Region::whole(input.spec().sample_shape()),
+                                  phase.query.cancellation));
+      const auto count = math_take(schema.tensors[0].sample_count());
+      std::vector<ResultMappedAxis> axes(shape.size());
+      for (unsigned axis = 0; axis < shape.size(); ++axis)
+        axes[axis].output_axis = axis;
+      auto identity = math_take(
+          ResultRelation::mapped(phase.resources, shape, Region::whole(shape),
+                                 input.spec().sample_shape(), axes,
+                                 {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
+      auto validation = math_take(ResultRelation::cartesian(
+          phase.resources, count,
+          {0, 4, 0, math_take(input.spec().sample_count()),
+           ResultSupportTarget::Tensor, 0}));
+      auto relation = math_take(
+          ResultRelation::unite(phase.resources, {identity, validation}));
+      if (gate) {
+        std::vector<ResultSupport> supports;
+        for (unsigned f = 0; f < report.schema().fields.size(); ++f)
+          supports.push_back({1, 7, 0, (f == 1 || f == 5) ? 3U : 1U,
+                              ResultSupportTarget::Field, f});
+        supports.push_back({1, 8, 0, 1, ResultSupportTarget::Descriptor, 0});
+        auto accepted = math_take(global_relation(phase, count, supports));
+        relation = math_take(
+            ResultRelation::unite(phase.resources, {relation, accepted}));
+      }
+      ResultTensorViewTransform transform;
+      transform.source_axes.resize(shape.size());
+      for (unsigned axis = 0; axis < shape.size(); ++axis)
+        transform.source_axes[axis].output_axis = axis;
+      for (const auto& region : output.boxes()) {
+        auto status = builder.publish_tensor_view(
+            0, region, window, transform, relation, {true, true, true, true},
+            phase.query.cancellation);
+        if (!status.ok() && status.code == ErrorCode::InvalidArgument &&
+            status.message.find("ViewUnavailable") != std::string::npos) {
+          status = builder.publish_tensor_kernel(
+              0, region,
+              [&](const auto& writers) {
+                return math_callback(phase, [&] {
+                  MathTensorReader reader(input, phase.query.cancellation);
+                  MathTensorWriter writer(writers[0]);
+                  const auto width =
+                      Value::element_size(input.spec().descriptor.element_type);
+                  std::vector<std::uint64_t> at;
+                  for (auto axis : region.dimensions())
+                    at.push_back(axis.offset);
+                  const auto elements = region.element_count();
+                  if (!elements.ok())
+                    return elements.status();
+                  for (std::uint64_t i = 0; i < elements.value(); ++i) {
+                    math_require(phase.consume_work(1));
+                    const auto bits = reader.bits(at);
+                    std::memcpy(writer.address(at), &bits, width);
+                    for (unsigned axis = at.size(); axis-- > 0;) {
+                      if (++at[axis] < region.dimensions()[axis].offset +
+                                           region.dimensions()[axis].extent)
+                        break;
+                      at[axis] = region.dimensions()[axis].offset;
+                    }
+                  }
+                  return Status::success();
+                });
+              },
+              relation, {true, true, true, true}, phase.query.cancellation);
+        }
+        math_require(status);
+      }
+    }
+    return Poll(ResultPublication{math_take(builder.seal()), true});
+  }
+  Poll poll(const ResultProgramPhase& phase) try {
+    using namespace numeric_ops;  // NOLINT(build/namespaces)
+    auto scratch = math_take(
+        phase.resources.reserve(ResourceCapacity::host(65536, 65536)));
     if (!stage) {
-      stage = gate ? 1 : 3;
-      return Poll(ResultProgramNeed{{}, {{gate ? 1U : 0U, 0, true, 0}}, {}});
+      const auto shape =
+          phase.query.output.result_schema->tensors[0].sample_shape();
+      output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
+                                          : math_take(Footprint::all(shape));
+      if (output.empty())
+        return publish(phase);
+      if (pack)
+        output = math_take(Footprint::all(shape));
+      if (!gate)
+        return need_table(phase);
+      stage = 1;
+      return Poll(ResultProgramNeed{{{1, 0, true, 0}}, {}});
     }
     if (stage == 1) {
       report = phase.results.at(1);
@@ -492,49 +461,61 @@ struct UnpackState {
       if (!facts.ok())
         return Poll(facts.status());
       ResultProgramNeed need;
-      for (unsigned field : {0U, 7U, 8U, 9U, 10U}) {
-        auto read = report.prepare_read(facts.value(), field, 0, 1);
+      for (unsigned field = 0; field < report.schema().fields.size(); ++field) {
+        auto read = report.prepare_read(facts.value(), field, 0,
+                                        (field == 1 || field == 5) ? 3 : 1);
         if (!read.ok())
           return Poll(read.status());
+        if (read.value().byte_size() > phase.query.page_bytes)
+          return Poll(Status{ErrorCode::ResourceExhausted,
+                             "bake report field exceeds Result window",
+                             FailureReason::CapacityLimit});
         need.io.push_back(read.take_value());
       }
       stage = 2;
       return Poll(std::move(need));
     }
     if (stage == 2) {
-      const auto passed =
-          std::get<std::shared_ptr<const CpuStorage>>(phase.io[0])->bytes()[0];
-      if (!passed) {
-        std::int64_t index;
+      std::uint8_t passed = 0;
+      const std::array<void*, 11> targets{&passed,
+                                          fields.axis.data(),
+                                          &fields.validation_count,
+                                          &fields.failed_count,
+                                          fields.max_abs_error.data(),
+                                          fields.max_error_point.data(),
+                                          fields.max_error_index.data(),
+                                          &fields.first_failure_index,
+                                          fields.first_failure_input.data(),
+                                          fields.first_failure_reference.data(),
+                                          fields.first_failure_lut.data()};
+      const std::array<std::uint64_t, 11> sizes{1,  72, 8,  8,  24, 72,
+                                                24, 8,  24, 24, 24};
+      for (unsigned f = 0; f < targets.size(); ++f) {
+        const auto bytes =
+            std::get<std::shared_ptr<const CpuStorage>>(phase.io[f])->bytes();
+        if (bytes.size() != sizes[f])
+          return Poll(domain("invalid bake report read window"));
+        std::memcpy(targets[f], bytes.data(), sizes[f]);
+      }
+      auto spec = math_take(lut3d_bake_description(report.schema()));
+      auto checked = input_internal::validate_lut3d_bake_report_values(
+          spec, &fields, passed, phase.consume_work);
+      if (!checked.ok())
+        return Poll(checked);
+      if (!fields.passed) {
+        const auto index = fields.first_failure_index;
         std::array<std::uint64_t, 3> point{}, reference{}, lut{};
-        std::memcpy(&index,
-                    std::get<std::shared_ptr<const CpuStorage>>(phase.io[1])
-                        ->bytes()
-                        .data(),
-                    8);
-        std::memcpy(point.data(),
-                    std::get<std::shared_ptr<const CpuStorage>>(phase.io[2])
-                        ->bytes()
-                        .data(),
+        std::memcpy(point.data(), fields.first_failure_input.data(), 24);
+        std::memcpy(reference.data(), fields.first_failure_reference.data(),
                     24);
-        std::memcpy(reference.data(),
-                    std::get<std::shared_ptr<const CpuStorage>>(phase.io[3])
-                        ->bytes()
-                        .data(),
-                    24);
-        std::memcpy(lut.data(),
-                    std::get<std::shared_ptr<const CpuStorage>>(phase.io[4])
-                        ->bytes()
-                        .data(),
-                    24);
-        auto spec = lut3d_bake_description(report.schema());
-        if (!spec.ok())
-          return Poll(spec.status());
+        std::memcpy(lut.data(), fields.first_failure_lut.data(), 24);
+        const auto& program =
+            *static_cast<const BakeProgram*>(phase.query.prepared->state());
         unsigned component = 0;
         for (; component < 3; ++component) {
-          auto accepted = arithmetic.check(
-              reference[component], lut[component], raw(spec.value().atol),
-              raw(spec.value().rtol), phase.consume_work);
+          auto accepted =
+              arithmetic.check(reference[component], lut[component],
+                               program.atol, program.rtol, phase.consume_work);
           if (!accepted.ok())
             return Poll(accepted.status());
           if (!accepted.value())
@@ -558,93 +539,19 @@ struct UnpackState {
             FailureReason::InvalidDomain,
             {FailureOrigin::Domain, FailureScope::Group}});
       }
-      stage = 3;
-      return Poll(ResultProgramNeed{{}, {{0, 0, true, 0}}, {}});
+      return need_table(phase);
     }
-    if (stage == 3) {
-      table = phase.results.at(0);
-      if (gate && (report.association().size() != 1 ||
-                   report.association()[0] != table.object_id()))
-        return Poll(Status{ErrorCode::OperationFailed,
-                           "bake report/table object mismatch",
-                           FailureReason::InvalidAssociation});
-      auto facts = table.descriptor();
-      if (!facts.ok())
-        return Poll(facts.status());
-      descriptor = facts.take_value();
-      construction = dependency_internal::metadata_owner(
-          65536 + phase.query.value_outputs->boxes().size() * 8192);
-      publication = std::make_unique<numeric_ops::ArrayPublication>(
-          phase.query.value_outputs->boxes().size(), 4);
-      for (const auto& region : phase.query.value_outputs->boxes()) {
-        auto allocated = MutableValue::allocate(phase.query.output.descriptor,
-                                                region, phase.allocator);
-        if (!allocated.ok())
-          return Poll(allocated.status());
-        outputs.push_back(allocated.take_value());
-      }
-      return next(phase);
-    }
-    const auto width =
-        Value::element_size(phase.query.output.descriptor.element_type);
-    auto bytes =
-        std::get<std::shared_ptr<const CpuStorage>>(phase.io[0])->bytes();
-    if (bytes.size() != batch * 3 * width)
-      return Poll(domain("bake table read window size"));
-    auto work = phase.consume_work(batch * 3);
-    if (!work.ok())
-      return Poll(work);
-    std::memcpy(
-        static_cast<std::uint8_t*>(outputs[box].data()) + offset * width,
-        bytes.data(), bytes.size());
-    offset += batch * 3;
-    std::uint64_t count = 1;
-    for (const auto& d : phase.query.value_outputs->boxes()[box].dimensions())
-      count *= d.extent;
-    if (offset == count) {
-      ++box;
-      offset = 0;
-    }
-    if (box < outputs.size())
-      return next(phase);
-    ResourceVector<Value> published;
-    for (auto& output : outputs) {
-      auto value = std::move(output).publish(phase.query.output.facets,
-                                             phase.query.resources);
-      if (!value.ok())
-        return Poll(value.status());
-      auto retained = publication->retain(value.take_value());
-      if (!retained.ok())
-        return Poll(retained.status());
-      published.push_back(retained.take_value());
-    }
-    auto value = publication->finish(
-        phase.query.output.descriptor, *phase.query.value_outputs,
-        published.data(), published.size(), {}, phase.query.output.facets,
-        phase.query.resources);
-    if (!value.ok())
-      return Poll(value.status());
-    const auto full = elements(phase.query.output.descriptor);
-    auto identity = ResultRelation::identity(phase.resources, full, 0, 5);
-    if (!identity.ok())
-      return Poll(identity.status());
-    auto descriptor_support =
-        ResultRelation::cartesian(phase.resources, full, {0, 8, 0, 1});
-    if (!descriptor_support.ok())
-      return Poll(descriptor_support.status());
-    std::vector<ResultRelation> parts{identity.take_value(),
-                                      descriptor_support.take_value()};
-    if (gate) {
-      auto report_support =
-          global_relation(phase, full, {{1, 7, 0, 37}, {1, 8, 0, 1}});
-      if (!report_support.ok())
-        return Poll(report_support.status());
-      parts.push_back(report_support.take_value());
-    }
-    auto relation = ResultRelation::unite(phase.resources, parts);
-    return relation.ok() ? Poll(ResultValuePublication{value.take_value(),
-                                                       relation.take_value()})
-                         : Poll(relation.status());
+    return publish(phase);
+  } catch (const Status& status) {
+    numeric_ops::math_record_failure(phase, status);
+    return Poll(status);
+  } catch (const std::bad_alloc&) {
+    auto failure = Status{ErrorCode::ResourceExhausted,
+                          {},
+                          FailureReason::CapacityLimit,
+                          {FailureOrigin::Resource, FailureScope::Group}};
+    numeric_ops::math_record_failure(phase, failure);
+    return Poll(failure);
   }
 };
 OperationDefinition operation(Kind kind) {
@@ -656,10 +563,19 @@ OperationDefinition operation(Kind kind) {
   auto& traits = result.traits;
   traits.input_count = kind == Kind::Measure ? 6 : kind == Kind::Gate ? 2 : 1;
   traits.input_schema.resize(traits.input_count);
+  for (auto& input : traits.input_schema) {
+    input.kind = OperationPortKind::Result;
+    input.element_type_mask = 12;
+  }
+  if (kind == Kind::Measure)
+    for (unsigned port : {0U, 1U, 3U})
+      traits.input_schema[port].element_type_mask = 4;
   const auto object = [&](unsigned port, const char* id) {
     traits.input_schema[port].kind = OperationPortKind::Result;
+    traits.input_schema[port].element_type_mask = 0;
     traits.input_schema[port].result_schema_id = id;
-    traits.input_schema[port].result_schema_version = 1;
+    traits.input_schema[port].result_schema_version =
+        std::string(id) == "curve.bake_lut3d.table" ? 2 : 1;
   };
   if (kind == Kind::Measure)
     object(2, "curve.bake_lut3d.table");
@@ -668,18 +584,15 @@ OperationDefinition operation(Kind kind) {
   if (kind == Kind::Gate)
     object(1, "curve.bake_lut3d.report");
   traits.requires_metadata_specialization = true;
-  traits.workspace_bytes = kind == Kind::Pack      ? kPackBytes
-                           : kind == Kind::Measure ? kMeasureBytes + 289
-                                                   : 0;
+  traits.workspace_bytes = kind == Kind::Measure ? 289 : 0;
   auto& out = traits.outputs[0];
   out.key = kind == Kind::Measure ? "report"
             : kind == Kind::Pack  ? "table"
                                   : "values";
   out.region_rule = OperationRegionRule::Dependency;
   out.dependency_version = 2;
-  out.continuation_bytes = kind == Kind::Pack      ? sizeof(PackState)
-                           : kind == Kind::Measure ? sizeof(MeasureState)
-                                                   : sizeof(UnpackState);
+  out.continuation_bytes =
+      kind == Kind::Measure ? sizeof(MeasureState) : sizeof(TensorViewState);
   out.maximum_dependency_stages = 1048576;
   if (kind == Kind::Pack || kind == Kind::Measure) {
     traits.parameter_schema = report_parameters();
@@ -690,18 +603,41 @@ OperationDefinition operation(Kind kind) {
     out.result_schema = schema.take_value();
     out.output_schema.kind = OperationPortKind::Result;
     out.output_schema.result_schema_id = std::string(out.result_schema->id);
-    out.output_schema.result_schema_version = 1;
+    out.output_schema.result_schema_version = out.result_schema->version;
   }
-  result.specialize_metadata = [kind](const auto& inputs, const auto& params) {
-    return specialize(kind, inputs, params);
+  if (kind == Kind::Unpack || kind == Kind::Gate) {
+    numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                         sizeof(TensorViewState));
+    out.region_rule = OperationRegionRule::Dependency;
+    out.maximum_dependency_stages = kind == Kind::Gate ? 4 : 2;
+  }
+  result.prepare_static =
+      [kind](const auto& inputs,
+             const auto& params) -> Result<OperationPreparation> {
+    auto output = specialize(kind, inputs, params);
+    if (!output.ok())
+      return Result<OperationPreparation>(output.status());
+    auto decoded = (kind == Kind::Pack || kind == Kind::Measure)
+                       ? description(params)
+                       : lut3d_bake_description(*inputs[0].result_schema);
+    if (!decoded.ok())
+      return Result<OperationPreparation>(decoded.status());
+    const auto& spec = decoded.value();
+    OperationPreparation prepared;
+    prepared.outputs = output.take_value();
+    prepared.state = std::make_shared<const BakeProgram>(
+        BakeProgram{spec.input_description.model, spec.output_description.model,
+                    raw(spec.atol), raw(spec.rtol)});
+    return Result<OperationPreparation>(std::move(prepared));
   };
   result.start_result =
       [kind](const auto&, const auto& allocator) -> Result<ResultContinuation> {
     if (kind == Kind::Pack)
-      return ResultContinuation::make<PackState>(allocator);
+      return ResultContinuation::make<TensorViewState>(allocator, false, true);
     if (kind == Kind::Measure)
       return ResultContinuation::make<MeasureState>(allocator);
-    return ResultContinuation::make<UnpackState>(allocator, kind == Kind::Gate);
+    return ResultContinuation::make<TensorViewState>(allocator,
+                                                     kind == Kind::Gate, false);
   };
   return result;
 }

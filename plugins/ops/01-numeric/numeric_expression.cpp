@@ -13,6 +13,7 @@
 
 #include "01-numeric/exact_sampling.hpp"
 #include "01-numeric/expression_evaluator.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/sequence_profiles.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "photospider/numeric/expression.hpp"
@@ -130,32 +131,28 @@ struct SampleState final {
     }
     return value;
   }
-  Result<Value> execute(const OperationInvocation& call,
-                        const std::function<Status(std::uint64_t)>& consume) {
-    using Answer = Result<Value>;
-    for (std::size_t slot = 0; slot < call.inputs.size(); ++slot) {
+  Status execute(const ResultProgramPhase& phase,
+                 const ResourceVector<ResultTensorWriteWindow>& writers) {
+    const auto& consume = phase.consume_work;
+    for (const auto& item : *phase.tensors) {
       auto status = consume(128);
       if (!status.ok())
-        return Answer(status);
-      const auto port = call.input_indices[slot];
-      const auto& value = call.inputs[slot];
+        return status;
+      const auto port = item.first.first;
+      const auto& input = item.second;
       const bool narrow =
-          value.descriptor().element_type == ElementType::Float32;
-      auto address = value.byte_address({0});
-      if (!address.ok())
-        return Answer(address.status());
-      std::uint64_t bits = 0;
-      std::memcpy(&bits, value.bytes().data() + address.value(),
-                  narrow ? 4 : 8);
+          input.spec().descriptor.element_type == ElementType::Float32;
+      MathTensorReader reader(input, phase.query.cancellation);
+      auto bits = reader.bits({0});
       const auto decoded = BinaryParts::decode(bits, narrow);
       if (decoded.nan || decoded.infinite) {
         const auto name = port == 0   ? "start"
                           : port == 1 ? "end"
                                       : program->expression.names[port - 2];
-        return Answer(expression_failure(
-            0, false, 0, FailureReason::InvalidDomain,
-            "nonfinite input " + name + " port=" + std::to_string(port) +
-                " bits=" + std::to_string(bits)));
+        return expression_failure(0, false, 0, FailureReason::InvalidDomain,
+                                  "nonfinite input " + name +
+                                      " port=" + std::to_string(port) +
+                                      " bits=" + std::to_string(bits));
       }
       bits = widened(bits, narrow);
       if (port < 2)
@@ -166,45 +163,38 @@ struct SampleState final {
     std::uint64_t step = 0;
     if (program->count > 1) {
       if (equal(endpoints[0], endpoints[1]))
-        return Answer(expression_failure(0, false, 0,
-                                         FailureReason::InvalidDomain,
-                                         "equal sampling endpoints"));
+        return expression_failure(0, false, 0, FailureReason::InvalidDomain,
+                                  "equal sampling endpoints");
       auto calculated = rounded(endpoints[1], endpoints[0], 1, 1,
                                 program->count - 1, false, true, consume);
       if (!calculated.ok())
-        return Answer(calculated.status());
+        return calculated.status();
       step = calculated.value();
       const auto parts = BinaryParts::decode(step, false);
       if (parts.infinite || !parts.magnitude)
-        return Answer(expression_failure(0, false, 0,
-                                         FailureReason::ArithmeticOverflow,
-                                         "unrepresentable sampling step"));
+        return expression_failure(0, false, 0,
+                                  FailureReason::ArithmeticOverflow,
+                                  "unrepresentable sampling step");
       const bool descending =
           BinaryParts::decode(endpoints[1], false).order_key() <
           BinaryParts::decode(endpoints[0], false).order_key();
       if (parts.negative != descending)
-        return Answer(expression_failure(0, false, 0,
-                                         FailureReason::InvalidDomain,
-                                         "sampling step direction"));
+        return expression_failure(0, false, 0, FailureReason::InvalidDomain,
+                                  "sampling step direction");
     }
-    ValueDescriptor descriptor{Values ? program->dtype : ElementType::Float64,
-                               {Values ? program->count : 3U}};
-    auto allocated =
-        MutableValue::allocate(descriptor, call.output_region, call.allocator);
-    if (!allocated.ok())
-      return Answer(allocated.status());
-    auto writer = allocated.take_value();
+    MathTensorWriter writer(writers[0]);
     if constexpr (!Values) {
       const std::array<std::uint64_t, 3> axis{
           endpoints[0], program->count == 1 ? endpoints[0] : endpoints[1],
           step};
-      std::memcpy(writer.data(), axis.data(), 24);
+      for (std::uint64_t i = 0; i < axis.size(); ++i)
+        std::memcpy(writer.address({i}), &axis[i], sizeof(axis[i]));
     } else {
       const auto width = Value::element_size(program->dtype);
       for (std::uint64_t offset = 0; offset < program->count;) {
         auto status = consume(1);
         if (!status.ok())
-          return Answer(status);
+          return status;
         const auto count = static_cast<std::size_t>(
             std::min<std::uint64_t>(4, program->count - offset));
         std::array<std::uint64_t, 4> coordinates{}, results{};
@@ -213,7 +203,7 @@ struct SampleState final {
           for (std::size_t lane = 0; lane < count; ++lane) {
             auto coordinate = validated_coordinate(offset + lane, consume);
             if (!coordinate.ok())
-              return Answer(coordinate.status());
+              return coordinate.status();
             coordinates[lane] = coordinate.value();
           }
           status = evaluator.accelerated.evaluate(
@@ -221,60 +211,57 @@ struct SampleState final {
               program->dtype == ElementType::Float32, results.data(),
               accepted.data(), consume, true);
           if (!status.ok())
-            return Answer(status);
+            return status;
         }
         for (std::size_t lane = 0; lane < count; ++lane) {
           if (!accepted[lane]) {
             auto value = evaluate_sample(offset + lane, consume);
             if (!value.ok())
-              return Answer(value.status());
+              return value.status();
             results[lane] = value.value();
           }
-          std::memcpy(writer.data() + (offset + lane) * width, &results[lane],
-                      width);
+          std::memcpy(writer.address({offset + lane}), &results[lane], width);
         }
         offset += count;
       }
     }
-    auto status = consume(1);
-    return status.ok() ? std::move(writer).publish() : Answer(status);
+    return consume(1);
   }
 };
 template <bool Values>
-Result<Value> execute_expression(const OperationInvocation& call,
-                                 SequenceProfile profile) {
-  using Answer = Result<Value>;
-  const auto* budget = resource_internal::metadata_budget();
-  const auto consume = [&](std::uint64_t work) {
-    if (call.cancellation.cancelled())
-      return Status{ErrorCode::Cancelled, {}};
-    return budget ? budget->consume({work}) : Status::success();
-  };
-  auto status = consume(1);
-  if (!status.ok())
-    return Answer(status);
-  input_internal::Float32Environment environment;
-  if (!environment.active())
-    return Answer(Status{ErrorCode::BackendUnavailable,
-                         "numeric environment unavailable"});
-  auto allocated = call.allocator.allocate(sizeof(SampleState<Values>));
-  if (!allocated.ok())
-    return Answer(allocated.status());
-  auto storage = allocated.take_value();
-  const auto* program =
-      static_cast<const SampleProgram*>(call.prepared->state());
-  std::unique_ptr<SampleState<Values>, void (*)(SampleState<Values>*)> state(
-      new (storage.data()) SampleState<Values>(program, profile),
-      [](SampleState<Values>* value) { value->~SampleState<Values>(); });
-  auto result = state->execute(call, consume);
-  if (!result.ok() && result.status().detail.origin == FailureOrigin::Domain) {
-    auto failure = result.status();
-    failure.detail.scope = FailureScope::Run;
-    failure.detail.atom = {};
-    return Answer(std::move(failure));
+struct ExpressionKernel final {
+  SequenceProfile profile;
+  explicit ExpressionKernel(SequenceProfile selected) : profile(selected) {}
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    if (writers.size() != 1)
+      return {ErrorCode::OperationFailed,
+              "expression requires one packed writer"};
+    auto status = phase.consume_work(1);
+    if (!status.ok())
+      return status;
+    input_internal::Float32Environment environment;
+    if (!environment.active())
+      return {ErrorCode::BackendUnavailable, "numeric environment unavailable"};
+    auto allocated = phase.allocator.allocate(sizeof(SampleState<Values>));
+    if (!allocated.ok())
+      return allocated.status();
+    auto storage = allocated.take_value();
+    const auto* program =
+        static_cast<const SampleProgram*>(phase.query.prepared->state());
+    std::unique_ptr<SampleState<Values>, void (*)(SampleState<Values>*)> state(
+        new (storage.data()) SampleState<Values>(program, profile),
+        [](SampleState<Values>* value) { value->~SampleState<Values>(); });
+    status = state->execute(phase, writers);
+    if (!status.ok() && status.detail.origin == FailureOrigin::Domain) {
+      status.detail.scope = FailureScope::Run;
+      status.detail.atom.reset();
+    }
+    return status;
   }
-  return result;
-}
+};
+template <bool Values>
+using ExpressionTensorProgram = WholeTensorProgram<ExpressionKernel<Values>>;
 
 OperationDefinition expression_operation(const std::string& key,
                                          SequenceProfile profile) {
@@ -287,6 +274,7 @@ OperationDefinition expression_operation(const std::string& key,
   traits.repeated_match = false;
   traits.input_schema.resize(2);
   for (auto& port : traits.input_schema) {
+    port.kind = OperationPortKind::Result;
     port.rank = 1;
     port.element_type_mask = 12;
   }
@@ -296,19 +284,22 @@ OperationDefinition expression_operation(const std::string& key,
       {"coefficient_names", OperationParameterType::String},
       {"count", OperationParameterType::Int64, true, true, 1, 1048576},
       {"dtype", OperationParameterType::String}};
+  set_whole_tensor_output(traits, ElementType::Float64,
+                          sizeof(ExpressionTensorProgram<true>));
   auto& values = traits.outputs[0];
-  values.key = "values";
-  values.region_rule = OperationRegionRule::Whole;
-  values.requires_dense_output = true;
+  // At most 258 inputs: five bounded Need envelopes and one publication.
+  values.maximum_dependency_stages = 6;
   traits.workspace_bytes = sizeof(SampleState<true>);
   traits.outputs.push_back(values);
   traits.outputs[1].key = "axis";
+  traits.outputs[1].continuation_bytes = sizeof(ExpressionTensorProgram<false>);
   operation.prepare_static =
       [profile](const auto& inputs,
                 const auto& parameters) -> Result<OperationPreparation> {
     using Answer = Result<OperationPreparation>;
     for (const auto& input : inputs)
-      if (input.descriptor.shape != std::vector<std::uint64_t>{1})
+      if (input.result_schema->tensors[0].sample_shape() !=
+          std::vector<std::uint64_t>{1})
         return Answer(
             Status{ErrorCode::TypeMismatch,
                    "expression inputs require [1]",
@@ -339,10 +330,13 @@ OperationDefinition expression_operation(const std::string& key,
     OperationPreparation prepared;
     prepared.outputs.resize(2);
     prepared.state = program;
-    prepared.outputs[0].metadata.descriptor = {program->dtype,
-                                               {program->count}};
-    prepared.outputs[1].metadata.descriptor = {ElementType::Float64, {3}};
-    prepared.outputs[1].metadata.atomic_trailing_axes = 1;
+    prepared.outputs[0].metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(
+            numeric_tensor_schema(program->dtype, {program->count}));
+    auto axis_schema = numeric_tensor_schema(ElementType::Float64, {3});
+    axis_schema.tensors[0].atomic_trailing_axes = 1;
+    prepared.outputs[1].metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(std::move(axis_schema));
     prepared.outputs[0].input_indices = std::vector<std::uint32_t>{};
     for (std::uint32_t port = 0; port < inputs.size(); ++port)
       if (port != 1 || program->count > 1)
@@ -353,9 +347,12 @@ OperationDefinition expression_operation(const std::string& key,
 
     return Answer(std::move(prepared));
   };
-  operation.callback = [profile](const OperationInvocation& call) {
-    return call.output_index == 0 ? execute_expression<true>(call, profile)
-                                  : execute_expression<false>(call, profile);
+  operation.start_result = [profile](const auto& query, const auto& allocator) {
+    return query.output_index == 0
+               ? ResultContinuation::make<ExpressionTensorProgram<true>>(
+                     allocator, profile)
+               : ResultContinuation::make<ExpressionTensorProgram<false>>(
+                     allocator, profile);
   };
   return operation;
 }

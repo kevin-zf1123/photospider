@@ -1,53 +1,46 @@
-# FMT-01 CPU performance
+# FMT-01 performance history and Result smoke
 
-This public workflow benchmarks `channel.extract_index_strict` and the native
-Apple Silicon profile through compile/execute. It uses a four-plane source,
-extracts plane 1, and checks every output sample with a separate integer-coordinate
-byte oracle. FP32/FP64 inputs store exactly representable integers. Special floating
-payloads and other dtypes remain covered by `test_channel_extraction`.
+The benchmark source uses the public Result API. The measurements below are
+historical records from the former Value/planar path and do not measure current
+Result execution. Two bounded Result smoke scenarios passed their byte oracle;
+no full Result performance matrix or timing conclusion is claimed.
 
-## Reproduce
+## Current Result smoke
+
+Build the current CLI and run the reported 128x128 full-plane and 130x130 tiled
+ROI smoke cases with all three layout choices:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
 cmake --build build --target photospider_channel_performance -j 8
-python3 examples/channel_extraction_performance/run.py \
-  build/examples/channel_extraction_performance/photospider_channel_performance \
-  build/fmt01-performance/current
-```
-
-The matrix includes 128×128 and 4096×4096 FP32 continuous/tiled images,
-4096×4096 UInt8/FP64 tiled images, a cross-tile 3×3 ROI, and the native accelerated profile (Apple Silicon or x86 AVX2).
-Tiled means physical 128×128 tile-separated planes; full rows request the entire
-plane in one execute, not 1024 separate execute calls. Only the ROI rows request
-[127,130)×[127,130). `auto`, `view`, and `materialize` are separate cases.
-Run the binary without the runner to choose an individual case:
-
-```sh
 build/examples/channel_extraction_performance/photospider_channel_performance \
-  4096 tiled fp32 materialize 9 strict full
+  128 continuous fp64 all 2 strict full
+build/examples/channel_extraction_performance/photospider_channel_performance \
+  130 tiled fp32 all 2 strict roi
 ```
 
-Arguments are size, storage, dtype, layout (or `all`), measured repetitions,
-profile (`strict`, `accelerated_apple_silicon`, or `accelerated_x86_64`), and `full|roi`. Source generation/provision and compilation are outside
-execute timing. One CPU worker, no result cache, retained fully provisioned input,
-two initial executions excluded from steady-state timing. Each materialized result
-uses fresh output backing and is destroyed outside its timed interval. Only the
-first execution per layout is exhaustively validated. `first_us` includes first
-execution but excludes compilation. Nine large-case samples and 31 small/ROI
-samples are used. p95 is the lower empirical quantile `floor((n-1)*0.95)` and is
-not a statistically stable tail-latency estimate. The harness logs individual
-samples to stderr for subsequent runs.
+Arguments are size, storage, dtype, layout, repetitions, CPU profile and
+`full|roi`. Source creation, sample provision and compilation occur before
+execute timing. An independent byte oracle checks the first output outside the
+timed interval. These bounded runs are functional smoke checks, not a benchmark
+matrix or a basis for speedup claims.
 
-`callback_p50_us` includes registry validation, output page preparation, the
-operation callback, and commit. It is not an isolated memcpy measurement. View
-has zero callback duration because it is handled by the executor; its public
-execute latency is still measured. Output backed/virtual bytes for a view describe
-its retained source owner, including unselected planes. `peak_live_bytes` is the
-execution budget's modeled capacity, not process RSS. Source read bytes are exact
-logical requested bytes, not hardware memory traffic.
+The CSV reports `source_logical_bytes` from the exact dependency support times
+element width. `run_live_payload_bytes` and `run_live_metadata_bytes` are the
+Root's live capacity above its post-source-setup baseline. `root_peak_payload_bytes`
+and `root_peak_metadata_bytes` are cumulative same-context high-water marks that
+include the source Result. The public Result API does not expose the operation's
+own output-backed or virtual byte counts, so the CLI omits those old Value-path
+metrics. Root capacity is not process RSS.
 
-## Xcode CPU Profiler
+## Historical Value/planar profiling and measurements
+
+The former benchmark used `run.py` to execute a 128x128/4096x4096 matrix across
+continuous/tiled layouts, dtypes, views, materialization and ROI. Its CSV fields,
+Xcode profiles and all timing tables below belong to that Value/planar executable.
+They are retained as historical measurements only; do not apply them to the
+current Result implementation.
+
+### Historical Xcode CPU Profiler
 
 ```sh
 /usr/bin/arch -arm64 /usr/bin/python3 \
@@ -76,7 +69,7 @@ requires explicit completion/save messages and no reported run issues, and still
 requires a successful export with nonempty execution samples. Recorder logs are
 retained for inspection.
 
-## Measured optimization, 2026-09-24
+### Historical measured optimization
 
 Apple M5, 10 logical CPUs, 32 GiB, macOS 27.0 (26A5425a), Clang 21.1.3,
 RelWithDebInfo (`-O2 -g -DNDEBUG`), Xcode xctrace 27.0 (27A266a), 16 KiB pages.
@@ -122,7 +115,7 @@ The failed Time Profiler attempts (`before.trace`, `before-native.trace`) are no
 used for hotspot conclusions. `before-cpu.trace` and `after-cpu.trace` supply the
 reported CPU evidence. Named lookup and split authoring were not separately timed.
 
-## Tiled overhead optimization, 2026-09-24
+### Historical tiled overhead optimization
 
 Same M5/toolchain and timing policy as above. A fresh pre-change run is in
 `tile-opt/before/summary.csv`; final serial measurements, taken after local builds
@@ -169,19 +162,22 @@ page-set lookup was 30.344% self. After span merging and shift/mask addressing,
 not elapsed-time fractions. CPU-only traces omit the auxiliary timelines of the
 older template, so they are not an all-instruments comparison.
 
-Native focused tests and both installed planar/channel consumer executables pass.
-The rectangle regression exercises permuted axes, padded continuous rows, partial
-edge tiles, ROI rejection, retained aliases and writer rollback. Non-power-of-two
-tiles are rejection cases. Run the public fixture with:
+At the time, the Value/planar focused tests and installed consumers passed. The
+rectangle regression exercised permuted axes, padded continuous rows, partial
+edge tiles, ROI rejection, retained aliases and writer rollback. Those consumer
+results are not installed-Result validation. The current Result integration test
+is exercised separately below; non-power-of-two tiles remain rejection cases.
+
+Run the current integration fixture with:
 
 ```sh
 cmake --build build --target test_planar_image_workflow test_channel_extraction -j 8
 ctest --test-dir build -R '^(test_planar_image_workflow|test_channel_extraction)$' --output-on-failure
 ```
 
-Both tests must exit zero after checking independent byte oracles and API bounds.
+Both tests check independent byte oracles and API bounds.
 
-### x86 / AVX2 verification
+### Historical x86 / AVX2 verification
 
 The same final C++ implementation was built in Ubuntu WSL2 on an Intel
 Core i9-12900 (24 logical CPUs, AVX2 available), Clang 18.1.3, Linux
@@ -201,9 +197,10 @@ first-execution exhaustive byte oracle, including `accelerated_x86_64`.
 | 4096² FP64 tiled | 25.944 ms |
 | 4096² FP32 tiled, 3×3 ROI | 58.240 µs |
 
-These are current-code portability/performance measurements; no pre-change WSL
-speedup or cross-machine performance comparison is claimed. No custom SIMD kernel
-was added. The formal x86 accelerated entry point was executed on an AVX2 host.
+These are historical Value/planar portability measurements; they are not
+current-Result timings. No pre-change WSL speedup or cross-machine performance
+comparison is claimed. No custom SIMD kernel was added. The formal x86 accelerated
+entry point was executed on an AVX2 host.
 Raw results, test/build logs and environment are copied to
 `build/fmt01-performance/tile-opt/wsl/`. The remote checkout is
 `/home/alex/photospider-fmt01-tile-20260924`, with build targets and suite runnable

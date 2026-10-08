@@ -11,6 +11,7 @@
 #include "fixtures/native_vulkan_spirv.hpp"
 #include "photospider/execution/resources.hpp"
 #include "photospider/photospider.hpp"
+#include "support/multi_output_result_fixture.hpp"
 #include "support/native_allocation_quota.hpp"
 #include "support/native_atlas_budget.hpp"
 #include "support/native_metadata_budget.hpp"
@@ -27,9 +28,9 @@ std::uint32_t expected_value(std::uint32_t value, const Parameters& p) {
   const std::uint64_t wide = std::uint64_t{value} * p.multiplier + p.increment;
   return static_cast<std::uint32_t>(wide ^ (wide >> 32));
 }
-ps_gpu_dispatch_v11 command(const ps_gpu_buffer_binding_v11* binding,
-                            const Parameters* parameters) {
-  ps_gpu_dispatch_v11 result{};
+ps_gpu_dispatch_v1 command(const ps_gpu_buffer_binding_v1* binding,
+                           const Parameters* parameters) {
+  ps_gpu_dispatch_v1 result{};
   result.struct_size = sizeof(result);
   result.source = reinterpret_cast<const char*>(kNativeVulkanSpirv);
   result.source_size = sizeof(kNativeVulkanSpirv);
@@ -43,35 +44,42 @@ ps_gpu_dispatch_v11 command(const ps_gpu_buffer_binding_v11* binding,
   result.grid[0] = parameters->width;
   result.grid[1] = parameters->height;
   result.grid[2] = parameters->depth;
-  result.code_format = PS_GPU_CODE_SPIRV_V11;
+  result.code_format = PS_GPU_CODE_SPIRV_V1;
   return result;
 }
 struct DependencyCompute {
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    auto made =
-        MutableValue::allocate(phase.query.output.descriptor,
-                               phase.query.outputs.boxes()[0], phase.allocator);
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    auto made = MutableValue::allocate(
+        phase.query.output.result_schema->tensors[0].descriptor,
+        phase.query.tensor_outputs->boxes()[0], phase.allocator);
     if (!made.ok())
-      return Result<DependencyPoll>(made.status());
+      return Result<ResultProgramPoll>(made.status());
     auto output = made.take_value();
-    auto token = phase.gpu_buffer(output.data(), output.size(), true);
-    if (!token.ok())
-      return Result<DependencyPoll>(token.status());
-    const ps_gpu_buffer_binding_v11 binding{
-        sizeof(binding), 0, token.value(), 0, output.size(), 1};
+    std::uint64_t token = 0;
+    if (!phase.gpu || phase.gpu->buffer(phase.gpu->context, output.data(),
+                                        output.size(), 1, &token))
+      return Result<ResultProgramPoll>(phase.gpu_status());
+    const ps_gpu_buffer_binding_v1 binding{sizeof(binding), 0, token, 0,
+                                           output.size(),   1};
     const Parameters parameters{1, 1, 1, 3, 7};
     auto dispatch = command(&binding, &parameters);
-    auto status = phase.gpu_execute(&dispatch, 1);
-    if (!status.ok())
-      return Result<DependencyPoll>(status);
+    if (phase.gpu->execute(phase.gpu->context, &dispatch, 1))
+      return Result<ResultProgramPoll>(phase.gpu_status());
     auto value = std::move(output).publish();
     if (!value.ok())
-      return Result<DependencyPoll>(value.status());
-    auto fragments =
-        ValueFragments::create(phase.query.output.descriptor, {},
-                               phase.query.outputs, {value.take_value()});
-    return fragments.ok() ? Result<DependencyPoll>(fragments.take_value())
-                          : Result<DependencyPoll>(fragments.status());
+      return Result<ResultProgramPoll>(value.status());
+    auto builder = multi_result::take(
+        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
+                             phase.query.semantic_key));
+    multi_result::check(builder.bind_descriptor_relation(
+        multi_result::take(ResultRelation::cartesian(phase.resources, 1, {}))));
+    multi_result::check(builder.publish_tensor(
+        0, value.value().region(), value.value().layout(),
+        value.value().storage(),
+        multi_result::take(ResultRelation::cartesian(phase.resources, 1, {})),
+        {true, true, true, true}));
+    return Result<ResultProgramPoll>(
+        ResultPublication{multi_result::take(builder.seal()), true});
   }
 };
 int dependency_workflow(const std::shared_ptr<Device>& device) {
@@ -87,16 +95,14 @@ int dependency_workflow(const std::shared_ptr<Device>& device) {
   definition.traits.supports_cpu = false;
   definition.traits.supports_gpu = true;
   auto& output = definition.traits.outputs[0];
-  output.output_element_type = ElementType::Int64;
-  output.shape_rule = OperationShapeRule::Fixed;
-  output.fixed_output_shape = {1};
-  output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
+  output =
+      multi_result::output("value", multi_result::schema(ElementType::Int64));
   output.continuation_bytes = sizeof(DependencyCompute);
   output.maximum_dependency_stages = 1;
-  definition.start_dependency = [](const DependencyQuery&,
-                                   const BufferAllocator& allocator) {
-    return DependencyContinuation::make<DependencyCompute>(allocator);
+  definition.traits.workspace_bytes = 4096;
+  definition.start_result = [](const ResultProgramQuery&,
+                               const BufferAllocator& allocator) {
+    return ResultContinuation::make<DependencyCompute>(allocator);
   };
   auto registered = registry->register_operation(std::move(definition));
   if (!registered.ok())
@@ -116,7 +122,7 @@ int dependency_workflow(const std::shared_ptr<Device>& device) {
       device->allocation_capacity(sizeof(Parameters)).value();
   for (auto kind : {ResourceKind::Device, ResourceKind::Shared}) {
     for (const bool reject : {true, false}) {
-      Value retained;
+      ResultRef retained;
       {
         ExecutionContextConfig config;
         config.gpu_enabled = true;
@@ -135,16 +141,19 @@ int dependency_workflow(const std::shared_ptr<Device>& device) {
         } else {
           PS_CHECK(result.value().diagnostics.native_dispatch_count == 1);
           PS_CHECK(result.value().diagnostics.fallback_reasons.empty());
-          retained = result.value().values.at("result");
-          // execute() collects dependency fragments into host result storage.
+          retained = result.value().results.at("result");
+          // The Result keeps its native affine publication alive.
           const auto stats = context.resource_budget().value().statistics();
-          PS_CHECK(stats.live[kind] == 0);
+          PS_CHECK(stats.live[kind] == payload);
           PS_CHECK(stats.peak[kind] == payload + constants);
         }
       }
       if (!reject) {
         std::uint64_t value = 0;
-        std::memcpy(&value, retained.bytes().data(), 8);
+        PS_CHECK(retained
+                     .read_tensor(retained.descriptor().take_value(), 0, {0},
+                                  &value, 8)
+                     .ok());
         PS_CHECK(value == 7);
       }
     }
@@ -204,14 +213,14 @@ int compute(const std::shared_ptr<Device>& device) {
     {
       Invocation invocation(device, {}, budget.allocator());
       const auto* api = invocation.service();
-      PS_CHECK(api->backend == PS_GPU_BACKEND_VULKAN_V11);
+      PS_CHECK(api->backend == PS_GPU_BACKEND_VULKAN_V1);
       PS_CHECK(api->minimum_buffer_offset_alignment >= 4);
       std::uint64_t token = 0;
       PS_CHECK(
           api->buffer(api->context, storage.data(), count * 4, 1, &token) == 0);
-      const ps_gpu_buffer_binding_v11 binding{sizeof(binding), 0, token, 0,
-                                              count * 4,       1};
-      std::array<ps_gpu_dispatch_v11, 2> commands{
+      const ps_gpu_buffer_binding_v1 binding{sizeof(binding), 0, token, 0,
+                                             count * 4,       1};
+      std::array<ps_gpu_dispatch_v1, 2> commands{
           command(&binding, &parameters), command(&binding, &parameters)};
       // One dispatch selects the module's shape; the other checks it
       // explicitly.
@@ -257,8 +266,8 @@ int validation(const std::shared_ptr<Device>& device) {
     std::uint64_t token = 0;
     PS_CHECK(api->buffer(api->context, storage.data(), storage.size(), 1,
                          &token) == 0);
-    ps_gpu_buffer_binding_v11 binding{sizeof(binding), 0, token, 0,
-                                      storage.size(),  1};
+    ps_gpu_buffer_binding_v1 binding{sizeof(binding), 0, token, 0,
+                                     storage.size(),  1};
     auto dispatch = command(&binding, &parameters);
     if (mode == 0) {
       binding.offset = 1;
@@ -269,7 +278,7 @@ int validation(const std::shared_ptr<Device>& device) {
     if (mode == 2)
       dispatch.group[0] = 8;
     if (mode == 3)
-      dispatch.code_format = PS_GPU_CODE_MSL_V11;
+      dispatch.code_format = PS_GPU_CODE_MSL_V1;
     if (mode == 4)
       dispatch.source_size = 7;
     if (mode == 5) {
@@ -296,7 +305,7 @@ int validation(const std::shared_ptr<Device>& device) {
   std::uint64_t token = 0;
   PS_CHECK(api->buffer(api->context, storage.data() + offset, 4, 1, &token) ==
            0);
-  const ps_gpu_buffer_binding_v11 binding{sizeof(binding), 0, token, 0, 4, 1};
+  const ps_gpu_buffer_binding_v1 binding{sizeof(binding), 0, token, 0, 4, 1};
   auto dispatch = command(&binding, &parameters);
   PS_CHECK(api->execute(api->context, &dispatch, 1) == 0);
   for (std::size_t i = 0; i < storage.size(); i += 4) {
@@ -364,7 +373,7 @@ int cancellation(const std::shared_ptr<Device>& device) {
   const auto* api = invocation.service();
   std::uint64_t token = 0;
   PS_CHECK(api->buffer(api->context, storage.data(), 4, 1, &token) == 0);
-  const ps_gpu_buffer_binding_v11 binding{sizeof(binding), 0, token, 0, 4, 1};
+  const ps_gpu_buffer_binding_v1 binding{sizeof(binding), 0, token, 0, 4, 1};
   const Parameters parameters{1, 1, 1, 3, 7};
   auto dispatch = command(&binding, &parameters);
   execution_testing::ExecutionTestHooks hooks;
@@ -390,9 +399,9 @@ int numeric_probe(const std::shared_ptr<Device>& device) {
   std::uint64_t token = 0;
   PS_CHECK(api->buffer(api->context, buffer.data(), buffer.size(), 1, &token) ==
            0);
-  const ps_gpu_buffer_binding_v11 binding{sizeof(binding), 0, token, 0,
-                                          buffer.size(),   1};
-  ps_gpu_dispatch_v11 dispatch{};
+  const ps_gpu_buffer_binding_v1 binding{sizeof(binding), 0, token, 0,
+                                         buffer.size(),   1};
+  ps_gpu_dispatch_v1 dispatch{};
   dispatch.struct_size = sizeof(dispatch);
   dispatch.source =
       reinterpret_cast<const char*>(kNativeVulkanNumericProbeSpirv);
@@ -402,7 +411,7 @@ int numeric_probe(const std::shared_ptr<Device>& device) {
   dispatch.buffers = &binding;
   dispatch.buffer_count = 1;
   dispatch.grid[0] = dispatch.grid[1] = dispatch.grid[2] = 1;
-  dispatch.code_format = PS_GPU_CODE_SPIRV_V11;
+  dispatch.code_format = PS_GPU_CODE_SPIRV_V1;
   PS_CHECK(api->execute(api->context, &dispatch, 1) == 0);
   std::memcpy(values.data(), buffer.data(), sizeof(values));
   PS_CHECK(values[2] == values[0]);
@@ -417,7 +426,7 @@ int numeric_probe(const std::shared_ptr<Device>& device) {
 }  // namespace
 int main() {
   auto device = Device::create();
-  if (!device || device->backend() != PS_GPU_BACKEND_VULKAN_V11) {
+  if (!device || device->backend() != PS_GPU_BACKEND_VULKAN_V1) {
     std::cout << "Vulkan unavailable: native hardware tests skipped\n";
     return 77;
   }

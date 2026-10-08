@@ -6,35 +6,35 @@ category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
-clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
+verification_status: focused_and_installed_result_tests_passed
 ---
 
 # FMT-08: assign and remove semantic interpretation
 
-Runtime update (package 0.22.0): FMT-08A/B are implemented with canonical
-TensorDescription v3, typed encoding/sampling/ICC/OCIO resource descriptions,
-opaque annotations, atomic edits and exact planar/generic-numeric regional
-execution. See the [runtime schema and interfaces](../../../kernel-architecture/Tensor-Semantic-Metadata.md),
-[minimal public workflow](../../../../examples/metadata_workflow/README.md)
-and [measured performance](../../../../examples/metadata_performance/README.md).
-Proposed remains the specification decision status; external FMT-12/13 transform
-engines are not claimed by the metadata/resource implementation.
-
-
-Implementation update: package 0.20.0 [removes the legacy format/color code](FMT_legacy_retirement.md).
-Descriptions of old registrations below record the inspected baseline only;
-those keys and pixel callbacks are no longer available. The target decision remains Proposed; its CPU implementation is recorded above.
+FMT-08A and FMT-08B currently use Result operation ABI 2 in package 0.30.0,
+WorkflowDocument 4 and OperationTraits 21. The specification status remains
+Proposed; it is separate from the CPU implementation status. Current execution
+uses one Result tensor and preserves its logical structure and sample bits.
+Focused Result tests pass: `test_metadata_assignment`, `test_global_results`,
+`test_result_execution`, `test_result_metadata_budget` and
+`test_result_image_contracts` (5/5 CTest), the public workflow, and two installed
+consumer tests. The metadata-to-`channel.extract` configuration/resource chain
+is covered; a chain through `channel.assemble` is not. This does not claim that
+every FMT consumer has been validated. The older
+[metadata performance workload](../../../../examples/metadata_performance/README.md)
+measures the previous Value/planar path and is not current Result performance
+evidence. See the [Result implementation guide](../../../kernel-architecture/Tensor-Semantic-Metadata.md)
+and [public workflow](../../../../examples/metadata_workflow/README.md).
 
 Inherit [FMT-common](FMT_common_contract.md), its NUM execution/resource baseline,
 canonical straight/internal-alpha rules and the
 [kernel storage contract](../../../kernel-specs/Tensor-Storage-and-Region-Access.md).
-Members are [A assign/edit](FMT-08A_assign_metadata.md), a proposed native node,
-and [B remove](FMT-08B_remove_metadata.md), a compile-time deletion-only helper.
+Members are [A assign/edit](FMT-08A_assign_metadata.md), a registered Result CPU
+operation, and [B remove](FMT-08B_remove_metadata.md), a transactional authoring
+helper that lowers to A.
 The specification decision and the runtime implementation record remain distinct.
 
-## Purpose and inspected baseline
+## Purpose
 
 FMT-08 publishes a new immutable interpretation of unchanged numeric samples.
 A downstream consumer receives that result metadata; call-local override changes
@@ -42,13 +42,12 @@ only one invocation's source interpretation. Neither changes another consumer's
 input. Assigning new primaries, a unit, transfer or numeric decoder reinterprets
 stored values; it does not perform color, unit, transfer or encoding arithmetic.
 
-At the inspection commit, the legacy color.assign registration
-used Float32 rank-three input, Image output semantics and required dense output.
-Its callback copied
-sample bytes for the Parameter semantic rule. The inspected legacy contract
-also required typed target-domain validation. Those retired typed-image rules
-do not establish this generic immutable metadata/planar contract or its exact
-regional behavior. No old key is silently upgraded or aliased by this document.
+The current registrations accept one Result schema containing one tensor member
+and no fields. They update the `photospider.tensor-description` facet and
+opaque annotations while preserving source schema identity, tensor key, batches,
+physical layout and logical sample structure. Registered legacy `photospider.`
+facets other than `photospider.tensor-description` require explicit import and
+are rejected by these operations.
 
 ## Confirmed choices
 
@@ -64,22 +63,22 @@ regional behavior. No old key is silently upgraded or aliased by this document.
 | Staticness | Edit paths, descriptors and resource declarations are compile-time fixed. |
 | Missing deletion | error by default, ignore explicitly; empty edits/removal lists are legal. |
 | Layout | auto default; legal read-only view where possible, otherwise materialize; forced view fails if impossible. |
-| Implementation | A native; B transactionally expands into A with no set entries. |
+| Implementation | A is a Result CPU operation; B transactionally expands into A with no set entries. |
 
 ## Ports, scope and parameters
 
-A takes one `input` tensor and returns one `values` tensor. B takes a graph and
-input edge and returns a single values edge. Dtype, rank, logical extents and
-index order are unchanged. The target dtypes are UInt8/UInt16/Int8/Int16/Int64/
-Float32/Float64, with missing native widths remaining implementation dependencies.
-Rank 1..8, positive extents and checked logical-size limits inherit NUM/FMT.
-An annotation does not make an unsupported runtime dtype available.
+A takes one `input` Result and returns one `values` Result. Its schema contains
+exactly one tensor member and no fields. B takes a workflow document and input
+edge and returns the `values` edge of a lowered A node. The current tensor
+dtypes are UInt8, UInt16, Int8, Int16, Int64, Float32 and Float64; rank is 1..8.
+The operation preserves schema id, tensor key, batch axes, layout and atomic
+metadata. Unsupported registered facets are rejected rather than reinterpreted.
 
-Parameters below are logical typed metadata/path records, not an invented
-serialization of the current v1 facet codec. Their canonical codec, schema
-registry and immutable result metadata representation are implementation
-prerequisites. The named CPU strict/Apple Silicon/x86-64 keys have identical
-sample bits and descriptor behavior; no numerical approximation applies.
+The public `MetadataOptions` API carries typed metadata values and paths. The
+authoring helper serializes a bounded edit transaction into the node; the
+runtime facet is canonical tensor-description v4 or v5. The registered CPU
+profiles are strict, Apple Silicon accelerated and x86-64 accelerated. The
+selected profile does not change metadata or sample-bit semantics.
 
 | Parameter | Definition / authoring default |
 | --- | --- |
@@ -220,13 +219,12 @@ certificate. Other consumers keep their own interpretations/evidence.
 
 ## Exact requests, layouts and dirty mapping
 
-For output Q, Data support is exactly the same input coordinates Q. A legal view
-need not dereference/copy those bytes, but valid source coverage and declared DAG
-support are still required; no view manufactures a successful missing observation.
-Materialization reads/copies only Q. The operation introduces no pixel Validation
-or Control dependency. Static metadata, referenced resources and consumed source
-descriptions form Descriptor dependencies, independent of Q. A descriptor-only
-inference query needs no source pixel execution.
+For output Q, Result Need requests Data support for exactly Q and Descriptor
+support for the input description. The Result role mask is 9: Data (1) plus
+Descriptor (8), with no Validation or Control role. The dependency-v2 relation
+maps each output coordinate to the same input coordinate and records the
+independent descriptor dependency. Metadata specialization scans descriptors
+and facets, never sample values.
 
 Dirty input samples map identically to output coordinates. A description/resource
 change invalidates semantic inference and downstream consumers that use it,
@@ -234,15 +232,15 @@ even when pixels are identical. There is no spatial resampling or complete-color
 closure. Required upstream Whole work and intrinsic producer failures retain
 their original scope. A partial request does not produce all tensor coverage.
 
-Auto shares a legal immutable backing via an independent target-metadata result
-header when possible; otherwise copies Q into new admitted storage. View requires
-that representation and fails ViewUnavailable rather than copying. Materialize
-always creates new owned requested coverage, including for semantic identity.
-No mode mutates the source header or changes numeric values. All modes must pass
-the same structural/target checks; automatic copy cannot hide a metadata error.
-Image allocations remain planar with the fixed DAG tile geometry, one virtual
-span and explicit required-page backing. View retention is ordinary storage
-ownership, not a forbidden external alpha association.
+Auto and view first publish a Result view retaining source backing, resource
+owners and association. Auto copies only when the requested physical view returns
+`ViewUnavailable`; forced view returns that error. Materialize copies each
+requested region through a transactional Result writer and checks cancellation
+at least once per 256 samples. Copying preserves each element's bytes, including
+NaNs, infinities and signed zero. All policies retain the source publication
+policy and layout, use same-coordinate support and never mutate the source
+Result. An empty output request uses a stateless continuation and publishes an
+empty Result without requesting sample payload.
 
 ## Algorithms, resources and errors
 
@@ -259,17 +257,14 @@ Admit simultaneous source/result owners, metadata headers, dependency/path maps,
 resources, windows, scratch and actual backing. Deduplicate shared resources.
 A view may retain a larger original backing; logical sample bytes are not an RSS
 bound. Deleted metadata does not promise immediate physical resource release
-while the input or another consumer owns it. Poll cancellation/currentness at
-most every 1024 metadata/copy entries, within bounded resource-validation work,
-and before publication. Release unpublished candidate resources on failure.
+while the input or another consumer owns it. Resource admission and publication
+check cancellation/currentness; copy execution checks cancellation within each
+run of at most 256 samples. Release unpublished candidate resources on failure.
 Use host scheduling, no private pool, eviction, replay or mutable shared cache.
 
-Initial optional sample-only result caching is disabled; a future cache must
-include source and target descriptions, static edits/modes, resource identities,
-layout and exact coverage. Equal pixel bytes do not make differently assigned
-color/profile/alpha interpretations interchangeable. Optimizers may eliminate
-copying only while preserving the full description effect and dependency/error
-semantics; they cannot erase an assignment as a numerical identity.
+Result caching is disabled for these operations. Equal pixel bytes do not make
+differently assigned interpretations interchangeable. Any future optimization
+must preserve metadata effects, dependency and error behavior.
 
 | Failure | Phase | Status / reason |
 | --- | --- | --- |
@@ -293,17 +288,10 @@ conflicts, exact partial requests and upstream failures. Verify profile/resource
 retention, context-independent produced views, final release, budget/cancel
 rollback and optimizer/cache preservation of semantic effects.
 
-Implementation requires canonical metadata/path/resource codecs, registered
-schema dependencies, immutable same-backing result descriptions, generic planar
-copy/view execution and the proposed native/helper interfaces. Deliver actual
-public compile/execute workflows with sample-byte and descriptor assertions.
-Benchmark large planar inputs with many metadata records, patch versus replacement
-and cascade, view versus materialize, full and one-channel/tile-crossing requests;
-report metadata/copy work, pixels read, backing and retained resource peaks plus
-build/profile/ISA and timing. Runtime and benchmark evidence is linked in the update above.
-
-Documentation checks covered local links/front matter/whitespace, independent
-expected metadata snapshots and a dependency-closure example, plus exact-bit
-copy fixtures including signaling NaN and Int64 maximum. These are specification
-examples, not tests of a registered metadata node, schema validator, resource
-lifetime implementation or physical view backend.
+The current focused CTest set passes 5/5: `test_metadata_assignment`,
+`test_global_results`, `test_result_execution`, `test_result_metadata_budget`,
+and `test_result_image_contracts`. The public workflow and two installed
+consumer tests also pass. These checks do not cover composition with migrated
+`channel.extract` or `channel.assemble` operations. Performance measurements in
+the older metadata workload cover the previous Value/planar path and are not
+Result execution evidence.

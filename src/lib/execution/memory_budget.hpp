@@ -212,22 +212,26 @@ class MemoryReservation final
     auto lease = std::make_shared<Allocation>();
     lease->metadata_lease = std::move(metadata);
     lease->owner = shared_from_this();
-    std::lock_guard<std::mutex> lock(budget_->mutex_);
+    std::unique_lock<std::mutex> lock(budget_->mutex_);
     if (sealed_ || bytes > capacity_ - used_)
       return Result<std::shared_ptr<void>>(
           Status::failure(ErrorCode::ResourceExhausted,
                           "operation exceeds reserved working set"));
-    if (shared && resource_lease_.valid()) {
-      auto status = resource_lease_.add_shared_payload(bytes);
-      if (!status.ok())
-        return Result<std::shared_ptr<void>>(status);
-    }
     used_ += bytes;
     budget_->live_ += bytes;
     observation_->live += bytes;
     observation_->peak = std::max(observation_->peak, observation_->live);
     peak_ = std::max(peak_, used_);
     lease->bytes = bytes;
+    lock.unlock();
+    // The provisional allocation pins its payload through concurrent seal().
+    // Root admission can retire other cached allocations, whose destructors
+    // take the MemoryBudget lock. Rollback uses the same Allocation destructor.
+    if (shared && resource_lease_.valid()) {
+      auto status = resource_lease_.add_shared_payload(bytes);
+      if (!status.ok())
+        return Result<std::shared_ptr<void>>(status);
+    }
     lease->shared = shared;
     return Result<std::shared_ptr<void>>(std::move(lease));
   }
@@ -346,46 +350,57 @@ inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(
   if (bytes > maximum_)
     return Result<std::shared_ptr<MemoryReservation>>(Status::failure(
         ErrorCode::ResourceExhausted, "minimum working set exceeds budget"));
-  while (reserved_ > maximum_ - bytes) {
-    if (reclaim) {
-      const auto epoch = admission_epoch_;
-      lock.unlock();
-      reclaim();
-      lock.lock();
-      if (reserved_ <= maximum_ - bytes)
-        break;
-      // A producer can publish a new cache entry while reclamation runs.
-      // Revisit it after its admission/seal transition before declaring
-      // failure.
-      if (epoch != admission_epoch_)
-        continue;
-    }
-    if (stop) {
-      const auto code = stop();
-      if (code != ErrorCode::Ok) {
-        Status failure;
-        failure.code = code;
-        return Result<std::shared_ptr<MemoryReservation>>(std::move(failure));
+  for (;;) {
+    while (reserved_ > maximum_ - bytes) {
+      if (reclaim) {
+        const auto epoch = admission_epoch_;
+        lock.unlock();
+        reclaim();
+        lock.lock();
+        if (reserved_ <= maximum_ - bytes)
+          break;
+        // A producer can publish a new cache entry while reclamation runs.
+        // Revisit it after its admission/seal transition before declaring
+        // failure.
+        if (epoch != admission_epoch_)
+          continue;
       }
+      if (stop) {
+        const auto code = stop();
+        if (code != ErrorCode::Ok) {
+          Status failure;
+          failure.code = code;
+          return Result<std::shared_ptr<MemoryReservation>>(std::move(failure));
+        }
+      }
+      if (!stop || active_ == 0)
+        return Result<std::shared_ptr<MemoryReservation>>(
+            Status::failure(ErrorCode::ResourceExhausted,
+                            "retained results exhaust available budget"));
+      changed_.wait_for(lock, std::chrono::milliseconds(2));
     }
-    if (!stop || active_ == 0)
-      return Result<std::shared_ptr<MemoryReservation>>(
-          Status::failure(ErrorCode::ResourceExhausted,
-                          "retained results exhaust available budget"));
-    changed_.wait_for(lock, std::chrono::milliseconds(2));
-  }
-  if (resources_) {
-    constexpr auto metadata =
-        sizeof(MemoryReservation) + sizeof(MemoryObservation);
-    if (bytes > UINT64_MAX - metadata)
-      return Result<std::shared_ptr<MemoryReservation>>(
-          Status{ErrorCode::ResourceExhausted, {}});
-    auto capacity = ResourceCapacity::host(bytes + metadata, metadata);
-    capacity[ResourceKind::Payload] = bytes;
-    auto admitted = resources_->reserve(capacity);
-    if (!admitted.ok())
-      return Result<std::shared_ptr<MemoryReservation>>(admitted.status());
-    reservation->resource_lease_ = admitted.take_value();
+    if (resources_) {
+      constexpr auto metadata =
+          sizeof(MemoryReservation) + sizeof(MemoryObservation);
+      if (bytes > UINT64_MAX - metadata)
+        return Result<std::shared_ptr<MemoryReservation>>(
+            Status{ErrorCode::ResourceExhausted, {}});
+      auto capacity = ResourceCapacity::host(bytes + metadata, metadata);
+      capacity[ResourceKind::Payload] = bytes;
+      lock.unlock();
+      auto admitted = resources_->reserve(capacity);
+      if (!admitted.ok())
+        return Result<std::shared_ptr<MemoryReservation>>(admitted.status());
+      lock.lock();
+      if (reserved_ > maximum_ - bytes) {
+        lock.unlock();
+        admitted = Result<ResourceLease>(ResourceLease{});
+        lock.lock();
+        continue;
+      }
+      reservation->resource_lease_ = admitted.take_value();
+    }
+    break;
   }
   reservation->capacity_ = bytes;
   reservation->planned_ = bytes;

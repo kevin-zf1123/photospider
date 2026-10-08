@@ -61,47 +61,6 @@ inline void close(const ps::Value& value, const std::vector<float>& expected,
         "float sample oracle failed");
   }
 }
-inline ps::WorkflowDocument document(
-    const std::vector<ps::Value>& inputs,
-    const std::vector<ps::WorkflowNode>& nodes) {
-  ps::WorkflowDocument doc;
-  for (std::size_t i = 0; i < inputs.size(); ++i)
-    doc.inputs.push_back({i + 1, "input" + std::to_string(i),
-                          inputs[i].descriptor(), inputs[i].region(),
-                          inputs[i].layout(), inputs[i].facets()});
-  doc.nodes = nodes;
-  doc.outputs = {{"result", nodes.back().id, "value"}};
-  return doc;
-}
-inline ps::ExecutionBindings bindings(const std::vector<ps::Value>& inputs) {
-  ps::ExecutionBindings result;
-  for (std::size_t i = 0; i < inputs.size(); ++i)
-    result.inputs.push_back({"input" + std::to_string(i), inputs[i]});
-  return result;
-}
-inline ps::Result<ps::ExecutionResult> evaluate(
-    const std::vector<ps::Value>& inputs,
-    const std::vector<ps::WorkflowNode>& nodes,
-    ps::PlanningOptions options = {}) {
-  auto registry = ps::make_default_operation_registry();
-  ps::GraphContext graph(document(inputs, nodes));
-  auto compiled = ps::Compiler(registry).compile(graph, options);
-  if (!compiled.ok())
-    return ps::Result<ps::ExecutionResult>(compiled.status());
-  ps::ExecutionContext execution(registry);
-  return execution.execute(compiled.value().plan, bindings(inputs));
-}
-inline ps::Result<ps::ExecutionResult> operation(
-    const std::string& key, const std::vector<ps::Value>& inputs,
-    const Parameters& parameters = {}) {
-  std::vector<ps::WorkflowInput> refs;
-  for (std::size_t i = 0; i < inputs.size(); ++i)
-    refs.push_back(ps::WorkflowInputReference{i + 1});
-  return evaluate(inputs, {{1, key, refs, parameters}});
-}
-inline ps::Value output(ps::Result<ps::ExecutionResult> result) {
-  return take(std::move(result)).values.at("result");
-}
 inline void rejected(const ps::Result<ps::ExecutionResult>& result,
                      ps::ErrorCode code) {
   require(!result.ok() && result.status().code == code,

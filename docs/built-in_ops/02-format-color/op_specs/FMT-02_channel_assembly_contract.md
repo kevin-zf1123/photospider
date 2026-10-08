@@ -7,30 +7,26 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-02: channel assembly and concatenation family
 
-Implementation: package 0.21.0 registers A/B/C CPU profiles with exact byte
-mapping, tensor-description v2, canonical static parameters, and legal retained
-views. See the [public API and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-02-channel-assembly)
-and [performance workflow](../../../../examples/channel_assembly_performance/README.md).
-Decision status remains Proposed; implementation facts below supersede the
-historical inspection's missing-runtime statements.
+Runtime contract: A/B/C and the scalar literal provider are registered as
+twelve Result operation ABI 2 CPU keys: `assemble`, `concatenate`,
+`assemble_mapped`, and `scalar_literal`, each with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
+The public authoring helpers are installed in
+`photospider/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
+specification decision remains Proposed; implementation status is recorded
+separately. The performance guide records small current Result smoke cases separately from
+historical Value/planar measurements; no full Result benchmark matrix is claimed.
 
-
-Implementation update: package 0.20.0 [removes the legacy format/color code](FMT_legacy_retirement.md).
-Descriptions of old registrations below record the inspected baseline only;
-those keys and pixel callbacks are no longer available. The old registration remains retired; the new FMT-02 family is implemented separately.
 
 This is the operator-local clarification for the Proposed FMT-02 family. Inherit
 [FMT-common](FMT_common_contract.md), the NUM numerical/resource conventions
 referenced there, and the accepted
 [kernel storage contract](../../../kernel-specs/Tensor-Storage-and-Region-Access.md).
-Confirmed decisions describe the target; they do not register or implement an API.
-Its independently specified members are
+The specification remains Proposed while the current runtime implementation is
+described separately. Its independently specified members are
 [FMT-02A assembly](FMT-02A_assemble_channels.md),
 [FMT-02B concatenation](FMT-02B_concatenate_channels.md) and
 [FMT-02C mapped assembly](FMT-02C_assemble_mapped_channels.md).
@@ -85,21 +81,31 @@ assembly a consumer of pixel-domain color or alpha constraints. A later semantic
 consumer validates the samples it actually uses. Assembly grants no new
 sample-validity certificate merely because a complete output description exists.
 
-## Historical inspection and explicit migration boundary
+## Current Result interface and bounds
 
-At the inspected commit, the legacy
-`channel.merge`
-registers two to four rank-two Float32/Float64 inputs, a required `semantic`
-parameter, and a typed output with a channel-last shape. This registration is
-not the proposed FMT-02 family. Package 0.19's
-[registry gates](../../../../src/lib/plugin/operation_registry.cpp) reject legacy
-image outputs before their callbacks; generic non-image uses remain separate.
-No compatibility with its former image numerical rules is selected here.
+The twelve registered keys use single-tensor Result inputs and outputs. Every
+connected input contributes Descriptor support, including inputs unused by the
+selected mapping; Data support includes only mapped sources in the requested
+output footprint. Each input descriptor contains one tensor and no fields.
+The implementation supports seven native dtypes by exact bit copy, preserves
+the Result schema id, tensor key, global metadata and publication policy, and
+rebuilds tensor facets from the inferred tensor description. Unknown source
+tensor facets are not copied. Batch axes form a cell-independent prefix and must match exactly across
+nonscalar sources; a scalar literal is represented by an explicit unbatched
+shape-[1] source. The full input and output sample counts are bounded by 2^40,
+and the full sample rank, including batch and cell axes, is at most 8. `axis`,
+`input_axes`, and `output_axis` index cell axes and exclude the Result batch
+prefix. Connected ports and static maps are bounded by implementation admission.
+Forced views require one CpuStorage owner and a single affine address expression
+for the complete requested region. Planar image views require ResultBuilder
+proof of consecutive planes from one root, correct plane order and row pitch.
+A forced view that lacks that proof returns `ViewUnavailable`; `auto` falls back
+to copying only for that status. Materialization reads only the requested
+regions. Scalar row replication uses bounded batches of at most 256 samples and
+checks work and cancellation during copying.
 
-At that inspection, PlanarImage storage alone did not establish FMT-02 support.
-Package 0.21.0 supplies the metadata codec, native dtypes, shape-changing exact
-mapping and A/B/C registrations documented in the implementation link above.
-Whole or Elementwise behavior does not replace that exact relation.
+The public Result workflow and implementation details are in the
+[architecture reference](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-02-channel-assembly).
 
 ## Clarification decisions
 
@@ -129,8 +135,9 @@ A receives equal-shape single-component tensors with no effective channel-axis
 designation. Its required static axis a inserts a new dimension at any position
 0..r in a rank-r input. It does not silently remove a singleton channel axis.
 An input such as [H,W,1] with a declared channel axis must first undergo explicit
-axis removal, or use B. The inherited positive rank-1..8 bounds imply that A
-accepts ranks 1..7 and produces ranks 2..8; scalar/rank-zero input is not added.
+axis removal, or use B. The cell-rank bounds imply that A accepts cell ranks 1..7 and produces cell
+ranks 2..8; batch axes also count toward the full sample-rank limit of 8.
+Scalar/rank-zero cell input is not added.
 
 For n inputs of shape S, A's output shape is insert(S,a,n). If j is an output
 coordinate and erase(j,a) removes its channel coordinate, the exact copy rule is:
@@ -144,7 +151,8 @@ explicit assertion, with FMT-common override/raw behavior. It never guesses an
 axis from shape. Removing ai from every input shape must yield the same ordered
 shape S; there is no implicit permutation of the remaining dimensions. Required
 static output_axis a inserts the combined channel extent into S. Inputs and
-output have the same rank, within the inherited rank-1..8 bound.
+output have the same cell rank, within the cell-rank bound 1..8; batch plus cell
+rank is at most 8.
 
 Let ci be the channel count of input i, p0=0 and p(i+1)=pi+ci using checked
 arithmetic. The output shape is insert(S,a,pn). For output channel k=j[a], find
@@ -225,11 +233,11 @@ are not propagated as a common output grid in raw mode.
 
 ## Interface and support matrix
 
-A/B/C target the default registry as separate primitives, with ordered repeated
-tensor inputs `inputs[0..n)` and one tensor output `values`. They do not consume
-a tensor collection as an opaque input; the authoring layer expands the selected
-collection entries into a static ordered input list. n>=1, subject to the shared
-kernel's compile-time port/graph limits and explicit resource admission. No
+A/B/C target the default registry as separate primitives, with 1..1024 ordered
+input Results in `inputs[0..n)`, each carrying one tensor, and one tensor output
+`values`. They do not consume a tensor collection as an opaque input; the
+authoring layer expands selected collection entries into this static ordered
+input list. Port and graph capacity still apply. No
 FMT-specific legacy two-to-four-input bound is inherited. All logical counts and
 channel prefix sums use checked arithmetic and the inherited 2^40-element bound.
 C specializes the static mapping/selection interface in its member specification.
@@ -245,9 +253,9 @@ the old `semantic` String parameter or new working runtime parameter kinds.
 | `input_overrides` | Static index-to-description map using the shared tensor metadata schema | Only for override; at least one valid input index. Replace the supplied inputs' effective descriptions for this call; other inputs retain theirs. |
 | `output_description` | Optional shared tensor metadata description, including per-channel definitions and explicit groups | Explicit channel/group fields authorize corresponding target reinterpretation in A/B/C. Match inferred shape/dtype/axes, propagate omitted applicable component fields and discard inapplicable model-dependent fields. No group or numerical conversion is guessed. |
 | `layout` | String: auto, view, materialize | auto; direct nodes provide it explicitly. |
-| A: `axis` | Int64 in [0,input_rank] | Required; insertion position, no negative shorthand. |
-| B: `input_axes` | Optional ordered list of n optional Int64 axis values, each in [0,input_rank) | Omitted entries require a unique effective metadata axis. Supplied entries assert agreement in respect/override; all entries are required in raw. |
-| B: `output_axis` | Int64 in [0,input_rank) | Required; no implicit channel-last default. |
+| A: `axis` | Int64 cell-axis index in [0,input_cell_rank] | Required; insertion position, no negative shorthand; excludes batch prefix. |
+| B: `input_axes` | Optional ordered list of n optional Int64 cell-axis indices, each in [0,input_cell_rank) | Omitted entries require a unique effective metadata axis. Supplied entries assert agreement in respect/override; all entries are required in raw. |
+| B: `output_axis` | Int64 cell-axis index in [0,input_cell_rank) | Required; no implicit channel-last default. |
 
 For A, an existing effective channel axis is an error, including extent one.
 Raw does not convert a physical image backing into another layout by clearing
@@ -260,7 +268,7 @@ possible without a complete image/color description.
 | Dimension | Strict / CPU accelerated target | Not promised |
 | --- | --- | --- |
 | Dtype | UInt8, UInt16, Int8, Int16, Int64, Float32, Float64, same across all inputs/output | Missing native widths require implementation; no implicit cast or Float16 extension. |
-| Rank | A: 1..7 to 2..8; B: 1..8 to same rank; C: mixed component/channel tensors with common nonchannel rank r, output rank r+1 in 1..8 | Rank zero, empty dimensions and dynamic arity are excluded; C with r=0 has channel-vector inputs only. |
+| Cell rank | A: 1..7 to 2..8; B: 1..8 to the same cell rank; C: output cell rank r+1 in 1..8 | Full sample rank includes batch and cell axes and is at most 8. Cell rank zero/empty dimensions and dynamic arity are excluded; C with r=0 has channel-vector inputs only. |
 | Values | Exact element bytes, including HDR/signed and IEEE special patterns | No ULP relaxation for copying; no color/alpha-domain scan. |
 | Input layout | Legal generic strided tensors and canonical planar image windows | Raw does not admit an interleaved image without explicit import. |
 | Output | auto/view/materialize with exact requested coverage | No cross-owner image representation or implicit packed ROI export. |
@@ -357,9 +365,10 @@ or temporary-file paging is introduced. Failed unpublished allocations roll
 back without losing existing valid regions. Poll cancellation/currentness and
 charge work at most every 1024 entries/elements during metadata validation,
 mapping, page preparation and copy, and immediately before publication.
-Initial member registrations disable optional sample-only completed-result
-caching; retained-owner sharing and dependency evidence remain enabled. A later
-cache requires the same physical-layout, owner and metadata proof as a fresh call.
+Prepared state is invocation-local. Reusing an immutable plan does not share
+mutable per-run payload state. Empty observations are stateless. ResultBuilder
+publication is transactional; a failed candidate leaves existing valid regions
+untouched.
 
 ## Reference algorithm and permitted optimizations
 
@@ -432,10 +441,10 @@ sample bits; descriptor/discrete results are exact. Include these cases:
   limits, cancellation, cache-off, and surviving result/windows after context
   teardown. Verify backing charges retire with the last owner.
 
-Implementation delivery must run an actual public WorkflowDocument/Compiler/
-ExecutionContext workflow through new member registrations, document commands
-and expected bytes, and exercise a partial channel ROI. Conceptual member DAGs
-and legacy test passes are not runtime evidence for the new interface.
+The public assembly integration fixture exercises WorkflowDocument, Compiler,
+ExecutionContext, exact output bytes and partial channel ROIs. The current
+performance guide records focused Result smoke coverage and keeps the historical
+Value/planar timings separate.
 
 Benchmark correctness first, then A assembling four independent Float32
 [4096,4096] planes and B concatenating RGB plus alpha for the same spatial
@@ -451,17 +460,18 @@ metadata/staging peak and retained owners. No throughput guarantee is inferred.
 Repository contracts and source links above establish the inspected baseline.
 The byte-copy and index equations are specified directly; no external commercial
 pixel-compatibility claim is made (U: unverified under the template's convention).
-No operator-local behavior question remains open. The package 0.21.0 implementation supplies shared metadata v2, optional-axis and
-indexed-override encodings, native dtypes, exact dependency/publication support,
-legal views and the member registrations. Runtime results and platform limits
-are recorded in the linked implementation and performance guides.
+No operator-local behavior question remains open. The current implementation supplies canonical metadata and mapping encodings,
+native dtypes, exact dependency/publication support, legal view checks and the
+member registrations. The performance guide records small byte-oracle-checked Result smokes; its older
+Value/planar measurements remain historical and do not measure Result latency.
 
 Documentation-level verification compared independent coordinate scatter and
 gather equations for 105 A cases, 141 B cases and 204 C cases across legal ranks
 and axis positions. C checks included mixed component/channel sources, repeated
 selection, selected-source support, dirty fan-out, and invalid destination maps.
-These 450 cases check the specified index equations; they neither execute a
-registered FMT operator nor establish physical storage or metadata conformance.
+These 450 cases check the specified index equations only; integration execution,
+metadata projection and physical storage are verified by the current CPU test
+suite described in the architecture reference.
 
 ## Canonical image alpha constraint
 

@@ -120,6 +120,8 @@ int token_lifetime(const std::shared_ptr<ps::gpu_internal::Device>& device) {
   auto allocator = device->allocator(ps::BufferAllocator());
   ps::gpu_internal::Invocation invocation(device, {});
   const auto* api = invocation.service();
+  PS_CHECK(api->struct_size == sizeof(*api) &&
+           api->abi_version == PS_GPU_ABI_VERSION_1);
   auto storage = allocator.allocate(16).take_value();
   auto owner = std::move(storage).freeze();
   std::weak_ptr<const ps::CpuStorage> weak = owner;
@@ -169,9 +171,9 @@ int complete_groups(const std::shared_ptr<ps::gpu_internal::Device>& device) {
       "threadgroup_barrier(mem_flags::mem_threadgroup);"
       "if(i==0){uint sum=0;for(uint "
       "k=0;k<12;++k)sum+=values[k];out[g.y*2+g.x]=sum;}}";
-  const ps_gpu_buffer_binding_v11 binding{
-      sizeof(ps_gpu_buffer_binding_v11), 0, token, 0, 16, 1};
-  ps_gpu_dispatch_v11 command{};
+  const ps_gpu_buffer_binding_v1 binding{
+      sizeof(ps_gpu_buffer_binding_v1), 0, token, 0, 16, 1};
+  ps_gpu_dispatch_v1 command{};
   command.struct_size = sizeof(command);
   command.source = shader;
   command.source_size = sizeof(shader) - 1;
@@ -220,7 +222,7 @@ int main() {
   const char metadata_shader[] =
       "#include <metal_stdlib>\nusing namespace metal;\n"
       "kernel void metadata(device uint* out [[buffer(0)]]) {out[0]=7;}";
-  ps_gpu_dispatch_v11 metadata_command{};
+  ps_gpu_dispatch_v1 metadata_command{};
   metadata_command.struct_size = sizeof(metadata_command);
   metadata_command.source = metadata_shader;
   metadata_command.source_size = sizeof(metadata_shader) - 1;
@@ -258,10 +260,10 @@ int main() {
         "kernel void scale(device const float* a [[buffer(0)]], "
         "device float* b [[buffer(1)]], uint i [[thread_position_in_grid]])"
         "{b[i]=a[i]*.5f;}";
-    ps_gpu_buffer_binding_v11 buffers[] = {
-        {sizeof(ps_gpu_buffer_binding_v11), 0, source, 0, 16, 0},
-        {sizeof(ps_gpu_buffer_binding_v11), 1, destination, 0, 16, 1}};
-    ps_gpu_dispatch_v11 command{};
+    ps_gpu_buffer_binding_v1 buffers[] = {
+        {sizeof(ps_gpu_buffer_binding_v1), 0, source, 0, 16, 0},
+        {sizeof(ps_gpu_buffer_binding_v1), 1, destination, 0, 16, 1}};
+    ps_gpu_dispatch_v1 command{};
     command.struct_size = sizeof(command);
     command.source = shader;
     command.source_size = sizeof(shader) - 1;
@@ -319,9 +321,9 @@ int main() {
         "kernel void work(device uint* out [[buffer(0)]], "
         "uint i [[thread_position_in_grid]]) {uint v=i;"
         "for(uint j=0;j<100000;++j)v=1664525u*v+1013904223u;out[i]=v;}";
-    const ps_gpu_buffer_binding_v11 binding{
-        sizeof(ps_gpu_buffer_binding_v11), 0, token, 0, 16, 1};
-    ps_gpu_dispatch_v11 command{};
+    const ps_gpu_buffer_binding_v1 binding{
+        sizeof(ps_gpu_buffer_binding_v1), 0, token, 0, 16, 1};
+    ps_gpu_dispatch_v1 command{};
     command.struct_size = sizeof(command);
     command.source = shader;
     command.source_size = sizeof(shader) - 1;

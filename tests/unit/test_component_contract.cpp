@@ -76,19 +76,15 @@ Result<ResultRef> filter(const ResourceBudget& root, const ComponentsSpec& spec,
   if (!started.ok())
     return Result<ResultRef>(started.status());
   auto continuation = started.take_value();
-  ResultValueInputs values;
+
   ResultObjectInputs objects{{0, labels}, {1, index}};
   ResourceVector<ResultIoReply> io;
   auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
   for (unsigned step = 0; step < 128; ++step) {
     ResultProgramPhase phase{
-        query,
-        values,
-        objects,
-        io,
-        allocator,
-        root,
-        [&](std::uint64_t work) { return root.consume({work}); },
+        query,  objects,
+        io,     allocator,
+        root,   [&](std::uint64_t work) { return root.consume({work}); },
         failure};
     auto polled = continuation.poll(phase);
     if (!polled.ok())
@@ -125,6 +121,55 @@ int main() {
       !component_filter_schema({1, 1, 1, ComponentIdScheme::CompactMinOrder})
            .ok());
   const ComponentsSpec spec{1, 5, 2};
+  {
+    OperationRegistry registry;
+    PS_CHECK(registry
+                 .register_operation(take(make_component_operation(
+                     ComponentOperation::Labels, spec)))
+                 .ok());
+    PS_CHECK(registry.freeze().ok());
+    SchemaTemplate source_schema;
+    source_schema.id = "test.components.mask";
+    ResultTensorSpec tensor;
+    tensor.key = "mask";
+    tensor.descriptor = {ElementType::UInt8, {1, 5}};
+    source_schema.tensors.push_back(tensor);
+    ResultProgramMetadata metadata;
+    metadata.inputs.resize(1);
+    metadata.output.result_schema =
+        std::make_shared<const SchemaTemplate>(take(components_schema(spec)));
+    const std::map<std::string, ParameterValue> parameters;
+    ResultProgramQuery query(metadata, parameters);
+    query.semantic_key = "labels-input";
+    ResourceBudget admission;
+    for (unsigned invalid = 0; invalid < 6; ++invalid) {
+      auto bad = source_schema;
+      if (invalid == 0)
+        bad.tensors[0].descriptor.shape = {5, 1};
+      if (invalid == 1)
+        bad.tensors[0].descriptor.element_type = ElementType::Int64;
+      if (invalid == 2)
+        bad.fields = {{"extra", ElementType::UInt8, {}, {}}};
+      if (invalid == 3)
+        bad.tensors.push_back(tensor);
+      if (invalid == 4)
+        bad.tensors[0].batch_axes = {2};
+      if (invalid == 5)
+        bad.tensors[0].facets = {{"test.annotation", 1, {0}}};
+      metadata.inputs[0].result_schema =
+          std::make_shared<const SchemaTemplate>(bad);
+      auto started = registry.start_result("components4.labels", query,
+                                           admission.allocator());
+      PS_CHECK(!started.ok() &&
+               started.status().code == ErrorCode::TypeMismatch);
+      PS_CHECK(admission.statistics().peak[ResourceKind::Host] == 0);
+    }
+    metadata.inputs[0].result_schema =
+        std::make_shared<const SchemaTemplate>(source_schema);
+    auto started = registry.start_result("components4.labels", query,
+                                         admission.allocator());
+    PS_CHECK(started.ok());
+  }
   ResourceBudget root;
   auto over_count =
       fixture(root, take(components_schema({1, 1, 0})), {{1}, {1, 1, 0}});
@@ -164,6 +209,14 @@ int main() {
            foreign.status().reason == FailureReason::InvalidAssociation &&
            reads == 0);
   auto output = take(filter(root, spec, labels, index, 2, &reads));
+  auto relation = take(output.relation(0));
+  PS_CHECK(take(relation.intersects(
+                    0, {{0, 7, 1, 1, ResultSupportTarget::Field, 1}}, 64))
+               .value_or(false));
+  PS_CHECK(!take(relation.intersects(
+                     0, {{0, 7, 2, 1, ResultSupportTarget::Field, 1}}, 64))
+                .value_or(true));
+
   auto page = take(
       take(output.prepare_read(take(output.descriptor()), 0, 0, 5)).load(5));
   const std::uint8_t expected[]{1, 1, 0, 1, 1};

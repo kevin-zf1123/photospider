@@ -37,7 +37,7 @@ class PHOTOSPIDER_API ValueFragments final {
    * @param resources Facet resources, inferred from the first fragment when
    * omitted. Empty CMYK coverage still requires explicit owning resources.
    * @return Complete fragments or InvalidArgument/TypeMismatch/NotFound (hole),
-   * ResourceExhausted/Cancelled. Typed images require full C in every fragment.
+   * ResourceExhausted/Cancelled. Typed tensors require full C in every fragment.
    */
   static Result<ValueFragments> create(ValueDescriptor descriptor,
                                        std::vector<ValueFacet> facets,

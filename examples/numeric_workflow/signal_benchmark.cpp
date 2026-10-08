@@ -30,6 +30,67 @@ T take(ps::Result<T> result) {
     throw std::runtime_error(result.status().message);
   return result.take_value();
 }
+ps::SchemaTemplate source_schema(const ps::Value& value) {
+  ps::SchemaTemplate schema;
+  schema.id = "benchmark.input";
+  ps::ResultTensorSpec tensor;
+  tensor.key = "data";
+  tensor.descriptor = value.descriptor();
+  tensor.facets = value.facets();
+  for (const auto& facet : tensor.facets)
+    if (facet.key == "photospider.color-array")
+      tensor.atomic_trailing_axes = 1;
+  schema.tensors.push_back(std::move(tensor));
+  return schema;
+}
+ps::ResultRef source(const ps::ResourceBudget& root, const ps::Value& value,
+                     const ps::SchemaTemplate& schema) {
+  auto builder = take(ps::ResultBuilder::start(
+      root, schema, "benchmark.source", {}, {}, 128, 128, value.resources()));
+  require(builder
+              .bind_descriptor_relation(
+                  take(ps::ResultRelation::cartesian(root, 1, {})))
+              .ok(),
+          "benchmark source descriptor");
+  // Immutable caller storage is admitted as Referenced without copying it
+  // into the execution Root's Payload capacity.
+  require(builder
+              .publish_tensor(
+                  0, value.region(), value.layout(), value.storage(),
+                  take(ps::ResultRelation::cartesian(
+                      root, take(schema.tensors[0].sample_count()), {})),
+                  {true, true, true, true})
+              .ok(),
+          "benchmark source Result publication");
+  return take(builder.seal());
+}
+ps::ExecutionBindings bind_sources(const ps::ResourceBudget& root,
+                                   const std::vector<ps::Value>& sources,
+                                   const ps::WorkflowDocument& document) {
+  ps::ExecutionBindings bindings;
+  for (std::size_t i = 0; i < sources.size(); ++i)
+    bindings.inputs.push_back(
+        {document.inputs[i].name,
+         source(root, sources[i], *document.inputs[i].result_schema)});
+  return bindings;
+}
+std::uint64_t read_bits(const ps::ResultRef& result,
+                        const ps::ResultDescriptor& descriptor,
+                        const std::vector<std::uint64_t>& at,
+                        std::size_t width) {
+  std::vector<ps::RegionDimension> dimensions;
+  for (auto coordinate : at)
+    dimensions.push_back({coordinate, 1});
+  const auto window = take(
+      result.acquire_tensor(descriptor, 0, ps::Region(std::move(dimensions))));
+  const auto row = take(window.row_run(at));
+  require(
+      width == ps::Value::element_size(window.spec().descriptor.element_type),
+      "benchmark sample width");
+  std::uint64_t bits = 0;
+  std::memcpy(&bits, row.data, width);
+  return bits;
+}
 ps::Value array(ps::ElementType type, const std::vector<std::uint64_t>& shape,
                 const std::vector<std::uint64_t>& bits) {
   const auto width = ps::Value::element_size(type);
@@ -50,15 +111,15 @@ struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
+  std::vector<ps::Value> sources;
   Fixture(ps::WorkflowNode node, const std::vector<ps::Value>& inputs) {
     for (std::size_t i = 0; i < inputs.size(); ++i) {
       const auto& value = inputs[i];
       const auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1, name, value.descriptor(),
-                                 value.region(), value.layout(),
-                                 value.facets()});
-      bindings.inputs.push_back({name, value});
+      document.inputs.push_back(
+          {i + 1, name,
+           std::make_shared<ps::SchemaTemplate>(source_schema(value))});
+      sources.push_back(value);
     }
     document.outputs = {{"values", node.id, "values"}};
     document.nodes = {std::move(node)};
@@ -78,6 +139,8 @@ struct Fixture {
     config.result_cache_bytes = cache ? cache_bytes : 0;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(registry, config);
+    auto bindings =
+        bind_sources(take(context.resource_budget()), sources, document);
     auto snapshot = context.freeze(plan.value().plan, bindings);
     if (!snapshot.ok())
       return ps::Result<ps::DemandResult>(snapshot.status());
@@ -205,7 +268,7 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
       fixture.document.outputs = {{"result", 1, output}};
       auto wanted = region({size}, std::move(regions));
       ps::ResourceBudget budget;
-      ps::ValueFragments retained;
+      ps::ResultRef retained;
       std::vector<std::int64_t> times;
       std::uint64_t source_elements = 0;
       {
@@ -218,7 +281,8 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
         config.managed_resources = ps::ResourceLimits{};
         ps::ExecutionContext context(fixture.registry, config);
         budget = take(context.resource_budget());
-        auto frozen = take(context.freeze(plan.plan, fixture.bindings));
+        auto bindings = bind_sources(budget, fixture.sources, fixture.document);
+        auto frozen = take(context.freeze(plan.plan, bindings));
         ps::ExecutionOptions options;
         options.maximum_dependency_work = UINT64_C(64) * 1024 * 1024 * 1024;
         options.dependencies.maximum_work = UINT64_C(32) * 1024 * 1024 * 1024;
@@ -236,12 +300,11 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
           source_elements = 0;
           for (const auto& support : take(result.dependencies.source_support()))
             source_elements += take(support.second.element_count());
+          const auto& output_result = result.results.at("result");
+          const auto descriptor = take(output_result.descriptor());
           for (unsigned i = 0; i < count; ++i) {
-            std::uint64_t bits = 0;
-            require(result.values.at("result")
-                        .read({operation < 2 ? i : 4 * i + 2}, &bits, width)
-                        .ok(),
-                    "benchmark read");
+            auto bits = read_bits(output_result, descriptor,
+                                  {operation < 2 ? i : 4 * i + 2}, width);
             if (narrow) {
               const auto word = static_cast<std::uint32_t>(bits);
               float value;
@@ -254,7 +317,7 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected,
                            : numeric_accuracy(bits, expected[i], profile),
                     "independent analytic benchmark bits");
           }
-          retained = result.values.at("result");
+          retained = output_result;
         }
       }
       std::sort(times.begin(), times.end());

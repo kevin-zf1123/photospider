@@ -68,6 +68,13 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def comparable_counters(rows):
+    modes = {row["mode"] for row in rows}
+    if len(modes) != 1:
+        raise RuntimeError("cannot compare different benchmark modes")
+    return ("checksum", "accepted", "reference", "refinements", "math_work") if modes == {"math"} else ("checksum",)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", required=True, type=Path)
@@ -183,7 +190,7 @@ def main():
         if any(len(rows) != args.pairs for rows in variants.values()):
             continue
         # All runs, not just each matched pair, must agree on output and work.
-        for key in ("checksum", "accepted", "reference", "refinements", "math_work"):
+        for key in comparable_counters([row for rows in variants.values() for row in rows]):
             values = {row[key] for rows in variants.values() for row in rows}
             if len(values) != 1:
                 failures.append(f"{name}: nonidentical {key}: {sorted(values)}")
@@ -201,8 +208,12 @@ def main():
         item["pair_speedups"] = ";".join(str(float(a["median_us"]) / float(b["median_us"]))
                                           for a, b in zip(variants["baseline"], variants["candidate"]))
         for key in ("checksum", "accepted", "reference", "refinements", "math_work",
+                    "root_peak_host_bytes", "run_live_payload_bytes", "run_live_metadata_bytes",
+                    "source_payload_bytes", "source_logical_bytes", "issued_work",
+                    "numeric_evaluated", "numeric_copied", "numeric_views",
+                    "strict_math_calls", "strict_fallbacks",
                     "peak_buffer_bytes", "copy_bytes", "tiles"):
-            item[key] = variants["candidate"][0][key]
+            item[key] = variants["candidate"][0].get(key, "")
         summary.append(item)
     if summary:
         with (args.output / "summary.csv").open("w", newline="") as stream:

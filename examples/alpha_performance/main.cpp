@@ -131,62 +131,94 @@ int main(int argc, char** argv) try {
       checked(encode_tensor_description(desc))};
   WorkflowDocument document;
   ExecutionBindings bindings;
-  WorkflowInputDeclaration declaration{
-      1, "input", descriptor, Region::whole(descriptor.shape), {}, facets};
+  auto registry = make_default_operation_registry();
+  ExecutionContextConfig config;
+  config.cpu_workers = workers;
+  config.maximum_live_bytes = UINT64_C(2) << 30;
+  config.managed_resources = ResourceLimits{};
+  config.managed_resources->capacity[ResourceKind::Host] =
+      config.maximum_live_bytes;
+  config.managed_resources->capacity[ResourceKind::Metadata] = UINT64_C(64)
+                                                               << 20;
+  ExecutionContext context(registry, config);
+  const auto root = checked(context.resource_budget());
+  auto setup_start = Clock::now();
+  SchemaTemplate schema;
+  schema.id = "example.alpha-benchmark";
+  ResultTensorSpec source;
+  source.key = "samples";
+  source.descriptor = descriptor;
+  source.facets = facets;
+  source.layout.spatial = storage != "generic";
+  source.layout.order =
+      storage == "tiled" ? ImagePlaneOrder::Tiled : ImagePlaneOrder::Continuous;
+  schema.tensors.push_back(source);
+  auto builder = checked(ResultBuilder::start(root, schema, "source"));
+  checked(builder.bind_descriptor_relation(checked(ResultRelation::cartesian(
+      root, 1, {0, 8, 0, 0, ResultSupportTarget::Descriptor, 0}))));
+  checked(builder.publish_tensor_kernel(
+      0, Region::whole(descriptor.shape),
+      [&](const auto& writers) {
+        for (const auto& writer : writers) {
+          const auto& dims = writer.region().dimensions();
+          const auto axis = writer.sample_axis();
+          std::vector<std::uint64_t> at;
+          for (const auto& d : dims)
+            at.push_back(d.offset);
+          for (;;) {
+            auto row = writer.row_run(at);
+            if (!row.ok())
+              return row.status();
+            const auto count =
+                std::min<std::uint64_t>(256, row.value().samples);
+            auto work = root.consume({count});
+            if (!work.ok())
+              return work;
+            for (std::uint64_t i = 0; i < count; ++i) {
+              const double a = alpha_at(at[1], distribution), color = at[2] + 1;
+              const auto value =
+                  bits(at[2] == 3 ? a : (inverse ? color * a : color), narrow);
+              std::memcpy(
+                  row.value().data + static_cast<std::int64_t>(i) *
+                                         row.value().sample_stride_bytes,
+                  &value, width);
+              ++at[axis];
+            }
+            if (at[axis] < dims[axis].offset + dims[axis].extent)
+              continue;
+            at[axis] = dims[axis].offset;
+            bool more = false;
+            for (std::size_t i = dims.size(); i;) {
+              --i;
+              if (i == axis)
+                continue;
+              if (++at[i] < dims[i].offset + dims[i].extent) {
+                more = true;
+                break;
+              }
+              at[i] = dims[i].offset;
+            }
+            if (!more)
+              break;
+          }
+        }
+        return Status::success();
+      },
+      checked(ResultRelation::cartesian(
+          root, checked(source.sample_count()),
+          {0, 1, 0, 0, ResultSupportTarget::Tensor, 0})),
+      {true, true, true, true}));
+  WorkflowInputDeclaration declaration;
+  declaration.id = 1;
+  declaration.name = "input";
+  declaration.result_schema = std::make_shared<const SchemaTemplate>(schema);
+  document.inputs.push_back(declaration);
   ExecutionBinding binding;
   binding.name = "input";
-  auto setup_start = Clock::now();
-  std::uint64_t source_backed = 0;
-  if (storage == "generic") {
-    declaration.layout = {0,
-                          {static_cast<std::int64_t>(size * channels * width),
-                           static_cast<std::int64_t>(channels * width),
-                           static_cast<std::int64_t>(width)}};
-    std::vector<std::uint8_t> bytes(size * size * channels * width);
-    for (std::uint64_t y = 0; y < size; ++y) {
-      for (std::uint64_t x = 0; x < size; ++x) {
-        for (unsigned c = 0; c < channels; ++c) {
-          const double a = alpha_at(x, distribution), color = c + 1;
-          const auto value =
-              bits(c == 3 ? a : (inverse ? color * a : color), narrow);
-          std::memcpy(bytes.data() + ((y * size + x) * channels + c) * width,
-                      &value, width);
-        }
-      }
-    }
-    binding.value =
-        checked(Value::create(descriptor, declaration.region,
-                              declaration.layout, std::move(bytes), facets));
-    source_backed = binding.value.bytes().size();
-  } else {
-    PlanarImageConfig config;
-    config.order = storage == "tiled" ? ImagePlaneOrder::Tiled
-                                      : ImagePlaneOrder::Continuous;
-    config.maximum_backed_bytes = UINT64_C(2) << 30;
-    auto image = checked(PlanarImage::create(descriptor, config, facets));
-    std::vector<std::uint8_t> plane(size * size * width);
-    for (unsigned c = 0; c < channels; ++c) {
-      for (std::uint64_t y = 0; y < size; ++y) {
-        for (std::uint64_t x = 0; x < size; ++x) {
-          const double a = alpha_at(x, distribution), color = c + 1;
-          const auto value =
-              bits(c == 3 ? a : (inverse ? color * a : color), narrow);
-          std::memcpy(plane.data() + (y * size + x) * width, &value, width);
-        }
-      }
-      checked(image.publish(Region({{0, size}, {0, size}, {c, 1}}),
-                            plane.data(), plane.size()));
-    }
-    declaration.planar_layout = PlanarImageLayout{config.order, 0, 1, 2, 0, {}};
-    source_backed = image.backed_bytes();
-    binding.image = std::make_shared<const PlanarImage>(std::move(image));
-  }
-  document.inputs.push_back(declaration);
+  binding.result = checked(builder.seal());
   bindings.inputs.push_back(binding);
   OperationMetadata metadata;
-  metadata.descriptor = descriptor;
-  metadata.facets = facets;
-  metadata.planar_layout = declaration.planar_layout;
+  metadata.result_schema = declaration.result_schema;
   const WorkflowInput input = WorkflowInputReference{1};
   WorkflowNodeOutput output;
   if (member == "associate" || inverse) {
@@ -240,27 +272,20 @@ int main(int argc, char** argv) try {
   const Region roi(dims);
   document.outputs = {{"result", output.source_node, output.source_port}};
   const auto setup_us = us(setup_start);
-  auto registry = make_default_operation_registry();
   GraphContext graph(document);
   PlanningOptions planning;
   planning.output_regions = {{"result", roi}};
   auto start = Clock::now();
   auto compiled = checked(Compiler(registry).compile(graph, planning));
   const auto compile_us = us(start);
-  ExecutionContextConfig config;
-  config.cpu_workers = workers;
-  config.maximum_live_bytes = UINT64_C(2) << 30;
-  if (managed == "on") {
-    config.managed_resources = ResourceLimits{};
-  }
-  ExecutionContext context(registry, config);
+  const auto baseline = root.statistics();
   ExecutionOptions execution;
   execution.dependencies.maximum_work = UINT64_C(1) << 50;
   execution.maximum_dependency_work = UINT64_C(1) << 50;
   execution.maximum_dependency_cache_work = 0;
   std::vector<double> times, callbacks;
   double first_us = 0;
-  std::uint64_t read_bytes = 0, copied = 0, peak = 0, output_backed = 0;
+  std::uint64_t logical_bytes = 0, live_payload = 0, live_metadata = 0;
   for (unsigned repeat = 0; repeat < repetitions + 2; ++repeat) {
     start = Clock::now();
     auto result =
@@ -277,20 +302,25 @@ int main(int argc, char** argv) try {
       times.push_back(elapsed);
       callbacks.push_back(callback);
     }
-    read_bytes = result.diagnostics.source_read_bytes;
-    copied = result.diagnostics.result_copy_bytes;
-    peak = std::max(peak, result.diagnostics.peak_live_bytes);
-    output_backed = result.images.count("result")
-                        ? result.images.at("result").backed_bytes()
-                        : result.values.at("result").bytes().size();
+    const auto support = checked(result.dependencies.source_support());
+    logical_bytes = support.count("input")
+                        ? checked(support.at("input").element_count()) * width
+                        : 0;
+    const auto current = root.statistics();
+    live_payload = current.live[ResourceKind::Payload] -
+                   baseline.live[ResourceKind::Payload];
+    live_metadata = current.live[ResourceKind::Metadata] >
+                            baseline.live[ResourceKind::Metadata]
+                        ? current.live[ResourceKind::Metadata] -
+                              baseline.live[ResourceKind::Metadata]
+                        : 0;
     // Verify every requested sample only outside the timed execution interval.
     // Chosen colors/alpha are exact powers of two, so this analytic oracle has
     // no tolerance and does not reuse the tested arbitrary-input arithmetic.
     if (!repeat) {
-      std::optional<PlanarImageReadWindow> window;
-      if (result.images.count("result")) {
-        window.emplace(checked(result.images.at("result").acquire(roi)));
-      }
+      const auto& output = result.results.at("result");
+      auto window =
+          checked(output.acquire_tensor(checked(output.descriptor()), 0, roi));
       for (auto y = dims[0].offset; y < dims[0].offset + dims[0].extent; ++y) {
         for (auto x = dims[1].offset; x < dims[1].offset + dims[1].extent;
              ++x) {
@@ -308,13 +338,7 @@ int main(int argc, char** argv) try {
               expected = 0;
             }
             const auto expected_bits = bits(expected, narrow);
-            const std::uint8_t* data = nullptr;
-            if (window) {
-              data = checked(window->row_run({y, x, c})).data;
-            } else {
-              const auto& v = result.values.at("result");
-              data = v.bytes().data() + checked(v.byte_address({y, x, c}));
-            }
+            const auto* data = checked(window.row_run({y, x, c})).data;
             if (std::memcmp(data, &expected_bits, width)) {
               throw std::runtime_error("benchmark sample validation failed");
             }
@@ -323,27 +347,36 @@ int main(int argc, char** argv) try {
       }
     }
   }
-  ResourceStatistics resources;
-  if (managed == "on") {
-    resources = checked(context.resource_budget()).statistics();
-  }
+  const auto resources = root.statistics();
   std::cout
       << "size,member,storage,request,algorithm,dtype,profile,layout,workers,"
          "distribution,repetitions,setup_us,compile_us,first_us,p50_us,p95_us,"
-         "callback_p50_us,source_bytes,copied_bytes,source_backed,output_"
-         "backed,peak_live_bytes,managed,issued_work,managed_peak_host,managed_"
+         "callback_p50_us,source_logical_bytes,source_payload_bytes,source_"
+         "metadata_bytes,"
+         "run_live_payload_bytes,run_live_metadata_bytes,root_peak_payload_"
+         "bytes,"
+         "root_peak_metadata_bytes,managed,issued_work,managed_peak_host,"
+         "managed_"
          "peak_metadata,managed_peak_referenced\n";
   std::cout << size << ',' << member << ',' << storage << ',' << request << ','
             << algorithm << ',' << dtype << ',' << profile << ',' << policy
             << ',' << workers << ',' << distribution << ',' << repetitions
             << ',' << setup_us << ',' << compile_us << ',' << first_us << ','
             << percentile(times, .5) << ',' << percentile(times, .95) << ','
-            << percentile(callbacks, .5) << ',' << read_bytes << ',' << copied
-            << ',' << source_backed << ',' << output_backed << ',' << peak
-            << ',' << managed << ',' << resources.issued.work << ','
-            << resources.peak[ResourceKind::Host] << ','
-            << resources.peak[ResourceKind::Metadata] << ','
-            << resources.peak[ResourceKind::Referenced] << '\n';
+            << percentile(callbacks, .5) << ',' << logical_bytes << ','
+            << baseline.live[ResourceKind::Payload] << ','
+            << baseline.live[ResourceKind::Metadata] << ',' << live_payload
+            << ',' << live_metadata << ','
+            << resources.peak[ResourceKind::Payload] << ','
+            << resources.peak[ResourceKind::Metadata] << ',' << managed << ',';
+  if (managed == "on")
+    std::cout << resources.issued.work << ','
+              << resources.peak[ResourceKind::Host] << ','
+              << resources.peak[ResourceKind::Metadata] << ','
+              << resources.peak[ResourceKind::Referenced];
+  else
+    std::cout << ",,,";
+  std::cout << '\n';
   std::cerr << "samples_us";
   for (double t : times) {
     std::cerr << ' ' << t;

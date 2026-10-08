@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderPixelOE VERSION 1.0.0 LANGUAGES CXX)
-find_package(Photospider 0.28 CONFIG REQUIRED COMPONENTS operation_sdk kernel)
+find_package(Photospider 0.32 CONFIG REQUIRED COMPONENTS operation_sdk kernel)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -94,4 +94,19 @@ if(UNIX)
   add_executable(pixeloe_check_tables src/check_tables.cpp "${GENERATED}/tables.cpp")
   target_include_directories(pixeloe_check_tables PRIVATE src)
   target_link_libraries(pixeloe_check_tables PRIVATE Photospider::operation_sdk Threads::Threads)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+  foreach(backend cpu cpu_tiled)
+    add_test(NAME pixeloe_result_contract_${backend}
+      COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_contract.py"
+        "${CMAKE_CURRENT_BINARY_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}/contract-${backend}" "${backend}"
+        --runner "$<TARGET_FILE:pixeloe_workflow>"
+        --plugin "$<TARGET_FILE:photospider_pixeloe>")
+    set_tests_properties(pixeloe_result_contract_${backend}
+      PROPERTIES TIMEOUT 180)
+  endforeach()
 endif()

@@ -94,7 +94,7 @@ bool Device::available() const noexcept {
   return impl_->valid.load();
 }
 std::uint32_t Device::backend() const noexcept {
-  return PS_GPU_BACKEND_METAL_V11;
+  return PS_GPU_BACKEND_METAL_V1;
 }
 std::uint64_t Device::minimum_buffer_offset_alignment() const noexcept {
   return 4;
@@ -107,6 +107,9 @@ Result<std::uint64_t> Device::allocation_capacity(std::uint64_t bytes) {
         Status{error, "injected native capacity query"});
 #endif
   collect_expired_allocations();
+  if (!available())
+    return Result<std::uint64_t>(
+        Status{ErrorCode::BackendUnavailable, "Metal unavailable"});
   const auto capacity = gpu_internal::allocation_capacity(bytes);
   if (!capacity || capacity > impl_->device.maxBufferLength)
     return Result<std::uint64_t>(
@@ -125,16 +128,18 @@ BufferAllocator Device::allocator(const BufferAllocator& host) {
   if (host.native_shared_reserve_)
     result.reserve_ = host.native_shared_reserve_;
   auto self = shared_from_this();
-  result.native_allocate_ = [self](std::uint64_t size,
-                                   const BufferAllocator::Reserve& reserve,
-                                   std::shared_ptr<const void> domain) {
-    return self->allocate(size, reserve, std::move(domain));
-  };
+  result.native_allocate_ =
+      [self](std::uint64_t size, const BufferAllocator::Reserve& reserve,
+             std::shared_ptr<const void> domain,
+             const BufferAllocator::AllocationCommit& commit) {
+        return self->allocate(size, reserve, std::move(domain), commit);
+      };
   return result;
 }
-Result<MutableBuffer> Device::allocate(std::uint64_t size,
-                                       const BufferAllocator::Reserve& reserve,
-                                       std::shared_ptr<const void> domain) {
+Result<MutableBuffer> Device::allocate(
+    std::uint64_t size, const BufferAllocator::Reserve& reserve,
+    std::shared_ptr<const void> domain,
+    const BufferAllocator::AllocationCommit& commit) {
   collect_expired_allocations();
   @autoreleasepool {
     const auto capacity = gpu_internal::allocation_capacity(size);
@@ -159,6 +164,8 @@ Result<MutableBuffer> Device::allocate(std::uint64_t size,
     owner->buffer =
         [impl_->device newBufferWithLength:capacity
                                    options:MTLResourceStorageModeShared];
+    if (owner->buffer && commit)
+      commit(storage.lease_, owner->buffer.allocatedSize);
     if (!owner->buffer || !owner->buffer.contents ||
         owner->buffer.allocatedSize > capacity)
       return Result<MutableBuffer>(Status::failure(
@@ -212,7 +219,7 @@ Result<BufferView> Device::view(const std::uint8_t* bytes, std::uint64_t size,
 }
 Status Device::execute(
     const std::vector<BufferView, NativeAllocator<BufferView>>& views,
-    const ps_gpu_dispatch_v11* commands, std::uint32_t count,
+    const ps_gpu_dispatch_v1* commands, std::uint32_t count,
     const CancellationToken& cancellation, Statistics* statistics,
     const BufferAllocator&) {
   @autoreleasepool {
@@ -225,7 +232,7 @@ Status Device::execute(
                              "Metal submission cancelled");
     if (!commands || count == 0 || count > 32 ||
         reinterpret_cast<std::uintptr_t>(commands) %
-            alignof(ps_gpu_dispatch_v11))
+            alignof(ps_gpu_dispatch_v1))
       return Status::failure(ErrorCode::InvalidArgument,
                              "invalid dispatch array");
     std::array<id<MTLComputePipelineState>, 32> pipelines{};
@@ -239,15 +246,15 @@ Status Device::execute(
             c.entry_size > 128 || c.buffer_count > 31 ||
             (c.buffer_count != 0 && !c.buffers) ||
             (c.buffers && reinterpret_cast<std::uintptr_t>(c.buffers) %
-                              alignof(ps_gpu_buffer_binding_v11)) ||
+                              alignof(ps_gpu_buffer_binding_v1)) ||
             c.constant_size > 4096 || (c.constant_size && !c.constants) ||
             (c.constant_size && c.constant_index > 30))
           return Status::failure(ErrorCode::InvalidArgument,
                                  "invalid dispatch record");
-        if (c.code_format > PS_GPU_CODE_SPIRV_V11)
+        if (c.code_format > PS_GPU_CODE_SPIRV_V1)
           return Status{ErrorCode::InvalidArgument,
                         "unknown GPU module format"};
-        if (c.code_format != PS_GPU_CODE_MSL_V11)
+        if (c.code_format != PS_GPU_CODE_MSL_V1)
           return Status{ErrorCode::BackendUnavailable,
                         "Metal requires an MSL module"};
         for (auto n : c.grid)

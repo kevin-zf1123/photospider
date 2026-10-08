@@ -2,30 +2,87 @@
 
 ## 范围与当前可用性
 
-结构化 `Result` 是图像 samples 的 public semantic、input、output、publication 和 ownership 契约。Result schema 声明由 `PlanarImage` backing 的 typed image slots，也可以声明 primitive fields。普通非图像 numeric `Value` 仍然有效。看起来像图像的 `Value` facet 或 operation catalog 中存在注册项，都不会使 Value callback 成为 Result 图像 operation。
+结构化 `Result` 是内置图像 operation 的 semantic、input、output、publication 和 ownership 契约。当前内置图像 operation 包括 `image.exposure_gain`、`image.opacity`、`image.brush_circle`、`image.mask`、`image.source_over`、`image.mix`、`image.gaussian_blur`、`image.downsample_box`、`mask.downsample_box`、`image.split_horizontal`、`image.stmap` 和两个 local inpainting operation。它们都使用 Result operation API。Result schema 声明由 typed tensor storage 支持的 typed image slots；存储可使用 private `PlanarImage` backing 或 immutable affine `CpuStorage`，也可以声明 primitive fields。普通非图像 numeric `Value` 仍然有效。
 
-当前 kernel package 为 0.30.0，WorkflowDocument schema 为 4，OperationTraits 版本为 21。独立 planar callback table、planar image executor 和 planar workflow binding 已移除。旧 planar C 入口 v1-v3 会被拒绝。Production operation 源码尚未改写为 Result 图像契约。下表说明当前源码和 runtime 可用性；test-defined minimal operations 与 public example 可使用 Result 图像路径。
+独立 planar callback table、planar image executor 和 planar workflow binding 已移除。旧 planar C 入口 v1-v3 会被拒绝。上述内置 operation 通过 Result image slots 执行。其他图像 family 尚未纳入这次迁移；下表区分当前源码/runtime 状态与已经实现的 Result 路径。
 
 ## Production 源码与 runtime 状态
 
-| Family | 当前源码与可用性 | 当前 API 要求的 Result 契约 |
+| Family | 当前源码与可用性 | 当前 Result 图像状态 |
 | --- | --- | --- |
-| FMT alpha | `alpha_operations.cpp`、`alpha_authoring.cpp` 和 `alpha_common.hpp` 保留在源码中；FMT 注册与构建目标已停用。 | 声明图像 slots，并在 Result descriptors 与 relations 中保留 alpha association、channel roles、group closure 和 output-specific metadata。 |
-| FMT channel construction and extraction | `channel_assembly.cpp`、`channel_literal_like.cpp` 和 `channel_extraction.cpp` 保留在源码中；共享 FMT 注册已停用，包括这些编译单元中的 numeric/scalar 分支。 | 图像端口使用 image slots；真正的 numeric ports 保持为 Values，并在 Result metadata 和 relations 中保留 channel/group 语义。 |
-| FMT metadata assignment | `metadata_assignment.cpp` 保留在源码中；其 FMT 注册已停用。 | 将图像 metadata 与拥有它的 Result image slot 一同发布，使 descriptor facts 和 backing 指向同一 Result generation。 |
-| FMT model conversion and RGB basis | `model_conversion.cpp`、`model_math.cpp`、`model_simd.cpp`、`rgb_basis.cpp` 和 `rgb_basis_math.cpp` 保留在源码中；注册项已停用。 | 将 color groups、encodings、channel roles 和 image backing 绑定到 typed Result slots，同时保持各 operation 声明的 numeric 行为。 |
-| FMT numeric conversion and transfer | `numeric_conversion.cpp`、`transfer.cpp`、`transfer_definition.cpp` 和 helpers 保留在源码中；FMT 注册已停用。 | 分开 numeric Value ports 与 image Result ports，并通过 typed descriptors 携带 image facets 和物理布局。 |
-| Exposure and grade | `image_exposure_gain.cpp` 仍注册，但 compiler 会拒绝其 image-Value 契约。`grade_levels.cpp` 仍是 numeric field operation。 | Exposure 必须声明 Result image input/output slots。除非其 public port 契约变化，`grade.levels` 保持 numeric Value。 |
-| Gaussian | `gaussian.cpp` 和 `gaussian_gpu.cpp` 仍注册，但 compiler 会拒绝其 structural image Value 契约。 | 声明 Result image slots，并通过 structured dependency relation 发布 output coverage 和 sample support，同时仅保留已实现的 Whole、tile 和 GPU capabilities。 |
-| STMap and dependency sampling | `dependency_sampling.cpp` 仍注册；其 STMap 图像路径使用旧 Value dependency protocol，不能作为 Result 图像 operation 执行。Numeric radius operation 仍是 Value operation。 | 声明 map/control dependencies，读取 Control samples 后发现所选 Data support，并在 Result relation 中发布已消费的 Control 与 Data support。 |
-| Split and box downsampling | `image_split_horizontal.cpp`、`image_downsample_box.cpp` 和 `mask_downsample_box.cpp` 仍注册，但 compiler 会拒绝 structural image Value 契约。 | 将每个命名输出或缩小后的图像声明为 typed Result slot，并提供各自的 query、support 和 dirty relation。 |
-| Composite and drawing | `image_brush_circle.cpp`、`image_local_inpaint_navier_stokes.cpp`、`image_mask.cpp`、`image_mix.cpp`、`image_opacity.cpp` 和 `image_source_over.cpp` 仍注册；其 image Value 契约不能通过 Result 路径执行。 | 使用 Result image slots，并保留 control/mask relations、color group facts、有效 coverage 和 Result owner associations。 |
-| Numeric LUT and structured LUT Results | `lut3d_bake_geometry.cpp` 提供 Whole numeric Value geometry operations。`lut3d_bake_results.cpp` 中 Pack 与 Measure 发布 structured Results；Unpack 与 Gate 发布 Values。`lut1d_application.cpp`、`lut3d_application.cpp`、`lut_apply_1d.cpp` 和 `field_apply_lut_1d.cpp` 消费 numeric Value/table 契约。 | Numeric geometry 与 Value consumers 保持为 Values。Pack/Measure Results 使用 typed primitive fields。面向图像的端口需要 typed image slot；图像 payload 不是 primitive field byte array。 |
-| Perlin and numeric generation | `perlin.cpp` 及其 GPU 实现发布泛型 numeric Values。调用方把 samples 解释为像素，不会自动形成图像契约。 | 非图像用途保持 numeric。图像生成需要显式声明 Result image output 和图像专用的 dependency/publication 契约。 |
-| C `rgba32f` module | `plugins/ops/rgba32f/image_plugin.c` 及其 GPU helper 保留了使用基础 operation ABI 11 和 in-tree SDK 的可选 DSO target。Compiler 与 registry runtime 会拒绝使用其旧 `RgbaFloat32`/`Float32Mask` image Value ports 的 workflows 和 invocations，因为这些端口要求 Result 图像契约。其 standalone CMake consumer 请求 package 0.11，与当前 exact-version package 不匹配；此处不宣称 build 或 runtime 验证通过。 | 声明 image slots，并使用 Result C ABI 1 提供 selected outputs、dependency services、leases 和有界 publication。 |
-| PixelOE | `plugins/ops/PixelOE/src/workflow.cpp` 及其 runtime 使用原 planar execution surface；尚未适配 Result image slots。 | 通过 Result inputs/outputs 绑定 image slots，再使用统一 Result execution path。 |
+| FMT alpha | 构建 `alpha_operations.cpp`、`alpha_common.hpp` 与 `alpha_authoring.cpp`；安装 `photospider/format/alpha.hpp`。 | 三个 CPU profiles 共注册 associate、unassociate、set 九个 native Result ABI 2 keys。`extract_alpha` 与 `remove_alpha` 仍是基于已注册 operations 的 helper 组合。 |
+| FMT channel extraction | `channel_extraction.cpp` 注册六个 `channel.extract_index_<profile>` 与 `channel.extract_named_<profile>` CPU Result operation；`format::split_channels` 展开 index nodes。Public header `photospider/format/channel.hpp` 单独安装。 | 对 generic 和 spatial Result tensor 提供精确分量访问及 Dependency-v2 support。这是 tensor operation，不是像素转换。 |
+| FMT literal-like fill | `channel_literal_like.cpp` 注册三个 `channel.literal_like_<profile>` Result CPU key。 | 单输入 Result；仅请求 Descriptor role 8，不读来源 samples；按请求输出重复同 dtype raw bits。可用于 FMT-05B opaque lowering，但不实现 `extract_alpha`。 |
+| FMT scalar literal | `channel_assembly.cpp` 注册三个 `channel.scalar_literal_<profile>` Result CPU key。 | 无输入 Whole primitive；以 prepared native bits 发布一个 generic shape `[1]` tensor，供 FMT-03 scalar sources 使用。 |
+| FMT channel assembly/editing | `channel_assembly.cpp` 注册 A/B/C CPU Result keys；已安装 assembly/editing headers 提供 A/B/C 与 swizzle/replace helpers。 | Result operation ABI 2；单 tensor 输入输出、七种逐位 dtype、样本数量有界、所有输入均做 Descriptor 检查、Data 按映射请求。五项 focused tests 和三个 installed consumers 通过；11 个性能 smoke 的 byte oracle 通过。 |
+| FMT metadata assignment | `metadata_assignment.cpp` 注册 `metadata.assign_<profile>` keys；`format::remove_metadata` 是 lowering helper。Public header `photospider/format/metadata.hpp` 单独安装。 | Result operation ABI 2；输入恰有一个 tensor member 且没有 fields。保留 schema、tensor key、batch axes、layout 和样本位。这是通用 Result tensor operation，不是专用图像 operation family。 |
+| FMT RGB basis conversion | `rgb_basis.cpp`、`rgb_basis_math.cpp` 注册 A/B/C CPU Result keys；`photospider/format/rgb_basis.hpp` 已安装。 | 三个 CPU profiles 共注册九个 Result ABI 2 keys。`format::convert_linear_rgb` 事务式组合已注册 stages，不增加 D key。这是通用 tensor operation，不是 image-slot operation。 |
+| FMT model conversion | `model_conversion.cpp`、`model_math.cpp` 和 `model_simd.cpp` 注册 FMT-11 Result operations；`photospider/format/model_conversion.hpp` 提供 graph helpers。 | A-R/T 在三个 CPU profiles 下共注册 57 个 keys；FMT-11S 降低为已注册的 MASK threshold operation。 |
+| FMT 数值格式转换与 transfer | `numeric_conversion.cpp` 注册 `numeric.convert_format_strict`；`transfer.cpp` 注册 `color.transfer_encode_<profile>` 与 `color.transfer_decode_<profile>`。`photospider/format/transfer.hpp` 单独安装。 | 两者都是通用 Result tensor operation，不是图像专用 family。数值转换执行同坐标 dtype/range conversion；transfer 对选中的 semantic RGB/Gray group 或显式 raw components 执行标量曲线转换。 |
+| Exposure and grade | `image.exposure_gain` 使用内置 Result 图像路径。`grade.levels` 仍是 numeric field operation。 | Exposure 接收 Result 图像和 `[0, 16]` 内的单例 Float32 Result 控制值；它缩放 RGB 并保留 alpha。`grade.levels` 仍为 numeric operation。 |
+| Gaussian | `image_program.cpp` 实现 typed `image.gaussian_blur`；`gaussian.cpp` 和 `gaussian_gpu.cpp` 实现独立的 generic numeric Gaussian operations。 | 图像 Gaussian 接收 `photospider.image` Results。在空间边界 clamp，并请求 radius halo；保留图像语义。CPU 与 Metal 使用不同的舍入契约。 |
+| STMap and dependency sampling | `dependency_sampling.cpp` 通过 Result API 注册 `image.stmap` 以及 generic `numeric.radius_gather` / `numeric.radius_scatter`。 | STMap 接收 RGBA `photospider.image` Result 和 cell shape 为 `{height, width, 2}` 的 generic Float64 map tensor；map 可以无 batch，也可以使用与 source 相同的 batch axes。Radius gather/scatter 接收无 batch 的 rank-one Float64 values 和 shape 相同的 Int64 radii，并发布 generic Float64 Result。这些都是 CPU Dependency-v2 operations；radius operations 不使用 image slot。 |
+| Split and box downsampling | `image.split_horizontal`、`image.downsample_box` 和 `mask.downsample_box` 使用内置 Result 图像路径。 | 各 operation 发布 typed Result image slots。Split 发布 `full`、`left` 和 `right`；downsampling 将输出区域映射到相应输入区域。 |
+| Composite and drawing | `image.brush_circle`、`image.mask`、`image.mix`、`image.opacity` 和 `image.source_over` 使用 Result。Native 和可选 OpenCV local Navier-Stokes operation 使用同一 Result API，并以 typed `photospider.image` 作为输入和输出。 | Inpainting 验证图像和 mask 的完整 batch 域，并发布完整图像 Result，保留接受的图像 schema 和 facets。它使用 Whole 需求，且没有 GPU backend。 |
+| Numeric LUT and structured LUT Results | `lut3d_bake_geometry.cpp` 提供 Whole numeric Value geometry operations。`lut3d_bake_results.cpp` 中 Pack 与 Measure 发布 structured Results；Unpack 与 Gate 发布 Values。`lut1d_application.cpp`、`lut3d_application.cpp`、`lut_apply_1d.cpp` 和 `field_apply_lut_1d.cpp` 消费 numeric Value/table 契约。 | 这些 numeric 和非图像 structured operation 不是 Result 图像实现。 |
+| Perlin and numeric generation | `perlin.cpp` 及其 GPU 实现接受并发布泛型 numeric Result tensor；Whole/GPU 使用整张量依赖，CPU tiled 使用 Result Dependency-v2 映射。 | 属于数值生成，不是 Result 图像算子。当前 Result Metal 路径、安装消费检查和 oracle 均已通过；旧 FreeBSD Vulkan 证据仅覆盖之前的 Value 路径。 |
+| RGBA Metal shader support | `plugins/ops/rgba32f/image_gpu.h` 和 `image.metal` 提供共享 native image helper 与 Metal shader；CMake 将 shader 嵌入生成源码。产品不再保留独立的 `image_plugin.c` DSO。 | 八个 built-in Result operations 执行 native Metal：exposure、opacity、Gaussian blur、mask、source-over、color downsample、mask downsample 和 brush。Mix 与 split 仍只有 CPU operation。 |
+| PixelOE | `plugins/ops/PixelOE/src/workflow.cpp` 通过 installed plugin 构建 public Result workflow；十二个 Result ABI 2 keys 提供 CPU Whole、CPU tiled、Metal 和 Vulkan profiles。 | CPU、CPU tiled 与 Metal public workflow 的当前 contract checks 通过；CPU 与 Metal 各通过 42 个 upstream-oracle fixtures。CPU-tiled 输出逐字节匹配已验证的 CPU/Metal 输出。本轮不声称 Result Vulkan 验证或 installed example consumer 已通过。 |
 
-九个 FMT 注册 family 已从 built-in registry 和常规 kernel operation 构建中移除：alpha、channel literal-like、channel extraction、model conversion、numeric conversion、transfer、channel assembly、metadata assignment 和 RGB basis。其源码仍保留在仓库中。Public FMT header subtree 不会安装。其他 production operations 可能仍注册，但 compiler 会拒绝其旧 structural-image Value 契约。注册存在不等于 runtime 图像支持。
+## RGBA 图像的原生 Metal operations
+
+`plugins/ops/rgba32f/image_gpu.h` 中的共享 helper 通过 Result native GPU service 提交 `image.metal`。CMake 读取 shader 并生成嵌入式 header；旧的独立 C DSO 不属于当前产品接口。`image.exposure_gain`、`image.opacity`、`image.gaussian_blur`、`image.mask`、`image.source_over`、`image.downsample_box`、`mask.downsample_box` 和 `image.brush_circle` 已注册 native Metal 实现。`image.mix` 和 `image.split_horizontal` 只有 CPU 实现。八个 Metal operation 在 `test_builtin_result_images` 中通过真实 dispatch 验证；安装库消费者 `installed_builtin_result_images` 和 `installed_builtin_result_images_native` 也全部通过（2/2），共包含 241 次 native dispatch，其中包括 205-tile 回归。
+
+`tests/integration/test_metal_images.cpp` 在 CPU 与 native 两种模式下分别拒绝 40 组无效 image/coverage samples 和 26 组无效 schema。其 native producer 测试 owner 对齐：17-byte owner 的 offset 为 1 时，producer 执行一次 native dispatch，随后 opacity 回退到 CPU，opacity 本身没有 native dispatch。16-byte owner 的 offset 为 4 且 channel origin 为 1 时，经 `byte_address` 标准化后，producer 和 opacity 各执行一次 native dispatch。两个 alignment case 的 transfer 数均为零。ExecutionContext 退役后，四个输出 samples 仍可读取。本地 CPU/native 检查及安装消费测试 `installed_image_domain`、`installed_image_domain_native` 分别在两种环境下均以 2/2 通过。
+
+RGBA operands 使用 `photospider.image` Result，其中有一个名为 `pixels` 的 spatial Float32 HWC tensor，并且恰有两个 batch axes：frame 与 layer。Coverage operands 使用相同 schema，但 tensor 为 spatial Float32 HW，batch axes 相同。RGB samples 可以是有限的 signed/HDR 值。RGBA 语义为 linear、premultiplied：alpha 必须有限且处于 [0,1]；alpha 为零时 RGB 必须为零。Coverage samples 必须是 [0,1] 内的有限值。每个 frame/layer image 独立处理；多图像 operations 要求 batch extent 一致。
+
+Image Gaussian 要求 Int64 `radius` 位于 [1,64]，Float64 `sigma` 位于 [0.1,64]。Preparation 使用 Float64 `exp` 计算并归一化 Gaussian weights。CPU 按递增 tap 顺序进行 Float64 乘加，水平 pass 舍入一次到 Float32，再由垂直 pass 舍入一次到 Float32。Metal 将准备好的权重转换为 Float32，并在 shader 中使用补偿求和。已验证的比较边界为 `abs(gpu - cpu) <= 1e-6 + 1e-5 * abs(cpu)`；这不构成 CPU/Metal 逐位相同的契约。两条路径都会在图像边缘 clamp tap，并请求所需 halo。 Gaussian 对 Empty demand 使用 stateless continuation，不产生 source observations；完整 batch/sample cardinality 溢出时，只要所请求的小 ROI 仍可表示，仍可执行。
+
+GPU 实现遇到保守 native arithmetic domain 之外的有限输入时，可返回 `BackendUnavailable`。八个同时有 CPU 和 GPU 实现的 operation traits 允许 CPU fallback；执行条件与 poll-time retry 限制见[Compiler 和本地执行](Compiler-and-Execution.zh.md)。其他失败不会触发 fallback。
+
+## 原生 alpha Result operations
+
+已安装的 `photospider/format/alpha.hpp` 可向普通 workflow 追加 FMT-04A/B 与
+FMT-05A nodes。九个 native keys 使用 Result ABI 2；FMT-05B/C 仍是基于已注册
+extraction、literal-like fill、mapped assembly 和 metadata assignment keys 的
+authoring compositions。这些是通用 single-tensor operations，不是专用的
+`photospider.image` slots。它们保留 batch prefix，按 cell-relative axes 处理，
+并限制 full sample rank 不超过 8、count 不超过 2^40。输入必须是无 fields 的单
+tensor；算术使用同 dtype Float32/Float64，提取和移除可逐位处理七种支持的 dtype。
+
+对于 FMT-04 semantic operations，参与计算的 color 和被消费的 alpha samples
+具有 Data 与 Validation support；只透传的 samples 不增加额外 sample validation。
+Raw association 只按 arithmetic 请求 Data，不附带 semantic-domain Validation。
+FMT-05A Set 对选中的 source colors 请求 Data 与 Validation；为这些 color outputs
+读取新 alpha source 时只增加 Validation support；发布的新 alpha channel 则请求其
+source 的 Data 与 Validation。所有连接输入均请求 Descriptor，这些 operations 不用
+Control。
+
+FMT-04 associate/unassociate 始终 materialize，且没有 layout 参数。在原生 alpha operations 中，只有 FMT-05A Set
+接受 layout policy。Generic Set view 要求完整 declared map 可证明使用单个
+`CpuStorage` owner 和单一 affine relation；spatial Set view 仅支持 internal identity。
+Set 的 `auto` 只在物理 `ViewUnavailable` 时 materialize。Materialization 在 Root
+budgets 与 cancellation 约束下事务发布；空输出请求不保留本次执行的载荷状态。这些
+FMT operations 没有新增 GPU backend。
+
+当前 `02-format-color` 中已有的 built-in FMT families 均提供 Result CPU operations，或提供可降低为已注册 operations 的 helper。FMT-01、FMT-02/03、FMT-04/05A alpha、FMT-06 numeric conversion、FMT-08、FMT-09 transfer、FMT-10 RGB basis、literal-like fill 与 scalar literal 使用 Result operation ABI 2。Public headers `photospider/format/channel.hpp`、`channel_assembly.hpp`、`channel_editing.hpp`、`alpha.hpp`、`metadata.hpp`、`transfer.hpp` 和 `rgb_basis.hpp` 和 `model_conversion.hpp` 分别单独安装。FMT-05B/C 是现有 Result operations 的可执行组合；FMT-04/05A、FMT-09 和 FMT-10 已有 native keys。其他 production operations 可能仍注册，但其 structural-image Value 契约仍在 Result 图像路径之外。注册本身不能证明具备 Result 图像支持。
+
+## 内置 Result 图像 operations
+
+`image.exposure_gain`、`image.opacity`、`image.brush_circle`、`image.mask`、`image.source_over`、`image.mix`、`image.gaussian_blur`、`image.downsample_box`、`mask.downsample_box` 和 `image.split_horizontal` 接收结构化 `Result` 并发布结构化 `Result`。图像 slot 使用 schema `photospider.image` version 1，包含一个名为 `pixels` 的 tensor 且不包含 fields。每个 slot 恰有两个 batch axes，分别表示 frame 和 layer，并声明 spatial layout。RGBA operation 要求 Float32 HWC 四通道 tensor 和 canonical linear premultiplied RGBA 语义；coverage 输入为带 coverage 语义的 Float32 HW tensor。多图像输入的 frame/layer 数量和空间尺寸必须一致。
+
+Local Navier-Stokes inpainting 使用同一 Result API 和 typed image schema。图像和 coverage 输入要求 frame/layer batch 与空间尺寸匹配。它验证完整的 `[N,L,H,W,4]` 图像域和 `[N,L,H,W]` mask 域，再发布完整图像 Result，并保留接受的图像 schema 和语义 facets。该 profile 要求 canonical linear-sRGB premultiplied RGBA、不透明 alpha 和 canonical coverage，并允许声明的 scene 或 display reference。不接受 CMYK 或 ICC ColorArray 输入，也不会为无类型 numeric tensor 推断图像语义。输出可以继续输入其他 typed image operation。
+
+图像 tensor 的 descriptor axes 表示 cell 轴。坐标 `{frame, layer, y, x, channel}` 定位一个 RGBA 样本，`{frame, layer, y, x}` 定位一个 coverage 样本。HWC 的 channel 在逻辑上是一个轴；`PlanarImage` 可以把各 channel 存为不同物理平面。所有这些 operation 都保留 frame 和 layer batch axes。
+
+`image.exposure_gain` 按 `[0, 16]` 内的控制值缩放 RGB 并保留 alpha。`image.opacity` 按 `[0, 1]` 内的控制值缩放四个 premultiplied RGBA channel。`image.brush_circle` 在图像后接收 `x`、`y`、`radius`、`red`、`green`、`blue`、`alpha` 七个控制值，按像素中心与圆心的距离绘制；半径必须是正的 normal Float32，alpha 范围为 `[0, 1]`。
+
+`image.mask` 将 premultiplied RGBA 与 coverage 相乘。`image.source_over` 按前景、背景顺序输入。`image.mix` 接收两张 RGBA 图像和一张作为插值系数的 coverage 图像。`image.downsample_box` 与 `mask.downsample_box` 要求整数参数 `factor` 在 `[1, 16]` 内，对每个 box 求平均，边缘不完整的 box 按实际样本数计算，输出高度和宽度使用向上取整。`image.split_horizontal` 要求 `split_x` 严格位于输入宽度内部，并通过复制 HWC tensor samples 发布 `full`、`left`、`right`。它接受七种受支持的 tensor dtype，不要求 RGBA semantics，保留输入 tensor schema，并逐样本复制完整字节。集成测试检查 UInt8、UInt16 和 Float64 samples，以及 split output 超过 temporary workspace 时仍能发布。Downsample 测试还覆盖靠近 `UINT64_MAX` 的 factor-16 边界。
+
+每个标量控制值都是只有一个 unbatched Float32 tensor 的 Result，sample shape 为 `{1}`。输入契约选择 schema 中唯一的 tensor member，因此其 tensor key 可由调用方选取。该 singleton sample 支持未对齐 stride，包括 `INT64_MIN`，callback 通过 Result tensor 接口读取。Exposure、opacity、brush 半径和 alpha 的范围由控制输入契约验证。直接绑定中的越界或非有限值以 `InvalidArgument` 失败，即使图像输出 footprint 为 Empty；上游 callback 生成的无效值在执行时以 `OperationFailed` 失败，且不会发布输出。
+
+Scheduler 为依赖验证请求完整标量样本，因此改变标量值或其验证状态可能使依赖它的所有输出像素变脏。图像输入按 operation 映射的空间 support 请求；例如 box downsampling 会为每个输出区域请求对应的输入 box。Empty 输出 footprint 不请求图像样本。这些描述只适用于当前内置实现。原生 Metal 支持范围仅为上文 RGBA Metal 一节列出的八个 operations；本表其他 operation 不因这些契约而获得 GPU 支持。
 
 ## Result 图像契约
 
@@ -37,4 +94,16 @@ Result owner 保留 schema、已认证 descriptor facts、backing、relations �
 
 ## Public 可执行路径与限制
 
-[`examples/unified_result_workflow`](../../../examples/unified_result_workflow/README.zh.md) 使用 test/example-only minimal operations 演示 public workflow。它选择 image Result output 和 numeric output，请求图像区域，并验证 dynamic support 变化。当前 built-in image operations 仍受上表限制；普通 numeric Values 和非图像 structured Results 不受影响。
+[`examples/image_vertical`](../../../examples/image_vertical/README.md) 编译由两个节点组成的 exposure/opacity graph，输入为 5D RGBA Results，并用独立 binary-fraction oracle 检查一个像素的输出。[`examples/regional_image_vertical`](../../../examples/regional_image_vertical/README.md) 增加独立二维 Gaussian oracle、whole 与 ROI 比较、物理 tile layout、source-window 检查和大型 zero-stride source fixture。两个示例都在同一 `ResourceBudget` root 下绑定 source Results 并执行；publication observer 通知请求的 Result output 已完成，不提供旧式 tile streaming。本地 `example_image_vertical` 与 `example_regional_image_vertical` 测试通过；安装包消费测试 `installed_image_vertical` 与 `installed_regional_image_vertical` 也通过。Regional affine source fixture 实测 Payload 峰值需求为 2328 bytes；2327-byte 限额返回 `ResourceExhausted`，这不是 RSS 上界。
+
+[`examples/s3_image_workflow`](../../../examples/s3_image_workflow/README.md) 增加应用层 brush edit、slider coalescing、preview/export 仲裁和 Result cache 检查。Coordinator 为 export 发出二十个独立的 4×4 Result region 请求；brush stamp 将 bounding ROI 向外对齐到 4×4 网格，可能跨越多个 physical tiles；immutable edit 采用每行最多四列的 zero-copy identity row views，并保留 source owners；它不表示应用将单个 atomic full-domain kernel request 切成 tiles，也不声称复现旧 Value tile stream。Full-resolution scene 使用 Gaussian radius 2、sigma 1.0；S3/S4 共用的 preview coordinator 使用 factor-4 proxy graph，参数为 radius 1、sigma 0.25。`preview` 和 `cache` scenarios 使用 CPU execution。本地两个测试和两个安装消费测试都通过。已验证的 preview run 应用九个 stamps、发出二十个 export regions 和二十七个 preview regions，并拒绝三次过期或无效 publication。Cache run 在 gain edit 后没有 blur polls，本地 patch 有十二次 blur polls。
+
+[`examples/s4_gpu_workflow`](../../../examples/s4_gpu_workflow/README.md) 通过 public CPU 或 native Metal execution 运行图像 graph 和八个 operations，并为 resident-chain 提供 whole、tiled 与 ROI layout。Resident-chain Gaussian 使用 radius 2、sigma 1.0；单独 all-operations Gaussian case 使用 radius 2、sigma 1.25。Factor-four proxy downsampling 由 S3/S4 共用的 preview coordinator 使用。`--explain` 报告已规划 operations、所选 backends、tensor full sample shapes 和末端 output region；input windows 由 runtime Result needs 决定。CPU oracle 检查和 native Metal dispatch 检查分开报告。使用 `--require-native` 时，Metal resident-chain、all-operations、cache、preview/export 和 fallback scenarios 要求设备可用；CPU fallback 不代表 Metal 执行。S4 Root 设置 16 MiB Payload 限额、8 MiB Result cache 限额和 262144 dependency-cache metadata units；默认限额为 65536 metadata units。S4 本地 scenario 与 layout CTest 12/12 通过；安装包 CPU 与 Metal scenarios 10/10 通过。已验证的 native resident-chain 报告五次 dispatch、三次 upload 且没有 fallback；all-operations 报告 36 次 dispatch 且没有 fallback。Cache-edits 中 warm request 没有 work，gain change 重用 blur，本地 patch 有十二次 blur polls。Preview/export 报告 219 次 image dispatch，不包含 brush-stamp 执行。这些是 fixture 资源限制和执行检查，不是 RSS 上界或性能保证。
+
+[`examples/unified_result_workflow`](../../../examples/unified_result_workflow/README.zh.md) 仍使用 test/example-only minimal operations 演示 public workflow、Result output 选择和图像区域请求。上述示例仅覆盖文中列出的路径，不会增加其他 built-in image operations。普通 numeric Values 和非图像 structured Results 仍可使用.
+
+## FMT-11 颜色模型转换
+
+FMT-11 A-R 和 T 在 strict、Apple Silicon 与 x86-64 profiles 下共注册 57 个 CPU keys。已安装的 authoring helpers 追加一个 key 并返回包含一个 tensor 的 `values` output；S 降低为 `mask.threshold_channel_<profile>`，不增加 color key。输入为无 fields 的单 Float32 或 Float64 tensor。完整 sample rank 不超过 8；sample count 受 Result schema 可表示范围和执行资源限制约束。Axis 相对 cell axes 编号，不包含 batch prefix。
+
+选中的语义 samples 请求 Data 与 Validation；raw T 验证 two-level selector；raw S 与 bypass samples 请求 Data；R 的常量输出仅需 Descriptor。Empty request 无运行状态。整个请求区域满足物理 view 约束时，Q 支持 generic 与 spatial view。其他成员物化输出，即使只请求 bypass 也拒绝 forced view。输出保留 schema id、tensor key 和 batches，更新选中的模型描述，并将 `atomic_trailing_axes` 设为零。六项 focused checks 与 `installed_model_conversion`、`installed_model_result`、`installed_alpha_model_interop` 三项 installed consumer 检查已通过。这些是通用 tensor operations，不是 typed image-slot operations。

@@ -119,5 +119,5 @@ def generate(slangc, root, out, module, entry, ep):
     definitions += ['};', f'static const GpuParameter vk_parameters_{entry}[] = {{' + ',\n'.join(records) + '};']
     record = (f'{{"{entry}", reinterpret_cast<const char*>(spirv_{entry}), sizeof(spirv_{entry}), '
               f'{{{", ".join(map(str, ep["threadGroupSize"]))}}}, {constant_index}, {size}, '
-              f'vk_parameters_{entry}, {len(records)}, PS_GPU_BACKEND_VULKAN_V11, PS_GPU_CODE_SPIRV_V11}}')
+              f'vk_parameters_{entry}, {len(records)}, PS_GPU_BACKEND_VULKAN_V1, PS_GPU_CODE_SPIRV_V1}}')
     return definitions, record

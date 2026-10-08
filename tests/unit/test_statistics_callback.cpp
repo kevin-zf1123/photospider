@@ -60,19 +60,15 @@ Result<ResultRef> parameters(const ResourceBudget& root, StatisticsSpec spec,
   query.page_bytes = 24;
   auto allocator = root.allocator();
   auto continuation = take(definition.start_result(query, allocator));
-  ResultValueInputs values;
+
   ResultObjectInputs objects{{0, histogram}};
   ResourceVector<ResultIoReply> io;
   auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
   for (unsigned step = 0; step < 32; ++step) {
     ResultProgramPhase phase{
-        query,
-        values,
-        objects,
-        io,
-        allocator,
-        root,
-        [&](std::uint64_t work) { return root.consume({work}); },
+        query,  objects,
+        io,     allocator,
+        root,   [&](std::uint64_t work) { return root.consume({work}); },
         failure};
     auto polled = continuation.poll(phase);
     if (!polled.ok())

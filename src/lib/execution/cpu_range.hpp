@@ -12,7 +12,9 @@
 #include <utility>
 
 #include "data/input_validation.hpp"
+#include "data/result_host_access.hpp"
 #include "execution/cpu_range_context.hpp"
+#include "execution/resource_observation.hpp"
 #include "execution/waiting_admission.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "photospider/plugin/cpu_parallel_api.h"
@@ -33,6 +35,8 @@ class CpuRangeQueue final {
     std::uint32_t peak = 0;
     bool caller_participates = true;
     ps_cpu_range_callback_v1 callback = nullptr;
+    data_internal::ResultHostAccessScope::Observer host_access;
+    PayloadCapture payload_capture;
     void* user = nullptr;
     const CancellationToken* cancellation = nullptr;
     const ResourceBudget* resources = nullptr;
@@ -87,8 +91,12 @@ class CpuRangeQueue final {
     try {
       ErrorCode metadata_failure = ErrorCode::Ok;
       std::optional<ResourceAllocationScope> resources;
-      if (job.resources)
+      std::optional<ResourcePayloadScope> payload;
+      if (job.resources) {
         resources.emplace(*job.resources, &metadata_failure);
+        payload.emplace(*job.resources, job.payload_capture);
+      }
+      data_internal::ResultHostAccessScope host_access(job.host_access);
       input_internal::Float32Environment environment;
       if (job.cancellation->cancelled()) {
         status.code = ErrorCode::Cancelled;
@@ -169,9 +177,12 @@ class CpuRangeQueue final {
     job.grain = grain;
     job.workers = workers ? workers : workers_;
     job.callback = callback;
+    job.host_access = data_internal::ResultHostAccessScope::capture();
     job.user = user;
     job.cancellation = &cancellation;
     job.resources = resources;
+    if (resources)
+      job.payload_capture = ResourcePayloadScope::capture(*resources);
     job.current = &current;
     ResourceLease lease;
     if (resources) {
@@ -264,9 +275,12 @@ class CpuRangeQueue final {
     job.workers = workers;
     job.caller_participates = false;
     job.callback = callback;
+    job.host_access = data_internal::ResultHostAccessScope::capture();
     job.user = user;
     job.cancellation = &cancellation;
     job.resources = resources;
+    if (resources)
+      job.payload_capture = ResourcePayloadScope::capture(*resources);
     job.current = &current;
     job.completion = &completion;
     ResourceLease lease;

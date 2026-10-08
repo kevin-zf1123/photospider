@@ -1,7 +1,9 @@
+#include <algorithm>
 #include <cfenv>  // NOLINT(build/c++11)
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -9,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
@@ -34,12 +37,145 @@ Value input(const std::vector<std::uint64_t>& shape,
 WorkflowDocument document(const Value& source, const std::string& key,
                           std::int64_t block) {
   WorkflowDocument doc;
-  doc.inputs = {{1, "x", source.descriptor(), source.region(), source.layout(),
-                 source.facets()}};
+  WorkflowInputDeclaration input;
+  input.id = 1;
+  input.name = "x";
+  input.result_schema = std::make_shared<SchemaTemplate>(
+      numeric_result_fixture::source_schema(source));
+  doc.inputs = {input};
   doc.nodes = {{1, key, {WorkflowInputReference{1}}, {{"block_size", block}}}};
   doc.outputs = {{"result", 1, "value"}};
   return doc;
 }
+struct Generator {
+  ValueDescriptor descriptor;
+  std::vector<ValueFacet> facets;
+  std::function<Result<Region>(const Region&, uint8_t*, uint64_t,
+                               const BufferAllocator&,
+                               const CancellationToken&)>
+      read;
+  uint64_t bytes = 0, maximum_payload = 0;
+};
+struct GeneratorProgram {
+  std::shared_ptr<Generator> source;
+  explicit GeneratorProgram(std::shared_ptr<Generator> value)
+      : source(std::move(value)) {}
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    auto builder =
+        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
+                             phase.query.semantic_key)
+            .take_value();
+    auto status = builder.bind_descriptor_relation(
+        ResultRelation::cartesian(phase.resources, 1, {}).take_value());
+    if (!status.ok())
+      return Result<ResultProgramPoll>(status);
+    const auto width = Value::element_size(source->descriptor.element_type);
+    for (const auto& region : phase.query.tensor_outputs->boxes()) {
+      const auto size = region.element_count().take_value() * width;
+      auto allocated = phase.resources.allocator().allocate(size);
+      if (!allocated.ok())
+        return Result<ResultProgramPoll>(allocated.status());
+      auto buffer = allocated.take_value();
+      auto read =
+          source->read(region, buffer.data(), size, phase.resources.allocator(),
+                       phase.query.cancellation);
+      if (!read.ok())
+        return Result<ResultProgramPoll>(read.status());
+      bool exact = region.rank() == read.value().rank();
+      for (size_t axis = 0; exact && axis < region.rank(); ++axis)
+        exact = region.dimensions()[axis].offset ==
+                    read.value().dimensions()[axis].offset &&
+                region.dimensions()[axis].extent ==
+                    read.value().dimensions()[axis].extent;
+      if (!exact)
+        return Result<ResultProgramPoll>(
+            Status{ErrorCode::TypeMismatch, "generator coverage"});
+      source->bytes += size;
+      std::vector<int64_t> strides(region.rank());
+      uint64_t stride = width;
+      for (size_t axis = strides.size(); axis--;) {
+        strides[axis] = stride;
+        stride *= region.dimensions()[axis].extent;
+      }
+      std::vector<uint64_t> origin;
+      for (const auto& dimension : region.dimensions())
+        origin.push_back(dimension.offset);
+      status = builder.publish_tensor(
+          0, region, {0, strides, origin}, std::move(buffer).freeze(),
+          ResultRelation::cartesian(phase.resources,
+                                    Region::whole(source->descriptor.shape)
+                                        .element_count()
+                                        .take_value(),
+                                    {})
+              .take_value(),
+          {true, true, true, true}, phase.query.cancellation);
+      if (!status.ok())
+        return Result<ResultProgramPoll>(status);
+    }
+    source->maximum_payload =
+        std::max(source->maximum_payload,
+                 phase.resources.statistics().live[ResourceKind::Payload]);
+    auto sealed = builder.seal();
+    return sealed.ok() ? Result<ResultProgramPoll>(
+                             ResultPublication{sealed.take_value(), true})
+                       : Result<ResultProgramPoll>(sealed.status());
+  }
+};
+WorkflowDocument generator_document(
+    const std::shared_ptr<OperationRegistry>& registry,
+    const std::shared_ptr<Generator>& source, const Value& declaration,
+    const std::string& operation, int64_t block) {
+  auto schema = numeric_result_fixture::source_schema(declaration);
+  schema.tensors[0].facets = source->facets;
+  for (const auto& facet : source->facets)
+    if (facet.key == "photospider.color-array")
+      schema.tensors[0].atomic_trailing_axes = 1;
+  OperationDefinition producer;
+  producer.key = "test.ordered.generator";
+  producer.traits.input_count = 0;
+  auto& output = producer.traits.outputs[0];
+  output.output_schema.kind = OperationPortKind::Result;
+  output.result_schema = schema;
+  output.output_schema.result_schema_id = std::string(schema.id);
+  output.output_schema.result_schema_version = schema.version;
+  output.region_rule = OperationRegionRule::Dependency;
+  output.dependency_version = 2;
+  output.continuation_bytes = sizeof(GeneratorProgram);
+  output.maximum_dependency_stages = 2;
+  producer.start_result = [source](const auto&, const auto& allocator) {
+    return ResultContinuation::make<GeneratorProgram>(allocator, source);
+  };
+  numeric_result_fixture::require(
+      registry->register_operation(std::move(producer)).ok(),
+      "generator registration");
+  numeric_result_fixture::require(registry->freeze().ok(), "generator freeze");
+  auto doc = document(declaration, operation, block);
+  doc.inputs.clear();
+  doc.nodes[0].inputs = {WorkflowNodeOutput{99, "value"}};
+  doc.nodes.insert(doc.nodes.begin(), {99, "test.ordered.generator", {}, {}});
+  return doc;
+}
+ExecutionContextConfig managed(uint64_t payload = 4096, uint64_t cache = 0) {
+  ExecutionContextConfig config;
+  config.cpu_workers = 1;
+  config.result_cache_bytes = cache;
+  config.managed_resources = ResourceLimits{};
+  config.managed_resources->capacity[ResourceKind::Payload] = payload;
+  return config;
+}
+ExecutionBindings bindings(ExecutionContext& context, const Value& value) {
+  auto root = context.resource_budget().take_value();
+  return {{{"x", numeric_result_fixture::source(root, value)}}};
+}
+double number(const ResultRef& result) {
+  double value = 0;
+  numeric_result_fixture::require(
+      result.read_tensor(result.descriptor().take_value(), 0, {0}, &value, 8)
+          .ok(),
+      "ordered Result scalar read");
+  return value;
+}
+
 double oracle(const std::vector<double>& samples, bool variance, bool fp32) {
   // Volatile intermediates establish explicit binary64 left-fold operations,
   // independent of implementation blocks, descriptors and fragment helpers.
@@ -77,13 +213,12 @@ int order_and_cache() {
           const auto source = input(shape, numbers, fp32);
           GraphContext graph(document(
               source, variance ? "numeric.variance" : "numeric.mean", block));
-          auto plan = Compiler(registry).compile(graph).take_value().plan;
-          InputSnapshotStore store({4096, 3});
-          auto snapshot = std::make_shared<const InputSnapshot>(
-              store.import_value(source).take_value());
-          ExecutionContext context(registry, {1, false, 8, 4096, 128});
-          auto demand = context.open_demand(plan, {{{"x", {}, {}, snapshot}}})
-                            .take_value();
+          auto plan =
+              numeric_result_fixture::take(Compiler(registry).compile(graph))
+                  .plan;
+          ExecutionContext context(registry, managed(4096, 128));
+          auto demand =
+              context.open_demand(plan, bindings(context, source)).take_value();
           const auto q = Footprint::all({1}).take_value();
           const double expected = oracle(numbers, variance, fp32);
           for (unsigned warm = 0; warm < 2; ++warm) {
@@ -93,26 +228,35 @@ int order_and_cache() {
                         << result.status().message << '\n';
             PS_CHECK(result.ok());
             double actual = 0;
-            PS_CHECK(
-                result.value().values.at("result").read({0}, &actual, 8).ok());
+            PS_CHECK(result.value()
+                         .results.at("result")
+                         .read_tensor(result.value()
+                                          .results.at("result")
+                                          .descriptor()
+                                          .take_value(),
+                                      0, {0}, &actual, 8)
+                         .ok());
             PS_CHECK(std::memcmp(&actual, &expected, 8) == 0);
-            PS_CHECK(result.value().diagnostics.cache_hits == warm);
+            PS_CHECK(context.cache_statistics().retained_bytes <= 128);
+            if (warm && block >= 64)
+              PS_CHECK(result.value().diagnostics.block_cache_hits > 0);
             PS_CHECK(result.value().dependencies.source_support().value().at(
                          "x") == Footprint::all(shape).take_value());
-            PS_CHECK(
-                result.value()
-                    .dependencies
-                    .potential_dirty("x", Footprint::all(shape).take_value())
-                    .value()
-                    .at("result") == q);
+            PS_CHECK(result.value()
+                         .dependencies
+                         .potential_dirty("x",
+                                          Footprint::all(shape).take_value(), 7,
+                                          {}, ResultSupportTarget::Tensor, 0)
+                         .value()
+                         .at("result") == q);
           }
         }
   return 0;
 }
 int bounded_source() {
-  auto registry = make_default_operation_registry();
   for (bool opaque : {false, true})
     for (bool variance : {false, true}) {
+      auto registry = make_default_operation_registry(false);
       auto declaration = input({4096}, std::vector<double>(4096, 1));
       if (opaque)
         declaration =
@@ -120,10 +264,7 @@ int bounded_source() {
                           declaration.layout(), declaration.copy_bytes(),
                           {{"vendor.proof", 1, {42}}})
                 .take_value();
-      GraphContext graph(document(
-          declaration, variance ? "numeric.variance" : "numeric.mean", 64));
-      auto plan = Compiler(registry).compile(graph).take_value().plan;
-      auto source = std::make_shared<RegionalSource>();
+      auto source = std::make_shared<Generator>();
       source->descriptor = declaration.descriptor();
       source->facets = declaration.facets();
       std::uint64_t reads = 0, next = 0;
@@ -143,28 +284,30 @@ int bounded_source() {
         }
         return Result<Region>(region);
       };
-      ExecutionContext context(registry, {1, false, 8, 1024});
-      auto result = context.execute(plan, {{{"x", {}, source}}});
+      GraphContext graph(generator_document(
+          registry, source, declaration,
+          variance ? "numeric.variance" : "numeric.mean", 64));
+      auto plan =
+          numeric_result_fixture::take(Compiler(registry).compile(graph)).plan;
+      ExecutionContext context(registry, managed(1024));
+      auto result = context.execute(plan);
       if (!result.ok())
         std::cerr << result.status().message << '\n';
       PS_CHECK(result.ok());
       // Uniform repetitions of 0,1,2,3: mean=1.5, population variance=1.25.
-      PS_CHECK(result.value().values.at("result").as_float64().value() ==
+      PS_CHECK(number(result.value().results.at("result")) ==
                (variance ? 1.25 : 1.5));
       PS_CHECK(reads == (variance ? 128U : 64U) && next == 0);
-      PS_CHECK(result.value().diagnostics.peak_live_bytes <= 1024);
-      PS_CHECK(result.value().diagnostics.source_read_bytes ==
-               32768 * (variance ? 2U : 1U));
+      PS_CHECK(source->maximum_payload <= 1024);
+      PS_CHECK(source->bytes == 32768 * (variance ? 2U : 1U));
     }
   return 0;
 }
 int exact_rank_eight_reads() {
-  auto registry = make_default_operation_registry();
+  auto registry = make_default_operation_registry(false);
   const std::vector<std::uint64_t> shape{2, 2, 2, 2, 2, 2, 2, 32};
   const auto declaration = input(shape, std::vector<double>(4096, 1));
-  GraphContext graph(document(declaration, "numeric.variance", 17));
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
-  auto source = std::make_shared<RegionalSource>();
+  auto source = std::make_shared<Generator>();
   source->descriptor = declaration.descriptor();
   std::uint64_t next = 0, visits = 0;
   source->read = [&](const Region& region, std::uint8_t* destination,
@@ -196,33 +339,57 @@ int exact_rank_eight_reads() {
     }
     return Result<Region>(region);
   };
-  ExecutionContext context(registry, {1, false, 8, 1024});
-  auto result = context.execute(plan, {{{"x", {}, source}}});
+  GraphContext graph(generator_document(registry, source, declaration,
+                                        "numeric.variance", 17));
+  auto plan =
+      numeric_result_fixture::take(Compiler(registry).compile(graph)).plan;
+  ExecutionContext context(registry, managed(1024));
+  auto result = context.execute(plan);
   if (!result.ok())
     std::cerr << result.status().message << '\n';
-  PS_CHECK(result.ok() &&
-           result.value().values.at("result").as_float64().value() == 1.25);
-  PS_CHECK(visits == 8192 && next == 0 &&
-           result.value().diagnostics.source_read_bytes == 65536);
+  PS_CHECK(result.ok() && number(result.value().results.at("result")) == 1.25);
+  PS_CHECK(visits == 8192 && next == 0 && source->bytes == 65536 &&
+           source->maximum_payload <= 1024);
   return 0;
 }
 int typed_channels_and_cancellation() {
   auto registry = make_default_operation_registry();
   std::vector<double> numbers;
   for (unsigned i = 0; i < 6; ++i)
-    numbers.insert(numbers.end(), {-1, 2, 0, 1});
-  auto plain = input({2, 3, 4}, numbers, true);
-  auto image = Value::create(plain.descriptor(), plain.region(), plain.layout(),
-                             plain.copy_bytes(),
-                             {encode_semantic(rgba_semantics()).take_value()})
-                   .take_value();
-  GraphContext rejected_graph(document(image, "numeric.variance", 1));
-  PS_CHECK(Compiler(registry).compile(rejected_graph).status().code ==
-           ErrorCode::InvalidArgument);
+    numbers.insert(numbers.end(), {1, 2, 3});
+  auto plain = input({2, 3, 3}, numbers, true);
+  ColorArrayDescriptor xyz;
+
+  registry = make_default_operation_registry(false);
+  auto tuples = std::make_shared<Generator>();
+  tuples->descriptor = plain.descriptor();
+  tuples->facets = {encode_color_array(xyz).take_value()};
+  unsigned tuple_reads = 0;
+  tuples->read = [&](const Region& region, uint8_t* destination, uint64_t bytes,
+                     const BufferAllocator&, const CancellationToken&) {
+    if (bytes != 12 || region.dimensions().back().extent != 3)
+      return Result<Region>(
+          Status{ErrorCode::OperationFailed, "partial typed tuple"});
+    const float data[] = {1, 2, 3};
+    std::memcpy(destination, data, 12);
+    ++tuple_reads;
+    return Result<Region>(region);
+  };
+  {
+    GraphContext graph(
+        generator_document(registry, tuples, plain, "numeric.variance", 1));
+    auto plan =
+        numeric_result_fixture::take(Compiler(registry).compile(graph)).plan;
+    ExecutionContext context(registry, managed(1024));
+    auto result = context.execute(plan);
+    PS_CHECK(result.ok() &&
+             std::abs(number(result.value().results.at("result")) - 2. / 3) <
+                 1e-15);
+    PS_CHECK(tuple_reads == 18 && tuples->bytes == 216 &&
+             tuples->maximum_payload <= 1024);
+  }
   const auto value = input({256}, std::vector<double>(256, 1));
-  GraphContext graph(document(value, "numeric.variance", 64));
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
-  auto source = std::make_shared<RegionalSource>();
+  auto source = std::make_shared<Generator>();
   source->descriptor = value.descriptor();
   CancellationSource cancel;
   unsigned reads = 0;
@@ -238,17 +405,17 @@ int typed_channels_and_cancellation() {
       cancel.cancel();
     return Result<Region>(region);
   };
-  ExecutionContext context(registry, {1, false, 8, 1024});
-  PS_CHECK(context.execute(plan, {{{"x", {}, source}}}, cancel.token())
-               .status()
-               .code == ErrorCode::Cancelled);
+  registry = make_default_operation_registry(false);
+  GraphContext graph(
+      generator_document(registry, source, value, "numeric.variance", 64));
+  auto plan =
+      numeric_result_fixture::take(Compiler(registry).compile(graph)).plan;
+  ExecutionContext context(registry, managed(1024));
+  PS_CHECK(context.execute(plan, {}, cancel.token()).status().code ==
+           ErrorCode::Cancelled);
   PS_CHECK(reads == 5);
   // The cancelled state and stage buffers retire; the same context recovers.
-  PS_CHECK(context.execute(plan, {{{"x", {}, source}}})
-               .value()
-               .values.at("result")
-               .as_float64()
-               .value() == 0);
+  PS_CHECK(number(context.execute(plan).value().results.at("result")) == 0);
   return 0;
 }
 int edited_block_cache() {
@@ -258,9 +425,11 @@ int edited_block_cache() {
     auto source = input({4}, numbers);
     GraphContext graph(
         document(source, variance ? "numeric.variance" : "numeric.mean", 2));
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
-    ExecutionContext context(registry, {1, false, 8, 4096, 512});
-    auto demand = context.open_demand(plan, {{{"x", source}}}).take_value();
+    auto plan =
+        numeric_result_fixture::take(Compiler(registry).compile(graph)).plan;
+    ExecutionContext context(registry, managed(4096, 512));
+    auto demand =
+        context.open_demand(plan, bindings(context, source)).take_value();
     DemandQuery q{{"result", Footprint::all({1}).take_value()}};
     auto initial = demand.request(q);
     PS_CHECK(initial.ok() && initial.value().diagnostics.block_cache_misses ==
@@ -268,13 +437,14 @@ int edited_block_cache() {
     // The unchanged first block retains its incoming sum. Variance pass two
     // must miss even that block because its fixed mean changes from 2.5 to 3.5.
     numbers[3] = 8;
-    PS_CHECK(demand.replace_bindings({{{"x", input({4}, numbers)}}}).ok());
+    PS_CHECK(
+        demand.replace_bindings(bindings(context, input({4}, numbers))).ok());
     auto changed = demand.request(q);
     PS_CHECK(
         changed.ok() && changed.value().diagnostics.block_cache_hits == 1 &&
         changed.value().diagnostics.block_cache_misses == (variance ? 3 : 1));
     double actual = 0, expected = oracle(numbers, variance, false);
-    PS_CHECK(changed.value().values.at("result").read({0}, &actual, 8).ok());
+    actual = number(changed.value().results.at("result"));
     PS_CHECK(std::memcmp(&actual, &expected, 8) == 0);
     PS_CHECK(changed.value().dependencies.source_support().value().at("x") ==
              Footprint::all({4}).value());
@@ -295,9 +465,11 @@ int failures_and_environment() {
              {{maximum, -maximum}, "variance overflow at sample 0"}}) {
       const auto source = input({scenario.first.size()}, scenario.first);
       GraphContext graph(document(source, "numeric.variance", block));
-      auto plan = Compiler(registry).compile(graph).take_value().plan;
-      ExecutionContext context(registry, {1, false, 8, 4096, 64});
-      auto demand = context.open_demand(plan, {{{"x", source}}}).take_value();
+      auto plan =
+          numeric_result_fixture::take(Compiler(registry).compile(graph)).plan;
+      ExecutionContext context(registry, managed(4096, 64));
+      auto demand =
+          context.open_demand(plan, bindings(context, source)).take_value();
       for (unsigned repeat = 0; repeat < 2; ++repeat) {
         auto failed = demand.request({{"result", q}});
         PS_CHECK(failed.status().code == ErrorCode::OperationFailed &&
@@ -313,17 +485,17 @@ int failures_and_environment() {
     }
   const auto finite = input({4}, {1e16, 1, -1e16, 4});
   GraphContext graph(document(finite, "numeric.mean", 1));
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan =
+      numeric_result_fixture::take(Compiler(registry).compile(graph)).plan;
   const auto prior = std::fegetround();
   PS_CHECK(std::fesetround(FE_UPWARD) == 0);
   // New workers inherit the nondefault environment; every poll must restore
   // strict arithmetic instead of relying on worker startup defaults.
-  ExecutionContext context(registry);
-  auto result = context.execute(plan, {{{"x", finite}}});
+  ExecutionContext context(registry, managed());
+  auto result = context.execute(plan, bindings(context, finite));
   const auto restored = std::fegetround();
   std::fesetround(prior);
-  PS_CHECK(result.ok() &&
-           result.value().values.at("result").as_float64().value() == 1 &&
+  PS_CHECK(result.ok() && number(result.value().results.at("result")) == 1 &&
            restored == FE_UPWARD);
   for (const auto block : {0, 65537}) {
     GraphContext bad(document(finite, "numeric.mean", block));

@@ -52,7 +52,8 @@ inline float background(std::uint64_t c, bool signed_data = false) {
 inline float mask(std::uint64_t y, std::uint64_t x) {
   return static_cast<float>((x + y) % 9) * .125F;
 }
-inline Scene scene(unsigned kind, int radius = 2, double sigma = 1.25,
+inline Scene scene(const ps::ResourceBudget& root, unsigned kind,
+                   int radius = 2, double sigma = 1.25,
                    std::uint64_t factor = 4, bool signed_data = false) {
   Scene s;
   std::vector<float> pixels, masks, back;
@@ -64,19 +65,19 @@ inline Scene scene(unsigned kind, int radius = 2, double sigma = 1.25,
         back.push_back(background(c, signed_data));
       }
     }
-  auto add = [&](const std::string& name, ps::Value value) {
+  auto add = [&](const std::string& name, ps::ResultRef value) {
     s.bindings.inputs.push_back({name, value});
     s.document.inputs.push_back(
         s1_fixture::declaration(s.document.inputs.size() + 1, name, value));
   };
-  add("image", kind == 6 ? s1_fixture::value(masks, {13, 17}, false)
-                         : s1_fixture::value(pixels, {13, 17, 4}));
+  add("image", kind == 6 ? s1_fixture::tensor(root, masks, {13, 17}, false)
+                         : s1_fixture::tensor(root, pixels, {13, 17, 4}));
   if (kind < 2)
-    add("factor", s1_fixture::scalar(kind == 0 ? 2.F : .5F));
+    add("factor", s1_fixture::scalar(root, kind == 0 ? 2.F : .5F));
   if (kind == 3)
-    add("mask", s1_fixture::value(masks, {13, 17}, false));
+    add("mask", s1_fixture::tensor(root, masks, {13, 17}, false));
   if (kind == 4)
-    add("background", s1_fixture::value(back, {13, 17, 4}));
+    add("background", s1_fixture::tensor(root, back, {13, 17, 4}));
   if (kind == 7) {
     const char* names[] = {"x", "y", "radius", "red", "green", "blue", "alpha"};
     const float args[] = {5.5F,
@@ -87,7 +88,7 @@ inline Scene scene(unsigned kind, int radius = 2, double sigma = 1.25,
                           signed_data ? -2.F : .75F,
                           .5F};
     for (int i = 0; i < 7; ++i)
-      add(names[i], s1_fixture::scalar(args[i]));
+      add(names[i], s1_fixture::scalar(root, args[i]));
   }
   const char* keys[] = {"image.exposure_gain", "image.opacity",
                         "image.gaussian_blur", "image.mask",
@@ -168,51 +169,67 @@ inline Scene scene(unsigned kind, int radius = 2, double sigma = 1.25,
       }
   return s;
 }
-inline void check(const Scene& s, const ps::Value& value) {
-  require(value.facets().size() == 1, "output must retain one typed facet");
-  auto semantic = ps::decode_semantic(value.facets()[0]);
+inline void check(const Scene& s, const ps::ResultRef& value) {
+  const auto& tensor = value.schema().tensors[0];
+  require(tensor.facets.size() == 1, "output must retain one typed facet");
+  auto semantic = ps::decode_semantic(tensor.facets[0]);
   require(semantic.ok() && semantic.value().kind ==
                                (s.channels == 4 ? ps::SemanticKind::Image
                                                 : ps::SemanticKind::Mask),
           "output typed semantics changed");
-  const auto y = value.region().dimensions()[0],
-             x = value.region().dimensions()[1];
-  for (auto row = y.offset; row < y.offset + y.extent; ++row)
-    for (auto col = x.offset; col < x.offset + x.extent; ++col)
-      for (std::uint64_t c = 0; c < s.channels; ++c) {
-        auto coordinate = s.channels == 4
-                              ? std::vector<std::uint64_t>{row, col, c}
-                              : std::vector<std::uint64_t>{row, col};
-        auto offset = value.byte_address(coordinate);
-        require(offset.ok(), "invalid result layout");
+  const auto descriptor = s1_fixture::take(value.descriptor());
+  s1_fixture::check(descriptor.tensor_coverage(0).visit(
+      [&](const auto& at) {
         float actual;
-        std::memcpy(&actual, value.bytes().data() + offset.value(), 4);
+        auto status = value.read_tensor(descriptor, 0, at, &actual, 4);
+        if (!status.ok())
+          return status;
         const auto expected =
-            s.expected[(row * s.width + col) * s.channels + c];
+            s.expected[(at[2] * s.width + at[3]) * s.channels +
+                       (s.channels == 4 ? at[4] : 0)];
         require(std::isfinite(actual) && std::abs(actual - expected) <=
                                              1e-6F + 1e-5F * std::abs(expected),
                 "independent image oracle mismatch");
-      }
+        return ps::Status::success();
+      },
+      UINT64_MAX));
+}
+inline std::vector<float> samples(const ps::ResultRef& value) {
+  std::vector<float> values;
+  auto descriptor = s1_fixture::take(value.descriptor());
+  s1_fixture::check(descriptor.tensor_coverage(0).visit(
+      [&](const auto& at) {
+        float sample;
+        auto status = value.read_tensor(descriptor, 0, at, &sample, 4);
+        if (status.ok())
+          values.push_back(sample);
+        return status;
+      },
+      UINT64_MAX));
+  return values;
 }
 inline std::uint64_t all_operations(
     ps::ExecutionContext& execution,
     const std::shared_ptr<ps::OperationRegistry>& operations,
     ps::ExecutionMode mode, std::uint64_t* fallback_count = nullptr) {
   ps::Compiler compiler(operations);
+  const auto root = s1_fixture::take(execution.resource_budget());
   if (fallback_count)
     *fallback_count = 0;
   std::uint64_t dispatches = 0;
   for (unsigned scenario = 0; scenario < 16; ++scenario) {
     const auto kind = scenario % 8;
-    auto s = scene(kind, 2, 1.25, 4, scenario >= 8);
+    auto s = scene(root, kind, 2, 1.25, 4, scenario >= 8);
     ps::GraphContext graph(s.document);
     for (bool tiled : {false, true}) {
       ps::PlanningOptions options;
       options.execution_mode = mode;
       if (tiled) {
         options.tile_height = 2;
-        options.tile_width = 3;
-        std::vector<ps::RegionDimension> dims = {{1, s.height - 1},
+        options.tile_width = 4;
+        std::vector<ps::RegionDimension> dims = {{0, 1},
+                                                 {0, 1},
+                                                 {1, s.height - 1},
                                                  {1, s.width - 1}};
         if (s.channels == 4)
           dims.push_back({0, 4});
@@ -225,7 +242,7 @@ inline std::uint64_t all_operations(
       execution.clear_result_cache();
       auto result = execution.execute(compiled.value().plan, s.bindings);
       require(result.ok(), result.status().message);
-      check(s, result.value().values.at("result"));
+      check(s, result.value().results.at("result"));
       if (mode == ps::ExecutionMode::NativeGpu && execution.gpu_enabled()) {
         require(result.value().diagnostics.native_dispatch_count > 0,
                 std::string("missing native dispatch: ") +
@@ -246,30 +263,34 @@ inline void numeric_edges(
     ps::ExecutionContext& execution,
     const std::shared_ptr<ps::OperationRegistry>& operations) {
   ps::Compiler compiler(operations);
-  ps::ExecutionContext cpu(operations);
+  const auto root = s1_fixture::take(execution.resource_budget());
   for (unsigned kind : {0U, 2U, 5U}) {
-    auto s = scene(kind, 64, 8, 16);
+    auto s = scene(root, kind, 64, 8, 16);
     std::vector<float> pixels(13 * 17 * 4, 1);
     for (std::size_t i = 0; i < pixels.size(); ++i)
       if (i % 4 != 3)
         pixels[i] = kind == 0   ? std::numeric_limits<float>::denorm_min()
                     : kind == 2 ? std::numeric_limits<float>::max()
                                 : std::numeric_limits<float>::max() / 2;
-    s.bindings.inputs[0].value = s1_fixture::value(pixels, {13, 17, 4});
+    s.bindings.inputs[0].result = s1_fixture::tensor(root, pixels, {13, 17, 4});
     ps::GraphContext graph(s.document);
     ps::PlanningOptions options;
     auto exact = compiler.compile(graph, options);
     require(exact.ok(), exact.status().message);
-    auto expected = cpu.execute(exact.value().plan, s.bindings);
+    auto expected = execution.execute(exact.value().plan, s.bindings);
     options.execution_mode = ps::ExecutionMode::NativeGpu;
     auto native = compiler.compile(graph, options);
     require(native.ok(), native.status().message);
     auto actual = execution.execute(native.value().plan, s.bindings);
     require(expected.ok() == actual.ok(), "numeric fallback changed success");
     if (actual.ok()) {
-      require(actual.value().values.at("result").bytes() ==
-                  expected.value().values.at("result").bytes(),
-              "numeric fallback not exact");
+      const auto actual_samples = samples(actual.value().results.at("result"));
+      const auto expected_samples =
+          samples(expected.value().results.at("result"));
+      require(actual_samples.size() == expected_samples.size() &&
+                  std::memcmp(actual_samples.data(), expected_samples.data(),
+                              actual_samples.size() * sizeof(float)) == 0,
+              "numeric fallback not bit exact");
       require(!actual.value().diagnostics.fallback_reasons.empty(),
               "missing numeric fallback reason");
     } else {
@@ -278,7 +299,7 @@ inline void numeric_edges(
     }
   }
   for (unsigned kind : {2U, 5U, 6U}) {
-    auto s = scene(kind, 64, 64, 16);
+    auto s = scene(root, kind, 64, 64, 16);
     ps::GraphContext graph(s.document);
     ps::PlanningOptions options;
     options.execution_mode = ps::ExecutionMode::NativeGpu;
@@ -286,47 +307,32 @@ inline void numeric_edges(
     require(compiled.ok(), compiled.status().message);
     auto result = execution.execute(compiled.value().plan, s.bindings);
     require(result.ok(), result.status().message);
-    check(s, result.value().values.at("result"));
+    check(s, result.value().results.at("result"));
     if (execution.gpu_enabled())
       require(result.value().diagnostics.native_dispatch_count > 0,
               "max radius/factor failed to dispatch");
   }
-  auto s = scene(7);
+  auto s = scene(root, 7);
   const std::uint64_t x = 8388608;
-  const std::vector<std::uint64_t> shape{1, x + 1, 4};
-  const ps::Region region({{0, 1}, {x, 1}, {0, 4}});
-  auto storage = ps::BufferAllocator().allocate(16).take_value();
+  const auto schema = s1_fixture::schema({1, x + 1, 4});
+  const ps::Region region({{0, 1}, {0, 1}, {0, 1}, {x, 1}, {0, 4}});
+  auto storage = s1_fixture::take(root.allocator().allocate(16));
   const float pixel[4] = {.125F, .25F, .5F, 1};
   std::memcpy(storage.data(), pixel, 16);
-  auto value = ps::Value::from_storage(
-      {ps::ElementType::Float32, shape}, region, {0, {16, 16, 4}, {0, x, 0}},
-      std::move(storage).freeze(), {s1_fixture::profile()});
-  require(value.ok(), value.status().message);
-  auto regional = std::make_shared<ps::RegionalSource>();
-  regional->descriptor = value.value().descriptor();
-  regional->facets = value.value().facets();
-  regional->read = [](const ps::Region& demand, std::uint8_t* data,
-                      std::uint64_t size, const ps::BufferAllocator&,
-                      const ps::CancellationToken&) {
-    if (size != 16)
-      return ps::Result<ps::Region>(
-          ps::Status::failure(ps::ErrorCode::InvalidArgument,
-                              "large coordinate test expects one pixel"));
-    const float source_pixel[4] = {.125F, .25F, .5F, 1};
-    std::memcpy(data, source_pixel, 16);
-    return ps::Result<ps::Region>(demand);
-  };
-  s.bindings.inputs[0].value = {};
-  s.bindings.inputs[0].source = regional;
-  s.bindings.inputs[1].value = s1_fixture::scalar(static_cast<float>(x));
-  s.bindings.inputs[2].value = s1_fixture::scalar(.5F);
-  s.bindings.inputs[3].value = s1_fixture::scalar(.25F);
-  s.document.inputs[0] = {1,
-                          "image",
-                          {ps::ElementType::Float32, shape},
-                          ps::Region::whole(shape),
-                          {0, {static_cast<std::int64_t>((x + 1) * 16), 16, 4}},
-                          {s1_fixture::profile()}};
+  auto builder =
+      s1_fixture::take(ps::ResultBuilder::start(root, schema, "large.brush"));
+  s1_fixture::check(builder.bind_descriptor_relation(
+      s1_fixture::take(ps::ResultRelation::cartesian(root, 1, {}))));
+  s1_fixture::check(builder.publish_tensor(
+      0, region, {0, {0, 0, 16, 16, 4}, {0, 0, 0, x, 0}},
+      std::move(storage).freeze(),
+      s1_fixture::take(ps::ResultRelation::cartesian(root, (x + 1) * 4, {})),
+      {true, true, true, true}));
+  s.bindings.inputs[0].result = s1_fixture::take(builder.seal());
+  s.bindings.inputs[1].result = s1_fixture::scalar(root, static_cast<float>(x));
+  s.bindings.inputs[2].result = s1_fixture::scalar(root, .5F);
+  s.bindings.inputs[3].result = s1_fixture::scalar(root, .25F);
+  s.document.inputs[0] = s1_fixture::declaration(1, "image", schema);
   ps::GraphContext graph(s.document);
   ps::PlanningOptions options;
   options.execution_mode = ps::ExecutionMode::NativeGpu;
@@ -335,8 +341,8 @@ inline void numeric_edges(
   require(compiled.ok(), compiled.status().message);
   auto result = execution.execute(compiled.value().plan, s.bindings);
   require(result.ok(), result.status().message);
-  require(std::memcmp(result.value().values.at("result").bytes().data(), pixel,
-                      16) == 0,
+  require(samples(result.value().results.at("result")) ==
+              std::vector<float>(pixel, pixel + 4),
           "large-coordinate circle coverage changed");
   if (execution.gpu_enabled())
     require(result.value().diagnostics.native_dispatch_count == 1,

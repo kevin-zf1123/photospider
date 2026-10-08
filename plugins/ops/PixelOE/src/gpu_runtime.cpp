@@ -6,9 +6,9 @@
 #include <string>
 
 namespace px {
-void dispatch_gpu(const ps_planar_services_v3* services, const char* entry,
+void dispatch_gpu(const ps_result_services_v2* services, const char* entry,
                   std::array<uint32_t, 3> grid, const Arguments& arguments) {
-  if (!services->consume_work(services->context, 16384))
+  if (services->consume_work(services->context, 16384) != 0)
     throw Failure(4, "PixelOE GPU metadata work budget exhausted");
   const GpuKernel* selected = nullptr;
   for (const auto& kernel : gpu_kernels()) {
@@ -21,11 +21,11 @@ void dispatch_gpu(const ps_planar_services_v3* services, const char* entry,
   if (!selected)
     throw Failure(6, std::string("missing native kernel: ") + entry);
   const auto& kernel = *selected;
-  if (!services->consume_work(services->context,
-                              gpu_work_bound(kernel, grid, arguments)))
+  if (services->consume_work(services->context,
+                             gpu_work_bound(kernel, grid, arguments)) != 0)
     throw Failure(4, "PixelOE GPU work budget exhausted");
   std::array<uint8_t, 512> constants{};
-  std::array<ps_gpu_buffer_binding_v11, 31> bindings{};
+  std::array<ps_gpu_buffer_binding_v1, 31> bindings{};
   uint32_t count = 0;
   for (uint32_t i = 0; i < kernel.parameter_count; ++i) {
     const auto& parameter = kernel.parameters[i];
@@ -35,8 +35,8 @@ void dispatch_gpu(const ps_planar_services_v3* services, const char* entry,
           value.count > UINT64_MAX / parameter.size || count == bindings.size())
         throw Failure(6, "invalid native PixelOE buffer argument");
       bindings[count++] = {
-          sizeof(ps_gpu_buffer_binding_v11), parameter.index,   value.token, 0,
-          value.count * parameter.size,      parameter.writable};
+          sizeof(ps_gpu_buffer_binding_v1), parameter.index,   value.token, 0,
+          value.count * parameter.size,     parameter.writable};
     } else {
       if (parameter.offset > constants.size() ||
           parameter.size > constants.size() - parameter.offset)
@@ -48,7 +48,7 @@ void dispatch_gpu(const ps_planar_services_v3* services, const char* entry,
                   parameter.size);
     }
   }
-  ps_gpu_dispatch_v11 dispatch{};
+  ps_gpu_dispatch_v1 dispatch{};
   dispatch.struct_size = sizeof(dispatch);
   dispatch.source = kernel.source;
   dispatch.source_size = kernel.source_size;
@@ -78,7 +78,7 @@ void Context::copy(const Array& source, const Array& destination) {
     std::memcpy(destination.data, source.data, source.count * 4);
     return;
   }
-  if (services_->gpu->backend == PS_GPU_BACKEND_VULKAN_V11) {
+  if (services_->gpu->backend == PS_GPU_BACKEND_VULKAN_V1) {
     if (source.count > UINT32_MAX)
       throw Failure(4, "PixelOE GPU copy grid exceeds uint32");
     dispatch_gpu(services_, "copy_words",
@@ -94,13 +94,13 @@ void Context::copy(const Array& source, const Array& destination) {
       "kernel void copy_words(device const uint* a [[buffer(0)]], "
       "device uint* b [[buffer(1)]], constant ulong& n [[buffer(2)]], "
       "uint i [[thread_position_in_grid]]){if(i<n)b[i]=a[i];}";
-  const ps_gpu_buffer_binding_v11 bindings[] = {
-      {sizeof(ps_gpu_buffer_binding_v11), 0, source.token, 0, source.count * 4,
+  const ps_gpu_buffer_binding_v1 bindings[] = {
+      {sizeof(ps_gpu_buffer_binding_v1), 0, source.token, 0, source.count * 4,
        0},
-      {sizeof(ps_gpu_buffer_binding_v11), 1, destination.token, 0,
+      {sizeof(ps_gpu_buffer_binding_v1), 1, destination.token, 0,
        destination.count * 4, 1}};
   const uint64_t count = source.count;
-  ps_gpu_dispatch_v11 dispatch{};
+  ps_gpu_dispatch_v1 dispatch{};
   dispatch.struct_size = sizeof(dispatch);
   dispatch.source = shader;
   dispatch.source_size = sizeof(shader) - 1;

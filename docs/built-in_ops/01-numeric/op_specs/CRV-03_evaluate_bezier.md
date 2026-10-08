@@ -12,13 +12,10 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
-verification_status: manual_public_workflows_and_independent_oracle
+verification_status: focused_result_manual_and_installed_consumer
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+repository_commit: current working tree
 ---
 
 # CRV-03: evaluate_bezier
@@ -43,9 +40,8 @@ CRV-03 target. Individual coordinate components may turn back or repeat.
 
 The mathematical operation evaluates B(t); it does not solve Bx(t)=x as
 [CRV-02](CRV-02_sample_bezier_function.md) does. Query parameters are explicit
-input data; no arc-length interpretation is implied. The three explicit profile
-keys and public `evaluate_bezier_node` constructor are implemented; Proposed
-continues to describe specification acceptance status.
+input data; no arc-length interpretation is implied. The three explicit profile keys and public `evaluate_bezier_node` constructor
+are implemented; Proposed continues to describe specification acceptance status.
 
 ## Confirmed control representation
 
@@ -84,25 +80,44 @@ Destination overflow and nonfinite demanded data fail the Run.
 
 ## Confirmed requested-component support
 
-One CPU Whole callback collects all four complete inputs with recognized typed
-validation, then validates every segment_indices/t row before any component
-arithmetic. It evaluates all N*D output cells and publishes one immutable dense
-[N,D] owner. Sparse demand restricts returned coverage but retains complete input
-collection, computation and output memory. Empty reads no payload; complete
-static metadata still validates.
+All inputs are Results containing one tensor member under any schema id/version
+and member key; `sample_shape()` supplies the complete dimensions, including
+batch axes. The Whole Result program requests every input with Data, Validation
+and Descriptor (role 13), then validates every segment_indices/t row before any
+component arithmetic. It evaluates all N*D output cells and publishes an
+immutable dense Result using schema `photospider.tensor` v1 / member `samples`,
+shape [N,D], selected dtype and empty facets. Output association records current
+source ObjectIds. A nonempty local request returns full certified coverage in
+global sample coordinates; coordinates are not rebased to the request. Empty
+produces empty coverage and does not poll a failing handle producer; static
+metadata and remaining execution stages still apply. For nonempty work,
+upstream handle failures propagate before endpoint shortcuts or invalid-query
+arithmetic.
 
-Mathematical selection is unchanged: t=0/1 uses only the selected anchor
-component; an interior uses both anchors and all relative handles of that segment
-and component. Generic numeric data outside every evaluated stencil is not
-additionally finite-checked. Complete typed and upstream validation still covers
-unused inputs. All rows/components are evaluated, so formerly unrequested bad
-index/t/components can fail the Run. No partial successful output is published.
-There is no global mathematical topology/monotonicity scan.
+Mathematical selection is unchanged: t=0/1 reads only the selected anchor
+component for the polynomial; an interior uses both anchors and all relative
+handles of that segment and component. Generic numeric data outside every
+evaluated stencil is not additionally finite-checked. Complete typed and
+upstream validation still covers unused active inputs. A typed RGBA handle
+Result with spatial layout and channel axis 2 can fail validation on an invalid
+alpha value. Whole execution computes all D columns even when the query requests
+only one component, so that sparse request still evaluates the alpha component.
+At t=0 the endpoint polynomial skips handles, while complete typed validation
+still checks the handle Result and can reject that alpha value. All rows and
+components are evaluated, so a bad index/t or evaluated component can fail the
+Run. No partial successful output is published. There is no global mathematical
+topology/monotonicity scan.
 
 Any input edit invalidates recorded output demand. Cache identity includes all
-input versions, profile, metadata and parameters. Output name, dtype, rank-2
-shape (including D=1) and empty facets are unchanged. Input zero/negative strides,
-offsets and unaligned storage remain legal. Output storage survives its context.
+input versions, profile, metadata and parameters. Replacing segment/t sources
+retains the compiled static preparation. Repeating a completed demand returns
+the same Result object; an equivalent fresh four-source binding can reuse the
+content cache and refresh all four source associations. Output name, dtype,
+rank-2 shape (including D=1) and empty facets are unchanged. Input
+zero/negative strides, offsets and unaligned storage remain legal. Output
+storage survives its context; the output owns its published payload, so source
+backings can retire. An authorized read window shares the output owner and can
+outlive the Result.
 
 ## Confirmed reconstruction and numerical versions
 
@@ -147,8 +162,10 @@ request partition, neighboring queries, thread order or cache state.
 | 2 segment_indices | Int64 [N] |
 | 3 t | Float32/Float64 [N] |
 
-All ports are required, generic Values. Output values is a generic Value [N,D]
-with empty facets. Static degree is required Int64 2 or 3; static dtype is
+All ports are required Result inputs with one tensor member under any schema
+id/version/key. Output port `values` is a Result using schema
+`photospider.tensor` v1 / member `samples`, shape [N,D], selected dtype and empty
+facets. Batch axes are included in the complete `sample_shape()`. Static degree is required Int64 2 or 3; static dtype is
 required String float32/float64, with constructor default float64. Direct nodes
 supply both. No output axis, extrapolation, automatic segment selection, squeeze
 or implicit dtype conversion from integers is provided. Shape/dtype inference
@@ -172,25 +189,20 @@ control reconstruction observe their separate rounding boundaries.
 
 ## Demand, dirty mapping and returned ownership
 
-One CPU Whole callback collects all four complete inputs with recognized typed
-validation, then validates every segment_indices/t row before any component
-arithmetic. It evaluates all N*D output cells and publishes one immutable dense
-[N,D] owner. Sparse demand restricts returned coverage but retains complete input
-collection, computation and output memory. Empty reads no payload; complete
-static metadata still validates.
+For a nonempty request Q, the operation returns complete certified [N,D]
+coverage in global sample coordinates while dependency and dirty mappings retain
+Q. Input version, profile, metadata and parameter identity participate in cache
+validation; a source edit invalidates the corresponding recorded demand. The
+manual fixture confirms replacement segment and t Results reuse the static
+PreparedOperation and refreshes all four source ObjectIds when a fresh equivalent
+bundle reuses the content cache.
 
-Mathematical selection is unchanged: t=0/1 uses only the selected anchor
-component; an interior uses both anchors and all relative handles of that segment
-and component. Generic numeric data outside every evaluated stencil is not
-additionally finite-checked. Complete typed and upstream validation still covers
-unused inputs. All rows/components are evaluated, so formerly unrequested bad
-index/t/components can fail the Run. No partial successful output is published.
-There is no global mathematical topology/monotonicity scan.
-
-Any input edit invalidates recorded output demand. Cache identity includes all
-input versions, profile, metadata and parameters. Output name, dtype, rank-2
-shape (including D=1) and empty facets are unchanged. Input zero/negative strides,
-offsets and unaligned storage remain legal. Output storage survives its context.
+The immutable dense output Result owns its packed payload independently of the
+four source backings and execution context. A previously acquired authorized
+read window shares that output owner and remains readable after releasing the
+Result. Releasing the final window releases the output Payload and all Root
+allocations. The Result schema and selected dtype remain stable across cache
+rebinds.
 
 ## Algorithm, resources and errors
 
@@ -212,6 +224,10 @@ InvalidDomain; actual RN64 reconstruction or final conversion overflow is
 OperationFailed/ArithmeticOverflow. Typed, upstream, stale, backend and
 cancellation errors preserve their categories. Whole numeric counters are not
 available; zero counters must not be interpreted as zero arithmetic/fallbacks.
+Public constant-node composition with D=2^39 and N=2^40 requests one cell but
+requires full output capacity and fails at the parametric node with
+ResourceExhausted/CapacityLimit. These cases verify the complete-output budget
+rule, not successful numerical execution at either physical maximum shape.
 
 ## Acceptance and implementation boundary
 
@@ -231,15 +247,35 @@ Mathematical endpoint evaluation ignores unused generic handles/opposite anchor,
 but full collection and typed validation still apply. An unrequested bad query
 or evaluated component fails the complete Run. Verify complete source support,
 whole invalidation, all-port layouts/fenv, Empty/schema, active cancellation and
-work/output/workspace rejection. Public constant-node composition checks that
-2^39-column and 2^40-row sparse requests still require the complete payload
-budget and fail when it is insufficient.
+work/output/workspace rejection. Acceptance also requires public constant-node
+composition cases showing that 2^39-column and 2^40-row sparse requests still
+require the complete payload budget and fail when it is insufficient. The
+Result manual workflow exercises both rejection cases under Strict and Apple
+profiles; they do not establish successful numerical execution at either
+maximum shape.
 
-The maintained public fixture in `examples/numeric_workflow/parametric.cpp`
-uses the constructor and Compiler/ExecutionContext. Its independent Bernstein
-oracle evaluates the complete output before projecting observed cells. Current
-native strict/Apple manual groups and 1428 oracle cases per profile passed.
-Other platforms were not rerun for this Whole migration.
+The public Result constructor is exercised by `test_numeric_parametric_result`
+and `installed_numeric_parametric_result`, which builds the same manual fixture
+against the installed package. Its source `Value` objects supply immutable
+storage referenced by source Results and charged as Referenced; output values,
+bindings, and reads use Results. Coverage includes both profiles, Float32/Float64,
+quadratic/cubic fixtures, all 16 combinations of reversed/unaligned inputs,
+zero-stride sources, caller and worker fenv, nine invalid static metadata cases, typed Whole
+validation, unused generic values, query/producer error ordering, endpoint
+selection, overflow, Empty, current association, demand dirty mapping, static
+preparation, exact-work cancellation, WorkLimit and complete Root release.
+Strict and Apple each passed all six manual groups and all 1428 independent
+Fraction oracle cases bit-for-bit. The focused root CTest selection passed
+`test_numeric_result_math` and `test_numeric_parametric_result` 2/2 in 4.67
+seconds (4.50 seconds and 0.17 seconds respectively). The installed 0.32.0
+package consumer passed `installed_numeric_parametric_result` 1/1 under Strict
+in 0.17 seconds; its direct Apple invocation passed all six groups. The separate
+`test_numeric_result_math` integration target
+continues to cover 22 Fraction golden words across CRV-02 function sampling and
+CRV-03 parametric evaluation; these integration cases do not replace the manual
+fixture or its installed consumer. Exact commands and current validation results
+are recorded in the [numeric workflow README](../../../../examples/numeric_workflow/README.md#parametric-bezier-evaluation-crv-03).
+x86 and successful physical maximum-shape numerical execution were not tested.
 
 Production retains RN64 reconstruction and exact integer power-Horner with one
 final rounding. All current profiles use the same exact numerical calculation;
@@ -251,9 +287,9 @@ performance and its limits.
 
 Build/run commands and editable use are maintained in
 [the numeric workflow README](../../../../examples/numeric_workflow/README.md#parametric-bezier-evaluation-crv-03).
-The manual target has no CTest or integration registration. See
-[implementation notes](../math-implementation.md#crv-03-parametric-bezier-evaluation)
-for arithmetic bounds and validation scope.
+The focused Result test command and coverage are in the numeric workflow README.
+See [implementation notes](../math-implementation.md#crv-03-parametric-bezier-evaluation)
+for unchanged arithmetic bounds and historical validation scope.
 
 - [Curve category](../curves.md).
 - [Operator template](../../00-foundation/spec-template.md).

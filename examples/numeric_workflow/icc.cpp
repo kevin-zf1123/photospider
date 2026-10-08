@@ -182,44 +182,146 @@ void ownership() {
                "dedup, work/cancel/admission cleanup PASS\n";
 }
 
+void check(ps::Status status) {
+  if (!status.ok())
+    throw std::runtime_error(status.message);
+}
+ps::SchemaTemplate color_schema(const ps::ValueFacet& facet,
+                                unsigned colors = 1) {
+  ps::SchemaTemplate schema;
+  schema.id = "photospider.tensor";
+  ps::ResultTensorSpec tensor;
+  tensor.key = "samples";
+  tensor.descriptor = {ps::ElementType::Float64, {colors, 4}};
+  tensor.facets = {facet};
+  tensor.atomic_trailing_axes = 1;
+  schema.tensors.push_back(std::move(tensor));
+  return schema;
+}
+ps::ResultRef source(const ps::ResourceBudget& root,
+                     const ps::SchemaTemplate& schema,
+                     const ps::Value& backing) {
+  auto builder = take(ps::ResultBuilder::start(
+      root, schema, "icc.input", {}, {}, 128, 128, backing.resources()));
+  check(builder.bind_descriptor_relation(
+      take(ps::ResultRelation::cartesian(root, 1, {}))));
+  auto storage = take(root.allocator().allocate(backing.bytes().size()));
+  std::memcpy(storage.data(), backing.bytes().data(), backing.bytes().size());
+  check(builder.publish_tensor(
+      0, backing.region(), backing.layout(), std::move(storage).freeze(),
+      take(ps::ResultRelation::cartesian(
+          root, take(schema.tensors[0].sample_count()), {})),
+      {true, true, true, true}));
+  return take(builder.seal());
+}
+ps::Footprint coverage(const ps::ResultRef& result) {
+  return take(result.descriptor()).tensor_coverage(0);
+}
 struct ProfileOutput {
-  ps::Result<ps::DependencyPoll> poll(const ps::DependencyPhase& phase) {
-    const auto& query = phase.query;
-    auto allocated = ps::MutableValue::allocate(query.output.descriptor,
-                                                query.outputs.boxes().front(),
-                                                phase.allocator);
-    if (!allocated.ok())
-      return ps::Result<ps::DependencyPoll>(allocated.status());
-    auto writer = allocated.take_value();
-    std::memset(writer.data(), 0, writer.size());
-    auto value =
-        std::move(writer).publish(query.output.facets, query.resources);
-    if (!value.ok())
-      return ps::Result<ps::DependencyPoll>(value.status());
-    auto result = ps::ValueFragments::create(
-        query.output.descriptor, query.output.facets, query.outputs,
-        {value.take_value()}, phase.sets, query.resources);
-    return result.ok() ? ps::Result<ps::DependencyPoll>(result.take_value())
-                       : ps::Result<ps::DependencyPoll>(result.status());
-  }
-};
-struct StructuredProfileOutput {
   ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
-    auto writer = take(ps::MutableValue::allocate(
-        phase.query.output.descriptor,
-        phase.query.value_outputs->boxes().front(), phase.allocator));
-    std::memset(writer.data(), 0, writer.size());
-    auto value = take(std::move(writer).publish(phase.query.output.facets,
-                                                phase.query.resources));
-    auto fragments = take(ps::ValueFragments::create(
-        phase.query.output.descriptor, phase.query.output.facets,
-        *phase.query.value_outputs, {value}, {}, phase.query.resources));
-    auto relation =
-        take(ps::ResultRelation::cartesian(phase.resources, 4, {0, 1, 0, 0}));
+    const auto& schema = *phase.query.output.result_schema;
+    const auto& tensor = schema.tensors[0];
+    auto builder = take(ps::ResultBuilder::start(
+        phase.resources, schema, phase.query.semantic_key, {}, {},
+        phase.query.tile_height, phase.query.tile_width,
+        phase.query.resources));
+    check(builder.bind_descriptor_relation(
+        take(ps::ResultRelation::cartesian(phase.resources, 1, {}))));
+    auto demand = phase.query.tensor_outputs
+                      ? *phase.query.tensor_outputs
+                      : take(ps::Footprint::all(tensor.sample_shape()));
+    demand = take(tensor.close_samples(demand));
+    auto relation = take(ps::ResultRelation::cartesian(
+        phase.resources, take(tensor.sample_count()), {}));
+    for (const auto& box : demand.boxes()) {
+      std::vector<double> values(take(box.element_count()));
+      check(builder.publish_tensor(
+          0, box,
+          {reinterpret_cast<const std::uint8_t*>(values.data()),
+           values.size() * sizeof(double)},
+          relation, {true, true, true, true}));
+    }
     return ps::Result<ps::ResultProgramPoll>(
-        ps::ResultValuePublication{std::move(fragments), std::move(relation)});
+        ps::ResultPublication{take(builder.seal()), true});
+  }
+  ps::Result<ps::ResourceVector<ps::ResultJointOutcome>> poll(
+      const ps::ResultJointPhase& phase) {
+    ps::ResourceVector<ps::ResultJointOutcome> replies;
+    for (const auto* member : phase.members)
+      replies.push_back(
+          {take(ps::result_atom_key(member->query)), poll(*member)});
+    return ps::Result<ps::ResourceVector<ps::ResultJointOutcome>>(
+        std::move(replies));
   }
 };
+ps::OperationDefinition profile_output(const ps::ValueFacet& facet,
+                                       unsigned* starts) {
+  ps::OperationDefinition operation;
+  operation.key = "manual.profile_output";
+  auto& traits = operation.traits;
+  auto& output = traits.outputs[0];
+  output.output_schema.kind = ps::OperationPortKind::Result;
+  output.output_schema.result_schema_id = "photospider.tensor";
+  output.output_schema.result_schema_version = 1;
+  output.output_schema.tensor_key = "samples";
+  output.result_schema = color_schema(facet);
+  output.region_rule = ps::OperationRegionRule::Dependency;
+  output.dependency_version = 2;
+  output.continuation_bytes = sizeof(ProfileOutput);
+  output.maximum_dependency_stages = 2;
+  output.failure_delivery = ps::FailureDelivery::PerAtomOutcome;
+  traits.joint_contract = 2;
+  traits.joint_continuation_bytes = sizeof(ProfileOutput);
+  operation.start_result = [starts](const auto&, const auto& allocator) {
+    ++*starts;
+    return ps::ResultContinuation::make<ProfileOutput>(allocator);
+  };
+  operation.start_result_joint = [starts](const auto&, const auto& allocator) {
+    ++*starts;
+    return ps::ResultJointContinuation::make<ProfileOutput>(allocator);
+  };
+  return operation;
+}
+ps::Result<ps::ResultRef> direct_result(const ps::OperationRegistry& registry,
+                                        const ps::ResourceBudget& root,
+                                        const ps::SchemaTemplate& schema,
+                                        const ps::ResourceBindings& resources,
+                                        const ps::Footprint& samples,
+                                        bool late_cancel = false) {
+  ps::ResourceAllocationScope scope(root);
+  ps::ResultProgramMetadata metadata;
+  metadata.output.result_schema =
+      std::make_shared<const ps::SchemaTemplate>(schema);
+  const std::map<std::string, ps::ParameterValue> parameters;
+  ps::ResultProgramQuery query(metadata, parameters);
+  query.tensor_outputs = samples;
+  query.semantic_key = "icc.direct";
+  query.resources = resources;
+  ps::CancellationSource cancelled;
+  query.cancellation = cancelled.token();
+  auto state = take(
+      registry.start_result("manual.profile_output", query, root.allocator()));
+  query.resources = {};
+  if (late_cancel)
+    cancelled.cancel();
+
+  ps::ResultObjectInputs no_results;
+  ps::ResourceVector<ps::ResultIoReply> no_io;
+  auto allocator = root.allocator();
+  ps::ResultProgramPhase phase{
+      query,
+      no_results,
+      no_io,
+      allocator,
+      root,
+      [root](auto work) { return root.consume({work}); },
+      std::make_shared<std::atomic<ps::ErrorCode>>(ps::ErrorCode::Ok)};
+  auto result = state.poll(phase);
+  return result.ok()
+             ? ps::Result<ps::ResultRef>(
+                   std::get<ps::ResultPublication>(result.value()).result)
+             : ps::Result<ps::ResultRef>(result.status());
+}
 void propagation() {
   auto bytes = fixture();
   ps::ResourceBudget root;
@@ -264,22 +366,21 @@ void propagation() {
               take(recollected.resources().icc_profile(profile.identity()))
                       .storage() == profile.storage(),
           "packed collect copies payload and retains typed ICC owner");
-  ps::InputSnapshotStore store;
-  auto snapshot = take(store.import_value(dense));
-  auto patched = take(store.patch(snapshot, b));
-  require(take(patched.resources().icc_profile(profile.identity())).bytes() ==
-              view(bytes),
-          "snapshot patch retains frozen profile bytes");
   auto registry = ps::make_default_operation_registry();
+  const auto input_schema = color_schema(facet, 2);
   ps::WorkflowDocument document;
-  document.inputs = {
-      {1, "inks", descriptor, dense.region(), dense.layout(), {facet}}};
+  ps::WorkflowInputDeclaration input;
+  input.id = 1;
+  input.name = "inks";
+  input.result_schema =
+      std::make_shared<const ps::SchemaTemplate>(input_schema);
+  document.inputs = {input};
   document.nodes = {{1, "core.identity", {ps::WorkflowInputReference{1}}, {}}};
   document.outputs = {{"inks", 1, "value"}};
   ps::GraphContext graph(document);
   ps::Compiler compiler(registry);
   require(!compiler.compile(graph).ok(),
-          "compiler rejects unresolved static input identity");
+          "compiler rejects unresolved static input profile");
   auto compiled = take(compiler.compile(graph, {}, bindings));
   require(compiled.semantic.resources().size() == 1 &&
               compiled.optimized.resources().size() == 1 &&
@@ -290,202 +391,165 @@ void propagation() {
   config.result_cache_bytes = 64;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext context(registry, config);
-  auto executed = take(context.execute(compiled.plan, {{{"inks", dense}}}));
-  require(take(executed.values.at("inks").resources().icc_profile(
+  auto execution_root = take(context.resource_budget());
+  auto original = source(execution_root, input_schema, dense);
+  ps::ExecutionBindings input_bindings{{{"inks", original}}};
+  auto executed = take(context.execute(compiled.plan, input_bindings));
+  require(take(executed.results.at("inks").resources().icc_profile(
                    profile.identity()))
                   .bytes() == view(bytes),
-          "legacy callback execution retains profile");
-  auto frozen = take(context.freeze(
-      compiled.plan, {{{"inks",
-                        {},
-                        {},
-                        std::make_shared<const ps::InputSnapshot>(patched)}}}));
-  auto from_snapshot = take(context.execute(frozen));
-  require(from_snapshot.values.at("inks").resources().size() == 1,
-          "snapshot regional source publication retains profile");
-  const ps::Region legacy_partial({{0, 1}, {2, 1}});
-  const auto legacy_full =
+          "Result identity output retains profile");
+  auto frozen = take(context.freeze(compiled.plan, input_bindings));
+  std::vector<std::uint8_t> changed(64);
+  const double replacement = .25;
+  std::memcpy(changed.data() + 7 * sizeof(double), &replacement,
+              sizeof(replacement));
+  auto patched_backing = take(
+      ps::Value::create(descriptor, ps::Region::whole({2, 4}), {0, {32, 8}},
+                        std::move(changed), {facet}, bindings));
+  auto patched = source(execution_root, input_schema, patched_backing);
+  auto handle = take(context.open_demand(compiled.plan, input_bindings));
+  check(handle.replace_bindings({{{"inks", patched}}}).status());
+  auto from_original = take(context.execute(frozen));
+  auto from_replacement = take(context.execute(take(handle.freeze())));
+  double before = 1, after = 0;
+  check(from_original.results.at("inks").read_tensor(
+      take(from_original.results.at("inks").descriptor()), 0, {1, 3}, &before,
+      sizeof(before)));
+  check(from_replacement.results.at("inks").read_tensor(
+      take(from_replacement.results.at("inks").descriptor()), 0, {1, 3}, &after,
+      sizeof(after)));
+  require(before == 0 && after == .25 &&
+              from_replacement.results.at("inks").resources().size() == 1,
+          "immutable Result binding replacement retains ICC and old capture");
+  const ps::Region input_partial({{0, 1}, {2, 1}});
+  const auto input_full =
       take(ps::Footprint::from_regions({2, 4}, {ps::Region({{0, 1}, {0, 4}})}));
-  ps::PlanningOptions legacy_options;
-  legacy_options.output_regions = {{"inks", legacy_partial}};
-  auto legacy_roi = take(compiler.compile(graph, legacy_options, bindings));
-  require(take(ps::Footprint::from_regions(
-              {2, 4}, {legacy_roi.plan.output_regions().at("inks")})) ==
-              legacy_full,
-          "ordinary compiler output ROI expands ColorArray channels");
-  const std::vector<ps::Value> legacy_values{dense};
-  const std::vector<ps::Region> legacy_demands{dense.region()};
-  const std::map<std::string, ps::ParameterValue> legacy_parameters;
-  ps::OperationInvocation legacy_call(legacy_values, legacy_demands,
-                                      legacy_parameters);
-  legacy_call.output_region = legacy_partial;
-  require(registry->invoke("core.identity", legacy_call).ok(),
-          "ordinary direct callback accepts partial color demand");
-  const auto image_facet = take(ps::encode_semantic(ps::rgba_semantics()));
-  require(!ps::operation_observations(
-               {{ps::ElementType::Float32, {1, 1, 4}}, {image_facet}},
-               take(ps::Footprint::from_regions(
-                   {1, 1, 4}, {ps::Region({{0, 1}, {0, 1}, {2, 1}})})))
-               .ok(),
-          "legacy Image observation still rejects partial channels");
+  ps::PlanningOptions input_planning;
+  input_planning.output_regions = {{"inks", input_partial}};
+  auto input_roi = take(compiler.compile(graph, input_planning, bindings));
+  require(
+      take(ps::Footprint::from_regions(
+          {2, 4}, {input_roi.plan.output_regions().at("inks")})) == input_full,
+      "Result compiler ROI expands ColorArray channels");
+  require(coverage(take(context.execute_fragments(
+                            frozen, {{"inks", take(ps::Footprint::from_regions(
+                                                  {2, 4}, {input_partial}))}}))
+                       .results.at("inks")) == input_full,
+          "Result identity sparse output closes complete color");
   document.nodes = {
       take(ps::numeric::abs_node(1, ps::WorkflowInputReference{1}))};
   document.outputs = {{"absolute", 1, "values"}};
   ps::GraphContext numeric_graph(document);
   auto numeric_plan = take(compiler.compile(numeric_graph, {}, bindings));
-  frozen = take(context.freeze(numeric_plan.plan, {{{"inks", dense}}}));
-  auto numeric = take(context.execute_fragments(
-      frozen, {{"absolute", take(ps::Footprint::all({2, 4}))}}));
-  require(numeric.values.at("absolute").resources().size() == 0,
-          "generic numeric output drops consumed ICC owner");
+  auto numeric = take(context.execute(numeric_plan.plan, input_bindings));
+  require(numeric.results.at("absolute").resources().size() == 0,
+          "generic numeric Result drops unreferenced ICC owner");
 
   auto custom = std::make_shared<ps::OperationRegistry>();
-  ps::OperationDefinition operation;
-  operation.key = "manual.profile_output";
-  operation.traits.input_count = 0;
-  operation.traits.deterministic = true;
-  operation.traits.side_effect_free = true;
-  operation.traits.cacheable = true;
-  operation.traits.input_schema.clear();
-  auto& output = operation.traits.outputs[0];
-  output.shape_rule = ps::OperationShapeRule::Fixed;
-  output.fixed_output_shape = {1, 4};
-  output.output_element_type = ps::ElementType::Float64;
-  output.region_rule = ps::OperationRegionRule::Dependency;
-  output.dependency_version = 1;
-  output.continuation_bytes = sizeof(ProfileOutput);
-  output.maximum_dependency_stages = 2;
-  output.atomic_trailing_axes = 1;
-  output.failure_delivery = ps::FailureDelivery::PerAtomOutcome;
-  output.output_semantic_rule = ps::OperationSemanticRule::Establish;
-  output.output_facets = {facet};
   unsigned starts = 0;
-  operation.start_dependency = [&starts](const auto&, const auto& allocator) {
-    ++starts;
-    return ps::DependencyContinuation::make<ProfileOutput>(allocator);
-  };
-  auto structured_operation = operation;
-  structured_operation.key = "manual.structured_profile_output";
-  structured_operation.traits.outputs[0].dependency_version = 2;
-  structured_operation.traits.outputs[0].atomic_trailing_axes = 0;
-  structured_operation.traits.outputs[0].failure_delivery =
-      ps::FailureDelivery::RequestFailureOnly;
-  structured_operation.traits.outputs[0].continuation_bytes =
-      sizeof(StructuredProfileOutput);
-  structured_operation.start_dependency = {};
-  structured_operation.start_result = [](const auto&, const auto& allocator) {
-    return ps::ResultContinuation::make<StructuredProfileOutput>(allocator);
-  };
-  require(
-      custom->register_operation(std::move(operation)).ok() &&
-          custom->register_operation(std::move(structured_operation)).ok() &&
-          custom->freeze().ok(),
-      "register profile output probes");
+  check(custom->register_operation(profile_output(facet, &starts)));
+  check(custom->freeze());
   ps::WorkflowDocument generated;
   generated.nodes = {{1, "manual.profile_output", {}, {}}};
   generated.outputs = {{"inks", 1, "value"}};
   ps::GraphContext generated_graph(generated);
   require(!ps::Compiler(custom).compile(generated_graph).ok(),
-          "compiler rejects unresolved inferred output identity");
+          "compiler rejects unresolved inferred output profile");
   auto generated_plan =
       take(ps::Compiler(custom).compile(generated_graph, {}, bindings));
-  ps::DependencyRequest request;
-  request.outputs = take(ps::Footprint::none({1, 4}));
-  request.snapshot_identity = "profile-empty";
-  require(!custom->start_dependency("manual.profile_output", request).ok() &&
-              starts == 0,
-          "Empty start resolves profile before callbacks");
-  request.resources = bindings;
-  auto session =
-      take(custom->start_dependency("manual.profile_output", request));
-  auto progress = take(session->poll());
-  require(
-      std::get<ps::DependencyResult>(progress).value.resources().size() == 1,
-      "Empty dependency result retains queryable ICC owner");
-  // Borrowed invocation vectors must have a live owner.
-  const std::vector<ps::Value> no_inputs;
-  const std::vector<ps::Region> no_demands;
-  const std::map<std::string, ps::ParameterValue> no_parameters;
-  ps::OperationInvocation direct(no_inputs, no_demands, no_parameters);
-  direct.resources = bindings;
-  auto direct_value = take(custom->invoke("manual.profile_output", direct));
-  require(direct_value.resources().size() == 1,
-          "direct dependency invocation publishes explicit output resources");
+  const auto schema = color_schema(facet);
+  const auto empty_samples = take(ps::Footprint::none({1, 4}));
   const ps::Region partial_region({{0, 1}, {2, 1}});
   const auto partial =
       take(ps::Footprint::from_regions({1, 4}, {partial_region}));
   const auto full_color = take(ps::Footprint::all({1, 4}));
-  direct.output_region = partial_region;
-  auto partial_direct = take(custom->invoke("manual.profile_output", direct));
-  require(take(ps::Footprint::from_regions(
-              {1, 4}, {partial_direct.region()})) == full_color,
-          "direct collector expands a channel to full color");
-  request.outputs = partial;
-  auto partial_session =
-      take(custom->start_dependency("manual.profile_output", request));
-  auto partial_progress = take(partial_session->poll());
-  const auto& partial_result = std::get<ps::DependencyResult>(partial_progress);
-  require(partial_result.value.coverage() == full_color &&
-              partial_result.original_outputs == full_color,
-          "direct session uses complete color observation");
+  ps::ResultProgramMetadata metadata;
+  metadata.output.result_schema =
+      std::make_shared<const ps::SchemaTemplate>(schema);
+  const std::map<std::string, ps::ParameterValue> parameters;
+  ps::ResultProgramQuery query(metadata, parameters);
+  query.tensor_outputs = empty_samples;
+  query.semantic_key = "icc.empty";
+  const auto old_starts = starts;
+  require(
+      !custom->start_result("manual.profile_output", query, root.allocator())
+              .ok() &&
+          starts == old_starts,
+      "Empty direct start resolves profile before callbacks");
+  auto direct_empty =
+      take(direct_result(*custom, root, schema, bindings, empty_samples));
+  require(direct_empty.resources().size() == 1 &&
+              coverage(direct_empty).empty() && starts == old_starts,
+          "Empty direct Result owns profile without operator callback");
+  auto direct = take(direct_result(*custom, root, schema, bindings, partial));
+  require(coverage(direct) == full_color && direct.resources().size() == 1,
+          "direct Result publication closes a complete color and owns ICC");
   ps::ResourceBudget direct_root;
-  ps::Value retained_direct;
-  {
-    ps::ResourceAllocationScope scope(direct_root);
-    direct.allocator = direct_root.allocator();
-    retained_direct = take(custom->invoke("manual.profile_output", direct));
-  }
+  auto retained_direct =
+      take(direct_result(*custom, direct_root, schema, bindings, full_color));
   require(direct_root.statistics().live[ps::ResourceKind::Referenced] ==
               bytes.size(),
-          "direct collector retains active root ICC admission");
+          "direct Result retains active Root ICC admission");
   retained_direct = {};
-  require(direct_root.statistics().live[ps::ResourceKind::Referenced] == 0,
-          "direct collector last release returns ICC reference capacity");
+  require(direct_root.statistics().live[ps::ResourceKind::Referenced] == 0 &&
+              direct_root.statistics().live[ps::ResourceKind::Host] == 0,
+          "last direct Result releases profile and metadata capacity");
+  ps::ResourceBudget cancelled_root;
+  const auto before_cancel = starts;
+  auto cancelled = direct_result(*custom, cancelled_root, schema, bindings,
+                                 empty_samples, true);
+  require(!cancelled.ok() &&
+              cancelled.status().code == ps::ErrorCode::Cancelled &&
+              starts == before_cancel,
+          "late cancellation skips Empty C2 publication and callbacks");
+  for (auto live : cancelled_root.statistics().live.values)
+    require(live == 0, "cancelled direct Empty releases all Root resources");
   ps::ResourceLimits direct_limits;
   direct_limits.capacity[ps::ResourceKind::Referenced] = bytes.size() - 1;
   ps::ResourceBudget direct_small(direct_limits);
   {
     ps::ResourceAllocationScope scope(direct_small);
-    direct.allocator = direct_small.allocator();
-    const auto old_starts = starts;
-    auto denied = custom->invoke("manual.profile_output", direct);
+    query.resources = bindings;
+    const auto prior = starts;
+    auto denied = custom->start_result("manual.profile_output", query,
+                                       direct_small.allocator());
     require(!denied.ok() &&
                 denied.status().code == ps::ErrorCode::ResourceExhausted &&
-                starts == old_starts,
-            "direct profile admission precedes callback");
-    const std::vector<ps::Value> values{dense};
-    const std::vector<ps::Region> demands{dense.region()};
-    ps::OperationInvocation legacy(values, demands, no_parameters);
-    legacy.allocator = direct_small.allocator();
-    auto legacy_denied = registry->invoke("core.identity", legacy);
-    require(!legacy_denied.ok() &&
-                legacy_denied.status().code == ps::ErrorCode::ResourceExhausted,
-            "ordinary direct callback honors active ICC reference budget");
+                starts == prior,
+            "Empty direct profile admission precedes callbacks");
+    query.tensor_outputs = partial;
+    denied = custom->start_result("manual.profile_output", query,
+                                  direct_small.allocator());
+    require(!denied.ok() &&
+                denied.status().code == ps::ErrorCode::ResourceExhausted &&
+                starts == prior,
+            "nonempty direct profile admission precedes callbacks");
   }
   ps::ExecutionContext generated_context(custom, config);
   auto generated_frozen =
       take(generated_context.freeze(generated_plan.plan, {}));
-  auto output_value = take(generated_context.execute(generated_frozen));
-  require(output_value.values.at("inks").resources().size() == 1,
-          "compiled dependency output retains admitted resources");
+  auto output = take(generated_context.execute(generated_frozen));
+  require(output.results.at("inks").resources().size() == 1,
+          "compiled Result output retains admitted profile");
   require(generated_context.cache_statistics().retained_bytes == 0 &&
               generated_context.cache_statistics().entries == 0,
-          "sample-only optional cache does not retain unaccounted ICC owner");
-  auto partial_result_run = take(generated_context.execute_fragments(
-      generated_frozen, {{"inks", partial}}));
-  require(partial_result_run.values.at("inks").coverage() == full_color,
-          "named sparse request returns full color");
+          "sample-only optional cache skips profile-bearing Results");
+  auto sparse = take(generated_context.execute_fragments(generated_frozen,
+                                                         {{"inks", partial}}));
+  require(coverage(sparse.results.at("inks")) == full_color,
+          "named sparse Result request returns a full color");
   auto atoms = take(generated_context.execute_atoms(generated_plan.plan, {},
                                                     {{"inks", partial}}));
   require(atoms.atoms.size() == 1 && atoms.atoms[0].outcome.ok() &&
-              atoms.atoms[0].outcome.value().coverage() == full_color,
-          "per-Atom partial request is one complete color");
-  auto handle = take(generated_context.open_demand(generated_plan.plan, {}));
-  require(
-      take(handle.request({{"inks", partial}})).values.at("inks").coverage() ==
-              full_color &&
-          handle.release({{"inks", partial}}).ok(),
-      "demand handle canonical request/release uses same full color");
+              coverage(atoms.atoms[0].outcome.value()) == full_color,
+          "partial Atom request is one complete Result color");
+  auto generated_handle =
+      take(generated_context.open_demand(generated_plan.plan, {}));
+  require(coverage(take(generated_handle.request({{"inks", partial}}))
+                       .results.at("inks")) == full_color,
+          "Result demand handle closes a partial color");
+  check(generated_handle.release({{"inks", partial}}));
   ps::PlanningOptions planning;
   planning.output_regions = {{"inks", partial_region}};
   auto narrow_plan =
@@ -498,87 +562,31 @@ void propagation() {
                   {take(generated_plan.plan.tile_plan("inks", partial_region))
                        .output_regions()
                        .at("inks")})) == full_color,
-          "compiler ROI and tile normalize color channels");
+          "Result compiler ROI and tile normalize color channels");
+  const auto before_empty = starts;
   auto empty = take(generated_context.execute_fragments(
-      generated_frozen, {{"inks", take(ps::Footprint::none({1, 4}))}}));
-  require(empty.values.at("inks").resources().size() == 1,
-          "Empty compiled demand retains static output resources");
+      generated_frozen, {{"inks", empty_samples}}));
+  require(empty.results.at("inks").resources().size() == 1 &&
+              coverage(empty.results.at("inks")).empty() &&
+              starts == before_empty,
+          "Empty C2 root Result retains profile without operator callback");
   config.managed_resources->capacity[ps::ResourceKind::Referenced] =
       bytes.size() - 1;
   ps::ExecutionContext limited(custom, config);
-  const auto before = starts;
-  auto failed = limited.execute_fragments(
-      generated_frozen, {{"inks", take(ps::Footprint::none({1, 4}))}});
-  require(!failed.ok() &&
-              failed.status().code == ps::ErrorCode::ResourceExhausted &&
-              starts == before,
-          "Empty run admits ICC capacity before callbacks");
-  generated.nodes[0].operation = "manual.structured_profile_output";
-  ps::GraphContext structured_graph(generated);
-  auto structured_plan =
-      take(ps::Compiler(custom).compile(structured_graph, {}, bindings));
-  auto structured_frozen =
-      take(generated_context.freeze(structured_plan.plan, {}));
-  auto structured_output = take(generated_context.execute(structured_frozen));
-  require(structured_output.values.at("inks").resources().size() == 1,
-          "structured query gives zero-input producer accepted ICC owner");
-  auto structured_partial = take(generated_context.execute_fragments(
-      structured_frozen, {{"inks", partial}}));
-  require(structured_partial.values.at("inks").coverage() == full_color,
-          "structured root closes partial color output");
-  ps::WorkflowDocument bridge_document;
-  bridge_document.nodes = {{1, "manual.profile_output", {}, {}},
-                           {2, "manual.structured_profile_output", {}, {}}};
-  bridge_document.outputs = {{"inks", 1, "value"}, {"structured", 2, "value"}};
-  ps::GraphContext bridge_graph(bridge_document);
-  auto bridge_plan =
-      take(ps::Compiler(custom).compile(bridge_graph, {}, bindings));
-  auto bridge_frozen = take(generated_context.freeze(bridge_plan.plan, {}));
-  require(take(generated_context.execute_fragments(bridge_frozen,
-                                                   {{"inks", partial}}))
-                  .values.at("inks")
-                  .coverage() == full_color,
-          "structured v1 bridge returns closed complete-color output");
-  ps::ResultProgramMetadata metadata;
-  metadata.output = {ps::ValueDescriptor{ps::ElementType::Float64, {1, 4}},
-                     {facet},
-                     {},
-                     1};
-  ps::ResultProgramQuery structured_query(metadata, no_parameters);
-  structured_query.value_outputs = partial;
-  structured_query.semantic_key = "icc-structured-direct";
-  require(!custom
-               ->start_result("manual.structured_profile_output",
-                              structured_query, root.allocator())
-               .ok(),
-          "direct structured start rejects unresolved output profile");
-  structured_query.resources = bindings;
-  auto structured_state = take(custom->start_result(
-      "manual.structured_profile_output", structured_query, root.allocator()));
-  structured_query.resources = {};
-  ps::ResultValueInputs no_values;
-  ps::ResultObjectInputs no_results;
-  ps::ResourceVector<ps::ResultIoReply> no_io;
-  auto allocator = root.allocator();
-  ps::ResultProgramPhase phase{
-      structured_query,
-      no_values,
-      no_results,
-      no_io,
-      allocator,
-      root,
-      [](auto) { return ps::Status::success(); },
-      std::make_shared<std::atomic<ps::ErrorCode>>(ps::ErrorCode::Ok)};
-  auto structured_polled = take(structured_state.poll(phase));
-  require(
-      std::get<ps::ResultValuePublication>(structured_polled)
-              .value.resources()
-              .size() == 1,
-      "structured continuation owns resources independently of query handle");
-  std::cout
-      << "ICC propagation: fragments, snapshots, compiler, callback, "
-         "dependency/v2, partial-color closure, Empty and capacity PASS\n";
+  const auto before_limited = starts;
+  for (const auto& demand : {empty_samples, full_color}) {
+    auto failed =
+        limited.execute_fragments(generated_frozen, {{"inks", demand}});
+    require(!failed.ok() &&
+                failed.status().code == ps::ErrorCode::ResourceExhausted &&
+                starts == before_limited,
+            "compiled ICC admission precedes Empty and nonempty callbacks");
+  }
+  std::cout << "ICC Result propagation: typed backing, immutable bindings, "
+               "compiler/direct/C2 ownership, partial-color closure, Empty "
+               "and pre-callback capacity PASS\n";
 }
+
 }  // namespace
 int main(int argc, char** argv) {
   try {

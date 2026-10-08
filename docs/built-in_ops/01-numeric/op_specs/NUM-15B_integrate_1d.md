@@ -13,10 +13,7 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+repository_commit: current working tree
 ---
 
 # NUM-15B: integrate_1d
@@ -31,10 +28,13 @@ Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
-Compute cumulative trapezoidal integration of dynamic samples [N], step [1]
-and initial [1], in that port order, all with the same Float32/Float64 dtype.
-Require 1<=N<=2^40. Output values retains shape [N] and dtype, with empty facets.
-There are no static numeric parameters or implicit casts/axis extraction.
+Compute cumulative trapezoidal integration from three `Result` tensor inputs in
+port order: samples with `sample_shape()` [N], step [1], and initial [1]. Each
+input may use any tensor member key; all share Float32 or Float64 dtype. Require
+1<=N<=2^40. The output port key is `values`; its Result schema is
+`photospider.tensor` with tensor member `samples`, shape [N], input dtype, and
+no facets. There are no static numeric parameters or
+implicit casts/axis extraction.
 
     values[0] = initial
     values[i] = initial + step * sum_{k=0..i-1}(samples[k]+samples[k+1])/2
@@ -103,17 +103,36 @@ Test negative step, N=1, raw sNaN/negative-zero initial at output 0, invalid ste
 ignored only for N=1 and rejected for all N>1 demands, NaN source priority,
 infinity cancellation, subnormals and finite cancellation after large areas.
 
-Read witnesses must show initial-only for N=1 and complete active inputs for
-N>1. Exercise disjoint outputs, dynamic step/initial invalidation, source
-strides, low work/capacity limits, checkpoint partition invariance, cancellation,
-cache-off and result lifetime through actual public WorkflowDocument execution
-when implemented. This trapezoidal rule approximates an underlying function's
-integral; exact rounding concerns the stated discrete formula. Implementation evidence below records the checks actually run.
+Focused coverage exercises public workflows, exact weighted-prefix arithmetic,
+raw output-zero copying, N=1, invalid step validation, NaN priority, infinities,
+pre-cancellation, resource limits and output lifetime. For N=1, the tests connect
+deliberately failing producers to samples and step; neither producer starts, the
+initial sNaN bits are copied, and dependency observations name only initial.
+Empty demand also starts no producer. For N>1, an output-zero request starts
+required producers and propagates their failure; statically excluding step still
+retains dtype validation. This trapezoidal rule approximates an underlying
+function's integral; exact rounding concerns the stated discrete formula.
 
 
 ## Implementation and executable acceptance
 
-All formal calculus profiles execute Whole. Mathematical weighted-prefix and
-raw output0 rules are unchanged. See [NUM-15 Whole execution](../calculus-whole.md)
-for current public workflow, oracle, resource checks and profiling. Older regional
-WSL/installed records predate Whole.
+All six registered profile keys execute Whole Result programs and preserve the
+`ExactCalculus` weighted-prefix arithmetic. For N=1, static specialization
+selects only input 2 (initial); samples and step metadata remain checked, but
+runtime support excludes them and their failed producers remain unstarted. Empty
+demand starts no producer and publishes empty tensor coverage. For N>1, each
+nonempty query prepares all active inputs even when it requests output 0, then
+publishes the complete output with full tensor coverage. The query scopes the
+recorded dependency observation and dirty mapping; it does not trim Result
+coverage. The manual workflow verifies failure ordering, raw output-zero
+copying, sparse requests, negative and zero strides, unaligned
+storage, caller and worker floating environments on actual continuation polls,
+resource limits, cancellation, and Result/window lifetime through Root release.
+
+The independent oracle retains 1,810 Fraction reference cases. Strict acceptance
+is bit-exact. Apple acceptance follows the shared FP32-scaled bound and includes
+a verified one-ULP difference; it is not a bit-exact claim. The root behavior
+test and installed consumer compile the same manual workflow with
+`-fno-fast-math -frounding-math -ffp-contract=off`. Commands and current
+execution details are in [NUM-15 Whole execution](../calculus-whole.md), and the
+runnable workflow is listed in [the numeric workflow guide](../../../../examples/numeric_workflow/README.md#discrete-derivatives-and-cumulative-integration-num-15).

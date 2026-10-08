@@ -3,10 +3,15 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <functional>
 #include <memory>
+#include <set>
+#include <tuple>
 #include <utility>
 #include <vector>
 
+#include "data/result_neighborhood.hpp"
+#include "data/result_reshape.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 
 namespace ps {
@@ -30,13 +35,47 @@ DependencyGuarantee combine_guarantee(DependencyGuarantee a,
       std::max(static_cast<unsigned>(a), static_cast<unsigned>(b)));
 }
 }  // namespace
+Result<std::uint64_t> ResultMappedAxis::source_coordinate(
+    std::uint64_t output) const {
+  if (output_axis < 0 || !step)
+    return Result<std::uint64_t>(source_origin);
+  const auto distance =
+      output >= output_origin ? output - output_origin : output_origin - output;
+  const auto magnitude = step < 0 ? static_cast<std::uint64_t>(-(step + 1)) + 1
+                                  : static_cast<std::uint64_t>(step);
+  const bool subtract = (output < output_origin) != (step < 0);
+  const auto available = subtract ? source_origin : UINT64_MAX - source_origin;
+  if (distance > available / magnitude)
+    return Result<std::uint64_t>(invalid_relation());
+  const auto delta = distance * magnitude;
+  return Result<std::uint64_t>(subtract ? source_origin - delta
+                                        : source_origin + delta);
+}
+namespace {
+__int128 floor_div(__int128 numerator, __int128 denominator) {
+  const auto quotient = numerator / denominator;
+  return quotient - (numerator % denominator < 0 ? 1 : 0);
+}
+__int128 ceil_div(__int128 numerator, __int128 denominator) {
+  return -floor_div(-numerator, denominator);
+}
+std::uint64_t step_magnitude(std::int64_t step) {
+  return step < 0 ? static_cast<std::uint64_t>(-(step + 1)) + 1
+                  : static_cast<std::uint64_t>(step);
+}
+}  // namespace
 struct ResultRelation::Impl {
   enum class Kind {
     Cartesian,
+    Mapped,
+    Neighborhood,
+    Reshape,
     Identity,
+    Prefix,
     Rows,
     Samples,
     Union,
+    Restricted,
     Compose,
     Unknown
   };
@@ -48,9 +87,63 @@ struct ResultRelation::Impl {
   std::uint64_t outputs = 0, row_count = 0;
   std::uint32_t depth = 1, children_count = 0;
   ResultSupport support;
+  ResourceVector<std::uint64_t> output_shape, input_shape;
+  ResourceVector<ResultMappedAxis> mapping;
+  ResourceVector<std::uint64_t> radii;
+  bool periodic = false;
+  Region mapped_outputs, reshape_source;
+  ResourceLease mapped_region_lease;
   TemporaryStorage rows;
   ResourceVector<ResultRelationRow> samples;
   std::array<std::shared_ptr<const Impl>, 16> children;
+  Result<const Impl*> output_geometry() const {
+    auto charged = budget.consume({1});
+    if (!charged.ok())
+      return Result<const Impl*>(charged);
+    if (!output_shape.empty())
+      return Result<const Impl*>(this);
+    if (kind == Kind::Union || kind == Kind::Compose) {
+      for (std::uint32_t i = 0; i < (kind == Kind::Union ? children_count : 1U);
+           ++i) {
+        auto geometry = children[i]->output_geometry();
+        if (!geometry.ok() || geometry.value())
+          return geometry;
+      }
+    }
+    return Result<const Impl*>(nullptr);
+  }
+  bool inside_mask(std::uint64_t output) const noexcept {
+    for (std::size_t axis = output_shape.size(); axis-- > 0;) {
+      const auto at = output % output_shape[axis];
+      output /= output_shape[axis];
+      const auto d = mapped_outputs.dimensions()[axis];
+      if (at < d.offset || at - d.offset >= d.extent)
+        return false;
+    }
+    return true;
+  }
+  Status validate_output_shape(const std::vector<std::uint64_t>& shape) const {
+    auto charged = budget.consume({shape.size() + 1});
+    if (!charged.ok())
+      return charged;
+    if (kind == Kind::Mapped || kind == Kind::Reshape ||
+        kind == Kind::Neighborhood || kind == Kind::Prefix ||
+        kind == Kind::Restricted) {
+      if (!std::equal(output_shape.begin(), output_shape.end(), shape.begin(),
+                      shape.end()))
+        return invalid_relation();
+    }
+    if (kind == Kind::Union || kind == Kind::Restricted ||
+        kind == Kind::Compose) {
+      for (std::uint32_t i = 0; i < (kind == Kind::Union ? children_count : 1U);
+           ++i) {
+        auto valid = children[i]->validate_output_shape(shape);
+        if (!valid.ok())
+          return valid;
+      }
+    }
+    return Status::success();
+  }
   static Result<std::shared_ptr<Impl>> make(ResourceBudget budget,
                                             std::uint64_t outputs) {
     auto capacity = ResourceCapacity::host(sizeof(Impl), sizeof(Impl));
@@ -70,7 +163,9 @@ struct ResultRelation::Impl {
   }
   Status walk(std::uint64_t output, std::uint64_t* remaining,
               const std::function<Status(ResultSupport)>& visitor,
-              bool declared = false) const {
+              bool declared = false, bool* outside = nullptr) const {
+    if (outside)
+      *outside = false;
     if (output >= outputs)
       return invalid_relation();
     auto tick = [&]() {
@@ -95,6 +190,179 @@ struct ResultRelation::Impl {
       case Kind::Identity:
         return visitor({support.input, support.roles, output, 1, support.target,
                         support.slot});
+      case Kind::Prefix:
+        return visitor({support.input, support.roles, 0, output + 1,
+                        support.target, support.slot});
+      case Kind::Reshape: {
+        std::array<uint64_t, 8> output_at{}, source_at{};
+        auto index = output;
+        for (size_t axis = output_shape.size(); axis-- > 0;) {
+          output_at[axis] = index % output_shape[axis];
+          index /= output_shape[axis];
+          const auto d = mapped_outputs.dimensions()[axis];
+          if (output_at[axis] < d.offset ||
+              output_at[axis] - d.offset >= d.extent)
+            return {ErrorCode::NotFound, "sample outside reshape witness"};
+        }
+        reshape_internal::Ordinal ordinal(output);
+        for (size_t axis = input_shape.size(); axis-- > 0;) {
+          const auto d = reshape_source.dimensions()[axis];
+          source_at[axis] = d.offset + ordinal.divide(d.extent);
+        }
+        uint64_t first = 0;
+        for (size_t axis = 0; axis < input_shape.size(); ++axis) {
+          if (first > (UINT64_MAX - source_at[axis]) / input_shape[axis])
+            return {ErrorCode::ResourceExhausted,
+                    "reshape support cannot be flattened"};
+          first = first * input_shape[axis] + source_at[axis];
+        }
+        if (first == UINT64_MAX)
+          return {ErrorCode::ResourceExhausted,
+                  "reshape support cannot be flattened"};
+        auto point = support;
+        point.first = first;
+        point.count = 1;
+        return visitor(point);
+      }
+      case Kind::Neighborhood: {
+        ResourceAllocationScope scope(budget);
+        auto scratch = budget.reserve(ResourceCapacity::host(512, 512));
+        if (!scratch.ok())
+          return scratch.status();
+        std::vector<RegionDimension> dims(output_shape.size());
+        auto ordinal = output;
+        for (std::size_t axis = dims.size(); axis-- > 0;) {
+          dims[axis] = {ordinal % output_shape[axis], 1};
+          ordinal /= output_shape[axis];
+        }
+        FootprintLimits limits;
+        limits.maximum_work = *remaining;
+        limits.consume_work = [&](std::uint64_t amount) {
+          if (amount > *remaining)
+            return Status{ErrorCode::ResourceExhausted, {}};
+          *remaining -= amount;
+          return budget.consume({amount});
+        };
+        auto centers = Footprint::from_regions(
+            std::vector<std::uint64_t>(output_shape.begin(),
+                                       output_shape.end()),
+            {Region(std::move(dims))}, limits);
+        if (!centers.ok())
+          return centers.status();
+        auto expanded = neighborhood_internal::expand(budget, centers.value(),
+                                                      radii, periodic, limits);
+        if (!expanded.ok())
+          return expanded.status();
+        for (const auto& box : expanded.value().boxes()) {
+          std::array<std::uint64_t, 8> at{};
+          for (std::size_t axis = 0; axis < output_shape.size(); ++axis)
+            at[axis] = box.dimensions()[axis].offset;
+          const auto last = output_shape.size() - 1;
+          for (;;) {
+            auto status = tick();
+            if (!status.ok())
+              return status;
+            std::uint64_t first = 0;
+            for (std::size_t axis = 0; axis < output_shape.size(); ++axis) {
+              if (first > (UINT64_MAX - at[axis]) / output_shape[axis])
+                return {ErrorCode::ResourceExhausted,
+                        "neighborhood support cannot be flattened"};
+              first = first * output_shape[axis] + at[axis];
+            }
+            auto span = support;
+            span.first = first;
+            span.count = box.dimensions()[last].extent;
+            if (span.count > UINT64_MAX - first)
+              return {ErrorCode::ResourceExhausted, {}};
+            status = visitor(span);
+            if (!status.ok())
+              return status;
+            std::size_t axis = last;
+            while (axis) {
+              --axis;
+              const auto d = box.dimensions()[axis];
+              if (++at[axis] < d.offset + d.extent)
+                break;
+              at[axis] = d.offset;
+            }
+            if (!axis && (!last || at[0] == box.dimensions()[0].offset))
+              break;
+          }
+        }
+        return Status::success();
+      }
+      case Kind::Mapped: {
+        std::array<std::uint64_t, 8> output_at{}, at{}, begin{}, extent{},
+            stride{};
+        auto index = output;
+        for (std::size_t axis = output_shape.size(); axis-- > 0;) {
+          output_at[axis] = index % output_shape[axis];
+          index /= output_shape[axis];
+          const auto d = mapped_outputs.dimensions()[axis];
+          if (output_at[axis] < d.offset ||
+              output_at[axis] - d.offset >= d.extent)
+            return Status{ErrorCode::NotFound, "sample outside mapped witness"};
+        }
+        std::uint64_t contiguous = 1;
+        auto prefix = input_shape.size();
+        for (std::size_t axis = input_shape.size(); axis-- > 0;) {
+          const auto m = mapping[axis];
+          auto start = m.source_coordinate(
+              m.output_axis < 0 ? 0 : output_at[m.output_axis]);
+          if (!start.ok())
+            return start.status();
+          begin[axis] = start.value();
+          extent[axis] = std::min(m.extent, input_shape[axis] - begin[axis]);
+          at[axis] = begin[axis];
+          if (axis + 1 == input_shape.size()) {
+            stride[axis] = 1;
+          } else {
+            if (stride[axis + 1] > UINT64_MAX / input_shape[axis + 1])
+              return {ErrorCode::ResourceExhausted,
+                      "tensor support cannot be flattened"};
+            stride[axis] = stride[axis + 1] * input_shape[axis + 1];
+          }
+        }
+        for (std::size_t axis = input_shape.size(); axis-- > 0;) {
+          if (contiguous > UINT64_MAX / extent[axis])
+            return {ErrorCode::ResourceExhausted,
+                    "tensor support count cannot be flattened"};
+          contiguous *= extent[axis];
+          prefix = axis;
+          if (begin[axis] || extent[axis] != input_shape[axis])
+            break;
+        }
+        for (;;) {
+          status = tick();
+          if (!status.ok())
+            return status;
+          std::uint64_t first = 0;
+          for (std::size_t axis = 0; axis < input_shape.size(); ++axis) {
+            if (at[axis] > (UINT64_MAX - first) / stride[axis])
+              return {ErrorCode::ResourceExhausted,
+                      "tensor support position cannot be flattened"};
+            first += at[axis] * stride[axis];
+          }
+          if (contiguous > UINT64_MAX - first)
+            return {ErrorCode::ResourceExhausted,
+                    "tensor support span cannot be flattened"};
+          auto span = support;
+          span.first = first;
+          span.count = contiguous;
+          status = visitor(span);
+          if (!status.ok())
+            return status;
+          std::size_t axis = prefix;
+          while (axis) {
+            --axis;
+            if (++at[axis] < begin[axis] + extent[axis])
+              break;
+            at[axis] = begin[axis];
+          }
+          if (!axis && (prefix == 0 || at[0] == begin[0]))
+            return Status::success();
+        }
+      }
       case Kind::Samples: {
         auto first = std::lower_bound(
             samples.begin(), samples.end(), output,
@@ -136,17 +404,30 @@ struct ResultRelation::Impl {
       case Kind::Union: {
         bool resolved = false;
         for (std::uint32_t i = 0; i < children_count; ++i) {
-          status = children[i]->walk(output, remaining, visitor, declared);
+          bool child_outside = false;
+          status = children[i]->walk(output, remaining, visitor, declared,
+                                     &child_outside);
           if (status.code == ErrorCode::NotFound &&
-              children[i]->guarantee != DependencyGuarantee::Unknown)
+              (children[i]->guarantee != DependencyGuarantee::Unknown ||
+               child_outside))
             continue;
           if (!status.ok())
             return status;
           resolved = true;
         }
-        return resolved ? Status::success()
-                        : Status{ErrorCode::NotFound,
-                                 "missing union observation witness"};
+        if (resolved)
+          return Status::success();
+        if (outside)
+          *outside = true;
+        return {ErrorCode::NotFound, "missing union observation witness"};
+      }
+      case Kind::Restricted: {
+        if (!inside_mask(output)) {
+          if (outside)
+            *outside = true;
+          return {ErrorCode::NotFound, "sample outside restricted witness"};
+        }
+        return children[0]->walk(output, remaining, visitor, declared, outside);
       }
       case Kind::Compose:
         return children[0]->walk(
@@ -165,11 +446,57 @@ struct ResultRelation::Impl {
               }
               return Status::success();
             },
-            declared);
+            declared, outside);
     }
     return invalid_relation();
   }
 };
+Result<std::uint64_t> ResultRelation::cache_metadata(
+    ResourceVector<const void*>& owners, std::uint64_t maximum,
+    const std::function<Status(std::uint64_t)>& work) const try {
+  if (!impl_)
+    return Result<std::uint64_t>(0);
+  ResourceAllocationScope scope(impl_->budget);
+  ResourceVector<const Impl*> pending{impl_.get()};
+  std::uint64_t total = 0;
+  while (!pending.empty()) {
+    auto charged = work(1 + owners.size());
+    if (!charged.ok())
+      return Result<std::uint64_t>(charged);
+    auto* node = pending.back();
+    pending.pop_back();
+    if (std::find(owners.begin(), owners.end(), node) != owners.end())
+      continue;
+    std::uint64_t count = 1;
+    const auto add = [&](std::uint64_t n) {
+      if (n > maximum || count > maximum - n)
+        return false;
+      count += n;
+      return true;
+    };
+    if (node->row_count > maximum / 7 ||
+        node->samples.capacity() > maximum / 7 ||
+        node->mapping.capacity() > maximum / 5 ||
+        !add(node->output_shape.capacity()) ||
+        !add(node->input_shape.capacity()) || !add(node->radii.capacity()) ||
+        !add(node->mapping.capacity() * 5) ||
+        !add(2 * node->mapped_outputs.rank()) ||
+        !add(2 * node->reshape_source.rank()) ||
+        !add(node->samples.capacity() * 7) || !add(node->row_count * 7) ||
+        !add(node->children_count) || total > maximum - count)
+      return Result<std::uint64_t>(Status{ErrorCode::ResourceExhausted, {}});
+    charged = work(count);
+    if (!charged.ok())
+      return Result<std::uint64_t>(charged);
+    total += count;
+    owners.push_back(node);
+    for (std::uint32_t i = 0; i < node->children_count; ++i)
+      pending.push_back(node->children[i].get());
+  }
+  return Result<std::uint64_t>(total);
+} catch (const std::bad_alloc&) {
+  return Result<std::uint64_t>(Status{ErrorCode::ResourceExhausted, {}});
+}
 bool ResultRelation::owned_by(const ResourceBudget& budget) const noexcept {
   return impl_ && impl_->budget.same_owner(budget);
 }
@@ -178,6 +505,74 @@ DependencyGuarantee ResultRelation::guarantee() const noexcept {
 }
 std::uint64_t ResultRelation::coverage() const noexcept {
   return impl_ ? impl_->outputs : 0;
+}
+Result<ResultRelation> ResultRelation::restrict_to(
+    const std::vector<std::uint64_t>& shape, const Region& region) const try {
+  using Answer = Result<ResultRelation>;
+  if (!impl_ || shape.empty() || shape.size() > 8 ||
+      !region.validate(shape).ok())
+    return Answer(invalid_relation());
+  std::uint64_t count = 1;
+  for (auto n : shape) {
+    if (!n)
+      return Answer(invalid_relation());
+    count = count > UINT64_MAX / n ? UINT64_MAX : count * n;
+  }
+  if (count != coverage())
+    return Answer(invalid_relation());
+  auto valid_shape = impl_->validate_output_shape(shape);
+  if (!valid_shape.ok())
+    return Answer(valid_shape);
+  bool whole = true;
+  for (std::size_t axis = 0; axis < shape.size(); ++axis)
+    whole &= !region.dimensions()[axis].offset &&
+             region.dimensions()[axis].extent == shape[axis];
+  if (whole)
+    return Answer(*this);
+  if (impl_->kind == Impl::Kind::Mapped || impl_->kind == Impl::Kind::Reshape ||
+      impl_->kind == Impl::Kind::Neighborhood ||
+      impl_->kind == Impl::Kind::Restricted) {
+    if (!std::equal(impl_->output_shape.begin(), impl_->output_shape.end(),
+                    shape.begin(), shape.end()))
+      return Answer(invalid_relation());
+    bool contained = impl_->mapped_outputs.rank() == region.rank();
+    for (std::size_t axis = 0; contained && axis < shape.size(); ++axis) {
+      const auto old = impl_->mapped_outputs.dimensions()[axis];
+      const auto next = region.dimensions()[axis];
+      contained = old.offset >= next.offset &&
+                  old.offset - next.offset <= next.extent &&
+                  old.extent <= next.extent - (old.offset - next.offset);
+    }
+    if (contained)
+      return Answer(*this);
+  }
+  if (impl_->depth >= 32)
+    return Answer(
+        Status{ErrorCode::ResourceExhausted, "Result relation depth limit"});
+  auto made = Impl::make(impl_->budget, coverage());
+  if (!made.ok())
+    return Answer(made.status());
+  auto node = made.take_value();
+  node->output_shape = ResourceVector<std::uint64_t>(
+      shape.begin(), shape.end(),
+      ResourceAllocator<std::uint64_t>(impl_->budget));
+  auto region_lease = impl_->budget.reserve(
+      ResourceCapacity::host(region.rank() * sizeof(RegionDimension),
+                             region.rank() * sizeof(RegionDimension)));
+  if (!region_lease.ok())
+    return Answer(region_lease.status());
+  node->mapped_region_lease = region_lease.take_value();
+  node->mapped_outputs = region;
+  node->kind = Impl::Kind::Restricted;
+  node->guarantee = guarantee();
+  node->depth = impl_->depth + 1;
+  node->children[0] = impl_;
+  node->children_count = 1;
+  ResultRelation result;
+  result.impl_ = std::move(node);
+  return Answer(std::move(result));
+} catch (const std::bad_alloc&) {
+  return Result<ResultRelation>(Status{ErrorCode::ResourceExhausted, {}});
 }
 Result<ResultRelation> ResultRelation::cartesian(
     ResourceBudget budget, std::uint64_t outputs, ResultSupport support,
@@ -194,6 +589,1149 @@ Result<ResultRelation> ResultRelation::cartesian(
   ResultRelation relation;
   relation.impl_ = std::move(impl);
   return Result<ResultRelation>(std::move(relation));
+}
+Result<ResultRelation> ResultRelation::mapped(
+    ResourceBudget budget, const std::vector<std::uint64_t>& output_shape,
+    const Region& outputs, const std::vector<std::uint64_t>& input_shape,
+    const std::vector<ResultMappedAxis>& axes, ResultSupport support) try {
+  using Answer = Result<ResultRelation>;
+  if (output_shape.empty() || output_shape.size() > 8 || input_shape.empty() ||
+      input_shape.size() > 8 || axes.size() != input_shape.size() ||
+      outputs.empty() || !outputs.validate(output_shape).ok() ||
+      !valid_support(support))
+    return Answer(invalid_relation());
+  ResourceAllocationScope scope(budget);
+  std::uint64_t output_count = 1;
+  for (auto n : output_shape) {
+    if (!n)
+      return Answer(invalid_relation());
+    output_count =
+        output_count > UINT64_MAX / n ? UINT64_MAX : output_count * n;
+  }
+  for (auto n : input_shape)
+    if (!n)
+      return Answer(invalid_relation());
+  for (std::size_t i = 0; i < axes.size(); ++i) {
+    const auto m = axes[i];
+    if (m.output_axis < -1 ||
+        m.output_axis >= static_cast<std::int32_t>(output_shape.size()) ||
+        !m.extent)
+      return Answer(invalid_relation());
+    const auto d = m.output_axis < 0 ? RegionDimension{0, 1}
+                                     : outputs.dimensions()[m.output_axis];
+    const auto first = m.source_coordinate(d.offset);
+    const auto last = m.source_coordinate(d.offset + d.extent - 1);
+    if (!first.ok() || !last.ok() || first.value() >= input_shape[i] ||
+        last.value() >= input_shape[i])
+      return Answer(invalid_relation());
+  }
+  auto made = Impl::make(budget, output_count);
+  if (!made.ok())
+    return Answer(made.status());
+  auto impl = made.take_value();
+  impl->output_shape =
+      ResourceVector<std::uint64_t>(output_shape.begin(), output_shape.end(),
+                                    ResourceAllocator<std::uint64_t>(budget));
+  impl->input_shape =
+      ResourceVector<std::uint64_t>(input_shape.begin(), input_shape.end(),
+                                    ResourceAllocator<std::uint64_t>(budget));
+  impl->mapping = ResourceVector<ResultMappedAxis>(
+      axes.begin(), axes.end(), ResourceAllocator<ResultMappedAxis>(budget));
+  auto admitted = budget.reserve(
+      ResourceCapacity::host(outputs.rank() * sizeof(RegionDimension),
+                             outputs.rank() * sizeof(RegionDimension)));
+  if (!admitted.ok())
+    return Answer(admitted.status());
+  // Region coordinates are accounted with the fixed witness metadata lease.
+  impl->mapped_region_lease = admitted.take_value();
+  impl->mapped_outputs = outputs;
+  impl->support = support;
+  impl->kind = Impl::Kind::Mapped;
+  impl->guarantee = DependencyGuarantee::Exact;
+  ResultRelation result;
+  result.impl_ = std::move(impl);
+  return Answer(std::move(result));
+} catch (const std::bad_alloc&) {
+  return Result<ResultRelation>(Status{ErrorCode::ResourceExhausted, {}});
+}
+Result<ResultRelation> ResultRelation::neighborhood(
+    ResourceBudget budget, const std::vector<std::uint64_t>& shape,
+    const std::vector<std::uint64_t>& radii, bool periodic,
+    ResultSupport support) try {
+  using Answer = Result<ResultRelation>;
+  if (shape.empty() || shape.size() > 8 || radii.size() != shape.size() ||
+      !valid_support(support) || support.first || support.count ||
+      support.target != ResultSupportTarget::Tensor || (support.roles & 8U))
+    return Answer(invalid_relation());
+  std::uint64_t count = 1;
+  for (auto extent : shape) {
+    if (!extent)
+      return Answer(invalid_relation());
+    count = count > UINT64_MAX / extent ? UINT64_MAX : count * extent;
+  }
+  ResourceAllocationScope scope(budget);
+  auto made = Impl::make(budget, count);
+  if (!made.ok())
+    return Answer(made.status());
+  auto impl = made.take_value();
+  impl->output_shape = ResourceVector<std::uint64_t>(
+      shape.begin(), shape.end(), ResourceAllocator<std::uint64_t>(budget));
+  impl->input_shape = impl->output_shape;
+  impl->radii = ResourceVector<std::uint64_t>(
+      radii.begin(), radii.end(), ResourceAllocator<std::uint64_t>(budget));
+  auto lease = budget.reserve(
+      ResourceCapacity::host(shape.size() * sizeof(RegionDimension),
+                             shape.size() * sizeof(RegionDimension)));
+  if (!lease.ok())
+    return Answer(lease.status());
+  impl->mapped_region_lease = lease.take_value();
+  impl->mapped_outputs = Region::whole(shape);
+  impl->kind = Impl::Kind::Neighborhood;
+  impl->periodic = periodic;
+  impl->support = support;
+  impl->guarantee = DependencyGuarantee::Exact;
+  ResultRelation result;
+  result.impl_ = std::move(impl);
+  return Answer(std::move(result));
+} catch (const std::bad_alloc&) {
+  return Result<ResultRelation>(Status{ErrorCode::ResourceExhausted, {}});
+}
+Result<ResultRelation> ResultRelation::reshape(
+    ResourceBudget budget, const std::vector<uint64_t>& output_shape,
+    const Region& outputs, const std::vector<uint64_t>& input_shape,
+    const Region& source_window, ResultSupport support) try {
+  using Answer = Result<ResultRelation>;
+  if (output_shape.empty() || output_shape.size() > 8 || input_shape.empty() ||
+      input_shape.size() > 8 || !outputs.validate(output_shape).ok() ||
+      source_window.empty() || !source_window.validate(input_shape).ok() ||
+      !valid_support(support) ||
+      support.target != ResultSupportTarget::Tensor || support.first ||
+      support.count)
+    return Answer(invalid_relation());
+  ResourceAllocationScope scope(budget);
+  std::vector<uint64_t> extents;
+  auto temporary = budget.reserve(
+      ResourceCapacity::host(8 * sizeof(uint64_t), 8 * sizeof(uint64_t)));
+  if (!temporary.ok())
+    return Answer(temporary.status());
+  extents.reserve(8);
+  for (auto d : source_window.dimensions())
+    extents.push_back(d.extent);
+  if (!reshape_internal::equal_products(output_shape, extents))
+    return Answer(invalid_relation());
+  uint64_t count = 1;
+  for (auto n : output_shape)
+    count = count > UINT64_MAX / n ? UINT64_MAX : count * n;
+  auto made = Impl::make(budget, count);
+  if (!made.ok())
+    return Answer(made.status());
+  auto impl = made.take_value();
+  impl->output_shape =
+      ResourceVector<uint64_t>(output_shape.begin(), output_shape.end(),
+                               ResourceAllocator<uint64_t>(budget));
+  impl->input_shape =
+      ResourceVector<uint64_t>(input_shape.begin(), input_shape.end(),
+                               ResourceAllocator<uint64_t>(budget));
+  const auto bytes =
+      (outputs.rank() + source_window.rank()) * sizeof(RegionDimension);
+  auto admitted = budget.reserve(ResourceCapacity::host(bytes, bytes));
+  if (!admitted.ok())
+    return Answer(admitted.status());
+  impl->mapped_region_lease = admitted.take_value();
+  impl->mapped_outputs = outputs;
+  impl->reshape_source = source_window;
+  impl->support = support;
+  impl->kind = Impl::Kind::Reshape;
+  impl->guarantee = DependencyGuarantee::Exact;
+  ResultRelation relation;
+  relation.impl_ = std::move(impl);
+  return Answer(std::move(relation));
+} catch (const std::bad_alloc&) {
+  return Result<ResultRelation>(Status{ErrorCode::ResourceExhausted, {}});
+}
+Status ResultRelation::project(
+    const Footprint& outputs,
+    const std::function<Status(ResultSupport, const Footprint*)>& visitor,
+    const FootprintLimits& limits) const try {
+  if (!impl_ || !outputs.valid() || !visitor)
+    return invalid_relation();
+  ResourceAllocationScope scope(impl_->budget);
+  ResourceVector<std::shared_ptr<const Impl>> leaves(
+      ResourceAllocator<std::shared_ptr<const Impl>>(impl_->budget));
+  std::function<Status(std::shared_ptr<const Impl>)> collect = [&](auto node) {
+    if (node->kind == Impl::Kind::Restricted) {
+      if (!std::equal(node->output_shape.begin(), node->output_shape.end(),
+                      outputs.shape().begin(), outputs.shape().end()))
+        return invalid_relation();
+      const auto before = leaves.size();
+      auto status = collect(node->children[0]);
+      leaves.resize(before);
+      if (!status.ok())
+        return status;
+      leaves.push_back(node);
+    } else if (node->kind == Impl::Kind::Union) {
+      for (std::uint32_t i = 0; i < node->children_count; ++i) {
+        auto status = collect(node->children[i]);
+        if (!status.ok())
+          return status;
+      }
+    } else if (node->kind == Impl::Kind::Cartesian ||
+               (node->kind == Impl::Kind::Identity &&
+                outputs.shape().size() == 1) ||
+               node->kind == Impl::Kind::Mapped ||
+               node->kind == Impl::Kind::Reshape ||
+               node->kind == Impl::Kind::Neighborhood ||
+               node->kind == Impl::Kind::Prefix) {
+      if (node->kind == Impl::Kind::Mapped ||
+          node->kind == Impl::Kind::Reshape ||
+          node->kind == Impl::Kind::Neighborhood ||
+          node->kind == Impl::Kind::Prefix) {
+        if (!std::equal(node->output_shape.begin(), node->output_shape.end(),
+                        outputs.shape().begin(), outputs.shape().end()))
+          return invalid_relation();
+        std::array<bool, 8> used{};
+        for (auto axis : node->mapping)
+          if (axis.output_axis >= 0 && axis.step) {
+            if (step_magnitude(axis.step) > axis.extent ||
+                used[axis.output_axis])
+              return Status{ErrorCode::NotFound,
+                            "scalar relation projection required"};
+            used[axis.output_axis] = true;
+          }
+      }
+      leaves.push_back(node);
+    } else {
+      return Status{ErrorCode::NotFound, "scalar relation projection required"};
+    }
+    return Status::success();
+  };
+  auto checked = collect(impl_);
+  if (!checked.ok())
+    return checked;
+  for (const auto& node : leaves) {
+    auto work = node->budget.consume({1});
+    if (!work.ok())
+      return work;
+    if (limits.cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, {}};
+    if (node->kind == Impl::Kind::Restricted) {
+      auto region = Footprint::from_regions(outputs.shape(),
+                                            {node->mapped_outputs}, limits);
+      if (!region.ok())
+        return region.status();
+      auto clipped = outputs.intersect(region.value(), limits);
+      if (!clipped.ok())
+        return clipped.status();
+      ResultRelation child;
+      child.impl_ = node->children[0];
+      auto status = child.project(clipped.value(), visitor, limits);
+      if (!status.ok())
+        return status;
+      continue;
+    }
+    if (node->kind == Impl::Kind::Cartesian) {
+      if (node->support.count && !outputs.empty()) {
+        auto status = visitor(node->support, nullptr);
+        if (!status.ok())
+          return status;
+      }
+      continue;
+    }
+    if (node->kind == Impl::Kind::Identity) {
+      if (outputs.boxes().size() > limits.maximum_work)
+        return {ErrorCode::ResourceExhausted, "identity projection work limit"};
+      for (const auto& box : outputs.boxes()) {
+        auto charged = node->budget.consume({1});
+        if (!charged.ok())
+          return charged;
+        if (limits.cancellation.cancelled())
+          return {ErrorCode::Cancelled, {}};
+        const auto d = box.dimensions()[0];
+        if (d.offset > node->outputs || d.extent > node->outputs - d.offset)
+          return invalid_relation();
+        if (d.extent) {
+          auto support = node->support;
+          support.first = d.offset;
+          support.count = d.extent;
+          auto status = visitor(support, nullptr);
+          if (!status.ok())
+            return status;
+        }
+      }
+      continue;
+    }
+    if (node->kind == Impl::Kind::Prefix) {
+      if (outputs.boxes().size() > limits.maximum_work)
+        return {ErrorCode::ResourceExhausted, "prefix projection work limit"};
+      std::uint64_t end = 0;
+      for (const auto& box : outputs.boxes()) {
+        auto charged = node->budget.consume({1});
+        if (!charged.ok())
+          return charged;
+        if (limits.cancellation.cancelled())
+          return {ErrorCode::Cancelled, {}};
+        const auto d = box.dimensions()[0];
+        end = std::max(end, d.offset + d.extent);
+      }
+      if (end) {
+        auto support = node->support;
+        support.count = end;
+        auto status = visitor(support, nullptr);
+        if (!status.ok())
+          return status;
+      }
+      continue;
+    }
+    auto domain = Footprint::from_regions(outputs.shape(),
+                                          {node->mapped_outputs}, limits);
+    if (!domain.ok())
+      return domain.status();
+    auto requested = outputs.intersect(domain.value(), limits);
+    if (!requested.ok())
+      return requested.status();
+    if (node->kind == Impl::Kind::Neighborhood) {
+      auto samples = neighborhood_internal::expand(
+          node->budget, requested.value(), node->radii, node->periodic, limits);
+      if (!samples.ok())
+        return samples.status();
+      if (!samples.value().empty()) {
+        auto status = visitor(node->support, &samples.value());
+        if (!status.ok())
+          return status;
+      }
+      continue;
+    }
+    if (node->kind == Impl::Kind::Reshape) {
+      auto shape_lease = node->budget.reserve(
+          ResourceCapacity::host(16 * sizeof(uint64_t), 16 * sizeof(uint64_t)));
+      if (!shape_lease.ok())
+        return shape_lease.status();
+      std::vector<uint64_t> extents;
+      extents.reserve(8);
+      for (auto d : node->reshape_source.dimensions())
+        extents.push_back(d.extent);
+      auto projected = reshape_internal::project(
+          node->budget, outputs.shape(), requested.value(), extents, limits);
+      if (!projected.ok())
+        return projected.status();
+      std::vector<Region> translated;
+      auto lease = node->budget.reserve(ResourceCapacity::host(
+          projected.value().boxes().size() *
+              (sizeof(Region) + extents.size() * sizeof(RegionDimension)),
+          projected.value().boxes().size() *
+              (sizeof(Region) + extents.size() * sizeof(RegionDimension))));
+      if (!lease.ok())
+        return lease.status();
+      translated.reserve(projected.value().boxes().size());
+      for (const auto& box : projected.value().boxes()) {
+        auto dimensions = box.dimensions();
+        for (size_t i = 0; i < dimensions.size(); ++i)
+          dimensions[i].offset += node->reshape_source.dimensions()[i].offset;
+        translated.emplace_back(std::move(dimensions));
+      }
+      auto samples = Footprint::from_regions(
+          std::vector<uint64_t>(node->input_shape.begin(),
+                                node->input_shape.end()),
+          translated, limits);
+      if (!samples.ok())
+        return samples.status();
+      if (!samples.value().empty()) {
+        auto status = visitor(node->support, &samples.value());
+        if (!status.ok())
+          return status;
+      }
+      continue;
+    }
+    std::vector<Region> boxes;
+    for (const auto& box : requested.value().boxes()) {
+      std::vector<RegionDimension> dimensions;
+      for (std::size_t axis = 0; axis < node->mapping.size(); ++axis) {
+        const auto m = node->mapping[axis];
+        const auto d = m.output_axis < 0 ? RegionDimension{0, 1}
+                                         : box.dimensions()[m.output_axis];
+        const auto a = m.source_coordinate(d.offset).value();
+        const auto b = m.source_coordinate(d.offset + d.extent - 1).value();
+        const auto first = std::min(a, b), last = std::max(a, b);
+        const auto end =
+            last + std::min(m.extent, node->input_shape[axis] - last);
+        dimensions.push_back({first, end - first});
+      }
+      boxes.emplace_back(std::move(dimensions));
+    }
+    auto samples = Footprint::from_regions(
+        std::vector<std::uint64_t>(node->input_shape.begin(),
+                                   node->input_shape.end()),
+        boxes, limits);
+    if (!samples.ok())
+      return samples.status();
+    if (!samples.value().empty()) {
+      auto status = visitor(node->support, &samples.value());
+      if (!status.ok())
+        return status;
+    }
+  }
+  return Status::success();
+} catch (const std::bad_alloc&) {
+  return Status{ErrorCode::ResourceExhausted, {}};
+}
+Status ResultRelation::validate_tuple_closure(
+    const Footprint& outputs, std::uint32_t input, std::uint32_t slot,
+    const std::vector<std::uint64_t>& shape, std::size_t channel,
+    std::uint32_t grouped_axes, const FootprintLimits& limits) const try {
+  if (!impl_ || channel >= shape.size() || !outputs.valid())
+    return invalid_relation();
+  ResourceAllocationScope scope(impl_->budget);
+  const auto failure = [] {
+    return Status{ErrorCode::InvalidArgument,
+                  "Result support omits same-observation tuple Validation",
+                  FailureReason::None,
+                  {FailureOrigin::Protocol, FailureScope::Group}};
+  };
+  auto tick = [&](std::uint64_t count) {
+    return limits.consume_work ? limits.consume_work(count)
+                               : impl_->budget.consume({count});
+  };
+  struct Node {
+    const Impl* value;
+    Footprint mask;
+  };
+  using Nodes = ResourceVector<Node>;
+  Nodes pending{ResourceAllocator<Node>(impl_->budget)};
+  Nodes leaves{ResourceAllocator<Node>(impl_->budget)};
+  pending.push_back({impl_.get(), outputs});
+  bool compact = true;
+  while (!pending.empty()) {
+    auto status = tick(1);
+    if (!status.ok())
+      return status;
+    auto current = std::move(pending.back());
+    pending.pop_back();
+    auto* node = current.value;
+    if (node->kind == Impl::Kind::Restricted ||
+        node->kind == Impl::Kind::Mapped) {
+      auto mask = Footprint::from_regions(outputs.shape(),
+                                          {node->mapped_outputs}, limits);
+      if (!mask.ok())
+        return mask.status();
+      auto clipped = current.mask.intersect(mask.value(), limits);
+      if (!clipped.ok())
+        return clipped.status();
+      current.mask = clipped.take_value();
+      if (current.mask.empty())
+        continue;
+    }
+    if (node->kind == Impl::Kind::Union ||
+        node->kind == Impl::Kind::Restricted) {
+      for (unsigned i = 0; i < node->children_count; ++i)
+        pending.push_back({node->children[i].get(), current.mask});
+    } else if (node->kind == Impl::Kind::Cartesian ||
+               node->kind == Impl::Kind::Mapped) {
+      if (node->support.input == input &&
+          node->support.target == ResultSupportTarget::Tensor &&
+          node->support.slot == slot && (node->support.roles & 7U))
+        leaves.push_back(std::move(current));
+    } else {
+      compact = false;
+    }
+  }
+  const auto channels = shape[channel];
+  auto complete = [&](const Node& entry) {
+    const auto* node = entry.value;
+    if (!(node->support.roles & 4U))
+      return false;
+    if (node->kind == Impl::Kind::Cartesian)
+      return channel + 1 == shape.size() &&
+             node->support.first % channels == 0 &&
+             node->support.count % channels == 0;
+    if (!std::equal(node->input_shape.begin(), node->input_shape.end(),
+                    shape.begin(), shape.end()))
+      return false;
+    const auto& axis = node->mapping[channel];
+    if (axis.output_axis < 0 || !axis.step)
+      return !axis.source_origin && axis.extent >= channels;
+    if (!(grouped_axes & (1U << axis.output_axis)) ||
+        step_magnitude(axis.step) > axis.extent)
+      return false;
+    for (std::size_t other = 0; other < node->mapping.size(); ++other) {
+      const auto& mapping = node->mapping[other];
+      if (other != channel && mapping.output_axis >= 0 && mapping.step &&
+          (grouped_axes & (1U << mapping.output_axis)))
+        return false;
+    }
+    for (const auto& box : entry.mask.boxes()) {
+      const auto d = box.dimensions()[axis.output_axis];
+      const auto first = axis.source_coordinate(d.offset);
+      const auto last = axis.source_coordinate(d.offset + d.extent - 1);
+      if (!first.ok() || !last.ok())
+        return false;
+      const auto low = std::min(first.value(), last.value());
+      const auto high = std::max(first.value(), last.value());
+      if (low || std::min(axis.extent, channels - high) != channels - high)
+        return false;
+    }
+    return true;
+  };
+  if (compact) {
+    bool proved = true;
+    for (const auto& data_entry : leaves) {
+      const auto* data = data_entry.value;
+      if (!(data->support.roles & 3U) ||
+          (!data->support.count && data->kind == Impl::Kind::Cartesian))
+        continue;
+      auto charged =
+          tick(shape.size() + 4 * data_entry.mask.boxes().size() + 1);
+      if (!charged.ok())
+        return charged;
+      if (complete(data_entry))
+        continue;
+      bool global_validation = false;
+      for (const auto& entry : leaves) {
+        auto charged = tick(shape.size() + 1);
+        if (!charged.ok())
+          return charged;
+        const auto* validation = entry.value;
+        if (validation->kind != Impl::Kind::Mapped ||
+            !(validation->support.roles & 4U) ||
+            !std::equal(validation->input_shape.begin(),
+                        validation->input_shape.end(), shape.begin(),
+                        shape.end()))
+          continue;
+        bool all = true;
+        for (std::size_t axis = 0; axis < shape.size(); ++axis) {
+          const auto& mapping = validation->mapping[axis];
+          all = all && (mapping.output_axis < 0 || !mapping.step) &&
+                !mapping.source_origin && mapping.extent >= shape[axis];
+        }
+        if (!all)
+          continue;
+        auto missing = data_entry.mask.subtract(entry.mask, limits);
+        if (!missing.ok())
+          return missing.status();
+        if (missing.value().empty()) {
+          global_validation = true;
+          break;
+        }
+      }
+      if (global_validation)
+        continue;
+      if (data->kind != Impl::Kind::Mapped ||
+          !std::equal(data->input_shape.begin(), data->input_shape.end(),
+                      shape.begin(), shape.end())) {
+        proved = false;
+        break;
+      }
+      const auto& needed = data_entry.mask;
+      auto covered = Footprint::none({channels}, limits);
+      if (!covered.ok())
+        return covered.status();
+      for (const auto& validation_entry : leaves) {
+        const auto* validation = validation_entry.value;
+        auto status = tick(shape.size() + 1);
+        if (!status.ok())
+          return status;
+        if (validation->kind != Impl::Kind::Mapped ||
+            !(validation->support.roles & 4U) ||
+            validation->input_shape != data->input_shape ||
+            validation->output_shape != data->output_shape)
+          continue;
+        bool same = true;
+        for (std::size_t axis = 0; axis < shape.size(); ++axis) {
+          if (axis == channel)
+            continue;
+          const auto& a = data->mapping[axis];
+          const auto& b = validation->mapping[axis];
+          same = same && a.output_axis == b.output_axis &&
+                 a.source_origin == b.source_origin && a.step == b.step &&
+                 a.extent == b.extent && a.output_origin == b.output_origin;
+        }
+        const auto& axis = validation->mapping[channel];
+        if (!same || (axis.output_axis >= 0 && axis.step))
+          continue;
+        auto missing = needed.subtract(validation_entry.mask, limits);
+        if (!missing.ok())
+          return missing.status();
+        if (!missing.value().empty())
+          continue;
+        auto interval = Footprint::from_regions(
+            {channels},
+            {Region({{axis.source_origin,
+                      std::min(axis.extent, channels - axis.source_origin)}})},
+            limits);
+        if (!interval.ok())
+          return interval.status();
+        covered = covered.value().unite(interval.value(), limits);
+        if (!covered.ok())
+          return covered.status();
+      }
+      auto all = Footprint::all({channels}, limits);
+      if (!all.ok())
+        return all.status();
+      if (covered.value() != all.value()) {
+        proved = false;
+        break;
+      }
+    }
+    if (proved)
+      return Status::success();
+  }
+  // Project complete output observations; grouped axes stay together.
+  // Compact input rectangles do not require a flattened domain cardinality.
+  const auto bridge_bytes = (outputs.boxes().size() + 16) *
+                            (sizeof(Region) + 8 * sizeof(RegionDimension));
+  auto scratch =
+      impl_->budget.reserve(ResourceCapacity::host(bridge_bytes, bridge_bytes));
+  if (!scratch.ok())
+    return scratch.status();
+  auto lease = scratch.take_value();
+  auto domain = outputs.shape();
+  std::vector<Region> observations;
+  observations.reserve(outputs.boxes().size());
+  for (std::size_t axis = 0; axis < domain.size(); ++axis)
+    if (grouped_axes & (1U << axis))
+      domain[axis] = 1;
+  for (const auto& box : outputs.boxes()) {
+    auto dimensions = box.dimensions();
+    for (std::size_t axis = 0; axis < domain.size(); ++axis)
+      if (grouped_axes & (1U << axis))
+        dimensions[axis] = {0, 1};
+    observations.emplace_back(std::move(dimensions));
+  }
+  auto wanted = Footprint::from_regions(domain, observations, limits);
+  if (!wanted.ok())
+    return wanted.status();
+  const auto spans = [&](ResultSupport support) -> Result<Footprint> {
+    std::vector<Region> boxes;
+    boxes.reserve(16);
+    auto first = support.first, remaining = support.count;
+    while (remaining) {
+      auto charged = tick(shape.size() + 1);
+      if (!charged.ok())
+        return Result<Footprint>(charged);
+      if (boxes.size() == 16)
+        return Result<Footprint>(
+            Status{ErrorCode::ResourceExhausted, "tuple proof span box limit"});
+      std::vector<RegionDimension> dimensions(shape.size());
+      auto index = first;
+      for (std::size_t axis = shape.size(); axis; --axis) {
+        dimensions[axis - 1] = {index % shape[axis - 1], 1};
+        index /= shape[axis - 1];
+      }
+      if (index)
+        return Result<Footprint>(failure());
+      std::uint64_t stride = 1, span = 1;
+      for (std::size_t axis = shape.size(); axis; --axis) {
+        const auto current = axis - 1;
+        if (!(first % stride) && remaining >= stride) {
+          const auto extent = std::min(
+              remaining / stride, shape[current] - dimensions[current].offset);
+          dimensions[current].extent = extent;
+          span = extent * stride;
+          for (std::size_t inner = axis; inner < shape.size(); ++inner)
+            dimensions[inner] = {0, shape[inner]};
+        }
+        if (stride > UINT64_MAX / shape[current])
+          break;
+        stride *= shape[current];
+      }
+      boxes.emplace_back(std::move(dimensions));
+      remaining -= span;
+      first += span;
+    }
+    return Footprint::from_regions(shape, boxes, limits);
+  };
+  return wanted.value().visit(
+      [&](const auto& at) {
+        auto charged = tick(outputs.shape().size() + 1);
+        if (!charged.ok())
+          return charged;
+        std::vector<RegionDimension> dimensions;
+        dimensions.reserve(at.size());
+        for (std::size_t axis = 0; axis < at.size(); ++axis)
+          dimensions.push_back(grouped_axes & (1U << axis)
+                                   ? RegionDimension{0, outputs.shape()[axis]}
+                                   : RegionDimension{at[axis], 1});
+        auto samples = Footprint::from_regions(outputs.shape(),
+                                               {Region(dimensions)}, limits);
+        if (!samples.ok())
+          return samples.status();
+        samples = samples.value().intersect(outputs, limits);
+        if (!samples.ok())
+          return samples.status();
+        auto data = Footprint::none(shape, limits);
+        auto validation = Footprint::none(shape, limits);
+        if (!data.ok() || !validation.ok())
+          return !data.ok() ? data.status() : validation.status();
+        const auto collect = [&](ResultSupport support,
+                                 const Footprint* mapped) {
+          auto status = tick(shape.size() + 1);
+          if (!status.ok())
+            return status;
+          if (support.input != input || support.slot != slot ||
+              support.target != ResultSupportTarget::Tensor ||
+              !(support.roles & 7U))
+            return Status::success();
+          auto part = mapped ? Result<Footprint>(*mapped) : spans(support);
+          if (!part.ok())
+            return part.status();
+          if (part.value().shape() != shape)
+            return failure();
+          if (support.roles & 3U) {
+            const auto bytes = part.value().boxes().size() *
+                               (sizeof(Region) + 8 * sizeof(RegionDimension));
+            auto bridge =
+                impl_->budget.reserve(ResourceCapacity::host(bytes, bytes));
+            if (!bridge.ok())
+              return bridge.status();
+            auto storage = bridge.take_value();
+            std::vector<Region> closed;
+            closed.reserve(part.value().boxes().size());
+            for (const auto& box : part.value().boxes()) {
+              auto dimensions = box.dimensions();
+              dimensions[channel] = {0, channels};
+              closed.emplace_back(std::move(dimensions));
+            }
+            auto tuples = Footprint::from_regions(shape, closed, limits);
+            if (!tuples.ok())
+              return tuples.status();
+            data = data.value().unite(tuples.value(), limits);
+            if (!data.ok())
+              return data.status();
+          }
+          if (support.roles & 4U) {
+            validation = validation.value().unite(part.value(), limits);
+            if (!validation.ok())
+              return validation.status();
+          }
+          return Status::success();
+        };
+        auto status = project(samples.value(), collect, limits);
+        if (status.code == ErrorCode::NotFound) {
+          data = Footprint::none(shape, limits);
+          validation = Footprint::none(shape, limits);
+          if (!data.ok() || !validation.ok())
+            return !data.ok() ? data.status() : validation.status();
+          status = samples.value().visit(
+              [&](const auto& coordinate) {
+                auto work = tick(coordinate.size() + 1);
+                if (!work.ok())
+                  return work;
+                std::uint64_t output = 0;
+                for (std::size_t axis = 0; axis < coordinate.size(); ++axis) {
+                  if (output >
+                      (UINT64_MAX - coordinate[axis]) / outputs.shape()[axis])
+                    return Status{ErrorCode::ResourceExhausted,
+                                  "tuple proof output overflow"};
+                  output = output * outputs.shape()[axis] + coordinate[axis];
+                }
+                return visit_declared(output, limits.maximum_work,
+                                      [&](ResultSupport support) {
+                                        return collect(support, nullptr);
+                                      });
+              },
+              limits.maximum_work, limits.cancellation);
+        }
+        if (!status.ok())
+          return status;
+        auto missing = data.value().subtract(validation.value(), limits);
+        return !missing.ok()             ? missing.status()
+               : missing.value().empty() ? Status::success()
+                                         : failure();
+      },
+      limits.maximum_work, limits.cancellation);
+} catch (const std::bad_alloc&) {
+  return {ErrorCode::ResourceExhausted, {}};
+}
+Status ResultRelation::certify(const Footprint& outputs,
+                               const FootprintLimits& limits) const try {
+  if (!impl_ || !outputs.valid())
+    return invalid_relation();
+  ResourceAllocationScope scope(impl_->budget);
+  auto valid_shape = impl_->validate_output_shape(outputs.shape());
+  if (!valid_shape.ok())
+    return valid_shape;
+  auto count = Footprint::all(outputs.shape(), limits);
+  if (!count.ok())
+    return count.status();
+  auto domain = count.value().element_count();
+  if ((domain.ok() && domain.value() != impl_->outputs) ||
+      (!domain.ok() && impl_->outputs != UINT64_MAX))
+    return invalid_relation();
+  auto missing = outputs;
+  bool scalar = false;
+  std::function<Status(std::shared_ptr<const Impl>)> prove =
+      [&](auto node) -> Status {
+    auto work = node->budget.consume({1});
+    if (!work.ok())
+      return work;
+    if (limits.cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, {}};
+    if (node->kind == Impl::Kind::Restricted) {
+      auto region = Footprint::from_regions(outputs.shape(),
+                                            {node->mapped_outputs}, limits);
+      if (!region.ok())
+        return region.status();
+      auto covered = missing.intersect(region.value(), limits);
+      if (!covered.ok())
+        return covered.status();
+      ResultRelation child;
+      child.impl_ = node->children[0];
+      auto certified = child.certify(covered.value(), limits);
+      if (!certified.ok())
+        return certified;
+      auto rest = missing.subtract(covered.value(), limits);
+      if (!rest.ok())
+        return rest.status();
+      missing = rest.take_value();
+      return Status::success();
+    }
+    if (node->kind == Impl::Kind::Union) {
+      for (std::uint32_t i = 0; i < node->children_count; ++i) {
+        auto status = prove(node->children[i]);
+        if (!status.ok())
+          return status;
+      }
+      return Status::success();
+    }
+    if (node->kind == Impl::Kind::Cartesian ||
+        node->kind == Impl::Kind::Identity ||
+        node->kind == Impl::Kind::Prefix) {
+      if (node->kind == Impl::Kind::Prefix &&
+          (outputs.shape().size() != 1 || outputs.shape()[0] != node->outputs))
+        return invalid_relation();
+      if (node->kind == Impl::Kind::Identity && !domain.ok() &&
+          !missing.empty())
+        return {ErrorCode::ResourceExhausted,
+                "identity tensor support cannot be flattened"};
+      auto empty = Footprint::none(outputs.shape(), limits);
+      if (!empty.ok())
+        return empty.status();
+      missing = empty.take_value();
+      return Status::success();
+    }
+    if (node->kind == Impl::Kind::Mapped || node->kind == Impl::Kind::Reshape ||
+        node->kind == Impl::Kind::Neighborhood) {
+      if (!std::equal(node->output_shape.begin(), node->output_shape.end(),
+                      outputs.shape().begin(), outputs.shape().end()))
+        return invalid_relation();
+      auto available = Footprint::from_regions(outputs.shape(),
+                                               {node->mapped_outputs}, limits);
+      if (!available.ok())
+        return available.status();
+      auto rest = missing.subtract(available.value(), limits);
+      if (!rest.ok())
+        return rest.status();
+      missing = rest.take_value();
+      return Status::success();
+    }
+    scalar = true;
+    return Status::success();
+  };
+  auto status = prove(impl_);
+  if (!status.ok())
+    return status;
+  if (missing.empty())
+    return Status::success();
+  if (!scalar)
+    return Status{ErrorCode::NotFound, "missing mapped Result witness"};
+  return missing.visit(
+      [&](const auto& at) {
+        std::uint64_t row = 0;
+        for (std::size_t axis = 0; axis < at.size(); ++axis) {
+          if (row > (UINT64_MAX - at[axis]) / outputs.shape()[axis])
+            return Status{ErrorCode::ResourceExhausted,
+                          "tensor witness coordinate cannot be flattened"};
+          row = row * outputs.shape()[axis] + at[axis];
+        }
+        return visit(row, limits.maximum_work,
+                     [](ResultSupport) { return Status::success(); });
+      },
+      limits.maximum_work, limits.cancellation);
+} catch (const std::bad_alloc&) {
+  return Status{ErrorCode::ResourceExhausted, {}};
+}
+Result<Footprint> ResultRelation::preimage(const Footprint& outputs,
+                                           ResultSupport input,
+                                           const Footprint& changed,
+                                           const FootprintLimits& limits) const
+    try {  // NOLINT(whitespace/indent_namespace)
+  using Answer = Result<Footprint>;
+  if (!impl_ || !outputs.valid() || !changed.valid())
+    return Answer(invalid_relation());
+  ResourceAllocationScope scope(impl_->budget);
+  auto valid_shape = impl_->validate_output_shape(outputs.shape());
+  if (!valid_shape.ok())
+    return Answer(valid_shape);
+  ResourceVector<Region> boxes{ResourceAllocator<Region>(impl_->budget)};
+  ResourceVector<ResourceLease> reshape_box_leases{
+      ResourceAllocator<ResourceLease>(impl_->budget)};
+  std::function<Status(std::shared_ptr<const Impl>)> visit =
+      [&](auto node) -> Status {
+    auto work = node->budget.consume({1});
+    if (!work.ok())
+      return work;
+    if (limits.cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, {}};
+    if (node->kind == Impl::Kind::Restricted) {
+      auto region = Footprint::from_regions(outputs.shape(),
+                                            {node->mapped_outputs}, limits);
+      if (!region.ok())
+        return region.status();
+      auto clipped = outputs.intersect(region.value(), limits);
+      if (!clipped.ok())
+        return clipped.status();
+      ResultRelation child;
+      child.impl_ = node->children[0];
+      auto projected = child.preimage(clipped.value(), input, changed, limits);
+      if (!projected.ok())
+        return projected.status();
+      boxes.insert(boxes.end(), projected.value().boxes().begin(),
+                   projected.value().boxes().end());
+      if (boxes.size() > limits.maximum_boxes)
+        return {ErrorCode::ResourceExhausted, "relation inverse box limit"};
+      return Status::success();
+    }
+    if (node->kind == Impl::Kind::Union) {
+      for (std::uint32_t i = 0; i < node->children_count; ++i) {
+        auto status = visit(node->children[i]);
+        if (!status.ok())
+          return status;
+      }
+      return Status::success();
+    }
+    if (node->kind != Impl::Kind::Mapped &&
+        node->kind != Impl::Kind::Cartesian &&
+        node->kind != Impl::Kind::Reshape && node->kind != Impl::Kind::Prefix &&
+        node->kind != Impl::Kind::Neighborhood)
+      return Status{ErrorCode::NotFound, "scalar inverse relation required"};
+    const auto support = node->support;
+    if (support.input != input.input || !(support.roles & input.roles) ||
+        support.target != input.target || support.slot != input.slot)
+      return Status::success();
+    if (node->kind == Impl::Kind::Cartesian) {
+      if (!support.count || changed.empty())
+        return Status::success();
+      std::uint64_t domain = 1;
+      for (auto n : changed.shape()) {
+        if (domain > UINT64_MAX / n)
+          return invalid_relation();
+        domain *= n;
+      }
+      bool hit = false;
+      if (!support.first && support.count == domain) {
+        hit = true;
+      } else if (support.count == 1) {
+        std::vector<std::uint64_t> at(changed.shape().size());
+        auto first = support.first;
+        for (std::size_t i = at.size(); i-- > 0;) {
+          at[i] = first % changed.shape()[i];
+          first /= changed.shape()[i];
+        }
+        hit = !first && changed.contains(at);
+      } else {
+        return Status{ErrorCode::NotFound, "scalar Cartesian inverse required"};
+      }
+      if (hit)
+        boxes.insert(boxes.end(), outputs.boxes().begin(),
+                     outputs.boxes().end());
+      return Status::success();
+    }
+    if (!std::equal(node->input_shape.begin(), node->input_shape.end(),
+                    changed.shape().begin(), changed.shape().end()) ||
+        !std::equal(node->output_shape.begin(), node->output_shape.end(),
+                    outputs.shape().begin(), outputs.shape().end()))
+      return invalid_relation();
+    if (node->kind == Impl::Kind::Prefix) {
+      if (changed.boxes().size() > limits.maximum_work)
+        return {ErrorCode::ResourceExhausted, "prefix inverse work limit"};
+      std::uint64_t first = node->outputs;
+      for (const auto& box : changed.boxes()) {
+        auto charged = node->budget.consume({1});
+        if (!charged.ok())
+          return charged;
+        if (limits.cancellation.cancelled())
+          return {ErrorCode::Cancelled, {}};
+        first = std::min(first, box.dimensions()[0].offset);
+      }
+      if (first < node->outputs && !outputs.empty()) {
+        if (boxes.size() >= limits.maximum_boxes)
+          return {ErrorCode::ResourceExhausted,
+                  "prefix inverse rectangle limit"};
+        auto lease = node->budget.reserve(ResourceCapacity::host(
+            sizeof(RegionDimension), sizeof(RegionDimension)));
+        if (!lease.ok())
+          return lease.status();
+        reshape_box_leases.push_back(lease.take_value());
+        boxes.emplace_back(
+            std::vector<RegionDimension>{{first, node->outputs - first}});
+      }
+      return Status::success();
+    }
+    if (node->kind == Impl::Kind::Neighborhood) {
+      auto expanded = neighborhood_internal::expand(
+          node->budget, changed, node->radii, node->periodic, limits);
+      if (!expanded.ok())
+        return expanded.status();
+      auto requested = expanded.value().intersect(outputs, limits);
+      if (!requested.ok())
+        return requested.status();
+      if (requested.value().boxes().size() >
+          limits.maximum_boxes -
+              std::min<std::uint64_t>(limits.maximum_boxes, boxes.size()))
+        return Status{ErrorCode::ResourceExhausted, {}};
+      for (const auto& box : requested.value().boxes()) {
+        const auto bytes = box.rank() * sizeof(RegionDimension);
+        auto lease = node->budget.reserve(ResourceCapacity::host(bytes, bytes));
+        if (!lease.ok())
+          return lease.status();
+        reshape_box_leases.push_back(lease.take_value());
+        boxes.push_back(box);
+      }
+      return Status::success();
+    }
+    if (node->kind == Impl::Kind::Reshape) {
+      if (outputs.empty() || changed.empty() || node->mapped_outputs.empty())
+        return Status::success();
+      auto witness = Footprint::from_regions(outputs.shape(),
+                                             {node->mapped_outputs}, limits);
+      if (!witness.ok())
+        return witness.status();
+      auto requested = outputs.intersect(witness.value(), limits);
+      if (!requested.ok())
+        return requested.status();
+      if (requested.value().empty())
+        return Status::success();
+      auto available = Footprint::from_regions(changed.shape(),
+                                               {node->reshape_source}, limits);
+      if (!available.ok())
+        return available.status();
+      auto clipped = changed.intersect(available.value(), limits);
+      if (!clipped.ok())
+        return clipped.status();
+      auto shape_lease = node->budget.reserve(
+          ResourceCapacity::host(8 * sizeof(uint64_t), 8 * sizeof(uint64_t)));
+      if (!shape_lease.ok())
+        return shape_lease.status();
+      std::vector<uint64_t> extents;
+      extents.reserve(8);
+      for (auto d : node->reshape_source.dimensions())
+        extents.push_back(d.extent);
+      const auto bytes =
+          clipped.value().boxes().size() *
+          (sizeof(Region) + extents.size() * sizeof(RegionDimension));
+      auto admitted =
+          node->budget.reserve(ResourceCapacity::host(bytes, bytes));
+      if (!admitted.ok())
+        return admitted.status();
+      std::vector<Region> local;
+      local.reserve(clipped.value().boxes().size());
+      for (const auto& box : clipped.value().boxes()) {
+        auto dimensions = box.dimensions();
+        for (size_t i = 0; i < dimensions.size(); ++i)
+          dimensions[i].offset -= node->reshape_source.dimensions()[i].offset;
+        local.emplace_back(std::move(dimensions));
+      }
+      auto points = Footprint::from_regions(extents, local, limits);
+      if (!points.ok())
+        return points.status();
+      const auto cap = limits.maximum_boxes == UINT64_MAX
+                           ? UINT64_MAX
+                           : limits.maximum_boxes + 1;
+      const auto output_cost = reshape_internal::projection_cost(
+          outputs.shape(), requested.value(), extents, cap);
+      const auto input_cost = reshape_internal::projection_cost(
+          extents, points.value(), outputs.shape(), cap);
+      // Bound work by independent prefix spans, not by scalar cardinality.
+      if (output_cost < input_cost) {
+        auto demanded = reshape_internal::project(
+            node->budget, outputs.shape(), requested.value(), extents, limits);
+        if (!demanded.ok())
+          return demanded.status();
+        auto relevant = points.value().intersect(demanded.value(), limits);
+        if (!relevant.ok())
+          return relevant.status();
+        points = std::move(relevant);
+      }
+      auto projected = reshape_internal::project(
+          node->budget, extents, points.value(), outputs.shape(), limits);
+      if (!projected.ok())
+        return projected.status();
+      auto inside = projected.value().intersect(requested.value(), limits);
+      if (!inside.ok())
+        return inside.status();
+      if (inside.value().boxes().size() >
+          limits.maximum_boxes -
+              std::min<uint64_t>(limits.maximum_boxes, boxes.size()))
+        return Status{ErrorCode::ResourceExhausted,
+                      "reshape inverse rectangle limit"};
+      for (const auto& box : inside.value().boxes()) {
+        const auto bytes = box.rank() * sizeof(RegionDimension);
+        auto lease = node->budget.reserve(ResourceCapacity::host(bytes, bytes));
+        if (!lease.ok())
+          return lease.status();
+        reshape_box_leases.push_back(lease.take_value());
+        boxes.push_back(box);
+      }
+      return Status::success();
+    }
+    for (const auto& box : changed.boxes()) {
+      auto dimensions = node->mapped_outputs.dimensions();
+      bool valid = true;
+      for (std::size_t i = 0; i < node->mapping.size(); ++i) {
+        const auto m = node->mapping[i];
+        const auto d = box.dimensions()[i];
+        const auto end = d.offset + d.extent;
+        const __int128 lower_input =
+            static_cast<__int128>(d.offset) - m.extent + 1;
+        const __int128 upper_input = static_cast<__int128>(end) - 1;
+        if (m.output_axis < 0 || !m.step) {
+          if (static_cast<__int128>(m.source_origin) < lower_input ||
+              static_cast<__int128>(m.source_origin) > upper_input) {
+            valid = false;
+            break;
+          }
+          continue;
+        }
+        const __int128 a = m.source_origin, b = m.output_origin;
+        const __int128 r = step_magnitude(m.step);
+        const auto lower = m.step > 0 ? b + ceil_div(lower_input - a, r)
+                                      : b + ceil_div(a - upper_input, r);
+        const auto upper = m.step > 0 ? b + floor_div(upper_input - a, r)
+                                      : b + floor_div(a - lower_input, r);
+        auto& output = dimensions[m.output_axis];
+        const auto lo = std::max(static_cast<__int128>(output.offset), lower);
+        const auto hi = std::min(
+            static_cast<__int128>(output.offset) + output.extent - 1, upper);
+        if (hi < lo) {
+          valid = false;
+          break;
+        }
+        const auto first = static_cast<std::uint64_t>(lo);
+        const auto last = static_cast<std::uint64_t>(hi);
+        output = {first, last - first + 1};
+      }
+      if (valid)
+        boxes.emplace_back(std::move(dimensions));
+      if (boxes.size() > limits.maximum_boxes)
+        return Status{ErrorCode::ResourceExhausted, {}};
+    }
+    return Status::success();
+  };
+  auto status = visit(impl_);
+  if (!status.ok())
+    return Answer(status);
+  const auto bytes =
+      boxes.size() *
+      (sizeof(Region) + outputs.shape().size() * sizeof(RegionDimension));
+  auto admitted = impl_->budget.reserve(ResourceCapacity::host(bytes, bytes));
+  if (!admitted.ok())
+    return Answer(admitted.status());
+  std::vector<Region> normalized;
+  normalized.reserve(boxes.size());
+  normalized.insert(normalized.end(), boxes.begin(), boxes.end());
+  auto mapped = Footprint::from_regions(outputs.shape(), normalized, limits);
+  return mapped.ok() ? mapped.value().intersect(outputs, limits) : mapped;
+} catch (const std::bad_alloc&) {
+  return Result<Footprint>(Status{ErrorCode::ResourceExhausted, {}});
 }
 Result<ResultRelation> ResultRelation::identity(
     ResourceBudget budget, std::uint64_t count, std::uint32_t input,
@@ -216,6 +1754,26 @@ Result<ResultRelation> ResultRelation::unknown(ResourceBudget budget,
   auto result = made.take_value();
   std::const_pointer_cast<Impl>(result.impl_)->kind = Impl::Kind::Unknown;
   return Result<ResultRelation>(std::move(result));
+}
+Result<ResultRelation> ResultRelation::prefix(
+    ResourceBudget budget, std::uint64_t count, std::uint32_t input,
+    std::uint32_t roles, ResultSupportTarget target, std::uint32_t slot) try {
+  if (!count || !roles || (roles & ~7U) ||
+      target == ResultSupportTarget::Descriptor)
+    return Result<ResultRelation>(invalid_relation());
+  auto made = cartesian(budget, count, {input, roles, 0, count, target, slot});
+  if (!made.ok())
+    return made;
+  auto result = made.take_value();
+  auto impl = std::const_pointer_cast<Impl>(result.impl_);
+  impl->output_shape = ResourceVector<std::uint64_t>(
+      {count}, ResourceAllocator<std::uint64_t>(budget));
+  impl->input_shape = ResourceVector<std::uint64_t>(
+      {count}, ResourceAllocator<std::uint64_t>(budget));
+  impl->kind = Impl::Kind::Prefix;
+  return Result<ResultRelation>(std::move(result));
+} catch (const std::bad_alloc&) {
+  return Result<ResultRelation>(Status{ErrorCode::ResourceExhausted, {}});
 }
 Result<ResultRelation> ResultRelation::rows(
     ResourceBudget budget, std::uint64_t outputs, std::uint64_t count,
@@ -302,6 +1860,50 @@ Result<ResultRelation> ResultRelation::unite(
   if (inputs.empty() || inputs.size() > 16 || !inputs[0].owned_by(budget))
     return Result<ResultRelation>(invalid_relation());
   try {
+    const auto adjacent_region = [](const Impl& a,
+                                    const Impl& b) -> std::optional<Region> {
+      if (a.kind != Impl::Kind::Restricted ||
+          b.kind != Impl::Kind::Restricted || a.children[0] != b.children[0] ||
+          a.output_shape != b.output_shape)
+        return std::nullopt;
+      const auto& left = a.mapped_outputs;
+      const auto& right = b.mapped_outputs;
+      auto dimensions = left.dimensions();
+      if (left.rank() != right.rank())
+        return std::nullopt;
+      unsigned differences = 0;
+      for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+        const auto x = dimensions[axis], y = right.dimensions()[axis];
+        if (x.offset == y.offset && x.extent == y.extent)
+          continue;
+        if (++differences > 1 || x.offset + x.extent < y.offset ||
+            y.offset + y.extent < x.offset)
+          return std::nullopt;
+        const auto first = std::min(x.offset, y.offset);
+        const auto end = std::max(x.offset + x.extent, y.offset + y.extent);
+        dimensions[axis] = {first, end - first};
+      }
+      return Region(std::move(dimensions));
+    };
+    // Adjacent publications of one witness retain one rectangular mask. This
+    // avoids growing a union tree for ordered frames or rows.
+    if (inputs.size() == 2 && inputs[1].owned_by(budget) &&
+        inputs[0].impl_->kind == Impl::Kind::Restricted &&
+        inputs[1].impl_->kind == Impl::Kind::Restricted &&
+        inputs[0].impl_->children[0] == inputs[1].impl_->children[0] &&
+        inputs[0].impl_->output_shape == inputs[1].impl_->output_shape) {
+      auto work = budget.consume({inputs[0].impl_->output_shape.size() + 1});
+      if (!work.ok())
+        return Result<ResultRelation>(work);
+      auto region = adjacent_region(*inputs[0].impl_, *inputs[1].impl_);
+      if (region) {
+        ResultRelation original;
+        original.impl_ = inputs[0].impl_->children[0];
+        return original.restrict_to({inputs[0].impl_->output_shape.begin(),
+                                     inputs[0].impl_->output_shape.end()},
+                                    *region);
+      }
+    }
     ResourceVector<std::shared_ptr<const Impl>> leaves{
         ResourceAllocator<std::shared_ptr<const Impl>>(budget)};
     ResourceVector<std::shared_ptr<const Impl>> pending{
@@ -312,22 +1914,99 @@ Result<ResultRelation> ResultRelation::unite(
         return Result<ResultRelation>(invalid_relation());
       pending.push_back(input.impl_);
     }
+    std::set<const Impl*, std::less<const Impl*>,
+             ResourceAllocator<const Impl*>>
+        seen{std::less<const Impl*>{}, ResourceAllocator<const Impl*>(budget)};
+    using CartesianKey = std::tuple<DependencyGuarantee, std::uint32_t,
+                                    std::uint32_t, std::uint64_t, std::uint64_t,
+                                    ResultSupportTarget, std::uint32_t>;
+    std::set<CartesianKey, std::less<CartesianKey>,
+             ResourceAllocator<CartesianKey>>
+        cartesian{std::less<CartesianKey>{},
+                  ResourceAllocator<CartesianKey>(budget)};
+    const Impl* shaped = nullptr;
     while (!pending.empty()) {
-      auto work = budget.consume({1});
+      std::uint64_t comparisons = 2;
+      for (auto size = seen.size(); size; size >>= 1)
+        comparisons += 2;
+      auto work = budget.consume({comparisons});
       if (!work.ok())
         return Result<ResultRelation>(work);
       auto node = std::move(pending.back());
       pending.pop_back();
+      if (!seen.insert(node.get()).second)
+        continue;
       if (node->kind == Impl::Kind::Union) {
         for (std::uint32_t i = 0; i < node->children_count; ++i)
           pending.push_back(node->children[i]);
       } else {
+        if (node->kind == Impl::Kind::Cartesian) {
+          std::uint64_t comparisons = 1;
+          for (auto size = cartesian.size(); size; size >>= 1)
+            comparisons += 2;
+          auto charged = budget.consume({comparisons});
+          if (!charged.ok())
+            return Result<ResultRelation>(charged);
+          const auto& support = node->support;
+          const CartesianKey key{node->guarantee, support.input, support.roles,
+                                 support.first,   support.count, support.target,
+                                 support.slot};
+          if (!cartesian.insert(key).second)
+            continue;
+        }
         if (leaves.size() >= 65536)
           return Result<ResultRelation>(Status{ErrorCode::ResourceExhausted,
                                                "Result relation leaf limit"});
+        auto output_geometry = node->output_geometry();
+        if (!output_geometry.ok())
+          return Result<ResultRelation>(output_geometry.status());
+        if (auto geometry = output_geometry.value()) {
+          if (shaped && !std::equal(shaped->output_shape.begin(),
+                                    shaped->output_shape.end(),
+                                    geometry->output_shape.begin(),
+                                    geometry->output_shape.end()))
+            return Result<ResultRelation>(invalid_relation());
+          auto valid = node->validate_output_shape(
+              {geometry->output_shape.begin(), geometry->output_shape.end()});
+          if (!valid.ok())
+            return Result<ResultRelation>(valid);
+          shaped = geometry;
+        }
         leaves.push_back(std::move(node));
       }
     }
+    // Completing another row can close a rectangular frontier held in a
+    // union. Reconsider its masks so ordered multi-axis publications retain
+    // compact geometry without widening a partially published row.
+    ResourceVector<std::shared_ptr<const Impl>> compact{
+        ResourceAllocator<std::shared_ptr<const Impl>>(budget)};
+    for (auto node : leaves) {
+      if (node->kind == Impl::Kind::Restricted) {
+        for (std::size_t i = 0; i < compact.size();) {
+          auto work = budget.consume({node->output_shape.size() + 1});
+          if (!work.ok())
+            return Result<ResultRelation>(work);
+          auto region = adjacent_region(*node, *compact[i]);
+          if (!region) {
+            ++i;
+            continue;
+          }
+          ResultRelation original;
+          original.impl_ = node->children[0];
+          auto merged = original.restrict_to(
+              {node->output_shape.begin(), node->output_shape.end()}, *region);
+          if (!merged.ok())
+            return merged;
+          node = merged.take_value().impl_;
+          compact.erase(compact.begin() + i);
+          if (node->kind != Impl::Kind::Restricted)
+            break;
+          i = 0;
+        }
+      }
+      compact.push_back(std::move(node));
+    }
+    leaves = std::move(compact);
     while (leaves.size() > 1) {
       ResourceVector<std::shared_ptr<const Impl>> next{
           ResourceAllocator<std::shared_ptr<const Impl>>(budget)};

@@ -13,8 +13,10 @@
 
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
+#include "result_fixture.hpp"     // NOLINT(build/include_subdir)
 
 namespace {
+namespace rf = numeric_result_fixture;
 void require(bool value, const char* message) {
   if (!value)
     throw std::runtime_error(message);
@@ -37,38 +39,128 @@ ps::Value raw(ps::ElementType type, const std::vector<std::uint64_t>& words) {
 struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry;
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
+  std::vector<ps::Value> backing;
   Fixture(std::shared_ptr<ps::OperationRegistry> operations,
           const std::string& key, const std::vector<ps::Value>& inputs,
           std::map<std::string, ps::ParameterValue> parameters = {})
-      : registry(std::move(operations)) {
+      : registry(std::move(operations)), backing(inputs) {
     ps::WorkflowNode node{1, key, {}, std::move(parameters)};
+    rf::declare_sources(&document, inputs);
     for (std::size_t i = 0; i < inputs.size(); ++i) {
-      const auto name = "input" + std::to_string(i);
-      const auto& value = inputs[i];
-      document.inputs.push_back({i + 1, name, value.descriptor(),
-                                 value.region(), value.layout(),
-                                 value.facets()});
-      bindings.inputs.push_back({name, value});
       node.inputs.push_back(ps::WorkflowInputReference{i + 1});
     }
     document.nodes = {std::move(node)};
     document.outputs = {{"values", 1, "values"}};
   }
-  ps::DemandResult run() {
+  ps::ExecutionBindings bindings(const ps::ResourceBudget& root) const {
+    return point_math_checks::bindings(root, backing, document);
+  }
+  ps::Result<ps::DemandResult> try_run(
+      const ps::DemandQuery* requested = nullptr) {
     ps::GraphContext graph(document);
-    auto plan = take(ps::Compiler(registry).compile(graph));
+    auto plan = ps::Compiler(registry).compile(graph);
+    if (!plan.ok())
+      return ps::Result<ps::DemandResult>(plan.status());
     ps::ExecutionContextConfig config;
     config.cpu_workers = 1;
     config.maximum_live_bytes = 262144;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext execution(registry, config);
-    auto frozen = take(execution.freeze(plan.plan, bindings));
-    return take(execution.execute_fragments(
-        frozen, {{"values", take(ps::Footprint::all(
-                                document.inputs[0].descriptor.shape))}}));
+    auto frozen = execution.freeze(plan.value().plan,
+                                   bindings(take(execution.resource_budget())));
+    if (!frozen.ok())
+      return ps::Result<ps::DemandResult>(frozen.status());
+    const ps::DemandQuery complete{
+        {"values",
+         take(ps::Footprint::all(
+             document.inputs[0].result_schema->tensors[0].sample_shape()))}};
+    return execution.execute_fragments(frozen.value(),
+                                       requested ? *requested : complete);
+  }
+  ps::DemandResult run() { return take(try_run()); }
+};
+void rgba_input(Fixture* fixture, unsigned port) {
+  auto schema = *fixture->document.inputs[port].result_schema;
+  schema.id = "manual.comparison.rgba";
+  auto& tensor = schema.tensors[0];
+  tensor.batch_axes = {1, 1};
+  tensor.descriptor.shape = {1, 1, 4};
+  tensor.layout.spatial = true;
+  tensor.layout.channel_axis = 2;
+  tensor.facets = {take(ps::encode_semantic(ps::rgba_semantics()))};
+  fixture->document.inputs[port].result_schema =
+      std::make_shared<ps::SchemaTemplate>(std::move(schema));
+}
+ps::Value rgba_backing(std::uint64_t alpha) {
+  auto value = raw(ps::ElementType::Float32, {0x3f800000, 0, 0, alpha});
+  return take(
+      ps::Value::from_storage({ps::ElementType::Float32, {1, 1, 1, 1, 4}},
+                              ps::Region::whole({1, 1, 1, 1, 4}),
+                              {0, {16, 16, 16, 16, 4}}, value.storage()));
+}
+struct FailingSource {
+  const char* message;
+  unsigned failed_at;
+  bool requested = false;
+  FailingSource(const char* message, unsigned at)
+      : message(message), failed_at(at) {}
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
+    if (!requested) {
+      requested = true;
+      ps::ResultProgramNeed need;
+      need.tensors.push_back(
+          {0, 0,
+           take(ps::Footprint::all(
+               phase.query.inputs[0].result_schema->tensors[0].sample_shape())),
+           1});
+      return ps::Result<ps::ResultProgramPoll>(std::move(need));
+    }
+    const auto width = ps::Value::element_size(phase.query.inputs[0]
+                                                   .result_schema->tensors[0]
+                                                   .descriptor.element_type);
+    for (unsigned at = 0; at <= failed_at; ++at) {
+      std::uint64_t bits = 0;
+      auto status = phase.read_tensor(0, 0, {at}, &bits, width);
+      if (!status.ok())
+        return ps::Result<ps::ResultProgramPoll>(status);
+    }
+    return ps::Result<ps::ResultProgramPoll>(
+        ps::Status{ps::ErrorCode::OperationFailed, message});
   }
 };
+void failing_input(Fixture* fixture, unsigned port, const char* message,
+                   unsigned failed_at = 0) {
+  ps::OperationDefinition operation;
+  operation.key = "manual.comparison_source" + std::to_string(port);
+  operation.traits.cacheable = false;
+  operation.traits.input_count = 1;
+  operation.traits.input_schema.resize(1);
+  operation.traits.input_schema[0].kind = ps::OperationPortKind::Result;
+  operation.traits.input_schema[0].tensor_key = "data";
+  ps::OperationOutputTraits output;
+  output.key = "data";
+  output.output_schema.kind = ps::OperationPortKind::Result;
+  output.result_schema = *fixture->document.inputs[port].result_schema;
+  output.output_schema.result_schema_id = std::string(output.result_schema->id);
+  output.output_schema.result_schema_version = output.result_schema->version;
+  output.region_rule = ps::OperationRegionRule::Whole;
+  output.dependency_version = 2;
+  output.continuation_bytes = sizeof(FailingSource);
+  output.maximum_dependency_stages = 2;
+  operation.traits.outputs = {std::move(output)};
+  operation.start_result = [message, failed_at](const auto&,
+                                                const auto& allocator) {
+    return ps::ResultContinuation::make<FailingSource>(allocator, message,
+                                                       failed_at);
+  };
+  auto registered = fixture->registry->register_operation(operation);
+  if (!registered.ok())
+    throw std::runtime_error(registered.message);
+  fixture->document.nodes[0].inputs[port] =
+      ps::WorkflowNodeOutput{10 + port, "data"};
+  fixture->document.nodes.push_back(
+      {10 + port, operation.key, {ps::WorkflowInputReference{port + 1}}, {}});
+}
 void examples(const std::string& profile) {
   auto registry = ps::make_default_operation_registry();
   for (const auto& entry : std::map<std::string, std::vector<std::uint8_t>>{
@@ -84,7 +176,7 @@ void examples(const std::string& profile) {
     auto result = fixture.run();
     for (std::uint64_t i = 0; i < 3; ++i) {
       std::uint8_t actual = 9;
-      require(result.values.at("values").read({i}, &actual, 1).ok() &&
+      require(rf::read(result.results.at("values"), {i}, &actual, 1).ok() &&
                   actual == entry.second[i],
               "comparison fixture");
     }
@@ -97,7 +189,7 @@ void examples(const std::string& profile) {
   const std::int64_t expected[] = {10, 2, 30};
   for (std::uint64_t i = 0; i < 3; ++i) {
     std::int64_t actual = 0;
-    require(selected.values.at("values").read({i}, &actual, 8).ok() &&
+    require(rf::read(selected.results.at("values"), {i}, &actual, 8).ok() &&
                 actual == expected[i],
             "select fixture");
   }
@@ -113,65 +205,55 @@ void examples(const std::string& profile) {
       {{"atol", 0.0}, {"rtol", 1.5}});
   auto checked = close.run();
   std::uint8_t actual = 1;
-  require(checked.values.at("values").read({0}, &actual, 1).ok() && actual == 0,
+  require(rf::read(checked.results.at("values"), {0}, &actual, 1).ok() &&
+              actual == 0,
           "exact is_close avoids infinity overflow");
   std::cout << "NUM-07: six predicates; select=[10,2,30] Whole true/false "
                "support; MAX/-MAX is_close=0 passed\n";
 }
 void selected_failures(const std::string& profile) {
-  auto registry = ps::make_default_operation_registry();
+  auto registry = ps::make_default_operation_registry(false);
   Fixture fixture(registry, "numeric.select" + profile,
                   {raw(ps::ElementType::UInt8, {1, 0, 1}),
                    raw(ps::ElementType::Int64, {10, 20, 30}),
                    raw(ps::ElementType::Int64, {1, 2, 3})});
-  std::array<std::vector<std::uint64_t>, 2> reads;
-  for (std::size_t branch = 0; branch < 2; ++branch) {
-    const auto value = fixture.bindings.inputs[branch + 1].value;
-    auto source = std::make_shared<ps::RegionalSource>();
-    source->descriptor = value.descriptor();
-    source->read = [&, branch, value](const auto& region, auto* destination,
-                                      auto, const auto&, const auto&) {
-      const auto axis = region.dimensions()[0];
-      for (std::uint64_t i = axis.offset; i < axis.offset + axis.extent; ++i) {
-        reads[branch].push_back(i);
-        if ((branch == 0 && i == 1) || (branch == 1 && i != 1))
-          return ps::Result<ps::Region>(ps::Status{
-              ps::ErrorCode::OperationFailed, "unselected source failure"});
-      }
-      std::memcpy(destination, value.bytes().data() + axis.offset * 8,
-                  axis.extent * 8);
-      return ps::Result<ps::Region>(region);
-    };
-    fixture.bindings.inputs[branch + 1].value = {};
-    fixture.bindings.inputs[branch + 1].source = source;
-  }
-  ps::GraphContext graph(fixture.document);
-  auto plan = take(ps::Compiler(registry).compile(graph));
-  ps::ExecutionContextConfig config;
-  config.cpu_workers = 1;
-  config.managed_resources = ps::ResourceLimits{};
-  ps::ExecutionContext execution(registry, config);
-  auto result = execution.execute(plan.plan, fixture.bindings);
+  for (unsigned branch = 0; branch < 2; ++branch)
+    failing_input(&fixture, branch + 1, "unselected source failure",
+                  branch ? 0 : 1);
+  require(registry->freeze().ok(), "freeze failing select registry");
+  auto result = fixture.try_run();
   require(
       !result.ok() && result.status().message == "unselected source failure",
       "Whole select exposes unselected source failure");
-  fixture.bindings.inputs[0].value = raw(ps::ElementType::UInt8, {1, 2, 1});
-  auto priority = execution.execute(plan.plan, fixture.bindings);
+  fixture.backing[0] = raw(ps::ElementType::UInt8, {1, 2, 1});
+  const ps::DemandQuery no_samples{{"values", take(ps::Footprint::none({3}))}};
+  auto no_sources = take(fixture.try_run(&no_samples));
+  require(take(no_sources.results.at("values").descriptor())
+                  .tensor_coverage(0)
+                  .empty() &&
+              take(no_sources.dependencies.source_support()).empty(),
+          "Empty select does not run failing Result producers");
+  auto priority = fixture.try_run();
   require(
       !priority.ok() &&
           priority.status().message == "unselected source failure",
       "Whole branch collection failure precedes invalid condition callback");
-  for (unsigned port = 1; port < 3; ++port) {
-    fixture.bindings.inputs[port].source.reset();
-    fixture.bindings.inputs[port].value =
-        raw(ps::ElementType::Int64, {1, 2, 3});
-  }
-  auto snapshot = take(execution.freeze(plan.plan, fixture.bindings));
+  fixture.document.nodes.resize(1);
+  for (unsigned port = 1; port < 3; ++port)
+    fixture.document.nodes[0].inputs[port] =
+        ps::WorkflowInputReference{port + 1};
+  ps::GraphContext graph(fixture.document);
+  auto plan = take(ps::Compiler(registry).compile(graph));
+  ps::ExecutionContext execution(registry);
+  auto snapshot = take(execution.freeze(
+      plan.plan, fixture.bindings(take(execution.resource_budget()))));
   auto empty = take(execution.execute_fragments(
       snapshot, {{"values", take(ps::Footprint::none({3}))}}));
-  require(empty.diagnostics.operation_timings.empty(),
+  require(take(empty.results.at("values").descriptor())
+                  .tensor_coverage(0)
+                  .empty() &&
+              take(empty.dependencies.source_support()).empty(),
           "Empty select skips invalid condition");
-
   auto failed = execution.execute_fragments(
       snapshot,
       {{"values", take(ps::Footprint::from_regions(
@@ -205,53 +287,44 @@ void copy_types_and_typed_closure(const std::string& profile) {
                              std::vector<std::uint64_t>{1, 0, 1}}) {
       const std::vector<ps::Value> inputs{raw(ps::ElementType::UInt8, mask),
                                           first, second};
-      const std::vector<ps::Region> demands{inputs[0].region(), first.region(),
-                                            second.region()};
-      const std::map<std::string, ps::ParameterValue> parameters;
-      ps::OperationInvocation call(inputs, demands, parameters);
-      auto output = take(registry->invoke("numeric.select" + profile, call));
+      auto output =
+          rf::bytes(Fixture(registry, "numeric.select" + profile, inputs)
+                        .run()
+                        .results.at("values"));
       for (std::size_t i = 0; i < 3; ++i)
-        require(std::memcmp(output.bytes().data() + i * width,
-                            &(mask[i] ? a[i] : b[i]), width) == 0,
+        require(std::memcmp(output.data() + i * width, &(mask[i] ? a[i] : b[i]),
+                            width) == 0,
                 "select preserves four dtype bit patterns");
     }
   }
-  auto rgba = raw(ps::ElementType::Float32, {0x3f800000, 0, 0, 0x40000000});
-  auto input = take(ps::Value::from_storage(
-      {ps::ElementType::Float32, {1, 1, 4}}, ps::Region::whole({1, 1, 4}),
-      {0, {16, 16, 4}}, rgba.storage(),
-      {take(ps::encode_semantic(ps::rgba_semantics()))}));
-  auto generic = take(ps::Value::from_storage(
-      input.descriptor(), input.region(), input.layout(), rgba.storage()));
-  const auto region = ps::Region::whole({1, 1, 4});
   for (unsigned condition : {0, 1}) {
     auto bytes = raw(ps::ElementType::UInt8, {condition, 0, 0, 0});
-    auto control = take(ps::Value::from_storage(
-        {ps::ElementType::UInt8, {1, 1, 4}}, ps::Region::whole({1, 1, 4}),
-        {0, {4, 4, 1}}, bytes.storage()));
-    const std::vector<ps::Value> inputs{control, input, generic};
-    const std::vector<ps::Region> demands{control.region(), input.region(),
-                                          generic.region()};
-    const std::map<std::string, ps::ParameterValue> parameters;
-    ps::OperationInvocation call(inputs, demands, parameters, ps::Backend::Cpu,
-                                 {}, region);
-    auto output = registry->invoke("numeric.select" + profile, call);
-    require(!output.ok(),
-            "Whole validates invalid typed branch for either condition");
+    auto control =
+        take(ps::Value::from_storage({ps::ElementType::UInt8, {1, 1, 1, 1, 4}},
+                                     ps::Region::whole({1, 1, 1, 1, 4}),
+                                     {0, {4, 4, 4, 4, 1}}, bytes.storage()));
+    for (auto alpha : {UINT64_C(0x3f800000), UINT64_C(0x40000000)}) {
+      Fixture fixture(registry, "numeric.select" + profile,
+                      {control, rgba_backing(alpha), rgba_backing(alpha)});
+      rgba_input(&fixture, 1);
+      auto output = fixture.try_run();
+      require(output.ok() == (alpha == 0x3f800000),
+              "Whole validates typed branch alpha for either condition");
+    }
   }
-  ps::DependencyRequest request;
-  request.inputs = {{{ps::ElementType::Float64, {1}}, {}},
-                    {{ps::ElementType::Float64, {1}}, {}}};
-  request.parameters = {{"atol", 0.0}, {"rtol", 0.0}};
-  request.outputs = take(ps::Footprint::none({1}));
-  request.snapshot_identity = "comparison-empty";
+  std::vector<ps::OperationMetadata> metadata(2);
+  for (auto& item : metadata)
+    item.result_schema = std::make_shared<ps::SchemaTemplate>(
+        rf::source_schema(raw(ps::ElementType::Float64, {0})));
+  std::map<std::string, ps::ParameterValue> parameters{{"atol", 0.0},
+                                                       {"rtol", 0.0}};
   for (auto bits : {UINT64_C(0xbff0000000000000), UINT64_C(0x7ff0000000000000),
                     UINT64_C(0x7ff0000000000001)}) {
     double tolerance = 0;
     std::memcpy(&tolerance, &bits, 8);
-    request.parameters["rtol"] = tolerance;
+    parameters["rtol"] = tolerance;
     auto invalid = registry->resolve_traits("numeric.is_close" + profile,
-                                            request.inputs, request.parameters);
+                                            metadata, parameters);
     require(invalid.status().code == ps::ErrorCode::InvalidArgument &&
                 invalid.status().reason == ps::FailureReason::InvalidDomain &&
                 invalid.status().detail.origin == ps::FailureOrigin::Schema,
@@ -275,18 +348,18 @@ void floating_environment(const std::string& profile) {
           {UINT64_C(0x7ff0000000000001), UINT64_C(0x8000000000000000),
            UINT64_C(0x7ff0000000000000)}),
       raw(ps::ElementType::Float64, {0, 0, UINT64_C(0xfff0000000000000)})};
-  const std::vector<ps::Region> demands{inputs[0].region(), inputs[1].region()};
   require(fesetround(FE_UPWARD) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
               feraiseexcept(FE_DIVBYZERO) == 0,
           "set caller floating environment");
   const auto flags = fetestexcept(FE_ALL_EXCEPT);
-  const std::map<std::string, ps::ParameterValue> parameters;
-  ps::OperationInvocation call(inputs, demands, parameters);
-  auto value = take(registry->invoke("numeric.equal" + profile, call));
+  auto control = std::make_shared<point_math_checks::Control>();
+  control->rounding = FE_UPWARD;
+  point_math_checks::Workflow workflow({1, "numeric.equal" + profile, {}, {}},
+                                       inputs, {}, control);
+  auto value = rf::bytes(take(workflow.run()).results.at("values"));
   require(fegetround() == FE_UPWARD && fetestexcept(FE_ALL_EXCEPT) == flags,
           "sNaN classification preserves caller rounding and flags");
-  require(value.bytes().data()[0] == 0 && value.bytes().data()[1] == 1 &&
-              value.bytes().data()[2] == 0,
+  require(value[0] == 0 && value[1] == 1 && value[2] == 0,
           "special comparison bits");
   std::cout << "comparison sNaN: caller rounding and prior exception flags "
                "preserved\n";
@@ -307,7 +380,7 @@ void composition_and_resources(const std::string& profile) {
   const std::int64_t expected[] = {1, 2, 2};
   for (std::uint64_t i = 0; i < 3; ++i) {
     std::int64_t actual = 0;
-    require(result.values.at("values").read({i}, &actual, 8).ok() &&
+    require(rf::read(result.results.at("values"), {i}, &actual, 8).ok() &&
                 actual == expected[i],
             "comparison output composes as select condition");
   }
@@ -339,12 +412,6 @@ void selected_cache(const std::string& profile) {
                   {raw(ps::ElementType::UInt8, {1, 0, 1}),
                    raw(ps::ElementType::Int64, {10, 20, 30}),
                    raw(ps::ElementType::Int64, {1, 2, 3})});
-  ps::InputSnapshotStore snapshots;
-  for (auto& binding : fixture.bindings.inputs) {
-    binding.snapshot = std::make_shared<const ps::InputSnapshot>(
-        take(snapshots.import_value(binding.value)));
-    binding.value = {};
-  }
   ps::GraphContext graph(fixture.document);
   auto plan = take(ps::Compiler(registry).compile(graph));
   ps::ExecutionContextConfig config;
@@ -352,29 +419,41 @@ void selected_cache(const std::string& profile) {
   config.result_cache_bytes = 32768;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext execution(registry, config);
-  auto demand = take(execution.open_demand(plan.plan, fixture.bindings));
+  const auto root = take(execution.resource_budget());
+  auto bindings = fixture.bindings(root);
   const ps::DemandQuery query{{"values", take(ps::Footprint::all({3}))}};
-  take(demand.request(query));
-  require(take(demand.request(query)).diagnostics.cache_hits > 0,
-          "select warm per-observation cache");
-  fixture.bindings.inputs[1].snapshot =
-      std::make_shared<const ps::InputSnapshot>(take(
-          snapshots.import_value(raw(ps::ElementType::Int64, {10, 99, 30}))));
-  require(demand.replace_bindings(fixture.bindings).ok(),
+  const auto first = take(execution.execute_fragments(
+      take(execution.freeze(plan.plan, bindings)), query));
+  bindings = fixture.bindings(root);
+  const auto warm = take(execution.execute_fragments(
+      take(execution.freeze(plan.plan, bindings)), query));
+  require(warm.diagnostics.cache_hits > 0,
+          "fresh select bindings reuse completed content cache");
+  auto demand = take(execution.open_demand(plan.plan, bindings));
+  const auto observed = take(demand.request(query));
+  const auto repeated = take(demand.request(query));
+  require(observed.results.at("values").object_id() ==
+              repeated.results.at("values").object_id(),
+          "same frozen demand shares completed Result observation");
+  bindings.inputs[1].result =
+      point_math_checks::source(take(execution.resource_budget()),
+                                raw(ps::ElementType::Int64, {10, 99, 30}),
+                                fixture.document.inputs[1].result_schema.get());
+  require(demand.replace_bindings(bindings).ok(),
           "replace unselected branch data");
   auto unchanged = take(demand.request(query));
   require(unchanged.diagnostics.cache_hits == 0,
           "unselected edit invalidates Whole select");
-  fixture.bindings.inputs[0].snapshot =
-      std::make_shared<const ps::InputSnapshot>(
-          take(snapshots.import_value(raw(ps::ElementType::UInt8, {1, 1, 1}))));
-  require(demand.replace_bindings(fixture.bindings).ok(),
+  bindings.inputs[0].result = point_math_checks::source(
+      take(execution.resource_budget()), raw(ps::ElementType::UInt8, {1, 1, 1}),
+      fixture.document.inputs[0].result_schema.get());
+  require(demand.replace_bindings(bindings).ok(),
           "replace condition decisions");
   auto changed = take(demand.request(query));
   std::int64_t actual = 0;
-  require(
-      changed.values.at("values").read({1}, &actual, 8).ok() && actual == 99,
-      "condition edit changes selected source");
+  require(rf::read(changed.results.at("values"), {1}, &actual, 8).ok() &&
+              actual == 99,
+          "condition edit changes selected source");
   const auto support = take(changed.dependencies.source_support());
   require(support.at("input1") == take(ps::Footprint::all({3})) &&
               support.at("input2") == take(ps::Footprint::all({3})),
@@ -387,13 +466,12 @@ void selected_cache(const std::string& profile) {
       reversed_source.descriptor(), reversed_source.region(), {8, {0}},
       reversed_source.storage()));
   const std::vector<ps::Value> inputs{reversed, zero};
-  const std::vector<ps::Region> demands{reversed.region(), zero.region()};
-  const std::map<std::string, ps::ParameterValue> parameters;
-  ps::OperationInvocation call(inputs, demands, parameters);
   const auto ordered =
-      take(registry->invoke("numeric.greater" + profile, call));
-  require(ordered.bytes().size() == 3 && ordered.bytes().data()[0] == 1 &&
-              ordered.bytes().data()[1] == 0 && ordered.bytes().data()[2] == 0,
+      rf::bytes(Fixture(registry, "numeric.greater" + profile, inputs)
+                    .run()
+                    .results.at("values"));
+  require(ordered.size() == 3 && ordered[0] == 1 && ordered[1] == 0 &&
+              ordered[2] == 0,
           "negative and zero strides preserve exact input coordinates");
   std::cout
       << "select cache: unselected edit invalidated, condition edit selects99 "
@@ -402,7 +480,6 @@ void selected_cache(const std::string& profile) {
 void whole_select_layout(const std::string& profile) {
   auto registry = ps::make_default_operation_registry();
   std::vector<ps::Value> inputs;
-  std::vector<ps::Region> demands;
   for (unsigned port = 0; port < 3; ++port) {
     const unsigned width = port ? 8 : 1;
     auto storage = take(ps::BufferAllocator{}.allocate(65 * width + 1));
@@ -420,15 +497,13 @@ void whole_select_layout(const std::string& profile) {
     inputs.push_back(take(ps::Value::from_storage(
         {port ? ps::ElementType::Float64 : ps::ElementType::UInt8, {1, 65}},
         ps::Region::whole({1, 65}), layout, std::move(storage).freeze())));
-    demands.push_back(inputs.back().region());
   }
-  const std::map<std::string, ps::ParameterValue> parameters;
-  ps::OperationInvocation call(inputs, demands, parameters, ps::Backend::Cpu,
-                               {}, ps::Region::whole({1, 65}));
-  auto result = take(registry->invoke("numeric.select" + profile, call));
+  auto result = Fixture(registry, "numeric.select" + profile, inputs)
+                    .run()
+                    .results.at("values");
   for (unsigned i = 0; i < 65; ++i) {
     double expected = (64 - i) % 3 == 0 ? 64 - i : 99, actual = 0;
-    std::memcpy(&actual, result.bytes().data() + 8 * i, 8);
+    require(rf::read(result, {0, i}, &actual, 8).ok(), "select layout read");
     require(actual == expected,
             "select mixed-width reversed/zero/unaligned singleton tail");
   }
@@ -443,7 +518,6 @@ void whole_predicates(const std::string& profile) {
       parameters = {{"atol", .25}, {"rtol", 0.0}};
     for (bool reverse : {false, true}) {
       std::vector<ps::Value> inputs;
-      std::vector<ps::Region> demands;
       for (unsigned port = 0; port < 2; ++port) {
         auto storage = take(ps::BufferAllocator{}.allocate(65 * 4 + 1));
         for (unsigned i = 0; i < 65; ++i) {
@@ -457,13 +531,12 @@ void whole_predicates(const std::string& profile) {
         inputs.push_back(take(ps::Value::from_storage(
             {ps::ElementType::Float32, {1, 65}}, ps::Region::whole({1, 65}),
             layout, std::move(storage).freeze())));
-        demands.push_back(inputs.back().region());
       }
-      ps::OperationInvocation call(inputs, demands, parameters,
-                                   ps::Backend::Cpu, {},
-                                   ps::Region::whole({1, 65}));
       auto result =
-          take(registry->invoke("numeric." + operation + profile, call));
+          rf::bytes(Fixture(registry, "numeric." + operation + profile, inputs,
+                            parameters)
+                        .run()
+                        .results.at("values"));
       for (unsigned i = 0; i < 65; ++i) {
         const unsigned x = reverse ? 64 - i : i;
         const bool expected = operation == "less"            ? x < 32
@@ -472,7 +545,7 @@ void whole_predicates(const std::string& profile) {
                               : operation == "greater_equal" ? x >= 32
                               : operation == "not_equal"     ? x != 32
                                                              : x == 32;
-        require(result.bytes().data()[i] == expected,
+        require(result[i] == expected,
                 "comparison Float32 four-lane tail/layout oracle");
       }
     }
@@ -483,10 +556,14 @@ void whole_predicates(const std::string& profile) {
     ps::GraphContext graph(fixture.document);
     auto plan = take(ps::Compiler(registry).compile(graph));
     ps::ExecutionContext context(registry);
-    auto snapshot = take(context.freeze(plan.plan, fixture.bindings));
+    auto snapshot = take(context.freeze(
+        plan.plan, fixture.bindings(take(context.resource_budget()))));
     auto empty = take(context.execute_fragments(
         snapshot, {{"values", take(ps::Footprint::none({3}))}}));
-    require(empty.diagnostics.operation_timings.empty(),
+    require(take(empty.results.at("values").descriptor())
+                    .tensor_coverage(0)
+                    .empty() &&
+                take(empty.dependencies.source_support()).empty(),
             "Empty comparison skips callback");
     const auto sparse =
         take(ps::Footprint::from_regions({3}, {ps::Region({{2, 1}})}));
@@ -503,33 +580,24 @@ void whole_predicates(const std::string& profile) {
               "comparison input gap dirties observed output");
     }
     for (unsigned port = 0; port < 2; ++port) {
-      auto source = std::make_shared<ps::RegionalSource>();
-      source->descriptor = fixture.document.inputs[port].descriptor;
-      source->read = [](const auto&, auto*, auto, const auto&, const auto&) {
-        return ps::Result<ps::Region>(ps::Status{ps::ErrorCode::OperationFailed,
-                                                 "required comparison source"});
-      };
-      auto failed_bindings = fixture.bindings;
-      failed_bindings.inputs[port].value = {};
-      failed_bindings.inputs[port].source = source;
-      auto failed = context.execute(plan.plan, failed_bindings);
+      Fixture failed_fixture(ps::make_default_operation_registry(false),
+                             "numeric." + operation + profile, fixture.backing,
+                             parameters);
+      failing_input(&failed_fixture, port, "required comparison source");
+      require(failed_fixture.registry->freeze().ok(),
+              "freeze failed comparison registry");
+      auto failed = failed_fixture.try_run();
       require(!failed.ok() &&
                   failed.status().message == "required comparison source",
               "both Whole comparison producers required");
-      auto bad = raw(ps::ElementType::Float32, {0, 0, 0, 0x40000000});
-      auto typed = take(ps::Value::from_storage(
-          {ps::ElementType::Float32, {1, 1, 4}}, ps::Region::whole({1, 1, 4}),
-          {0, {16, 16, 4}}, bad.storage(),
-          {take(ps::encode_semantic(ps::rgba_semantics()))}));
-      auto generic = take(ps::Value::from_storage(
-          typed.descriptor(), typed.region(), typed.layout(), bad.storage()));
-      std::vector<ps::Value> inputs{generic, generic};
-      inputs[port] = typed;
-      std::vector<ps::Region> demands{typed.region(), typed.region()};
-      ps::OperationInvocation call(inputs, demands, parameters,
-                                   ps::Backend::Cpu, {}, typed.region());
-      require(!registry->invoke("numeric." + operation + profile, call).ok(),
-              "typed comparison input cannot hide invalid alpha");
+      for (auto alpha : {UINT64_C(0x3f800000), UINT64_C(0x40000000)}) {
+        Fixture typed(registry, "numeric." + operation + profile,
+                      {rgba_backing(alpha), rgba_backing(alpha)}, parameters);
+        rgba_input(&typed, port);
+        auto answer = typed.try_run();
+        require(answer.ok() == (alpha == 0x3f800000),
+                "typed comparison input validates alpha on either port");
+      }
     }
   }
   std::cout << "seven Whole comparisons: support/dirty/Empty, both-port errors "
@@ -554,7 +622,7 @@ void oracle(const std::string& profile) {
                     {raw(type, {a}), raw(type, {b})}, parameters);
     auto result = fixture.run();
     std::uint8_t actual = 7;
-    require(result.values.at("values").read({0}, &actual, 1).ok(),
+    require(rf::read(result.results.at("values"), {0}, &actual, 1).ok(),
             "oracle read");
     std::cout << static_cast<unsigned>(actual) << '\n';
   }

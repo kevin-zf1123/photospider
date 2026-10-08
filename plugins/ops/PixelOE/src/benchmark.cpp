@@ -25,11 +25,12 @@ int main(int argc, char** argv) try {
   uint32_t w = std::stoul(argv[1]), h = std::stoul(argv[2]);
   int reps = argc > 3 ? std::stoi(argv[3]) : 3;
   Memory memory;
-  ps_planar_services_v3 services{};
+  ps_result_services_v2 services{};
   services.struct_size = sizeof(services);
+  services.abi_version = PS_RESULT_OPERATION_ABI_VERSION_2;
   services.context = &memory;
   services.cancelled = [](void*) { return 0; };
-  services.allocate_scratch = [](void* p, uint64_t n) -> uint8_t* {
+  services.allocate_scratch = [](void* p, uint64_t n, uint8_t** destination) -> int {
     auto& m = *static_cast<Memory*>(p);
     auto* data = static_cast<uint8_t*>(std::calloc(n, 1));
     if (data) {
@@ -37,18 +38,19 @@ int main(int argc, char** argv) try {
       m.live += n;
       m.peak = std::max(m.peak, m.live);
     }
-    return data;
+    *destination = data;
+    return data ? 0 : 4;
   };
   services.release_scratch = [](void* p, uint8_t* data) {
     auto& m = *static_cast<Memory*>(p);
     auto found = m.blocks.find(data);
     if (found == m.blocks.end()) {
-      return 0;
+      return 6;
     }
     m.live -= found->second;
     m.blocks.erase(found);
     std::free(data);
-    return 1;
+    return 0;
   };
   px::Environment env;
   px::Context setup(&services);

@@ -48,19 +48,6 @@ inline Result<double> floating_parameter(
   return Result<double>(Status::failure(ErrorCode::InvalidArgument,
                                         "operation parameter is not Float64"));
 }
-inline Value allocated_scalar(const OperationInvocation& invocation,
-                              double number) {
-  auto allocation = MutableValue::allocate(
-      {ElementType::Float64, {1}}, Region::whole({1}), invocation.allocator);
-  if (!allocation.ok())
-    throw std::bad_alloc();
-  auto value = allocation.take_value();
-  std::memcpy(value.data(), &number, sizeof(number));
-  auto result = std::move(value).publish();
-  if (!result.ok())
-    throw std::logic_error(result.status().message);
-  return result.take_value();
-}
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
 inline constexpr bool simulated_gpu = true;
 #else

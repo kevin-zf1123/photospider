@@ -1,5 +1,6 @@
 #include "photospider/numeric/color_ramps.hpp"
 
+#include <atomic>
 #include <cfenv>  // NOLINT(build/c++11)
 #include <cstdint>
 #include <cstring>
@@ -9,13 +10,13 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "icc_fixture.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/numeric/arrays.hpp"
 #include "photospider/photospider.hpp"
-#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 void require(bool condition, const char* message) {
@@ -49,19 +50,76 @@ ps::Value i64(std::vector<std::uint64_t> shape,
               std::vector<std::int64_t> values) {
   return array(ps::ElementType::Int64, std::move(shape), values);
 }
-ps::ValueFragments run(ps::WorkflowNode node,
-                       const std::vector<ps::Value>& values,
-                       ps::ColorModel expected_model,
-                       const ps::ResourceBindings& resources = {}) {
-  ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
+ps::SchemaTemplate source_schema(const ps::Value& value) {
+  ps::SchemaTemplate schema;
+  schema.id = "manual.ramp.input";
+  ps::ResultTensorSpec member;
+  member.key = "data";
+  member.descriptor = value.descriptor();
+  member.facets = value.facets();
+  for (const auto& facet : member.facets)
+    if (facet.key == "photospider.color-array")
+      member.atomic_trailing_axes = 1;
+  schema.tensors.push_back(std::move(member));
+  return schema;
+}
+ps::ResultRef source(const ps::ResourceBudget& root, const ps::Value& value) {
+  auto schema = source_schema(value);
+  auto bytes = take(root.allocator().allocate(value.bytes().size()));
+  std::memcpy(bytes.data(), value.bytes().data(), value.bytes().size());
+  auto builder = take(ps::ResultBuilder::start(
+      root, schema, "ramp.input", {}, {}, 128, 128, value.resources()));
+  require(builder
+              .bind_descriptor_relation(
+                  take(ps::ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
+              .ok(),
+          "ramp source descriptor");
+  require(
+      builder
+          .publish_tensor(
+              0, value.region(), value.layout(), std::move(bytes).freeze(),
+              take(ps::ResultRelation::cartesian(
+                  root, take(schema.tensors[0].sample_count()), {0, 1, 0, 0})),
+              {true, true, true, true})
+          .ok(),
+      "ramp source Result publication");
+  return take(builder.seal());
+}
+void declare_sources(ps::WorkflowDocument* document,
+                     const std::vector<ps::Value>& values) {
   for (std::size_t i = 0; i < values.size(); ++i) {
-    const auto& value = values[i];
-    auto name = "input" + std::to_string(i);
-    document.inputs.push_back({i + 1, name, value.descriptor(), value.region(),
-                               value.layout(), value.facets()});
-    bindings.inputs.push_back({std::move(name), value});
+    ps::WorkflowInputDeclaration input;
+    input.id = i + 1;
+    input.name = "input" + std::to_string(i);
+    input.result_schema =
+        std::make_shared<ps::SchemaTemplate>(source_schema(values[i]));
+    document->inputs.push_back(std::move(input));
   }
+}
+ps::ExecutionBindings bind_sources(const ps::ResourceBudget& root,
+                                   const std::vector<ps::Value>& values) {
+  ps::ExecutionBindings bindings;
+  for (std::size_t i = 0; i < values.size(); ++i)
+    bindings.inputs.push_back(
+        {"input" + std::to_string(i), source(root, values[i])});
+  return bindings;
+}
+uint64_t read(const ps::ResultRef& result, const std::vector<uint64_t>& at) {
+  uint64_t bits = 0;
+  require(
+      result
+          .read_tensor(take(result.descriptor()), 0, at, &bits,
+                       ps::Value::element_size(
+                           result.schema().tensors[0].descriptor.element_type))
+          .ok(),
+      "ramp Result coordinate read");
+  return bits;
+}
+ps::ResultRef run(ps::WorkflowNode node, const std::vector<ps::Value>& values,
+                  ps::ColorModel expected_model,
+                  const ps::ResourceBindings& resources = {}) {
+  ps::WorkflowDocument document;
+  declare_sources(&document, values);
   document.nodes = {std::move(node)};
   document.outputs = {{"colors", document.nodes[0].id, "values"}};
   auto registry = ps::make_default_operation_registry();
@@ -71,8 +129,12 @@ ps::ValueFragments run(ps::WorkflowNode node,
   config.cpu_workers = 1;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext context(registry, config);
+  auto bindings = bind_sources(take(context.resource_budget()), values);
   auto frozen = take(context.freeze(compiled.plan, std::move(bindings)));
-  const auto shape = compiled.plan.steps().back().output_descriptor.shape;
+  const auto shape = compiled.plan.steps()
+                         .back()
+                         .output_result_schema->tensors[0]
+                         .sample_shape();
   auto region = ps::Region::whole(shape).dimensions();
   region.back() = {1, 1};
   auto query = take(ps::Footprint::from_regions(shape, {ps::Region(region)}));
@@ -81,10 +143,12 @@ ps::ValueFragments run(ps::WorkflowNode node,
   options.dependencies.maximum_work = 100000000;
   auto result =
       take(context.execute_fragments(frozen, {{"colors", query}}, {}, options));
-  auto output = result.values.at("colors");
-  require(output.coverage() == take(ps::Footprint::all(shape)),
+  auto output = result.results.at("colors");
+  require(take(output.descriptor()).tensor_coverage(0) ==
+              take(ps::Footprint::all(shape)),
           "component request returns complete colors");
-  auto description = take(ps::decode_color_array(output.facets().front()));
+  auto description =
+      take(ps::decode_color_array(output.schema().tensors[0].facets.front()));
   require(description.model == expected_model, "output model retained");
   const auto support = take(result.dependencies.source_support());
   require(support.at("input1") ==
@@ -92,19 +156,24 @@ ps::ValueFragments run(ps::WorkflowNode node,
           "all stops remain dependencies");
   return output;
 }
-void check(const ps::ValueFragments& value,
-           const std::vector<double>& expected) {
-  auto collected = take(value.collect(
-      ps::Region::whole(value.descriptor().shape), ps::BufferAllocator{}));
-  require(collected.bytes().size() == expected.size() * sizeof(double),
-          "output size");
+void check(const ps::ResultRef& value, const std::vector<double>& expected) {
+  const auto& tensor = value.schema().tensors[0];
+  const auto shape = tensor.sample_shape();
+  require(take(tensor.sample_count()) == expected.size() &&
+              tensor.descriptor.element_type == ps::ElementType::Float64,
+          "output size and dtype");
+  std::vector<uint64_t> at(shape.size(), 0);
   for (std::size_t i = 0; i < expected.size(); ++i) {
-    std::uint64_t actual, wanted;
-    std::memcpy(&actual, collected.bytes().data() + i * 8, 8);
+    uint64_t wanted;
     std::memcpy(&wanted, &expected[i], 8);
-    if (actual != wanted)
+    if (read(value, at) != wanted)
       throw std::runtime_error("color bits differ at component " +
                                std::to_string(i));
+    for (auto axis = at.size(); axis-- > 0;) {
+      if (++at[axis] < shape[axis])
+        break;
+      at[axis] = 0;
+    }
   }
 }
 ps::Value raw(ps::ElementType type, std::vector<std::uint64_t> shape,
@@ -225,18 +294,9 @@ void probe(ps::CpuNumericProfile profile) {
           std::string(output_unit == 0   ? "none"
                       : output_unit == 1 ? "straight"
                                          : "premultiplied");
-    for (std::size_t i = 0; i < values.size(); ++i) {
-      const auto& value = values[i];
-      auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1,
-                                 name,
-                                 value.descriptor(),
-                                 value.region(),
-                                 value.layout(),
-                                 {}});
-      bindings.inputs.push_back({name, value});
+    declare_sources(&document, values);
+    for (std::size_t i = 0; i < values.size(); ++i)
       node.inputs.push_back(ps::WorkflowInputReference{i + 1});
-    }
     document.nodes = {std::move(node)};
     document.outputs = {{"colors", 1, "values"}};
     ps::GraphContext graph(document);
@@ -248,6 +308,7 @@ void probe(ps::CpuNumericProfile profile) {
     ps::ExecutionOptions options;
     options.maximum_dependency_work = 100000000;
     options.dependencies.maximum_work = 100000000;
+    bindings = bind_sources(take(context.resource_budget()), values);
     auto result =
         context.execute(compiled.plan, std::move(bindings), {}, options);
     if (!result.ok()) {
@@ -265,16 +326,12 @@ void probe(ps::CpuNumericProfile profile) {
                                  result.status().message);
       continue;
     }
-    const auto& output = result.value().values.at("colors");
-    const auto width =
-        ps::Value::element_size(output.descriptor().element_type);
-    for (std::size_t offset = 0; offset < output.bytes().size();
-         offset += width) {
-      std::uint64_t bits = 0;
-      std::memcpy(&bits, output.bytes().data() + offset, width);
-      if (offset)
+    const auto& output = result.value().results.at("colors");
+    const auto count = take(output.schema().tensors[0].sample_count());
+    for (std::size_t i = 0; i < count; ++i) {
+      if (i)
         std::cout << ' ';
-      std::cout << std::hex << bits << std::dec;
+      std::cout << std::hex << read(output, {0, i}) << std::dec;
     }
     std::cout << '\n';
   }
@@ -302,8 +359,8 @@ void rgb_examples(ps::CpuNumericProfile profile) {
                     f64({2, 4}, {1, 0, 0, 0, 0, 0, 1, 1})},
                    ps::ColorModel::Rgb);
   check(value, {0, 0, 0, 0, 0, 0, .5, .5, 0, 0, 1, 1});
-  require(take(ps::decode_color_array(value.facets().front())).association ==
-              ps::ColorAssociation::Premultiplied,
+  require(take(ps::decode_color_array(value.schema().tensors[0].facets.front()))
+                  .association == ps::ColorAssociation::Premultiplied,
           "RGBA default output association");
   std::cout << "RGB public workflows: exact sRGB midpoint, transparent hidden "
                "color, complete RGBA and premultiplied default PASS\n";
@@ -326,17 +383,7 @@ void rgb_failure_isolation(ps::CpuNumericProfile profile) {
                   : f64({2, 4}, {0, 0, 0, 1, 0, 0, 0, -1})};
     ps::WorkflowDocument document;
     ps::ExecutionBindings bindings;
-    for (unsigned i = 0; i < values.size(); ++i) {
-      const auto& value = values[i];
-      auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1,
-                                 name,
-                                 value.descriptor(),
-                                 value.region(),
-                                 value.layout(),
-                                 {}});
-      bindings.inputs.push_back({name, value});
-    }
+    declare_sources(&document, values);
     document.nodes = {node};
     document.outputs = {{"colors", 1, "values"}};
     ps::GraphContext graph(document);
@@ -345,6 +392,7 @@ void rgb_failure_isolation(ps::CpuNumericProfile profile) {
     config.cpu_workers = 1;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(registry, config);
+    bindings = bind_sources(take(context.resource_budget()), values);
     ps::ExecutionOptions execution;
     execution.maximum_dependency_work = 100000000;
     execution.dependencies.maximum_work = 100000000;
@@ -365,6 +413,73 @@ void rgb_failure_isolation(ps::CpuNumericProfile profile) {
   }
   std::cout << "RGB Whole outcomes: component request, invalid alpha, "
                "association underflow and Run failure PASS\n";
+}
+void result_resources(const ps::WorkflowNode& node,
+                      const std::vector<ps::Value>& values,
+                      uint64_t output_bytes) {
+  auto registry = ps::make_default_operation_registry();
+  ps::WorkflowDocument document;
+  declare_sources(&document, values);
+  document.nodes = {node};
+  document.outputs = {{"colors", node.id, "values"}};
+  ps::GraphContext graph(document);
+  auto compiled = take(ps::Compiler(registry).compile(graph));
+  std::vector<ps::OperationMetadata> metadata(values.size());
+  uint64_t input_bytes = 0;
+  for (unsigned i = 0; i < values.size(); ++i) {
+    metadata[i].result_schema =
+        std::make_shared<ps::SchemaTemplate>(source_schema(values[i]));
+    input_bytes += values[i].bytes().size();
+  }
+  const auto traits =
+      take(registry->resolve_traits(node.operation, metadata, node.parameters));
+  const auto shape = compiled.plan.steps()
+                         .back()
+                         .output_result_schema->tensors[0]
+                         .sample_shape();
+  for (unsigned mode = 0; mode < 4; ++mode) {
+    ps::ExecutionContextConfig config;
+    config.cpu_workers = 1;
+    config.managed_resources = ps::ResourceLimits{};
+    if (mode == 0)
+      config.managed_resources->maximum_work = 50000;
+    if (mode == 1 || mode == 2)
+      config.managed_resources->capacity[ps::ResourceKind::Payload] =
+          input_bytes +
+          (mode == 1 ? 8 : output_bytes + traits.workspace_bytes - 1);
+    ps::ExecutionContext context(registry, config);
+    auto root = take(context.resource_budget());
+    auto bindings = bind_sources(root, values);
+    const auto payload = root.statistics().live[ps::ResourceKind::Payload];
+    auto frozen = take(context.freeze(compiled.plan, bindings));
+    const auto baseline_work = root.statistics().issued.work;
+    ps::CancellationSource stop;
+    std::atomic<bool> ready{false}, done{false};
+    std::thread watcher;
+    if (mode == 3) {
+      watcher = std::thread([&] {
+        ready.store(true);
+        while (!done.load() &&
+               root.statistics().issued.work < baseline_work + 10000)
+          std::this_thread::yield();
+        if (!done.load())
+          stop.cancel();
+      });
+      while (!ready.load())
+        std::this_thread::yield();
+    }
+    auto result = context.execute_fragments(
+        frozen, {{"colors", take(ps::Footprint::all(shape))}}, stop.token());
+    done.store(true);
+    if (watcher.joinable())
+      watcher.join();
+    require(!result.ok() &&
+                result.status().code ==
+                    (mode == 3 ? ps::ErrorCode::Cancelled
+                               : ps::ErrorCode::ResourceExhausted) &&
+                root.statistics().live[ps::ResourceKind::Payload] == payload,
+            "ramp Result work/payload/workspace/cancellation rollback");
+  }
 }
 void interruption(ps::CpuNumericProfile profile, bool rgb = false) {
   ps::numeric::HueRampOptions options;
@@ -389,7 +504,7 @@ void interruption(ps::CpuNumericProfile profile, bool rgb = false) {
                                       f64({2}, {0, 1}),
                                       rgb ? f64({2, 3}, {0, 0, 0, 1, 1, 1})
                                           : f64({2, 3}, {20, 2, 0, 80, 4, 4})};
-  point_math_checks::resources(node, values, 256 * 3 * 8);
+  result_resources(node, values, 256 * 3 * 8);
   std::cout << (rgb ? "RGB" : "polar")
             << " ramp Whole work/payload/workspace, active cancellation and "
                "release PASS\n";
@@ -407,13 +522,7 @@ void sparse_and_dirty(ps::CpuNumericProfile profile) {
       f64({4, 3}, {0, 1, 2, 10, 11, 12, nan, nan, nan, nan, nan, nan})};
   ps::WorkflowDocument document;
   ps::ExecutionBindings bindings;
-  for (std::size_t i = 0; i < values.size(); ++i) {
-    const auto& value = values[i];
-    const auto name = "input" + std::to_string(i);
-    document.inputs.push_back(
-        {i + 1, name, value.descriptor(), value.region(), value.layout(), {}});
-    bindings.inputs.push_back({name, value});
-  }
+  declare_sources(&document, values);
   document.nodes = {node};
   document.outputs = {{"colors", 1, "values"}};
   auto registry = ps::make_default_operation_registry();
@@ -424,6 +533,8 @@ void sparse_and_dirty(ps::CpuNumericProfile profile) {
   config.result_cache_bytes = 65536;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext context(registry, config);
+  auto root = take(context.resource_budget());
+  bindings = bind_sources(root, values);
   auto frozen = take(context.freeze(compiled.plan, bindings));
   const auto wanted =
       take(ps::Footprint::from_regions({3, 3}, {ps::Region({{0, 2}, {1, 1}})}));
@@ -435,30 +546,30 @@ void sparse_and_dirty(ps::CpuNumericProfile profile) {
               failed.status().detail.scope == ps::FailureScope::Run,
           "unrequested query NaN fails Whole execution");
   values[0] = f64({3}, {0, .5, 0});
-  bindings.inputs[0].value = values[0];
+  bindings.inputs[0].result = source(root, values[0]);
   frozen = take(context.freeze(compiled.plan, bindings));
   auto result = take(context.execute_fragments(frozen, {{"colors", wanted}}));
-  require(result.values.at("colors").coverage() == complete &&
+  require(take(result.results.at("colors").descriptor()).tensor_coverage(0) ==
+                  take(ps::Footprint::all({3, 3})) &&
               take(result.dependencies.source_support()).at("input2") ==
                   take(ps::Footprint::all({4, 3})),
           "Whole transport reads all colors; unused generic NaN rows stay "
           "mathematically unused");
-  auto packed = take(result.values.at("colors").collect(complete.boxes()[0],
-                                                        ps::BufferAllocator{}));
-  const std::vector<double> expected{0, 1, 2, 5, 6, 7};
-  require(std::memcmp(packed.bytes().data(), expected.data(), 48) == 0,
-          "sparse exact XYZ values");
+  const std::vector<double> expected{0, 1, 2, 5, 6, 7, 0, 1, 2};
+  check(result.results.at("colors"), expected);
   const auto edit =
       take(ps::Footprint::from_regions({4, 3}, {ps::Region({{1, 1}, {2, 1}})}));
   const auto dirty = take(result.dependencies.potential_dirty("input2", edit));
   require(dirty.at("colors") == complete,
           "any input edit dirties the complete recorded output demand");
   auto typed_bindings = bindings;
-  typed_bindings.inputs[2].value = take(ps::Value::from_storage(
-      values[2].descriptor(), values[2].region(), values[2].layout(),
-      values[2].storage(), {take(ps::encode_color_array({}))}));
+  typed_bindings.inputs[2].result = source(
+      root, take(ps::Value::from_storage(
+                values[2].descriptor(), values[2].region(), values[2].layout(),
+                values[2].storage(), {take(ps::encode_color_array({}))})));
   auto typed_document = document;
-  typed_document.inputs[2].facets = typed_bindings.inputs[2].value.facets();
+  typed_document.inputs[2].result_schema = std::make_shared<ps::SchemaTemplate>(
+      typed_bindings.inputs[2].result.schema());
   ps::GraphContext typed_graph(typed_document);
   auto typed_plan = take(ps::Compiler(registry).compile(typed_graph));
   auto typed_frozen = context.freeze(typed_plan.plan, typed_bindings);
@@ -470,23 +581,28 @@ void sparse_and_dirty(ps::CpuNumericProfile profile) {
           "unused invalid typed ColorArray row fails full input validation");
   auto demand = take(context.open_demand(compiled.plan, bindings));
   take(demand.request({{"colors", wanted}}));
-  require(take(demand.request({{"colors", wanted}})).diagnostics.cache_hits > 0,
-          "resource-free ColorArray result cache reuses exact witness");
+  auto repeated = take(demand.request({{"colors", wanted}}));
+  require(read(repeated.results.at("colors"), {1, 0}) ==
+              read(result.results.at("colors"), {1, 0}),
+          "repeated Result color request remains consistent");
   values[2] = f64({4, 3}, {0, 1, 2, 20, 21, 22, nan, nan, nan, nan, nan, nan});
-  bindings.inputs[2].value = values[2];
+  bindings.inputs[2].result = source(root, values[2]);
   require(demand.replace_bindings(bindings).ok(), "replace selected color row");
   auto changed = take(demand.request({{"colors", wanted}}));
   double component = 0;
-  require(changed.values.at("colors").read({1, 0}, &component, 8).ok() &&
+  require(changed.results.at("colors")
+                  .read_tensor(take(changed.results.at("colors").descriptor()),
+                               0, {1, 0}, &component, 8)
+                  .ok() &&
               component == 10,
           "cache invalidation observes edited stop color");
   require(demand.release({{"colors", wanted}}).ok(), "partial demand release");
   // A broadcast source still requires a complete Whole output allocation.
   const auto extent = UINT64_C(1) << 38;
   auto seed = f64({1}, {.5});
-  document.inputs[0] = {
-      1, "input0", seed.descriptor(), seed.region(), seed.layout(), {}};
-  bindings.inputs[0].value = seed;
+  document.inputs[0].result_schema =
+      std::make_shared<ps::SchemaTemplate>(source_schema(seed));
+  bindings.inputs[0].result = source(root, seed);
   document.nodes[0].inputs[0] = ps::WorkflowNodeOutput{2, "values"};
   document.nodes.push_back(take(
       ps::numeric::constant_node(2, ps::WorkflowInputReference{1}, {extent},
@@ -501,8 +617,9 @@ void sparse_and_dirty(ps::CpuNumericProfile profile) {
           "sparse giant request rejects complete Whole output allocation");
   auto empty = take(context.execute_fragments(
       frozen, {{"colors", take(ps::Footprint::none({3, 3}))}}));
-  require(empty.values.at("colors").coverage().empty(),
-          "Empty has no sample output");
+  require(
+      take(empty.results.at("colors").descriptor()).tensor_coverage(0).empty(),
+      "Empty has no sample output");
   std::cout
       << "color ramp workflow: complete inputs/dirty scope, sparse delivery, "
          "cache replacement, Empty and giant output budget PASS\n";
@@ -535,12 +652,10 @@ void strides_and_metadata(ps::CpuNumericProfile profile) {
   const std::vector<ps::Value> values{reversed(f64({2}, {0, .5})),
                                       reversed(f64({2}, {0, 1})),
                                       reversed(colors)};
-  std::vector<ps::OperationMetadata> metadata;
-  std::vector<ps::Region> demands;
-  for (const auto& value : values) {
-    metadata.push_back({value.descriptor(), value.facets()});
-    demands.push_back(value.region());
-  }
+  std::vector<ps::OperationMetadata> metadata(values.size());
+  for (unsigned i = 0; i < values.size(); ++i)
+    metadata[i].result_schema =
+        std::make_shared<ps::SchemaTemplate>(source_schema(values[i]));
   for (int mode : {FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO}) {
     fenv_t saved;
     require(fegetenv(&saved) == 0, "save ramp fenv");
@@ -548,16 +663,7 @@ void strides_and_metadata(ps::CpuNumericProfile profile) {
                 feraiseexcept(FE_INEXACT) == 0,
             "set ramp fenv");
     const int flags = fetestexcept(FE_ALL_EXCEPT);
-    ps::ResourceBudget budget(ps::ResourceLimits{});
-    ps::ResourceAllocationScope scope(budget);
-    ps::OperationInvocation call(values, demands, node.parameters,
-                                 ps::Backend::Cpu, {},
-                                 ps::Region::whole({2, 3}), budget.allocator());
-    auto output = take(registry->invoke(node.operation, call));
-    check(take(ps::ValueFragments::create(output.descriptor(), output.facets(),
-                                          take(ps::Footprint::all({2, 3})),
-                                          {output})),
-          {1, 2, 3, 5, 6, 7});
+    check(run(node, values, ps::ColorModel::Xyz), {1, 2, 3, 5, 6, 7});
     require(fegetround() == mode && fetestexcept(FE_ALL_EXCEPT) == flags,
             "ramp preserves caller rounding and flags");
     require(fesetenv(&saved) == 0, "restore ramp fenv");
@@ -567,21 +673,16 @@ void strides_and_metadata(ps::CpuNumericProfile profile) {
   broadcast[0] = take(ps::Value::from_storage(
       {ps::ElementType::Float64, {2, 2}}, ps::Region::whole({2, 2}),
       {0, {0, 0}}, seed.storage()));
-  demands[0] = broadcast[0].region();
-  ps::OperationInvocation broadcast_call(broadcast, demands, node.parameters,
-                                         ps::Backend::Cpu, {},
-                                         ps::Region::whole({2, 2, 3}));
-  auto broadcast_result =
-      take(registry->invoke(node.operation, broadcast_call));
-  const std::vector<double> expected{5, 6, 7, 5, 6, 7, 5, 6, 7, 5, 6, 7};
-  require(
-      std::memcmp(broadcast_result.bytes().data(), expected.data(), 96) == 0,
-      "rank-two zero-stride input resets after validation and preserves output "
-      "order");
+  auto broadcast_result = run(node, broadcast, ps::ColorModel::Xyz);
+  check(broadcast_result, {5, 6, 7, 5, 6, 7, 5, 6, 7, 5, 6, 7});
   ps::ColorArrayDescriptor different;
   different.model = ps::ColorModel::Cielab;
   different.white = ps::color_white_d50();
-  metadata[2].facets = {take(ps::encode_color_array(different))};
+  auto mismatched_schema =
+      std::make_shared<ps::SchemaTemplate>(*metadata[2].result_schema);
+  mismatched_schema->tensors[0].facets = {
+      take(ps::encode_color_array(different))};
+  metadata[2].result_schema = mismatched_schema;
   auto mismatched =
       registry->resolve_traits(node.operation, metadata, node.parameters);
   require(!mismatched.ok() &&
@@ -657,7 +758,7 @@ void examples(ps::CpuNumericProfile profile) {
   }();
   check(cmyk, {.5, .5, .5, .5});
   const auto cmyk_description =
-      take(ps::decode_color_array(cmyk.facets().front()));
+      take(ps::decode_color_array(cmyk.schema().tensors[0].facets.front()));
   require(cmyk_description.profile &&
               cmyk.resources().icc_profile(*cmyk_description.profile).ok(),
           "CMYK output retains ICC owner after compiler/context/source "

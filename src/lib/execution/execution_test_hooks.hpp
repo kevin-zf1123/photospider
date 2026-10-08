@@ -52,6 +52,11 @@ enum class SchedulerFailurePoint : std::uint8_t {
 enum class CallbackSubmitAction : std::uint8_t {
   /** @brief Preserve ordinary backend queue submission. */
   Proceed,
+  /** @brief Simulate queue acceptance followed by dropping work before start.
+   * Destroys the unstarted queue entry; dependency-stage retirement resolves
+   * its completion as Cancelled.
+   */
+  Drop,
   /** @brief Return the same false rejection as a stopped backend queue. */
   Reject,
   /** @brief Raise `std::bad_alloc` before backend queue mutation. */
@@ -142,6 +147,17 @@ struct ExecutionTestHooks final {
   PostSubmitObservationHook post_submit_observation = nullptr;
   /** @brief Called after the callback body, before queue ownership retires. */
   FinalResultReadyHook callback_body_finished = nullptr;
+  /** @brief Called after the cancelled coordinator retires its caller and
+   * before it attempts shared-registry adoption.
+   * @note Noninstalled test-kernel hook; exceptions preserve synchronous drain.
+   * The hook must not re-enter the executing Run.
+   */
+  void (*structured_handoff_ready)() = nullptr;
+  /** @brief Called after a structured I/O request succeeds, before retention.
+   * @note Noninstalled test-kernel hook; exceptions reach the Need error path.
+   * The hook must not re-enter the executing Run.
+   */
+  void (*structured_io_completed)() = nullptr;
   /** @brief Called after successful checkpoint retention, outside its lock. */
   FinalResultReadyHook checkpoint_published = nullptr;
   /** @brief Called after a completed checkpoint and its provenance are found.
@@ -245,6 +261,19 @@ void notify_post_submit_observation() noexcept;
  * @note Private test-only point, outside queue and Run locks; hook is noexcept.
  */
 void notify_callback_body_finished() noexcept;
+/** @brief Exposes the coordinator handoff admission boundary to tests.
+ * @throws Exceptions from the configured test hook; the caller drains instead.
+ * @note Only the noninstalled test-kernel variant calls this. It must not
+ * re-enter the executing Run.
+ */
+void notify_structured_handoff_ready();
+
+/** @brief Injects a failure after successful structured I/O, before retention.
+ * @throws Exceptions from the configured test hook.
+ * @note Only the noninstalled test-kernel variant calls this. The hook must not
+ * re-enter the executing Run.
+ */
+void notify_structured_io_completed();
 
 /** @brief Observes retained state before the publishing callback returns.
  * @note Private test-only point; must not re-enter the publishing Run.

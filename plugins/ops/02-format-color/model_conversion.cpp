@@ -12,9 +12,10 @@
 #include <utility>
 #include <vector>
 
-#include "01-numeric/array_publication.hpp"
+#include "00-foundation/tensor_program.hpp"
 #include "02-format-color/model_math.hpp"
 #include "02-format-color/model_simd.hpp"
+#include "02-format-color/result_mapping.hpp"
 #include "photospider/data/tensor_description.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "photospider/format/channel.hpp"
@@ -39,6 +40,13 @@ struct Preparation final {
   std::vector<Slot> slots;
   std::vector<std::uint64_t> source_shape;
   Layout layout = Layout::Auto;
+  struct Span final {
+    Region region;
+    Slot slot;
+    unsigned mask = 0, roles = 1;
+    std::vector<std::vector<ResultMappedAxis>> maps;
+  };
+  std::vector<Span> spans;
 };
 Status invalid(const std::string& text) {
   return {ErrorCode::InvalidArgument,
@@ -128,8 +136,7 @@ std::vector<std::uint64_t> indices(const std::string& value) {
   }
   return result;
 }
-std::optional<TensorDescription> description_of(
-    const OperationMetadata& input) {
+std::optional<TensorDescription> description_of(const ResultTensorSpec& input) {
   for (const auto& f : input.facets) {
     if (f.key != "photospider.tensor-description")
       continue;
@@ -448,16 +455,21 @@ Result<OperationPreparation> prepare(
     auto available = numeric_ops::sequence_profile_available(profile);
     if (!available.ok())
       return Answer(available);
-    const auto& input = inputs[0];
+    require(inputs.size() == 1, "FMT-11 requires one input");
+    const auto valid_input = tensor_ops::check_tensor(inputs[0]);
+    if (!valid_input.ok())
+      throw valid_input;
+    const auto& input = inputs[0].result_schema->tensors[0];
     const auto& shape = input.descriptor.shape;
+    const auto full_shape = input.sample_shape();
     if ((input.descriptor.element_type != ElementType::Float32 &&
          input.descriptor.element_type != ElementType::Float64) ||
-        shape.empty() || shape.size() > 8 || input.result_schema)
-      return Answer(
-          mismatch("FMT-11 requires a rank 1..8 Float32/Float64 Value"));
+        shape.empty() || full_shape.size() > 8)
+      return Answer(mismatch(
+          "FMT-11 requires a full-rank 1..8 Float32/Float64 Result tensor"));
     auto selected = std::make_shared<Preparation>();
     auto& out = *selected;
-    out.source_shape = shape;
+    out.source_shape = full_shape;
     out.math.kind = kind;
     out.math.profile = profile;
     out.math.narrow = input.descriptor.element_type == ElementType::Float32;
@@ -685,12 +697,14 @@ Result<OperationPreparation> prepare(
     }
     if (p.count("expected_source_layout"))
       require(text(p, "expected_source_layout") ==
-                  format::detail::layout_assertion(input.planar_layout),
+                  format::detail::layout_assertion(input.layout),
               "physical source layout assertion mismatch");
 
     OperationOutputSpecialization output;
-    output.metadata = input;
-    output.metadata.atomic_trailing_axes = 0;
+    output.metadata = inputs[0];
+    auto schema = *inputs[0].result_schema;
+    auto& output_tensor = schema.tensors[0];
+    output_tensor.atomic_trailing_axes = 0;
     out.output_axis = out.source_axis;
     const auto source_channels = out.source_axis ? shape[*out.source_axis] : 1;
     require(source_channels <= 65536,
@@ -710,24 +724,23 @@ Result<OperationPreparation> prepare(
         remap[i] = static_cast<std::int64_t>(out.slots.size());
         out.slots.push_back({-1, i});
       }
-      output.metadata.descriptor.shape[*out.output_axis] = source_channels - 2;
+      output_tensor.descriptor.shape[*out.output_axis] = source_channels - 2;
     } else if (kind == Kind::GrayToColor) {
       if (!out.source_axis) {
-        require(shape.size() < 8 && p.count("output_axis"),
+        require(full_shape.size() < 8 && p.count("output_axis"),
                 "axis-free Gray expansion requires output_axis and rank room");
         const auto axis = std::get<std::int64_t>(p.at("output_axis"));
         require(axis >= 0 && static_cast<std::uint64_t>(axis) <= shape.size(),
                 "output_axis outside insertion range");
         out.output_axis = static_cast<std::uint32_t>(axis);
-        output.metadata.descriptor.shape.insert(
-            output.metadata.descriptor.shape.begin() + axis, 3);
+        output_tensor.descriptor.shape.insert(
+            output_tensor.descriptor.shape.begin() + axis, 3);
       } else {
         require(!p.count("output_axis"),
                 "output_axis only applies to axis-free Gray expansion");
         require(source_channels <= UINT64_MAX - 2,
                 "Gray expansion channel overflow");
-        output.metadata.descriptor.shape[*out.output_axis] =
-            source_channels + 2;
+        output_tensor.descriptor.shape[*out.output_axis] = source_channels + 2;
       }
       for (std::uint64_t i = 0; i < source_channels; ++i) {
         if (i == out.components[0]) {
@@ -884,13 +897,13 @@ Result<OperationPreparation> prepare(
         }
       }
       auto valid =
-          validate_tensor_description(result, output.metadata.descriptor);
+          validate_tensor_description(result, output_tensor.descriptor);
       if (!valid.ok())
         throw valid;
       auto encoded = encode_tensor_description(result);
       if (!encoded.ok())
         throw encoded.status();
-      auto& facets = output.metadata.facets;
+      auto& facets = output_tensor.facets;
       facets.erase(std::remove_if(facets.begin(), facets.end(),
                                   [](const auto& f) {
                                     return f.key ==
@@ -899,10 +912,11 @@ Result<OperationPreparation> prepare(
                    facets.end());
       facets.push_back(encoded.take_value());
     }
-    if (input.planar_layout) {
-      auto image = *input.planar_layout;
-      require(image.channel_axis == out.source_axis,
-              "FMT-11 image selectors must use the actual planar channel axis");
+    if (input.layout.spatial) {
+      auto image = input.layout;
+      require(
+          image.channel_axis == out.source_axis,
+          "FMT-11 image selectors must use the actual spatial channel axis");
       if (!out.source_axis && out.output_axis) {
         if (image.height_axis >= *out.output_axis)
           ++image.height_axis;
@@ -910,65 +924,64 @@ Result<OperationPreparation> prepare(
           ++image.width_axis;
       }
       image.channel_axis = out.output_axis;
-      image.groups.clear();  // Physical groups are optional; semantic groups
-                             // live in the facet.
-      output.metadata.planar_layout = image;
-      require(out.layout != Layout::View,
-              "Q validated planar aliases are not supported by the current "
-              "host; use auto/materialize or generic fragments");
+      image.groups.clear();
+      if (kind != Kind::ColorToGray || out.layout == Layout::Materialize)
+        image.row_pitch_bytes = 0;
+      output_tensor.layout = image;
     }
-    // Piecewise channel-affine relation shared by demand and dirty propagation.
-    std::vector<DependencyMapPiece> mappings;
-    mappings.reserve(out.slots.size());
-    for (std::size_t slot = 0; slot < out.slots.size(); ++slot) {
-      std::vector<RegionDimension> dimensions;
-      for (const auto n : output.metadata.descriptor.shape)
-        dimensions.push_back({0, n});
+    const auto output_shape = output_tensor.sample_shape();
+    if (out.source_axis)
+      *out.source_axis += input.batch_axes.size();
+    if (out.output_axis)
+      *out.output_axis += input.batch_axes.size();
+    for (std::size_t first = 0; first < out.slots.size();) {
+      std::size_t last = first + 1;
+      const auto slot = out.slots[first];
+      if (slot.component < 0)
+        while (last < out.slots.size() && out.slots[last].component < 0 &&
+               out.slots[last].source == slot.source + last - first)
+          ++last;
+      auto dims = Region::whole(output_shape).dimensions();
       if (out.output_axis)
-        dimensions[*out.output_axis] = {slot, 1};
-      auto observation = Footprint::from_regions(
-          output.metadata.descriptor.shape, {Region(std::move(dimensions))});
-      if (!observation.ok())
-        throw observation.status();
-      DependencyMapPiece piece{observation.take_value(), {}};
-      const auto& selected_slot = out.slots[slot];
-      unsigned mask =
-          selected_slot.component < 0
-              ? 1
-              : support(kind, static_cast<unsigned>(selected_slot.component),
-                        out.math.gray);
+        dims[*out.output_axis] = {first, last - first};
+      Preparation::Span span;
+      span.region = Region(std::move(dims));
+      span.slot = slot;
+      span.mask = slot.component < 0
+                      ? 1U
+                      : support(kind, slot.component, out.math.gray);
+      span.roles = slot.component >= 0 &&
+                           (out.math.semantic || kind == Kind::BinaryToGray)
+                       ? 5U
+                       : 1U;
       for (unsigned c = 0; c < 3; ++c) {
-        if (!(mask & (1u << c)))
+        if (!(span.mask & (1U << c)))
           continue;
-        DependencyMappedNeed need;
-        need.port = 0;
-        need.roles = static_cast<std::uint32_t>(DependencyRole::Data);
-        for (unsigned axis = 0; axis < shape.size(); ++axis) {
-          DependencyAxis mapped;
+        std::vector<ResultMappedAxis> axes(full_shape.size());
+        for (unsigned axis = 0; axis < axes.size(); ++axis) {
+          auto& map = axes[axis];
           if (out.source_axis && axis == *out.source_axis) {
-            mapped.observation_axis = -1;
-            mapped.fixed = {selected_slot.component < 0 ? selected_slot.source
-                                                        : out.components[c],
-                            1};
+            map.source_origin =
+                slot.component < 0 ? slot.source : out.components[c];
+            if (slot.component < 0) {
+              map.output_axis = static_cast<std::int32_t>(*out.output_axis);
+              map.output_origin = first;
+            }
           } else {
-            mapped.observation_axis = static_cast<std::int32_t>(
+            map.output_axis = static_cast<std::int32_t>(
                 axis +
                 (!out.source_axis && out.output_axis && axis >= *out.output_axis
                      ? 1
                      : 0));
           }
-          need.axes.push_back(mapped);
         }
-        piece.inputs.push_back(std::move(need));
+        span.maps.push_back(std::move(axes));
       }
-      mappings.push_back(std::move(piece));
+      out.spans.push_back(std::move(span));
+      first = last;
     }
-    output.static_dependency_pieces = std::move(mappings);
-    output.regional_atomic = true;
-    output.preserve_output_views =
-        kind == Kind::ColorToGray && out.layout != Layout::Materialize;
-    if (out.layout == Layout::View)
-      output.maximum_output_payload_bytes = 0;
+    output.metadata.result_schema =
+        std::make_shared<SchemaTemplate>(std::move(schema));
     auto constants = prepare_constants(out.math);
     if (!constants.ok())
       throw constants.status();
@@ -982,22 +995,6 @@ Result<OperationPreparation> prepare(
   }
 }
 
-void source_coordinate(const Preparation& p,
-                       const std::vector<std::uint64_t>& at,
-                       std::vector<std::uint64_t>& source) {
-  for (unsigned axis = 0; axis < source.size(); ++axis)
-    source[axis] =
-        at[axis +
-           (!p.source_axis && p.output_axis && axis >= *p.output_axis ? 1 : 0)];
-}
-void advance(std::vector<std::uint64_t>& at, const Region& box) {
-  for (std::size_t axis = at.size(); axis-- > 0;) {
-    const auto& dim = box.dimensions()[axis];
-    if (++at[axis] < dim.offset + dim.extent)
-      break;
-    at[axis] = dim.offset;
-  }
-}
 Status located(Status status, const std::vector<std::uint64_t>& at,
                int component) {
   if (status.detail.origin == FailureOrigin::Domain) {
@@ -1010,378 +1007,421 @@ Status located(Status status, const std::vector<std::uint64_t>& at,
 }
 struct Scratch final {
   ModelMath math;
+  bool allow_candidate;
   static constexpr std::size_t kBatch = 64;
   std::array<std::array<double, kBatch>, 3> input{};
   std::array<double, kBatch> candidates{};
   std::array<std::array<std::uint64_t, 3>, kBatch> bits{};
   explicit Scratch(const MathConfig& config, const Constants& constants,
                    const RationalMath::Work& work)
-      : math(config, constants, work) {}
+      : math(config, constants, work),
+        allow_candidate(config.algorithm != Algorithm::Reference) {}
 };
-Result<ValueFragments> generic_views(const DependencyPhase& phase,
-                                     const Preparation& p, ModelMath& math) {
-  using Answer = Result<ValueFragments>;
-  const auto& descriptor = phase.query.output.descriptor;
-  const auto& facets = phase.query.output.facets;
-  const auto width = Value::element_size(descriptor.element_type);
-  const auto& fragments = phase.inputs[0].fragments();
-  const auto boxes = phase.query.outputs.boxes().size();
-  if (p.slots.size() && fragments.size() > UINT64_MAX / p.slots.size())
-    return Answer(invalid("Q view metadata count overflow"));
-  const auto pieces = p.slots.size() * fragments.size();
-  if (pieces && boxes > UINT64_MAX / pieces)
-    return Answer(invalid("Q view metadata count overflow"));
-  std::uint64_t facet_bytes = 0;
-  for (const auto& f : facets)
-    facet_bytes += f.payload.size() + f.key.size() + sizeof(f);
-  numeric_ops::ArrayPublication publication(
-      boxes * pieces, descriptor.shape.size(), facet_bytes);
-  std::vector<Value> values;
-  for (const auto& box : phase.query.outputs.boxes()) {
-    const auto channels = box.dimensions()[*p.output_axis];
-    for (std::uint64_t channel = channels.offset;
-         channel < channels.offset + channels.extent; ++channel) {
-      const auto& slot = p.slots[channel];
-      const auto index =
-          slot.component < 0
-              ? slot.source
-              : p.components[static_cast<unsigned>(
-                    copied_component(p.math.kind, 0, p.math.gray))];
-      for (const auto& fragment : fragments) {
-        auto status = phase.consume_work(descriptor.shape.size() + 1);
-        if (!status.ok())
-          return Answer(status);
-        const auto input_channel =
-            fragment.region().dimensions()[*p.source_axis];
-        if (index < input_channel.offset ||
-            index - input_channel.offset >= input_channel.extent)
-          continue;
-        auto dimensions = box.dimensions();
-        dimensions[*p.output_axis] = {channel, 1};
-        bool empty = false;
-        for (unsigned axis = 0; axis < dimensions.size(); ++axis) {
-          if (axis == *p.output_axis)
-            continue;
-          const auto a = dimensions[axis];
-          const auto b = fragment.region().dimensions()[axis];
-          const auto start = std::max(a.offset, b.offset);
-          const auto end = std::min(a.offset + a.extent, b.offset + b.extent);
-          if (start >= end) {
-            empty = true;
-            break;
-          }
-          dimensions[axis] = {start, end - start};
-        }
-        if (empty)
-          continue;
-        const Region region(dimensions);
-        std::vector<std::uint64_t> at, source;
-        for (const auto d : dimensions)
-          at.push_back(d.offset);
-        source = at;
-        source[*p.source_axis] = index;
-        auto address = fragment.byte_address(source);
-        if (!address.ok())
-          return Answer(address.status());
-        const auto origin = at;
-        auto strides = fragment.layout().byte_strides;
-        strides[*p.output_axis] = 0;  // One channel per owner-preserving view.
-        if (slot.component >= 0 && p.math.semantic) {
-          auto count = region.element_count();
-          if (!count.ok())
-            return Answer(count.status());
-          for (std::uint64_t i = 0; i < count.value(); ++i) {
-            source = at;
-            source[*p.source_axis] = index;
-            std::array<std::uint64_t, 3> bits{};
-            auto read = phase.read(0, source,
-                                   &bits[static_cast<unsigned>(copied_component(
-                                       p.math.kind, 0, p.math.gray))],
-                                   width);
-            if (!read.ok())
-              return Answer(read);
-            auto checked = math.evaluate(bits, 0);
-            if (!checked.ok())
-              return Answer(located(checked.status(), at, 0));
-            advance(at, region);
-          }
-        }
-        auto view = Value::from_storage(
-            descriptor, region, {address.value(), std::move(strides), origin},
-            fragment.storage(), facets, phase.query.resources);
-        if (!view.ok())
-          return Answer(view.status());
-        auto retained = publication.retain(view.take_value());
-        if (!retained.ok())
-          return Answer(retained.status());
-        values.push_back(retained.take_value());
-      }
-    }
-  }
-  return publication.finish(descriptor, phase.query.outputs, values.data(),
-                            values.size(), phase.sets, facets,
-                            phase.query.resources);
-}
-Result<ValueFragments> generic(const DependencyPhase& phase,
-                               const Preparation& p) {
-  using Answer = Result<ValueFragments>;
-  auto status = phase.consume_work(1);
+using tensor_ops::take;
+using Poll = Result<ResultProgramPoll>;
+void check(Status status) {
   if (!status.ok())
-    return Answer(status);
-  input_internal::Float32Environment environment;
-  MathConfig config = p.math;
-  if (!environment.active())
-    config.algorithm = Algorithm::Reference;
-  const RationalMath::Work work = [&](std::uint64_t n) {
-    return phase.consume_work(n);
-  };
-  auto storage = phase.allocator.allocate(sizeof(Scratch));
-  if (!storage.ok())
-    return Answer(storage.status());
-  auto memory = storage.take_value();
-  std::unique_ptr<Scratch, void (*)(Scratch*)> scratch(
-      new (memory.data()) Scratch(config, *p.constants, work),
-      [](Scratch* s) { s->~Scratch(); });
-  if (p.math.kind == Kind::ColorToGray && p.layout != Layout::Materialize)
-    return generic_views(phase, p, scratch->math);
-  const auto& descriptor = phase.query.output.descriptor;
-  const auto& facets = phase.query.output.facets;
-  const auto width = Value::element_size(descriptor.element_type);
-  std::uint64_t facet_bytes = 0;
-  for (const auto& f : facets)
-    facet_bytes += f.payload.size() + f.key.size() + sizeof(f);
-  numeric_ops::ArrayPublication publication(
-      phase.query.outputs.boxes().size(), descriptor.shape.size(), facet_bytes);
-  std::vector<Value> values;
-  for (const auto& box : phase.query.outputs.boxes()) {
-    auto allocated = MutableValue::allocate(descriptor, box, phase.allocator);
-    if (!allocated.ok())
-      return Answer(allocated.status());
-    auto writer = allocated.take_value();
-    auto count = box.element_count();
-    if (!count.ok())
-      return Answer(count.status());
-    std::vector<std::uint64_t> at, source(p.source_shape.size());
-    for (const auto dim : box.dimensions())
-      at.push_back(dim.offset);
-    for (std::uint64_t i = 0; i < count.value(); ++i) {
-      status = phase.consume_work(1);
-      if (!status.ok())
-        return Answer(status);
-      const auto& slot = p.slots[p.output_axis ? at[*p.output_axis] : 0];
-      source_coordinate(p, at, source);
-      std::uint64_t result = 0;
-      if (slot.component < 0) {
-        if (p.source_axis)
-          source[*p.source_axis] = slot.source;
-        status = phase.read(0, source, &result, width);
-        if (!status.ok())
-          return Answer(status);
-      } else {
-        const auto component = static_cast<unsigned>(slot.component);
-        const auto mask = support(p.math.kind, component, p.math.gray);
-        std::array<std::uint64_t, 3> bits{};
-        for (unsigned c = 0; c < 3; ++c) {
-          if (!(mask & (1u << c)))
-            continue;
-          if (p.source_axis)
-            source[*p.source_axis] = p.components[c];
-          status = phase.read(0, source, &bits[c], width);
-          if (!status.ok())
-            return Answer(status);
-        }
-        auto computed = scratch->math.evaluate(bits, component);
-        if (!computed.ok())
-          return Answer(located(computed.status(), at, slot.component));
-        result = computed.value();
-      }
-      std::memcpy(writer.data() + i * width, &result, width);
-      advance(at, box);
-    }
-    status = phase.consume_work(1);
-    if (!status.ok())
-      return Answer(status);
-    auto value = std::move(writer).publish(facets, phase.query.resources);
-    if (!value.ok())
-      return Answer(value.status());
-    auto retained = publication.retain(value.take_value());
-    if (!retained.ok())
-      return Answer(retained.status());
-    values.push_back(retained.take_value());
+    throw status;
+}
+ResultBuilder builder_for(const ResultProgramPhase& phase, bool empty) {
+  auto builder = take(ResultBuilder::start(
+      phase.resources, *phase.query.output.result_schema,
+      phase.query.semantic_key, {},
+      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
+                                                     phase.association->end())
+                        : std::vector<std::uint64_t>{},
+      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
+  check(builder.bind_descriptor_relation(take(ResultRelation::cartesian(
+      phase.resources, 1,
+      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+  return builder;
+}
+Poll empty_result(const ResultProgramPhase& phase) try {
+  auto builder = builder_for(phase, true);
+  return Poll(ResultPublication{take(builder.seal()), true});
+} catch (const Status& status) {
+  return Poll(status);
+}
+std::optional<Region> intersection(const Region& a, const Region& b) {
+  std::vector<RegionDimension> dims;
+  for (unsigned axis = 0; axis < a.rank(); ++axis) {
+    const auto x = a.dimensions()[axis], y = b.dimensions()[axis];
+    const auto first = std::max(x.offset, y.offset);
+    const auto last = std::min(x.offset + x.extent, y.offset + y.extent);
+    if (last <= first)
+      return {};
+    dims.push_back({first, last - first});
   }
-  return publication.finish(descriptor, phase.query.outputs, values.data(),
-                            values.size(), phase.sets, facets,
-                            phase.query.resources);
+  return Region(std::move(dims));
+}
+ResultRelation relation_for(const ResultProgramPhase& phase,
+                            const Preparation& p) {
+  const auto& tensor = phase.query.output.result_schema->tensors[0];
+  const auto shape = tensor.sample_shape();
+  ResourceVector<ResultRelation> pieces;
+  for (const auto& span : p.spans)
+    for (const auto& map : span.maps) {
+      check(phase.consume_work(shape.size() + 1));
+      pieces.push_back(take(ResultRelation::mapped(
+          phase.resources, shape, span.region, p.source_shape, map,
+          {0, span.roles, 0, 0, ResultSupportTarget::Tensor, 0})));
+    }
+  pieces.push_back(take(ResultRelation::cartesian(
+      phase.resources, take(tensor.sample_count()),
+      {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
+  while (pieces.size() > 1) {
+    ResourceVector<ResultRelation> next;
+    for (std::size_t first = 0; first < pieces.size(); first += 16) {
+      check(phase.consume_work(17));
+      std::vector<ResultRelation> group;
+      for (auto i = first; i < std::min(first + 16, pieces.size()); ++i)
+        group.push_back(pieces[i]);
+      next.push_back(take(ResultRelation::unite(phase.resources, group)));
+    }
+    pieces = std::move(next);
+  }
+  return pieces.front();
+}
+std::vector<std::uint64_t> mapped_coordinate(
+    const std::vector<ResultMappedAxis>& map,
+    const std::vector<std::uint64_t>& at) {
+  std::vector<std::uint64_t> source;
+  for (const auto& axis : map)
+    source.push_back(take(axis.source_coordinate(
+        axis.output_axis < 0 ? 0 : at[axis.output_axis])));
+  return source;
+}
+Status run_region(const ResultProgramPhase& phase, const Preparation& p,
+                  const Preparation::Span& span, const Region& region,
+                  Scratch* scratch, NumericDiagnostics* report,
+                  const std::vector<ResultTensorReadWindow>& inputs,
+                  const ResultTensorWriteWindow* writer) {
+  const auto& tensor = phase.query.output.result_schema->tensors[0];
+  const auto& dims = region.dimensions();
+  const auto sample_axis = tensor.layout.spatial ? tensor.batch_axes.size() +
+                                                       tensor.layout.width_axis
+                                                 : region.rank() - 1;
+  auto axis = sample_axis;
+  // Generic channel-last converted slots have one sample per row. Traverse
+  // rectangle rows to retain SIMD batches without gathering peer components.
+  const bool rectangles = !tensor.layout.spatial && p.output_axis == axis &&
+                          dims[axis].extent == 1 && region.rank() > 1;
+  if (rectangles)
+    --axis;
+  std::vector<std::uint64_t> at;
+  for (auto d : dims)
+    at.push_back(d.offset);
+  const auto width = p.math.narrow ? 4U : 8U;
+  const auto component =
+      static_cast<unsigned>(std::max(0, span.slot.component));
+  const bool candidate =
+      writer && scratch->allow_candidate && span.slot.component >= 0 &&
+      (p.math.kind == Kind::RgbToYcbcr || p.math.kind == Kind::YcbcrToRgb) &&
+      p.math.profile != SequenceProfile::Strict &&
+      p.math.algorithm != Algorithm::Reference;
+  std::array<double, 3> coefficients{};
+  std::array<std::uint64_t, 3> read_work{};
+  for (std::size_t i = 0; i < inputs.size(); ++i)
+    read_work[i] =
+        take(execution_internal::ResultWindowAccess::read_work(inputs[i]));
+  if (candidate) {
+    for (unsigned c = 0; c < 3; ++c) {
+      const auto bound = p.constants->first_fast[component][c];
+      coefficients[c] = bound.low + (bound.high - bound.low) * .5;
+    }
+  }
+  for (;;) {
+    if (phase.query.cancellation.cancelled())
+      return {ErrorCode::Cancelled, "FMT-11 cancelled"};
+    auto available = dims[axis].offset + dims[axis].extent - at[axis];
+    std::array<const std::uint8_t*, 3> pointers{};
+    std::array<std::int64_t, 3> strides{};
+    std::size_t input = 0;
+    for (unsigned c = 0; c < 3; ++c) {
+      if (!(span.mask & (1U << c)))
+        continue;
+      const auto& window = inputs[input];
+      const auto address_work = read_work[input];
+      const auto& map = span.maps[input++];
+      check(phase.consume_work(address_work));
+      const auto source = mapped_coordinate(map, at);
+      const auto sample = window.sample_axis();
+      const auto row = window.row_axis();
+      if (map[sample].output_axis == static_cast<std::int32_t>(axis)) {
+        const auto run = take(window.row_run(source));
+        pointers[c] = run.data;
+        strides[c] = run.sample_stride_bytes;
+        available = std::min(available, run.samples);
+      } else if (row &&
+                 map[*row].output_axis == static_cast<std::int32_t>(axis)) {
+        check(phase.consume_work(address_work));
+        const auto run = take(window.rectangle_run(source));
+        pointers[c] = run.row.data;
+        strides[c] = run.row_stride_bytes;
+        available = std::min(available, run.rows);
+      } else {
+        pointers[c] = take(window.row_run(source)).data;
+        available = 1;
+      }
+    }
+    std::uint8_t* target = nullptr;
+    std::int64_t target_stride = 0;
+    if (writer) {
+      if (rectangles) {
+        const auto run = take(writer->rectangle_run(at));
+        target = run.row.data;
+        target_stride = run.row_stride_bytes;
+        available = std::min(available, run.rows);
+      } else {
+        const auto run = take(writer->row_run(at));
+        target = run.data;
+        target_stride = run.sample_stride_bytes;
+        available = std::min(available, run.samples);
+      }
+    }
+    if (!available)
+      return {ErrorCode::Internal, "FMT-11 empty Result run"};
+    for (std::uint64_t offset = 0; offset < available;) {
+      const auto count =
+          std::min<std::uint64_t>(Scratch::kBatch, available - offset);
+      if (phase.query.cancellation.cancelled())
+        return {ErrorCode::Cancelled, "FMT-11 cancelled"};
+      check(phase.consume_work(count));
+      for (unsigned lane = 0; lane < count; ++lane) {
+        scratch->bits[lane] = {};
+        for (unsigned c = 0; c < 3; ++c) {
+          if (!(span.mask & (1U << c)))
+            continue;
+          std::memcpy(&scratch->bits[lane][c],
+                      pointers[c] +
+                          static_cast<std::int64_t>(offset + lane) * strides[c],
+                      width);
+          if (candidate) {
+            const auto classified = numeric_ops::BinaryParts::decode(
+                scratch->bits[lane][c], p.math.narrow);
+            scratch->input[c][lane] =
+                classified.nan || classified.infinite
+                    ? 0
+                    : numeric_ops::numeric_double(scratch->bits[lane][c],
+                                                  p.math.narrow);
+          }
+        }
+      }
+      if (candidate) {
+        std::array<const double*, 3> data{};
+        for (unsigned c = 0; c < 3; ++c)
+          data[c] = scratch->input[c].data();
+        dot_candidates(data, coefficients, span.mask,
+                       scratch->candidates.data(), count, p.math.profile,
+                       p.math.algorithm == Algorithm::Auto);
+      }
+      for (unsigned lane = 0; lane < count; ++lane) {
+        auto bits = scratch->bits[lane][0];
+        if (span.slot.component >= 0) {
+          const bool arithmetic =
+              copied_component(p.math.kind, component, p.math.gray) < 0;
+          if (arithmetic)
+            ++report->evaluated_values;
+          const auto before = scratch->math.counters().reference;
+          const auto computed = scratch->math.evaluate(
+              scratch->bits[lane], component,
+              candidate ? std::optional<double>(scratch->candidates[lane])
+                        : std::nullopt);
+          const auto references = scratch->math.counters().reference - before;
+          report->strict_math_calls += references;
+          if (p.math.profile != SequenceProfile::Strict &&
+              scratch->allow_candidate && references) {
+            report->strict_fallbacks += references;
+            bool finite = true;
+            for (unsigned c = 0; c < 3; ++c) {
+              if (!(span.mask & (1U << c)))
+                continue;
+              const auto value = numeric_ops::BinaryParts::decode(
+                  scratch->bits[lane][c], p.math.narrow);
+              finite = finite && !value.nan && !value.infinite;
+            }
+            const auto reason =
+                finite ? NumericFallbackReason::RoundingUnresolved
+                       : NumericFallbackReason::SpecialValueProtection;
+            report->fallback_reasons[static_cast<unsigned>(reason)] +=
+                references;
+          }
+          if (!computed.ok()) {
+            auto coordinate = at;
+            coordinate[axis] += offset + lane;
+            return located(computed.status(), coordinate, span.slot.component);
+          }
+          bits = computed.value();
+          if (writer && !arithmetic)
+            ++report->copied_elements;
+        } else if (writer) {
+          ++report->copied_elements;
+        }
+        if (writer)
+          std::memcpy(
+              target + static_cast<std::int64_t>(offset + lane) * target_stride,
+              &bits, width);
+      }
+      offset += count;
+    }
+    at[axis] += available;
+    if (at[axis] < dims[axis].offset + dims[axis].extent)
+      continue;
+    at[axis] = dims[axis].offset;
+    bool next = false;
+    for (std::size_t i = dims.size(); i;) {
+      --i;
+      if (i == axis)
+        continue;
+      if (++at[i] < dims[i].offset + dims[i].extent) {
+        next = true;
+        break;
+      }
+      at[i] = dims[i].offset;
+    }
+    if (!next)
+      return Status::success();
+  }
 }
 struct State final {
-  const Preparation* prepared;
+  const Preparation* p;
   bool requested = false;
-  explicit State(const Preparation* p) : prepared(p) {}
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
+  Footprint output;
+  explicit State(const Preparation* prepared) : p(prepared) {}
+  Poll poll(const ResultProgramPhase& phase) try {
+    const auto& spec = phase.query.output.result_schema->tensors[0];
     if (!requested) {
       requested = true;
-      DependencyNeedBatch batch;
-      batch.static_mapping = true;
-      return Result<DependencyPoll>(std::move(batch));
+      output = phase.query.tensor_outputs
+                   ? *phase.query.tensor_outputs
+                   : take(Footprint::all(spec.sample_shape()));
+      std::vector<Region> regions;
+      unsigned roles = 8;
+      for (const auto& span : p->spans)
+        for (const auto& box : output.boxes()) {
+          check(phase.consume_work(box.rank() + 1));
+          const auto part = intersection(span.region, box);
+          if (!part)
+            continue;
+          for (const auto& map : span.maps) {
+            roles |= span.roles;
+            regions.push_back(format_result::mapped_region(*part, map));
+          }
+        }
+      ResultProgramNeed need;
+      need.tensors.push_back(
+          {0, 0, take(Footprint::from_regions(p->source_shape, regions)),
+           roles});
+      return Poll(std::move(need));
     }
-    auto answer = generic(phase, *prepared);
-    return answer.ok() ? Result<DependencyPoll>(answer.take_value())
-                       : Result<DependencyPoll>(answer.status());
+    input_internal::Float32Environment environment;
+    MathConfig config = p->math;
+    if (!environment.active())
+      config.algorithm = Algorithm::Reference;
+    const RationalMath::Work work = [&](std::uint64_t n) {
+      if (phase.query.cancellation.cancelled())
+        return Status{ErrorCode::Cancelled, "FMT-11 cancelled"};
+      return phase.consume_work(n);
+    };
+    auto memory = take(phase.allocator.allocate(sizeof(Scratch)));
+    std::unique_ptr<Scratch, void (*)(Scratch*)> scratch(
+        new (memory.data()) Scratch(config, *p->constants, work),
+        [](Scratch* s) { s->~Scratch(); });
+    NumericDiagnostics report;
+    report.profile = p->math.profile == SequenceProfile::Strict
+                         ? CpuNumericProfile::Strict
+                     : p->math.profile == SequenceProfile::AppleSilicon
+                         ? CpuNumericProfile::AppleSiliconNeon
+                         : CpuNumericProfile::X86Avx2;
+    const char* implementation =
+        "photospider.fmt11/"
+        "1;Result-runs;exact-rational;certified;no-fast-math;rounding-math;fp-"
+        "contract=off;"
+#if defined(__APPLE__) && defined(__aarch64__)
+        "Darwin/arm64;"
+#elif defined(__FreeBSD__)
+        "FreeBSD;"
+#elif defined(__linux__) && defined(__x86_64__)
+        "Linux/x86_64;"
+#else
+        "portable;"
+#endif
+        __clang_version__;
+    std::strncpy(report.implementation.data(), implementation,
+                 report.implementation.size() - 1);
+    auto result = [&]() -> Poll {
+      try {
+        auto builder = builder_for(phase, false);
+        const auto relation = relation_for(phase, *p);
+        for (const auto& span : p->spans)
+          for (const auto& box : output.boxes()) {
+            check(work(box.rank() + 1));
+            const auto part = intersection(span.region, box);
+            if (!part)
+              continue;
+            const auto footprint =
+                take(Footprint::from_regions(spec.sample_shape(), {*part}));
+            check(format_result::planes(
+                spec, footprint, [&](const Region& region) {
+                  std::vector<ResultTensorReadWindow> inputs;
+                  for (const auto& map : span.maps)
+                    inputs.push_back(take(phase.tensors->at({0, 0}).acquire(
+                        format_result::mapped_region(region, map),
+                        phase.query.cancellation)));
+                  if (p->math.kind == Kind::ColorToGray &&
+                      p->layout != Layout::Materialize) {
+                    check(run_region(phase, *p, span, region, scratch.get(),
+                                     &report, inputs, nullptr));
+                    format_result::PublicationCounts counts;
+                    const auto status = format_result::publish(
+                        phase, &builder, region, inputs[0], span.maps[0],
+                        relation, p->layout == Layout::View ? "view" : "auto",
+                        0, &counts);
+                    report.view_elements += counts.viewed;
+                    report.copied_elements += counts.copied;
+                    return status;
+                  }
+                  return builder.publish_tensor_kernel(
+                      0, region,
+                      [&](const auto& writers) {
+                        try {
+                          for (const auto& writer : writers)
+                            check(run_region(phase, *p, span, writer.region(),
+                                             scratch.get(), &report, inputs,
+                                             &writer));
+                          return Status::success();
+                        } catch (const Status& status) {
+                          return status;
+                        }
+                      },
+                      relation, {true, true, true, true},
+                      phase.query.cancellation);
+                }));
+          }
+        check(work(1));
+        return Poll(ResultPublication{take(builder.seal()), true});
+      } catch (const Status& status) {
+        return Poll(status);
+      }
+    }();
+    if (phase.report_numeric)
+      check(phase.report_numeric(report));
+    return result;
+  } catch (const Status& status) {
+    return Poll(status);
   }
 };
-Status planar(const PlanarOperationInvocation& call) {
-  const auto& p = *static_cast<const Preparation*>(call.prepared->state());
-  const auto* budget = resource_internal::metadata_budget();
-  const RationalMath::Work work = [&](std::uint64_t n) {
-    if (call.cancellation.cancelled())
-      return Status{ErrorCode::Cancelled,
-                    "FMT-11 cancelled",
-                    FailureReason::Cancelled,
-                    {FailureOrigin::Cancellation, FailureScope::Run}};
-    return budget ? budget->consume({n}) : Status::success();
-  };
-  auto status = work(1);
-  if (!status.ok())
-    return status;
-  input_internal::Float32Environment environment;
-  MathConfig config = p.math;
-  if (!environment.active())
-    config.algorithm = Algorithm::Reference;
-  auto storage = call.allocator.allocate(sizeof(Scratch));
-  if (!storage.ok())
-    return storage.status();
-  auto memory = storage.take_value();
-  std::unique_ptr<Scratch, void (*)(Scratch*)> scratch(
-      new (memory.data()) Scratch(config, *p.constants, work),
-      [](Scratch* s) { s->~Scratch(); });
-  const auto width =
-      Value::element_size(call.output_metadata.descriptor.element_type);
-  const auto& layout = *call.output_metadata.planar_layout;
-  const auto y = call.output_region.dimensions()[layout.height_axis];
-  const auto x = call.output_region.dimensions()[layout.width_axis];
-  const auto channels = p.output_axis
-                            ? call.output_region.dimensions()[*p.output_axis]
-                            : RegionDimension{0, 1};
-  std::vector<std::uint64_t> at, source(p.source_shape.size());
-  for (const auto dim : call.output_region.dimensions())
-    at.push_back(dim.offset);
-  for (std::uint64_t channel = channels.offset;
-       channel < channels.offset + channels.extent; ++channel) {
-    if (p.output_axis)
-      at[*p.output_axis] = channel;
-    const auto& slot = p.slots[channel];
-    const auto component = static_cast<unsigned>(std::max(0, slot.component));
-    const auto mask =
-        slot.component < 0 ? 1 : support(config.kind, component, config.gray);
-    const bool candidate =
-        slot.component >= 0 &&
-        (config.kind == Kind::RgbToYcbcr || config.kind == Kind::YcbcrToRgb) &&
-        config.profile != SequenceProfile::Strict &&
-        config.algorithm != Algorithm::Reference;
-    std::array<double, 3> coefficients{};
-    if (candidate) {
-      for (unsigned c = 0; c < 3; ++c) {
-        const auto bound = p.constants->first_fast[component][c];
-        coefficients[c] = bound.low + (bound.high - bound.low) * .5;
-      }
-    }
-    for (std::uint64_t row = y.offset; row < y.offset + y.extent; ++row) {
-      at[layout.height_axis] = row;
-      for (std::uint64_t column = x.offset; column < x.offset + x.extent;) {
-        status = work(1);
-        if (!status.ok())
-          return status;
-        at[layout.width_axis] = column;
-        source_coordinate(p, at, source);
-        auto output = call.output.row_run(at);
-        if (!output.ok())
-          return output.status();
-        std::uint64_t span =
-            std::min(output.value().samples, x.offset + x.extent - column);
-        std::array<const std::uint8_t*, 3> pointers{};
-        for (unsigned c = 0; c < 3; ++c) {
-          if (!(mask & (1u << c)))
-            continue;
-          if (p.source_axis)
-            source[*p.source_axis] =
-                slot.component < 0 ? slot.source : p.components[c];
-          auto input = call.inputs[0].row_run(source);
-          if (!input.ok())
-            return input.status();
-          span = std::min(span, input.value().samples);
-          pointers[c] = input.value().data;
-        }
-        if (span == 0)
-          return {ErrorCode::Internal, "FMT-11 empty row span"};
-        for (std::uint64_t offset = 0; offset < span;) {
-          const auto count =
-              std::min<std::uint64_t>(Scratch::kBatch, span - offset);
-          status = work(count);
-          if (!status.ok())
-            return status;
-          if (slot.component < 0) {
-            std::memcpy(output.value().data + offset * width,
-                        pointers[0] + offset * width, count * width);
-            offset += count;
-            continue;
-          }
-          for (std::size_t lane = 0; lane < count; ++lane) {
-            scratch->bits[lane] = {};
-            for (unsigned c = 0; c < 3; ++c) {
-              if (!(mask & (1u << c)))
-                continue;
-              std::memcpy(&scratch->bits[lane][c],
-                          pointers[c] + (offset + lane) * width, width);
-              if (candidate) {
-                const auto classified = numeric_ops::BinaryParts::decode(
-                    scratch->bits[lane][c], config.narrow);
-                // Classification precedes every FP conversion, including sNaN.
-                scratch->input[c][lane] =
-                    classified.nan || classified.infinite
-                        ? 0
-                        : numeric_ops::numeric_double(scratch->bits[lane][c],
-                                                      config.narrow);
-              }
-            }
-          }
-          if (candidate) {
-            std::array<const double*, 3> inputs{};
-            for (unsigned c = 0; c < 3; ++c)
-              inputs[c] = scratch->input[c].data();
-            dot_candidates(inputs, coefficients, mask,
-                           scratch->candidates.data(), count, config.profile,
-                           config.algorithm == Algorithm::Auto);
-          }
-          for (std::size_t lane = 0; lane < count; ++lane) {
-            auto computed = scratch->math.evaluate(
-                scratch->bits[lane], component,
-                candidate ? std::optional<double>(scratch->candidates[lane])
-                          : std::nullopt);
-            if (!computed.ok()) {
-              at[layout.width_axis] = column + offset + lane;
-              return located(computed.status(), at, slot.component);
-            }
-            const auto bits = computed.value();
-            std::memcpy(output.value().data + (offset + lane) * width, &bits,
-                        width);
-          }
-          offset += count;
-        }
-        column += span;
-      }
-    }
-  }
-  return work(1);
-}
 OperationDefinition definition(Kind kind, SequenceProfile profile,
                                const char* suffix) {
   OperationDefinition def;
   def.key = std::string(operation_name(kind)) + suffix;
   auto& traits = def.traits;
   traits.input_count = 1;
-  traits.input_schema.resize(1);
+  OperationPortConstraint port;
+  port.kind = OperationPortKind::Result;
+  port.element_type_mask = 127;
+  traits.input_schema = {port};
   traits.cacheable = false;
-  traits.planar_storage_capable = true;
   traits.requires_metadata_specialization = true;
   traits.workspace_bytes = sizeof(Scratch);
   // All statics are optional in the schema so preparation can supply defaults
@@ -1405,21 +1445,22 @@ OperationDefinition definition(Kind kind, SequenceProfile profile,
             [](const auto& a, const auto& b) { return a.key < b.key; });
   auto& output = traits.outputs[0];
   output.key = "values";
-  output.shape_rule = OperationShapeRule::Fixed;
-  output.fixed_output_shape = {1};
+  output.output_schema = port;
+  output.result_schema = tensor_ops::scalar_schema();
   output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
+  output.dependency_version = 2;
   output.continuation_bytes = sizeof(State);
   output.maximum_dependency_stages = 2;
   def.prepare_static = [kind, profile](const auto& inputs, const auto& params) {
     return prepare(kind, profile, inputs, params);
   };
-  def.start_dependency = [](const DependencyQuery& query,
-                            const BufferAllocator& allocator) {
-    return DependencyContinuation::make<State>(
+  def.start_result = [](const ResultProgramQuery& query,
+                        const BufferAllocator& allocator) {
+    if (query.tensor_outputs && query.tensor_outputs->empty())
+      return ResultContinuation::stateless<empty_result>();
+    return ResultContinuation::make<State>(
         allocator, static_cast<const Preparation*>(query.prepared->state()));
   };
-  def.planar_callback = planar;
   return def;
 }
 }  // namespace

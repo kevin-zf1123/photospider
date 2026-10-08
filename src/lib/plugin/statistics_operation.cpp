@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -44,12 +45,17 @@ Status validate(Op op, StatisticsSpec spec,
       if (!input.result_schema || !expected.ok() ||
           !input.result_schema->same_schema(expected.value()))
         return domain("integer statistics Result schema mismatch");
-    } else if (input.result_schema || !input.facets.empty() ||
-               input.descriptor.element_type !=
-                   (i == 1 ? ElementType::UInt8 : ElementType::Int64) ||
-               input.descriptor.shape !=
-                   std::vector<std::uint64_t>{spec.height, spec.width}) {
-      return domain("integer statistics requires facet-free Int64/UInt8 HW");
+    } else {
+      if (!input.result_schema || !input.result_schema->fields.empty() ||
+          input.result_schema->tensors.size() != 1)
+        return domain("integer statistics requires one Result tensor");
+      const auto& tensor = input.result_schema->tensors[0];
+      if (!tensor.batch_axes.empty() || !tensor.facets.empty() ||
+          tensor.descriptor.element_type !=
+              (i == 1 ? ElementType::UInt8 : ElementType::Int64) ||
+          tensor.descriptor.shape !=
+              std::vector<std::uint64_t>{spec.height, spec.width})
+        return domain("integer statistics requires facet-free Int64/UInt8 HW");
     }
   }
   return Status::success();
@@ -72,7 +78,7 @@ struct State {
   Result<ResultRelation> relation(const ResultProgramPhase& phase,
                                   std::uint64_t outputs,
                                   bool metadata = false) {
-    std::array<ResultRelation, 3> parts;
+    std::array<ResultRelation, 6> parts;
     unsigned used = 0;
     const auto add = [&](Result<ResultRelation> made) {
       if (!made.ok())
@@ -80,30 +86,34 @@ struct State {
       parts[used++] = made.take_value();
       return Status::success();
     };
-    if (op != Op::Parameters) {
-      auto status =
-          add(op == Op::Grade && !metadata
-                  ? ResultRelation::identity(phase.resources, outputs, 0, 5)
-                  : ResultRelation::cartesian(
-                        phase.resources, outputs, {0, 15, 0, size()},
-                        DependencyGuarantee::Conservative));
+    for (unsigned port = 0; port < phase.query.inputs.size(); ++port) {
+      auto status = add(ResultRelation::cartesian(
+          phase.resources, outputs,
+          {port, 8, 0, 1, ResultSupportTarget::Descriptor, 0},
+          DependencyGuarantee::Conservative));
       if (!status.ok())
         return Result<ResultRelation>(status);
-    }
-    const unsigned port = op == Op::Parameters ? 0 : 1;
-    auto status = add(ResultRelation::cartesian(
-        phase.resources, outputs,
-        {port, op == Op::Histogram ? 15U : 7U, 0,
-         op == Op::Histogram    ? size()
-         : op == Op::Parameters ? descriptor.rows(0) * 2
-                                : 4},
-        DependencyGuarantee::Conservative));
-    if (!status.ok())
-      return Result<ResultRelation>(status);
-    if (op != Op::Histogram) {
-      status = add(
-          ResultRelation::cartesian(phase.resources, outputs, {port, 8, 0, 1},
-                                    DependencyGuarantee::Conservative));
+      const bool tensor = op == Op::Histogram || (op == Op::Grade && !port);
+      if (tensor) {
+        status = add(
+            op == Op::Grade && !metadata
+                ? ResultRelation::identity(phase.resources, outputs, port, 5,
+                                           ResultSupportTarget::Tensor, 0)
+                : ResultRelation::cartesian(
+                      phase.resources, outputs,
+                      {port, 7, 0, size(), ResultSupportTarget::Tensor, 0},
+                      DependencyGuarantee::Conservative));
+      } else {
+        for (unsigned field = 0; field < 2; ++field) {
+          status =
+              add(ResultRelation::cartesian(phase.resources, outputs,
+                                            {port, 7, 0, descriptor.rows(field),
+                                             ResultSupportTarget::Field, field},
+                                            DependencyGuarantee::Conservative));
+          if (!status.ok())
+            return Result<ResultRelation>(status);
+        }
+      }
       if (!status.ok())
         return Result<ResultRelation>(status);
     }
@@ -132,7 +142,7 @@ struct State {
                        : Poll(sealed.status());
   }
   Poll source(const ResultProgramPhase& phase) {
-    // Histogram Value requests have their own fixed, admitted strip bound.
+    // Histogram tensor requests have their own fixed, admitted strip bound.
     // A small Result I/O window must not multiply all source scan stages.
     const auto source_bytes =
         op == Op::Histogram
@@ -149,9 +159,9 @@ struct State {
     if (!samples.ok())
       return Poll(samples.status());
     ResultProgramNeed need;
-    need.values.push_back({0, samples.value()});
+    need.tensors.push_back({0, 0, samples.value(), 15});
     if (op == Op::Histogram)
-      need.values.push_back({1, samples.value()});
+      need.tensors.push_back({1, 0, samples.value(), 15});
     stage = 3;
     return Poll(std::move(need));
   }
@@ -179,8 +189,7 @@ struct State {
       stage = 1;
       if (op != Op::Histogram)
         return Poll(
-            ResultProgramNeed{{},
-                              {{op == Op::Parameters ? 0U : 1U, 0, true, 0}},
+            ResultProgramNeed{{{op == Op::Parameters ? 0U : 1U, 0, true, 0}},
                               {}});
     }
     if (stage == 1) {
@@ -324,12 +333,14 @@ struct State {
           const std::vector<std::uint64_t> coordinate{row / spec.width,
                                                       row % spec.width + i};
           std::int64_t value = 0;
-          auto status = phase.read(0, coordinate, &value, 8);
+          auto status = phase.tensors->at({0, 0}).read(
+              coordinate, &value, 8, phase.query.cancellation);
           if (!status.ok())
             return Poll(status);
           if (op == Op::Histogram) {
             std::uint8_t mask = 0;
-            status = phase.read(1, coordinate, &mask, 1);
+            status = phase.tensors->at({1, 0}).read(coordinate, &mask, 1,
+                                                    phase.query.cancellation);
             if (!status.ok())
               return Poll(status);
             if (mask) {
@@ -357,7 +368,7 @@ struct State {
           row += batch;
           rows = row;
           stage = 4;
-          return Poll(ResultProgramNeed{{}, {}, {write.take_value()}});
+          return Poll(ResultProgramNeed{{}, {write.take_value()}});
         }
       }
       row += batch;
@@ -445,7 +456,7 @@ struct State {
       return Poll(!x.ok() ? x.status() : y.status());
     rows += batch;
     stage = 4;
-    return Poll(ResultProgramNeed{{}, {}, {x.take_value(), y.take_value()}});
+    return Poll(ResultProgramNeed{{}, {x.take_value(), y.take_value()}});
   }
 };
 }  // namespace
@@ -486,20 +497,36 @@ Result<OperationDefinition> make_statistics_operation(
   out.output_schema.result_schema_id = std::string(out.result_schema->id);
   out.output_schema.result_schema_version = 1;
   for (unsigned i = 0; i < traits.input_count; ++i) {
+    traits.input_schema[i].kind = OperationPortKind::Result;
     if (op == Op::Parameters || (op == Op::Grade && i == 1)) {
       auto input = statistics_schema(
           op == Op::Parameters ? Rep::Histogram : Rep::Parameters, spec);
       traits.input_schema[i].kind = OperationPortKind::Result;
       traits.input_schema[i].result_schema_id = std::string(input.value().id);
       traits.input_schema[i].result_schema_version = 1;
+    } else {
+      traits.input_schema[i].element_type = static_cast<std::uint32_t>(
+          i == 1 ? ElementType::UInt8 : ElementType::Int64);
+      traits.input_schema[i].rank = 2;
     }
   }
   if (op == Op::Grade)
     traits.parameter_schema.push_back(
         {"target", OperationParameterType::Float64, true, true, 0,
          std::numeric_limits<double>::max()});
-  definition.validate_dependency = [op, spec](const auto& inputs, const auto&) {
-    return validate(op, spec, inputs);
+  traits.requires_metadata_specialization = true;
+  definition.specialize_metadata =
+      [op, spec, schema = *out.result_schema](
+          const auto& metadata,
+          const auto&) -> Result<std::vector<OperationOutputSpecialization>> {
+    auto status = validate(op, spec, metadata);
+    if (!status.ok())
+      return Result<std::vector<OperationOutputSpecialization>>(status);
+    OperationOutputSpecialization output;
+    output.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(schema);
+    return Result<std::vector<OperationOutputSpecialization>>(
+        std::vector<OperationOutputSpecialization>{std::move(output)});
   };
   definition.start_result = [op, spec](const ResultProgramQuery& query,
                                        const BufferAllocator& allocator) {

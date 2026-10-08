@@ -1,4 +1,4 @@
-#include <chrono>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <future>
@@ -9,1099 +9,810 @@
 #include <utility>
 #include <vector>
 
+#include "channel_extraction_workflow/source.hpp"
 #include "icc_fixture.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/photospider.hpp"
-#include "support/test_support.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
-
-int workflow() {
-  auto registry = make_default_operation_registry();
-  PS_CHECK(registry->find_traits("channel.extract_index_strict").ok());
-  PS_CHECK(registry->find_traits("channel.extract_named_strict").ok());
-  const ValueDescriptor source{ElementType::UInt8, {2, 2, 4}};
-  TensorDescription description;
-  description.channel_axis = 2;
-  description.channels = {{"B", "blue", "relative"},
-                          {"A", "coverage", "dimensionless"},
-                          {"R", "red", "relative"},
-                          {"G", "green", "relative"}};
-  description.model = "rgb";
-  description.transfer = "linear";
-  auto facet = encode_tensor_description(description);
-  PS_CHECK(facet.ok());
-  const std::vector<std::uint8_t> bytes{30, 25, 10, 20, 31, 50, 11, 21,
-                                        32, 75, 12, 22, 33, 99, 13, 23};
-  auto value = Value::create(source, Region::whole(source.shape),
-                             {0, {8, 4, 1}}, bytes, {facet.value()});
-  PS_CHECK(value.ok());
+using channel_fixture::check;
+using channel_fixture::owner;
+using channel_fixture::read;
+using channel_fixture::require;
+using channel_fixture::source;
+using channel_fixture::Source;
+using channel_fixture::take;
+using Params = std::map<std::string, ParameterValue>;
+Params parameters(std::int64_t axis, std::int64_t index, bool keep,
+                  const std::string& layout = "auto") {
+  return {{"axis", axis},
+          {"index", index},
+          {"keepdims", keep},
+          {"layout", layout},
+          {"metadata_mode", std::string("raw")}};
+}
+struct Fixture {
+  Source input;
+  std::shared_ptr<OperationRegistry> registry =
+      make_default_operation_registry();
+  std::unique_ptr<ExecutionContext> context;
   WorkflowDocument document;
-  document.inputs = {{1,
-                      "source",
-                      source,
-                      Region::whole(source.shape),
-                      {0, {8, 4, 1}},
-                      {facet.value()}}};
-  document.nodes = {{1,
-                     "channel.extract_index_strict",
-                     {WorkflowInputReference{1}},
-                     {{"axis", std::int64_t{2}},
-                      {"index", std::int64_t{1}},
-                      {"keepdims", false},
-                      {"layout", std::string("materialize")},
-                      {"metadata_mode", std::string("respect")}}}};
-  document.outputs = {{"alpha", 1, "values"}};
-  PlanningOptions options;
-  options.output_regions = {{"alpha", Region({{1, 1}, {0, 2}})}};
-  GraphContext graph(document);
-  Compiler compiler(registry);
-  auto plan = compiler.compile(graph, options);
-  PS_CHECK(plan.ok());
   ExecutionBindings bindings;
-  bindings.inputs = {{"source", value.take_value()}};
-  ExecutionContext execution(registry);
-  auto run = execution.execute(plan.value().plan, bindings);
-  if (!run.ok())
-    std::cerr << "run failure: " << static_cast<int>(run.status().code) << " "
-              << run.status().message << '\n';
-  PS_CHECK(run.ok());
-  const auto& result = run.value().values.at("alpha");
-  PS_CHECK(result.descriptor().shape == std::vector<std::uint64_t>({2, 2}));
-  PS_CHECK(result.region().dimensions()[0].offset == 1);
-  PS_CHECK(result.bytes().size() == 2);
-  PS_CHECK(result.bytes().data()[0] == 75);
-  PS_CHECK(result.bytes().data()[1] == 99);
-  auto output_description = decode_tensor_description(result.facets()[0]);
-  PS_CHECK(output_description.ok());
-  PS_CHECK(!output_description.value().channel_axis);
-  PS_CHECK(output_description.value().component->name == "A");
-
-  document.nodes[0].operation = "channel.extract_named_strict";
-  document.nodes[0].parameters.erase("index");
-  document.nodes[0].parameters["match"] = std::string("role");
-  document.nodes[0].parameters["selector"] = std::string("red");
-  document.nodes[0].parameters["layout"] = std::string("view");
-  GraphContext named_graph(document);
-  auto named_plan = compiler.compile(named_graph, options);
-  PS_CHECK(named_plan.ok());
-  auto named = execution.execute(named_plan.value().plan, bindings);
-  PS_CHECK(named.ok());
-  const auto& red = named.value().values.at("alpha");
-  PS_CHECK(red.byte_address({1, 0}).ok());
-  PS_CHECK(red.bytes().data()[red.byte_address({1, 0}).value()] == 12);
-  PS_CHECK(red.bytes().data()[red.byte_address({1, 1}).value()] == 13);
-
-  WorkflowDocument split_document;
-  split_document.inputs = document.inputs;
-  OperationMetadata source_metadata;
-  source_metadata.descriptor = source;
-  source_metadata.facets = {facet.value()};
-  auto handles = format::split_channels(
-      split_document, WorkflowInputReference{1}, source_metadata);
-  PS_CHECK(handles.ok() && handles.value().size() == 4);
-  PS_CHECK(handles.value()[2].name == "c2");
-  PS_CHECK(split_document.nodes.size() == 4);
-  split_document.outputs = {{"red", handles.value()[2].output.source_node,
-                             handles.value()[2].output.source_port}};
-  GraphContext split_graph(split_document);
-  options.output_regions = {{"red", Region({{1, 1}, {0, 2}})}};
-  auto split_plan = compiler.compile(split_graph, options);
-  PS_CHECK(split_plan.ok());
-  auto split_run = execution.execute(split_plan.value().plan, bindings);
-  PS_CHECK(split_run.ok());
-  const auto& split_red = split_run.value().values.at("red");
-  PS_CHECK(split_red.bytes().data()[split_red.byte_address({1, 0}).value()] ==
-           12);
-  PS_CHECK(split_red.bytes().data()[split_red.byte_address({1, 1}).value()] ==
-           13);
-  PS_CHECK(!split_run.value().diagnostics.operation_timings.empty());
-  for (const auto& timing : split_run.value().diagnostics.operation_timings)
-    PS_CHECK(timing.output.node_id == handles.value()[2].output.source_node);
-  return 0;
-}
-int resource_lifetime() {
-  auto bytes = numeric_fixture::fixture();
-  ResourceBudget budget;
-  auto imported =
-      IccProfile::import(ByteView(bytes.data(), bytes.size()), budget);
-  PS_CHECK(imported.ok());
-  auto profile = imported.take_value();
-  const auto identity = profile.identity();
-  auto owners = ResourceBindings::create({profile}, budget);
-  PS_CHECK(owners.ok());
-  auto resource_bindings = owners.take_value();
-  TensorDescription description;
-  description.channel_axis = 2;
-  description.channels = {{"C", "cyan", "relative"},
-                          {"M", "magenta", "relative"},
-                          {"Y", "yellow", "relative"},
-                          {"K", "black", "relative"}};
-  description.model = "cmyk";
-  description.white = std::array<double, 2>{.3127, .3290};
-  description.primaries_xy =
-      std::array<double, 6>{.64, .33, .30, .60, .15, .06};
-  description.profile = identity;
-  auto facet = encode_tensor_description(description);
-  PS_CHECK(facet.ok());
-  auto decoded = decode_tensor_description(facet.value());
-  PS_CHECK(decoded.ok());
-  PS_CHECK(decoded.value().white == description.white);
-  PS_CHECK(decoded.value().primaries_xy == description.primaries_xy);
-  PS_CHECK(decoded.value().profile == description.profile);
-  const ValueDescriptor descriptor{ElementType::UInt8, {1, 1, 4}};
-  PS_CHECK(Value::create(descriptor, Region::whole(descriptor.shape),
-                         {0, {4, 4, 1}}, {1, 2, 3, 4}, {facet.value()})
-               .status()
-               .code == ErrorCode::InvalidArgument);
-  Value surviving;
-  {
-    auto registry = make_default_operation_registry();
-    auto source = Value::create(descriptor, Region::whole(descriptor.shape),
-                                {0, {4, 4, 1}}, {1, 2, 3, 4}, {facet.value()},
-                                resource_bindings);
-    PS_CHECK(source.ok());
-    WorkflowDocument document;
-    document.inputs = {{1,
-                        "source",
-                        descriptor,
-                        Region::whole(descriptor.shape),
-                        {0, {4, 4, 1}},
-                        {facet.value()}}};
-    document.nodes = {{1,
-                       "channel.extract_index_strict",
-                       {WorkflowInputReference{1}},
-                       {{"index", std::int64_t{3}},
-                        {"keepdims", false},
-                        {"layout", std::string("materialize")},
-                        {"metadata_mode", std::string("respect")}}}};
-    document.outputs = {{"black", 1, "values"}};
-    GraphContext graph(document);
-    Compiler compiler(registry);
-    auto compiled = compiler.compile(graph, {}, resource_bindings);
-    PS_CHECK(compiled.ok());
-    ExecutionContext execution(registry);
-    auto run = execution.execute(compiled.value().plan,
-                                 {{{"source", source.take_value()}}});
-    PS_CHECK(run.ok());
-    surviving = run.value().values.at("black");
-    document.inputs[0].facets.clear();
-    document.nodes[0].parameters["metadata_mode"] = std::string("override");
-    document.nodes[0].parameters["metadata_override"] =
-        tensor_description_parameter(description).take_value();
-    document.nodes[0].parameters["layout"] = std::string("view");
-    auto plain = Value::create(descriptor, Region::whole(descriptor.shape),
-                               {0, {4, 4, 1}}, {1, 2, 3, 4})
-                     .take_value();
-    GraphContext override_graph(document);
-    auto override_plan =
-        compiler.compile(override_graph, {}, resource_bindings);
-    PS_CHECK(override_plan.ok());
-    auto override_run =
-        execution.execute(override_plan.value().plan, {{{"source", plain}}});
-    PS_CHECK(override_run.ok());
-    PS_CHECK(override_run.value()
-                 .values.at("black")
-                 .resources()
-                 .icc_profile(identity)
-                 .ok());
-    document.inputs[0].layout = {};
-    document.inputs[0].planar_layout = PlanarImageLayout{};
-    auto image = PlanarImage::import_value(plain, {}).take_value();
-    ExecutionBindings image_bindings;
-    ExecutionBinding image_binding;
-    image_binding.name = "source";
-    image_binding.image = std::make_shared<const PlanarImage>(image);
-    image_bindings.inputs.push_back(image_binding);
-    GraphContext image_graph(document);
-    auto image_plan = compiler.compile(image_graph, {}, resource_bindings);
-    PS_CHECK(image_plan.ok());
-    auto image_run = execution.execute(image_plan.value().plan, image_bindings);
-    PS_CHECK(image_run.ok());
-    PS_CHECK(image_run.value()
-                 .images.at("black")
-                 .resources()
-                 .icc_profile(identity)
-                 .ok());
-    auto spatial_description = description;
-    spatial_description.channel_axis = 0;
-    spatial_description.channels = {{"row", "", ""}};
-    document.nodes[0].parameters["metadata_override"] =
-        tensor_description_parameter(spatial_description).take_value();
-    document.nodes[0].parameters["index"] = std::int64_t{0};
-    document.nodes[0].parameters["layout"] = std::string("auto");
-    GraphContext spatial_graph(document);
-    auto spatial_plan = compiler.compile(spatial_graph, {}, resource_bindings);
-    PS_CHECK(spatial_plan.ok());
-    auto spatial_run =
-        execution.execute(spatial_plan.value().plan, image_bindings);
-    PS_CHECK(spatial_run.ok());
-    PS_CHECK(spatial_run.value()
-                 .values.at("black")
-                 .resources()
-                 .icc_profile(identity)
-                 .ok());
+  std::unique_ptr<GraphContext> graph;
+  ResourceBindings resources;
+  explicit Fixture(Source value, std::optional<ResourceLimits> limits = {})
+      : input(std::move(value)) {
+    ExecutionContextConfig config;
+    config.managed_resources = limits;
+    context = std::make_unique<ExecutionContext>(registry, config);
+    document.inputs = {channel_fixture::declaration(input)};
+    resources = input.resources;
+    bind();
   }
-  resource_bindings = ResourceBindings{};
-  profile = {};
-  PS_CHECK(surviving.resources().icc_profile(identity).ok());
-  PS_CHECK(surviving.bytes().data()[0] == 4);
-  return 0;
+  void bind() {
+    bindings.inputs = {
+        {"source",
+         channel_fixture::publish(take(context->resource_budget()), input)}};
+  }
+  void node(Params params, bool named = false) {
+    document.nodes = {{1,
+                       named ? "channel.extract_named_strict"
+                             : "channel.extract_index_strict",
+                       {WorkflowInputReference{1}},
+                       std::move(params)}};
+    document.outputs = {{"result", 1, "values"}};
+  }
+  auto compile(const PlanningOptions& options = {}) {
+    graph = std::make_unique<GraphContext>(document);
+    return Compiler(registry).compile(*graph, options, resources);
+  }
+  Result<ExecutionResult> execute(const PlanningOptions& options = {},
+                                  CancellationToken cancellation = {},
+                                  ExecutionOptions execution = {}) {
+    auto plan = compile(options);
+    if (!plan.ok())
+      return Result<ExecutionResult>(plan.status());
+    execution.dependencies.maximum_work = 1000000000;
+    execution.maximum_dependency_work = 1000000000;
+    return context->execute(plan.value().plan, bindings, cancellation,
+                            execution);
+  }
+};
+std::vector<std::uint64_t> output_shape(const Source& source,
+                                        unsigned cell_axis, bool keep) {
+  auto shape = source.schema.tensors[0].sample_shape();
+  const auto axis = source.schema.tensors[0].batch_axes.size() + cell_axis;
+  if (keep)
+    shape[axis] = 1;
+  else
+    shape.erase(shape.begin() + axis);
+  return shape;
 }
-int arbitrary_axis_oracle() {
-  auto registry = make_default_operation_registry();
-  Compiler compiler(registry);
-  ExecutionContext execution(registry);
-  const std::vector<ElementType> dtypes{
-      ElementType::UInt8,  ElementType::UInt16, ElementType::Int8,
-      ElementType::Int16,  ElementType::Int64,  ElementType::Float32,
-      ElementType::Float64};
-  const std::vector<std::pair<std::vector<std::uint64_t>, std::uint32_t>> cases{
-      {{3, 2, 4}, 0},
-      {{3, 2, 4}, 1},
-      {{3, 2, 4}, 2},
-      {{2, 1, 2, 1, 2, 1, 2, 2}, 6},
-      {{4}, 0}};
-  for (auto dtype : dtypes)
-    for (const auto& fixture : cases)
-      for (bool keepdims : {false, true}) {
-        const auto& shape = fixture.first;
-        const auto axis = fixture.second;
-        if (shape.size() == 1 && !keepdims)
-          continue;
-        const auto width = Value::element_size(dtype);
-        std::uint64_t count = 1;
-        for (auto extent : shape)
-          count *= extent;
-        std::vector<std::uint8_t> bytes(count * width);
-        for (std::size_t i = 0; i < bytes.size(); ++i)
-          bytes[i] = static_cast<std::uint8_t>(17 + i * 37);
-        if (dtype == ElementType::Float32) {
-          const std::uint32_t payloads[]{0x80000000U, 0x7fc00011U, 0x7f800000U,
-                                         0xff800000U};
-          std::memcpy(bytes.data(), payloads, sizeof(payloads));
-        } else if (dtype == ElementType::Float64) {
-          const std::uint64_t payloads[]{
-              0x8000000000000000ULL, 0x7ff8000000000011ULL,
-              0x7ff0000000000000ULL, 0xfff0000000000000ULL};
-          std::memcpy(bytes.data(), payloads, sizeof(payloads));
-        }
-        std::vector<std::int64_t> strides(shape.size());
-        std::uint64_t stride = width;
-        for (std::size_t i = shape.size(); i-- > 0;) {
-          strides[i] = static_cast<std::int64_t>(stride);
-          stride *= shape[i];
-        }
-        auto input = Value::create({dtype, shape}, Region::whole(shape),
-                                   {0, strides}, bytes);
-        PS_CHECK(input.ok());
-        WorkflowDocument document;
-        document.inputs = {{1,
-                            "source",
-                            {dtype, shape},
-                            Region::whole(shape),
-                            {0, strides},
-                            {},
-                            {}}};
-        const auto selected = shape[axis] - 1;
-        document.nodes = {{1,
-                           "channel.extract_index_strict",
-                           {WorkflowInputReference{1}},
-                           {{"axis", static_cast<std::int64_t>(axis)},
-                            {"index", static_cast<std::int64_t>(selected)},
-                            {"keepdims", keepdims},
-                            {"layout", std::string("materialize")},
-                            {"metadata_mode", std::string("raw")}}}};
-        document.outputs = {{"selected", 1, "values"}};
-        std::vector<std::uint64_t> out_shape = shape;
-        if (keepdims)
-          out_shape[axis] = 1;
+Region mapped(const Source& source, const Region& region, unsigned cell_axis,
+              std::uint64_t index, bool keep) {
+  auto dims = region.dimensions();
+  const auto axis = source.schema.tensors[0].batch_axes.size() + cell_axis;
+  if (keep)
+    dims[axis] = {index, 1};
+  else
+    dims.insert(dims.begin() + axis, {index, 1});
+  return Region(std::move(dims));
+}
+void oracle(const Source& source, const ExecutionResult& run, const Region& q,
+            unsigned axis, std::uint64_t index, bool keep,
+            const char* name = "result") {
+  const auto& result = run.results.at(name);
+  const auto shape = output_shape(source, axis, keep);
+  check(result.schema().tensors[0].sample_shape() == shape,
+        "inferred complete sample shape");
+  const auto covered = take(result.descriptor()).tensor_coverage(0);
+  check(covered == take(Footprint::from_regions(shape, {q})),
+        "exact output coverage");
+  const auto bytes = read(result, q);
+  const auto width =
+      Value::element_size(source.schema.tensors[0].descriptor.element_type);
+  std::size_t next = 0;
+  const auto physical_axis = source.schema.tensors[0].batch_axes.size() + axis;
+  require(covered.visit(
+      [&](const auto& at) {
+        auto from = at;
+        if (keep)
+          from[physical_axis] = index;
         else
-          out_shape.erase(out_shape.begin() + axis);
-        std::vector<RegionDimension> dims;
-        for (auto extent : out_shape)
-          dims.push_back({extent > 1 ? 1ULL : 0ULL, 1});
-        const Region roi(dims);
-        PlanningOptions options;
-        options.output_regions = {{"selected", roi}};
-        GraphContext graph(document);
-        auto compiled = compiler.compile(graph, options);
-        PS_CHECK(compiled.ok());
-        auto run = execution.execute(compiled.value().plan,
-                                     {{{"source", input.take_value()}}});
-        PS_CHECK(run.ok());
-        const auto& result = run.value().values.at("selected");
-        PS_CHECK(result.descriptor().element_type == dtype);
-        PS_CHECK(result.descriptor().shape == out_shape);
-        std::vector<std::uint64_t> source_coordinate;
-        std::vector<std::uint64_t> output_coordinate;
-        for (auto dim : dims)
-          output_coordinate.push_back(dim.offset);
-        source_coordinate.resize(shape.size());
-        for (std::size_t i = 0; i < shape.size(); ++i)
-          source_coordinate[i] =
-              i == axis ? selected
-                        : output_coordinate[i < axis || keepdims ? i : i - 1];
-        std::uint64_t linear = 0;
-        for (std::size_t i = 0; i < shape.size(); ++i)
-          linear = linear * shape[i] + source_coordinate[i];
-        const auto address = result.byte_address(output_coordinate);
-        PS_CHECK(address.ok());
-        PS_CHECK(std::memcmp(result.bytes().data() + address.value(),
-                             bytes.data() + linear * width, width) == 0);
-      }
-  return 0;
+          from.insert(from.begin() + physical_axis, index);
+        check(!std::memcmp(
+                  bytes.data() + next,
+                  source.bytes.data() + channel_fixture::address(source, from),
+                  width),
+              "independent bit-copy oracle");
+        next += width;
+        return Status::success();
+      },
+      UINT64_MAX));
 }
-int preflight_errors() {
-  auto registry = make_default_operation_registry();
-  Compiler compiler(registry);
-  const ValueDescriptor descriptor{ElementType::UInt8, {2, 3}};
-  TensorDescription incorrect;
-  incorrect.channel_axis = 1;
-  incorrect.channels = {{"A", "a", ""}, {"B", "b", ""}};
-  auto facet = encode_tensor_description(incorrect);
-  PS_CHECK(facet.ok());
-  WorkflowDocument document;
-  document.inputs = {{1,
-                      "source",
-                      descriptor,
-                      Region::whole(descriptor.shape),
-                      {0, {3, 1}},
-                      {facet.value()}}};
-  document.nodes = {{1,
-                     "channel.extract_index_strict",
-                     {WorkflowInputReference{1}},
-                     {{"axis", std::int64_t{1}},
-                      {"index", std::int64_t{0}},
-                      {"keepdims", false},
-                      {"layout", std::string("materialize")},
-                      {"metadata_mode", std::string("respect")}}}};
-  document.outputs = {{"selected", 1, "values"}};
-  GraphContext graph(document);
-  auto invalid_table = compiler.compile(graph);
-  PS_CHECK(invalid_table.status().code == ErrorCode::TypeMismatch);
-  PS_CHECK(invalid_table.status().reason == FailureReason::None);
-  document.nodes[0].operation = "channel.extract_named_strict";
-  document.nodes[0].parameters.erase("index");
-  document.nodes[0].parameters["match"] = std::string("name");
-  document.nodes[0].parameters["selector"] = std::string("A");
-  GraphContext named_graph(document);
-  auto invalid_named = compiler.compile(named_graph);
-  PS_CHECK(invalid_named.status().code == ErrorCode::TypeMismatch);
-
-  WorkflowDocument producer;
-  producer.inputs = {{1,
-                      "source",
-                      descriptor,
-                      Region::whole(descriptor.shape),
-                      {0, {3, 1}},
-                      {},
-                      {}}};
-  producer.nodes = {{99, "core.identity", {WorkflowInputReference{1}}, {}}};
-  OperationMetadata false_metadata;
-  false_metadata.descriptor = {ElementType::Float64, {9, 3}};
+TensorDescription bgra() {
+  TensorDescription d;
+  d.channel_axis = 2;
+  d.channels = {{"B", "blue", "relative"},
+                {"A", "coverage", "ratio"},
+                {"R", "red", "relative"},
+                {"G", "green", "relative"}};
+  d.model = "rgb";
+  d.transfer = "linear";
+  return d;
+}
+void workflow() {
+  auto input = source({ElementType::UInt8, {2, 2, 4}},
+                      {take(encode_tensor_description(bgra()))});
+  input.bytes = {30, 25, 10, 20, 31, 50, 11, 21,
+                 32, 75, 12, 22, 33, 99, 13, 23};
+  Fixture f(input);
+  auto params = parameters(2, 1, false, "materialize");
+  params["metadata_mode"] = std::string("respect");
+  f.node(params);
+  PlanningOptions planning;
+  const Region roi({{1, 1}, {0, 2}});
+  planning.output_regions = {{"result", roi}};
+  auto run = take(f.execute(planning));
+  check(read(run.results.at("result"), roi) ==
+            std::vector<std::uint8_t>({75, 99}),
+        "alpha ROI");
+  auto d = take(decode_tensor_description(
+      run.results.at("result").schema().tensors[0].facets[0]));
+  check(!d.channel_axis && d.component->name == "A", "projected component");
+  params.erase("index");
+  params["match"] = std::string("role");
+  params["selector"] = std::string("red");
+  params["layout"] = std::string("view");
+  f.node(params, true);
+  run = take(f.execute(planning));
+  oracle(input, run, roi, 2, 2, false);
+  f.document.nodes.clear();
+  OperationMetadata metadata;
+  metadata.result_schema = f.document.inputs[0].result_schema;
+  auto handles = take(
+      format::split_channels(f.document, WorkflowInputReference{1}, metadata));
+  check(handles.size() == 4 && handles[2].name == "c2", "split handles");
+  f.document.outputs = {{"result", handles[2].output.source_node, "values"}};
+  run = take(f.execute(planning));
+  oracle(input, run, roi, 2, 2, false);
+  for (const auto& timing : run.diagnostics.operation_timings)
+    check(timing.output.node_id == handles[2].output.source_node,
+          "unrequested split sibling");
+  // Reuse one static preparation concurrently with independent runtime state.
+  auto plan = take(f.compile(planning));
+  auto first = std::async(std::launch::async, [&] {
+    return f.context->execute(plan.plan, f.bindings);
+  });
+  auto second = f.context->execute(plan.plan, f.bindings);
+  oracle(input, take(first.get()), roi, 2, 2, false);
+  oracle(input, take(std::move(second)), roi, 2, 2, false);
+}
+void arbitrary_axis_oracle() {
+  std::size_t cases = 0;
+  for (auto type : {ElementType::UInt8, ElementType::UInt16, ElementType::Int8,
+                    ElementType::Int16, ElementType::Int64,
+                    ElementType::Float32, ElementType::Float64})
+    for (const auto& shape :
+         {std::vector<std::uint64_t>{3, 2, 4},
+          std::vector<std::uint64_t>{2, 1, 2, 1, 2, 1, 2, 2},
+          std::vector<std::uint64_t>{4}})
+      for (unsigned axis = 0; axis < shape.size(); ++axis)
+        for (bool keep : {false, true}) {
+          if (!keep && shape.size() == 1)
+            continue;
+          auto input = source({type, shape});
+          if (type == ElementType::Float32) {
+            const std::uint32_t bits[] = {0x7f800001, 0x7fc12345, 0x80000000,
+                                          0xff800000};
+            for (std::size_t i = 0; i < input.bytes.size(); i += 4)
+              std::memcpy(input.bytes.data() + i, &bits[(i / 4) % 4], 4);
+          }
+          if (type == ElementType::Float64) {
+            const std::uint64_t bits[] = {
+                0x7ff0000000000001, 0x7ff8000000012345, 0x8000000000000000,
+                0xfff0000000000000};
+            for (std::size_t i = 0; i < input.bytes.size(); i += 8)
+              std::memcpy(input.bytes.data() + i, &bits[(i / 8) % 4], 8);
+          }
+          Fixture f(input);
+          const auto out_shape = output_shape(input, axis, keep);
+          auto dims = Region::whole(out_shape).dimensions();
+          for (auto& d : dims)
+            if (d.extent > 1) {
+              d.offset = 1;
+              --d.extent;
+            }
+          const Region roi(dims);
+          PlanningOptions planning;
+          planning.output_regions = {{"result", roi}};
+          const auto selected = shape[axis] - 1;
+          for (const auto* policy : {"auto", "view", "materialize"}) {
+            f.node(parameters(axis, selected, keep, policy));
+            auto result = take(f.execute(planning));
+            oracle(input, result, roi, axis, selected, keep);
+            check((owner(result.results.at("result"), roi) ==
+                   owner(f.bindings.inputs[0].result,
+                         mapped(input, roi, axis, selected, keep))) ==
+                      (std::string(policy) != "materialize"),
+                  "generic view/copy owners");
+            ++cases;
+          }
+        }
+  std::cout << "arbitrary-axis bit-copy cases=" << cases << '\n';
+}
+void planar_and_batches() {
+  for (bool chw : {false, true})
+    for (bool tiled : {false, true})
+      for (bool keep : {false, true}) {
+        ResultTensorLayout layout;
+        layout.spatial = true;
+        layout.order =
+            tiled ? ImagePlaneOrder::Tiled : ImagePlaneOrder::Continuous;
+        layout.height_axis = chw ? 1 : 0;
+        layout.width_axis = chw ? 2 : 1;
+        layout.channel_axis = chw ? 0 : 2;
+        layout.groups = {{"components", 0, 3}};
+        if (!tiled)
+          layout.row_pitch_bytes = 160;
+        const auto cell = chw ? std::vector<std::uint64_t>{3, 130, 131}
+                              : std::vector<std::uint64_t>{130, 131, 3};
+        auto input = source({ElementType::UInt8, cell}, {}, layout, {2, 2});
+        const auto axis = *layout.channel_axis;
+        auto dims = Region::whole(output_shape(input, axis, keep)).dimensions();
+        dims[0] = {0, 2};
+        dims[1] = {1, 1};
+        auto h = 2 + layout.height_axis -
+                 (!keep && axis < layout.height_axis ? 1 : 0);
+        auto w =
+            2 + layout.width_axis - (!keep && axis < layout.width_axis ? 1 : 0);
+        dims[h] = {127, 3};
+        dims[w] = {126, 4};
+        const Region roi(dims);
+        input.coverage = {mapped(input, roi, axis, 1, keep)};
+        Fixture f(input);
+        PlanningOptions planning;
+        planning.output_regions = {{"result", roi}};
+        for (const auto* policy : {"view", "materialize", "auto"}) {
+          f.node(parameters(axis, 1, keep, policy));
+          auto run = take(f.execute(planning));
+          oracle(input, run, roi, axis, 1, keep);
+          const auto& groups =
+              run.results.at("result").schema().tensors[0].layout.groups;
+          check(keep ? (groups.size() == 1 && groups[0].role == "components" &&
+                        groups[0].first_channel == 0 &&
+                        groups[0].channel_count == 1)
+                     : groups.empty(),
+                "physical channel group projection");
+          auto plane = roi.dimensions();
+          plane[0].extent = 1;
+          check((owner(run.results.at("result"), Region(plane)) ==
+                 owner(f.bindings.inputs[0].result,
+                       mapped(input, Region(plane), axis, 1, keep))) ==
+                    (std::string(policy) != "materialize"),
+                "planar batch owner");
+          const auto support = take(Footprint::from_regions(
+              input.schema.tensors[0].sample_shape(), input.coverage));
+          check(take(run.dependencies.source_support()).at("source") == support,
+                "exact single-plane Need across tiles and batches");
+          const auto query = take(
+              Footprint::from_regions(output_shape(input, axis, keep), {roi}));
+          require(take(run.results.at("result").tensor_relation(0))
+                      .project(query, [&](auto s, const Footprint* samples) {
+                        check(s.roles == 1 &&
+                                  s.target == ResultSupportTarget::Tensor &&
+                                  samples && *samples == support,
+                              "Data-only exact extraction relation");
+                        return Status::success();
+                      }));
+          auto wrong_channel = input.coverage[0].dimensions();
+          wrong_channel[2 + axis].offset = 0;
+          auto dirty = take(run.dependencies.potential_dirty(
+              "source",
+              take(Footprint::from_regions(
+                  input.schema.tensors[0].sample_shape(),
+                  {Region(wrong_channel)})),
+              1, {}, ResultSupportTarget::Tensor, 0));
+          check(dirty.at("result").empty(), "unselected channel is clean");
+          dirty = take(run.dependencies.potential_dirty(
+              "source", support, 1, {}, ResultSupportTarget::Tensor, 0));
+          check(dirty.at("result") == query,
+                "selected source maps to exact output");
+        }
+        auto unavailable = roi.dimensions();
+        unavailable[w] = {0, 1};
+        planning.output_regions = {{"result", Region(unavailable)}};
+        check(!f.execute(planning).ok(),
+              "missing source coverage cannot become a view");
+      }
+}
+void spatial_axes() {
+  for (bool width_slice : {false, true})
+    for (bool tiled : {false, true})
+      for (bool keep : {false, true}) {
+        ResultTensorLayout layout;
+        layout.spatial = true;
+        layout.order =
+            tiled ? ImagePlaneOrder::Tiled : ImagePlaneOrder::Continuous;
+        layout.height_axis = width_slice ? 2 : 0;
+        layout.width_axis = width_slice ? 0 : 1;
+        layout.channel_axis = width_slice ? 1 : 2;
+        layout.groups = {{"components", 0, width_slice ? 3U : 4U}};
+        if (!tiled)
+          layout.row_pitch_bytes = 32;
+        auto input = source({ElementType::UInt16,
+                             width_slice ? std::vector<std::uint64_t>{5, 3, 2}
+                                         : std::vector<std::uint64_t>{2, 3, 4}},
+                            {}, layout);
+        Fixture f(input);
+        auto q = Region::whole(output_shape(input, 0, keep));
+        PlanningOptions planning;
+        planning.output_regions = {{"result", q}};
+        for (const auto* policy : {"auto", "materialize"}) {
+          f.node(parameters(0, 1, keep, policy));
+          oracle(input, take(f.execute(planning)), q, 0, 1, keep);
+        }
+        f.node(parameters(0, 1, keep, "view"));
+        auto refused = f.execute(planning);
+        check(!refused.ok() &&
+                  refused.status().code == ErrorCode::InvalidArgument &&
+                  refused.status().reason == FailureReason::InvalidDomain,
+              "planar spatial slicing requires copying");
+      }
+}
+void strided_and_disjoint() {
+  for (unsigned kind = 0; kind < 3; ++kind) {
+    auto input = source({ElementType::UInt8, {2, 3}});
+    input.bytes = {0, 1, 2, 3, 4, 5};
+    input.layout = kind == 0   ? StridedLayout{2, {3, -1}}
+                   : kind == 1 ? StridedLayout{0, {0, 1}}
+                               : StridedLayout{2, {3, 1}, {0, 2}};
+    Fixture f(input);
+    for (const auto* policy : {"view", "materialize"}) {
+      f.node(parameters(1, 1, false, policy));
+      oracle(input, take(f.execute()), Region::whole({2}), 1, 1, false);
+    }
+  }
+  ResultTensorLayout spatial;
+  spatial.spatial = true;
+  auto input = source({ElementType::UInt8, {1, 3, 2}}, {}, spatial);
+  input.coverage = {Region({{0, 1}, {0, 1}, {1, 1}}),
+                    Region({{0, 1}, {2, 1}, {1, 1}})};
+  Fixture f(input);
+  f.node(parameters(2, 1, false, "view"));
+  f.document.outputs = {{"left", 1, "values"}, {"right", 1, "values"}};
+  PlanningOptions planning;
+  planning.output_regions = {{"left", Region({{0, 1}, {0, 1}})},
+                             {"right", Region({{0, 1}, {2, 1}})}};
+  auto run = take(f.execute(planning));
+  oracle(input, run, planning.output_regions.at("left"), 2, 1, false, "left");
+  oracle(input, run, planning.output_regions.at("right"), 2, 1, false, "right");
+  check(take(run.dependencies.source_support()).at("source") ==
+            take(Footprint::from_regions(input.schema.tensors[0].sample_shape(),
+                                         input.coverage)),
+        "disjoint gaps remain unread");
+}
+void fragmented_views() {
+  for (bool mixed : {false, true}) {
+    ResultTensorLayout layout;
+    layout.spatial = mixed;
+    auto input =
+        source({ElementType::UInt8, mixed ? std::vector<std::uint64_t>{2, 3, 2}
+                                          : std::vector<std::uint64_t>{2, 4}},
+               {}, layout);
+    Fixture f(input);
+    const auto root = take(f.context->resource_budget());
+    auto builder =
+        take(ResultBuilder::start(root, input.schema, "fragmented.source"));
+    require(builder.bind_descriptor_relation(
+        take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0}))));
+    const auto shape = input.schema.tensors[0].sample_shape();
+    auto relation = take(ResultRelation::cartesian(
+        root, take(input.schema.tensors[0].sample_count()), {0, 1, 0, 0}));
+    for (std::uint64_t row : {0, 1}) {
+      auto dims = Region::whole(shape).dimensions();
+      dims[0] = {row, 1};
+      const Region region(dims);
+      if (mixed && row == 1) {
+        require(builder.publish_tensor_kernel(
+            0, region,
+            [&](const auto& writers) {
+              for (const auto& writer : writers) {
+                auto fp =
+                    take(Footprint::from_regions(shape, {writer.region()}));
+                require(fp.visit(
+                    [&](const auto& at) {
+                      auto run = take(writer.row_run(at));
+                      *run.data =
+                          input.bytes[channel_fixture::address(input, at)];
+                      return Status::success();
+                    },
+                    UINT64_MAX));
+              }
+              return Status::success();
+            },
+            relation, {true, true, true, true}));
+      } else {
+        const auto count = take(region.element_count());
+        auto storage = take(root.allocator().allocate(count));
+        std::memcpy(storage.data(), input.bytes.data() + row * count, count);
+        auto physical = input.layout;
+        physical.origin.assign(shape.size(), 0);
+        physical.origin[0] = row;
+        require(builder.publish_tensor(0, region, physical,
+                                       std::move(storage).freeze(), relation,
+                                       {true, true, true, true}));
+      }
+    }
+    f.bindings.inputs[0].result = take(builder.seal());
+    const auto axis = mixed ? 2U : 1U;
+    f.node(parameters(axis, 1, false, "view"));
+    auto selected = WorkflowNodeOutput{1, "values"};
+    format::MetadataOptions edit;
+    edit.layout = "view";
+    auto assigned = take(format::assign_metadata(f.document, selected, edit));
+    f.document.outputs = {{"result", assigned.source_node, "values"}};
+    auto run = take(f.execute());
+    const auto q = Region::whole(output_shape(input, axis, false));
+    oracle(input, run, q, axis, 1, false);
+    for (std::uint64_t row : {0, 1}) {
+      auto dims = q.dimensions();
+      dims[0] = {row, 1};
+      check(owner(run.results.at("result"), Region(dims)) ==
+                owner(f.bindings.inputs[0].result,
+                      mapped(input, Region(dims), axis, 1, false)),
+            "fragmented/mixed view chain retains each actual backing");
+    }
+  }
+}
+void preflight_and_split() {
+  Fixture f(source({ElementType::UInt8, {2, 3}}));
+  auto params = parameters(1, 0, false);
+  for (const auto& invalid : {std::make_pair("axis", std::int64_t{-1}),
+                              {"axis", std::int64_t{2}},
+                              {"index", std::int64_t{-1}},
+                              {"index", std::int64_t{3}}}) {
+    auto bad = params;
+    bad[invalid.first] = invalid.second;
+    f.node(bad);
+    auto result = f.compile();
+    check(!result.ok() && result.status().code == ErrorCode::InvalidArgument &&
+              result.status().reason == FailureReason::InvalidDomain,
+          "selector preflight status");
+  }
+  f.node(params);
+  TensorDescription bad_table;
+  bad_table.channel_axis = 1;
+  bad_table.channels = {{"A", "a", ""}, {"B", "b", ""}};
+  auto schema = f.input.schema;
+  schema.tensors[0].facets = {take(encode_tensor_description(bad_table))};
+  f.document.inputs[0].result_schema =
+      std::make_shared<const SchemaTemplate>(schema);
+  check(f.compile().status().code == ErrorCode::TypeMismatch,
+        "invalid table length");
+  Fixture named(source({ElementType::UInt8, {2, 2, 4}},
+                       {take(encode_tensor_description(bgra()))}));
+  auto named_params = parameters(2, 0, false);
+  named_params.erase("index");
+  named_params["metadata_mode"] = std::string("respect");
+  named_params["match"] = std::string("name");
+  named_params["selector"] = std::string("missing");
+  named.node(named_params, true);
+  check(!named.compile().ok(), "absent named selector");
+  named.document.nodes[0].parameters["selector"] = std::string("R");
+  named.document.nodes[0].parameters["metadata_mode"] = std::string("raw");
+  check(!named.compile().ok(), "raw has no name lookup");
+  auto ambiguous = bgra();
+  ambiguous.channels[1].name = "R";
+  schema = named.input.schema;
+  schema.tensors[0].facets = {take(encode_tensor_description(ambiguous))};
+  named.document.inputs[0].result_schema =
+      std::make_shared<const SchemaTemplate>(schema);
+  named.document.nodes[0].parameters["metadata_mode"] = std::string("respect");
+  check(!named.compile().ok(), "ambiguous named selector");
+  named.document.inputs = {channel_fixture::declaration(named.input)};
+  named.document.nodes.clear();
+  OperationMetadata metadata;
+  metadata.result_schema = named.document.inputs[0].result_schema;
   format::ChannelExtractOptions options;
+  options.layout = "bad";
+  auto count = named.document.nodes.size();
+  check(!format::split_channels(named.document, WorkflowInputReference{1},
+                                metadata, options)
+                .ok() &&
+            named.document.nodes.size() == count,
+        "split invalid layout is transactional");
+  options = {};
+  auto wrong = *metadata.result_schema;
+  wrong.tensors[0].batch_axes = {2};
+  metadata.result_schema = std::make_shared<const SchemaTemplate>(wrong);
+  check(!format::split_channels(named.document, WorkflowInputReference{1},
+                                metadata, options)
+                .ok() &&
+            named.document.nodes.empty(),
+        "split declared batch metadata mismatch");
+  named.document.nodes = {
+      {99, "core.identity", {WorkflowInputReference{1}}, {}}};
+  auto handles = take(format::split_channels(
+      named.document, WorkflowNodeOutput{99, "value"}, metadata, options));
+  named.document.outputs = {
+      {"result", handles[0].output.source_node, "values"}};
+  check(named.compile().status().code == ErrorCode::InvalidArgument,
+        "forward producer schema assertion rejects batch drift");
+  auto large_input =
+      source({ElementType::UInt8, {2, 3}},
+             {{"app.first", 1, std::vector<std::uint8_t>(4096, 1)},
+              {"app.second", 1, std::vector<std::uint8_t>(4096, 2)},
+              {"app.third", 1, std::vector<std::uint8_t>(4096, 3)}});
+  check(large_input.schema.canonical_size() > 8192,
+        "large static metadata fixture");
+  Fixture large(large_input);
+  metadata.result_schema = large.document.inputs[0].result_schema;
+  options = {};
   options.axis = 1;
   options.metadata_mode = "raw";
-  auto handles = format::split_channels(
-      producer, WorkflowNodeOutput{99, "value"}, false_metadata, options);
-  PS_CHECK(handles.ok());
-  producer.outputs = {
-      {"selected", handles.value()[0].output.source_node, "values"}};
-  GraphContext mismatched_graph(producer);
-  auto mismatched = compiler.compile(mismatched_graph);
-  PS_CHECK(mismatched.status().code == ErrorCode::InvalidArgument);
-  PS_CHECK(mismatched.status().reason == FailureReason::InvalidDomain);
-  return 0;
+  handles = take(format::split_channels(
+      large.document, WorkflowInputReference{1}, metadata, options));
+  check(std::get<std::string>(
+            large.document.nodes[0].parameters.at("expected_source_schema"))
+                .size() == 64,
+        "complete source schema assertion stays within static string capacity");
+  large.document.outputs = {
+      {"result", handles[0].output.source_node, "values"}};
+  oracle(large_input, take(large.execute()), Region::whole({2}), 1, 0, false);
+  auto altered = large_input.schema;
+  altered.tensors[0].facets[0].payload[0] ^= 1;
+  large.document.inputs[0].result_schema =
+      std::make_shared<const SchemaTemplate>(altered);
+  check(large.compile().status().code == ErrorCode::InvalidArgument,
+        "bounded digest assertion still detects unrelated metadata drift");
+  Fixture rank_one(source({ElementType::UInt8, {4}}));
+  rank_one.node(parameters(0, 0, false));
+  check(!rank_one.compile().ok(), "rank-one squeeze rejected");
+  rank_one.node(parameters(0, 0, true));
+  rank_one.document.nodes[0].operation =
+      "channel.extract_index_accelerated_apple_silicon";
+#if defined(__aarch64__) && defined(__APPLE__)
+  oracle(rank_one.input, take(rank_one.execute()), Region::whole({1}), 0, 0,
+         true);
+  rank_one.document.nodes[0].operation =
+      "channel.extract_index_accelerated_x86_64";
+  check(!rank_one.compile().ok(), "unavailable CPU profile rejected");
+#endif
 }
-int planar_alias() {
-  PlanarImageConfig config;
-  config.tile_height = 2;
-  config.tile_width = 2;
-  const ValueDescriptor descriptor{ElementType::UInt8, {2, 3, 2}};
-  auto created = PlanarImage::create(descriptor, config);
-  PS_CHECK(created.ok());
-  auto source = created.take_value();
-  const Region selected({{0, 2}, {0, 3}, {1, 1}});
-  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6};
-  PS_CHECK(source.publish(selected, samples.data(), samples.size()).ok());
-  auto writer = source.begin_write(Region({{0, 1}, {0, 1}, {0, 1}}));
-  PS_CHECK(writer.ok());
-  CancellationSource cancellation;
-  auto future = std::async(std::launch::async, [&] {
-    return source.channel_view(1, false, Region::whole({2, 3}), {}, {},
-                               cancellation.token());
-  });
-  cancellation.cancel();
-  const auto ready = future.wait_for(std::chrono::seconds(2));
-  writer = Result<PlanarImageWriteWindow>(
-      Status{ErrorCode::Cancelled, "release test writer"});
-  PS_CHECK(ready == std::future_status::ready);
-  PS_CHECK(future.get().status().code == ErrorCode::Cancelled);
-  auto alias = source.channel_view(1, false, Region::whole({2, 3}));
-  PS_CHECK(alias.ok());
-  auto view = alias.take_value();
-  PS_CHECK(view.descriptor().shape == std::vector<std::uint64_t>({2, 3}));
-  PS_CHECK(view.valid_samples() == 6);
-  PS_CHECK(view.owner_token() == source.owner_token());
-  PS_CHECK(view.reserved_bytes() == source.reserved_bytes());
-  PS_CHECK(view.begin_write(Region::whole({2, 3})).status().code ==
-           ErrorCode::InvalidArgument);
-  source = {};
-  std::vector<std::uint8_t> observed(6);
-  PS_CHECK(
-      view.read(Region::whole({2, 3}), observed.data(), observed.size()).ok());
-  PS_CHECK(observed == samples);
-  auto kept = view.channel_view(0, true, Region::whole({2, 3, 1}));
-  PS_CHECK(kept.status().code == ErrorCode::InvalidArgument);
-  return 0;
-}
-int planar_workflow() {
-  auto registry = make_default_operation_registry();
-  const ValueDescriptor descriptor{ElementType::UInt8, {130, 130, 3}};
-  PlanarImageConfig config;
-  auto created = PlanarImage::create(descriptor, config);
-  PS_CHECK(created.ok());
-  auto source = created.take_value();
-  const Region input_region({{127, 3}, {127, 3}, {1, 1}});
-  const std::vector<std::uint8_t> bytes{1, 2, 3, 4, 5, 6, 7, 8, 9};
-  PS_CHECK(source.publish(input_region, bytes.data(), bytes.size()).ok());
-  WorkflowDocument document;
-  document.inputs = {
-      {1,
-       "image",
-       descriptor,
-       Region::whole(descriptor.shape),
-       {},
-       {},
-       PlanarImageLayout{ImagePlaneOrder::Tiled, 0, 1, 2, 0, {}}}};
-  document.nodes = {{1,
-                     "channel.extract_index_strict",
-                     {WorkflowInputReference{1}},
-                     {{"axis", std::int64_t{2}},
-                      {"index", std::int64_t{1}},
-                      {"keepdims", false},
-                      {"layout", std::string("view")},
-                      {"metadata_mode", std::string("raw")}}}};
-  document.outputs = {{"selected", 1, "values"}};
-  PlanningOptions options;
-  options.output_regions = {{"selected", Region({{127, 3}, {127, 3}})}};
-  GraphContext graph(document);
-  Compiler compiler(registry);
-  auto compiled = compiler.compile(graph, options);
-  if (!compiled.ok())
-    std::cerr << "planar compile: " << compiled.status().message << '\n';
-  PS_CHECK(compiled.ok());
-  ExecutionBindings bindings;
-  ExecutionBinding binding;
-  binding.name = "image";
-  binding.image = std::make_shared<const PlanarImage>(source);
-  bindings.inputs.push_back(std::move(binding));
-  ExecutionContext execution(registry);
-  auto run = execution.execute(compiled.value().plan, bindings);
-  if (!run.ok())
-    std::cerr << "planar execute: " << run.status().message << '\n';
-  PS_CHECK(run.ok());
-  const auto& selected = run.value().images.at("selected");
-  PS_CHECK(selected.owner_token() == source.owner_token());
-  std::vector<std::uint8_t> observed(bytes.size());
-  PS_CHECK(
-      selected
-          .read(Region({{127, 3}, {127, 3}}), observed.data(), observed.size())
-          .ok());
-  PS_CHECK(observed == bytes);
-  PS_CHECK(selected.valid_samples() == 9);
-  const Region extra({{0, 1}, {0, 1}, {1, 1}});
-  const std::uint8_t extra_sample = 99;
-  PS_CHECK(source.publish(extra, &extra_sample, 1).code == ErrorCode::Stale);
-  PS_CHECK(selected.valid_samples() == 9);
-  std::uint8_t denied = 0;
-  PS_CHECK(selected.read(Region({{0, 1}, {0, 1}}), &denied, 1).code ==
-           ErrorCode::NotFound);
-  document.nodes[0].parameters["layout"] = std::string("materialize");
-  GraphContext copied_graph(document);
-  auto copied_plan = compiler.compile(copied_graph, options);
-  PS_CHECK(copied_plan.ok());
-  auto copied = execution.execute(copied_plan.value().plan, bindings);
-  if (!copied.ok())
-    std::cerr << "planar copy: " << copied.status().message << '\n';
-  PS_CHECK(copied.ok());
-  const auto& materialized = copied.value().images.at("selected");
-  PS_CHECK(materialized.owner_token() != source.owner_token());
-  observed.assign(bytes.size(), 0);
-  PS_CHECK(
-      materialized
-          .read(Region({{127, 3}, {127, 3}}), observed.data(), observed.size())
-          .ok());
-  PS_CHECK(observed == bytes);
-  document.nodes[0].parameters["keepdims"] = true;
-  document.nodes[0].parameters["layout"] = std::string("view");
-  options.output_regions = {{"selected", Region({{127, 3}, {127, 3}, {0, 1}})}};
-  GraphContext kept_graph(document);
-  auto kept_plan = compiler.compile(kept_graph, options);
-  PS_CHECK(kept_plan.ok());
-  auto kept_run = execution.execute(kept_plan.value().plan, bindings);
-  PS_CHECK(kept_run.ok());
-  const auto& kept = kept_run.value().images.at("selected");
-  PS_CHECK(kept.descriptor().shape ==
-           std::vector<std::uint64_t>({130, 130, 1}));
-  observed.assign(bytes.size(), 0);
-  PS_CHECK(kept.read(Region({{127, 3}, {127, 3}, {0, 1}}), observed.data(),
-                     observed.size())
-               .ok());
-  PS_CHECK(observed == bytes);
-
-  WorkflowDocument split;
-  split.inputs = document.inputs;
-  OperationMetadata metadata;
-  metadata.descriptor = descriptor;
-  metadata.planar_layout = *split.inputs[0].planar_layout;
-  format::ChannelExtractOptions split_options;
-  split_options.axis = 2;
-  auto handles = format::split_channels(split, WorkflowInputReference{1},
-                                        metadata, split_options);
-  PS_CHECK(handles.ok() && handles.value().size() == 3);
-  split.outputs = {
-      {"selected", handles.value()[1].output.source_node, "values"}};
-  options.output_regions = {{"selected", Region({{127, 3}, {127, 3}})}};
-  GraphContext split_graph(split);
-  auto split_plan = compiler.compile(split_graph, options);
-  PS_CHECK(split_plan.ok());
-  auto split_run = execution.execute(split_plan.value().plan, bindings);
-  PS_CHECK(split_run.ok());
-  observed.assign(bytes.size(), 0);
-  PS_CHECK(
-      split_run.value()
-          .images.at("selected")
-          .read(Region({{127, 3}, {127, 3}}), observed.data(), observed.size())
-          .ok());
-  PS_CHECK(observed == bytes);
-  return 0;
-}
-int planar_variants() {
-  auto registry = make_default_operation_registry();
-  Compiler compiler(registry);
-  ExecutionContext execution(registry);
-  TensorDescription description;
-  description.channel_axis = 2;
-  description.channels = {{"B", "blue", "relative"},
-                          {"R", "red", "relative"},
-                          {"G", "green", "relative"}};
-  auto facet = encode_tensor_description(description);
-  PS_CHECK(facet.ok());
-  const ValueDescriptor described{ElementType::UInt8, {2, 2, 3}};
-  auto created = PlanarImage::create(described, {}, {facet.value()});
-  PS_CHECK(created.ok());
-  auto source = created.take_value();
-  const Region green({{0, 2}, {0, 2}, {2, 1}});
-  const std::vector<std::uint8_t> green_bytes{10, 11, 12, 13};
-  PS_CHECK(source.publish(green, green_bytes.data(), green_bytes.size()).ok());
-  WorkflowDocument document;
-  document.inputs = {{1,
-                      "image",
-                      described,
-                      Region::whole(described.shape),
-                      {},
-                      {facet.value()},
-                      PlanarImageLayout{}}};
-  document.nodes = {{1,
-                     "channel.extract_named_strict",
-                     {WorkflowInputReference{1}},
-                     {{"keepdims", false},
-                      {"layout", std::string("view")},
-                      {"match", std::string("role")},
-                      {"metadata_mode", std::string("respect")},
-                      {"selector", std::string("green")}}}};
-  document.outputs = {{"green", 1, "values"}};
-  GraphContext graph(document);
-  auto compiled = compiler.compile(graph);
-  PS_CHECK(compiled.ok());
-  ExecutionBindings bindings;
-  ExecutionBinding binding;
-  binding.name = "image";
-  binding.image = std::make_shared<const PlanarImage>(source);
-  bindings.inputs.push_back(std::move(binding));
-  auto run = execution.execute(compiled.value().plan, bindings);
-  PS_CHECK(run.ok());
-  const auto& result = run.value().images.at("green");
-  PS_CHECK(result.owner_token() == source.owner_token());
-  std::vector<std::uint8_t> observed(4);
-  PS_CHECK(result.read(Region::whole({2, 2}), observed.data(), observed.size())
-               .ok());
-  PS_CHECK(observed == green_bytes);
-  auto projected = decode_tensor_description(result.facets()[0]);
-  PS_CHECK(projected.ok() && projected.value().component->role == "green");
-
-  PlanarImageConfig chw_config;
-  chw_config.height_axis = 1;
-  chw_config.width_axis = 2;
-  chw_config.channel_axis = 0;
-  const ValueDescriptor chw_descriptor{ElementType::UInt8, {3, 130, 130}};
-  auto chw_created = PlanarImage::create(chw_descriptor, chw_config);
-  PS_CHECK(chw_created.ok());
-  auto chw_source = chw_created.take_value();
-  const Region chw_region({{1, 1}, {127, 3}, {127, 3}});
-  const std::vector<std::uint8_t> chw_bytes{1, 2, 3, 4, 5, 6, 7, 8, 9};
-  PS_CHECK(
-      chw_source.publish(chw_region, chw_bytes.data(), chw_bytes.size()).ok());
-  WorkflowDocument chw_document;
-  chw_document.inputs = {
-      {1,
-       "image",
-       chw_descriptor,
-       Region::whole(chw_descriptor.shape),
-       {},
-       {},
-       PlanarImageLayout{ImagePlaneOrder::Tiled, 1, 2, 0, 0, {}}}};
-  chw_document.nodes = {{1,
-                         "channel.extract_index_strict",
-                         {WorkflowInputReference{1}},
-                         {{"axis", std::int64_t{0}},
-                          {"index", std::int64_t{1}},
-                          {"keepdims", false},
-                          {"layout", std::string("materialize")},
-                          {"metadata_mode", std::string("raw")}}}};
-  chw_document.outputs = {{"selected", 1, "values"}};
-  PlanningOptions options;
-  options.output_regions = {{"selected", Region({{127, 3}, {127, 3}})}};
-  GraphContext chw_graph(chw_document);
-  auto chw_plan = compiler.compile(chw_graph, options);
-  PS_CHECK(chw_plan.ok());
-  bindings.inputs[0].image = std::make_shared<const PlanarImage>(chw_source);
-  auto chw_run = execution.execute(chw_plan.value().plan, bindings);
-  PS_CHECK(chw_run.ok());
-  observed.assign(chw_bytes.size(), 0);
-  PS_CHECK(
-      chw_run.value()
-          .images.at("selected")
-          .read(Region({{127, 3}, {127, 3}}), observed.data(), observed.size())
-          .ok());
-  PS_CHECK(observed == chw_bytes);
-  return 0;
-}
-int strided_producer() {
-  auto registry = make_default_operation_registry(false);
-  const ValueDescriptor descriptor{ElementType::UInt8, {2, 3}};
-  auto base = Value::create(descriptor, Region::whole(descriptor.shape),
-                            {0, {3, 1}}, {0, 1, 2, 3, 4, 5});
-  PS_CHECK(base.ok());
-  auto reversed =
-      Value::from_storage(descriptor, Region::whole(descriptor.shape),
-                          {2, {3, -1}}, base.value().storage());
-  PS_CHECK(reversed.ok());
-  auto broadcast =
-      Value::from_storage(descriptor, Region::whole(descriptor.shape),
-                          {0, {0, 1}}, base.value().storage());
-  PS_CHECK(broadcast.ok());
-  const auto register_source = [&](const std::string& name, Value value) {
-    OperationDefinition definition;
-    definition.key = name;
-    auto& output = definition.traits.outputs[0];
-    output.output_element_type = ElementType::UInt8;
-    output.shape_rule = OperationShapeRule::Fixed;
-    output.fixed_output_shape = {2, 3};
-    output.region_rule = OperationRegionRule::Whole;
-    definition.callback = [held =
-                               std::move(value)](const OperationInvocation&) {
-      return Result<Value>(held);
-    };
-    return registry->register_operation(std::move(definition));
-  };
-  PS_CHECK(
-      register_source("test.channel_reversed", reversed.take_value()).ok());
-  PS_CHECK(
-      register_source("test.channel_broadcast", broadcast.take_value()).ok());
-  PS_CHECK(registry->freeze().ok());
-  Compiler compiler(registry);
-  ExecutionContext execution(registry);
-  for (const auto& case_data :
-       {std::make_pair("test.channel_reversed",
-                       std::vector<std::uint8_t>{1, 4}),
-        std::make_pair("test.channel_broadcast",
-                       std::vector<std::uint8_t>{1, 1})}) {
-    WorkflowDocument document;
-    document.nodes = {{1, case_data.first, {}, {}},
-                      {2,
-                       "channel.extract_index_strict",
-                       {WorkflowNodeOutput{1, "value"}},
-                       {{"axis", std::int64_t{1}},
-                        {"index", std::int64_t{1}},
-                        {"keepdims", false},
-                        {"layout", std::string("view")},
-                        {"metadata_mode", std::string("raw")}}}};
-    document.outputs = {{"result", 2, "values"}};
-    GraphContext graph(document);
-    auto compiled = compiler.compile(graph);
-    PS_CHECK(compiled.ok());
-    auto run = execution.execute(compiled.value().plan);
-    PS_CHECK(run.ok());
-    const auto& result = run.value().values.at("result");
-    PS_CHECK(result.bytes().data()[result.byte_address({0}).value()] ==
-             case_data.second[0]);
-    PS_CHECK(result.bytes().data()[result.byte_address({1}).value()] ==
-             case_data.second[1]);
+void resource_and_metadata() {
+  ResourceBudget budget;
+  auto bytes = numeric_fixture::fixture();
+  auto profile =
+      take(IccProfile::import(ByteView(bytes.data(), bytes.size()), budget));
+  const auto identity = profile.identity();
+  auto resources = take(ResourceBindings::create({profile}, budget));
+  TensorDescription d;
+  d.channel_axis = 2;
+  d.channels = {{"C", "cyan", "relative"},
+                {"M", "magenta", "relative"},
+                {"Y", "yellow", "relative"},
+                {"K", "black", "relative"}};
+  d.model = "cmyk";
+  d.profile = identity;
+  d.white = std::array<double, 2>{.3127, .3290};
+  d.primaries_xy = std::array<double, 6>{.64, .33, .30, .60, .15, .06};
+  auto facet = take(encode_tensor_description(d));
+  auto plain = source({ElementType::UInt8, {1, 1, 4}});
+  plain.bytes = {1, 2, 3, 4};
+  auto described = plain;
+  described.schema.tensors[0].facets = {facet};
+  bool denied = false;
+  try {
+    (void)channel_fixture::publish(budget, described);
+  } catch (const std::runtime_error&) {
+    denied = true;
   }
-  return 0;
-}
-int disjoint_planar_roots() {
-  auto registry = make_default_operation_registry();
-  const ValueDescriptor descriptor{ElementType::UInt8, {1, 3, 2}};
-  auto created = PlanarImage::create(descriptor, {});
-  PS_CHECK(created.ok());
-  auto source = created.take_value();
-  const std::uint8_t left = 17, right = 29;
-  PS_CHECK(source.publish(Region({{0, 1}, {0, 1}, {1, 1}}), &left, 1).ok());
-  PS_CHECK(source.publish(Region({{0, 1}, {2, 1}, {1, 1}}), &right, 1).ok());
-  WorkflowDocument document;
-  document.inputs = {{1,
-                      "image",
-                      descriptor,
-                      Region::whole(descriptor.shape),
-                      {},
-                      {},
-                      PlanarImageLayout{}}};
-  document.nodes = {{1,
-                     "channel.extract_index_strict",
-                     {WorkflowInputReference{1}},
-                     {{"axis", std::int64_t{2}},
-                      {"index", std::int64_t{1}},
-                      {"keepdims", false},
-                      {"layout", std::string("view")},
-                      {"metadata_mode", std::string("raw")}}}};
-  document.outputs = {{"left", 1, "values"}, {"right", 1, "values"}};
-  PlanningOptions options;
-  options.output_regions = {{"left", Region({{0, 1}, {0, 1}})},
-                            {"right", Region({{0, 1}, {2, 1}})}};
-  GraphContext graph(document);
-  Compiler compiler(registry);
-  auto plan = compiler.compile(graph, options);
-  PS_CHECK(plan.ok());
-  ExecutionBindings bindings;
-  ExecutionBinding binding;
-  binding.name = "image";
-  binding.image = std::make_shared<const PlanarImage>(source);
-  bindings.inputs.push_back(std::move(binding));
-  ExecutionContext execution(registry);
-  auto run = execution.execute(plan.value().plan, bindings);
-  PS_CHECK(run.ok());
-  std::uint8_t observed = 0;
-  PS_CHECK(run.value()
-               .images.at("left")
-               .read(Region({{0, 1}, {0, 1}}), &observed, 1)
-               .ok());
-  PS_CHECK(observed == left);
-  PS_CHECK(run.value()
-               .images.at("right")
-               .read(Region({{0, 1}, {2, 1}}), &observed, 1)
-               .ok());
-  PS_CHECK(observed == right);
-  PS_CHECK(run.value().images.at("left").valid_samples() == 1);
-  PS_CHECK(run.value().images.at("right").valid_samples() == 1);
-  return 0;
-}
-int planar_spatial_axis() {
-  auto registry = make_default_operation_registry();
-  Compiler compiler(registry);
-  ExecutionContext execution(registry);
-  const ValueDescriptor descriptor{ElementType::UInt8, {2, 3, 4}};
-  auto source = PlanarImage::create(descriptor, {}).take_value();
-  const std::vector<std::uint8_t> bytes{100, 101, 102, 103, 104, 105,
-                                        106, 107, 108, 109, 110, 111};
-  PS_CHECK(
-      source
-          .publish(Region({{1, 1}, {0, 3}, {0, 4}}), bytes.data(), bytes.size())
-          .ok());
-  WorkflowDocument document;
-  document.inputs = {{1,
-                      "image",
-                      descriptor,
-                      Region::whole(descriptor.shape),
-                      {},
-                      {},
-                      PlanarImageLayout{}}};
-  document.nodes = {{1,
-                     "channel.extract_index_strict",
-                     {WorkflowInputReference{1}},
-                     {{"axis", std::int64_t{0}},
-                      {"index", std::int64_t{1}},
-                      {"keepdims", false},
-                      {"layout", std::string("auto")},
-                      {"metadata_mode", std::string("raw")}}}};
-  document.outputs = {{"selected", 1, "values"}};
-  ExecutionBindings bindings;
-  ExecutionBinding binding;
-  binding.name = "image";
-  binding.image = std::make_shared<const PlanarImage>(source);
-  bindings.inputs.push_back(binding);
-  for (bool keep : {false, true}) {
-    document.nodes[0].parameters["keepdims"] = keep;
-    for (const auto* layout : {"auto", "materialize"}) {
-      document.nodes[0].parameters["layout"] = std::string(layout);
-      PlanningOptions options;
-      options.output_regions = {
-          {"selected",
-           keep ? Region({{0, 1}, {1, 2}, {1, 2}}) : Region({{1, 2}, {1, 2}})}};
-      GraphContext graph(document);
-      auto compiled = compiler.compile(graph, options);
-      if (!compiled.ok())
-        std::cerr << compiled.status().message << '\n';
-      PS_CHECK(compiled.ok());
-      auto run = execution.execute(compiled.value().plan, bindings);
-      if (!run.ok())
-        std::cerr << run.status().message << '\n';
-      PS_CHECK(run.ok());
-      std::vector<std::uint8_t> observed(4);
-      if (keep) {
-        PS_CHECK(run.value()
-                     .images.at("selected")
-                     .read(options.output_regions.at("selected"),
-                           observed.data(), observed.size())
-                     .ok());
-      } else {
-        const auto& value = run.value().values.at("selected");
-        observed.assign(value.bytes().begin(), value.bytes().end());
-      }
-      PS_CHECK(observed == std::vector<std::uint8_t>({105, 106, 109, 110}));
+  check(denied, "profile metadata cannot manufacture a resource");
+  ResultRef surviving;
+  for (bool spatial : {false, true}) {
+    for (const auto* policy : {"view", "materialize"}) {
+      auto input = plain;
+      input.schema.tensors[0].layout.spatial = spatial;
+      Fixture f(input);
+      f.resources = resources;
+      auto p = parameters(2, 3, false, policy);
+      p["metadata_mode"] = std::string("override");
+      p["metadata_override"] = take(tensor_description_parameter(d));
+      f.node(p);
+      auto result = take(f.execute());
+      surviving = result.results.at("result");
+      check(surviving.resources().icc_profile(identity).ok() &&
+                read(surviving, Region::whole({1, 1})) ==
+                    std::vector<std::uint8_t>{4},
+            "override retains profile owner");
+      auto out = take(
+          decode_tensor_description(surviving.schema().tensors[0].facets[0]));
+      check(out.component->name == "K" && out.profile == identity &&
+                out.white == d.white && out.primaries_xy == d.primaries_xy,
+            "component interpretation projected without conversion");
     }
-    document.nodes[0].parameters["layout"] = std::string("view");
-    GraphContext rejected(document);
-    auto view_plan = compiler.compile(rejected);
-    PS_CHECK(view_plan.ok());
-    PS_CHECK(
-        execution.execute(view_plan.value().plan, bindings).status().code ==
-        ErrorCode::InvalidArgument);
   }
-  document.nodes[0].parameters["keepdims"] = false;
-  document.nodes[0].parameters["layout"] = std::string("auto");
-  document.nodes.push_back({2,
-                            "channel.extract_index_strict",
-                            {WorkflowNodeOutput{1, "values"}},
-                            {{"axis", std::int64_t{1}},
-                             {"index", std::int64_t{1}},
-                             {"keepdims", false},
-                             {"layout", std::string("materialize")},
-                             {"metadata_mode", std::string("raw")}}});
-  document.outputs = {{"selected", 2, "values"}};
-  PlanningOptions options;
-  options.output_regions = {{"selected", Region({{1, 2}})}};
-  GraphContext graph(document);
-  auto compiled = compiler.compile(graph, options);
-  PS_CHECK(compiled.ok());
-  auto run = execution.execute(compiled.value().plan, bindings);
-  if (!run.ok())
-    std::cerr << "chained: " << run.status().message << '\n';
-  PS_CHECK(run.ok());
-  const auto& value = run.value().values.at("selected");
-  PS_CHECK(value.bytes().size() == 2);
-  PS_CHECK(value.bytes()[0] == 105 && value.bytes()[1] == 109);
-  return 0;
+  resources = {};
+  profile = {};
+  check(surviving.resources().icc_profile(identity).ok(),
+        "profile survives producer/context retirement");
+  surviving = {};
+  check(budget.statistics().live[ResourceKind::Host] == 0,
+        "last Result releases profile budget");
+
+  OcioConfigSnapshot snapshot;
+  snapshot.config = {'c'};
+  snapshot.spaces = {{"working", "scene"}};
+  snapshot.build_identity = "fixture-build";
+  snapshot.settings = "reference";
+  auto config = take(OcioConfigResource::import(snapshot, budget));
+  Fixture f(source({ElementType::Float32, {2, 3, 4}}));
+  f.resources = take(ResourceBindings::create({}, {config}, budget));
+  TensorDescription described_rgb = bgra();
+  described_rgb.model.clear();
+  described_rgb.transfer.clear();
+  TensorColorGroup group;
+  group.name = "rgb";
+  group.indices = {2, 3, 0};
+  group.components = {described_rgb.channels[2], described_rgb.channels[3],
+                      described_rgb.channels[0]};
+  group.alpha = 1;
+  group.interpretation.model = "rgb";
+  group.interpretation.convention = "ocio-native";
+  group.interpretation.configured =
+      TensorConfiguredSpace{config.identity(), "working", "scene"};
+  described_rgb.groups = {group};
+  format::MetadataOptions edit;
+  edit.mode = "replace";
+  edit.description = described_rgb;
+  auto assigned = take(
+      format::assign_metadata(f.document, WorkflowInputReference{1}, edit));
+  auto p = parameters(2, 2, false, "view");
+  p["metadata_mode"] = std::string("respect");
+  f.document.nodes.push_back(
+      {99, "channel.extract_index_strict", {assigned}, p});
+  f.document.outputs = {{"result", 99, "values"}};
+  auto observed = take(f.execute());
+  auto component = take(decode_tensor_description(
+      observed.results.at("result").schema().tensors[0].facets[0]));
+  check(component.groups.empty() &&
+            component.component->interpretation->configured ==
+                group.interpretation.configured &&
+            observed.results.at("result").resources().config_count() == 1,
+        "metadata-to-extraction preserves configured interpretation/resource");
 }
-int planar_view_budget() {
+void atomic_observations() {
+  auto input = source({ElementType::UInt8, {2, 3}});
+  input.schema.tensors[0].atomic_trailing_axes = 1;
+  Fixture f(input);
+  for (unsigned axis : {0, 1}) {
+    f.node(parameters(axis, 1, false, "view"));
+    auto result = take(f.execute());
+    oracle(input, result, Region::whole(output_shape(input, axis, false)), axis,
+           1, false);
+    check(
+        result.results.at("result").schema().tensors[0].atomic_trailing_axes ==
+            (axis == 0 ? 1U : 0U),
+        "atomic cell axis projection");
+  }
+}
+void sparse_huge_domain() {
   auto registry = make_default_operation_registry();
-  ExecutionContextConfig config;
-  config.managed_resources = ResourceLimits{};
-  ExecutionContext execution(registry, config);
-  const auto budget = execution.resource_budget().take_value();
-  const auto before = budget.statistics().live[ResourceKind::Payload];
-  PlanarImage retained;
+  ExecutionContext context(registry);
+  const auto root = take(context.resource_budget());
+  SchemaTemplate schema;
+  schema.id = "test.huge-channel";
+  ResultTensorSpec tensor;
+  tensor.key = "samples";
+  tensor.descriptor = {ElementType::UInt8, {UINT64_MAX, 2}};
+  schema.tensors.push_back(std::move(tensor));
+  auto builder = take(ResultBuilder::start(root, schema, "sparse.source"));
+  require(builder.bind_descriptor_relation(
+      take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0}))));
+  auto data = take(root.allocator().allocate(1));
+  *data.data() = 73;
+  require(builder.publish_tensor(
+      0, Region({{UINT64_MAX - 1, 1}, {1, 1}}),
+      {0, {0, 0}, {UINT64_MAX - 1, 1}}, std::move(data).freeze(),
+      take(ResultRelation::cartesian(root, UINT64_MAX, {0, 1, 0, 0})),
+      {true, true, true, true}));
+  auto source_result = take(builder.seal());
+  WorkflowDocument document;
+  WorkflowInputDeclaration input;
+  input.id = 1;
+  input.name = "source";
+  input.result_schema = std::make_shared<const SchemaTemplate>(schema);
+  document.inputs = {input};
+  document.nodes = {{1,
+                     "channel.extract_index_strict",
+                     {WorkflowInputReference{1}},
+                     parameters(1, 1, false, "view")}};
+  document.outputs = {{"result", 1, "values"}};
+  PlanningOptions planning;
+  const Region roi({{UINT64_MAX - 1, 1}});
+  planning.output_regions = {{"result", roi}};
+  GraphContext graph(document);
+  auto compiled = take(Compiler(registry).compile(graph, planning));
+  auto run =
+      take(context.execute(compiled.plan, {{{"source", source_result}}}));
+  check(read(run.results.at("result"), roi) == std::vector<std::uint8_t>{73},
+        "sparse domain need not have representable full sample count");
+}
+void limits_empty_lifetime() {
+  auto input = source({ElementType::UInt8, {2, 3}});
+  Fixture f(input);
+  f.node(parameters(1, 1, false, "view"));
+  auto plan = take(f.compile());
+  auto frozen = take(f.context->freeze(plan.plan, f.bindings));
+  const auto root = take(f.context->resource_budget());
+  auto before = root.statistics().peak[ResourceKind::Payload];
+  auto empty = take(f.context->execute_fragments(
+      frozen, {{"result", take(Footprint::none({2}))}}));
+  check(take(empty.results.at("result").descriptor())
+                .tensor_coverage(0)
+                .empty() &&
+            root.statistics().peak[ResourceKind::Payload] == before,
+        "Empty has no sample/state Payload");
+  CancellationSource cancelled;
+  cancelled.cancel();
+  check(f.context->execute(plan.plan, f.bindings, cancelled.token())
+                .status()
+                .code == ErrorCode::Cancelled,
+        "precancelled invocation");
+  ExecutionOptions work;
+  work.maximum_dependency_work = 1;
+  check(f.context->execute(plan.plan, f.bindings, {}, work).status().code ==
+            ErrorCode::ResourceExhausted,
+        "work exhaustion");
+  ResourceLimits limits;
+  limits.capacity[ResourceKind::Payload] = 6;
+  Fixture small(input, limits);
+  small.node(parameters(1, 1, false, "view"));
+  check(small.execute().status().code == ErrorCode::ResourceExhausted,
+        "source-only capacity cannot admit continuation");
+  check(take(small.context->resource_budget())
+                .statistics()
+                .live[ResourceKind::Payload] == 6,
+        "failed continuation leaves only source");
+  std::optional<ResultTensorReadWindow> retained;
+  ResourceBudget owned;
   {
-    const ValueDescriptor descriptor{ElementType::UInt8, {1, 1, 2}};
-    auto source = PlanarImage::create(descriptor, {}).take_value();
-    const std::uint8_t sample = 23;
-    PS_CHECK(source.publish(Region({{0, 1}, {0, 1}, {1, 1}}), &sample, 1).ok());
-    WorkflowDocument document;
-    document.inputs = {{1,
-                        "image",
-                        descriptor,
-                        Region::whole(descriptor.shape),
-                        {},
-                        {},
-                        PlanarImageLayout{}}};
-    document.nodes = {{1,
-                       "channel.extract_index_strict",
-                       {WorkflowInputReference{1}},
-                       {{"axis", std::int64_t{2}},
-                        {"index", std::int64_t{1}},
-                        {"keepdims", true},
-                        {"layout", std::string("view")},
-                        {"metadata_mode", std::string("raw")}}}};
-    document.outputs = {{"selected", 1, "values"}};
-    GraphContext graph(document);
-    Compiler compiler(registry);
-    auto compiled = compiler.compile(graph);
-    PS_CHECK(compiled.ok());
-    ExecutionBindings bindings;
-    ExecutionBinding binding;
-    binding.name = "image";
-    binding.image = std::make_shared<const PlanarImage>(source);
-    bindings.inputs.push_back(binding);
-    ExecutionContextConfig limited_config;
-    limited_config.maximum_live_bytes = 1;
-    ExecutionContext limited(registry, limited_config);
-    PS_CHECK(limited.execute(compiled.value().plan, bindings).status().code ==
-             ErrorCode::ResourceExhausted);
-    auto run = execution.execute(compiled.value().plan, bindings);
-    PS_CHECK(run.ok());
-    auto nested = run.value()
-                      .images.at("selected")
-                      .channel_view(0, false, Region::whole({1, 1}));
-    PS_CHECK(nested.ok());
-    retained = nested.take_value();
-    PS_CHECK(budget.statistics().live[ResourceKind::Payload] > before);
+    ResultTensorLayout layout;
+    layout.spatial = true;
+    auto source_image = source({ElementType::UInt8, {1, 1, 2}}, {}, layout);
+    source_image.bytes = {1, 23};
+    Fixture owner_fixture(source_image);
+    owned = take(owner_fixture.context->resource_budget());
+    owner_fixture.node(parameters(2, 1, false, "view"));
+    auto run = take(owner_fixture.execute());
+    const auto& result = run.results.at("result");
+    retained.emplace(take(result.acquire_tensor(take(result.descriptor()), 0,
+                                                Region::whole({1, 1}))));
   }
-  PS_CHECK(budget.statistics().live[ResourceKind::Payload] > before);
-  std::uint8_t observed = 0;
-  PS_CHECK(retained.read(Region::whole({1, 1}), &observed, 1).ok());
-  PS_CHECK(observed == 23);
-  retained = {};
-  PS_CHECK(budget.statistics().live[ResourceKind::Payload] == before);
-  return 0;
-}
-int mixed_input_budget() {
-  auto registry = make_default_operation_registry();
-  Compiler compiler(registry);
-  const ValueDescriptor descriptor{ElementType::UInt8, {4096}};
-  auto value = Value::create(descriptor, Region::whole(descriptor.shape),
-                             {0, {1}}, std::vector<std::uint8_t>(4096))
-                   .take_value();
-  WorkflowDocument document;
-  document.inputs = {
-      {1, "tensor", descriptor, Region::whole(descriptor.shape), {0, {1}}, {}}};
-  document.nodes = {{1, "core.identity", {WorkflowInputReference{1}}, {}}};
-  document.outputs = {{"tensor", 1, "value"}};
-  PlanningOptions options;
-  options.output_regions = {{"tensor", Region({{0, 1}})}};
-  ExecutionBindings bindings;
-  bindings.inputs = {{"tensor", value}};
-  ExecutionContextConfig config;
-  config.managed_resources = ResourceLimits{};
-  config.managed_resources->capacity[ResourceKind::Referenced] = 1024;
-  ExecutionContext execution(registry, config);
-  for (bool mixed : {false, true}) {
-    if (mixed) {
-      const ValueDescriptor image_descriptor{ElementType::UInt8, {1, 1, 1}};
-      auto image = PlanarImage::create(image_descriptor, {}).take_value();
-      const std::uint8_t sample = 1;
-      PS_CHECK(image.publish(Region::whole(image_descriptor.shape), &sample, 1)
-                   .ok());
-      document.inputs.push_back({2,
-                                 "image",
-                                 image_descriptor,
-                                 Region::whole(image_descriptor.shape),
-                                 {},
-                                 {},
-                                 PlanarImageLayout{}});
-      document.nodes.push_back({2,
-                                "channel.extract_index_strict",
-                                {WorkflowInputReference{2}},
-                                {{"axis", std::int64_t{2}},
-                                 {"index", std::int64_t{0}},
-                                 {"keepdims", false},
-                                 {"layout", std::string("view")},
-                                 {"metadata_mode", std::string("raw")}}});
-      document.outputs.push_back({"image", 2, "values"});
-      ExecutionBinding binding;
-      binding.name = "image";
-      binding.image = std::make_shared<const PlanarImage>(image);
-      bindings.inputs.push_back(binding);
-    }
-    GraphContext graph(document);
-    auto compiled = compiler.compile(graph, options);
-    PS_CHECK(compiled.ok());
-    PS_CHECK(execution.execute(compiled.value().plan, bindings).status().code ==
-             ErrorCode::ResourceExhausted);
-  }
-  return 0;
-}
-int physical_width_slice() {
-  auto registry = make_default_operation_registry();
-  Compiler compiler(registry);
-  ExecutionContext execution(registry);
-  const ValueDescriptor descriptor{ElementType::UInt16, {5, 3, 2}};
-  for (const auto order :
-       {ImagePlaneOrder::Continuous, ImagePlaneOrder::Tiled}) {
-    PlanarImageConfig config;
-    config.order = order;
-    config.width_axis = 0;
-    config.channel_axis = 1;
-    config.height_axis = 2;
-    if (order == ImagePlaneOrder::Continuous)
-      config.row_pitch_bytes = 32;
-    auto source = PlanarImage::create(descriptor, config).take_value();
-    std::vector<std::uint16_t> samples;
-    for (std::uint16_t x = 0; x < 5; ++x)
-      for (std::uint16_t c = 0; c < 3; ++c)
-        for (std::uint16_t y = 0; y < 2; ++y)
-          samples.push_back(100 * x + 10 * c + y);
-    PS_CHECK(source
-                 .publish(Region::whole(descriptor.shape),
-                          reinterpret_cast<const std::uint8_t*>(samples.data()),
-                          samples.size() * sizeof(std::uint16_t))
-                 .ok());
-    WorkflowDocument document;
-    document.inputs = {
-        {1,
-         "image",
-         descriptor,
-         Region::whole(descriptor.shape),
-         {},
-         {},
-         PlanarImageLayout{order, 2, 0, 1, config.row_pitch_bytes, {}}}};
-    document.nodes = {{1,
-                       "channel.extract_index_strict",
-                       {WorkflowInputReference{1}},
-                       {{"axis", std::int64_t{0}},
-                        {"index", std::int64_t{3}},
-                        {"keepdims", true},
-                        {"layout", std::string("materialize")},
-                        {"metadata_mode", std::string("raw")}}}};
-    document.outputs = {{"width", 1, "values"}};
-    GraphContext graph(document);
-    auto compiled = compiler.compile(graph);
-    PS_CHECK(compiled.ok());
-    ExecutionBinding binding;
-    binding.name = "image";
-    binding.image = std::make_shared<const PlanarImage>(source);
-    ExecutionBindings bindings;
-    bindings.inputs.push_back(binding);
-    auto run = execution.execute(compiled.value().plan, bindings);
-    PS_CHECK(run.ok());
-    std::vector<std::uint16_t> observed(6);
-    PS_CHECK(run.value()
-                 .images.at("width")
-                 .read(Region::whole({1, 3, 2}),
-                       reinterpret_cast<std::uint8_t*>(observed.data()),
-                       observed.size() * sizeof(std::uint16_t))
-                 .ok());
-    PS_CHECK(observed ==
-             std::vector<std::uint16_t>({300, 301, 310, 311, 320, 321}));
-  }
-  return 0;
+  check(owned.statistics().live[ResourceKind::Payload] > 0 &&
+            *take(retained->row_run({0, 0})).data == 23,
+        "planar view window outlives all Result/context owners");
+  retained.reset();
+  check(owned.statistics().live[ResourceKind::Payload] == 0,
+        "last window releases planar backing");
 }
 }  // namespace
-
-int main() {
-  if (workflow())
-    return 1;
-  if (resource_lifetime())
-    return 1;
-  if (arbitrary_axis_oracle())
-    return 1;
-  if (preflight_errors())
-    return 1;
-  if (planar_alias())
-    return 1;
-  if (planar_workflow())
-    return 1;
-  if (planar_variants())
-    return 1;
-  if (strided_producer())
-    return 1;
-  if (disjoint_planar_roots() || planar_spatial_axis())
-    return 1;
-  if (planar_view_budget())
-    return 1;
-  if (mixed_input_budget())
-    return 1;
-  return physical_width_slice();
+int main() try {
+  workflow();
+  arbitrary_axis_oracle();
+  planar_and_batches();
+  spatial_axes();
+  strided_and_disjoint();
+  fragmented_views();
+  preflight_and_split();
+  resource_and_metadata();
+  atomic_observations();
+  sparse_huge_domain();
+  limits_empty_lifetime();
+  std::cout << "FMT-01 Result extraction, split, exact support, views and "
+               "resources passed\n";
+  return 0;
+} catch (const std::exception& error) {
+  std::cerr << error.what() << '\n';
+  return 1;
 }

@@ -1,73 +1,12 @@
 #include <cfenv>  // NOLINT(build/c++11)
 #include <cmath>
-#include <cstring>
 #include <limits>
-#include <map>
-#include <memory>
-#include <string>
 
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
-namespace {
-int raster_admission(std::uint64_t height, std::uint64_t width) {
-  using namespace ps;  // NOLINT(build/namespaces)
-  const LayerSpec spec{height, width};
-  auto definition = make_layer_operation(LayerOperation::Assemble, spec);
-  PS_CHECK(definition.ok());
-  ResultProgramMetadata metadata;
-  metadata.output.result_schema = std::make_shared<const SchemaTemplate>(
-      *definition.value().traits.outputs[0].result_schema);
-  metadata.inputs.resize(2);
-  metadata.inputs[0].descriptor = {ElementType::Float32, {height, width, 4}};
-  metadata.inputs[0].facets = {encode_semantic(rgba_semantics()).take_value()};
-  metadata.inputs[1].descriptor = {ElementType::Float32, {height, width, 3}};
-  OperationRegistry registry;
-  PS_CHECK(registry.register_operation(definition.take_value()).ok());
-  PS_CHECK(registry.freeze().ok());
-  std::map<std::string, ParameterValue> parameters;
-  ResultProgramQuery query(metadata, parameters);
-  query.semantic_key = "large-layer-admission";
-  query.page_bytes = 64;
-  ResourceLimits limits;
-  limits.capacity[ResourceKind::Host] = 65536;
-  limits.capacity[ResourceKind::Metadata] = 65536;
-  ResourceBudget root(limits);
-  auto allocator = root.allocator();
-  auto started = registry.start_result("layer.assemble", query, allocator);
-  PS_CHECK(started.ok());
-  auto continuation = started.take_value();
-  ResultValueInputs values;
-  ResultObjectInputs objects;
-  ResourceVector<ResultIoReply> io;
-  auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
-  ResultProgramPhase phase{
-      query,
-      values,
-      objects,
-      io,
-      allocator,
-      root,
-      [&](std::uint64_t work) { return root.consume({work}); },
-      failure};
-  auto polled = continuation.poll(phase);
-  PS_CHECK(polled.ok());
-  auto* need = std::get_if<ResultProgramNeed>(&polled.value());
-  PS_CHECK(need && need->values.size() == 2 && need->io.empty());
-  // Admission only: no pixel callback/I/O has run. Full execution remains
-  // subject to explicitly configured stage, work, disk and capacity budgets.
-  PS_CHECK(root.statistics().live[ResourceKind::Disk] == 0 &&
-           root.statistics().peak[ResourceKind::Host] <= 65536);
-  return 0;
-}
-}  // namespace
-
 int main() {
   using namespace ps;  // NOLINT(build/namespaces)
-  PS_CHECK(raster_admission(1, 1048576) == 0);
-  PS_CHECK(raster_admission(1, 1048577) == 0);
-  PS_CHECK(raster_admission(1080, 1920) == 0);
-  PS_CHECK(raster_admission(1, 67108864) == 0);
   const float maximum = std::numeric_limits<float>::max();
   const float tiny = std::numeric_limits<float>::denorm_min();
   LayerPixel underflow{{{1, 0, 0}, tiny}, {3, -4, 5}};
@@ -87,6 +26,8 @@ int main() {
   LayerPixel limit{{{maximum, 0, 0}, .5F}, {-maximum, 0, 0}};
   PS_CHECK(layer_over(limit, limit).status().reason ==
            FailureReason::ArithmeticOverflow);
+  auto flattened = layer_flatten(emission_only, {1, 2, 3}).take_value();
+  PS_CHECK(flattened.a == 1 && flattened.p == (std::array<float, 3>{5, 0, 6}));
   auto response = layer_response(limit).take_value();
   auto response_pair = response_over(response, response).take_value();
   PS_CHECK(response_pair.q[0] == 0 && response_pair.t == .25F);
@@ -138,20 +79,6 @@ int main() {
   auto unchanged = layer_opacity(signed_zero, 1).take_value();
   PS_CHECK(std::signbit(unchanged.coverage.p[0]) &&
            std::signbit(unchanged.emission[0]));
-  for (unsigned k = 1; k <= 6; ++k) {
-    auto schema =
-        layer_schema(static_cast<LayerRepresentation>(k)).take_value();
-    PS_CHECK(schema.validate(true).ok());
-    auto wrong = schema;
-    wrong.metadata[0].payload[16] = 2;
-    PS_CHECK(!wrong.validate(true).ok());
-    wrong = schema;
-    wrong.fields[0].record_shape[0]++;
-    PS_CHECK(!wrong.validate(true).ok());
-    wrong = schema;
-    wrong.publication = PublishPolicy::StablePrefix;
-    PS_CHECK(!wrong.validate(true).ok());
-  }
   // Independent integer numerator reference: all selected dyadic arithmetic is
   // exactly representable, so each rational identity checks bit-exact output.
   for (int pa = -2; pa <= 2; ++pa)

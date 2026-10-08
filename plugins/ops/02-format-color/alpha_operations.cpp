@@ -9,7 +9,6 @@
 #include <utility>
 #include <vector>
 
-#include "01-numeric/array_publication.hpp"
 #include "02-format-color/alpha_common.hpp"
 #include "02-format-color/alpha_math.hpp"
 #include "02-format-color/alpha_numeric_metadata.hpp"
@@ -22,6 +21,14 @@ struct Slot final {
   bool color = false;
   bool alpha = false;
 };
+struct Map final {
+  std::uint32_t port = 0, roles = 1;
+  std::vector<ResultMappedAxis> axes;
+};
+struct Span final {
+  std::uint64_t first = 0, count = 1;
+  Map map;
+};
 struct Preparation final {
   Action action = Action::Associate;
   bool raw = false, narrow = true, simd = false, reference = false;
@@ -30,37 +37,125 @@ struct Preparation final {
   std::uint64_t alpha_index = 0;
   std::string group, layout;
   std::vector<Slot> slots;
-  std::vector<DependencyMappedNeed> data_maps;
-  DependencyMappedNeed alpha_map;
+  std::vector<Map> data_maps;
+  Map alpha_map;
+  std::vector<Span> spans;
   bool view_legal = false;
 };
-DependencyMappedNeed mapping(const Preparation& state,
-                             const std::vector<OperationMetadata>& inputs,
-                             bool alpha, std::uint64_t source) {
-  DependencyMappedNeed map;
+Map mapping(const Preparation& state,
+            const std::vector<OperationMetadata>& inputs, bool alpha,
+            std::uint64_t source) {
+  Map map;
   map.port = alpha && state.external ? 1 : 0;
+  const auto& input = inputs[map.port].result_schema->tensors[0];
+  const auto batches = inputs[0].result_schema->tensors[0].batch_axes.size();
   const auto source_axis =
       map.port == 0 ? state.input_axis : std::optional<std::uint32_t>{};
-  for (std::size_t axis = 0; axis < inputs[map.port].descriptor.shape.size();
-       ++axis) {
-    DependencyAxis item;
+  for (std::size_t axis = 0; axis < input.sample_shape().size(); ++axis) {
+    ResultMappedAxis item;
     if (alpha && state.scalar) {
-      item.fixed = {0, 1};
-    } else if (source_axis && axis == *source_axis) {
-      item.fixed = {source, 1};
+      item.source_origin = 0;
+    } else if (axis < batches) {
+      item.output_axis = axis;
+    } else if (source_axis && axis - batches == *source_axis) {
+      item.source_origin = source;
     } else {
-      const auto spatial = axis - (source_axis && axis > *source_axis ? 1 : 0);
-      item.observation_axis = static_cast<std::int32_t>(
-          spatial +
-          (state.output_axis && spatial >= *state.output_axis ? 1 : 0));
+      const auto spatial =
+          axis - batches -
+          (source_axis && axis - batches > *source_axis ? 1 : 0);
+      item.output_axis =
+          batches + spatial +
+          (state.output_axis && spatial >= *state.output_axis ? 1 : 0);
     }
     map.axes.push_back(item);
   }
   return map;
 }
+bool same_axis(const ResultMappedAxis& a, const ResultMappedAxis& b) {
+  return a.output_axis == b.output_axis && a.source_origin == b.source_origin &&
+         a.step == b.step && a.extent == b.extent &&
+         a.output_origin == b.output_origin;
+}
+std::optional<Map> merge_map(const Map& first, const Map& second,
+                             std::uint32_t output_axis, std::uint64_t start) {
+  if (first.port != second.port || first.roles != second.roles ||
+      first.axes.size() != second.axes.size())
+    return {};
+  auto result = first;
+  for (std::size_t i = 0; i < first.axes.size(); ++i) {
+    const auto& a = first.axes[i];
+    const auto& b = second.axes[i];
+    if (a.output_axis >= 0 || b.output_axis >= 0) {
+      if (!same_axis(a, b))
+        return {};
+    } else {
+      const auto delta =
+          static_cast<__int128>(b.source_origin) - a.source_origin;
+      if (delta < -1 || delta > 1 || a.extent != b.extent)
+        return {};
+      if (delta) {
+        result.axes[i].output_axis = output_axis;
+        result.axes[i].output_origin = start;
+        result.axes[i].step = static_cast<std::int64_t>(delta);
+      }
+    }
+  }
+  return result;
+}
+bool matches_map(const Map& merged, const Map& item, std::uint32_t output_axis,
+                 std::uint64_t channel) {
+  if (merged.port != item.port || merged.roles != item.roles ||
+      merged.axes.size() != item.axes.size())
+    return false;
+  for (std::size_t i = 0; i < item.axes.size(); ++i) {
+    const auto& a = merged.axes[i];
+    const auto& b = item.axes[i];
+    if (a.output_axis == static_cast<std::int32_t>(output_axis) &&
+        b.output_axis < 0) {
+      auto coordinate = a.source_coordinate(channel);
+      if (!coordinate.ok() || coordinate.value() != b.source_origin ||
+          a.extent != b.extent)
+        return false;
+    } else if (!same_axis(a, b)) {
+      return false;
+    }
+  }
+  return true;
+}
+void prepare_spans(Preparation* s, std::size_t batches) {
+  const auto axis =
+      static_cast<std::uint32_t>(batches + s->output_axis.value_or(0));
+  for (std::size_t first = 0; first < s->data_maps.size();) {
+    std::size_t end = first + 1;
+    Map map = s->data_maps[first];
+    if (s->output_axis && end < s->data_maps.size()) {
+      auto merged = merge_map(map, s->data_maps[end], axis, first);
+      if (merged) {
+        map = std::move(*merged);
+        ++end;
+        while (end < s->data_maps.size() &&
+               matches_map(map, s->data_maps[end], axis, end))
+          ++end;
+      }
+    }
+    s->spans.push_back({first, end - first, std::move(map)});
+    first = end;
+  }
+  for (std::size_t first = 0; first < s->slots.size();) {
+    if (!s->slots[first].color) {
+      ++first;
+      continue;
+    }
+    auto end = first + 1;
+    while (end < s->slots.size() && s->slots[end].color)
+      ++end;
+    s->spans.push_back({first, end - first, s->alpha_map});
+    first = end;
+  }
+}
 Result<OperationPreparation> prepare_alpha(
     const std::vector<OperationMetadata>& inputs, const Params& p,
-    Action action, numeric_ops::SequenceProfile profile) {
+    Action action, numeric_ops::SequenceProfile profile) try {
   using Answer = Result<OperationPreparation>;
   auto available = numeric_ops::sequence_profile_available(profile);
   if (!available.ok()) {
@@ -74,16 +169,18 @@ Result<OperationPreparation> prepare_alpha(
     if (!status.ok()) {
       return Answer(status);
     }
-    if ((m.descriptor.element_type != ElementType::Float32 &&
-         m.descriptor.element_type != ElementType::Float64) ||
-        m.descriptor.element_type != inputs[0].descriptor.element_type) {
+    if ((tensor(m).descriptor.element_type != ElementType::Float32 &&
+         tensor(m).descriptor.element_type != ElementType::Float64) ||
+        tensor(m).descriptor.element_type !=
+            tensor(inputs[0]).descriptor.element_type) {
       return Answer(mismatch(
           "arithmetic/set require matching Float32 or Float64 inputs"));
     }
   }
+  const auto& main = inputs[0].result_schema->tensors[0];
   Preparation s;
   s.action = action;
-  s.narrow = inputs[0].descriptor.element_type == ElementType::Float32;
+  s.narrow = main.descriptor.element_type == ElementType::Float32;
   s.raw = text(p, "metadata_mode", "respect") == "raw";
   s.group = text(p, "group");
   s.layout = text(p, "layout", action == Action::Set ? "auto" : "materialize");
@@ -165,8 +262,8 @@ Result<OperationPreparation> prepare_alpha(
         return Answer(invalid("raw channels requires axis"));
       }
       const auto axis = std::get<std::int64_t>(p.at("axis"));
-      if (axis < 0 || static_cast<std::uint64_t>(axis) >=
-                          inputs[0].descriptor.shape.size()) {
+      if (axis < 0 ||
+          static_cast<std::uint64_t>(axis) >= main.descriptor.shape.size()) {
         return Answer(invalid("raw axis out of rank"));
       }
       s.input_axis = static_cast<std::uint32_t>(axis);
@@ -179,8 +276,7 @@ Result<OperationPreparation> prepare_alpha(
       if (!number(
               list.substr(begin, end == std::string::npos ? end : end - begin),
               &index) ||
-          index >=
-              (s.input_axis ? inputs[0].descriptor.shape[*s.input_axis] : 1) ||
+          index >= (s.input_axis ? main.descriptor.shape[*s.input_axis] : 1) ||
           !seen.insert(index).second) {
         return Answer(invalid("raw components must be distinct valid indices"));
       }
@@ -191,8 +287,7 @@ Result<OperationPreparation> prepare_alpha(
       begin = end + 1;
     }
   }
-  const auto count =
-      s.input_axis ? inputs[0].descriptor.shape[*s.input_axis] : 1;
+  const auto count = s.input_axis ? main.descriptor.shape[*s.input_axis] : 1;
   if (count > 65536) {
     return Answer(invalid("channel mapping capacity exceeded"));
   }
@@ -215,7 +310,7 @@ Result<OperationPreparation> prepare_alpha(
     if (p.count("alpha_match") || p.count("alpha_selector")) {
       return Answer(invalid("external alpha forbids internal selector"));
     }
-    auto spatial = inputs[0].descriptor.shape;
+    auto spatial = main.descriptor.shape;
     if (s.input_axis) {
       spatial.erase(spatial.begin() + *s.input_axis);
     }
@@ -223,8 +318,10 @@ Result<OperationPreparation> prepare_alpha(
       return Answer(invalid("rank-zero external alpha plane is forbidden"));
     }
     const auto expected = s.scalar ? std::vector<std::uint64_t>{1} : spatial;
-    if (inputs[1].descriptor.shape != expected ||
-        (s.scalar && inputs[1].planar_layout)) {
+    if ((s.scalar && !tensor(inputs[1]).batch_axes.empty()) ||
+        (!s.scalar && tensor(inputs[1]).batch_axes != main.batch_axes) ||
+        tensor(inputs[1]).descriptor.shape != expected ||
+        (s.scalar && tensor(inputs[1]).layout.spatial)) {
       return Answer(mismatch("external alpha shape/structure mismatch"));
     }
     if (!s.scalar) {
@@ -350,6 +447,9 @@ Result<OperationPreparation> prepare_alpha(
   OperationOutputSpecialization output;
   output.metadata = inputs[0];
   output.metadata.atomic_trailing_axes = 0;
+  auto schema = *inputs[0].result_schema;
+  auto& output_spec = schema.tensors[0];
+  output_spec.atomic_trailing_axes = 0;
   s.output_axis = s.input_axis;
   std::vector<std::int64_t> source_map;
   if (action == Action::Set) {
@@ -374,16 +474,15 @@ Result<OperationPreparation> prepare_alpha(
       }
       const auto axis = std::get<std::int64_t>(p.at("output_axis"));
       if (axis < 0 ||
-          static_cast<std::uint64_t>(axis) >
-              inputs[0].descriptor.shape.size() ||
-          inputs[0].descriptor.shape.size() == 8) {
+          static_cast<std::uint64_t>(axis) > main.descriptor.shape.size() ||
+          main.sample_shape().size() == 8) {
         return Answer(invalid("inserted output axis out of rank"));
       }
       s.output_axis = static_cast<std::uint32_t>(axis);
-      output.metadata.descriptor.shape.insert(
-          output.metadata.descriptor.shape.begin() + *s.output_axis, 1);
-      if (output.metadata.planar_layout) {
-        auto& l = *output.metadata.planar_layout;
+      output_spec.descriptor.shape.insert(
+          output_spec.descriptor.shape.begin() + *s.output_axis, 1);
+      if (output_spec.layout.spatial) {
+        auto& l = output_spec.layout;
         if (l.height_axis >= *s.output_axis) {
           ++l.height_axis;
         }
@@ -410,15 +509,15 @@ Result<OperationPreparation> prepare_alpha(
       target = static_cast<std::uint64_t>(position);
     }
     source_map.insert(source_map.begin() + target, -1);
-    output.metadata.descriptor.shape[*s.output_axis] = source_map.size();
+    output_spec.descriptor.shape[*s.output_axis] = source_map.size();
     auto remapped =
         remap_description(*semantic, source_map, *s.output_axis, target);
     if (!remapped.ok()) {
       return Answer(remapped.status());
     }
     desc = remapped.take_value();
-    if (output.metadata.planar_layout) {
-      output.metadata.planar_layout->groups.clear();
+    if (output_spec.layout.spatial) {
+      output_spec.layout.groups.clear();
     }
   } else {
     for (std::uint64_t i = 0; i < count; ++i) {
@@ -442,7 +541,7 @@ Result<OperationPreparation> prepare_alpha(
     }
   }
   if (desc) {
-    auto valid = validate_tensor_description(*desc, output.metadata.descriptor);
+    auto valid = validate_tensor_description(*desc, output_spec.descriptor);
     if (!valid.ok()) {
       return Answer(valid);
     }
@@ -451,19 +550,21 @@ Result<OperationPreparation> prepare_alpha(
       return Answer(encoded.status());
     }
     if (!s.raw) {
-      output.metadata.facets = output_facets(inputs[0], *desc);
+      output_spec.facets = output_facets(inputs[0], *desc);
     }
   }
+  output.metadata.result_schema =
+      std::make_shared<const SchemaTemplate>(std::move(schema));
   auto valid_shape = shape_valid(output.metadata);
   if (!valid_shape.ok()) {
     return Answer(valid_shape);
   }
   s.alpha_map = mapping(s, inputs, true, s.alpha_index);
-  s.alpha_map.roles = static_cast<std::uint32_t>(DependencyRole::Validation);
+  s.alpha_map.roles = static_cast<std::uint32_t>(
+      s.raw ? DependencyRole::Data : DependencyRole::Validation);
   if (action != Action::Set) {
     s.alpha_map.roles |= static_cast<std::uint32_t>(DependencyRole::Data);
   }
-  std::vector<DependencyMapPiece> pieces;
   bool identity_view =
       action == Action::Set && !s.external && s.input_axis == s.output_axis;
   for (std::size_t k = 0; k < source_map.size(); ++k) {
@@ -476,63 +577,29 @@ Result<OperationPreparation> prepare_alpha(
     auto data = mapping(
         s, inputs, slot.alpha,
         slot.alpha ? s.alpha_index : static_cast<std::uint64_t>(original));
-    s.data_maps.push_back(data);
-    auto dims = Region::whole(output.metadata.descriptor.shape).dimensions();
-    if (s.output_axis) {
-      dims[*s.output_axis] = {k, 1};
-    }
-    auto coverage = Footprint::from_regions(output.metadata.descriptor.shape,
-                                            {Region(dims)});
-    if (!coverage.ok()) {
-      return Answer(coverage.status());
-    }
-    std::vector<DependencyMappedNeed> needs{data};
-    if (slot.color) {
-      needs.push_back(s.alpha_map);
-    }
-    if (slot.alpha) {
-      needs[0].roles |= static_cast<std::uint32_t>(DependencyRole::Validation);
-    }
-    for (std::uint32_t port = 0; port < inputs.size(); ++port) {
-      DependencyMappedNeed descriptor;
-      descriptor.port = port;
-      descriptor.roles = static_cast<std::uint32_t>(DependencyRole::Descriptor);
-      descriptor.tags = {{1, 0}};
-      needs.push_back(std::move(descriptor));
-    }
-    pieces.push_back({coverage.take_value(), std::move(needs)});
+    if (slot.alpha || (!s.raw && slot.color))
+      data.roles |= 4;
+    s.data_maps.push_back(std::move(data));
     const auto actual =
         slot.alpha ? s.alpha_index : static_cast<std::uint64_t>(original);
     identity_view = identity_view && actual == k;
   }
   s.view_legal = identity_view;
-  output.static_dependency_pieces = std::move(pieces);
-  output.regional_atomic = true;
-  output.preserve_output_views =
-      action == Action::Set && s.layout != "materialize" &&
-      (!output.metadata.planar_layout || s.view_legal);
-  if (output.metadata.planar_layout && action == Action::Set) {
-    output.data_movement_view_policy =
-        s.layout == "view"          ? DataMovementViewPolicy::RequireView
-        : s.layout == "materialize" ? DataMovementViewPolicy::Materialize
-                                    : DataMovementViewPolicy::Auto;
-  }
+  prepare_spans(&s, main.batch_axes.size());
   OperationPreparation result;
   result.outputs.push_back(std::move(output));
   result.state = std::make_shared<Preparation>(std::move(s));
   return Answer(std::move(result));
+} catch (const Status& status) {
+  return Result<OperationPreparation>(status);
 }
-void source_at(const DependencyMappedNeed& map,
-               const std::vector<std::uint64_t>& at,
+void source_at(const Map& map, const std::vector<std::uint64_t>& at,
                std::vector<std::uint64_t>* source) {
   source->resize(map.axes.size());
   for (std::size_t i = 0; i < map.axes.size(); ++i) {
-    const auto& a = map.axes[i];
-    (*source)[i] = a.observation_axis < 0
-                       ? a.fixed.offset
-                       : static_cast<std::uint64_t>(
-                             static_cast<__int128>(at[a.observation_axis]) +
-                             a.translation);
+    const auto& axis = map.axes[i];
+    (*source)[i] = tensor_ops::take(axis.source_coordinate(
+        axis.output_axis < 0 ? 0 : at[axis.output_axis]));
   }
 }
 Status sample_failure(const Preparation& s, const MathFailure& failure,
@@ -564,533 +631,479 @@ Status sample_failure(const Preparation& s, const MathFailure& failure,
           failure.reason,
           {FailureOrigin::Domain, FailureScope::Atom}};
 }
-bool contains(const Region& region, const std::vector<std::uint64_t>& at) {
-  if (region.rank() != at.size()) {
-    return false;
-  }
-  for (std::size_t i = 0; i < at.size(); ++i) {
-    const auto d = region.dimensions()[i];
-    if (at[i] < d.offset || at[i] - d.offset >= d.extent) {
-      return false;
-    }
-  }
-  return true;
+using tensor_ops::require;
+using tensor_ops::take;
+using Poll = Result<ResultProgramPoll>;
+Status unavailable_view() {
+  return invalid(
+      "ViewUnavailable: full set-alpha map has no common affine owner");
 }
-struct Cursor final {
-  const ValueFragments* input;
-  const Value* cached = nullptr;
-  Status read(const std::vector<std::uint64_t>& at, void* destination,
-              std::size_t width) {
-    if (!cached || !contains(cached->region(), at)) {
-      cached = nullptr;
-      for (const auto& v : input->fragments()) {
-        if (contains(v.region(), at)) {
-          cached = &v;
-          break;
-        }
-      }
+std::optional<std::uint32_t> output_axis(const Preparation& s,
+                                         const ResultTensorSpec& spec) {
+  return s.output_axis
+             ? std::optional<std::uint32_t>{static_cast<std::uint32_t>(
+                   spec.batch_axes.size() + *s.output_axis)}
+             : std::nullopt;
+}
+ResultRelation joined(const ResultProgramPhase& phase,
+                      ResourceVector<ResultRelation> relations) {
+  const auto& root = phase.resources;
+  while (relations.size() > 1) {
+    ResourceVector<ResultRelation> next{
+        ResourceAllocator<ResultRelation>(root)};
+    for (std::size_t i = 0; i < relations.size(); i += 16) {
+      require(phase.consume_work(17));
+      std::vector<ResultRelation> group;
+      const auto end = std::min(relations.size(), i + 16);
+      for (auto j = i; j < end; ++j)
+        group.push_back(relations[j]);
+      next.push_back(take(ResultRelation::unite(root, std::move(group))));
     }
-    if (!cached) {
-      return Status{ErrorCode::NotFound, "alpha source coverage is missing"};
-    }
-    auto address = cached->byte_address(at);
-    if (!address.ok()) {
-      return address.status();
-    }
-    std::memcpy(destination, cached->bytes().data() + address.value(), width);
-    return Status::success();
+    relations = std::move(next);
   }
-};
+  return relations.front();
+}
+ResultBuilder builder(const ResultProgramPhase& phase, bool empty) {
+  auto result = take(ResultBuilder::start(
+      phase.resources, *phase.query.output.result_schema,
+      phase.query.semantic_key, {},
+      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
+                                                     phase.association->end())
+                        : std::vector<std::uint64_t>{},
+      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
+  ResourceVector<ResultRelation> relations{
+      ResourceAllocator<ResultRelation>(phase.resources)};
+  for (std::uint32_t port = 0; port < phase.query.inputs.size(); ++port)
+    relations.push_back(take(ResultRelation::cartesian(
+        phase.resources, 1,
+        {port, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0})));
+  require(result.bind_descriptor_relation(joined(phase, std::move(relations))));
+  return result;
+}
+Poll empty_result(const ResultProgramPhase& phase) try {
+  auto result = builder(phase, true);
+  return Poll(ResultPublication{take(result.seal()), true});
+} catch (const Status& status) {
+  return Poll(status);
+}
+Region channel_region(const Region& box, std::optional<std::uint32_t> axis,
+                      std::uint64_t channel) {
+  auto dims = box.dimensions();
+  if (axis)
+    dims[*axis] = {channel, 1};
+  return Region(std::move(dims));
+}
+ResultRelation relation(const ResultProgramPhase& phase, const Preparation& s) {
+  const auto& spec = phase.query.output.result_schema->tensors[0];
+  const auto shape = spec.sample_shape();
+  const auto axis = output_axis(s, spec);
+  ResourceVector<ResultRelation> relations{
+      ResourceAllocator<ResultRelation>(phase.resources)};
+  for (const auto& span : s.spans) {
+    require(phase.consume_work(span.map.axes.size() + 1));
+    auto dims = Region::whole(shape).dimensions();
+    if (axis)
+      dims[*axis] = {span.first, span.count};
+    const auto& map = span.map;
+    relations.push_back(take(ResultRelation::mapped(
+        phase.resources, shape, Region(std::move(dims)),
+        phase.query.inputs[map.port].result_schema->tensors[0].sample_shape(),
+        map.axes,
+        {map.port, map.roles, 0, 0, ResultSupportTarget::Tensor, 0})));
+  }
+  for (std::uint32_t port = 0; port < phase.query.inputs.size(); ++port)
+    relations.push_back(take(ResultRelation::cartesian(
+        phase.resources, take(spec.sample_count()),
+        {port, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
+  return joined(phase, std::move(relations));
+}
+// Inspect only authorized backing metadata. This proves the full declared map
+// but does not grant any additional sample authorization or output coverage.
 struct GenericView final {
-  const Value* owner = nullptr;
-  __int128 base = 0;
+  std::shared_ptr<const CpuStorage> owner;
+  std::uint64_t base = 0;
   std::vector<std::int64_t> strides;
 };
-// Prove the COMPLETE declared mapping, not only the requested channels. Source
-// fragments must agree on one affine map per port and share one immutable
-// storage owner. Physical bounds are checked over the full output shape, but
-// this proof grants no sample coverage: only the validated query is published.
-Result<std::optional<GenericView>> generic_view(const DependencyPhase& phase,
-                                                const Preparation& state) {
-  using Answer = Result<std::optional<GenericView>>;
-  const auto unavailable = [] { return Answer(std::optional<GenericView>{}); };
-  if (state.action != Action::Set || state.layout == "materialize") {
-    return unavailable();
-  }
-  GenericView result;
-  const auto rank = phase.query.output.descriptor.shape.size();
-  std::vector<__int128> bases(phase.inputs.size());
-  std::vector<const Value*> sources(phase.inputs.size(), nullptr);
-  for (const auto& map : state.data_maps) {
-    if (sources[map.port]) {
+Status generic_view(const ResultProgramPhase& phase, const Preparation& s,
+                    GenericView* proof) {
+  const auto& spec = phase.query.output.result_schema->tensors[0];
+  const auto shape = spec.sample_shape();
+  const auto rank = shape.size();
+  std::array<Value, 2> sources;
+  std::array<__int128, 2> bases{};
+  const CpuStorage* owner = nullptr;
+  for (const auto& map : s.data_maps) {
+    if (sources[map.port].valid())
       continue;
-    }
-    for (const auto& value : phase.inputs[map.port].fragments()) {
-      auto work = phase.consume_work(1 + rank);
-      if (!work.ok()) {
-        return Answer(work);
+    const auto& input = phase.tensors->at({map.port, 0});
+    std::function<Status(const Region&)> inspect;
+    inspect = [&](const Region& region) {
+      require(phase.consume_work(1 + rank));
+      auto window = take(input.acquire(region, phase.query.cancellation));
+      auto value = execution_internal::ResultWindowAccess::affine(window);
+      if (!value.ok()) {
+        if (value.status().code != ErrorCode::NotFound)
+          return value.status();
+        auto split =
+            execution_internal::ResultWindowAccess::visit_backing_regions(
+                window, phase.resources, inspect);
+        if (!split.ok())
+          return split.status();
+        return split.value() ? Status::success() : unavailable_view();
       }
-      __int128 base = value.layout().byte_offset;
-      for (std::size_t i = 0; i < value.layout().origin.size(); ++i) {
-        base -= static_cast<__int128>(value.layout().origin[i]) *
-                value.layout().byte_strides[i];
-      }
-      if (result.owner &&
-          result.owner->storage().get() != value.storage().get()) {
-        return unavailable();
-      }
-      if (sources[map.port] && (base != bases[map.port] ||
-                                value.layout().byte_strides !=
-                                    sources[map.port]->layout().byte_strides)) {
-        return unavailable();
-      }
-      result.owner = &value;
-      sources[map.port] = &value;
+      const auto& v = value.value();
+      auto base = static_cast<__int128>(v.layout().byte_offset);
+      for (std::size_t i = 0; i < v.layout().origin.size(); ++i)
+        base -= static_cast<__int128>(v.layout().origin[i]) *
+                v.layout().byte_strides[i];
+      if (owner && owner != v.storage().get())
+        return unavailable_view();
+      const auto& previous = sources[map.port];
+      if (previous.valid() &&
+          (base != bases[map.port] ||
+           previous.layout().byte_strides != v.layout().byte_strides))
+        return unavailable_view();
+      owner = v.storage().get();
+      sources[map.port] = value.take_value();
       bases[map.port] = base;
+      return Status::success();
+    };
+    for (const auto& box : input.coverage().boxes()) {
+      auto inspected = inspect(box);
+      if (!inspected.ok())
+        return inspected;
     }
-    if (!sources[map.port]) {
-      return unavailable();
-    }
+    if (!sources[map.port].valid())
+      return unavailable_view();
   }
-  std::vector<__int128> offsets;
-  for (const auto& map : state.data_maps) {
-    const auto& source = *sources[map.port];
+  std::array<std::int64_t, 8> strides{};
+  __int128 first = 0, channel_stride = 0;
+  for (std::size_t k = 0; k < s.data_maps.size(); ++k) {
+    require(phase.consume_work(rank + 1));
+    const auto& map = s.data_maps[k];
+    const auto& source = sources[map.port];
     auto base = bases[map.port];
-    std::vector<std::int64_t> strides(rank, 0);
+    std::array<std::int64_t, 8> projected{};
     for (std::size_t i = 0; i < map.axes.size(); ++i) {
       const auto& axis = map.axes[i];
       const auto stride = source.layout().byte_strides[i];
-      base += static_cast<__int128>(
-                  axis.observation_axis < 0
-                      ? static_cast<std::int64_t>(axis.fixed.offset)
-                      : axis.translation) *
-              stride;
-      if (axis.observation_axis >= 0) {
-        strides[axis.observation_axis] = stride;
-      }
+      base += static_cast<__int128>(axis.source_origin) * stride;
+      if (axis.output_axis >= 0)
+        projected[axis.output_axis] = stride;
     }
-    if (offsets.empty()) {
-      result.strides = strides;
-    } else if (result.strides != strides) {
-      return unavailable();
-    }
-    offsets.push_back(base);
-  }
-  if (offsets.empty() || !state.output_axis) {
-    return unavailable();
-  }
-  const __int128 channel_stride =
-      offsets.size() > 1 ? offsets[1] - offsets[0] : 0;
-  if (channel_stride < INT64_MIN || channel_stride > INT64_MAX) {
-    return unavailable();
-  }
-  for (std::size_t k = 0; k < offsets.size(); ++k) {
-    if (offsets[k] != offsets[0] + static_cast<__int128>(k) * channel_stride) {
-      return unavailable();
+    if (!k) {
+      strides = projected;
+      first = base;
+    } else {
+      if (strides != projected)
+        return unavailable_view();
+      if (k == 1)
+        channel_stride = base - first;
+      if (base != first + static_cast<__int128>(k) * channel_stride)
+        return unavailable_view();
     }
   }
-  result.base = offsets[0];
-  result.strides[*state.output_axis] =
-      static_cast<std::int64_t>(channel_stride);
-  auto low = result.base, high = result.base;
+  const auto axis = output_axis(s, spec);
+  if (!axis || channel_stride < INT64_MIN || channel_stride > INT64_MAX)
+    return unavailable_view();
+  strides[*axis] = static_cast<std::int64_t>(channel_stride);
+  auto low = first, high = first;
   for (std::size_t i = 0; i < rank; ++i) {
-    const auto span =
-        static_cast<__int128>(phase.query.output.descriptor.shape[i] - 1) *
-        result.strides[i];
-    if (span < 0) {
-      low += span;
-    } else {
-      high += span;
-    }
+    const auto delta = static_cast<__int128>(shape[i] - 1) * strides[i];
+    (delta < 0 ? low : high) += delta;
   }
-  const auto width =
-      Value::element_size(phase.query.output.descriptor.element_type);
   if (low < 0 ||
-      high + width > static_cast<__int128>(result.owner->bytes().size())) {
-    return unavailable();
-  }
-  return Answer(std::optional<GenericView>{std::move(result)});
+      high + (s.narrow ? 4 : 8) > static_cast<__int128>(owner->bytes().size()))
+    return unavailable_view();
+  proof->owner = sources[s.data_maps.front().port].storage();
+  proof->base = static_cast<std::uint64_t>(first);
+  proof->strides.assign(strides.begin(), strides.begin() + rank);
+  return Status::success();
 }
-Result<ValueFragments> evaluate(const DependencyPhase& phase,
-                                const Preparation& s) {
-  using Answer = Result<ValueFragments>;
-  const auto& descriptor = phase.query.output.descriptor;
-  const auto& facets = phase.query.output.facets;
-  const auto width = Value::element_size(descriptor.element_type);
-  auto proof = generic_view(phase, s);
-  if (!proof.ok()) {
-    return Answer(proof.status());
-  }
-  const bool viewed = proof.value().has_value();
-  if (s.layout == "view" && !viewed) {
-    return Answer(invalid(
-        "ViewUnavailable: full set-alpha map has no common affine owner"));
-  }
-  numeric_ops::ArrayPublication publication(phase.query.outputs.boxes().size(),
-                                            descriptor.shape.size());
-  std::vector<Value> values;
-  std::vector<Cursor> cursors;
-  for (const auto& input : phase.inputs) {
-    cursors.push_back({&input, nullptr});
-  }
-  input_internal::Float32Environment environment;
-  const std::function<Status(std::uint64_t)> exact_work =
-      [&phase](std::uint64_t work) { return phase.consume_work(work); };
-  constexpr std::uint64_t block = 128;
-  std::array<std::uint8_t, block * 8> colors{}, alpha{}, result{};
-  std::vector<std::uint64_t> at(descriptor.shape.size()), source;
-  for (const auto& box : phase.query.outputs.boxes()) {
-    std::optional<MutableValue> writer;
-    if (!viewed) {
-      auto allocated = MutableValue::allocate(descriptor, box, phase.allocator);
-      if (!allocated.ok()) {
-        return Answer(allocated.status());
-      }
-      writer = allocated.take_value();
-    }
-    const auto channel = s.output_axis ? box.dimensions()[*s.output_axis]
-                                       : RegionDimension{0, 1};
-    for (std::uint64_t k = channel.offset; k < channel.offset + channel.extent;
-         ++k) {
-      auto dims = box.dimensions();
-      if (s.output_axis) {
-        dims[*s.output_axis] = {k, 1};
-      }
-      Region selected(dims);
-      const auto size = selected.element_count().value();
-      const auto& slot = s.slots[k];
-      const auto& data = s.data_maps[k];
-      for (std::uint64_t begin = 0; begin < size; begin += block) {
-        const auto n = std::min(block, size - begin);
-        auto charged =
-            phase.consume_work(n * (descriptor.shape.size() * 2 + 64));
-        if (!charged.ok()) {
-          return Answer(charged);
-        }
-        if (phase.query.cancellation.cancelled()) {
-          return Answer(Status{ErrorCode::Cancelled, "alpha cancelled"});
-        }
-        for (std::uint64_t lane = 0; lane < n; ++lane) {
-          region_run_coordinate(selected, begin + lane, &at);
-          source_at(data, at, &source);
-          auto read = cursors[data.port].read(
-              source, colors.data() + lane * width, width);
-          if (!read.ok()) {
-            return Answer(read);
-          }
-          if (slot.color) {
-            source_at(s.alpha_map, at, &source);
-            read = cursors[s.alpha_map.port].read(
-                source, alpha.data() + lane * width, width);
-            if (!read.ok()) {
-              return Answer(read);
-            }
-          } else if (slot.alpha) {
-            std::memcpy(alpha.data() + lane * width,
-                        colors.data() + lane * width, width);
-          }
-        }
-        if (slot.color || slot.alpha) {
-          auto failed =
-              math_span(colors.data(), alpha.data(), result.data(), n, s.narrow,
-                        slot.alpha ? Action::Set : s.action, s.raw, s.simd,
-                        s.reference, environment, exact_work);
-          if (!failed.status.ok()) {
-            return Answer(failed.status);
-          }
-          if (failed.reason != FailureReason::None) {
-            region_run_coordinate(selected, begin + failed.lane, &at);
-            if (slot.alpha) {
-              failed.operand = "alpha";
-            }
-            return Answer(sample_failure(s, failed, at));
-          }
-        } else {
-          std::memcpy(result.data(), colors.data(), n * width);
-        }
-        if (!viewed) {
-          for (std::uint64_t lane = 0; lane < n; ++lane) {
-            region_run_coordinate(selected, begin + lane, &at);
-            std::uint64_t offset = 0;
-            for (std::size_t axis = 0; axis < at.size(); ++axis) {
-              offset = offset * box.dimensions()[axis].extent + at[axis] -
-                       box.dimensions()[axis].offset;
-            }
-            std::memcpy(writer->data() + offset * width,
-                        result.data() + lane * width, width);
-          }
-        }
-      }
-    }
-    if (writer) {
-      auto value = std::move(*writer).publish(facets, phase.query.resources);
-      if (!value.ok()) {
-        return Answer(value.status());
-      }
-      auto retained = publication.retain(value.take_value());
-      if (!retained.ok()) {
-        return Answer(retained.status());
-      }
-      values.push_back(retained.take_value());
-    } else {
-      std::vector<std::uint64_t> origin;
-      auto address = proof.value()->base;
-      for (std::size_t axis = 0; axis < box.rank(); ++axis) {
-        origin.push_back(box.dimensions()[axis].offset);
-        address +=
-            static_cast<__int128>(origin.back()) * proof.value()->strides[axis];
-      }
-      if (address < 0 || address > UINT64_MAX) {
-        return Answer(invalid("view address overflow"));
-      }
-      auto view = Value::from_storage(
-          descriptor, box,
-          {static_cast<std::uint64_t>(address), proof.value()->strides, origin},
-          proof.value()->owner->storage(), facets, phase.query.resources);
-      if (!view.ok()) {
-        return Answer(view.status());
-      }
-      auto retained = publication.retain(view.take_value());
-      if (!retained.ok()) {
-        return Answer(retained.status());
-      }
-      values.push_back(retained.take_value());
-    }
-  }
-  if (phase.query.cancellation.cancelled()) {
-    return Answer(
-        Status{ErrorCode::Cancelled, "alpha cancelled before publication"});
-  }
-  return publication.finish(descriptor, phase.query.outputs, values.data(),
-                            values.size(), phase.sets, facets,
-                            phase.query.resources);
-}
-struct Continuation final {
-  const Preparation* state;
-  bool requested = false;
-  explicit Continuation(const Preparation* s) : state(s) {}
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    if (!requested) {
-      requested = true;
-      DependencyNeedBatch batch;
-      batch.static_mapping = true;
-      return Result<DependencyPoll>(std::move(batch));
-    }
-    auto result = evaluate(phase, *state);
-    return result.ok() ? Result<DependencyPoll>(result.take_value())
-                       : Result<DependencyPoll>(result.status());
-  }
-};
 struct ReadSpan final {
   const std::uint8_t* data;
   std::uint64_t count;
   std::int64_t stride;
 };
-Result<ReadSpan> planar_read(const PlanarOperationInvocation& call,
-                             const DependencyMappedNeed& map,
-                             const std::vector<std::uint64_t>& at,
-                             std::vector<std::uint64_t>* source,
-                             std::uint32_t width_axis, std::uint64_t limit,
-                             std::size_t width) {
+ReadSpan read_span(const ResultTensorReadWindow& window, const Map& map,
+                   const std::vector<std::uint64_t>& at,
+                   std::vector<std::uint64_t>* source, std::uint32_t row_axis,
+                   std::uint64_t limit) {
   source_at(map, at, source);
-  if (!call.exact_inputs) {
-    auto run = call.inputs[map.port].row_run(*source);
-    if (!run.ok()) {
-      return Result<ReadSpan>(run.status());
-    }
-    return Result<ReadSpan>(ReadSpan{run.value().data, run.value().samples,
-                                     static_cast<std::int64_t>(width)});
-  }
-  for (const auto& input : *call.exact_inputs) {
-    if (input.port != map.port || !contains(input.region, *source)) {
+  const auto run = take(window.row_run(*source));
+  if (map.axes[window.sample_axis()].output_axis ==
+      static_cast<std::int32_t>(row_axis))
+    return {run.data, std::min(limit, run.samples), run.sample_stride_bytes};
+  const bool repeat =
+      std::none_of(map.axes.begin(), map.axes.end(), [&](const auto& axis) {
+        return axis.output_axis == static_cast<std::int32_t>(row_axis);
+      });
+  return {run.data, repeat ? limit : 1, 0};
+}
+Status evaluate(const ResultProgramPhase& phase, const Preparation& s,
+                const Region& box, const ResultTensorWriteWindow* writer) {
+  const auto& spec = phase.query.output.result_schema->tensors[0];
+  const auto axis = output_axis(s, spec);
+  const auto channels = axis ? box.dimensions()[*axis] : RegionDimension{0, 1};
+  const std::size_t width = s.narrow ? 4 : 8;
+  input_internal::Float32Environment environment;
+  const std::function<Status(std::uint64_t)> consume = [&](std::uint64_t n) {
+    if (phase.query.cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, "alpha exact arithmetic cancelled"};
+    return phase.consume_work(n);
+  };
+  constexpr std::uint64_t block = 128;
+  std::array<std::uint8_t, block * 8> x{}, a{}, y{};
+  std::vector<std::uint64_t> at, source;
+  for (auto k = channels.offset; k < channels.offset + channels.extent; ++k) {
+    const auto selected = channel_region(box, axis, k);
+    const auto& slot = s.slots[k];
+    const auto& map = s.data_maps[k];
+    auto color =
+        take(phase.tensors->at({map.port, 0})
+                 .acquire(format_result::mapped_region(selected, map.axes),
+                          phase.query.cancellation));
+    std::optional<ResultTensorReadWindow> alpha;
+    if (slot.color)
+      alpha.emplace(take(
+          phase.tensors->at({s.alpha_map.port, 0})
+              .acquire(format_result::mapped_region(selected, s.alpha_map.axes),
+                       phase.query.cancellation)));
+    const auto work =
+        take(execution_internal::ResultWindowAccess::read_work(color)) +
+        (alpha ? take(execution_internal::ResultWindowAccess::read_work(*alpha))
+               : 0);
+    const auto calculate = [&](const std::uint8_t* colors,
+                               const std::uint8_t* weights, std::uint64_t n) {
+      if (!slot.color && !slot.alpha) {
+        std::memcpy(y.data(), colors, n * width);
+        return MathFailure{};
+      }
+      return math_span(colors, weights, y.data(), n, s.narrow,
+                       slot.alpha ? Action::Set : s.action, s.raw, s.simd,
+                       s.reference, environment, consume);
+    };
+    if (!spec.layout.spatial) {
+      const auto count = take(selected.element_count());
+      for (std::uint64_t begin = 0; begin < count; begin += block) {
+        const auto n = std::min(block, count - begin);
+        require(consume(n * (64 + 2 * selected.rank() + work)));
+        for (std::uint64_t lane = 0; lane < n; ++lane) {
+          region_run_coordinate(selected, begin + lane, &at);
+          source_at(map, at, &source);
+          const auto run = take(color.row_run(source));
+          std::memcpy(x.data() + lane * width, run.data, width);
+          if (alpha) {
+            source_at(s.alpha_map, at, &source);
+            const auto weight = take(alpha->row_run(source));
+            std::memcpy(a.data() + lane * width, weight.data, width);
+          }
+        }
+        const auto failed =
+            calculate(x.data(), slot.alpha ? x.data() : a.data(), n);
+        if (!failed.status.ok())
+          return failed.status;
+        if (failed.reason != FailureReason::None) {
+          region_run_coordinate(selected, begin + failed.lane, &at);
+          auto failure = failed;
+          if (slot.alpha)
+            failure.operand = "alpha";
+          return sample_failure(s, failure, at);
+        }
+        if (writer) {
+          for (std::uint64_t lane = 0; lane < n; ++lane) {
+            region_run_coordinate(selected, begin + lane, &at);
+            const auto run = take(writer->row_run(at));
+            std::memcpy(run.data, y.data() + lane * width, width);
+          }
+        }
+      }
       continue;
     }
-    if (input.image.valid()) {
-      auto run = input.image.row_run(*source);
-      if (!run.ok()) {
-        return Result<ReadSpan>(run.status());
-      }
-      return Result<ReadSpan>(ReadSpan{run.value().data, run.value().samples,
-                                       static_cast<std::int64_t>(width)});
-    }
-    auto address = input.value.byte_address(*source);
-    if (!address.ok()) {
-      return Result<ReadSpan>(address.status());
-    }
-    std::int64_t stride = 0;
-    for (std::size_t i = 0; i < map.axes.size(); ++i) {
-      if (map.axes[i].observation_axis ==
-          static_cast<std::int32_t>(width_axis)) {
-        stride = input.value.layout().byte_strides[i];
-        const auto d = input.region.dimensions()[i];
-        limit = std::min(limit, d.offset + d.extent - (*source)[i]);
-      }
-    }
-    return Result<ReadSpan>(
-        ReadSpan{input.value.bytes().data() + address.value(), limit, stride});
-  }
-  return Result<ReadSpan>(Status{
-      ErrorCode::NotFound, "alpha exact planar source coverage is missing"});
-}
-Status planar_alpha(const PlanarOperationInvocation& call) {
-  const auto& s = *static_cast<const Preparation*>(call.prepared->state());
-  if (s.layout == "view" && (!s.view_legal || !call.validate_only)) {
-    return invalid(
-        "ViewUnavailable: set-alpha requires an identity same-owner view");
-  }
-  const auto& layout = *call.output_metadata.planar_layout;
-  const auto& dims = call.output_region.dimensions();
-  const auto h = layout.height_axis, w = layout.width_axis;
-  const auto channels =
-      layout.channel_axis ? dims[*layout.channel_axis] : RegionDimension{0, 1};
-  const std::size_t width = s.narrow ? 4 : 8;
-  std::vector<std::uint64_t> at(dims.size()), source;
-  for (std::size_t i = 0; i < dims.size(); ++i) {
-    at[i] = dims[i].offset;
-  }
-  input_internal::Float32Environment environment;
-  const auto* budget = resource_internal::metadata_budget();
-  const std::function<Status(std::uint64_t)> exact_work =
-      [&call, budget](std::uint64_t work) {
-        if (call.cancellation.cancelled()) {
-          return Status{ErrorCode::Cancelled,
-                        "alpha exact arithmetic cancelled"};
+    const auto h = spec.batch_axes.size() + spec.layout.height_axis;
+    const auto w = spec.batch_axes.size() + spec.layout.width_axis;
+    const auto& dims = selected.dimensions();
+    at.clear();
+    for (const auto& d : dims)
+      at.push_back(d.offset);
+    for (auto row = dims[h].offset; row < dims[h].offset + dims[h].extent;
+         ++row) {
+      at[h] = row;
+      for (auto col = dims[w].offset; col < dims[w].offset + dims[w].extent;) {
+        at[w] = col;
+        auto n = std::min(block, dims[w].offset + dims[w].extent - col);
+        require(consume(n * (64 + 2 * selected.rank() + work)));
+        auto colors = read_span(color, map, at, &source, w, n);
+        n = std::min(n, colors.count);
+        auto weights = slot.alpha ? colors : ReadSpan{nullptr, n, 0};
+        if (alpha) {
+          weights = read_span(*alpha, s.alpha_map, at, &source, w, n);
+          n = std::min(n, weights.count);
         }
-        return budget ? budget->consume({work}) : Status::success();
-      };
-  constexpr std::uint64_t block = 128;
-  std::array<std::uint8_t, block * 8> xb{}, ab{}, yb{};
-  const auto advance = [](ReadSpan* span, std::uint64_t n) {
-    span->count -= n;
-    // Do not form an out-of-bounds pointer after the last negative-stride
-    // sample, even when that pointer would not subsequently be dereferenced.
-    if (span->count) {
-      span->data += static_cast<std::int64_t>(n) * span->stride;
-    }
-  };
-  for (std::uint64_t channel = channels.offset;
-       channel < channels.offset + channels.extent; ++channel) {
-    if (layout.channel_axis) {
-      at[*layout.channel_axis] = channel;
-    }
-    const auto& slot = s.slots[channel];
-    const auto& map = s.data_maps[channel];
-    for (std::uint64_t y = dims[h].offset; y < dims[h].offset + dims[h].extent;
-         ++y) {
-      at[h] = y;
-      // Retain a checked row span across bounded arithmetic blocks. A tile or
-      // exact fragment boundary expires the span before another access. This
-      // avoids repeated owner/coordinate lookup on long continuous rows.
-      ReadSpan color_span{nullptr, 0, 0}, alpha_span{nullptr, 0, 0};
-      std::uint8_t* output_data = nullptr;
-      std::uint64_t output_count = 0;
-      for (std::uint64_t x = dims[w].offset;
-           x < dims[w].offset + dims[w].extent;) {
-        at[w] = x;
-        if (call.cancellation.cancelled()) {
-          return Status{ErrorCode::Cancelled, "alpha planar cancelled"};
+        std::optional<ResultTensorMutableRun> target;
+        if (writer) {
+          target = take(writer->row_run(at));
+          n = std::min(n, target->samples);
         }
-        const auto left = dims[w].offset + dims[w].extent - x;
-        auto n = std::min(block, left);
-        if (!color_span.count) {
-          auto color = planar_read(call, map, at, &source, w, left, width);
-          if (!color.ok()) {
-            return color.status();
-          }
-          color_span = color.take_value();
-        }
-        n = std::min(n, color_span.count);
-        if (slot.color) {
-          if (!alpha_span.count) {
-            auto alpha =
-                planar_read(call, s.alpha_map, at, &source, w, left, width);
-            if (!alpha.ok()) {
-              return alpha.status();
-            }
-            alpha_span = alpha.take_value();
-          }
-          n = std::min(n, alpha_span.count);
-        }
-        std::uint8_t* destination = yb.data();
-        if (!call.validate_only) {
-          if (!output_count) {
-            auto out = call.output.row_run(at);
-            if (!out.ok()) {
-              return out.status();
-            }
-            output_count = out.value().samples;
-            output_data = out.value().data;
-          }
-          n = std::min(n, output_count);
-          destination = output_data;
-        }
-        if (!n) {
-          return Status{ErrorCode::Internal, "empty alpha row span"};
-        }
-        if (budget) {
-          auto charged = budget->consume({n * 64});
-          if (!charged.ok()) {
-            return charged;
-          }
-        }
+        if (!n)
+          return {ErrorCode::Internal, "empty alpha row span"};
         const auto gather = [n, width](ReadSpan span, std::uint8_t* buffer) {
-          if (span.stride == static_cast<std::int64_t>(width)) {
+          if (!span.data || span.stride == static_cast<std::int64_t>(width))
             return span.data;
-          }
-          for (std::uint64_t i = 0; i < n; ++i) {
+          for (std::uint64_t i = 0; i < n; ++i)
             std::memcpy(buffer + i * width,
                         span.data + static_cast<std::int64_t>(i) * span.stride,
                         width);
-          }
           return static_cast<const std::uint8_t*>(buffer);
         };
-        const auto* c = gather(color_span, xb.data());
-        if (slot.color || slot.alpha) {
-          const auto* a =
-              gather(slot.color ? alpha_span : color_span, ab.data());
-          auto failed = math_span(c, a, destination, n, s.narrow,
-                                  slot.alpha ? Action::Set : s.action, s.raw,
-                                  s.simd, s.reference, environment, exact_work);
-          if (!failed.status.ok()) {
-            return failed.status;
-          }
-          if (failed.reason != FailureReason::None) {
-            at[w] += failed.lane;
-            if (slot.alpha) {
-              failed.operand = "alpha";
-            }
-            return sample_failure(s, failed, at);
-          }
-        } else if (!call.validate_only) {
-          std::memcpy(destination, c, n * width);
+        auto failed =
+            calculate(gather(colors, x.data()), gather(weights, a.data()), n);
+        if (!failed.status.ok())
+          return failed.status;
+        if (failed.reason != FailureReason::None) {
+          at[w] += failed.lane;
+          if (slot.alpha)
+            failed.operand = "alpha";
+          return sample_failure(s, failed, at);
         }
-        advance(&color_span, n);
-        if (slot.color) {
-          advance(&alpha_span, n);
+        if (target) {
+          for (std::uint64_t i = 0; i < n; ++i)
+            std::memcpy(target->data + static_cast<std::int64_t>(i) *
+                                           target->sample_stride_bytes,
+                        y.data() + i * width, width);
         }
-        if (!call.validate_only) {
-          output_count -= n;
-          if (output_count) {
-            output_data += n * width;
-          }
-        }
-        x += n;
+        col += n;
       }
     }
   }
   return Status::success();
 }
+struct State final {
+  const Preparation* state;
+  bool requested = false;
+  Footprint output;
+  ResultRelation support;
+  explicit State(const Preparation* prepared) : state(prepared) {}
+  Poll poll(const ResultProgramPhase& phase) try {
+    auto scratch =
+        take(phase.resources.reserve(ResourceCapacity::host(16384, 16384)));
+    const auto& spec = phase.query.output.result_schema->tensors[0];
+    const auto& s = *state;
+    if (!requested) {
+      requested = true;
+      output = phase.query.tensor_outputs
+                   ? *phase.query.tensor_outputs
+                   : take(Footprint::all(spec.sample_shape()));
+      support = relation(phase, s);
+      ResultProgramNeed need;
+      FootprintLimits limits;
+      limits.cancellation = phase.query.cancellation;
+      limits.consume_work = [&](std::uint64_t work) {
+        return phase.consume_work(work);
+      };
+      for (std::uint32_t port = 0; port < phase.query.inputs.size(); ++port) {
+        auto samples = take(Footprint::none(
+            phase.query.inputs[port].result_schema->tensors[0].sample_shape()));
+        std::uint32_t roles = 8;
+        require(support.project(
+            output,
+            [&](auto source, const Footprint* selected) {
+              require(phase.consume_work(1));
+              if (source.input == port && selected) {
+                roles |= source.roles;
+                samples = take(samples.unite(*selected, limits));
+              }
+              return Status::success();
+            },
+            limits));
+        need.tensors.push_back({port, 0, std::move(samples), roles});
+      }
+      return Poll(std::move(need));
+    }
+    auto result = builder(phase, false);
+    std::string policy = s.layout;
+    GenericView proof;
+    if (policy != "materialize") {
+      const auto available =
+          spec.layout.spatial
+              ? (s.view_legal ? Status::success() : unavailable_view())
+              : generic_view(phase, s, &proof);
+      if (!available.ok()) {
+        if (policy == "view" || !format_result::view_unavailable(available))
+          return Poll(available);
+        policy = "materialize";
+      }
+    }
+    require(format_result::planes(spec, output, [&](const Region& box) {
+      if (policy != "materialize") {
+        require(evaluate(phase, s, box, nullptr));
+        if (!spec.layout.spatial) {
+          StridedLayout layout;
+          layout.byte_strides = proof.strides;
+          __int128 address = proof.base;
+          for (std::size_t i = 0; i < box.rank(); ++i) {
+            layout.origin.push_back(box.dimensions()[i].offset);
+            address +=
+                static_cast<__int128>(layout.origin.back()) * proof.strides[i];
+          }
+          if (address < 0 || address > UINT64_MAX)
+            return invalid("view address overflow");
+          layout.byte_offset = static_cast<std::uint64_t>(address);
+          return result.publish_tensor(0, box, layout, proof.owner, support,
+                                       {true, true, true, true},
+                                       phase.query.cancellation);
+        }
+        const auto axis = output_axis(s, spec);
+        const auto channels =
+            axis ? box.dimensions()[*axis] : RegionDimension{0, 1};
+        for (auto k = channels.offset; k < channels.offset + channels.extent;
+             ++k) {
+          const auto part = channel_region(box, axis, k);
+          const auto& map = s.data_maps[k];
+          auto source =
+              take(phase.tensors->at({map.port, 0})
+                       .acquire(format_result::mapped_region(part, map.axes),
+                                phase.query.cancellation));
+          require(format_result::publish(phase, &result, part, source, map.axes,
+                                         support, policy, map.port));
+        }
+        return Status::success();
+      }
+      return result.publish_tensor_kernel(
+          0, box,
+          [&](const auto& writers) {
+            try {
+              for (const auto& writer : writers)
+                require(evaluate(phase, s, writer.region(), &writer));
+              return Status::success();
+            } catch (const Status& status) {
+              return status;
+            }
+          },
+          support, {true, true, true, true}, phase.query.cancellation);
+    }));
+    require(phase.consume_work(1));
+    if (phase.query.cancellation.cancelled())
+      return Poll(
+          Status{ErrorCode::Cancelled, "alpha cancelled before publication"});
+    return Poll(ResultPublication{take(result.seal()), true});
+  } catch (const Status& status) {
+    return Poll(status);
+  }
+};
+
 OperationDefinition alpha_definition(const std::string& key, Action action,
                                      numeric_ops::SequenceProfile profile) {
   OperationDefinition d;
   d.key = key;
   auto& t = d.traits;
-  t.input_schema.resize(1);
+  OperationPortConstraint port;
+  port.kind = OperationPortKind::Result;
+  port.element_type_mask = 127;
+  t.input_schema = {port};
   t.repeated_minimum = 1;
   t.repeated_maximum = 2;
   t.repeated_match = false;
-  t.planar_storage_capable = true;
-  t.planar_exact_dependencies = true;
   t.cacheable = false;
   t.requires_metadata_specialization = true;
   t.workspace_bytes = 16384;
@@ -1121,21 +1134,22 @@ OperationDefinition alpha_definition(const std::string& key, Action action,
   }
   auto& out = t.outputs[0];
   out.key = "values";
-  out.shape_rule = OperationShapeRule::Fixed;
-  out.fixed_output_shape = {1};
+  out.output_schema = port;
+  out.result_schema = tensor_ops::scalar_schema();
   out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 1;
-  out.continuation_bytes = sizeof(Continuation);
+  out.dependency_version = 2;
+  out.continuation_bytes = sizeof(State);
   out.maximum_dependency_stages = 2;
   d.prepare_static = [action, profile](const auto& inputs, const auto& params) {
     return prepare_alpha(inputs, params, action, profile);
   };
-  d.start_dependency = [](const DependencyQuery& q,
-                          const BufferAllocator& allocator) {
-    return DependencyContinuation::make<Continuation>(
-        allocator, static_cast<const Preparation*>(q.prepared->state()));
+  d.start_result = [](const ResultProgramQuery& query,
+                      const BufferAllocator& allocator) {
+    if (query.tensor_outputs && query.tensor_outputs->empty())
+      return ResultContinuation::stateless<empty_result>();
+    return ResultContinuation::make<State>(
+        allocator, static_cast<const Preparation*>(query.prepared->state()));
   };
-  d.planar_callback = planar_alpha;
   return d;
 }
 }  // namespace alpha_ops

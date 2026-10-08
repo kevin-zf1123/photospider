@@ -6,12 +6,9 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+repository_commit: current working tree
 ---
 
 # CRV-01: interpolation family
@@ -60,21 +57,12 @@ status is recorded below. No provisional recommendation in the category index
 becomes a confirmed rule
 merely through this family record.
 
-## Existing implementation facts
+## Separate interpolation interface
 
-Source inspected at the front-matter commit:
-
-- [curve.sample_linear](../../../../plugins/ops/01-numeric/curve_sample_linear.cpp)
-  and [curve.sample_monotone](../../../../plugins/ops/01-numeric/curve_sample_monotone.cpp)
-  each use one Float32/Float64 controls[K,2] input and Whole output execution.
-- Static domain_min/domain_max and count generate an increasing uniform grid;
-  count is 2..1048576 and out_of_domain is reject/clip. Output is a rank-1
-  array with input dtype. These are not explicit-query input interfaces.
-- The legacy `curve.sample_linear`/`curve.sample_monotone` implementation uses
-  Whole output and static domains; it is separate from the maintained explicit-
-  query CRV-01 keys. The current explicit-query implementation and its exact
-  demand behavior are recorded in the maintained section below and in the
-  public workflow README.
+The registry also contains `curve.sample_linear` and `curve.sample_monotone`,
+which use a controls tensor and a generated static-domain grid. They remain
+separate operation contracts. The twelve explicit-query keys in this family
+accept x, y and query tensors and do not alias those controls-based operations.
 
 ## Related specifications
 
@@ -86,61 +74,80 @@ Source inspected at the front-matter commit:
 
 ## Maintained implementation and validation
 
-The four Proposed interfaces are implemented by twelve registered keys in `plugins/ops/01-numeric/curve_interpolation.cpp` and the public
-constructors in `photospider/numeric/curves.hpp`. Strict and Float64 outputs use
-exact rational whole-formula evaluation with 352 limbs (22,528 bits) and a
-96-slot callback workspace; the maximum live formula slots are bounded at 49.
-Accelerated Float32 evaluation propagates conservative intervals through the
-complete formula and publishes only when both endpoints round to the same
-Float32 value. This stronger condition preserves monotonicity across queries
-and strict fallbacks. Named knots/clamps remain exact. Exact cross products
-recognize a collinear complete local PCHIP stencil and use the equivalent linear
-formula. Rounded slope equality is not used. NEON/AVX2 integer comparison and
-publication helpers remain available; the Whole callback does not expose DependencySession fallback counters.
+The four Proposed interfaces are implemented by twelve registered keys in
+`plugins/ops/01-numeric/curve_interpolation.cpp` and public constructors in
+`photospider/numeric/curves.hpp`. Each workflow input and output is a Result. An
+input schema contains one tensor member under any schema id and member key;
+`sample_shape()` supplies x[K], y[K] or y[K,C], and query[N]. Each input can use
+Float32 or Float64 independently. The `values` output uses schema
+`photospider.tensor`, member `samples`, empty facets, and shape [N] or [N,C]; the
+multi-function column is an ordinary sample axis.
 
-For every nonempty request, one CPU Whole callback collects complete x, y and
-query inputs, including recognized typed validation and upstream failures. It
-validates all x knots and all query controls before y arithmetic, evaluates every query and every output column, and returns
-one immutable dense output of shape [N] or [N,C]. Empty reads no payload; static
-metadata validation still applies. Sparse demand restricts publication coverage,
-but does not reduce input collection, computation or the complete output owner.
+All four operations use Whole execution. For a nonempty request, the Result
+continuation requests Data, Validation and Descriptor (role 13) for all three
+inputs, then validates all x knots and query controls before ordinate arithmetic.
+It evaluates every query and output column and publishes the complete dense
+output, even when the request is sparse. Input `ResultTensorSpec.facets` carries
+typed semantics such as Mask validation; recognized typed validation and required
+upstream failures cover complete active inputs, including values outside the
+arithmetic stencil. A sparse request records its requested dependency region Q;
+the returned Result can still have full computed coverage and global sample
+coordinates. Empty requests read no payload, while static schema and metadata
+checks still apply.
 
-The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
-linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
-outside every evaluated stencil do not undergo an additional finite scan. Typed
-validation and upstream execution cover complete inputs, including unused values.
-All query rows and output columns are evaluated, so errors in unrequested rows
-or columns can fail the run. Reject still performs full upstream collection.
+Strict and Float64 output use exact rational evaluation of the whole formula,
+followed by one RN-even conversion. The fixed arithmetic arena has 352 limbs
+(22,528 bits) and 96 slots, with at most 49 live formula slots. Accelerated
+Float32 evaluation propagates conservative intervals through the whole formula
+and publishes only when both endpoints round to the same Float32 value. This
+condition preserves monotonicity across queries and strict fallbacks. Knots and
+selected clamps remain exact. Exact cross products recognize a collinear
+complete local PCHIP stencil and use the equivalent linear formula; rounded slope
+equality does not trigger this reduction.
 
-Any input change invalidates the recorded output demand. Cache identity includes
-complete input versions, profile, metadata and parameters. Numerical failures
-have Run scope and publish no partial successful output; they do not provide
-independent per-column Atom success. Input strides, offsets, zero strides and
-negative strides remain legal. Packed output storage outlives the context.
+The mathematical stencil remains local: an exact knot or clamp uses one y,
+linear interpolation uses two endpoints, and PCHIP uses its fixed local stencil.
+Generic y values outside every evaluated stencil receive no additional finite
+scan, although typed validation and upstream execution still cover the complete
+active input. Every query and output column is evaluated, so an invalid value in
+an unrequested row or column can fail the run. `reject` also collects all active
+inputs before classifying the domain.
 
-Search/classification costs O(K+N log K), followed by N scalar evaluations
-(or N*C for multi). Classification is shared across columns. The complete dense
-output costs b*N (or b*N*C) bytes; reserve it even for one requested cell. Input
-collection and retained owners also require admission. The callback declares its
-fixed exact arithmetic workspace, and the host-accounted knot vector has 8*K
-element bytes plus allocator/metadata overhead. K<=65536 bounds its elements at
-524288 bytes. No full slope table is required.
+Cache identity includes complete input versions, profile, metadata and
+parameters. Replacing source Results updates the associations to their current
+ObjectIds; a reusable static preparation does not retain old source owners.
+Numerical failures have Run scope and publish no partial output. The operations do
+not report independent per-column Atom success. Input offsets, positive, zero
+and negative strides are supported. Published output storage and an authorized
+read window retain their owner beyond context destruction.
 
-Poll work/cancellation during reads, binary search, exact arithmetic and before
-publication. Capacity and work exhaustion return ResourceExhausted, with failed
-output/workspace released. A giant logical broadcast can therefore fail a small
-payload budget even for sparse demand. Resource limits do not authorize weaker
-arithmetic. Backend, typed, upstream, stale and cancellation failures retain their
-categories. Numeric failures are OperationFailed/InvalidDomain or final-output
-ArithmeticOverflow, with Run scope and offending port/index where available.
+Searching/classification costs O(K+N log K), followed by N scalar evaluations
+(or N*C for multi), with classification shared across columns. The complete
+dense output needs b*N (or b*N*C) bytes even for a one-cell request. Input
+collection, retained owners, the fixed arithmetic workspace and the knot vector
+also require admission. The vector has 8*K element bytes plus allocator and
+metadata overhead; K<=65536 bounds the element storage at 524288 bytes. No full
+slope table is required. Work and cancellation checks run during input reads,
+binary search, exact arithmetic and before publication. Capacity or work
+exhaustion returns ResourceExhausted and releases failed output and scratch
+storage; resource limits do not weaken the arithmetic contract. Numeric failures
+are OperationFailed/InvalidDomain or final-output ArithmeticOverflow, with Run
+scope and the offending port/index where available. Other typed, upstream, stale
+and cancellation failures preserve their failure categories.
 
-See [the numeric workflow README](../../../../examples/numeric_workflow/README.md)
-and [math implementation](../math-implementation.md) for public commands and
-algorithm details. `implementation_status: implemented` records the current
-manual acceptance boundary while the specification remains Proposed. Current Whole acceptance uses the public workflow and independent Fraction oracle
-on local Clang 21 strict/Apple. The executable checks full support/dirty and Run
-failure behavior, mathematical knot selection, lifetime, strides/fenv, managed
-work/output/workspace budgets and active cancellation, metadata/Empty, cache and
-upstream collection, giant-output rejection and complete typed-mask validation.
-Cross-platform historical results do not establish current Whole validation.
-The manual target is EXCLUDE_FROM_ALL and has no CTest registration.
+The manual Result fixture, exact Fraction oracle and installed consumer are
+defined in the [numeric workflow README](../../../../examples/numeric_workflow/README.md).
+The root focused CTest selection covers `test_numeric_curves_result`,
+`test_numeric_result_math`, and `test_result_image_contracts`; it passed 3/3 in
+5.09 seconds. The separate installed consumer test
+`installed_numeric_curves_result` passed 1/1 in 0.36 seconds under Strict.
+Their command lines and coverage are documented there. The manual fixture's six
+groups passed under direct Strict and Apple runs. The installed consumer's direct
+Apple run also passed.
+The strengthened independent Fraction oracle passed 2,487 bit-exact cases for
+each profile. The bounded benchmark passed eight rows per profile with two
+polls, N*C computed elements and `timing_scope=result_execute_fragments`; its
+Root Payload peaks are listed in the workflow README. These bounded timing
+checks do not establish a performance improvement. Historical Value-path
+measurements are in [math implementation](../math-implementation.md#crv-01-exact-interpolation)
+and do not validate the Result workflow.

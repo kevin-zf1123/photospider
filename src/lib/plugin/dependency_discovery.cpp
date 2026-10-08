@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <map>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -20,89 +22,150 @@ std::uint64_t word(const std::uint8_t* bytes, unsigned width) {
   return value;
 }
 }  // namespace
-Result<std::vector<DependencyNeed>> decode_discovery(
+Status visit_discovery_records(
     const CpuStorage& table, std::uint32_t capacity, std::uint32_t candidates,
-    const DependencyQuery& query, const FootprintLimits& limits,
-    std::uint64_t* normalization_work, std::uint64_t* metadata_entries,
-    const std::function<Status(std::uint64_t)>& consume_work) {
-  using Answer = Result<std::vector<DependencyNeed>>;
+    const FootprintLimits& limits,
+    const std::function<Status(const GpuDiscoveryRecord&)>& visit) {
   if (limits.cancellation.cancelled())
-    return Answer(Status{ErrorCode::Cancelled, {}});
+    return {ErrorCode::Cancelled, {}};
   const auto size = 16 + static_cast<std::uint64_t>(capacity) * 144;
-  if (!normalization_work || !metadata_entries || !capacity ||
-      capacity > 65536 || table.bytes().size() != size)
-    return Answer(invalid("invalid GPU discovery allocation"));
+  if (!visit || !capacity || capacity > 65536 || table.bytes().size() != size)
+    return invalid("invalid GPU discovery allocation");
   const auto* bytes = table.bytes().data();
   const auto count = word(bytes, 4), overflow = word(bytes + 4, 4);
   if (word(bytes + 8, 8) || overflow > 1 || count > candidates)
-    return Answer(invalid("invalid GPU discovery header"));
+    return invalid("invalid GPU discovery header");
   if (overflow)
-    return Answer(Status::failure(ErrorCode::ResourceExhausted,
-                                  "GPU discovery request table overflow"));
+    return Status::failure(ErrorCode::ResourceExhausted,
+                           "GPU discovery request table overflow");
   if (count > capacity || count > limits.maximum_boxes)
-    return Answer(invalid("invalid GPU discovery request count"));
-  std::map<std::pair<std::uint32_t, std::uint32_t>, std::vector<Region>> groups;
+    return invalid("invalid GPU discovery request count");
   for (std::uint64_t i = 0; i < count; ++i) {
     if (limits.cancellation.cancelled())
-      return Answer(Status{ErrorCode::Cancelled, {}});
+      return {ErrorCode::Cancelled, {}};
     const auto* row = bytes + 16 + i * 144;
-    const auto port = word(row, 4), roles = word(row + 4, 4),
-               rank = word(row + 8, 4);
-    if (port >= query.inputs.size() || !roles || (roles & ~UINT64_C(7)) ||
-        word(row + 12, 4) || rank != query.inputs[port].descriptor.shape.size())
-      return Answer(invalid("invalid GPU discovery record"));
-    std::vector<RegionDimension> dimensions;
-    for (unsigned a = 0; a < 8; ++a) {
-      const auto offset = word(row + 16 + a * 8, 8),
-                 extent = word(row + 80 + a * 8, 8);
-      if (a < rank) {
-        const auto domain = query.inputs[port].descriptor.shape[a];
-        if (!extent || offset >= domain || extent > domain - offset)
-          return Answer(invalid("GPU discovery rectangle outside domain"));
-        dimensions.push_back({offset, extent});
-      } else if (offset || extent) {
-        return Answer(invalid("nonzero unused GPU discovery axis"));
-      }
+    GpuDiscoveryRecord record;
+    record.input = word(row, 4);
+    record.roles = word(row + 4, 4);
+    record.rank = word(row + 8, 4);
+    record.slot = word(row + 12, 4);
+    if (!record.roles || (record.roles & ~7U) || !record.rank ||
+        record.rank > 8)
+      return invalid("invalid GPU discovery record");
+    for (unsigned axis = 0; axis < 8; ++axis) {
+      record.offsets[axis] = word(row + 16 + axis * 8, 8);
+      record.extents[axis] = word(row + 80 + axis * 8, 8);
+      if (axis < record.rank ? !record.extents[axis]
+                             : record.offsets[axis] || record.extents[axis])
+        return invalid("invalid GPU discovery axis");
     }
-    Region region(std::move(dimensions));
-    const auto& input = query.inputs[port];
-    if (!input_internal::complete_tuple_channels(input.descriptor, input.facets,
-                                                 region))
-      return Answer(invalid("GPU discovery omits image channel closure"));
-    groups[{port, roles}].push_back(std::move(region));
+    auto status = visit(record);
+    if (!status.ok())
+      return status;
   }
-  std::vector<DependencyNeed> result;
-  for (const auto& group : groups) {
+  return Status::success();
+}
+Result<ResourceVector<ResultTensorNeed>> decode_result_discovery(
+    const CpuStorage& table, std::uint32_t capacity, std::uint32_t candidates,
+    const ResultProgramQuery& query, const ResourceBudget& resources,
+    FootprintLimits limits, std::uint64_t* metadata_entries) {
+  using Answer = Result<ResourceVector<ResultTensorNeed>>;
+  using Key = std::tuple<std::uint32_t, std::uint32_t, std::uint32_t>;
+  struct Box {
+    ResourceLease lease;
+    Region region;
+  };
+  using Boxes = ResourceVector<Box>;
+  using Entry = std::pair<const Key, Boxes>;
+  std::map<Key, Boxes, std::less<Key>, ResourceAllocator<Entry>> groups{
+      std::less<Key>{}, ResourceAllocator<Entry>(resources)};
+  auto visited = visit_discovery_records(
+      table, capacity, candidates, limits, [&](const GpuDiscoveryRecord& row) {
+        if (row.input >= query.inputs.size() ||
+            !query.inputs[row.input].result_schema ||
+            row.slot >= query.inputs[row.input].result_schema->tensors.size())
+          return invalid("invalid Result GPU discovery input slot");
+        const auto& spec =
+            query.inputs[row.input].result_schema->tensors[row.slot];
+        const auto rank = spec.batch_axes.size() + spec.descriptor.shape.size();
+        if (row.rank != rank)
+          return invalid("invalid Result GPU discovery rank");
+        auto lease = resources.reserve(ResourceCapacity::host(
+            sizeof(Region) +
+                rank * (sizeof(RegionDimension) + sizeof(std::uint64_t)),
+            sizeof(Region) +
+                rank * (sizeof(RegionDimension) + sizeof(std::uint64_t))));
+        if (!lease.ok())
+          return lease.status();
+        auto shape = spec.sample_shape();
+        std::vector<RegionDimension> dimensions;
+        dimensions.reserve(rank);
+        for (unsigned axis = 0; axis < rank; ++axis) {
+          if (row.offsets[axis] >= shape[axis] ||
+              row.extents[axis] > shape[axis] - row.offsets[axis])
+            return invalid("GPU discovery rectangle outside Result domain");
+          dimensions.push_back({row.offsets[axis], row.extents[axis]});
+        }
+        auto raw = Footprint::from_regions(
+            shape, {Region(std::move(dimensions))}, limits);
+        if (!raw.ok())
+          return raw.status();
+        auto closed = spec.close_samples(raw.value(), limits);
+        if (!closed.ok())
+          return closed.status();
+        if (closed.value() != raw.value())
+          return invalid("GPU discovery omits Result tuple closure");
+        const Key key{row.input, row.slot, row.roles};
+        auto found = groups.find(key);
+        if (found == groups.end()) {
+          if (groups.size() >= limits.maximum_boxes)
+            return Status{ErrorCode::ResourceExhausted,
+                          "GPU discovery group limit"};
+          found = groups.emplace(key, Boxes{ResourceAllocator<Box>(resources)})
+                      .first;
+        }
+        found->second.push_back(
+            {lease.take_value(), raw.value().boxes().front()});
+        return Status::success();
+      });
+  if (!visited.ok())
+    return Answer(visited);
+  ResourceVector<ResultTensorNeed> result{
+      ResourceAllocator<ResultTensorNeed>(resources)};
+  for (auto& group : groups) {
     std::uint64_t roles = 0;
     for (std::uint32_t bit = 1; bit <= 4; bit <<= 1)
-      roles += (group.first.second & bit) != 0;
+      roles += (std::get<2>(group.first) & bit) != 0;
+    const auto& spec = query.inputs[std::get<0>(group.first)]
+                           .result_schema->tensors[std::get<1>(group.first)];
+    const auto rank = spec.batch_axes.size() + spec.descriptor.shape.size();
+    const auto bytes =
+        group.second.size() * (sizeof(Region) + rank * sizeof(RegionDimension));
+    auto admission = resources.reserve(ResourceCapacity::host(bytes, bytes));
+    if (!admission.ok())
+      return Answer(admission.status());
+    if (limits.consume_work) {
+      auto charged = limits.consume_work(group.second.size() * (1 + 2 * rank));
+      if (!charged.ok())
+        return Answer(charged);
+    }
+    std::vector<Region> boxes;
+    boxes.reserve(group.second.size());
+    for (const auto& box : group.second)
+      boxes.push_back(box.region);
+    auto samples = Footprint::from_regions(spec.sample_shape(), boxes, limits);
+    if (!samples.ok())
+      return Answer(samples.status());
+    const auto count = samples.value().boxes().size() + 1;
     if (*metadata_entries > limits.maximum_boxes ||
-        (limits.maximum_boxes - *metadata_entries) / roles <= 1)
+        count > (limits.maximum_boxes - *metadata_entries) / roles)
       return Answer(
           Status{ErrorCode::ResourceExhausted, "GPU discovery metadata limit"});
-    auto grant = limits;
-    grant.maximum_boxes =
-        (limits.maximum_boxes - *metadata_entries) / roles - 1;
-    grant.maximum_work = std::min(grant.maximum_work, *normalization_work);
-    grant.consume_work = consume_work;
-    std::uint64_t used = 0;
-    struct Charge {
-      std::uint64_t* remaining;
-      const std::uint64_t& used;
-      ~Charge() {
-        if (remaining)
-          *remaining -= used;
-      }
-    } charge{consume_work ? nullptr : normalization_work, used};
-    auto set = Footprint::from_regions(
-        query.inputs[group.first.first].descriptor.shape, group.second, grant,
-        &used);
-    if (!set.ok())
-      return Answer(set.status());
-    *metadata_entries += roles * (set.value().boxes().size() + 1);
-    result.push_back(
-        {group.first.first, group.first.second, set.take_value(), {}});
+    *metadata_entries += roles * count;
+    result.push_back({std::get<0>(group.first), std::get<1>(group.first),
+                      samples.take_value(), std::get<2>(group.first)});
   }
   return Answer(std::move(result));
 }
+
 }  // namespace ps::plugin_internal

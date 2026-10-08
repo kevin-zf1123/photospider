@@ -12,124 +12,251 @@
 #include <utility>
 #include <vector>
 
-#include "execution/dependency_content.hpp"
+#include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "execution/memory_budget.hpp"
 #include "execution/result_cache.hpp"
 #include "photospider/photospider.hpp"
+#include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
-ps::Value scalar(float number) {
-  std::vector<std::uint8_t> bytes(4);
-  std::memcpy(bytes.data(), &number, 4);
-  return ps::Value::create({ps::ElementType::Float32, {1}},
-                           ps::Region::whole({1}), {0, {4}}, std::move(bytes))
-      .take_value();
+enum class CacheMode { Constant, First, Sum };
+struct CacheProgram {
+  CacheMode mode;
+  std::shared_ptr<std::atomic<unsigned>> calls;
+  bool requested = false;
+  CacheProgram(CacheMode selected, std::shared_ptr<std::atomic<unsigned>> count)
+      : mode(selected), calls(std::move(count)) {}
+  ps::Result<ps::ResultProgramPoll> poll(
+      const ps::ResultProgramPhase& phase) try {
+    using namespace ps;  // NOLINT(build/namespaces)
+    using multi_result::check;
+    using multi_result::take;
+    auto scratch =
+        take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));
+    if (!requested) {
+      requested = true;
+      ResultProgramNeed need;
+      for (std::uint32_t i = 0; i < phase.query.inputs.size(); ++i)
+        need.tensors.push_back(
+            {i, 0,
+             take(Footprint::all(phase.query.inputs[i]
+                                     .result_schema->tensors[0]
+                                     .sample_shape())),
+             9});
+      return Result<ResultProgramPoll>(std::move(need));
+    }
+    if (calls)
+      ++*calls;
+    const auto& schema = *phase.query.output.result_schema;
+    auto builder = take(ResultBuilder::start(phase.resources, schema,
+                                             phase.query.semantic_key));
+    std::vector<ResultRelation> descriptor, data;
+    const auto count = take(schema.tensors[0].sample_count());
+    for (std::uint32_t i = 0; i < phase.query.inputs.size(); ++i) {
+      descriptor.push_back(take(ResultRelation::cartesian(
+          phase.resources, 1,
+          {i, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
+      data.push_back(take(ResultRelation::cartesian(
+          phase.resources, count,
+          {i, 1, 0,
+           take(phase.query.inputs[i].result_schema->tensors[0].sample_count()),
+           ResultSupportTarget::Tensor, 0})));
+    }
+    check(builder.bind_descriptor_relation(
+        take(ResultRelation::unite(phase.resources, descriptor))));
+    auto relation = take(ResultRelation::unite(phase.resources, data));
+    const auto region = Region::whole(schema.tensors[0].sample_shape());
+    if (mode == CacheMode::First) {
+      auto window = take(phase.tensors->at({0, 0}).acquire(region));
+      ResultTensorViewTransform identity;
+      identity.source_axes = {{0, 0, 1, 1}};
+      check(builder.publish_tensor_view(0, region, window, identity,
+                                        std::move(relation),
+                                        {true, true, true, true}));
+    } else {
+      double value = mode == CacheMode::Constant ? 2 : 0;
+      for (std::uint32_t i = 0; i < phase.query.inputs.size(); ++i) {
+        const auto type = phase.query.inputs[i]
+                              .result_schema->tensors[0]
+                              .descriptor.element_type;
+        if (type == ElementType::Float32) {
+          float input = 0;
+          check(phase.read_tensor(i, 0, {0}, &input, sizeof(input)));
+          if (mode == CacheMode::Sum)
+            value += input;
+        } else {
+          double input = 0;
+          check(phase.read_tensor(i, 0, {0}, &input, sizeof(input)));
+          if (mode == CacheMode::Sum)
+            value += input;
+        }
+      }
+      check(phase.consume_work(phase.query.inputs.size()));
+      auto bytes = take(phase.allocator.allocate(8));
+      std::memcpy(bytes.data(), &value, sizeof(value));
+      check(builder.publish_tensor(
+          0, region, {0, {8}}, std::move(bytes).freeze(), std::move(relation),
+          {true, true, true, true}));
+    }
+    return Result<ResultProgramPoll>(
+        ResultPublication{take(builder.seal()), true});
+  } catch (const multi_result::Failure& failure) {
+    return ps::Result<ps::ResultProgramPoll>(failure.status);
+  }
+};
+ps::OperationDefinition cache_operation(
+    std::string key, const ps::SchemaTemplate& output,
+    CacheMode mode = CacheMode::First, unsigned inputs = 1,
+    std::shared_ptr<std::atomic<unsigned>> calls = {},
+    ps::ElementType input_type = ps::ElementType::Float64) {
+  ps::OperationDefinition operation;
+  operation.key = std::move(key);
+  operation.traits.input_count = inputs;
+  operation.traits.input_schema.resize(inputs);
+  for (auto& port : operation.traits.input_schema) {
+    port.kind = ps::OperationPortKind::Result;
+    port.element_type = static_cast<std::uint32_t>(input_type);
+    port.rank = 1;
+  }
+  auto result = multi_result::output("value", output);
+  result.region_rule = ps::OperationRegionRule::Whole;
+  result.continuation_bytes = sizeof(CacheProgram);
+  operation.traits.outputs = {std::move(result)};
+  operation.traits.workspace_bytes = 8;
+  operation.start_result = [mode, calls](const auto&, const auto& allocator) {
+    return ps::ResultContinuation::make<CacheProgram>(allocator, mode, calls);
+  };
+  return operation;
 }
-int dynamic_opaque_cache_preservation() {
+ps::ExecutionContextConfig configuration(std::uint64_t bytes = 65536) {
+  ps::ExecutionContextConfig config;
+  config.cpu_workers = 1;
+  config.result_cache_bytes = bytes;
+  config.managed_resources = ps::ResourceLimits{};
+  return config;
+}
+int opaque_result_cache_preservation() {
   using namespace ps;  // NOLINT(build/namespaces)
   auto operations = std::make_shared<OperationRegistry>();
-  OperationTraits producer;
-  producer.input_count = 1;
-  producer.input_schema.resize(1);
-  const auto opaque =
-      Value::create({ElementType::Float64, {1}}, Region::whole({1}), {0, {8}},
-                    Value::from_float64(2).copy_bytes(),
-                    {{"vendor.test", 1, {42}}})
-          .take_value();
+  auto input_schema = multi_result::schema(ElementType::Float32);
+  auto output_schema = multi_result::schema();
+  output_schema.tensors[0].facets = {{"vendor.test", 1, {42}}};
+  auto calls = std::make_shared<std::atomic<unsigned>>(0);
   PS_CHECK(operations
-               ->register_operation({"source", producer,
-                                     [opaque](const OperationInvocation&) {
-                                       return Result<Value>(opaque);
-                                     }})
+               ->register_operation(
+                   cache_operation("source", output_schema, CacheMode::Constant,
+                                   1, calls, ElementType::Float32))
                .ok());
-  auto identity = make_default_operation_registry()
-                      ->find_traits("core.identity")
-                      .take_value();
-  PS_CHECK(operations
-               ->register_operation({"identity", identity,
-                                     [](const OperationInvocation& call) {
-                                       return Result<Value>(call.inputs[0]);
-                                     }})
-               .ok());
+  PS_CHECK(
+      operations->register_operation(cache_operation("identity", output_schema))
+          .ok());
   PS_CHECK(operations->freeze().ok());
-  const auto input = scalar(1);
   WorkflowDocument document;
-  document.inputs = {{1, "input", input.descriptor(), input.region(),
-                      input.layout(), input.facets()}};
+  document.inputs = {multi_result::declaration(1, "input", input_schema)};
   document.nodes = {{1, "source", {WorkflowInputReference{1}}, {}},
                     {2, "identity", {WorkflowNodeOutput{1, "value"}}, {}}};
   document.outputs = {{"result", 1, "value"}};
   GraphContext graph(document);
   auto plan = Compiler(operations).compile(graph).take_value().plan;
-  InputSnapshotStore store;
-  ExecutionBindings bindings{{{"input",
-                               {},
-                               {},
-                               std::make_shared<InputSnapshot>(
-                                   store.import_value(input).take_value())}}};
-  ExecutionContext execution(operations, {1, false, 8, 65536, 8192});
+  ExecutionContext execution(operations, configuration());
+  auto root = execution.resource_budget().take_value();
+  ExecutionBindings bindings{
+      {multi_result::binding(root, "input", 1, input_schema)}};
+  auto copied_document = document;
+  copied_document.outputs = {{"result", 2, "value"}};
+  GraphContext copied_graph(copied_document);
+  auto copied_plan =
+      Compiler(operations).compile(copied_graph).take_value().plan;
   for (bool warm : {false, true}) {
     auto result = execution.execute(plan, bindings);
     PS_CHECK(result.ok());
-    const auto& output = result.value().values.at("result");
-    PS_CHECK(output.copy_bytes() == opaque.copy_bytes());
-    PS_CHECK(output.facets().size() == 1 &&
-             output.facets()[0].key == opaque.facets()[0].key &&
-             output.facets()[0].version == opaque.facets()[0].version &&
-             output.facets()[0].payload == opaque.facets()[0].payload);
+    const auto& output = result.value().results.at("result");
+    PS_CHECK(multi_result::number(output) == 2);
+    const auto& facets = output.schema().tensors[0].facets;
+    PS_CHECK(facets.size() == 1 && facets[0].key == "vendor.test" &&
+             facets[0].version == 1 &&
+             facets[0].payload == std::vector<uint8_t>{42});
     PS_CHECK(warm ? result.value().diagnostics.cache_hits > 0
                   : result.value().diagnostics.cache_hits == 0);
-    const std::vector<Value> inputs{output};
-    const std::vector<Region> demands{output.region()};
-    const std::map<std::string, ParameterValue> parameters;
-    OperationInvocation call{inputs,           demands, parameters,
-                             Backend::Cpu,     {},      output.region(),
-                             BufferAllocator{}};
-    auto copied = operations->invoke("identity", call);
-    PS_CHECK(copied.ok() && copied.value().copy_bytes() == output.copy_bytes());
-    PS_CHECK(copied.value().facets().size() == 1 &&
-             copied.value().facets()[0].payload == output.facets()[0].payload);
+    auto copied = execution.execute(copied_plan, bindings);
+    PS_CHECK(copied.ok() &&
+             multi_result::number(copied.value().results.at("result")) == 2);
+    PS_CHECK(copied.value()
+                 .results.at("result")
+                 .schema()
+                 .tensors[0]
+                 .facets[0]
+                 .payload == facets[0].payload);
+    PS_CHECK(*calls == 1);
   }
   return 0;
 }
-int dependency_content_bits() {
-  using namespace ps;                      // NOLINT(build/namespaces)
-  using namespace ps::execution_internal;  // NOLINT(build/namespaces)
+int result_content_bits() {
+  using namespace ps;  // NOLINT(build/namespaces)
   for (auto type : {ElementType::UInt8, ElementType::Int64,
                     ElementType::Float32, ElementType::Float64}) {
     const auto width = Value::element_size(type);
-    std::vector<std::uint8_t> bytes(width * 3);
-    for (std::size_t i = 0; i < bytes.size(); ++i)
-      bytes[i] = static_cast<std::uint8_t>(255 - i);
+    auto schema = multi_result::schema(type, {3});
+    auto registry = std::make_shared<OperationRegistry>();
+    auto calls = std::make_shared<std::atomic<unsigned>>(0);
+    PS_CHECK(registry
+                 ->register_operation(cache_operation(
+                     "bits.identity", schema, CacheMode::First, 1, calls, type))
+                 .ok());
+    PS_CHECK(registry->freeze().ok());
+    WorkflowDocument doc;
+    doc.inputs = {multi_result::declaration(1, "x", schema)};
+    doc.nodes = {{1, "bits.identity", {WorkflowInputReference{1}}, {}}};
+    doc.outputs = {{"y", 1, "value"}};
+    GraphContext graph(doc);
+    auto plan = Compiler(registry).compile(graph).take_value().plan;
+    ExecutionContext context(registry, configuration());
+    auto root = context.resource_budget().take_value();
+    std::vector<std::uint8_t> backing(width * 3), logical(width * 3);
+    for (std::size_t i = 0; i < backing.size(); ++i)
+      backing[i] = static_cast<std::uint8_t>(255 - i);
+    for (std::size_t i = 0; i < 3; ++i)
+      std::memcpy(logical.data() + i * width, backing.data() + (2 - i) * width,
+                  width);
     auto reversed =
         Value::create({type, {3}}, Region::whole({3}),
-                      {2 * width, {-static_cast<std::int64_t>(width)}}, bytes)
+                      {2 * width, {-static_cast<std::int64_t>(width)}}, backing)
             .take_value();
-    InputSnapshotStore store({1024, 1});
-    const auto snapshot = store.import_value(reversed).take_value();
-    for (const auto& box : {Region::whole({3}), Region({{2, 1}})})
-      PS_CHECK(dependency_value_identity(reversed, box, {}).value() ==
-               snapshot.content_identity(box).value());
-    const std::map<std::string, Footprint> support{
-        {"x", Footprint::all({3}).take_value()}};
-    std::uint64_t work = 1000;
-    auto a = dependency_content_identity({{"x", reversed}}, support, &work, {});
-    work = 1000;
-    auto b = dependency_content_identity(
-        {{"x", {}, {}, std::make_shared<const InputSnapshot>(snapshot)}},
-        support, &work, {});
-    PS_CHECK(a.ok() && b.ok() && a.value() == b.value());
+    const auto bind = [&](const Value& value) {
+      return ExecutionBindings{
+          {{"x", numeric_result_fixture::source(root, value, &schema)}}};
+    };
+    auto first = context.execute(plan, bind(reversed));
+    PS_CHECK(first.ok() && *calls == 1 &&
+             numeric_result_fixture::bytes(first.value().results.at("y")) ==
+                 logical);
+    auto dense = Value::create({type, {3}}, Region::whole({3}),
+                               {0, {static_cast<std::int64_t>(width)}}, logical)
+                     .take_value();
+    auto equivalent = context.execute(plan, bind(dense));
+    PS_CHECK(equivalent.ok() && *calls == 1 &&
+             equivalent.value().diagnostics.cache_hits > 0 &&
+             numeric_result_fixture::bytes(
+                 equivalent.value().results.at("y")) == logical);
+    logical[width] ^= 1;
+    auto edited =
+        Value::create({type, {3}}, Region::whole({3}),
+                      {0, {static_cast<std::int64_t>(width)}}, logical)
+            .take_value();
+    auto changed = context.execute(plan, bind(edited));
+    PS_CHECK(changed.ok() && *calls == 2 &&
+             numeric_result_fixture::bytes(changed.value().results.at("y")) ==
+                 logical);
+    // Optional verification fuel never prevents the normal identity operation.
+    ExecutionOptions bounded;
+    bounded.maximum_dependency_cache_work = 1;
+    auto uncached = context.execute(plan, bind(edited), {}, bounded);
+    PS_CHECK(uncached.ok() && *calls == 3 &&
+             uncached.value().diagnostics.cache_hits == 0 &&
+             numeric_result_fixture::bytes(uncached.value().results.at("y")) ==
+                 logical);
   }
-  auto opaque =
-      Value::create({ElementType::UInt8, {1}}, Region::whole({1}), {0, {1}},
-                    {42},
-                    {{"vendor.proof", 1, std::vector<std::uint8_t>(1000)}})
-          .take_value();
-  std::uint64_t work = 100;
-  auto bounded = dependency_content_identity(
-      {{"x", opaque}}, {{"x", Footprint::all({1}).take_value()}}, &work, {});
-  PS_CHECK(bounded.status().code == ErrorCode::ResourceExhausted && work == 0);
   return 0;
 }
 int dependency_cache_storage() {
@@ -197,37 +324,19 @@ int dependency_cache_storage() {
 int cache_shared_route_budget() {
   using namespace ps;  // NOLINT(build/namespaces)
   auto registry = std::make_shared<OperationRegistry>();
-  OperationDefinition leaf;
-  leaf.key = "cache.whole";
-  leaf.traits.input_count = 1;
-  leaf.traits.input_schema.resize(1);
-  leaf.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
-  leaf.traits.outputs[0].region_rule = OperationRegionRule::Whole;
-  leaf.callback = [](const OperationInvocation& call) {
-    return Result<Value>(call.inputs[0]);
-  };
+  const auto schema = multi_result::schema();
+  auto leaf = cache_operation("cache.whole", schema);
   auto calls = std::make_shared<std::atomic<unsigned>>(0);
-  auto merge = leaf;
-  merge.key = "cache.merge";
-  merge.traits.input_count = 2;
-  merge.traits.input_schema.resize(2);
-  merge.callback = [calls](const OperationInvocation& call) {
-    ++*calls;
-    return Result<Value>(
-        Value::from_float64(call.inputs[0].as_float64().value() +
-                            call.inputs[1].as_float64().value()));
-  };
-  auto branch1 = leaf, branch2 = leaf;
-  branch1.key = "cache.branch1";
-  branch2.key = "cache.branch2";
+  auto merge = cache_operation("cache.merge", schema, CacheMode::Sum, 2, calls);
+  auto branch1 = cache_operation("cache.branch1", schema);
+  auto branch2 = cache_operation("cache.branch2", schema);
   PS_CHECK(registry->register_operation(leaf).ok());
   PS_CHECK(registry->register_operation(branch1).ok());
   PS_CHECK(registry->register_operation(branch2).ok());
   PS_CHECK(registry->register_operation(merge).ok());
   PS_CHECK(registry->freeze().ok());
   WorkflowDocument document;
-  document.inputs = {
-      {1, "x", {ElementType::Float64, {1}}, Region::whole({1}), {0, {8}}, {}}};
+  document.inputs = {multi_result::declaration(1, "x", schema)};
   document.nodes = {
       {1, leaf.key, {WorkflowInputReference{1}}, {}},
       {2, branch1.key, {WorkflowNodeOutput{1, "value"}}, {}},
@@ -239,9 +348,13 @@ int cache_shared_route_budget() {
   document.outputs = {{"y", 4, "value"}};
   GraphContext graph(document);
   auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContext execution(registry, {1, false, 64, 1048576, 65536});
+  ExecutionContext execution(registry, configuration());
+  auto resource_root = execution.resource_budget().take_value();
   auto frozen =
-      execution.freeze(plan, {{{"x", Value::from_float64(7)}}}).take_value();
+      execution
+          .freeze(plan,
+                  {{multi_result::binding(resource_root, "x", 7, schema)}})
+          .take_value();
   const DemandQuery query{{"y", Footprint::all({1}).take_value()}};
   PS_CHECK(execution.execute_fragments(frozen, query).ok() && *calls == 1);
   // Split the old shared Whole owner into two equivalent new source nodes.
@@ -260,16 +373,20 @@ int cache_shared_route_budget() {
   GraphContext changed(document);
   auto changed_plan = Compiler(registry).compile(changed).take_value().plan;
   auto changed_frozen =
-      execution.freeze(changed_plan, {{{"x", Value::from_float64(7)}}})
+      execution
+          .freeze(changed_plan,
+                  {{multi_result::binding(resource_root, "x", 7, schema)}})
           .take_value();
   auto result = execution.execute_fragments(changed_frozen, query);
   PS_CHECK(result.ok() && *calls == 1 &&
            result.value().diagnostics.cache_hits > 0);
   double actual = 0;
-  PS_CHECK(
-      result.value().values.at("y").read({0}, &actual, sizeof(actual)).ok() &&
-      actual == 14);
-  auto dirty = result.value().dependencies.potential_dirty("x", query.at("y"));
+  PS_CHECK(numeric_result_fixture::read(result.value().results.at("y"), {0},
+                                        &actual, sizeof(actual))
+               .ok() &&
+           actual == 14);
+  auto dirty = result.value().dependencies.potential_dirty(
+      "x", query.at("y"), 7, {}, ResultSupportTarget::Tensor, 0);
   PS_CHECK(dirty.ok() && dirty.value().at("y") == query.at("y"));
   return 0;
 }
@@ -277,26 +394,16 @@ int dependency_cache_proof_limits() {
   using namespace ps;                      // NOLINT(build/namespaces)
   using namespace ps::execution_internal;  // NOLINT(build/namespaces)
   auto registry = std::make_shared<OperationRegistry>();
-  OperationDefinition leaf;
-  leaf.key = "leaf";
-  leaf.traits.outputs[0].output_element_type = ElementType::Float32;
-  leaf.traits.input_count = 1;
-  leaf.traits.input_schema.resize(1);
-  leaf.traits.outputs[0].shape_rule = OperationShapeRule::PreserveFirstInput;
-  leaf.traits.outputs[0].region_rule = OperationRegionRule::Elementwise;
-  leaf.callback = [](const OperationInvocation& call) {
-    return Result<Value>(call.inputs[0]);
-  };
-  auto merge = leaf;
-  merge.key = "merge";
-  merge.traits.input_count = 4;
-  merge.traits.input_schema.resize(4);
+  const auto schema = multi_result::schema(ElementType::Float32);
+  auto leaf = cache_operation("leaf", schema, CacheMode::First, 1, {},
+                              ElementType::Float32);
+  auto merge = cache_operation("merge", schema, CacheMode::First, 4, {},
+                               ElementType::Float32);
   PS_CHECK(registry->register_operation(leaf).ok());
   PS_CHECK(registry->register_operation(merge).ok());
   PS_CHECK(registry->freeze().ok());
   WorkflowDocument document;
-  document.inputs = {
-      {1, "x", {ElementType::Float32, {1}}, Region::whole({1}), {0, {4}}, {}}};
+  document.inputs = {multi_result::declaration(1, "x", schema)};
   document.nodes = {{1, "leaf", {WorkflowInputReference{1}}, {}}};
   std::vector<WorkflowInput> siblings;
   for (std::uint64_t i = 2; i <= 5; ++i) {
@@ -357,8 +464,13 @@ int dependency_cache_proof_limits() {
   PS_CHECK(!dependency_cache_proof(plan, root, 1200, &work, &visits, {}).ok());
   // Compare the projected source set with public execution's independently
   // assembled evidence for this diamond. No hidden implementation exports.
-  ExecutionContext context(registry);
-  auto frozen = context.freeze(plan, {{{"x", scalar(7)}}}).take_value();
+  ExecutionContext context(registry, configuration());
+  auto frozen =
+      context
+          .freeze(plan,
+                  {{multi_result::binding(
+                      context.resource_budget().take_value(), "x", 7, schema)}})
+          .take_value();
   auto computed = context.execute_fragments(frozen, {{"y", q}});
   PS_CHECK(computed.ok());
   const auto support =
@@ -435,9 +547,9 @@ int concurrent_reclamation() {
 }
 }  // namespace
 int main() {
-  PS_CHECK(dynamic_opaque_cache_preservation() == 0);
+  PS_CHECK(opaque_result_cache_preservation() == 0);
   PS_CHECK(concurrent_reclamation() == 0);
-  PS_CHECK(dependency_content_bits() == 0);
+  PS_CHECK(result_content_bits() == 0);
   PS_CHECK(dependency_cache_storage() == 0);
   PS_CHECK(cache_shared_route_budget() == 0);
   PS_CHECK(dependency_cache_proof_limits() == 0);

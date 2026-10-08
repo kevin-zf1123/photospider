@@ -13,15 +13,15 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+verification_status: focused_result_validation_passed
+repository_commit: current working tree
 ---
 
 # CRV-06A: color_ramp_rgb
+
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member and no fields, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -39,7 +39,7 @@ an explicit Proposed contract implemented by the current runtime.
 ## Confirmed color domain and operation
 
 Use explicit stops[K] and colors[K,C] to map scalar input positions to colors,
-with output shape input.shape+[C]. This RGB implementation is separate from the
+with output shape sample_shape(input)+[C]. This RGB implementation is separate from the
 CMYK/LCH/HSL/LAB/YCbCr ramps in the [family contract](CRV-06_color_ramp.md).
 The same RGB operation supports colors[K,3] for RGB and colors[K,4] for RGBA;
 the color description explicitly declares alpha presence. Other color models
@@ -84,13 +84,13 @@ stop. Requested input positions remain read/validated even in the constant case.
 Input, stops and colors independently accept Float32/Float64; the output dtype
 selects Float32/Float64 and defaults to colors' dtype. Output appends C=3/4, so
 input rank must permit the extra axis under the current positive rank-1..8
-Value limit. Total logical input/color/output products retain the 2^40 cap.
+logical element limit. Total logical input/color/output products retain the 2^40 cap.
 
 ## Confirmed color observation granularity
 
 The final channel axis is a complete RGB/RGBA color. Any channel request closes
 to a complete color, and a nonempty request evaluates the full Whole output.
-All input arrays are collected and typed-validated; stop order and every finite
+All input Result tensors are typed/upstream-validated; stop order and every finite
 position are checked before selected-row color mathematics. Alpha and finite
 constraints apply to all components of each mathematically selected color.
 Exact stop hits, clamp and K=1 use one stop color and directly
@@ -168,7 +168,7 @@ Ordered required inputs are input[S], stops[K], colors[K,C]. Here S is an
 arbitrary rank-1..7 positive shape, C=3 or 4, colors.shape[0]=stops.shape[0],
 and output values has shape S+[C]. Enforce the stated K and 2^40 input/color/
 output product limits using checked integer arithmetic. Position input and stops
-are generic floating Values; colors may be generic or already color-described
+are generic floating Result tensors; colors may be generic or already color-described
 under the explicit matching rule. All scalar positions must be finite for a nonempty Whole request.
 
 | Static parameter | Type/domain | Constructor behavior |
@@ -229,33 +229,34 @@ on the identical-color shortcut.
 
 ## Observation mapping, demand and ownership
 
-All formal strict and accelerated keys use Whole execution. Any nonempty
-request collects complete input, stops and color arrays (and both rational-hue
-integer arrays when present), with complete upstream and typed validation.
-The callback validates every stop, then every position, before color arithmetic.
-Each position still uses exactly one hit/clamp/singleton row or two enclosing
-rows mathematically. Unused generic color rows are not subjected to new numeric
-domain checks; invalid typed data or upstream failures anywhere still fail.
-Empty requests perform static preflight but read no sample payload.
+All formal strict and accelerated keys use Whole Result programs. A nonempty
+Run declares Data, Validation and Descriptor needs (role 13) for every input, so
+typed and upstream validation covers complete tensor members. The executor reads
+authorized windows directly; the callback does not collect or copy complete input
+arrays. It validates all stops, then every input position, before color arithmetic.
+Each position uses one exact hit/clamp/singleton row or two enclosing rows for its
+mathematics. Generic color rows outside all evaluated stencils remain numerically
+unused, while their typed/upstream validation still applies. Empty reads no sample
+payload after static preparation.
 
-The output is one immutable dense Value of shape input.shape+[C]. The final
-channel axis retains complete-color closure, ColorArray identity and owned ICC
-resources where applicable. Public fragments expose the requested complete
-colors while retaining the full output owner. Arbitrary immutable input strides,
-offsets and unaligned storage are supported. Owners survive context teardown.
-Any input edit invalidates the complete recorded output demand. Cache identity
-retains descriptors, parameters, typed validation and resource identities.
-Numeric errors have Run scope; no successful color subset survives a failed
-callback. Upstream, resource and cancellation errors retain their categories.
+The `values` port publishes an immutable `photospider.tensor` v1 Result with
+`samples` shape `sample_shape(input)+[C]`, the ColorArray v1 facet and
+`atomic_trailing_axes=1`. Whole writes publish the full output transactionally;
+the Result retains full certified coverage and global coordinates. Fragments expose
+requested regions while retaining the full output owner. Arbitrary immutable source
+strides, offsets and unaligned storage are supported. Result association records
+source ObjectIds, and selected ColorArray resources remain owned by the output.
+Input edits invalidate complete recorded output demand. Numeric errors have Run
+scope; failed callbacks publish no color subset. Upstream, resource and cancellation
+errors retain their categories.
 
-For N=product(input.shape), lookup work is O(K+N log K), plus actual exact or
-certified arithmetic. Full output payload is N*C*sizeof(dtype), even for a small
-requested region. Account complete collected inputs, fixed admitted arithmetic
-workspace, a ResourceVector stop index with 8K element bytes plus allocator and
-metadata overhead, and retained descriptors/resources. No per-output dependency
-records or point-state array is retained. Work/capacity limits and cancellation
-apply during scans, lookup, arithmetic and before publication; incomplete
-certification fails ResourceExhausted. No reduced-precision fallback is added.
+Lookup work remains O(K+N log K), plus exact or certified arithmetic. Full output
+payload is N*C*sizeof(dtype), even for a small request. Account source owners/windows,
+fixed arithmetic workspace, the Root-owned ResourceVector stop index (8K element
+bytes plus allocator/metadata overhead), output and retained descriptors/resources.
+No per-output dependency records or point-state array is retained. Work/capacity and
+cancellation checks apply during scans, lookup, arithmetic and before publication;
+incomplete certification fails ResourceExhausted. No reduced-precision fallback is added.
 
 ## Reference algorithm, budgets and failures
 
@@ -316,17 +317,5 @@ below; the document remains Proposed.
 - [Operator specification template](../../00-foundation/spec-template.md).
 
 ## Maintained implementation and validation
-
-Public [`color_ramp_rgb_node`](../../../../include/photospider/numeric/color_ramps.hpp)
-constructs this primitive; [`color_ramps.cpp`](../../../../plugins/ops/01-numeric/color_ramps.cpp)
-implements its Whole complete-output execution.
-
-Direct, linear and gamma=2 paths use exact rational/root arithmetic.
-Other gamma and sRGB paths use certified whole-expression enclosures.
-Current profiles return strict bits; the accelerated RGB contract permits
-up to four ULP while retaining exact alpha and failure classification.
-
-See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation),
-[mathematical machinery](../math-implementation.md#crv-06-colorarray-and-color-ramps)
-and [public workflow commands](../../../../examples/numeric_workflow/README.md#color-ramps)
-for resource limits and actual validation.
+Public `color_ramp_rgb_node` is declared in [`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp); `color_ramps.cpp` implements the Whole Result program. Direct, linear and gamma=2 paths use exact rational/root arithmetic; other gamma and sRGB paths use certified whole-expression enclosures. The accelerated RGB contract permits up to four ULP while alpha and failure classification remain exact.
+The focused Result CTest, Strict/Apple manual groups, independent Fraction/Machin-pi and RGB rational/root/Decimal oracles, and installed consumer have passed. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation) and [workflow README](../../../../examples/numeric_workflow/README.md#color-ramps) for coverage and unsupported platforms/shapes.

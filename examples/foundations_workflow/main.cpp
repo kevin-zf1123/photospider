@@ -23,9 +23,7 @@ int main(int argc, char** argv) {
         {"generator-gain", foundations::generator_gain}};
     unsigned ran = 0;
     for (const auto& scene : scenes)
-      if ((scenario == "all" &&
-           (scene.first == "numeric" || scene.first == "expression-lut")) ||
-          scenario == scene.first) {
+      if (scenario == "all" || scenario == scene.first) {
         scene.second();
         ++ran;
       }

@@ -1,70 +1,24 @@
 # FMT-11 performance workflow
 
-这是性能分析入口，不是独立正确性 oracle。先运行 `test_model_math` 和
-`test_model_conversion`。构建目标为 `photospider_model_conversion_performance`；
-可执行文件位于构建目录的 `examples/model_conversion_performance/`。
+当前驱动提供直接数学模式和两种 Result workflow 模式。`math` 直接调用 private `ModelMath` 与 SIMD 实现；它不是 installed public math consumer。`generic` 和 `planar` 通过 public Result graph 编译与执行，`planar` 使用 spatial Result storage。历史 Value/planar 测量不代表当前 Result 实现的性能。
 
 ```sh
-cmake --build build-fmt11 --target photospider_model_conversion_performance
-B=build-fmt11/examples/model_conversion_performance/photospider_model_conversion_performance
+cmake --build build --target photospider_model_conversion_performance
+B=build/examples/model_conversion_performance/photospider_model_conversion_performance
 $B --help
-$B --member M --dtype f32 --profile strict --algorithm auto --mode math --width 1024 --height 1 --repeats 7
-$B --member M --dtype f32 --profile strict --algorithm reference --mode math --width 1024 --height 1 --repeats 7
-$B --member M --dtype f64 --profile x86 --algorithm auto --mode planar --width 133 --height 2 --repeats 7
-$B --member M --dtype f64 --profile x86 --algorithm scalar --mode planar --width 133 --height 2 --repeats 7
-$B --member E --dtype f32 --profile strict --algorithm auto --mode planar --width 1024 --height 128 --roi-width 7 --repeats 7
+$B --member M --dtype f32 --profile strict --algorithm auto --mode generic --width 133 --height 2 --repeats 3 --warmup 2
+$B --member M --dtype f64 --profile x86 --algorithm reference --mode planar --width 133 --height 2 --roi-width 7 --repeats 3 --warmup 2
+$B --member M --dtype f32 --profile apple --algorithm auto --mode math --width 133 --height 2 --repeats 3 --warmup 2
 ```
 
-macOS Apple Silicon 将 `--profile x86` 改为 `--profile apple`。不支持的加速 profile
-明确失败，不会将 scalar 结果标成成功的 AVX2/NEON 结果。FreeBSD arm64 上 `apple`
-profile 仍不适用；应测试 strict，新增 NEON 候选路径目前遵循既有 Apple profile 的平台限制。
+`--member` 接受 A..T；`--dtype` 接受 f32/f64；`--profile` 接受 strict、x86 或 apple；`--algorithm` 接受 auto、scalar 或 reference；`--mode` 接受 math、generic 或 planar。尺寸、ROI、重复次数、预热次数、worker 数、tile 大小与证明工作上限分别由 `--width`、`--height`、`--roi-width`、`--repeats`、`--warmup`、`--workers`、`--tile` 和 `--work` 控制。`auto` 使用 profile 准许的 SIMD 候选并逐 lane 进行数值 certification；`scalar` 关闭批量 SIMD，但仍执行相同的 certification；`reference` 关闭快速滤证路径，使用 reference 运算。证明 work 达到 `--work` 上限时，运行失败，不应作为性能结果。比较不同实现时应固定编译 flags、参数、warmup 与 repeats。
 
-`--member A..T` 对应规格成员。S 的图执行使用公开 helper 所采用的 MASK 构件，
-没有 `color.gray_to_black_white` 原生注册项。所有 benchmark 图使用 raw 及 materialize，
-不测语义元数据检查成本，也不测 Q 的 view 路径。
+`prepare_us` 记录 math 常量准备时间，`compile_us` 记录图编译时间。Graph 模式的 `median_us`、`min_us`、`max_us`、`p90_us` 和 `timings_us` 仅计时 `execute` 调用；完整 ROI 输出的 bit checksum 在计时结束后计算。Math 模式则直接计时数值循环，并在循环内累计 checksum。checksum 用于跨运行一致性检查，不是独立正确性 oracle。预热运行不进入正式计时与计数；数学计数、Result work、source logical bytes 和 numeric diagnostics 按正式 repeats 累加。
 
-三种 mode：`math` 直接测数值核心，单线程，另报常量准备时间；`generic` 测 Value 图；
-`planar` 测 tiled PlanarImage 图。后两者单独报告编译时间，重复复用同一执行计划和输入，
-每轮生成新输出；计时不包含输入导入或输出全量导出，包含执行阶段真实分配和调度。
-`--roi-width` 只请求左侧窄条，不是全图计算后裁剪。跨通道稀疏/非连续区域由集成测试覆盖。
+CSV 包含当前输入参数、prepare/compile 与计时列、`accepted`、`reference`、`refinements`、`math_work`、`root_peak_host_bytes`、`run_live_payload_bytes`、`run_live_metadata_bytes`、`source_payload_bytes`、`source_logical_bytes`、`issued_work`、`numeric_evaluated`、`numeric_copied`、`numeric_views`、`strict_math_calls`、`strict_fallbacks` 和 `checksum` 等字段。`accepted`、`reference`、`refinements`、`math_work` 仅在 math 模式填写；Root 与 numeric 字段仅在 Result graph 模式填写，不适用的列为空。
 
-`auto` 使用适用的滤证算法及新增矩阵 SIMD 候选；`scalar` 关闭新增矩阵 SIMD 候选，
-仍使用同一滤证算法及底层 NUM/SLEEF（它们自身可能用 ISA）；`reference` 关闭这些快速滤证，
-使用精确有理数/定向区间路径。它不是错误舍入的普通 libm 对照。
+在 Result graph 模式中，`source_payload_bytes` 是执行前 Root 中 source payload 的基线。`source_logical_bytes` 是各正式 repeat 请求的来源逻辑 support 大小，按 dtype 字节数计算，不代表实际内存流量。`issued_work` 与 `numeric_*` 字段累计所有正式 repeats。`run_live_payload_bytes` 与 `run_live_metadata_bytes` 分别记录 Result 存活期间相对执行前基线的最大正增量；`root_peak_host_bytes` 是 Root 累计 Host 峰值，包含 setup、warmup 与 execute 计时外的输出读取。驱动显式设置 Root Host 容量为 8 GiB、Metadata 子限额为 64 MiB；这是本例压力配置，不是运行时默认值。
 
-CSV 中 accepted/reference/refinements/math_work 仅在 math 模式有效；图模式这些列为 0，
-不是“无回退/无工作”。`--warmup N` 默认为 2，允许 0；预热不计入计时、数学计数、work、copy/tiles
-或 checksum。计数累计所有正式 repeats；median/min/max/p90 是单轮时间统计，
-偶数轮的 median 取中间两项均值，p90 使用 nearest-rank。
-`timings_us` 保留用分号分隔的逐轮原始时间。图模式在执行计时结束后，按逻辑坐标
-摘要 ROI 内**全部输出位**；math 模式保持在数值循环内累计 checksum。
-全量摘要可以发现原先首样本摘要遗漏的差异，但哈希相等不是数学正确性的证明；
-仍需独立 oracle 与回归。读取输出也会影响下一轮缓存状态，因此前后比较必须使用
-同一新版 harness、参数、warmup 和 repeats，不能直接混比旧版首像素结果。
-`peak_buffer_bytes` 是框架 buffer 模型峰值，不是完整 managed arena、committed backing 或 RSS。
-图中 `source_read_bytes=0` 可以表示直接绑定预先存在的 Value/image，不代表没有读样本。
+`tools/fmt11/compare_performance.py` 使用 `--baseline` 和 `--candidate` 指定两个兼容的驱动可执行文件，按随机化 AB/BA 顺序运行至少三对独立进程。图模式比较完整输出 checksum；math 模式还比较 `accepted`、`reference`、`refinements` 和 `math_work`。脚本支持 Linux CPU affinity，并用本地文件锁避免该脚本的并发运行。历史 graph CSV 中的零计数与当前不适用字段的空值可以共存；graph 模式只比较 checksum。
 
-先用小尺寸测 E/F/D/H/J/L reference，留意 `--work` 的显式证明工作上限；不要拿
-ResourceExhausted 当作性能结果或通过降低精度绕过。大图比较应保持相同输入、ROI、tile、
-profile、线程数和工作预算。宽度建议 1/2/3/4/7/63/64/65/127/128/129/133/1920/3840；
-测试 tile 64/128/256、worker 1/2/物理核数、Float32/Float64。
-
-严格的速度结论需在空闲实机独立重复进程、记录编译器/flags/CPU/OS/温控状态，
-排除并发构建。macOS 用 Instruments Time Profiler/Allocations、`/usr/bin/time -l`；
-FreeBSD 用 pmcstat（已配置 PMC 时）、DTrace、`/usr/bin/time -l`。关注 SIMD 占比、
-证明回退/GCD/矩阵求逆准备、每 tile 一次的大 scratch 分配、row_run 与依赖元数据成本。
-
-## 可重复的前后对比
-
-`tools/fmt11/compare_performance.py` 接受 `--baseline` 和 `--candidate` 两个可执行
-文件；`--accelerated-profile apple|x86` 选择加速 profile，Darwin arm64 默认 apple，
-其他平台默认 x86；场景名称同步使用所选 profile。两者必须由**相同本文件 harness**、相同编译器/flags，分别链接修改前后
-数值实现得到。脚本执行至少三对独立进程，固定随机种子交错 AB/BA，支持 Linux
-CPU affinity，并用本地文件锁防止该脚本自身并发运行（不能排除其他用户进程）。
-原始 JSONL 保存命令、stdout/stderr、退出码、每轮时间及数值/工作量计数；汇总
-保存每对进程 median、整体 median、极值与 speedup。失败和 checksum/work 不一致
-均导致非零退出。测试期间不要同时编译。
-
-先检查参考路径与 Float64 的 GCD 成本，再比较 strict/x86 的大图/窄 ROI、worker
-以及 tile。SIMD 命中不等于端到端更快；小 ROI、任务调度与线程争用可能主导。
-不能把历史机器的单次结果和本轮 Linux 热态多次结果拼成同一提速比。
+当前验证限于一致性 smoke：160 次串行 graph 执行覆盖 A–T、Float32/Float64、generic/planar 和 auto/reference，尺寸为 width 3、height 2，repeats 1、warmup 0；40 组中每组四种组合的 checksum 一致。另有三次 Apple profile 的 NCL M、Float32、width 133、height 2 执行，math、generic 和 planar 模式均通过。它们不提供独立 golden oracle 或速度结论，完整性能矩阵尚未运行。六项 focused 检查全部通过，包括 model conversion、model math、metadata、rational arithmetic、alpha/model interop 和 Result 行为覆盖。安装包消费检查 `installed_model_conversion`、`installed_model_result` 和 `installed_alpha_model_interop` 也全部通过。

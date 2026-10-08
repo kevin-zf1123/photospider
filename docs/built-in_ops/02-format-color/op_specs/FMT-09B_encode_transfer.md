@@ -7,11 +7,9 @@ kind: primitive
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: implemented_handoff_pending_platform_review
+implementation_status: implemented_cpu_result_abi_2
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
-proposed_operation_keys:
+registered_operation_keys:
   - color.transfer_encode_strict
   - color.transfer_encode_accelerated_apple_silicon
   - color.transfer_encode_accelerated_x86_64
@@ -20,13 +18,19 @@ proposed_operation_keys:
 # FMT-09B: encode transfer
 
 Inherit the complete [FMT-09 contract](FMT-09_transfer_contract.md) and
-[scalar definitions](FMT-09_transfer_math.md). These keys are registered native primitives in the development handoff,
-not a universal color converter. See the [handoff](../../../development/FMT-09-handoff.md)
-for test evidence and platform-review boundaries.
+[scalar definitions](FMT-09_transfer_math.md). This direction has strict,
+accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 2 keys. The
+specification remains Proposed.
 
 ## Interface and observable behavior
 
-One Float32/Float64 `input` produces same-dtype, same-shape `values`. A target
+One input Result with one tensor member and no fields produces one `values`
+output Result containing one tensor. The member uses Float32 or Float64, retains
+its dtype, shape and axis positions, and preserves Result schema identity, tensor
+key and batch axes. Semantic output updates transfer facets; raw output retains
+the input facets. Both set `atomic_trailing_axes` to zero. Complete sample rank,
+including batch and cell axes, is at most 8; sample count is at most 2^40. Axis
+indices refer to cell axes and exclude the Result batch prefix. A target
 curve is always explicit; gamma, BT.2020 variant and BT.1886 black/white parameters
 follow the family table. Semantic source metadata must already identify the
 compatible linear quantity. An encoded source is rejected rather than encoded
@@ -53,9 +57,9 @@ Reference incompatibility is static; no metadata update performs a scene-to-disp
 rendering. Static parameter checks precede sample evaluation in all modes.
 
 Auto/view/materialize follows the family identity rule. Semantic identity retains
-its requested finite checks and independent output metadata. Nonidentity B only
-materializes requested coverage, obeying planar ownership, prepared pages,
-cancellation, bounded strict math and publication rules. Intrinsic ACEScc floor
+its requested finite checks and independent output metadata. Nonidentity B
+materializes requested coverage under Result owner, prepared-coverage,
+cancellation, bounded strict-math and publication rules. Intrinsic ACEScc floor
 samples retain their source witnesses and can still fail input validation.
 
 ## Independent acceptance fixtures
@@ -91,7 +95,6 @@ samples retain their source witnesses and can still fail input validation.
     a nonidentity curve fails; source state and unchanged bypass samples must
     agree between auto/materialize and full/sparse execution.
 
-A future public workflow explicitly requests the desired encoding after any
-needed FMT-10/ref-normalization stages, observes encoded samples, then separately
-uses FMT-06 and an I/O codec if external integer/file output is required. This
-specification does not implement that workflow or register its proposed keys.
+An explicit D -> basis/reference stage -> E workflow composes these operations;
+the registry does not choose such a chain automatically. FMT-06 and an I/O codec
+remain explicit stages when external integer or file output is required.

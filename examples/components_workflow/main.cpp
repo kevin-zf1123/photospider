@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "../shared/result_source.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {
@@ -23,10 +24,7 @@ void check(bool ok, const char* message) {
 template <class T>
 T take(Result<T> result) {
   if (!result.ok())
-    throw std::runtime_error(
-        "code=" + std::to_string(static_cast<int>(result.status().code)) +
-        " reason=" + std::to_string(static_cast<int>(result.status().reason)) +
-        ": " + result.status().message);
+    throw example_result::Failure(result.status());
   return result.take_value();
 }
 struct Reference {
@@ -74,34 +72,6 @@ Reference bfs(const std::vector<std::uint8_t>& source, std::uint64_t width,
   }
   return r;
 }
-std::shared_ptr<RegionalSource> source(const std::vector<std::uint8_t>& pixels,
-                                       std::uint64_t width, unsigned* reads,
-                                       CancellationSource* cancellation,
-                                       bool cancel) {
-  auto result = std::make_shared<RegionalSource>();
-  result->descriptor = {ElementType::UInt8, {pixels.size() / width, width}};
-  result->read = [&pixels, width, reads, cancellation, cancel](
-                     const Region& region, std::uint8_t* output,
-                     std::uint64_t bytes, const BufferAllocator&,
-                     const CancellationToken&) -> Result<Region> {
-    ++*reads;
-    if (cancel && *reads == 2)
-      cancellation->cancel();
-    const auto& r = region.dimensions();
-    std::uint64_t copied = 0;
-    for (auto y = r[0].offset; y < r[0].offset + r[0].extent; ++y)
-      for (auto x = r[1].offset; x < r[1].offset + r[1].extent; ++x) {
-        if (copied == bytes)
-          return Result<Region>(
-              Status{ErrorCode::InvalidArgument, "source byte range"});
-        output[copied++] = pixels[y * width + x];
-      }
-    return copied == bytes ? Result<Region>(region)
-                           : Result<Region>(Status{ErrorCode::InvalidArgument,
-                                                   "source byte count"});
-  };
-  return result;
-}
 struct Sink {
   const std::vector<std::uint8_t>* expected;
   std::uint64_t row = 0, batch = 0, kept = 0;
@@ -110,10 +80,10 @@ struct Sink {
   ResultDescriptor descriptor;
   explicit Sink(const std::vector<std::uint8_t>* reference)
       : expected(reference) {}
-  Poll poll(const ResultProgramPhase& p) {
+  Poll poll(const ResultProgramPhase& p) try {
     if (!stage) {
       stage = 1;
-      return Poll(ResultProgramNeed{{}, {{0, 0, true, 0}}, {}});
+      return Poll(ResultProgramNeed{{{0, 0, true, 0}}, {}});
     }
     if (stage == 1) {
       input = p.results.at(0);
@@ -146,40 +116,37 @@ struct Sink {
       if (!read.ok())
         return Poll(read.status());
       stage = 3;
-      return Poll(ResultProgramNeed{{}, {}, {read.take_value()}});
+      return Poll(ResultProgramNeed{{}, {read.take_value()}});
     }
-    auto memory = MutableValue::allocate(p.query.output.descriptor,
-                                         Region::whole({1}), p.allocator);
-    if (!memory.ok())
-      return Poll(memory.status());
-    auto buffer = memory.take_value();
+    auto builder = take(ResultBuilder::start(
+        p.resources, *p.query.output.result_schema, p.query.semantic_key));
+    example_result::check(
+        builder.bind_descriptor_relation(take(ResultRelation::cartesian(
+            p.resources, 1,
+            {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0}))));
+    auto relation = take(ResultRelation::cartesian(
+        p.resources, 1,
+        {0, 7, 0, expected->size(), ResultSupportTarget::Field, 0},
+        DependencyGuarantee::Conservative));
     const double value = static_cast<double>(kept);
-    std::memcpy(buffer.data(), &value, 8);
-    auto published = std::move(buffer).publish({});
-    if (!published.ok())
-      return Poll(published.status());
-    const auto held = published.take_value();
-    auto fragments = ValueFragments::create_view(
-        p.query.output.descriptor, {}, *p.query.value_outputs, &held, 1);
-    if (!fragments.ok())
-      return Poll(fragments.status());
-    auto relation =
-        ResultRelation::cartesian(p.resources, 1, {0, 7, 0, expected->size()},
-                                  DependencyGuarantee::Conservative);
-    if (!relation.ok())
-      return Poll(relation.status());
-    return Poll(
-        ResultValuePublication{fragments.take_value(), relation.take_value()});
+    example_result::check(builder.publish_tensor(
+        0, Region::whole({1}),
+        {reinterpret_cast<const std::uint8_t*>(&value), 8}, relation,
+        {true, true, true, true}));
+    return Poll(ResultPublication{take(builder.seal()), true});
+  } catch (const example_result::Failure& failure) {
+    return Poll(failure.status);
   }
 };
 void run(const char* name, std::uint64_t h, std::uint64_t w,
          std::vector<std::uint8_t> mask, std::int64_t threshold = 2,
          std::uint64_t window = 64, std::uint64_t maximum = 1048576,
          unsigned failure = 0, std::uint64_t work = 10000000,
-         std::uint32_t stages = 1000000) {
+         std::uint32_t stages = 1000000, unsigned layout = 0) {
   check(mask.size() == h * w, "fixture dimensions");
   const auto reference = bfs(mask, w, threshold);
   ComponentsSpec spec{h, w, maximum, ComponentIdScheme::MinPixel};
+  CancellationSource cancellation;
   auto registry = std::make_shared<OperationRegistry>();
   std::array<unsigned, 3> starts{};
   for (auto op : {ComponentOperation::Labels, ComponentOperation::Area,
@@ -204,25 +171,21 @@ void run(const char* name, std::uint64_t h, std::uint64_t w,
   traits.input_schema[0].kind = OperationPortKind::Result;
   traits.input_schema[0].result_schema_id = "photospider.component_filter";
   traits.input_schema[0].result_schema_version = 1;
+  traits.outputs = {
+      example_result::output(example_result::schema(ElementType::Float64, {1}),
+                             sizeof(Sink), 1000000)};
   auto& out = traits.outputs[0];
   out.region_rule = OperationRegionRule::Dependency;
   out.dependency_version = 2;
   out.continuation_bytes = sizeof(Sink);
   out.maximum_dependency_stages = 1000000;
-  out.output_element_type = ElementType::Float64;
-  out.shape_rule = OperationShapeRule::Fixed;
-  out.fixed_output_shape = {1};
   sink.start_result = [&reference](const auto&, const auto& allocator) {
     return ResultContinuation::make<Sink>(allocator, &reference.mask);
   };
   check(registry->register_operation(std::move(sink)).ok(), "register sink");
   WorkflowDocument doc;
-  doc.inputs = {{1,
-                 "mask",
-                 {ElementType::UInt8, {h, w}},
-                 Region::whole({h, w}),
-                 {0, {static_cast<std::int64_t>(w), 1}},
-                 {}}};
+  doc.inputs = {example_result::declaration(
+      1, "mask", example_result::schema(ElementType::UInt8, {h, w}))};
   doc.nodes = {
       {1, "components4.labels", {WorkflowInputReference{1}}, {}},
       {2, "components4.area", {WorkflowNodeOutput{1, "value"}}, {}},
@@ -236,12 +199,8 @@ void run(const char* name, std::uint64_t h, std::uint64_t w,
   if (other.size() > 1)
     other[1] = 0;
   if (failure == 3) {
-    doc.inputs.push_back({2,
-                          "other",
-                          {ElementType::UInt8, {h, w}},
-                          Region::whole({h, w}),
-                          {0, {static_cast<std::int64_t>(w), 1}},
-                          {}});
+    doc.inputs.push_back(example_result::declaration(
+        2, "other_mask", example_result::schema(ElementType::UInt8, {h, w})));
     doc.nodes.push_back(
         {6, "components4.labels", {WorkflowInputReference{2}}, {}});
     doc.nodes[2].inputs[0] = WorkflowNodeOutput{6, "value"};
@@ -254,28 +213,46 @@ void run(const char* name, std::uint64_t h, std::uint64_t w,
   check(registry->freeze().ok(), "freeze registry");
   GraphContext graph(doc);
   auto compiled = take(Compiler(registry).compile(graph));
+  const auto host = h * w > 65536 ? 4194304ULL : 1048576ULL;
   ResourceBudget root;
-  unsigned reads = 0;
   Result<ExecutionResult> result(Status{ErrorCode::Internal, {}});
   {
     ExecutionContextConfig config;
     config.managed_resources = ResourceLimits{};
-    config.managed_resources->capacity[ResourceKind::Host] = 65536;
-    config.managed_resources->capacity[ResourceKind::Metadata] = 65536;
+    config.managed_resources->capacity[ResourceKind::Host] = host;
+    config.managed_resources->capacity[ResourceKind::Metadata] = host;
     if (failure == 1)
       config.managed_resources->capacity[ResourceKind::Disk] = 4096;
+    config.managed_resources->capacity[ResourceKind::Payload] = 32768;
+    config.managed_resources->capacity[ResourceKind::Referenced] =
+        2 * mask.size();
     ExecutionContext context(registry, config);
     root = take(context.resource_budget());
-    CancellationSource cancellation;
-    ExecutionBindings bindings{
-        {{"mask", {}, source(mask, w, &reads, &cancellation, failure == 2)}}};
+    const auto bind = [&](std::string name,
+                          const std::vector<std::uint8_t>& pixels) {
+      return example_result::input(
+          root, std::move(name),
+          example_result::schema(ElementType::UInt8, {h, w}),
+          [&](std::uint64_t i, std::uint8_t* bytes) { *bytes = pixels[i]; },
+          layout == 7, layout == 8);
+    };
+    ExecutionBindings bindings{{bind("mask", mask)}};
     if (failure == 3)
-      bindings.inputs.push_back(
-          {"other", {}, source(other, w, &reads, &cancellation, false)});
+      bindings.inputs.push_back(bind("other_mask", other));
     ExecutionOptions options;
     options.maximum_result_window_bytes = window;
     options.maximum_dependency_work = work;
     options.dependencies.maximum_stages = stages;
+    if (failure == 2) {
+      options.result_publication = [&](ValueRef output, const ResultRef&) {
+        if (output.node_id == 1) {
+          check(root.statistics().peak[ResourceKind::Disk] > 0,
+                "component cancellation after backing writes");
+          cancellation.cancel();
+        }
+        return Status::success();
+      };
+    }
     if (failure == 4)
       graph.replace(doc);
     result =
@@ -291,8 +268,9 @@ void run(const char* name, std::uint64_t h, std::uint64_t w,
       check(result.status().reason == FailureReason::InvalidAssociation,
             "foreign area association");
     else if (failure == 4)
-      check(result.status().code == ErrorCode::Stale && reads == 0,
-            "stale before source reads");
+      check(result.status().code == ErrorCode::Stale &&
+                starts == std::array<unsigned, 3>{},
+            "stale before operation starts");
     else if (reference.rows.size() > maximum)
       check(result.status().code == ErrorCode::OperationFailed &&
                 result.status().reason == FailureReason::InvalidDomain &&
@@ -303,7 +281,8 @@ void run(const char* name, std::uint64_t h, std::uint64_t w,
       check(result.status().code == ErrorCode::ResourceExhausted,
             "component bounded failure category");
     check(root.statistics().live[ResourceKind::Disk] == 0 &&
-              root.statistics().live[ResourceKind::Payload] == 0,
+              root.statistics().live[ResourceKind::Payload] == 0 &&
+              root.statistics().live[ResourceKind::Referenced] == 0,
           "component failed cleanup");
     std::cout << name << " rejected: " << result.status().message << '\n';
     return;
@@ -352,7 +331,9 @@ void run(const char* name, std::uint64_t h, std::uint64_t w,
   auto support = take(area.descriptor_relation());
   check(support.guarantee() == DependencyGuarantee::Conservative,
         "Conservative global support");
-  check(take(support.intersects(0, {{0, 8, 0, 1}}, 64)).value_or(false),
+  check(take(support.intersects(
+                 0, {{0, 8, 0, 1, ResultSupportTarget::Descriptor, 0}}, 64))
+            .value_or(false),
         "empty descriptor invalidation");
   support = {};
   auto held =
@@ -363,16 +344,26 @@ void run(const char* name, std::uint64_t h, std::uint64_t w,
   labels = {};
   area = {};
   filtered = {};
-  check(weak.lock().valid(),
-        "filter window retains Labels and area after context");
+  check(!weak.lock().valid(), "copied filter does not retain Labels payload");
+  check(
+      root.statistics().live[ResourceKind::Disk] > 0 &&
+          held->bytes().data()[0] == reference.mask[0],
+      "filter window retains readable backing after Result/context retirement");
   held.reset();
   check(!weak.lock().valid() && root.statistics().live[ResourceKind::Disk] == 0,
         "last component window releases backing");
+  check(root.statistics().live[ResourceKind::Referenced] == 0,
+        "component input backing released");
+  check(root.statistics().peak[ResourceKind::Host] <= host &&
+            root.statistics().peak[ResourceKind::Payload] <= 32768,
+        "bounded Result source and computation storage");
   std::cout << name << " passed HW=" << h << 'x' << w
             << " K=" << reference.rows.size() << " window=" << window
             << " host_peak=" << root.statistics().peak[ResourceKind::Host]
+            << " payload_peak=" << root.statistics().peak[ResourceKind::Payload]
             << " issued_stages=" << root.statistics().issued.stages
-            << " source_reads=" << reads << '\n';
+            << " referenced_peak="
+            << root.statistics().peak[ResourceKind::Referenced] << '\n';
 }
 }  // namespace
 int main(int argc, char** argv) {
@@ -413,6 +404,10 @@ int main(int argc, char** argv) {
     run("disk-after-UF", 2, 3, {1, 1, 1, 1, 1, 1}, 1, 64, 1, 1);
     run("cancel-after-write", 2, 3, {1, 1, 1, 1, 1, 1}, 1, 32, 1, 2);
     run("stale", 2, 3, {1, 1, 1, 1, 1, 1}, 1, 64, 1, 4);
+    run("negative-stride", 2, 3, {1, 0, 1, 1, 1, 1}, 5, 64, 2, 0, 10000000,
+        1000000, 7);
+    run("zero-stride", 2, 3, {1, 1, 1, 1, 1, 1}, 6, 64, 1, 0, 10000000, 1000000,
+        8);
     run("int64-threshold", 1, 3, {1, 1, 1}, INT64_MAX, 64, 1);
     std::vector<std::uint8_t> isolated(32 * 33);
     for (unsigned y = 0; y < 32; ++y)

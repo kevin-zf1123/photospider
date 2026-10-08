@@ -70,14 +70,23 @@ bool whole_region(const Region& region,
 /** @brief Validates and canonicalizes a metadata-only declaration. */
 Status validate_declaration(WorkflowInputDeclaration* declaration);
 /** @brief Checks a bound Value against already canonical declaration facts. */
-Status validate_binding(const WorkflowInputDeclaration& declaration,
-                        const Value& value);
+
 /** @brief Checks all closed port schema combinations before registration. */
 Status validate_port_schema(const OperationTraits& traits);
 /** @brief Checks declarative output/repeated-input records before publication.
  */
 Status validate_operation_contract(const OperationTraits& traits);
 /** @brief Checks scalar/image descriptors and exact profile facet metadata. */
+/** @brief Resolve and validate a named logical tensor member in Result
+ * metadata. An omitted member key is unambiguous only for a single-tensor
+ * representation. This performs no payload access or production.
+ */
+/** @brief Whether this Result constraint selects a tensor member. Without a
+ * key a dtype/rank/facet predicate requires one unambiguous tensor member.
+ */
+bool tensor_member_predicate(const OperationPortConstraint& port) noexcept;
+Result<std::uint32_t> resolve_tensor_member(const OperationPortConstraint& port,
+                                            const OperationMetadata& metadata);
 Status validate_port_metadata(const OperationPortConstraint& port,
                               const OperationMetadata& metadata);
 Status validate_port_metadata(const OperationPortConstraint& port,
@@ -100,6 +109,31 @@ ValueFacet image_facet();
 Status validate_port_value(const OperationPortConstraint& port,
                            const Value& value, ErrorCode numeric_failure,
                            const std::function<ErrorCode()>& stop);
+/** @brief Validate a bounded scalar tensor using captured immutable coverage.
+ * Reads its logical sample through Result access without dense-layout
+ * assumptions. numeric_failure distinguishes external admission from computed
+ * input failure.
+ */
+Status validate_port_tensor(const OperationPortConstraint& port,
+                            const ResultRef& result,
+                            const ResultDescriptor& descriptor,
+                            const OperationMetadata& metadata,
+                            ErrorCode numeric_failure,
+                            const CancellationToken& cancellation,
+                            const std::function<ErrorCode()>& stop);
+/** @brief Validate recognized typed numeric domains over exact tensor samples.
+ * Only explicit Validation obligations call this; empty sets and raw facets
+ * read no payload. Batch and cell axes remain distinct. Windows retain exact
+ * captured coverage and finite scans observe stop plus owning cancellation.
+ */
+Status validate_tensor_samples(const ResultRef& result,
+                               const ResultDescriptor& descriptor,
+                               uint32_t slot, const Footprint& samples,
+                               const ResourceBudget& resources,
+                               ErrorCode numeric_failure,
+                               const CancellationToken& cancellation,
+                               const std::function<ErrorCode()>& stop,
+                               const std::function<Status(uint64_t)>& consume);
 /** @brief Checks nonempty image demand including complete channel coverage. */
 bool image_demand(const Region& region) noexcept;
 /** @brief Recognized semantic keys; ColorArray is independent of SemanticKind.

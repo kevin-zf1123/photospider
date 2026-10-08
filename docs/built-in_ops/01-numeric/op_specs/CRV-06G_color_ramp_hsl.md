@@ -8,15 +8,15 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+verification_status: focused_result_validation_passed
+repository_commit: current working tree
 ---
 
 # CRV-06G: HSL ramps
+
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member and no fields, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -41,13 +41,14 @@ Three independent entrypoints use radian, floating pi_multiple or exact
 rational_pi hue. The floating forms take ordered input, stops, colors[K,3],
 with channel order H,S,L. The rational form takes input, stops,
 saturation_lightness[K,2], hue_numerator[K], hue_denominator[K]. Integers are
-Int64, denominator>0, unreduced fractions are valid. Floating ports independently
-accept Float32/Float64. Output is values, shape input.shape+[3], ordered H,S,L.
+Int64; selected denominators must be positive, and unreduced fractions are
+valid. Unselected generic q<=0 rows add no mathematical-domain check. Floating ports independently
+accept Float32/Float64. Output is values, shape sample_shape(input)+[3], ordered H,S,L.
 
 Inherit [CIELCh CRV-06D](CRV-06D_color_ramp_cielch.md) for K=1..65536,
 input rank 1..7 and all positive logical counts <=2^40, finite strictly increasing
 stops, clamp/reject default clamp, singleton behavior, output hue units and defaults,
-static description matching, complete-color observation, Whole input collection and selected-row mathematics,
+static description matching, complete-color observation, Whole role-13 validation and selected-row mathematics,
 whole-input dirty witnesses, layout/owner/resource accounting, cancellation and errors.
 Replace its lightness_chroma port with saturation_lightness. Output dtype defaults
 to colors dtype or saturation_lightness dtype. Required static String parameters
@@ -92,13 +93,5 @@ separate conversion specifications, not guessed by this interpolation operation.
 - [Color-array description](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).
 
 ## Maintained implementation and validation
-
-This shared HSL contract covers three primitives and nine profile keys.
-The public helpers are `color_ramp_hsl_node`,
-`color_ramp_hsl_pi_node` and `color_ramp_hsl_rational_pi_node` in
-[`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp).
-Coordinates and original hue ratios use exact rational interpolation;
-conversion between radian and pi units uses certified pi, with a 4096-bit
-precision ceiling. Equal units cancel symbolically. Every profile returns
-strict bits. See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation)
-and [public workflows](../../../../examples/numeric_workflow/README.md#color-ramps).
+The public helpers `color_ramp_hsl_node`, `color_ramp_hsl_pi_node` and `color_ramp_hsl_rational_pi_node` are declared in [`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp); `color_ramps.cpp` implements their Whole Result programs. Coordinate values and original hue ratios use exact rational interpolation. Cross-unit conversion in either direction multiplies or divides by certified pi, with a 4096-bit precision ceiling; same-unit RationalPi expressions cancel pi symbolically.
+The focused Result CTest, Strict/Apple manual groups, independent Fraction/Machin-pi and RGB rational/root/Decimal oracles, and installed consumer have passed. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation) and [workflow README](../../../../examples/numeric_workflow/README.md#color-ramps) for coverage and unsupported platforms/shapes.

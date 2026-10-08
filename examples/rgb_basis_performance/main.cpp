@@ -105,15 +105,9 @@ WorkflowDocument graph(const WorkflowDocument& base, const std::string& member,
 std::uint64_t read(const ExecutionResult& out, std::uint64_t y, std::uint64_t x,
                    std::uint64_t c, bool narrow) {
   std::uint64_t word = 0;
-  const auto v = out.values.find("out");
-  if (v != out.values.end()) {
-    const auto address = checked(v->second.byte_address({y, x, c}));
-    std::memcpy(&word, v->second.bytes().data() + address, narrow ? 4 : 8);
-  } else {
-    checked(out.images.at("out").read(Region({{y, 1}, {x, 1}, {c, 1}}),
-                                      reinterpret_cast<std::uint8_t*>(&word),
-                                      narrow ? 4 : 8));
-  }
+  const auto& value = out.results.at("out");
+  checked(value.read_tensor(checked(value.descriptor()), 0, {y, x, c}, &word,
+                            narrow ? 4 : 8));
   return word;
 }
 void compare(const ExecutionResult& actual, const ExecutionResult& reference,
@@ -189,7 +183,24 @@ int main(int argc, char** argv) try {
       description(member == "b" || member == "c" || member == "i")));
   WorkflowDocument base;
   ExecutionBindings bindings;
-  PlanarImage image;
+  auto registry = make_default_operation_registry();
+  ExecutionContextConfig config;
+  config.cpu_workers = workers;
+  config.maximum_live_bytes = UINT64_C(1) << 33;
+  config.managed_resources = ResourceLimits{};
+  config.managed_resources->capacity[ResourceKind::Host] =
+      config.maximum_live_bytes;
+  config.managed_resources->capacity[ResourceKind::Metadata] = UINT64_C(64)
+                                                               << 20;
+  config.result_cache_bytes = 0;
+  ExecutionContext executor(registry, config);
+  const auto root = checked(executor.resource_budget());
+  const auto initial_available = root.available_capacity();
+  const auto initial_usage = root.statistics();
+  const auto capacity = [&](ResourceKind kind) {
+    return initial_available[kind] + initial_usage.live[kind] +
+           initial_usage.protected_cleanup[kind];
+  };
   const auto input_start = Clock::now();
   const auto fill = [&](std::uint8_t* destination, std::uint64_t i,
                         std::uint64_t c) {
@@ -204,48 +215,69 @@ int main(int argc, char** argv) try {
       std::memcpy(destination, &sample, 8);
     }
   };
-  if (planar) {
-    PlanarImageConfig config;
-    config.tile_height = config.tile_width = tile;
-    config.maximum_backed_bytes = UINT64_C(1) << 32;
-    image = checked(PlanarImage::create(descriptor, config, {facet}));
-    std::vector<std::uint8_t> plane(size * size * width);
-    for (std::uint64_t c = 0; c < 4; ++c) {
-      for (std::uint64_t i = 0; i < size * size; ++i)
-        fill(plane.data() + i * width, i, c);
-      checked(image.publish(Region({{0, size}, {0, size}, {c, 1}}),
-                            plane.data(), plane.size()));
-    }
-    base.inputs = {{1,
-                    "source",
-                    descriptor,
-                    Region::whole(descriptor.shape),
-                    {},
-                    {facet},
-                    PlanarImageLayout{config.order, 0, 1, 2, 0, {}}}};
-    ExecutionBinding b;
-    b.name = "source";
-    b.image = std::make_shared<const PlanarImage>(image);
-    bindings.inputs.push_back(std::move(b));
-  } else {
-    std::vector<std::uint8_t> data(size * size * 4 * width);
-    for (std::uint64_t i = 0; i < size * size; ++i)
-      for (std::uint64_t c = 0; c < 4; ++c)
-        fill(data.data() + (4 * i + c) * width, i, c);
-    const StridedLayout strides{0,
-                                {static_cast<std::int64_t>(size * 4 * width),
-                                 static_cast<std::int64_t>(4 * width),
-                                 static_cast<std::int64_t>(width)}};
-    auto value = checked(Value::create(
-        descriptor, Region::whole(descriptor.shape), strides, data, {facet}));
-    base.inputs = {{1,
-                    "source",
-                    descriptor,
-                    Region::whole(descriptor.shape),
-                    strides,
-                    {facet}}};
-    bindings.inputs = {{"source", std::move(value)}};
-  }
+  SchemaTemplate schema;
+  schema.id = "example.rgb-basis";
+  ResultTensorSpec tensor;
+  tensor.key = "samples";
+  tensor.descriptor = descriptor;
+  tensor.facets = {facet};
+  tensor.layout.spatial = planar;
+  tensor.layout.order = ImagePlaneOrder::Tiled;
+  schema.tensors.push_back(tensor);
+  auto builder = checked(
+      ResultBuilder::start(root, schema, "fmt10.source", {}, {}, tile, tile));
+  checked(builder.bind_descriptor_relation(
+      checked(ResultRelation::cartesian(root, 1, {0, 8, 0, 0}))));
+  auto relation =
+      checked(ResultRelation::cartesian(root, size * size * 4, {0, 1, 0, 0}));
+  checked(builder.publish_tensor_kernel(
+      0, Region::whole(descriptor.shape),
+      [&](const auto& writers) {
+        for (const auto& writer : writers) {
+          const auto& dims = writer.region().dimensions();
+          const auto axis = writer.sample_axis();
+          std::vector<std::uint64_t> at;
+          for (auto dim : dims)
+            at.push_back(dim.offset);
+          for (;;) {
+            auto run = checked(writer.row_run(at));
+            for (std::uint64_t lane = 0; lane < run.samples; ++lane) {
+              auto coordinate = at;
+              coordinate[axis] += lane;
+              fill(run.data + static_cast<std::int64_t>(lane) *
+                                  run.sample_stride_bytes,
+                   coordinate[0] * size + coordinate[1], coordinate[2]);
+            }
+            at[axis] += run.samples;
+            if (at[axis] < dims[axis].offset + dims[axis].extent)
+              continue;
+            at[axis] = dims[axis].offset;
+            bool next = false;
+            for (std::size_t i = dims.size(); i;) {
+              --i;
+              if (i == axis)
+                continue;
+              if (++at[i] < dims[i].offset + dims[i].extent) {
+                next = true;
+                break;
+              }
+              at[i] = dims[i].offset;
+            }
+            if (!next)
+              break;
+          }
+        }
+        return Status::success();
+      },
+      relation, {true, true, true, true}));
+  auto source = checked(builder.seal());
+  WorkflowInputDeclaration declaration;
+  declaration.id = 1;
+  declaration.name = "source";
+  declaration.result_schema = std::make_shared<SchemaTemplate>(schema);
+  base.inputs = {declaration};
+  bindings.inputs = {{"source", source}};
+  const auto source_payload = root.statistics().live[ResourceKind::Payload];
   const auto input_ms = ms(input_start);
   Region region = Region::whole(descriptor.shape);
   if (coverage == "color") {
@@ -263,7 +295,6 @@ int main(int argc, char** argv) try {
   gate_dims[0].extent = std::min<std::uint64_t>(gate_edge, gate_dims[0].extent);
   gate_dims[1].extent = std::min<std::uint64_t>(gate_edge, gate_dims[1].extent);
   const Region gate(gate_dims);
-  auto registry = make_default_operation_registry();
   const auto author_start = Clock::now();
   auto document = graph(base, member, profile, layout, raw, registry);
   const auto author_ms = ms(author_start);
@@ -281,12 +312,6 @@ int main(int argc, char** argv) try {
   reference_planning.output_regions = {{"out", gate}};
   auto reference_plan =
       checked(compiler.compile(reference_context, reference_planning));
-  ExecutionContextConfig config;
-  config.cpu_workers = workers;
-  config.maximum_live_bytes = UINT64_C(1)
-                              << 33;  // explicit 8 GiB benchmark allowance
-  config.result_cache_bytes = 0;
-  ExecutionContext executor(registry, config);
   ExecutionOptions options;
   options.maximum_parallelism = workers;
   options.dependencies.maximum_work = UINT64_C(1) << 44;
@@ -297,27 +322,39 @@ int main(int argc, char** argv) try {
     auto out = checked(executor.execute(compiled.plan, bindings, {}, options));
     compare(out, reference, gate, narrow, profile == "strict", member == "d");
   }
+  const auto baseline = root.statistics();
   std::cout
       << "size,dtype,member,profile,coverage,storage,tile,workers,layout,mode,"
-         "iteration,input_ms,author_ms,compile_ms,execute_ms,source_backed,"
-         "output_backed,output_reserved,source_read_bytes,result_copy_bytes,"
-         "peak_live_bytes,numeric_evaluated,numeric_fallbacks,gate_samples,"
+         "iteration,input_ms,author_ms,compile_ms,execute_ms,source_payload_"
+         "bytes,"
+         "run_live_payload_bytes,run_live_metadata_bytes,source_logical_bytes,"
+         "issued_work,"
+         "root_peak_host_bytes,numeric_evaluated,numeric_fallbacks,gate_"
+         "samples,"
          "warmups\n";
   std::vector<double> times;
   for (unsigned i = 0; i < repeats; ++i) {
+    const auto work_before = root.statistics().issued.work;
     const auto start = Clock::now();
     auto out = checked(executor.execute(compiled.plan, bindings, {}, options));
     const auto elapsed = ms(start);
+    const auto issued_work = root.statistics().issued.work - work_before;
+    const auto usage = root.statistics();
     compare(out, reference, gate, narrow, profile == "strict", member == "d");
     times.push_back(elapsed);
-    std::uint64_t backed = 0, reserved = 0, evaluated = 0, fallbacks = 0;
-    if (planar) {
-      const auto& v = out.images.at("out");
-      backed = v.backed_bytes();
-      reserved = v.reserved_bytes();
-    } else {
-      backed = out.values.at("out").bytes().size();
-    }
+    const auto backed = usage.live[ResourceKind::Payload] -
+                        baseline.live[ResourceKind::Payload];
+    const auto metadata = usage.live[ResourceKind::Metadata] >
+                                  baseline.live[ResourceKind::Metadata]
+                              ? usage.live[ResourceKind::Metadata] -
+                                    baseline.live[ResourceKind::Metadata]
+                              : 0;
+    const auto logical = checked(checked(out.dependencies.source_support())
+                                     .at("source")
+                                     .element_count()) *
+                         width;
+    const auto peak = root.statistics().peak[ResourceKind::Host];
+    std::uint64_t evaluated = 0, fallbacks = 0;
     for (const auto& t : out.diagnostics.operation_timings) {
       evaluated += t.numeric.evaluated_values;
       fallbacks += t.numeric.strict_fallbacks;
@@ -326,23 +363,19 @@ int main(int argc, char** argv) try {
               << ',' << profile << ',' << coverage << ',' << storage << ','
               << tile << ',' << workers << ',' << layout << ',' << mode << ','
               << i << ',' << input_ms << ',' << author_ms << ',' << compile_ms
-              << ',' << elapsed << ','
-              << (planar ? image.backed_bytes() : size * size * 4 * width)
-              << ',' << backed << ',' << reserved << ','
-              << out.diagnostics.source_read_bytes << ','
-              << out.diagnostics.result_copy_bytes << ','
-              << out.diagnostics.peak_live_bytes << ',' << evaluated << ','
-              << fallbacks << ',' << checked(gate.element_count()) << ','
-              << warmups << '\n';
+              << ',' << elapsed << ',' << source_payload << ',' << backed << ','
+              << metadata << ',' << logical << ',' << issued_work << ',' << peak
+              << ',' << evaluated << ',' << fallbacks << ','
+              << checked(gate.element_count()) << ',' << warmups << '\n';
   }
   std::sort(times.begin(), times.end());
   std::cerr << "median execute_ms=" << times[times.size() / 2]
             << "; cache=off; input=fully published; warmups=" << warmups
             << "; correctness gate=at most " << gate_edge << 'x' << gate_edge
             << " requested samples\n";
-  if (planar)
-    std::cerr << "Planar callbacks do not yet expose numeric counters; zero "
-                 "numeric columns mean unavailable, not zero fallback.\n";
+  std::cerr << "Root Host capacity=" << capacity(ResourceKind::Host)
+            << "; Metadata capacity=" << capacity(ResourceKind::Metadata)
+            << '\n';
   return 0;
 } catch (const std::exception& e) {
   std::cerr << "FMT-10 benchmark: " << e.what() << '\n';

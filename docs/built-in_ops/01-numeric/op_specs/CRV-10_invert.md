@@ -6,12 +6,9 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+repository_commit: current working tree
 ---
 
 # CRV-10: one-dimensional inverse lookup
@@ -44,7 +41,7 @@ than swapping x/y and fitting a different PCHIP curve. The following clauses
 complete the initial clarification; the runtime implementation is available
 through the six registered keys while this specification remains Proposed.
 
-Dynamic inputs are x[K], y[K], query[N]. x is finite and strictly increasing;
+Each dynamic input is a Result containing one tensor member under any schema id and member key; `sample_shape()` gives x[K], y[K] and query[N]. x is finite and strictly increasing;
 y is finite and either strictly increasing or strictly decreasing globally.
 Reject plateaus/repeated y values. query contains target y values, may repeat or
 be unordered. Every nonempty request validates all x/y for the required topology;
@@ -54,10 +51,8 @@ Static out_of_domain is reject/clamp, default reject. Compare query against the
 actual numeric range of y; clamp selects the corresponding x endpoint, accounting
 for y direction. No inverse of extrapolated linear/PCHIP tails is provided.
 
-x/y/query independently accept Float32/Float64 and may mix. Output values[N]
-uses static Float32/Float64 dtype, default Float64. K is 2..65536; N is
-1..2^40. Every nonempty request reads all three inputs and computes the complete
-output. Every query and final x must be finite; an invalid query or output
+x/y/query independently accept Float32/Float64 and may mix. Output port `values` is a Result with schema `photospider.tensor`, member `samples`, shape [N], empty facets and static Float32/Float64 dtype, default Float64. K is 2..65536; N is
+1..2^40. Every nonempty request reads all three inputs and computes the complete output. Every query and final x must be finite; an invalid query or output
 overflow anywhere fails the run, including outside the delivered footprint.
 
 Strict inverts the forward mathematical curve before destination rounding, then
@@ -110,16 +105,13 @@ classification/sign must match strict. No GPU implementation is specified.
 
 ## Demand, dirty propagation and storage
 
-Empty Q reads no payload. All six formal profile keys use Whole. Nonempty Q
-collects complete x/y/query before the callback, validates global x/y topology,
-then prechecks every query control before inverse arithmetic. The unchanged
+Empty Q reads no payload. All six formal profile keys use Whole. Nonempty Q collects complete x/y/query Results with Data, Validation and Descriptor (role 13), validates global x/y topology, then prechecks every query control before inverse arithmetic. The unchanged
 linear pair or PCHIP stencil is selected from complete inputs. Any input change
 invalidates the complete output. Full typed/upstream validation can fail even
 outside delivered Q. Dynamic numerical failures have Domain/Run scope.
 
 Cache identity includes method, dtype, policy, profile and complete inputs.
-The callback publishes one immutable dense values[N]; delivery preserves Q's
-global coordinates. Arbitrary legal strides, offsets, unaligned and zero/negative
+The program publishes one immutable dense Result with full certified coverage; sample coordinates remain global rather than being rebased to Q. Its association records the actual source ObjectIds. Arbitrary legal strides, offsets, unaligned and zero/negative
 strides are supported. Output ownership survives context destruction.
 
 Lookup work is O(K+N log K) plus exact arithmetic/refinement. Promoted x/y use
@@ -166,21 +158,8 @@ inverse-curves example linked below for the command and current validation evide
 
 ## Maintained implementation and validation
 
-The current runtime registers six keys through the public
-[`inverse_curves.hpp`](../../../../include/photospider/numeric/inverse_curves.hpp)
-helpers `invert_linear_node` and `invert_pchip_node`. Linear inverse uses an
-exact rational path and is bitwise identical across profiles. PCHIP uses
-the exact polynomial/lattice algorithm in strict and for general Float64 output.
-Accelerated Float32 output first tries bracketed refinement and accepts only a
-uniquely rounded output; uncertainty uses strict scalar fallback. Exact cross
-products reduce collinear stencils to linear inversion, while knot/clamp and
-K=2 paths remain direct. Scalar integer comparison is scoped to inverse work
-and restores the surrounding numeric profile.
+The dedicated `test_numeric_inverse_result` CTest passed 1/1 in 0.89 seconds (0.94 seconds for its focused selection). The separate `test_numeric_result_math` integration test passed with the baking test in a distinct selection, 2/2 in 5.22 seconds (4.83 seconds for the shared math executable). The installed package 0.32.0 consumer selection for baking, inverse and LUT3D passed 3/3 in 5.71 seconds; `installed_numeric_inverse_result` took 0.94 seconds. Its direct Apple run passed all five groups. The source/contract reviewer and worker verification found no blocker or required change. Historical package 0.18 Value-path timings are retained in the [math implementation notes](../math-implementation.md#crv-10-inverse-curves); they do not measure current Result performance.
 
-See the [inverse-curves workflow](../../../../examples/numeric_workflow/README.md#inverse-curves)
-for the shared fixture and validation details. Native Clang 21 Strict/Apple
-passed four manual groups and 407 independent Fraction cases per profile, plus
-focused numeric/compiler tests. Tests include full-input failure/dirty support,
-all stride combinations, floating environments, K=65536, a 2^40-output budget
-rejection, active cancellation and owner release. This Whole revision has not
-been validated on WSL/AVX2 or through an installed-package consumer.
+`plugins/ops/01-numeric/curve_inverse.cpp` registers the six Whole Result keys; the public constructors are `invert_linear_node` and `invert_pchip_node` in [`inverse_curves.hpp`](../../../../include/photospider/numeric/inverse_curves.hpp). Linear inversion uses an exact rational path across profiles. Strict and general Float64 PCHIP use the exact polynomial/lattice algorithm. Accelerated Float32 PCHIP uses a certified bracket and accepts only a uniquely rounded result, otherwise it falls back to the strict scalar solver. Exact cross products reduce collinear PCHIP stencils to linear inversion; K=2, knot and clamp paths remain direct. Scalar integer comparison temporarily selects the strict inverse math profile and restores the surrounding numeric profile afterward. The execution floating-environment guard independently preserves the caller environment.
+
+The maintained manual fixture is `examples/numeric_workflow/inverse.cpp`; it keeps source arrays as Value backing, binds their immutable Results through the public workflow, returns Results and reads them through authorized windows. Its five behavior groups pass under Strict and Apple. The independent 407-case Fraction oracle passes under both profiles, with exact Strict expectations and the shared FP32-scaled acceptance bound for Apple. These are separate from `test_numeric_result_math`'s `inverse_workflows` and `inverse_boundaries` integration cases. The fixture covers both caller and actual computation-worker floating environments, mixed dtypes, negative/zero strides, dirty scope, knot/clamp signed zero, static preparation reuse, repeated-demand ObjectId retention, a true fresh-source cache hit with current direct associations, Empty propagation without polling a failed producer, `SampledSignal` type failure attributed to input 2, cancellation, and source-owner retirement. Retained Float32 and Float64 outputs/read windows account for 12 and 24 Payload bytes; releasing the final window returns Root live capacity to zero. K=65536 executes successfully. A public N=2^40 constant View is rejected as `ResourceExhausted/CapacityLimit` at node 1 because Whole execution must allocate the complete output; this is not a numerical run at that physical output size. The installed-consumer target is configured to compile and link the public workflow source against package 0.32.0. Historical package 0.18 Value-path timings are retained in the [math implementation notes](../math-implementation.md#crv-10-inverse-curves); they do not measure current Result performance.

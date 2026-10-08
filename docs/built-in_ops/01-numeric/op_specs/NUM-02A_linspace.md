@@ -14,219 +14,54 @@ status: Proposed
 spec_revision: 0.2.0
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
-repository_branch: ops-impl
-repository_commit: 30478d33
+repository_branch: ops-specs
+repository_commit: current working tree
 ---
 
 # NUM-02A: linspace
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+The strict key follows the exact reference below. Accelerated floating results follow the shared [final FP32 four-ULP contract](NUM_accelerated_contract.md), including its range and fallback rules; copies, endpoints and special values remain exact. Inherit the [NUM baseline](NUM_common_contract.md) for status, registration, shared execution and acceptance requirements. The explicit rules here take precedence.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+`numeric.linspace_{strict,accelerated_apple_silicon,accelerated_x86_64}` creates a one-dimensional sequence from `start`, `end` and a static `count`. Each input is a Result containing exactly one tensor member at any member key. Its complete `sample_shape()` must be `[1]`; both inputs are Float32 or Float64 and may use different floating types. `count` is a required static Int64 in `[1, 1048576]`. `dtype` is a required static String, `float32` or `float64`. The public `linspace_node` helper defaults to Float64 output and the strict CPU profile; callers can select another supported CPU profile explicitly.
 
-This contract records the endpoint-defined sequence generator separately from
-the step-defined NUM-02B arange generator. Both independent operators are
-implemented; their public entry points and validation are recorded below.
-Specification acceptance remains Proposed.
+The `values` output is a Result with schema `photospider.tensor`, member `samples`, shape `[count]` and the selected floating dtype. The `axis` output uses the same schema and member key, Float64 shape `[3]`, and `atomic_trailing_axes=1`. Both outputs use ordinary tensor axes and drop facets and batch topology. The axis tuple is `[start, end, step]`. Values and axis are independent output identities; requesting an axis component closes demand over the complete three-component tuple.
 
-## Confirmed scope
+## Exact sequence and axis
 
-Generate a one-dimensional numeric sequence using `start`, `end`, and `count`,
-including both endpoints for a non-singleton sequence. The sequence is intended
-to supply numeric inputs to other operations.
-
-The selected named outputs are `values[N]` in Float32 or Float64 (default
-Float64), and Float64 `axis[3]`, storing `[start,end,step]`.
-
-Input slots 0 and 1 are dynamic `start` and `end`, each a Float32/Float64 `[1]`
-Value. They may have different dtypes. Static count is in `[1,1048576]`;
-ascending and descending intervals are supported. For count=1, return `[start]`
-and `axis=[start,start,0]`, without reading/validating end payload or scheduling
-its producer solely for this node. Static metadata checks still apply to the
-declared end edge. Output conversion is defined by the selected dtype contract.
-
-For N>=2, treat the widened endpoints as exact binary rational values and define
+For `N=count >= 2`, interpret the finite input endpoints as exact binary rational values and define each sample from its global index:
 
 ```text
-values[0] = RN_dtype(start)
+values[0]   = RN_dtype(start)
 values[N-1] = RN_dtype(end)
-values[i] = RN_dtype(((N-1-i)*exact(start) + i*exact(end))/(N-1)), 0<i<N-1
+values[i]   = RN_dtype(((N-1-i)*exact(start) + i*exact(end))/(N-1)), 0<i<N-1
 ```
 
-Each generated value is correctly rounded directly to its output dtype with
-round-to-nearest/ties-to-even. Float32 does not go through an intermediate
-rounded Float64 interpolated value. No recurrence adds a rounded step across
-the sequence; the global index determines each independently requested value.
+`RN_dtype` means direct round-to-nearest, ties-to-even in the selected output type. Float32 output never passes through an already-rounded interpolated Float64 value. The kernel computes each sample from its index rather than repeatedly adding a rounded step. For `N=1`, values is `[RN_dtype(start)]` and axis is `[start, start, +0]`; runtime uses only the start payload.
 
-The constructor writes `dtype="float64"` unless a Float32 output is requested.
-Direct nodes supply required `count: Int64` and `dtype: String` explicitly;
-the registry does not infer a missing count or synthesize domain inputs.
-NUM-01's sampling conventions are references, not automatically inherited
-restrictions on this numeric-value sequence.
+For `N>=2`, axis is `[start, end, RN64((exact(end)-exact(start))/(N-1))]`. The difference and quotient are evaluated without an overflowing Float64 intermediate. Equal endpoints are valid and produce a positive-zero step. A nonzero exact step may round to signed zero. Axis retains widened endpoint values even when values use Float32. Reconstruct samples from endpoints and count; repeatedly adding the rounded step is not the sequence definition.
 
-## Confirmed repeated-value policy
+Equal endpoints and duplicate rounded samples are valid. Consumers that require strictly ordered coordinates must check that condition themselves. Endpoints preserve their signed-zero bits through conversion. An interior exact zero is negative only when both endpoints are negative zero; otherwise it is positive zero. A nonzero exact result rounded to zero retains its sign. A constant negative-zero sequence therefore contains negative-zero values, while its axis step is positive zero.
 
-Equal endpoints are valid: for example, start=end=2 and count=3 produce
-`values=[2,2,2]` and `axis=[2,2,0]`. Adjacent generated values may also become
-equal through floating-point rounding. Neither case is an error. Consumers
-requiring strictly ordered/distinct coordinates must validate that property.
-This differs intentionally from NUM-01's duplicate-sampling-coordinate rejection.
+Only dynamically read floating inputs must be finite, and every published component must be finite. A step rounding overflow fails the selected `axis` output. Any sample overflow fails a nonempty `values` request, including when the overflowing global index lies outside the consumer projection. Subnormals and gradual underflow to signed zero are valid. The implementation restores the caller's rounding mode and exception flags.
 
-## Numerical versions
+## Result demand and failure behavior
 
-Follow the maintainer's general rule for subsequent NUM specifications: strict,
-Apple Silicon CPU accelerated and x86-64 CPU accelerated have independently
-named keys. Strict sequence values retain correct rounding; accelerated floating values
-follow the shared FP32-scaled bound. Axis and selected endpoints remain exact.
+Both outputs use Whole execution. For a nonempty request, the program reads authorized input tensor windows and computes the complete selected output through a packed Result writer before consumer projection. The published Result retains the complete object and its global coordinates. For `count > 1`, it requests both scalar inputs with Data, Validation and Descriptor roles (role 13). Thus an endpoint-only values request still depends on both inputs, and a failed end producer can fail the request. For `count=1`, static specialization selects only input 0 for runtime Need and relation support for either output. The second input's complete static metadata is still checked during specialization and seal; its payload and producer are not requested. Empty requests do not read payload or perform arithmetic.
 
-## Axis, special values and rounding
+Static preflight rejects missing or malformed parameters with `InvalidArgument`; unsupported input dtype, nonscalar input shape or a non-floating output dtype uses `TypeMismatch`. Any active source change invalidates the complete selected output. An axis failure leaves a separately successful values result intact. Runtime nonfinite inputs fail with `OperationFailed` / `InvalidDomain`; rounded output overflow uses `OperationFailed` / `ArithmeticOverflow`. Both are Domain/Run failures identified with the selected output and global sample or axis component. Resource, cancellation, stale-input, typed-validation and upstream failures retain their original status. Failure publishes no partial output.
 
-For N>=2, axis is `[start,end,RN64((exact(end)-exact(start))/(N-1))]`.
-Compute this exact rational difference/quotient without an overflowing Float64
-intermediate. Equal endpoints have step +0. A nonzero exact step may round to
-a signed zero; that is valid and consistent with the repeated-value policy.
-Axis does not claim that repeatedly adding its rounded step reproduces values.
-Reconstruct the conceptual grid from both endpoints and N using the formula
-above. Axis retains the original widened endpoints even for Float32 values.
+Output values own `count * sizeof(dtype)` payload bytes. Axis owns 24 bytes. The `SequenceMath` workspace is admitted through the phase allocator. The host resource ledger accounts for input windows, output and scratch; work and cancellation are checked during generation and before publication. Failure releases unpublished output and scratch. These payload sizes are not an RSS bound.
 
-Only actually read inputs must be finite. Every published numeric component must
-be finite. A step whose Float64 rounding overflows fails axis only. Any value whose chosen output rounding overflows fails the complete values
-request, including when that value is outside the projected Region. There is no
-NaN/Inf preservation or clipping mode. Subnormals and gradual underflow to signed
-zero are allowed; restore the caller's floating-point environment.
+## Authoring and current checks
 
-Endpoint outputs preserve the endpoint's signed-zero sign through conversion.
-For an interior exact zero, return -0 only when both endpoints are -0; otherwise
-return +0. A nonzero exact result rounding to zero retains its sign. Thus a
-constant -0 interval remains a sequence of -0 values, while axis.step is +0.
+`numeric::SequenceInput` carries a workflow input reference and an immutable single-tensor Result schema hint; it contains no payload. `sequence_input` builds it from a workflow input declaration. `linspace_node` writes explicit `count` and `dtype` parameters and defaults to Float64. Changing either parameter requires recompilation.
 
-## Whole demand, failures and invalidation
+The focused Result sequence fixture runs through:
 
-All formal profile keys use a synchronous Whole callback for the selected
-output. Nonempty values requests compute all N values; nonempty axis requests
-compute its complete three-component Atomic tuple. The executor projects the
-owned output to the requested global Region afterwards. Values and axis remain
-independent output identities. An axis-only request does not generate values.
+```sh
+ctest --test-dir build/kernel-dev -R '^test_numeric_sequences_result$' --output-on-failure
+```
 
-For N=1, both outputs read start only. Static specialization excludes the other
-port from runtime demand, typed payload validation and invalidation. Its schema
-still validates at compile time. For N>=2, both scalars are collected and
-validated even for an endpoint-only request. A failed other producer or an
-unrepresentable unrequested value therefore fails the selected Whole request.
-An axis failure does not certify a separately requested values failure.
-Empty requests perform no payload reads or callback work.
+The workflow loop checks strict and available Apple Silicon execution with Float64 endpoints. Separate strict cases check direct Float32 rounding with `start=1`, `end=0x1.0000020000001p0`, and `count=3`: the middle result is `0x3f800001`, while Float64-then-Float32 double rounding gives `0x3f800000`. Other checks cover endpoint and axis output selection, atomic tuple closure, extreme finite cancellation, signed zero, axis-only overflow, failure from an overflowing value outside requested coverage, nonfinite-input failure, Empty, work-limit rollback and pre-cancellation. It also checks count-one exclusion of a failing end producer while retaining static dtype validation, plus count-two upstream failure. The x86 profile's unavailable path is checked; this is not an x86 execution result. The focused workflow is supplemented by the independent Fraction/IEEE oracle and installed SDK consumer described in [sequences Whole](../sequences-whole.md); neither supplies an x86 execution or performance claim.
 
-Each active input change invalidates all observations of its selected output;
-projection restricts returned dirty coverage to the consumer's requested Region.
-Input views may have legal offsets, unaligned storage and signed/zero strides.
-Outputs are generic packed immutable owners with empty facets. Values own N*b
-bytes and axis owns 24 bytes, including when the consumer requests one element.
-The public output descriptors, keys and tuple observation identity are unchanged.
-Owners survive invocation/context destruction and release at the final owner.
-
-Profile/count/dtype, complete static metadata and witnessed active inputs enter
-cache identity. Cache-off preserves arithmetic and ownership. Whole callbacks
-have no per-atom numeric diagnostics; report those counters as unavailable.
-
-## Algorithms and resources
-
-The reference computes the finite binary-rational weighted sum and denominator
-exactly, then rounds once to the destination IEEE dtype. Bounded integer limbs
-or compensated arithmetic with a proved exact-rounding fallback are permissible.
-Do not replace the reference by double arithmetic merely because most values
-match. Opposite extreme finite endpoints require neither an infinite difference
-nor an overflowed weighted product when the requested value is representable.
-
-Accelerated CPU implementations can vectorize independent observations and use
-fast correctly rounded cases with strict fallback for unresolved rounding.
-Every result must match strict bits. No output recurrence, SIMD tail overread,
-approximate division or reassociation is permitted to change that result.
-Platform-specific names on unsupported platforms return BackendUnavailable;
-do not silently select another operator. Profile keys remain explicit; per-atom fallback diagnostics are unavailable
-on the Whole path.
-
-For a nonempty values request, payload is N*b bytes (b=4/8), plus
-constant exact-arithmetic workspace. Axis separately uses 24 bytes and the same
-bounded workspace. At the count bound, values use 4/8 MiB. Work is O(N) for
-values and O(1) for axis, including partial consumer requests. Charge input,
-output and scratch capacity before allocation. No coordinate array is needed.
-
-Use existing allocator/admission/work/stage services and host workers. Poll
-cancellation before input work, between admitted sample batches, within long
-limb/refinement work and before publishing. No more than 64 samples occur between
-polls. Budget exhaustion returns ResourceExhausted, without truncating count or
-publishing a guessed rounded value. Host service failures remain sticky; strict
-fallback cannot erase a prior read/resource/cancellation failure. No disk backing
-or persistent mutable state is required. Payload bounds do not claim an RSS bound.
-
-## Errors and acceptance
-
-Malformed/missing static parameters return InvalidArgument; unsupported input
-shape/dtype returns TypeMismatch. Nonfinite actually read scalars fail the
-request with OperationFailed/InvalidDomain; output or step rounding overflow
-uses OperationFailed/ArithmeticOverflow. Preserve current upstream identity,
-cancellation/stale status and ResourceExhausted reasons. Numeric failures identify
-the selected output and global value index (or axis step). Numeric failures
-carry Domain origin and Run scope; no partial values are published.
-
-| Test | Independent expected result |
-| --- | --- |
-| L01 | (0,1,5) -> `[0,0.25,0.5,0.75,1]`, axis `[0,1,0.25]`; reverse gives reversed values and negative step |
-| L02 | (2,2,3) -> `[2,2,2]`, axis `[2,2,0]`; -0 endpoints preserve -0 value bits |
-| L03 | N=1 returns start and `[start,start,0]` without invoking a failing end producer |
-| L04 | start=1, end=nextafter(1,+inf), N=3 allows the rounded duplicate `[1,1,end]` |
-| L05 | start=`0x1p0`, end=`0x1.0000020000001p0`, N=3: middle Float32 is `0x1.000002p0`; Float64-then-Float32 incorrectly gives 1 |
-| L06 | Opposite maximum Float64 endpoints, N=3: middle is zero and step finite; N=2 values remain valid while requested axis overflows |
-| L07 | For N>=2 endpoint-only requests require both inputs; axis remains independent |
-| L08 | Float32 output overflow anywhere fails the selected values request; zero-step underflow and repeated output values are accepted |
-| L09 | Mixed input dtypes, dynamic endpoint changes in one plan, invalid static limits and legal strided views |
-| L10 | Nonzero/disjoint requests, joint on/off, caller rounding mode, batches and SIMD widths match strict bits |
-| L11 | Exact dirty witnesses, warm/cache-off behavior, cancellation, small-ROI versus full-array budgets and final-owner release |
-| L12 | Three supported CPU profiles match exact rational rounding; incompatible-platform failure and Whole counters unavailable |
-
-The target public fixture is a WorkflowDocument with two scalar input bindings,
-one selected linspace key, explicit count/dtype, and named values/axis outputs.
-Compile once, execute increasing and decreasing endpoint bindings, then request
-selected value indices and check actual producer reads and returned bytes.
-Use independent rational/IEEE rounding oracles, not a second production call.
-Implementation delivery must provide the real public test target, run command
-and observed results.
-
-## Implementation
-
-The six sequence keys, including all three linspace profiles, are registered in
-`plugins/ops/01-numeric/numeric_sequences.cpp`. `exact_sequence.hpp` uses bounded
-integer limbs for exact binary rational formulas and direct IEEE rounding;
-`sequence_profiles.cpp` supplies scalar, NEON and AVX2 widening multiplication.
-C++ tuple observation metadata makes axis one atomic observation. The public
-`numeric/sequences.hpp` authoring helpers write explicit count/dtype parameters.
-
-The manually invoked [numeric workflow](../../../../examples/numeric_workflow/README.md)
-provides build/run commands, editable graph construction and expected results.
-On 2026-09-14 the strict and Apple Silicon profiles passed local public-workflow
-checks and 960 independent Fraction/IEEE cases per profile. Ubuntu WSL Clang
-strict and x86-64 AVX2 passed the same oracle. Local installed-consumer execution
-also passed. Resource, cancellation, exact cache, tuple certificates, independent
-axis failures and owner lifetime have manual checks. No integration registration is included. On 2026-09-20 the manual
-[category timing/accounting driver](../../../../examples/numeric_workflow/README.md#native-category-timing-and-accounting)
-measured N=1/256 on native Clang Strict/Apple with exact output checks and managed
-resource accounting. Specification acceptance remains separate from this
-implementation record.
-
-## Related contracts
-
-- [NUM-02 category](../core.md).
-- [NUM-01 expression generator](NUM-01_sample_expression.md).
-- [Per-operation template](../../00-foundation/spec-template.md).
-- [Shared execution contracts](../../00-foundation/contracts.md).
-
-Whole migration validation and timing: [sequences Whole](../sequences-whole.md).
+The current implementation uses 68 base-2^32 limbs for finite binary64 rational arithmetic and direct IEEE rounding for its accelerated paths as well as strict. This exact implementation is an implementation fact; the public accelerated accuracy promise remains the shared FP32 four-ULP contract. An unsupported accelerated target returns `BackendUnavailable`; the runtime does not substitute a different key. No NUM-14 finite-Float32 certificate is used. Current shared storage and Whole behavior is summarized in [sequences Whole](../sequences-whole.md).

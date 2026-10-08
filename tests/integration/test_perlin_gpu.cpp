@@ -6,6 +6,8 @@
 #include <utility>
 #include <vector>
 
+#include "../../examples/perlin_workflow/result_fixture.hpp"
+#include "../../examples/unified_result_workflow/minimal_ops.hpp"
 #include "fixtures/native_vulkan_spirv.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
@@ -27,14 +29,10 @@ Value input_value(const std::vector<std::uint64_t>& raw, bool narrow) {
 Result<ExecutionResult> run(const std::shared_ptr<OperationRegistry>& registry,
                             ExecutionContext& context, const Value& input,
                             bool narrow, bool gpu = true,
-                            const CancellationToken& cancellation = {}) {
+                            const CancellationToken& cancellation = {},
+                            bool fragmented = false) {
   WorkflowDocument document;
-  document.inputs = {{1,
-                      "coordinates",
-                      input.descriptor(),
-                      input.region(),
-                      input.layout(),
-                      {}}};
+  perlin_fixture::declare(&document, input);
   document.nodes = {{1,
                      gpu ? "noise.perlin2002_3d_v1_strict_gpu"
                          : "noise.perlin2002_3d_v1_strict_cpu_whole",
@@ -48,19 +46,41 @@ Result<ExecutionResult> run(const std::shared_ptr<OperationRegistry>& registry,
   auto compiled = Compiler(registry).compile(graph, planning);
   if (!compiled.ok())
     return Result<ExecutionResult>(compiled.status());
-  return context.execute(compiled.value().plan, {{{"coordinates", input}}},
+  const auto root = context.resource_budget().take_value();
+  auto bindings = perlin_fixture::bind(root, input);
+  if (fragmented) {
+    const auto& schema = *document.inputs[0].result_schema;
+    auto builder = numeric_result_fixture::take(
+        ResultBuilder::start(root, schema, "pieces"));
+    auto relation = numeric_result_fixture::take(ResultRelation::cartesian(
+        root, input.region().element_count().take_value(), {}));
+    numeric_result_fixture::require(
+        builder
+            .bind_descriptor_relation(numeric_result_fixture::take(
+                ResultRelation::cartesian(root, 1, {})))
+            .ok(),
+        "descriptor");
+    const auto rows = input.descriptor().shape[0];
+    const auto width = Value::element_size(input.descriptor().element_type);
+    for (std::uint64_t row = 0; row < rows; ++row)
+      numeric_result_fixture::require(
+          builder
+              .publish_tensor(
+                  0, Region({{row, 1}, {0, 3}}),
+                  ByteView(input.bytes().data() + row * 3 * width, 3 * width),
+                  relation, {true, true, true, true})
+              .ok(),
+          "coordinate piece");
+    bindings.inputs[0].result = numeric_result_fixture::take(builder.seal());
+  }
+  return context.execute(compiled.value().plan, std::move(bindings),
                          cancellation);
 }
 int empty_request(const std::shared_ptr<OperationRegistry>& registry,
                   ExecutionContext& context) {
   const auto input = input_value({UINT64_C(0x7ff0000000000001), 0, 0}, false);
   WorkflowDocument document;
-  document.inputs = {{1,
-                      "coordinates",
-                      input.descriptor(),
-                      input.region(),
-                      input.layout(),
-                      {}}};
+  perlin_fixture::declare(&document, input);
   document.nodes = {{1,
                      "noise.perlin2002_3d_v1_strict_gpu",
                      {WorkflowInputReference{1}},
@@ -71,37 +91,30 @@ int empty_request(const std::shared_ptr<OperationRegistry>& registry,
   planning.execution_mode = ExecutionMode::NativeGpu;
   auto compiled = Compiler(registry).compile(graph, planning);
   PS_CHECK(compiled.ok());
-  auto frozen =
-      context.freeze(compiled.value().plan, {{{"coordinates", input}}});
+  auto frozen = context.freeze(
+      compiled.value().plan,
+      perlin_fixture::bind(context.resource_budget().take_value(), input));
   PS_CHECK(frozen.ok());
   auto result = context.execute_fragments(
       frozen.value(), {{"values", Footprint::none({1}).take_value()}});
   if (!result.ok())
     std::cerr << result.status().message << '\n';
-  PS_CHECK(result.ok() &&
-           result.value().values.at("values").coverage().empty());
+  PS_CHECK(result.ok() && result.value()
+                              .results.at("values")
+                              .descriptor()
+                              .value()
+                              .tensor_coverage(0)
+                              .empty());
   PS_CHECK(result.value().diagnostics.native_dispatch_count == 0);
   PS_CHECK(result.value().diagnostics.fallback_reasons.empty());
   return 0;
 }
-int native_layout() {
-  auto registry = make_default_operation_registry(false);
-  OperationDefinition source;
-  source.key = "test.native_coordinates";
-  source.traits.supports_cpu = false;
-  source.traits.supports_gpu = true;
-  source.traits.estimated_bytes = 201;
-  auto& output = source.traits.outputs[0];
-  output.key = "coordinates";
-  output.shape_rule = OperationShapeRule::Fixed;
-  output.fixed_output_shape = {5, 3};
-  output.output_element_type = ElementType::Float64;
-  output.region_rule = OperationRegionRule::Whole;
-  source.callback = [](const OperationInvocation& call) -> Result<Value> {
+struct NativeCoordinates {
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& call) {
     // The final binary64 read ends at byte 200, exactly the view's last byte.
     auto made = call.allocator.allocate(201);
     if (!made.ok())
-      return Result<Value>(made.status());
+      return Result<ResultProgramPoll>(made.status());
     auto buffer = made.take_value();
     std::uint64_t values[15]{};
     for (unsigned i = 0; i < 5; ++i) {
@@ -116,25 +129,26 @@ int native_layout() {
         "for(uint k=0;k<8;++k)b[at+k]=uchar(a[i]>>(8*k));}";
     const auto* api = call.gpu;
     if (!api)
-      return Result<Value>(Status{ErrorCode::BackendUnavailable, "no GPU"});
-    const bool vulkan = api->backend == PS_GPU_BACKEND_VULKAN_V11;
+      return Result<ResultProgramPoll>(
+          Status{ErrorCode::BackendUnavailable, "no GPU"});
+    const bool vulkan = api->backend == PS_GPU_BACKEND_VULKAN_V1;
     std::uint64_t vulkan_values[30]{};
     for (unsigned i = 0; i < 15; ++i)
       vulkan_values[2 * i] = values[i];
     std::uint64_t token = 0;
     if (api->buffer(api->context, buffer.data(), buffer.size(), 1, &token))
-      return Result<Value>(
+      return Result<ResultProgramPoll>(
           Status{ErrorCode::OperationFailed, "source binding"});
-    const ps_gpu_buffer_binding_v11 binding{
-        sizeof(ps_gpu_buffer_binding_v11), 0, token, 0, buffer.size(), 1};
-    ps_gpu_dispatch_v11 dispatch{};
+    const ps_gpu_buffer_binding_v1 binding{
+        sizeof(ps_gpu_buffer_binding_v1), 0, token, 0, buffer.size(), 1};
+    ps_gpu_dispatch_v1 dispatch{};
     dispatch.struct_size = sizeof(dispatch);
     dispatch.source =
         vulkan ? reinterpret_cast<const char*>(kPerlinCoordinatesSpirv)
                : shader;
     dispatch.source_size =
         vulkan ? sizeof(kPerlinCoordinatesSpirv) : sizeof(shader) - 1;
-    dispatch.code_format = vulkan ? PS_GPU_CODE_SPIRV_V11 : PS_GPU_CODE_MSL_V11;
+    dispatch.code_format = vulkan ? PS_GPU_CODE_SPIRV_V1 : PS_GPU_CODE_MSL_V1;
     dispatch.entry = "produce";
     dispatch.entry_size = 7;
     dispatch.buffers = &binding;
@@ -145,11 +159,41 @@ int native_layout() {
     dispatch.grid[0] = 15;
     dispatch.grid[1] = dispatch.grid[2] = 1;
     if (api->execute(api->context, &dispatch, 1))
-      return Result<Value>(
+      return Result<ResultProgramPoll>(
           Status{ErrorCode::OperationFailed, "source dispatch"});
-    return Value::from_storage({ElementType::Float64, {5, 3}},
-                               Region::whole({5, 3}), {81, {32, -8}, {1, 2}},
-                               std::move(buffer).freeze());
+    auto builder = numeric_result_fixture::take(
+        ResultBuilder::start(call.resources, *call.query.output.result_schema,
+                             call.query.semantic_key));
+    auto relation = numeric_result_fixture::take(
+        ResultRelation::cartesian(call.resources, 15, {}));
+    auto status = builder.bind_descriptor_relation(numeric_result_fixture::take(
+        ResultRelation::cartesian(call.resources, 1, {})));
+    if (!status.ok())
+      return Result<ResultProgramPoll>(status);
+    status = builder.publish_tensor(
+        0, Region::whole({5, 3}), {81, {32, -8}, {1, 2}},
+        std::move(buffer).freeze(), relation, {true, true, true, true});
+    if (!status.ok())
+      return Result<ResultProgramPoll>(status);
+    return Result<ResultProgramPoll>(
+        ResultPublication{numeric_result_fixture::take(builder.seal()), true});
+  }
+};
+int native_layout() {
+  auto registry = make_default_operation_registry(false);
+  OperationDefinition source;
+  source.key = "test.native_coordinates";
+  source.traits = unified_example::traits(0, sizeof(NativeCoordinates));
+  source.traits.supports_cpu = false;
+  source.traits.supports_gpu = true;
+  auto& output = source.traits.outputs[0];
+  output.key = "coordinates";
+  output.region_rule = OperationRegionRule::Whole;
+  auto schema = numeric_result_fixture::source_schema(
+      input_value(std::vector<std::uint64_t>(15), false));
+  unified_example::result_output(&output, schema);
+  source.start_result = [](const auto&, const auto& allocator) {
+    return ResultContinuation::make<NativeCoordinates>(allocator);
   };
   PS_CHECK(registry->register_operation(std::move(source)).ok());
   PS_CHECK(registry->freeze().ok());
@@ -165,7 +209,7 @@ int native_layout() {
   planning.execution_mode = ExecutionMode::NativeGpu;
   auto compiled = Compiler(registry).compile(graph, planning);
   PS_CHECK(compiled.ok());
-  Value retained;
+  ResultRef retained;
   {
     ExecutionContextConfig config;
     config.gpu_enabled = true;
@@ -177,37 +221,39 @@ int native_layout() {
     PS_CHECK(result.ok() &&
              result.value().diagnostics.native_dispatch_count == 2);
     PS_CHECK(result.value().diagnostics.fallback_reasons.empty());
-    retained = result.value().values.at("values");
+    retained = result.value().results.at("values");
+    PS_CHECK(result.value().diagnostics.transfer_count == 0);
   }
+  const auto retained_bytes = numeric_result_fixture::bytes(retained);
   const double expected[] = {1785. / 16384., 75. / 512., 1635. / 16384., 0.,
                              -1635. / 16384.};
   for (unsigned i = 0; i < 5; ++i) {
     double result = 0;
-    std::memcpy(&result, retained.bytes().data() + i * 8, 8);
+    std::memcpy(&result, retained_bytes.data() + i * 8, 8);
     PS_CHECK(result == expected[i]);
   }
   return 0;
 }
-int cancellation_between_submissions() {
-  auto registry = make_default_operation_registry(false);
-  auto* borrowed_registry = registry.get();
-  CancellationSource cancellation;
-  unsigned submissions = 0, dispatches = 0;
-  OperationDefinition wrapper;
-  wrapper.key = "test.cancel_native_perlin";
-  wrapper.traits =
-      registry->find_traits("noise.perlin2002_3d_v1_strict_gpu").take_value();
-  wrapper.traits.requires_metadata_specialization = false;
-  wrapper.traits.outputs[0].fixed_output_shape = {2057};
-  wrapper.traits.outputs[0].output_element_type = ElementType::Float64;
-  wrapper.callback = [&](const OperationInvocation& call) {
+struct CancelAfterSubmission {
+  ResultContinuation inner;
+  CancellationSource* cancellation;
+  unsigned* submissions;
+  unsigned* dispatches;
+  CancelAfterSubmission(ResultContinuation continuation,
+                        CancellationSource* token, unsigned* calls,
+                        unsigned* commands)
+      : inner(std::move(continuation)),
+        cancellation(token),
+        submissions(calls),
+        dispatches(commands) {}
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& call) {
     struct State {
-      const ps_gpu_service_v11* native;
+      const ps_gpu_service_v1* native;
       CancellationSource* cancellation;
       unsigned* submissions;
       unsigned* dispatches;
-    } state{call.gpu, &cancellation, &submissions, &dispatches};
-    ps_gpu_service_v11 proxy = *call.gpu;
+    } state{call.gpu, cancellation, submissions, dispatches};
+    ps_gpu_service_v1 proxy = *call.gpu;
     proxy.context = &state;
     proxy.buffer = [](void* context, const std::uint8_t* bytes,
                       std::uint64_t size, std::uint32_t writable,
@@ -219,7 +265,7 @@ int cancellation_between_submissions() {
       const auto& s = *static_cast<State*>(context);
       return s.native->release(s.native->context, token);
     };
-    proxy.execute = [](void* context, const ps_gpu_dispatch_v11* commands,
+    proxy.execute = [](void* context, const ps_gpu_dispatch_v1* commands,
                        std::uint32_t count) {
       auto& s = *static_cast<State*>(context);
       const auto result = s.native->execute(s.native->context, commands, count);
@@ -232,21 +278,40 @@ int cancellation_between_submissions() {
     };
     auto nested = call;
     nested.gpu = &proxy;
+    return inner.poll(nested);
+  }
+};
+int cancellation_between_submissions() {
+  auto registry = make_default_operation_registry(false);
+  auto* borrowed_registry = registry.get();
+  CancellationSource cancellation;
+  unsigned submissions = 0, dispatches = 0;
+  OperationDefinition wrapper;
+  wrapper.key = "test.cancel_native_perlin";
+  wrapper.traits =
+      registry->find_traits("noise.perlin2002_3d_v1_strict_gpu").take_value();
+  wrapper.traits.requires_metadata_specialization = false;
+  wrapper.traits.outputs[0].result_schema->tensors[0].descriptor.shape = {2057};
+  wrapper.traits.outputs[0].continuation_bytes += sizeof(CancelAfterSubmission);
+  wrapper.start_result =
+      [&](const auto& query,
+          const auto& allocator) -> Result<ResultContinuation> {
+    auto nested = query;
     nested.prepared.reset();
-    return borrowed_registry->invoke("noise.perlin2002_3d_v1_strict_gpu",
-                                     nested);
+    auto inner = borrowed_registry->start_result(
+        "noise.perlin2002_3d_v1_strict_gpu", nested, allocator);
+    if (!inner.ok())
+      return inner;
+    return ResultContinuation::make<CancelAfterSubmission>(
+        allocator, inner.take_value(), &cancellation, &submissions,
+        &dispatches);
   };
   PS_CHECK(registry->register_operation(std::move(wrapper)).ok());
   PS_CHECK(registry->freeze().ok());
   std::vector<std::uint64_t> raw(2057 * 3, UINT64_C(0x3fd0000000000000));
   const auto input = input_value(raw, false);
   WorkflowDocument document;
-  document.inputs = {{1,
-                      "coordinates",
-                      input.descriptor(),
-                      input.region(),
-                      input.layout(),
-                      {}}};
+  perlin_fixture::declare(&document, input);
   document.nodes = {
       {1, "test.cancel_native_perlin", {WorkflowInputReference{1}}, {}}};
   document.outputs = {{"values", 1, "values"}};
@@ -260,7 +325,9 @@ int cancellation_between_submissions() {
   config.managed_resources = ResourceLimits{};
   ExecutionContext context(registry, config);
   auto result = context.execute(
-      compiled.value().plan, {{{"coordinates", input}}}, cancellation.token());
+      compiled.value().plan,
+      perlin_fixture::bind(context.resource_budget().take_value(), input),
+      cancellation.token());
   if (result.ok() || result.status().code != ErrorCode::Cancelled)
     std::cerr << "unexpected mid-GPU cancellation result "
               << (result.ok() ? "success" : result.status().message)
@@ -305,8 +372,9 @@ int main(int argc, char** argv) {
       }
       PS_CHECK(dispatched(result.value()) == 0);
       std::uint64_t bits = 0;
-      const auto& value = result.value().values.at("values");
-      std::memcpy(&bits, value.bytes().data(), output_narrow ? 4 : 8);
+      const auto value =
+          numeric_result_fixture::bytes(result.value().results.at("values"));
+      std::memcpy(&bits, value.data(), output_narrow ? 4 : 8);
       std::cout << std::hex << bits << '\n';
     }
     return std::cin.eof() ? 0 : 2;
@@ -329,8 +397,26 @@ int main(int argc, char** argv) {
     PS_CHECK(result.value().diagnostics.native_submission_count > 1);
     auto reference = run(registry, context, input, narrow, false);
     PS_CHECK(reference.ok());
-    PS_CHECK(result.value().values.at("values").copy_bytes() ==
-             reference.value().values.at("values").copy_bytes());
+    PS_CHECK(
+        numeric_result_fixture::bytes(result.value().results.at("values")) ==
+        numeric_result_fixture::bytes(reference.value().results.at("values")));
+  }
+  const auto pieces = input_value(
+      {UINT64_C(0x3fd0000000000000), 0, 0, UINT64_C(0x3fe0000000000000), 0, 0},
+      false);
+  for (bool gpu : {false, true}) {
+    auto fragmented = run(registry, context, pieces, false, gpu, {}, true);
+    auto packed = run(registry, context, pieces, false, gpu);
+    PS_CHECK(fragmented.ok() && packed.ok());
+    PS_CHECK(
+        numeric_result_fixture::bytes(
+            fragmented.value().results.at("values")) ==
+        numeric_result_fixture::bytes(packed.value().results.at("values")));
+    if (gpu) {
+      PS_CHECK(dispatched(fragmented.value()) == 0);
+      PS_CHECK(fragmented.value().diagnostics.transfer_count == 1 &&
+               fragmented.value().diagnostics.transfer_bytes == 48);
+    }
   }
   const auto tiny = input_value(
       {1, UINT64_C(0x8000000000000001), UINT64_C(0x3fd0000000000000)}, false);
@@ -340,9 +426,10 @@ int main(int argc, char** argv) {
       std::cerr << result.status().message << '\n';
     PS_CHECK(result.ok() && dispatched(result.value()) == 0);
     auto reference = run(registry, context, tiny, narrow, false);
-    PS_CHECK(reference.ok() &&
-             result.value().values.at("values").copy_bytes() ==
-                 reference.value().values.at("values").copy_bytes());
+    PS_CHECK(reference.ok() && numeric_result_fixture::bytes(
+                                   result.value().results.at("values")) ==
+                                   numeric_result_fixture::bytes(
+                                       reference.value().results.at("values")));
   }
   auto invalid =
       run(registry, context,

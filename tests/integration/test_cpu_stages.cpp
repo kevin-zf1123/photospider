@@ -80,11 +80,7 @@ ExecutionBindings bindings() {
                   .publish(Region::whole({1, 1, 1}),
                            reinterpret_cast<const uint8_t*>(&value), 4)
                   .ok());
-  return {{{"image",
-            {},
-            {},
-            {},
-            std::make_shared<const PlanarImage>(std::move(image))}}};
+  return {{{"image", std::make_shared<const PlanarImage>(std::move(image))}}};
 }
 struct Geometry {
   std::thread::id caller;

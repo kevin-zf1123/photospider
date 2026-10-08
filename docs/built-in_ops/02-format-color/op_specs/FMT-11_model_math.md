@@ -5,7 +5,7 @@ kind: shared_mathematical_contract
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_cpu_result_abi_2
 clarification_status: complete
 repository_branch: ops-specs
 inspection_commit: 1b403fb9

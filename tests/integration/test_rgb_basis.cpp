@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -14,7 +15,9 @@
 #include <utility>
 #include <vector>
 
+#include "../support/transfer_result_fixture.hpp"
 #include "fixtures/fmt10_oracles.hpp"
+#include "numeric_workflow/icc_fixture.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
@@ -92,6 +95,9 @@ std::uint64_t bits(double x, bool narrow) {
   return out;
 }
 struct Source {
+  std::shared_ptr<ExecutionContext> context =
+      std::make_shared<ExecutionContext>(registry());
+  ResourceBudget root = channel_fixture::take(context->resource_budget());
   WorkflowDocument document;
   ExecutionBindings bindings;
 };
@@ -102,43 +108,24 @@ Result<Source> source(bool narrow, std::vector<std::uint64_t> shape,
   Source out;
   const ValueDescriptor descriptor{
       narrow ? ElementType::Float32 : ElementType::Float64, shape};
-  std::vector<std::int64_t> strides(shape.size());
-  std::int64_t stride = narrow ? 4 : 8;
-  for (std::size_t i = shape.size(); i; --i) {
-    strides[i - 1] = stride;
-    stride *= static_cast<std::int64_t>(shape[i - 1]);
-  }
   std::vector<ValueFacet> facets;
   if (description) {
-    auto f = encode_tensor_description(*description);
-    if (!f.ok())
-      return Result<Source>(f.status());
-    facets.push_back(f.take_value());
+    auto facet = encode_tensor_description(*description);
+    if (!facet.ok())
+      return Result<Source>(facet.status());
+    facets.push_back(facet.take_value());
   }
-  const auto bytes = pack_bits(words, narrow);
-  auto v = Value::create(descriptor, Region::whole(shape), {0, strides}, bytes,
-                         facets);
-  if (!v.ok())
-    return Result<Source>(v.status());
-  out.document.inputs = {
-      {1, "source", descriptor, Region::whole(shape), {0, strides}, facets}};
-  if (planar) {
-    PlanarImageConfig config;
-    config.order = ImagePlaneOrder::Tiled;
-    config.tile_height = config.tile_width = tile;
-    auto image = PlanarImage::import_value(v.value(), config);
-    if (!image.ok())
-      return Result<Source>(image.status());
-    out.document.inputs[0].layout = {};
-    out.document.inputs[0].planar_layout =
-        PlanarImageLayout{config.order, 0, 1, 2, 0, {}};
-    ExecutionBinding binding;
-    binding.name = "source";
-    binding.image = std::make_shared<const PlanarImage>(image.take_value());
-    out.bindings.inputs.push_back(std::move(binding));
-  } else {
-    out.bindings.inputs = {{"source", v.take_value()}};
-  }
+  ResultTensorLayout layout;
+  layout.spatial = planar;
+  layout.order = ImagePlaneOrder::Tiled;
+  auto input = channel_fixture::source(descriptor, facets, layout);
+  input.bytes = pack_bits(words, narrow);
+  input.tile_height = input.tile_width = tile;
+  auto declaration = channel_fixture::declaration(input);
+  declaration.id = 1;
+  declaration.name = "source";
+  out.document.inputs = {declaration};
+  out.bindings.inputs = {{"source", channel_fixture::publish(out.root, input)}};
   return Result<Source>(std::move(out));
 }
 Result<ExecutionResult> execute(Source& s, std::optional<Region> region = {},
@@ -157,9 +144,8 @@ Result<ExecutionResult> execute(Source& s, std::optional<Region> region = {},
   auto compiled = compiler.compile(graph, planning);
   if (!compiled.ok())
     return Result<ExecutionResult>(compiled.status());
-  ExecutionContext execution(registry());
-  return execution.execute(compiled.value().plan, s.bindings, {},
-                           execution_options);
+  return s.context->execute(compiled.value().plan, s.bindings, {},
+                            execution_options);
 }
 Result<ExecutionResult> run(bool narrow, std::vector<std::uint64_t> shape,
                             const std::vector<std::uint64_t>& words,
@@ -182,24 +168,10 @@ Result<ExecutionResult> run(bool narrow, std::vector<std::uint64_t> shape,
 std::uint64_t read(const ExecutionResult& result,
                    const std::vector<std::uint64_t>& at) {
   std::uint64_t word = 0;
-  const auto v = result.values.find("out");
-  if (v != result.values.end()) {
-    auto offset = v->second.byte_address(at);
-    if (!offset.ok())
-      std::abort();
-    std::memcpy(&word, v->second.bytes().data() + offset.value(),
-                Value::element_size(v->second.descriptor().element_type));
-  } else {
-    const auto& image = result.images.at("out");
-    std::vector<RegionDimension> ranges;
-    for (auto a : at)
-      ranges.push_back({a, 1});
-    if (!image
-             .read(Region(ranges), reinterpret_cast<std::uint8_t*>(&word),
-                   Value::element_size(image.descriptor().element_type))
-             .ok())
-      std::abort();
-  }
+  const auto& value = result.results.at("out");
+  transfer_fixture::take(value.read_tensor(
+      channel_fixture::take(value.descriptor()), 0, at, &word,
+      Value::element_size(value.schema().tensors[0].descriptor.element_type)));
   return word;
 }
 TensorDescription semantic(unsigned member = 0, unsigned index = 7,
@@ -281,8 +253,8 @@ int metadata_and_roi() {
   PS_CHECK(read(result.value(), {0, 0, 3}) == bits(-2, true));
   PS_CHECK(read(result.value(), {0, 0, 0}) == bits(8, true));
   PS_CHECK(read(result.value(), {0, 0, 1}) == 0x7f800123);
-  auto decoded =
-      decode_tensor_description(result.value().values.at("out").facets()[0]);
+  auto decoded = decode_tensor_description(
+      result.value().results.at("out").schema().tensors[0].facets[0]);
   PS_CHECK(decoded.ok());
   PS_CHECK(decoded.value().groups[0].components[0].role == "x");
   PS_CHECK(decoded.value().groups[0].indices == d.groups[0].indices);
@@ -312,8 +284,8 @@ int metadata_and_roi() {
   auto unchanged = run(true, {1, 1, 4}, words, 0, rp, {}, d);
   error(unchanged);
   PS_CHECK(unchanged.ok());
-  auto raw_desc =
-      decode_tensor_description(unchanged.value().values.at("out").facets()[0]);
+  auto raw_desc = decode_tensor_description(
+      unchanged.value().results.at("out").schema().tensors[0].facets[0]);
   PS_CHECK(raw_desc.ok() &&
            raw_desc.value().groups[0].interpretation.model == "rgb");
   // Source-only override, units/reference and nonnative encoding rejection.
@@ -362,9 +334,9 @@ int metadata_boundaries() {
   PS_CHECK(out.ok());
   for (unsigned c = 3; c < 7; ++c)
     PS_CHECK(read(out.value(), {0, 0, c}) == words[c]);
-  auto result =
-      decode_tensor_description(out.value().values.at("out").facets()[0])
-          .take_value();
+  auto result = decode_tensor_description(
+                    out.value().results.at("out").schema().tensors[0].facets[0])
+                    .take_value();
   PS_CHECK(result.groups[1].interpretation.model == "rgb");
   PS_CHECK(result.groups[1].interpretation.primaries_xy ==
            other.interpretation.primaries_xy);
@@ -392,23 +364,26 @@ int metadata_boundaries() {
   interpretation.analytic_binding = analytic;
   for (auto& component : bound.groups[0].components)
     component.unit.clear();
+  const auto operation_metadata = [&](const TensorDescription& desc) {
+    auto input = channel_fixture::source(
+        {ElementType::Float64, {1, 1, 3}},
+        {channel_fixture::take(encode_tensor_description(desc))});
+    OperationMetadata result;
+    result.result_schema = std::make_shared<SchemaTemplate>(input.schema);
+    return result;
+  };
   const auto prepare_metadata = [&](const TensorDescription& desc) {
-    auto facet = encode_tensor_description(desc);
-    if (!facet.ok())
-      return Result<std::shared_ptr<const PreparedOperation>>(facet.status());
-    return registry()->prepare_operation(
-        key(0), {{{ElementType::Float64, {1, 1, 3}}, {facet.take_value()}}},
-        {{"group", std::string("main")}});
+    return registry()->prepare_operation(key(0), {operation_metadata(desc)},
+                                         {{"group", std::string("main")}});
   };
   auto accepted = prepare_metadata(bound);
   PS_CHECK(accepted.ok());
-  auto inferred = infer_operation_outputs(
-                      accepted.value()->traits(),
-                      {{{ElementType::Float64, {1, 1, 3}},
-                        {encode_tensor_description(bound).take_value()}}},
-                      {{"group", std::string("main")}})
+  auto inferred = infer_operation_outputs(accepted.value()->traits(),
+                                          {operation_metadata(bound)},
+                                          {{"group", std::string("main")}})
                       .take_value();
-  auto published = decode_tensor_description(inferred[0].facets[0]);
+  auto published = decode_tensor_description(
+      inferred[0].result_schema->tensors[0].facets[0]);
   PS_CHECK(published.ok());
   PS_CHECK(published.value().groups[0].components[0].unit == "1");
   PS_CHECK(published.value().groups[0].interpretation.convention ==
@@ -652,12 +627,23 @@ int custom_registry_authoring() {
       OperationDefinition op;
       op.key = key(member);
       op.traits.input_count = 1;
-      op.traits.input_schema.resize(1);
+      OperationPortConstraint port;
+      port.kind = OperationPortKind::Result;
+      port.element_type_mask = 127;
+      op.traits.input_schema = {port};
       auto& output = op.traits.outputs[0];
       output.key = "values";
-      output.shape_rule = OperationShapeRule::Fixed;
-      output.fixed_output_shape = {1, 1, 3};
-      output.output_element_type = ElementType::Float32;
+      output.output_schema = port;
+      output.result_schema =
+          channel_fixture::source({ElementType::Float32, {1, 1, 3}}).schema;
+      output.output_schema.result_schema_id = output.result_schema->id;
+      output.output_schema.result_schema_version =
+          output.result_schema->version;
+      output.output_schema.tensor_key = "samples";
+      output.region_rule = OperationRegionRule::Dependency;
+      output.dependency_version = 2;
+      output.continuation_bytes = 1;
+      output.maximum_dependency_stages = 1;
       for (const auto* name :
            {"metadata_mode", "layout", "components", "source_basis",
             "target_basis", "source_white", "target_white", "method"})
@@ -665,8 +651,10 @@ int custom_registry_authoring() {
             {name, OperationParameterType::String, false});
       op.traits.parameter_schema.push_back(
           {"axis", OperationParameterType::Int64, false});
-      op.callback = [](const OperationInvocation&) -> Result<Value> {
-        return Result<Value>(
+      op.start_result =
+          [](const ResultProgramQuery&,
+             const BufferAllocator&) -> Result<ResultContinuation> {
+        return Result<ResultContinuation>(
             Status{ErrorCode::OperationFailed, "not executed"});
       };
       if (foreign_state) {
@@ -680,7 +668,11 @@ int custom_registry_authoring() {
           return Result<OperationPreparation>(std::move(prepared));
         };
       }
-      PS_CHECK(custom_registry->register_operation(std::move(op)).ok());
+      const auto registered =
+          custom_registry->register_operation(std::move(op));
+      if (!registered.ok())
+        std::cerr << registered.message << '\n';
+      PS_CHECK(registered.ok());
     }
     for (const auto* policy : {"require_match", "preserve_xyz", "adapt"}) {
       auto sample = source(true, {1, 1, 3}, {0, 0, 0}).take_value();
@@ -770,162 +762,296 @@ int tiled_and_profiles() {
   }
   return 0;
 }
+Result<DemandResult> instrumented(
+    const channel_fixture::Source& backing, const Parameters& parameters,
+    const Footprint& query, std::shared_ptr<transfer_fixture::Hooks> hooks,
+    CancellationToken cancellation = {},
+    std::uint64_t maximum_work = UINT64_MAX) {
+  auto local = transfer_fixture::registry(key(0), hooks);
+  ExecutionContext context(local);
+  const auto input = channel_fixture::publish(
+      channel_fixture::take(context.resource_budget()), backing);
+  GraphContext graph(transfer_fixture::document(input, key(0), parameters));
+  auto compiled = Compiler(local).compile(graph);
+  if (!compiled.ok())
+    return Result<DemandResult>(compiled.status());
+  auto frozen = channel_fixture::take(
+      context.freeze(compiled.value().plan, transfer_fixture::bindings(input)));
+  ExecutionOptions options;
+  options.maximum_dependency_work = maximum_work;
+  options.dependencies.maximum_work = UINT64_MAX;
+  options.dependencies.sets.maximum_work = UINT64_MAX;
+  return context.execute_fragments(frozen, {{"result", query}}, cancellation,
+                                   options);
+}
 int dependency_support_and_limits() {
+  using channel_fixture::take;
   const std::vector<std::uint64_t> shape{2, 5, 4};
-  OperationMetadata metadata;
-  metadata.descriptor = {ElementType::Float64, shape};
-  metadata.facets = {
-      encode_tensor_description(semantic(0, 7, false, true)).take_value()};
-  auto prepared = registry()->prepare_operation(
-      key(0), {metadata}, {{"group", std::string("main")}});
-  PS_CHECK(prepared.ok());
-  const auto& pieces =
-      *prepared.value()->traits().outputs[0].static_dependency_pieces;
-  PS_CHECK(pieces.size() <=
-           7);  // O(selected components), not tensor cardinality
-  auto all = Footprint::all(shape).take_value();
-  auto certificate = DependencyCertificate::create_mapped("fmt10-support", all,
-                                                          {shape}, pieces);
-  PS_CHECK(certificate.ok());
   const auto pixel = [&](unsigned c) {
-    return Footprint::from_regions(shape, {Region({{1, 1}, {3, 1}, {c, 1}})})
-        .take_value();
+    return take(
+        Footprint::from_regions(shape, {Region({{1, 1}, {3, 1}, {c, 1}})}));
   };
   const auto triple =
-      Footprint::from_regions(shape, {Region({{1, 1}, {3, 1}, {0, 3}})})
-          .take_value();
-  auto needs = certificate.value().backward(pixel(0));
-  PS_CHECK(needs.ok());
-  bool data = false, validation = false, descriptor = false;
-  for (const auto& need : needs.value()) {
-    if (need.roles == static_cast<std::uint32_t>(DependencyRole::Data)) {
-      PS_CHECK(need.samples == triple);
-      data = true;
+      take(Footprint::from_regions(shape, {Region({{1, 1}, {3, 1}, {0, 3}})}));
+  const auto parameters = Parameters{{"group", std::string("main")}};
+  auto full = run(false, shape, std::vector<std::uint64_t>(40), 0, parameters,
+                  {}, semantic(0, 7, false, true));
+  error(full);
+  PS_CHECK(full.ok());
+  auto dirty = full.value().dependencies.potential_dirty(
+      "source", pixel(1), 1, {}, ResultSupportTarget::Tensor, 0);
+  PS_CHECK(dirty.ok() && dirty.value().at("out") == triple);
+  auto validation_dirty = full.value().dependencies.potential_dirty(
+      "source", pixel(1), 4, {}, ResultSupportTarget::Tensor, 0);
+  PS_CHECK(validation_dirty.ok() &&
+           validation_dirty.value().at("out") == triple);
+  auto descriptor_dirty = full.value().dependencies.potential_dirty(
+      "source", take(Footprint::all({1})), 8, {},
+      ResultSupportTarget::Descriptor, 0);
+  PS_CHECK(descriptor_dirty.ok() &&
+           descriptor_dirty.value().at("out") == take(Footprint::all(shape)));
+  auto raw_source = channel_fixture::source(
+      {ElementType::Float64, shape},
+      {take(encode_tensor_description(semantic(0, 7, false, true)))});
+  std::fill(raw_source.bytes.begin(), raw_source.bytes.end(), 0);
+  for (unsigned channel : {0U, 3U}) {
+    auto hooks = std::make_shared<transfer_fixture::Hooks>();
+    unsigned roles = 0;
+    Footprint requested;
+    hooks->need = [&](const ResultProgramNeed& need) {
+      transfer_fixture::require(need.tensors.size() == 1, "one RGB capability");
+      roles = need.tensors[0].roles;
+      requested = need.tensors[0].samples;
+    };
+    auto result = instrumented(raw_source, parameters, pixel(channel), hooks);
+    PS_CHECK(result.ok());
+    PS_CHECK(roles == (channel == 3 ? 9U : 13U));
+    PS_CHECK(requested == (channel == 3 ? pixel(3) : triple));
+    bool data = false, validation = false, descriptor = false;
+    for (const auto& observation :
+         take(result.value().dependencies.source_observations())) {
+      if (observation.target == ResultSupportTarget::Descriptor) {
+        descriptor = true;
+      } else {
+        PS_CHECK(observation.samples == requested);
+        data |= (observation.roles & 1) != 0;
+        validation |= (observation.roles & 4) != 0;
+      }
     }
-    if (need.roles == static_cast<std::uint32_t>(DependencyRole::Validation)) {
-      PS_CHECK(need.samples == triple);
-      validation = true;
-    }
-    if (need.roles == static_cast<std::uint32_t>(DependencyRole::Descriptor)) {
-      PS_CHECK(!need.tags.empty());
-      descriptor = true;
-    }
+    PS_CHECK(data && descriptor && validation == (channel != 3));
   }
-  PS_CHECK(data && validation && descriptor);
-  auto dirty = certificate.value().transpose(
-      {0, static_cast<std::uint32_t>(DependencyRole::Data), pixel(1), {}});
-  PS_CHECK(dirty.ok() && dirty.value() == triple);
-  auto alpha = certificate.value().backward(pixel(3));
-  PS_CHECK(alpha.ok());
-  for (const auto& need : alpha.value()) {
-    PS_CHECK(need.roles !=
-             static_cast<std::uint32_t>(DependencyRole::Validation));
-    if (need.roles == static_cast<std::uint32_t>(DependencyRole::Data))
-      PS_CHECK(need.samples == pixel(3));
-  }
-  auto descriptor_dirty = certificate.value().transpose(
-      {0,
-       static_cast<std::uint32_t>(DependencyRole::Descriptor),
-       Footprint::none(shape).take_value(),
-       {{1, 0}}});
-  PS_CHECK(descriptor_dirty.ok() && descriptor_dirty.value() == all);
-
-  // Direct generic input: channel-first with a negative source stride.
   const std::vector<std::uint64_t> strided_shape{3, 2};
-  auto input =
-      Value::create({ElementType::Float64, strided_shape},
-                    Region::whole(strided_shape), {32, {-16, 8}},
-                    pack_bits({bits(5, false), bits(6, false), bits(3, false),
-                               bits(4, false), bits(1, false), bits(2, false)},
-                              false));
-  PS_CHECK(input.ok());
-  DependencyRequest request;
-  request.inputs = {{input.value().descriptor(), input.value().facets()}};
-  request.parameters = raw(0, 7);
-  request.parameters["axis"] = std::int64_t{0};
-  request.outputs = Footprint::all(strided_shape).take_value();
-  request.snapshot_identity = "fmt10-strided";
-  request.prepared =
-      registry()
-          ->prepare_operation(key(0), request.inputs, request.parameters)
-          .take_value();
-  auto fragments =
-      ValueFragments::create(input.value().descriptor(), input.value().facets(),
-                             request.outputs, {input.value()});
-  PS_CHECK(fragments.ok());
-  auto start = registry()->start_dependency(key(0), request);
-  PS_CHECK(start.ok());
-  auto session = start.take_value();
-  PS_CHECK(session->poll().ok());
-  PS_CHECK(
-      session->supply({fragments.value()}, request.snapshot_identity).ok());
-  auto completed = session->poll();
-  if (!completed.ok())
-    std::cerr << completed.status().message << '\n';
-  PS_CHECK(completed.ok() &&
-           std::holds_alternative<DependencyResult>(completed.value()));
-  const auto& output = std::get<DependencyResult>(completed.value()).value;
+  auto strided = channel_fixture::source({ElementType::Float64, strided_shape});
+  strided.layout = {32, {-16, 8}};
+  strided.bytes = pack_bits({bits(5, false), bits(6, false), bits(3, false),
+                             bits(4, false), bits(1, false), bits(2, false)},
+                            false);
+  auto params = raw(0, 7);
+  params["axis"] = std::int64_t{0};
+  const auto all = take(Footprint::all(strided_shape));
+  auto hooks = std::make_shared<transfer_fixture::Hooks>();
+  auto completed = instrumented(strided, params, all, hooks);
+  PS_CHECK(completed.ok());
+  const auto& output = completed.value().results.at("result");
   for (unsigned c = 0; c < 3; ++c)
     for (unsigned x = 0; x < 2; ++x) {
       std::uint64_t word = 0;
-      PS_CHECK(output.read({c, x}, &word, 8).ok());
+      PS_CHECK(
+          output.read_tensor(take(output.descriptor()), 0, {c, x}, &word, 8)
+              .ok());
       PS_CHECK(word == bits((c * 2 + x + 1) * (c == 2 ? 2 : 1), false));
     }
-  request.outputs = Footprint::none(strided_shape).take_value();
-  auto empty = registry()->start_dependency(key(0), request);
-  PS_CHECK(empty.ok());
-  auto empty_result = empty.value()->poll();
-  PS_CHECK(empty_result.ok() &&
-           std::holds_alternative<DependencyResult>(empty_result.value()));
-  PS_CHECK(std::get<DependencyResult>(empty_result.value())
-               .value.coverage()
+  bool needed = false;
+  hooks->need = [&](const ResultProgramNeed&) { needed = true; };
+  auto empty = instrumented(strided, params,
+                            take(Footprint::none(strided_shape)), hooks);
+  PS_CHECK(empty.ok() && !needed);
+  PS_CHECK(take(empty.value().results.at("result").descriptor())
+               .tensor_coverage(0)
                .empty());
-
-  request.outputs = Footprint::all(strided_shape).take_value();
-  request.limits.maximum_work = 150;
-  auto low = registry()->start_dependency(key(0), request);
-  Status low_status = low.status();
-  if (low.ok()) {
-    auto progress = low.value()->poll();
-    low_status = progress.status();
-    if (progress.ok()) {
-      low_status =
-          low.value()->supply({fragments.value()}, request.snapshot_identity);
-      if (low_status.ok())
-        low_status = low.value()->poll().status();
-    }
-  }
-  PS_CHECK(low_status.code == ErrorCode::ResourceExhausted);
-  request.limits.maximum_work = 1048576;
+  auto low = instrumented(strided, params, all, hooks, {}, 150);
+  PS_CHECK(!low.ok() && low.status().code == ErrorCode::ResourceExhausted);
   CancellationSource cancelled;
-  request.cancellation = cancelled.token();
   cancelled.cancel();
-  auto stopped = registry()->start_dependency(key(0), request);
-  PS_CHECK((stopped.ok() ? stopped.value()->poll().status() : stopped.status())
-               .code == ErrorCode::Cancelled);
+  auto stopped = instrumented(strided, params, all, hooks, cancelled.token());
+  PS_CHECK(!stopped.ok() && stopped.status().code == ErrorCode::Cancelled);
   CancellationSource midway;
-  request.cancellation = midway.token();
-  bool armed = false;
   std::uint64_t work = 0;
-  auto charging = [&](std::uint64_t amount) {
-    if (armed) {
-      work += amount;
-      if (work > 300)
-        midway.cancel();
-    }
-    return Status::success();
+  hooks->charge = [&](std::uint64_t amount, const ResultProgramPhase& phase) {
+    work += amount;
+    if (work > 300)
+      midway.cancel();
+    return phase.consume_work(amount);
   };
-  auto active = registry()->start_dependency(key(0), request, BufferAllocator{},
-                                             charging);
-  PS_CHECK(active.ok() && active.value()->poll().ok());
-  PS_CHECK(active.value()
-               ->supply({fragments.value()}, request.snapshot_identity)
-               .ok());
-  armed = true;
-  auto interrupted = active.value()->poll();
+  auto interrupted = instrumented(strided, params, all, hooks, midway.token());
   PS_CHECK(!interrupted.ok() &&
            interrupted.status().code == ErrorCode::Cancelled);
   PS_CHECK(work > 300);
+  work = 0;
+  hooks->charge = [&](std::uint64_t amount, const ResultProgramPhase& phase) {
+    work += amount;
+    return work > 300 ? Status{ErrorCode::Stale, "RGB stage invalidated"}
+                      : phase.consume_work(amount);
+  };
+  const auto stale = instrumented(strided, params, all, hooks);
+  PS_CHECK(!stale.ok() && stale.status().code == ErrorCode::Stale);
+  hooks = std::make_shared<transfer_fixture::Hooks>();
+  fenv_t saved;
+  int before = 0, after = 0, round = 0;
+  hooks->before = [&](const ResultProgramPhase&) {
+    fegetenv(&saved);
+    fesetround(FE_DOWNWARD);
+    feclearexcept(FE_ALL_EXCEPT);
+    feraiseexcept(FE_INVALID);
+    before = fetestexcept(FE_ALL_EXCEPT);
+  };
+  hooks->after = [&](const ResultProgramPhase&) {
+    after = fetestexcept(FE_ALL_EXCEPT);
+    round = fegetround();
+    fesetenv(&saved);
+  };
+  const auto environment = instrumented(strided, params, all, hooks);
+  PS_CHECK(environment.ok() && before == after && round == FE_DOWNWARD);
+  return 0;
+}
+int batches_owners_resources() {
+  using channel_fixture::take;
+  const Region roi({{1, 1}, {0, 1}, {1, 1}, {0, 3}, {2, 1}});
+  for (unsigned storage = 0; storage < 3; ++storage) {
+    ResultRef retained;
+    ResourceBudget root;
+    ColorProfileIdentity identity;
+    {
+      ExecutionContext context(registry());
+      root = take(context.resource_budget());
+      ResourceBudget profile_root;
+      const auto bytes = numeric_fixture::fixture();
+      const auto profile = take(IccProfile::import(
+          ByteView(bytes.data(), bytes.size()), profile_root));
+      identity = profile.identity();
+      auto description = semantic(2, 7, false, true);
+      description.groups[0].interpretation.white =
+          std::array<double, 2>{.25, .25};
+      description.channels = {{"x", "x", "1"},
+                              {"y", "y", "1"},
+                              {"z", "z", "1"},
+                              {"alpha", "alpha", "coverage"},
+                              {"side", "aux", "1"}};
+      description.channels[4].interpretation.emplace();
+      description.channels[4].interpretation->profile = identity;
+      ResultTensorLayout layout;
+      layout.spatial = storage != 0;
+      layout.order =
+          storage == 2 ? ImagePlaneOrder::Tiled : ImagePlaneOrder::Continuous;
+      auto input = channel_fixture::source(
+          {ElementType::Float64, {2, 3, 5}},
+          {take(encode_tensor_description(description))}, layout, {2, 2});
+      input.resources = take(ResourceBindings::create({profile}, profile_root));
+      const std::array<double, 5> samples{
+          1, 2, 3, std::numeric_limits<double>::quiet_NaN(), 5};
+      for (std::size_t i = 0; i < input.bytes.size() / 8; ++i) {
+        const double value = samples[i % 5] * (1 + i / 5);
+        std::memcpy(input.bytes.data() + i * 8, &value, 8);
+      }
+      auto source = channel_fixture::publish(root, input);
+      Parameters params{{"group", std::string("main")},
+                        {"method", std::string("xyz_scaling")},
+                        {"target_white", white({.25, .25})},
+                        {"layout", std::string("view")}};
+      auto document = transfer_fixture::document(source, key(2), params);
+      GraphContext graph(document);
+      PlanningOptions planning;
+      planning.output_regions = {{"result", roi}};
+      auto compiled =
+          take(Compiler(registry()).compile(graph, planning, input.resources));
+      const auto bindings = transfer_fixture::bindings(source);
+      auto a = std::async(std::launch::async, [&] {
+        return context.execute(compiled.plan, bindings);
+      });
+      auto b = std::async(std::launch::async, [&] {
+        return context.execute(compiled.plan, bindings);
+      });
+      auto first = take(a.get());
+      auto second = take(b.get());
+      retained = first.results.at("result");
+      PS_CHECK(channel_fixture::read(retained, roi) ==
+               channel_fixture::read(second.results.at("result"), roi));
+      PS_CHECK(channel_fixture::owner(retained, roi) ==
+               channel_fixture::owner(source, roi));
+      PS_CHECK(retained.association().size() == 1 &&
+               retained.association()[0] == source.object_id());
+      PS_CHECK(retained.schema().id == source.schema().id &&
+               retained.schema().tensors[0].key ==
+                   source.schema().tensors[0].key &&
+               retained.schema().tensors[0].batch_axes ==
+                   input.schema.tensors[0].batch_axes);
+      PS_CHECK(retained.resources().icc_profile(identity).ok());
+      std::uint64_t viewed = 0;
+      for (const auto& timing : first.diagnostics.operation_timings)
+        viewed += timing.numeric.view_elements;
+      PS_CHECK(viewed == 3);
+      params["target_white"] = white({.5, .25});
+      params["layout"] = std::string("materialize");
+      GraphContext changed(transfer_fixture::document(source, key(2), params));
+      auto changed_plan = take(
+          Compiler(registry()).compile(changed, planning, input.resources));
+      auto transformed = take(context.execute(changed_plan.plan, bindings));
+      const auto& output = transformed.results.at("result");
+      PS_CHECK(channel_fixture::owner(output, roi) !=
+               channel_fixture::owner(source, roi));
+      const auto got = channel_fixture::read(output, roi);
+      PS_CHECK(got.size() == 24);
+      for (unsigned i = 0; i < 3; ++i) {
+        double value;
+        std::memcpy(&value, got.data() + i * 8, 8);
+        PS_CHECK(value == (16 + i) * 1.5);
+      }
+      std::uint64_t evaluated = 0;
+      for (const auto& timing : transformed.diagnostics.operation_timings)
+        evaluated += timing.numeric.evaluated_values;
+      PS_CHECK(evaluated == 3);
+    }
+    PS_CHECK(retained.resources().icc_profile(identity).ok());
+    const auto got = channel_fixture::read(retained, roi);
+    PS_CHECK(got.size() == 24);
+    for (unsigned i = 0; i < 3; ++i) {
+      double value;
+      std::memcpy(&value, got.data() + i * 8, 8);
+      PS_CHECK(value == (16 + i) * 3);
+    }
+    retained = {};
+    PS_CHECK(root.statistics().live[ResourceKind::Payload] == 0);
+  }
+  return 0;
+}
+int wide_identity_under_metadata_budget() {
+  using channel_fixture::take;
+  ExecutionContextConfig config;
+  config.managed_resources = ResourceLimits{};
+  config.managed_resources->capacity[ResourceKind::Metadata] = 512 * 1024;
+  ExecutionContext context(registry(), config);
+  const auto root = take(context.resource_budget());
+  auto backing = channel_fixture::source({ElementType::Float64, {1, 1, 65536}});
+  const auto source = channel_fixture::publish(root, backing);
+  auto params = raw(2, 0);
+  params["target_white"] = params["source_white"];
+  params["layout"] = std::string("view");
+  GraphContext graph(transfer_fixture::document(source, key(2), params));
+  auto plan = take(Compiler(registry()).compile(graph));
+  ExecutionOptions options;
+  options.maximum_dependency_work = UINT64_MAX;
+  options.dependencies.maximum_work = UINT64_MAX;
+  auto result = take(context.execute(
+      plan.plan, transfer_fixture::bindings(source), {}, options));
+  const auto& output = result.results.at("result");
+  const auto whole = Region::whole({1, 1, 65536});
+  PS_CHECK(channel_fixture::owner(output, whole) ==
+           channel_fixture::owner(source, whole));
+  PS_CHECK(channel_fixture::read(output, whole) == backing.bytes);
+  std::uint64_t viewed = 0;
+  for (const auto& timing : result.diagnostics.operation_timings)
+    viewed += timing.numeric.view_elements;
+  PS_CHECK(viewed == 65536);
   return 0;
 }
 int invalid_parameters_and_fenv() {
@@ -970,6 +1096,8 @@ int main() {
   PS_CHECK(tiled_and_profiles() == 0);
   PS_CHECK(dependency_support_and_limits() == 0);
   PS_CHECK(invalid_parameters_and_fenv() == 0);
+  PS_CHECK(batches_owners_resources() == 0);
+  PS_CHECK(wide_identity_under_metadata_budget() == 0);
   std::cout << "FMT-10 integration checks passed\n";
   return 0;
 }

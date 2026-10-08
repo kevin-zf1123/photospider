@@ -1,95 +1,62 @@
 # NUM-11 Whole execution
 
-All21 formal reduction keys use Whole. Numeric reducers collect/validate complete
-input, compute all keepdims groups and publish complete dense output before
-consumer projection. Any active source edit invalidates every recorded output
-observation. Unrequested group overflow or upstream/typed failure affects the
-Run; no partial successful groups are published. Empty reads nothing. Numerical
-group order, dtype domains, ddof, first-NaN payload mapping and exact final
-rounding/root rules are unchanged. Unsuffixed mean/variance remain distinct
-legacy implementations.
+The 21 formal `numeric.reduce_*` keys accept one Result per input port, with exactly one tensor member under any member key. The complete `sample_shape()` includes batch axes; rank is 1..8, extents are positive, and the logical element count is at most 2^40. Each `values` output is a `photospider.tensor` / `samples` Result. It preserves rank, sets reduced extents to one, uses ordinary axes, and drops input facets and batch topology.
 
-Count has an empty static runtime-input projection. It validates metadata only,
-skips source producers and owns one8-byte zero-stride complete output. Numeric
-reducers reuse one4048-byte exact workspace per callback (this arm64 build),
-reset before each group; full output and collected input storage are additional.
-Rank<=8 coordinate vectors are bounded host containers. The former64-sample
-streaming memory guarantee has been replaced by full-input storage. Exact limb
-work and every input are metered/cancellable; no per-group descriptor, staged
-publication or numeric atom diagnostic remains.
+The six numerical reducers validate static schema and parameters during specialization. For nonempty demand, Whole requests the input with Data, Validation and Descriptor roles (role 13), validates its typed payload, and reads authorized Result windows. It computes every keepdims group and publishes a complete dense output before consumer projection. The implementation does not first collect or pack the full input. A typed-validation failure or arithmetic overflow in an unrequested group still fails the selected output. Empty demand reads no payload and performs no group arithmetic. Any active source edit dirties the complete output.
 
-## Public workflow and validation
+`reduce_count` specializes with an empty runtime input projection. It still validates the complete static schema and axes, but creates no runtime source observation or association and does not schedule an upstream sample producer. The producer binds a known-empty support witness, multiplies the reduced extents in O(rank), and publishes the complete keepdims shape through zero strides over one 8-byte Int64 owner. Source-byte edits do not invalidate count; schema shape/type and axes determine it.
+
+## Memory and errors
+
+The six numerical reducers hold authorized input windows while owning a complete dense output and one fixed exact aggregate or moments workspace. The workspace is admitted through the phase allocator. The Root ledger accounts for read windows, output, exact state, work and cancellation. Capacity, work, upstream, typed-validation and cancellation failures preserve their host status and release unpublished output. Integer final overflow is a Domain/Run `ArithmeticOverflow` failure at its output coordinate; floating infinity and NaN are numerical results.
+
+Count's output size is independent of its logical shape. Its 8-byte zero-stride backing remains readable after context retirement and is released with its last owner. Managed resource counts do not bound process RSS.
+
+## Current behavior checks
+
+Build and run the public Result workflow and the independent Fraction/midpoint-square oracle with:
 
 ```sh
-DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric --target photospider_numeric_reductions -j8
-build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions strict
-build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions apple
-python3 oracle/ops/numeric/reduction_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions strict
-python3 oracle/ops/numeric/reduction_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_reductions apple
+cmake --build build/kernel-dev --target photospider_numeric_reductions -j8
+build/kernel-dev/examples/numeric_workflow/photospider_numeric_reductions strict
+python3 oracle/ops/numeric/reduction_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_reductions strict
+python3 oracle/ops/numeric/reduction_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_reductions apple
+ctest --test-dir build/kernel-dev -R '^test_numeric_reductions_result$' --output-on-failure
 ```
 
-Both profiles pass all public fixtures and4740 independent Fraction/midpoint-square
-oracle cases each. On[[1,2,3],[4,5,6]], axes1 produces sum[6,15], min[1,4],
-max[3,6], mean[2,5], count[3,3], variance[RN(2/3),RN(2/3)] and
-std[RN(sqrt(2/3)),RN(sqrt(2/3))]. Four rounding modes, exact integer overflow
-cancellation, dtype conversion, subnormal/extreme/NaN/Inf/zero cases, multiple
-axes and exact root boundaries are covered.
+The strict and available Apple Silicon workflow runs exit successfully. The oracle covers 4,740 independent cases per profile. The workflow exercises all seven reducers under four rounding modes on the actual worker and caller, typed validation, strided inputs, unrequested-group overflow, Empty demand, work and cancellation failures, and invalid `ddof`.
 
-Whole fixtures exercise a4096-value RegionalSource with complete ordered input,
-2^40 logical count with2^20 outputs on an8-byte owner and zero failed-producer
-calls, unrequested group overflow, all-recorded-output dirty propagation,
-full typed rejection (Count remains payload-free), Empty, pre-cancel, ddof,
-strided logical NaN priority, unaligned negative/zero strides, work/full-output/
-scratch failure and cancellation after admitted arithmetic with ownership cleanup.
-Required later source failure cannot be suppressed by a NaN. Five focused
-numeric/dependency/demand/resources/compiler CTests, format/lint and scoped
-read-only review pass. No x86 runtime test in this migration; older regional
-WSL/installed records are not current Whole acceptance.
+A generated Result producer publishes 4,096 values cycling through 0..3. Sum, mean, variance and standard deviation return 6,144, 1.5, 1.25 and the correctly rounded square root of 1.25. The test reads the Root Payload peak directly and requires it to include at least the 32 KiB source while staying within the configured 128 KiB cap. After context retirement, the source has retired and the retained dense reduction Result accounts for 8 bytes; releasing it returns Root resources to zero.
 
-## Public latency and exact core
+A two-stage tail-failure case publishes and certifies the first 128 samples of a 129-sample source, including an sNaN, then returns the original `required tail after NaN` `OperationFailed` on poll two. All six numerical reductions fail with that upstream error before any numerical computation poll. The failed source prefix remains readable after context retirement, while coordinate 128 has no coverage; releasing the prefix returns Root resources to zero.
 
-Apple M5/macOS27.0 (26A5425a), Clang21.1.3 O2/RelWithDebInfo,
--fno-fast-math -ffp-contract=off, package0.18/traits16. Before adapter from483888c8
-linked to the same current kernel; this isolates adapter behavior. One worker,
-result/dependency caches off,1 GiB payload,2^40 dependency work,512 MiB dependency
-state. Compile/freeze precedes timing; one warmup plus seven measured calls.
-Every result is checked outside timing. Float64 input[4,N/4] repeats0,1,2,3;
-axis1, Float64 numerical outputs and Int64 count, ddof0. Each group sum is
-1.5*N/4, mean1.5, min0, max3, variance1.25, std RN(sqrt(1.25)).
+The count case derives a `[2^20,1]` output from a `2^40`-element schema while leaving its failing sample producer factory uncalled. It records no source observations or association. The first and last logical elements share a pointer in the zero-stride 8-byte backing; an escaped read window remains valid after context retirement, and the final release returns Root resources to zero.
 
-Core invokes the actual callback with prepared metadata and prebuilt input,
-including output/workspace allocation, grouping and arithmetic, excluding public
-scheduling/collection and managed work-ledger overhead. Accelerated results
-retain their own contract; this migration adds no NUM-14 certificate. Scalar
-and platform exact limbs remain, and NUM-14 Accelerate/SME comparisons are untouched.
+The cache case distinguishes identity sharing on one Frozen workflow from completed-result reuse with a fresh equal-content source and Frozen workflow. The cache replay carries the current source ObjectId. Replacing an unrequested input group invalidates and recomputes the complete Whole result; the requested first group remains 3 while the second becomes 11. The original dense output stays readable after context retirement at 16 payload bytes and releases all Root resources with its last owner.
 
-Milliseconds median [min,max], N=16384:
+Each Whole write keeps one `NumericDiagnostics` record local to the callback. `evaluated_values` increments after an authorized source word is read and immediately before it is supplied to the exact accumulator; on success it counts accumulator input attempts, not output groups. `reduce_count` uses a metadata-only path and reports zero evaluated values. The selected profile and exact accumulator implementation identity are reported once at completion. The identity's ISA suffix describes the four-word output-selection helper, not SIMD execution of the reduction algorithm. Strict and Apple workflow checks report zero strict-math calls, strict fallbacks and fallback reasons.
 
-| Operation | Before public | Whole public | Apple callback core | Scalar core median |
-| --- | --- | --- | --- | --- |
-| sum |10.2019 [10.0645,10.5703]|1.4464 [1.4330,1.4650]|1.2350 [1.1808,1.2972]|1.2391|
-| minimum |9.4563 [9.1555,9.9980]|.5823 [.5628,.5904]|.3969 [.3945,.4129]|.3739|
-| maximum |9.2947 [9.0740,9.9615]|.5578 [.5510,.6290]|.4025 [.3964,.4187]|.4058|
-| mean |10.7454 [10.2437,11.1065]|1.4989 [1.4135,1.6455]|1.2350 [1.2225,1.2506]|1.2295|
-| count |.0804 [.0772,.1078]|.0329 [.0295,.0648]|.000375 [.000334,.001667]|.000417|
-| variance |11.8831 [11.7301,12.4280]|3.2991 [3.1992,3.3291]|2.6865 [2.5985,2.7345]|2.7290|
-| std |12.0718 [11.8338,12.6387]|3.2903 [3.2725,3.3460]|2.7428 [2.6993,2.7856]|2.8883|
+The callback reports diagnostics after normal completion or a status it handles locally, preserving the first operation failure if reporting is rejected. WorkLimit or cancellation can prevent the report from merging. A `Status` thrown during tensor-window acquisition/read or `std::bad_alloc` caught by the outer math callback can bypass this local report. Cache hits add no new accumulator attempts; Empty demand does no sample arithmetic.
 
-N=256 and all Scalar sample ranges are retained in raw CSV. Numerical controlled
-payload peak rises from4200 to135152 bytes at N=16384 (full collected input,
-4048-byte state and32-byte output). Count decreases from64 to8 bytes. External
-source backing/RSS is not represented by these peaks. Partial numeric output
-still incurs complete input/group computation and storage; sparse requests can
-regress.
+The final focused root selection completed 40 tests in 19.79 seconds: 39 passed and one skipped, with zero failures. It included this dedicated test and the shared `test_numeric_result_math` fixture. Root resource tests passed 3/3, and the installed numeric selection passed 10/10. The independent reduction oracle passes 4,740 cases per Strict and Apple profile. Sibling-source 4 MiB and 5 MiB Root Payload peak assertions passed in the complete `test_dependency_program` run. The skipped test was `test_vulkan_gpu`, with return code 77. x86 execution, Vulkan execution and new performance measurements were not run.
 
-A12-second variance capture has11972 execution-chain samples:11639 include
-execute_reduction,10341 ExactMoments,10311 ExactAggregate,720
-ResourceBudget::consume and12 collect. Inclusive counts overlap. Largest leaves
-are FixedInteger<68>::add4735, set_product2597 and set940; exact accumulation
-and product construction dominate this fixture. Final multiply_fixed appears in
-12 samples and round in2. The remaining cost is directly observed in the exact
-core, without inferring an I/O bottleneck.
+Typed-boundary checks use a straight-alpha RGB Result. A green-only request still validates the complete typed input, so an invalid alpha outside that selected channel fails each of the six numerical reducers with `InvalidArgument` / `InvalidDomain`; metadata-only count succeeds without reading it. Empty demand has empty coverage, support and computed-element count. Pre-cancellation, same-schema valid typed input, logical-order NaN priority across strided windows, unaligned/negative/zero strides, final overflow, and invalid `ddof` are also checked.
 
-Raw local files: build/num-whole-remaining/reductions-timings.csv,
-reductions-perf.cpp/build-reductions-perf.py, reductions-whole.trace, exported
-XML/sample JSON/profile summary, public/oracle logs and reductions-focused.log.
+The installed consumer uses the same workflow source and links `Photospider::kernel`. To check it against a local install, run:
+
+```sh
+cmake --install build/kernel-dev --prefix build/kernel-dev/result-repeat-install
+cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer \
+  -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-repeat-install" \
+  -DPhotospider_DIR="$PWD/build/kernel-dev/result-repeat-install/lib/cmake/Photospider" \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_reductions_consumer -j8
+ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_reductions_result$' --output-on-failure
+```
+
+The installed selection above includes `installed_numeric_reductions_result`.
+Its compile uses only the installed prefix's `include` directory plus
+`-fno-fast-math -frounding-math -ffp-contract=off`, and links the prefix's
+`lib/libphotospider.a`.
+
+These checks do not establish x86 execution, GPU support, maximum-shape throughput or an RSS bound. Historical Value-path measurements are not evidence for the current Result implementation. The seven specifications remain Proposed; their formulas and acceptance rules are linked from [the shared contract](op_specs/NUM-11_reduction_contract.md).

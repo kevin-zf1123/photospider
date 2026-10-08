@@ -2,13 +2,13 @@
 
 英文权威版本：[Layer-Runtime.md](../Layer-Runtime.md)。
 
-Layer 值类型及纯算术 helper 仍属于 C++ API。Result coordinator 拒绝 `photospider.layer`、`photospider.layer_response`、`photospider.raw_rgba_sum`、`photospider.layer_contributions`、`photospider.weighted_layer_sum`、`photospider.optional_layer`，以及带 `photospider.layer` key 的 Result facet，因为这些打包字段不符合当前 planar 图像存储契约。图像使用[张量存储与区域访问](../../kernel-specs/zh/Tensor-Storage-and-Region-Access.zh.md)。
+Layer 值类型及纯算术 helper 仍属于 C++ API。Result schema validator 拒绝 `photospider.layer`、`photospider.layer_response`、`photospider.raw_rgba_sum`、`photospider.layer_contributions`、`photospider.weighted_layer_sum`、`photospider.optional_layer`，以及带 `photospider.layer` key 的 Result facet。这些 schema 不是受支持的 Result 图像表示。图像使用[Result Tensor 存储与区域访问](../../kernel-specs/zh/Tensor-Storage-and-Region-Access.zh.md)；`PlanarImage` 是该存储的 typed backing，不是独立的公共图像路径。
 
 ## 1. 模块边界与所有权
 
-`layer.hpp` 定义内存值契约和纯计算。`layer_operation.hpp` 仍声明旧分阶段操作的工厂，但这些操作的 Result 输出无法通过当前发布校验。Layer Result workflow 不属于受支持的图像存储路径。调用者仍可直接把 `LayerPixel` 传给值 helper，无需创建 Result。被拒绝的六个 ID 是 `photospider.layer`、`photospider.layer_response`、`photospider.raw_rgba_sum`、`photospider.layer_contributions`、`photospider.weighted_layer_sum` 和 `photospider.optional_layer`。
+`layer.hpp` 定义内存值契约和纯计算。它不再提供 Layer operation factory 或可运行的 Layer Result workflow。调用者仍可直接把 `LayerPixel` 传给值 helper，无需创建 Result。Result schema validator 拒绝六个 ID：`photospider.layer`、`photospider.layer_response`、`photospider.raw_rgba_sum`、`photospider.layer_contributions`、`photospider.weighted_layer_sum` 和 `photospider.optional_layer`。
 
-Planar image owner 保存图像样本，并让 view 保持其 backing。Layer 的 coverage/emission 成对字段没有 planar image owner 或 Region 契约。两种所有权模型不能通过附加 metadata 互换。
+图像 pipeline 将样本存入 Result Tensor，并通过 Result owner 和 read window 保留字段或 tensor backing。`PlanarImage` 可作为该 pipeline 内部的 typed backing。Layer 的 coverage/emission pair 仍是内存值，不定义图像 Tensor 存储或 Region 访问。
 
 ## 2. 核心数据结构与内存布局
 
@@ -35,13 +35,16 @@ Raw sum 保存有限 `P` 和有限、非负累加 mass `M`；`M=0` 时要求 `P=
 ## 3. 调度与状态机
 
 ```text
-Layer values --纯 helper--> Layer / Response / RawSum values
-      |                                  |
-      +--旧 OperationDefinition --------+--> Result coordinator 拒绝 layer schema
-PlanarImage -------------------------------> 受支持的图像存储与 Region 路径
+Layer value structs --纯 helper--> Layer / Response / RawSum values
+          |
+          +-- layer_schema 描述 --> Result schema 校验拒绝
+
+image samples --> Result Tensor 存储 --> 已注册图像操作
+                         |
+                         +-- 可选 PlanarImage typed backing
 ```
 
-Result 路径在 coordinator schema 校验处终止，不会到达完整发布。纯 helper 独立于该路径返回本地值，其错误仍由调用方处理。
+Layer schema 描述在 Result schema 校验处终止，不能进入发布。纯 helper 独立于图像执行返回本地值，其错误仍由调用方处理。
 
 ## 4. 算法与数学
 
@@ -53,11 +56,13 @@ Result 路径在 coordinator schema 校验处终止，不会到达完整发布�
 
 纯 helper `weighted_layer_leaf` 和 `weighted_layer_add` 不选择累加树。组合叶子的调用方负责选择并持有分组策略。
 
-`SchemaTemplate::validate` 对六个 Result schema ID 和 `photospider.layer` facet 返回 `TypeMismatch`。`layer_schema` 可以构造字段描述，但当前描述无法通过 Result 校验边界。`validate_layer_result` 的可选 work hook 增加独立 work 上限；根 work 和 I/O 也会计费。
+`SchemaTemplate::validate` 对六个 Result schema ID 和 `photospider.layer` facet 返回 `TypeMismatch`。`layer_schema` 可以为纯值契约构造描述，但该描述无法通过 Result 校验边界。`validate_layer_result` 的可选 work hook 增加独立 work 上限；Root work 和 I/O 也会计费。
+
+纯 helper 行为由 `test_layer` 和安装包 consumer `installed_layer_values` 覆盖。这些检查针对算术 API，不涉及 Layer operation、图像 workflow 或 GPU 路径。
 
 ## 5. 限制与非目标
 
-- `make_layer_operation` 可以构造定义，但这些定义不能恢复 Result 发布能力。
-- Layer 不是 planar 图像存储，也不定义 planar Region 访问、分块图像执行或 GPU 后端。
+- 当前没有 `make_layer_operation` factory 或 Layer 图像 workflow。
+- Layer 值不定义 Result Tensor 存储、Region 访问、分块图像执行或 GPU backend。`PlanarImage` 是 Result 图像路径内部的 typed backing，不是独立的公共图像 API。
 - 该算术契约不提供认证数值误差界或进程 RSS 上界。
 - 内存 helper 不做颜色空间转换，也不从样本值推断 working space。调用方需要处理关联无效、算术溢出和加权关联下溢等 helper 错误。

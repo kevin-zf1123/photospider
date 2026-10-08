@@ -1,7 +1,9 @@
 #include "data/input_validation.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <set>
@@ -11,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "data/typed_sample_validation.hpp"
 #include "photospider/data/tensor_description.hpp"
 #include "plugin/dense_layout_validation.hpp"
 
@@ -26,14 +29,41 @@ std::uint32_t float_bits(float value) noexcept {
   std::memcpy(&bits, &value, sizeof(bits));
   return bits;
 }
+Status validate_member_descriptor(const OperationPortConstraint& port,
+                                  const ValueDescriptor& descriptor,
+                                  const std::vector<ValueFacet>& facets,
+                                  OperationPortKind policy);
 bool valid_constraint(const OperationPortConstraint& port) {
   if (port.kind == OperationPortKind::Result) {
-    return valid_input_name(port.result_schema_id) &&
-           port.result_schema_version && !port.rank && !port.element_type &&
-           !port.element_type_mask && !port.semantic_kind &&
-           port.facets.empty() && float_bits(port.minimum) == 0 &&
-           float_bits(port.maximum) == 0;
+    const bool fixed = !port.result_schema_id.empty();
+    if ((fixed && (!valid_input_name(port.result_schema_id) ||
+                   !port.result_schema_version)) ||
+        (!fixed && port.result_schema_version) ||
+        (!fixed && !tensor_member_predicate(port)))
+      return false;
+    if (!tensor_member_predicate(port))
+      return !port.rank && !port.element_type && !port.element_type_mask &&
+             !port.semantic_kind && port.facets.empty() &&
+             !port.requires_semantics && !port.scalar_bounds &&
+             float_bits(port.minimum) == 0 && float_bits(port.maximum) == 0;
+    if ((!port.tensor_key.empty() && !valid_input_name(port.tensor_key)) ||
+        port.rank > 8 || port.element_type > 7 || port.semantic_kind > 10 ||
+        (port.element_type_mask & ~UINT32_C(127)) ||
+        (port.element_type && port.element_type_mask))
+      return false;
+    auto facets = port.facets;
+    if (!canonicalize_facets(&facets).ok() || !same_facets(facets, port.facets))
+      return false;
+    if (!port.scalar_bounds)
+      return float_bits(port.minimum) == 0 && float_bits(port.maximum) == 0;
+    return (!port.element_type || port.element_type == 4) &&
+           (!port.rank || port.rank == 1) &&
+           (!port.element_type_mask || port.element_type_mask == 8) &&
+           std::isfinite(port.minimum) && std::isfinite(port.maximum) &&
+           port.minimum <= port.maximum;
   }
+  if (!port.tensor_key.empty() || port.requires_semantics || port.scalar_bounds)
+    return false;
   if (!port.result_schema_id.empty() || port.result_schema_version)
     return false;
   if (port.rank > 8 || port.element_type > 7 || port.semantic_kind > 10 ||
@@ -209,73 +239,10 @@ bool whole_region(const Region& region,
 }
 
 Status validate_declaration(WorkflowInputDeclaration* declaration) {
-  if (declaration->result_schema) {
-    if (!declaration->descriptor.shape.empty() ||
-        !declaration->region.empty() || !declaration->facets.empty() ||
-        !declaration->layout.byte_strides.empty() ||
-        !declaration->layout.origin.empty() || declaration->layout.byte_offset)
-      return failure(ErrorCode::InvalidArgument,
-                     "Result declaration has Value metadata");
-    return declaration->result_schema->validate(true);
-  }
-  for (const auto& facet : declaration->facets) {
-    if (facet.key == "photospider.image" ||
-        (facet.key == "photospider.color-array" &&
-         declaration->descriptor.shape.size() >= 3))
-      return failure(ErrorCode::InvalidArgument,
-                     "image declaration requires Result schema");
-    if (facet.key == "photospider.semantic") {
-      auto semantic = decode_semantic(facet);
-      if (semantic.ok() && (semantic.value().kind == SemanticKind::ImagePlane ||
-                            semantic.value().kind == SemanticKind::Mask))
-        return failure(ErrorCode::InvalidArgument,
-                       "image declaration requires Result schema");
-    }
-  }
-  auto dense = dense_metadata(declaration->descriptor);
-  if (!dense.ok())
-    return dense.status();
-  if ((!declaration->layout.origin.empty() &&
-       declaration->layout.origin.size() !=
-           declaration->descriptor.shape.size()) ||
-      !whole_region(declaration->region, declaration->descriptor.shape) ||
-      declaration->layout.byte_offset != 0 ||
-      std::any_of(declaration->layout.origin.begin(),
-                  declaration->layout.origin.end(),
-                  [](std::uint64_t value) { return value != 0; }) ||
-      declaration->layout.byte_strides != dense.value().layout.byte_strides) {
+  if (!declaration->result_schema)
     return failure(ErrorCode::InvalidArgument,
-                   "input requires whole dense layout");
-  }
-  return canonicalize_facets(&declaration->facets);
-}
-
-Status validate_binding(const WorkflowInputDeclaration& declaration,
-                        const Value& value) {
-  if (declaration.result_schema)
-    return failure(ErrorCode::TypeMismatch,
-                   "Result declaration requires a Result binding");
-  if (!value.valid())
-    return failure(ErrorCode::InvalidArgument, "invalid bound Value");
-  if (value.descriptor().element_type != declaration.descriptor.element_type ||
-      value.descriptor().shape != declaration.descriptor.shape ||
-      !whole_region(value.region(), declaration.descriptor.shape)) {
-    return failure(ErrorCode::TypeMismatch,
-                   "binding descriptor or Region differs");
-  }
-  auto dense = dense_metadata(declaration.descriptor);
-  if (!dense.ok())
-    return dense.status();
-  if (value.layout().byte_offset != 0 ||
-      value.layout().byte_strides != declaration.layout.byte_strides ||
-      value.bytes().size() != dense.value().bytes) {
-    return failure(ErrorCode::TypeMismatch,
-                   "binding layout or storage differs");
-  }
-  if (!same_facets(value.facets(), declaration.facets)) {
-    return failure(ErrorCode::TypeMismatch, "binding facets differ");
-  }
-  return Status::success();
+                   "workflow input requires Result schema");
+  return declaration->result_schema->validate(true);
 }
 
 Status validate_port_schema(const OperationTraits& traits) {
@@ -442,17 +409,73 @@ ValueFacet image_facet() {
   return encode_semantic(rgba_semantics()).take_value();
 }
 
+bool tensor_member_predicate(const OperationPortConstraint& port) noexcept {
+  return !port.tensor_key.empty() || port.element_type ||
+         port.element_type_mask || port.rank || port.semantic_kind ||
+         !port.facets.empty() || port.requires_semantics || port.scalar_bounds;
+}
+Result<std::uint32_t> resolve_tensor_member(const OperationPortConstraint& port,
+                                            const OperationMetadata& metadata) {
+  using Answer = Result<std::uint32_t>;
+  if (port.kind != OperationPortKind::Result || !metadata.result_schema)
+    return Answer(
+        failure(ErrorCode::TypeMismatch, "Result tensor port required"));
+  const auto& schema = *metadata.result_schema;
+  std::uint32_t slot = 0;
+  if (port.tensor_key.empty()) {
+    if (schema.tensors.size() != 1)
+      return Answer(
+          failure(ErrorCode::TypeMismatch, "select a named tensor member"));
+  } else {
+    while (slot < schema.tensors.size() &&
+           std::string_view(schema.tensors[slot].key) != port.tensor_key)
+      ++slot;
+    if (slot == schema.tensors.size())
+      return Answer(failure(ErrorCode::TypeMismatch,
+                            "required tensor member is missing"));
+  }
+  const auto& tensor = schema.tensors[slot];
+  auto valid = validate_member_descriptor(
+      port, tensor.descriptor, tensor.facets, OperationPortKind::Value);
+  if (!valid.ok())
+    return Answer(valid);
+  if (!port.facets.empty() && !same_facets(port.facets, tensor.facets))
+    return Answer(
+        failure(ErrorCode::TypeMismatch, "tensor member facets mismatch"));
+  if (port.requires_semantics || port.semantic_kind) {
+    valid = validate_member_descriptor(port, tensor.descriptor, tensor.facets,
+                                       OperationPortKind::Typed);
+    if (!valid.ok())
+      return Answer(valid);
+  }
+  if (port.scalar_bounds) {
+    if (!tensor.batch_axes.empty() ||
+        tensor.descriptor.shape != std::vector<std::uint64_t>{1})
+      return Answer(failure(ErrorCode::TypeMismatch,
+                            "scalar tensor requires full sample shape one"));
+    valid = validate_member_descriptor(port, tensor.descriptor, tensor.facets,
+                                       OperationPortKind::Float32Scalar);
+    if (!valid.ok())
+      return Answer(valid);
+  }
+  return Answer(slot);
+}
 Status validate_port_metadata(const OperationPortConstraint& port,
                               const OperationMetadata& metadata) {
   if (metadata.result_schema) {
     if (port.kind != OperationPortKind::Result ||
-        std::string_view(metadata.result_schema->id) !=
-            std::string_view(port.result_schema_id) ||
-        metadata.result_schema->version != port.result_schema_version ||
+        (!port.result_schema_id.empty() &&
+         (std::string_view(metadata.result_schema->id) !=
+              std::string_view(port.result_schema_id) ||
+          metadata.result_schema->version != port.result_schema_version)) ||
         !metadata.descriptor.shape.empty() || !metadata.facets.empty())
       return failure(ErrorCode::TypeMismatch,
                      "structured input schema mismatch");
-    return metadata.result_schema->validate(true);
+    auto valid = metadata.result_schema->validate(true);
+    if (!valid.ok() || !tensor_member_predicate(port))
+      return valid;
+    auto slot = resolve_tensor_member(port, metadata);
+    return slot.ok() ? Status::success() : slot.status();
   }
   if (port.kind == OperationPortKind::Result)
     return failure(ErrorCode::TypeMismatch, "paged ResultRef input required");
@@ -471,6 +494,13 @@ Status validate_port_metadata(const OperationPortConstraint& port,
 Status validate_port_metadata(const OperationPortConstraint& port,
                               const ValueDescriptor& descriptor,
                               const std::vector<ValueFacet>& facets) {
+  return validate_member_descriptor(port, descriptor, facets, port.kind);
+}
+namespace {
+Status validate_member_descriptor(const OperationPortConstraint& port,
+                                  const ValueDescriptor& descriptor,
+                                  const std::vector<ValueFacet>& facets,
+                                  OperationPortKind policy) {
   const auto element = static_cast<std::uint32_t>(descriptor.element_type);
   if (element < 1 || element > 7 || descriptor.shape.empty() ||
       descriptor.shape.size() > 8 ||
@@ -515,9 +545,9 @@ Status validate_port_metadata(const OperationPortConstraint& port,
     if (!status.ok())
       return status;
   }
-  if (port.kind == OperationPortKind::Value)
+  if (policy == OperationPortKind::Value)
     return Status::success();
-  if (port.kind == OperationPortKind::Typed) {
+  if (policy == OperationPortKind::Typed) {
     const auto found =
         std::find_if(facets.begin(), facets.end(),
                      [](const auto& f) { return typed_facet(f.key); });
@@ -542,7 +572,7 @@ Status validate_port_metadata(const OperationPortConstraint& port,
   if (descriptor.element_type != ElementType::Float32) {
     return failure(ErrorCode::TypeMismatch, "port requires Float32");
   }
-  if (port.kind == OperationPortKind::Float32Mask) {
+  if (policy == OperationPortKind::Float32Mask) {
     if (descriptor.shape.size() != 2 || descriptor.shape[0] == 0 ||
         descriptor.shape[1] == 0 ||
         !same_facets(facets,
@@ -551,7 +581,7 @@ Status validate_port_metadata(const OperationPortConstraint& port,
                      "mask requires HW coverage semantics");
     return Status::success();
   }
-  if (port.kind == OperationPortKind::Float32Scalar) {
+  if (policy == OperationPortKind::Float32Scalar) {
     if (descriptor.shape != std::vector<std::uint64_t>{1})
       return failure(ErrorCode::TypeMismatch, "scalar requires shape one");
     if (!facets.empty()) {
@@ -576,6 +606,8 @@ Status validate_port_metadata(const OperationPortConstraint& port,
   }
   return Status::success();
 }
+
+}  // namespace
 
 bool image_demand(const Region& region) noexcept {
   return region.rank() == 3 && !region.empty() &&
@@ -655,6 +687,169 @@ DependencyMappedNeed validation_map(DependencyMappedNeed support,
   if (axis)
     support.axes[*axis] = {-1, {0, metadata.descriptor.shape[*axis]}};
   return support;
+}
+
+Status validate_port_tensor(const OperationPortConstraint& port,
+                            const ResultRef& result,
+                            const ResultDescriptor& descriptor,
+                            const OperationMetadata& metadata,
+                            ErrorCode numeric_failure,
+                            const CancellationToken& cancellation,
+                            const std::function<ErrorCode()>& stop) {
+  auto selected = resolve_tensor_member(port, metadata);
+  if (!selected.ok())
+    return selected.status();
+  if (!port.scalar_bounds)
+    return Status::success();
+  const auto& coverage = descriptor.tensor_coverage(selected.value());
+  if (!coverage.valid() || coverage.shape() != std::vector<uint64_t>{1} ||
+      !coverage.contains({0}))
+    return failure(ErrorCode::TypeMismatch,
+                   "scalar requires complete single-sample coverage");
+  if (stop) {
+    auto code = stop();
+    if (code != ErrorCode::Ok)
+      return failure(code, "scalar validation stopped");
+  }
+  Float32Environment environment;
+  if (!environment.active())
+    return failure(ErrorCode::OperationFailed,
+                   "cannot set binary32 environment");
+  float scalar = 0;
+  auto read = result.read_tensor(descriptor, selected.value(), {0}, &scalar,
+                                 sizeof(scalar), cancellation);
+  if (!read.ok())
+    return read;
+  if (stop) {
+    auto code = stop();
+    if (code != ErrorCode::Ok)
+      return failure(code, "scalar validation stopped");
+  }
+  if (!std::isfinite(scalar) || scalar < port.minimum || scalar > port.maximum)
+    return failure(numeric_failure,
+                   "scalar is nonfinite or outside port interval");
+  return Status::success();
+}
+
+Status validate_tensor_samples(
+    const ResultRef& result, const ResultDescriptor& descriptor, uint32_t slot,
+    const Footprint& samples, const ResourceBudget& resources,
+    ErrorCode numeric_failure, const CancellationToken& cancellation,
+    const std::function<ErrorCode()>& stop,
+    const std::function<Status(uint64_t)>& consume) try {
+  if (!result.valid() || slot >= result.schema().tensors.size() ||
+      !samples.valid())
+    return {ErrorCode::TypeMismatch, "invalid typed tensor samples"};
+  const auto& spec = result.schema().tensors[slot];
+  if (samples.empty())
+    return Status::success();
+  const ValueFacet* typed = nullptr;
+  for (const auto& facet : spec.facets)
+    if (typed_facet(facet.key)) {
+      typed = &facet;
+      break;
+    }
+  if (!typed)
+    return Status::success();
+  auto scratch = resources.reserve(ResourceCapacity::host(
+      4096 + 4 * typed->payload.size(), 4096 + 4 * typed->payload.size()));
+  if (!scratch.ok())
+    return scratch.status();
+  ResourceAllocationScope scope(resources);
+  std::optional<SemanticDescriptor> semantic;
+  std::optional<ColorArrayDescriptor> color;
+  if (typed->key == "photospider.color-array") {
+    auto decoded = decode_color_array(*typed);
+    if (!decoded.ok())
+      return decoded.status();
+    color = decoded.take_value();
+  } else {
+    auto decoded = decode_semantic(*typed);
+    if (!decoded.ok())
+      return decoded.status();
+    semantic = decoded.take_value();
+  }
+  for (const auto& box : samples.boxes()) {
+    auto dimensions = box.dimensions();
+    const std::size_t batches = 0;
+    for (size_t axis = 0; axis < batches; ++axis)
+      dimensions[axis].extent = 1;
+    for (;;) {
+      const Region region(dimensions);
+      auto acquired =
+          result.acquire_tensor(descriptor, slot, region, cancellation);
+      if (!acquired.ok())
+        return acquired.status();
+      auto window = acquired.take_value();
+      struct Cached {
+        std::array<uint64_t, 8> at{};
+        ResultTensorRun run;
+        bool valid = false;
+      };
+      std::array<Cached, 4> cache{};
+      const auto sample_axis = window.sample_axis();
+      const auto reader = [&](const auto& at) -> Result<double> {
+        if (consume) {
+          auto charged = consume(1);
+          if (!charged.ok())
+            return Result<double>(charged);
+        }
+        auto& row = cache[at.back() % cache.size()];
+        bool hit = row.valid && at[sample_axis] >= row.at[sample_axis] &&
+                   at[sample_axis] - row.at[sample_axis] < row.run.samples;
+        for (size_t axis = 0; hit && axis < at.size(); ++axis)
+          if (axis != sample_axis && at[axis] != row.at[axis])
+            hit = false;
+        if (!hit) {
+          auto run = window.row_run(at);
+          if (!run.ok())
+            return Result<double>(run.status());
+          row.run = run.take_value();
+          std::copy(at.begin(), at.end(), row.at.begin());
+          row.valid = true;
+        }
+        const auto offset =
+            static_cast<__int128>(at[sample_axis] - row.at[sample_axis]) *
+            row.run.sample_stride_bytes;
+        const auto* bytes = row.run.data + static_cast<std::ptrdiff_t>(offset);
+        double value = 0;
+        if (spec.descriptor.element_type == ElementType::Float32) {
+          float narrow;
+          std::memcpy(&narrow, bytes, 4);
+          value = narrow;
+        } else if (spec.descriptor.element_type == ElementType::Float64) {
+          std::memcpy(&value, bytes, 8);
+        } else {
+          int64_t integer;
+          std::memcpy(&integer, bytes, 8);
+          value = static_cast<double>(integer);
+        }
+        return Result<double>(value);
+      };
+      auto checked =
+          color ? validate_color_samples(*color, spec.descriptor, region,
+                                         reader, numeric_failure, stop)
+                : validate_semantic_samples(*semantic, spec.descriptor, region,
+                                            spec.batch_axes.size(), reader,
+                                            numeric_failure, stop);
+      if (!checked.ok())
+        return checked;
+      bool advanced = false;
+      for (size_t axis = batches; axis-- > 0;) {
+        if (++dimensions[axis].offset <
+            box.dimensions()[axis].offset + box.dimensions()[axis].extent) {
+          advanced = true;
+          break;
+        }
+        dimensions[axis].offset = box.dimensions()[axis].offset;
+      }
+      if (!advanced)
+        break;
+    }
+  }
+  return Status::success();
+} catch (const std::bad_alloc&) {
+  return {ErrorCode::ResourceExhausted, {}};
 }
 
 Status validate_port_value(const OperationPortConstraint& port,

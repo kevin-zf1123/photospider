@@ -56,6 +56,8 @@ typedef struct ps_cpu_parallel_service_v1 {
 
 The service is borrowed by a CPU Whole callback. It partitions `[0, count)` into finite, disjoint intervals no larger than `grain`. `workers == 0` selects the grant maximum; a positive value requests between one and that maximum participants, including the calling thread. The service may run fewer blocks concurrently than the grant. Each active block receives a unique live scratch slot. Inputs and callback user data remain borrowed until the synchronous barrier returns; scratch must not escape the call.
 
+Before a nonempty run starts any block callback, the host reserves the job record against Root Host and Metadata capacity and one Root Entry, then charges `work=count` and `stages=ceil(count/grain)`. These charges use the same Root budget as work already issued by the execution, so prior work reduces the remaining allowance. If reservation or charging fails, the run returns a sticky resource failure and invokes zero block callbacks. A zero-count run creates no job and charges no work or stages; the ordinary argument and cancellation checks still apply.
+
 A one-participant grant or a range that fits in one block executes inline on the caller. Long blocks poll the supplied cancellation token. The service stops future claims and drains active blocks before returning. A block uses immutable inputs and preallocated outputs; row, allocation, publication, preparation, and diagnostics services belong to the callback thread and are unavailable to range blocks. Nested range calls are rejected, and service violations remain sticky.
 
 For count `N` and positive grain `B`, the block count avoids overflow from `N + B - 1`:
@@ -64,6 +66,16 @@ $$
 N_{blocks}=N/B + (N\bmod B\ne0),\qquad
 end=begin+\min(B,N-begin).
 $$
+
+Structured CPU Result Whole polls receive this borrowed service as `ResultProgramPhase::cpu_parallel`. It schedules blocks within the active Whole callback; it does not parallelize a Result dependency graph independently. `tests/integration/test_cpu_parallel.cpp` exercises a `UINT64_MAX` range after earlier Root work and verifies resource rejection before any block callback. `tests/unit/test_cpu_range.cpp` checks endpoint arithmetic without a Root budget and therefore does not establish Root admission behavior.
+
+### Structured Result callback waves
+
+The structured coordinator registers requested named Result roots and advances their dependency Actors. Potential CPU contract-1 joint candidate roots remain deferred until their consuming Actor validates its Need and registers the producer inputs, allowing peer C1 inputs to join before candidate start. A validated Need adds eligible computed inputs to the pending frontier. Each Need input has an independent cursor; the coordinator rotates among inputs that can make progress, and an Actor is visited at most once per traversal. This keeps a deep dependency chain from being recursively revisited for every peer input.
+
+When the frontier has queued callback work, the coordinator submits up to `maximum_parallelism` tasks from its Root-owned pending list. It waits for submitted callbacks to retire before reading their phase results and applying them serially, then advances the next dependency frontier. The limit applies to submitted callback tasks, not a second scheduler for the Result graph. CPU staged-tile coordination and GPU callbacks keep their existing inline/controller and single-lane paths.
+
+Submission-local transfer, tile and native observations remain with each task until retirement, when the coordinator merges them. Joint workers mark callback entry and execute the shared callback; the coordinator accounts for the group once at retirement. Result poll timing spans phase creation through coordinator retirement, including queue and wave waiting, so it is not a compute-only duration. Shutdown and synchronous Run completion drain submitted work before releasing borrowed callback state.
 
 ### Planar staged tile service
 

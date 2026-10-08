@@ -11,21 +11,24 @@
 #include "photospider/numeric/workflow_authoring.hpp"
 
 namespace ps::numeric {
-/** @brief Generated source input, always Float64 with final component axis 3.
- * Grid shape is [N0,N1,N2,3], validation shape is [P,3]. Source code must be
- * independently pointwise and handle these batch shapes without reading other
- * sampled colors. Shared dynamic inputs use ordinary existing graph edges.
+/** @brief Generated source input, always a Float64 Result tensor with final
+ * extent-3 component axis. Grid shape is [N0,N1,N2,3], validation shape is
+ * [P,3]. Source code must be independently pointwise and handle these complete
+ * sample shapes without reading other sampled colors. Shared dynamic inputs use
+ * ordinary existing graph edges.
  */
 struct Lut3dSourceInput {
   WorkflowNodeOutput colors;
   ValueDescriptor descriptor;
 };
 /** @brief Authoring-only source expansion, called twice on a staged document.
- * Append ordinary nodes and return their output; preserve existing
- * declarations, nodes and exports. No computation, runtime callback or captured
+ * Append ordinary nodes and return an output that resolves to one Result tensor
+ * with the supplied complete sample shape and Float32/64 dtype. A supplied
+ * ColorArray facet must match the requested description; a generic tensor may
+ * omit that facet. Preserve existing input declarations (including Result
+ * schemas), nodes and exports. No computation, runtime callback or captured
  * closure is retained. The supplied graph's keys/profiles and explicit casts
- * define the reference. Float32/64 output must preserve the supplied batch
- * shape.
+ * define the reference.
  */
 using Lut3dSourceBuilder = std::function<Result<WorkflowNodeOutput>(
     WorkflowDocument&, const Lut3dSourceInput&)>;
@@ -45,12 +48,19 @@ struct Lut3dBakeOptions {
 };
 struct Lut3dValidationPoints {
   WorkflowInput values;
-  /** @brief Authoring hint 1..1048576; Compiler checks Float64 [count,3]. */
+  /** @brief Authoring hint 1..1048576; Compiler checks one Float64 Result
+   * tensor with full `sample_shape()` [count,3].
+   */
   std::uint64_t count = 0;
 };
-/** @brief Connectable exports; table is globally quality-gated, axis
- * independent. report is a curve.bake_lut3d.report v1 ResultRef; read it with
- * the public read_lut3d_bake_report helper after execution. Names are not
+/** @brief Connectable exports; table is a globally quality-gated
+ * `photospider.tensor` v1 Result with `samples` shape [N0,N1,N2,3], selected
+ * dtype and ColorArray v1 facet. Axis is an independent Float64 tensor. report
+ * is a curve.bake_lut3d.report v1 ResultRef; request it through
+ * `ExecutionContext::execute()` and read it with the public
+ * read_lut3d_bake_report helper. Its association records observed Result input
+ * ObjectIds in port order: axis, grid and owned table occupy the first three
+ * entries, followed by owners observed from source batches. Names are not
  * auto-exported.
  */
 struct BakedLut3d {
@@ -64,19 +74,26 @@ struct BakedLut3d {
  * immutable binding snapshot, including shared inputs. No nested execution or
  * file save occurs.
  *
- * Generated profile Value nodes use Whole: complete inputs and dense outputs,
- * full-input invalidation and numeric Run failures. Budget full grid, points,
- * converted colors and source intermediates even for partial table requests.
- * Pack/measure/unpack/gate retain the structured Result protocol, bounded I/O,
- * schema provenance and report/table object association. The final table gate
- * returns requested complete-color fragments backed by its own storage.
+ * All 15 profile geometry nodes use Whole Result programs with role-13 inputs,
+ * full outputs, complete-demand invalidation and numeric Run failures. Static
+ * preparation validates each operation's metadata and stores immutable POD
+ * state for geometry or report work; runtime callbacks reuse that prepared
+ * state. Budget full grid, points, converted colors and source intermediates
+ * even for partial table requests. Pack, measure, unpack and gate are
+ * Result-only. Pack/unpack/gate try authorized tensor views first and keep
+ * legal common-owner mappings; only a physical `ViewUnavailable` causes a
+ * transactional packed materialization of that ROI, charged to Root payload.
+ * The final gate returns requested complete-color fragments with global
+ * coordinates. Measure and gate validate bounded report windows before table
+ * publication; a passed gate checks report association entry 2 against the
+ * owned-table input after role-13 table validation.
  * Every nonempty table or report request validates all grid colors, complete
  * source outputs, centers and extra points. report successfully records
  * passed=false on exceeded tolerances; table then fails OperationFailed/
  * InvalidDomain with LutApproximationToleranceExceeded. Axis-only observes no
  * source or extra points. Source/shape/domain/work/capacity/cancellation/stale
- * failures retain their categories. Result and packed Value owners survive
- * context teardown. Measured acceptance applies only at listed points using
+ * failures retain their categories. Result owners survive context teardown.
+ * Measured acceptance applies only at listed points using
  * the chosen interpolation and table output dtype, never the continuous domain.
  *
  * Calls modifying one document must be serialized. All authoring is staged;

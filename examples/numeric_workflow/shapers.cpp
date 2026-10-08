@@ -1,5 +1,6 @@
 #include "photospider/numeric/shapers.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cfenv>  // NOLINT(build/c++11)
@@ -7,6 +8,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -15,7 +17,7 @@
 
 #include "photospider/numeric/color_ramps.hpp"
 #include "photospider/photospider.hpp"
-#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/plugin/result_program.hpp"
 
 namespace {
 void require(bool condition, const char* message) {
@@ -38,17 +40,76 @@ std::uint64_t bits(double value, bool narrow = false) {
   }
   return raw;
 }
-ps::Value array(bool narrow, const std::vector<std::uint64_t>& words) {
-  const unsigned width = narrow ? 4 : 8;
-  std::vector<std::uint8_t> bytes(width * words.size());
-  for (std::size_t i = 0; i < words.size(); ++i)
-    std::memcpy(bytes.data() + i * width, &words[i], width);
-  return take(ps::Value::create(
-      {narrow ? ps::ElementType::Float32 : ps::ElementType::Float64,
-       {words.size()}},
-      ps::Region::whole({words.size()}), {0, {width}}, std::move(bytes)));
+template <class Input>
+ps::ValueDescriptor descriptor(const Input& value) {
+  const auto& tensor = value.schema().tensors[0];
+  return {tensor.descriptor.element_type, tensor.sample_shape()};
 }
-ps::Value numbers(bool narrow, const std::vector<double>& values) {
+struct SampleInput {
+  ps::SchemaTemplate format;
+  ps::StridedLayout layout;
+  std::vector<uint64_t> words;
+  const ps::SchemaTemplate& schema() const { return format; }
+};
+SampleInput array(bool narrow, const std::vector<std::uint64_t>& words,
+                  std::vector<std::uint64_t> shape = {},
+                  std::vector<ps::ValueFacet> facets = {},
+                  std::optional<ps::StridedLayout> layout = {}) {
+  const unsigned width = narrow ? 4 : 8;
+  if (shape.empty())
+    shape = {words.size()};
+  ps::SchemaTemplate schema;
+  schema.id = "manual.shaper.input";
+  ps::ResultTensorSpec tensor;
+  tensor.key = "coordinates";
+  tensor.descriptor = {
+      narrow ? ps::ElementType::Float32 : ps::ElementType::Float64, shape};
+  tensor.facets = std::move(facets);
+  schema.tensors.push_back(std::move(tensor));
+  if (!layout) {
+    std::vector<int64_t> strides(shape.size());
+    int64_t stride = width;
+    for (auto i = shape.size(); i-- > 0;) {
+      strides[i] = stride;
+      stride *= shape[i];
+    }
+    layout = ps::StridedLayout{1, strides};
+  }
+  return {std::move(schema), std::move(*layout), words};
+}
+ps::Result<ps::ResultRef> publish_input(const SampleInput& input,
+                                        const ps::ResourceBudget& root) {
+  using Answer = ps::Result<ps::ResultRef>;
+  const auto width = ps::Value::element_size(descriptor(input).element_type);
+  auto allocation = root.allocator().allocate(width * input.words.size() + 1);
+  if (!allocation.ok())
+    return Answer(allocation.status());
+  auto bytes = allocation.take_value();
+  for (std::size_t i = 0; i < input.words.size(); ++i)
+    std::memcpy(bytes.data() + 1 + i * width, &input.words[i], width);
+  auto started = ps::ResultBuilder::start(root, input.schema(), "shaper.input");
+  if (!started.ok())
+    return Answer(started.status());
+  auto builder = started.take_value();
+  auto descriptor_relation =
+      ps::ResultRelation::cartesian(root, 1, {0, 8, 0, 0});
+  if (!descriptor_relation.ok())
+    return Answer(descriptor_relation.status());
+  auto bound =
+      builder.bind_descriptor_relation(descriptor_relation.take_value());
+  if (!bound.ok())
+    return Answer(bound);
+  auto relation = ps::ResultRelation::cartesian(
+      root, take(input.schema().tensors[0].sample_count()), {0, 1, 0, 0});
+  if (!relation.ok())
+    return Answer(relation.status());
+  auto published =
+      builder.publish_tensor(0, ps::Region::whole(descriptor(input).shape),
+                             input.layout, std::move(bytes).freeze(),
+                             relation.take_value(), {true, true, true, true});
+  return published.ok() ? builder.seal() : Answer(published);
+}
+SampleInput numbers(bool narrow, const std::vector<double>& values) {
   std::vector<std::uint64_t> words;
   for (auto value : values)
     words.push_back(bits(value, narrow));
@@ -58,16 +119,19 @@ struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
+  std::vector<SampleInput> values;
   Fixture(unsigned method, ps::CpuNumericProfile profile,
-          const std::vector<ps::Value>& values) {
+          const std::vector<SampleInput>& values)
+      : values(values) {
     for (unsigned i = 0; i < values.size(); ++i) {
       const auto& value = values[i];
       const auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1, name, value.descriptor(),
-                                 value.region(), value.layout(),
-                                 value.facets()});
-      bindings.inputs.push_back({name, value});
+      ps::WorkflowInputDeclaration input;
+      input.id = i + 1;
+      input.name = name;
+      input.result_schema =
+          std::make_shared<ps::SchemaTemplate>(value.schema());
+      document.inputs.push_back(std::move(input));
     }
     const ps::WorkflowInput x = ps::WorkflowInputReference{1},
                             l = ps::WorkflowInputReference{2},
@@ -76,7 +140,7 @@ struct Fixture {
     if (method < 2) {
       auto helper = method ? ps::numeric::linear_shaper_inverse
                            : ps::numeric::linear_shaper;
-      output = take(helper(document, x, l, u, values[0].descriptor(), profile));
+      output = take(helper(document, x, l, u, descriptor(values[0]), profile));
     } else {
       auto helper = method == 3 ? ps::numeric::log2_shaper_inverse_node
                                 : ps::numeric::log2_shaper_node;
@@ -84,6 +148,17 @@ struct Fixture {
       output = {1, "values"};
     }
     document.outputs = {{"values", output.source_node, output.source_port}};
+  }
+  ps::Result<ps::ExecutionBindings> bindings_for(
+      const ps::ResourceBudget& root) const {
+    ps::ExecutionBindings bindings;
+    for (unsigned i = 0; i < values.size(); ++i) {
+      auto value = publish_input(values[i], root);
+      if (!value.ok())
+        return ps::Result<ps::ExecutionBindings>(value.status());
+      bindings.inputs.push_back({document.inputs[i].name, value.take_value()});
+    }
+    return ps::Result<ps::ExecutionBindings>(std::move(bindings));
   }
   ps::Result<ps::DemandResult> run(const ps::Footprint& wanted,
                                    bool joint = true) const {
@@ -95,7 +170,10 @@ struct Fixture {
     config.cpu_workers = 1;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(registry, config);
-    auto frozen = context.freeze(compiled.value().plan, bindings);
+    auto bindings = bindings_for(take(context.resource_budget()));
+    if (!bindings.ok())
+      return ps::Result<ps::DemandResult>(bindings.status());
+    auto frozen = context.freeze(compiled.value().plan, bindings.value());
     if (!frozen.ok())
       return ps::Result<ps::DemandResult>(frozen.status());
     ps::ExecutionOptions options;
@@ -106,14 +184,15 @@ struct Fixture {
                                      options);
   }
 };
-std::uint64_t read(const ps::ValueFragments& value,
+std::uint64_t read(const ps::ResultRef& value,
                    const std::vector<std::uint64_t>& at) {
   std::uint64_t raw = 0;
-  require(value
-              .read(at, &raw,
-                    ps::Value::element_size(value.descriptor().element_type))
-              .ok(),
-          "read shaper global coordinate");
+  require(
+      value
+          .read_tensor(take(value.descriptor()), 0, at, &raw,
+                       ps::Value::element_size(descriptor(value).element_type))
+          .ok(),
+      "read shaper global coordinate");
   return raw;
 }
 void examples(ps::CpuNumericProfile profile) {
@@ -139,8 +218,9 @@ void examples(ps::CpuNumericProfile profile) {
       for (bool joint : {false, true}) {
         auto result =
             take(fixture.run(take(ps::Footprint::all({input.size()})), joint));
-        const auto& output = result.values.at("values");
-        require(output.facets().empty(), "generic shaper result");
+        const auto& output = result.results.at("values");
+        require(output.schema().tensors[0].facets.empty(),
+                "generic shaper result");
         for (unsigned i = 0; i < expected.size(); ++i)
           require(read(output, {i}) == bits(expected[i], narrow),
                   "public shaper golden");
@@ -155,7 +235,7 @@ void examples(ps::CpuNumericProfile profile) {
               support.at("input2") == take(ps::Footprint::all({1})),
           "complete input and both shared bounds");
       require(
-          read(result.values.at("values"), {1}) == bits(expected[1], narrow),
+          read(result.results.at("values"), {1}) == bits(expected[1], narrow),
           "partial shaper survives context destruction");
       auto empty = take(fixture.run(take(ps::Footprint::none({input.size()}))));
       require(take(empty.dependencies.source_support()).empty(),
@@ -166,33 +246,92 @@ void examples(ps::CpuNumericProfile profile) {
       << "four public shapers, both dtypes, exact landmarks/extrapolation, "
          "joint/cache-off, Whole witnesses, Empty and owner lifetime PASS\n";
 }
-ps::Value direct(const std::shared_ptr<ps::OperationRegistry>& registry,
-                 const ps::WorkflowNode& node,
-                 const std::vector<ps::Value>& inputs) {
-  std::vector<ps::Region> demands;
-  for (const auto& input : inputs)
-    demands.push_back(input.region());
-  ps::ResourceBudget budget(ps::ResourceLimits{});
-  ps::ResourceAllocationScope scope(budget);
-  ps::OperationInvocation call(inputs, demands, node.parameters,
-                               ps::Backend::Cpu, {}, inputs[0].region(),
-                               budget.allocator());
-  return take(registry->invoke(node.operation, call));
+ps::ResultRef direct(const ps::WorkflowNode& node,
+                     const std::vector<SampleInput>& inputs) {
+  const auto profile = node.operation.find("apple_silicon") != std::string::npos
+                           ? ps::CpuNumericProfile::AppleSiliconNeon
+                       : node.operation.find("x86_64") != std::string::npos
+                           ? ps::CpuNumericProfile::X86Avx2
+                           : ps::CpuNumericProfile::Strict;
+  const auto method =
+      node.operation.find("inverse") != std::string::npos ? 3U : 2U;
+  Fixture fixture(method, profile, inputs);
+  return take(
+             fixture.run(take(ps::Footprint::all(descriptor(inputs[0]).shape))))
+      .results.at("values");
 }
-ps::Value reversed(const ps::Value& value) {
-  const unsigned width =
-      ps::Value::element_size(value.descriptor().element_type);
-  const auto count = value.bytes().size() / width;
-  std::vector<std::uint8_t> bytes(1 + value.bytes().size());
-  for (std::size_t i = 0; i < count; ++i)
-    std::memcpy(bytes.data() + 1 + (count - i - 1) * width,
-                value.bytes().data() + i * width, width);
-  auto strides = value.layout().byte_strides;
-  for (auto& stride : strides)
-    stride = -stride;
-  return take(ps::Value::create(value.descriptor(), value.region(),
-                                {1 + (count - 1) * width, strides},
-                                std::move(bytes), value.facets()));
+SampleInput reversed(const SampleInput& value) {
+  const auto meta = descriptor(value);
+  const auto width = ps::Value::element_size(meta.element_type);
+  const auto count = value.words.size();
+  auto words = value.words;
+  std::reverse(words.begin(), words.end());
+  std::vector<int64_t> strides(meta.shape.size());
+  int64_t stride = -static_cast<int64_t>(width);
+  for (auto axis = meta.shape.size(); axis-- > 0;) {
+    strides[axis] = stride;
+    stride *= meta.shape[axis];
+  }
+  return array(meta.element_type == ps::ElementType::Float32, words, meta.shape,
+               value.schema().tensors[0].facets,
+               ps::StridedLayout{1 + (count - 1) * width, strides});
+}
+void admitted_resources(const ps::WorkflowNode& node,
+                        const std::vector<SampleInput>& inputs) {
+  const auto profile = node.operation.find("apple_silicon") != std::string::npos
+                           ? ps::CpuNumericProfile::AppleSiliconNeon
+                       : node.operation.find("x86_64") != std::string::npos
+                           ? ps::CpuNumericProfile::X86Avx2
+                           : ps::CpuNumericProfile::Strict;
+  Fixture fixture(node.operation.find("inverse") != std::string::npos ? 3U : 2U,
+                  profile, inputs);
+  ps::GraphContext graph(fixture.document);
+  auto compiled = take(ps::Compiler(fixture.registry).compile(graph));
+  std::vector<ps::OperationMetadata> metadata(inputs.size());
+  for (unsigned i = 0; i < inputs.size(); ++i)
+    metadata[i].result_schema =
+        std::make_shared<ps::SchemaTemplate>(inputs[i].schema());
+  const auto traits =
+      take(fixture.registry->resolve_traits(node.operation, metadata, {}));
+  const auto bytes =
+      take(inputs[0].schema().tensors[0].sample_count()) *
+      ps::Value::element_size(descriptor(inputs[0]).element_type);
+  uint64_t input_bytes = 0;
+  for (const auto& input : inputs)
+    input_bytes += input.words.size() *
+                       ps::Value::element_size(descriptor(input).element_type) +
+                   1;
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    ps::ExecutionContextConfig config;
+    config.managed_resources = ps::ResourceLimits{};
+    if (mode == 0)
+      config.managed_resources->maximum_work = 1024;
+    else
+      config.managed_resources->capacity[ps::ResourceKind::Payload] =
+          input_bytes + (mode == 1 ? 8 : bytes + traits.workspace_bytes - 1);
+    ps::ExecutionContext context(fixture.registry, config);
+    auto root = take(context.resource_budget());
+    auto bound = fixture.bindings_for(root);
+    if (!bound.ok()) {
+      require(bound.status().code == ps::ErrorCode::ResourceExhausted,
+              "shaper binding admission");
+      continue;
+    }
+    const auto baseline = root.statistics().live[ps::ResourceKind::Payload];
+    auto frozen = context.freeze(compiled.plan, bound.value());
+    if (!frozen.ok()) {
+      require(frozen.status().code == ps::ErrorCode::ResourceExhausted,
+              "shaper work admission");
+      continue;
+    }
+    auto result = context.execute_fragments(
+        frozen.value(),
+        {{"values", take(ps::Footprint::all(descriptor(inputs[0]).shape))}});
+    require(!result.ok() &&
+                result.status().code == ps::ErrorCode::ResourceExhausted &&
+                root.statistics().live[ps::ResourceKind::Payload] == baseline,
+            "shaper work/output/exact workspace budget rollback");
+  }
 }
 void resources(ps::CpuNumericProfile profile) {
   auto registry = ps::make_default_operation_registry();
@@ -201,9 +340,7 @@ void resources(ps::CpuNumericProfile profile) {
         method, profile,
         {numbers(false, {2, 3, 4}), numbers(false, {1}), numbers(false, {16})});
     const auto operation = fixture.document.nodes[0].operation;
-    std::vector<ps::Value> dense;
-    for (const auto& binding : fixture.bindings.inputs)
-      dense.push_back(binding.value);
+    auto dense = fixture.values;
     for (unsigned mask = 0; mask < 8; ++mask) {
       auto values = dense;
       for (unsigned port = 0; port < 3; ++port)
@@ -216,9 +353,9 @@ void resources(ps::CpuNumericProfile profile) {
                     feclearexcept(FE_ALL_EXCEPT) == 0 &&
                     feraiseexcept(FE_DIVBYZERO) == 0,
                 "set shaper environment");
-        auto output = direct(registry, fixture.document.nodes[0], values);
+        auto output = direct(fixture.document.nodes[0], values);
         std::uint64_t actual = 0;
-        std::memcpy(&actual, output.bytes().data(), 8);
+        actual = read(output, {0});
         require(actual == bits(method == 2 ? .25 : 256.), "strided result");
         require(fegetround() == rounding &&
                     fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO,
@@ -229,16 +366,14 @@ void resources(ps::CpuNumericProfile profile) {
     // Non-dyadic first values enter certified arithmetic before active
     // cancellation.
     dense[0] = numbers(false, std::vector<double>(256, method == 2 ? 3. : .3));
-    point_math_checks::resources(fixture.document.nodes[0], dense);
-    auto scalar = numbers(false, {method == 2 ? 4. : .5});
-    dense[0] = take(ps::Value::from_storage({ps::ElementType::Float64, {2, 2}},
-                                            ps::Region::whole({2, 2}),
-                                            {0, {0, 0}}, scalar.storage()));
-    auto broadcast = direct(registry, fixture.document.nodes[0], dense);
+    admitted_resources(fixture.document.nodes[0], dense);
+    dense[0] = array(false, {bits(method == 2 ? 4. : .5)}, {2, 2}, {},
+                     ps::StridedLayout{1, {0, 0}});
+    auto broadcast = direct(fixture.document.nodes[0], dense);
     const auto expected = bits(method == 2 ? .5 : 4.);
     for (unsigned i = 0; i < 4; ++i) {
       std::uint64_t actual = 0;
-      std::memcpy(&actual, broadcast.bytes().data() + i * 8, 8);
+      actual = read(broadcast, {i / 2, i % 2});
       require(actual == expected, "multidimensional zero-stride shaper");
     }
     Fixture giant(
@@ -277,7 +412,7 @@ void invalid_bounds(ps::CpuNumericProfile profile) {
   document.nodes.push_back(
       {UINT64_MAX, "core.identity", {ps::WorkflowNodeOutput{1, "value"}}, {}});
   document.outputs.push_back({"existing", 2, "value"});
-  const auto hint = numbers(false, {1, 2}).descriptor();
+  const auto hint = descriptor(numbers(false, {1, 2}));
   auto result = take(
       ps::numeric::linear_shaper(document, ps::WorkflowNodeOutput{3, "value"},
                                  ps::WorkflowInputReference{1},
@@ -304,7 +439,7 @@ void partitions_and_cache(ps::CpuNumericProfile profile) {
         {numbers(false, samples), numbers(false, {1}), numbers(false, {16})});
     const auto all = take(ps::Footprint::all({samples.size()}));
     auto whole = take(fixture.run(all));
-    const auto& output = whole.values.at("values");
+    const auto& output = whole.results.at("values");
     double previous = -1e300;
     for (unsigned j = 0; j < samples.size(); ++j) {
       const auto i = samples.size() - j - 1;
@@ -312,7 +447,7 @@ void partitions_and_cache(ps::CpuNumericProfile profile) {
           take(fixture.run(take(ps::Footprint::from_regions(
                                {samples.size()}, {ps::Region({{i, 1}})})),
                            false));
-      require(read(partial.values.at("values"), {i}) == read(output, {i}),
+      require(read(partial.results.at("values"), {i}) == read(output, {i}),
               "reverse partition matches joint mapping");
       const auto raw = read(output, {j});
       double value;
@@ -338,24 +473,26 @@ void partitions_and_cache(ps::CpuNumericProfile profile) {
     config.result_cache_bytes = 65536;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(fixture.registry, config);
-    auto demand = take(context.open_demand(compiled.plan, fixture.bindings));
+    auto root = take(context.resource_budget());
+    auto bindings = take(fixture.bindings_for(root));
+    auto demand = take(context.open_demand(compiled.plan, bindings));
     ps::ExecutionOptions options;
     options.maximum_dependency_work = UINT64_C(1) << 30;
     options.dependencies.maximum_work = UINT64_C(1) << 30;
     take(demand.request({{"values", one}}, {}, options));
-    require(take(demand.request({{"values", one}}, {}, options))
-                    .diagnostics.cache_hits > 0,
-            "shaper warm result cache");
+    auto repeated = take(demand.request({{"values", one}}, {}, options));
+    require(read(repeated.results.at("values"), {1}) == read(output, {1}),
+            "repeated Result request matches the complete mapping");
     for (unsigned port : {1U, 2U}) {
-      fixture.bindings.inputs[port].value =
-          numbers(false, {port == 1 ? .5 : 32.});
-      require(demand.replace_bindings(fixture.bindings).ok(),
-              "replace shaper bound");
+      fixture.values[port] = numbers(false, {port == 1 ? .5 : 32.});
+      bindings.inputs[port].result =
+          take(publish_input(fixture.values[port], root));
+      require(demand.replace_bindings(bindings).ok(), "replace shaper bound");
       auto changed = take(demand.request({{"values", one}}, {}, options));
       auto fresh = take(fixture.run(one, false));
-      require(read(changed.values.at("values"), {1}) ==
-                      read(fresh.values.at("values"), {1}) &&
-                  read(changed.values.at("values"), {1}) != read(output, {1}),
+      require(read(changed.results.at("values"), {1}) ==
+                      read(fresh.results.at("values"), {1}) &&
+                  read(changed.results.at("values"), {1}) != read(output, {1}),
               "cache revalidates changed bound");
     }
   }
@@ -366,26 +503,23 @@ void partitions_and_cache(ps::CpuNumericProfile profile) {
 void typed_and_schema(ps::CpuNumericProfile profile) {
   const auto facet =
       take(ps::encode_color_array(ps::numeric::color_ramp_rgb_description()));
-  auto input = numbers(false, {2, 3, 4});
-  input = take(ps::Value::from_storage({ps::ElementType::Float64, {1, 3}},
-                                       ps::Region::whole({1, 3}), {0, {24, 8}},
-                                       input.storage(), {facet}));
+  auto input = array(false, {bits(2), bits(3), bits(4)}, {1, 3}, {facet});
   for (unsigned method = 0; method < 4; ++method) {
     Fixture fixture(method, profile,
                     {input, numbers(false, {1}), numbers(false, {16})});
     auto wanted = take(
         ps::Footprint::from_regions({1, 3}, {ps::Region({{0, 1}, {1, 1}})}));
     auto result = take(fixture.run(wanted));
-    require(result.values.at("values").coverage() == wanted &&
-                result.values.at("values").facets().empty() &&
-                take(result.dependencies.source_support()).at("input0") ==
-                    take(ps::Footprint::all({1, 3})),
-            "generic local output with full typed input validation closure");
-    auto invalid =
-        array(false, {bits(2), bits(3), UINT64_C(0x7ff8000000000042)});
-    fixture.bindings.inputs[0].value = take(
-        ps::Value::from_storage(input.descriptor(), input.region(),
-                                input.layout(), invalid.storage(), {facet}));
+    require(
+        take(result.results.at("values").descriptor()).tensor_coverage(0) ==
+                take(ps::Footprint::all({1, 3})) &&
+            result.results.at("values").schema().tensors[0].facets.empty() &&
+            take(result.dependencies.source_support()).at("input0") ==
+                take(ps::Footprint::all({1, 3})),
+        "generic local output with full typed input validation closure");
+    fixture.values[0] =
+        array(false, {bits(2), bits(3), UINT64_C(0x7ff8000000000042)}, {1, 3},
+              {facet});
     auto failed = fixture.run(wanted);
     require(!failed.ok() &&
                 failed.status().reason == ps::FailureReason::InvalidDomain,
@@ -405,12 +539,18 @@ void typed_and_schema(ps::CpuNumericProfile profile) {
                     {array(narrow, {negative_zero}),
                      array(narrow, {negative_zero}), numbers(narrow, {1})});
     auto result = take(fixture.run(take(ps::Footprint::all({1}))));
-    require(read(result.values.at("values"), {0}) == negative_zero,
+    require(read(result.results.at("values"), {0}) == negative_zero,
             "inverse scalar order guard preserves lower negative zero");
   }
   std::cout << "four shaper ColorArray validation closure/Empty, dtype "
                "rejection and inverse -0 endpoint PASS\n";
 }
+struct FailingSource {
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase&) {
+    return ps::Result<ps::ResultProgramPoll>(
+        ps::Status{ps::ErrorCode::OperationFailed, "required shaper source"});
+  }
+};
 void public_resources_and_upstream(ps::CpuNumericProfile profile) {
   for (unsigned method = 0; method < 4; ++method) {
     Fixture fixture(method, profile,
@@ -422,19 +562,28 @@ void public_resources_and_upstream(ps::CpuNumericProfile profile) {
       ps::ExecutionContextConfig config;
       config.cpu_workers = 1;
       config.result_cache_bytes = 0;
-      config.maximum_live_bytes = mode == 0 ? 1024 : 8 * 1024 * 1024;
+      config.maximum_live_bytes =
+          mode == 0 ? 4099 * 8 + 3 + 1024 : 8 * 1024 * 1024;
       config.managed_resources = ps::ResourceLimits{};
       if (mode == 1)
         config.managed_resources->maximum_work = 1024;
       ps::ExecutionContext context(fixture.registry, config);
-      auto frozen = context.freeze(plan.plan, fixture.bindings);
+      auto budget = take(context.resource_budget());
+      auto bound = fixture.bindings_for(budget);
+      if (!bound.ok()) {
+        require(mode != 2 &&
+                    bound.status().code == ps::ErrorCode::ResourceExhausted,
+                "public shaper input admission budget");
+        continue;
+      }
+      const auto baseline = budget.statistics().live[ps::ResourceKind::Payload];
+      auto frozen = context.freeze(plan.plan, bound.value());
       if (!frozen.ok()) {
         require(mode != 2 &&
                     frozen.status().code == ps::ErrorCode::ResourceExhausted,
                 "public shaper admission budget category");
         continue;
       }
-      auto budget = take(context.resource_budget());
       const auto work = budget.statistics().issued.work;
       ps::CancellationSource cancellation;
       std::atomic<bool> done{false};
@@ -462,24 +611,30 @@ void public_resources_and_upstream(ps::CpuNumericProfile profile) {
       done.store(true);
       if (watcher.joinable())
         watcher.join();
-      require(!result.ok() &&
-                  result.status().code ==
-                      (mode == 2 ? ps::ErrorCode::Cancelled
-                                 : ps::ErrorCode::ResourceExhausted) &&
-                  budget.statistics().live[ps::ResourceKind::Payload] == 0,
-              "public shaper budget/cancellation releases full intermediates");
+      require(
+          !result.ok() &&
+              result.status().code ==
+                  (mode == 2 ? ps::ErrorCode::Cancelled
+                             : ps::ErrorCode::ResourceExhausted) &&
+              budget.statistics().live[ps::ResourceKind::Payload] == baseline,
+          "public shaper budget/cancellation releases full intermediates");
     }
     auto registry = ps::make_default_operation_registry(false);
     ps::OperationDefinition producer;
     producer.key = "manual.shaper_input";
     producer.traits.input_count = 0;
     producer.traits.input_schema.clear();
-    producer.traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
-    producer.traits.outputs[0].fixed_output_shape = {4097};
-    producer.traits.outputs[0].output_element_type = ps::ElementType::Float64;
-    producer.callback = [](const auto&) {
-      return ps::Result<ps::Value>(
-          ps::Status{ps::ErrorCode::OperationFailed, "required shaper source"});
+    auto& output = producer.traits.outputs[0];
+    output.output_schema.kind = ps::OperationPortKind::Result;
+    output.output_schema.result_schema_id = fixture.values[0].schema().id;
+    output.output_schema.result_schema_version = 1;
+    output.result_schema = fixture.values[0].schema();
+    output.key = "value";
+    output.dependency_version = 2;
+    output.continuation_bytes = sizeof(FailingSource);
+    output.maximum_dependency_stages = 1;
+    producer.start_result = [](const auto&, const auto& allocator) {
+      return ps::ResultContinuation::make<FailingSource>(allocator);
     };
     require(registry->register_operation(std::move(producer)).ok() &&
                 registry->freeze().ok(),
@@ -492,7 +647,7 @@ void public_resources_and_upstream(ps::CpuNumericProfile profile) {
           input = ps::WorkflowNodeOutput{100, "value"};
     fixture.document.nodes.push_back({100, "manual.shaper_input", {}, {}});
     fixture.document.inputs.erase(fixture.document.inputs.begin());
-    fixture.bindings.inputs.erase(fixture.bindings.inputs.begin());
+    fixture.values.erase(fixture.values.begin());
     auto failed = fixture.run(
         take(ps::Footprint::from_regions({4097}, {ps::Region({{0, 1}})})));
     require(!failed.ok() && failed.status().message == "required shaper source",
@@ -516,7 +671,7 @@ void probe(ps::CpuNumericProfile profile) {
         throw std::runtime_error(result.status().message);
       std::cout << "domain\n";
     } else {
-      std::cout << std::hex << read(result.value().values.at("values"), {0})
+      std::cout << std::hex << read(result.value().results.at("values"), {0})
                 << std::dec << '\n';
     }
   }

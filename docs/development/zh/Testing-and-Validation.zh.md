@@ -56,21 +56,40 @@ Kernel test 覆盖：
   `ExecutionResult`，并各自以一次健康 execute 证明精确 cleanup；
 - Value/Region/strided-layout/facet/buffer 负向契约；
 - operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime，包括
-  C operation ABI 11 typed parameter schema、demand view，以及带精确 destroy/close count 的
-  deterministic owner-allocation failure。一个 copy-aware C++ embedding callable 通过
-  rvalue 注册，随后 arm 为拒绝后续 copy；它仍能完成 freeze/invoke，并允许未冻结 registry
-  加载合法 DSO，且只有一次 invocation、copy count 不增加。这证明 registry/map/staging
-  snapshot 只复制 immutable owning handle，并精确保留 DSO lease。Callback 抛出
-  `std::runtime_error` 或 `what()` 为 null 的标准异常时，会分别以原 diagnostic 或空
-  message 隔离为 `OperationFailed`；`std::bad_alloc` 仍可由 embedding caller 观察，且
-  input/parameter/output classification 保持不变；
-- operation invocation prevalidation 覆盖 default-invalid Value 位于首个与最后一个 input、
-  successful callback 返回 default-invalid output，以及 unknown backend 分别作用于 C++
-  与真实 GPU-capable DSO。Invalid input 与 unknown backend 都返回 `InvalidArgument`，不
-  进入 callback，也不增加 DSO CPU/GPU counter；已知但不支持的 GPU 保持
-  `BackendUnavailable`。Preserve output-type 冲突与 Match input type/shape 冲突会在原本
-  deliberate failure 且有 side effect 的 callback 能运行之前返回 `TypeMismatch`；callback
-  output `Value{}` 则继续在 entry 后返回 `TypeMismatch`；
+  Result operation ABI 2 typed parameter schema、demand view，以及带精确 destroy/close count 的
+  deterministic owner-allocation failure。Copy-aware C++ embedding 测试通过 rvalue 注册一个
+  提供 Result continuation factory 的 callable，再将其设为拒绝后续 copy。Registry freeze 后，
+  `start_result` 和 `poll` 发布 Float64 值 41；factory 恰好调用一次，callable copy 数不增加。
+  带额外 input 的 Result query 返回 `InvalidArgument`，且不再次调用 factory。在另一个独立的未
+  freeze registry 中加载合法 Result DSO 也成功，已注册 callable 不会被复制或调用，并检查 DSO
+  加载的事务性。这些检查覆盖 immutable callable handle；
+- `test_prepared_workspace` 覆盖 Whole 与 Dependency-v2 Result continuation。静态准备把 0 或
+  4096 bytes 加到声明的 16-byte workspace 上；同一编译 plan 执行两次不会再次 prepare。UInt8
+  输出分别为 0 和 17。4096-byte 情况在 2048-byte Payload 限额下返回 `ResourceExhausted`；额外
+  workspace 请求导致总量溢出 `UINT64_MAX` 时，会在 preparation 阶段拒绝。成功与失败执行都会释放
+  Root Payload allocation；
+- `test_result_exceptions` 覆盖 direct 与 compiled Result scalar、contract-1 和 contract-2 的
+  start/poll 边界。标准异常转换为带 `HostException` 的 `OperationFailed`，保留 `what()` 文本
+  （为 null 时使用空文本）；`std::bad_alloc` 转为 `ResourceExhausted`，非标准异常转为带固定
+  `HostException` 诊断的 `OperationFailed`。较早的 allocation failure 优先于随后异常；失败 joint poll
+  会锁存错误且不再次调用 callback；抛异常的 failure observer 不能替换 producer 已选定的 failure；
+  direct 与 workflow case 结束后 Root Payload 均归零；
+- `test_backend_admission` 覆盖 Result 注册与启动。它拒绝没有任何受支持 backend 的 operation，以及
+  没有 CPU target 的 CPU-fallback 声明。GPU-only operation 的 direct startup 和 CPU compilation 返回
+  `BackendUnavailable`；Native-GPU plan 可编译，但 GPU-disabled context 会在进入 factory 前拒绝执行。
+  GPU-targeted 且允许 CPU fallback 的双 backend operation 在该 context 中只进入 CPU factory，发布
+  UInt8 值 17，并记录一个 fallback reason；GPU factory 调用数为零。
+  `tests/consumer/CMakeLists.txt` 将相同源码注册为 `installed_result_exceptions` 和
+  `installed_result_backend_admission`；
+- `test_plugin_registry` 中的 Result invocation prevalidation：direct `start_result` 会在检查 malformed
+  input metadata 前，对不支持的 GPU backend 返回 `BackendUnavailable`。首个或最后一个 input slot 缺少
+  Result schema 时返回 `TypeMismatch`；fixture 的 `prepare_static` 会校验预期的单个 Float64 tensor 和
+  shape。Metadata 被拒绝时不会进入 operation factory。Compiled callback 若返回 invalid Result、错误
+  output tensor type 或不完整 tensor coverage，会以 `InvalidArgument` 和 Protocol detail 失败。其他
+  进程内 Value API 仍是独立接口；
+- `test_result_diagnostics` 覆盖 full-coverage zero-stride Result publication 的精确与饱和
+  `computed_elements`。`test_plugin_registry` 也运行同一 shared fixture。两项 focused test 均已在本地通过；
+  installed consumer 注册为 `installed_result_diagnostics`，该测试也已通过；
 - native loading 前的精确 operation/provider library path validation：显式长度的合法
   fixture path 后接 embedded NUL 与 suffix 时返回 `InvalidArgument`，不发布 operation
   key/provider schema，且 owner-allocation、native-load 与 native-close test hook 均为零；
@@ -265,10 +284,7 @@ schema 的拒绝行为。
 `test_result_execution` 还使用 64-byte 和 256-byte windows 检查零行、部分行与 8192 行 discovery。
 Resource tests 覆盖 retained Result owners 和 metadata 限额。Focused suite 用时约三秒。
 
-Native C fixture 在 Metal 上完成一次 dispatch 并读回 4。Native GPU tests 还覆盖两种 invalid service
-mode，并保留 sticky errors。Base ABI numeric GPU-to-Result fixture 验证 backing 为 4000 bytes 的
-affine view 向单个 sample 传输 4 bytes，以及 backing 为 4 bytes 的 zero-stride broadcast view 向
-1000 samples 传输 4000 bytes。500-unit work limit 会以 `ResourceExhausted` 拒绝 broadcast copy。没有兼容硬件时 native CTest 返回 77；本次 host 使用 Metal，测试未 skip。
+Native GPU tests 通过独立的 native GPU service ABI 与 Result operation callbacks 执行，覆盖 dispatch、readback、sticky service errors 和有界 tensor-window transfer。没有兼容硬件时 native CTest 返回 77；硬件执行结果必须与 CPU fallback 分开报告。
 
 复跑 core set 时，构建这些 test executables 并运行相应 CTest：
 

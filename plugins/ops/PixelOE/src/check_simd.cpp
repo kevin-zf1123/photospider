@@ -42,8 +42,9 @@ void equal(const px::Array& a, const px::Array& b, const std::string& name) {
 int main() try {
   px::Environment environment;
   Memory memory;
-  ps_planar_services_v3 services{};
+  ps_result_services_v2 services{};
   services.struct_size = sizeof(services);
+  services.abi_version = PS_RESULT_OPERATION_ABI_VERSION_2;
   services.context = &memory;
   services.cancelled = [](void* raw) {
     auto& m = *static_cast<Memory*>(raw);
@@ -51,21 +52,22 @@ int main() try {
       std::abort();
     return ++m.polls >= m.cancel_after ? 1 : 0;
   };
-  services.allocate_scratch = [](void* raw, uint64_t size) -> uint8_t* {
+  services.allocate_scratch = [](void* raw, uint64_t size, uint8_t** destination) -> int {
     auto& m = *static_cast<Memory*>(raw);
     if (m.thread != std::this_thread::get_id())
       std::abort();
     auto* p = static_cast<uint8_t*>(std::calloc(size, 1));
     if (p)
       m.blocks[p] = size;
-    return p;
+    *destination = p;
+    return p ? 0 : 4;
   };
   services.release_scratch = [](void* raw, uint8_t* p) {
     auto& m = *static_cast<Memory*>(raw);
     if (m.thread != std::this_thread::get_id() || m.blocks.erase(p) != 1)
       std::abort();
     std::free(p);
-    return 1;
+    return 0;
   };
   mode(false);
   px::Context scalar(&services);

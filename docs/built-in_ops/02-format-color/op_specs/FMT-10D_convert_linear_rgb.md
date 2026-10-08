@@ -7,25 +7,24 @@ kind: composite_workflow
 category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
-implementation_status: not_implemented
+implementation_status: implemented_public_authoring_helper
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-10D: compose linear RGB basis conversion
 
 Inherit the complete [FMT-10 family](FMT-10_rgb_basis_contract.md) and
 [exact matrix definitions](FMT-10_basis_math.md). This is a Proposed specification,
-not a registered implementation or an alias of a retired operation.
+a public authoring helper over the registered A/B/C Result operations; no native D key is registered.
 
 ## Authoring interface and expansion
 
-The proposed helper `convert_linear_rgb` receives a graph, an `input` edge,
-known descriptor/effective metadata, explicit target basis, family fields and
-one NUM CPU profile (strict by default). It returns one `values` edge handle.
-It creates no native D registry key or automatic converter. Resolve and verify
-source geometry against real inference; raw requires explicit source geometry.
+The installed `format::convert_linear_rgb` helper receives a WorkflowDocument, an
+input edge, static `RgbBasisOptions`, and an optional OperationRegistry (built-ins
+are used by default). It appends registered A/B/C operations and returns B's
+`values` WorkflowNodeOutput. It creates no native D registry key or automatic
+converter. The helper resolves source metadata from the real input edge; raw mode
+requires explicit source geometry.
 
 The static white policy determines the expansion:
 
@@ -69,7 +68,7 @@ RGB conversion still traverses nonidentity A/B and therefore fails forced view.
 The no-conversion path is an explicitly retained input edge, not a mathematical
 simplification silently performed by D.
 
-## Independent fixtures and future public workflow
+## Independent numerical fixtures
 
 1. Same sRGB/Rec.709 basis, Float32 RGB [1,0,0], no C: exact matrices from the
    RN64 preset with rounding after A and B yield strict output bit patterns
@@ -95,7 +94,6 @@ simplification silently performed by D.
    Source/context lifetime, low budgets, intermediate failures and cancellation
    are checked on the actual expanded graph.
 
-A future public demonstration explicitly builds A->C->B and the D helper for the
-same source/target/profile, requests color and alpha separately and checks both
-against independent staged arithmetic. For encoded images, FMT-09 stages remain
-visible outside D. The proposal adds no runtime implementation or timing claim.
+D preserves the visible A/C/B stage sequence for encoded-image workflows; FMT-09
+remains an explicit stage outside D. The helper is a graph-authoring convenience,
+not a fused numerical operation.

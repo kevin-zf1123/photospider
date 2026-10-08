@@ -15,6 +15,7 @@
 #include "allocation_profile.hpp"  // NOLINT(build/include_subdir)
 #include "copy_profile.hpp"        // NOLINT(build/include_subdir)
 #include "photospider/photospider.hpp"
+#include "result_workflow.hpp"  // NOLINT(build/include_subdir)
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -51,27 +52,7 @@ int main(int argc, char** argv) try {
         "usage: runs[1..1000000] nodes[1..4096] workers[1..64] "
         "clients[1..min(64,runs)] timing[0|1]");
   auto registry = std::make_shared<OperationRegistry>();
-  OperationDefinition operation;
-  operation.key = "benchmark.increment";
-  operation.traits.input_count = 1;
-  operation.traits.input_schema.resize(1);
-  operation.traits.cacheable = false;
-  operation.traits.outputs[0].output_element_type = ElementType::Int64;
-  operation.traits.outputs[0].shape_rule =
-      OperationShapeRule::PreserveFirstInput;
-  operation.callback = [](const OperationInvocation& call) {
-    auto made = MutableValue::allocate({ElementType::Int64, {1}},
-                                       Region::whole({1}), call.allocator);
-    if (!made.ok())
-      return Result<Value>(made.status());
-    auto output = made.take_value();
-    std::int64_t value;
-    std::memcpy(&value, call.inputs[0].bytes().data(), 8);
-    ++value;
-    std::memcpy(output.data(), &value, 8);
-    return std::move(output).publish();
-  };
-  check(registry->register_operation(std::move(operation)));
+  check(registry->register_operation(scheduler_result::operation(true)));
   check(registry->freeze());
   ExecutionContextConfig config;
   config.cpu_workers = workers;
@@ -80,18 +61,17 @@ int main(int argc, char** argv) try {
   config.collect_scheduler_timing = timing != 0;
   ExecutionContext execution(registry, config);
   Compiler compiler(registry);
+  const auto root = take(execution.resource_budget());
   struct Sample {
     double construct, compile, execute, total;
   };
   const auto request = [&](std::int64_t seed) {
     const auto start = Clock::now();
     WorkflowDocument document;
-    document.inputs = {{1,
-                        "input",
-                        {ElementType::Int64, {1}},
-                        Region::whole({1}),
-                        {0, {8}},
-                        {}}};
+    auto input = scheduler_result::source(
+        root, scheduler_result::schema(ElementType::Int64, {1}),
+        ByteView(reinterpret_cast<const std::uint8_t*>(&seed), sizeof(seed)));
+    document.inputs = {scheduler_result::declaration(input)};
     for (unsigned i = 0; i < nodes; ++i) {
       WorkflowNode node;
       node.id = i + 1;
@@ -102,11 +82,7 @@ int main(int argc, char** argv) try {
     }
     document.outputs = {{"output", nodes, "value"}};
     GraphContext graph(std::move(document));
-    auto input = take(MutableValue::allocate(
-        {ElementType::Int64, {1}}, Region::whole({1}), BufferAllocator()));
-    std::memcpy(input.data(), &seed, 8);
-    auto bindings =
-        ExecutionBindings{{{"input", take(std::move(input).publish())}}};
+    ExecutionBindings bindings{{{"input", std::move(input)}}};
     const double construct_us = us(start);
     auto t = Clock::now();
     auto plan = take(compiler.compile(graph));
@@ -115,7 +91,8 @@ int main(int argc, char** argv) try {
     auto result = take(execution.execute(plan.plan, std::move(bindings)));
     const double execute_us = us(t);
     std::int64_t observed;
-    std::memcpy(&observed, result.values.at("output").bytes().data(), 8);
+    const auto& output = result.results.at("output");
+    check(output.read_tensor(take(output.descriptor()), 0, {0}, &observed, 8));
     if (observed != seed + nodes)
       throw std::runtime_error("incorrect result");
     return Sample{construct_us, compile_us, execute_us, us(start)};
@@ -191,9 +168,10 @@ int main(int argc, char** argv) try {
   if (after.cpu.saturated || after.gpu.saturated)
     throw std::runtime_error("scheduler observation saturated");
   if (timing && (after.cpu.accepted_callbacks - before.cpu.accepted_callbacks !=
-                     std::uint64_t{runs} * nodes ||
+                     std::uint64_t{runs} * nodes * 3 ||
                  after.cpu.started_callbacks != after.cpu.accepted_callbacks))
-    throw std::runtime_error("scheduler callback count mismatch");
+    throw std::runtime_error(
+        "Result start/Need/publication callback count mismatch");
   std::vector<double> construct, compile, execute, total;
   construct.reserve(runs);
   compile.reserve(runs);
@@ -214,8 +192,9 @@ int main(int argc, char** argv) try {
   double sum = 0;
   for (double value : total)
     sum += value;
-  std::cout << "{\"runs\":" << runs << ",\"nodes\":" << nodes
-            << ",\"workers\":" << workers << ",\"clients\":" << clients
+  std::cout << "{\"io_contract\":\"Result\",\"callbacks_per_node\":3,\"runs\":"
+            << runs << ",\"nodes\":" << nodes << ",\"workers\":" << workers
+            << ",\"clients\":" << clients
             << ",\"warmup\":20,\"warmup_per_client\":20,\"cache\":false,\"new_"
                "graphs\":true"
             << ",\"oracle\":\"int64_chain_increment\",\"qps\":"

@@ -1,71 +1,106 @@
 # NUM-07 Whole execution
 
-All 24 formal NUM-07 profile keys now use synchronous Whole execution: six
-ordinary predicates, `is_close`, and `select`, each strict/Apple/x86. The public
-workflow authors these keys directly. Output is still `values`: UInt8 0/1 for
-predicates and the original branch dtype/shape for select. Legacy keys are not
-used as substitutes.
+All 24 formal NUM-07 profile keys use synchronous Whole Result execution: six
+ordinary predicates, `is_close`, and `select`, each with strict, Apple and x86
+profiles. Each input is a single-tensor Result in slot 0, and all inputs must
+have the same complete `sample_shape()`, including batch axes. Each predicate
+compares inputs of the same dtype. The six ordinary predicates accept UInt8,
+Int64, Float32 and Float64; `is_close` accepts Float32 and Float64 and checks
+finite, nonnegative Float64 tolerances even when the runtime footprint is
+Empty. For `select`, the condition is UInt8 and the two branches share one
+dtype.
 
-Nonempty requests collect and typed-validate every complete input, compute a
-complete packed owned output and project it to consumer coordinates. Empty
-skips payload and callback. All source edits invalidate all observed outputs.
-There are no dependency maps, continuations or per-value diagnostics (N/A).
-Comparison scratch is one fixed admitted workspace, with four-element batches;
-select uses fixed scalar locals and no dynamic arithmetic workspace. Capacity
-includes full input collections and complete output even for sparse consumers.
-Unpublished allocations are released on error/cancellation; published owners
-survive context destruction.
+The output is a `photospider.tensor` v1 Result with tensor key `samples`, full
+`sample_shape()` and no input facets or batch-axis metadata. Predicates return
+UInt8 0/1; `select` retains the branch dtype and copies selected bits. The Whole
+program requests every active input with Data, Validation and Descriptor roles
+(13), then reads through authorized Result windows. It does not collect or copy
+complete input payloads. The comparison kernel handles up to four samples per
+batch; it uses the admitted `ComparisonMath` workspace and the shared Whole
+program's bounded phase scratch.
 
-The eager select decision was explicitly confirmed for this migration:
-unselected source and typed failures are visible; collection/typed failure may
-precede the callback's condition validation. A byte other than 0/1 anywhere
-fails with InvalidArgument/InvalidDomain/Run, no Atom key, and a diagnostic byte
-and global linear index. Selected bits, including signaling NaN and signed zero,
+The `ResultRelation` records each input's descriptor and full-domain Data
+support. An input edit can therefore dirty every observed output sample, while
+the requested footprint still scopes the dependency query. A sparse consumer
+does not turn the published Result into a packed ROI: Whole execution publishes
+the complete output in global coordinates. Published Result owners survive
+context destruction; uncommitted output is released on error or cancellation.
+
+`select` eagerly requires and typed-validates both full branches, even when a
+condition selects only one. Source or typed failures can precede condition
+evaluation. A condition byte other than 0 or 1 fails with
+InvalidArgument/InvalidDomain/Run and a diagnostic containing the byte and
+global linear index. Selected bits, including signaling NaN and signed zero,
 are copied without arithmetic quieting. Predicate IEEE/integer rules and exact
 binary-rational `is_close` threshold arithmetic remain unchanged. Scalar/NEON/AVX2
 comparison facilities remain; no NUM-14 certificate is used, and existing
 matrix Scalar/Accelerate/SME comparisons are unchanged.
 
-## Validation and public example
+An Empty request still runs the small Whole poll that seals a zero-coverage
+Result and descriptor constant witness. It issues no tensor Need, starts no
+computed input producer and performs no sample arithmetic; static schema and
+tolerance validation still applies.
 
-2026-09-21, Apple M5 arm64, macOS 27.0 (26A5425a), Clang 21.1.3,
-RelWithDebInfo; numerical code disables fast math and FP contraction:
+## Current validation entry points
 
-- Independent IEEE/Fraction oracle: 3,760 cases each for strict and Apple.
-- Both public manual suites passed: six predicate fixtures; select `[10,2,30]`;
-  exact MAX/-MAX tolerance; eager unselected source and typed failures;
-  source-before-invalid-condition priority; invalid unprojected byte; Empty;
-  full support/dirty; warm cache and unselected-edit invalidation; composition
-  `less -> select` yielding `[1,2,2]`; escaped output owners.
-- Direct fixtures passed four dtype raw selection, sNaN/fenv, 65-element
-  four-lane tails, unaligned shifted origins, arbitrary singleton strides,
-  negative/zero strides and mixed UInt8-control/Float64-branch strides.
-- Resource tests passed complete output/scratch rejection and cancellation after
-  arithmetic started, with Payload release. Select has no scratch allocation;
-  its output budget is based on branch width, not UInt8 condition width.
-- Five focused CTests passed: numeric operations, dependency sampling, execution
-  demand, resources and compiler. ClangFormat 21/cpplint and independent scoped
-  code/spec review passed. No x86, installed-consumer or full release matrix ran.
+Build and run the strict public example, focused CTest and independent oracle:
 
 ```sh
-DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric \
-  --target photospider_numeric_comparisons -j8
-build/clang21-numeric/examples/numeric_workflow/photospider_numeric_comparisons _strict
+cmake --build build/kernel-dev --target photospider_numeric_comparisons -j 8
+build/kernel-dev/examples/numeric_workflow/photospider_numeric_comparisons _strict
+ctest --test-dir build/kernel-dev -R '^test_numeric_comparisons_result$' --output-on-failure
 python3 oracle/ops/numeric/comparison_oracle.py \
-  build/clang21-numeric/examples/numeric_workflow/photospider_numeric_comparisons _strict
+  build/kernel-dev/examples/numeric_workflow/photospider_numeric_comparisons _strict
 ```
 
-Repeat with `_accelerated_apple_silicon`. Historical WSL/installed-consumer
-results in the operator specs describe the pre-Whole implementation.
+Use `_accelerated_apple_silicon` on Apple Silicon or
+`_accelerated_x86_64` on x86-64; an unsupported host reports
+`BackendUnavailable`. The root registers `test_numeric_comparisons_result`, and
+the installed consumer registers `installed_numeric_comparisons_result` from
+the same example source against `Photospider::kernel`.
 
-## Measurements
+Current Result evidence: the strict root and installed-consumer CTests pass 1/1
+each, strict and Apple default workflows exit successfully, and the unchanged
+comparison oracle passes 3,760 cases in each profile.
+
+The preceding validation record below belongs to the earlier Value-backed Whole
+runtime. It is retained as historical evidence and does not validate the current
+Result implementation.
+
+### Historical Value-backed Whole validation
+
+2026-09-21, Apple M5 arm64, macOS 27.0 (26A5425a), Clang 21.1.3,
+RelWithDebInfo; numerical code disabled fast math and FP contraction:
+
+- Independent IEEE/Fraction oracle: 3,760 cases each for strict and Apple.
+- The earlier public manual suites covered six predicate fixtures; select
+  `[10,2,30]`; exact MAX/-MAX tolerance; eager unselected source and typed
+  failures; source-before-invalid-condition priority; invalid unprojected byte;
+  Empty; full support/dirty; warm cache and unselected-edit invalidation;
+  composition `less -> select` yielding `[1,2,2]`; and escaped output owners.
+- Earlier direct fixtures covered four-dtype raw selection, sNaN/fenv,
+  65-element four-lane tails, unaligned shifted origins, singleton strides,
+  negative/zero strides and mixed UInt8-control/Float64-branch strides.
+- Earlier resource checks covered complete output/scratch rejection and
+  cancellation after arithmetic started, with Payload release. Select has no
+  scratch allocation; its output budget used branch width, not UInt8 condition
+  width.
+- Five focused CTests, ClangFormat 21/cpplint and scoped code/spec review passed
+  for that implementation. That run did not include x86, an installed consumer
+  or the full release matrix.
+
+## Historical Value-backed Whole measurements
+
+The measurements below are from the earlier Value-backed Whole implementation;
+none is a measurement of the current Result runtime.
 
 One CPU worker, cache off, 1 GiB public Payload limit, 2^40 dependency/run/
 Footprint work limits, 512 MiB dependency state, default managed ResourceLimits.
 One warm-up and seven timed samples; generation, compile, freeze and full-output
 verification are outside execution timing. Every timed result is independently
-checked. Before registration objects come from `634be487`, linked to the same
-kernel. Public and core are separately measured layers, not timing subtraction.
+checked. The measured source objects come from baseline `634be487`, were created
+before timing, and were linked to the same kernel. Public and core are separately
+measured layers, not timing subtraction.
 
 Float64 `[N]` predicate inputs are `a[i]=(i%16)/8`, `b[i]=1`; is_close uses
 atol=.25, rtol=0, so equal is true at residue 8 and close at residues 6..10.

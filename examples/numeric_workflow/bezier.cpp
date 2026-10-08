@@ -3,6 +3,7 @@
 #include <fenv.h>  // NOLINT(build/c++11)
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -18,8 +19,10 @@
 
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
+#include "result_fixture.hpp"     // NOLINT(build/include_subdir)
 
 namespace {
+namespace rf = numeric_result_fixture;
 void require(bool condition, const char* message) {
   if (!condition)
     throw std::runtime_error(message);
@@ -50,19 +53,16 @@ struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
-  Fixture(ps::WorkflowNode node, const std::vector<ps::Value>& inputs) {
-    for (std::size_t i = 0; i < inputs.size(); ++i) {
-      const auto& value = inputs[i];
-      const auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1, name, value.descriptor(),
-                                 value.region(), value.layout(),
-                                 value.facets()});
-      bindings.inputs.push_back({name, value});
-    }
+  std::vector<ps::Value> backing;
+  Fixture(ps::WorkflowNode node, const std::vector<ps::Value>& inputs)
+      : backing(inputs) {
+    rf::declare_sources(&document, inputs);
     document.outputs = {{"values", node.id, "values"},
                         {"axis", node.id, "axis"}};
     document.nodes = {std::move(node)};
+  }
+  ps::ExecutionBindings bindings(const ps::ResourceBudget& root) const {
+    return point_math_checks::bindings(root, backing, document);
   }
   ps::Result<ps::DemandResult> run(
       const ps::DemandQuery& query, bool cache = true,
@@ -79,7 +79,8 @@ struct Fixture {
     config.result_cache_bytes = cache ? cache_bytes : 0;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(registry, config);
-    auto snapshot = context.freeze(plan.value().plan, bindings);
+    auto snapshot = context.freeze(plan.value().plan,
+                                   bindings(take(context.resource_budget())));
     if (!snapshot.ok())
       return ps::Result<ps::DemandResult>(snapshot.status());
     ps::ExecutionOptions options;
@@ -117,9 +118,9 @@ ps::Footprint region(const std::vector<std::uint64_t>& shape,
 void value(const ps::DemandResult& result, const char* key, std::uint64_t at,
            std::uint64_t expected, unsigned width = 8) {
   std::uint64_t bits = 0;
-  require(
-      result.values.at(key).read({at}, &bits, width).ok() && bits == expected,
-      "Bezier expected bits");
+  require(rf::read(result.results.at(key), {at}, &bits, width).ok() &&
+              bits == expected,
+          "Bezier expected bits");
 }
 void examples(ps::CpuNumericProfile profile) {
   Fixture cubic(node(3, 9, profile), {doubles({2, 2}, {0, 0, 1, 1}),
@@ -216,10 +217,13 @@ void topology_and_support(ps::CpuNumericProfile profile) {
   auto failed = local.run({{"values", demand}}, false);
   require(!failed.ok() && failed.status().detail.scope == ps::FailureScope::Run,
           "unrequested segment Y failure covers Whole output");
-  local.bindings.inputs[1].value = doubles({2, 1, 2}, {.25, .5, .25, -.5});
+  local.backing[1] = doubles({2, 1, 2}, {.25, .5, .25, -.5});
   auto result = take(local.run(
       {{"values", demand}, {"axis", take(ps::Footprint::all({3}))}}, false));
   value(result, "values", 1, raw(.5));
+  require(take(result.results.at("values").descriptor()).tensor_coverage(0) ==
+              take(ps::Footprint::all({5})),
+          "sparse Bezier Result retains complete Whole coverage");
   auto support = take(result.dependencies.source_support());
   require(support.at("input0") == take(ps::Footprint::all({3, 2})) &&
               support.at("input1") == take(ps::Footprint::all({2, 1, 2})),
@@ -240,7 +244,7 @@ void topology_and_support(ps::CpuNumericProfile profile) {
   auto knot =
       take(knot_only.run({{"values", take(ps::Footprint::all({1}))}}, false));
   value(knot, "values", 0, raw(1));
-  local.bindings.inputs[1].value =
+  local.backing[1] =
       array(Type::Float64, {2, 1, 2}, {raw(.25), raw(.5), raw(-.25), nan});
   auto badx =
       local.run({{"values", region({5}, {ps::Region({{0, 1}})})}}, false);
@@ -307,6 +311,18 @@ void topology_and_support(ps::CpuNumericProfile profile) {
   std::cout << "Whole support/dirty/failure, mathematical knot/clamp selection "
                "and topology passed\n";
 }
+struct FailedSource final {
+  unsigned* calls;
+  bool end;
+  FailedSource(unsigned* counter, bool endpoint)
+      : calls(counter), end(endpoint) {}
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase&) {
+    ++*calls;
+    return ps::Result<ps::ResultProgramPoll>(
+        ps::Status{ps::ErrorCode::OperationFailed,
+                   end ? "required end producer" : "required anchor producer"});
+  }
+};
 void producers_and_schema(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
   auto registry = ps::make_default_operation_registry(false);
@@ -316,15 +332,19 @@ void producers_and_schema(ps::CpuNumericProfile profile) {
     source.key = kind ? "manual.bezier_end" : "manual.bezier_anchors";
     source.traits.input_count = 0;
     source.traits.input_schema.clear();
-    source.traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
-    source.traits.outputs[0].fixed_output_shape =
-        kind ? std::vector<std::uint64_t>{1} : std::vector<std::uint64_t>{2, 2};
-    source.traits.outputs[0].output_element_type = Type::Float64;
-    source.callback = [&, kind](const auto&) {
-      ++calls[kind];
-      return ps::Result<ps::Value>(ps::Status{
-          ps::ErrorCode::OperationFailed,
-          kind ? "required end producer" : "required anchor producer"});
+    auto& output = source.traits.outputs[0];
+    output.region_rule = ps::OperationRegionRule::Whole;
+    output.output_schema.kind = ps::OperationPortKind::Result;
+    auto schema = rf::source_schema(kind ? doubles({1}, {0})
+                                         : doubles({2, 2}, {0, 0, 1, 1}));
+    output.output_schema.result_schema_id = schema.id;
+    output.output_schema.result_schema_version = schema.version;
+    output.result_schema = std::move(schema);
+    output.continuation_bytes = sizeof(FailedSource);
+    output.maximum_dependency_stages = 8;
+    source.start_result = [&, kind](const auto&, const auto& allocator) {
+      return ps::ResultContinuation::make<FailedSource>(allocator, &calls[kind],
+                                                        kind != 0);
     };
     require(registry->register_operation(std::move(source)).ok(),
             "Bezier failure producer");
@@ -335,9 +355,9 @@ void producers_and_schema(ps::CpuNumericProfile profile) {
                 doubles({1}, {.5}), doubles({1}, {0})});
   both.registry = registry;
   both.document.inputs.erase(both.document.inputs.begin() + 3);
-  both.bindings.inputs.erase(both.bindings.inputs.begin() + 3);
+  both.backing.erase(both.backing.begin() + 3);
   both.document.inputs.erase(both.document.inputs.begin());
-  both.bindings.inputs.erase(both.bindings.inputs.begin());
+  both.backing.erase(both.backing.begin());
   both.document.nodes[0].inputs[0] = ps::WorkflowNodeOutput{2, "value"};
   both.document.nodes[0].inputs[3] = ps::WorkflowNodeOutput{3, "value"};
   both.document.nodes.push_back({2, "manual.bezier_anchors", {}, {}});
@@ -348,6 +368,7 @@ void producers_and_schema(ps::CpuNumericProfile profile) {
           "axis/N1 skips failing controls/end");
   auto values = both.run({{"values", take(ps::Footprint::all({1}))}}, false);
   require(!values.ok() &&
+              values.status().code == ps::ErrorCode::OperationFailed &&
               values.status().message == "required anchor producer" &&
               calls == std::array<unsigned, 2>{1, 0},
           "values N1 still validates controls");
@@ -356,7 +377,7 @@ void producers_and_schema(ps::CpuNumericProfile profile) {
                     doubles({1}, {.5}), doubles({1}, {0})});
   end_only.registry = registry;
   end_only.document.inputs.pop_back();
-  end_only.bindings.inputs.pop_back();
+  end_only.backing.pop_back();
   end_only.document.nodes[0].inputs[3] = ps::WorkflowNodeOutput{3, "value"};
   end_only.document.nodes.push_back({3, "manual.bezier_end", {}, {}});
   auto one =
@@ -367,65 +388,73 @@ void producers_and_schema(ps::CpuNumericProfile profile) {
   auto required =
       end_only.run({{"axis", take(ps::Footprint::all({3}))}}, false);
   require(!required.ok() &&
+              required.status().code == ps::ErrorCode::OperationFailed &&
               required.status().message == "required end producer" &&
               calls[1] == 1,
           "N2 end required");
   auto builtins = ps::make_default_operation_registry();
   auto authored = node(3, 9, profile);
-  ps::DependencyRequest request;
-  request.inputs = {{{Type::Float64, {2, 2}}, {}},
-                    {{Type::Float32, {1, 2, 2}}, {}},
-                    {{Type::Float32, {1}}, {}},
-                    {{Type::Float64, {1}}, {}}};
-  request.parameters = authored.parameters;
-  request.output_index = 1;
-  request.outputs = take(ps::Footprint::none({3}));
-  request.snapshot_identity = "Bezier-schema";
-  require(both.run({{"axis", take(ps::Footprint::none({3}))}}, false).ok(),
-          "Empty no control payload");
+  const std::vector<ps::Value> sources{
+      doubles({2, 2}, {0, 0, 1, 1}),
+      array(Type::Float32, {1, 2, 2}, {0, 0, 0, 0}),
+      array(Type::Float32, {1}, {0}), doubles({1}, {1})};
+  std::vector<ps::OperationMetadata> metadata;
+  for (const auto& input : sources) {
+    ps::OperationMetadata item;
+    item.result_schema =
+        std::make_shared<ps::SchemaTemplate>(rf::source_schema(input));
+    metadata.push_back(std::move(item));
+  }
+  const auto before = calls;
+  const auto empty =
+      take(both.run({{"axis", take(ps::Footprint::none({3}))}}, false));
+  require(calls == before && take(empty.results.at("axis").descriptor())
+                                 .tensor_coverage(0)
+                                 .empty(),
+          "Empty no producer or control payload");
   for (unsigned kind = 0; kind < 8; ++kind) {
-    auto bad = request;
+    auto inputs = metadata;
+    auto parameters = authored.parameters;
+    const auto descriptor = [&](unsigned port, ps::ValueDescriptor next) {
+      auto schema = *inputs[port].result_schema;
+      schema.tensors[0].descriptor = std::move(next);
+      inputs[port].result_schema =
+          std::make_shared<ps::SchemaTemplate>(std::move(schema));
+    };
     if (kind == 0)
-      bad.parameters.erase("count");
+      parameters.erase("count");
     if (kind == 1)
-      bad.parameters["degree"] = std::int64_t{4};
+      parameters["degree"] = std::int64_t{4};
     if (kind == 2)
-      bad.parameters["count"] = std::int64_t{1048577};
+      parameters["count"] = std::int64_t{1048577};
     if (kind == 3)
-      bad.parameters["out_of_domain"] = std::string("linear_extrapolate");
+      parameters["out_of_domain"] = std::string("linear_extrapolate");
     if (kind == 4)
-      bad.inputs[1].descriptor.shape = {1, 1, 2};
+      descriptor(1, {Type::Float32, {1, 1, 2}});
     if (kind == 5)
-      bad.inputs[0].descriptor.shape = {65537, 2};
+      descriptor(0, {Type::Float64, {65537, 2}});
     if (kind == 6)
-      bad.inputs[2].descriptor.element_type = Type::Int64;
+      descriptor(2, {Type::Int64, {1}});
     if (kind == 7)
-      bad.inputs[3].descriptor.shape = {2};
-    auto invalid = builtins->resolve_traits(authored.operation, bad.inputs,
-                                            bad.parameters);
+      descriptor(3, {Type::Float64, {2}});
+    auto invalid =
+        builtins->resolve_traits(authored.operation, inputs, parameters);
     require(!invalid.ok() &&
                 (invalid.status().code == ps::ErrorCode::TypeMismatch ||
                  invalid.status().code == ps::ErrorCode::InvalidArgument),
-            "Bezier static validation even axis Empty");
+            "Bezier static Result metadata even axis Empty");
   }
   std::cout << "axis/Empty/failing controls and N1/N2 end isolation, static "
                "degree/arity/count/type bounds passed\n";
 }
 
-ps::Value direct(const std::shared_ptr<ps::OperationRegistry>& registry,
-                 const ps::WorkflowNode& authored,
-                 const std::vector<ps::Value>& inputs, unsigned count,
-                 unsigned output_index = 0) {
-  std::vector<ps::Region> demands;
-  for (const auto& v : inputs)
-    demands.push_back(v.region());
-  ps::ResourceBudget budget(ps::ResourceLimits{});
-  ps::ResourceAllocationScope scope(budget);
-  ps::OperationInvocation call(
-      inputs, demands, authored.parameters, ps::Backend::Cpu, {},
-      ps::Region::whole({output_index ? 3 : count}), budget.allocator());
-  call.output_index = output_index;
-  return take(registry->invoke(authored.operation, call));
+ps::ResultRef execute_result(
+    const ps::WorkflowNode& authored, const std::vector<ps::Value>& inputs,
+    unsigned output_index = 0,
+    const std::shared_ptr<point_math_checks::Control>& control = {}) {
+  point_math_checks::Workflow workflow(authored, inputs, {}, control,
+                                       output_index);
+  return take(workflow.run()).results.at("values");
 }
 ps::Value reversed_unaligned(const ps::Value& value) {
   const auto bytes = value.bytes();
@@ -463,13 +492,14 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
       require(fesetround(mode) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
                   feraiseexcept(FE_DIVBYZERO) == 0,
               "set Bezier fenv");
-      auto result = direct(registry, authored, inputs, 9);
+      auto control = std::make_shared<point_math_checks::Control>();
+      control->rounding = mode;
+      auto result = execute_result(authored, inputs, 0, control);
       std::uint64_t bits = 0;
-      std::memcpy(&bits, result.bytes().data() + take(result.byte_address({1})),
-                  8);
+      require(rf::read(result, {1}, &bits, 8).ok(), "Bezier Result read");
       require(bits == raw(.5), "strided Bezier bits");
-      auto axis = direct(registry, authored, inputs, 9, 1);
-      std::memcpy(&bits, axis.bytes().data() + take(axis.byte_address({2})), 8);
+      auto axis = execute_result(authored, inputs, 1, control);
+      require(rf::read(axis, {2}, &bits, 8).ok(), "Bezier axis Result read");
       require(bits == raw(.125), "independent axis tuple layout");
       require(
           fegetround() == mode && fetestexcept(FE_ALL_EXCEPT) == FE_DIVBYZERO,
@@ -486,36 +516,35 @@ void layouts_and_resources(ps::CpuNumericProfile profile) {
   config.maximum_live_bytes = 1024 * 1024;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext context(registry, config);
-  auto frozen = take(context.freeze(plan.plan, large.bindings));
+  auto frozen = take(context.freeze(
+      plan.plan, large.bindings(take(context.resource_budget()))));
   auto rejected = context.execute_fragments(
       frozen, {{"values", region({1048576}, {ps::Region({{0, 1}})})}});
   require(!rejected.ok() &&
-              rejected.status().code == ps::ErrorCode::ResourceExhausted,
-          "sparse demand admits complete output before callback");
+              rejected.status().code == ps::ErrorCode::ResourceExhausted &&
+              rejected.status().reason == ps::FailureReason::CapacityLimit &&
+              rejected.status().detail.node_id == 1,
+          "sparse demand admits complete output at Bezier node");
   std::cout << "all-port layouts/fenv, Whole work/cancel/output/scratch and "
                "giant-output budget passed\n";
 }
 
-void cache_atoms_and_typed(ps::CpuNumericProfile profile) {
+void cache_and_typed(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
   Fixture fixture(node(2, 5, profile), {doubles({3, 2}, {0, 0, .5, 1, 1, 0}),
                                         doubles({2, 1, 2}, {.25, .5, .25, -.5}),
                                         doubles({1}, {0}), doubles({1}, {1})});
   ps::GraphContext graph(fixture.document);
   auto plan = take(ps::Compiler(fixture.registry).compile(graph));
-  ps::InputSnapshotStore snapshots;
-  for (auto& binding : fixture.bindings.inputs) {
-    binding.snapshot = std::make_shared<const ps::InputSnapshot>(
-        take(snapshots.import_value(binding.value)));
-    binding.value = {};
-  }
   ps::ExecutionContextConfig config;
   config.cpu_workers = 1;
   config.result_cache_bytes = 4 * 1024 * 1024;
   config.maximum_live_bytes = 8 * 1024 * 1024;
   config.managed_resources = ps::ResourceLimits{};
   ps::ExecutionContext context(fixture.registry, config);
-  auto demand = take(context.open_demand(plan.plan, fixture.bindings));
+  const auto root = take(context.resource_budget());
+  auto bindings = fixture.bindings(root);
+  auto demand = take(context.open_demand(plan.plan, bindings));
   ps::ExecutionOptions options;
   options.maximum_dependency_work = UINT64_C(16) * 1024 * 1024 * 1024;
   options.dependencies.maximum_work = UINT64_C(8) * 1024 * 1024 * 1024;
@@ -524,25 +553,57 @@ void cache_atoms_and_typed(ps::CpuNumericProfile profile) {
                         {"axis", take(ps::Footprint::all({3}))}};
   auto first = take(demand.request(query, {}, options));
   value(first, "values", 1, raw(.5));
-  require(take(demand.request(query, {}, options)).diagnostics.cache_hits > 0,
-          "Bezier warm cache");
-  fixture.bindings.inputs[1].snapshot =
-      std::make_shared<const ps::InputSnapshot>(take(
-          snapshots.import_value(doubles({2, 1, 2}, {.25, 1.5, .25, -.5}))));
-  require(demand.replace_bindings(fixture.bindings).ok(), "Bezier handle edit");
+  const auto repeated = take(demand.request(query, {}, options));
+  for (const auto* key : {"values", "axis"})
+    require(first.results.at(key).object_id() ==
+                repeated.results.at(key).object_id(),
+            "same Bezier demand retains completed Result");
+  const auto fresh_bindings = fixture.bindings(root);
+  const auto warm = take(context.execute_fragments(
+      take(context.freeze(plan.plan, fresh_bindings)), query, {}, options));
+  require(warm.diagnostics.cache_hits == 2,
+          "fresh Bezier sources reuse both cached outputs");
+  for (const auto* key : {"values", "axis"}) {
+    require(rf::bytes(first.results.at(key)) == rf::bytes(warm.results.at(key)),
+            "cached Bezier bits");
+    const auto association = warm.results.at(key).association();
+    for (unsigned port = std::strcmp(key, "axis") == 0 ? 2 : 0; port < 4;
+         ++port)
+      require(std::find(association.begin(), association.end(),
+                        fresh_bindings.inputs[port].result.object_id()) !=
+                      association.end() &&
+                  std::find(association.begin(), association.end(),
+                            bindings.inputs[port].result.object_id()) ==
+                      association.end(),
+              "cached Bezier refreshes every active source association");
+    if (std::strcmp(key, "axis") == 0) {
+      for (unsigned port = 0; port < 2; ++port)
+        require(std::find(association.begin(), association.end(),
+                          fresh_bindings.inputs[port].result.object_id()) ==
+                    association.end(),
+                "cached Bezier axis excludes control associations");
+    }
+  }
+  const auto values_preparation = plan.plan.steps()[0].prepared;
+  require(values_preparation != nullptr, "Bezier static preparation");
+  bindings.inputs[1].result =
+      point_math_checks::source(root, doubles({2, 1, 2}, {.25, 1.5, .25, -.5}),
+                                fixture.document.inputs[1].result_schema.get());
+  require(demand.replace_bindings(bindings).ok(), "Bezier handle edit");
   auto changed = take(demand.request(query, {}, options));
   value(changed, "values", 1, raw(1));
   value(changed, "values", 2, raw(1));
   value(changed, "values", 3, raw(.5));
   value(changed, "axis", 2, raw(.25));
-  fixture.bindings.inputs[0].snapshot =
-      std::make_shared<const ps::InputSnapshot>(
-          take(snapshots.import_value(doubles({3, 2}, {0, 0, .2, 1, 1, 0}))));
-  fixture.bindings.inputs[1].snapshot =
-      std::make_shared<const ps::InputSnapshot>(
-          take(snapshots.import_value(doubles({2, 1, 2}, {.1, .5, .4, -.5}))));
-  require(demand.replace_bindings(fixture.bindings).ok(),
-          "Bezier topology edit");
+  bindings.inputs[0].result =
+      point_math_checks::source(root, doubles({3, 2}, {0, 0, .2, 1, 1, 0}),
+                                fixture.document.inputs[0].result_schema.get());
+  bindings.inputs[1].result =
+      point_math_checks::source(root, doubles({2, 1, 2}, {.1, .5, .4, -.5}),
+                                fixture.document.inputs[1].result_schema.get());
+  require(demand.replace_bindings(bindings).ok(), "Bezier topology edit");
+  require(plan.plan.steps()[0].prepared == values_preparation,
+          "Bezier control topology edits reuse static preparation");
   auto moved = take(demand.request(
       {{"values", region({5}, {ps::Region({{1, 1}})})}}, {}, options));
   require(take(moved.dependencies.source_support()).at("input1") ==
@@ -554,7 +615,7 @@ void cache_atoms_and_typed(ps::CpuNumericProfile profile) {
   auto expected =
       take(fresh.run({{"values", region({5}, {ps::Region({{1, 1}})})}}, false));
   std::uint64_t bits = 0;
-  require(expected.values.at("values").read({1}, &bits, 8).ok(),
+  require(rf::read(expected.results.at("values"), {1}, &bits, 8).ok(),
           "fresh result");
   value(moved, "values", 1, bits);
   const auto nan = UINT64_C(0x7ff0000000000042);
@@ -574,15 +635,19 @@ void cache_atoms_and_typed(ps::CpuNumericProfile profile) {
   auto authored = node(2, 2, profile);
   auto anchors = array(Type::Float32, {2, 2}, {0, 0, 0x3f800000, 0x3fc00000});
   const auto facet = take(ps::encode_semantic(ps::coverage_semantics()));
-  anchors = take(ps::Value::from_storage(anchors.descriptor(), anchors.region(),
-                                         anchors.layout(), anchors.storage(),
-                                         {facet}));
   std::vector<ps::Value> inputs{anchors, doubles({1, 1, 2}, {.5, 0}),
                                 doubles({1}, {0}), doubles({1}, {1})};
   Fixture typed(authored, inputs);
+  auto typed_schema = *typed.document.inputs[0].result_schema;
+  typed_schema.tensors[0].facets = {facet};
+  typed.document.inputs[0].result_schema =
+      std::make_shared<ps::SchemaTemplate>(std::move(typed_schema));
   auto typed_failure =
       typed.run({{"values", region({2}, {ps::Region({{0, 1}})})}}, false);
-  require(!typed_failure.ok(), "typed remote anchor failure before arithmetic");
+  require(!typed_failure.ok() &&
+              typed_failure.status().code == ps::ErrorCode::InvalidArgument &&
+              typed_failure.status().detail.input_id == 1,
+          "typed remote anchor failure before arithmetic");
   require(typed.run({{"axis", take(ps::Footprint::all({3}))}}, false).ok(),
           "axis skips typed control validation");
   auto anchor_storage = doubles({2}, {0, 1});
@@ -595,14 +660,71 @@ void cache_atoms_and_typed(ps::CpuNumericProfile profile) {
                 {0, {16, 8, 0}}, handle_storage.storage())),
             doubles({1}, {0}), doubles({1}, {1})};
   authored = node(3, 9, profile);
-  auto zero_stride = direct(registry, authored, inputs, 9);
+  auto zero_stride = execute_result(authored, inputs);
   bits = 0;
-  std::memcpy(&bits,
-              zero_stride.bytes().data() + take(zero_stride.byte_address({1})),
-              8);
+  require(rf::read(zero_stride, {1}, &bits, 8).ok(), "zero-stride Result read");
   require(bits == raw(.125), "zero-stride controls preserve y=x");
   std::cout << "cache replacement, independent axis failure, typed Mask and "
                "zero strides passed\n";
+}
+
+void retained_outputs(ps::CpuNumericProfile profile) {
+  ps::ResourceBudget root;
+  ps::ResultRef values, axis;
+  ps::ResultTensorReadWindow values_window, axis_window;
+  std::vector<std::weak_ptr<const ps::CpuStorage>> input_owners;
+  {
+    Fixture fixture(
+        node(2, 3, profile),
+        {doubles({2, 2}, {0, 0, 1, 1}), doubles({1, 1, 2}, {.5, .5}),
+         doubles({1}, {0}), doubles({1}, {1})});
+    for (const auto& input : fixture.backing)
+      input_owners.push_back(input.storage());
+    ps::GraphContext graph(fixture.document);
+    const auto compiled = take(ps::Compiler(fixture.registry).compile(graph));
+    ps::ExecutionContextConfig config;
+    config.cpu_workers = 1;
+    config.result_cache_bytes = 0;
+    config.managed_resources = ps::ResourceLimits{};
+    ps::ExecutionContext context(fixture.registry, config);
+    root = take(context.resource_budget());
+    const auto result =
+        take(context.execute(compiled.plan, fixture.bindings(root)));
+    values = result.results.at("values");
+    axis = result.results.at("axis");
+    require(values.object_id() != axis.object_id() &&
+                axis.schema().tensors[0].atomic_trailing_axes == 1,
+            "Bezier output identities and atomic axis remain independent");
+    values_window = take(values.acquire_tensor(take(values.descriptor()), 0,
+                                               ps::Region::whole({3})));
+    axis_window = take(axis.acquire_tensor(take(axis.descriptor()), 0,
+                                           ps::Region::whole({3})));
+  }
+  for (const auto& owner : input_owners)
+    require(owner.expired(), "Bezier outputs retire every source backing");
+  require(root.statistics().live[ps::ResourceKind::Payload] == 48,
+          "escaped Bezier values/axis each retain a 24-byte owner");
+  double number = 0;
+  require(rf::read(values, {1}, &number, 8).ok() && number == .5 &&
+              rf::read(axis, {2}, &number, 8).ok() && number == .5,
+          "both Bezier Results survive source and context retirement");
+  values = {};
+  axis = {};
+  auto row = take(values_window.row_run({1}));
+  std::memcpy(&number, row.data, 8);
+  require(
+      number == .5 && root.statistics().live[ps::ResourceKind::Payload] == 48,
+      "Bezier read windows survive both Result releases");
+  values_window = {};
+  require(root.statistics().live[ps::ResourceKind::Payload] == 24,
+          "releasing values window retires only its output owner");
+  row = take(axis_window.row_run({2}));
+  std::memcpy(&number, row.data, 8);
+  require(number == .5, "axis window survives values owner release");
+  axis_window = {};
+  point_math_checks::released(root);
+  std::cout << "source retirement, independent values/axis/window owners "
+               "and final all-Root release passed\n";
 }
 
 void oracle(ps::CpuNumericProfile profile) {
@@ -657,9 +779,8 @@ void oracle(ps::CpuNumericProfile profile) {
     }
     for (auto i : indices) {
       std::uint64_t bits = 0;
-      require(result.value()
-                  .values.at("values")
-                  .read({i}, &bits, dtype == 4 ? 4 : 8)
+      require(rf::read(result.value().results.at("values"), {i}, &bits,
+                       dtype == 4 ? 4 : 8)
                   .ok(),
               "Bezier oracle output");
       std::cout << std::hex << bits << ' ';
@@ -667,7 +788,7 @@ void oracle(ps::CpuNumericProfile profile) {
     std::cout << "| ";
     for (unsigned i = 0; i < 3; ++i) {
       std::uint64_t bits = 0;
-      require(result.value().values.at("axis").read({i}, &bits, 8).ok(),
+      require(rf::read(result.value().results.at("axis"), {i}, &bits, 8).ok(),
               "Bezier oracle axis");
       std::cout << std::hex << bits << ' ';
     }
@@ -679,8 +800,9 @@ void benchmark_stress(ps::CpuNumericProfile profile,
                       const std::string& selected) {
   std::cout
       << "profile,fixture,repetitions,median_us,max_us,root_calls,evaluated,"
-         "fallbacks,peak_payload_bytes\n";
-  for (bool cancellation : {false, true}) {
+         "fallbacks,peak_payload_bytes,continuation_polls,computed_elements,"
+         "timing_scope\n";
+  for (bool half_subnormal : {false, true}) {
     const auto sub = [](int units) {
       return static_cast<std::uint64_t>(units < 0 ? -units : units) |
              (units < 0 ? (UINT64_C(1) << 63) : 0);
@@ -688,7 +810,7 @@ void benchmark_stress(ps::CpuNumericProfile profile,
     const double t = 0x1p-10;
     Fixture fixture(
         node(3, 1, profile),
-        cancellation
+        half_subnormal
             ? std::vector<ps::Value>{array(ps::ElementType::Float64, {2, 2},
                                            {0, sub(-17), raw(45), sub(742)}),
                                      array(ps::ElementType::Float64, {1, 2, 2},
@@ -706,13 +828,15 @@ void benchmark_stress(ps::CpuNumericProfile profile,
     config.maximum_live_bytes = 8 * 1024 * 1024;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(fixture.registry, config);
-    auto snapshot = take(context.freeze(plan.plan, fixture.bindings));
+    auto snapshot = take(context.freeze(
+        plan.plan, fixture.bindings(take(context.resource_budget()))));
     ps::ExecutionOptions options;
     options.dependencies.maximum_work = UINT64_C(64) * 1024 * 1024 * 1024;
     options.maximum_dependency_work = UINT64_C(128) * 1024 * 1024 * 1024;
+    options.maximum_dependency_cache_work = 0;
     ps::DemandQuery query{{"values", take(ps::Footprint::all({1}))}};
     std::vector<std::int64_t> times;
-    std::uint64_t calls = 0, peak = 0;
+    std::uint64_t peak = 0, polls = 0, computed = 0;
     for (unsigned repeat = 0; repeat < 3; ++repeat) {
       const auto start = std::chrono::steady_clock::now();
       auto result =
@@ -721,22 +845,26 @@ void benchmark_stress(ps::CpuNumericProfile profile,
                           std::chrono::steady_clock::now() - start)
                           .count());
       value(result, "values", 0,
-            cancellation ? (UINT64_C(1) << 63)
-                         : raw(.75 * t + .75 * t * t - .5 * t * t * t));
-      calls = 0;
-      std::uint64_t evaluated = 0, fallbacks = 0;
+            half_subnormal ? (UINT64_C(1) << 63)
+                           : raw(.75 * t + .75 * t * t - .5 * t * t * t));
+      polls = computed = 0;
       for (const auto& timing : result.diagnostics.operation_timings) {
-        calls += timing.numeric.strict_math_calls;
-        evaluated += timing.numeric.evaluated_values;
-        fallbacks += timing.numeric.strict_fallbacks;
+        polls += timing.invocation_count;
+        computed += timing.computed_elements;
       }
-
-      peak = std::max(peak, result.diagnostics.peak_live_bytes);
+      require(polls == 2 && computed == 1 && result.diagnostics.cache_hits == 0,
+              "Bezier stress executes one complete result with real polls");
+      require(result.diagnostics.managed_resources.has_value(),
+              "Bezier stress Root statistics");
+      peak = std::max(peak, result.diagnostics.managed_resources
+                                ->peak[ps::ResourceKind::Payload]);
+      require(peak >= 8, "Bezier stress peak covers output");
     }
     std::sort(times.begin(), times.end());
-    std::cout << selected << ',' << (cancellation ? "half_subnormal" : "flat_x")
-              << ",3," << times[1] << ',' << times[2] << ",N/A,N/A,N/A," << peak
-              << '\n';
+    std::cout << selected << ','
+              << (half_subnormal ? "half_subnormal" : "flat_x") << ",3,"
+              << times[1] << ',' << times[2] << ",N/A,N/A,N/A," << peak << ','
+              << polls << ',' << computed << ",result_execute_fragments\n";
   }
 }
 
@@ -745,7 +873,8 @@ void benchmark_stress(ps::CpuNumericProfile profile,
 void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
   std::cout << "profile,degree,K,N,region,repetitions,status,median_us,max_us,"
                "peak_payload_bytes,peak_metadata_bytes,issued_work,root_calls,"
-               "evaluated,fallbacks,source_coordinates\n";
+               "evaluated,fallbacks,source_coordinates,continuation_polls,"
+               "computed_elements,timing_scope\n";
   for (unsigned degree : {2, 3})
     for (unsigned k : {2, 64})
       for (unsigned n : {17, 129})
@@ -774,11 +903,13 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
           config.managed_resources = ps::ResourceLimits{};
           ps::ExecutionContext context(fixture.registry, config);
           auto budget = take(context.resource_budget());
-          auto snapshot = take(context.freeze(plan.plan, fixture.bindings));
+          auto snapshot = take(context.freeze(
+              plan.plan, fixture.bindings(take(context.resource_budget()))));
           ps::ExecutionOptions options;
           options.maximum_dependency_work = UINT64_C(128) * 1024 * 1024 * 1024;
           options.dependencies.maximum_work = UINT64_C(64) * 1024 * 1024 * 1024;
           options.dependencies.sets.maximum_work = 64 * 1024 * 1024;
+          options.maximum_dependency_cache_work = 0;
           auto wanted =
               sparse
                   ? region({n}, {ps::Region({{0, 1}}), ps::Region({{n / 2, 1}}),
@@ -787,8 +918,7 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
           ps::DemandQuery query{{"values", wanted}};
           std::vector<std::int64_t> times;
           std::string outcome;
-          std::uint64_t work = 0, calls = 0, evaluated = 0, fallbacks = 0,
-                        sources = 0;
+          std::uint64_t work = 0, polls = 0, computed = 0, sources = 0;
           for (unsigned repeat = 0; repeat < 3; ++repeat) {
             auto before = budget.statistics().issued.work;
             const auto start = std::chrono::steady_clock::now();
@@ -809,14 +939,21 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
             outcome = status;
             if (!result.ok())
               continue;
-            calls = evaluated = fallbacks = sources = 0;
+            polls = computed = sources = 0;
             for (const auto& timing :
                  result.value().diagnostics.operation_timings) {
-              calls += timing.numeric.strict_math_calls;
-              evaluated += timing.numeric.evaluated_values;
-              fallbacks += timing.numeric.strict_fallbacks;
+              polls += timing.invocation_count;
+              computed += timing.computed_elements;
             }
 
+            require(polls == 2 && computed == n &&
+                        result.value().diagnostics.cache_hits == 0,
+                    "Bezier benchmark performs complete computation polls");
+            require(result.value().diagnostics.managed_resources &&
+                        result.value()
+                                .diagnostics.managed_resources
+                                ->peak[ps::ResourceKind::Payload] >= 8 * n,
+                    "Bezier benchmark peak covers complete output");
             for (const auto& source :
                  take(result.value().dependencies.source_support()))
               sources += take(source.second.element_count());
@@ -839,10 +976,11 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
                     << stats.peak[ps::ResourceKind::Metadata] << ',' << work
                     << ',';
           if (outcome == "ok")
-            std::cout << "N/A,N/A,N/A," << sources;
+            std::cout << "N/A,N/A,N/A," << sources << ',' << polls << ','
+                      << computed;
           else
-            std::cout << "NA,NA,NA,NA";
-          std::cout << '\n' << std::flush;
+            std::cout << "NA,NA,NA,NA,NA,NA";
+          std::cout << ",result_execute_fragments\n" << std::flush;
         }
 }
 
@@ -850,6 +988,8 @@ void benchmark(ps::CpuNumericProfile profile, const std::string& selected) {
 int main(int argc, char** argv) {
   try {
     const std::string selected = argc > 1 ? argv[1] : "strict";
+    require(selected == "strict" || selected == "apple" || selected == "x86",
+            "profile");
     const auto profile = selected == "strict" ? ps::CpuNumericProfile::Strict
                          : selected == "apple"
                              ? ps::CpuNumericProfile::AppleSiliconNeon
@@ -865,7 +1005,8 @@ int main(int argc, char** argv) {
       topology_and_support(profile);
       producers_and_schema(profile);
       layouts_and_resources(profile);
-      cache_atoms_and_typed(profile);
+      cache_and_typed(profile);
+      retained_outputs(profile);
     }
     return 0;
   } catch (const std::exception& error) {

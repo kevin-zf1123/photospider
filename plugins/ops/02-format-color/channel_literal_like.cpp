@@ -6,9 +6,10 @@
 #include <utility>
 #include <vector>
 
-#include "01-numeric/array_publication.hpp"
-#include "02-format-color/alpha_lowering.hpp"
-#include "photospider/data/region_runs.hpp"
+#include "01-numeric/sequence_profiles.hpp"
+#include "02-format-color/result_mapping.hpp"
+#include "photospider/data/tensor_description.hpp"
+#include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -35,109 +36,129 @@ void fill(const LiteralPreparation& s, std::uint8_t* out, std::uint64_t n) {
     ready += next;
   }
 }
+using format_result::require;
+using format_result::take;
+using Poll = Result<ResultProgramPoll>;
+Status invalid(const std::string& message) {
+  return {ErrorCode::InvalidArgument,
+          message,
+          FailureReason::InvalidDomain,
+          {FailureOrigin::Schema, FailureScope::Unspecified}};
+}
+ResultBuilder builder(const ResultProgramPhase& phase, bool empty) {
+  auto result = take(ResultBuilder::start(
+      phase.resources, *phase.query.output.result_schema,
+      phase.query.semantic_key, {},
+      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
+                                                     phase.association->end())
+                        : std::vector<std::uint64_t>{},
+      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
+  require(result.bind_descriptor_relation(take(ResultRelation::cartesian(
+      phase.resources, 1,
+      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+  return result;
+}
+Poll empty_result(const ResultProgramPhase& phase) try {
+  auto result = builder(phase, true);
+  return Poll(ResultPublication{take(result.seal()), true});
+} catch (const Status& status) {
+  return Poll(status);
+}
 struct LiteralState final {
-  const LiteralPreparation* state;
+  LiteralPreparation state;
   bool requested = false;
-  explicit LiteralState(const LiteralPreparation* s) : state(s) {}
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    using R = Result<DependencyPoll>;
+  explicit LiteralState(LiteralPreparation value) : state(value) {}
+  Poll poll(const ResultProgramPhase& phase) try {
     if (!requested) {
       requested = true;
-      DependencyNeedBatch batch;
-      batch.static_mapping = true;
-      return R(std::move(batch));
+      ResultProgramNeed need;
+      need.tensors.push_back(
+          {0, 0,
+           take(Footprint::none(
+               phase.query.inputs[0].result_schema->tensors[0].sample_shape())),
+           8});
+      return Poll(std::move(need));
     }
-    if (state->require_view) {
-      return R(unavailable());
-    }
-    const auto& descriptor = phase.query.output.descriptor;
-    const auto& facets = phase.query.output.facets;
-    numeric_ops::ArrayPublication publication(
-        phase.query.outputs.boxes().size(), descriptor.shape.size());
-    std::vector<Value> values;
-    for (const auto& box : phase.query.outputs.boxes()) {
-      auto allocated = MutableValue::allocate(descriptor, box, phase.allocator);
-      if (!allocated.ok()) {
-        return R(allocated.status());
-      }
-      auto writer = allocated.take_value();
-      const auto count = box.element_count().value();
-      for (std::uint64_t i = 0; i < count; i += 256) {
-        const auto n = std::min<std::uint64_t>(256, count - i);
-        auto status = phase.consume_work(n);
-        if (!status.ok()) {
-          return R(status);
-        }
-        if (phase.query.cancellation.cancelled()) {
-          return R(Status{ErrorCode::Cancelled, "literal fill cancelled"});
-        }
-        fill(*state, writer.data() + i * state->width, n);
-      }
-      auto value = std::move(writer).publish(facets, phase.query.resources);
-      if (!value.ok()) {
-        return R(value.status());
-      }
-      auto retained = publication.retain(value.take_value());
-      if (!retained.ok()) {
-        return R(retained.status());
-      }
-      values.push_back(retained.take_value());
-    }
-    auto result = publication.finish(descriptor, phase.query.outputs,
-                                     values.data(), values.size(), phase.sets,
-                                     facets, phase.query.resources);
-    return result.ok() ? R(result.take_value()) : R(result.status());
+    if (state.require_view)
+      return Poll(unavailable());
+    auto scratch =
+        take(phase.resources.reserve(ResourceCapacity::host(8192, 8192)));
+    const auto& tensor = phase.query.output.result_schema->tensors[0];
+    const auto output = phase.query.tensor_outputs
+                            ? *phase.query.tensor_outputs
+                            : take(Footprint::all(tensor.sample_shape()));
+    auto result = builder(phase, false);
+    const auto relation = take(ResultRelation::cartesian(
+        phase.resources, take(tensor.sample_count()),
+        {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0}));
+    require(format_result::planes(tensor, output, [&](const Region& box) {
+      return result.publish_tensor_kernel(
+          0, box,
+          [&](const auto& writers) {
+            for (const auto& writer : writers) {
+              const auto& dims = writer.region().dimensions();
+              const auto axis = writer.sample_axis();
+              std::vector<std::uint64_t> at;
+              for (auto dim : dims)
+                at.push_back(dim.offset);
+              for (;;) {
+                if (phase.query.cancellation.cancelled())
+                  return Status{ErrorCode::Cancelled, "literal fill cancelled"};
+                auto run = writer.row_run(at);
+                if (!run.ok())
+                  return run.status();
+                const auto n =
+                    std::min<std::uint64_t>(256, run.value().samples);
+                auto status = phase.consume_work(n);
+                if (!status.ok())
+                  return status;
+                if (run.value().sample_stride_bytes ==
+                    static_cast<std::int64_t>(state.width)) {
+                  fill(state, run.value().data, n);
+                } else {
+                  for (std::uint64_t i = 0; i < n; ++i)
+                    std::memcpy(
+                        run.value().data + static_cast<std::ptrdiff_t>(
+                                               static_cast<__int128>(i) *
+                                               run.value().sample_stride_bytes),
+                        state.bits.data(), state.width);
+                }
+                at[axis] += n;
+                if (at[axis] < dims[axis].offset + dims[axis].extent)
+                  continue;
+                at[axis] = dims[axis].offset;
+                bool next = false;
+                for (std::size_t i = dims.size(); i;) {
+                  --i;
+                  if (i == axis)
+                    continue;
+                  if (++at[i] < dims[i].offset + dims[i].extent) {
+                    next = true;
+                    break;
+                  }
+                  at[i] = dims[i].offset;
+                }
+                if (!next)
+                  break;
+              }
+            }
+            return Status::success();
+          },
+          relation, {true, true, true, true}, phase.query.cancellation);
+    }));
+    return Poll(ResultPublication{take(result.seal()), true});
+  } catch (const Status& status) {
+    return Poll(status);
   }
 };
-Status literal_planar(const PlanarOperationInvocation& call) {
-  const auto& s =
-      *static_cast<const LiteralPreparation*>(call.prepared->state());
-  if (s.require_view) {
-    return unavailable();
-  }
-  const auto& dims = call.output_region.dimensions();
-  const auto& layout = *call.output_metadata.planar_layout;
-  auto rows = dims;
-  rows[layout.width_axis].extent = 1;
-  Region row_region(rows);
-  std::vector<std::uint64_t> at(dims.size());
-  for (std::uint64_t row = 0; row < row_region.element_count().value(); ++row) {
-    region_run_coordinate(row_region, row, &at);
-    const auto x = dims[layout.width_axis];
-    for (std::uint64_t i = 0; i < x.extent;) {
-      if (call.cancellation.cancelled()) {
-        return Status{ErrorCode::Cancelled, "planar literal fill cancelled"};
-      }
-      at[layout.width_axis] = x.offset + i;
-      auto out = call.output.row_run(at);
-      if (!out.ok()) {
-        return out.status();
-      }
-      const auto n =
-          std::min<std::uint64_t>({256, x.extent - i, out.value().samples});
-      if (const auto* budget = resource_internal::metadata_budget()) {
-        auto status = budget->consume({n});
-        if (!status.ok()) {
-          return status;
-        }
-      }
-      fill(s, out.value().data, n);
-      i += n;
-    }
-  }
-  return Status::success();
-}
 }  // namespace
 
 Result<OperationPreparation> prepare_channel_literal_like(
-    const std::vector<OperationMetadata>& inputs, const alpha_ops::Params& p,
-    numeric_ops::SequenceProfile profile) {
+    const std::vector<OperationMetadata>& inputs,
+    const format_result::Params& p, numeric_ops::SequenceProfile profile) try {
   using R = Result<OperationPreparation>;
-  using alpha_ops::invalid;
-  using alpha_ops::output_facets;
-  using alpha_ops::shape_valid;
-  using alpha_ops::source_assertion;
-  using alpha_ops::text;
+  using format_result::source_assertion;
+  using format_result::text;
   auto status = numeric_ops::sequence_profile_available(profile);
   if (!status.ok()) {
     return R(status);
@@ -147,12 +168,18 @@ Result<OperationPreparation> prepare_channel_literal_like(
     return R(invalid(
         "literal-like requires its complete source descriptor assertion"));
   }
-  status = shape_valid(inputs[0]);
+  status = tensor_ops::check_tensor(inputs[0]);
   if (!status.ok()) {
     return R(status);
   }
+  const auto& input = inputs[0].result_schema->tensors[0];
+  auto count = input.sample_count();
+  if (!count.ok())
+    return R(count.status());
+  if (!count.value() || count.value() > (UINT64_C(1) << 40))
+    return R(invalid("logical count is outside [1,2^40]"));
   LiteralPreparation s;
-  s.width = Value::element_size(inputs[0].descriptor.element_type);
+  s.width = Value::element_size(input.descriptor.element_type);
   const auto bits = text(p, "bits");
   const auto hex = [](char c) -> int {
     if (c >= '0' && c <= '9') {
@@ -179,23 +206,26 @@ Result<OperationPreparation> prepare_channel_literal_like(
   }
   s.require_view = policy == "view";
   OperationOutputSpecialization output;
-  output.metadata = inputs[0];
+  auto schema = *inputs[0].result_schema;
+  auto& tensor = schema.tensors[0];
   if (p.count("axis")) {
     const auto axis = std::get<std::int64_t>(p.at("axis"));
     const bool keep = std::get<bool>(p.at("keepdims"));
     if (axis < 0 ||
-        static_cast<std::uint64_t>(axis) >= inputs[0].descriptor.shape.size() ||
-        (!keep && inputs[0].descriptor.shape.size() == 1)) {
+        static_cast<std::uint64_t>(axis) >= input.descriptor.shape.size() ||
+        (!keep && input.descriptor.shape.size() == 1)) {
       return R(invalid("invalid literal-like axis/rank"));
     }
     if (keep) {
-      output.metadata.descriptor.shape[axis] = 1;
+      tensor.descriptor.shape[axis] = 1;
     } else {
-      output.metadata.descriptor.shape.erase(
-          output.metadata.descriptor.shape.begin() + axis);
+      if (static_cast<std::uint64_t>(axis) >=
+          input.descriptor.shape.size() - tensor.atomic_trailing_axes)
+        --tensor.atomic_trailing_axes;
+      tensor.descriptor.shape.erase(tensor.descriptor.shape.begin() + axis);
     }
-    if (output.metadata.planar_layout) {
-      auto& l = *output.metadata.planar_layout;
+    if (tensor.layout.spatial) {
+      auto& l = tensor.layout;
       if (!l.channel_axis ||
           *l.channel_axis != static_cast<std::uint32_t>(axis)) {
         return R(invalid("literal-like cannot erase a planar spatial axis"));
@@ -211,35 +241,41 @@ Result<OperationPreparation> prepare_channel_literal_like(
       }
     }
   }
-  if (output.metadata.planar_layout) {
-    output.metadata.planar_layout->groups.clear();
+  if (tensor.layout.spatial) {
+    tensor.layout.groups.clear();
   }
   auto description =
       tensor_description_from_parameter(text(p, "output_description"));
   if (!description.ok()) {
     return R(description.status());
   }
-  status = validate_tensor_description(description.value(),
-                                       output.metadata.descriptor);
+  status = validate_tensor_description(description.value(), tensor.descriptor);
   if (!status.ok()) {
     return R(status);
   }
-  output.metadata.facets = output_facets(inputs[0], description.value());
-  auto coverage = Footprint::all(output.metadata.descriptor.shape);
-  if (!coverage.ok()) {
-    return R(coverage.status());
-  }
-  DependencyMappedNeed descriptor;
-  descriptor.port = 0;
-  descriptor.roles = static_cast<std::uint32_t>(DependencyRole::Descriptor);
-  descriptor.tags = {{1, 0}};
-  output.static_dependency_pieces =
-      std::vector<DependencyMapPiece>{{coverage.take_value(), {descriptor}}};
-  output.regional_atomic = true;
+  tensor.facets.erase(
+      std::remove_if(tensor.facets.begin(), tensor.facets.end(),
+                     [](const auto& f) {
+                       return f.key == "photospider.tensor-description" ||
+                              f.key == "photospider.semantic" ||
+                              f.key == "photospider.image" ||
+                              f.key == "photospider.color-array";
+                     }),
+      tensor.facets.end());
+  auto facet = encode_tensor_description(description.value());
+  if (!facet.ok())
+    return R(facet.status());
+  tensor.facets.push_back(facet.take_value());
+  std::sort(tensor.facets.begin(), tensor.facets.end(),
+            [](const auto& a, const auto& b) { return a.key < b.key; });
+  output.metadata.result_schema =
+      std::make_shared<const SchemaTemplate>(std::move(schema));
   OperationPreparation result;
   result.outputs.push_back(std::move(output));
   result.state = std::make_shared<LiteralPreparation>(s);
   return R(std::move(result));
+} catch (const Status& status) {
+  return Result<OperationPreparation>(status);
 }
 Status register_channel_literal_like(OperationRegistry* registry) {
   for (const auto& profile :
@@ -252,12 +288,12 @@ Status register_channel_literal_like(OperationRegistry* registry) {
     d.key = std::string("channel.literal_like_") + profile.first;
     auto& t = d.traits;
     t.input_count = 1;
-    t.input_schema.resize(1);
+    OperationPortConstraint port;
+    port.kind = OperationPortKind::Result;
+    port.element_type_mask = 127;
+    t.input_schema = {port};
     t.cacheable = false;
-    t.planar_storage_capable = true;
-    t.planar_exact_dependencies = true;
     t.requires_metadata_specialization = true;
-    t.workspace_bytes = 4096;
     for (const auto* key : {"bits", "expected_inputs", "output_description",
                             "layout", "authoring_member"}) {
       t.parameter_schema.push_back({key, OperationParameterType::String});
@@ -267,22 +303,22 @@ Status register_channel_literal_like(OperationRegistry* registry) {
     t.parameter_schema.push_back({"keepdims", OperationParameterType::Bool});
     auto& output = t.outputs[0];
     output.key = "values";
-    output.shape_rule = OperationShapeRule::Fixed;
-    output.fixed_output_shape = {1};
+    output.output_schema = port;
+    output.result_schema = tensor_ops::scalar_schema();
     output.region_rule = OperationRegionRule::Dependency;
-    output.dependency_version = 1;
+    output.dependency_version = 2;
     output.continuation_bytes = sizeof(LiteralState);
     output.maximum_dependency_stages = 2;
     d.prepare_static = [kind = profile.second](const auto& inputs,
                                                const auto& p) {
       return prepare_channel_literal_like(inputs, p, kind);
     };
-    d.start_dependency = [](const DependencyQuery& q,
-                            const BufferAllocator& a) {
-      return DependencyContinuation::make<LiteralState>(
-          a, static_cast<const LiteralPreparation*>(q.prepared->state()));
+    d.start_result = [](const ResultProgramQuery& q, const BufferAllocator& a) {
+      if (q.tensor_outputs && q.tensor_outputs->empty())
+        return ResultContinuation::stateless<empty_result>();
+      return ResultContinuation::make<LiteralState>(
+          a, *static_cast<const LiteralPreparation*>(q.prepared->state()));
     };
-    d.planar_callback = literal_planar;
     auto status = registry->register_operation(std::move(d));
     if (!status.ok()) {
       return status;

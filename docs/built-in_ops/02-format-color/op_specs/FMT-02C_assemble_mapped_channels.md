@@ -13,18 +13,18 @@ implemented_operation_keys:
   - channel.assemble_mapped_strict
   - channel.assemble_mapped_accelerated_apple_silicon
   - channel.assemble_mapped_accelerated_x86_64
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-02C: assemble explicitly mapped components
 
-Implementation: package 0.21.0 registers A/B/C CPU profiles with exact byte
-mapping, tensor-description v2, canonical static parameters, and legal retained
-views. See the [public API and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-02-channel-assembly)
-and [performance workflow](../../../../examples/channel_assembly_performance/README.md).
-Decision status remains Proposed; implementation facts below supersede the
-historical inspection's missing-runtime statements.
+Runtime contract: A/B/C are registered as twelve Result operation ABI 2 CPU
+keys: `assemble`, `concatenate`, `assemble_mapped`, and `scalar_literal`, each
+with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
+The public authoring helpers are installed in
+`photospider/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
+specification decision remains Proposed; implementation status is recorded
+separately. The performance guide records focused Result smokes and labels its earlier
+Value/planar measurements as historical; no full Result matrix is reported.
 
 
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md) for
@@ -35,8 +35,9 @@ output-component reinterpretation. Its default-registry keys are independent of 
 
 ## Inputs and static interface
 
-Ordered repeated tensor inputs `inputs[0..n)` produce one tensor `values`.
-n>=1; sources may be selected repeatedly or not at all. Every connected input
+Ordered inputs `inputs[0..n)` are single-tensor Results and produce one tensor
+`values`. The family allows 1..1024 inputs; sources may be selected repeatedly
+or not at all. Every connected input
 still participates in static structural validation, even when no mapping row
 selects it. All inputs have one common dtype; no implicit cast is performed.
 
@@ -51,14 +52,15 @@ Each input explicitly declares one of two source structures:
 Every S must match in rank, dimension order and extent; apply the family's
 coordinate-metadata checks as well. Do not infer source structure from rank,
 axis extent or a missing label, and do not squeeze, broadcast, transpose spatial
-axes or resample. An explicit output axis a is inserted into S. If S has rank r,
-output rank is r+1<=8. Component inputs have rank r in 1..7; channel inputs have
-rank r+1 in 1..8. For r=0, only channel-vector inputs are legal; this adds no
-rank-zero tensor support.
+axes or resample. An explicit output cell-axis a, excluding the Result batch prefix, is inserted
+into S. If S has cell rank r, output cell rank is r+1. Component inputs have
+cell rank r in 1..7; channel inputs have cell rank r+1 in 1..8. In every case,
+batch plus cell rank is at most 8. For r=0, only channel-vector inputs are legal;
+this adds no rank-zero tensor support.
 
-All parameters are static logical authoring values. The family requires a
-canonical shared encoding before implementation; these tables do not claim
-that new structured parameter kinds already exist in the current ABI.
+All parameters are static logical authoring values serialized through the
+current String parameter ABI. Public helpers validate and encode these records
+without reading sample payloads.
 
 | Parameter | Meaning / constraints |
 | --- | --- |
@@ -224,4 +226,5 @@ The conceptual public workflow is `RGBA + independent plane -> mapped assembly
 example with a partial channel request and checked bytes. Benchmark the family
 [4096,4096] workload with identity, reorder and repeated-source maps, full and
 one-channel requests, recording mapping size and descriptor-resolution time
-separately. No runtime or performance result is claimed by this Proposed spec.
+separately. This Proposed specification does not claim a Result performance measurement. The
+legacy performance driver still exercises Value/planar execution.

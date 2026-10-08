@@ -54,19 +54,23 @@ class PHOTOSPIDER_API PlanarPageBudget final {
  private:
   friend class PlanarImage;
   friend class PlanarImageWriteWindow;
+  friend class ResultBuilder;
   Result<std::shared_ptr<void>> charge(std::uint64_t bytes,
-                                       bool metadata = false);
+                                       bool metadata = false,
+                                       bool already_accounted = false);
   void release(std::uint64_t bytes) noexcept;
   std::uint64_t maximum_bytes_;
   mutable std::mutex mutex_;
   std::uint64_t live_bytes_ = 0;
   Reserve reserve_;
+  std::function<void(const std::shared_ptr<void>&, std::uint64_t)>
+      payload_committed_;
   std::shared_ptr<void> accounting_domain_;
 };
 
 /**
  * @brief Image storage policy. Logical axis order is independent of planar
- * physical order. Rank-two images omit channel_axis and have one plane.
+ * physical order. Rank-two tensors omit channel_axis and have one plane.
  */
 struct PHOTOSPIDER_API PlanarImageConfig final {
   ImagePlaneOrder order = ImagePlaneOrder::Tiled;
@@ -161,6 +165,8 @@ class PHOTOSPIDER_API PlanarImageReadWindow final {
 
  private:
   friend class PlanarImage;
+  friend class ResultTensorReadWindow;
+  friend class ResultBuilder;
   PlanarImageReadWindow(std::shared_ptr<PlanarImage> image, Region region);
   std::shared_ptr<PlanarImage> image_;
   Region region_;
@@ -223,7 +229,8 @@ class PHOTOSPIDER_API PlanarImage final {
   PlanarImage() noexcept = default;
   /** @brief Validate structural axes/groups without reserving address space. */
   static Status validate_layout(const ValueDescriptor& descriptor,
-                                const PlanarImageLayout& layout);
+                                const PlanarImageLayout& layout,
+                                bool physical = true);
 
  private:
   friend class ResultBuilder;
@@ -262,6 +269,24 @@ class PHOTOSPIDER_API PlanarImage final {
       const std::vector<std::uint64_t>& coordinate) const;
 
  private:
+  // Result-only canonical mapping kernel. Public image access and ownership
+  // remain expressed through ResultRef and its authorized windows.
+  static Result<PlanarImage> assemble_view(
+      const std::vector<PlanarImage>& sources,
+      const std::vector<std::uint64_t>& channels,
+      const std::vector<std::uint64_t>& channel_counts,
+      ValueDescriptor descriptor, PlanarImageLayout layout,
+      const Region& requested, std::vector<ValueFacet> facets,
+      std::shared_ptr<PlanarPageBudget> metadata_budget,
+      const CancellationToken& cancellation, const ResourceBindings& resources);
+
+  /** @brief Result has already certified the complete immutable rectangle.
+   * Does not re-read mutable coverage containers or wait on a writer lock.
+   * Only ResultRef may create this capability after its captured-facts check.
+   */
+  Result<PlanarImageReadWindow> certified_window(
+      const Region& region, const CancellationToken& cancellation) const;
+
   /** @brief Acquire exact valid coverage and retain backing for view reads.
    * @return Move-only window, or NotFound for any unpublished sample.
    * @note The requested region is never silently widened to whole channels;
@@ -280,6 +305,7 @@ class PHOTOSPIDER_API PlanarImage final {
       const Region& region, const CancellationToken& cancellation = {});
 
   friend class PlanarImageReadWindow;
+  friend class ResultRef;
   explicit PlanarImage(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
   std::shared_ptr<Impl> impl_;
 };

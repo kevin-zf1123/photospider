@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -8,6 +9,7 @@
 #include <vector>
 
 #include "photospider/plugin/operation_registry.hpp"
+#include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
@@ -16,13 +18,56 @@ using namespace ps;  // NOLINT(build/namespaces)
 OperationDefinition definition() {
   OperationDefinition op;
   op.key = "test.results";
-  op.traits.outputs[0].key = "first";
-  op.traits.outputs.push_back(op.traits.outputs[0]);
-  op.traits.outputs[1].key = "second";
-  op.callback = [](const OperationInvocation& call) {
-    return Result<Value>(Value::from_float64(10 + call.output_index));
+  op.traits.workspace_bytes = 2048;
+  op.traits.outputs = {multi_result::output("first"),
+                       multi_result::output("second")};
+  op.start_result = [](const ResultProgramQuery& query,
+                       const BufferAllocator& allocator) {
+    return ResultContinuation::make<multi_result::Program>(
+        allocator, -1, 10.0 + query.output_index);
   };
   return op;
+}
+
+Result<ResultRef> invoke_constant(const OperationRegistry& registry,
+                                  const std::string& key, unsigned output) {
+  auto traits = registry.find_traits(key);
+  if (!traits.ok())
+    return Result<ResultRef>(traits.status());
+  ResultProgramMetadata metadata;
+  metadata.output.result_schema = std::make_shared<const SchemaTemplate>(
+      *traits.value()
+           .outputs[output < traits.value().outputs.size() ? output : 0]
+           .result_schema);
+  const std::map<std::string, ParameterValue> parameters;
+  ResultProgramQuery query(metadata, parameters);
+  query.output_index = output;
+  query.semantic_key = key;
+  ResourceBudget root;
+  auto allocator = root.allocator();
+  auto state = registry.start_result(key, query, allocator);
+  if (!state.ok())
+    return Result<ResultRef>(state.status());
+
+  ResultObjectInputs objects;
+  ResourceVector<ResultIoReply> io;
+  ResultProgramPhase phase{
+      query,
+      objects,
+      io,
+      allocator,
+      root,
+      [&](std::uint64_t units) { return root.consume({units}); },
+      std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok)};
+  auto continuation = state.take_value();
+  auto polled = continuation.poll(phase);
+  if (!polled.ok())
+    return Result<ResultRef>(polled.status());
+  const auto* publication = std::get_if<ResultPublication>(&polled.value());
+  if (!publication || !publication->complete)
+    return Result<ResultRef>(
+        Status{ErrorCode::OperationFailed, "missing constant publication"});
+  return Result<ResultRef>(publication->result);
 }
 
 int registration_and_invocation() {
@@ -33,15 +78,9 @@ int registration_and_invocation() {
   PS_CHECK(found.ok() && found.value().outputs.size() == 2);
   op.traits.outputs[1].key = "mutated";
   PS_CHECK(registry.find_traits(op.key).value().outputs[1].key == "second");
-  std::vector<Value> inputs;
-  std::vector<Region> demands;
-  std::map<std::string, ParameterValue> parameters;
-  OperationInvocation call(inputs, demands, parameters);
-  call.output_index = 1;
-  auto value = registry.invoke(op.key, call);
-  PS_CHECK(value.ok() && value.value().as_float64().value() == 11);
-  call.output_index = 2;
-  PS_CHECK(!registry.invoke(op.key, call).ok());
+  auto value = invoke_constant(registry, op.key, 1);
+  PS_CHECK(value.ok() && multi_result::number(value.value()) == 11);
+  PS_CHECK(!invoke_constant(registry, op.key, 2).ok());
   op = definition();
   op.key = "test.duplicate";
   op.traits.outputs[1].key = "first";
@@ -49,6 +88,7 @@ int registration_and_invocation() {
   op.traits.outputs.clear();
   PS_CHECK(!registry.register_operation(op).ok());
   op = definition();
+  op.key = "test.nonfree";
   op.traits.cacheable = false;
   op.traits.side_effect_free = false;
   PS_CHECK(!registry.register_operation(op).ok());
@@ -56,100 +96,81 @@ int registration_and_invocation() {
   auto mixed = definition();
   mixed.key = "test.mixed";
   auto& first = mixed.traits.outputs[0];
-  first.output_schema.kind = OperationPortKind::Typed;
   first.output_schema.semantic_kind =
       static_cast<std::uint32_t>(SemanticKind::Scalar);
-  first.output_semantic_rule = OperationSemanticRule::Establish;
   SemanticDescriptor scalar;
   scalar.channels = {{"value", "value", "dimensionless"}};
-  first.output_facets = {encode_semantic(scalar).take_value()};
+  first.result_schema->tensors[0].facets = {
+      encode_semantic(scalar).take_value()};
   PS_CHECK(registry.register_operation(mixed).ok());
-  call.output_index = 1;
-  PS_CHECK(registry.invoke(mixed.key, call).ok());
-  OperationRegistry c_registry;
-  PS_CHECK(c_registry.load_plugin(PS_MULTI_OUTPUT_FIXTURE).ok());
-  call.output_index = 1;
-  auto c_value = c_registry.invoke("test.c_results", call);
-  PS_CHECK(c_value.ok() && c_value.value().as_float64().value() == 11);
-  PS_CHECK(c_registry.find_traits("test.c_results").value().outputs[1].key ==
+  auto generic = invoke_constant(registry, mixed.key, 1);
+  PS_CHECK(generic.ok());
+  PS_CHECK(generic.value().schema().tensors[0].facets.empty());
+  PS_CHECK(multi_result::number(generic.value()) == 11);
+  auto c_registry = std::make_shared<OperationRegistry>();
+  PS_CHECK(c_registry->load_plugin(PS_MULTI_OUTPUT_FIXTURE).ok());
+  PS_CHECK(c_registry->find_traits("test.c_results").value().outputs[1].key ==
            "second");
+  PS_CHECK(c_registry->freeze().ok());
+  WorkflowDocument c_document;
+  c_document.nodes = {{1, "test.c_results", {}, {}}};
+  c_document.outputs = {{"selected", 1, "second"}};
+  GraphContext c_graph(c_document);
+  auto c_plan = Compiler(c_registry).compile(c_graph);
+  PS_CHECK(c_plan.ok());
+  ExecutionContext c_execution(c_registry);
+  auto c_value = c_execution.execute(c_plan.value().plan);
+  PS_CHECK(c_value.ok() &&
+           multi_result::number(c_value.value().results.at("selected")) == 11);
   return 0;
 }
 
-struct SelectedState {
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    auto writer =
-        MutableValue::allocate(phase.query.output.descriptor,
-                               phase.query.outputs.boxes()[0], phase.allocator);
-    if (!writer.ok())
-      return Result<DependencyPoll>(writer.status());
-    const double number = 20 + phase.query.output_index;
-    auto output = writer.take_value();
-    std::memcpy(output.data(), &number, sizeof(number));
-    auto value = std::move(output).publish();
-    if (!value.ok())
-      return Result<DependencyPoll>(value.status());
-    auto fragments =
-        ValueFragments::create(phase.query.output.descriptor, {},
-                               phase.query.outputs, {value.take_value()});
-    if (!fragments.ok())
-      return Result<DependencyPoll>(fragments.status());
-    return Result<DependencyPoll>(fragments.take_value());
-  }
-};
 int staged_selection() {
   auto op = definition();
   op.key = "test.staged_results";
-  op.callback = {};
-  for (auto& output : op.traits.outputs) {
-    output.region_rule = OperationRegionRule::Dependency;
-    output.dependency_version = 1;
-    output.continuation_bytes = sizeof(SelectedState);
-    output.maximum_dependency_stages = 1;
-  }
-  op.traits.outputs[1].shape_rule = OperationShapeRule::Fixed;
-  op.traits.outputs[1].fixed_output_shape = {2};
-  op.start_dependency = [](const DependencyQuery&,
-                           const BufferAllocator& allocator) {
-    return DependencyContinuation::make<SelectedState>(allocator);
+  op.traits.outputs[1] = multi_result::output(
+      "second", multi_result::schema(ElementType::Float64, {2}));
+  op.start_result = [](const ResultProgramQuery& query,
+                       const BufferAllocator& allocator) {
+    return ResultContinuation::make<multi_result::Program>(
+        allocator, -1, 20.0 + query.output_index);
   };
   OperationRegistry registry;
   PS_CHECK(registry.register_operation(op).ok());
-  std::vector<Value> inputs;
-  std::vector<Region> demands;
-  std::map<std::string, ParameterValue> parameters;
-  OperationInvocation call(inputs, demands, parameters);
-  call.output_index = 1;
-  auto result = registry.invoke(op.key, call);
+  auto result = invoke_constant(registry, op.key, 1);
   PS_CHECK(result.ok());
-  PS_CHECK(result.value().descriptor().shape == std::vector<std::uint64_t>{2});
-  for (std::size_t i = 0; i < 2; ++i) {
-    double value = 0;
-    std::memcpy(&value, result.value().bytes().data() + i * sizeof(value),
-                sizeof(value));
-    PS_CHECK(value == 21);
-  }
+  PS_CHECK(result.value().schema().tensors[0].sample_shape() ==
+           std::vector<std::uint64_t>{2});
+  PS_CHECK(multi_result::number(result.value(), {0}) == 21);
+  PS_CHECK(multi_result::number(result.value(), {1}) == 21);
   return 0;
 }
 
 int compilation() {
   auto registry = std::make_shared<OperationRegistry>();
   auto op = definition();
-  op.traits.outputs[0].shape_rule = OperationShapeRule::Fixed;
-  op.traits.outputs[0].fixed_output_shape = {3, 5};
-  op.traits.outputs[1].shape_rule = OperationShapeRule::Fixed;
-  op.traits.outputs[1].fixed_output_shape = {2};
-  op.traits.outputs[1].output_element_type = ElementType::Int64;
+  op.traits.outputs[0] = multi_result::output(
+      "first", multi_result::schema(ElementType::Float64, {3, 5}));
+  op.traits.outputs[1] = multi_result::output(
+      "second", multi_result::schema(ElementType::Int64, {2}));
   PS_CHECK(registry->register_operation(op).ok());
   OperationDefinition identity;
   identity.key = "test.identity";
   identity.traits.input_count = 1;
   identity.traits.input_schema.resize(1);
-  identity.traits.outputs[0].shape_rule =
-      OperationShapeRule::PreserveFirstInput;
-  identity.traits.outputs[0].output_dtype_rule = OperationDtypeRule::Input;
-  identity.callback = [](const OperationInvocation& call) {
-    return Result<Value>(call.inputs[0]);
+  identity.traits.input_schema[0].kind = OperationPortKind::Result;
+  identity.traits.input_schema[0].tensor_key = "number";
+  identity.traits.outputs[0] = multi_result::output("value");
+  identity.traits.requires_metadata_specialization = true;
+  identity.specialize_metadata = [](const auto& inputs, const auto&) {
+    OperationOutputSpecialization output;
+    output.metadata.result_schema = inputs[0].result_schema;
+    return Result<std::vector<OperationOutputSpecialization>>(
+        std::vector<OperationOutputSpecialization>{std::move(output)});
+  };
+  identity.start_result = [](const ResultProgramQuery&,
+                             const BufferAllocator& allocator) {
+    return ResultContinuation::make<multi_result::Program>(allocator, 0);
   };
   PS_CHECK(registry->register_operation(identity).ok());
   auto mixed_record = definition();
@@ -167,18 +188,35 @@ int compilation() {
   auto compiled = compiler.compile(graph);
   PS_CHECK(compiled.ok());
   PS_CHECK(compiled.value().semantic.nodes()[0].outputs.size() == 2);
-  PS_CHECK(
-      compiled.value().semantic.nodes()[0].outputs[1].descriptor.element_type ==
-      ElementType::Int64);
+  PS_CHECK(compiled.value()
+               .semantic.nodes()[0]
+               .outputs[1]
+               .result_schema->tensors[0]
+               .descriptor.element_type == ElementType::Int64);
   const auto& steps = compiled.value().plan.steps();
   PS_CHECK(steps.size() == 2);
   PS_CHECK((steps[0].result_ref() == ValueRef{1, 1}));
-  PS_CHECK(steps[0].output_descriptor.shape == std::vector<std::uint64_t>{2});
+  PS_CHECK(steps[0].output_result_schema->tensors[0].sample_shape() ==
+           std::vector<std::uint64_t>{2});
   PS_CHECK(std::get<PlanStepInput>(steps[1].inputs[0]).step_index == 0);
+  ExecutionContext context(registry);
+  auto executed = context.execute(compiled.value().plan);
+  PS_CHECK(executed.ok());
+  const auto& integer_result = executed.value().results.at("selected");
+  std::int64_t integer = 0;
+  PS_CHECK(
+      integer_result
+          .read_tensor(integer_result.descriptor().value(), 0, {1}, &integer, 8)
+          .ok());
+  PS_CHECK(integer == 11);
   document.outputs.push_back({"first", 1, "first"});
   GraphContext both(document);
   auto all = compiler.compile(both);
   PS_CHECK(all.ok() && all.value().plan.steps().size() == 3);
+  auto all_executed = context.execute(all.value().plan);
+  PS_CHECK(all_executed.ok());
+  PS_CHECK(multi_result::number(all_executed.value().results.at("first"),
+                                {2, 4}) == 10);
   document.outputs.back().port = "absent";
   GraphContext bad(document);
   PS_CHECK(!compiler.compile(bad).ok());
@@ -200,38 +238,52 @@ int inference() {
   traits.parameter_schema = {
       {"radius", OperationParameterType::Float64, true, true, 0, 64},
       {"split", OperationParameterType::Int64, true, true, 1, 100}};
-  auto& crop = traits.outputs[0];
-  crop.shape_rule = OperationShapeRule::Axes;
-  crop.output_axes = {{OperationExtentSource::InputAxis, 1, {}, 0, 0, 0}};
-  crop.output_axes[0].subtract_parameter = "split";
-  auto& kernel = traits.outputs[1];
-  kernel.shape_rule = OperationShapeRule::Axes;
-  kernel.output_axes = {
-      {OperationExtentSource::CeilParameter, 1, "radius", 0, 0, 1}};
-  kernel.output_axes[0].multiplier = 2;
-  kernel.input_indices = std::vector<std::uint32_t>{};
+  traits.input_schema[0].kind = OperationPortKind::Result;
+  traits.input_schema[0].tensor_key = "number";
+  traits.outputs[1].input_indices = std::vector<std::uint32_t>{};
+  traits.requires_metadata_specialization = true;
+  op.specialize_metadata = [](const auto& inputs, const auto& parameters)
+      -> Result<std::vector<OperationOutputSpecialization>> {
+    const auto extent = inputs[0].result_schema->tensors[0].sample_shape()[0];
+    const auto split = static_cast<std::uint64_t>(
+        std::get<std::int64_t>(parameters.at("split")));
+    if (split >= extent)
+      return Result<std::vector<OperationOutputSpecialization>>(
+          Status{ErrorCode::InvalidArgument, "invalid split"});
+    const auto radius = std::get<double>(parameters.at("radius"));
+    std::vector<OperationOutputSpecialization> outputs(2);
+    outputs[0].metadata.result_schema = std::make_shared<const SchemaTemplate>(
+        multi_result::schema(ElementType::Float64, {extent - split}));
+    outputs[1].metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(multi_result::schema(
+            ElementType::Float64,
+            {2 * static_cast<std::uint64_t>(std::ceil(radius)) + 1}));
+    return Result<std::vector<OperationOutputSpecialization>>(
+        std::move(outputs));
+  };
   OperationRegistry registry;
   PS_CHECK(registry.register_operation(op).ok());
-  const std::vector<OperationMetadata> inputs = {
-      {{ElementType::Float64, {7}}, {}}};
+  std::vector<OperationMetadata> inputs(1);
+  inputs[0].result_schema = std::make_shared<const SchemaTemplate>(
+      multi_result::schema(ElementType::Float64, {7}));
   for (double radius : {0., .25, 1., 1.25, 2., 64.}) {
     const std::map<std::string, ParameterValue> parameters = {
         {"radius", radius},
         {"split", std::int64_t{3}}};
-    auto resolved = resolve_operation_traits(traits, 1, parameters);
+    auto resolved = registry.resolve_traits(op.key, inputs, parameters);
     PS_CHECK(resolved.ok());
     auto outputs =
         infer_operation_outputs(resolved.value(), inputs, parameters);
     PS_CHECK(outputs.ok() && outputs.value().size() == 2);
-    PS_CHECK(outputs.value()[0].descriptor.shape ==
+    PS_CHECK(outputs.value()[0].result_schema->tensors[0].sample_shape() ==
              std::vector<std::uint64_t>{4});
-    PS_CHECK(outputs.value()[1].descriptor.shape[0] ==
+    PS_CHECK(outputs.value()[1].result_schema->tensors[0].sample_shape()[0] ==
              2 * static_cast<std::uint64_t>(std::ceil(radius)) + 1);
   }
   const std::map<std::string, ParameterValue> bad = {
       {"radius", std::numeric_limits<double>::infinity()},
       {"split", std::int64_t{3}}};
-  PS_CHECK(!resolve_operation_traits(traits, 1, bad).ok());
+  PS_CHECK(!registry.resolve_traits(op.key, inputs, bad).ok());
   return 0;
 }
 }  // namespace

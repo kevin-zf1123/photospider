@@ -55,6 +55,7 @@ class PHOTOSPIDER_API TemporaryStorage final {
   Status seal();
 
  private:
+  friend class ResultRef;
   struct Impl;
   std::shared_ptr<Impl> impl_;
 };

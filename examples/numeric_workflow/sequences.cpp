@@ -2,7 +2,6 @@
 
 #include <fenv.h>  // NOLINT(build/c++11)
 
-#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -13,13 +12,15 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
+#include "result_fixture.hpp"     // NOLINT(build/include_subdir)
 
 namespace {
+namespace rf = numeric_result_fixture;
 const char* profile_suffix = "_strict";
 void require(bool condition, const std::string& message) {
   if (!condition)
@@ -35,35 +36,41 @@ struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
+  std::vector<ps::Value> backing;
   unsigned other_reads = 0;
 
   Fixture(const std::string& key, ps::Value a, ps::Value b, std::int64_t count,
           const std::string& dtype, bool failing_other = false) {
-    const std::vector<ps::Value> inputs{a, b};
-    for (std::size_t i = 0; i < inputs.size(); ++i) {
-      const auto name = i ? "other" : "start";
-      const auto& value = inputs[i];
-      document.inputs.push_back({i + 1,
-                                 name,
-                                 value.descriptor(),
-                                 value.region(),
-                                 value.layout(),
-                                 {}});
-      if (i && failing_other) {
-        auto source = std::make_shared<ps::RegionalSource>();
-        source->descriptor = value.descriptor();
-        source->read = [this](const auto&, auto*, auto, const auto&,
-                              const auto&) -> ps::Result<ps::Region> {
-          ++other_reads;
-          return ps::Result<ps::Region>(
-              ps::Status{ps::ErrorCode::OperationFailed,
-                         "deliberately failing unneeded source"});
-        };
-        bindings.inputs.push_back({name, {}, source});
-      } else {
-        bindings.inputs.push_back({name, value});
-      }
+    backing = {std::move(a), std::move(b)};
+    rf::declare_sources(&document, backing);
+    document.inputs[0].name = "start";
+    document.inputs[1].name = "other";
+    if (failing_other) {
+      registry = ps::make_default_operation_registry(false);
+      ps::OperationDefinition failure;
+      failure.key = "manual.sequence_failure";
+      failure.traits.input_count = 0;
+      failure.traits.input_schema.clear();
+      auto& output = failure.traits.outputs[0];
+      output.output_schema.kind = ps::OperationPortKind::Result;
+      output.result_schema = *document.inputs[1].result_schema;
+      output.output_schema.result_schema_id = output.result_schema->id;
+      output.output_schema.result_schema_version = 1;
+      output.dependency_version = 2;
+      output.continuation_bytes = 1;
+      output.maximum_dependency_stages = 1;
+      output.region_rule = ps::OperationRegionRule::Whole;
+      failure.start_result =
+          [this](const auto&,
+                 const auto&) -> ps::Result<ps::ResultContinuation> {
+        ++other_reads;
+        return ps::Result<ps::ResultContinuation>(
+            ps::Status{ps::ErrorCode::OperationFailed,
+                       "deliberately failing unneeded source"});
+      };
+      require(registry->register_operation(std::move(failure)).ok() &&
+                  registry->freeze().ok(),
+              "register Result sequence source");
     }
     std::string selected_key = key;
     if (key.size() >= 7 && key.substr(key.size() - 7) == "_strict")
@@ -74,11 +81,17 @@ struct Fixture {
          {ps::WorkflowInputReference{1}, ps::WorkflowInputReference{2}},
          {{"count", count}, {"dtype", dtype}}}};
     document.outputs = {{"values", 1, "values"}, {"axis", 1, "axis"}};
+    if (failing_other) {
+      document.inputs.pop_back();
+      backing.pop_back();
+      document.nodes[0].inputs[1] = ps::WorkflowNodeOutput{2, "value"};
+      document.nodes.push_back({2, "manual.sequence_failure", {}, {}});
+    }
   }
 
   ps::Result<ps::ExecutionResult> run(const std::string& port = {},
-                                      std::uint64_t index = 0,
-                                      bool one = false) {
+                                      std::uint64_t index = 0, bool one = false,
+                                      bool empty = false) {
     if (!port.empty())
       document.outputs = {{port, 1, port}};
     ps::PlanningOptions planning;
@@ -88,18 +101,56 @@ struct Fixture {
     auto compiled = ps::Compiler(registry).compile(graph, planning);
     if (!compiled.ok())
       return ps::Result<ps::ExecutionResult>(compiled.status());
-    ps::ExecutionContext execution(registry);
-    return execution.execute(compiled.value().plan, bindings);
+    ps::ExecutionContextConfig config;
+    config.cpu_workers = 1;
+    config.maximum_live_bytes = 32 * 1024 * 1024;
+    config.managed_resources = ps::ResourceLimits{};
+    ps::ExecutionContext execution(registry, config);
+    auto bindings = point_math_checks::bindings(
+        take(execution.resource_budget()), backing, document);
+    ps::ExecutionOptions options;
+    options.dependencies.maximum_work = UINT64_C(1) << 50;
+    options.maximum_dependency_work = UINT64_C(1) << 50;
+    options.maximum_dependency_cache_work = 0;
+    if (empty) {
+      auto frozen = execution.freeze(compiled.value().plan, bindings);
+      if (!frozen.ok())
+        return ps::Result<ps::ExecutionResult>(frozen.status());
+      const auto& step = compiled.value().plan.steps().at(
+          compiled.value().plan.outputs().at(port));
+      const auto shape = step.output_result_schema->tensors[0].sample_shape();
+      auto demanded = execution.execute_fragments(
+          frozen.value(), {{port, take(ps::Footprint::none(shape))}}, {},
+          options);
+      if (!demanded.ok())
+        return ps::Result<ps::ExecutionResult>(demanded.status());
+      auto completed = demanded.take_value();
+      ps::ExecutionResult result;
+      result.results = std::move(completed.results);
+      result.dependencies = std::move(completed.dependencies);
+      result.diagnostics = std::move(completed.diagnostics);
+      return ps::Result<ps::ExecutionResult>(std::move(result));
+    }
+    return execution.execute(compiled.value().plan, bindings, {}, options);
   }
 };
 template <class T>
-void exact(const ps::Value& value, const std::vector<T>& expected) {
-  require(value.bytes().size() == expected.size() * sizeof(T), "result size");
-  require(std::memcmp(value.bytes().data(), expected.data(),
-                      value.bytes().size()) == 0,
-          "result bits differ from independent expected values");
-  require(value.facets().empty(), "numeric result must be generic");
+void exact(const ps::ResultRef& value, const std::vector<T>& expected,
+           std::uint64_t first = 0) {
+  require(ps::Value::element_size(
+              value.schema().tensors[0].descriptor.element_type) == sizeof(T),
+          "result sample width");
+  for (std::size_t i = 0; i < expected.size(); ++i) {
+    T actual{};
+    require(
+        rf::read(value, {first + i}, &actual, sizeof(T)).ok() &&
+            std::memcmp(&actual, &expected[i], sizeof(T)) == 0,
+        "result bits differ at global coordinate " + std::to_string(first + i));
+  }
+  require(value.schema().tensors[0].facets.empty(),
+          "numeric result must be generic");
 }
+
 ps::Value number(double x) {
   return ps::Value::from_float64(x);
 }
@@ -197,79 +248,84 @@ void controls_and_ownership() {
   ps::PlanningOptions planning;
   planning.output_regions["values"] = ps::Region({{0, 1}});
   auto compiled = take(ps::Compiler(fixture.registry).compile(graph, planning));
-  ps::InputSnapshotStore snapshots;
-  for (auto& binding : fixture.bindings.inputs) {
-    binding.snapshot = std::make_shared<const ps::InputSnapshot>(
-        take(snapshots.import_value(binding.value)));
-    binding.value = {};
-  }
   ps::ExecutionContextConfig config;
   config.cpu_workers = 1;
   config.maximum_live_bytes = 65536;
   config.result_cache_bytes = 32768;
   config.managed_resources = ps::ResourceLimits{};
-  ps::Value retained;
+  ps::ResultRef retained;
   std::optional<ps::ResourceBudget> root;
   {
     ps::ExecutionContext execution(fixture.registry, config);
     root = take(execution.resource_budget());
-    auto demand = take(execution.open_demand(compiled.plan, fixture.bindings));
+    auto bindings =
+        point_math_checks::bindings(*root, fixture.backing, fixture.document);
+    auto demand = take(execution.open_demand(compiled.plan, bindings));
     const ps::DemandQuery query{
         {"values",
          take(ps::Footprint::from_regions({256}, {ps::Region({{0, 1}})}))}};
     auto result = take(demand.request(query));
-    retained = result.values.at("values").fragments().at(0);
+    retained = result.results.at("values");
     double first = 1;
-    std::memcpy(&first, retained.bytes().data(), 8);
+    require(rf::read(retained, {0}, &first, 8).ok(), "retained Result read");
     require(first == 0, "first value");
-    auto warm = take(demand.request(query));
-    require(warm.diagnostics.cache_hits >= 1, "warm exact numeric cache");
-    fixture.bindings.inputs[1].snapshot =
-        std::make_shared<const ps::InputSnapshot>(
-            take(snapshots.import_value(number(1.0))));
-    require(demand.replace_bindings(fixture.bindings).ok(),
-            "replace unused sequence binding");
+    auto shared = take(demand.request(query));
+    require(shared.results.at("values").object_id() == retained.object_id(),
+            "same Frozen shares the completed Result");
+    auto fresh_bindings =
+        point_math_checks::bindings(*root, fixture.backing, fixture.document);
+    auto fresh = take(execution.freeze(compiled.plan, fresh_bindings));
+    auto warm = take(execution.execute_fragments(fresh, query));
+    require(warm.diagnostics.cache_hits >= 1,
+            "fresh Frozen completed numeric cache hit");
+    require(warm.results.at("values").association() ==
+                ps::ResourceVector<std::uint64_t>{
+                    fresh_bindings.inputs[0].result.object_id(),
+                    fresh_bindings.inputs[1].result.object_id()},
+            "cache replay associates current sources");
+    bindings.inputs[1].result = point_math_checks::source(*root, number(1.0));
+    require(demand.replace_bindings(bindings).ok(),
+            "replace active step Result");
     auto unchanged = take(demand.request(query));
     require(
         unchanged.diagnostics.cache_hits == 0,
         "active step edit invalidates Whole even for index-zero projection");
     double projected = 1;
-    require(unchanged.values.at("values").read({0}, &projected, 8).ok() &&
+    require(rf::read(unchanged.results.at("values"), {0}, &projected, 8).ok() &&
                 projected == 0,
             "Whole projected value");
+    double last = 0;
+    std::uint64_t computed = 0;
+    for (const auto& timing : unchanged.diagnostics.operation_timings)
+      computed += timing.computed_elements;
+    require(rf::read(unchanged.results.at("values"), {255}, &last, 8).ok() &&
+                last == 255 && computed == 256,
+            "active step edit recomputes the entire published Result");
     ps::CancellationSource cancelled;
     cancelled.cancel();
     auto stopped =
-        execution.execute(compiled.plan, fixture.bindings, cancelled.token());
+        execution.execute(compiled.plan, bindings, cancelled.token());
     require(!stopped.ok() && stopped.status().code == ps::ErrorCode::Cancelled,
             "pre-cancelled sequence");
     require(root->statistics().peak[ps::ResourceKind::Payload] >= 2048,
             "one-index request accounts full output capacity");
   }
   double first = 1;
-  std::memcpy(&first, retained.bytes().data(), 8);
+  require(rf::read(retained, {0}, &first, 8).ok(), "escaped Result read");
   require(first == 0, "escaped Whole owner");
-  require(root->statistics().live[ps::ResourceKind::Payload] >= 8,
+  require(root->statistics().live[ps::ResourceKind::Payload] >= 2048,
           "result retains its admitted owner");
   retained = {};
-  require(root->statistics().live[ps::ResourceKind::Payload] == 0,
-          "final owner must release payload");
+  point_math_checks::released(*root);
   config.result_cache_bytes = 0;
   config.maximum_live_bytes = 32;
   ps::ExecutionContext tiny(fixture.registry, config);
-  auto denied = tiny.execute(compiled.plan, fixture.bindings);
+  auto tiny_bindings = point_math_checks::bindings(
+      take(tiny.resource_budget()), fixture.backing, fixture.document);
+  auto denied = tiny.execute(compiled.plan, tiny_bindings);
   require(
       !denied.ok() && denied.status().code == ps::ErrorCode::ResourceExhausted,
       "state capacity must be admitted before allocation");
-  config.maximum_live_bytes = 65536;
-  config.managed_resources->maximum_work = 20;
-  ps::ExecutionContext bounded(fixture.registry, config);
-  auto exhausted = bounded.execute(compiled.plan, fixture.bindings);
-  require(!exhausted.ok() &&
-              exhausted.status().reason == ps::FailureReason::WorkLimit,
-          "numeric work must retain root WorkLimit: " +
-              exhausted.status().message + " reason=" +
-              std::to_string(static_cast<int>(exhausted.status().reason)));
 
   fenv_t saved;
   require(fegetenv(&saved) == 0, "save caller floating environment");
@@ -278,30 +334,32 @@ void controls_and_ownership() {
   const auto flags = fetestexcept(FE_ALL_EXCEPT);
   Fixture rounding("numeric.linspace_strict", number(1),
                    number(0x1.0000020000001p0), 3, "float32");
-  exact<float>(take(rounding.run("values", 1, true)).values.at("values"),
-               {0x1.000002p0F});
+  exact<float>(take(rounding.run("values", 1, true)).results.at("values"),
+               {0x1.000002p0F}, 1);
   require(fegetround() == FE_DOWNWARD && fetestexcept(FE_ALL_EXCEPT) == flags,
           "caller rounding and exception flags must be restored");
   require(fesetenv(&saved) == 0, "restore caller floating environment");
-  const std::vector<ps::Region> demands(2, ps::Region::whole({1}));
   std::vector<std::uint8_t> bytes(17);
   const double start = 2;
   std::memcpy(bytes.data() + 1, &start, 8);
   auto strided =
       take(ps::Value::create({ps::ElementType::Float64, {1}},
                              ps::Region::whole({1}), {1, {-8}}, bytes));
-  const std::vector<ps::Value> inputs{strided, number(4)};
-  const std::map<std::string, ps::ParameterValue> parameters{
-      {"count", std::int64_t{3}},
-      {"dtype", std::string("float64")}};
-  ps::OperationInvocation call(inputs, demands, parameters, ps::Backend::Cpu,
-                               {}, ps::Region::whole({3}));
-  exact<double>(take(fixture.registry->invoke(
-                    std::string("numeric.linspace") + profile_suffix, call)),
-                {2, 3, 4});
-  auto authored = take(ps::numeric::arange_node(
-      2, {ps::WorkflowInputReference{1}, {ps::ElementType::Int64, {1}}},
-      {ps::WorkflowInputReference{2}, {ps::ElementType::Int64, {1}}}, 4));
+  Fixture layout("numeric.linspace_strict", strided, number(4), 3, "float64");
+  auto control = std::make_shared<point_math_checks::Control>();
+  control->rounding = FE_DOWNWARD;
+  point_math_checks::Workflow workflow(layout.document.nodes[0],
+                                       {strided, number(4)}, {}, control);
+  exact<double>(take(workflow.run()).results.at("values"), {2, 3, 4});
+  require(control->computation_polls > 0,
+          "strided sequence uses checked worker");
+  const auto int_schema = [](std::uint64_t id) {
+    return ps::numeric::SequenceInput{
+        ps::WorkflowInputReference{id},
+        std::make_shared<ps::SchemaTemplate>(rf::source_schema(integer(0)))};
+  };
+  auto authored =
+      take(ps::numeric::arange_node(2, int_schema(1), int_schema(2), 4));
   require(std::get<std::string>(authored.parameters.at("dtype")) == "int64" &&
               authored.operation == "numeric.arange_strict",
           "integer authoring defaults must be explicit");
@@ -317,144 +375,94 @@ void controls_and_ownership() {
 void whole_budgets() {
   Fixture fixture("numeric.linspace_strict", number(0), number(1), 16384,
                   "float64");
-  std::vector<ps::Value> inputs{number(0), number(1)};
-  std::vector<ps::Region> demands(2, ps::Region::whole({1}));
-  const auto& node = fixture.document.nodes[0];
-  auto traits = take(fixture.registry->resolve_traits(
-      node.operation,
-      {{inputs[0].descriptor(), {}}, {inputs[1].descriptor(), {}}},
-      node.parameters));
-  for (unsigned mode = 0; mode < 3; ++mode) {
-    ps::ResourceLimits limits;
-    if (mode == 0)
-      limits.maximum_work = 10000;
-    if (mode == 1)
-      limits.capacity[ps::ResourceKind::Payload] = 65536;
-    if (mode == 2)
-      limits.capacity[ps::ResourceKind::Payload] =
-          16384 * 8 + traits.workspace_bytes - 1;
-    ps::ResourceBudget budget(limits);
-    {
-      ps::ResourceAllocationScope scope(budget);
-      ps::OperationInvocation call(
-          inputs, demands, node.parameters, ps::Backend::Cpu, {},
-          ps::Region::whole({16384}), budget.allocator());
-      auto result = fixture.registry->invoke(node.operation, call);
-      require(
-          !result.ok() &&
-              result.status().code == ps::ErrorCode::ResourceExhausted,
-          "Whole sequence rejects insufficient work/output/scratch capacity");
-    }
-    require(budget.statistics().live[ps::ResourceKind::Payload] == 0,
-            "sequence failure releases unpublished output/scratch");
-  }
-  ps::ResourceBudget budget(ps::ResourceLimits{});
-  ps::CancellationSource cancellation;
-  std::atomic<bool> ready{false}, done{false};
-  std::thread watcher([&] {
-    ready.store(true);
-    while (!done.load() && budget.statistics().issued.work < 100000)
-      std::this_thread::yield();
-    if (!done.load())
-      cancellation.cancel();
-  });
-  while (!ready.load())
-    std::this_thread::yield();
-  ps::Status status;
-  try {
-    ps::ResourceAllocationScope scope(budget);
-    ps::OperationInvocation call(
-        inputs, demands, node.parameters, ps::Backend::Cpu,
-        cancellation.token(), ps::Region::whole({16384}), budget.allocator());
-    status = fixture.registry->invoke(node.operation, call).status();
-  } catch (...) {
-    done.store(true);
-    watcher.join();
-    throw;
-  }
-  done.store(true);
-  watcher.join();
-  require(status.code == ps::ErrorCode::Cancelled &&
-              budget.statistics().issued.work >= 100000 &&
-              budget.statistics().live[ps::ResourceKind::Payload] == 0,
-          "cancel admitted sequence arithmetic and release full storage");
+  point_math_checks::resources(fixture.document.nodes[0],
+                               {number(0), number(1)});
+  std::cout << "Result callback-work/capacity/cancellation and all-Root "
+               "release: passed\n";
 }
 
 void sequences() {
   Fixture line("numeric.linspace_strict", number(0), number(1), 5, "float64");
   auto result = take(line.run());
   std::cout << "profile=" << profile_suffix << " Whole numeric counters=N/A\n";
-  exact<double>(result.values.at("values"), {0, .25, .5, .75, 1});
-  exact<double>(result.values.at("axis"), {0, 1, .25});
-  auto traits = take(line.registry->resolve_traits(
-      line.document.nodes[0].operation,
-      {{number(0).descriptor(), {}}, {number(1).descriptor(), {}}},
-      line.document.nodes[0].parameters));
-  require(traits.outputs[1].atomic_trailing_axes == 1 &&
-              traits.outputs[1].region_rule == ps::OperationRegionRule::Whole,
-          "axis keeps tuple observation identity with Whole execution");
+  exact<double>(result.results.at("values"), {0, .25, .5, .75, 1});
+  exact<double>(result.results.at("axis"), {0, 1, .25});
+  require(
+      result.results.at("axis").schema().tensors[0].atomic_trailing_axes == 1,
+      "axis keeps atomic tuple observation identity");
   Fixture partial_axis("numeric.linspace_strict", number(0), number(1), 5,
                        "float64");
   auto partial = take(partial_axis.run("axis", 1, true));
-  exact<double>(partial.values.at("axis"), {1});
+  exact<double>(partial.results.at("axis"), {0, 1, .25});
   auto changed = take(ps::Footprint::all({1}));
   auto dirty = take(partial.dependencies.potential_dirty("other", changed));
-  require(dirty.at("axis") ==
-              take(ps::Footprint::from_regions({3}, {ps::Region({{1, 1}})})),
-          "tuple dirty mapping must restrict to actual root coverage");
-  const std::vector<ps::Value> direct_inputs{number(0), number(1)};
-  const std::vector<ps::Region> direct_demands(2, ps::Region::whole({1}));
-  const auto parameters = line.document.nodes[0].parameters;
-  ps::OperationInvocation direct(direct_inputs, direct_demands, parameters,
-                                 ps::Backend::Cpu, {}, ps::Region({{1, 1}}));
-  direct.output_index = 1;
-  require(!line.registry->invoke(line.document.nodes[0].operation, direct).ok(),
-          "direct Whole axis rejects ROI");
-  ps::OperationMetadata grouped{{ps::ElementType::Float64, {2, 3, 4}},
-                                {},
-                                {},
-                                2};
+  require(dirty.at("axis") == take(ps::Footprint::all({3})),
+          "tuple dirty mapping covers the complete atomic observation");
+  ps::ResultTensorSpec grouped;
+  grouped.key = "grouped";
+  grouped.descriptor = {ps::ElementType::Float64, {2, 3, 4}};
+  grouped.atomic_trailing_axes = 2;
   auto component = take(ps::Footprint::from_regions(
       {2, 3, 4}, {ps::Region({{1, 1}, {2, 1}, {1, 1}})}));
-  auto observation = take(ps::operation_observations(grouped, component));
-  require(observation ==
-              take(ps::Footprint::from_regions({2}, {ps::Region({{1, 1}})})),
-          "trailing-axis observation projection");
-  auto closure = take(ps::observation_samples(grouped, observation));
+  require(grouped.observation_shape() == std::vector<std::uint64_t>{2},
+          "trailing axes form one observation per leading coordinate");
+  auto closure = take(grouped.close_samples(component));
   require(closure == take(ps::Footprint::from_regions(
                          {2, 3, 4}, {ps::Region({{1, 1}, {0, 3}, {0, 4}})})),
-          "trailing-axis complete tuple closure");
+          "Result tensor trailing-axis complete tuple closure");
   Fixture reverse("numeric.linspace_strict", number(1), number(0), 5,
                   "float64");
   auto backwards = take(reverse.run());
-  exact<double>(backwards.values.at("values"), {1, .75, .5, .25, 0});
-  exact<double>(backwards.values.at("axis"), {1, 0, -.25});
+  exact<double>(backwards.results.at("values"), {1, .75, .5, .25, 0});
+  exact<double>(backwards.results.at("axis"), {1, 0, -.25});
   Fixture midpoint("numeric.linspace_strict", number(1),
                    number(0x1.0000020000001p0), 3, "float32");
-  exact<float>(take(midpoint.run("values", 1, true)).values.at("values"),
-               {0x1.000002p0F});
+  exact<float>(take(midpoint.run("values", 1, true)).results.at("values"),
+               {0x1.000002p0F}, 1);
   for (const char* key : {"numeric.linspace_strict", "numeric.arange_strict"}) {
     Fixture singleton(key, number(-0.0), number(0), 1, "float64", true);
     auto only = take(singleton.run());
-    exact<double>(only.values.at("values"), {-0.0});
-    exact<double>(only.values.at("axis"), {-0.0, -0.0, 0.0});
+    exact<double>(only.results.at("values"), {-0.0});
+    exact<double>(only.results.at("axis"), {-0.0, -0.0, 0.0});
     require(singleton.other_reads == 0, "singleton scheduled its unused input");
     Fixture endpoint(key, number(7), number(0), 5, "float64", true);
-    require(!endpoint.run("values", 0, true).ok() && endpoint.other_reads > 0,
-            "non-singleton Whole values require end/step even at index zero");
+    auto required = endpoint.run("values", 0, true);
+    require(
+        !required.ok() && endpoint.other_reads == 1 &&
+            required.status().message == "deliberately failing unneeded source",
+        "non-singleton Whole values require end/step even at index zero");
+    Fixture empty(key, number(0), number(1), 5, "float64", true);
+    for (const char* port : {"values", "axis"}) {
+      auto result = take(empty.run(port, 0, false, true));
+      require(
+          empty.other_reads == 0 && take(result.results.at(port).descriptor())
+                                        .tensor_coverage(0)
+                                        .empty(),
+          "Empty has no producer start or published samples");
+      for (const auto& timing : result.diagnostics.operation_timings)
+        require(timing.computed_elements == 0, "Empty has no computation");
+      for (const auto& input : take(result.dependencies.source_support()))
+        require(input.second.empty(), "Empty has no input sample support");
+    }
+    Fixture static_other(key, number(0), integer(1), 1, "float64", true);
+    auto schema_error = static_other.run();
+    require(!schema_error.ok() &&
+                schema_error.status().code == ps::ErrorCode::TypeMismatch &&
+                static_other.other_reads == 0,
+            "excluded second input retains static dtype validation");
     Fixture zeros(key, number(-0.0), number(-0.0), 3, "float64");
-    exact<double>(take(zeros.run("values")).values.at("values"),
+    exact<double>(take(zeros.run("values")).results.at("values"),
                   {-0.0, -0.0, -0.0});
   }
   const double maximum = std::numeric_limits<double>::max();
   Fixture extremes("numeric.linspace_strict", number(-maximum), number(maximum),
                    3, "float64");
   auto extreme = take(extremes.run());
-  exact<double>(extreme.values.at("values"), {-maximum, 0, maximum});
-  exact<double>(extreme.values.at("axis"), {-maximum, maximum, maximum});
+  exact<double>(extreme.results.at("values"), {-maximum, 0, maximum});
+  exact<double>(extreme.results.at("axis"), {-maximum, maximum, maximum});
   Fixture axis_overflow("numeric.linspace_strict", number(-maximum),
                         number(maximum), 2, "float64");
-  exact<double>(take(axis_overflow.run("values")).values.at("values"),
+  exact<double>(take(axis_overflow.run("values")).results.at("values"),
                 {-maximum, maximum});
   auto failed = axis_overflow.run("axis");
   require(!failed.ok() &&
@@ -462,21 +470,21 @@ void sequences() {
           "unrepresentable axis must fail independently");
   Fixture ints("numeric.arange_strict", integer(3), integer(-2), 4, "int64");
   auto ir = take(ints.run());
-  exact<std::int64_t>(ir.values.at("values"), {3, 1, -1, -3});
-  exact<std::int64_t>(ir.values.at("axis"), {3, -3, -2});
+  exact<std::int64_t>(ir.results.at("values"), {3, 1, -1, -3});
+  exact<std::int64_t>(ir.results.at("axis"), {3, -3, -2});
   Fixture large("numeric.arange_strict", integer(9007199254740993LL),
                 integer(1), 3, "int64");
   exact<std::int64_t>(
-      take(large.run("values")).values.at("values"),
+      take(large.run("values")).results.at("values"),
       {9007199254740993LL, 9007199254740994LL, 9007199254740995LL});
   Fixture cancellation("numeric.arange_strict", integer(INT64_MIN),
                        integer(INT64_MAX), 3, "int64");
   exact<std::int64_t>(
-      take(cancellation.run("values", 2, true)).values.at("values"),
-      {INT64_MAX - 1});
+      take(cancellation.run("values", 2, true)).results.at("values"),
+      {INT64_MAX - 1}, 2);
   Fixture progression("numeric.arange_strict", number(-maximum),
                       number(maximum), 3, "float64");
-  exact<double>(take(progression.run("values")).values.at("values"),
+  exact<double>(take(progression.run("values")).results.at("values"),
                 {-maximum, 0, maximum});
   std::cout << "NUM-02: values=[0,0.25,0.5,0.75,1] axis=[0,1,0.25]\n"
                "direct Float32 rounding, endpoint isolation, signed zero, "
@@ -514,9 +522,11 @@ int main(int argc, char** argv) {
                     << '\n';
           continue;
         }
-        const auto& value = result.value().values.at("values");
+        const auto& value = result.value().results.at("values");
         std::uint64_t bits = 0;
-        std::memcpy(&bits, value.bytes().data(), value.bytes().size());
+        require(
+            rf::read(value, {index}, &bits, dtype == "float32" ? 4 : 8).ok(),
+            "oracle Result read");
         std::cout << std::hex << bits << std::dec << '\n';
       }
       return 0;

@@ -3,7 +3,7 @@
 #include <fenv.h>  // NOLINT(build/c++11)
 
 #include <algorithm>
-#include <atomic>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -12,14 +12,16 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
 #include "photospider/execution/resource_allocator.hpp"
 #include "photospider/photospider.hpp"
+#include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
+#include "result_fixture.hpp"     // NOLINT(build/include_subdir)
 
 namespace {
+namespace rf = numeric_result_fixture;
 void require(bool condition, const char* message) {
   if (!condition)
     throw std::runtime_error(message);
@@ -50,18 +52,15 @@ struct Fixture {
   std::shared_ptr<ps::OperationRegistry> registry =
       ps::make_default_operation_registry();
   ps::WorkflowDocument document;
-  ps::ExecutionBindings bindings;
-  Fixture(ps::WorkflowNode node, const std::vector<ps::Value>& inputs) {
-    for (std::size_t i = 0; i < inputs.size(); ++i) {
-      const auto& value = inputs[i];
-      const auto name = "input" + std::to_string(i);
-      document.inputs.push_back({i + 1, name, value.descriptor(),
-                                 value.region(), value.layout(),
-                                 value.facets()});
-      bindings.inputs.push_back({name, value});
-    }
+  std::vector<ps::Value> backing;
+  Fixture(ps::WorkflowNode node, const std::vector<ps::Value>& inputs)
+      : backing(inputs) {
+    rf::declare_sources(&document, inputs);
     document.outputs = {{"values", node.id, "values"}};
     document.nodes = {std::move(node)};
+  }
+  ps::ExecutionBindings bindings(const ps::ResourceBudget& root) const {
+    return point_math_checks::bindings(root, backing, document);
   }
   ps::Result<ps::DemandResult> run(const ps::DemandQuery& query,
                                    bool cache = true,
@@ -78,7 +77,8 @@ struct Fixture {
     config.result_cache_bytes = cache ? cache_bytes : 0;
     config.managed_resources = ps::ResourceLimits{};
     ps::ExecutionContext context(registry, config);
-    auto snapshot = context.freeze(plan.value().plan, bindings);
+    auto snapshot = context.freeze(plan.value().plan,
+                                   bindings(take(context.resource_budget())));
     if (!snapshot.ok())
       return ps::Result<ps::DemandResult>(snapshot.status());
     ps::ExecutionOptions options;
@@ -129,8 +129,9 @@ void oracle(ps::CpuNumericProfile profile) {
     require(all.visit(
                    [&](const auto& at) {
                      std::uint64_t bits = 0;
-                     auto status = result.values.at("values").read(
-                         at, &bits, ps::Value::element_size(dtype));
+                     auto status =
+                         rf::read(result.results.at("values"), at, &bits,
+                                  ps::Value::element_size(dtype));
                      if (!first)
                        std::cout << ' ';
                      first = false;
@@ -210,7 +211,8 @@ void benchmark(ps::CpuNumericProfile profile, unsigned n, unsigned cin,
     config.managed_resources->capacity[ps::ResourceKind::Host] = UINT64_C(1)
                                                                  << 30;
   ps::ExecutionContext context(fixture.registry, config);
-  auto frozen = take(context.freeze(plan.plan, fixture.bindings));
+  auto frozen = take(context.freeze(
+      plan.plan, fixture.bindings(take(context.resource_budget()))));
   const auto all = take(ps::Footprint::all(output_shape));
   ps::ExecutionOptions options;
   options.maximum_dependency_cache_work = 0;
@@ -232,14 +234,14 @@ void benchmark(ps::CpuNumericProfile profile, unsigned n, unsigned cin,
     for (unsigned i = 0; i < n; ++i)
       for (unsigned o = 0; o < cout; ++o) {
         std::uint64_t actual = 0;
-        require(result.values.at("values")
-                        .read(side ? std::vector<std::uint64_t>{i / side,
-                                                                i % side, o}
-                                   : std::vector<std::uint64_t>{i, o},
-                              &actual, narrow ? 4 : 8)
-                        .ok() &&
-                    actual == expected[i * cout + o],
-                "benchmark analytic bits");
+        require(
+            rf::read(result.results.at("values"),
+                     side ? std::vector<std::uint64_t>{i / side, i % side, o}
+                          : std::vector<std::uint64_t>{i, o},
+                     &actual, narrow ? 4 : 8)
+                    .ok() &&
+                actual == expected[i * cout + o],
+            "benchmark analytic bits");
       }
     for (const auto& timing : result.diagnostics.operation_timings)
       if (timing.computed_elements) {
@@ -276,7 +278,7 @@ void examples(ps::CpuNumericProfile profile) {
                      [&](const auto& at) {
                        std::uint64_t bits = 0;
                        auto status =
-                           result.values.at("values").read(at, &bits, 8);
+                           rf::read(result.results.at("values"), at, &bits, 8);
                        require(bits == expected[index++], "affine fixture");
                        return status;
                      },
@@ -304,8 +306,8 @@ void examples(ps::CpuNumericProfile profile) {
             "Whole change dirties all observed outputs");
   require(result.diagnostics.operation_timings.size() == 1 &&
               result.diagnostics.operation_timings[0].computed_elements == 4 &&
-              result.diagnostics.operation_timings[0].invocation_count == 1,
-          "partial consumer invokes one complete Whole callback");
+              result.diagnostics.operation_timings[0].invocation_count == 2,
+          "partial consumer invokes Need and one complete Whole computation");
   std::cout
       << "affine fixture, cache/fenv/lifetime, Whole support/dirty passed\n";
 }
@@ -339,9 +341,9 @@ void block_consistency(ps::CpuNumericProfile profile) {
                  [&](const auto& at) {
                    std::uint32_t want = 0, actual = 0;
                    require(
-                       expected.values.at("values").read(at, &want, 4).ok() &&
-                           whole.values.at("values")
-                               .read(at, &actual, 4)
+                       rf::read(expected.results.at("values"), at, &want, 4)
+                               .ok() &&
+                           rf::read(whole.results.at("values"), at, &actual, 4)
                                .ok() &&
                            want == actual,
                        "blocked exact bits");
@@ -366,8 +368,10 @@ void block_consistency(ps::CpuNumericProfile profile) {
               [&](const auto& at) {
                 std::uint32_t want = 0, actual = 0;
                 require(
-                    expected.values.at("values").read(at, &want, 4).ok() &&
-                        result.values.at("values").read(at, &actual, 4).ok() &&
+                    rf::read(expected.results.at("values"), at, &want, 4)
+                            .ok() &&
+                        rf::read(result.results.at("values"), at, &actual, 4)
+                            .ok() &&
                         want == actual,
                     "blocked sparse partition bits");
                 return ps::Status::success();
@@ -387,20 +391,15 @@ void block_consistency(ps::CpuNumericProfile profile) {
       b.descriptor(), b.region(), {12, {-4}}, b.storage()));
   const std::vector<ps::Value> strided_inputs{broadcast, reversed_m,
                                               reversed_b};
-  const std::vector<ps::Region> strided_regions{x.region(), m.region(),
-                                                b.region()};
   const auto strided_node = authored(profile);
-  ps::OperationInvocation invocation(strided_inputs, strided_regions,
-                                     strided_node.parameters, ps::Backend::Cpu,
-                                     {}, ps::Region::whole({5, 13, 4}));
   const auto sr =
-      take(fixture.registry->invoke(authored(profile).operation, invocation));
-  const auto se = take(fixture.registry->invoke(
-      authored(ps::CpuNumericProfile::Strict).operation, invocation));
-  require(sr.bytes().size() == se.bytes().size() &&
-              std::memcmp(sr.bytes().data(), se.bytes().data(),
-                          sr.bytes().size()) == 0,
-          "blocked zero/negative stride bits");
+      take(Fixture(strided_node, strided_inputs).run({{"values", all}}, false));
+  const auto se =
+      take(Fixture(authored(ps::CpuNumericProfile::Strict), strided_inputs)
+               .run({{"values", all}}, false));
+  require(
+      rf::bytes(sr.results.at("values")) == rf::bytes(se.results.at("values")),
+      "blocked zero/negative stride Result bits");
   auto padded = take(ps::BufferAllocator{}.allocate(x.bytes().size() + 1));
   std::memcpy(padded.data() + 1, x.bytes().data(), x.bytes().size());
   auto storage = std::move(padded).freeze();
@@ -412,75 +411,114 @@ void block_consistency(ps::CpuNumericProfile profile) {
     auto unaligned = take(
         ps::Value::from_storage(x.descriptor(), x.region(), layout, storage));
     const std::vector<ps::Value> direct_inputs{unaligned, m, b};
-    ps::OperationInvocation direct(direct_inputs, strided_regions,
-                                   strided_node.parameters, ps::Backend::Cpu,
-                                   {}, ps::Region::whole({5, 13, 4}));
-    auto actual =
-        take(fixture.registry->invoke(strided_node.operation, direct));
+    auto actual = take(
+        Fixture(strided_node, direct_inputs).run({{"values", all}}, false));
     require(
         all.visit(
                [&](const auto& at) {
                  std::uint32_t want = 0, bits = 0;
-                 require(expected.values.at("values").read(at, &want, 4).ok(),
-                         "expected read");
-                 std::memcpy(
-                     &bits,
-                     actual.bytes().data() + take(actual.byte_address(at)), 4);
+                 require(
+                     rf::read(expected.results.at("values"), at, &want, 4).ok(),
+                     "expected read");
+                 require(
+                     rf::read(actual.results.at("values"), at, &bits, 4).ok(),
+                     "unaligned Result read");
                  require(want == bits, "unaligned packed offset/origin bits");
                  return ps::Status::success();
                },
                4096)
             .ok(),
-        "direct shifted Whole result");
+        "shifted Whole Result");
   }
   std::cout << "Float32 block/tail, sparse rank-3 partitions, source NaN, "
                "zero/negative strides and caller fenv passed\n";
+}
+ps::OperationMetadata tensor_metadata(ps::ElementType type,
+                                      std::vector<std::uint64_t> shape) {
+  ps::SchemaTemplate schema;
+  schema.id = "manual.matrix.metadata";
+  ps::ResultTensorSpec tensor;
+  tensor.key = "data";
+  tensor.descriptor = {type, std::move(shape)};
+  schema.tensors.push_back(std::move(tensor));
+  ps::OperationMetadata result;
+  result.result_schema =
+      std::make_shared<ps::SchemaTemplate>(std::move(schema));
+  return result;
+}
+void rgba_vectors(Fixture* fixture) {
+  const auto& raw = fixture->backing[0];
+  fixture->backing[0] =
+      take(ps::Value::from_storage({ps::ElementType::Float32, {1, 1, 1, 1, 4}},
+                                   ps::Region::whole({1, 1, 1, 1, 4}),
+                                   {0, {16, 16, 16, 16, 4}}, raw.storage()));
+  auto schema = rf::source_schema(fixture->backing[0]);
+  auto& tensor = schema.tensors[0];
+  tensor.batch_axes = {1, 1};
+  tensor.descriptor.shape = {1, 1, 4};
+  tensor.layout.spatial = true;
+  tensor.layout.channel_axis = 2;
+  tensor.facets = {take(ps::encode_semantic(ps::rgba_semantics()))};
+  fixture->document.inputs[0].result_schema =
+      std::make_shared<ps::SchemaTemplate>(std::move(schema));
 }
 void whole_contract(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
   auto registry = ps::make_default_operation_registry();
   const auto node = authored(profile);
-  std::vector<ps::OperationMetadata> metadata{{{Type::Float32, {1, 1, 4}}, {}},
-                                              {{Type::Float32, {2, 4}}, {}},
-                                              {{Type::Float32, {2}}, {}}};
-  const auto traits =
-      take(registry->resolve_traits(node.operation, metadata, node.parameters));
+  std::vector<ps::OperationMetadata> metadata{
+      tensor_metadata(Type::Float32, {1, 1, 4}),
+      tensor_metadata(Type::Float32, {2, 4}),
+      tensor_metadata(Type::Float32, {2})};
+  const auto prepared = take(
+      registry->prepare_operation(node.operation, metadata, node.parameters));
+  const auto& traits = prepared->traits();
   require(traits.outputs[0].region_rule == ps::OperationRegionRule::Whole &&
-              traits.outputs[0].dependency_version == 0,
-          "matrix Whole registration");
+              traits.outputs[0].dependency_version == 2 &&
+              traits.outputs[0].result_schema &&
+              traits.outputs[0].result_schema->tensors[0].sample_shape() ==
+                  std::vector<std::uint64_t>({1, 1, 2}),
+          "matrix Whole Result registration and static preparation");
   for (unsigned kind = 0; kind < 4; ++kind) {
     auto bad = metadata;
     if (kind == 0)
-      bad[1].descriptor.element_type = Type::Float64;
+      bad[1] = tensor_metadata(Type::Float64, {2, 4});
     if (kind == 1)
-      bad[0].descriptor.shape = {1, 1, 5};
+      bad[0] = tensor_metadata(Type::Float32, {1, 1, 5});
     if (kind == 2)
-      bad[2].descriptor.shape = {3};
+      bad[2] = tensor_metadata(Type::Float32, {3});
     if (kind == 3)
-      bad[0].descriptor.shape = {UINT64_C(1) << 40, 4};
+      bad[0] = tensor_metadata(Type::Float32, {UINT64_C(1) << 40, 4});
     auto answer =
-        registry->resolve_traits(node.operation, bad, node.parameters);
+        registry->prepare_operation(node.operation, bad, node.parameters);
     require(!answer.ok() &&
                 answer.status().code == ps::ErrorCode::TypeMismatch &&
                 answer.status().detail.origin == ps::FailureOrigin::Schema,
-            "matrix metadata rejects invalid dtype/shape/count");
+            "matrix Result metadata rejects invalid dtype/shape/count");
   }
   const std::vector<ps::Value> inputs{
       array(Type::Float32, {1, 1, 4}, {0, 0, 0, 0}),
       array(Type::Float32, {2, 4}, std::vector<std::uint64_t>(8, 0)),
       array(Type::Float32, {2}, {0, 0})};
   Fixture fixture(node, inputs);
-  auto empty =
-      take(fixture.run({{"values", take(ps::Footprint::none({1, 1, 2}))}}));
-  require(empty.diagnostics.operation_timings.empty(),
-          "Empty skips Whole callback");
-  const std::vector<ps::Region> regions{inputs[0].region(), inputs[1].region(),
-                                        inputs[2].region()};
-  ps::OperationInvocation partial(inputs, regions, node.parameters,
-                                  ps::Backend::Cpu, {},
-                                  ps::Region({{0, 1}, {0, 1}, {1, 1}}));
-  require(!registry->invoke(node.operation, partial).ok(),
-          "direct ROI rejected");
+  auto empty = take(
+      fixture.run({{"values", take(ps::Footprint::none({1, 1, 2}))}}, false));
+  const auto facts = take(empty.results.at("values").descriptor());
+  require(facts.sealed() && facts.tensor_coverage(0).empty() &&
+              std::all_of(empty.diagnostics.operation_timings.begin(),
+                          empty.diagnostics.operation_timings.end(),
+                          [](const auto& timing) {
+                            return timing.computed_elements == 0;
+                          }),
+          "Empty publishes metadata without matrix arithmetic");
+  const auto partial = take(ps::Footprint::from_regions(
+      {1, 1, 2}, {ps::Region({{0, 1}, {0, 1}, {1, 1}})}));
+  const auto projected = take(fixture.run({{"values", partial}}, false));
+  require(
+      projected.diagnostics.operation_timings.size() == 1 &&
+          projected.diagnostics.operation_timings[0].computed_elements == 2 &&
+          projected.diagnostics.operation_timings[0].invocation_count == 2,
+      "partial Result demand computes one complete Whole output");
   for (bool narrow : {false, true}) {
     const auto type = narrow ? Type::Float32 : Type::Float64;
     const std::uint64_t one =
@@ -488,93 +526,94 @@ void whole_contract(ps::CpuNumericProfile profile) {
     const std::vector<ps::Value> values{
         array(type, {2, 2}, {one, one, one, one}),
         array(type, {2, 2}, {one, one, one, one}), array(type, {2}, {0, 0})};
-    const std::vector<ps::Region> demands{
-        values[0].region(), values[1].region(), values[2].region()};
-    for (bool payload : {false, true}) {
-      ps::ResourceLimits limits;
-      if (payload)
-        limits.capacity[ps::ResourceKind::Payload] = 8;
-      else
-        limits.maximum_work = narrow ? 8 : 1000;
-      ps::ResourceBudget budget(limits);
+    ps::ResourceBudget root;
+    auto control = std::make_shared<point_math_checks::Control>();
+    {
+      point_math_checks::Workflow workflow(node, values, {}, control);
+      root = workflow.root;
       {
-        ps::ResourceAllocationScope scope(budget);
-        ps::OperationInvocation call(
-            values, demands, node.parameters, ps::Backend::Cpu, {},
-            ps::Region::whole({2, 2}), budget.allocator());
-        auto answer = registry->invoke(node.operation, call);
-        require(!answer.ok() &&
-                    answer.status().code == ps::ErrorCode::ResourceExhausted,
-                "Whole resource failure");
+        const auto first = workflow.run();
+        require(
+            first.ok() && control->work > 0 && control->computation_polls == 1,
+            "measure actual matrix computation work");
       }
-      require(budget.statistics().live[ps::ResourceKind::Payload] == 0,
-              "Whole failed output and scratch released");
+      const auto required = control->work;
+      for (bool enough : {true, false}) {
+        control->work = 0;
+        control->computation_polls = 0;
+        control->maximum_work = enough ? required : required - 1;
+        const auto result = workflow.run();
+        require(result.ok() == enough && control->computation_polls == 1,
+                "exact matrix callback work threshold");
+        if (!enough)
+          require(result.status().code == ps::ErrorCode::ResourceExhausted &&
+                      result.status().reason == ps::FailureReason::WorkLimit,
+                  "matrix callback work failure retains its reason");
+      }
     }
+    point_math_checks::released(root);
+    {
+      ps::ResourceLimits limits;
+      limits.capacity[ps::ResourceKind::Payload] = 8;
+      point_math_checks::Workflow workflow(node, values, limits);
+      root = workflow.root;
+      const auto result = workflow.run();
+      require(!result.ok() &&
+                  result.status().code == ps::ErrorCode::ResourceExhausted,
+              "Whole Result output and workspace obey Payload budget");
+    }
+    point_math_checks::released(root);
   }
   ps::CancellationSource cancelled;
   cancelled.cancel();
-  ps::OperationInvocation call(inputs, regions, node.parameters,
-                               ps::Backend::Cpu, cancelled.token(),
-                               ps::Region::whole({1, 1, 2}));
-  require(registry->invoke(node.operation, call).status().code ==
-              ps::ErrorCode::Cancelled,
-          "Whole cancellation");
-  // Invalid typed source payload must fail validation, even if generic numeric
-  // NaNs would have a successful result.
+  {
+    auto control = std::make_shared<point_math_checks::Control>();
+    point_math_checks::Workflow workflow(node, inputs, {}, control);
+    require(workflow.run(cancelled.token()).status().code ==
+                    ps::ErrorCode::Cancelled &&
+                control->polls == 0,
+            "pre-cancelled matrix enters no continuation poll");
+  }
   for (bool invalid : {false, true}) {
     auto typed_inputs = inputs;
-    auto raw = array(Type::Float32, {1, 1, 4},
-                     {invalid ? UINT64_C(0x7fc00042) : 0, 0, 0, 0x3f800000});
-    typed_inputs[0] = take(ps::Value::from_storage(
-        raw.descriptor(), raw.region(), raw.layout(), raw.storage(),
-        {take(ps::encode_semantic(ps::rgba_semantics()))}));
-    ps::OperationInvocation typed(typed_inputs, regions, node.parameters,
-                                  ps::Backend::Cpu, {},
-                                  ps::Region::whole({1, 1, 2}));
-    const auto answer = registry->invoke(node.operation, typed);
-    require(answer.ok() != invalid, "Whole typed validation");
+    typed_inputs[0] =
+        array(Type::Float32, {1, 1, 4},
+              {invalid ? UINT64_C(0x7fc00042) : 0, 0, 0, 0x3f800000});
+    Fixture typed(node, typed_inputs);
+    rgba_vectors(&typed);
+    const auto answer = typed.run(
+        {{"values", take(ps::Footprint::all({1, 1, 1, 1, 2}))}}, false);
+    require(answer.ok() != invalid,
+            "Whole Result validates complete typed RGBA vectors");
+    if (!invalid) {
+      const auto alpha = take(ps::Footprint::from_regions(
+          {1, 1, 1, 1, 4},
+          {ps::Region({{0, 1}, {0, 1}, {0, 1}, {0, 1}, {3, 1}})}));
+      require(
+          take(answer.value().dependencies.potential_dirty("input0", alpha, 4))
+                  .at("values") == take(ps::Footprint::all({1, 1, 1, 1, 2})),
+          "typed validation alpha dirties all observed matrix output");
+    }
   }
-  // Synchronize cancellation to admitted callback work, without sleep timing.
   const std::vector<ps::Value> large{
       array(Type::Float32, {16384, 4},
             std::vector<std::uint64_t>(65536, 0x3f800000)),
       array(Type::Float32, {4, 4}, std::vector<std::uint64_t>(16, 0x3f800000)),
       array(Type::Float32, {4}, {0, 0, 0, 0})};
-  const std::vector<ps::Region> demands{large[0].region(), large[1].region(),
-                                        large[2].region()};
-  ps::ResourceBudget budget(ps::ResourceLimits{});
-  ps::CancellationSource cancellation;
-  std::atomic<bool> ready{false}, finished{false};
-  std::thread watcher([&] {
-    ready.store(true);
-    while (!finished.load() && budget.statistics().issued.work < 22)
-      std::this_thread::yield();
-    if (!finished.load())
-      cancellation.cancel();
-  });
-  while (!ready.load())
-    std::this_thread::yield();
-  ps::Status outcome;
-  try {
-    ps::ResourceAllocationScope scope(budget);
-    ps::OperationInvocation running(
-        large, demands, node.parameters, ps::Backend::Cpu, cancellation.token(),
-        ps::Region::whole({16384, 4}), budget.allocator());
-    outcome = registry->invoke(node.operation, running).status();
-  } catch (...) {
-    finished.store(true);
-    watcher.join();
-    throw;
-  }
-  finished.store(true);
-  watcher.join();
-  require(outcome.code == ps::ErrorCode::Cancelled &&
-              budget.statistics().issued.work >= 22 &&
-              budget.statistics().live[ps::ResourceKind::Payload] == 0,
-          "mid-callback cancellation releases Whole payload");
-  std::cout << "Whole/Empty, schema, direct ROI, work/payload failure and "
-               "cancellation passed\n";
+  point_math_checks::resources(node, large, 16384 * 4 * 4);
+  std::cout << "Result Whole/Empty, metadata, sparse projection, exact work, "
+               "typed validation, capacity/cancellation and all-Root cleanup "
+               "passed\n";
 }
+struct FailedSource final {
+  unsigned* calls;
+  explicit FailedSource(unsigned* count) : calls(count) {}
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase&) {
+    ++*calls;
+    return ps::Result<ps::ResultProgramPoll>(
+        ps::Status{ps::ErrorCode::OperationFailed, "required matrix producer"});
+  }
+};
 
 void strides_and_failures(ps::CpuNumericProfile profile) {
   using Type = ps::ElementType;
@@ -592,19 +631,19 @@ void strides_and_failures(ps::CpuNumericProfile profile) {
                                    m.storage())),
       take(ps::Value::from_storage(b.descriptor(), b.region(), {8, {-8}},
                                    b.storage()))};
-  const std::vector<ps::Region> regions{x.region(), m.region(), b.region()};
   fenv_t saved;
   require(fegetenv(&saved) == 0, "save matrix environment");
   for (auto mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
     require(fesetround(mode) == 0 && feclearexcept(FE_ALL_EXCEPT) == 0 &&
                 feraiseexcept(FE_DIVBYZERO) == 0,
             "matrix flags");
-    ps::OperationInvocation invocation(reversed, regions, node.parameters,
-                                       ps::Backend::Cpu, {},
-                                       ps::Region::whole({2}));
-    auto result = take(registry->invoke(node.operation, invocation));
+    auto control = std::make_shared<point_math_checks::Control>();
+    control->rounding = mode;
+    point_math_checks::Workflow workflow(node, reversed, {}, control);
+    auto result = take(workflow.run()).results.at("values");
+    const auto bytes = rf::bytes(result);
     std::array<std::uint64_t, 2> bits{};
-    std::memcpy(bits.data(), result.bytes().data(), 16);
+    std::memcpy(bits.data(), bytes.data(), 16);
     require(bits == std::array<std::uint64_t, 2>{0x4008000000000000,
                                                  0x4028000000000000},
             "all-port negative strides");
@@ -618,13 +657,16 @@ void strides_and_failures(ps::CpuNumericProfile profile) {
   failure.key = "manual.matrix_failed_source";
   failure.traits.input_count = 0;
   failure.traits.input_schema.clear();
-  failure.traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
-  failure.traits.outputs[0].fixed_output_shape = {2, 2};
-  failure.traits.outputs[0].output_element_type = Type::Float64;
-  failure.callback = [&](const auto&) {
-    ++calls;
-    return ps::Result<ps::Value>(
-        ps::Status{ps::ErrorCode::OperationFailed, "required matrix producer"});
+  auto& output = failure.traits.outputs[0];
+  output.output_schema.kind = ps::OperationPortKind::Result;
+  output.result_schema = *tensor_metadata(Type::Float64, {2, 2}).result_schema;
+  output.output_schema.result_schema_id = std::string(output.result_schema->id);
+  output.output_schema.result_schema_version = output.result_schema->version;
+  output.dependency_version = 2;
+  output.continuation_bytes = sizeof(FailedSource);
+  output.maximum_dependency_stages = 1;
+  failure.start_result = [&calls](const auto&, const auto& allocator) {
+    return ps::ResultContinuation::make<FailedSource>(allocator, &calls);
   };
   require(failed_registry->register_operation(std::move(failure)).ok() &&
               failed_registry->freeze().ok(),
@@ -633,17 +675,130 @@ void strides_and_failures(ps::CpuNumericProfile profile) {
                   {array(Type::Float64, {2}, {0x7ff0000000000042, 0}), m, b});
   fixture.registry = failed_registry;
   fixture.document.inputs.erase(fixture.document.inputs.begin() + 1);
-  fixture.bindings.inputs.erase(fixture.bindings.inputs.begin() + 1);
+  fixture.backing.erase(fixture.backing.begin() + 1);
   fixture.document.nodes[0].inputs[1] = ps::WorkflowNodeOutput{2, "value"};
   fixture.document.nodes.push_back({2, "manual.matrix_failed_source", {}, {}});
   auto answer = fixture.run({{"values", take(ps::Footprint::all({2}))}});
-  require(!answer.ok() &&
-              answer.status().message == "required matrix producer" &&
-              calls == 1,
-          "vector NaN cannot suppress matrix source failure");
+  require(
+      !answer.ok() && answer.status().code == ps::ErrorCode::OperationFailed &&
+          answer.status().message == "required matrix producer" && calls == 1,
+      "vector NaN cannot suppress matrix source failure");
   std::cout << "negative strides on all ports, fenv flags and required source "
                "failure after NaN "
                "passed\n";
+}
+void prepared_rebinding(ps::CpuNumericProfile profile) {
+  using Type = ps::ElementType;
+  Fixture fixture(
+      authored(profile),
+      {array(Type::Float64, {2}, {0x4000000000000000, 0x4008000000000000}),
+       array(Type::Float64, {2, 2},
+             {0x3ff0000000000000, 0, 0, 0x3ff0000000000000}),
+       array(Type::Float64, {2}, {0, 0})});
+  ps::GraphContext graph(fixture.document);
+  const auto compiled = take(ps::Compiler(fixture.registry).compile(graph));
+  const auto preparation = compiled.plan.steps()[0].prepared;
+  require(preparation != nullptr, "matrix plan owns static preparation");
+  ps::ExecutionContextConfig config;
+  config.cpu_workers = 1;
+  config.result_cache_bytes = 1048576;
+  config.managed_resources = ps::ResourceLimits{};
+  ps::ExecutionContext context(fixture.registry, config);
+  const auto root = take(context.resource_budget());
+  const ps::DemandQuery query{{"values", take(ps::Footprint::all({2}))}};
+  ps::ExecutionOptions options;
+  options.maximum_dependency_cache_work = UINT64_C(128) * 1024 * 1024;
+  auto bindings = fixture.bindings(root);
+  const auto cold = take(context.execute_fragments(
+      take(context.freeze(compiled.plan, bindings)), query, {}, options));
+  auto fresh = fixture.bindings(root);
+  const auto warm = take(context.execute_fragments(
+      take(context.freeze(compiled.plan, fresh)), query, {}, options));
+  require(warm.diagnostics.cache_hits > 0 &&
+              rf::bytes(cold.results.at("values")) ==
+                  rf::bytes(warm.results.at("values")),
+          "fresh source Results reuse matrix content with identical output");
+  const auto association = warm.results.at("values").association();
+  for (unsigned port = 0; port < 3; ++port) {
+    const auto current = fresh.inputs[port].result.object_id();
+    require(std::find(association.begin(), association.end(), current) !=
+                    association.end() &&
+                std::find(association.begin(), association.end(),
+                          bindings.inputs[port].result.object_id()) ==
+                    association.end(),
+            "cached matrix Result refreshes every source association");
+  }
+  auto demand = take(context.open_demand(compiled.plan, fresh));
+  const auto before = take(demand.request(query, {}, options));
+  const auto repeated = take(demand.request(query, {}, options));
+  require(before.results.at("values").object_id() ==
+              repeated.results.at("values").object_id(),
+          "same matrix demand retains its completed Result");
+  auto replacement = array(Type::Float64, {2, 2},
+                           {0x4000000000000000, 0, 0, 0x4008000000000000});
+  fresh.inputs[1].result = point_math_checks::source(
+      root, replacement, fixture.document.inputs[1].result_schema.get());
+  require(demand.replace_bindings(fresh).ok(),
+          "matrix input replacement preserves static schema");
+  const auto after = take(demand.request(query, {}, options));
+  double x = 0, y = 0;
+  require(
+      rf::read(after.results.at("values"), {0}, &x, 8).ok() &&
+          rf::read(after.results.at("values"), {1}, &y, 8).ok() && x == 4 &&
+          y == 9 && compiled.plan.steps()[0].prepared == preparation,
+      "dynamic matrix edit reuses preparation and recomputes actual samples");
+  const auto changed =
+      take(ps::Footprint::from_regions({2, 2}, {ps::Region({{1, 1}, {1, 1}})}));
+  require(take(after.dependencies.potential_dirty("input1", changed, 4))
+                  .at("values") == take(ps::Footprint::all({2})),
+          "replaced matrix keeps full Validation dirty support");
+  std::cout
+      << "Result preparation rebind, warm content, refreshed association, "
+         "completed demand and validation dirty support passed\n";
+}
+void retained_output(ps::CpuNumericProfile profile) {
+  ps::ResourceBudget root;
+  ps::ResultRef output;
+  ps::ResultTensorReadWindow window;
+  std::weak_ptr<const ps::CpuStorage> input_owner;
+  {
+    using Type = ps::ElementType;
+    Fixture fixture(
+        authored(profile),
+        {array(Type::Float64, {2}, {0x4000000000000000, 0x4008000000000000}),
+         array(Type::Float64, {2, 2},
+               {0x3ff0000000000000, 0x4000000000000000, 0xbff0000000000000, 0}),
+         array(Type::Float64, {2}, {0x4010000000000000, 0x4014000000000000})});
+    input_owner = fixture.backing[0].storage();
+    ps::GraphContext graph(fixture.document);
+    auto compiled = take(ps::Compiler(fixture.registry).compile(graph));
+    ps::ExecutionContextConfig config;
+    config.cpu_workers = 1;
+    config.result_cache_bytes = 0;
+    config.managed_resources = ps::ResourceLimits{};
+    ps::ExecutionContext context(fixture.registry, config);
+    root = take(context.resource_budget());
+    auto result = take(context.execute(compiled.plan, fixture.bindings(root)));
+    output = result.results.at("values");
+    window = take(output.acquire_tensor(take(output.descriptor()), 0,
+                                        ps::Region::whole({2})));
+  }
+  require(input_owner.expired(),
+          "owned matrix output does not retain retired source backing");
+  require(root.statistics().live[ps::ResourceKind::Payload] == 16,
+          "escaped matrix Result and window charge one output owner");
+  double value = 0;
+  require(rf::read(output, {0}, &value, 8).ok() && value == 12,
+          "matrix Result survives context and source retirement");
+  output = {};
+  auto row = take(window.row_run({1}));
+  std::memcpy(&value, row.data, 8);
+  require(value == 3 && root.statistics().live[ps::ResourceKind::Payload] == 16,
+          "authorized matrix window owns backing after Result release");
+  window = {};
+  point_math_checks::released(root);
+  std::cout << "source retirement, escaped Result/window, one Payload owner "
+               "and final all-Root release passed\n";
 }
 }  // namespace
 int main(int argc, char** argv) {
@@ -672,6 +827,8 @@ int main(int argc, char** argv) {
       examples(profile);
       block_consistency(profile);
       strides_and_failures(profile);
+      prepared_rebinding(profile);
+      retained_output(profile);
     }
     return 0;
   } catch (const std::exception& error) {

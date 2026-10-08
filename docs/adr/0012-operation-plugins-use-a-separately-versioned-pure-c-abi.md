@@ -17,27 +17,23 @@ startup configuration --> load library --> validate exact table --> copy traits/
                                       host validates/copies output
 ```
 
-Library-owned tables remain mapped while their destroy callback runs. The host owns copied metadata and validates generic `Value` callback output. Dependency programs can retain authorized input-owner handles until explicit release or state destruction; their per-poll input/output pointers remain borrowed. Planar callbacks write through host-owned row buffers, and GPU tokens retain allocations until release or callback retirement. These lifetimes differ and are detailed in [Plugin ABI](../kernel-architecture/Plugin-ABI.md).
+Library-owned tables remain mapped while their destroy callback runs. The host owns copied metadata and validates Result schemas and publication. C++ dependency programs can retain authorized input-owner handles until explicit release or state destruction; per-poll pointers remain borrowed. Result tensor windows and native GPU tokens retain backing owners until release or callback retirement. These lifetimes are detailed in [Plugin ABI](../kernel-architecture/Plugin-ABI.md).
 
 ## 3. Formal Contracts & APIs
 
 ```c
-#define PS_OPERATION_ABI_VERSION_11 11U
-uint32_t ps_operation_plugin_get_abi_version(void);
-const ps_operation_plugin_api_v11 *ps_operation_plugin_get_api_v11(void);
+#define PS_RESULT_OPERATION_ABI_VERSION_2 2U
+const ps_result_operation_plugin_api_v2 *
+ps_result_operation_plugin_get_api_v2(void);
 #define PS_DATA_PROVIDER_ABI_VERSION_1 1U
-#define PS_PLANAR_OPERATION_ABI_VERSION_3 3U
-uint32_t ps_data_provider_get_abi_version(void);
 const ps_data_provider_api_v1 *ps_data_provider_get_api_v1(void);
 ```
 
-Operation ABI v11 declares operation traits, parameter and port schemas, callbacks, output contracts, and native GPU services. The independently versioned provider ABI v1 publishes bounded data-schema records. The specialized planar interface is separately versioned as ABI v3. See [Plugin ABI](../kernel-architecture/Plugin-ABI.md) for record layouts and callback order.
+The operation-plugin C contract is the standalone Result ABI 2 table. It declares Result ports, tensor members, fields, staged callbacks, dependency relations, and Result publication. The data-provider C table remains independently versioned at ABI 1. The former base operation ABI 11 and planar operation C table have been removed; C++ `Value` and dependency APIs remain separate in-process interfaces. See [Plugin ABI](../kernel-architecture/Plugin-ABI.md) for the current table layout and callback contract.
 
-The loader checks exact ABI versions and structure sizes, natural pointer/array alignment, pointer/count pairs, bounded counts and key lengths, strict UTF-8 keys, checked arithmetic, closed enum/flag combinations, required callbacks, dense fixed-output representability, callback results, output byte/facet bounds, and exactly-once destroy ownership. It rejects trailing structure bytes. Multi-record updates use copy-then-swap, so allocation failure or a later invalid record cannot publish a valid prefix. A library guard acquires ownership immediately and invokes any safely readable destroy callback before closing each rejected library. Published plugin tables are destroyed before unload.
+The loader checks exact Result ABI version and structure size, natural pointer/array alignment, pointer/count pairs, bounded counts and key lengths, strict UTF-8 keys, checked arithmetic, closed enum/flag combinations, required callbacks, input/output schema constraints, parameter/facet bounds and exactly-once destroy ownership. Runtime publication checks actual tensor and field coverage. Multi-record updates use copy-then-swap, so allocation failure or a later invalid record cannot publish a valid prefix. A library guard acquires ownership immediately and invokes any safely readable destroy callback before closing each rejected library. Published plugin tables are destroyed before unload.
 
-Generic operation callbacks run synchronously. Their input views and output sink are borrowed for the call, and accepted generic Value output is copied or frozen before return. The first sink publication attempt claims the sink even when validation fails; a second attempt records a sticky violation. Host cancellation is checked first, followed by sink allocation failure, malformed image output, and duplicate publication. A backend-unavailable result after a published sink attempt does not request fallback: an accepted output becomes `OperationFailed`, while a rejected first attempt returns the sink’s typed failure. Unknown nonzero callback results become `OperationFailed`. CPU fallback is available only for an explicit backend-unavailable result from a GPU attempt whose copied traits permit it, before any sink publication attempt.
-
-Planar callbacks use host-owned row buffers and invocation-local scratch services; they do not return a generic Value through the operation sink. GPU allocation tokens retain backing ownership until release or callback retirement. Dependency programs may retain authorized input handles until release or state destruction, while ordinary service pointers expire at the synchronous poll boundary. The registry is frozen before compiler and executor use.
+Result callbacks receive borrowed query and phase-service records. The host checks Needs, typed relations, publication coverage, resource limits, cancellation, and backend fallback before exposing a Result. GPU allocation tokens and owning tensor windows retain backing ownership until release or callback retirement; ordinary service pointers expire when the callback returns. The registry is frozen before compiler and executor use. The former Base C ABI is not loaded as a fallback.
 
 ## 4. Non-Goals & Explicit Boundaries
 - ABI validation is not a sandbox, signature verification, package admission, or crash isolation.

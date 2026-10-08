@@ -9,22 +9,18 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-03B: replace selected channel slots
 
-Runtime update: FMT-03A/B are implemented as transactional public authoring
-helpers over FMT-02C. Scalar fills are fused into its internal mapped dependency
-plan under the fusion permission below; ordinary FMT-02C authoring still accepts
-only component/channel sources. Typed literals use exact-bit scalar providers.
-See [implementation and runnable workflow](../../../kernel-architecture/Channel-and-Color-Operations.md#fmt-03-channel-editing)
-and the [measured CPU performance](../../../../examples/channel_editing_performance/README.md).
-Proposed remains the specification decision status.
+Runtime contract: this installed helper expands transactionally into the
+registered FMT-02C Result operation. Scalar literals use prepared native bits
+through the registered `channel.scalar_literal_<profile>` provider. The helper
+has no separate operation key. The specification decision remains Proposed;
+the performance guide records focused Result smokes and labels its earlier Value/planar measurements as historical.
 
 Inherit the complete [FMT-03 family contract](FMT-03_channel_editing_contract.md).
-The proposed authoring helper `replace_channels` takes a graph, `base`, any
+The public authoring helper `replace_channels` takes a graph, `base`, any
 external spatial/scalar source edges, a static replacement list and the family
 parameters. It returns one immutable `values` edge. It expands into FMT-02C
 and any conforming scalar sources; there is no independent native key.
@@ -42,8 +38,8 @@ Source expressions may select an original base channel, an external component
 tensor, a selected external channel or an explicit scalar constant. External
 spatial sources match the base nonchannel shape and coordinate description under
 the family rules; their own channel axes may differ. Scalars are same-dtype
-shape-[1] sources, with typed literal shortcuts. A/B's positive-rank, checked
-extent and no-implicit-broadcast rules apply.
+shape-[1] sources, with typed literal shortcuts. A/B's positive cell-rank, checked extent and no-implicit-broadcast rules
+apply; batch plus cell rank is at most 8.
 
 For output slot k, use its replacement expression if listed and original base
 channel k otherwise. Every expression observes the original immutable inputs.

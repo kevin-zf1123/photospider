@@ -74,6 +74,7 @@ class PHOTOSPIDER_API CpuStorage final {
   friend class BufferAllocator;
   friend class MutableBuffer;
   friend class Value;
+  friend class ResultRef;
   std::shared_ptr<const void> domain_;
   std::vector<std::shared_ptr<const void>> allocation_scopes_;
   CpuStorage() = default;
@@ -135,6 +136,12 @@ class PHOTOSPIDER_API BufferAllocator final {
   /** @brief Reports whether storage belongs to this allocator's accounting
    * domain. */
   bool owns(const CpuStorage& storage) const noexcept;
+  /** @brief Tests whether both allocators share a nonempty accounting domain.
+   * Limited allocators and native/resource descendants of one Root can compare
+   * equal. The test does not compare quotas or provenance scopes, retain either
+   * allocator, or grant access to payload owned by that domain.
+   */
+  bool same_owner(const BufferAllocator& other) const noexcept;
   /** @brief Allocates exactly size zero-initialized bytes after reservation.
    * Local size, quota and allocation exhaustion use ResourceExhausted with
    * CapacityLimit. External reservation/native failures preserve their Status.
@@ -186,9 +193,13 @@ class PHOTOSPIDER_API BufferAllocator final {
   friend class execution_internal::MemoryReservation;
   BufferAllocator limited_impl(std::uint64_t maximum_bytes,
                                FailureObserver failure, bool requested) const;
+  using AllocationCommit =
+      std::function<void(const std::shared_ptr<void>&, std::uint64_t)>;
   std::function<Result<MutableBuffer>(std::uint64_t, const Reserve&,
-                                      std::shared_ptr<const void>)>
+                                      std::shared_ptr<const void>,
+                                      const AllocationCommit&)>
       native_allocate_;
+  AllocationCommit allocation_committed_;
   Reserve reserve_;
   // Alternate root accounting for a host-visible native allocation. Scoped
   // allocators wrap both policies with the same live-byte counter.

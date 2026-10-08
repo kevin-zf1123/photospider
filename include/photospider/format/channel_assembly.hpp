@@ -10,9 +10,15 @@
 #include "photospider/format/channel.hpp"
 
 namespace ps::format {
-/** @brief Invocation-local FMT-02 metadata and layout policy. Helpers serialize
- * defaults explicitly. Output interpretation relabels bytes without conversion.
- * Profiles: strict, accelerated_apple_silicon, accelerated_x86_64.
+/** @brief Static FMT-02 metadata, output-layout and CPU-profile policy.
+ *
+ * The helpers serialize these options into an invocation-local graph node and
+ * perform no sample reads. `output_description` can define result semantics;
+ * execution copies source element bits without color or numeric conversion.
+ * `auto` retains a view when the complete requested mapping is representable,
+ * otherwise it materializes requested samples. `view` requires a legal retained
+ * view; `materialize` always copies requested samples. Profiles are `strict`,
+ * `accelerated_apple_silicon`, and `accelerated_x86_64`.
  */
 struct ChannelAssemblyOptions final {
   std::string metadata_mode = "respect";
@@ -21,14 +27,24 @@ struct ChannelAssemblyOptions final {
   std::string layout = "auto";
   std::string profile = "strict";
 };
-/** @brief C source structure; component has no axis; channels resolves an axis
- * from metadata or the explicit assertion. Raw requires an explicit axis. */
+/** @brief Static source shape for one FMT-02C input.
+ *
+ * Each input Result carries one tensor. `component=true` describes an input
+ * with no channel axis and requires `axis` to be empty. Otherwise `axis`
+ * optionally asserts its channel cell axis, excluding the batch prefix; an
+ * empty axis resolves from effective metadata, except raw mode requires it.
+ */
 struct ChannelSourceStructure final {
   bool component = false;
   std::optional<std::uint32_t> axis;
 };
-/** @brief One C row; selector is index decimal text, or exact UTF-8 name/role.
- * Destinations must cover [0,row_count) once. Sources may repeat. */
+/** @brief One static FMT-02C source-to-destination row.
+ *
+ * `selector` is canonical unsigned decimal for `index`, or an exact UTF-8
+ * `name`/`role` value. Every destination in `[0, mapping.size())` occurs once;
+ * source selections may repeat. `destination_component` supplies explicit
+ * semantic fields for this result slot.
+ */
 struct ChannelMapping final {
   std::uint32_t input = 0;
   std::string match = "index";
@@ -86,9 +102,15 @@ inline Result<WorkflowNodeOutput> append_assembly(
   return Answer(WorkflowNodeOutput{id, "values"});
 }
 }  // namespace detail
-/** @brief FMT-02A: insert axis into equal component shapes. Does no payload
- * I/O. On failure the document is unchanged; allocation may throw bad_alloc.
- * Returned edge is independently connectable; compile validates all metadata.
+/** @brief Append FMT-02A for ordered, equal-shape component Results.
+ *
+ * Inputs are single-tensor Results. The helper accepts 1 to 1024 input Results.
+ * `axis` is the inserted output cell-axis index and excludes the Result batch
+ * prefix. The complete sample rank, including batch and cell axes, is at
+ * most 8. The helper reads no samples. It returns a connectable `values` edge
+ * on success; validation of connected Result descriptors occurs at compilation
+ * and execution. On a returned error the document is unchanged. Allocation
+ * failures may throw `std::bad_alloc`; callers must serialize document writes.
  */
 inline Result<WorkflowNodeOutput> assemble_channels(
     WorkflowDocument& document, std::vector<WorkflowInput> inputs,
@@ -97,9 +119,17 @@ inline Result<WorkflowNodeOutput> assemble_channels(
                                  {{"axis", static_cast<std::int64_t>(axis)}},
                                  options);
 }
-/** @brief FMT-02B: concatenate channel blocks; null axes resolve from metadata.
- * An empty axes vector omits all assertions. Compile rejects mismatched shapes,
- * dtype or axes. Same exception/ownership contract as assemble_channels.
+/** @brief Append FMT-02B for ordered channel-block concatenation.
+ *
+ * Inputs are single-tensor Results. `axes` is empty to resolve all input cell
+ * axes from metadata, or supplies one optional cell-axis assertion per input;
+ * null entries resolve from metadata.
+ * `output_axis` is a cell-axis index too. All axis values exclude the Result
+ * batch prefix. Complete sample rank, including
+ * batch and cell axes, is at most 8. The helper reads no samples. Compilation
+ * and execution validate dtype, batch prefix, remaining shape and axis
+ * assertions. Error, exception and document-mutation guarantees match
+ * `assemble_channels`.
  */
 inline Result<WorkflowNodeOutput> concatenate_channels(
     WorkflowDocument& document, std::vector<WorkflowInput> inputs,
@@ -117,9 +147,16 @@ inline Result<WorkflowNodeOutput> concatenate_channels(
   return detail::append_assembly(document, "concatenate", std::move(inputs),
                                  std::move(parameters), options);
 }
-/** @brief FMT-02C: copy explicitly selected components into destination slots.
- * Structure and mappings are static, canonical v1 String records. Helpers do
- * not infer structure or expand constant/broadcast inputs. No sample I/O.
+/** @brief Append FMT-02C with a complete static source-to-slot mapping.
+ *
+ * `inputs` are Results with one tensor each. `structure` describes each input,
+ * and `mapping` covers
+ * every output slot exactly once. `output_axis` and source axes index cell
+ * axes, excluding the Result batch prefix; complete sample rank is at most 8.
+ * The helper serializes canonical records but does not read samples, infer
+ * missing source structure, or add broadcast sources. It returns a connectable
+ * `values` edge. On a returned error the document is unchanged; allocation may
+ * throw `std::bad_alloc` and callers must serialize document writes.
  */
 inline Result<WorkflowNodeOutput> assemble_mapped_channels(
     WorkflowDocument& document, std::vector<WorkflowInput> inputs,

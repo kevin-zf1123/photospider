@@ -4,11 +4,14 @@
 
 ## 已实现条目
 
-PNT-05A `local_inpaint_navier_stokes` 已提供 native Apple Silicon 与可选 OpenCV
-两个算子。输入为不透明线性 RGBA 与二值 hole mask，必填 Int64 `radius` 为
-1..32，使用 Whole 依赖。详见[规格书](op_specs/PNT-05A_local_inpaint_navier_stokes.md)
-及[实现、公开 workflow 与验收说明](inpaint-ns-implementation.md)。验收说明保留了
-推断阶段检查和部分取消、缓存测试的覆盖边界。
+PNT-05A 已提供 native CPU operation 和可选 OpenCV 4.12.0 adapter。两者都接收
+带 `photospider.image` v1 schema 的 image 与 coverage Result，要求不透明线性
+RGBA、二值 mask 和必填 Int64 `radius`（1..32），并使用 Whole 需求及
+CompleteBundle 输出。Whole Result 保留 batch axes、接受的图像 schema、语义
+facets 与 resources；该 profile 只接受 canonical linear-sRGB RGBA，不接受
+CMYK 或 ICC ColorArray。ROI 只影响结果采集，不缩小算法的全域验证。native 与 adapter 的受控内存边界
+不同；GPU 不支持。详见[规格书](op_specs/PNT-05A_local_inpaint_navier_stokes.md)
+及[实现、公开 workflow 与当前验证](inpaint-ns-implementation.md)。
 
 ## 算子目录
 

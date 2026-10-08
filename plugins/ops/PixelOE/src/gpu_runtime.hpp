@@ -25,6 +25,6 @@ struct GpuKernel {
 const std::vector<GpuKernel>& gpu_kernels();
 uint64_t gpu_work_bound(const GpuKernel&, std::array<uint32_t, 3>,
                         const Arguments&);
-void dispatch_gpu(const ps_planar_services_v3*, const char*,
+void dispatch_gpu(const ps_result_services_v2*, const char*,
                   std::array<uint32_t, 3>, const Arguments&);
 }  // namespace px

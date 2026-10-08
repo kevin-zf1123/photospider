@@ -44,7 +44,7 @@ slots. Every result is immutable and bit preserving. Canonical images use the
 DAG's planar storage/tile geometry; generic constant views may have zero strides.
 A forced impossible view fails with `ViewUnavailable`.
 
-All seven native dtypes and rank 1..8 are supported. Input ports and output slots
+All seven native dtypes are supported. Cell rank plus batch rank is at most 8. Input ports and output slots
 are bounded to 1024, workflow nodes to 65536, each String parameter to 8192 bytes,
 and logical tensors to 2^40 elements; encoded metadata may impose a tighter
 limit. Invalid selections/metadata return `InvalidArgument`; mismatched
@@ -53,14 +53,6 @@ allocation exceptions; callers serialize document mutation. No sample I/O occurs
 while authoring. Descriptor checks cover all inputs, including unused base/source
 channels. Runtime Data and dirty support follow only effective source mappings.
 
-The deterministic integration suite covers all dtype/rank/axis combinations,
-exact regional dependencies, NaN/signed-zero bytes, changing scalars, groups,
-raw/override boundaries, literal and graph limits, mixed axes, views and errors:
-
-```sh
-cmake --build build --target test_channel_editing -j 8
-ctest --test-dir build -R '^test_channel_editing$' --output-on-failure
-```
-
-See the [performance workflow](../channel_editing_performance/README.md) for the
-FP32 128x128 and 4096x4096 continuous/tiled matrix and CPU profiling.
+The deterministic integration suite covers dtype/rank/axis combinations,
+exact regional dependencies, NaN and signed-zero bytes, changing scalar values,
+groups, metadata modes, literal and graph limits, views, cancellation and errors.

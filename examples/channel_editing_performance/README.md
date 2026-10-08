@@ -14,7 +14,93 @@ configured CPU worker and the DAG-wide 128x128 tile geometry. No private worker
 pool, completed-result cache, or custom ISA copy kernel is used. These are local
 macOS CPU measurements; x86/WSL, native Windows and GPU were not measured here.
 
-## Reproduce
+The latency and memory tables below record earlier Value/planar execution and
+are historical measurements, not Result ABI 2 timing or memory evidence. FMT-03A/B
+are current public authoring helpers over the registered FMT-02C Result key.
+Current Result usage and metric interpretation are documented separately below.
+
+
+## Current Result driver
+
+The driver now runs FMT-03 public helpers through the registered FMT-02C Result
+operation and the public `WorkflowDocument`, `Compiler` and `ExecutionContext`
+APIs. It keeps the argument order `size member storage request layout
+repetitions profile`. For example:
+
+```sh
+cmake --build build --target photospider_channel_editing_performance -j 8
+./build/examples/channel_editing_performance/photospider_channel_editing_performance \
+  130 fill tiled roi materialize 1 strict
+```
+
+Members A, B, repeat, fill, subset, insert and identity retain their documented
+source and output mappings. The program checks requested samples against an
+independent byte oracle. It uses one CPU worker and no custom thread pool.
+
+`source_logical_bytes` sums `Footprint.element_count() * sizeof(float)` over
+all bound inputs in the public `run.dependencies.source_support()` map. Both
+drivers use Float32 sources, so it measures exact declared logical support, not
+physical I/O or output copy traffic. `source_payload_bytes` and `source_metadata_bytes` report Root live
+payload and metadata after source setup, before benchmark runs.
+`run_live_payload_bytes` and `run_live_metadata_bytes` are live-resource deltas
+above that baseline while the current execution result remains alive. They cover
+all resources retained under the Root at the sampling point, not output storage
+alone. `root_peak_payload_bytes` and `root_peak_metadata_bytes` report cumulative
+Root lifetime peaks. They include source setup and earlier runs, and the first-run
+oracle window can contribute; they are not per-run peaks. These managed resource
+values are not RSS. The CSV columns are `size`, `dtype`, `member`,
+`storage`, `request`, `layout`, `profile`, `repetitions`, `compile_us`,
+`first_us`, `p50_us`, `p95_us`, `core_p50_us`, `source_logical_bytes`,
+`source_payload_bytes`, `source_metadata_bytes`, `run_live_payload_bytes`,
+`run_live_metadata_bytes`, `root_peak_payload_bytes`, and
+`root_peak_metadata_bytes`. The public Result API does not expose output virtual
+reservation or a separate copied-byte counter.
+
+The latency tables, profiler traces and memory tables below are historical
+Value/planar-driver measurements. Fields such as `copied_bytes`, `output_virtual`
+and modeled-output totals describe that driver; they are absent from the current
+Result CSV.
+
+
+### Current Result smoke coverage
+
+The current Result driver was built and run in 11 small strict-profile smoke
+cases, each with one measured repetition after two warmups. Every case passed
+the independent byte oracle. This is focused execution evidence, not the former
+full performance matrix or profiling evidence.
+
+| Member | Smoke configuration |
+| --- | --- |
+| Editing A | `128 A tiled full materialize` |
+| Editing B | `128 B continuous one materialize` |
+| Repeat | `128 repeat continuous full auto` |
+| Fill | `130 fill tiled roi materialize` |
+| Identity | `128 identity tiled full view` |
+| Subset | `130 subset tiled roi auto` |
+| Insert | `128 insert continuous one materialize` |
+
+The other four cases cover FMT-02 assembly and shared-owner view and are listed
+in its [performance guide](../channel_assembly_performance/README.md). FMT-03
+fill ROI reports 112 logical source bytes and subset ROI reports 72. Identity
+reports zero additional live payload at the observation point. No 4096x4096
+Result run, complete matrix, or new Result profile has been measured.
+
+
+## Full Result matrix
+
+The standalone example target also builds against the installed public kernel package:
+
+```sh
+cmake --install build/kernel-dev --prefix build/kernel-dev/consumer-install
+cmake -S examples/channel_editing_performance -B build/channel-editing-performance-consumer \
+  -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/consumer-install" \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build/channel-editing-performance-consumer --target photospider_channel_editing_performance -j 8
+```
+
+The installed-package target builds successfully. The following command runs the
+current Result matrix. Only the smoke cases above were run for this update; the
+full matrix and profiler were not run.
 
 ```sh
 cmake --build build --target photospider_channel_editing_performance -j 8
@@ -61,7 +147,7 @@ publication. Public execution also includes bindings, scheduling and admission.
 Raw per-execution samples are in each case's `.log`; CSV includes compile/first
 latency, source/copied bytes, backing, virtual span, metadata and modeled peak.
 
-## Initial delivery serial results
+## Historical Value/planar serial results
 
 All 45 cases pass. Latencies are **microseconds**, p50 / p95.
 
@@ -113,7 +199,7 @@ All 45 cases pass. Latencies are **microseconds**, p50 / p95.
 | 4096² | insert | tiled | one | materialize/strict | 5306.500 / 5375.750 |
 | 4096² | insert | tiled | roi | materialize/strict | 25.750 / 38.333 |
 
-## Optimization evidence
+## Historical Value/planar optimization evidence
 
 Before optimization, fill/4096/tiled/full/materialize had **49.973 ms p50**
 (49.704 ms core) over five samples. The final matching case has **20.541 ms p50**
@@ -160,7 +246,7 @@ path, exports execution-stack cycle samples and rejects empty/failed recordings.
 Both before/after recordings completed without reported run issues. Compiler
 activity outside the profiled process is not included in the filtered stacks.
 
-## Memory and exact support
+## Historical Value/planar memory and exact support
 
 These are controlled capacities, not RSS or memory-bus traffic. Every case keeps
 its complete source allocation alive. Materialized output virtual span is the
@@ -184,7 +270,7 @@ output planes. The unrequested samples in those pages are not valid. Identity
 views copy zero bytes and retain the original 256 MiB owner. Optimization changes
 copy traversal, not output backing or lifetime accounting.
 
-## Validation and artifacts
+## Historical Value/planar validation and artifacts
 
 Seven focused CTests pass: channel editing, assembly, extraction, planar workflow,
 compiler, Value and execution demand. The minimal public example checks the offset

@@ -13,63 +13,17 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+repository_commit: current working tree
 ---
 
 # NUM-11E: reduce_count
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+Inherit the [NUM baseline](NUM_common_contract.md) and [NUM-11 shared contract](NUM-11_reduction_contract.md). Count is discrete and exact in every profile.
 
-Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+`numeric.reduce_count_*` takes one Result containing exactly one tensor member at any key. Static `axes` chooses a nonempty set of distinct axes. The `values` output is an Int64 Result using schema `photospider.tensor` and member `samples`; it has the input rank, reduced extents set to one, ordinary axes and empty facets. Every group value is the product of the input extents on the reduced axes. Since input element count is at most 2^40, each count fits Int64.
 
-Count logical elements per reduction group using only input metadata. Accept
-UInt8/Int64/Float32/Float64 `input`; output `values` is Int64, with axes/shape and
-fixed keepdims semantics from the [reduction contract](NUM-11_reduction_contract.md).
-Only axes is a static parameter; there is no dtype or finite/nonzero-count mode.
-Output facets are empty. Each result equals product(input.shape[j], j in axes),
-an exact integer in [1,2^40]. All three profiles produce identical value bits.
+Count reads only static schema metadata. It requests no runtime input ports, performs no sample-data or typed-payload validation, and does not schedule source sample producers solely to calculate count. Complete input schema and axes validation still apply. Byte-only edits do not invalidate count. Static schema shape/type metadata and axes determine its output and are checked during specialization and seal; changing them requires a newly specialized and sealed plan. The empty runtime input projection does not subscribe to a Descriptor Need. Empty demand publishes no values and does no runtime source work.
 
-## Metadata-only dependence and storage
+The kernel calculates the checked extent product in O(rank), allocates one 8-byte Int64 owner and publishes the complete keepdims shape with zero strides. A dense physical output is not required. Its output mapping, coverage and lifetime follow the shared immutable Result rules. Resource, work and cancellation failures retain host statuses and release unpublished storage.
 
-All elements count, including zeros, NaNs and infinities; no element needs to be
-read to establish this fact. Use Descriptor/metadata support only, with empty
-Data/Control/numeric Validation support. An upstream numeric failure is not
-requested simply to produce this count. Metadata/schema validation still occurs.
-Changing sample bytes without changing shape does not invalidate count. Shape,
-axes/profile and metadata dependencies belong to output inference/cache identity.
-Empty output requests publish no values and request no upstream sample work.
-
-Compute the checked axis product with O(rank) work. The implementation may own
-one Int64 count and expose one complete immutable zero-stride output before
-projection; no dense physical layout is promised. Account actual
-count backing/output fragments and metadata, and do not reserve the entire
-logical payload merely to express repeated counts. Keep exact Region origins and
-coverage, with no implicit missing data. Final owners may outlive the context.
-
-## Errors and acceptance
-
-Compile/preflight rejects unsupported metadata, invalid axes and source shape
-outside the common cap. No floating domain or value-validation error is produced.
-Resource/cancellation errors retain existing Status semantics; poll before
-publication and during any materialized chunk fill, releasing unpublished work
-on failure. Do not use an input-reader helper that implicitly executes upstream
-sample computation.
-
-Fixture: input shape [2,3,4], axes="1,2" produces Int64 shape [2,1,1]
-with values [[[12]],[[12]]], independently of sample bytes. An instrumented
-upstream whose numeric evaluation would fail must show zero sample reads. Test
-all dtypes, NaN/Inf/zero-filled source descriptors, full reduction, axis order
-normalization, invalid/duplicate axes, shape changes, byte-only source changes,
-partial output requests, resource cleanup and count-owner lifetime through the
-public manual target. The formal keys execute Whole and preserve the numerical rules above. See
-[NUM-11 Whole execution](../reductions-whole.md) for current public workflow,
-validation and timing. Earlier regional platform records predate Whole.
+For input shape `[2,3,4]` and `axes="1,2"`, output shape is `[2,1,1]` and both groups contain 12. For full reduction, output keeps rank with every extent set to one. The current fixture verifies count from a `2^40`-element schema whose upstream producer would fail if started. The producer remains unstarted, source observations and association are empty, the `[2^20,1]` output reads `2^20` at both ends, and the output adds exactly 8 payload bytes. First and last values share a pointer; the result remains readable after context retirement and releases the 8-byte backing with its last owner. See [NUM-11 Whole execution](../reductions-whole.md) for the test command and wider evidence boundary.

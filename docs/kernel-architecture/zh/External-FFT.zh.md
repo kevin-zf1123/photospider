@@ -4,7 +4,7 @@
 
 ## 1. 模块边界与职责
 
-安装后的 CPU operation factory 使用必需临时存储和有界窗口实现二维实数 FFT。`fft_operation.hpp` 提供公共工厂；coordinator 负责 Result 发布、根资源准入和输入关联。变换期间 operation 持有两代复数临时数据；输出 Result 独立于 execution context 和可选共享缓存保留 backing 与上游关联。
+安装后的 CPU operation factory 使用必需临时存储和有界窗口实现二维实数 FFT。`fft_operation.hpp` 提供公共工厂；coordinator 负责 Result 发布、Root 资源准入和输入关联。变换期间 operation 持有两代复数临时数据；每个输出 Result 拥有其发布的 backing。
 
 ## 2. 核心数据结构与内存布局
 
@@ -23,27 +23,36 @@ Spectrum samples 是 Float64 实部/虚部对，按声明的慢到快轴顺序�
 
 | Key | 输入 | 输出 |
 | --- | --- | --- |
-| `fft.forward_real` | 无 facet、有限 Float64 HW | 完整 Spectrum |
-| `fft.import_response` | 无 facet 的 Float64 HW2 或 HK2 | 按显式频率基底构造的完整 Spectrum |
+| `fft.forward_real` | 一个 unbatched、无 facet、无 fields 的 Float64 HW tensor Result | 完整 Spectrum |
+| `fft.import_response` | 一个 unbatched、无 facet、无 fields 的 Float64 HW2 或 HK2 tensor Result | 按显式频率基底构造的完整 Spectrum |
 | `fft.multiply` | 两个描述完全一致的完整 Spectrum | 完整逐点复数乘积 |
 | `fft.inverse_real` | 完整 Spectrum | 实部投影及实测虚部残差 |
+
+ForwardReal 与 ImportResponse 的数值输入依据 tensor type 和精确 shape 验证，不要求固定的输入 Result schema ID。Multiply 和 InverseReal 的 Spectrum 输入必须匹配完整声明 schema。
 
 `photospider.fft_real_output` 保存 H*W 个 Float64 像素和一个 Float64 `imaginary_residual`。`fft_inverse_identity_v1` facet 保留完整 Spectrum 契约。残差为 `max(abs(imag(inverse/HW)))`，是实测诊断值，不是误差证书。
 
 ## 3. 调度与状态机
 
-Producer 在 source 读取或 continuation 分配前检查完整 Spectrum identity。Width 为 4 和 5 时 packing 后列数都是 3，因此 packed 样本数不能证明 identity 相同。Registry 也会在 producer 启动前检查推导的输出 metadata。Whole-transform dependency support 为 Conservative；输入编辑可以使所有输出变脏。
+Producer 在 source 读取或 continuation 分配前检查完整 Spectrum identity。Width 为 4 和 5 时 packing 后列数都是 3，因此 packed 样本数不能证明 identity 相同。Registry 也会在 producer 启动前检查推导的输出 metadata。Whole-transform dependency support 为 Conservative；输入编辑可以使所有输出变脏。Tensor support 按逻辑 tensor sample 定位，Field support 按字段行定位，metadata 使用独立 Descriptor support。每个 Spectrum field row 存储一对实部/虚部，因此 relation 计数使用复数行数，而非单独 Float64 分量数。
 
 ```text
-real source --forward：spool A -> transform -> transpose A/B -> 第二轴--> Spectrum
-response Value --import_response：直接有界复制 ------------------------> Spectrum
+variant Result binding
+       |                                      |
+       v                                      v
+pixels source --Need--> Float64 HW Result   response source --Need--> Float64 HW2/HK2 Result
+       |                                      |
+       +-------------------+------------------+
+                           v
+ real source --forward：spool A -> transform -> transpose A/B -> 第二轴--> Spectrum
+ response Result --import_response：直接有界复制 ------------------------> Spectrum
 Spectrum + Spectrum --multiply：有界逐点复数乘法 ---------------------> Spectrum
 Spectrum --inverse：展开半谱 -> transform -> transpose A/B -> 投影 ---> spatial Result
 Spectrum/Result 校验 --------------------------------------------+-----> 发布
                                                                   +-----> 拒绝
 ```
 
-Forward 和 inverse 创建两代完整复数临时数据，各扩展到经检查的 `16*H*W` 字节。Import 和 multiply 不运行 DIF。创建、扩展、依赖写入和 drain 是不同 coordinator stage。窗口上限为 `min(user_page_bytes,1024)`，且至少能容纳一个 16 字节复数记录。Callback workspace 为 4096 字节；读回复、保留的窗口 metadata、输出批次和 gather buffer 另计入根预算。Transpose、odd-leaf 输出和最终 gather 分批处理，不覆盖源 generation 后续仍需读取的值。每个 producer 的 stage 上限由工厂声明的 1,000,000、`DependencyLimits::maximum_stages`（默认 4096）和根 stage budget 共同约束。运行未完成时不会发布完整 Result。必需 scratch 在最后一次复制后释放；Result association 和逃逸的 read window 会把 backing 保留到最后一个 owner 释放。
+Forward 和 inverse 创建两代完整复数临时数据，各扩展到经检查的 `16*H*W` 字节。Import 和 multiply 不运行 DIF。创建、扩展、依赖写入和 drain 是不同 coordinator stage。窗口上限为 `min(user_page_bytes,1024)`，且至少能容纳一个 16 字节复数记录。Callback workspace 为 4096 字节；读回复、保留的窗口 metadata、输出批次和 gather buffer 另计入 Root。Transpose、odd-leaf 输出和最终 gather 分批处理，不覆盖源 generation 后续仍需读取的值。每个 producer 的 stage 上限由工厂声明的 1,000,000、`DependencyLimits::maximum_stages`（默认 4096）和 Root stage budget 共同约束。运行未完成时不会发布完整 Result。必需 scratch 在最后一次复制后释放。Result association 只存储源 ObjectId，不保活源 payload。已加载的 field `CpuStorage` 会保留其 read plan 和 Result 实现，使字段 backing 在 context 和 Result wrapper 释放后仍可读取，直到最后一个 window 释放。
 
 ## 4. 算法与数学
 

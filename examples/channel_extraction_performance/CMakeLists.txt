@@ -1,3 +1,8 @@
+cmake_minimum_required(VERSION 3.21)
+project(PhotospiderChannelPerformance LANGUAGES CXX)
+if(NOT TARGET Photospider::kernel)
+  find_package(Photospider 0.32 CONFIG REQUIRED COMPONENTS kernel)
+endif()
 add_executable(photospider_channel_performance main.cpp)
 target_link_libraries(photospider_channel_performance PRIVATE Photospider::kernel)
 target_compile_features(photospider_channel_performance PRIVATE cxx_std_17)

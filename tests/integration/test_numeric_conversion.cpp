@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <functional>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -16,8 +18,10 @@
 #include <xmmintrin.h>
 #endif
 
+#include "../support/test_support.hpp"
+#include "channel_extraction_workflow/source.hpp"
+#include "numeric_workflow/icc_fixture.hpp"
 #include "photospider/photospider.hpp"
-#include "support/test_support.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -28,107 +32,180 @@ std::vector<std::uint8_t> pack(const std::vector<T>& values) {
   std::memcpy(bytes.data(), values.data(), bytes.size());
   return bytes;
 }
+using channel_fixture::take;
+const ResultTensorSpec& tensor(const ResultRef& result) {
+  return result.schema().tensors[0];
+}
+Status read_bytes(const ResultRef& result, const Region& region,
+                  std::uint8_t* out, std::size_t bytes) {
+  const auto packed = channel_fixture::read(result, region);
+  if (packed.size() != bytes)
+    return {ErrorCode::Internal, "test read size"};
+  std::memcpy(out, packed.data(), bytes);
+  return Status::success();
+}
 template <class T>
-T read(const Value& value, const std::vector<std::uint64_t>& at) {
-  auto address = value.byte_address(at);
-  if (!address.ok())
-    std::abort();
-  T result;
-  std::memcpy(&result, value.bytes().data() + address.value(), sizeof(T));
-  return result;
+T read(const ResultRef& result, const std::vector<std::uint64_t>& at) {
+  std::vector<RegionDimension> dims;
+  for (auto x : at)
+    dims.push_back({x, 1});
+  auto window =
+      take(result.acquire_tensor(take(result.descriptor()), 0, Region(dims)));
+  T sample;
+  std::memcpy(&sample, take(window.row_run(at)).data, sizeof(sample));
+  return sample;
+}
+struct Probe {
+  std::uint64_t limit = UINT64_MAX, work = 0;
+  unsigned charges = 0;
+  std::function<void()> before, after;
+  std::function<void(std::uint64_t)> charge;
+  CancellationToken cancellation;
+};
+struct PreparedProbe {
+  std::shared_ptr<const PreparedOperation> inner;
+};
+struct ProbePhase {
+  ResultContinuation inner;
+  Probe* probe;
+  ProbePhase(ResultContinuation value, Probe* p)
+      : inner(std::move(value)), probe(p) {}
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    if (!phase.tensors || phase.tensors->empty())
+      return inner.poll(phase);
+    auto forwarded = phase;
+    forwarded.consume_work = [&](std::uint64_t amount) {
+      if (amount > probe->limit - probe->work)
+        return Status{ErrorCode::ResourceExhausted, "test numeric work limit"};
+      probe->work += amount;
+      ++probe->charges;
+      if (probe->charge)
+        probe->charge(amount);
+      return phase.consume_work(amount);
+    };
+    if (probe->before)
+      probe->before();
+    auto result = inner.poll(forwarded);
+    if (probe->after)
+      probe->after();
+    return result;
+  }
+};
+std::shared_ptr<OperationRegistry> probe_registry(Probe* probe) {
+  auto base = make_default_operation_registry();
+  if (!probe)
+    return base;
+  auto registry = std::make_shared<OperationRegistry>();
+  OperationDefinition spy;
+  spy.key = "numeric.convert_format_strict";
+  spy.traits = take(base->find_traits(spy.key));
+  spy.traits.outputs[0].continuation_bytes += sizeof(ProbePhase);
+  spy.prepare_static = [base](const auto& inputs, const auto& params) {
+    auto inner = base->prepare_operation("numeric.convert_format_strict",
+                                         inputs, params);
+    if (!inner.ok())
+      return Result<OperationPreparation>(inner.status());
+    OperationPreparation result;
+    result.outputs.resize(1);
+    result.outputs[0].metadata.result_schema = std::make_shared<SchemaTemplate>(
+        *inner.value()->traits().outputs[0].result_schema);
+    result.state =
+        std::make_shared<PreparedProbe>(PreparedProbe{inner.take_value()});
+    return Result<OperationPreparation>(std::move(result));
+  };
+  spy.start_result = [base, probe](const auto& query, const auto& allocator) {
+    auto forwarded = query;
+    forwarded.prepared =
+        static_cast<const PreparedProbe*>(query.prepared->state())->inner;
+    auto inner = base->start_result("numeric.convert_format_strict", forwarded,
+                                    allocator);
+    if (!inner.ok())
+      return inner;
+    return ResultContinuation::make<ProbePhase>(allocator, inner.take_value(),
+                                                probe);
+  };
+  channel_fixture::require(registry->register_operation(std::move(spy)));
+  channel_fixture::require(registry->freeze());
+  return registry;
+}
+Result<ExecutionResult> run_source(
+    const channel_fixture::Source& source,
+    std::map<std::string, ParameterValue> parameters,
+    std::optional<Region> roi = {}, Probe* probe = nullptr,
+    ResultRef* published = nullptr, bool empty = false) {
+  WorkflowDocument document;
+  document.inputs = {channel_fixture::declaration(source)};
+  document.nodes = {{1,
+                     "numeric.convert_format_strict",
+                     {WorkflowInputReference{1}},
+                     std::move(parameters)}};
+  document.outputs = {{"converted", 1, "values"}};
+  auto registry = probe_registry(probe);
+  PlanningOptions planning;
+  planning.tile_height = source.tile_height;
+  planning.tile_width = source.tile_width;
+  if (roi)
+    planning.output_regions = {{"converted", *roi}};
+  GraphContext graph(document);
+  auto compiled = Compiler(registry).compile(graph, planning, source.resources);
+  if (!compiled.ok())
+    return Result<ExecutionResult>(compiled.status());
+  ExecutionContextConfig config;
+  config.cpu_workers = 1;
+  ExecutionContext context(registry, config);
+  ExecutionBindings bindings;
+  bindings.inputs.push_back(
+      {"source",
+       channel_fixture::publish(take(context.resource_budget()), source)});
+  if (published)
+    *published = bindings.inputs[0].result;
+  if (empty) {
+    auto frozen = context.freeze(compiled.value().plan, bindings);
+    if (!frozen.ok())
+      return Result<ExecutionResult>(frozen.status());
+    auto demand = context.execute_fragments(
+        frozen.value(),
+        {{"converted",
+          take(Footprint::none(source.schema.tensors[0].sample_shape()))}});
+    if (!demand.ok())
+      return Result<ExecutionResult>(demand.status());
+    ExecutionResult result;
+    result.results = std::move(demand.value().results);
+    return Result<ExecutionResult>(std::move(result));
+  }
+  ExecutionOptions options;
+  options.dependencies.maximum_work = UINT64_C(1) << 40;
+  options.maximum_dependency_work = UINT64_C(1) << 40;
+  return context.execute(compiled.value().plan, bindings,
+                         probe ? probe->cancellation : CancellationToken{},
+                         options);
 }
 Result<ExecutionResult> run(ElementType source_type,
                             const std::vector<std::uint64_t>& shape,
                             const std::vector<std::uint8_t>& bytes,
                             std::map<std::string, ParameterValue> parameters,
                             std::optional<Region> roi = {},
-                            std::optional<TensorDescription> description = {}) {
-  const ValueDescriptor source{source_type, shape};
-  std::vector<std::int64_t> strides(shape.size());
-  std::int64_t width = Value::element_size(source_type);
-  for (std::size_t i = shape.size(); i; --i) {
-    strides[i - 1] = width;
-    width *= static_cast<std::int64_t>(shape[i - 1]);
-  }
+                            std::optional<TensorDescription> description = {},
+                            Probe* probe = nullptr) {
   std::vector<ValueFacet> facets;
-  if (description) {
-    auto encoded = encode_tensor_description(*description);
-    if (!encoded.ok())
-      return Result<ExecutionResult>(encoded.status());
-    facets.push_back(encoded.take_value());
-  }
-  auto value =
-      Value::create(source, Region::whole(shape), {0, strides}, bytes, facets);
-  if (!value.ok())
-    return Result<ExecutionResult>(value.status());
-  WorkflowDocument document;
-  document.inputs = {
-      {1, "source", source, Region::whole(shape), {0, strides}, facets}};
-  document.nodes = {{1,
-                     "numeric.convert_format_strict",
-                     {WorkflowInputReference{1}},
-                     std::move(parameters)}};
-  document.outputs = {{"converted", 1, "values"}};
-  PlanningOptions options;
-  if (roi)
-    options.output_regions = {{"converted", *roi}};
-  auto registry = make_default_operation_registry();
-  Compiler compiler(registry);
-  GraphContext graph(document);
-  auto plan = compiler.compile(graph, options);
-  if (!plan.ok())
-    return Result<ExecutionResult>(plan.status());
-  ExecutionContext executor(registry);
-  return executor.execute(plan.value().plan,
-                          {{{"source", value.take_value()}}});
+  if (description)
+    facets.push_back(take(encode_tensor_description(*description)));
+  auto source = channel_fixture::source({source_type, shape}, facets);
+  source.bytes = bytes;
+  return run_source(source, std::move(parameters), roi, probe);
 }
 Result<ExecutionResult> run_planar(
-    ElementType source_type, std::uint64_t samples,
+    ElementType type, std::uint64_t samples,
     const std::vector<std::uint8_t>& bytes,
     std::map<std::string, ParameterValue> parameters, std::uint64_t rows = 1,
     std::optional<Region> roi = {}, std::uint64_t tile_extent = 128) {
-  const ValueDescriptor descriptor{source_type, {rows, samples, 1}};
-  PlanarImageConfig config;
-  config.order = ImagePlaneOrder::Tiled;
-  config.tile_height = config.tile_width = tile_extent;
-  auto created = PlanarImage::create(descriptor, config);
-  if (!created.ok())
-    return Result<ExecutionResult>(created.status());
-  auto image = created.take_value();
-  auto published = image.publish(Region::whole(descriptor.shape), bytes.data(),
-                                 bytes.size());
-  if (!published.ok())
-    return Result<ExecutionResult>(published);
-  WorkflowDocument document;
-  document.inputs = {{1,
-                      "image",
-                      descriptor,
-                      Region::whole(descriptor.shape),
-                      {},
-                      {},
-                      PlanarImageLayout{config.order, 0, 1, 2, 0, {}}}};
-  document.nodes = {{1,
-                     "numeric.convert_format_strict",
-                     {WorkflowInputReference{1}},
-                     std::move(parameters)}};
-  document.outputs = {{"converted", 1, "values"}};
-  auto registry = make_default_operation_registry();
-  Compiler compiler(registry);
-  GraphContext graph(document);
-  PlanningOptions options;
-  options.tile_height = options.tile_width = tile_extent;
-  if (roi)
-    options.output_regions = {{"converted", *roi}};
-  auto plan = compiler.compile(graph, options);
-  if (!plan.ok())
-    return Result<ExecutionResult>(plan.status());
-  ExecutionBinding binding;
-  binding.name = "image";
-  binding.image = std::make_shared<const PlanarImage>(image);
-  ExecutionBindings bindings;
-  bindings.inputs.push_back(binding);
-  ExecutionContext execution(registry);
-  return execution.execute(plan.value().plan, bindings);
+  ResultTensorLayout layout;
+  layout.spatial = true;
+  layout.order = ImagePlaneOrder::Tiled;
+  auto source = channel_fixture::source({type, {rows, samples, 1}}, {}, layout);
+  source.bytes = bytes;
+  source.tile_height = source.tile_width = tile_extent;
+  return run_source(source, std::move(parameters), roi);
 }
 
 int numeric_cases() {
@@ -137,7 +214,7 @@ int numeric_cases() {
   if (!converted.ok())
     std::cerr << "default conversion: " << converted.status().message << '\n';
   PS_CHECK(converted.ok());
-  const auto& first = converted.value().values.at("converted");
+  const auto& first = converted.value().results.at("converted");
   PS_CHECK(read<float>(first, {0}) == 0);
   PS_CHECK(read<float>(first, {1}) == 128.0f / 255.0f);
   PS_CHECK(read<float>(first, {2}) == 1);
@@ -151,11 +228,11 @@ int numeric_cases() {
   converted = run(ElementType::UInt8, {3}, {0, 128, 255},
                   {{"dtype", std::string("float32")}, {"rescale", false}});
   PS_CHECK(converted.ok());
-  PS_CHECK(read<float>(converted.value().values.at("converted"), {1}) == 128);
+  PS_CHECK(read<float>(converted.value().results.at("converted"), {1}) == 128);
   auto signed_map = run(ElementType::Int8, {4}, {128, 255, 0, 127},
                         {{"dtype", std::string("uint8")}});
   PS_CHECK(signed_map.ok());
-  const auto& mapped = signed_map.value().values.at("converted");
+  const auto& mapped = signed_map.value().results.at("converted");
   PS_CHECK(read<std::uint8_t>(mapped, {0}) == 0);
   PS_CHECK(read<std::uint8_t>(mapped, {1}) == 127);
   PS_CHECK(read<std::uint8_t>(mapped, {2}) == 128);
@@ -166,14 +243,14 @@ int numeric_cases() {
   if (!big.ok())
     std::cerr << "int64: " << big.status().message << '\n';
   PS_CHECK(big.ok());
-  const auto& big_result = big.value().values.at("converted");
+  const auto& big_result = big.value().results.at("converted");
   PS_CHECK(read<std::uint8_t>(big_result, {1}) == 127);
   PS_CHECK(read<std::uint8_t>(big_result, {2}) == 128);
   auto partial = run(ElementType::Float64, {3}, pack<double>({0, 1, 1e100}),
                      {{"dtype", std::string("uint8")}, {"rescale", false}},
                      Region({{0, 2}}));
   PS_CHECK(partial.ok());
-  PS_CHECK(read<std::uint8_t>(partial.value().values.at("converted"), {1}) ==
+  PS_CHECK(read<std::uint8_t>(partial.value().results.at("converted"), {1}) ==
            1);
   auto rejected = run(ElementType::Float64, {3}, pack<double>({0, 1, 1e100}),
                       {{"dtype", std::string("uint8")}, {"rescale", false}});
@@ -189,7 +266,7 @@ int numeric_cases() {
        {"layout", std::string("view")}});
   PS_CHECK(identity.ok());
   std::uint64_t preserved;
-  auto value = read<double>(identity.value().values.at("converted"), {1});
+  auto value = read<double>(identity.value().results.at("converted"), {1});
   std::memcpy(&preserved, &value, 8);
   PS_CHECK(preserved == nan_bits);
   const double max32 = static_cast<double>(std::numeric_limits<float>::max());
@@ -200,7 +277,7 @@ int numeric_cases() {
           {{"dtype", std::string("float32")}, {"rescale", false}},
           Region({{0, 1}}));
   PS_CHECK(near_limit.ok());
-  PS_CHECK(read<float>(near_limit.value().values.at("converted"), {0}) ==
+  PS_CHECK(read<float>(near_limit.value().results.at("converted"), {0}) ==
            std::numeric_limits<float>::max());
   auto far_limit =
       run(ElementType::Float64, {2}, pack<double>({adjacent, max32 * 2}),
@@ -212,14 +289,14 @@ int numeric_cases() {
            {"rescale", false},
            {"overflow", std::string("clip")}});
   PS_CHECK(clipped_limit.ok());
-  PS_CHECK(read<float>(clipped_limit.value().values.at("converted"), {1}) ==
+  PS_CHECK(read<float>(clipped_limit.value().results.at("converted"), {1}) ==
            std::numeric_limits<float>::max());
   auto nan_cast = run(ElementType::Float64, {1}, pack<double>({signaling}),
                       {{"dtype", std::string("float32")}, {"rescale", false}});
   PS_CHECK(nan_cast.ok());
   std::uint32_t quiet;
   const auto converted_nan =
-      read<float>(nan_cast.value().values.at("converted"), {0});
+      read<float>(nan_cast.value().results.at("converted"), {0});
   std::memcpy(&quiet, &converted_nan, 4);
   PS_CHECK(quiet == UINT32_C(0xffc00000));
   auto reversed =
@@ -228,7 +305,7 @@ int numeric_cases() {
            {"target_range",
             std::string("f64:3ff0000000000000,f64:0000000000000000")}});
   PS_CHECK(reversed.ok());
-  const auto& reverse_value = reversed.value().values.at("converted");
+  const auto& reverse_value = reversed.value().results.at("converted");
   PS_CHECK(read<float>(reverse_value, {0}) == 1);
   PS_CHECK(read<float>(reverse_value, {1}) == .75f);
   PS_CHECK(read<float>(reverse_value, {2}) == 0);
@@ -250,7 +327,7 @@ int numeric_cases() {
       {}, described);
   PS_CHECK(raw.ok());
   auto raw_description = decode_tensor_description(
-      raw.value().values.at("converted").facets().at(0));
+      tensor(raw.value().results.at("converted")).facets.at(0));
   PS_CHECK(raw_description.ok());
   PS_CHECK(raw_description.value().axes[0].name == "pixel");
   PS_CHECK(raw_description.value().axes[0].origin == 4);
@@ -262,7 +339,7 @@ int numeric_cases() {
            {"source_range",
             std::string("i:0,i:1;i:-128,i:127;i:-128,i:127;i:0,i:1")}});
   PS_CHECK(table.ok());
-  const auto& table_value = table.value().values.at("converted");
+  const auto& table_value = table.value().results.at("converted");
   for (std::uint64_t c = 0; c < 4; ++c)
     PS_CHECK(read<std::uint8_t>(table_value, {0, c}) == 128);
   auto signed_zero =
@@ -271,7 +348,7 @@ int numeric_cases() {
            {"target_range", std::string("f64:8000000000000000,i:1")}});
   PS_CHECK(signed_zero.ok());
   float zero_sample =
-      read<float>(signed_zero.value().values.at("converted"), {0});
+      read<float>(signed_zero.value().results.at("converted"), {0});
   std::uint32_t zero_bits;
   std::memcpy(&zero_bits, &zero_sample, 4);
   PS_CHECK(zero_bits == UINT32_C(0x80000000));
@@ -280,7 +357,7 @@ int numeric_cases() {
                             {"source_range", std::string("i:-1,i:1")},
                             {"target_range", std::string("i:-1,i:1")}});
   PS_CHECK(ordinary_zero.ok());
-  zero_sample = read<float>(ordinary_zero.value().values.at("converted"), {0});
+  zero_sample = read<float>(ordinary_zero.value().results.at("converted"), {0});
   std::memcpy(&zero_bits, &zero_sample, 4);
   PS_CHECK(zero_bits == 0);
   auto mixed_identity =
@@ -291,7 +368,7 @@ int numeric_cases() {
            {"layout", std::string("view")}});
   PS_CHECK(mixed_identity.ok());
   auto identity_nan =
-      read<double>(mixed_identity.value().values.at("converted"), {0});
+      read<double>(mixed_identity.value().results.at("converted"), {0});
   std::memcpy(&preserved, &identity_nan, 8);
   PS_CHECK(preserved == nan_bits);
   TensorDescription grouped;
@@ -321,7 +398,7 @@ int numeric_cases() {
     std::cerr << inherited.status().message << '\n';
   PS_CHECK(inherited.ok());
   auto inherited_description = decode_tensor_description(
-      inherited.value().values.at("converted").facets().at(0));
+      tensor(inherited.value().results.at("converted")).facets.at(0));
   PS_CHECK(inherited_description.ok());
   const auto& encoding = *inherited_description.value().channels[0].encoding;
   PS_CHECK((std::get_if<std::int64_t>(&encoding.decoded[1]) &&
@@ -334,7 +411,7 @@ int numeric_cases() {
                        {}, grouped);
   PS_CHECK(raw_group.ok());
   auto raw_group_description = decode_tensor_description(
-      raw_group.value().values.at("converted").facets().at(0));
+      tensor(raw_group.value().results.at("converted")).facets.at(0));
   PS_CHECK(raw_group_description.ok());
   PS_CHECK(raw_group_description.value().groups.empty());
   PS_CHECK(raw_group_description.value().channels[0].name == "R");
@@ -358,7 +435,7 @@ int numeric_cases() {
                        {"metadata_override", replacement.take_value()}});
   PS_CHECK(rational.ok());
   auto rational_description = decode_tensor_description(
-      rational.value().values.at("converted").facets().at(0));
+      tensor(rational.value().results.at("converted")).facets.at(0));
   PS_CHECK(rational_description.ok());
   const auto& rational_encoding = *rational_description.value().encoding;
   const auto* third =
@@ -404,79 +481,42 @@ int pair_endpoints() {
         std::cerr << source.second << "->" << target.second << ": "
                   << converted.status().message << '\n';
       PS_CHECK(converted.ok());
-      const auto& value = converted.value().values.at("converted");
-      PS_CHECK(value.descriptor().element_type == target.first);
+      const auto& value = converted.value().results.at("converted");
+      PS_CHECK(tensor(value).descriptor.element_type == target.first);
       const auto expected = endpoints(target.first);
       for (std::uint64_t i = 0; i < 2; ++i) {
-        auto address = value.byte_address({i});
-        PS_CHECK(address.ok());
+        const auto observed = channel_fixture::read(value, Region({{i, 1}}));
         const auto width = Value::element_size(target.first);
-        PS_CHECK(std::memcmp(value.bytes().data() + address.value(),
-                             expected.data() + i * width, width) == 0);
+        PS_CHECK(std::memcmp(observed.data(), expected.data() + i * width,
+                             width) == 0);
       }
     }
   return 0;
 }
 int planar_cross_tile() {
-  const ValueDescriptor descriptor{ElementType::UInt8, {131, 133, 4}};
-  PlanarImageConfig config;
-  auto source = PlanarImage::create(descriptor, config);
-  PS_CHECK(source.ok());
-  auto input_image = source.take_value();
-  std::vector<std::uint8_t> plane(131 * 133);
-  for (std::uint64_t channel = 0; channel < 4; ++channel) {
-    for (std::uint64_t y = 0; y < 131; ++y)
-      for (std::uint64_t x = 0; x < 133; ++x)
-        plane[y * 133 + x] =
-            static_cast<std::uint8_t>((y * 17 + x * 13 + channel * 31) % 256);
-    PS_CHECK(input_image
-                 .publish(Region({{0, 131}, {0, 133}, {channel, 1}}),
-                          plane.data(), plane.size())
-                 .ok());
-  }
-  WorkflowDocument document;
-  document.inputs = {{1,
-                      "image",
-                      descriptor,
-                      Region::whole(descriptor.shape),
-                      {},
-                      {},
-                      PlanarImageLayout{config.order, 0, 1, 2, 0, {}}}};
-  document.nodes = {{1,
-                     "numeric.convert_format_strict",
-                     {WorkflowInputReference{1}},
-                     {{"dtype", std::string("float32")},
-                      {"metadata_mode", std::string("raw")}}}};
-  document.outputs = {{"converted", 1, "values"}};
-  PlanningOptions options;
+  ResultTensorLayout layout;
+  layout.spatial = true;
+  layout.order = ImagePlaneOrder::Tiled;
+  auto source =
+      channel_fixture::source({ElementType::UInt8, {131, 133, 4}}, {}, layout);
+  for (std::uint64_t y = 0; y < 131; ++y)
+    for (std::uint64_t x = 0; x < 133; ++x)
+      for (std::uint64_t c = 0; c < 4; ++c)
+        source.bytes[(y * 133 + x) * 4 + c] = (y * 17 + x * 13 + c * 31) % 256;
   const Region roi({{127, 3}, {127, 3}, {1, 1}});
-  options.output_regions = {{"converted", roi}};
-  auto registry = make_default_operation_registry();
-  Compiler compiler(registry);
-  GraphContext graph(document);
-  auto plan = compiler.compile(graph, options);
-  PS_CHECK(plan.ok());
-  ExecutionBinding binding;
-  binding.name = "image";
-  binding.image = std::make_shared<const PlanarImage>(input_image);
-  ExecutionBindings bindings;
-  bindings.inputs.push_back(binding);
-  ExecutionContext execution(registry);
-  auto result = execution.execute(plan.value().plan, bindings);
-  if (!result.ok())
-    std::cerr << result.status().message << '\n';
+  auto result = run_source(source,
+                           {{"dtype", std::string("float32")},
+                            {"metadata_mode", std::string("raw")}},
+                           roi);
   PS_CHECK(result.ok());
-  const auto& image = result.value().images.at("converted");
   std::array<float, 9> observed{};
-  PS_CHECK(image
-               .read(roi, reinterpret_cast<std::uint8_t*>(observed.data()),
-                     sizeof(observed))
+  PS_CHECK(read_bytes(result.value().results.at("converted"), roi,
+                      reinterpret_cast<std::uint8_t*>(observed.data()),
+                      sizeof(observed))
                .ok());
   for (std::uint64_t y = 0; y < 3; ++y)
     for (std::uint64_t x = 0; x < 3; ++x) {
-      const auto code = (static_cast<std::uint64_t>(127 + y) * 17 +
-                         static_cast<std::uint64_t>(127 + x) * 13 + 31) %
-                        256;
+      const auto code = ((127 + y) * 17 + (127 + x) * 13 + 31) % 256;
       PS_CHECK(observed[y * 3 + x] == static_cast<float>(code) / 255);
     }
   return 0;
@@ -491,11 +531,10 @@ int planar_vector_oracles() {
                               {"metadata_mode", std::string("raw")}});
   PS_CHECK(expanded.ok());
   std::vector<float> floats(count);
-  PS_CHECK(expanded.value()
-               .images.at("converted")
-               .read(Region::whole({1, count, 1}),
-                     reinterpret_cast<std::uint8_t*>(floats.data()),
-                     floats.size() * 4)
+  PS_CHECK(read_bytes(expanded.value().results.at("converted"),
+                      Region::whole({1, count, 1}),
+                      reinterpret_cast<std::uint8_t*>(floats.data()),
+                      floats.size() * 4)
                .ok());
   for (std::uint64_t i = 0; i < count; ++i)
     PS_CHECK(floats[i] ==
@@ -505,10 +544,9 @@ int planar_vector_oracles() {
       {{"dtype", std::string("uint8")}, {"metadata_mode", std::string("raw")}});
   PS_CHECK(compressed.ok());
   std::vector<std::uint8_t> round_trip(count);
-  PS_CHECK(compressed.value()
-               .images.at("converted")
-               .read(Region::whole({1, count, 1}), round_trip.data(),
-                     round_trip.size())
+  PS_CHECK(read_bytes(compressed.value().results.at("converted"),
+                      Region::whole({1, count, 1}), round_trip.data(),
+                      round_trip.size())
                .ok());
   PS_CHECK(round_trip == codes);
   auto invalid_float = floats;
@@ -528,11 +566,10 @@ int planar_vector_oracles() {
                               {"metadata_mode", std::string("raw")}});
   PS_CHECK(narrowed.ok());
   std::vector<float> narrowed_samples(count);
-  PS_CHECK(narrowed.value()
-               .images.at("converted")
-               .read(Region::whole({1, count, 1}),
-                     reinterpret_cast<std::uint8_t*>(narrowed_samples.data()),
-                     narrowed_samples.size() * 4)
+  PS_CHECK(read_bytes(narrowed.value().results.at("converted"),
+                      Region::whole({1, count, 1}),
+                      reinterpret_cast<std::uint8_t*>(narrowed_samples.data()),
+                      narrowed_samples.size() * 4)
                .ok());
   for (std::uint64_t i = 0; i < count; ++i)
     PS_CHECK(narrowed_samples[i] == static_cast<float>(doubles[i]));
@@ -554,11 +591,10 @@ int planar_vector_oracles() {
                                  {"metadata_mode", std::string("raw")}});
   PS_CHECK(exceptional.ok());
   std::vector<std::uint32_t> bits(count);
-  PS_CHECK(exceptional.value()
-               .images.at("converted")
-               .read(Region::whole({1, count, 1}),
-                     reinterpret_cast<std::uint8_t*>(bits.data()),
-                     bits.size() * 4)
+  PS_CHECK(read_bytes(exceptional.value().results.at("converted"),
+                      Region::whole({1, count, 1}),
+                      reinterpret_cast<std::uint8_t*>(bits.data()),
+                      bits.size() * 4)
                .ok());
   PS_CHECK(bits[1] == UINT32_C(0x80000000));
   PS_CHECK(bits[2] == UINT32_C(0x7f800000));
@@ -606,11 +642,10 @@ int planar_tile_oracle(std::uint64_t side) {
   auto converted = run_planar(ElementType::Float32, side, pack(samples),
                               parameters, side, {}, side);
   PS_CHECK(converted.ok());
-  PS_CHECK(
-      converted.value()
-          .images.at("converted")
-          .read(Region::whole({side, side, 1}), actual.data(), actual.size())
-          .ok());
+  PS_CHECK(read_bytes(converted.value().results.at("converted"),
+                      Region::whole({side, side, 1}), actual.data(),
+                      actual.size())
+               .ok());
   PS_CHECK(actual == expected);
   samples.back() = std::numeric_limits<float>::quiet_NaN();
   auto rejected = run_planar(ElementType::Float32, side, pack(samples),
@@ -623,11 +658,10 @@ int planar_tile_oracle(std::uint64_t side) {
   auto clipped = run_planar(ElementType::Float32, side, pack(samples), clipping,
                             side, {}, side);
   PS_CHECK(clipped.ok());
-  PS_CHECK(
-      clipped.value()
-          .images.at("converted")
-          .read(Region::whole({side, side, 1}), actual.data(), actual.size())
-          .ok());
+  PS_CHECK(read_bytes(clipped.value().results.at("converted"),
+                      Region::whole({side, side, 1}), actual.data(),
+                      actual.size())
+               .ok());
   expected.back() = 255;
   PS_CHECK(actual == expected);
   samples.back() = std::numeric_limits<float>::quiet_NaN();
@@ -636,9 +670,8 @@ int planar_tile_oracle(std::uint64_t side) {
                             parameters, side, roi, side);
   PS_CHECK(partial.ok());
   std::vector<std::uint8_t> region_bytes(64 * 64);
-  PS_CHECK(partial.value()
-               .images.at("converted")
-               .read(roi, region_bytes.data(), region_bytes.size())
+  PS_CHECK(read_bytes(partial.value().results.at("converted"), roi,
+                      region_bytes.data(), region_bytes.size())
                .ok());
   for (unsigned y = 0; y < 64; ++y)
     for (unsigned x = 0; x < 64; ++x)
@@ -658,9 +691,9 @@ int randomized_i64_oracle() {
       {{"dtype", std::string("uint8")}, {"metadata_mode", std::string("raw")}});
   PS_CHECK(converted.ok());
   std::vector<std::uint8_t> actual(count);
-  PS_CHECK(converted.value()
-               .images.at("converted")
-               .read(Region::whole({1, count, 1}), actual.data(), actual.size())
+  PS_CHECK(read_bytes(converted.value().results.at("converted"),
+                      Region::whole({1, count, 1}), actual.data(),
+                      actual.size())
                .ok());
   for (std::uint64_t i = 0; i < count; ++i) {
     const auto offset =
@@ -699,13 +732,12 @@ int randomized_float_narrowing() {
                             {"metadata_mode", std::string("raw")}});
   PS_CHECK(planar.ok());
   std::vector<std::uint32_t> planar_bits(samples.size());
-  PS_CHECK(planar.value()
-               .images.at("converted")
-               .read(Region::whole({1, samples.size(), 1}),
-                     reinterpret_cast<std::uint8_t*>(planar_bits.data()),
-                     planar_bits.size() * 4)
+  PS_CHECK(read_bytes(planar.value().results.at("converted"),
+                      Region::whole({1, samples.size(), 1}),
+                      reinterpret_cast<std::uint8_t*>(planar_bits.data()),
+                      planar_bits.size() * 4)
                .ok());
-  const auto& output = converted.value().values.at("converted");
+  const auto& output = converted.value().results.at("converted");
   for (std::size_t i = 0; i < samples.size(); ++i) {
     float expected = static_cast<float>(samples[i]);
     if (std::isinf(expected))
@@ -734,7 +766,7 @@ int randomized_float_widening() {
   auto converted = run(ElementType::Float32, {samples.size()}, pack(samples),
                        {{"dtype", std::string("float64")}, {"rescale", false}});
   PS_CHECK(converted.ok());
-  const auto& output = converted.value().values.at("converted");
+  const auto& output = converted.value().results.at("converted");
   for (std::size_t i = 0; i < samples.size(); ++i) {
     const double expected = static_cast<double>(samples[i]);
     const auto actual = read<double>(output, {i});
@@ -746,50 +778,41 @@ int randomized_float_widening() {
   return 0;
 }
 int direct_fenv() {
-  const std::uint32_t input_bits = UINT32_C(0x80000001);
-  auto value = Value::create({ElementType::Float32, {1}}, Region::whole({1}),
-                             {0, {4}}, pack<std::uint32_t>({input_bits}));
-  PS_CHECK(value.ok());
-  auto source = value.take_value();
-  DependencyRequest request;
-  request.inputs = {{source.descriptor(), source.facets()}};
-  request.outputs = Footprint::all({1}).take_value();
-  request.parameters = {{"dtype", std::string("uint8")},
-                        {"metadata_mode", std::string("raw")},
-                        {"overflow", std::string("clip")}};
-  request.snapshot_identity = "fmt06-fenv";
-  auto registry = make_default_operation_registry();
-  auto started =
-      registry->start_dependency("numeric.convert_format_strict", request);
-  PS_CHECK(started.ok());
-  auto session = started.take_value();
-  auto first = session->poll();
-  PS_CHECK(first.ok());
-  auto fragments =
-      ValueFragments::create(source.descriptor(), source.facets(),
-                             Footprint::all({1}).take_value(), {source});
-  PS_CHECK(fragments.ok());
-  PS_CHECK(session->supply({fragments.take_value()}, "fmt06-fenv").ok());
+  Probe probe;
   fenv_t original;
-  fegetenv(&original);
-  PS_CHECK(fesetround(FE_DOWNWARD) == 0);
-  feclearexcept(FE_ALL_EXCEPT);
-  feraiseexcept(FE_INVALID);
-  const auto before = fetestexcept(FE_ALL_EXCEPT);
-  auto second = session->poll();
-  const auto after = fetestexcept(FE_ALL_EXCEPT);
-  const auto rounding = fegetround();
-  fesetenv(&original);
-  PS_CHECK(second.ok());
-  PS_CHECK(std::holds_alternative<DependencyResult>(second.value()));
-  PS_CHECK(before == after);
-  PS_CHECK(rounding == FE_DOWNWARD);
+  int before = 0, after = 0, rounding = 0;
+  probe.before = [&] {
+    fegetenv(&original);
+    fesetround(FE_DOWNWARD);
+    feclearexcept(FE_ALL_EXCEPT);
+    feraiseexcept(FE_INVALID);
+    before = fetestexcept(FE_ALL_EXCEPT);
+  };
+  probe.after = [&] {
+    after = fetestexcept(FE_ALL_EXCEPT);
+    rounding = fegetround();
+    fesetenv(&original);
+  };
+  auto result = run(ElementType::Float32, {1},
+                    pack<std::uint32_t>({UINT32_C(0x80000001)}),
+                    {{"dtype", std::string("uint8")},
+                     {"metadata_mode", std::string("raw")},
+                     {"overflow", std::string("clip")}},
+                    {}, {}, &probe);
+  PS_CHECK(result.ok());
+  PS_CHECK(before == after && rounding == FE_DOWNWARD);
   return 0;
 }
 int static_shape_limit() {
   auto registry = make_default_operation_registry();
   OperationMetadata input;
-  input.descriptor = {ElementType::UInt8, {(UINT64_C(1) << 40) + 1}};
+  SchemaTemplate schema;
+  schema.id = "test.numeric";
+  ResultTensorSpec spec;
+  spec.key = "samples";
+  spec.descriptor = {ElementType::UInt8, {(UINT64_C(1) << 40) + 1}};
+  schema.tensors.push_back(spec);
+  input.result_schema = std::make_shared<SchemaTemplate>(schema);
   auto prepared = registry->prepare_operation(
       "numeric.convert_format_strict", {input},
       {{"dtype", std::string("uint8")}, {"metadata_mode", std::string("raw")}});
@@ -844,87 +867,43 @@ int rational_codec_rejections() {
   return 0;
 }
 int cold_u8_budget() {
-  auto registry = make_default_operation_registry();
   for (std::uint64_t count : {1, 3, 16, 19, 64, 259}) {
-    auto value =
-        Value::create({ElementType::UInt8, {count}}, Region::whole({count}),
-                      {0, {1}}, std::vector<std::uint8_t>(count, 128));
-    PS_CHECK(value.ok());
-    DependencyRequest request;
-    request.inputs = {{value.value().descriptor(), {}}};
-    request.outputs = Footprint::all({count}).take_value();
-    request.parameters = {{"dtype", std::string("float32")}};
-    request.snapshot_identity = "cold-u8-budget";
-    request.limits.maximum_work = 2048;
-    auto started =
-        registry->start_dependency("numeric.convert_format_strict", request);
-    PS_CHECK(started.ok());
-    auto session = started.take_value();
-    PS_CHECK(session->poll().ok());
-    auto input = ValueFragments::create(value.value().descriptor(), {},
-                                        request.outputs, {value.value()});
-    PS_CHECK(input.ok());
-    PS_CHECK(
-        session->supply({input.take_value()}, request.snapshot_identity).ok());
-    auto result = session->poll();
+    Probe probe;
+    probe.limit = 2048;
+    auto result =
+        run(ElementType::UInt8, {count}, std::vector<std::uint8_t>(count, 128),
+            {{"dtype", std::string("float32")}}, {}, {}, &probe);
     PS_CHECK(!result.ok());
     PS_CHECK(result.status().code == ErrorCode::ResourceExhausted);
-    PS_CHECK(session->consumed_work() > 95);
+    PS_CHECK(probe.work > 95 && probe.work <= probe.limit);
   }
   return 0;
 }
 int budget_failure_order() {
-  auto registry = make_default_operation_registry();
   std::uint64_t first_failure_work = 0;
   for (std::uint64_t bad_at : {0, 1, 17, 63}) {
     std::vector<float> samples(64, .5f);
     samples[bad_at] = std::numeric_limits<float>::quiet_NaN();
-    auto source = Value::create({ElementType::Float32, {64}},
-                                Region::whole({64}), {0, {4}}, pack(samples));
-    PS_CHECK(source.ok());
-    DependencyRequest request;
-    request.inputs = {{source.value().descriptor(), {}}};
-    request.outputs = Footprint::all({64}).take_value();
-    request.parameters = {{"dtype", std::string("uint8")},
-                          {"metadata_mode", std::string("raw")}};
-    request.snapshot_identity = "fmt06-failure-order";
-    // Permit the erroneous sample, but not the complete next 64-sample run.
-    request.limits.maximum_work = 64 + (bad_at + 1) * 65;
-    auto started =
-        registry->start_dependency("numeric.convert_format_strict", request);
-    PS_CHECK(started.ok());
-    auto session = started.take_value();
-    PS_CHECK(session->poll().ok());
-    auto fragments = ValueFragments::create(source.value().descriptor(), {},
-                                            request.outputs, {source.value()});
-    PS_CHECK(fragments.ok());
-    PS_CHECK(
-        session->supply({fragments.take_value()}, request.snapshot_identity)
-            .ok());
-    // Preparation canonicalizes footprints using the platform std::sort;
-    // its metered comparison count is not a portable constant. Isolate this
-    // poll: one dispatch unit plus exactly 65 units per visited sample. The
-    // invalid sample must win before any charge for the remaining run.
-    const auto before_poll = session->consumed_work();
-    PS_CHECK(before_poll < 64);
-    auto result = session->poll();
+    Probe probe;
+    // One window checkpoint plus exactly 65 units per visited sample.
+    probe.limit = 1 + (bad_at + 1) * 65;
+    auto result = run(ElementType::Float32, {64}, pack(samples),
+                      {{"dtype", std::string("uint8")},
+                       {"metadata_mode", std::string("raw")}},
+                      {}, {}, &probe);
     PS_CHECK(!result.ok());
     PS_CHECK(result.status().code == ErrorCode::OperationFailed);
     PS_CHECK(result.status().reason == FailureReason::InvalidDomain);
     PS_CHECK(result.status().message.find("coordinate=[" +
                                           std::to_string(bad_at) + "]") !=
              std::string::npos);
-    // The session/footprint bookkeeping is not part of the numeric sample
-    // tariff. Compare the same request at different failure positions so a
-    // protocol bookkeeping change does not invalidate the per-sample oracle.
-    if (bad_at == 0) {
-      first_failure_work = session->consumed_work();
-      PS_CHECK(first_failure_work >= 65);
-      PS_CHECK(first_failure_work <= request.limits.maximum_work);
-    }
-    PS_CHECK(session->consumed_work() == first_failure_work + bad_at * 65);
-    PS_CHECK(session->consumed_work() == before_poll + 1 + (bad_at + 1) * 65);
-    PS_CHECK(session->consumed_work() <= request.limits.maximum_work);
+    PS_CHECK(result.status().message.find(
+                 "source_dtype=float32 target_dtype=uint8 range_index=0") !=
+             std::string::npos);
+    if (!bad_at)
+      first_failure_work = probe.work;
+    PS_CHECK(probe.work == first_failure_work + bad_at * 65);
+    PS_CHECK(probe.work <= probe.limit);
   }
   return 0;
 }
@@ -939,7 +918,7 @@ int generic_vector_oracles() {
     const float expected =
         static_cast<float>(static_cast<double>(codes[i]) / 255.0);
     const auto actual =
-        read<float>(expanded.value().values.at("converted"), {i});
+        read<float>(expanded.value().results.at("converted"), {i});
     PS_CHECK(std::memcmp(&actual, &expected, 4) == 0);
   }
   // Every rounding boundary, on both sides, plus exact halves and short tails.
@@ -960,7 +939,7 @@ int generic_vector_oracles() {
     const auto lower = static_cast<std::int64_t>(std::floor(mapped));
     const auto expected =
         lower + (mapped - lower > .5 || (mapped - lower == .5 && (lower & 1)));
-    PS_CHECK(read<std::uint8_t>(compressed.value().values.at("converted"),
+    PS_CHECK(read<std::uint8_t>(compressed.value().results.at("converted"),
                                 {i}) == expected);
   }
   return 0;
@@ -989,150 +968,273 @@ int generic_special_bits() {
   std::vector<std::uint64_t> bits(259);
   for (std::size_t i = 0; i < bits.size(); ++i)
     bits[i] = cases[i % cases.size()].first;
-  auto value =
-      Value::create({ElementType::Float64, {bits.size()}},
-                    Region::whole({bits.size()}), {0, {8}}, pack(bits));
-  PS_CHECK(value.ok());
-  auto registry = make_default_operation_registry();
   for (unsigned mode = 0; mode < 4; ++mode) {
-    DependencyRequest request;
-    request.inputs = {{value.value().descriptor(), {}}};
-    request.outputs = Footprint::all({bits.size()}).take_value();
-    request.parameters = {{"dtype", std::string("float32")},
-                          {"rescale", false},
-                          {"overflow", std::string("clip")}};
-    request.snapshot_identity = "generic-special-bits";
-    auto started =
-        registry->start_dependency("numeric.convert_format_strict", request);
-    PS_CHECK(started.ok());
-    auto session = started.take_value();
-    PS_CHECK(session->poll().ok());
-    auto input = ValueFragments::create(value.value().descriptor(), {},
-                                        request.outputs, {value.value()});
-    PS_CHECK(input.ok());
-    PS_CHECK(
-        session->supply({input.take_value()}, request.snapshot_identity).ok());
+    Probe probe;
+    bool restored_ok = false;
 #if defined(__x86_64__)
-    const auto saved = _mm_getcsr();
-    _mm_setcsr((saved & ~UINT32_C(0x8040)) | ((mode & 1) ? 0x8000 : 0) |
-               ((mode & 2) ? 0x40 : 0));
+    unsigned saved = 0;
 #elif defined(__aarch64__)
-    std::uint64_t saved;
-    __asm__ volatile("mrs %0, fpcr" : "=r"(saved));
-    const auto selected =
-        (saved & ~(UINT64_C(1) << 24)) | ((mode & 1) ? (UINT64_C(1) << 24) : 0);
-    __asm__ volatile("msr fpcr, %0" : : "r"(selected));
+    std::uint64_t saved = 0, selected = 0;
 #endif
-    auto result = session->poll();
+    probe.before = [&] {
 #if defined(__x86_64__)
-    const bool restored =
-        _mm_getcsr() == ((saved & ~UINT32_C(0x8040)) |
-                         ((mode & 1) ? 0x8000 : 0) | ((mode & 2) ? 0x40 : 0));
-    _mm_setcsr(saved);
-    PS_CHECK(restored);
+      saved = _mm_getcsr();
+      _mm_setcsr((saved & ~UINT32_C(0x8040)) | ((mode & 1) ? 0x8000 : 0) |
+                 ((mode & 2) ? 0x40 : 0));
 #elif defined(__aarch64__)
-    std::uint64_t restored;
-    __asm__ volatile("mrs %0, fpcr" : "=r"(restored));
-    __asm__ volatile("msr fpcr, %0" : : "r"(saved));
-    PS_CHECK(restored == selected);
+      __asm__ volatile("mrs %0, fpcr" : "=r"(saved));
+      selected = (saved & ~(UINT64_C(1) << 24)) |
+                 ((mode & 1) ? (UINT64_C(1) << 24) : 0);
+      __asm__ volatile("msr fpcr, %0" : : "r"(selected));
 #endif
+    };
+    probe.after = [&] {
+#if defined(__x86_64__)
+      const bool restored =
+          _mm_getcsr() == ((saved & ~UINT32_C(0x8040)) |
+                           ((mode & 1) ? 0x8000 : 0) | ((mode & 2) ? 0x40 : 0));
+      _mm_setcsr(saved);
+      restored_ok = restored;
+#elif defined(__aarch64__)
+      std::uint64_t restored;
+      __asm__ volatile("mrs %0, fpcr" : "=r"(restored));
+      __asm__ volatile("msr fpcr, %0" : : "r"(saved));
+      restored_ok = restored == selected;
+#else
+      restored_ok = true;
+#endif
+    };
+    auto result = run(ElementType::Float64, {bits.size()}, pack(bits),
+                      {{"dtype", std::string("float32")},
+                       {"rescale", false},
+                       {"overflow", std::string("clip")}},
+                      {}, {}, &probe);
     PS_CHECK(result.ok());
-    const auto& output = std::get<DependencyResult>(result.value()).value;
+    PS_CHECK(restored_ok);
+    const auto& output = result.value().results.at("converted");
     for (std::size_t i = 0; i < bits.size(); ++i) {
       std::uint32_t actual = 0;
-      PS_CHECK(output.read({i}, &actual, sizeof(actual)).ok());
+      actual = read<std::uint32_t>(output, {i});
       PS_CHECK(actual == cases[i % cases.size()].second);
     }
   }
   return 0;
 }
-int direct_limits() {
-  auto source = Value::create({ElementType::Float64, {1}}, Region::whole({1}),
-                              {0, {8}}, pack<double>({0.25}));
-  PS_CHECK(source.ok());
-  auto input = source.take_value();
-  DependencyRequest request;
-  request.inputs = {{input.descriptor(), input.facets()}};
-  request.outputs = Footprint::all({1}).take_value();
-  request.parameters = {{"dtype", std::string("float32")},
-                        {"source_range", std::string("i:0,i:3")},
-                        {"target_range", std::string("i:0,i:1")},
-                        {"metadata_mode", std::string("raw")}};
-  request.snapshot_identity = "fmt06-limits";
-  request.limits.maximum_work = UINT64_MAX;
-  auto registry = make_default_operation_registry();
-  // Derive the limit from a completed execution: the exact integer algorithm
-  // may legitimately eliminate work, so a fixed historical threshold is not
-  // a resource contract. One unit below completion must still fail.
-  auto measured =
-      registry->start_dependency("numeric.convert_format_strict", request);
-  PS_CHECK(measured.ok());
-  auto reference = measured.take_value();
-  PS_CHECK(reference->poll().ok());
-  auto reference_fragments =
-      ValueFragments::create(input.descriptor(), input.facets(),
-                             Footprint::all({1}).take_value(), {input});
-  PS_CHECK(reference_fragments.ok());
-  PS_CHECK(reference->supply({reference_fragments.take_value()}, "fmt06-limits")
-               .ok());
-  PS_CHECK(reference->poll().ok());
-  const auto complete_work = reference->consumed_work();
-  PS_CHECK(complete_work > 1);
-  request.limits.maximum_work = complete_work - 1;
-  auto started =
-      registry->start_dependency("numeric.convert_format_strict", request);
-  PS_CHECK(started.ok());
-  auto session = started.take_value();
-  auto first = session->poll();
-  PS_CHECK(first.ok());
-  auto fragments =
-      ValueFragments::create(input.descriptor(), input.facets(),
-                             Footprint::all({1}).take_value(), {input});
-  PS_CHECK(fragments.ok());
-  PS_CHECK(session->supply({fragments.take_value()}, "fmt06-limits").ok());
-  auto second = session->poll();
-  PS_CHECK(!second.ok());
-  PS_CHECK(second.status().code == ErrorCode::ResourceExhausted);
-  PS_CHECK(session->consumed_work() > 0 &&
-           session->consumed_work() < complete_work);
-  CancellationSource cancellation;
-  request.limits.maximum_work = 1048576;
-  request.cancellation = cancellation.token();
-  cancellation.cancel();
-  auto cancelled =
-      registry->start_dependency("numeric.convert_format_strict", request);
-  if (cancelled.ok()) {
-    auto progress = cancelled.value()->poll();
-    PS_CHECK(!progress.ok());
-  } else {
-    PS_CHECK(cancelled.status().code == ErrorCode::Cancelled);
+int result_batches_and_views() {
+  for (unsigned storage = 0; storage < 3; ++storage) {
+    ResultTensorLayout layout;
+    layout.spatial = storage != 0;
+    layout.order =
+        storage == 2 ? ImagePlaneOrder::Tiled : ImagePlaneOrder::Continuous;
+    auto source = channel_fixture::source({ElementType::UInt8, {2, 3, 2}}, {},
+                                          layout, {2, 2});
+    const auto shape = source.schema.tensors[0].sample_shape();
+    const Region roi({{1, 1}, {0, 1}, {1, 1}, {0, 3}, {1, 1}});
+    ResultRef original;
+    const std::map<std::string, ParameterValue> identity{
+        {"dtype", std::string("uint8")},
+        {"rescale", false},
+        {"layout", std::string("view")}};
+    auto viewed = run_source(source, identity, roi, nullptr, &original);
+    PS_CHECK(viewed.ok());
+    auto retained = viewed.value().results.at("converted");
+    PS_CHECK(channel_fixture::owner(retained, roi) ==
+             channel_fixture::owner(original, roi));
+    PS_CHECK(tensor(retained).batch_axes ==
+             source.schema.tensors[0].batch_axes);
+    PS_CHECK(retained.association().size() == 1 &&
+             retained.association()[0] == original.object_id());
+    const auto expected = channel_fixture::read(original, roi);
+    original = {};
+    viewed = Result<ExecutionResult>(ExecutionResult{});
+    PS_CHECK(channel_fixture::read(retained, roi) == expected);
+    PS_CHECK(!retained
+                  .acquire_tensor(take(retained.descriptor()), 0,
+                                  Region::whole(shape))
+                  .ok());
+    auto empty = run_source(source, identity, {}, nullptr, nullptr, true);
+    PS_CHECK(empty.ok());
+    PS_CHECK(take(empty.value().results.at("converted").descriptor())
+                 .tensor_coverage(0)
+                 .empty());
+    auto converted =
+        run_source(source,
+                   {{"dtype", std::string("float32")},
+                    {"axis", std::int64_t{2}},
+                    {"target_range", std::string("i:0,i:1;i:0,i:2")}},
+                   roi);
+    PS_CHECK(converted.ok());
+    const auto& output = converted.value().results.at("converted");
+    for (std::uint64_t x = 0; x < 3; ++x) {
+      const std::vector<std::uint64_t> at{1, 0, 1, x, 1};
+      const auto code = source.bytes[channel_fixture::address(source, at)];
+      PS_CHECK(read<float>(output, at) ==
+               static_cast<float>(static_cast<double>(code) * 2 / 255));
+    }
+    const auto q = take(Footprint::from_regions(shape, {roi}));
+    PS_CHECK(
+        take(converted.value().dependencies.source_support()).at("source") ==
+        q);
+    for (unsigned roles : {1, 2, 4}) {
+      auto dirty =
+          take(converted.value().dependencies.potential_dirty(
+                   "source", q, roles, {}, ResultSupportTarget::Tensor, 0))
+              .at("converted");
+      PS_CHECK(roles == 1 ? dirty == q : dirty.empty());
+    }
+    auto invalid_source = channel_fixture::source(
+        {ElementType::Float64, {2, 3, 2}}, {}, layout, {2, 2});
+    invalid_source.bytes = pack<double>(std::vector<double>(48, 1e100));
+    auto invalid =
+        run_source(invalid_source,
+                   {{"dtype", std::string("uint8")},
+                    {"axis", std::int64_t{2}},
+                    {"source_range", std::string("i:0,i:1;i:0,i:1")}},
+                   roi);
+    PS_CHECK(!invalid.ok() &&
+             invalid.status().reason == FailureReason::ArithmeticOverflow);
+    PS_CHECK(invalid.status().message.find("coordinate=[1,0,1,0,1]") !=
+             std::string::npos);
+    PS_CHECK(invalid.status().message.find(
+                 "source_dtype=float64 target_dtype=uint8 range_index=1 "
+                 "channel_axis=2 channel=1") != std::string::npos);
+    auto forced = run_source(
+        source,
+        {{"dtype", std::string("float32")}, {"layout", std::string("view")}},
+        roi);
+    PS_CHECK(!forced.ok() && forced.status().message.find("ViewUnavailable") !=
+                                 std::string::npos);
   }
-  CancellationSource midflight;
-  request.cancellation = midflight.token();
-  std::uint64_t work = 0;
-  unsigned evaluation_checks = 0;
-  bool evaluating = false;
-  auto charging = [&](std::uint64_t amount) {
-    work += amount;
-    if (evaluating && amount && ++evaluation_checks == 2)
-      midflight.cancel();
-    return Status::success();
+  // A generic identity preserves legal negative and zero strides.
+  for (const auto stride : {std::int64_t{-4}, std::int64_t{0}}) {
+    auto source = channel_fixture::source({ElementType::Float32, {3}});
+    source.bytes = pack<std::uint32_t>(
+        {UINT32_C(0x7f800001), UINT32_C(0x80000000), UINT32_C(0xffc00123)});
+    source.layout.byte_strides = {stride};
+    source.layout.byte_offset = stride < 0 ? 8 : 0;
+    ResultRef original;
+    auto run = run_source(source,
+                          {{"dtype", std::string("float32")},
+                           {"rescale", false},
+                           {"layout", std::string("view")}},
+                          {}, nullptr, &original);
+    PS_CHECK(run.ok());
+    const auto& result = run.value().results.at("converted");
+    auto window = take(result.acquire_tensor(take(result.descriptor()), 0,
+                                             Region::whole({3})));
+    PS_CHECK(take(window.row_run({0})).sample_stride_bytes == stride);
+    PS_CHECK(channel_fixture::read(result, Region::whole({3})) ==
+             channel_fixture::read(original, Region::whole({3})));
+  }
+  for (auto stride : {std::int64_t{-2}, std::int64_t{0}}) {
+    auto source = channel_fixture::source({ElementType::Int16, {3}});
+    source.bytes = pack<std::int16_t>({1, 2, 3});
+    source.layout.byte_strides = {stride};
+    source.layout.byte_offset = stride < 0 ? 4 : 0;
+    auto converted = run_source(
+        source, {{"dtype", std::string("float32")}, {"rescale", false}});
+    PS_CHECK(converted.ok());
+    for (std::uint64_t i = 0; i < 3; ++i)
+      PS_CHECK(read<float>(converted.value().results.at("converted"), {i}) ==
+               (stride < 0 ? 3 - i : 1));
+  }
+  return 0;
+}
+int result_resource_lifetime_and_reuse() {
+  ResultRef retained;
+  ColorProfileIdentity identity;
+  ResourceBudget source_root;
+  {
+    ResourceBudget profiles;
+    const auto bytes = numeric_fixture::fixture();
+    auto profile = take(
+        IccProfile::import(ByteView(bytes.data(), bytes.size()), profiles));
+    identity = profile.identity();
+    TensorDescription d;
+    d.component = TensorChannelDescription{"x", "", ""};
+    d.component->interpretation.emplace();
+    d.component->interpretation->profile = identity;
+    auto source = channel_fixture::source({ElementType::Float64, {3}},
+                                          {take(encode_tensor_description(d))});
+    source.bytes = pack<double>({.25, .5, 1});
+    source.resources = take(ResourceBindings::create({profile}, profiles));
+    WorkflowDocument document;
+    document.inputs = {channel_fixture::declaration(source)};
+    document.nodes = {
+        {1,
+         "numeric.convert_format_strict",
+         {WorkflowInputReference{1}},
+         {{"dtype", std::string("float32")}, {"rescale", false}}}};
+    document.outputs = {{"converted", 1, "values"}};
+    auto registry = make_default_operation_registry();
+    GraphContext graph(document);
+    const auto compiled =
+        take(Compiler(registry).compile(graph, {}, source.resources));
+    ExecutionContext context(registry);
+    source_root = take(context.resource_budget());
+    ExecutionBindings bindings;
+    bindings.inputs.push_back(
+        {"source", channel_fixture::publish(source_root, source)});
+    auto first = std::async(std::launch::async, [&] {
+      return context.execute(compiled.plan, bindings);
+    });
+    auto second = std::async(std::launch::async, [&] {
+      return context.execute(compiled.plan, bindings);
+    });
+    auto a = take(first.get());
+    auto b = take(second.get());
+    retained = a.results.at("converted");
+    PS_CHECK(
+        channel_fixture::read(retained, Region::whole({3})) ==
+        channel_fixture::read(b.results.at("converted"), Region::whole({3})));
+    PS_CHECK(retained.resources().icc_profile(identity).ok());
+    PS_CHECK(retained.association()[0] ==
+             bindings.inputs[0].result.object_id());
+  }
+  PS_CHECK(retained.resources().icc_profile(identity).ok());
+  PS_CHECK(read<float>(retained, {0}) == .25F &&
+           read<float>(retained, {2}) == 1);
+  retained = {};
+  PS_CHECK(source_root.statistics().live[ResourceKind::Payload] == 0);
+  return 0;
+}
+int direct_limits() {
+  const std::map<std::string, ParameterValue> parameters{
+      {"dtype", std::string("float32")},
+      {"source_range", std::string("i:0,i:3")},
+      {"target_range", std::string("i:0,i:1")},
+      {"metadata_mode", std::string("raw")}};
+  auto execute = [&](Probe* probe) {
+    return run(ElementType::Float64, {1}, pack<double>({.25}), parameters, {},
+               {}, probe);
   };
-  auto running = registry->start_dependency(
-      "numeric.convert_format_strict", request, BufferAllocator{}, charging);
-  PS_CHECK(running.ok());
-  auto active = running.take_value();
-  PS_CHECK(active->poll().ok());
-  auto mid_fragments =
-      ValueFragments::create(input.descriptor(), input.facets(),
-                             Footprint::all({1}).take_value(), {input});
-  PS_CHECK(mid_fragments.ok());
-  PS_CHECK(active->supply({mid_fragments.take_value()}, "fmt06-limits").ok());
-  evaluating = true;
-  auto interrupted = active->poll();
-  PS_CHECK(!interrupted.ok());
-  PS_CHECK(interrupted.status().code == ErrorCode::Cancelled);
-  PS_CHECK(work > 0 && evaluation_checks == 2);
+  Probe measured;
+  PS_CHECK(execute(&measured).ok());
+  PS_CHECK(measured.work > 1);
+  Probe limited;
+  limited.limit = measured.work - 1;
+  auto failed = execute(&limited);
+  PS_CHECK(!failed.ok() &&
+           failed.status().code == ErrorCode::ResourceExhausted);
+  PS_CHECK(limited.work > 0 && limited.work < measured.work);
+  CancellationSource cancelled;
+  cancelled.cancel();
+  Probe before;
+  before.cancellation = cancelled.token();
+  auto stopped = execute(&before);
+  PS_CHECK(!stopped.ok() && stopped.status().code == ErrorCode::Cancelled);
+  CancellationSource midflight;
+  Probe during;
+  during.cancellation = midflight.token();
+  unsigned checks = 0;
+  during.charge = [&](std::uint64_t amount) {
+    if (amount && ++checks == 2)
+      midflight.cancel();
+  };
+  auto interrupted = execute(&during);
+  PS_CHECK(!interrupted.ok() &&
+           interrupted.status().code == ErrorCode::Cancelled);
+  PS_CHECK(during.work > 0 && checks == 2);
   return 0;
 }
 }  // namespace
@@ -1164,6 +1266,8 @@ int main() {
   if (static_shape_limit())
     return 1;
   if (rational_codec_rejections())
+    return 1;
+  if (result_batches_and_views() || result_resource_lifetime_and_reuse())
     return 1;
   return direct_limits();
 }

@@ -139,17 +139,18 @@ including domain/failure classification. The same kernel handles vector tails.
 `2*x+1` and ordinary exp can therefore avoid both per-sample continuation work
 and multiprecision math. Cancellation and all continuation storage are accounted.
 
-Dependency-path diagnostics identify the numerical implementation, compiler/OS/build identity
-and actual selected profile. The build identity includes the pinned SLEEF sources
-and integration module, preventing old/new accelerated cache identity reuse. Evaluations
-are admitted before arithmetic; copied values are counted before their fixed
-publication store. Both counts and an already attempted fallback survive a later
-resource or cancellation failure. Cache hits add no fabricated arithmetic work.
+DependencyPath diagnostics identify the numerical implementation, compiler/OS/build identity and selected profile. The build identity includes the pinned SLEEF sources and integration module, preventing old/new accelerated cache identity reuse. In that path, evaluations are admitted before arithmetic and copied values are counted before their fixed publication store. Those counts and an attempted fallback survive later resource or cancellation failure. Cache hits add no fabricated arithmetic work. This accounting model does not describe the NUM-11/13 Whole accumulators below.
 
 NUM-04/05 now use Whole callbacks. Their arithmetic and fallback rules are
 unchanged, but per-value diagnostics described above are unavailable (N/A).
 The older timing and regional acceptance tables below describe their recorded
 revisions; see [current Whole measurements](point-math-whole.md).
+
+NUM-11 reductions and NUM-13 scans keep one `NumericDiagnostics` object local to each Whole `write`. After `MathTensorReader` returns an input word, the callback increments `evaluated_values` immediately before passing that word to the exact accumulator. On successful execution, the count therefore matches sample words supplied to the accumulator, not output groups or positions. Prefix zero boundaries, integral-image carries and final output conversions do not add input attempts. The reducer's `implementation` identity names `photospider.reduction-exact/1;accumulator-u64x68`; scans use `photospider.scan-exact/1;accumulator-u64x68`. Both append the selected profile's `selection_implementation` and host/build identity. That ISA label describes the four-word output-selection scratch helper; it does not claim that the complete reduction or scan algorithm uses SIMD arithmetic.
+
+For these exact accumulator paths, Strict and Apple checks report zero `strict_math_calls`, zero `strict_fallbacks` and zero fallback reasons. This records that these operations did not dispatch a strict fallback; it is not a measure of scalar work. `reduce_count` uses a separate metadata-only identity and reports zero evaluated values. Empty requests do no sample arithmetic, and a completed-result cache hit contributes no new input attempts.
+
+The callback attempts one final report after a normal return or a status it handles through `finish`. It records a handled operation failure before reporting and preserves that primary status if diagnostic admission is rejected. WorkLimit or cancellation can prevent the report from being merged. A `Status` thrown while acquiring or reading a tensor window, or `std::bad_alloc` caught by the outer `math_callback`, is recorded by that outer layer and can bypass the local final-report attempt. These counters do not promise a partial progress record for every terminal path.
 
 ## Independent reference and execution
 
@@ -401,18 +402,21 @@ The combined Hermite numerator is below 2^20999 and denominator below 2^18897.
 The 352-limb (22528-bit) workspace covers these bounds plus denominator
 alignment, 53 quotient trials and midpoint doubling. The fixed 96-slot arena
 uses at most 49 live slots in the formula; every slot and ratio temporary is
-part of the admitted callback workspace. Endpoint limits compare exact cross-products.
+part of the admitted Result continuation workspace. Endpoint limits compare
+exact cross-products.
 Direct node/clamp conversion, two-point linear degeneration and exterior
 tangent evaluation have smaller bounds. Arithmetic polls work/cancellation
 inside limb multiplication and final division. Independent scoped arithmetic
 review also compared 3208 Fraction formula expansions successfully.
 
-For every nonempty request, one CPU Whole callback collects complete x, y and
-query inputs, including recognized typed validation and upstream failures. It
-validates all x knots and all query controls before y arithmetic, evaluates every query and every output column, and returns
-one immutable dense output of shape [N] or [N,C]. Empty reads no payload; static
-metadata validation still applies. Sparse demand restricts publication coverage,
-but does not reduce input collection, computation or the complete output owner.
+For every nonempty request, the CPU Whole Result continuation collects complete
+x, y and query inputs, including recognized typed validation and upstream
+failures. It validates all x knots and query controls before y arithmetic,
+evaluates every query and output column, and returns one immutable dense Result
+of shape [N] or [N,C]. Empty reads no payload; static metadata validation still
+applies. Sparse demand records the requested dependency region Q, but does not
+reduce input collection, computation or the complete output owner. The Result
+can retain full computed coverage, with sample coordinates in global positions.
 
 The mathematical stencil remains unchanged: an exact knot/clamp uses one y;
 linear uses two endpoints; PCHIP uses its fixed local stencil. Generic y values
@@ -430,8 +434,8 @@ negative strides remain legal. Packed output storage outlives the context.
 Search/classification costs O(K+N log K), followed by N scalar evaluations
 (or N*C for multi). Classification is shared across columns. The complete dense
 output costs b*N (or b*N*C) bytes; reserve it even for one requested cell. Input
-collection and retained owners also require admission. The callback declares its
-fixed exact arithmetic workspace, and the host-accounted knot vector has 8*K
+collection and retained owners also require admission. The continuation declares
+its fixed exact arithmetic workspace, and the host-accounted knot vector has 8*K
 element bytes plus allocator/metadata overhead. K<=65536 bounds its elements at
 524288 bytes. No full slope table is required.
 
@@ -444,23 +448,45 @@ categories. Numeric failures are OperationFailed/InvalidDomain or final-output
 ArithmeticOverflow, with Run scope and offending port/index where available.
 
 
-Clang 21.1.3 RelWithDebInfo on Apple M5 / macOS 27.0 (26A5425a), package
-0.18.0, passed 2487 independent Fraction cases for each strict/Apple profile,
-the public workflow groups, active cancellation/budget checks, and focused
-numeric/compiler tests. The existing Apple inverse workflow also passed after
-the shared exact evaluator gained an optional already-normalized environment.
-Other platforms were not rerun for this migration.
+The measurements and test results in the remainder of this section are
+historical evidence from the Value-based adapter and callback implementation.
+They do not validate the current Result workflow or establish its performance.
+Current Result checks use the `test_numeric_curves_result` manual fixture, the
+`test_numeric_result_math` integration test, the independent Fraction oracle,
+and the installed `installed_numeric_curves_result` consumer; commands are in
+the [numeric workflow README](../../../examples/numeric_workflow/README.md#explicit-query-curves-crv-01).
+The manual fixture's six groups passed in direct Strict and Apple runs. They
+cover Result declarations and bindings, Whole sparse support and error paths,
+layouts and floating-environment preservation, Empty and metadata validation,
+work/cancellation/resource limits, cache and binding replacement, typed Mask
+validation, upstream failures, and Result/read-window lifetime and release. The
+installed 0.32 consumer passed `installed_numeric_curves_result` 1/1 under
+Strict in 0.36 seconds; its direct Apple invocation also passed. The root
+focused CTest selection passed 3/3 in 5.09 seconds. The strengthened Fraction
+oracle passed 2,487 bit-exact cases for each of Strict and Apple. See the
+workflow README for commands and exact evidence boundaries.
 
-Native sampling (2026-09-21) uses K=17, N=512, x[j]=j, y[j,c]=j+c,
-query[i]=(i%64)/4+1/8, dense inputs, complete demand, one CPU worker and cache
+The earlier Clang 21.1.3 RelWithDebInfo run on Apple M5 / macOS 27.0
+(26A5425a), package 0.18.0, passed 2487 independent Fraction cases for each
+strict/Apple profile, the then-current public workflow groups, active
+cancellation/budget checks, and focused numeric/compiler tests. The existing
+Apple inverse workflow also passed after the shared exact evaluator gained an
+optional already-normalized environment. These results belong to that older
+adapter and are not evidence for the Result interface. Other platforms were
+not rerun for those measurements.
+
+Historical Value-adapter sampling (2026-09-21) uses K=17, N=512, x[j]=j,
+y[j,c]=j+c, query[i]=(i%64)/4+1/8, dense inputs, complete demand, one CPU worker and cache
 disabled. Strict uses Float64, Apple uses Float32. One warm invocation precedes
-seven measured invocations, with analytic identity checks outside timing. Both
-adapters use the same kernel; the comparison adapter is the CRV-01 source at
-3d35f5eb. Public latency includes execution, managed metering, collection and
-result assembly, excluding compile/freeze. The core column measures the current
-numeric callback on prepared complete Values, including lookup, arithmetic,
-allocation and publication, but excluding scheduling, collection and managed
-metering. It is not a pure arithmetic instruction benchmark.
+seven measured invocations, with analytic identity checks outside timing. The
+comparison used the prior Value adapter and the same numerical kernel. Public
+latency includes execution, managed metering, collection and result assembly,
+excluding compile/freeze. The core column measures the Value numeric callback
+on prepared complete Values, including lookup, arithmetic, allocation and
+publication, but excluding scheduling, collection and managed metering. It is
+not a pure arithmetic instruction benchmark and cannot be compared with the
+current `execute_fragments` Result timer, which includes coordinator discovery
+and publication/digest work.
 
 Budgets: 1 GiB payload, 2 GiB Host, 512 MiB Metadata, 512 MiB dependency state,
 2^40 dependency/Run work units, default unlimited managed work. Raising Metadata
@@ -472,7 +498,7 @@ Apple peak is 294,128 before and 296,380 bytes after.
 
 All times below are median [min,max] milliseconds for these seven samples.
 
-| Operation | C | Profile/dtype | Public before | Public Whole | Numeric callback core |
+| Historical Value operation | C | Profile/dtype | Value public before | Value public Whole | Value callback core |
 | --- | ---: | --- | ---: | ---: | ---: |
 | linear | 1 | strict/Float64 | 10.026 [9.726,10.364] | 2.650 [2.602,2.939] | 2.449 [2.417,2.555] |
 | linear | 1 | apple/Float32 | 7.286 [7.084,7.381] | 0.145 [0.141,0.162] | 0.080 [0.076,0.083] |
@@ -483,7 +509,7 @@ All times below are median [min,max] milliseconds for these seven samples.
 | pchip | 4 | strict/Float64 | 55.231 [54.921,56.102] | 21.307 [21.054,21.696] | 19.805 [19.645,20.042] |
 | pchip | 4 | apple/Float32 | 32.468 [32.017,33.298] | 0.701 [0.669,0.741] | 0.617 [0.546,0.673] |
 
-Three 12-second Time Profiler captures of Apple Float32 PCHIP C=4 retain
+Three historical 12-second Time Profiler captures of Apple Float32 PCHIP C=4 retain
 11,781/11,769/11,745 execution-stack samples for the old adapter, initial Whole
 adapter and final Whole adapter respectively. Inclusive counts overlap. The old
 adapter has DependencySession on 84.14% and Footprint methods on 52.42% of these
@@ -491,8 +517,31 @@ samples. Initial Whole shows repeated fegetenv/fesetenv on 12.59%; moving the
 same guard around the complete callback removes sampled per-value fenv frames
 in the final capture. Final nextafter interval expansion is 42.66%, managed
 ResourceBudget methods 6.84%, and ValueFragments::collect 0.55%. No NUM-14
-finite-Float32 certificate is used. Scalar exact arithmetic and accelerated
-interval/fallback paths retain their existing mathematical contract.
+finite-Float32 certificate was used by that adapter. Scalar exact arithmetic
+and accelerated interval/fallback paths retain the numerical contract described
+above.
+
+These old-path counters and timings must not be read as current Result
+performance. The Result fixture's optional `benchmark` mode passed eight cases
+per profile (sixteen across Strict and Apple): N=1/64, C=1/2, K=17, one worker,
+cache off and dependency-cache proof off. Its timer surrounds
+`execute_fragments`, includes coordinator discovery, continuation polls,
+computation, publication and digest work, and excludes source construction,
+compile, freeze, readback and output checks. It reports two continuation polls,
+N*C computed elements, the managed Root Payload peak and
+`timing_scope=result_execute_fragments`; each case checks that the measured
+Payload peak covers the complete output. Both profiles reported the same Root
+Payload peaks:
+
+| N | C | Root Payload peak (bytes) |
+| ---: | ---: | ---: |
+| 1 | 1 | 288536 |
+| 64 | 1 | 289040 |
+| 1 | 2 | 288544 |
+| 64 | 2 | 289552 |
+
+These are bounded correctness and timing-scope smoke results. They do not
+establish a performance improvement or a platform matrix.
 
 Raw driver, build script, CSV sample ranges, logs, trace exports and analysis
 are local ignored artifacts under `build/crv-whole/` (`curves-final-times.csv`,
@@ -502,74 +551,24 @@ other CPUs. Whole diagnostics do not expose per-value fallback counts.
 
 ## CRV-02 exact Bezier function sampling
 
-`bezier_function.cpp` registers three explicit degree-2/3 sampler profiles.
-`ExactSampling` shares NUM-01's exact weighted grid and RN64 addition/conversion.
-`ExactPolynomial` stores signed integer coefficients in units 2^-1075;
-`ExactBezier` validates exact derivative minima and solves the unique interior
-Bx root by dyadic bisection. Interval Horner bounds the whole By image. Integer
-pseudo-remainder GCD and exact low-degree root tests decide shared zeros and
-rounding midpoints; they avoid assuming that a small residual proves rounding.
-Nonzero half-subnormal boundaries use the boundary sign when the tie rounds to
-zero. Direct dyadic roots and constant ordinates use exact evaluation.
+`bezier_function.cpp` registers three explicit degree-2/3 sampler profiles. `ExactSampling` shares NUM-01's exact weighted grid and RN64 addition/conversion. `ExactPolynomial` stores signed integer coefficients in units 2^-1075; `ExactBezier` validates exact derivative minima and solves the unique interior Bx root by dyadic bisection. Interval Horner bounds the whole By image. Integer pseudo-remainder GCD and exact low-degree root tests decide shared zeros and rounding midpoints; they avoid assuming that a small residual proves rounding. Nonzero half-subnormal boundaries use the boundary sign when the tie rounds to zero. Direct dyadic roots and constant ordinates use exact evaluation.
 
-The fixed arena has 640 64-bit limbs (40960 bits) per number and 96 slots,
-all inside the admitted callback state. Initial coefficients have fewer than
-2105 bits. The worst degree-three integer remainder chain grows through
-4211, 10529 and fewer than 25280 bits. Horner evaluation at the 8192 fractional
-bit refinement cap stays below 26683 bits; final rounding temporaries fit the
-same arena. The static maximum live-slot bound is 44, including temporary
-GCD calls. Explicit work/cancellation runs inside long arithmetic; unresolved
-refinement or storage limits return ResourceExhausted/CapacityLimit. The solver
-has a finite budget, not a promise that every algebraic input resolves at any
-caller-selected budget. All profiles use this exact numerical path, so no
-numerical fallback is reported; profile-specific integer helpers supply the
-scalar/NEON/AVX2 operations. The Whole callback does not expose per-value
-solver/fallback counters.
+The fixed arena has 640 64-bit limbs (40960 bits) per number and 96 slots, all inside the admitted Result continuation state. Initial coefficients have fewer than 2105 bits. The worst degree-three integer remainder chain grows through 4211, 10529 and fewer than 25280 bits. Horner evaluation at the 8192 fractional bit refinement cap stays below 26683 bits; final rounding temporaries fit the same arena. The static maximum live-slot bound is 44, including temporary GCD calls. Explicit work/cancellation runs inside long arithmetic; unresolved refinement or storage limits return ResourceExhausted/CapacityLimit. The solver has a finite budget, not a promise that every algebraic input resolves at any caller-selected budget. All profiles use this exact numerical path, so no numerical fallback is reported; profile-specific integer helpers supply the scalar/NEON/AVX2 operations. The Whole callback does not expose per-value solver/fallback counters.
 
-Values uses one CPU Whole callback. For every nonempty values request, collect
-complete anchors and handles plus start and, only when count>1, end. Recognized
-typed validation and upstream failures apply to all collected components. Validate
-all x topology, then every generated coordinate/domain/adjacent-separation control
-before y arithmetic. Evaluate all count outputs and allocate one complete dense
-values owner, even for sparse demand. Empty reads no payload.
+Both outputs use CPU Whole Result continuations. A nonempty `values` request collects complete anchors and handles plus start and, only when count>1, end with Data, Validation and Descriptor roles. Typed validation and upstream failures apply to all collected inputs. The continuation validates all x topology, then every generated coordinate, domain condition and adjacent-separation control before y arithmetic. It evaluates every sample and publishes a complete dense Result, including for sparse demand. The Result certifies full coverage in global sample coordinates. Empty demand reads no input payload and executes no numeric kernel; the runtime can still poll metadata and seal the Result.
 
-Mathematical selection remains local: exact anchor/clamp uses that anchor y;
-interior evaluation uses the selected segment's anchor y and relative y handles.
-Generic y outside every evaluated stencil is not additionally finite-checked.
-All output samples are evaluated, so an invalid otherwise-unrequested sample can
-fail the complete values Run. Failure publishes no partial successful values.
-Axis independently collects start/end only (start for count=1), computes its
-24-byte tuple and never validates control payloads or per-coordinate separation.
-Static descriptors of all four edges are still validated for either output.
+Mathematical selection remains local: exact anchor/clamp uses that anchor y; interior evaluation uses the selected segment's anchor y and relative y handles. Generic y outside every evaluated stencil is not additionally finite-checked. All output samples are evaluated, so an invalid otherwise-unrequested sample can fail the complete values Run. Failure publishes no partial successful values. Each output publishes through its own all-or-nothing Result transaction. Axis collects only start and end, with count=1 excluding end, computes its 24-byte tuple and does not read controls or validate per-coordinate separation. Static metadata for all four edges is checked for either output.
 
-Any collected anchor/handle edit invalidates the recorded values demand; controls
-never dirty axis. Start/end affect both outputs, except that count=1 ignores end.
-Complete immutable input versions, profile, metadata and parameters remain in
-cache identity. Both outputs retain their existing names, dtypes, empty facets
-and independent identity; there is no new pairing object. Returned owners survive
-context destruction. Sparse publication coverage retains the complete owner.
+The Result association records actual source ObjectIds. Input changes update recorded dependency dirtiness for the requested region; anchor and handle changes affect `values`, while start/end affect outputs that depend on them. The count=1 dependency omits `end`. Complete immutable input versions, profile, metadata and parameters remain in cache identity, while binding topology can reuse the static PreparedOperation. Both outputs retain independent identities, names, dtypes and empty facets. Result owners and authorized read windows remain valid past context and source-handle retirement; releasing the final window releases the Root allocation.
 
 
-Native Clang 21.1.3 strict/Apple public workflows and each profile's 382
-independent Fraction/de Casteljau/Euclid-Sturm numeric/error cases passed; four
-additional maximum-count cases verify full-output admission failure at 1 MiB.
-These four are resource checks, not successful million-element numeric runs.
-Focused numeric/compiler tests, active cancellation/work/output/workspace
-checks, arbitrary layouts/fenv and typed-input validation passed.
+The manual Result fixture in `examples/numeric_workflow/bezier.cpp` passed all six groups under Strict and Apple. It covers Result declarations/bindings/reads, count-one and axis dependency projection, sparse full-output coverage and source association, same-demand and fresh-source cache behavior, preparation reuse, error ordering, all-port layouts, caller/worker fenv, work/cancellation/output/scratch limits, typed validation, and Result/read-window lifetime. It also verifies that retained values and axis windows keep 48 Payload bytes alive after all four source owners retire, that releasing the values window leaves the 24-byte axis readable, and that releasing the final window returns all Root usage to zero. Generic y data outside the mathematical stencil is not scanned; recognized typed validation still applies to the complete active Result input. The maximum-count oracle cases verify that a sparse request cannot admit the complete dense output under a 1 MiB Payload budget. They check capacity rejection at the operation node, not successful million-element numerical execution.
 
-Sampling on Apple M5 / macOS 27.0 (26A5425a), package 0.18.0, uses degree 2/3,
-K=2, N=129, Float64 inputs/output, anchors [[0,0],[1,1]], quadratic offset
-[.5,.5], or cubic offsets [.25,.25],[-.25,-.25]. The grid is [0,1] inclusive.
-Every output is independently checked against RN64(i/128). One warm invocation
-precedes seven measured samples. One CPU worker, cache off, 1 GiB payload,
-2 GiB Host, 512 MiB Metadata and dependency state, 2^40 dependency/Run work,
-and default unlimited managed work apply. Compile/freeze/checking are outside
-public execution timing. The comparison adapter is CRV-02 at 3d35f5eb linked
-to the same kernel; the current core column calls the prepared complete-Value
-numeric callback, including allocation/classification/solver/publication but
-excluding scheduler, collection and managed metering. All times are median
-[min,max] ms. Small overlapping sample ranges cannot establish that core is
-faster or slower than public execution.
+The independent `bezier_oracle.py` passed 382 Fraction/de Casteljau/Euclid-Sturm numeric and error cases for each Strict and Apple profile. Four additional cases per profile check maximum-count full-output capacity rejection. Reproduction commands, installed consumer configuration and the manual benchmark protocol are in the [numeric workflow README](../../../examples/numeric_workflow/README.md#bezier-function-sampling-crv-02). The focused root CTest run passed `test_numeric_result_math` and `test_numeric_bezier_result` 2/2 in 4.99 seconds (4.39 seconds and 0.60 seconds respectively). The installed package 0.32.0 consumer compiled the same manual fixture and passed `installed_numeric_bezier_result` 1/1 under Strict in 0.71 seconds; its direct Apple invocation passed all six groups. Independent code and contract review found no unresolved blocker or required change. The separate integration target's 22 golden words include six function outputs plus sixteen CRV-03 parametric outputs; these integration fixtures do not establish that `parametric.cpp` was migrated by this manual-workflow change. x86 and maximum physical K/N execution were not tested.
+
+The Result benchmark passed 16 regular rows under each profile across degree 2/3, K=2/64, N=17/129 and Whole/ROI demand, using Float64 and three repetitions. Each row reported two continuation polls and N computed elements; Root Payload peaks were 523,368 bytes at N=17 and 524,264 bytes at N=129. Each profile also passed two stress rows, reporting two polls, one computed element and a 523,240 byte Root Payload peak. The timer surrounds `execute_fragments` with cache and dependency-cache proof disabled. Its scope includes coordinator discovery, continuation polling, computation, publication and digest, and excludes source creation, compilation, freeze, readback and output checks. It reports the managed Root Payload peak and `timing_scope=result_execute_fragments`. Whole execution does not expose per-value root-solver or fallback counters, so those fields remain N/A. These are bounded timing-scope and behavior smoke checks; they do not establish a performance improvement.
+
+The benchmark table below is historical Value-path sampling on Apple M5 / macOS 27.0 (26A5425a), package 0.18.0. It uses degree 2/3, K=2, N=129, Float64 inputs/output, anchors [[0,0],[1,1]], quadratic offset [.5,.5], or cubic offsets [.25,.25],[-.25,-.25]. The grid is [0,1] inclusive. Every output is independently checked against RN64(i/128). One warm invocation precedes seven measured samples. One CPU worker, cache off, 1 GiB payload, 2 GiB Host, 512 MiB Metadata and dependency state, 2^40 dependency/Run work, and default unlimited managed work apply. Compile/freeze/checking are outside public execution timing. The comparison adapter is the prior CRV-02 Value adapter linked to the same kernel; the core column calls the prepared complete-Value numeric callback, including allocation/classification/solver/ publication but excluding scheduler, collection and managed metering. These measurements do not describe the current Result path. All times are median [min,max] ms. Small overlapping sample ranges cannot establish that core is faster or slower than public execution.
 
 | Degree | Profile | Public before | Public Whole | Numeric callback core |
 | --- | --- | ---: | ---: | ---: |
@@ -578,90 +577,115 @@ faster or slower than public execution.
 | cubic | strict | 87.547 [86.536,87.955] | 76.894 [76.396,78.221] | 76.885 [76.514,77.787] |
 | cubic | apple | 85.549 [84.666,86.681] | 74.007 [73.099,75.409] | 74.512 [73.850,74.814] |
 
-Context-reported peak Metadata drops from 7,281,016/7,281,024 bytes to
-3,584/3,592 bytes for quadratic/cubic. These are managed statistics, not RSS.
-The 12-second Apple cubic Time Profiler capture contains 11,932 execution-stack
-samples: ExactBezier::inverse is inclusive in 99.18%, ExactPolynomial methods
-97.45%, ResourceBudget 2.99%, ExactSampling 0.07%, and collect 0.02%. Inclusive
-categories overlap. Exclusive samples identify fixed-integer top/subtract/add
-and shifting as the main remaining work. The observed cubic improvement is
-limited by exact inverse arithmetic; no cheaper unproved inverse or NUM-14
-Float32 certificate is substituted.
+Context-reported peak Metadata drops from 7,281,016/7,281,024 bytes to 3,584/3,592 bytes for quadratic/cubic. These are managed statistics, not RSS. The 12-second Apple cubic Time Profiler capture contains 11,932 execution-stack samples: ExactBezier::inverse is inclusive in 99.18%, ExactPolynomial methods 97.45%, ResourceBudget 2.99%, ExactSampling 0.07%, and collect 0.02%. Inclusive categories overlap. Exclusive samples identify fixed-integer top/subtract/add and shifting as the main remaining work. The observed cubic improvement is limited by exact inverse arithmetic; no cheaper unproved inverse or NUM-14 Float32 certificate is substituted.
 
-Raw drivers/build commands, seven-sample ranges, trace/XML, logs and analysis
-remain locally under ignored `build/crv-whole/` (`bezier-times.csv`,
-`bezier-after.trace`, `bezier-profile-summary.txt`). This is native evidence for
-the stated grids; it does not establish all-shape or cross-platform speedups.
+Historical Value-path drivers/build commands, seven-sample ranges, trace/XML, logs and analysis remain under ignored `build/crv-whole/`.
 
 
 ## CRV-03 parametric Bezier evaluation
 
-`parametric_bezier.cpp` retains ExactSampling RN64 reconstruction and
-ExactPolynomial integer Bernstein/power-Horner evaluation with direct output
-rounding. Unlike CRV-02, it evaluates explicit t and does not solve an inverse.
-The scalar numerator bound is 5329 bits for degree<=3 and t in [0,1]. Endpoints
-convert one anchor; interior exact zero is negative only if every reconstructed
-control is negative zero. All profiles retain the current exact calculation,
-with scalar/NEON/AVX2 integer helpers and the unchanged accelerated contract.
+`parametric_bezier.cpp` evaluates explicit t and does not solve an inverse. The
+public `evaluate_bezier_node` accepts four Result inputs and specializes the
+output schema from their descriptors and static degree/dtype parameters. The
+manual `parametric.cpp` workflow declares schema-backed inputs, binds source
+Results, executes through the public compiler/context API and reads output
+Results through authorized tensor access. Its `Value` objects provide immutable
+source storage only; source Results refer to that storage and account it as
+Referenced. Result tensor schemas carry descriptor and semantic facets.
 
-One CPU Whole callback collects all four complete inputs with recognized typed
-validation, then validates every segment_indices/t row before any component
-arithmetic. It evaluates all N*D output cells and publishes one immutable dense
-[N,D] owner. Sparse demand restricts returned coverage but retains complete input
-collection, computation and output memory. Empty reads no payload; complete
-static metadata still validates.
+The Whole Result continuation requests active inputs with Data, Validation and
+Descriptor (role 13), validates every segment/t row before component arithmetic,
+evaluates all N*D output cells and publishes one immutable dense [N,D] Result
+with full certified coverage in global coordinates. A sparse query restricts
+recorded dependency/dirty mapping while retaining full input collection,
+computation and output allocation. Empty output coverage is empty and Empty does
+not poll a failing handle producer; static metadata and other execution stages
+remain active. Nonempty requests preserve upstream handle failures before
+endpoint or invalid-query arithmetic. Each output transaction publishes
+atomically; a failure releases unpublished state. Output association records the
+current input ObjectIds.
 
-Mathematical selection is unchanged: t=0/1 uses only the selected anchor
-component; an interior uses both anchors and all relative handles of that segment
-and component. Generic numeric data outside every evaluated stencil is not
-additionally finite-checked. Complete typed and upstream validation still covers
-unused inputs. All rows/components are evaluated, so formerly unrequested bad
-index/t/components can fail the Run. No partial successful output is published.
-There is no global mathematical topology/monotonicity scan.
+Endpoint t=0/1 reads only the selected anchor for the mathematical value. An
+interior reads both anchors and all relative handles for its segment and
+component. Generic numeric data outside evaluated stencils is not additionally
+finite-checked. Complete typed validation and upstream execution still cover all
+active inputs. The fixture's typed RGBA handle Result has spatial layout and
+channel axis 2. Its sparse query asks for column 0 at t=.5, but Whole execution
+computes all D=4 columns and reads the alpha handle as well. A separate t=0
+case shows that endpoint mathematics skips the handle while complete typed
+validation still checks it and rejects an invalid alpha value. Every query row
+and output component is evaluated, so any bad segment/t or evaluated component
+fails the Run and no partial Result is published. No global mathematical
+topology scan is performed.
 
-Any input edit invalidates recorded output demand. Cache identity includes all
-input versions, profile, metadata and parameters. Output name, dtype, rank-2
-shape (including D=1) and empty facets are unchanged. Input zero/negative strides,
-offsets and unaligned storage remain legal. Output storage survives its context.
+RN64 reconstruction and the exact Bernstein/power-Horner implementation are
+unchanged. The scalar numerator bound is 5329 bits for degree<=3 and t in [0,1].
+Endpoints convert one anchor. For an interior exact zero, the result is negative
+only when every reconstructed control is negative zero; nonzero underflow keeps
+the mathematical sign. All profiles retain the same exact calculation with
+scalar/NEON/AVX2 integer helpers and the shared accelerated contract. Caller and
+worker floating environments are preserved.
 
-The callback retains one row classification and fixed arithmetic workspace,
-independent of N and D. It validates all rows, then reclassifies each row once
-for all columns. Work is O(N+N*D*degree), plus exact arithmetic, complete input
-collection and typed validation. Complete output costs b*N*D bytes. Admit that
-output and fixed workspace even for one requested cell, together with collected
-inputs/retained owners and metadata. Giant broadcast inputs/output can therefore
-fail a small payload budget. No per-cell dependency certificates or full
-coefficient table is retained.
+The continuation retains one row and fixed arithmetic workspace independent of
+N and D. It classifies rows before component arithmetic and reclassifies each
+row for all columns. Work is O(N+N*D*degree), plus exact arithmetic, input
+collection and typed validation. Complete output costs b*N*D bytes. Admission
+accounts for that output and fixed workspace even for a one-cell request, as
+well as collected inputs, retained owners and metadata. Public constant-node
+composition checks with D=2^39 and N=2^40 request only one cell but fail at the
+parametric node with ResourceExhausted/CapacityLimit because the complete output
+does not fit. These cases verify complete-output capacity rejection; they do not
+run successful numerical evaluation at physical maximum shapes. No per-cell
+dependency certificates or full coefficient table is retained.
 
-Use the host worker and resource ledger; poll cancellation on reads, row controls,
-inside exact arithmetic and before publication. Work/capacity failures preserve
-ResourceExhausted and release unpublished state/output. Numeric failures have Run
-scope, identifying offending port/index where available. Invalid segment/t is
-InvalidArgument/InvalidDomain; used nonfinite controls are OperationFailed/
-InvalidDomain; actual RN64 reconstruction or final conversion overflow is
-OperationFailed/ArithmeticOverflow. Typed, upstream, stale, backend and
-cancellation errors preserve their categories. Whole numeric counters are not
-available; zero counters must not be interpreted as zero arithmetic/fallbacks.
+The host worker and resource ledger account computation. Cancellation is polled
+on reads, row controls, exact arithmetic and before publication. Computation
+WorkLimit, output/scratch capacity failure and cancellation propagate their
+categories and release unpublished output and all Root resources. Invalid
+segment/t is InvalidArgument/InvalidDomain; used nonfinite controls are
+OperationFailed/InvalidDomain; actual RN64 reconstruction or output conversion
+overflow is OperationFailed/ArithmeticOverflow. Typed, upstream, stale and
+backend errors preserve their categories. Replacing segment or t source Results
+reuses static preparation; completed-demand repetition returns the same Result
+object, while a fresh equivalent four-source bundle demonstrates a content-cache
+hit and refreshes all four source associations. Whole execution exposes no
+per-value counters, so zero counters do not imply zero arithmetic or fallbacks.
 
+The fixture runs all 16 combinations of reversed, unaligned layouts across all
+four inputs and a separate zero-stride source composition. Under each caller
+rounding mode it verifies the actual computation worker's floating environment.
+Nine malformed static Result schema/parameter cases are
+rejected before execution. Lifetime checks cover Float32 and Float64 3x2 outputs:
+all four source backings expire, the escaped Result and authorized read window
+share one 24-byte or 48-byte output owner, and releasing both returns all Root
+live capacity to zero. The manual Strict/Apple checks also cover typed
+validation, source association, static preparation, full sparse coverage,
+upstream error ordering, work/cancellation and output/scratch cleanup. Strict
+and Apple each passed all six manual groups and all 1428 independent Fraction
+oracle cases bit-for-bit. The focused root CTest selection passed
+`test_numeric_result_math` and `test_numeric_parametric_result` 2/2 in 4.67
+seconds (4.50 seconds and 0.17 seconds respectively). The installed 0.32.0
+package consumer compiled and linked the same manual source;
+`installed_numeric_parametric_result` passed 1/1 under Strict in 0.17 seconds,
+and the direct Apple invocation passed all six groups. The exact consumer
+configuration is recorded in the [workflow README](../../../examples/numeric_workflow/README.md#parametric-bezier-evaluation-crv-03). The separate `test_numeric_result_math`
+integration target retains 22 golden words for CRV-02 function and CRV-03
+parametric results, but does not replace the manual test or installed consumer.
+x86 was not tested.
 
-Native Clang 21.1.3 strict/Apple public manual checks and 1428 independent
-Bernstein/RN64 cases per profile passed for the Whole implementation. Focused
-numeric/compiler tests passed. Other CPU platforms were not rerun. The giant
-2^39-column/2^40-row cases validate complete-output budget rejection rather than
-successful sparse numerical evaluation.
-
-Native Apple M5 / macOS 27.0 (26A5425a), package 0.18.0 sampling uses K=2,
-N=128, D=4, degree 2/3, Float64 inputs/output, indices all zero, t[i]=(i%64)/64,
-anchors[0,c]=c and anchors[1,c]=c+1. Quadratic offsets are .5; cubic offsets
-are .25 and -.25. An independent dyadic polynomial checks c+t (quadratic) or
-c+.75*t+.75*t*t-.5*t*t*t (cubic) outside timing. One warm invocation precedes
-seven measurements. One CPU worker, cache off, 1 GiB payload, 2 GiB Host,
-512 MiB Metadata and dependency state, 2^40 dependency/Run work, default
-unlimited managed work apply. The old adapter is source at 3d35f5eb linked to
-the same kernel. Public timing excludes compile/freeze and includes execution,
-collection, metering and result assembly. Core means the prepared complete-Value
-numeric callback with allocation and publication but no scheduling/collection or
-managed metering. Times are median [min,max] milliseconds.
+Historical package 0.18 Value-path sampling on Apple M5 / macOS 27.0 (26A5425a)
+uses K=2, N=128, D=4, degree 2/3, Float64 inputs/output, indices all zero,
+t[i]=(i%64)/64, anchors[0,c]=c and anchors[1,c]=c+1. Quadratic offsets are
+.5; cubic offsets are .25 and -.25. An independent dyadic polynomial checks
+c+t (quadratic) or c+.75*t+.75*t*t-.5*t*t*t (cubic) outside timing. One warm
+invocation precedes seven measurements. One CPU worker, cache off, 1 GiB payload,
+2 GiB Host, 512 MiB Metadata and dependency state, 2^40 dependency/Run work,
+and default unlimited managed work apply. Public timing excludes compile/freeze
+and includes execution, collection, metering and result assembly. The core column
+measures the prepared complete-Value numeric callback with allocation and
+publication, excluding scheduling, collection and managed metering. Times are
+median [min,max] milliseconds. These historical Value-path timings do not
+measure or predict current Result performance.
 
 | Degree | Profile | Public before | Public Whole | Numeric callback core |
 | --- | --- | ---: | ---: | ---: |
@@ -670,80 +694,46 @@ managed metering. Times are median [min,max] milliseconds.
 | cubic | strict | 19.812 [19.624,19.997] | 9.592 [9.486,9.674] | 9.124 [9.042,9.292] |
 | cubic | apple | 19.570 [19.045,20.265] | 9.183 [9.149,9.418] | 8.823 [8.638,9.035] |
 
-Context-reported peak Metadata falls from 20,554,216 to 3,432 bytes. Whole
-collection slightly increases peak payload: cubic 523,744 to 525,768 bytes.
-A 12-second Apple cubic Time Profiler capture retains 11,879 execution-stack
-samples: ParametricState::evaluate is inclusive in 98.75%, ExactPolynomial in
-94.01%, ResourceBudget in 3.00%, ExactSampling in 0.35%, and collect in 0.07%.
-Inclusive categories overlap; exact polynomial arithmetic is the remaining
-observed bottleneck. Numerical bounds and the fixed workspace are unchanged;
-no NUM-14 certificate or floating approximation is introduced.
+The historical adapter's context-reported peak Metadata falls from 20,554,216
+to 3,432 bytes. Whole collection slightly increases peak payload: cubic 523,744
+to 525,768 bytes. A 12-second Apple cubic Time Profiler capture retains 11,879
+execution-stack samples: ParametricState::evaluate is inclusive in 98.75%,
+ExactPolynomial in 94.01%, ResourceBudget in 3.00%, ExactSampling in 0.35%, and
+collect in 0.07%. Inclusive categories overlap; exact polynomial arithmetic was
+the remaining observed bottleneck in that historical Value-path profile.
 
-Raw driver/build commands, ranges, trace/XML and analysis are local ignored
-`build/crv-whole/parametric-*` artifacts, including `parametric-times.csv` and
-`parametric-profile-summary.txt`. These results establish the stated native
-workload, not arbitrary-shape or cross-platform speedups.
+Raw driver/build commands, ranges, trace/XML and analysis for those package 0.18
+Value-path measurements remain in ignored `build/crv-whole/parametric-*`
+artifacts, including `parametric-times.csv` and
+`parametric-profile-summary.txt`. They describe the stated native historical
+workload only.
 
 
 ## CRV-04 public LUT1D authoring
 
-`numeric/lut1d.hpp` expands six constructors into existing runtime nodes.
-Expression/Bezier export one source's two outputs; interpolation exports the
-interpolator values and Float64 linspace axis. The final table dtype does not
-alter query generation. The constructor owns metadata only and appends after
-successful local construction, reserving existing/supplied producer IDs and the
-65536-node cap. It exports references through BakedLut1d and never edits the
-caller's output labels implicitly. Source contracts supply all runtime resource,
-precision, dependency, cache and failure semantics.
+`numeric/lut1d.hpp` exposes six authoring functions that append ordinary runtime nodes to a caller-owned `WorkflowDocument`: expression and Bezier samplers each produce `values` and `axis`, while linear and PCHIP interpolation templates first produce Float64 linspace queries and then interpolation values. `BakedLut1d` returns node-output references; `outputs()` creates caller-named workflow exports. Construction creates graph metadata only. It reserves existing and referenced node IDs, allocates the lowest available positive IDs, enforces the 65,536-node limit and appends nodes only after the complete expansion succeeds. A failed construction leaves the graph unchanged. The caller owns output declarations and compilation.
 
-All expanded formal source outputs now use CPU Whole. A nonempty values request
-computes the complete baked table and retains its full output owner, even when
-only a few cells are returned. Interpolation bakes materialize the complete
-Float64 linspace query array (8*count bytes) before the complete interpolation
-output (count*C*dtype bytes). Account simultaneous source owners, query/table
-buffers and each source's fixed workspace through the same host resource root.
-There is no additional opaque bake primitive, cache, runtime function object or
-pairing certificate.
+The source operations use Result inputs and outputs. `SequenceInput` pairs a workflow edge with an immutable Result schema hint for a Float32/Float64 `[1]` endpoint; the compiler checks the actual binding independently. The manual fixture keeps arrays as local `Value` backing, publishes their storage as immutable source Results, and binds those Results through `ExecutionBindings`. It does not import values through a snapshot store. `Fixture::run` returns `DemandResult.results`, and the fixture reads values through authorized Result tensor access.
 
-Axis remains an independent Float64[3] output: axis-only does not execute the
-expression coefficients, Bezier controls or interpolation x/y. Count=1 still
-omits end payload. For count>1, even a request for only the first value collects
-end and computes the full grid. Each source retains its mathematical formula,
-selection/NaN/typed rules and numeric allowance; complete active input collection
-can propagate previously unrequested upstream/typed failures. Numeric failures
-have their source Whole Run scope. Any active source edit invalidates recorded
-values demand; function controls never dirty axis. Empty reads no payload.
-Output names, generic shapes/dtypes, C=1, explicit exports and post-context
-immutable ownership remain unchanged. Cache-off retains active ownership.
+All expanded formal outputs use CPU Whole continuations. A nonempty `values` demand computes the full table and reports its full coverage, including for a sparse request. Interpolation templates allocate the full Float64 query array (`8*count` bytes), followed by the full table (`count*C*dtype_size` bytes), in addition to source owners and source-specific workspace. The host accounts these allocations through one Root resource budget. A sparse million-row multi-PCHIP request under a 1 MiB Payload budget checks full-output rejection; it does not demonstrate sparse success or successful maximum-size execution.
 
-Clang21 strict/Apple each pass 48 generated/explicit graph pairs and independent
-analytic fixtures, complete dependencies/dirty mapping, native source selection,
-cache/source failures, named exports/authoring limits, managed work/payload
-budgets and active cancellation. Six-template signed/unaligned/scalar-zero
-snapshot-import tests preserve logical values. A million-row sparse request
-verifies full-output rejection under 1 MiB, not sparse success. Source numeric
-and direct-layout oracles remain in their separately validated families.
+`axis` is a separate Float64 `[3]` Result. Axis-only demand skips expression coefficients, Bezier controls and interpolation x/y. For `count=1`, the expanded source omits the end payload. For `count>1`, a first-value request still collects the end input and computes the complete grid. Each source keeps its own mathematical formula, selection, typed validation and numerical allowance. Active Result collection can propagate typed or upstream errors outside the requested numerical region, and numerical failures retain the source operation's Run scope. Empty `values` demand returns empty coverage without polling its failing numerical producer or reading payload; metadata processing and Result sealing remain ordinary execution work.
 
+Source associations contain the active Result ObjectIds, while dependency support and dirty mapping follow the output request. Repeated identical demand retains the completed Result identity. A fresh same-content source bundle reuses cached outputs with current associations. Each output association follows its direct producer inputs: an interpolated table points to x, y and the current query Result; the query Result and independent axis point to current endpoint Results. A one-node sampler asserts exactly two cache hits for `values` and `axis`; an interpolation graph also exports `query_values` and asserts exactly three hits. Replacing bindings reuses static `PreparedOperation` objects and recomputes outputs for the new endpoints. Function controls affect values demand; they do not dirty the independent axis.
 
-Native sampling on Apple M5/macOS 27.0 (26A5425a), Clang 21.1.3 O2/debug,
-package 0.18.0 uses all six public templates at count=129, Float64 inputs/output,
-C=1 for scalar and C=2 for multi, with the control fixtures in baking.cpp.
-Expression and quadratic Bezier implement x^2 on [0,1]; linear is 2*x on [0,2];
-PCHIP uses x=[0,1,2], y=[0,1,4] on [0,2]; linear multi uses [2*x,10-2*x] on
-[0,1]; PCHIP multi uses [P(x),4-P(x)] on [.5,1.5]. An independent dyadic
-piecewise polynomial checks all values outside timing. Both values and axis are
-requested. One worker, cache off, 1 GiB payload, 2 GiB Host, 512 MiB Metadata
-and dependency state, 2^40 dependency/Run work, default unlimited managed work;
-one warm invocation precedes seven samples. Compile/freeze is excluded.
+The manual harness in `examples/numeric_workflow/baking.cpp` contains seven groups. Its generated-versus-explicit graph check spans six templates, two output dtypes and four demand modes: 48 graph pairs per profile. It compares Result descriptors, coverage, requested bits, source support and dirty mapping, and checks separately encoded analytic sample values. These fixture values test composition equivalence; they are not a replacement for the independent numeric oracles for the source operations. Other groups exercise count-one and failing-end behavior, empty-demand and axis/source isolation, source failures, cache/association behavior, static preparation reuse, authoring boundaries, mixed endpoint/table dtype, reversed/unaligned/scalar-zero source layouts, caller and actual-worker floating-environment restoration, work/payload limits, active cancellation, and recovery.
 
-The before adapter replaces only CRV-01/02 with their 3d35f5eb sources in the
-same kernel. Expression was already Whole and has no implementation change;
-its before/after differences are sampling variation. These templates have no
-independent numerical callback. The current core column is the sum of the host's
-monotonic expanded-source callback durations (microsecond resolution), including
-numeric arithmetic, allocation and work metering but excluding input collection
-and graph scheduling. This differs from the unmetered direct-core measurements
-for individual source families. Times are median [min,max] milliseconds.
+The ownership group covers all six templates for Float32 and Float64 outputs. It retires each source backing while retaining separate values and axis Results and authorized read windows. The two output buffers remain independently charged to Root Payload; each window remains readable after its Result handle is released. Releasing the final window returns live Root resources to zero.
+
+The million-row sparse admission case returns `ResourceExhausted / CapacityLimit` at node 1 before the complete linspace query Result can be admitted. It verifies that the full query payload is budgeted before interpolation, not that a million-row table was numerically computed. The fixture also injects work exhaustion and cancellation during actual computation; both paths release live Payload to zero. The direct numerical oracles for expression, sequences, curves and Bezier remain in their source families. The baking graph comparison verifies that the six public constructors expand to the corresponding source nodes without changing any source formula.
+
+The root focused CTest selection passed `test_numeric_baking_result` and `test_numeric_result_math` 2/2: 0.38 and 4.83 seconds, 5.22 seconds total. Direct Strict and Apple runs each passed the seven manual groups. After reinstalling the current package 0.32.0, the consumer was freshly compiled and linked against `result-only-install`; the installed baking/inverse/LUT3D selection passed 3/3 in 5.71 seconds, including 2.39 seconds for baking. The installed baking consumer also passed all seven groups under Apple. These CTest durations include work from concurrent CPU tests and are not performance measurements. x86 execution and successful maximum-physical-size sampling were not run.
+
+### Historical Value-path sampling
+
+The following package 0.18.0 timing table and profiler observations are retained as historical evidence from the Value adapter and callback implementation. They do not measure the current Result path and must not be used to claim Result performance. The workload used Apple M5/macOS 27.0 (26A5425a), Clang 21.1.3 O2/debug, count=129, Float64 endpoint/table values, C=1 for scalar templates and C=2 for multi templates. Expression and quadratic Bezier evaluated `x^2` on `[0,1]`; linear used `2*x` on `[0,2]`; PCHIP used `x=[0,1,2]`, `y=[0,1,4]` on `[0,2]`; linear multi used `[2*x,10-2*x]` on `[0,1]`; PCHIP multi used `[P(x),4-P(x)]` on `[.5,1.5]`. A dyadic piecewise-polynomial oracle checked all samples outside timing. Both outputs were requested, with one worker, cache off, 1 GiB Payload, 2 GiB Host, 512 MiB Metadata and dependency state, `2^40` dependency/Run work and default unlimited managed work. One warm invocation preceded seven measured samples; compilation and freeze were excluded.
+
+The historical before comparison changed the CRV-01/02 sources used by the old adapter while retaining the same kernel. Expression was already Whole, so its difference is sampling variation. These templates did not have a separate numerical callback; the callback column reports the sum of expanded source callbacks, including numerical work, allocation and managed work metering, but excluding input collection and graph scheduling. Times are median `[min,max]` milliseconds.
 
 | Template | Profile | Public before | Public Whole | Expanded callback sum |
 | --- | --- | ---: | ---: | ---: |
@@ -760,19 +750,9 @@ for individual source families. Times are median [min,max] milliseconds.
 | PCHIP multi | strict | 25.563 [25.138,25.875] | 19.718 [19.122,20.369] | 19.541 [18.972,20.181] |
 | PCHIP multi | apple | 24.633 [24.577,24.911] | 18.163 [18.019,18.697] | 17.997 [17.861,18.549] |
 
-For multi PCHIP, context-reported peak Metadata falls from 8,219,352 to 4,376
-bytes; reported payload changes from 290,176 to 290,024 bytes. These are managed
-capacities, not RSS. The 12-second Apple multi-PCHIP Time Profiler trace retains
-11,948 execution-stack samples, with ExactCurve::evaluate inclusive in 98.05%,
-ResourceBudget in 6.05%, and collect in 0.06%; no DependencySession frame is
-sampled. Inclusive categories overlap. Exact curve arithmetic remains the
-observed bottleneck for this nonlinear Float64 template.
+For historical multi-PCHIP, context-reported peak Metadata changed from 8,219,352 to 4,376 bytes and reported Payload changed from 290,176 to 290,024 bytes. These are managed capacities, not RSS. The 12-second Apple multi-PCHIP Time Profiler trace retained 11,948 execution-stack samples: `ExactCurve::evaluate` was inclusive in 98.05%, `ResourceBudget` in 6.05%, and `collect` in 0.06%; no `DependencySession` frame was sampled. Inclusive counters overlap. Exact curve arithmetic was the observed bottleneck for that historical nonlinear Float64 workload.
 
-Ignored local raw artifacts are `build/crv-whole/baking-times.csv`,
-`baking-perf.cpp`, its build script, `baking-after.trace`, exported XML and
-`baking-profile-summary.txt`. Results cover these native fixtures, not an
-all-shape/platform claim. No new primitive or numerical standard was introduced.
-
+The historical raw artifacts remain in ignored local paths: `build/crv-whole/baking-times.csv`, `baking-perf.cpp`, its build script, `baking-after.trace`, exported XML and `baking-profile-summary.txt`. They belong to the package 0.18 Value-path run and provide no current Result timing. No new primitive or numerical formula was introduced by the authoring templates.
 
 ## CRV-05 dynamic-axis LUT1D
 
@@ -782,33 +762,37 @@ one-entry selections and exact whole-formula linear interpolation. Descending
 pairs reorder both x/y to satisfy ExactCurve's positive-denominator internal
 representation. Channel queries are classified independently.
 
-Every nonempty request uses one CPU Whole callback over complete input, table
-and axis Values, including recognized typed validation and upstream failures.
-Validate the complete reconstructed axis first, then every finite/domain query
-before table arithmetic. Compute every output element/channel and publish one
-immutable dense owner with the complete input shape. Sparse demand restricts
-returned coverage, not computation or full output memory. Empty reads no payload;
-all static metadata checks still apply.
+Every nonempty request uses a CPU Whole Result continuation. It requests input,
+table and axis with Data, Validation and Descriptor roles, including typed
+validation and upstream failures. The continuation validates the complete
+reconstructed axis, then every finite/domain query before table arithmetic. It
+computes every output element/channel and publishes an immutable packed Result
+with full coverage and global coordinates, even when the request is sparse.
+Empty reads no payload; static metadata checks still apply.
 
 Mathematical table selection is unchanged: knot/clamp/singleton converts one
 entry; interpolation/extrapolation uses its adjacent pair, independently per
 channel. Generic entries outside all evaluated stencils receive no additional
 finite scan. Typed validation and upstream collection cover the complete table.
 Errors in otherwise-unrequested queries or evaluated channels can fail the Run.
-Any input/table/axis edit invalidates recorded output demand. Cache identity
+The Result association retains the actual source ObjectIds. Dirty mapping follows
+the recorded query region, while an input/table/axis replacement invalidates that
+demand. Static preparation remains reusable across those bindings. Cache identity
 retains all input versions, profile, metadata and parameters. There is no
 per-channel Atom success isolation. Output dtype, shape and empty facets remain
 unchanged; arbitrary input offsets, unaligned and signed/zero strides remain
 legal. The complete immutable owner survives context destruction.
 
-For M total input elements, work is O(L+M log L) plus exact arithmetic, full
-input collection and typed validation. Singleton lookup is constant time per
-query. The callback retains a host-accounted Float64 grid of 8*L element bytes
-(up to 8 MiB) plus allocator/metadata overhead, fixed exact workspace and O(rank)
-coordinate state. It retains no per-output certificates, rows or lookup table.
-Output costs dtype_bytes*M, regardless of requested coverage. Complete table
-collection costs its full L (or L*C) logical payload when a dense collect is
-needed; retained source owners are accounted separately.
+For M input elements, work is O(L+M log L) plus exact arithmetic and typed
+validation. Singleton lookup is constant time per query. The continuation retains
+the reconstructed Float64 grid in a Root allocation charged to Metadata by the
+default ResourceAllocator; its element bytes are 8*L, up to 8 MiB, plus allocator
+overhead. Input and table reads use authorized zero-copy Root windows over their
+source storage; the operation does not make a dense copy of the complete table.
+Root accounts retained owners and windows. Fixed exact workspace and O(rank)
+coordinate state are also admitted. The continuation retains no per-output
+certificates, rows or lookup table. Output costs dtype_bytes*M regardless of
+requested coverage.
 
 The complete axis uses endpoint-weighted RN64 coordinates. One caller-preserving
 floating environment covers axis reconstruction and curve evaluation; unresolved
@@ -820,28 +804,58 @@ Numeric InvalidDomain/ArithmeticOverflow failures have Run scope. Typed, upstrea
 resource, stale, backend and cancellation failures retain their categories.
 Whole does not expose per-value fallback counters; report those as unavailable.
 
-Native strict/Apple each pass six public workflow groups and 1416 independent
-Fraction grid/linear cases, covering complete output semantics, mixed dtypes,
-Float32/64 fenv/layouts, typed input, cache/source failures and active arithmetic/
-axis cancellation. The maximum L=1048576 grid retains an 8 MiB numeric index and
-uses 16 MiB payload admission for full table collect. Giant channel output is
-verified to reject an insufficient budget. All six public baking-to-LUT chains
-verify their separate approximation and axis constraints. Other CPUs were not
-rerun for this migration.
+The Result manual workflow now checks seven groups under Strict and the locally
+available Apple profile. Its independent Fraction driver passes 1,416 bit-equal
+cases for each profile. The six CRV-04 baking chains connect to the Result LUT
+consumer; source replacement retains the same static preparation, fresh source
+Results produce cache hits with current associations, and sparse requests retain
+full Whole output coverage. The fixture also covers typed RGBA validation,
+upstream failures, all-port layouts, caller/worker fenv, resource and cancellation
+rollback, output lifetime and Root release. Its maximum L=1,048,576 case uses a
+16 MiB Payload capacity; Root diagnostics show the 8 MiB axis grid charged to
+Metadata while peak Payload remains below 8 MiB, confirming no dense table copy.
+A 2^39-channel sparse request fails with CapacityLimit at the LUT node. The full
+maximum physical channel table and x86 numerical execution were not tested.
+
+The existing `test_numeric_result_math` integration fixture retains additional
+LUT1D checks, including custom Result schemas, channel batch shape [2,2,2],
+eight scalar Fraction golden bits, axis/query/table error precedence, and
+cancellation inside a 352-limb `ExactCurve` slot. Its 1 MiB Payload cases reject
+a sparse input[262144] request whose full Float64 output needs 2 MiB, and accept
+a zero-stride Float32 table [262145] while adding only the 8-byte output to live
+Payload. These are integration-fixture results, separate from the manual
+`lut1d.cpp` groups.
+
+The focused root CTest selection passed `test_numeric_lut1d_result` and the
+separate `test_numeric_result_math` integration test 2/2 in 4.74 seconds
+(manual 0.31 seconds; integration 4.42 seconds). The installed consumer compiled
+the same `lut1d.cpp` source against package 0.32.0 and passed
+`installed_numeric_lut1d_result` 1/1 under Strict in 0.38 seconds (0.39 seconds
+total); its direct Apple run passed all seven groups. The prior
+`installed_result_numeric` test exercises a separate fixture and was not rerun
+for this LUT1D migration. Reproduction commands are in the [numeric workflow
+README](../../../examples/numeric_workflow/README.md#lut1d-application-crv-05).
+
+The standalone benchmark tables and profiler samples below describe the older
+package 0.18 Value adapter. They are historical evidence and do not measure or
+establish performance for the Result continuation. This migration has no
+performance claim.
 
 
-Native Apple M5/macOS 27.0 (26A5425a), Clang 21.1.3 O2/debug, package 0.18.0
+Historical Value-adapter sampling on Apple M5/macOS 27.0 (26A5425a), Clang
+21.1.3 O2/debug, package 0.18.0
 sampling uses L=17, 512 query rows, C=1 for scalar or C=4 for channels, dense
 input/table and Float64 axis=[0,16,1]. Table[j,c]=j+c and query[i,c]=
 ((i+c)%64)/4+1/8; an independent identity-line check verifies query+c outside
 timing. Strict uses Float64 input/table/output; Apple uses Float32. One worker,
 cache off, 1 GiB payload, 2 GiB Host, 512 MiB Metadata and dependency state,
 2^40 dependency/Run work, default unlimited managed work; one warm invocation
-precedes seven measured samples. The comparison adapter uses CRV-05 source at
-3d35f5eb with the same kernel. Public timing excludes compile/freeze and includes
-execution, collect, metering and result assembly. Core is the current prepared
-complete-Value callback with allocation/lookup/arithmetic/publication but no
-scheduler, collection or managed work metering. Times are median [min,max] ms.
+precedes seven measured samples. The comparison used an earlier Value adapter
+with the same numerical kernel. Public timing excludes compile/freeze and
+includes execution, collection, metering and result assembly. The core column
+measures the historical Value callback on prepared complete Values, including
+allocation, lookup, arithmetic and publication but excluding scheduling,
+collection and managed work metering. Times are median [min,max] ms.
 
 | Variant | Profile/dtype | Public before | Public Whole | Numeric callback core |
 | --- | --- | ---: | ---: | ---: |
@@ -865,8 +879,8 @@ used. This is evidence for the stated native workload, not all-shape speedups.
 
 Raw driver/build commands, ranges, trace/XML and summaries remain in ignored
 `build/crv-whole/lut1d-*`, including `lut1d-times.csv` and
-`lut1d-profile-summary.txt`. Current focused numeric/compiler tests, ClangFormat21,
-cpplint and scoped code/spec review passed.
+`lut1d-profile-summary.txt`. Those measurements are from the Value adapter; the
+Result fixture does not reuse their timing boundaries.
 
 
 ## CRV-06 ColorArray and color ramps
@@ -1028,42 +1042,76 @@ per-component accumulation. Original contributing bits determine all-negative-
 zero results; other exact cancellations are +0 and nonzero underflow retains
 its sign. No floating local coordinate or intermediate blend is rounded.
 
-The six formal profile keys use Whole callbacks. Complete input/table/axis
-collection precedes all callback math. Axis validation precedes a complete
-query/model/domain prepass, followed by exact selected-vertex mathematics.
-Generic zero-weight invalid vertices remain unused; invalid typed vertices or
-upstream failures anywhere remain observable. Sparse delivery retains a full
-dense ColorArray output; any input edit dirties all recorded demand. Numeric
-failures have Run scope. Three ResourceVector axis indices need
-8*(N0+N1+N2) element bytes plus allocator/metadata overhead; fixed admitted
-exact state replaces all per-output dependency certificates and point records.
-Full input/table collection and output payload must fit managed budgets.
-All profiles keep exact integer arithmetic and their scalar/NEON/AVX2 compare
-helpers. No approximate backend or NUM-14 certificate is introduced, and
-DependencySession numerical counters are N/A.
+The six registered profiles use Whole Result continuations. Static preparation
+validates port schemas, dtypes, shapes, descriptions, and ColorArray facets,
+then retains the immutable program state for reuse across source rebinding.
+Each nonempty execution validates all three axes and every original input
+color/query before clamp, then performs exact selected-vertex mathematics.
+Typed validation and upstream failures cover the complete active Results and
+can precede callback numeric checks. Only exact positive-weight vertices enter
+the formula; zero-weight generic samples remain mathematically unused.
 
-The independent Fraction oracle reconstructs RN64 grids, cells and simplexes,
-then rounds rational sums using separate Python integer IEEE logic. Native
-strict/Apple each pass 1062 cases across eight models, mixed dtypes, all axis
-directions, unequal extents, split ties, boundaries, extreme/zero cases and
-zero-weight generic invalid vertices. Five public manual groups cover complete
-support/dirty/cache effects, typed table validation, unrequested query failure
-priority, rank-three traversal, arbitrary strides/fenv, full-storage budgets,
-active cancellation and Run errors. Maximal 256^3 broadcast tables are checked
-directly without copying; the public 384 MiB collect and 2^38-position output
-are explicitly rejected under an 8 MiB payload budget. These are resource tests,
-not successful giant public-output numerical tests. Focused numeric/compiler/
-color/resource CTests pass; no new x86 or installed-consumer run is claimed.
+The continuation records the current input, table, and axis ObjectIds. Its
+published Result has full certified coverage in global coordinates, including
+for a sparse request, and retains the complete three-component ColorArray facet.
+Input or table replacement updates dirty mapping from the recorded source
+support; the prepared operation remains reusable across those bindings. Empty
+demand performs no numerical producer poll. Each invocation publishes through
+an all-or-nothing Result transaction, and numeric failures have Run scope.
+Input/table samples use authorized zero-copy Root windows. Escaped Results and
+windows retain their storage after source owners or the context retire; releasing
+the final window returns the corresponding Root allocation. `UniformAxis` owns
+Float64 grids costing 8*(N0+N1+N2) bytes, in addition to the packed output and
+fixed exact workspace. Capacity, work, cancellation, and allocation failures
+release unpublished output state.
+
+All profiles use exact integer arithmetic and the existing scalar/NEON/AVX2
+integer helpers. The implementation adds no approximate backend or NUM-14
+certificate; numerical counters from the former dependency session do not
+apply to this Result continuation.
+
+The independent Fraction oracle reconstructs RN64 grids, cells, and simplexes,
+then rounds rational sums using separate Python integer IEEE logic. The migrated
+manual Result fixture passes six groups for Strict and Apple; its existing oracle
+passes 1,062 cases per profile with its exact expected-string gate unchanged.
+The fixture exercises Result declarations and bindings, sparse full-color
+coverage, source associations and cache reuse, preparation reuse, Empty and
+failed table producers, typed ColorArray validation, reversed/unaligned layouts,
+caller and worker floating environments, owner retirement, and window lifetime.
+Two interpolation outputs retain 12 and 24 Payload bytes while their escaped
+read windows remain alive after source retirement; releasing the final windows
+returns Root usage to zero.
+
+A Float64 table with maximum 256^3 grid shape succeeds using an 8-byte backing
+window under an 8 MiB Root Payload cap, showing that the execution does not copy
+the 384 MiB dense table. A separate sparse query requiring 2^38 output positions
+is rejected as `CapacityLimit` at node 1 because the complete output exceeds the
+budget. This is a capacity rejection, not successful numerical execution at
+that output size. The `test_numeric_lut3d_result` behavior test runs the manual
+fixture under Strict. The shared `test_numeric_result_math` includes distinct
+LUT workflow, boundary, preparation, and resource fixtures; those are separate
+evidence from the six manual groups. Reproduction and installed-consumer
+commands are in the [numeric workflow README](../../../examples/numeric_workflow/README.md#joint-three-axis-color-luts).
+No x86 execution or native GPU execution is established by this evidence.
+
+The LUT3D-specific root CTest passed 1/1 in 1.48 s (1.49 s total). The shared
+math test passed in a separate CTest selection that also included baking
+coverage (4.83 s). A fresh consumer build against the installed 0.32.0 package
+passed the three-test installed selection 3/3 in 5.71 s; the LUT3D test took
+2.36 s.
+The installed consumer's direct Apple run passed all six groups.
 
 
-CRV-07 performance: Apple M5, macOS 27.0 (26A5425a), Clang 21.1.3 `-O2`,
+The following CRV-07 measurements are historical Value-path sampling, not
+performance evidence for the current Result execution. They used Apple M5,
+macOS 27.0 (26A5425a), Clang 21.1.3 `-O2`,
 package 0.18.0/traits16/CABI9/provider1/framing14. Each run has a 17^3 XYZ identity
 table, Float64 input/output, N=128 colors with channel j at
 `((i+j)%64)*.25+.125`, full output, one worker and cache off. Payload 1 GiB,
 host 2 GiB, metadata/dependency state 512 MiB each, dependency/run work 2^40,
 managed work unlimited. One warmup plus seven samples; independent identity
-checks are outside timing. Before links the `3d35f5eb` LUT3D adapter into the
-same current kernel. Core invokes the numerical callback on complete Values,
+checks are outside timing. The before column links a Value-path LUT3D adapter
+into the same kernel build. Core invokes the numerical callback on complete Values,
 including grid construction, lookup, allocation and publication, excluding
 managed metering, collect and scheduling. Milliseconds: median [min,max].
 
@@ -1186,106 +1234,120 @@ overlap. Exclusive `ExactRatioWorkspace<192>::top` is 32.20% and directed divisi
 
 ## CRV-09 measured LUT3D baking
 
-`bake_lut3d` stages an ordinary WorkflowDocument, invokes the authoring source
-builder for the grid and validation shapes and validates both through Compiler
-metadata analysis. Prefix identity protects existing nodes, declarations, layout
-origins and exports. Source output shape/dtype and attached color descriptions
-are checked; optional ICC ResourceBindings resolve unrelated/shared typed inputs.
-A SHA-256 recipe identity frames the expanded source document, designated endpoints
-and compiler semantic identity. The helper retains no executable callback.
-Both graph expansions execute under the final plan's one frozen binding snapshot.
-Source pointwise independence remains the caller's assertion.
+`bake_lut3d` stages an ordinary `WorkflowDocument`, invokes the authoring-only
+source builder for grid colors `[N0,N1,N2,3]` and validation colors `[P,3]`, then
+checks both expansions with Compiler metadata analysis. The helper protects
+existing declarations, Result schemas, nodes and exports; a failed builder
+leaves the document unchanged. It retains no builder or capture. A SHA-256
+recipe identity includes the expanded source, designated endpoints and compiler
+semantic identity. Both expansions execute under one frozen binding snapshot,
+including shared dynamic inputs and optional `ResourceBindings`. Pointwise
+independence is the caller's assertion.
 
-Generated axes reuse `UniformAxis`; centers reuse exact endpoint averaging with
-one RN64 conversion. Every grid color is an explicit global report dependency,
-including when a constant source ignores its generated input. Color validation
-checks source and converted table samples, then a CompleteBundle sampled-table
-Result owns converted colors with their recipe/schema. Unpack feeds that object
-to the existing CRV-07 method with explicit `table_dtype` and reject policy.
-The report associates the actual sampled-table ObjectId. Gate requires an exactly
-matching schema and that object association; it cannot reuse a passed report for
-another same-shaped table. It copies only requested complete-color table regions
-while retaining global report support.
+`baking3d.cpp` binds source fixtures from `Value` backing into immutable
+Root-owned Referenced Results. The public bake graph publishes only Result
+outputs: table, axis and report. Geometry programs use Whole Result with
+role-13 validation and complete outputs. Static preparation validates metadata
+and stores reusable geometry or report POD state. Empty tensor demand skips
+payload evaluation; source, table, axis and report failures preserve their
+observed failure status and scope.
 
-Per-component error is an exact nonnegative integer in `2^-2148` units. Opposite
-signs add magnitudes; equal signs subtract them. The threshold is
-`atol+rtol*abs(reference)` in the same units. Error needs fewer than 3173 bits;
-the threshold/product needs fewer than 4197, within the 4352-bit workspace.
-Selection compares exact integers, replacing maxima only on strict increase;
-ordinal zero initializes every component. Report rounding happens afterward:
-RN64 the maximum, compare that encoded value back to the exact integer and
-increment one positive IEEE step if it rounded downward. Unrepresentable error
-is diagnostic +Inf. The helper was independently checked against 432 Fraction
-cases including ±MAX, subnormals, opposite signs and exact tolerance boundaries.
+The axis and grid generators use `UniformAxis`; center coordinates average the
+actual neighboring Float64 endpoints and round once. Every grid color remains a
+global report dependency even when a constant source ignores its generated
+color input. The owned table is a `curve.bake_lut3d.table` v2 Result, and the
+exported table is an immutable `photospider.tensor` Result with `samples`, the
+chosen dtype, ColorArray v1 and `atomic_trailing_axes=1`. Unpack supplies the
+actual table to CRV-07 with explicit `table_dtype` and reject policy. The
+CompleteBundle report stores eleven fixed fields and associates observed input
+ObjectIds in port order; entry 2 identifies the owned table. Gate validates all
+report fields and the table with role 13, checks that association, then publishes
+the requested complete-color region in global coordinates. An association
+mismatch need not precede table-pixel validation.
 
-Measurement enumerates row-major centers followed by extras, at most 64 colors
-per Value request. It stores only fixed maxima/first-failure/counts. Eleven fields
-are appended through explicit Result I/O actions and sealed together; no prefix
-can claim completed measurement. Each field and the descriptor have global
-Cartesian support across axis, grid, owned table, points, source and applied
-colors. Result schema specialization preserves protocol-2 kind/id/version and
-validates all fields/domain/metadata through the closed schema vocabulary.
-The canonical resolved schema already participates in graph/plan/cache identity.
-No C++ record layout, C ABI or workflow framing version changes are required.
+Per-component error and `atol+rtol*abs(reference)` are compared as exact
+integers in `2^-2148` units. Error needs fewer than 3173 bits; the threshold
+product needs fewer than 4197, within the 4352-bit workspace. Exact integer
+comparison selects maxima and preserves the earliest ordinal on ties. The
+reported maximum is rounded to Float64, then advanced by one positive IEEE step
+if that rounded down; an unrepresentable error is diagnostic +Inf. The independent
+Fraction oracle checks 384 cases per profile against the current Result harness.
 
-The sampled table is packed through authorized rectangular collect, bounded by
-page size and 64 KiB, combining complete inner rows/planes when they fit. Negative/unaligned layouts use the
-checked collect fallback; packed inputs use bounded bulk copies. Its registered validator
-scans all colors with cancellation/work accounting. The report validator checks
-canonical schema, counts/classifications, reconstructed axis and recorded point
-domains without recomputing the source. The 15 generated formal profile Value
-keys use Whole, with full input collection and dense outputs, Run numeric errors
-and full-input dirty scope. Their fixed workspace and three ResourceVector axis
-indexes are managed; color outputs retain tuple metadata/resources. Gate/unpack
-retain requested complete-color output fragments. Owners retain admission beyond
-context retirement. Report/table owners retain mandatory temporary backing.
-Source callback state never enters execution. Source operation allocations and
-repeated validation count against host budgets; generated full-grid validation
-currently admits the full grid. Large dense bakes can exceed work, stage or
-capacity limits despite a small requested exported fragment.
+Measurement visits row-major cell centers and then extra points. The continuation
+stores only counts, maxima and first-failure data, and seals all eleven fields
+together after complete measurement. Its Result fields retain global support
+across axis, grid, owned table, validation points, source reference and applied
+colors. The specialized report schema validates its fields, domain and metadata.
+Its canonical resolved schema participates in graph, plan and cache identity.
 
-The four unsuffixed pack/measure/unpack/gate keys retain ResultProtocol2; none
-is advertised as a Value Whole key. Measure now collects three 64-row windows
-once per poll, with at most 4608 bytes plus 289 bytes for final report writes.
-The sealed schema is decoded once, retaining only model/tolerance POD fields.
-It preserves finite checks, exact error comparison, earliest equal maximum and
-first failure. Shared immutable one-row/three-row relations reduce repeated
-report-field relation construction without weakening provenance. Pack admits
-64 KiB workspace; Measure admits 4897 bytes, in addition to continuation,
-metadata, source/full Value owners and immutable Result backing. The global gate,
-failed-report success and failed-table behavior remain unchanged.
+Pack, Unpack and Gate first request authorized Result tensor views. Legal mappings
+retain the existing common storage owner; a physical `ViewUnavailable` triggers
+transactional materialization of the requested region, preserving sample bits
+and dependency support while charging Root Payload. The baking harness checks
+Float32/Float64 across all five geometries, reversed and unaligned layouts, and
+verifies the mapped row address equals the source backing address with zero Root
+Payload. Pack uses two polls for this path. Report reads use bounded windows;
+table or report results can be retained and released independently, while table
+read-window ancestry may keep backing alive. Releasing the final window releases
+all Root live capacity. Source axis owners expire after context and fixture
+retirement.
 
-Native Clang 21 strict/Apple each pass nine public manual groups and 480 Fraction
-report cases. New checks cover all five Whole geometry kinds with independent
-axis/grid/center/extra/color expectations, negative/unaligned direct layouts,
-active work cancellation, fixed-workspace/full-output rejection, 2x2x256 table
-rows, and Float32/64 strided pack/unpack through 72-byte and 64KiB windows.
-Existing quality gate, object mismatch, report cancellation and escaped-owner
-checks remain. Six focused numeric/compiler/color/resource/Result CTests pass.
-No new x86 or installed-consumer run is claimed. Commands and modifiable source
-builders remain in the numeric workflow README.
+All source operations, full grid colors, validation points, converted colors,
+table backing, report fields, windows and scratch consume their respective host
+budgets. A small requested table region does not reduce the full bake or global
+measurement work. The harness verifies a huge grid is rejected with
+CapacityLimit at its geometry node; it does not demonstrate successful
+maximum-shape execution. Measured acceptance applies only at the listed centers
+and extra points under the selected interpolation method and table dtype; it is
+not a continuous-domain bound. A completed threshold failure returns a readable
+report with `passed=false`, while a dependent table request fails with
+`LutApproximationToleranceExceeded`. Axis remains independent. Source, invalid
+data, cancellation, stale binding and resource failures remain execution errors.
+
+The manual executable passes 12 behavior groups in each of Strict and Apple
+modes. Its Fraction oracle passes 384 cases per profile. The root focused
+selection passed 9/9 tests in 15.30 seconds: eight manual workflow tests,
+including `test_numeric_baking3d_result` (5.12 seconds), and the shared
+`test_numeric_result_math` integration test (4.58 seconds). Its bake assertions
+are independent fixture coverage, not all cases from `baking3d.cpp`. Its cache
+fixture uses a 64 MiB Result cache,
+1,048,576 `maximum_dependency_cache_metadata` proof units and 128 Mi
+dependency-cache work units; 14 hits were observed, while the assertion requires
+only a positive count. The metadata limit is measured in proof units, not bytes.
+The fresh 0.32.0 installed-consumer selection passed 8/8
+tests in 14.63 seconds, including `installed_numeric_baking3d_result` (5.91
+seconds); the installed Apple run passed all twelve groups. Exact commands and
+coverage are in the [numeric workflow README](../../../examples/numeric_workflow/README.md#measured-three-dimensional-lut-baking).
+No current x86, native-GPU or successful maximum-shape execution is claimed.
 
 
-CRV-09 performance: Apple M5/macOS27.0 (26A5425a), Clang21.1.3 `-O2`,
-package0.18.0/traits16/CABI9/provider1/framing14. Identity RGB source, trilinear,
+Historical CRV-09 performance: Apple M5/macOS 27.0 (26A5425a), Clang 21.1.3
+`-O2`, package 0.18.0/traits 16/C ABI 9/provider 1/framing 14. These results
+belong to the earlier Value-backed implementation and its then-current
+adapters; they do not measure the Result implementation described above. No
+current Result performance campaign has been run. The historical fixture uses
+an identity RGB source, trilinear,
 Float64 table/reference, zero tolerances, [0,1]^3, no extra points; K=5 or 9
 on each axis (125/729 grid colors and 64/512 validation centers). Full table
-and report are jointly exported. One worker, cache off, payload1GiB/host2GiB,
+and report are jointly exported. One worker, cache off, payload 1 GiB/Host 2 GiB,
 metadata/dependency-state512MiB each, dependency/run work2^40, managed work
-unlimited, Result window64KiB. One warmup plus seven samples; dyadic table values
-and exact zero-error reports are checked outside timing. Before substitutes
-only the `3d35f5eb` geometry/Result adapters in the same current kernel, retaining
-the current CRV-07 implementation on both sides.
+unlimited, Result window 64 KiB. One warmup plus seven samples; dyadic table values
+and exact zero-error reports are checked outside timing. The comparison kept the
+CRV-07 implementation constant while changing the then-current geometry and
+Result adapters.
 
-The numerical core directly executes the actual Whole axis, grid, point, color
-and LUT3D callbacks, then ExactBakeError comparison/maxima/upward rounding on the
-same identity fixture. It includes allocation and publication of intermediate
+The historical numerical-core column executes Whole axis, grid, point, color and
+LUT3D callbacks, then ExactBakeError comparison, maxima and upward rounding on
+the same fixture. It includes allocation and publication of intermediate
 Values, excludes schema preparation, managed metering, scheduling, collection,
-Result pack/unpack/gate I/O and report serialization. It is a numerical chain
+pack/unpack/gate I/O and report serialization. It is a numerical-chain
 measurement, not a single arithmetic instruction benchmark. Static preparations
-are reused; all outputs are still checked. Milliseconds: median [min,max].
+were reused; outputs were checked. Milliseconds: median [min,max].
 
-| Grid/profile | Before public | Whole/batched public | Direct numerical core |
+Historical 0.18 measurements from the earlier Value-backed workflow; these
+columns do not measure the current Result execution path.
+
+| Grid/profile | Earlier public | Whole/batched public | Numeric core |
 | --- | ---: | ---: | ---: |
 | 5³/strict | 124.729 [124.324,125.783] | 42.875 [42.709,43.277] | 7.966 [7.894,8.261] |
 | 9³/strict | 414.184 [408.621,415.912] | 118.901 [117.989,120.836] | 59.896 [59.716,62.562] |
@@ -1299,7 +1361,8 @@ storage. `StructuredExecution::value` also does not append Whole OperationTiming
 records; therefore the raw CSV's callback sum omits numerical Whole work and is
 not used as the numerical core. No kernel telemetry contract is changed here.
 
-The first 12-second Whole/row-window profile had 11,563 execution-stack samples.
+In the historical 12-second Whole/row-window profile there were 11,563
+execution-stack samples.
 Exclusive `color_internal::multiply` occupied 45.35%; stacks locate repeated
 exact ColorArray basis checks under structured Result advance/value paths.
 Pack was still requesting every innermost row separately. This led to the bounded
@@ -1308,7 +1371,9 @@ POD model/tolerance fields. A public test directly verifies one rectangle and
 three Pack polls for a complete 2x2x256 table, alongside five small/full-window
 sizes and Float32/64 negative/unaligned source layouts. An intermediate row-window
 9³ Apple public median was 184.258 ms; the final rectangle median is 117.399 ms.
-Raw drivers, before/row-window/final CSVs and traces are local `build/crv-whole/baking3d-*`.
+Raw drivers, before/row-window/final CSVs and traces are local
+`build/crv-whole/baking3d-*`. The profile and CSVs are historical and do not
+establish current Result performance.
 
 The final packed-window 12-second trace has 11,737 execution-stack samples:
 ExactLut3d appears in 53.34%, PackState in 0.68%, MeasureState in 3.56%, collect
@@ -1364,23 +1429,45 @@ comparison is scalar and restores the surrounding profile. Scalar/NEON/AVX2
 implementations remain; no Accelerate/SME inverse backend is introduced.
 
 The [public inverse workflow](../../../examples/numeric_workflow/README.md#inverse-curves)
-passed four manual groups and 407 independent Fraction cases per native
-Strict/Apple profile, plus numeric/compiler focused tests. New cases cover full
-failure/dirty scope, stride combinations/floating environments, K=65536,
-2^40-output capacity rejection, active cancellation and owner release. WSL/AVX2
-and installed-package consumers were not rerun for this Whole revision.
+uses a Result-backed manual fixture with local Value source backing, immutable
+source Results, workflow bindings, Result outputs and authorized read windows.
+Its five groups run under Strict and Apple. The independent 407-case Fraction
+oracle passes under both profiles: Strict matches its exact reference, while
+Apple is checked against the shared FP32-scaled bound. The manual fixture checks
+both caller and actual computation-worker floating environments, negative and
+zero strides, true fresh-source cache reuse with refreshed direct associations,
+same-demand ObjectId retention, static preparation reuse, Empty propagation
+without polling a failed producer, typed SampledSignal error attribution,
+K=65536 execution, and retained Float32/Float64 outputs after source-owner
+retirement. An escaped Result and read window retain 12 or 24 Payload bytes;
+closing the last window returns Root live capacity to zero. A public N=2^40
+constant View is rejected with CapacityLimit at the inverse node because Whole
+execution requires complete output storage; it does not demonstrate numerical
+execution at that output size. `test_numeric_result_math` separately covers
+`inverse_workflows` and `inverse_boundaries`; those integration fixtures are not
+the manual fixture. The dedicated `test_numeric_inverse_result` CTest passed
+1/1 in 0.89 seconds (0.94 seconds for its focused selection). The shared math
+integration test passed in a separate two-test selection with baking: 2/2 in
+5.22 seconds, of which the math executable took 4.83 seconds. The installed
+consumer selection for baking, inverse and LUT3D passed 3/3 in 5.71 seconds;
+`installed_numeric_inverse_result` took 0.94 seconds, and its Apple run passed
+all five groups. The source/contract reviewer and worker verification found no
+blocker or required change. WSL/AVX2 and native GPU execution are not established
+by this evidence.
 
-CRV-10 timing uses Apple M5/macOS 27.0 (26A5425a), Clang21.1.3 O2,
-package0.18.0/traits16/CABI9/provider1/framing14. K=3, N=128, alternating
-analytic roots .5 and 2 (linear) or .5 and 1.5 (PCHIP); inputs Float64, output
-Float32/64. One warm run plus seven measured runs, one worker, both caches off,
-payload1GiB/host2GiB/metadata512MiB/dependency-state512MiB, dependency/run work
-2^40 and unlimited managed work. Each run validates the analytic results outside
-timing. Before is the 3d35f5eb inverse adapter linked against the same current
-kernel. Core calls the current numerical callback on complete prepared inputs,
-including allocation/validation/publication but excluding scheduler, collect and
-managed metering. Raw `build/crv-whole/inverse-times.csv` contains every profile,
-dtype and min/median/max; these small samples include substantial timing spread.
+The following CRV-10 timings and profiler observations are historical evidence
+from the package 0.18.0 Value adapter and callback. They do not measure or predict
+the current Result implementation. The historical run used Apple M5/macOS 27.0
+(26A5425a), Clang 21.1.3 O2, traits 16/C ABI 9/provider 1/framing 14. K=3,
+N=128, alternating analytic roots .5 and 2 (linear) or .5 and 1.5 (PCHIP);
+inputs were Float64 and outputs Float32/64. One warm run plus seven measured
+runs used one worker, both caches off, payload 1 GiB/host 2 GiB/metadata 512
+MiB/dependency state 512 MiB, dependency/run work 2^40 and unlimited managed
+work. Each run checked the analytic results outside timing. “Before” is the
+historical adapter linked against that run's kernel. “Whole public” and “Core”
+are measurements from that same Value-path revision; raw
+`build/crv-whole/inverse-times.csv` stores every profile, dtype and min/median/max.
+The small samples include substantial timing spread.
 
 | Apple case | Before public ms median [min,max] | Whole public ms | Core ms |
 | --- | --- | --- | --- |
@@ -1388,13 +1475,13 @@ dtype and min/median/max; these small samples include substantial timing spread.
 | PCHIP Float32 | 63.8515 [63.2178,66.8059] | 59.9372 [56.1078,84.2566] | 42.6794 [42.3566,43.064] |
 | PCHIP Float64 | 133.420 [131.387,138.058] | 124.120 [106.747,134.468] | 91.8836 [91.5059,92.8748] |
 
-N=128 metadata peak falls from5,749,224 to3,248 bytes; Float64 payload peak
-rises from286,856 to287,832 bytes. The native 12s Time Profiler capture
-`build/crv-whole/inverse.trace` has11,948 execution samples: ExactCurve::inverse
-99.78% inclusive, multiply_fixed72.49%, collect.02%, no DependencySession stack.
-Integer multiplication is36.60% exclusive. This directly identifies remaining
-PCHIP exact arithmetic cost; the Whole I/O change does not replace its numerical
-contract. Trace/export/symbol logs and sample JSON are alongside the CSV.
+The historical N=128 metadata peak fell from 5,749,224 to 3,248 bytes, while
+Float64 Payload peak rose from 286,856 to 287,832 bytes. Its native 12-second
+Time Profiler capture `build/crv-whole/inverse.trace` has 11,948 execution
+samples: `ExactCurve::inverse` is 99.78% inclusive, `multiply_fixed` 72.49%, and
+collect 0.02%, with no `DependencySession` stack. Integer multiplication is
+36.60% exclusive. The historical trace, exports, symbol logs and sample JSON
+remain with the CSV; none records current Result performance.
 
 ## CRV-11 resampling and certified lowpass
 
@@ -1442,14 +1529,7 @@ Continuous geometry keeps coordinates as signed integers in `2^-1074` units.
 Floor quotient/remainder select exact periods; forward segments choose the right
 piece at knots and reflected backward segments choose the left. World coordinate
 copies are clipped to positive-length support, with no wrap seam bridge. Stored
-coordinate combinations fit below 2102 bits; the common 12288-bit records and
-ResourceVector maps are admitted under host capacity. All30 formal lowpass keys
-use Whole: complete inputs are collected, all centers/columns are computed, and
-one dense output is published. Positions are globally validated first; only one
-output's exact piece map is retained/reused. Full input/output storage is required
-for partial delivery; any input edit invalidates all output. Full typed/upstream
-validation and nonuniform remote invalid values can fail the run. Dynamic
-numerical errors have Domain/Run scope. Empty requests read no payload.
+coordinate combinations fit below 2102 bits; the common 12288-bit records and ResourceVector maps are admitted under host capacity. All 30 formal low-pass keys use Whole. A nonempty request validates the complete active inputs and reads authorized Root windows directly; the callback does not collect or copy the complete source tensors. It computes all centers and columns, then publishes one dense output. Nonuniform evaluation validates positions globally and retains one output's exact piece map for reuse. Full source access and output storage are required for partial delivery; any input edit invalidates all recorded output demand. Typed/upstream failures and nonuniform remote invalid values can fail the run. Dynamic numerical errors have Domain/Run scope. Empty requests read no sample payload after static preflight.
 Uniform tap order/zero omissions and nonuniform positive-length integration
 remain mathematical rules. No per-output dependency records remain.
 
@@ -1489,41 +1569,29 @@ quadrature approximation. No arbitrary one-sided interval is declared negative
 zero. Nonuniform accelerated keys still use strict fallback. Whole numeric/fallback
 counters are unavailable (N/A).
 Every scale scan, partition piece, coefficient/refinement and limb operation has
-work/cancellation checks. No integration tests or external math dependency enter
-the product. MPFR/Fraction are independent manual references only.
+work/cancellation checks. The production path has no MPFR/Fraction dependency;
+those remain independent manual references.
 
 Public examples, exact fixtures, response checks and runtime commands are in
 [resampling](../../../examples/numeric_workflow/README.md#signal-resampling),
 [uniform lowpass](../../../examples/numeric_workflow/README.md#uniform-lowpass)
 and [nonuniform lowpass](../../../examples/numeric_workflow/README.md#nonuniform-lowpass).
 
-Whole CRV-11 acceptance: native Strict/Apple each passed twelve public manual
-groups,474 independent directed MPFR uniform cases and245 Fraction/directed MPFR
-continuous cases. The focused numeric/compiler CTests passed2/2. Layout tests
-include all-port negative/unaligned/zero strides, all four floating modes and an
-independent two-constant oracle across a non-last axis. Tests also cover full
-input/dirty support, nonuniform remote-column Run errors, unchanged uniform
-NaN/Inf/tap order, full typed validation, cache replacement, active arithmetic
-and huge-period cancellation, 2^40-output budget rejection, and escaped owners.
-Resampling tests retain independent raw/typed positions, verify complete sample
-support and remote-query failure. A composed accelerated Hann test uses its
-contractual final FP32 bound; Strict still checks the exact reference bits.
-WSL/AVX2 and installed consumers were not rerun for this Whole revision.
+The four maintained manual executables exercise distinct parts of this family.
+Under Strict and Apple, resampling passed eight groups per profile, uniform
+low-pass two, nonuniform low-pass two, and execution/resource checks four. The
+resampling examples preserve CRV-01's existing exact-copy and numeric-accuracy
+checks; this family has no separate numerical oracle. The uniform MPFR oracle
+passed 474 accepted-value cases per profile: Strict compares exact reference
+bits, while Apple applies the shared final FP32 bound. The nonuniform Fraction /
+directed-MPFR oracle passed 245 cases per profile with exact `got == want` bits.
+These oracle results come from their respective low-pass programs; the shared `test_numeric_result_math` fixture and four manual executables are separate evidence. The final focused root selection included `test_numeric_result_math`, `test_numeric_resampling_result`, `test_numeric_lowpass_result`, `test_numeric_lowpass_nonuniform_result`, `test_numeric_lowpass_execution_result` and four adjacent family tests; it passed 9/9 in 15.30 seconds, with 4.58 seconds in the shared math fixture. The installed 0.32.0 consumers for resampling, uniform low-pass, nonuniform low-pass and low-pass execution passed 4/4 in 4.74 seconds; direct installed Apple runs passed the respective eight, two, two and four groups. Independent installed-package review found no unresolved blocker or required change. Manual checks cover all-port negative, unaligned and zero strides, worker and caller floating-environment preservation, an independent two-constant oracle on a non-last axis, complete Whole input/dirty support, remote-column Run errors, uniform NaN/Inf tap order, typed validation, cache replacement and source association, static preparation reuse, real-work cancellation, 2^40-output capacity rejection, and escaped owners. Resampling additionally checks raw and typed position forwarding, output-specific support, remote-query failure, K=65536 execution, and a zero-copy mapped position view at N=2^40 while the full samples output is rejected for capacity. Float64 layout checks cover all four templates and eight source layouts under each caller/worker rounding mode; Float32 checks separately cover bit-preserving positions, typed validation, and owner lifetime. These are execution checks, not an independent resampling oracle. No x86 numerical run, native GPU run, full CTest or Result performance run is recorded in this section.
 
-Performance: Apple M5/macOS27.0 (26A5425a), Clang21.1.3 O2,
-package0.18.0/traits16/CABI9/provider1/framing14. One warm plus seven measured
-runs, one worker, result/dependency caches off, payload1GiB/host2GiB/
-metadata512MiB/dependency-state512MiB, dependency/run work2^40, unlimited managed
-work. Complete Float64 quarter-wave signals [0,1,0,-1] repeat; uniform N=32,
-R=2; nonuniform K=9 positions0..8, R=.5. Boundary Wrap, cutoff=.25 or sigma1,
-Kaiser beta2. Independent directed MPFR/Fraction full-output references are checked
-outside timing with the profile's numerical contract. Before links the3d35f5eb
-lowpass adapter against the same current kernel. Core invokes current callbacks
-on complete prepared inputs, including validation/allocation/publication and
-excluding scheduler, collection and managed metering. Both profiles and all ten
-kernels have separate public/core results in `build/crv-whole/lowpass-times.csv`.
+### Historical Value-path timing and profiler records
 
-| Apple Float64 case | Before public ms median [min,max] | Whole public ms | Core ms |
+The following package 0.18.0 measurements and raw artifacts document the former Value adapter/callback path. They are historical records and do not measure, predict, or establish the performance of the current Result continuations. The run used Apple M5/macOS 27.0 (26A5425a), Clang 21.1.3 O2, package 0.18.0/traits 16/C ABI 9/provider 1/framing 14. One warm plus seven measured runs used one worker, result/dependency caches off, payload 1 GiB/host 2 GiB/metadata 512 MiB/dependency state 512 MiB, dependency/Run work 2^40 and unlimited managed work. Complete Float64 quarter-wave signals [0,1,0,-1] repeat; uniform N=32, R=2; nonuniform K=9 positions 0..8, R=0.5. Boundary is Wrap, cutoff=0.25 or sigma=1, Kaiser beta=2. Independent directed MPFR/Fraction full-output references were checked outside timing under the profile's numerical contract. The comparison linked the former low-pass adapter against the then-current numerical kernels. Its recorded core boundary invoked callbacks on complete prepared Values, including callback validation, allocation and publication, while excluding scheduler, collection and managed metering. The historical CSV contains public/core measurements for the old path.
+
+| Apple Float64 case | Former Value public ms median [min,max] | Former Value Whole public ms | Former Value callback core ms |
 | --- | --- | --- | --- |
 | uniform Blackman N32 | 2.324 [2.18487,2.55154] | 1.623 [1.57667,1.72717] | 1.36992 [1.31183,1.57867] |
 | uniform Gaussian N32 | 5.46692 [5.39583,5.62338] | 4.42375 [4.23163,4.81121] | 3.67492 [3.62696,4.01025] |
@@ -1537,35 +1605,11 @@ before samples; retain the CSV ranges rather than treating medians as guaranteed
 speedups. Scalar/NEON/AVX2 identities and fallback math remain; there is no new
 Accelerate/SME lowpass backend and no NUM-14-specific certificate reuse.
 
-The four public resampling templates were also sampled with both exports:
-K17,N128,C1/2, affine y=x+column, alternating dyadic queries, Float64, identical
-budgets/cache/worker/version/repetitions. Before uses the old CRV-01 adapter;
-identity forwarding is unchanged. `build/crv-whole/resampling-times.csv` contains
-all four templates under Strict/Apple. For Apple PCHIP C2, public20.7837
-[20.5402,21.4798]→15.4488[15.1929,15.8609]ms; interpolation core2.33012
-[2.2685,2.52983]ms. Core excludes independent position forwarding and public
-multi-output orchestration, so it is not the entire template's execution cost.
+The four public resampling templates were also sampled on the former Value path with both exports: K=17, N=128, C=1/2, affine y=x+column, alternating dyadic queries, Float64, and identical budgets/cache/worker/version/repetitions. The comparison used the old CRV-01 adapter; identity forwarding is unchanged. `build/crv-whole/resampling-times.csv` contains all four templates under Strict/Apple. For Apple PCHIP C=2, public time was 20.7837 [20.5402,21.4798] ms before and 15.4488 [15.1929,15.8609] ms after; interpolation core was 2.33012 [2.2685,2.52983] ms. Core excludes independent position forwarding and public multi-output orchestration, so it is not the entire template's execution cost.
 
-Native 12s Instruments Time Profiler captures are
-`build/crv-whole/lowpass-uniform.trace` and `lowpass-nonuniform.trace`.
-Gaussian uniform has11,148 execution samples: UniformLowpassMath98.27%,
-DirectedInterval98.17%, DirectedLowpassKernel94.38% inclusive; collect.06%,
-no DependencySession frames. ExactRatio::top is30.27% exclusive. Blackman
-nonuniform has10,649 execution samples: NonuniformLowpassMath99.02%,
-DirectedInterval99.34%, geometry partition.39%, collect.02%; ExactRatio::top
-is34.52% exclusive. Inclusive percentages overlap. The evidence places remaining
-cost in certified numerical evaluation, with the per-output dependency path
-removed. Raw XML/sample JSON, symbol/export logs and drivers accompany the CSV.
+Historical native 12-second Instruments Time Profiler captures are `build/crv-whole/lowpass-uniform.trace` and `lowpass-nonuniform.trace`. Gaussian uniform has 11,148 execution samples: UniformLowpassMath 98.27%, DirectedInterval 98.17%, DirectedLowpassKernel 94.38% inclusive; collect 0.06%, with no DependencySession frames. ExactRatio::top is 30.27% exclusive. Blackman nonuniform has 10,649 execution samples: NonuniformLowpassMath 99.02%, DirectedInterval 99.34%, geometry partition 0.39%, collect 0.02%; ExactRatio::top is 34.52% exclusive. Inclusive percentages overlap. These historical samples place the observed cost in certified numerical evaluation after the per-output dependency path had been removed. Raw XML/sample JSON, symbol/export logs and drivers accompanied the CSV.
 
-The resampling dual-export capture `build/crv-whole/resampling.trace` contains
-11,233 execution samples: Footprint methods43.74%, identity forwarding16.10%,
-curve callback17.72% and collect1.24% inclusive. Tiny allocator allocation/free
-account for27.18% exclusive. The remaining public/core gap includes generic
-multi-output footprint and identity processing; changing that shared kernel path
-is outside the CRV numerical callback migration. Position-only independence and
-original semantic facets are preserved. The maintained public signal benchmark
-also passed Apple Hann N5/N1025 sparse delivery with independent numerical checks
-and owner release; Whole evaluated/fallback columns now print N/A.
+The historical resampling dual-export capture `build/crv-whole/resampling.trace` contains 11,233 execution samples: Footprint methods 43.74%, identity forwarding 16.10%, curve callback 17.72% and collect 1.24% inclusive. Tiny allocator allocation/free account for 27.18% exclusive. The remaining public/core gap includes generic multi-output footprint and identity processing; changing that shared kernel path was outside the CRV numerical callback migration. Position-only independence and original semantic facets are preserved. The historical public signal benchmark also passed Apple Hann N=5/N=1025 sparse delivery with independent numerical checks and owner release. Its Whole evaluated/fallback columns printed N/A; these observations do not describe the current Result path.
 
 ## Shared rounding and regional execution
 

@@ -9,25 +9,21 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
 clarification_status: complete
-proposed_operation_keys:
+registered_operation_keys:
   - alpha.unassociate_strict
   - alpha.unassociate_accelerated_apple_silicon
   - alpha.unassociate_accelerated_x86_64
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-04B: import premultiplied numeric samples as straight
 
-CPU implementation (2026-09-25): the source package now includes this member/family,
-its public C++ authoring API, correctness fixtures and a
-[performance/review driver](../../../../examples/alpha_performance/README.md).
-`Proposed`/D1 still describe design-review status, not missing executable code.
-Apple Silicon and FreeBSD performance/portability require target-machine review.
+The default registry provides `alpha.unassociate_<profile>` for the three CPU
+profiles. The operation uses Result ABI 2 and preserves the declared tensor
+shape, dtype and channel positions. The specification remains Proposed. The current focused `test_alpha_operations` CTest and the fourteen small alpha benchmark smoke cases pass; no full matrix claim is made.
 
 
 Inherit the complete [FMT-04 boundary contract](FMT-04_alpha_association_contract.md).
-These implemented CPU primitive keys are not aliases of the retired typed-image keys.
+The operation accepts one single-tensor Result without fields, with optional second input only for raw explicit plane/scalar weights. All connected inputs are Descriptor-checked; semantic operands use Data and Validation, pass-through samples do not gain Validation, and no Control dependency is declared.
 
 ## Interface and representation
 
@@ -101,6 +97,4 @@ floating overflow use the independent NUM bit oracle. Semantic zero predicates
 and output representation remain exact across profiles.
 
 Conceptual DAG: explicit premultiplied payload with internal alpha -> B ->
-straight image consumer. Implementation must deliver public compile/execute
-examples plus independent numeric, region, metadata, budget and lifetime checks.
-No implementation or benchmark result is claimed here.
+straight image consumer. The native Result implementation uses the public helper and registry contract described above. Runtime and performance claims are limited to checks actually run on the target host.

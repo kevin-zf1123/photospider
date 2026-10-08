@@ -13,10 +13,7 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+repository_commit: current working tree
 ---
 
 # NUM-13B: integral_image
@@ -31,10 +28,15 @@ Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
-Compute two-axis rectangular prefix sums with leading zero boundaries. Required
-static String axes names exactly two distinct nonnegative input axes; normalize
-the pair to increasing order. Input rank is 2..8 with positive extents. Output
-values retains all other axes and adds one to each selected axis. All other axes
+The `numeric.integral_image_*` operations accept one `Result` tensor member under
+any member key. The output port key is `values`; its Result schema is
+`photospider.tensor` with tensor member `samples`. The source
+`sample_shape()` includes batch axes; the output uses that complete shape as
+ordinary axes and has no facets or batch topology. Compute two-axis rectangular
+prefix sums with leading zero boundaries. Required static String axes name
+exactly two distinct nonnegative input axes; normalize the pair to increasing
+order. Input rank is 2..8 with positive extents. The output retains all other
+axes and adds one to each selected axis. All other axes
 are independent batches, with no image/color semantics inferred. Input/output
 logical counts must not exceed 2^40; output facets are empty.
 
@@ -50,7 +52,9 @@ or correct rounding. Static dtype is explicit in direct nodes.
 Inherit [prefix_sum's arithmetic and failure rules](NUM-13A_prefix_sum.md), using
 rectangle contributors rather than line contributors. If either selected output
 boundary is zero, the rectangle is empty: return integer zero or floating +0
-while Whole still prepares the full input. Nonempty rectangle NaN priority follows original
+while Whole still validates full input support for a nonempty demand. The kernel
+reads through authorized Result windows and does not pack a second full input
+payload. Nonempty rectangle NaN priority follows original
 logical row-major coordinates, independent of which selected axis is processed
 first. Preserve the shared payload conversion and mixed-infinity/zero rules.
 
@@ -58,9 +62,13 @@ All complete-output rectangles are converted/range-checked; any integer overflow
 fails Domain/Run, including outside the consumer projection. Internal exact sums
 can exceed the destination range. Rounded integral outputs never become exact
 carry. Strict remains reproducible; accelerated floating results retain their
-own shared bound. Empty demand reads nothing; nonempty zero-boundary requests
-still read and validate all source cells. Any source edit invalidates all recorded
-observations, including projections at zero boundaries.
+own shared bound. Empty demand reads nothing; nonempty demand requests Data,
+Validation and Descriptor (role 13) for complete input support, including
+zero-boundary requests. Any source edit invalidates all recorded observations,
+including projections at zero boundaries.
+The operator publishes its complete output in global coordinates. The requested
+footprint scopes observed dependency roots; it does not restrict reads from the
+Result's complete published coverage.
 
 ## Algorithms, resources and errors
 
@@ -74,10 +82,11 @@ row; within each row preserve source logical order. Reset all columns per plane.
 
 This takes O(full_input_count) exact updates/conversions with one fixed pair of
 full workspaces and one compact carry per inner-axis column. Column element
-capacity is560*W bytes on the recorded arm64 build, plus ResourceAllocator
-header/alignment/Entries, charged as metadata. Full input collection and complete
-dense output are additional payload. W is the higher-numbered selected axis's
-extent; it is not chosen by physical stride or assumed to be the shorter axis.
+capacity is `560*W` bytes on the recorded arm64 build, plus ResourceAllocator
+header, alignment and Entries, charged as metadata. The complete dense output
+is additional payload; input reads use authorized windows rather than a packed
+copy. W is the higher-numbered selected axis's extent; it is not chosen by
+physical stride or assumed to be the shorter axis.
 No repeated rectangle scan, per-output descriptors or persistent table is retained.
 Work/cancellation checks cover resets, reads, merges, conversions and publication.
 
@@ -94,14 +103,18 @@ independent batches, disjoint corners with an L-shaped source union, Run failure
 when an unrequested integer rectangle overflows despite representable later results, NaN priority across axes and all inherited dtype/stride/resource cases.
 
 Four-corner rectangle queries on rounded floating outputs may introduce their
-own rounding/cancellation error; this operator guarantees each prefix result,
-not exact recovery from arbitrary downstream subtraction. Test exact integer
-fixtures separately from floating retrieval accuracy. Deliver public workflow
-runs and lifetime/invalidation checks; the implementation evidence below records the checks actually run.
+own rounding/cancellation error; this operator guarantees each integral-image
+result, not exact recovery from arbitrary downstream subtraction. Test exact
+integer fixtures separately from floating retrieval accuracy. The current
+`test_numeric_scans_result` covers independent small-integer enumeration,
+cross-plane NaN/layout cases, resource limits, cancellation, Empty demand and
+zero-boundary input validation. The older `test_numeric_result_math.cpp`
+integration fixture contains additional integral-image cases, but it was not
+rerun for this Result migration.
 
 ## Implementation and executable acceptance
 
-All formal profiles use the exact Whole algorithm above. Current public workflow,
-Fraction rectangle oracle, cross-plane/NaN/layout/resource checks and measured
-public/core performance are in [NUM-13 Whole execution](../scans-whole.md).
-Older regional WSL/installed acceptance is historical.
+All six registered profile keys use the exact Whole algorithm above. Current
+public workflow and focused Result math coverage are in
+[NUM-13 Whole execution](../scans-whole.md). Proposed specification status is
+unchanged.

@@ -63,20 +63,31 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
       {{parameter, std::move(encoded)}, {"layout", std::string(layout_name)}}});
 }
 }  // namespace layout_detail
-/** @brief Authors a row-major logical reshape with explicit target shape.
- * Compiler checks equal positive element counts <=2^40, rank 1..8 and source
- * dtype. Output values preserves UInt8/Int64/Float32/Float64 bits, with empty
- * facets. No payload is accessed by this pure, concurrent-safe helper.
- * Every nonempty demand reads and validates the complete active input, then
- * publishes the complete output before projection. Any active input edit
- * invalidates the complete output; upstream/typed/domain failures are Run-wide.
- * Auto uses one affine owner for the complete output or allocates a full packed
- * copy. View reports Domain/Run InvalidArgument/ViewUnavailable if the complete
- * input/output cannot use one affine owner. Compatible same-owner fragments
- * may join; multiple owners require Auto/Dense collection. Views retain their
- * immutable source storage/resources after context destruction. Dense owns
- * N*dtype_size output bytes, including for a sparse downstream request.
- * Resource/cancellation failures never trigger Auto fallback.
+/** @brief Authors a row-major logical reshape with an explicit target shape.
+ * The source and result are single-tensor Result objects. The source tensor may
+ * use any schema id/member key; its complete sample_shape() has rank 1..8,
+ * positive extents and at most 2^40 elements. UInt8, Int8, UInt16, Int16,
+ * Int64, Float32 and Float64 are supported; the target keeps the source dtype
+ * and preserves every element bit, including signaling-NaN payloads.
+ * The published photospider.tensor/samples Result has the complete target shape
+ * as ordinary axes, with facets and batch-axis metadata dropped.
+ *
+ * This pure, concurrent-safe helper only authors node metadata and reads no
+ * payload. Static schema and parameter checks run before the CPU Whole program
+ * requests active tensors through Tensor Needs. A nonempty request uses role
+ * 13 to trigger typed-payload validation, then publishes a complete Result
+ * with global output coordinates. A downstream query limits observed
+ * dependencies; it does not turn the publication into a packed ROI result.
+ * View requires one proven affine source/output owner. If the complete mapping
+ * is unavailable, View reports Domain/Run InvalidArgument with diagnostic
+ * ViewUnavailable. Compatible fragments may join when they share that owner.
+ * Auto materializes a complete packed output only when a view is unavailable;
+ * Dense always materializes it and owns N*dtype_size bytes, including for a
+ * sparse downstream query. Resource, validation and cancellation errors remain
+ * errors rather than Auto fallbacks.
+ * Published views retain their source storage and resources after context
+ * destruction. Layout registrations disable cross-run content caching because
+ * content alone does not identify physical owners or strides.
  * Returns owned node metadata; malformed authoring arguments return
  * InvalidArgument/InvalidDomain/Schema, allocation may throw bad_alloc.
  */
@@ -101,12 +112,16 @@ inline Result<WorkflowNode> transpose_node(
                              permutation, true, layout, profile);
 }
 /** @brief Authors a dynamic slice with static positive per-axis counts.
- * starts and steps must be Int64[rank]. For nonempty demand the operation
- * collects active inputs, then validates full slice endpoints using widened
- * integer arithmetic. Starts are absolute nonnegative indices; used steps are
- * nonzero. Counts of one ignore their step numerically; the whole step port is
- * excluded only when all counts are one. Otherwise all step entries are
- * collected and validated, so even an unused entry can cause an upstream
+ * starts and steps are Int64[rank] Result inputs. For nonempty demand the
+ * operation requests each active input through a full Tensor Need with Data,
+ * Validation and Descriptor roles (role 13), triggering typed-payload
+ * validation. It checks full slice endpoints using widened integer arithmetic.
+ * Starts are absolute
+ * nonnegative indices; used steps are nonzero. Counts of one ignore their step
+ * numerically; the whole step port is
+ * excluded from runtime Need and association only when all counts are one;
+ * static schema and parameter checks still apply. Otherwise all step entries
+ * are requested and validated, so even an unused entry can cause an upstream
  * failure. Empty reads no controls or data. Invalid controls report
  * InvalidArgument/InvalidDomain and InvalidSlice with axis/values.
  * Layout/lifetime rules match reshape_node.

@@ -12,7 +12,7 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-impl
+repository_branch: ops-specs
 repository_commit: current working tree
 ---
 
@@ -21,87 +21,91 @@ repository_commit: current working tree
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
 [final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+range and fallback rules. Clamp comparisons and selected results remain exact.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+registration, shared execution and acceptance requirements; explicit rules
+below and in the named family contract take precedence. This specification
+remains Proposed; its status does not describe runtime registration.
 
-Inputs `input`, `lower` and `upper` are dynamic arrays with exactly matching
-shapes and dtypes. Support UInt8, Int64, Float32 and Float64; output `values`
-preserves dtype and shape with empty facets. Shared limits are explicitly
-broadcast to the array shape. There are no implicit casts or broadcasting,
-and no static numeric limit parameters.
+## Tensor ports and Whole execution
 
-The three independently named CPU versions follow the common bitwise-equivalent
-basic-operation rule. Read and validate all three complete operands for every nonempty request.
-Empty requests read no payload and invoke no callback. Shape is rank 1..8 with positive
-extents. Inherit [binary execution conventions](NUM-05_binary_contract.md),
-extending Whole Data support and validation/invalidation to all three ports.
+The three input ports are `input`, `lower` and `upper`, in that order. Each is a
+`Result` containing exactly one tensor member at index zero; its
+`ResultTensorSpec::key` may be any key. The three members must have identical
+`sample_shape()` and element type. The shape includes every input batch axis. Supported types are
+UInt8, Int64, Float32 and Float64. There are no static numeric limit parameters,
+implicit casts or implicit broadcasts.
 
-At every logical coordinate, validate lower<=upper. Equal limits and infinite
-floating limits are allowed. A NaN limit or lower>upper fails the complete invocation;
-an input NaN does not hide invalid bounds. With valid bounds, an input NaN
-preserves payload/sign and is quieted under the common policy.
+The output port is `values`, a `Result` with schema `photospider.tensor` and
+tensor key `samples`. It preserves the input element type and uses the complete
+input `sample_shape()` as the output cell shape. Batch axes become ordinary
+output axes, and output facets are empty. Input shape rank is 1..8 and its
+complete logical element count is at most 2^40.
 
-After valid bounds and input-NaN handling, choose lower when input<lower,
-upper when input>upper, otherwise return input. Comparisons treat signed zeros
-as equal; an in-range input retains its bits, including -0. In particular
-clamp(-0,+0,+0)=-0. This is not defined by composing minimum and maximum.
-No selected integer or finite floating value is converted or rounded.
+The three formal clamp profile keys use one Whole continuation. A nonempty
+request issues one Need covering every sample on all three inputs with Data,
+Validation and Descriptor roles (13). The continuation reads owning tensor
+windows, validates every bound, then publishes the complete output through one
+direct tensor writer. Sparse output demand does not narrow input validation or
+the arithmetic domain. Any bound failure invalidates the complete invocation.
+The output relation carries complete Data support from every input and retains
+the full-input validation and descriptor obligations.
+
+An Empty request publishes the declared output schema with empty sample
+coverage. It issues no input payload Need and performs no sample arithmetic;
+the callback does not run.
+
+## Numeric behavior
+
+At each global logical coordinate, validate `lower <= upper`. Equal bounds and
+infinite floating-point bounds are valid. A NaN bound or `lower > upper` fails
+the complete invocation, even if the coordinate lies outside the requested
+output projection. An input NaN does not hide an invalid bound.
+
+With valid bounds, quiet an input NaN while preserving its sign and payload.
+Otherwise choose `lower` when `input < lower`, choose `upper` when
+`input > upper`, and copy the input bits when it lies in range. Comparisons
+treat signed zeros as equal, so an in-range `-0` remains `-0`; in particular,
+`clamp(-0,+0,+0) = -0`. The operation is not defined by composing minimum and
+maximum. Integer order uses exact signed comparison, and selected values are
+not converted or rounded.
 
 ## Errors, resources and acceptance
 
-Unsupported dtypes or mismatched shapes fail compile/preflight. Invalid dynamic
-bounds fail evaluation with InvalidArgument and FailureReason::InvalidDomain and diagnostic tag InvalidBounds, reporting
-the global coordinate and offending bound port/value bits. Validate all three
-full-input dependencies; an invalid bound outside the consumer projection also
-fails the invocation. Failures have Run scope and no Atom key. No partial output
-is published, under the inherited terminal rules.
+Shape, dtype, rank or element-count mismatch fails metadata specialization as a
+schema/type error. Typed semantic-coverage validation preserves its originating
+`Status`, including `FailureReason::None` when that is the source status; it is
+not relabeled as a numeric bounds error. Numeric bound failure returns
+`InvalidArgument` with `FailureReason::InvalidDomain`, Domain origin, Run scope
+and no Atom key. Its diagnostic identifies the bound port and raw bits and
+includes the complete logical coordinate, including any former batch prefix.
 
-Work is O(full logical elements); output bytes are full logical elements times
-dtype size, even for sparse consumers. All input collections coexist with the
-complete output and fixed arithmetic workspace. Any input edit invalidates all
-observed output coordinates.
-Temporary state is bounded per processing chunk; account actual source owners,
-output/scratch and validation closure under the host budgets. Preserve floating
-environment, check cancellation at least every 64 elements, and release
-unpublished allocations on failure.
+The Whole callback owns one fixed `RangeMath` workspace through the phase
+allocator and charges work to the execution root. Complete input windows,
+output payload and workspace coexist during execution. Capacity, work-limit,
+cancellation or numeric failure publishes no partial output and releases
+unpublished scratch and payload. Empty requests avoid input payload allocation
+and sample work.
 
-Conceptual public fixture: input=[-1,0.5,2], lower=[0,0,0], upper=[1,1,1]
-returns [0,0.5,1]. Bind all inputs in WorkflowDocument and check values through
-ExecutionContext when implemented. Repeat supported dtype fixtures, UInt8/Int64
-extrema, equal bounds, signed-zero permutations, infinite limits/input, input
-NaN payloads and invalid bounds concurrent with input NaN. Use exact comparison
-and bit-selection as an independent oracle. Verify disjoint support, typed
-validation, invalidation, lifetime, resource exhaustion and cancellation as
-defined by the shared execution contract.
+The current public Result workflow and focused test are described in
+[NUM-06 Result Whole execution](../range-whole.md). The workflow directly checks
+Float32/Float64 paths, negative and zero-stride Int64 layouts, invalid bounds
+outside sparse demand, typed validation, Whole support, Empty, resource
+exhaustion, cache behavior and global-coordinate projection. The independent
+oracle covers UInt8 and Int64 boundary values. The separate
+[`test_numeric_result_math.cpp`](../../../../tests/integration/test_numeric_result_math.cpp)
+fixture retains additional checks for all four dtypes, integer extrema,
+batch-axis flattening, negative zero and pre-cancellation; it was not rerun for
+this update.
 
-## Current implementation status
+Input values `[-1, 0.5, 2]`, lower `[0,0,0]` and upper `[1,1,1]` produce
+`[0,0.5,1]`. The current [`ranges.cpp` workflow](../../../../examples/numeric_workflow/ranges.cpp)
+binds tensor Results and reads the published `values` Result.
 
-The three versioned keys use closed matching-shape/input-dtype inference and
-pure metadata validation for their three inputs. The implementation reads
-`input`, `lower` and `upper` arrays, validates bounds across the complete input, preserves selected bits and
-reports `InvalidBounds` with coordinate and bound information. It uses raw
-IEEE/integer order keys and shared scalar/NEON/AVX2 comparison facilities.
-The public composition example is in `examples/numeric_workflow/ranges.cpp`.
-
-Historical pre-Whole local strict/Apple runs passed the broadcast composition,
-Atom-isolated invalid bounds, sparse support, upstream endpoint dependencies,
-work limits and cancellation cleanup. Ubuntu WSL Clang 18
-strict/x86 and the installed consumer passed that pre-Whole implementation on
-2026-09-14; these are not validations of the current Whole path. Additional checks cover
-recognized typed validation, bound cache edits, arbitrary strides, global ROI
-origins and schema failures. This does not change the Proposed status of
-this specification.
-
-## Whole validation
-
-The maintained synchronous callback uses no dependency maps or continuation.
-Per-value numeric counters are N/A. The numerical comparison and rational engine
-are unchanged; Scalar/NEON/AVX2 profile rules remain as specified. The local
-strict/Apple Whole validation passed 2,826 independent Fraction/bit cases per
-profile, public composition and error/layout/typed/cache/resource checks.
-See [NUM-06 Whole measurements](../range-whole.md) for commands, memory costs,
-public/core timings and profiler scope. This does not change Proposed status.
+The code declares strict, Apple Silicon and x86-64 profile keys. The current
+root Result test, Apple Silicon workflow, independent strict/Apple Fraction
+oracle and installed consumer are summarized in [NUM-06 Result Whole
+execution](../range-whole.md). No x86 execution, native GPU support or
+performance result is claimed. These evidence boundaries do not change the
+Proposed status.

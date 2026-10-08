@@ -11,6 +11,7 @@
 #include <malloc.h>
 #endif
 
+#include "execution/result_checkpoints.hpp"
 #include "execution/shared_results.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
@@ -135,6 +136,56 @@ void operator delete[](void* p, std::size_t,
 #endif
 
 namespace {
+int input_facts_lifetime() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  using execution_internal::ResultInputFacts;
+  ResourceLimits limits;
+  limits.capacity[ResourceKind::Host] = 65536;
+  limits.capacity[ResourceKind::Metadata] = 65536;
+  ResourceBudget root(limits);
+  {
+    ResultInputFacts facts(root);
+    for (unsigned port : {1, 0})
+      for (unsigned id = 128; id; --id)
+        facts[{port, id}] = port * 1000 + id;
+    facts[{2, 1}] = 4;
+    PS_CHECK(facts.size() == 257);
+    ResultInputFacts copied = facts;
+    copied[{1, 64}] = 9000;
+    PS_CHECK((facts[{1, 64}] == 1064 && copied.size() == facts.size()));
+    ResultInputFacts moved(std::move(copied));
+    PS_CHECK(copied.size() == 0 && !(copied.begin() != copied.end()));
+    copied[{4, 2}] = 7;
+    copied = std::move(moved);
+    PS_CHECK((moved.size() == 0 && copied[{1, 64}] == 9000));
+    copied.clear();
+    PS_CHECK(copied.size() == 0 && !(copied.begin() != copied.end()));
+    const auto free = 65536 - root.statistics().live[ResourceKind::Host] -
+                      ResourceBudget::lease_metadata_bytes();
+    auto reservation = root.reserve(ResourceCapacity::host(free, free));
+    PS_CHECK(reservation.ok());
+    bool rejected = false;
+    try {
+      facts[{3, 9}] = 9;
+    } catch (const std::bad_alloc&) {
+      rejected = true;
+    }
+    PS_CHECK(rejected && facts.size() == 257);
+    ResultInputFacts::Key previous{};
+    std::size_t count = 0;
+    for (const auto& fact : facts) {
+      PS_CHECK(previous < fact.first);
+      previous = fact.first;
+      ++count;
+    }
+    PS_CHECK(count == facts.size());
+    reservation = Result<ResourceLease>(ResourceLease{});
+    facts[{3, 9}] = 9;
+    PS_CHECK(facts.size() == 258);
+  }
+  PS_CHECK(root.statistics().live[ResourceKind::Host] == 0);
+  return 0;
+}
 int weak_windows() {
   using namespace ps;  // NOLINT(build/namespaces)
   struct ComparableOwner {
@@ -272,8 +323,10 @@ int callback_failure_copy_exhaustion() {
   ExecutionContext context(registry, config);
   auto result = context.execute(compiled.plan);
   PS_CHECK(!fail_next_allocation && !result.ok() &&
+           result.status().code == ErrorCode::InvalidArgument &&
            result.status().reason == FailureReason::MalformedEnvelope &&
            result.status().detail.origin == FailureOrigin::Protocol &&
+           result.status().detail.scope == FailureScope::Group &&
            result.status().detail.node_id == 41);
   return 0;
 }
@@ -316,12 +369,14 @@ int main() {
     PS_CHECK(live == 0);
   SchemaTemplate image_schema;
   image_schema.id = "test.large_image_metadata";
-  ResultImageSpec image;
+  ResultTensorSpec image;
+  image.batch_axes = {1, 1};
+  image.layout.spatial = true;
   image.key = "pixels";
   image.descriptor = {ElementType::Float32, {1, 1}};
   image.layout.channel_axis = {};
   image.facets = {{"test.large", 1, std::vector<uint8_t>(65536, 9)}};
-  image_schema.images.push_back(std::move(image));
+  image_schema.tensors.push_back(std::move(image));
   PS_CHECK(image_schema.validate(true).ok());
   large_allocations = 0;
   inspect_allocations = true;
@@ -333,5 +388,6 @@ int main() {
   for (auto live : budget.statistics().live.values)
     PS_CHECK(live == 0);
   PS_CHECK(weak_windows() == 0);
+  PS_CHECK(input_facts_lifetime() == 0);
   return 0;
 }

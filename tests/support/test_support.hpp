@@ -4,6 +4,8 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "photospider/photospider.hpp"
 
@@ -69,7 +71,7 @@ inline WorkflowDocument delayed_document(std::int64_t milliseconds) {
 }
 
 /**
- * @brief Reads one named Float64 scalar result.
+ * @brief Reads a named Float64 scalar from a Result tensor.
  * @param result Successful execution result.
  * @param name Exact result name.
  * @return Scalar value or NaN when missing/malformed.
@@ -77,12 +79,22 @@ inline WorkflowDocument delayed_document(std::int64_t milliseconds) {
  */
 inline double named_scalar(const ExecutionResult& result,
                            const std::string& name) {
-  const auto iterator = result.values.find(name);
-  if (iterator == result.values.end()) {
-    return std::numeric_limits<double>::quiet_NaN();
+  const auto object = result.results.find(std::string_view(name));
+  if (object != result.results.end()) {
+    auto facts = object->second.descriptor();
+    double number = std::numeric_limits<double>::quiet_NaN();
+    if (!facts.ok() || object->second.schema().tensors.size() != 1 ||
+        object->second.schema().tensors[0].descriptor.element_type !=
+            ElementType::Float64 ||
+        object->second.schema().tensors[0].sample_shape() !=
+            std::vector<std::uint64_t>{1} ||
+        !object->second
+             .read_tensor(facts.value(), 0, {0}, &number, sizeof(number))
+             .ok())
+      return std::numeric_limits<double>::quiet_NaN();
+    return number;
   }
-  auto value = iterator->second.as_float64();
-  return value.ok() ? value.value() : std::numeric_limits<double>::quiet_NaN();
+  return std::numeric_limits<double>::quiet_NaN();
 }
 
 }  // namespace ps::test

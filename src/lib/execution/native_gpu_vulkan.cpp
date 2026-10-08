@@ -114,7 +114,7 @@ struct Pipeline final {
 };
 // Only fixed LocalSize modules belong to this ABI. Full shader validity and
 // buffer access discipline are the trusted plugin's responsibility.
-Result<std::array<std::uint32_t, 3>> local_size(const ps_gpu_dispatch_v11& c,
+Result<std::array<std::uint32_t, 3>> local_size(const ps_gpu_dispatch_v1& c,
                                                 bool byte_storage) {
   if (!c.source || c.source_size < 20 || c.source_size > 262144 ||
       c.source_size % 4 || reinterpret_cast<std::uintptr_t>(c.source) % 4)
@@ -350,7 +350,7 @@ bool Device::available() const noexcept {
   return impl_->valid.load();
 }
 std::uint32_t Device::backend() const noexcept {
-  return PS_GPU_BACKEND_VULKAN_V11;
+  return PS_GPU_BACKEND_VULKAN_V1;
 }
 std::uint64_t Device::minimum_buffer_offset_alignment() const noexcept {
   return std::max<std::uint64_t>(
@@ -388,16 +388,18 @@ BufferAllocator Device::allocator(const BufferAllocator& host) {
   if (host.native_shared_reserve_)
     result.reserve_ = host.native_shared_reserve_;
   auto self = shared_from_this();
-  result.native_allocate_ = [self](std::uint64_t size,
-                                   const BufferAllocator::Reserve& reserve,
-                                   std::shared_ptr<const void> domain) {
-    return self->allocate(size, reserve, std::move(domain));
-  };
+  result.native_allocate_ =
+      [self](std::uint64_t size, const BufferAllocator::Reserve& reserve,
+             std::shared_ptr<const void> domain,
+             const BufferAllocator::AllocationCommit& commit) {
+        return self->allocate(size, reserve, std::move(domain), commit);
+      };
   return result;
 }
-Result<MutableBuffer> Device::allocate(std::uint64_t size,
-                                       const BufferAllocator::Reserve& reserve,
-                                       std::shared_ptr<const void> domain) {
+Result<MutableBuffer> Device::allocate(
+    std::uint64_t size, const BufferAllocator::Reserve& reserve,
+    std::shared_ptr<const void> domain,
+    const BufferAllocator::AllocationCommit& commit) {
   collect_expired_allocations();
   if (!available())
     return Result<MutableBuffer>(
@@ -461,6 +463,8 @@ Result<MutableBuffer> Device::allocate(std::uint64_t size,
   }
   if (code != VK_SUCCESS)
     return Result<MutableBuffer>(failed(code, "vkAllocateMemory"));
+  if (commit)
+    commit(storage.lease_, capacity);
 #ifdef PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS
   if (execution_testing::fail_native_allocation(1))
     return Result<MutableBuffer>(
@@ -527,7 +531,7 @@ Result<BufferView> Device::view(const std::uint8_t* bytes, std::uint64_t size,
 }
 Status Device::execute(
     const std::vector<BufferView, NativeAllocator<BufferView>>& views,
-    const ps_gpu_dispatch_v11* commands, std::uint32_t count,
+    const ps_gpu_dispatch_v1* commands, std::uint32_t count,
     const CancellationToken& cancellation, Statistics* statistics,
     const BufferAllocator& command_allocator) {
   std::lock_guard<std::mutex> lock(impl_->queue_mutex);
@@ -536,7 +540,7 @@ Status Device::execute(
   if (cancellation.cancelled())
     return Status{ErrorCode::Cancelled, "Vulkan submission cancelled"};
   if (!commands || !count || count > 32 ||
-      reinterpret_cast<std::uintptr_t>(commands) % alignof(ps_gpu_dispatch_v11))
+      reinterpret_cast<std::uintptr_t>(commands) % alignof(ps_gpu_dispatch_v1))
     return Status{ErrorCode::InvalidArgument, "invalid dispatch array"};
   const auto& context = impl_->context;
   const auto& limits = context->properties.limits;
@@ -550,14 +554,14 @@ Status Device::execute(
           c.entry_size > 128 || c.buffer_count > 31 ||
           (c.buffer_count && !c.buffers) ||
           (c.buffers && reinterpret_cast<std::uintptr_t>(c.buffers) %
-                            alignof(ps_gpu_buffer_binding_v11)) ||
+                            alignof(ps_gpu_buffer_binding_v1)) ||
           c.constant_size > 4096 ||
           (c.constant_size && (!c.constants || c.constant_index > 30)))
         return Status{ErrorCode::InvalidArgument,
                       "invalid Vulkan dispatch record"};
-      if (c.code_format > PS_GPU_CODE_SPIRV_V11)
+      if (c.code_format > PS_GPU_CODE_SPIRV_V1)
         return Status{ErrorCode::InvalidArgument, "unknown GPU module format"};
-      if (c.code_format != PS_GPU_CODE_SPIRV_V11)
+      if (c.code_format != PS_GPU_CODE_SPIRV_V1)
         return Status{ErrorCode::BackendUnavailable, "Vulkan requires SPIR-V"};
       auto group = local_size(c, context->byte_storage);
       if (!group.ok())

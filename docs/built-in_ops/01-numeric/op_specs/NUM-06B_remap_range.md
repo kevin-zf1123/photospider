@@ -12,106 +12,127 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-impl
+repository_branch: ops-specs
 repository_commit: current working tree
 ---
 
 # NUM-06B: remap_range
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
+Map a source interval to a target interval and extrapolate linearly outside the
+source interval. Strict uses the exact reference formula. Floating arithmetic
+in accelerated profiles follows the shared
 [final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
+verified enclosure and fallback rules.
 
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+registration, shared execution and acceptance requirements; explicit rules
+below and in the named family contract take precedence. This specification
+remains Proposed; its status does not describe runtime registration.
 
-Map a source interval to a target interval, linearly extrapolating outside the
-source interval. Inputs in port order are `input`, `source_lower`, `source_upper`,
-`target_lower`, `target_upper`. All five are dynamic arrays of the same shape
-and dtype, Float32 or Float64. Output `values` preserves dtype/shape with empty
-facets. There are no static numeric parameters or implicit broadcasts/casts.
-Shared scalar bounds use explicit broadcast. Clipping uses a separate clamp.
+## Tensor ports and Whole execution
 
-Source bounds must satisfy source_lower<source_upper. Target bounds may be
-increasing, decreasing or equal. Mathematical formula for finite inputs is
+Inputs are five `Result` tensor members, in port order: `input`,
+`source_lower`, `source_upper`, `target_lower`, `target_upper`. Each input
+`Result` contains exactly one tensor member at tensor index zero, with any
+`ResultTensorSpec::key`. All five must have
+identical `sample_shape()` and element type, Float32 or Float64. The shape
+includes every declared batch axis. There are no static numeric parameters,
+implicit casts or implicit broadcasts. Clipping is a separate clamp operation.
 
-    target_lower + (input-source_lower) *
-        (target_upper-target_lower) / (source_upper-source_lower)
+The output port is `values`, a `Result` with schema `photospider.tensor` and
+tensor key `samples`. It preserves the input element type and uses the complete
+input `sample_shape()` as the output cell shape. Batch axes become ordinary
+output axes, and output facets are empty. Input shape rank is 1..8 and its
+complete logical element count is at most 2^40.
 
-All five complete operands are read and validated for every nonempty request.
-Inherit [binary execution conventions](NUM-05_binary_contract.md), extending
-Whole support and invalidation to all five ports. Invalid bounds outside a
-consumer projection also fail the invocation with Run scope and no Atom key.
-Empty reads no payload and invokes no callback. The common three independent CPU profiles apply.
+The three formal remap profile keys use one Whole continuation. A nonempty
+request issues one Need covering every sample on all five inputs with Data,
+Validation and Descriptor roles (13). The continuation reads owning tensor
+windows, validates all four bounds, then publishes the complete output through
+one direct tensor writer. Sparse output demand does not narrow validation or
+arithmetic. Any invalid bound fails the complete invocation, even when the
+invalid coordinate is outside the requested output region. The output relation
+carries complete Data support from every input and retains full-input
+Validation and Descriptor obligations.
 
-## Numerical and validation rules
+An Empty request publishes the declared output schema with empty sample
+coverage. It issues no input payload Need and performs no sample arithmetic;
+the callback does not run.
 
-All four bounds must be finite. A NaN/infinite bound or source_lower>=source_upper
-fails evaluation with InvalidArgument, FailureReason::InvalidDomain and diagnostic tag InvalidBounds, and the global
-coordinate and offending port/value bits. Validate bounds even when input is
-NaN. Valid bounds permit any floating input: quiet input NaN with payload/sign
-preserved; map infinities according to the sign of the exact slope. A constant
-target interval maps non-NaN infinities to the target constant.
+## Numeric behavior
 
-For ordinary finite inputs, correctly round the entire exact rational formula
-directly to output dtype once. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound;
-intermediate rounded subtraction/multiplication/division does not define the
-operation. Mathematical output overflow yields the correctly signed infinity
-as a successful numeric result; gradual underflow preserves the result sign.
-Exact non-special zero results are +0.
+For finite ordinary inputs, the mathematical formula is
 
-After bounds validation and input-NaN propagation, equal target bounds return
-target_lower bits, taking precedence over endpoint selection and infinite input.
-This includes opposite-sign target zeros. Otherwise exact source endpoints
-return their corresponding target endpoint bits, then infinite inputs follow
-the slope rule, then ordinary finite inputs use the exact formula.
+$$
+y = t_0 + (x-s_0)\,\frac{t_1-t_0}{s_1-s_0}.
+$$
 
-Use exact dyadic/rational arithmetic or a certified equivalent to avoid spurious
-intermediate overflow. Charge exact arithmetic scratch/work and return
-ResourceExhausted if budgets are insufficient. Read all five sources even for
-endpoint and constant paths. Check cancellation during extended arithmetic and
-at least every 64 simple samples; publish no partial failed observation.
+All four bounds must be finite and `source_lower < source_upper`. A NaN or
+infinite bound, or a non-increasing source interval, is invalid. Target bounds
+may increase, decrease or be equal. Bound validation precedes input-NaN
+handling, so an input NaN never hides an invalid bound.
 
-## Acceptance and current status
+After bounds validate, an input NaN is quieted while its sign and payload are
+preserved. Apply the remaining cases in this order:
 
-Conceptual public fixture: input=[0,0.5,1,2], source bounds=[0,1] and target
-bounds=[0,255] broadcast to shape [4] produces [0,127.5,255,510]. Test descending
-and constant targets, exact endpoints, signed zeros, infinities and NaN payloads,
-invalid bounds concurrent with input NaN, near-equal source bounds, output
-overflow/subnormals and representable results with overflowing naive differences.
-Use an independent exact rational oracle with direct Float32/Float64 rounding;
-verify strict bits and accelerated final FP32-scaled accuracy. Execute shared disjoint support, validation,
-invalidation, owner/cache, budget/cancellation and public entry-point cases when
-implemented. Output storage covers the complete logical array, then the executor projects
-the consumer coordinates. Account five full input collections, complete output
-and fixed scratch; sparse consumers may require substantially more memory/work.
+1. Equal target bounds return the `target_lower` bits for every non-NaN input,
+   including infinite inputs and opposite-sign target zeros.
+2. An exact `source_lower` input returns the `target_lower` bits.
+3. An exact `source_upper` input returns the `target_upper` bits.
+4. An infinite input maps to the correctly signed infinity according to the
+   exact slope sign.
+5. A finite input evaluates the whole formula as an exact dyadic rational and
+   rounds once to the output type.
 
-This remains distinct from `encode_range`. The three versioned keys are
-registered with closed matching-shape/input-dtype inference, pure metadata
-validation and five explicit dynamic inputs.
-Exact rational numerator/denominator construction uses a bounded final hardware
-quotient in accelerated profiles only when its enclosure passes the final-error
-gate; unresolved cases use exact rounding. Whole execution,
-endpoint precedence, invalid-bound diagnostics and
-the public broadcast-to-remap-to-clamp workflow are implemented. Historical pre-Whole local strict/Apple runs passed the 2826-case Fraction
-oracle, endpoint/invalid-bound cases, sparse support and resource cleanup.
-Ubuntu WSL Clang 18 strict/x86 passed the same oracle and pre-Whole workflows
-on 2026-09-14; the installed consumer passed that earlier implementation.
-Neither is evidence for the current Whole execution path. Direct invocation
-also preserved caller floating flags while a negative nonzero exact result
-underflowed to negative zero. Independently reviewed adjacent-value rounding
-checks covered 4198-bit numerators and exact half-way boundaries. This does not
-change the Proposed status of this specification.
+A finite mathematical result that overflows returns the correctly signed
+infinity. Gradual underflow preserves the exact result sign; an exact
+non-special zero is positive zero. Endpoint selection preserves the supplied
+target endpoint bits.
 
-## Whole validation
+The strict profile rounds the exact rational result directly. Accelerated
+profiles may use the shared hardware quotient only when its final-error
+enclosure passes the [FP32 four-ULP contract](NUM_accelerated_contract.md);
+otherwise they use strict exact rounding. No NUM-14 certificate or weaker
+approximation is introduced.
 
-The maintained synchronous callback uses no dependency maps or continuation.
-Per-value numeric counters are N/A. The numerical comparison and rational engine
-are unchanged; Scalar/NEON/AVX2 profile rules remain as specified. The local
-strict/Apple Whole validation passed 2,826 independent Fraction/bit cases per
-profile, public composition and error/layout/typed/cache/resource checks.
-See [NUM-06 Whole measurements](../range-whole.md) for commands, memory costs,
-public/core timings and profiler scope. This does not change Proposed status.
+## Errors, resources and acceptance
+
+Shape, dtype, rank or element-count mismatch fails metadata specialization as a
+schema/type error. Typed semantic-coverage validation preserves its originating
+`Status`, including `FailureReason::None` when that is the source status; it is
+not relabeled as a numeric bounds error. Numeric bound failure returns
+`InvalidArgument` with `FailureReason::InvalidDomain`, Domain origin, Run scope
+and no Atom key. Its diagnostic identifies the invalid bound port and raw bits
+and includes the complete logical coordinate, including any former batch
+prefix.
+
+The Whole callback owns a fixed `RangeMath` workspace through the phase
+allocator and charges work to the execution root. All five complete input
+windows, complete output payload and workspace coexist during execution. Exact
+rational work can exceed the root work limit. Capacity, work-limit,
+cancellation or numeric failure publishes no partial output and releases
+unpublished scratch and payload. Empty requests avoid input payload allocation
+and sample work.
+
+The current public Result workflow and focused test are described in
+[NUM-06 Result Whole execution](../range-whole.md). The workflow checks
+remap-to-clamp composition, invalid bounds outside sparse demand, all five input
+obligations, Empty, Whole support, typed validation through clamp, cache
+invalidation, and rational work exhaustion. The strict and Apple Silicon
+oracles cover the remap formulas and boundary values. The separate
+[`test_numeric_result_math.cpp`](../../../../tests/integration/test_numeric_result_math.cpp)
+fixture retains checks for an overflowing intermediate subtraction, invalid
+bounds despite input NaN, batch-axis flattening and pre-cancellation; it was not
+rerun for this update.
+
+For example, Float64 input `[0,0.5,1,2]` with source bounds `[0,1]` and target
+bounds `[0,255]` explicitly broadcast to the input shape produces
+`[0,127.5,255,510]`. The current [`ranges.cpp` workflow](../../../../examples/numeric_workflow/ranges.cpp)
+binds tensor Results and reads the published `values` Result.
+
+The code declares strict, Apple Silicon and x86-64 profile keys. The current
+root Result test, Apple Silicon workflow, independent strict/Apple Fraction
+oracle and installed consumer are summarized in [NUM-06 Result Whole
+execution](../range-whole.md). No x86 execution, native GPU support or
+performance result is claimed. These evidence boundaries do not change the
+Proposed status.

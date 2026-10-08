@@ -54,12 +54,7 @@ parameters. Kernel identity is not an unspecified low-pass mode.
 
 ## Resampling template contract
 
-The four templates map positions to CRV-01 x, values to y and new_positions to
-query. Export the chosen interpolator's values as samples and the independent
-new_positions binding as positions. Single-function/multi-function shapes and
-all dtype/count limits match CRV-01A/B/C/D exactly. The extra position output
-preserves source bits, dtype, descriptor and owning backing; normal source read
-validation still applies, but the template introduces no curve validation for it.
+The four templates map positions to CRV-01 x, values to y and new_positions to query. Export the chosen interpolator's values as samples and the independent new_positions binding as positions. Single-function/multi-function shapes and all dtype/count limits match CRV-01A/B/C/D exactly. The samples node uses the existing CRV-01 interpolation operation. The positions node uses `core.identity` to expose the bound new_positions Result, retaining its descriptor, dtype, facets and raw bits, including NaN/Inf/sNaN/negative zero. Its requested support is exactly the requested new_positions region and it has no curve-source dependency. Typed and upstream validation of the bound new_positions Result still applies. Only a samples request invokes CRV-01's finite-query and source validation.
 
 Authoring static profile=strict/apple_silicon/x86_64 defaults to strict and chooses
 the corresponding primitive key. Other static parameters are the source's dtype
@@ -68,15 +63,12 @@ defined extrapolation). No implicit low-pass, sample-rate inference, period or
 anti-alias quality claim is added. Construction is lazy and outputs remain dynamic
 with their bound source snapshots.
 
-Sample requests inherit CRV-01's Whole complete-input collection, full output
-allocation/invalidation and Run numerical failures. Mathematical stencils remain
-unchanged; undelivered invalid queries or columns can fail the run.
+Sample requests inherit CRV-01's Whole complete-input validation, full output allocation/invalidation and Run numerical failures. The operation reads authorized Result windows without collecting or copying its complete tensor inputs. Mathematical stencils remain unchanged; undelivered invalid queries or columns can fail the run. A sparse sample request still publishes full certified coverage, while its recorded dependency support and dirty mapping cover the complete interpolation inputs.
 Position-only requests have only the exact requested new_positions source
 support and no source curve reads. Joint execution is an optimization, not a
 dependency change. Empty requests, arbitrary source strides, owners after context
 teardown, cache-off, budgets and cancellation follow the source/forwarding contract.
-Account bindings, source read windows, output/intermediate owners and compiled
-template state rather than treating export aliases as unowned pointers.
+Account bindings, source read windows, output/intermediate owners and compiled template state rather than treating export aliases as unowned pointers. Cached sample Results associate the current positions, values and query Result identities; the forwarded positions Result associates the current query source. Static interpolation preparation can survive binding replacement while dynamic sample Results are recomputed. Escaped Results and authorized read windows retain their owners after context retirement and handle release.
 
 Conceptual fixture positions=[0,1,3], values=[0,2,4], new_positions=[2,0.5,2]
 gives linear samples=[3,1,3] and positions=[2,0.5,2]. PCHIP uses its own exact
@@ -112,21 +104,6 @@ these are Proposed templates, not new registered interpolation primitives.
 
 ## Maintained implementation and validation
 
-The four public resampling templates are maintained through the public
-`resampling.hpp` authoring helpers. Uniform and nonuniform low-pass families each
-provide 15 Whole registered profile keys (five kernels across strict, Apple and x86);
-accelerated uniform keys reuse certified coefficient enclosures and bound the
-complete convolution before final-error acceptance, with strict fallback when
-unresolved. Exact tap support is unchanged. Nonuniform accelerated keys retain
-strict fallback. Nonuniform evaluation uses exact
-partition and paired-affine pieces with global Taylor moments and a rigorous tail
-bound; it is not local adaptive quadrature.
+The four public resampling templates are maintained through the public `resampling.hpp` authoring helpers. Each helper appends a CRV-01 samples node and a `core.identity` positions node with collision-free IDs; it leaves existing workflow exports unchanged and returns both node outputs for explicit use or export. Samples and positions are Results throughout compilation, binding and execution. The identity output is a mapped view of the bound query Result, so a positions-only demand does not read curve data or allocate a copied position payload. The four helpers introduce no registered interpolation operation of their own.
 
-Certified precision ranges from 128 to 4096 bits and polynomial order is bounded
-by 512; capacity or unresolved rounding may return `ResourceExhausted`. See the
-[signal-resampling workflow](../../../../examples/numeric_workflow/README.md#signal-resampling),
-[uniform low-pass workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
-and [nonuniform low-pass workflow](../../../../examples/numeric_workflow/README.md#nonuniform-lowpass).
-Native Clang21 Strict/Apple validation for the Whole revision is recorded in
-that workflow and the math implementation notes. WSL/AVX2 and installed-package
-consumers have not been rerun. Whole numerical/fallback counters are N/A.
+The maintained resampling executable passes eight manual groups under each of Strict and Apple. It retains the existing CRV-01 exact-copy and numeric-accuracy checks and does not define an independent resampling oracle. The tests cover scalar and multi-column linear/PCHIP results, independent raw and typed position forwarding, position-only dependency support, complete Whole sample support and dirty mapping, two fresh-content cache hits with current direct-source associations, static preparation reuse after binding replacement, upstream failure order, arbitrary source layouts, worker/caller floating-environment preservation and escaped owners. Float64 layout checks cover all four templates and eight source layouts under each caller/worker rounding mode; Float32 checks separately cover bit-preserving positions, typed validation and owner lifetime. K=65536 executes a real endpoint interpolation. At N=2^40 the positions output successfully exposes a zero-copy mapped view, while a samples request is rejected because the complete Whole output exceeds the Root Payload budget. The latter is a capacity rejection, not a numerical run at that output size. The installed 0.32.0 consumer passes its Strict CTest and eight direct Apple groups through the public package. See the [signal-resampling workflow](../../../../examples/numeric_workflow/README.md#signal-resampling).

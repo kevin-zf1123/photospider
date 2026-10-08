@@ -1,61 +1,99 @@
 # NUM-09 Whole execution
 
-The nine formal reshape/transpose/slice profile keys execute Whole callbacks.
-All active inputs are collected/validated for nonempty demand, and the complete
-output is published before projection. All active input edits invalidate the
-complete output; upstream/typed/domain failures affect the Run. Empty reads
-nothing. Slice ignores singleton-axis steps numerically; the complete step port
-is excluded only when all counts are one. Otherwise even unused step entries
-participate in Whole input preparation. Output names, shapes, dtypes and exact
-raw bits are unchanged, including sNaN payloads. Legacy unsuffixed keys are
-separate. No NUM-14 numeric certificate is reused.
+The nine formal reshape, transpose and slice profile keys execute CPU Whole
+Result programs. Each active input is a single-tensor Result, and its complete
+sample_shape() includes any batch axes. The output is a
+`photospider.tensor`/`samples` Result with the complete transformed shape as
+ordinary axes; output facets and batch-axis metadata are empty. The program
+publishes the complete output in global coordinates. A requested query `Q`
+limits dependency observation and downstream reads, not the shape or coverage
+of the published Result.
 
-View requires one complete affine input/output owner. Compatible same-owner
-fragments may join after an address-map proof in both execution bridges.
-Multiple owners fail View with ViewUnavailable; Auto/Dense may collect. Reshape
-proves maximal contiguous chunks symbolically; transpose permutes strides; slice
-uses checked widened stride multiplication. A small projection cannot make a
-globally non-affine View succeed. Auto falls back only for unavailable views.
-Dense allocates N*dtype_size output bytes plus fixed state, and may own full
-collected inputs; View retains source storage/resources, possibly oversized.
-All three retain cacheable=false because content caches do not witness layout.
+The planner validates static schemas and parameters before callbacks. For
+nonempty work, the program requests each active tensor with Data, Validation and
+Descriptor roles (role 13), which supplies its typed-payload validation
+obligation. The callback reads through those authorized windows and computes the
+whole output. An edit to observed input support invalidates the recorded output
+dependency. Empty output has empty coverage and support. Slice ignores a
+singleton axis's step value. When every count is one, the step port is excluded
+from runtime Need and association; its static schema is still checked.
+Otherwise all step entries are requested and validated, even where a particular
+entry is numerically unused. Upstream, typed, domain, resource and cancellation
+failures remain visible to the Run. The transform preserves selected raw
+element bits, including signaling-NaN payloads.
+
+`View` requires one affine source/output owner proven for the complete output.
+Compatible fragments can join only when they share an owner and the address
+mapping remains valid. Multiple owners make explicit `View` unavailable. `Auto`
+uses a view when possible and otherwise materializes a complete packed output;
+`Dense` always materializes that complete output. Only `ViewUnavailable`
+permits `Auto` to fall back. The operation reads from authorized source windows
+and does not need to pack the complete input first.
+Resource, validation, upstream and cancellation errors remain errors. A sparse
+query cannot make a globally non-affine view valid. Reshape proves contiguous
+logical chunks, transpose permutes strides, and slice uses checked widened
+stride arithmetic. Views retain source storage and resources after context
+retirement. All three operations disable cross-run content caching because a
+content key does not prove owner or stride identity; same-run sharing remains
+available.
 
 ## Public workflow and validation
 
 ```sh
-DEVELOPER_DIR=/Library/Developer/CommandLineTools cmake --build build/clang21-numeric --target photospider_numeric_layouts photospider_numeric_prepared -j8
-build/clang21-numeric/examples/numeric_workflow/photospider_numeric_layouts strict
-build/clang21-numeric/examples/numeric_workflow/photospider_numeric_layouts apple
-python3 oracle/ops/numeric/layout_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_layouts strict
-python3 oracle/ops/numeric/layout_oracle.py build/clang21-numeric/examples/numeric_workflow/photospider_numeric_layouts apple
-build/clang21-numeric/examples/numeric_workflow/photospider_numeric_prepared
+cmake --build build/kernel-dev --target photospider_numeric_layouts -j8
+ctest --test-dir build/kernel-dev -R '^test_numeric_layouts_result$' --output-on-failure
+build/kernel-dev/examples/numeric_workflow/photospider_numeric_layouts strict
+build/kernel-dev/examples/numeric_workflow/photospider_numeric_layouts apple
+python3 oracle/ops/numeric/layout_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_layouts strict
+python3 oracle/ops/numeric/layout_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_layouts apple
 ```
 
-Both profiles passed public examples (`[2,3]->[3,2]` reshape, transpose
-`values[k,i,j]=100*i+10*j+k`, reverse slice `[4,2,0]`) and 636 independent
-integer-coordinate/raw-bit oracle cases each. A separate exhaustive finite
-address oracle, independent of production chunk rules, passed 6374 successful
-View/Auto/Dense cases per profile plus expected View rejections. It covers
-negative/zero/singleton strides, unaligned origins and non-contiguous chunks.
+The focused `test_numeric_layouts_result` test and the full default workflow pass
+on the local Apple host. The independent seven-dtype oracle passes 1,113 cases
+for each of the strict and Apple profiles. The separate finite-address oracle
+checks 6,374 successful View/Auto/Dense mappings per profile plus expected View
+rejections. It independently covers negative, zero and singleton strides,
+unaligned addresses and non-contiguous chunks. No current x86 execution, native
+GPU execution or performance result is claimed. The installed consumer test
+`installed_numeric_layouts_result` also passes 1/1 against the installed
+`Photospider::kernel` package.
 
 Public graph fixtures test compatible same-owner fragments, multi-owner
-View failure/Auto/Dense collection, full source support/dirty, invalid full
+View failure and Auto/Dense output materialization, full source support/dirty, invalid full
 slice controls, excluded all-singleton step producers, complete typed rejection,
 Empty, work/output/scratch limits and cancellation after admitted copying.
 Raw specials in all four fenv modes and escaped storage/resource lifetime pass.
 Prepared Whole view fixtures include giant zero-stride producer output,
 structured consumption, original external dense owner retention, multi-owner
 rejection, same-owner singleton joining and sticky allocator failures.
-The fixed workspace is 288 bytes on this arm64 build. Rank<=8 coordinate
-vectors use bounded host-container allocation. No x86 runtime test was performed;
-older 2026-09-14 regional WSL checks are not Whole acceptance.
+The separate [`prepared.cpp::whole_views` Result fixture](../../../examples/numeric_workflow/README.md#whole-result-view-preparation)
+uses a compiled CPU Whole Tensor Need: it checks affine view proof, strict
+multi-owner rejection, Auto collection into Root-owned private backing, an
+8-byte source under an 8-byte output cap, and owner lifetime after context
+retirement. It documents a Result input path, not the legacy NUM-09 oracle or
+timing evidence below.
+Earlier measurements of a 288-byte fixed workspace belong to the Value Whole
+implementation. The current Result operation declares zero fixed workspace
+bytes and reserves up to 4096 bytes of Host scratch for rank<=8 coordinate
+vectors. Earlier regional checks do not establish Whole behavior. The installed
+consumer is registered as `installed_numeric_layouts_result`; run it from the
+configured consumer build after installing the SDK:
 
-## Timing and bottleneck evidence
+```sh
+cmake --install build/kernel-dev --prefix build/kernel-dev/consumer-install
+cmake -S tests/consumer -B build/kernel-dev/consumer-build -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/consumer-install"
+cmake --build build/kernel-dev/consumer-build --target photospider_numeric_layouts_consumer -j8
+ctest --test-dir build/kernel-dev/consumer-build -R '^installed_numeric_layouts_result$' --output-on-failure
+```
 
-Apple M5, macOS27.0 (26A5425a), Clang21.1.3, O2/RelWithDebInfo,
--fno-fast-math -ffp-contract=off, package0.18/traits16. Old adapter is from
-63f9d794, linked to the same current kernel; this isolates adapter behavior,
-not an entire historical build. One worker, result/dependency caches disabled,
+## Historical Value Whole timing and bottleneck evidence
+
+The following measurements describe the earlier Value Whole implementation,
+not the current Result workflow. They were recorded on Apple M5, macOS27.0
+(26A5425a), Clang21.1.3, O2/RelWithDebInfo, with `-fno-fast-math` and
+`-ffp-contract=off`, package0.18/traits16. The earlier adapter was linked to a
+later kernel; this isolates adapter behavior, not an entire historical build.
+It used one worker, result/dependency caches disabled,
 1 GiB payload limit, 2^40 dependency work and 512 MiB dependency-state limit.
 Compile/freeze happen before timing. Each row has one warmup and seven measured
 calls; every output is checked outside timing. Input Int64[N/2,2]=0..N-1;
@@ -97,7 +135,5 @@ lock757/unlock592, LayoutState::execute625 and map560. Mapping/copy and managed
 work metering dominate this measured case; full input collection is a small
 sample fraction. No unmeasured claim is made about other shapes.
 
-Raw local files: build/num-whole-remaining/layouts-timings.csv, layouts-perf.cpp,
-build-layouts-perf.py, layouts-whole.trace/XML, layouts-samples.json and profile
-summary, manual/oracle logs and layouts-focused.log. Focused verification and
-ClangFormat21/cpplint results accompany the local commit.
+Raw local files from that historical run are not part of the current Result
+acceptance. The timing table remains only as historical Value Whole evidence.

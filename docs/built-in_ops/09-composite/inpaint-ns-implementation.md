@@ -1,182 +1,191 @@
-# Local Navier-Stokes inpainting implementation
+# Local Navier-Stokes inpainting
 
-This document describes the retained OpenCV and native Apple Silicon source, its algorithm and resource boundaries, and source-level numerical checks. The callbacks still use the legacy Value image contract and do not execute through the current public Result image path.
-The authoritative contract is [PNT-05A](op_specs/PNT-05A_local_inpaint_navier_stokes.md).
+The registry provides two CPU Result operations:
+`image.local_inpaint_navier_stokes_native_apple_silicon` and
+`image.local_inpaint_navier_stokes_openCV`. Both fill binary holes with the
+same single-channel Float32 Navier-Stokes reference profile applied separately
+to R, G, and B. The native implementation does not link OpenCV. The OpenCV
+adapter is optional and uses OpenCV 4.12.0. The operations have no GPU backend.
 
-## Retained callback contract
+## Result contract
 
-The constraints below describe the source callbacks; they are not a currently available public image operation contract because the compiler rejects their structural-image Value ports.
+Both inputs use Result schema `photospider.image` version 1, with one tensor
+member named `pixels` and no fields. The image tensor is Float32 `[H,W,4]`
+with scene- or display-reference linear-sRGB, D65, premultiplied RGBA semantics.
+The mask tensor is Float32 `[H,W]` with canonical coverage semantics. Both
+tensors carry the same two positive batch axes `[N,L]`, so their complete sample
+shapes are `[N,L,H,W,4]` and `[N,L,H,W]`. The output port `image` publishes
+the image tensor's complete Result schema, facets, spatial metadata and resources.
+An output may feed other typed image operations.
 
-Both operations take ordered Float32 Image `[H,W,4]` and canonical Float32
-coverage `[H,W]`, require exact Int64 `radius` in `[1,32]`, and expose only named
-output `image`:
+Static specialization checks the schemas and parameters without reading samples.
+It requires matching batch axes, matching H/W, `3 <= H,W <= 32768`,
+`H*W <= INT32_MAX`, and checked representable sizes for backing, strides and
+allocation. The alpha semantic descriptor must be canonical linear-sRGB
+premultiplied RGBA; its scene/display reference is preserved. The mask must use
+canonical coverage semantics.
 
-- `image.local_inpaint_navier_stokes_native_apple_silicon`
-- `image.local_inpaint_navier_stokes_openCV`
+The only parameter is required static Int64 `radius` in `[1,32]`; there are no
+defaults, aliases or method selection. Unknown keys, missing radius, other
+numeric types and values outside that interval fail before computation.
+`x_axis`/`y_axis` parameters do not exist: the algorithm always uses H and W
+from the tensor descriptor after the batch prefix.
 
-Image channels must be ordered linear-sRGB D65 premultiplied RGBA, alpha exactly
-one. Scene/display reference and image facets are preserved. Masks must contain
-numeric zero or one. The full domain is validated even for zero masks and ROI
-requests. Hole RGB is zeroed before each sequential Float32 channel solve;
-only hole RGB is copied back. Known samples and alpha keep their original bits.
-Whole traits conservatively demand and invalidate both complete inputs.
+## Pixel and numerical behavior
 
-The synchronous ABI's declarative inference checks typed dtype/rank and preserves
-input image metadata. It has no custom synchronous metadata validator: the
-additional exact color profile, equal spatial shape and `3..32768` limits are
-checked at callback entry. **The specification's requirement to reject every
-shape/profile violation during inference is not fully implemented.** Host port
-validation can run before that callback check. No shared ABI was changed to add
-custom inference. This also limits claims about rejecting enormous synthetic
-computed views without a full host scan.
+Execution validates every batch plane over the complete input domain before
+processing. Every RGB component must be finite, alpha must equal exactly 1, and
+every mask sample must be numeric 0 or 1. The mask's two signed-zero encodings
+both mean known. A finite RGB placeholder inside a hole is ignored by the
+algorithm; NaN or infinity in any RGB sample is still invalid, including outside
+a requested ROI. Static schema validation does not inspect sample values.
 
-## Implementation and resource boundaries
+For each plane, the implementation copies all original RGBA bits to the output.
+It converts mask values to an internal 0/255 UInt8 mask, copies known RGB into a
+Float32 work plane, and sets hole RGB to positive zero before each channel solve.
+It solves R, then G, then B and copies results back only at holes. Known pixels and
+all alpha bits remain unchanged. The result is finite but is not clamped to
+`[0,1]`. A validated all-zero mask returns the original image bits after the
+complete input scan. A plane whose mask is all ones fails with OperationFailed
+because no known pixel exists.
 
-`inpaint_ns_native.cpp` is a standalone C++ port of the single-channel Float32
-OpenCV 4.12.0 NS path. It retains the original Intel license
-in source and in installed `share/licenses/Photospider/inpaint_ns_license.txt`.
-It has no OpenCV headers, calls or symbols. It uses a fixed host-owned heap,
-row-major initial insertion, stable insertion-order ties and up/left/down/right
-frontier neighbors. The pinned source passes its mask state to NS, so initial
-queued known neighbors deliberately retain KNOWN state. Gradients and mixed
-Float32/Float64 expressions retain source order. No SIMD/Metal/FMA optimization
-or private thread pool is used.
+The numerical reference is OpenCV 4.12.0 `cv::inpaint(..., INPAINT_NS)` on
+three Float32 planes. The native implementation retains the source's state
+transitions and arithmetic order: padded guard state, initial band construction,
+arrival time initialization to `1.0e6f`, gradient indexing and edge branches.
+Initial frontier insertion is row-major, equal arrival times retain insertion
+order, and frontier neighbors are considered up, left, down, right. Initially
+queued known neighbors retain the source's KNOWN state. Constants and mixed
+Float32/Float64 expressions retain source order, including `1e-20f`, `0.01`,
+and `1e-6f`. This is a named discrete profile, not a general PDE solver.
 
-With `N=H*W`, `P=(H+2)*(W+2)`, native callback payload capacities are:
+For each hole RGB sample, the pinned reference tolerance is
+`abs(actual-reference) <= 1e-6 + 1e-5*abs(reference)`. Unmasked samples and
+alpha are bitwise exact. Changing finite RGB placeholders under the same mask
+does not change the filled result.
 
-| Buffer | Bytes |
+## Demand, publication and lifecycle
+
+Both operations use Whole dependency semantics. The first Result Need requests
+the complete image and mask sample domains with Data, Validation and Descriptor
+roles (mask 13). The runtime validates both inputs before invoking the numerical
+kernel. The output dependency relation conservatively records Data and
+Validation support for both complete inputs; each input's descriptor relation is
+declared independently. Any input sample or relevant metadata change dirties the
+whole output.
+One changed input sample therefore invalidates the complete output.
+
+Successful publication is one CompleteBundle Result containing the cloned image
+schema and a dense, root-owned output backing. The output keeps the input's batch
+axes and all image metadata, including the scene/display reference. No partial
+result is published. An Empty Result request uses a stateless continuation that
+seals an empty result without requesting image/mask payload or entering
+validation, coefficient, or numerical work.
+
+All batch planes are validated first and then processed sequentially. Each plane
+uses fresh algorithm scratch; no state is shared between executions. Cancellation
+is checked throughout validation, packing, frontier processing and copy-back.
+OpenCV is non-interruptible inside a channel call; its adapter checks cancellation
+before and after each channel. Concurrent invocations use independent state.
+
+## Managed resources and work
+
+Let `N=H*W` per batch plane and `P=(H+2)*(W+2)`. The native phase allocator
+owns per-plane scratch of `21N+5P` bytes:
+
+| Native scratch | Bytes |
 | --- | ---: |
-| Output | `16N` |
-| Binary mask | `N` |
-| Reused Float32 work plane | `4N` |
+| UInt8 mask | `N` |
+| Float32 work plane | `4N` |
 | Padded state | `P` |
 | Padded arrival times | `4P` |
-| Fixed heap, 16-byte entry | `16N` |
-| Total callback payload | `37N+5P` |
+| Fixed 16-byte heap entry storage | `16N` |
 
-Initial band and hole pixels are disjoint. Each hole changes to BAND before
-insertion, so each canvas pixel is inserted at most once; total insertion order
-and live capacity are bounded by N. Dimensions bound every product and signed
-index. All payload buffers use `call.allocator`. The conservative workspace
-reservation is `2 * demanded_input_bytes + 65536` excluding output. At minimum
-3x3 dimensions this bounds scratch `21N+5P < 35N`. Upstream materialization,
-retained caller storage, metadata and output collectors have their existing
-host accounting; these formulas are not RSS measurements.
+For the minimum 3x3 plane, `21N+5P < 35N`. Output storage is separately
+allocated through the Result resource root at 16 bytes per pixel and batch plane.
+The operation reserves workspace for twice the authorized image-plus-mask input
+bytes, plus 64 KiB. This covers host-owned materialization/scratch bounds; actual
+capacity admission remains authoritative and these values are not an RSS limit.
+Only one plane's scratch is live at a time.
 
-Validation polls every 512 pixels (five samples each), output copying every
-1024 pixels, packing/copy-back every 4096 samples, and native initialization
-every 1024 grid positions. Frontier processing checks every 64 pops and 4096
-candidate visits. Allocation and channel boundaries and prepublication also
-check cancellation. Host allocation internals themselves remain the allocator's
-responsibility. No callback publishes partially completed results.
+Before validation reads, the operation prepays a conservative bound based on
+Result window read work and per-pixel address/classification costs. For each
+plane's three channel solves it prepays
+`3*(8P + N*(256 + 128*log2_bound(N)) + K*(2r+1)^2*512)`, where K is the hole
+count and r is radius. The `log2_bound` term is the implementation's integer
+bit length of N and bounds heap comparisons/moves. Arithmetic never runs beyond
+the admitted credit; a finite work limit may reject before actual work would have
+exhausted it.
 
-The adapter calls the locally provisioned OpenCV 4.12.0 sequentially on three
-Float32 planes. Host output/packing uses `25N` bytes. Its external OpenCV
-matrices/queue are **not host-budgeted**. A separate conservative estimate for
-this pinned source and libc++ vector growth is `7P+32N+64KiB`; this is not a hard
-allocation guarantee or measured peak. The internal channel call cannot observe
-the host cancellation token. Only before/after-channel cancellation is promised.
-`cv::Error::StsNoMem` maps to ResourceExhausted. No process-global OpenCV allocator
-or thread configuration is changed.
+The OpenCV adapter owns three host-managed arrays totaling `9N` bytes: the `N`
+byte mask and separate `4N` source and target Float32 planes. OpenCV's internal
+matrices and queue are external allocations and cannot be bounded by the kernel
+root. The estimate `7P+32N+64 KiB` for the pinned adapter and libc++ vector
+growth is not a hard allocation guarantee or measured peak.
+OpenCV `StsNoMem` maps to ResourceExhausted. No global OpenCV allocator or thread
+configuration is changed.
 
-The source marks the OpenCV adapter uncacheable and the native callback cacheable. These Value-result cache flags do not make either callback executable through the current Result image path. Replacing a same-version OpenCV library can change numerical behavior without changing the kernel source build identity. In-run Whole materialization still applies to both callbacks.
+The Result output backing and per-plane hole-count vector are allocated through
+the execution Root; the vector stores one count per batch plane. The phase
+allocator owns the per-plane mask, work plane,
+padded state and times, and native heap; it releases that scratch when the
+plane finishes. Neither implementation has a private thread pool. The native
+source retains the required license at
+`share/licenses/Photospider/inpaint_ns_license.txt`. The OpenCV operation is
+uncacheable because replacing a same-version OpenCV library can change numerical
+behavior outside the kernel build identity. This does not make the native
+operation's output cacheable across changed inputs or profiles.
 
-Both callbacks save/restore floating environment and use nearest rounding and
-gradual underflow. Source flags disable fast math and FP contraction. Finite
-checks plus overflow/invalid/divide-by-zero exception checks reject nonfinite
-arithmetic; native also checks weight/accumulation intermediates explicitly.
-Unmasked signed zero is copied through `memcpy`.
+## Errors and finite validation evidence
 
-## Source-level numerical checks
-
-The matrix below records numerical checks for the retained implementation source. Its former runner is not a current registered test target, and these checks do not establish a public Result image workflow.
-
-Host: Apple M5, macOS 27.0, AppleClang 21.0.0.21000101, RelWithDebInfo,
-static arm64 kernel, Metal OFF. Adapter-enabled validation uses OpenCV 4.12.0
-core/imgproc/photo built with `-fno-fast-math -frounding-math -ffp-contract=off`.
-A binary with the same OpenCV version but different contraction settings is
-outside this numerical profile. CMake checks the version; the dependency
-provider must supply the specified floating-point configuration.
-The adapter-enabled test independently calls OpenCV and checks 288
-backend/shape/pattern/radius combinations: 144 per backend, shapes 3x5, 5x7,
-11x13, 17x19; radii 1/3/8/32; constant, asymmetric pattern, scratches, edge/corner,
-block, scattered, checkerboard and one-known-pixel masks. It also reruns every
-case with changed finite hole placeholders. Tolerance is exactly
-`1e-6+1e-5*abs(reference)`. Native-only builds run 16 matrix constant cases plus the exact T02 fixture and
-the remaining OpenCV-independent checks.
-
-| ID | Actual evidence and remaining scope |
+| Condition | Result |
 | --- | --- |
-| T01 | PASS: zero-mask exact bytes including image/mask signed zero; NaN/Inf still rejected. |
-| T02 | PASS: exact 5x5 `(0.25,0.5,0.75,1)` center-hole r=1 analytic fixture, plus the analytic fixture. |
-| T03 | PASS: placeholder change preserves complete output bytes for all 288 matrix cells. |
-| T04 | PASS for the listed small synthetic patterns and all four radii; no real-image corpus. |
-| T05 | PASS: combined top/left and bottom/right edges/corners, scattered holes, one known corner/center. No sanitizer run. |
-| T06 | PASS: full mask fails OperationFailed. |
-| T07 | PASS: fractional/out-of-range/NaN masks, alpha .5, NaN/Inf RGB. Direct host InvalidArgument is preserved where detected first. |
-| T08 | PASS: 1/32 accepted; 0/33, absence, Float64 and unknown key rejected. Negative radius follows the same schema, not separately tested. |
-| T09 | PARTIAL: minimum dimension 3 works, dimensions 1/2 reject; no huge/overflow descriptor test and no complete inference-stage rejection, as explained above. |
-| T10 | PASS: nonzero 3x2 ROI at (1,1), 1x1 tiles, Whole crop equality and distant NaN rejection. |
-| T11 | PARTIAL: direct public registry invocation of valid padded, offset, nonzero-origin, negative/zero-stride views matches packed input; inputs remain immutable. No computed fixture-operation workflow was added. |
-| T12 | PASS: repeated outputs, FE_UPWARD inputs, caller rounding restored. No cross-compiler bit claim. |
-| T13 | PASS: signed/HDR synthetic samples, large alternating 1e30 gradients rejected as OperationFailed. No exhaustive Float32 extreme sweep. |
-| T14 | PARTIAL: independent changed input/mask/radius/metadata executions and distant-NaN failures covered; same-context native cache reuse and adapter recomputation are checked, but no complete changed-input cache-invalidation regression. |
-| T15 | PASS native: each of six allocations fails independently, owners release, exact 1170-byte 5x5 capacity succeeds and 1169 fails. Adapter host buffers accounted, external allocation failure injection absent. |
-| T16 | PARTIAL native: pre-entry and six allocation-boundary cancellation points fail Cancelled. Frontier/init/prepublication polling is source-reviewed, not deterministically interrupted in tests; Stale and latency tests absent. Adapter internal interruption unsupported by adapter contract. |
-| T17 | The former registry/compile/bind/execute example uses the legacy image path; it is not current Result image support or a current test target. |
-| T18 | PASS: two independent asynchronous invocations per backend match baseline; no concurrency stress/sanitizer matrix. |
+| Wrong schema, tensor count, dtype, dimensions, batches, or color/coverage profile | TypeMismatch during static preparation |
+| Missing, unknown, non-Int64, or out-of-range radius | InvalidArgument before callback entry |
+| Invalid typed image or mask value detected by the host's Need Validation | InvalidArgument with host validation priority |
+| Nonbinary coverage, nonopaque alpha, nonfinite RGB, or nonfinite arithmetic rejected by operator-specific checks | OperationFailed for direct and generated bindings |
+| Full mask in any batch plane | OperationFailed |
+| Unrepresentable size, work exhaustion, or allocation failure | ResourceExhausted |
+| Cancellation | Cancelled; admitted buffers are released |
+| Unsupported backend | BackendUnavailable; no GPU or alternative algorithm fallback |
 
-## Source validation
+The native Result suite passes 16 numerical cases, validation and rounding
+checks, concurrency, ROI behavior, cache policy, strided layouts, batch planes,
+and result ownership. It also passes six Root payload capacity boundaries,
+work exhaustion, active cancellation, invalid dimensions through UINT64_MAX
+metadata, and Empty-demand checks. A full-mask plane fails as specified.
 
-The standalone example and test runner use the removed planar/value binding surface, so their build, CTest and consumer commands are not current entry points. The retained test source documents independent numerical cases only.
+The OpenCV adapter test passes a 288-case reference matrix: 144 cases per
+backend across shapes, patterns, radii 1/3/8/32 and all mask families. Its
+validation, rounding, concurrency, ROI, cache, layout and batch checks pass.
+Both adapters passed the 5x5 constant-color public example. The strict OpenCV
+4.12.0 library was built from the 4.12 tag with
+`-fno-fast-math -frounding-math -ffp-contract=off`.
 
-## Build source and independent checks
+The standalone native consumer configures, builds, and runs against package
+0.30.0. The installed adapter consumer passes three tests: the 288-case
+consumer, native example, and OpenCV example. A native-only package also passes
+its two installed checks, and its executable has no OpenCV undefined symbols.
+The native suite also verifies complete-output invalidation after a one-sample
+input change. Same-context results after changing image, mask, radius, or image
+reference match fresh executions bitwise, with zero cache hits.
+These are finite checks, not a proof over all inputs. Deterministic frontier
+cancellation injection and host Stale-priority injection are not covered. OpenCV
+allocations inside its library remain outside hard Root capacity.
 
-The native implementation is built by default, with OpenCV discovery disabled. Enabling
-`PHOTOSPIDER_ENABLE_INPAINT_OPENCV` additionally registers the adapter and makes
-OpenCV 4.12.0 a dependency of the installed kernel package.
+## Public workflow
 
-For adapter-enabled builds, first provide the pinned reference library. A local
-build can be prepared as follows (Git, CMake and a C++ compiler are required):
+The [standalone workflow example](../../../examples/inpaint_ns_workflow/README.md)
+constructs typed Result inputs, binds them to a public WorkflowDocument, runs the
+native operation, and checks the named `image` output. Its 5x5 constant-color
+fixture verifies the output and retained image semantic facet.
 
-```sh
-git clone --depth 1 --branch 4.12.0 https://github.com/opencv/opencv.git build/opencv-source
-cmake -S build/opencv-source -B build/opencv-build \
-  -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
-  -DCMAKE_INSTALL_PREFIX="$PWD/build/opencv-strict" \
-  -DCMAKE_CXX_FLAGS="-fno-fast-math -frounding-math -ffp-contract=off" \
-  -DCMAKE_C_FLAGS="-fno-fast-math -frounding-math -ffp-contract=off" \
-  -DBUILD_LIST=core,imgproc,photo -DBUILD_SHARED_LIBS=ON \
-  -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF \
-  -DBUILD_opencv_apps=OFF -DBUILD_JAVA=OFF -DBUILD_opencv_python3=OFF \
-  -DWITH_IPP=OFF -DWITH_OPENCL=OFF -DWITH_ITT=OFF -DWITH_PROTOBUF=OFF \
-  -DWITH_LAPACK=OFF -DCPU_BASELINE=NEON -DCPU_DISPATCH=
-cmake --build build/opencv-build -j 3
-cmake --install build/opencv-build
-```
+    cmake --build build/kernel-dev --target photospider_inpaint_ns_workflow -j 8
+    build/kernel-dev/examples/inpaint_ns_workflow/photospider_inpaint_ns_workflow
 
-Point `OpenCV_DIR` at that installation or an equivalently configured dependency:
+For the optional adapter, use the strictly built OpenCV 4.12.0 package and enable
+`PHOTOSPIDER_ENABLE_INPAINT_OPENCV`. Its standalone example selects the adapter
+with the operation key `image.local_inpaint_navier_stokes_openCV`.
 
-```sh
-cmake -S . -B build/inpaint-ns -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DBUILD_TESTING=OFF -DPHOTOSPIDER_ENABLE_METAL=OFF -DBUILD_SHARED_LIBS=OFF \
-  -DPHOTOSPIDER_ENABLE_INPAINT_OPENCV=ON \
-  -DOpenCV_DIR="$PWD/build/opencv-strict/lib/cmake/opencv4"
-cmake --build build/inpaint-ns --target photospider -j 3
-```
-
-The retained implementation checks include the numerical matrix described above. They invoke source callbacks, not a supported Result image workflow.
-
-Native-only build:
-
-```sh
-cmake -S . -B build/inpaint-native -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DBUILD_TESTING=OFF -DPHOTOSPIDER_ENABLE_METAL=OFF -DBUILD_SHARED_LIBS=OFF \
-  -DPHOTOSPIDER_ENABLE_INPAINT_OPENCV=OFF
-cmake --build build/inpaint-native --target photospider -j 3
-nm -u build/inpaint-native/libphotospider.a | rg -i 'opencv|__ZN2cv'
-```
-
-On a native-only build, the symbol filter returns no OpenCV references (`rg` exit 1). The OpenCV callback source is absent when its adapter is disabled.
-
-The retained test source does not exercise the removed planar workflow binding or the current Result image path.
+The package version is 0.30.0. The OpenCV operation is available only when the
+kernel is built with the optional OpenCV 4.12.0 adapter.

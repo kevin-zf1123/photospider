@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "../shared/result_source.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {
@@ -24,65 +25,46 @@ void check(bool ok, const char* message) {
 template <class T>
 T take(Result<T> result) {
   if (!result.ok())
-    throw std::runtime_error(
-        "code=" + std::to_string(static_cast<int>(result.status().code)) +
-        " reason=" + std::to_string(static_cast<int>(result.status().reason)) +
-        ": " + result.status().message);
+    throw example_result::Failure(result.status());
   return result.take_value();
 }
 double sample(std::uint64_t y, std::uint64_t x, std::uint64_t width,
               unsigned variant) {
   if (variant == 4 && y == 0 && x == 0)
     return std::numeric_limits<double>::infinity();
+  if (variant == 8)
+    return 1;
   if (variant == 1)
     return y == 1 && x == 0 ? 1 : 0;
   return static_cast<double>(
              static_cast<std::int64_t>(((y * width + x) * 7) % 13) - 6) +
          (variant == 5 ? 1 : 0);
 }
-std::shared_ptr<RegionalSource> source(
-    std::uint64_t h, std::uint64_t w, std::uint64_t k, bool response,
-    unsigned variant, unsigned* reads,
-    CancellationSource* cancellation = nullptr) {
-  auto result = std::make_shared<RegionalSource>();
-  result->descriptor = {ElementType::Float64,
-                        response ? std::vector<std::uint64_t>{h, k, 2}
-                                 : std::vector<std::uint64_t>{h, w}};
-  result->read = [h, w, response, variant, reads, cancellation](
-                     const Region& region, std::uint8_t* output,
-                     std::uint64_t bytes, const BufferAllocator&,
-                     const CancellationToken&) -> Result<Region> {
-    ++*reads;
-    if (variant == 3 && *reads == 2 && cancellation)
-      cancellation->cancel();
-    const auto& r = region.dimensions();
-    std::uint64_t offset = 0;
-    const long double tau = 2 * std::acos(-1.0L);
-    for (auto y = r[0].offset; y < r[0].offset + r[0].extent; ++y)
-      for (auto x = r[1].offset; x < r[1].offset + r[1].extent; ++x) {
-        const auto channels = response ? r[2].extent : 1;
-        for (std::uint64_t c = 0; c < channels; ++c) {
-          if (offset + 8 > bytes)
-            return Result<Region>(
-                Status{ErrorCode::InvalidArgument, "source byte range"});
-          double value = sample(y, x, w, variant);
-          if (response) {
-            const auto angle = -tau * (static_cast<long double>(y) / h +
-                                       static_cast<long double>(x) / w);
-            value = static_cast<double>(r[2].offset + c ? std::sin(angle)
-                                                        : std::cos(angle));
-            if (variant == 2 && !y && !x && r[2].offset + c == 1)
-              value = 1;
-          }
-          std::memcpy(output + offset, &value, 8);
-          offset += 8;
-        }
-      }
-    return offset == bytes ? Result<Region>(region)
-                           : Result<Region>(Status{ErrorCode::InvalidArgument,
-                                                   "source byte count"});
-  };
-  return result;
+ExecutionBindings bindings(const ResourceBudget& root, std::uint64_t h,
+                           std::uint64_t w, std::uint64_t k, unsigned variant) {
+  auto pixels = example_result::input(
+      root, "pixels", example_result::schema(ElementType::Float64, {h, w}),
+      [w, variant](std::uint64_t i, std::uint8_t* bytes) {
+        const auto value = sample(i / w, i % w, w, variant);
+        std::memcpy(bytes, &value, 8);
+      },
+      variant == 7, variant == 8);
+  auto response = example_result::input(
+      root, "response", example_result::schema(ElementType::Float64, {h, k, 2}),
+      [h, w, k, variant](std::uint64_t i, std::uint8_t* bytes) {
+        const auto y = i / (k * 2), x = i / 2 % k, c = i % 2;
+        const auto angle =
+            -2 * std::acos(-1.0L) *
+            (static_cast<long double>(y) / h + static_cast<long double>(x) / w);
+        double value = variant == 8 ? (c ? 0 : 1)
+                                    : static_cast<double>(c ? std::sin(angle)
+                                                            : std::cos(angle));
+        if (variant == 2 && !y && !x && c == 1)
+          value = 1;
+        std::memcpy(bytes, &value, 8);
+      },
+      variant == 7);
+  return {{std::move(pixels), std::move(response)}};
 }
 struct Sink {
   std::uint64_t h, w, row = 0, batch = 0;
@@ -91,10 +73,10 @@ struct Sink {
   ResultDescriptor descriptor;
   Sink(std::uint64_t height, std::uint64_t width, unsigned v)
       : h(height), w(width), variant(v) {}
-  Poll poll(const ResultProgramPhase& p) {
+  Poll poll(const ResultProgramPhase& p) try {
     if (stage == 0) {
       stage = 1;
-      return Poll(ResultProgramNeed{{}, {{0, 0, true, 0}}, {}});
+      return Poll(ResultProgramNeed{{{0, 0, true, 0}}, {}});
     }
     if (stage == 1) {
       input = p.results.at(0);
@@ -132,30 +114,29 @@ struct Sink {
       if (!read.ok())
         return Poll(read.status());
       stage = 3;
-      return Poll(ResultProgramNeed{{}, {}, {read.take_value()}});
+      return Poll(ResultProgramNeed{{}, {read.take_value()}});
     }
-    auto memory = MutableValue::allocate(p.query.output.descriptor,
-                                         Region::whole({1}), p.allocator);
-    if (!memory.ok())
-      return Poll(memory.status());
-    auto buffer = memory.take_value();
+    auto builder = take(ResultBuilder::start(
+        p.resources, *p.query.output.result_schema, p.query.semantic_key));
+    example_result::check(
+        builder.bind_descriptor_relation(take(ResultRelation::cartesian(
+            p.resources, 1,
+            {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0}))));
+    auto pixels = take(ResultRelation::cartesian(
+        p.resources, 1, {0, 7, 0, h * w, ResultSupportTarget::Field, 0},
+        DependencyGuarantee::Conservative));
+    auto residual = take(ResultRelation::cartesian(
+        p.resources, 1, {0, 7, 0, 1, ResultSupportTarget::Field, 1},
+        DependencyGuarantee::Conservative));
     const double count = static_cast<double>(row);
-    std::memcpy(buffer.data(), &count, 8);
-    auto published = std::move(buffer).publish({});
-    if (!published.ok())
-      return Poll(published.status());
-    const auto held = published.take_value();
-    auto fragments = ValueFragments::create_view(
-        p.query.output.descriptor, {}, *p.query.value_outputs, &held, 1);
-    if (!fragments.ok())
-      return Poll(fragments.status());
-    auto relation =
-        ResultRelation::cartesian(p.resources, 1, {0, 7, 0, h * w + 1},
-                                  DependencyGuarantee::Conservative);
-    if (!relation.ok())
-      return Poll(relation.status());
-    return Poll(
-        ResultValuePublication{fragments.take_value(), relation.take_value()});
+    example_result::check(builder.publish_tensor(
+        0, Region::whole({1}),
+        {reinterpret_cast<const std::uint8_t*>(&count), 8},
+        take(ResultRelation::unite(p.resources, {pixels, residual})),
+        {true, true, true, true}));
+    return Poll(ResultPublication{take(builder.seal()), true});
+  } catch (const example_result::Failure& failure) {
+    return Poll(failure.status);
   }
 };
 void run(std::uint64_t h, std::uint64_t w, SpectrumPacking packing,
@@ -164,6 +145,7 @@ void run(std::uint64_t h, std::uint64_t w, SpectrumPacking packing,
          std::uint32_t stages = 200000) {
   auto spec = take(fft_spectrum_spec(h, w, packing));
   const auto k = packing == SpectrumPacking::Full ? w : w / 2 + 1, n = h * w;
+  CancellationSource cancellation;
   auto registry = std::make_shared<OperationRegistry>();
   std::array<unsigned, 4> starts{};
   for (auto op : {FftOperation::ForwardReal, FftOperation::ImportResponse,
@@ -188,32 +170,26 @@ void run(std::uint64_t h, std::uint64_t w, SpectrumPacking packing,
   traits.input_schema[0].kind = OperationPortKind::Result;
   traits.input_schema[0].result_schema_id = "photospider.fft_real_output";
   traits.input_schema[0].result_schema_version = 1;
+  traits.outputs = {
+      example_result::output(example_result::schema(ElementType::Float64, {1}),
+                             sizeof(Sink), 1000000)};
   auto& out = traits.outputs[0];
   out.region_rule = OperationRegionRule::Dependency;
   out.dependency_version = 2;
   out.continuation_bytes = sizeof(Sink);
   out.maximum_dependency_stages = 1000000;
-  out.output_element_type = ElementType::Float64;
-  out.shape_rule = OperationShapeRule::Fixed;
-  out.fixed_output_shape = {1};
   sink.start_result = [h, w, variant](const auto&, const auto& allocator) {
     return ResultContinuation::make<Sink>(allocator, h, w, variant);
   };
   check(registry->register_operation(std::move(sink)).ok(),
         "register FFT sink");
   WorkflowDocument doc;
-  doc.inputs = {{1,
-                 "pixels",
-                 {ElementType::Float64, {h, w}},
-                 Region::whole({h, w}),
-                 {0, {static_cast<std::int64_t>(w * 8), 8}},
-                 {}},
-                {2,
-                 "response",
-                 {ElementType::Float64, {h, k, 2}},
-                 Region::whole({h, k, 2}),
-                 {0, {static_cast<std::int64_t>(k * 16), 16, 8}},
-                 {}}};
+  doc.inputs = {
+      example_result::declaration(
+          1, "pixels", example_result::schema(ElementType::Float64, {h, w})),
+      example_result::declaration(
+          2, "response",
+          example_result::schema(ElementType::Float64, {h, k, 2}))};
   doc.nodes = {
       {1, "fft.forward_real", {WorkflowInputReference{1}}, {}},
       {2, "fft.import_response", {WorkflowInputReference{2}}, {}},
@@ -232,45 +208,47 @@ void run(std::uint64_t h, std::uint64_t w, SpectrumPacking packing,
   check(registry->freeze().ok(), "freeze FFT registry");
   GraphContext graph(doc);
   auto compiled = take(Compiler(registry).compile(graph));
-  unsigned reads = 0;
+  const auto host = h * w > 65536 ? 4194304ULL : 1048576ULL;
   ResourceBudget root;
   Result<ExecutionResult> result(Status{ErrorCode::Internal, {}});
   {
     ExecutionContextConfig config;
     config.managed_resources = ResourceLimits{};
-    config.managed_resources->capacity[ResourceKind::Host] = 65536;
-    config.managed_resources->capacity[ResourceKind::Metadata] = 65536;
+    config.managed_resources->capacity[ResourceKind::Host] = host;
+    config.managed_resources->capacity[ResourceKind::Metadata] = host;
     config.managed_resources->capacity[ResourceKind::Disk] = disk;
+    config.managed_resources->capacity[ResourceKind::Payload] = 32768;
+    config.managed_resources->capacity[ResourceKind::Referenced] =
+        2 * (n * 8 + h * k * 16);
     ExecutionContext context(registry, config);
     root = take(context.resource_budget());
     ExecutionOptions options;
     options.maximum_result_window_bytes = window;
     options.maximum_dependency_work = work;
     options.dependencies.maximum_stages = stages;
-    CancellationSource cancellation;
+    if (variant == 3) {
+      options.result_publication = [&](ValueRef output, const ResultRef&) {
+        if (output.node_id == 1) {
+          check(root.statistics().peak[ResourceKind::Disk] > 0,
+                "FFT cancellation after backing writes");
+          cancellation.cancel();
+        }
+        return Status::success();
+      };
+    }
     ExecutionResult prior;
     if (variant == 5) {
       auto prior_doc = doc;
       prior_doc.outputs = {{"fft", 1, "value"}};
       GraphContext prior_graph(prior_doc);
       auto prior_plan = take(Compiler(registry).compile(prior_graph));
-      prior = take(context.execute(
-          prior_plan.plan,
-          {{{"pixels", {}, source(h, w, k, false, 0, &reads)},
-            {"response", {}, source(h, w, k, true, 0, &reads)}}},
-          {}, options));
+      prior = take(context.execute(prior_plan.plan, bindings(root, h, w, k, 0),
+                                   {}, options));
     }
     if (variant == 6)
       graph.replace(doc);
-    result = context.execute(
-        compiled.plan,
-        {{{"pixels",
-           {},
-           source(h, w, k, false, variant, &reads, &cancellation)},
-          {"response",
-           {},
-           source(h, w, k, true, variant, &reads, &cancellation)}}},
-        cancellation.token(), options);
+    result = context.execute(compiled.plan, bindings(root, h, w, k, variant),
+                             cancellation.token(), options);
     if (variant == 5 && result.ok()) {
       auto before = prior.results.at("fft"),
            after = result.value().results.at("fft");
@@ -293,8 +271,9 @@ void run(std::uint64_t h, std::uint64_t w, SpectrumPacking packing,
       variant == 3 || variant == 4 || variant == 6) {
     check(!result.ok(), "expected FFT bounded/association failure");
     if (variant == 6) {
-      check(result.status().code == ErrorCode::Stale && reads == 0,
-            "stale plan rejected before source reads");
+      check(result.status().code == ErrorCode::Stale &&
+                starts == std::array<unsigned, 4>{},
+            "stale plan rejected before operation starts");
     } else if (variant == 4) {
       check(result.status().reason == FailureReason::InvalidDomain,
             "nonfinite input domain reason");
@@ -310,7 +289,8 @@ void run(std::uint64_t h, std::uint64_t w, SpectrumPacking packing,
             "FFT resource failure category");
     }
     check(root.statistics().live[ResourceKind::Disk] == 0 &&
-              root.statistics().live[ResourceKind::Payload] == 0,
+              root.statistics().live[ResourceKind::Payload] == 0 &&
+              root.statistics().live[ResourceKind::Referenced] == 0,
           "FFT failure cleanup");
     std::cout << "rejected " << h << 'x' << w << " window=" << window << ": "
               << result.status().message << '\n';
@@ -381,20 +361,32 @@ void run(std::uint64_t h, std::uint64_t w, SpectrumPacking packing,
   output = {};
   fft = {};
   image = {};
-  check(weak.lock().valid(),
-        "inverse window retains FFT association after context");
+  check(!weak.lock().valid(), "copied inverse does not retain FFT payload");
+  check(root.statistics().live[ResourceKind::Disk] > 0,
+        "inverse windows retain their own backing");
+  double retained_pixel;
+  std::memcpy(&retained_pixel, held->bytes().data(), 8);
+  check(std::abs(retained_pixel - sample(h - 1, w - 1, w, variant)) < 1e-8,
+        "inverse window remains readable after Result and context retirement");
   residue.reset();
   held.reset();
-  check(!weak.lock().valid(), "FFT last window retires ancestors");
+  check(!weak.lock().valid(), "FFT copied source remains retired");
   check(root.statistics().live[ResourceKind::Disk] == 0,
         "FFT last owner releases mandatory disk");
+  check(root.statistics().live[ResourceKind::Referenced] == 0,
+        "FFT input backing released");
+  check(root.statistics().peak[ResourceKind::Host] <= host &&
+            root.statistics().peak[ResourceKind::Payload] <= 32768,
+        "bounded Result source and computation storage");
   std::cout << "passed " << h << 'x' << w
             << " packing=" << static_cast<unsigned>(packing)
             << " window=" << window << " measured_dft_error=" << maximum
             << " measured_imaginary=" << imaginary
             << " host_peak=" << root.statistics().peak[ResourceKind::Host]
+            << " payload_peak=" << root.statistics().peak[ResourceKind::Payload]
             << " issued_stages=" << root.statistics().issued.stages
-            << " source_reads=" << reads << '\n';
+            << " referenced_peak="
+            << root.statistics().peak[ResourceKind::Referenced] << '\n';
 }
 }  // namespace
 int main(int argc, char** argv) {
@@ -431,6 +423,8 @@ int main(int argc, char** argv) {
     run(3, 4, SpectrumPacking::R2CHalf, 64, 4);
     run(3, 4, SpectrumPacking::R2CHalf, 64, 5);
     run(3, 4, SpectrumPacking::R2CHalf, 64, 6);
+    run(3, 4, SpectrumPacking::R2CHalf, 64, 7);
+    run(3, 4, SpectrumPacking::R2CHalf, 64, 8);
     run(1, 8192, SpectrumPacking::R2CHalf, 256);
     run(1, 513, SpectrumPacking::R2CHalf, 64, 0, 100000000);
     return 0;

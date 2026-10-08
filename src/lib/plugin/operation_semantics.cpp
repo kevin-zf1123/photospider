@@ -300,3 +300,109 @@ Facets infer_transformed_facets(
   return encode(s);
 }
 }  // namespace ps::contract_internal
+
+namespace ps {
+namespace {
+Status invalid(const char* text) {
+  return Status::failure(ErrorCode::InvalidArgument, text);
+}
+bool image_metadata(const OperationMetadata& metadata) {
+  return std::any_of(
+      metadata.facets.begin(), metadata.facets.end(),
+      [](const auto& facet) { return facet.key == "photospider.image"; });
+}
+Status validate_metadata(OperationMetadata* metadata) {
+  if (metadata->atomic_trailing_axes > metadata->descriptor.shape.size() ||
+      (metadata->atomic_trailing_axes && image_metadata(*metadata)))
+    return invalid("invalid input tuple observation metadata");
+  auto shape = Footprint::none(metadata->descriptor.shape);
+  if (!shape.ok())
+    return shape.status();
+  try {
+    static_cast<void>(Value::element_size(metadata->descriptor.element_type));
+  } catch (const std::invalid_argument&) {
+    return invalid("unknown dependency dtype");
+  }
+  auto status = input_internal::canonicalize_facets(&metadata->facets);
+  if (!status.ok())
+    return status;
+  if (input_internal::tuple_channel_axis(metadata->descriptor,
+                                         metadata->facets) &&
+      metadata->atomic_trailing_axes > 1)
+    return invalid("color observations group exactly one trailing axis");
+  return input_internal::validate_port_metadata({}, metadata->descriptor,
+                                                metadata->facets);
+}
+}  // namespace
+Result<Footprint> operation_observations(const OperationMetadata& output,
+                                         const Footprint& samples,
+                                         const FootprintLimits& limits) {
+  auto metadata = output;
+  auto status = validate_metadata(&metadata);
+  if (!status.ok())
+    return Result<Footprint>(status);
+  if (!samples.valid() || samples.shape() != output.descriptor.shape)
+    return Result<Footprint>(invalid("output footprint domain mismatch"));
+  const auto grouped = output.atomic_trailing_axes;
+  if (grouped > output.descriptor.shape.size() ||
+      (grouped && image_metadata(output)))
+    return Result<Footprint>(invalid("invalid tuple observation metadata"));
+  const bool color =
+      input_internal::tuple_channel_axis(output.descriptor, output.facets)
+          .has_value();
+  if (!color && !grouped)
+    return Result<Footprint>(samples);
+  std::vector<Region> rectangles;
+  for (const auto& box : samples.boxes()) {
+    if (image_metadata(output) && !input_internal::complete_tuple_channels(
+                                      output.descriptor, output.facets, box))
+      return Result<Footprint>(
+          invalid("a color observation requires complete channels"));
+    auto dimensions = box.dimensions();
+    dimensions.resize(dimensions.size() - (grouped ? grouped : 1));
+    if (dimensions.empty())
+      dimensions.push_back({0, 1});
+    rectangles.emplace_back(std::move(dimensions));
+  }
+  auto shape = output.descriptor.shape;
+  shape.resize(shape.size() - (grouped ? grouped : 1));
+  if (shape.empty())
+    shape.push_back(1);
+  return Footprint::from_regions(std::move(shape), rectangles, limits);
+}
+Result<Footprint> observation_samples(const OperationMetadata& output,
+                                      const Footprint& observations,
+                                      const FootprintLimits& limits) {
+  auto metadata = output;
+  auto status = validate_metadata(&metadata);
+  if (!status.ok())
+    return Result<Footprint>(status);
+  auto shape = output.descriptor.shape;
+  const auto grouped = output.atomic_trailing_axes;
+  if (grouped > shape.size() || (grouped && image_metadata(output)))
+    return Result<Footprint>(invalid("invalid tuple observation metadata"));
+  const auto trailing = grouped ? grouped
+                                : (input_internal::tuple_channel_axis(
+                                       output.descriptor, output.facets)
+                                       ? 1U
+                                       : 0U);
+  shape.resize(shape.size() - trailing);
+  if (shape.empty())
+    shape.push_back(1);
+  if (!observations.valid() || observations.shape() != shape)
+    return Result<Footprint>(invalid("observation domain mismatch"));
+  if (!trailing)
+    return Result<Footprint>(observations);
+  std::vector<Region> rectangles;
+  for (const auto& box : observations.boxes()) {
+    auto dimensions = box.dimensions();
+    if (trailing == output.descriptor.shape.size())
+      dimensions.clear();
+    for (auto axis = output.descriptor.shape.size() - trailing;
+         axis < output.descriptor.shape.size(); ++axis)
+      dimensions.push_back({0, output.descriptor.shape[axis]});
+    rectangles.emplace_back(std::move(dimensions));
+  }
+  return Footprint::from_regions(output.descriptor.shape, rectangles, limits);
+}
+}  // namespace ps

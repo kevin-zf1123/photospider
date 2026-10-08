@@ -1,7 +1,9 @@
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -10,18 +12,18 @@
 #include <utility>
 #include <vector>
 
-#include "01-numeric/array_publication.hpp"
 #include "01-numeric/sequence_profiles.hpp"
-#include "02-format-color/alpha_lowering.hpp"
+#include "02-format-color/result_mapping.hpp"
 #include "data/model_coordinates.hpp"
 #include "photospider/data/region_runs.hpp"
-#include "photospider/execution/data_movement.hpp"
 #include "photospider/format/channel_editing.hpp"
 #include "plugin/builtin_operations.hpp"
 #include "plugin/utf8_validation.hpp"
 
 namespace ps::plugin_internal {
 namespace {
+using format_result::require;
+using format_result::take;
 using numeric_ops::SequenceProfile;
 Status invalid(const std::string& text) {
   return {ErrorCode::InvalidArgument,
@@ -46,6 +48,7 @@ struct Assembly final {
   std::vector<Span> spans;
   std::vector<bool> scalars;
   std::string layout;
+  std::vector<std::vector<std::uint32_t>> by_port;
 };
 bool number(const std::string& text, std::uint64_t* value) {
   if (text.empty() || (text.size() > 1 && text[0] == '0'))
@@ -215,35 +218,21 @@ TensorChannelDescription component(const std::optional<TensorDescription>& d,
   }
   return out;
 }
-// A bounded, lossless descriptor assertion. It is part of invocation identity
-// and catches stale authoring hints on producer edges without evaluating them.
-std::string input_assertion(const std::vector<OperationMetadata>& inputs) {
-  std::string out = "v1";
-  for (const auto& input : inputs) {
-    out += ";" +
-           std::to_string(static_cast<unsigned>(input.descriptor.element_type));
-    for (auto extent : input.descriptor.shape)
-      out += "," + std::to_string(extent);
-    out += ":" + format::detail::assembly_hex(
-                     format::detail::layout_assertion(input.planar_layout));
-    for (const auto& f : input.facets) {
-      out += ":" + format::detail::assembly_hex(f.key) + "," +
-             std::to_string(f.version) + ",";
-      out += format::detail::assembly_hex(
-          std::string(f.payload.begin(), f.payload.end()));
-    }
-  }
-  return out;
+const ResultTensorSpec& tensor(const OperationMetadata& input) {
+  require(tensor_ops::check_tensor(input));
+  return input.result_schema->tensors[0];
 }
+using format_result::assembly_source_assertion;
 Result<OperationPreparation> prepare(
     const std::vector<OperationMetadata>& inputs, const Params& p, int member,
-    SequenceProfile profile) {
+    SequenceProfile profile) try {
   using Answer = Result<OperationPreparation>;
   auto available = numeric_ops::sequence_profile_available(profile);
   if (!available.ok())
     return Answer(available);
   if (p.count("expected_inputs") &&
-      std::get<std::string>(p.at("expected_inputs")) != input_assertion(inputs))
+      std::get<std::string>(p.at("expected_inputs")) !=
+          assembly_source_assertion(inputs))
     return Answer(
         invalid("FMT-03 authoring descriptors disagree with inference"));
   if (inputs.empty())
@@ -287,16 +276,17 @@ Result<OperationPreparation> prepare(
   assembly.layout = layout;
   std::vector<std::optional<TensorDescription>> descriptions;
   std::vector<std::uint64_t> shape;
-  std::optional<PlanarImageLayout> image_layout;
+  std::optional<ResultTensorLayout> image_layout;
   bool any_image = false;
   for (std::size_t i = 0; i < inputs.size(); ++i) {
-    const auto& input = inputs[i];
+    const auto& input = tensor(inputs[i]);
     const auto& dimensions = input.descriptor.shape;
     const std::string where = "input " + std::to_string(i) + ": ";
-    if (input.result_schema || dimensions.empty() || dimensions.size() > 8 ||
-        input.descriptor.element_type != inputs[0].descriptor.element_type)
+    if (dimensions.empty() || dimensions.size() > 8 ||
+        input.descriptor.element_type !=
+            tensor(inputs[0]).descriptor.element_type)
       return Answer(mismatch(where + "unsupported rank/type or mixed dtype"));
-    auto extent = Region::whole(dimensions).element_count();
+    auto extent = input.sample_count();
     if (!extent.ok())
       return Answer(extent.status());
     if (extent.value() == 0 || extent.value() > (1ULL << 40))
@@ -348,7 +338,8 @@ Result<OperationPreparation> prepare(
       }
     }
     if (scalar) {
-      if (dimensions != std::vector<std::uint64_t>{1} || input.planar_layout)
+      if (dimensions != std::vector<std::uint64_t>{1} || input.layout.spatial ||
+          !input.batch_axes.empty())
         return Answer(mismatch(where + "scalar requires generic shape [1]"));
     } else if (single) {
       if (dimensions.size() > 7 ||
@@ -375,12 +366,13 @@ Result<OperationPreparation> prepare(
       if (scalar)
         return Answer(invalid("first source must establish the spatial grid"));
       shape = nonchannel;
-    } else if (!scalar && shape != nonchannel) {
+    } else if (!scalar && (shape != nonchannel ||
+                           input.batch_axes != tensor(inputs[0]).batch_axes)) {
       return Answer(mismatch(where + "nonchannel extents differ"));
     }
-    if (input.planar_layout) {
+    if (input.layout.spatial) {
       any_image = true;
-      auto structural = *input.planar_layout;
+      auto structural = input.layout;
       if (structural.channel_axis != axis)
         return Answer(invalid(
             where + "interpretation cannot relabel physical image axes"));
@@ -414,8 +406,9 @@ Result<OperationPreparation> prepare(
   std::uint64_t channels = 0;
   if (member != 2) {
     for (std::size_t i = 0; i < inputs.size(); ++i) {
-      auto count =
-          assembly.axes[i] ? inputs[i].descriptor.shape[*assembly.axes[i]] : 1;
+      auto count = assembly.axes[i]
+                       ? tensor(inputs[i]).descriptor.shape[*assembly.axes[i]]
+                       : 1;
       if (count > (1ULL << 40) - channels)
         return Answer(invalid("channel prefix overflow"));
       assembly.spans.push_back(
@@ -441,9 +434,10 @@ Result<OperationPreparation> prepare(
       auto selector = unhex(fields[2]);
       if (!selector.ok())
         return Answer(selector.status());
-      auto count = assembly.axes[port]
-                       ? inputs[port].descriptor.shape[*assembly.axes[port]]
-                       : 1;
+      auto count =
+          assembly.axes[port]
+              ? tensor(inputs[port]).descriptor.shape[*assembly.axes[port]]
+              : 1;
       if (fields[1] == "index") {
         if (!number(selector.value(), &selected) || selected >= count)
           return Answer(invalid("source selector index out of range"));
@@ -491,11 +485,14 @@ Result<OperationPreparation> prepare(
               });
   }
   OperationOutputSpecialization output;
-  output.metadata.descriptor = {inputs[0].descriptor.element_type, shape};
-  output.metadata.descriptor.shape.insert(
-      output.metadata.descriptor.shape.begin() + output_axis, channels);
-  auto output_count =
-      Region::whole(output.metadata.descriptor.shape).element_count();
+  auto schema = *inputs[0].result_schema;
+  auto& output_tensor = schema.tensors[0];
+  output_tensor.atomic_trailing_axes = 0;
+  output_tensor.layout = {};
+  output_tensor.descriptor = {tensor(inputs[0]).descriptor.element_type, shape};
+  output_tensor.descriptor.shape.insert(
+      output_tensor.descriptor.shape.begin() + output_axis, channels);
+  auto output_count = output_tensor.sample_count();
   if (!output_count.ok())
     return Answer(output_count.status());
   if (output_count.value() > (1ULL << 40))
@@ -510,7 +507,7 @@ Result<OperationPreparation> prepare(
       return Answer(decoded.status());
     target = decoded.take_value();
     auto status =
-        validate_tensor_description(*target, output.metadata.descriptor);
+        validate_tensor_description(*target, output_tensor.descriptor);
     if (!status.ok())
       return Answer(status);
     if ((target->channel_axis && *target->channel_axis != assembly.axis) ||
@@ -680,7 +677,7 @@ Result<OperationPreparation> prepare(
   auto encoded = encode_tensor_description(result);
   if (!encoded.ok())
     return Answer(encoded.status());
-  output.metadata.facets = {encoded.take_value()};
+  output_tensor.facets = {encoded.take_value()};
   if (any_image) {
     auto physical = *image_layout;
     if (physical.height_axis >= assembly.axis)
@@ -688,277 +685,376 @@ Result<OperationPreparation> prepare(
     if (physical.width_axis >= assembly.axis)
       ++physical.width_axis;
     physical.channel_axis = assembly.axis;
-    output.metadata.planar_layout = std::move(physical);
+    output_tensor.layout = std::move(physical);
   }
-  std::vector<DependencyMapPiece> pieces;
-  for (const auto& span : assembly.spans) {
-    auto dims = Region::whole(output.metadata.descriptor.shape).dimensions();
-    dims[assembly.axis] = {span.destination, span.count};
-    auto coverage = Footprint::from_regions(output.metadata.descriptor.shape,
-                                            {Region(dims)});
-    if (!coverage.ok())
-      return Answer(coverage.status());
-    DependencyMappedNeed need;
-    need.port = span.port;
-    const auto source_axis = assembly.axes[span.port];
-    const auto rank = inputs[span.port].descriptor.shape.size();
-    for (std::size_t a = 0; a < rank; ++a) {
-      DependencyAxis axis;
-      if (assembly.scalars[span.port]) {
-        axis.observation_axis = -1;
-        axis.fixed = {0, 1};
-      } else if (source_axis && a == *source_axis) {
-        axis.observation_axis = assembly.axis;
-        axis.translation = static_cast<std::int64_t>(span.source) -
-                           static_cast<std::int64_t>(span.destination);
-      } else {
-        auto spatial = a - (source_axis && a > *source_axis ? 1 : 0);
-        axis.observation_axis = spatial < assembly.axis ? spatial : spatial + 1;
-      }
-      need.axes.push_back(axis);
-    }
-    pieces.push_back({coverage.take_value(), {std::move(need)}});
-  }
-  output.static_dependency_pieces = std::move(pieces);
-  output.regional_atomic = true;
-  output.preserve_output_views = layout != "materialize";
-  if (output.metadata.planar_layout) {
-    output.data_movement = DataMovementKind::BitwiseMapped;
-    const auto policy = layout;
-    output.data_movement_view_policy =
-        policy == "materialize" ? DataMovementViewPolicy::Materialize
-        : policy == "view"      ? DataMovementViewPolicy::RequireView
-                                : DataMovementViewPolicy::Auto;
-  }
+  assembly.by_port.resize(inputs.size());
+  for (std::size_t i = 0; i < assembly.spans.size(); ++i)
+    assembly.by_port[assembly.spans[i].port].push_back(i);
+  auto valid = schema.validate(true);
+  if (!valid.ok())
+    return Answer(valid);
+  output.metadata.result_schema =
+      std::make_shared<const SchemaTemplate>(std::move(schema));
   OperationPreparation prepared;
   prepared.outputs.push_back(std::move(output));
   prepared.state = std::make_shared<Assembly>(std::move(assembly));
   return Answer(std::move(prepared));
+} catch (const Status& status) {
+  return Result<OperationPreparation>(status);
 }
 
-Result<ValueFragments> evaluate(const DependencyPhase& phase,
-                                const Assembly& a) {
-  using Answer = Result<ValueFragments>;
-  const auto& descriptor = phase.query.output.descriptor;
-  const auto& facets = phase.query.output.facets;
-  const auto width = Value::element_size(descriptor.element_type);
-  // Every projected fragment has an exact affine mapping and retains its
-  // source.
-  std::vector<Value> views;
-  for (const auto& box : phase.query.outputs.boxes())
-    for (const auto& span : a.spans) {
-      const auto c = box.dimensions()[a.axis];
-      auto first = std::max(c.offset, span.destination);
-      auto last = std::min(c.offset + c.extent, span.destination + span.count);
-      if (first >= last)
-        continue;
-      for (const auto& source : phase.inputs[span.port].fragments()) {
-        auto charged = phase.consume_work(1 + descriptor.shape.size());
-        if (!charged.ok())
-          return Answer(charged);
-        auto dims = box.dimensions();
-        dims[a.axis] = {first, last - first};
-        const auto source_axis = a.axes[span.port];
-        std::vector<std::uint64_t> source_at(source.region().rank());
-        std::vector<std::int64_t> strides(descriptor.shape.size(), 0);
-        bool intersects = true;
-        if (a.scalars[span.port])
-          source_at[0] = 0;
-        for (std::size_t i = 0; !a.scalars[span.port] && i < source_at.size();
-             ++i) {
-          const auto input = source.region().dimensions()[i];
-          std::size_t target;
-          std::int64_t shift = 0;
-          if (source_axis && i == *source_axis) {
-            target = a.axis;
-            shift = static_cast<std::int64_t>(span.source) -
-                    static_cast<std::int64_t>(span.destination);
-          } else {
-            auto j = i - (source_axis && i > *source_axis ? 1 : 0);
-            target = j < a.axis ? j : j + 1;
-          }
-          const auto start = std::max<__int128>(
-              dims[target].offset, static_cast<__int128>(input.offset) - shift);
-          const auto end = std::min<__int128>(
-              dims[target].offset + dims[target].extent,
-              static_cast<__int128>(input.offset) + input.extent - shift);
-          if (start >= end) {
-            intersects = false;
-            break;
-          }
-          dims[target] = {static_cast<std::uint64_t>(start),
-                          static_cast<std::uint64_t>(end - start)};
-          source_at[i] = static_cast<std::uint64_t>(start + shift);
-          strides[target] = source.layout().byte_strides[i];
-        }
-        if (!intersects)
-          continue;
-        auto address = source.byte_address(source_at);
-        if (!address.ok())
-          return Answer(address.status());
-        std::vector<std::uint64_t> origin;
-        for (const auto& dim : dims)
-          origin.push_back(dim.offset);
-        auto view = Value::from_storage(
-            descriptor, Region(dims), {address.value(), strides, origin},
-            source.storage(), facets, phase.query.resources);
-        if (!view.ok())
-          return Answer(view.status());
-        views.push_back(view.take_value());
-      }
+using Poll = Result<ResultProgramPoll>;
+ResultRelation joined(const ResourceBudget& budget,
+                      ResourceVector<ResultRelation> relations) {
+  while (relations.size() > 1) {
+    ResourceVector<ResultRelation> next{
+        ResourceAllocator<ResultRelation>(budget)};
+    for (std::size_t i = 0; i < relations.size(); i += 16) {
+      const auto end = std::min(relations.size(), i + 16);
+      next.push_back(take(ResultRelation::unite(
+          budget, {relations.begin() + i, relations.begin() + end})));
     }
-  bool legal_view = !views.empty();
-  // A generic result may have several authorized fragments, but a forced view
-  // requires a common owner and one global affine address map.
-  std::vector<std::int64_t> canonical;
-  __int128 base = 0;
-  if (legal_view) {
-    canonical = views[0].layout().byte_strides;
-    const auto& v = views[0];
-    bool channel_stride_found = v.region().dimensions()[a.axis].extent > 1;
-    for (const auto& next : views) {
-      if (next.storage().get() != v.storage().get()) {
-        legal_view = false;
-        break;
-      }
-      for (std::size_t d = 0; d < canonical.size(); ++d)
-        if (d != a.axis && canonical[d] != next.layout().byte_strides[d])
-          legal_view = false;
-      if (!channel_stride_found && next.region().dimensions()[a.axis].offset !=
-                                       v.region().dimensions()[a.axis].offset) {
-        __int128 delta = static_cast<__int128>(next.layout().byte_offset) -
-                         v.layout().byte_offset;
-        for (std::size_t d = 0; d < canonical.size(); ++d)
-          if (d != a.axis)
-            delta -= (static_cast<__int128>(next.layout().origin[d]) -
-                      v.layout().origin[d]) *
-                     canonical[d];
-        const auto dc = static_cast<__int128>(next.layout().origin[a.axis]) -
-                        v.layout().origin[a.axis];
-        if (delta % dc || delta / dc < INT64_MIN || delta / dc > INT64_MAX) {
-          legal_view = false;
-        } else {
-          canonical[a.axis] = static_cast<std::int64_t>(delta / dc);
-          channel_stride_found = true;
-        }
-      }
-    }
-    base = v.layout().byte_offset;
-    for (std::size_t d = 0; d < canonical.size(); ++d)
-      base -= static_cast<__int128>(v.layout().origin[d]) * canonical[d];
-    for (const auto& v2 : views) {
-      __int128 expected = base;
-      for (std::size_t d = 0; d < canonical.size(); ++d)
-        expected += static_cast<__int128>(v2.layout().origin[d]) * canonical[d];
-      if (expected != v2.layout().byte_offset ||
-          (v2.region().dimensions()[a.axis].extent > 1 &&
-           canonical[a.axis] != v2.layout().byte_strides[a.axis]))
-        legal_view = false;
-    }
+    relations = std::move(next);
   }
-  if (a.layout == "view" && !legal_view)
-    return Answer(invalid("ViewUnavailable: no common affine owner mapping"));
-  numeric_ops::ArrayPublication publication(
-      views.size() + phase.query.outputs.boxes().size(),
-      descriptor.shape.size());
-  std::vector<Value> values;
-  if (a.layout != "materialize" && legal_view) {
-    for (const auto& box : phase.query.outputs.boxes()) {
-      std::vector<std::uint64_t> origin;
-      __int128 address = base;
-      for (std::size_t d = 0; d < canonical.size(); ++d) {
-        origin.push_back(box.dimensions()[d].offset);
-        address += static_cast<__int128>(origin.back()) * canonical[d];
-      }
-      if (address < 0 || address > UINT64_MAX)
-        return Answer(invalid("view offset overflow"));
-      auto view = Value::from_storage(
-          descriptor, box,
-          {static_cast<std::uint64_t>(address), canonical, origin},
-          views[0].storage(), facets, phase.query.resources);
-      if (!view.ok())
-        return Answer(view.status());
-      auto kept = publication.retain(view.take_value());
-      if (!kept.ok())
-        return Answer(kept.status());
-      values.push_back(kept.take_value());
-    }
+  return relations.front();
+}
+ResultBuilder assembly_builder(const ResultProgramPhase& phase, bool empty) {
+  auto result = take(ResultBuilder::start(
+      phase.resources, *phase.query.output.result_schema,
+      phase.query.semantic_key, {},
+      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
+                                                     phase.association->end())
+                        : std::vector<std::uint64_t>{},
+      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
+  ResourceVector<ResultRelation> descriptors{
+      ResourceAllocator<ResultRelation>(phase.resources)};
+  if (empty || phase.query.inputs.empty()) {
+    descriptors.push_back(take(ResultRelation::cartesian(
+        phase.resources, 1, {0, 8, 0, 0, ResultSupportTarget::Descriptor, 0})));
   } else {
-    for (const auto& box : phase.query.outputs.boxes()) {
-      auto allocated = MutableValue::allocate(descriptor, box, phase.allocator);
-      if (!allocated.ok())
-        return Answer(allocated.status());
-      auto writer = allocated.take_value();
-      for (const auto& view : views) {
-        auto intersection = Footprint::from_regions(
-            descriptor.shape, {view.region()}, phase.sets);
-        if (!intersection.ok())
-          return Answer(intersection.status());
-        auto region =
-            Footprint::from_regions(descriptor.shape, {box}, phase.sets);
-        if (!region.ok())
-          return Answer(region.status());
-        auto clipped =
-            intersection.value().intersect(region.value(), phase.sets);
-        if (!clipped.ok())
-          return Answer(clipped.status());
-        for (const auto& copy_box : clipped.value().boxes()) {
-          auto copied = copy_value_region(
-              view, copy_box, box, writer.data(),
-              box.element_count().value() * width, phase.query.cancellation,
-              [&](std::uint64_t n) {
-                for (std::uint64_t i = 0; i < n; ++i) {
-                  auto charged = phase.consume_work(box.rank() + width);
-                  if (!charged.ok())
-                    return charged;
-                }
-                return Status::success();
-              });
-          if (!copied.ok())
-            return Answer(copied);
-        }
-      }
-      auto value = std::move(writer).publish(facets, phase.query.resources);
-      if (!value.ok())
-        return Answer(value.status());
-      auto kept = publication.retain(value.take_value());
-      if (!kept.ok())
-        return Answer(kept.status());
-      values.push_back(kept.take_value());
+    for (std::uint32_t port = 0; port < phase.query.inputs.size(); ++port)
+      descriptors.push_back(take(ResultRelation::cartesian(
+          phase.resources, 1,
+          {port, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
+  }
+  require(result.bind_descriptor_relation(
+      joined(phase.resources, std::move(descriptors))));
+  return result;
+}
+Poll empty_result(const ResultProgramPhase& phase) try {
+  auto result = assembly_builder(phase, true);
+  return Poll(ResultPublication{take(result.seal()), true});
+} catch (const Status& status) {
+  return Poll(status);
+}
+Region span_region(const ResultTensorSpec& output, const Assembly& assembly,
+                   const Span& span) {
+  auto dims = Region::whole(output.sample_shape()).dimensions();
+  dims[output.batch_axes.size() + assembly.axis] = {span.destination,
+                                                    span.count};
+  return Region(std::move(dims));
+}
+std::vector<ResultMappedAxis> mapping(const ResultProgramQuery& query,
+                                      const Assembly& a, const Span& span) {
+  const auto& source = query.inputs[span.port].result_schema->tensors[0];
+  const auto batches = query.output.result_schema->tensors[0].batch_axes.size();
+  const auto source_axis = a.axes[span.port];
+  std::vector<ResultMappedAxis> axes(source.sample_shape().size());
+  for (std::size_t i = 0; i < axes.size(); ++i) {
+    if (a.scalars[span.port]) {
+      axes[i].output_axis = -1;
+    } else if (i < batches) {
+      axes[i].output_axis = i;
+    } else if (source_axis && i - batches == *source_axis) {
+      axes[i].output_axis = batches + a.axis;
+      axes[i].source_origin = span.source;
+      axes[i].output_origin = span.destination;
+    } else {
+      const auto j =
+          i - batches - (source_axis && i - batches > *source_axis ? 1 : 0);
+      axes[i].output_axis = batches + (j < a.axis ? j : j + 1);
     }
   }
-  if (phase.query.cancellation.cancelled())
-    return Answer(Status{ErrorCode::Cancelled, "assembly cancelled"});
-  return publication.finish(descriptor, phase.query.outputs, values.data(),
-                            values.size(), phase.sets, facets,
-                            phase.query.resources);
+  return axes;
+}
+struct Projected final {
+  const void* owner = nullptr;
+  std::uint64_t offset = 0;
+  std::array<RegionDimension, 8> dims{};
+  std::array<std::int64_t, 8> strides{};
+};
+Status unavailable_view() {
+  return invalid("ViewUnavailable: no common affine owner mapping");
+}
+// Retain the pre-Result whole-query view predicate, including cross-box owners.
+Status generic_view(const ResultProgramPhase& phase, const Assembly& a,
+                    const Footprint& outputs,
+                    const ResourceVector<ResultRelation>& relations) {
+  ResourceVector<Projected> views{
+      ResourceAllocator<Projected>(phase.resources)};
+  const auto& output = phase.query.output.result_schema->tensors[0];
+  const auto rank = output.sample_shape().size();
+  const auto channel_axis = output.batch_axes.size() + a.axis;
+  for (std::size_t s = 0; s < a.spans.size(); ++s) {
+    const auto& span = a.spans[s];
+    auto clipped = take(outputs.intersect(take(Footprint::from_regions(
+        output.sample_shape(), {span_region(output, a, span)}))));
+    const auto axes = mapping(phase.query, a, span);
+    std::function<Status(const Region&, const ResultTensorReadWindow&)> inspect;
+    inspect = [&](const Region& box, const ResultTensorReadWindow& window) {
+      require(phase.consume_work(rank + axes.size()));
+      auto affine = execution_internal::ResultWindowAccess::affine(window);
+      if (!affine.ok()) {
+        if (affine.status().code != ErrorCode::NotFound)
+          return affine.status();
+        auto partitioned =
+            execution_internal::ResultWindowAccess::visit_backing_regions(
+                window, phase.resources, [&](const Region& region) {
+                  auto pieces = take(relations[s].preimage(
+                      take(Footprint::from_regions(output.sample_shape(),
+                                                   {box})),
+                      {span.port, 1, 0, 0, ResultSupportTarget::Tensor, 0},
+                      take(Footprint::from_regions(window.spec().sample_shape(),
+                                                   {region}))));
+                  for (const auto& part : pieces.boxes()) {
+                    auto source = take(
+                        phase.tensors->at({span.port, 0})
+                            .acquire(format_result::mapped_region(part, axes),
+                                     phase.query.cancellation));
+                    auto status = inspect(part, source);
+                    if (!status.ok())
+                      return status;
+                  }
+                  return Status::success();
+                });
+        if (!partitioned.ok())
+          return partitioned.status();
+        return partitioned.value() ? Status::success() : unavailable_view();
+      }
+      Projected view;
+      view.owner = affine.value().storage().get();
+      std::copy(box.dimensions().begin(), box.dimensions().end(),
+                view.dims.begin());
+      std::vector<std::uint64_t> at;
+      for (std::size_t i = 0; i < axes.size(); ++i) {
+        const auto& axis = axes[i];
+        at.push_back(take(axis.source_coordinate(
+            axis.output_axis < 0 ? 0
+                                 : box.dimensions()[axis.output_axis].offset)));
+        if (axis.output_axis >= 0)
+          view.strides[axis.output_axis] =
+              affine.value().layout().byte_strides[i];
+      }
+      view.offset = take(affine.value().byte_address(at));
+      views.push_back(view);
+      return Status::success();
+    };
+    for (const auto& box : clipped.boxes()) {
+      auto window = take(phase.tensors->at({span.port, 0})
+                             .acquire(format_result::mapped_region(box, axes),
+                                      phase.query.cancellation));
+      auto status = inspect(box, window);
+      if (!status.ok())
+        return status;
+    }
+  }
+  if (views.empty())
+    return unavailable_view();
+  const auto& first = views.front();
+  auto strides = first.strides;
+  bool channel_stride = first.dims[channel_axis].extent > 1;
+  for (const auto& view : views) {
+    require(phase.consume_work(rank + 1));
+    if (view.owner != first.owner)
+      return unavailable_view();
+    for (std::size_t d = 0; d < rank; ++d)
+      if (d != channel_axis && strides[d] != view.strides[d])
+        return unavailable_view();
+    if (!channel_stride &&
+        view.dims[channel_axis].offset != first.dims[channel_axis].offset) {
+      __int128 delta = static_cast<__int128>(view.offset) - first.offset;
+      for (std::size_t d = 0; d < rank; ++d)
+        if (d != channel_axis)
+          delta -= (static_cast<__int128>(view.dims[d].offset) -
+                    first.dims[d].offset) *
+                   strides[d];
+      const auto dc = static_cast<__int128>(view.dims[channel_axis].offset) -
+                      first.dims[channel_axis].offset;
+      if (delta % dc || delta / dc < INT64_MIN || delta / dc > INT64_MAX)
+        return unavailable_view();
+      strides[channel_axis] = delta / dc;
+      channel_stride = true;
+    }
+  }
+  for (const auto& view : views) {
+    require(phase.consume_work(rank + 1));
+    __int128 expected = first.offset;
+    for (std::size_t d = 0; d < rank; ++d)
+      expected +=
+          (static_cast<__int128>(view.dims[d].offset) - first.dims[d].offset) *
+          strides[d];
+    if (expected != view.offset ||
+        (view.dims[channel_axis].extent > 1 &&
+         strides[channel_axis] != view.strides[channel_axis]))
+      return unavailable_view();
+  }
+  return Status::success();
 }
 struct State final {
   const Assembly* assembly;
-  bool requested = false;
+  std::uint32_t next_input = 0;
+  std::optional<ResultTensorInputs> ready;
+  std::optional<ResourceVector<ResultRelation>> relations;
+  Footprint output;
   explicit State(const Assembly* value) : assembly(value) {}
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    if (!requested) {
-      requested = true;
-      DependencyNeedBatch batch;
-      batch.static_mapping = true;
-      return Result<DependencyPoll>(std::move(batch));
+  Poll poll(const ResultProgramPhase& phase) try {
+    auto scratch =
+        take(phase.resources.reserve(ResourceCapacity::host(16384, 16384)));
+    const auto& spec = phase.query.output.result_schema->tensors[0];
+    if (!ready) {
+      ready.emplace(
+          std::less<std::pair<std::uint32_t, std::uint32_t>>{},
+          ResourceAllocator<ResultTensorInputs::value_type>(phase.resources));
+      relations.emplace(ResourceAllocator<ResultRelation>(phase.resources));
+      output = phase.query.tensor_outputs
+                   ? *phase.query.tensor_outputs
+                   : take(Footprint::all(spec.sample_shape()));
+      for (const auto& span : assembly->spans)
+        relations->push_back(take(ResultRelation::mapped(
+            phase.resources, spec.sample_shape(),
+            span_region(spec, *assembly, span),
+            phase.query.inputs[span.port]
+                .result_schema->tensors[0]
+                .sample_shape(),
+            mapping(phase.query, *assembly, span),
+            {span.port, 1, 0, 0, ResultSupportTarget::Tensor, 0})));
     }
-    auto result = evaluate(phase, *assembly);
-    return result.ok() ? Result<DependencyPoll>(result.take_value())
-                       : Result<DependencyPoll>(result.status());
+    if (phase.tensors)
+      for (const auto& input : *phase.tensors)
+        ready->insert_or_assign(input.first, input.second);
+    if (next_input < phase.query.inputs.size()) {
+      ResultProgramNeed need;
+      while (next_input < phase.query.inputs.size() &&
+             need.tensors.size() < 64) {
+        const auto port = next_input++;
+        auto samples = take(Footprint::none(
+            phase.query.inputs[port].result_schema->tensors[0].sample_shape()));
+        for (auto s : assembly->by_port[port])
+          require((*relations)[s].project(
+              output, [&](auto, const Footprint* selected) {
+                if (selected)
+                  samples = take(samples.unite(*selected));
+                return Status::success();
+              }));
+        const auto roles = samples.empty() ? 8U : 9U;
+        need.tensors.push_back({port, 0, std::move(samples), roles});
+      }
+      return Poll(std::move(need));
+    }
+    auto supplied = phase;
+    supplied.tensors = &*ready;
+    auto result = assembly_builder(phase, false);
+    std::string policy = assembly->layout;
+    if (!spec.layout.spatial && policy != "materialize") {
+      auto available = generic_view(supplied, *assembly, output, *relations);
+      if (!available.ok()) {
+        if (policy == "view" || !format_result::view_unavailable(available))
+          return Poll(available);
+        policy = "materialize";
+      }
+    }
+    auto relation = joined(phase.resources, *relations);
+    require(format_result::planes(spec, output, [&](const Region& box) {
+      if (spec.layout.spatial && policy != "materialize") {
+        ResourceVector<ResultTensorReadWindow> windows{
+            ResourceAllocator<ResultTensorReadWindow>(phase.resources)};
+        std::vector<const ResultTensorReadWindow*> sources;
+        for (const auto& span : assembly->spans) {
+          auto clipped =
+              take(Footprint::from_regions(spec.sample_shape(), {box}));
+          clipped = take(clipped.intersect(take(Footprint::from_regions(
+              spec.sample_shape(), {span_region(spec, *assembly, span)}))));
+          for (const auto& part : clipped.boxes())
+            windows.push_back(take(
+                ready->at({span.port, 0})
+                    .acquire(format_result::mapped_region(
+                                 part, mapping(phase.query, *assembly, span)),
+                             phase.query.cancellation)));
+        }
+        for (const auto& window : windows)
+          sources.push_back(&window);
+        auto status = result.publish_tensor_view(0, box, sources, relation,
+                                                 {true, true, true, true},
+                                                 phase.query.cancellation);
+        if (status.ok())
+          return status;
+        if (!format_result::view_unavailable(status))
+          return status;
+        if (policy == "view")
+          return unavailable_view();
+      }
+      for (std::size_t s = 0; s < assembly->spans.size(); ++s) {
+        const auto& span = assembly->spans[s];
+        auto clipped =
+            take(Footprint::from_regions(spec.sample_shape(), {box}));
+        clipped = take(clipped.intersect(take(Footprint::from_regions(
+            spec.sample_shape(), {span_region(spec, *assembly, span)}))));
+        const auto axes = mapping(phase.query, *assembly, span);
+        for (const auto& part : clipped.boxes()) {
+          auto window =
+              take(ready->at({span.port, 0})
+                       .acquire(format_result::mapped_region(part, axes),
+                                phase.query.cancellation));
+          auto status = format_result::publish(
+              supplied, &result, part, window, axes, relation,
+              spec.layout.spatial ? "materialize" : policy, span.port);
+          if (!status.ok())
+            return status;
+        }
+      }
+      return Status::success();
+    }));
+    return Poll(ResultPublication{take(result.seal()), true});
+  } catch (const Status& status) {
+    return Poll(status);
   }
 };
+struct ScalarState final {
+  std::array<std::uint8_t, 8> bits{};
+  std::size_t width = 0;
+  Poll poll(const ResultProgramPhase& phase) try {
+    auto result = assembly_builder(phase, true);
+    auto relation = take(ResultRelation::cartesian(
+        phase.resources, 1, {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
+    require(phase.consume_work(width));
+    require(result.publish_tensor_kernel(
+        0, Region::whole({1}),
+        [&](const auto& writers) {
+          auto row = writers[0].row_run({0});
+          if (!row.ok())
+            return row.status();
+          std::memcpy(row.value().data, bits.data(), width);
+          return Status::success();
+        },
+        relation, {true, true, true, true}, phase.query.cancellation));
+    return Poll(ResultPublication{take(result.seal()), true});
+  } catch (const Status& status) {
+    return Poll(status);
+  }
+};
+
 OperationDefinition definition(const std::string& key, int member,
                                SequenceProfile profile) {
   OperationDefinition op;
   op.key = key;
   auto& t = op.traits;
-  t.input_schema.resize(1);
+  OperationPortConstraint port;
+  port.kind = OperationPortKind::Result;
+  port.element_type_mask = 127;
+  t.input_schema = {port};
   t.repeated_minimum = 1;
   t.repeated_maximum = 1024;
   t.repeated_match = false;
-  t.planar_storage_capable = true;
   t.cacheable = false;
   t.requires_metadata_specialization = true;
   t.parameter_schema = {
@@ -984,48 +1080,22 @@ OperationDefinition definition(const std::string& key, int member,
   }
   auto& out = t.outputs[0];
   out.key = "values";
-  out.shape_rule = OperationShapeRule::Fixed;
-  out.fixed_output_shape = {1};
+  out.output_schema = port;
+  out.result_schema = tensor_ops::scalar_schema();
   out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 1;
+  out.dependency_version = 2;
   out.continuation_bytes = sizeof(State);
-  out.maximum_dependency_stages = 2;
+  out.maximum_dependency_stages = 17;
   op.prepare_static = [member, profile](const auto& inputs,
                                         const auto& params) {
     return prepare(inputs, params, member, profile);
   };
-  op.start_dependency = [](const DependencyQuery& query,
-                           const BufferAllocator& allocator) {
-    return DependencyContinuation::make<State>(
+  op.start_result = [](const ResultProgramQuery& query,
+                       const BufferAllocator& allocator) {
+    if (query.tensor_outputs && query.tensor_outputs->empty())
+      return ResultContinuation::stateless<empty_result>();
+    return ResultContinuation::make<State>(
         allocator, static_cast<const Assembly*>(query.prepared->state()));
-  };
-  op.planar_callback = [](const PlanarOperationInvocation& call) {
-    if (std::get<std::string>(call.parameters.at("layout")) == "view")
-      return invalid(
-          "ViewUnavailable: direct planar output cannot replace its owner");
-    if (!call.prepared)
-      return Status{ErrorCode::Internal, "channel assembly preparation absent"};
-    const auto& out = call.prepared->traits().outputs[0];
-    auto requested = Footprint::from_regions(
-        call.output_metadata.descriptor.shape, {call.output_region});
-    if (!requested.ok())
-      return requested.status();
-    for (const auto& piece : *out.static_dependency_pieces) {
-      auto clipped = piece.coverage.intersect(requested.value());
-      if (!clipped.ok())
-        return clipped.status();
-      const auto& map = piece.inputs[0];
-      for (const auto& box : clipped.value().boxes()) {
-        auto status = copy_planar_region(
-            box, map, &call.inputs[map.port], nullptr, call.output,
-            *call.output_metadata.planar_layout,
-            Value::element_size(call.output_metadata.descriptor.element_type),
-            call.cancellation);
-        if (!status.ok())
-          return status;
-      }
-    }
-    return Status::success();
   };
   return op;
 }
@@ -1069,42 +1139,43 @@ OperationDefinition scalar_literal(const std::string& key,
                         {"bits", OperationParameterType::String}};
   auto& out = t.outputs[0];
   out.key = "values";
-  out.shape_rule = OperationShapeRule::Fixed;
-  out.fixed_output_shape = {1};
+  out.output_schema.kind = OperationPortKind::Result;
+  out.output_schema.element_type_mask = 127;
+  out.result_schema = tensor_ops::scalar_schema();
   out.region_rule = OperationRegionRule::Whole;
-  op.specialize_metadata = [profile](const auto&, const auto& parameters) {
-    using Answer = Result<std::vector<OperationOutputSpecialization>>;
+  out.dependency_version = 2;
+  out.continuation_bytes = sizeof(ScalarState);
+  out.maximum_dependency_stages = 1;
+  op.prepare_static =
+      [profile](const auto&,
+                const auto& parameters) -> Result<OperationPreparation> {
+    using Answer = Result<OperationPreparation>;
     auto status = numeric_ops::sequence_profile_available(profile);
     if (!status.ok())
       return Answer(status);
     auto bytes = literal_bytes(parameters);
     if (!bytes.ok())
       return Answer(bytes.status());
-    OperationOutputSpecialization result;
-    result.metadata.descriptor = {
-        static_cast<ElementType>(
-            std::get<std::int64_t>(parameters.at("dtype"))),
-        {1}};
-    return Answer(std::vector<OperationOutputSpecialization>{result});
+    auto schema = tensor_ops::scalar_schema();
+    schema.tensors[0].descriptor.element_type = static_cast<ElementType>(
+        std::get<std::int64_t>(parameters.at("dtype")));
+    OperationOutputSpecialization output;
+    output.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(std::move(schema));
+    OperationPreparation prepared;
+    prepared.outputs.push_back(std::move(output));
+    auto state = std::make_shared<ScalarState>();
+    state->width = bytes.value().size();
+    std::copy(bytes.value().begin(), bytes.value().end(), state->bits.begin());
+    prepared.state = std::move(state);
+    return Answer(std::move(prepared));
   };
-  op.callback = [](const OperationInvocation& call) {
-    using Answer = Result<Value>;
-    if (call.cancellation.cancelled())
-      return Answer(Status{ErrorCode::Cancelled, "literal cancelled"});
-    auto bytes = literal_bytes(call.parameters);
-    if (!bytes.ok())
-      return Answer(bytes.status());
-    const ValueDescriptor descriptor{
-        static_cast<ElementType>(
-            std::get<std::int64_t>(call.parameters.at("dtype"))),
-        {1}};
-    auto allocated =
-        MutableValue::allocate(descriptor, call.output_region, call.allocator);
-    if (!allocated.ok())
-      return Answer(allocated.status());
-    auto writer = allocated.take_value();
-    std::memcpy(writer.data(), bytes.value().data(), bytes.value().size());
-    return std::move(writer).publish();
+  op.start_result = [](const ResultProgramQuery& query,
+                       const BufferAllocator& allocator) {
+    if (query.tensor_outputs && query.tensor_outputs->empty())
+      return ResultContinuation::stateless<empty_result>();
+    return ResultContinuation::make<ScalarState>(
+        allocator, *static_cast<const ScalarState*>(query.prepared->state()));
   };
   return op;
 }
@@ -1116,7 +1187,7 @@ Result<std::optional<TensorDescription>> edit_description(
   if (options.input_overrides.count(port)) {
     result = options.input_overrides.at(port);
   } else {
-    for (const auto& f : metadata.facets)
+    for (const auto& f : tensor(metadata).facets)
       if (f.key == "photospider.tensor-description") {
         auto decoded = decode_tensor_description(f);
         if (!decoded.ok()) {
@@ -1128,7 +1199,8 @@ Result<std::optional<TensorDescription>> edit_description(
       }
   }
   if (result) {
-    auto valid = validate_tensor_description(*result, metadata.descriptor);
+    auto valid =
+        validate_tensor_description(*result, tensor(metadata).descriptor);
     if (!valid.ok()) {
       if (options.metadata_mode != "raw")
         return Answer(valid);
@@ -1168,7 +1240,7 @@ Result<WorkflowNodeOutput> edit_channels(
     WorkflowDocument& document, std::vector<format::ChannelEditInput> inputs,
     const std::vector<format::ChannelEditSource>& slots,
     const std::vector<format::ChannelReplacement>* replacements,
-    const format::ChannelAssemblyOptions& options) {
+    const format::ChannelAssemblyOptions& options) try {
   using Answer = Result<WorkflowNodeOutput>;
   if (inputs.empty() || inputs.size() > 1024 || inputs[0].structure.component ||
       inputs[0].structure.scalar ||
@@ -1185,17 +1257,16 @@ Result<WorkflowNodeOutput> edit_channels(
   for (const auto& entry : options.input_overrides)
     if (entry.first >= inputs.size())
       return Answer(invalid("FMT-03 override input ordinal is absent"));
-  const auto base = inputs[0].metadata;
+  const auto& base = tensor(inputs[0].metadata);
   const auto dtype = base.descriptor.element_type;
   if (dtype != ElementType::UInt8 && dtype != ElementType::Int8 &&
       dtype != ElementType::UInt16 && dtype != ElementType::Int16 &&
       dtype != ElementType::Int64 && dtype != ElementType::Float32 &&
       dtype != ElementType::Float64)
     return Answer(mismatch("FMT-03 unsupported base dtype"));
-  if (base.result_schema || base.descriptor.shape.empty() ||
-      base.descriptor.shape.size() > 8)
+  if (base.descriptor.shape.empty() || base.descriptor.shape.size() > 8)
     return Answer(mismatch("FMT-03 base requires positive rank 1..8"));
-  auto base_description = edit_description(base, 0, options);
+  auto base_description = edit_description(inputs[0].metadata, 0, options);
   if (!base_description.ok())
     return Answer(base_description.status());
   auto axis = inputs[0].structure.axis;
@@ -1265,7 +1336,10 @@ Result<WorkflowNodeOutput> edit_channels(
             {"bits", bits}}});
       format::ChannelEditInput input;
       input.input = WorkflowNodeOutput{id, "values"};
-      input.metadata.descriptor = {literal.dtype, {1}};
+      auto scalar_schema = tensor_ops::scalar_schema();
+      scalar_schema.tensors[0].descriptor = {literal.dtype, {1}};
+      input.metadata.result_schema =
+          std::make_shared<const SchemaTemplate>(std::move(scalar_schema));
       input.structure.scalar = true;
       literals[bits] = inputs.size();
       inputs.push_back(std::move(input));
@@ -1283,18 +1357,16 @@ Result<WorkflowNodeOutput> edit_channels(
         (input.structure.scalar &&
          (input.structure.component || input.structure.axis)))
       return Answer(invalid("FMT-03 conflicting source structure"));
-    if (input.metadata.result_schema)
-      return Answer(mismatch("FMT-03 requires tensor inputs"));
+    require(tensor_ops::check_tensor(input.metadata));
     // Supplied declaration metadata is checked before committing the expansion.
     if (const auto* ref = std::get_if<WorkflowInputReference>(&input.input)) {
       bool found = false;
       for (const auto& declaration : document.inputs)
         if (declaration.id == ref->input_id) {
           OperationMetadata actual;
-          actual.descriptor = declaration.descriptor;
-          actual.facets = declaration.facets;
-          actual.planar_layout = declaration.planar_layout;
-          if (input_assertion({actual}) != input_assertion({input.metadata}))
+          actual.result_schema = declaration.result_schema;
+          if (assembly_source_assertion({actual}) !=
+              assembly_source_assertion({input.metadata}))
             return Answer(
                 invalid("FMT-03 descriptor disagrees with declaration"));
           found = true;
@@ -1326,7 +1398,7 @@ Result<WorkflowNodeOutput> edit_channels(
     if (options.metadata_mode != "raw" && d.value() &&
         d.value()->channel_axis && !structure.scalar && !structure.component)
       a = d.value()->channel_axis;
-    const auto& shape = metadata[e.input].descriptor.shape;
+    const auto& shape = tensor(metadata[e.input]).descriptor.shape;
     if (shape.empty() || (a && *a >= shape.size()))
       return Answer(mismatch("FMT-03 source rank/axis mismatch"));
     const auto n = a ? shape[*a] : 1;
@@ -1461,7 +1533,7 @@ Result<WorkflowNodeOutput> edit_channels(
   auto& node = staged.nodes.back();
   node.parameters["input_structure"] = fused_structure;
   node.parameters["output_description_complete"] = true;
-  node.parameters["expected_inputs"] = input_assertion(metadata);
+  node.parameters["expected_inputs"] = assembly_source_assertion(metadata);
   node.parameters["authoring_member"] =
       std::string(replacements ? "FMT-03B" : "FMT-03A");
   for (const auto& n : staged.nodes)
@@ -1478,11 +1550,16 @@ Result<WorkflowNodeOutput> edit_channels(
     return Answer(checked.status());
   document = std::move(staged);
   return output;
+} catch (const Status& status) {
+  return Result<WorkflowNodeOutput>(status);
+} catch (const std::bad_alloc&) {
+  return Result<WorkflowNodeOutput>(Status{
+      ErrorCode::ResourceExhausted, "channel authoring allocation failed"});
 }
 }  // namespace
 Result<OperationPreparation> prepare_alpha_channel_mapping(
-    const std::vector<OperationMetadata>& inputs, const alpha_ops::Params& p,
-    numeric_ops::SequenceProfile profile) {
+    const std::vector<OperationMetadata>& inputs,
+    const format_result::Params& p, numeric_ops::SequenceProfile profile) {
   return prepare(inputs, p, 2, profile);
 }
 Status register_channel_assembly(OperationRegistry* registry) {

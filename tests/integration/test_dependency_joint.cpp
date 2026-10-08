@@ -1,378 +1,203 @@
+#include <algorithm>
 #include <array>
-#include <cstring>
-#include <functional>
+#include <cstdint>
+#include <iostream>
+#include <map>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
-struct Counters {
-  int starts = 0, polls = 0, destroys = 0;
-  std::function<void()> hook;
-};
-Result<DependencyPoll> publish(const DependencyPhase& phase, double number) {
-  auto allocated =
-      MutableValue::allocate(phase.query.output.descriptor,
-                             phase.query.outputs.boxes()[0], phase.allocator);
-  if (!allocated.ok())
-    return Result<DependencyPoll>(allocated.status());
-  auto output = allocated.take_value();
-  std::memcpy(output.data(), &number, sizeof(number));
-  auto value = std::move(output).publish();
-  if (!value.ok())
-    return Result<DependencyPoll>(value.status());
-  auto fragments =
-      ValueFragments::create(phase.query.output.descriptor, {},
-                             phase.query.outputs, {value.take_value()});
-  if (!fragments.ok())
-    return Result<DependencyPoll>(fragments.status());
-  return Result<DependencyPoll>(fragments.take_value());
-}
-struct Singleton {
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
-    return publish(phase, 7);
-  }
+using multi_result::check;
+using multi_result::take;
+struct Counts {
+  unsigned starts = 0, polls = 0, members = 0, destroys = 0;
+  bool quality = false;
 };
 struct Joint {
-  std::shared_ptr<Counters> counts;
-  int mode;
-  std::array<bool, 64> requested{};
-  Joint(std::shared_ptr<Counters> counts, int mode)
-      : counts(std::move(counts)), mode(mode) {
-    ++this->counts->starts;
-  }
+  std::shared_ptr<Counts> counts;
+  explicit Joint(std::shared_ptr<Counts> counts) : counts(std::move(counts)) {}
   ~Joint() noexcept { ++counts->destroys; }
-  Result<std::vector<DependencyAtomOutcome>> poll(
-      const DependencyJointPhase& joint) {
+  Result<ResourceVector<ResultJointOutcome>> poll(
+      const ResultJointPhase& phase) {
     ++counts->polls;
-    if (mode == 9)
-      static_cast<void>(joint.consume_work(UINT64_MAX));
-    if (counts->hook)
-      counts->hook();
-    using Answer = Result<std::vector<DependencyAtomOutcome>>;
-    if (mode == 4)
-      throw std::runtime_error("shared failure");
-    std::vector<DependencyAtomOutcome> outcomes;
-    for (const auto* phase : joint.members) {
-      const auto id = phase->query.output_index;
-      const auto key = dependency_atom_key(phase->query).value();
-      if (mode == 5 && id == 0) {
-        outcomes.push_back(
-            {key, Result<DependencyPoll>(
-                      Status{ErrorCode::OperationFailed, "member failure"})});
-      } else if (mode == 6 && id == 0) {
-        double ignored;
-        static_cast<void>(phase->read(0, {0}, &ignored, sizeof(ignored)));
-        outcomes.push_back({key, publish(*phase, 9)});
-      } else if (mode == 7 && !requested[id]) {
-        requested[id] = true;
-        std::vector<std::uint64_t> atom;
-        for (const auto& dim :
-             phase->query.observations.boxes()[0].dimensions())
-          atom.push_back(dim.offset);
-        outcomes.push_back(
-            {key, Result<DependencyPoll>(DependencyNeedBatch{
-                      {{atom, {{0, 1, Footprint::all({1}).take_value(), {}}}}},
-                      {}})});
-      } else if (mode == 7) {
-        double value = 0;
-        auto status = phase->read(0, {0}, &value, sizeof(value));
-        outcomes.push_back({key, status.ok() ? publish(*phase, value + id)
-                                             : Result<DependencyPoll>(status)});
-      } else {
-        outcomes.push_back({key, publish(*phase, 10 + id)});
-      }
+    ResourceVector<ResultJointOutcome> outcomes;
+    for (const auto* member : phase.members) {
+      ++counts->members;
+      const auto key = take(result_atom_key(member->query));
+      auto builder = take(ResultBuilder::start(
+          member->resources, *member->query.output.result_schema,
+          member->query.semantic_key));
+      check(builder.bind_descriptor_relation(
+          take(ResultRelation::cartesian(member->resources, 1, {}))));
+      const double value = 10 + key.output_index;
+      const auto count =
+          take(member->query.output.result_schema->tensors[0].sample_count());
+      check(builder.publish_tensor(
+          0, member->query.tensor_outputs->boxes()[0],
+          {reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)},
+          take(ResultRelation::cartesian(member->resources, count, {})),
+          {true, true, true, true}));
+      std::optional<QualityReport> quality;
+      if (counts->quality && key.output_index == 0)
+        quality = take(QualityReport::measured_residual("direct-c1", 1, 0,
+                                                        phase.allocator));
+      outcomes.push_back({key,
+                          Result<ResultProgramPoll>(
+                              ResultPublication{take(builder.seal()), true}),
+                          std::move(quality)});
     }
-    if (mode == 1)
-      outcomes.pop_back();
-    if (mode == 2)
-      outcomes.back().key = outcomes.front().key;
-    if (mode == 3)
-      outcomes.back().key.output_index = 64;
-    return Answer(std::move(outcomes));
+    std::reverse(outcomes.begin(), outcomes.end());
+    return Result<ResourceVector<ResultJointOutcome>>(std::move(outcomes));
   }
 };
-OperationDefinition definition(std::shared_ptr<Counters> counts, int mode,
-                               unsigned count = 2) {
+OperationDefinition definition(const std::shared_ptr<Counts>& counts) {
   OperationDefinition op;
-  op.key = "test.joint";
-  op.traits.outputs.resize(count);
+  op.key = "test.distinct_result_outputs";
+  op.traits.outputs.clear();
+  for (unsigned i = 0; i < 64; ++i)
+    op.traits.outputs.push_back(multi_result::output(
+        "out" + std::to_string(i),
+        multi_result::schema(ElementType::Float64, {i + 1})));
   op.traits.joint_contract = 1;
   op.traits.joint_continuation_bytes = sizeof(Joint);
-  if (mode == 7) {
-    op.traits.input_count = 1;
-    op.traits.input_schema.resize(1);
-  }
-  for (unsigned i = 0; i < count; ++i) {
-    auto& output = op.traits.outputs[i];
-    output.key = "out" + std::to_string(i);
-    output.region_rule = OperationRegionRule::Dependency;
-    output.dependency_version = 1;
-    output.continuation_bytes = sizeof(Singleton);
-    output.maximum_dependency_stages = 3;
-    output.failure_delivery = FailureDelivery::PerAtomOutcome;
-    output.shape_rule = OperationShapeRule::Fixed;
-    output.fixed_output_shape = {i + 1};
-  }
-  op.start_dependency = [](const DependencyQuery&,
-                           const BufferAllocator& allocator) {
-    return DependencyContinuation::make<Singleton>(allocator);
+  op.traits.joint_workspace_bytes = 4096;
+  op.start_result = [](const auto&, const auto&) {
+    return Result<ResultContinuation>(
+        Status{ErrorCode::Internal, "unexpected singleton"});
   };
-  op.start_joint = [counts, mode](const auto&,
-                                  const BufferAllocator& allocator) {
-    return DependencyJointContinuation::make<Joint>(allocator, counts, mode);
+  op.start_result_joint = [counts](const auto&, const auto& allocator) {
+    ++counts->starts;
+    return ResultJointContinuation::make<Joint>(allocator, counts);
   };
   return op;
 }
-std::vector<DependencyRequest> requests(unsigned count = 2,
-                                        bool inputs = false) {
-  std::vector<DependencyRequest> result;
-  for (unsigned i = 0; i < count; ++i) {
-    DependencyRequest request;
-    request.snapshot_identity = "snapshot";
-    request.output_index = i;
-    request.outputs =
-        Footprint::from_regions({i + 1}, {Region({{i, 1}})}).take_value();
-    if (inputs)
-      request.inputs = {{{ElementType::Float64, {1}}, {}}};
-    result.push_back(std::move(request));
+int distinct_outputs(int cancelled, bool before_start, bool no_work = false,
+                     bool quality = false) {
+  ResourceLimits limits;
+  if (no_work)
+    limits.maximum_work = 100000;
+  ResourceBudget root(limits);
+  ResourceAllocationScope scope(root);
+  auto counts = std::make_shared<Counts>();
+  counts->quality = quality;
+  OperationRegistry registry;
+  check(registry.register_operation(definition(counts)));
+  check(registry.freeze());
+  auto outputs = take(infer_operation_outputs(
+      take(registry.find_traits("test.distinct_result_outputs")), {}, {}));
+  std::vector<ResultProgramMetadata> metadata;
+  metadata.reserve(64);
+  std::map<std::string, ParameterValue> parameters;
+  ResourceVector<ResultProgramQuery> queries;
+  queries.reserve(64);
+  std::array<std::string, 64> keys;
+  CancellationSource cancellation;
+  if (before_start)
+    cancellation.cancel();
+  for (unsigned i = 0; i < 64; ++i) {
+    metadata.push_back({{}, outputs[i]});
+    queries.emplace_back(metadata.back(), parameters);
+    auto& query = queries.back();
+    query.output_index = i;
+    keys[i] = "result-output-" + std::to_string(i);
+    query.semantic_key = keys[i];
+    query.snapshot_identity = "distinct-outputs";
+    query.tensor_outputs =
+        take(Footprint::from_regions({i + 1}, {Region({{i, 1}})}));
+    if (static_cast<int>(i) == cancelled)
+      query.cancellation = cancellation.token();
   }
-  return result;
-}
-int outcomes() {
-  for (int mode = 0; mode <= 6; ++mode) {
-    auto counts = std::make_shared<Counters>();
-    OperationRegistry registry;
-    PS_CHECK(registry.register_operation(definition(counts, mode)).ok());
-    auto started = registry.start_joint("test.joint", requests());
-    PS_CHECK(started.ok());
-    auto session = started.take_value();
-    auto polled = session->poll();
-    if (mode >= 1 && mode <= 4) {
-      PS_CHECK(!polled.ok());
-      PS_CHECK(polled.status().code == (mode == 4
-                                            ? ErrorCode::OperationFailed
-                                            : ErrorCode::InvalidArgument));
-    } else {
-      PS_CHECK(polled.ok() && polled.value().size() == 2);
-      for (const auto& event : polled.value()) {
-        if (mode >= 5 && event.key.output_index == 0) {
-          PS_CHECK(!event.outcome.ok());
-          continue;
+  for (unsigned malformed = 0; malformed < 3; ++malformed) {
+    auto changed = queries;
+    if (malformed == 0)
+      changed.back().output_index = 0;
+    else if (malformed == 1)
+      changed.back().snapshot_identity = "different";
+    else
+      changed.push_back(queries.back());
+    auto rejected = registry.start_result_joint("test.distinct_result_outputs",
+                                                changed, root);
+    PS_CHECK(!rejected.ok() && counts->starts == 0);
+  }
+  auto state = take(registry.start_result_joint("test.distinct_result_outputs",
+                                                queries, root));
+  if (!before_start && cancelled >= 0)
+    cancellation.cancel();
+  auto allocator = root.allocator();
+  auto work = [&](std::uint64_t n) { return root.consume({n}); };
+  ResultObjectInputs inputs;
+  ResourceVector<ResultIoReply> io;
+  ResourceVector<ResultProgramPhase> phases;
+  phases.reserve(64);
+  for (const auto& query : queries)
+    phases.push_back({query, inputs, io, allocator, root, work, {}});
+  ResourceVector<const ResultProgramPhase*> ready;
+  for (const auto& phase : phases)
+    ready.push_back(&phase);
+  if (no_work)
+    check(root.consume({limits.maximum_work - root.statistics().issued.work}));
+  auto response = state.poll({ready, allocator, work});
+  if (no_work) {
+    PS_CHECK(!response.ok() &&
+             response.status().code == ErrorCode::ResourceExhausted &&
+             counts->polls == 0 && counts->members == 0);
+  } else if (quality) {
+    PS_CHECK(!response.ok() &&
+             response.status().detail.origin == FailureOrigin::Protocol &&
+             counts->polls == 1);
+  } else {
+    PS_CHECK(response.ok() && response.value().size() == 64 &&
+             counts->polls == 1 &&
+             counts->members == (cancelled < 0 ? 64u : 63u));
+    std::array<bool, 64> seen{};
+    for (const auto& outcome : response.value()) {
+      const auto index = outcome.key.output_index;
+      PS_CHECK(index < 64 && !seen[index] &&
+               outcome.key.coordinate[0] == index);
+      seen[index] = true;
+      if (static_cast<int>(index) == cancelled) {
+        PS_CHECK(!outcome.outcome.ok() &&
+                 outcome.outcome.status().code == ErrorCode::Cancelled &&
+                 !outcome.quality);
+      } else {
+        PS_CHECK(outcome.outcome.ok());
+        const auto& result =
+            std::get<ResultPublication>(outcome.outcome.value()).result;
+        PS_CHECK(multi_result::number(result, {index}) == 10 + index);
+        if (index) {
+          double unavailable = 0;
+          PS_CHECK(!result
+                        .read_tensor(take(result.descriptor()), 0, {0},
+                                     &unavailable, 8)
+                        .ok());
         }
-        PS_CHECK(event.outcome.ok());
-        const auto& result = std::get<DependencyResult>(event.outcome.value());
-        double value = 0;
-        PS_CHECK(
-            result.value.read({event.key.output_index}, &value, sizeof(value))
-                .ok());
-        PS_CHECK(value == 10 + event.key.output_index);
-        PS_CHECK(result.certificate.has_value());
       }
     }
-    PS_CHECK(counts->starts == 1 && counts->polls == 1 &&
-             counts->destroys == 1);
-    PS_CHECK(!session->poll().ok());
+    auto repeated = state.poll({ready, allocator, work});
+    PS_CHECK(!repeated.ok() && counts->polls == 1);
   }
-  return 0;
-}
-int reads_and_lifecycle() {
-  auto counts = std::make_shared<Counters>();
-  OperationRegistry registry;
-  PS_CHECK(registry.register_operation(definition(counts, 7)).ok());
-  auto session =
-      registry.start_joint("test.joint", requests(2, true)).take_value();
-  auto needs = session->poll();
-  PS_CHECK(needs.ok() && needs.value().size() == 2);
-  for (unsigned id = 0; id < 2; ++id) {
-    PS_CHECK(session->pending_reads(AtomKey{id, 1, {id}}).value().size() >= 1);
-    auto input = Value::from_float64(20);
-    auto fragments = ValueFragments::create(
-        input.descriptor(), {}, Footprint::all({1}).take_value(), {input});
-    PS_CHECK(fragments.ok());
-    PS_CHECK(
-        session
-            ->supply(AtomKey{id, 1, {id}}, {fragments.take_value()}, "snapshot")
-            .ok());
-    auto result = session->poll();
-    PS_CHECK(result.ok() && result.value().size() == 1);
-    PS_CHECK(result.value()[0].key.output_index == id &&
-             result.value()[0].outcome.ok());
-  }
-  PS_CHECK(counts->polls == 3 && counts->destroys == 1);
-  auto failed =
-      registry.start_joint("test.joint", requests(2, true)).take_value();
-  PS_CHECK(failed->poll().ok());
-  PS_CHECK(!failed->supply(AtomKey{0, 1, {0}}, {}, "wrong").ok());
-  PS_CHECK(!failed->supply(AtomKey{1, 1, {1}}, {}, "wrong").ok());
-  PS_CHECK(counts->destroys == 2);
-  return 0;
-}
-int cancellation_and_limits() {
-  auto counts = std::make_shared<Counters>();
-  OperationRegistry registry;
-  PS_CHECK(registry.register_operation(definition(counts, 0, 64)).ok());
-  auto all = registry.start_joint("test.joint", requests(64)).take_value();
-  bool full_group_reentry_rejected = false;
-  counts->hook = [&] { full_group_reentry_rejected = !all->poll().ok(); };
-  auto complete = all->poll();
-  counts->hook = {};
-  PS_CHECK(complete.ok() && complete.value().size() == 64 &&
-           full_group_reentry_rejected);
-  for (const auto& member : complete.value())
-    PS_CHECK(member.outcome.ok());
-  for (unsigned cancelled : {0U, 31U, 63U}) {
-    auto query = requests(64);
-    CancellationSource cancellation;
-    query[cancelled].cancellation = cancellation.token();
-    auto session = registry.start_joint("test.joint", query).take_value();
-    cancellation.cancel();
-    auto result = session->poll();
-    PS_CHECK(result.ok() && result.value().size() == 64);
-    for (const auto& event : result.value())
-      PS_CHECK(event.outcome.ok() == (event.key.output_index != cancelled));
-  }
-  for (unsigned cancelled : {0U, 31U, 63U}) {
-    auto query = requests(64);
-    CancellationSource cancellation;
-    cancellation.cancel();
-    query[cancelled].cancellation = cancellation.token();
-    auto started = registry.start_joint("test.joint", query);
-    PS_CHECK(started.ok());
-    auto result = started.value()->poll();
-    PS_CHECK(result.ok() && result.value().size() == 64);
-    for (const auto& event : result.value())
-      PS_CHECK(event.outcome.ok() == (event.key.output_index != cancelled));
-  }
-  auto small = requests();
-  for (auto& member : small)
-    member.limits.maximum_state_bytes = 32;
-  auto rejected = registry.start_joint("test.joint", small);
-  PS_CHECK(!rejected.ok() &&
-           rejected.status().code == ErrorCode::ResourceExhausted);
-  auto query = requests();
-  query[1].output_index = 0;
-  PS_CHECK(!registry.start_joint("test.joint", query).ok());
-  query = requests();
-  query[1].snapshot_identity = "different";
-  PS_CHECK(!registry.start_joint("test.joint", query).ok());
-  query = requests();
-  for (auto& member : query)
-    member.limits.maximum_work = 2;
-  auto start_limited = registry.start_joint("test.joint", query);
-  PS_CHECK(!start_limited.ok() &&
-           start_limited.status().code == ErrorCode::ResourceExhausted);
-  // Construction admits observation metadata before polling. Cap the remaining
-  // poll fuel independently so this case still tests member failure delivery.
-  auto limited = registry.start_joint("test.joint", requests());
-  PS_CHECK(limited.ok());
-  const auto preparation_work = limited.value()->consumed_work();
-  auto result = limited.value()->poll(BufferAllocator{}, 0);
-  PS_CHECK(result.ok() && result.value().size() == 2);
-  for (const auto& event : result.value())
-    PS_CHECK(!event.outcome.ok() &&
-             event.outcome.status().code == ErrorCode::ResourceExhausted);
-  PS_CHECK(limited.value()->consumed_work() == preparation_work);
-  return 0;
-}
-int reentrant_calls() {
-  auto counts = std::make_shared<Counters>();
-  OperationRegistry registry;
-  PS_CHECK(registry.register_operation(definition(counts, 0)).ok());
-  auto session = registry.start_joint("test.joint", requests()).take_value();
-  bool poll_rejected = false, supply_rejected = false;
-  counts->hook = [&] {
-    poll_rejected = !session->poll().ok();
-    supply_rejected = !session->supply(AtomKey{0, 1, {0}}, {}, "snapshot").ok();
-  };
-  auto result = session->poll();
-  counts->hook = {};
-  PS_CHECK(result.ok() && poll_rejected && supply_rejected);
-  for (const auto& member : result.value())
-    PS_CHECK(member.outcome.ok());
-  return 0;
-}
-int host_input_failure() {
-  auto counts = std::make_shared<Counters>();
-  OperationRegistry registry;
-  PS_CHECK(registry.register_operation(definition(counts, 7)).ok());
-  auto session =
-      registry.start_joint("test.joint", requests(2, true)).take_value();
-  PS_CHECK(session->poll().ok());
-  PS_CHECK(session
-               ->fail_input(AtomKey{0, 1, {0}},
-                            Status{ErrorCode::OperationFailed, "upstream"})
-               .ok());
-  PS_CHECK(!session->pending_reads(AtomKey{0, 1, {0}}).ok());
-  auto input = Value::from_float64(20);
-  auto fragments =
-      ValueFragments::create(input.descriptor(), {},
-                             Footprint::all({1}).take_value(), {input})
-          .take_value();
-  PS_CHECK(session->supply(AtomKey{1, 1, {1}}, {fragments}, "snapshot").ok());
-  auto result = session->poll();
-  PS_CHECK(result.ok() && result.value().size() == 1 &&
-           result.value()[0].key.output_index == 1 &&
-           result.value()[0].outcome.ok());
-  PS_CHECK(counts->destroys == 1);
-  return 0;
-}
-int shared_work_limit() {
-  auto counts = std::make_shared<Counters>();
-  OperationRegistry registry;
-  PS_CHECK(registry.register_operation(definition(counts, 9)).ok());
-  auto session = registry.start_joint("test.joint", requests()).take_value();
-  auto result = session->poll();
-  PS_CHECK(!result.ok() &&
-           result.status().code == ErrorCode::ResourceExhausted);
-  PS_CHECK(counts->destroys == 1);
-  return 0;
-}
-int c_protocol() {
-  OperationRegistry registry;
-  PS_CHECK(registry.load_plugin(PS_DEPENDENCY_JOINT_FIXTURE).ok());
-  for (int mode = 0; mode <= 9; ++mode) {
-    auto query = requests();
-    for (auto& member : query)
-      member.parameters["mode"] = static_cast<std::int64_t>(mode);
-    auto started = registry.start_joint("test.c_joint", query);
-    if (mode == 8) {
-      PS_CHECK(!started.ok());
-      continue;
-    }
-    PS_CHECK(started.ok());
-    auto result = started.value()->poll();
-    if (mode == 9) {
-      PS_CHECK(!result.ok() &&
-               result.status().code == ErrorCode::ResourceExhausted);
-    } else if (mode >= 1 && mode <= 4) {
-      PS_CHECK(!result.ok());
-      PS_CHECK(result.status().code == (mode == 4
-                                            ? ErrorCode::OperationFailed
-                                            : ErrorCode::InvalidArgument));
-    } else {
-      PS_CHECK(result.ok() && result.value().size() == 2);
-      for (const auto& event : result.value())
-        PS_CHECK(event.outcome.ok() ==
-                 !(mode >= 5 && event.key.output_index == 0));
-    }
-  }
+  state = {};
+  PS_CHECK(counts->starts == 1 && counts->destroys == 1);
   return 0;
 }
 }  // namespace
-int main() {
-  PS_CHECK(host_input_failure() == 0);
-  PS_CHECK(shared_work_limit() == 0);
-  PS_CHECK(reentrant_calls() == 0);
-  PS_CHECK(c_protocol() == 0);
-  PS_CHECK(outcomes() == 0);
-  PS_CHECK(reads_and_lifecycle() == 0);
-  PS_CHECK(cancellation_and_limits() == 0);
+int main() try {
+  PS_CHECK(distinct_outputs(-1, false) == 0);
+  for (int cancelled : {0, 31, 63}) {
+    PS_CHECK(distinct_outputs(cancelled, false) == 0);
+    PS_CHECK(distinct_outputs(cancelled, true) == 0);
+  }
+  PS_CHECK(distinct_outputs(-1, false, true) == 0);
+  PS_CHECK(distinct_outputs(-1, false, false, true) == 0);
   return 0;
+} catch (const std::exception& error) {
+  std::cerr << error.what() << '\n';
+  return 1;
 }

@@ -1,6 +1,6 @@
 # 几何变换、重采样与液化
 
-2026-09-13 已实现：`image.stmap` 接受 canonical Float32 RGBA 与 generic Float64 HW2 像素坐标 map，提供 bilinear、五种显式边界和精确 data/control 读取；`image.split_horizontal` 提供命名多输出及偏移 Region。见[采样契约](../../kernel-architecture/Dependency-Sampling.md)、[多输出](../../kernel-architecture/Multi-Output-Operations.md)。下面 validity、其他核、map 生成/合成及液化仍为扩展需求。
+`image.stmap` 当前提供 CPU Result 路径：source 为 `photospider.image` v1/member `pixels`、batch axes `[F,L]`、Float32 cell shape `[Hs,Ws,4]`；map 为无 fields 的单 tensor Result，可使用任意结构有效的 schema/member key，Float64 cell shape `[Ho,Wo,2]`；batch 可为空以广播，也可与 source 相同。它输出同 frame/layer shape 的 canonical image Result，支持 bilinear 与 `constant`、`clamp`、`wrap`、`reflect`、`mirror` 五种显式边界。`numeric.radius_gather` 和 `numeric.radius_scatter` 当前接收 unbatched rank-one Float64 source Result 与 Int64 radius Result，输出 `photospider.tensor` v1/member `samples` Result；见[采样契约](../../kernel-architecture/Dependency-Sampling.md)。`image.split_horizontal` 提供命名多输出及偏移 Region。见[多输出](../../kernel-architecture/Multi-Output-Operations.md)。下面 validity、其他核、map 生成/合成及液化仍为扩展需求。
 
 状态Proposed。基础inverse sampler、affine与map合成为D1；非线性网格、逆解与高质量footprint为D2。向量场为Float32/64 `[Hout,Wout,2]`，不是颜色图像。默认像素边界坐标，中心 `(x+.5,y+.5)`；向量分量x,y，数组y,x,c。
 
@@ -55,7 +55,7 @@ Nuke官方STMap以归一化U/V表示绝对源位置，左下(0,0)、右上(1,1)�
 
 ## Region、资源与验收
 
-affine可映射矩形顶点后扩大filter footprint；homography须排除分母零点；任意非线性映射有内部极值、缝和跨面采样，只看四角不保证输入bbox保守。某tile指向全源图时真实需求可以很大。G4 已实现 STMap 按 map 值发现精确源 tap 的读取与 dirty 关系；更一般的 warp 仍须实现各自支持和校验逻辑。精确映射不保证读取区域小，也不自动生成其他 warp 算法。
+affine可映射矩形顶点后扩大filter footprint；homography须排除分母零点；任意非线性映射有内部极值、缝和跨面采样，只看四角不保证输入bbox保守。某tile指向全源图时真实需求可以很大。`image.stmap` 的 Result 实现按 map 值发现精确源 tap 的读取与 dirty 关系；G4 radius workflow 展示 Result 输入上的 radius 编辑、demand 替换和保留输出行为。更一般的 warp 仍须实现各自支持和校验逻辑。精确映射不保证读取区域小，也不自动生成其他 warp 算法。
 
 验收包括整数排列bit保持、identity map、已知点、map合成反例、bilinear解析2×2、常量保持、zero/negative scale、极点、odd尺寸、alpha边缘与zone plate缩小频谱。Whole/ROI/tile一致与前向dirty传播分别检查；局部编辑map不总意味着只读局部源。
 

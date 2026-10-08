@@ -8,6 +8,7 @@
 
 #include "data/color_array_exact.hpp"
 #include "data/input_validation.hpp"
+#include "data/typed_sample_validation.hpp"
 
 namespace ps {
 namespace {
@@ -328,74 +329,27 @@ Status validate_color_array_value(const ColorArrayDescriptor& s,
                                   const std::function<ErrorCode()>& stop) {
   if (!value.valid())
     return invalid("invalid color-array Value");
-  auto status = validate_color_array_descriptor(s, value.descriptor());
-  if (!status.ok())
-    return status;
-  const auto& dims = value.region().dimensions();
-  if (value.region().empty() || dims.back().offset != 0 ||
-      dims.back().extent != channels(s))
-    return Status::failure(ErrorCode::TypeMismatch,
-                           "color coverage omits complete tuple");
-  input_internal::Float32Environment environment;
-  if (!environment.active())
-    return Status::failure(ErrorCode::OperationFailed,
-                           "cannot set color numeric environment");
-  std::vector<std::uint64_t> index;
-  index.reserve(dims.size());
-  for (auto d : dims)
-    index.push_back(d.offset);
-  std::uint64_t visited = 0;
-  std::array<double, 4> color{};
-  for (;;) {
-    if ((visited++ & 1023U) == 0 && stop) {
-      const auto code = stop();
-      if (code != ErrorCode::Ok) {
-        Status result;
-        result.code = code;
-        return result;
-      }
-    }
-    auto address = value.byte_address(index);
+  const auto reader = [&](const auto& at) -> Result<double> {
+    auto address = value.byte_address(at);
     if (!address.ok())
-      return address.status();
-    double sample;
-    const auto* data = value.bytes().data() + address.value();
+      return Result<double>(address.status());
+    const auto* bytes = value.bytes().data() + address.value();
+    double sample = 0;
     if (value.descriptor().element_type == ElementType::Float32) {
       float narrow;
-      std::memcpy(&narrow, data, 4);
+      std::memcpy(&narrow, bytes, sizeof(narrow));
       sample = narrow;
+    } else if (value.descriptor().element_type == ElementType::Float64) {
+      std::memcpy(&sample, bytes, sizeof(sample));
     } else {
-      std::memcpy(&sample, data, 8);
+      int64_t integer;
+      std::memcpy(&integer, bytes, sizeof(integer));
+      sample = static_cast<double>(integer);
     }
-    bool valid = finite(sample);
-    const auto channel = index.back();
-    color[channel] = sample;
-    auto reason = FailureReason::InvalidDomain;
-    if (s.model == ColorModel::Cmyk)
-      valid = valid && sample >= 0 && sample <= 1;
-    if ((s.model == ColorModel::Cielch || s.model == ColorModel::Oklch) &&
-        channel == 1)
-      valid = valid && sample >= 0;
-    if (s.model == ColorModel::Rgb && channel == 3) {
-      valid = valid && sample >= 0 && sample <= 1;
-      if (valid && s.association == ColorAssociation::Premultiplied &&
-          sample == 0 && (color[0] != 0 || color[1] != 0 || color[2] != 0)) {
-        valid = false;
-        reason = FailureReason::InvalidAssociation;
-      }
-    }
-    if (!valid)
-      return {failure, "sample violates color-array domain", reason};
-    std::size_t axis = index.size();
-    while (axis) {
-      --axis;
-      if (++index[axis] < dims[axis].offset + dims[axis].extent)
-        break;
-      index[axis] = dims[axis].offset;
-    }
-    if (!axis && index[0] == dims[0].offset)
-      break;
-  }
-  return Status::success();
+    return Result<double>(sample);
+  };
+  return input_internal::validate_color_samples(
+      s, value.descriptor(), value.region(), reader, failure, stop);
 }
+
 }  // namespace ps

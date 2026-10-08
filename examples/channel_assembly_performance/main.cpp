@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/photospider.hpp"
+#include "channel_editing/benchmark.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -19,10 +19,6 @@ T checked(Result<T> value) {
   if (!value.ok())
     throw std::runtime_error(value.status().message);
   return value.take_value();
-}
-void checked(Status status) {
-  if (!status.ok())
-    throw std::runtime_error(status.message);
 }
 double elapsed(Clock::time_point at) {
   return std::chrono::duration<double, std::micro>(Clock::now() - at).count();
@@ -53,12 +49,12 @@ int main(int argc, char** argv) try {
   if (request == "roi" && size < 130)
     throw std::runtime_error("ROI requires size >= 130");
   auto registry = make_default_operation_registry();
+  ExecutionContext context(registry, channel_benchmark::config());
+  const auto root = checked(context.resource_budget());
   Compiler compiler(registry);
   WorkflowDocument document;
   ExecutionBindings bindings;
   std::vector<WorkflowInput> sources;
-  std::uint64_t source_backed = 0, source_metadata = 0, source_virtual = 0,
-                page = 0;
   auto setup = Clock::now();
   std::uint64_t next_channel = 0;
   const std::vector<unsigned> counts =
@@ -66,52 +62,33 @@ int main(int argc, char** argv) try {
       : member == "B" ? std::vector<unsigned>{3, 1}
                       : std::vector<unsigned>{4};
   for (const auto count : counts) {
-    PlanarImageConfig config;
-    config.order = storage == "tiled" ? ImagePlaneOrder::Tiled
+    ResultTensorLayout layout;
+    layout.spatial = true;
+    layout.order = storage == "tiled" ? ImagePlaneOrder::Tiled
                                       : ImagePlaneOrder::Continuous;
     if (member == "A")
-      config.channel_axis.reset();
-    config.maximum_backed_bytes = 1024ULL * 1024 * 1024;
+      layout.channel_axis.reset();
     ValueDescriptor descriptor{ElementType::Float32, {size, size}};
-    if (config.channel_axis)
+    if (layout.channel_axis)
       descriptor.shape.push_back(count);
-    auto image = checked(PlanarImage::create(descriptor, config));
-    std::vector<float> plane(size * size);
-    for (unsigned c = 0; c < count; ++c) {
-      for (std::uint64_t y = 0; y < size; ++y)
-        for (std::uint64_t x = 0; x < size; ++x)
-          plane[y * size + x] = sample(y, x, next_channel + c);
-      auto dims = Region::whole(descriptor.shape).dimensions();
-      if (config.channel_axis)
-        dims[2] = {c, 1};
-      checked(image.publish(Region(dims),
-                            reinterpret_cast<const std::uint8_t*>(plane.data()),
-                            plane.size() * sizeof(float)));
-    }
+    auto result = channel_benchmark::source(
+        root, descriptor, layout, [&](const auto& at) {
+          return sample(at[0], at[1],
+                        next_channel + (layout.channel_axis ? at[2] : 0));
+        });
     next_channel += count;
-    source_backed += image.backed_bytes();
-    source_metadata += image.metadata_bytes();
-    source_virtual += image.reserved_bytes();
-    page = image.page_size();
     const auto id = document.inputs.size() + 1;
     const auto name = "input" + std::to_string(id);
-    document.inputs.push_back(
-        {id,
-         name,
-         descriptor,
-         Region::whole(descriptor.shape),
-         {},
-         {},
-         PlanarImageLayout{config.order, 0, 1, config.channel_axis, 0, {}}});
-    ExecutionBinding binding;
-    binding.name = name;
-    binding.image = std::make_shared<const PlanarImage>(image);
-    bindings.inputs.push_back(std::move(binding));
+    WorkflowInputDeclaration declaration;
+    declaration.id = id;
+    declaration.name = name;
+    declaration.result_schema =
+        std::make_shared<const SchemaTemplate>(result.schema());
+    document.inputs.push_back(std::move(declaration));
+    bindings.inputs.push_back({name, std::move(result)});
     sources.push_back(WorkflowInputReference{id});
   }
-  std::cerr << "source_ready setup_us=" << elapsed(setup)
-            << " backed=" << source_backed << " metadata=" << source_metadata
-            << '\n';
+  std::cerr << "source_ready setup_us=" << elapsed(setup) << '\n';
   format::ChannelAssemblyOptions options;
   options.metadata_mode = "raw";
   options.layout = policy;
@@ -119,8 +96,7 @@ int main(int argc, char** argv) try {
   WorkflowNodeOutput output;
   if (member == "view") {
     OperationMetadata metadata;
-    metadata.descriptor = document.inputs[0].descriptor;
-    metadata.planar_layout = document.inputs[0].planar_layout;
+    metadata.result_schema = document.inputs[0].result_schema;
     format::ChannelExtractOptions extract;
     extract.axis = 2;
     extract.metadata_mode = "raw";
@@ -153,17 +129,18 @@ int main(int argc, char** argv) try {
   auto start = Clock::now();
   auto compiled = checked(compiler.compile(graph, planning));
   const auto compile_us = elapsed(start);
-  ExecutionContextConfig config;
-  config.cpu_workers = 1;
-  config.maximum_live_bytes = 2ULL * 1024 * 1024 * 1024;
-  ExecutionContext context(registry, config);
+  const auto baseline = root.statistics();
+  ExecutionOptions execution;
+  execution.maximum_dependency_work = 1000000000000ULL;
+  execution.dependencies.maximum_work = 1000000000000ULL;
   std::vector<double> times, core;
   double first = 0;
-  std::uint64_t backed = 0, virtual_bytes = 0, metadata = 0, peak = 0,
-                read_bytes = 0, copied = 0;
+  std::uint64_t payload = 0, metadata = 0, peak_payload = 0, peak_metadata = 0,
+                read_bytes = 0;
   for (unsigned repeat = 0; repeat < repetitions + 2; ++repeat) {
     start = Clock::now();
-    auto result = checked(context.execute(compiled.plan, bindings));
+    auto result =
+        checked(context.execute(compiled.plan, bindings, {}, execution));
     const auto us = elapsed(start);
     if (repeat == 0)
       first = us;
@@ -174,15 +151,18 @@ int main(int argc, char** argv) try {
       times.push_back(us);
       core.push_back(operation_us);
     }
-    const auto& image = result.images.at("result");
-    backed = image.backed_bytes();
-    virtual_bytes = image.reserved_bytes();
-    metadata = image.metadata_bytes();
-    peak = std::max(peak, result.diagnostics.peak_live_bytes);
-    read_bytes = result.diagnostics.source_read_bytes;
-    copied = result.diagnostics.result_copy_bytes;
+    const auto& image = result.results.at("result");
+    const auto statistics = root.statistics();
+    payload = channel_benchmark::extra(statistics.live[ResourceKind::Payload],
+                                       baseline.live[ResourceKind::Payload]);
+    metadata = channel_benchmark::extra(statistics.live[ResourceKind::Metadata],
+                                        baseline.live[ResourceKind::Metadata]);
+    peak_payload = statistics.peak[ResourceKind::Payload];
+    peak_metadata = statistics.peak[ResourceKind::Metadata];
+    read_bytes = channel_benchmark::logical_bytes(result, bindings);
     if (repeat == 0) {
-      auto window = checked(image.acquire(roi));
+      auto window =
+          checked(image.acquire_tensor(checked(image.descriptor()), 0, roi));
       const auto yr = roi.dimensions()[0], xr = roi.dimensions()[1],
                  cr = roi.dimensions()[2];
       for (auto c = cr.offset; c < cr.offset + cr.extent; ++c)
@@ -195,8 +175,10 @@ int main(int argc, char** argv) try {
                                                             : c == 3 ? 3
                                                                      : 2)
                                                          : c);
-              if (std::memcmp(row.data + j * sizeof(float), &expected,
-                              sizeof(float)))
+              if (std::memcmp(row.data + static_cast<std::ptrdiff_t>(
+                                             static_cast<__int128>(j) *
+                                             row.sample_stride_bytes),
+                              &expected, sizeof(float)))
                 throw std::runtime_error("independent byte oracle mismatch");
             }
             x += row.samples;
@@ -206,17 +188,17 @@ int main(int argc, char** argv) try {
   std::cout
       << "size,dtype,member,storage,request,layout,profile,repetitions,compile_"
          "us,"
-         "first_us,p50_us,p95_us,core_p50_us,source_bytes,copied_bytes,source_"
-         "backed,source_metadata,source_virtual,output_backed,output_metadata,"
-         "output_virtual,peak_live_bytes,page_bytes\n";
+         "first_us,p50_us,p95_us,core_p50_us,source_logical_bytes,source_"
+         "payload_bytes,"
+         "source_metadata_bytes,run_live_payload_bytes,run_live_metadata_bytes,"
+         "root_peak_payload_bytes,root_peak_metadata_bytes\n";
   std::cout << size << ",fp32," << member << ',' << storage << ',' << request
             << ',' << policy << ',' << profile << ',' << repetitions << ','
             << compile_us << ',' << first << ',' << percentile(times, .5) << ','
             << percentile(times, .95) << ',' << percentile(core, .5) << ','
-            << read_bytes << ',' << copied << ',' << source_backed << ','
-            << source_metadata << ',' << source_virtual << ',' << backed << ','
-            << metadata << ',' << virtual_bytes << ',' << peak << ',' << page
-            << '\n';
+            << read_bytes << ',' << baseline.live[ResourceKind::Payload] << ','
+            << baseline.live[ResourceKind::Metadata] << ',' << payload << ','
+            << metadata << ',' << peak_payload << ',' << peak_metadata << '\n';
   std::cerr << "samples_us";
   for (auto t : times)
     std::cerr << ' ' << t;

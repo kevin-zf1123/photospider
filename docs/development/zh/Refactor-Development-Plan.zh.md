@@ -24,7 +24,7 @@
 | --- | --- | --- |
 | 调整前的 ADR 0016 候选稿使用固定标量源文档参数及 UInt8 张量测试场景。 | 将每次运行的普通数值输入与静态形状、halo、特化事实分开；使用像素发生变化且数值绑定也发生变化的图像测试场景。 | 接受其公开 API 前修订 #256。#257 实现；#258 交付算子示例。 |
 | PreserveFirstInput 检查第一个描述符；MatchAllInputs 要求每个输入描述符匹配。Elementwise/Halo 要求每个输入形状匹配输出。 | rank-3（秩为3）的 RGBA 图像和 rank-1（秩为1）的标量无法原样使用现有 Elementwise/Halo 路径。冻结明确的逐端口描述符、标量和需求语义。 | #256 必须在报告绑定单独满足新的 S1 测试场景前处理此项。 |
-| Value 和 C 算子/provider 词汇只包含 UInt8、Int64、Float64。当前 C ABI 验证精确的结构大小和封闭枚举。 | Float32=4 需要 Value、加载器、语义特征、调用、输出、provider 的处理，以及声明旧插件策略。仅 C 结构布局相同不足以证明语义兼容。 | #256 作出版本与消费者决策；#257 完成精确实现。 |
+| Operation plugin 使用 standalone Result C ABI 2；旧 Base C operation table 已移除。Data-provider C ABI 仍独立版本化。 | C++ Value API 与 C plugin 契约分开；Result module 必须使用当前精确 table layout。 | 不提供 Base C 兼容 shim；明确保留 provider ABI 与 C++ Value 边界。 |
 | S1 草案要求完整连续 CPU 存储；当前回调返回完整 Value。 | 将其保留为 S1 支持范围。后续区域/Storage 工作必须明确替换相关契约，不作永久的所有存储均为 CPU vector 承诺。 | S2 决策与实现，不自动成为 S1 通用分配器。 |
 | 规划输出 Region 进入规范化的物理需求身份。 | Region 变化可以重新规划现有优化后的 IR；普通数值和像素变化复用计划。 | 保留当前阶段分离。执行时 ROI 是独立选择，不成为重新分析未改变语义图的理由。 |
 | Cache-Model 暴露 PlanCacheKey，且没有缓存服务。#203 排除保留的执行 Value 和持久化。 | 分别增加结果缓存和区域失效工作；编译片段复用不能完成该能力。 | S3-A 与 S3-C 在各自决策后进行。 |
@@ -33,7 +33,7 @@
 | GPU 当前表示带有 Run 内的主机字节复制的可选回调通道。 | 必须在真实硬件上交付并验证原生缓冲区/图像、完成事件、跨运行所有者和预算。 | S4。回调的后端标签不等同于原生 GPU 驻留。 |
 | CMake 的公开使用要求和已安装消费者明确要求 cxx_std_17。 | 作为明确的工具链/软件包任务评估 C++20，包括传递性的使用要求和 C/C++ 消费者。 | 有界的 S1 候选任务；本轮规划不改变语言标准。 |
 
-证据入口：`include/photospider/plugin/operation_registry.hpp`、`src/lib/compiler/compiler.cpp`（`infer_output_descriptor`、`derive_input_demand`）、`include/photospider/plugin/operation_plugin_api.h`、`src/lib/plugin/data_definition_registry.cpp`、`CMakeLists.txt`、`tests/consumer/CMakeLists.txt`、[Cache Model](../../kernel-architecture/zh/Cache-Model.zh.md)、[Region Semantics](../../kernel-architecture/zh/Region-Semantics.zh.md)、[ADR 0012](../../adr/zh/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md) 和 [ADR 0015](../../adr/zh/0015-breaking-product-boundary-scope-reset.zh.md)。
+证据入口：`include/photospider/plugin/operation_registry.hpp`、`src/lib/compiler/compiler.cpp`（`infer_output_descriptor`、`derive_input_demand`）、`include/photospider/plugin/result_operation_plugin_api.h`、`src/lib/plugin/data_definition_registry.cpp`、`CMakeLists.txt`、`tests/consumer/CMakeLists.txt`、[Cache Model](../../kernel-architecture/zh/Cache-Model.zh.md)、[Region Semantics](../../kernel-architecture/zh/Region-Semantics.zh.md)、[ADR 0012](../../adr/zh/0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md) 和 [ADR 0015](../../adr/zh/0015-breaking-product-boundary-scope-reset.zh.md)。
 
 ## 阶段验收与顺序
 

@@ -9,15 +9,15 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+verification_status: focused_result_validation_passed
+repository_commit: current working tree
 ---
 
 # CRV-06F: OKLCh ramps
+
+Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ramp.md#result-tensor-ports): each is a Result with exactly one tensor member and no fields, under any structurally valid schema id/version/member key. Shape checks use complete `sample_shape()` values, including batch axes.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -43,14 +43,15 @@ normalized CIELAB l/C* with OKLab L/C and configurable white with fixed D65.
 The shared lightness revision does not rescale OKLab coordinates. Specifically:
 
 - Floating radian/pi inputs use colors[K,3]; rational input uses
-  lightness_chroma[K,2] and Int64 numerator/denominator arrays, q>0.
+  lightness_chroma[K,2] and Int64 numerator/denominator arrays. Selected rows
+  require q>0; unused generic q<=0 rows add no mathematical-domain check.
 - Output dtype defaults to colors or lightness_chroma dtype. Output hue unit
   defaults to radian for radian input and pi_multiple for the other two inputs.
 - Hue is the original unnormalized value. Interpolate its raw difference,
   retaining multiple turns. There is no hue_path or normalization parameter.
 - C=0 never discards hue. Unit conversion and interpolation are performed as
   one mathematical formula with final correct rounding; all versions match bits.
-- All inputs are collected under Whole; selected complete rows define the mathematics.
+- Whole requests validate all Result inputs; authorized tensor windows supply selected complete rows for the mathematics.
   Any channel request observes the full color, including rational numerator and
   denominator, and carries an output OKLCh/D65/hue-unit description.
 
@@ -73,13 +74,5 @@ with the OKLCh description. The maintained public workflow and current execution
 - [OKLab counterpart](CRV-06E_color_ramp_oklab.md).
 
 ## Maintained implementation and validation
-
-This shared OKLCh contract covers three primitives and nine profile keys.
-The public helpers are `color_ramp_oklch_node`,
-`color_ramp_oklch_pi_node` and `color_ramp_oklch_rational_pi_node` in
-[`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp).
-Coordinates and original hue ratios use exact rational interpolation;
-conversion between radian and pi units uses certified pi, with a 4096-bit
-precision ceiling. Equal units cancel symbolically. Every profile returns
-strict bits. See the [family implementation](CRV-06_color_ramp.md#maintained-implementation-and-validation)
-and [public workflows](../../../../examples/numeric_workflow/README.md#color-ramps).
+The public helpers `color_ramp_oklch_node`, `color_ramp_oklch_pi_node` and `color_ramp_oklch_rational_pi_node` are declared in [`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp); `color_ramps.cpp` implements their Whole Result programs. Coordinate values and original hue ratios use exact rational interpolation. Cross-unit conversion in either direction multiplies or divides by certified pi, with a 4096-bit precision ceiling; same-unit RationalPi expressions cancel pi symbolically.
+The focused Result CTest, Strict/Apple manual groups, independent Fraction/Machin-pi and RGB rational/root/Decimal oracles, and installed consumer have passed. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation) and [workflow README](../../../../examples/numeric_workflow/README.md#color-ramps) for coverage and unsupported platforms/shapes.

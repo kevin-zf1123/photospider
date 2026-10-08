@@ -288,11 +288,14 @@ using plugin_internal::alpha_ops::referenced_elsewhere;
 using plugin_internal::alpha_ops::remap_description;
 using plugin_internal::alpha_ops::source_assertion;
 using plugin_internal::alpha_ops::source_parameters;
+using plugin_internal::alpha_ops::tensor;
 Result<WorkflowNodeOutput> associate_alpha(WorkflowDocument& d,
                                            WorkflowInput input,
                                            const AlphaAssociationOptions& o,
                                            std::optional<WorkflowInput> a) try {
   return associate(d, std::move(input), o, a, false);
+} catch (const Status& status) {
+  return Answer(status);
 } catch (const std::bad_alloc&) {
   return Result<WorkflowNodeOutput>(Status{
       ErrorCode::ResourceExhausted, "alpha authoring allocation failed"});
@@ -301,6 +304,8 @@ Result<WorkflowNodeOutput> unassociate_alpha(
     WorkflowDocument& d, WorkflowInput input, const AlphaAssociationOptions& o,
     std::optional<WorkflowInput> a) try {
   return associate(d, std::move(input), o, a, true);
+} catch (const Status& status) {
+  return Answer(status);
 } catch (const std::bad_alloc&) {
   return Result<WorkflowNodeOutput>(Status{
       ErrorCode::ResourceExhausted, "alpha authoring allocation failed"});
@@ -332,6 +337,8 @@ Result<WorkflowNodeOutput> set_alpha(WorkflowDocument& d, WorkflowInput input,
     p["output_axis"] = static_cast<std::int64_t>(*o.output_axis);
   }
   return append(d, std::move(input), a, "alpha.set_" + o.profile, std::move(p));
+} catch (const Status& status) {
+  return Answer(status);
 } catch (const std::bad_alloc&) {
   return Answer(Status{ErrorCode::ResourceExhausted,
                        "alpha authoring allocation failed"});
@@ -346,6 +353,7 @@ Result<WorkflowNodeOutput> extract_alpha(WorkflowDocument& document,
     return Answer(source.status());
   }
   const auto& s = source.value();
+  const auto& input_spec = tensor(metadata);
   if (o.missing_alpha != "error" && o.missing_alpha != "opaque") {
     return Answer(invalid("unknown missing_alpha policy"));
   }
@@ -360,17 +368,17 @@ Result<WorkflowNodeOutput> extract_alpha(WorkflowDocument& document,
     probe.component = TensorChannelDescription{"alpha", "alpha", "coverage"};
     probe.component->encoding = *o.alpha_encoding;
     auto status = validate_tensor_description(
-        probe, {metadata.descriptor.element_type, {1}});
+        probe, {input_spec.descriptor.element_type, {1}});
     if (!status.ok()) {
       return Answer(status);
     }
   }
-  if (s.axis && !o.keepdims && metadata.descriptor.shape.size() == 1) {
+  if (s.axis && !o.keepdims && input_spec.descriptor.shape.size() == 1) {
     return Answer(invalid("rank-one alpha extraction requires keepdims=true"));
   }
-  auto target = alpha_description(s, metadata.descriptor.element_type,
+  auto target = alpha_description(s, input_spec.descriptor.element_type,
                                   o.keepdims, o.alpha_encoding);
-  auto descriptor = metadata.descriptor;
+  auto descriptor = input_spec.descriptor;
   if (s.axis) {
     if (o.keepdims) {
       descriptor.shape[*s.axis] = 1;
@@ -411,7 +419,7 @@ Result<WorkflowNodeOutput> extract_alpha(WorkflowDocument& document,
   } else {
     const auto& encoding = s.axis && o.keepdims ? *target.channels[0].encoding
                                                 : *target.component->encoding;
-    auto bits = opaque_bits(metadata.descriptor.element_type, encoding);
+    auto bits = opaque_bits(input_spec.descriptor.element_type, encoding);
     if (!bits.ok()) {
       return Answer(bits.status());
     }
@@ -424,6 +432,8 @@ Result<WorkflowNodeOutput> extract_alpha(WorkflowDocument& document,
     key = "channel.literal_like_" + o.profile;
   }
   return append(document, std::move(input), {}, key, std::move(p));
+} catch (const Status& status) {
+  return Answer(status);
 } catch (const std::bad_alloc&) {
   return Answer(Status{ErrorCode::ResourceExhausted,
                        "alpha extraction authoring allocation failed"});
@@ -438,6 +448,7 @@ Result<WorkflowNodeOutput> remove_alpha(WorkflowDocument& document,
     return Answer(source.status());
   }
   const auto& s = source.value();
+  const auto& input_spec = tensor(metadata);
   if (o.missing_alpha != "error" && o.missing_alpha != "identity") {
     return Answer(invalid("unknown missing_alpha policy"));
   }
@@ -463,7 +474,7 @@ Result<WorkflowNodeOutput> remove_alpha(WorkflowDocument& document,
   const bool erase = s.group.alpha && !referenced_elsewhere(s, *s.group.alpha);
   std::vector<std::int64_t> indices;
   std::vector<ChannelMapping> rows;
-  for (std::uint64_t c = 0; c < metadata.descriptor.shape[*s.axis]; ++c) {
+  for (std::uint64_t c = 0; c < input_spec.descriptor.shape[*s.axis]; ++c) {
     if (erase && c == *s.group.alpha) {
       continue;
     }
@@ -489,7 +500,8 @@ Result<WorkflowNodeOutput> remove_alpha(WorkflowDocument& document,
   }
   auto& p = staged.nodes.back().parameters;
   p["output_description_complete"] = true;
-  p["expected_inputs"] = source_assertion({metadata});
+  p["expected_inputs"] =
+      plugin_internal::format_result::assembly_source_assertion({metadata});
   p["authoring_member"] = std::string("FMT-05C");
   auto checked = plugin_internal::prepare_alpha_channel_mapping(
       {metadata}, p, profile_kind(o.profile));
@@ -498,6 +510,8 @@ Result<WorkflowNodeOutput> remove_alpha(WorkflowDocument& document,
   }
   document = std::move(staged);
   return node;
+} catch (const Status& status) {
+  return Answer(status);
 } catch (const std::bad_alloc&) {
   return Answer(Status{ErrorCode::ResourceExhausted,
                        "alpha removal authoring allocation failed"});

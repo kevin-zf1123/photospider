@@ -10,10 +10,10 @@
 #include "photospider/format/channel.hpp"
 
 namespace ps::format {
-/** @brief Closed typed values for the registered tensor-description-v4/v5
- * schema. Strings never acquire resources or certify samples. Profile
- * identities must resolve in the ResourceBindings supplied to
- * Compiler/ExecutionContext.
+/** @brief Closed typed values accepted by the tensor-description-v4/v5
+ * metadata editor. Strings remain data: they do not load resources or certify
+ * sample values. Profile and configuration identities must resolve through
+ * ResourceBindings during compilation and execution.
  */
 // NOLINTBEGIN(whitespace/indent_namespace)
 using MetadataValue = std::variant<
@@ -26,20 +26,28 @@ using MetadataValue = std::variant<
     std::vector<TensorAxisDescription>, std::vector<TensorColorGroup>,
     ValueFacet>;
 // NOLINTEND
-/** @brief Atomic subtree replacement. Paths start with /semantic or
- * /annotations/<facet-key>. Segments escape '~' as ~0 and '/' as ~1.
- * Channel entries accept index:N, name:TEXT or role:TEXT selectors resolved
- * against the original source. Groups use their exact unique name; axes use
- * canonical decimal indices. See the metadata operation guide for leaf paths.
+/** @brief One typed metadata assignment.
+ *
+ * A path begins with `/semantic` or `/annotations/<facet-key>`. Escape `~` as
+ * `~0` and `/` as `~1` within a segment. Channel entries accept `index:N`,
+ * `name:TEXT` or `role:TEXT`, resolved against the original source; group names
+ * must be exact and unique, and axis indices use canonical decimal notation.
+ * Setting a subtree replaces it atomically. See the metadata operation guide
+ * for the registered leaf paths and value types.
  */
 struct MetadataSet final {
   std::string path;
   MetadataValue value;
 };
-/** @brief Static FMT-08 edit transaction. Defaults are explicit in generated
- * nodes. Replace requires description (possibly empty); patch forbids it.
- * Replace permits only annotation set/remove entries. Cascade can delete only
- * affected old dependent descriptions and must preserve all explicit sets.
+/** @brief Static FMT-08 edit options copied into the generated workflow node.
+ *
+ * `mode` is `patch` or `replace`; replace requires `description` (possibly
+ * empty), while patch forbids it. Replace edits may target annotations only.
+ * `dependencies` is `error` or `cascade`; cascade removes affected prior
+ * descriptions but preserves explicit assignments. `missing` is `error` or
+ * `ignore` and applies only to absent deletion targets. `layout` is `auto`,
+ * `view` or `materialize`. `profile` selects `strict`,
+ * `accelerated_apple_silicon` or `accelerated_x86_64`.
  */
 struct MetadataOptions final {
   std::string mode = "patch";
@@ -51,21 +59,49 @@ struct MetadataOptions final {
   std::string layout = "auto";
   std::string profile = "strict";
 };
-/** @brief Append native FMT-08A without reading samples. Validates static
- * syntax/types/options and stages the entire node before append; malformed
- * edits return InvalidArgument and allocation failures ResourceExhausted with
- * the graph unchanged. Source-relative selectors and target structure are
- * validated at compile time. Input/returned edges belong to document; callers
- * serialize document writes. Immutable execution is thread-safe, preserves
- * exact bits/coverage and resource ownership, and disables sample-only caches.
- * Strict and named CPU profiles have identical metadata and byte semantics.
+/** @brief Append a Result-based FMT-08A metadata edit node to `document`.
+ *
+ * The source must be a Result schema with one tensor member and no fields. The
+ * helper validates typed edit syntax and options and appends transactionally;
+ * a failure leaves `document` unchanged. An internal optional canonical-source
+ * assertion can constrain the schema; this helper does not set it. Compilation
+ * resolves selectors, validates the complete target description and required
+ * resource identities, without reading sample values. Published views retain
+ * source backing and resource owners; materialized Results own copied backing.
+ * The Result operation preserves tensor structure and sample bits, requests
+ * Data plus Descriptor support, has no Validation or Control role, and disables
+ * result caching. An empty output
+ * request publishes an empty Result without requesting payload. `auto` uses a
+ * legal Result view and copies only when that view is unavailable; `view`
+ * reports `ViewUnavailable`; `materialize` copies requested samples with
+ * cancellation checks at most every 256 samples. Named CPU profiles preserve
+ * the same metadata and byte semantics.
+ *
+ * Calls that mutate the same `document` must be serialized by the caller.
+ * Compiled immutable workflows can execute concurrently.
+ *
+ * @param document Workflow to extend; unchanged if authoring fails.
+ * @param input Existing Result input edge.
+ * @param options Static metadata edits and execution policy.
+ * @return The new node's `values` output edge, or an error such as
+ *         `InvalidArgument` or `ResourceExhausted`.
  */
 PHOTOSPIDER_API Result<WorkflowNodeOutput> assign_metadata(
     WorkflowDocument& document, WorkflowInput input,
     const MetadataOptions& options = {});
-/** @brief FMT-08B deletion-only transactional lowering to FMT-08A. Options must
- * remain patch with no set/description/remove entries; targets supply remove.
- * Other failure, ownership, concurrency and execution rules match A.
+/** @brief Lower a deletion-only metadata edit to the Result-based FMT-08A node.
+ *
+ * `options` must remain in patch mode with empty `set`, `description` and
+ * `remove`; `targets` supplies the deletion paths. The helper has the same
+ * source schema requirement, transaction behavior and execution semantics as
+ * assign_metadata.
+ *
+ * @param document Workflow to extend; unchanged if authoring fails.
+ * @param input Existing Result input edge.
+ * @param targets Static paths to remove.
+ * @param options Shared dependency, missing, layout and CPU profile policy.
+ * @return The lowered node's `values` edge, or an error such as
+ *         `InvalidArgument` or `ResourceExhausted`.
  */
 PHOTOSPIDER_API Result<WorkflowNodeOutput> remove_metadata(
     WorkflowDocument& document, WorkflowInput input,

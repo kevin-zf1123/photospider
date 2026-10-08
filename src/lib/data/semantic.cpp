@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "data/input_validation.hpp"
+#include "data/typed_sample_validation.hpp"
 #include "plugin/utf8_validation.hpp"
 
 namespace ps {
@@ -458,78 +459,27 @@ Status validate_semantic_value(const SemanticDescriptor& s, const Value& value,
                                const std::function<ErrorCode()>& stop) {
   if (!value.valid())
     return invalid("invalid semantic Value");
-  // Float32-to-Float64 conversion can flush subnormals on the caller's thread.
-  // Validate exact stored samples under the same environment as image ports.
-  input_internal::Float32Environment environment;
-  if (!environment.active())
-    return Status::failure(ErrorCode::OperationFailed,
-                           "cannot set typed sample numeric environment");
-  auto status = validate_semantic_descriptor(s, value.descriptor());
-  if (!status.ok())
-    return status;
-  if (value.region().empty())
-    return Status::failure(ErrorCode::TypeMismatch, "empty typed coverage");
-  if (s.kind == SemanticKind::ByteResource)
-    return Status::success();
-  const auto& dims = value.region().dimensions();
-  const bool image = s.kind == SemanticKind::Image;
-  if (image && (dims[2].offset != 0 || dims[2].extent != s.channels.size()))
-    return Status::failure(ErrorCode::TypeMismatch,
-                           "image coverage omits channels");
-  std::vector<std::uint64_t> index;
-  for (auto d : dims)
-    index.push_back(d.offset);
-  std::uint64_t visited = 0;
-  double color[3] = {};
-  for (;;) {
-    if ((visited++ & 1023U) == 0 && stop) {
-      const auto code = stop();
-      if (code != ErrorCode::Ok) {
-        Status result;
-        result.code = code;
-        return result;
-      }
-    }
-    auto address = value.byte_address(index);
+  const auto reader = [&](const auto& at) -> Result<double> {
+    auto address = value.byte_address(at);
     if (!address.ok())
-      return address.status();
+      return Result<double>(address.status());
+    const auto* bytes = value.bytes().data() + address.value();
     double sample = 0;
-    const auto* data = value.bytes().data() + address.value();
     if (value.descriptor().element_type == ElementType::Float32) {
-      float x;
-      std::memcpy(&x, data, 4);
-      sample = x;
+      float narrow;
+      std::memcpy(&narrow, bytes, sizeof(narrow));
+      sample = narrow;
     } else if (value.descriptor().element_type == ElementType::Float64) {
-      std::memcpy(&sample, data, 8);
+      std::memcpy(&sample, bytes, sizeof(sample));
     } else {
-      std::int64_t x;
-      std::memcpy(&x, data, 8);
-      sample = static_cast<double>(x);
+      int64_t integer;
+      std::memcpy(&integer, bytes, sizeof(integer));
+      sample = static_cast<double>(integer);
     }
-    bool valid = std::isfinite(sample);
-    if (s.kind == SemanticKind::Mask)
-      valid = valid && sample >= 0 && sample <= 1;
-    if (image) {
-      const auto c = index[2];
-      if (c < 3)
-        color[c] = sample;
-      else
-        valid = valid && sample >= 0 && sample <= 1 &&
-                (s.association != "coverage_premultiplied" || sample != 0 ||
-                 (color[0] == 0 && color[1] == 0 && color[2] == 0));
-    }
-    if (!valid)
-      return Status::failure(failure, "sample violates typed semantic domain");
-    std::size_t axis = index.size();
-    while (axis) {
-      --axis;
-      if (++index[axis] < dims[axis].offset + dims[axis].extent)
-        break;
-      index[axis] = dims[axis].offset;
-    }
-    if (axis == 0 && index[0] == dims[0].offset)
-      break;
-  }
-  return Status::success();
+    return Result<double>(sample);
+  };
+  return input_internal::validate_semantic_samples(
+      s, value.descriptor(), value.region(), 0, reader, failure, stop);
 }
+
 }  // namespace ps

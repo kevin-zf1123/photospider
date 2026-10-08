@@ -12,15 +12,17 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+verification_status: focused_result_validation_passed
+repository_commit: current working tree
 ---
 
 # CRV-11E5: lowpass_uniform_gaussian
+
+The dynamic inputs inherit the [family Result tensor-port contract](CRV-11_uniform_lowpass_contract.md): each port is a Result with exactly one tensor member and no fields under any structurally valid schema id/version/member key. Shapes use complete `sample_shape()` values, including batch axes.
+
+
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -31,8 +33,7 @@ values remain exact.
 ## Interface and kernel
 
 The [uniform low-pass contract](CRV-11_uniform_lowpass_contract.md) is normative.
-Dynamic input is input, Float32/Float64 rank 1..8, positive extents/count <=2^40.
-Named values preserves shape/dtype with generic facets. Static axis selects the
+Dynamic `input` is a single-tensor Result; use its full `sample_shape()` (rank 1..8, positive extents/count <=2^40) and Float32/Float64 dtype. Output port `values` is a `photospider.tensor` v1/member `samples` Result preserving shape/dtype with generic facets. Static axis selects the
 filtered dimension; integer radius=1..4096 sets symmetric support -R..R.
 boundary is reflect/replicate/zero/wrap, default non-endpoint-repeating reflect.
 Required kernel-specific static Float64 parameters are sigma.
@@ -50,16 +51,18 @@ Finite constants retain bits when all contributing extended samples match.
 Follow the shared IEEE NaN/Inf ordering and skip only mathematical zero taps.
 Do not drop underflowed approximate coefficients from logical dependencies.
 
-All three formal profile keys use Whole. Nonempty requests collect the complete
-input and compute one dense output of the same shape/dtype. Any input edit
-invalidates all outputs; full typed/upstream validation can fail outside delivered
-Q. Mathematical tap selection, boundary mapping, NaN/Inf order and zero signs
-remain unchanged. Zero taps remain unused numerical operands. Empty reads nothing.
-For total N elements work is O(N*(2R+1)) plus certified arithmetic, and output
-storage is N*sizeof(dtype), alongside complete collected input and bounded
-coefficient/tap workspace. Failure/cancellation publishes no partial output and
-releases temporaries. Inherit legal strides, owned output, cache-off and managed
-work/capacity checks from the shared contract.
+All three formal keys use Whole Result programs. Nonempty requests declare Data,
+Validation and Descriptor needs (role 13) for the complete input member. Typed and
+upstream validation covers the full tensor; authorized windows feed the callback
+directly without collecting or copying full input. Whole computes all outputs.
+Input changes invalidate complete recorded output demand; empty demand reads no
+payload after static preflight. The Result writer publishes the complete same-
+shape/dtype output in one transaction, with full coverage and global coordinates.
+The Root accounts source windows, the full N*sizeof(dtype) output, and bounded
+coefficient/tap workspace. Legal strides remain supported; the output owner
+survives context teardown. Failure or cancellation publishes no partial output
+and releases temporary state. The shared contract defines the unchanged
+mathematical tap selection, boundary mapping, NaN/Inf order and zero signs.
 
 ## Acceptance and implementation status
 
@@ -85,6 +88,4 @@ whole-sum evaluation, with Whole fallback counters unavailable. Support and spec
 shortcuts remain exact.
 Certified precision is bounded to 128..4096 bits; unresolved
 capacity or rounding may return `ResourceExhausted`. See the [shared workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
-and [CRV-11 umbrella](CRV-11_resample_signal.md). Native Clang21 Strict/Apple validation for the Whole revision is recorded in
-that workflow and the math implementation notes. WSL/AVX2 and installed-package
-consumers have not been rerun. Whole numerical/fallback counters are N/A.
+and [CRV-11 umbrella](CRV-11_resample_signal.md). The focused Result CTest, Strict/Apple manual workflows, independent Result oracles and installed consumer pass. Historical performance measurements are from the earlier Value implementation; no Result performance or x86 numerical execution was run. See the shared workflow for exact coverage and commands.

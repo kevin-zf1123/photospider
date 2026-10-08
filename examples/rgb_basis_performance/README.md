@@ -1,4 +1,81 @@
-# FMT-10 性能与正确性门禁示例
+# FMT-10 Result 性能 smoke 与历史 Value/planar 数据
+
+FMT-10 A/B/C 当前以 Result ABI 2 注册，D 使用公共 authoring helper 展开为
+A→可选 C→B。性能驱动已迁移到公共 Result API。旧参数说明、计时字段、算法
+对照和测量记录保留在下方“历史 Value/planar 记录”中；这些内容描述旧运行路径，
+不是当前 Result 性能数据。
+
+## 当前 Result 驱动
+
+构建并查看 CLI：
+
+```sh
+cmake --build build/fmt10 --target photospider_fmt10_performance -j 2
+EXE=build/fmt10/examples/rgb_basis_performance/photospider_fmt10_performance
+"$EXE" --help
+"$EXE" 130 f32 a strict cross 1 planar 128 1 materialize respect 0 3
+```
+
+13 个位置参数保持不变，依次为 size、dtype、member、profile、coverage、
+repeats、storage、tile、workers、layout、metadata mode、warmups 和 gate_edge。
+size 为 3..4096；dtype 为 `f32|f64`；member 为 `a|b|c|d|i`；profile 为
+`strict|accelerated_apple_silicon|accelerated_x86_64`；coverage 为
+`full|color|alpha|cross`；repeats 为 1..100；storage 为 `planar|generic`；
+tile 为正的二次幂；workers 为 1..64；layout 为 `auto|view|materialize`；
+metadata mode 为 `respect|raw`；warmups 为 0..20；gate_edge 为 1..size。
+`planar` 输入使用 spatial Result layout 和 tiled planes，`generic` 使用
+generic tensor layout。输入 Result tensor 形状为 `[size,size,4]`，分量类型为
+Float32 或 Float64。
+
+`a`、`b`、`c`、`d` 分别执行 RGB→XYZ、XYZ→RGB、白点适应和公共 D helper；
+`i` 是相同白点的 C identity，用于检查 view 与 materialize。D 固定为
+sRGB→CAT16 D50→ProPhoto。`color` 请求第一个颜色分量，`alpha` 请求 alpha，
+`cross` 请求 y/x 从 tile-1 起的 3×3 ROI 和四个通道，因此 tile=128 时 ROI 为
+[127,130)×[127,130)。输入先完整发布；result cache 关闭。
+
+驱动先编译同一参数的 strict reference graph，再对当前 graph 执行；每轮计时执行
+后的门禁检查最多 `gate_edge×gate_edge` 的请求区域。Float32 与 strict 输出按位
+比较；加速 Float64 使用四个 Float32 ULP 步长界，D 使用 16 步长界。这个门禁
+复核当前运行与 strict 实现的一致程度，不是独立精确 oracle。Independent
+coefficient/rounding oracles 由 `test_rgb_basis` 覆盖。`execute_ms` 只计 public
+execution call；门禁读取发生在计时之后。`input_ms`、`author_ms` 和 `compile_ms`
+分别计输入 Result 构建、helper graph expansion 和实际 graph compilation。
+
+Result CSV schema 为：
+
+```text
+size,dtype,member,profile,coverage,storage,tile,workers,layout,mode,iteration,input_ms,author_ms,compile_ms,execute_ms,source_payload_bytes,run_live_payload_bytes,run_live_metadata_bytes,source_logical_bytes,issued_work,root_peak_host_bytes,numeric_evaluated,numeric_fallbacks,gate_samples,warmups
+```
+
+`source_payload_bytes` 是输入发布后的 Root live payload。重复执行前的 Root
+baseline 在 strict reference、编译和 warmups 后读取；`run_live_payload_bytes` 与
+`run_live_metadata_bytes` 表示该基线之上的 live 增量。`source_logical_bytes` 是
+当前 output dependencies 报告的 source support 元素数乘 dtype 宽度，不是物理
+流量。`issued_work` 是该次执行的 Root work 增量。`root_peak_host_bytes` 是累计
+Root Host peak，包含 setup、reference/warmups 和 gate read。上述值不是进程 RSS 或
+独立 output size。`numeric_evaluated` 与 `numeric_fallbacks` 来自 operation
+diagnostics；`gate_samples` 是门禁比较的 tensor 元素数；`warmups` 记录本次运行
+配置。CSV 每行对应一次 measured execute，execute 中位数另写到 stderr。
+
+该示例显式配置 Root Host 总容量为 8 GiB、Metadata 子限额为 64 MiB，且 Payload
+上限仍为 8 GiB。Root 统计同时包含输入、输出、中间 Result 和 strict reference
+所需的结果。这是性能示例的显式压力配置，不是生产默认值；当前没有 4096 尺寸的
+完整矩阵证据。
+
+25 项 serial Result smoke 均通过门禁：20 项覆盖
+A/B/C/D/I×Float32/Float64×generic/planar，size=3 且 gate 覆盖全部请求区域；另外
+五项覆盖 tile=128 的 A strict cross ROI、Apple Silicon identity view、Apple Silicon
+D generic、raw B alpha-only，以及 Apple Silicon C color-only；这五项的 gate 也覆盖
+各自完整的请求区域。该 strict reference
+门禁不是独立 oracle。完整性能矩阵、4096 尺寸、跨平台行为和速度结论均未验证。
+`test_rgb_basis` 与 `test_rgb_basis_math` 已通过；integration suite 保留 4,032 项
+independent oracle 检查。额外的 65,536-channel identity view 在 512 KiB Metadata
+budget 下通过 byte oracle，view count 为 65,536。`installed_rgb_basis` consumer、
+独立 installed-package performance consumer build，以及 size-3 Float32 D case 的
+36 个请求元素门禁均通过。这些 correctness/consumer 检查不构成性能测量；完整证据
+边界见 FMT-10 实现页。
+
+## 历史 Value/planar 记录
 
 构建目标 `photospider_fmt10_performance` 默认 EXCLUDE_FROM_ALL，须显式构建。所有计时输出为 CSV；输入预先完整发布，result cache 关闭，准备、编译和执行分别计时。记录 dtype/member/profile、ROI、存储、tile/workers/layout、backed/reserved、读/复制字节、peak live 与可用的数值统计。
 

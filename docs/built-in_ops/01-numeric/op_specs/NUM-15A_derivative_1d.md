@@ -13,10 +13,7 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+repository_commit: current working tree
 ---
 
 # NUM-15A: derivative_1d
@@ -31,10 +28,13 @@ Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
 registration, shared execution and acceptance requirements; explicit rules below
 and in the named family contract take precedence.
 
-Differentiate one-dimensional samples using dynamic inputs `samples` [N] and
-`step` [1], both Float32 or both Float64. Require 2<=N<=2^40 and finite nonzero
-step, allowing negative step. Output values has shape [N], preserves dtype and
-has empty facets. The starting coordinate does not affect this operation;
+Differentiate one-dimensional samples using two `Result` tensor inputs: samples
+with `sample_shape()` [N] and step with `sample_shape()` [1]. Each input may use
+any tensor member key. Both use Float32 or both Float64. Require 2<=N<=2^40 and
+finite nonzero step, allowing negative step. The output port key is `values`;
+its Result schema is `photospider.tensor` with tensor member `samples`, shape
+[N], input dtype, and no facets. The
+starting coordinate does not affect this operation;
 callers preserve or connect sampling-axis information separately. There are no
 static numeric parameters or implicit casts/axis extraction.
 
@@ -89,14 +89,31 @@ exact rational arithmetic. Test negative step, N=2, step subnormals, NaN priorit
 interior center NaN outside the requested stencil, infinities, signed zeros,
 disjoint source-read witnesses, dirty inverse stencils, budgets and cancellation.
 
-Deliver actual public WorkflowDocument execution and owner-lifetime checks when
-implemented. Implementation evidence below records the checks actually run.
+Focused Result math coverage exercises public workflows, exact small examples,
+negative step, N=2, exceptional values, budgets, pre-cancellation, and output
+lifetime after context retirement.
 
 
 ## Implementation and executable acceptance
 
-All six formal calculus keys use Whole and preserve ExactCalculus arithmetic.
-Current public workflow, independent Fraction oracle, layout/error/budget checks
-and separate public/core timing are in
-[NUM-15 Whole execution](../calculus-whole.md). Earlier regional WSL/installed
-records are historical. Proposed status is unchanged.
+All six registered profile keys use Whole Result programs and the existing
+`ExactCalculus` arithmetic. The manual public workflow binds Result sources
+whose tensor storage references the fixture's backing Values. Nonempty sparse
+requests still prepare all required inputs and publish the complete Whole
+output with full tensor coverage. The query scopes the recorded dependency
+observation and dirty mapping; it does not trim Result coverage. The fixture
+checks that a center sample excluded from an interior stencil does not enter
+that output's arithmetic, while Whole preparation reads and validates all active
+sources. It also exercises
+negative strides, unaligned and zero-stride input, caller and worker floating
+environments during actual continuation polls, schema rejection, work limits,
+cancellation, and output lifetime after context retirement.
+
+The independent oracle retains 1,810 Fraction reference cases. Strict acceptance
+is bit-exact. Apple acceptance uses the shared FP32-scaled accelerated bound and
+includes a verified one-ULP difference. The root behavior test and installed
+consumer compile the manual workflow with `-fno-fast-math -frounding-math
+-ffp-contract=off`. Commands and current execution details are in
+[NUM-15 Whole execution](../calculus-whole.md), and the runnable workflow is
+listed in [the numeric workflow guide](../../../../examples/numeric_workflow/README.md#discrete-derivatives-and-cumulative-integration-num-15).
+Proposed status is unchanged.

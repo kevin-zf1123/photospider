@@ -32,19 +32,31 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
                    {{"axis", static_cast<std::int64_t>(axis)}}});
 }
 }  // namespace indexing_detail
-/** @brief Authors ordered concatenation of 2..256 same-dtype, same-rank arrays.
- * Compiler checks non-axis extents and the checked axis sum/count <=2^40.
- * Whole reads and validates every input for any nonempty demand. View requires
- * one complete affine owner across all ports; incompatible/multiple owners
- * return Domain/Run ViewUnavailable. Dense collects and owns the complete
- * output. All active input edits invalidate all output observations; unselected
- * input failures can fail the Run. Empty reads nothing. Views retain source
- * resources. Content caching is disabled because physical viewability is not
- * witnessed. Inputs are ordered input_0..input_(K-1); output is values with
- * empty facets. Helpers access no payload and return owned node metadata.
- * Invalid arguments return InvalidArgument/InvalidDomain/Schema; allocation may
- * throw bad_alloc. Calls are pure and concurrent-safe. All profiles preserve
- * raw element bits.
+/** @brief Authors ordered concatenation of 2..256 tensor Results.
+ * Each input Result supplies one tensor member at any schema/member key, with
+ * a complete sample_shape() including batch axes. Inputs use UInt8, Int64,
+ * Float32 or Float64 and share dtype, rank and all non-concatenated extents;
+ * each has rank 1..8 and at most 2^40 elements.
+ * The result is a photospider.tensor/samples Result with the full concatenated
+ * shape as ordinary axes and no facets or batch metadata.
+ *
+ * The helper only authors node metadata. The CPU Whole program statically
+ * validates shape and parameters, then requests active input tensors with
+ * Data, Validation and Descriptor roles (role 13) for nonempty work. It
+ * publishes the complete output; query projection does not reduce preparation
+ * or computation. View proves one affine map across the complete inputs and
+ * can join compatible fragments from the same owner. Explicit View reports
+ * Domain/Run ViewUnavailable for multiple owners or incompatible geometry.
+ * Dense materializes a complete packed output. Concatenate disables
+ * cross-run content caching because content does not establish physical
+ * viewability; Views retain source storage/resources after context retirement.
+ * Empty demand reads no payload or performs sample copying.
+ *
+ * Inputs are ordered input_0..input_(K-1); the output port is values. This
+ * pure, concurrent-safe helper reads no payload and returns owned node
+ * metadata. Invalid authoring arguments return
+ * InvalidArgument/InvalidDomain/Schema; allocation may throw bad_alloc.
+ * Profiles preserve raw element bits.
  */
 inline Result<WorkflowNode> concatenate_node(
     std::uint64_t id, std::vector<WorkflowInput> inputs, std::uint32_t axis,
@@ -66,13 +78,22 @@ inline Result<WorkflowNode> concatenate_node(
       std::string(layout == ArrayLayout::View ? "view" : "dense");
   return Result<WorkflowNode>(std::move(authored));
 }
-/** @brief Authors dense single-axis gather with dynamic Int64[M] indices.
- * Source and result share dtype/rank; result axis length is M. Whole reads and
- * validates all source/indices, then owns complete packed output before
- * projection. Repeated indices preserve output order. Any invalid index returns
- * IndexOutOfBounds as InvalidArgument/InvalidDomain; no clipping, casts or
- * implicit broadcasts. Ownership, errors and concurrency follow
- * concatenate_node; output is values.
+/** @brief Authors single-axis gather using an Int64 index Result.
+ * The source is a single-tensor Result; the index Result has a rank-one tensor
+ * [M]. Their complete sample shapes include batch axes, have rank 1..8 and at
+ * most 2^40 elements. UInt8, Int64, Float32 and Float64 are supported. The
+ * output `values` is a packed photospider.tensor/samples Result with the
+ * selected source extent replaced by M and facets/batch metadata dropped; its
+ * N*element_size bytes remain owned after context retirement. A nonempty CPU
+ * Whole request uses role 13 for source and indices, validates every index and
+ * computes the complete output before projection. Repeated indices retain
+ * order, and an out-of-range index reports InvalidArgument/InvalidDomain with
+ * diagnostic IndexOutOfBounds. Active input edits invalidate recorded output
+ * observations. There is no clipping, cast or implicit broadcast. The pure,
+ * concurrent-safe helper reads no payload and authors only node metadata.
+ * Invalid authoring id/axis/profile returns
+ * InvalidArgument/InvalidDomain/Schema; allocation may throw bad_alloc. Source,
+ * typed, resource and cancellation failures retain their categories.
  */
 inline Result<WorkflowNode> gather_node(
     std::uint64_t id, WorkflowInput input, WorkflowInput indices,
@@ -80,18 +101,26 @@ inline Result<WorkflowNode> gather_node(
   return indexing_detail::node(
       id, "gather", {std::move(input), std::move(indices)}, axis, profile);
 }
-/** @brief Scatter rules with base, Int64[M] indices and matching updates.
- * Output values preserves base shape/dtype and has empty facets. Every nonempty
- * request reads and validates full base/indices/updates before callback.
- * Numerical replacement selects the last matching update; aggregates include
- * base then increasing j. Unselected upstream/typed failures can fail Whole
- * preparation. No-hit paths preserve base bits including sNaN. Sum rounds the
- * exact total once; integer final overflow fails with ArithmeticOverflow.
- * Minimum/maximum propagate the first NaN and use signed-zero numerical order.
- * Outputs are immutable complete dense arrays and outlive the context. Final
- * overflow is Domain/Run, and any active input edit invalidates the complete
- * output. Source/resource/ cancellation failures retain their categories; no
- * partial result is returned.
+/** @brief Authors scatter with base, Int64 indices and matching updates
+ * Results. Each Result contributes one tensor member under any key; complete
+ * sample_shape() includes batch axes, has rank 1..8 and at most 2^40 elements.
+ * UInt8, Int64, Float32 and Float64 are supported. The immutable `values`
+ * output retains base shape/dtype as a packed photospider.tensor/samples Result
+ * of N*element_size bytes; it has no facets/batch metadata and remains owned
+ * after context retirement. Nonempty Whole work requests all three inputs with
+ * role 13, validates every index and computes the complete output before
+ * projection. Any active input or typed-validation failure can fail the Run.
+ * Replacement selects the last update position; aggregates include base, then
+ * updates in increasing position. No-hit and replacement copies preserve bits,
+ * including signaling NaNs. Sum accumulates exactly and converts once; integer
+ * final overflow is OperationFailed/ArithmeticOverflow, attributed to the
+ * complete output coordinate as Domain/Run. Minimum/maximum propagate the first
+ * NaN and use the NUM-05 signed-zero order. Failures publish no partial Result;
+ * source, typed, resource and cancellation failures retain their categories.
+ * Active input edits invalidate recorded output observations. The pure,
+ * concurrent-safe helper reads no payload and authors node metadata only.
+ * Invalid authoring id/axis/profile returns
+ * InvalidArgument/InvalidDomain/Schema; allocation may throw bad_alloc.
  */
 inline Result<WorkflowNode> scatter_replace_node(
     std::uint64_t id, WorkflowInput base, WorkflowInput indices,

@@ -8,28 +8,22 @@ category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
-clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
+verification_status: focused_and_installed_result_tests_passed
 ---
 
 # FMT-08B: remove selected semantic descriptions or annotations
 
-Runtime update (package 0.22.0): FMT-08A/B are implemented with canonical
-TensorDescription v3, typed encoding/sampling/ICC/OCIO resource descriptions,
-opaque annotations, atomic edits and exact planar/generic-numeric regional
-execution. See the [runtime schema and interfaces](../../../kernel-architecture/Tensor-Semantic-Metadata.md),
-[minimal public workflow](../../../../examples/metadata_workflow/README.md)
-and [measured performance](../../../../examples/metadata_performance/README.md).
-Proposed remains the specification decision status; external FMT-12/13 transform
-engines are not claimed by the metadata/resource implementation.
-
-
 Inherit the complete [FMT-08 contract](FMT-08_metadata_assignment_contract.md).
-The proposed authoring helper `remove_metadata` takes a graph, input edge,
-static targets and family parameters, returning one `values` edge. It lowers
+The `remove_metadata` authoring helper takes a workflow document, input Result
+edge, static targets and family options, returning one `values` edge. It lowers
 to [A assign metadata](FMT-08A_assign_metadata.md) in patch mode with no set
-entries and the target list as remove. There is no new native registry key.
+entries and the target list as remove. It creates no separate registry key; the
+lowered node selects A's CPU profile. Result operation ABI is 2,
+WorkflowDocument is 4 and OperationTraits is 21. FMT-08B remains Proposed.
+Focused Result tests pass for metadata edits, Result execution/global behavior,
+resource budgets and image contracts; the public workflow and two installed
+consumer tests pass. The metadata-to-`channel.extract` configuration/resource
+chain is covered; `channel.assemble` composition is outside this evidence.
 
 ## Interface and lowering
 
@@ -77,11 +71,11 @@ immediate deallocation of shared storage is promised.
 
 ## Demand, layout and errors
 
-B inherits A's exact q->q sample support and dirty mapping, Descriptor dependencies
-and absence of pixel Validation/Control support. View can retain backing without
-loading samples; materialize copies only requested bits. Unrequested values,
-including NaN/invalid alpha, are not scanned. Upstream required failures retain
-their original scope. Static inference still validates the retained target.
+B inherits A's same-coordinate sample support and dirty mapping, with Result Need
+role mask 9 (Data | Descriptor) and no Validation or Control role. View can
+retain backing without loading samples; materialize copies only requested bits.
+Sample values are not scanned. Upstream failures retain their original scope.
+Static preparation validates the retained metadata target and source schema.
 
 Missing=ignore and empty targets do not override a forced materialize request.
 All outputs have independent immutable metadata, and all modes preserve actual
@@ -108,9 +102,8 @@ groups and component labels. Verify input metadata and another consumer remain
 unchanged. Valid pixel bytes are still available as generic/component data; no
 RGB/Gray model is inferred merely because three channels remain.
 
-Compare helper inference/results against an independently constructed expected
-metadata tree and byte-identical input at all requested coordinates. Check all
-layouts, partial/tile-crossing requests, resource lifetimes after context release,
-missing coverage, graph rollback, low budgets and cancellation. Conceptual graph:
-input -> B -> generic/component processing -> explicit A when a new interpretation
-is needed. Runnable public workflow evidence is linked in the runtime update above.
+The public [metadata workflow](../../../../examples/metadata_workflow/README.md)
+executes assign and remove Result nodes and checks exact sample bits. The older
+[metadata performance workload](../../../../examples/metadata_performance/README.md)
+covers the previous Value/planar path and is not current Result performance
+evidence.

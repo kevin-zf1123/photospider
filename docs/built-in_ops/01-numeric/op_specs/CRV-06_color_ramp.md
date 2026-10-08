@@ -6,19 +6,17 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_subset
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+verification_status: focused_result_validation_passed
+repository_commit: current working tree
 ---
 
 # CRV-06: color-ramp family
 
 ## Revised lightness coordinate and implementation boundary
 
-The [2026-09-23 shared scale revision](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
+The [shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
 LUT input axes and output table coordinates. Finite values outside 0..1 remain
 legal. Opponent/chroma scales and arithmetic formulas are unchanged. Runtime
@@ -37,8 +35,24 @@ values remain exact.
 
 Use explicit dynamic stops[K] and colors[K,C] rather than only a uniform LUT.
 Each scalar element of input maps to one complete color, with output shape
-input.shape+[C]. Nonuniform stop spacing is supported. This scalar-to-color
+sample_shape(input)+[C]. Nonuniform stop spacing is supported. This scalar-to-color
 mapping differs from CRV-05's independent per-input-channel table application.
+
+## Result tensor ports
+
+Each dynamic port is a Result containing exactly one tensor member and no fields.
+Any structurally valid schema id/version/member key is accepted. Validate shapes
+against each member's complete `sample_shape()`, including batch axes. The ports
+are `input` (rank 1..7, Float32/64), `stops` (rank 1, K=1..65536, Float32/64),
+`colors` (rank 2, [K,C], Float32/64), and for RationalPi variants
+`hue_numerator` and `hue_denominator` (rank 1, [K], Int64). RationalPi colors
+use [K,2] model-specific component arrays; all other colors use [K,C]. The
+first three floating inputs independently select their dtype. All input, color
+and output logical element products are limited to 2^40. Only a mathematically
+selected RationalPi denominator q must be positive; an unselected generic
+q<=0 value adds no mathematical-domain failure. Typed/upstream validation still
+covers every input tensor.
+
 
 The maintainer requires separate implementations/specifications for RGB, CMYK,
 XYZ, CIELAB, CIELCh(ab), OKLab, OKLCh, HSL and YCbCr. They are implemented as
@@ -72,7 +86,7 @@ silently extending current accepted runtime metadata or conversion behavior.
 Current typed Image validation in
 [semantic.cpp](../../../../src/lib/data/semantic.cpp) accepts RGB only with
 primaries=srgb and transfer=linear. Image samples are Float32 HWC; the generic
-input.shape+[C] output and configurable RGB encoding are not already supported
+sample_shape(input)+[C] output and configurable RGB encoding are not already supported
 typed Image metadata. The required color-description and transfer extensions
 must be specified and implemented explicitly rather than relabeling incompatible
 data as the existing profile.
@@ -107,8 +121,8 @@ it is not silently discarded into an untyped numeric array.
 The current runtime registers 45 CRV-06 keys and exposes 15 primitive helpers
 through `photospider/numeric/color_ramps.hpp`; this shared contract is not itself
 a registered operation. ColorArray codec/metadata and full-color closure are
-implemented, with ICC import/bind and immutable ownership through compiler,
-Value, snapshot and dependency paths.
+implemented, with ICC import/bind and immutable ownership. Result output schemas select the
+resource identities required by their ColorArray facets.
 
 RGB direct, linear and gamma=2 paths are exact; sRGB and general-gamma paths use
 certified full expressions. Gamma normalization and deferred scaling preserve HDR
@@ -118,43 +132,79 @@ relevant certified steps, not the integer-capacity bound. Accelerated RGB permit
 the shared FP32 4 ULP by contract. Current implementations return strict bits,
 while the same accelerated allowance applies to non-RGB arithmetic.
 
-Native arm64 Clang 21 strict/Apple Whole validation covers seven public workflow
-groups, 1784 independent Fraction/Machin-pi cases and 352 RGB rational-root/Decimal
-cases per profile. Manual checks include complete-input query/typed failure,
-Run-scoped association errors, sparse delivery, full dirty support, cache rebinding,
-negative/unaligned and zero strides, rank-two traversal, fenv restoration, Empty,
-work/output/workspace budgets, active cancellation and CMYK ICC ownership after
-context teardown. Focused numeric, compiler, color and resource tests pass.
-This Whole change has no new x86 or installed-package execution evidence.
-Public commands and measurements are in the [workflow README](../../../../examples/numeric_workflow/README.md)
-and [math implementation](../math-implementation.md#crv-06-colorarray-and-color-ramps).
+The Result CTest `test_numeric_result_math` passes 1/1 in 6.93 seconds. Its
+`color_ramp_workflows`, `color_ramp_boundaries`, `color_ramp_icc` and
+`color_ramp_active_cancel` coverage includes Empty ICC behavior, generic clamp
+resource selection, ICC ownership, and cancellation during actual exact work
+(RGB's 640-limb slot and the coordinate path's 144-limb slot). Those active
+cancellation paths return Root resources to baseline after context teardown.
+Successful ICC and Result-lifetime cases retain their valid owners.
 
+Seven manual groups pass for each of Strict and the locally available Apple
+profile. Against the Result `--probe`, `color_ramp_oracle.py` passes 1,784
+Fraction/Machin-pi cases per profile and `rgb_ramp_oracle.py` passes 352
+rational/root/Decimal cases per profile. The installed `installed_result_numeric`
+consumer passes 1/1 in 0.21 seconds; it exercises public XYZ/CMYK helpers and
+reads the ColorArray Result, including its ICC owner, after context teardown.
+Repeated requests return consistent values and rebinding changes associations;
+these checks do not establish a warm-cache hit.
+
+Reproduce the focused suite, Strict/Apple manual groups and independent oracles
+with:
+
+```sh
+cmake --build build/kernel-dev --target test_numeric_result_math photospider_numeric_color_ramps -j8
+ctest --test-dir build/kernel-dev -R '^test_numeric_result_math$' --output-on-failure
+build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps strict
+python3 oracle/ops/numeric/color_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps strict
+python3 oracle/ops/numeric/rgb_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps strict
+build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps apple
+python3 oracle/ops/numeric/color_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps apple
+python3 oracle/ops/numeric/rgb_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps apple
+```
+
+Reproduce the installed consumer check with:
+
+```sh
+cmake --install build/kernel-dev --prefix build/kernel-dev/consumer-install
+cmake -S tests/consumer -B build/kernel-dev/consumer-build -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/consumer-install"
+cmake --build build/kernel-dev/consumer-build --target photospider_result_numeric_consumer -j8
+ctest --test-dir build/kernel-dev/consumer-build -R '^installed_result_numeric$' --output-on-failure
+```
+
+These checks cover Strict and the local Apple profile only. No x86 numerical,
+maximum-shape, or performance rerun is included. CRV-06 has no GPU variant.
+The ColorArray v1 CIELAB/CIELCh implicit L* scale difference from the native
+`l=L*/100` contract remains open. See the [workflow README](../../../../examples/numeric_workflow/README.md#color-ramps)
+and [math implementation](../math-implementation.md#crv-06-colorarray-and-color-ramps)
+for the implementation and evidence boundaries.
 ## Whole execution and resources
 
-All formal strict and accelerated keys use Whole execution. Any nonempty
-request collects complete input, stops and color arrays (and both rational-hue
-integer arrays when present), with complete upstream and typed validation.
-The callback validates every stop, then every position, before color arithmetic.
-Each position still uses exactly one hit/clamp/singleton row or two enclosing
-rows mathematically. Unused generic color rows are not subjected to new numeric
-domain checks; invalid typed data or upstream failures anywhere still fail.
-Empty requests perform static preflight but read no sample payload.
+All formal strict and accelerated keys use Whole Result programs. A nonempty
+Run declares Data, Validation and Descriptor needs (role 13) for every input, so
+typed and upstream validation covers complete tensor members. The executor reads
+authorized windows directly; the callback does not collect or copy complete input
+arrays. It validates all stops, then every input position, before color arithmetic.
+Each position uses one exact hit/clamp/singleton row or two enclosing rows for its
+mathematics. Generic color rows outside all evaluated stencils remain numerically
+unused, while their typed/upstream validation still applies. Empty reads no sample
+payload after static preparation.
 
-The output is one immutable dense Value of shape input.shape+[C]. The final
-channel axis retains complete-color closure, ColorArray identity and owned ICC
-resources where applicable. Public fragments expose the requested complete
-colors while retaining the full output owner. Arbitrary immutable input strides,
-offsets and unaligned storage are supported. Owners survive context teardown.
-Any input edit invalidates the complete recorded output demand. Cache identity
-retains descriptors, parameters, typed validation and resource identities.
-Numeric errors have Run scope; no successful color subset survives a failed
-callback. Upstream, resource and cancellation errors retain their categories.
+The `values` port publishes an immutable `photospider.tensor` v1 Result with
+`samples` shape `sample_shape(input)+[C]`, the ColorArray v1 facet and
+`atomic_trailing_axes=1`. Whole writes publish the full output transactionally;
+the Result retains full certified coverage and global coordinates. Fragments expose
+requested regions while retaining the full output owner. Arbitrary immutable source
+strides, offsets and unaligned storage are supported. Result association records
+source ObjectIds, and selected ColorArray resources remain owned by the output.
+Input edits invalidate complete recorded output demand. Numeric errors have Run
+scope; failed callbacks publish no color subset. Upstream, resource and cancellation
+errors retain their categories.
 
-For N=product(input.shape), lookup work is O(K+N log K), plus actual exact or
-certified arithmetic. Full output payload is N*C*sizeof(dtype), even for a small
-requested region. Account complete collected inputs, fixed admitted arithmetic
-workspace, a ResourceVector stop index with 8K element bytes plus allocator and
-metadata overhead, and retained descriptors/resources. No per-output dependency
-records or point-state array is retained. Work/capacity limits and cancellation
-apply during scans, lookup, arithmetic and before publication; incomplete
-certification fails ResourceExhausted. No reduced-precision fallback is added.
+Lookup work remains O(K+N log K), plus exact or certified arithmetic. Full output
+payload is N*C*sizeof(dtype), even for a small request. Account source owners/windows,
+fixed arithmetic workspace, the Root-owned ResourceVector stop index (8K element
+bytes plus allocator/metadata overhead), output and retained descriptors/resources.
+No per-output dependency records or point-state array is retained. Work/capacity and
+cancellation checks apply during scans, lookup, arithmetic and before publication;
+incomplete certification fails ResourceExhausted. No reduced-precision fallback is added.

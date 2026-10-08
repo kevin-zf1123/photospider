@@ -14,11 +14,11 @@
 #include <utility>
 #include <vector>
 
-#include "01-numeric/array_publication.hpp"
+#include "00-foundation/tensor_program.hpp"
+#include "02-format-color/result_mapping.hpp"
 #include "02-format-color/rgb_basis_math.hpp"
 #include "data/input_validation.hpp"
 #include "photospider/data/region_runs.hpp"
-#include "photospider/execution/data_movement.hpp"
 #include "photospider/numeric/workflow_authoring.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -310,6 +310,12 @@ struct Preparation final {
   std::array<ExactRow, 3> rows;
   std::array<std::uint64_t, 3> selected{};
   unsigned axis = 0;
+  std::string layout;
+  struct Span final {
+    Region region;
+    unsigned terms, roles;
+  };
+  std::vector<Span> spans;
   bool narrow = false, semantic = true, is_identity = false,
        materialize = false;
   SequenceProfile profile = SequenceProfile::Strict;
@@ -334,14 +340,16 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
   typed(environment.active(), "floating environment unavailable");
   checked(numeric_ops::sequence_profile_available(profile));
   require(inputs.size() == 1, "one input required");
-  const auto& input = inputs[0];
+  checked(tensor_ops::check_tensor(inputs[0]));
+  const auto& input = inputs[0].result_schema->tensors[0];
   const auto& shape = input.descriptor.shape;
-  typed(!input.result_schema && !shape.empty() && shape.size() <= 8 &&
+  const auto full_shape = input.sample_shape();
+  typed(!shape.empty() && full_shape.size() <= 8 &&
             (input.descriptor.element_type == ElementType::Float32 ||
              input.descriptor.element_type == ElementType::Float64),
         "requires Float32/64 rank 1..8");
   std::uint64_t count = 1;
-  for (const auto extent : shape) {
+  for (const auto extent : full_shape) {
     typed(extent && extent <= (UINT64_C(1) << 40) / count,
           "tensor exceeds 2^40 samples");
     count *= extent;
@@ -503,9 +511,8 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
   require(axis < shape.size(), "axis outside rank");
   for (auto c : selected)
     require(c < shape[axis], "component outside channel extent");
-  if (input.planar_layout)
-    typed(input.planar_layout->channel_axis &&
-              *input.planar_layout->channel_axis == axis,
+  if (input.layout.spatial)
+    typed(input.layout.channel_axis && *input.layout.channel_axis == axis,
           "selected axis must be structural image channel axis");
   Matrix matrix;
   std::optional<ResolvedBasis> source, target;
@@ -568,7 +575,8 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
                         method_index(text(params, "method")));
   }
   auto state = std::make_shared<Preparation>(matrix);
-  state->axis = axis;
+  state->axis = static_cast<unsigned>(input.batch_axes.size()) + axis;
+  state->layout = layout;
   state->selected = selected;
   state->semantic = semantic;
   state->narrow = input.descriptor.element_type == ElementType::Float32;
@@ -579,8 +587,10 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
   require(layout != "view" || state->is_identity,
           "ViewUnavailable: nonidentity transform");
   OperationOutputSpecialization output;
-  output.metadata = input;
-  output.metadata.atomic_trailing_axes = 0;
+  output.metadata = inputs[0];
+  auto schema = *inputs[0].result_schema;
+  auto& output_tensor = schema.tensors[0];
+  output_tensor.atomic_trailing_axes = 0;
   if (semantic) {
     auto& group = desc->groups[group_index];
     TensorInterpretation updated = effective;
@@ -638,14 +648,17 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
     desc->analytic_binding.reset();
     desc->convention = "relative-v1";
     checked(validate_tensor_description(*desc, input.descriptor));
-    output.metadata.facets.clear();
+    output_tensor.facets.clear();
     for (const auto& f : input.facets)
       if (f.key != "photospider.tensor-description")
-        output.metadata.facets.push_back(f);
-    output.metadata.facets.push_back(checked(encode_tensor_description(*desc)));
+        output_tensor.facets.push_back(f);
+    output_tensor.facets.push_back(checked(encode_tensor_description(*desc)));
   }
-  if (input.planar_layout)
-    output.metadata.planar_layout->row_pitch_bytes = 0;
+  if (output_tensor.layout.spatial &&
+      (!state->is_identity || state->materialize))
+    output_tensor.layout.row_pitch_bytes = 0;
+  output.metadata.result_schema =
+      std::make_shared<SchemaTemplate>(std::move(schema));
   std::vector<std::uint64_t> boundaries{0, shape[axis]};
   for (auto c : selected) {
     boundaries.push_back(c);
@@ -654,44 +667,13 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
   std::sort(boundaries.begin(), boundaries.end());
   boundaries.erase(std::unique(boundaries.begin(), boundaries.end()),
                    boundaries.end());
-  std::vector<DependencyMapPiece> pieces;
   for (unsigned i = 1; i < boundaries.size(); ++i) {
-    auto dims = Region::whole(shape).dimensions();
-    dims[axis] = {boundaries[i - 1], boundaries[i] - boundaries[i - 1]};
-    auto coverage = checked(Footprint::from_regions(shape, {Region(dims)}));
+    auto dims = Region::whole(full_shape).dimensions();
+    dims[state->axis] = {boundaries[i - 1], boundaries[i] - boundaries[i - 1]};
     const bool color = state->row(boundaries[i - 1]) >= 0;
-    std::vector<DependencyMappedNeed> needs;
-    const unsigned terms = color && !state->is_identity ? 3 : 1;
-    for (unsigned j = 0; j < terms; ++j) {
-      DependencyMappedNeed need;
-      need.roles = static_cast<std::uint32_t>(DependencyRole::Data);
-      if (semantic && color)
-        need.roles |= static_cast<std::uint32_t>(DependencyRole::Validation);
-      for (unsigned a = 0; a < shape.size(); ++a)
-        need.axes.push_back(
-            terms == 3 && a == axis
-                ? DependencyAxis{-1, {selected[j], 1}, 0}
-                : DependencyAxis{static_cast<std::int32_t>(a), {0, 1}, 0});
-      needs.push_back(std::move(need));
-    }
-    DependencyMappedNeed descriptor;
-    descriptor.roles = static_cast<std::uint32_t>(DependencyRole::Descriptor);
-    descriptor.tags.push_back({1, 0});
-    needs.push_back(std::move(descriptor));
-    pieces.push_back({std::move(coverage), std::move(needs)});
-  }
-  output.static_dependency_pieces = std::move(pieces);
-  output.regional_atomic = true;
-  output.preserve_output_views =
-      state->is_identity && !state->materialize && !input.planar_layout;
-  if (output.preserve_output_views)
-    output.maximum_output_payload_bytes = 0;
-  if (state->is_identity && input.planar_layout) {
-    output.data_movement = DataMovementKind::BitwiseMapped;
-    output.data_movement_view_policy =
-        layout == "view"     ? DataMovementViewPolicy::RequireView
-        : state->materialize ? DataMovementViewPolicy::Materialize
-                             : DataMovementViewPolicy::Auto;
+    state->spans.push_back({Region(std::move(dims)),
+                            color && !state->is_identity ? 3U : 1U,
+                            semantic && color ? 5U : 1U});
   }
   OperationPreparation result;
   result.outputs.push_back(std::move(output));
@@ -828,409 +810,328 @@ Status evaluate(
   }
   return Status::success();
 }
-bool contains(const Region& region, const std::vector<std::uint64_t>& at) {
-  for (unsigned a = 0; a < at.size(); ++a) {
-    const auto d = region.dimensions()[a];
-    if (at[a] < d.offset || at[a] - d.offset >= d.extent)
-      return false;
-  }
-  return true;
+using Poll = Result<ResultProgramPoll>;
+ResultBuilder result_builder(const ResultProgramPhase& phase, bool empty) {
+  auto builder = checked(ResultBuilder::start(
+      phase.resources, *phase.query.output.result_schema,
+      phase.query.semantic_key, {},
+      phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
+                                                     phase.association->end())
+                        : std::vector<std::uint64_t>{},
+      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
+  checked(builder.bind_descriptor_relation(checked(ResultRelation::cartesian(
+      phase.resources, 1,
+      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+  return builder;
 }
-struct Cursor final {
-  const DependencyPhase& phase;
-  std::array<const Value*, 3> previous{};
-  Status read(const std::vector<std::uint64_t>& at, unsigned term,
-              std::size_t width, std::uint64_t* out) {
-    auto charged = phase.consume_work(at.size() + 1);
-    if (!charged.ok())
-      return charged;
-    const Value* source = previous[term];
-    if (!source || !contains(source->region(), at)) {
-      charged = phase.consume_work(phase.inputs[0].fragments().size() *
-                                   (at.size() + 1));
-      if (!charged.ok())
-        return charged;
-      source = nullptr;
-      for (const auto& fragment : phase.inputs[0].fragments())
-        if (contains(fragment.region(), at)) {
-          source = &fragment;
-          break;
-        }
-      if (!source)
-        return {ErrorCode::NotFound, "FMT-10 required sample is missing"};
-      previous[term] = source;
+Poll empty_result(const ResultProgramPhase& phase) try {
+  auto builder = result_builder(phase, true);
+  return Poll(ResultPublication{checked(builder.seal()), true});
+} catch (const CheckedFailure& failure) {
+  return Poll(failure.status);
+}
+std::vector<ResultMappedAxis> mapping(std::size_t rank,
+                                      const Preparation& state, unsigned terms,
+                                      unsigned term) {
+  std::vector<ResultMappedAxis> axes(rank);
+  for (unsigned a = 0; a < rank; ++a) {
+    axes[a].output_axis = static_cast<std::int32_t>(a);
+    if (terms == 3 && a == state.axis) {
+      axes[a].output_axis = -1;
+      axes[a].source_origin = state.selected[term];
     }
-    auto address = source->byte_address(at);
-    if (!address.ok())
-      return address.status();
-    *out = 0;
-    std::memcpy(out, source->bytes().data() + address.value(), width);
-    return Status::success();
   }
-};
-Result<ValueFragments> publish(const DependencyPhase& phase,
-                               const Preparation& state, Workspace* work,
-                               NumericDiagnostics* report) {
-  using Answer = Result<ValueFragments>;
-  const auto& descriptor = phase.query.output.descriptor;
-  const auto& facets = phase.query.output.facets;
-  const auto width = state.narrow ? 4U : 8U;
-  std::uint64_t facet_bytes = 0;
-  for (const auto& f : facets)
-    facet_bytes += f.payload.size() + f.key.size();
-  numeric_ops::ArrayPublication publication(
-      phase.query.outputs.boxes().size() +
-          (state.is_identity ? phase.inputs[0].fragments().size() : 0),
-      descriptor.shape.size(), facet_bytes);
-  ResourceVector<Value> values;
-  Cursor cursor{phase, {}};
+  return axes;
+}
+ResultRelation relation(const ResultProgramPhase& phase,
+                        const Preparation& state) {
+  const auto& spec = phase.query.output.result_schema->tensors[0];
+  const auto shape = spec.sample_shape();
+  ResourceVector<ResultRelation> relations;
+  for (const auto& span : state.spans)
+    for (unsigned j = 0; j < span.terms; ++j) {
+      checked(phase.consume_work(shape.size() + 1));
+      relations.push_back(checked(ResultRelation::mapped(
+          phase.resources, shape, span.region, shape,
+          mapping(shape.size(), state, span.terms, j),
+          {0, span.roles, 0, 0, ResultSupportTarget::Tensor, 0})));
+    }
+  relations.push_back(checked(ResultRelation::cartesian(
+      phase.resources, checked(spec.sample_count()),
+      {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
+  while (relations.size() > 1) {
+    ResourceVector<ResultRelation> next;
+    for (std::size_t i = 0; i < relations.size(); i += 16) {
+      checked(phase.consume_work(17));
+      std::vector<ResultRelation> group;
+      for (auto j = i; j < std::min(i + 16, relations.size()); ++j)
+        group.push_back(relations[j]);
+      next.push_back(checked(ResultRelation::unite(phase.resources, group)));
+    }
+    relations = std::move(next);
+  }
+  return relations.front();
+}
+// A channel plane traverses the window sample axis, or its row axis when the
+// generic sample axis is the channel itself. Both strides are authorized by
+// the window; no unrequested peer channels are gathered.
+Status run_plane(const ResultProgramPhase& phase, const Preparation& state,
+                 Workspace* work, NumericDiagnostics* report,
+                 const Region& plane,
+                 const std::array<ResultTensorReadWindow, 3>& sources,
+                 const ResultTensorWriteWindow* writer) {
+  const auto& dims = plane.dimensions();
+  const auto channel = dims[state.axis].offset;
+  const int row = state.row(channel);
+  const unsigned terms = row >= 0 && !state.is_identity ? 3 : 1;
+  auto axis = sources[0].sample_axis();
+  const bool rectangles = axis == state.axis && sources[0].row_axis();
+  if (rectangles)
+    axis = *sources[0].row_axis();
   std::vector<std::uint64_t> at;
-  for (const auto& box : phase.query.outputs.boxes()) {
-    if (state.is_identity && !state.materialize) {
-      for (const auto& fragment : phase.inputs[0].fragments()) {
-        std::vector<RegionDimension> overlap;
-        bool intersects = true;
-        for (unsigned a = 0; a < box.rank(); ++a) {
-          const auto p = box.dimensions()[a],
-                     q = fragment.region().dimensions()[a];
-          const auto begin = std::max(p.offset, q.offset),
-                     end = std::min(p.offset + p.extent, q.offset + q.extent);
-          if (end <= begin) {
-            intersects = false;
-            break;
-          }
-          overlap.push_back({begin, end - begin});
-        }
-        if (!intersects)
-          continue;
-        Region region(std::move(overlap));
-        auto selected =
-            Footprint::from_regions(descriptor.shape, {region}, phase.sets);
-        if (!selected.ok())
-          return Answer(selected.status());
-        auto status = selected.value().visit(
-            [&](const auto& coordinate) {
-              auto charged = phase.consume_work(coordinate.size() + 1);
-              if (!charged.ok())
-                return charged;
-              if (state.semantic && state.row(coordinate[state.axis]) >= 0) {
-                std::uint64_t raw;
-                auto read = cursor.read(coordinate, 0, width, &raw);
-                if (!read.ok())
-                  return read;
-                if (!finite_bits(raw, state.narrow))
-                  return sample_failure("nonfinite identity input",
-                                        FailureReason::InvalidDomain,
-                                        coordinate);
-              }
-              ++report->view_elements;
-              return Status::success();
-            },
-            phase.sets.maximum_work, phase.query.cancellation);
-        if (!status.ok())
-          return Answer(status);
-        auto view = fragment.view(region);
-        if (!view.ok())
-          return Answer(view.status());
-        auto mapped = Value::from_storage(
-            descriptor, region, view.value().layout(), view.value().storage(),
-            facets, phase.query.resources);
-        if (!mapped.ok())
-          return Answer(mapped.status());
-        auto retained = publication.retain(mapped.take_value());
-        if (!retained.ok())
-          return Answer(retained.status());
-        values.push_back(retained.take_value());
+  for (auto dim : dims)
+    at.push_back(dim.offset);
+  const auto width = state.narrow ? 4U : 8U;
+  for (;;) {
+    if (phase.query.cancellation.cancelled())
+      return {ErrorCode::Cancelled, "FMT-10 cancelled"};
+    std::array<const std::uint8_t*, 3> data{};
+    std::array<std::int64_t, 3> strides{};
+    auto available = dims[axis].offset + dims[axis].extent - at[axis];
+    for (unsigned j = 0; j < terms; ++j) {
+      auto coordinate = at;
+      coordinate[state.axis] = terms == 3 ? state.selected[j] : channel;
+      if (rectangles) {
+        const auto run = checked(sources[j].rectangle_run(coordinate));
+        data[j] = run.row.data;
+        strides[j] = run.row_stride_bytes;
+        available = std::min(available, run.rows);
+      } else {
+        const auto run = checked(sources[j].row_run(coordinate));
+        data[j] = run.data;
+        strides[j] = run.sample_stride_bytes;
+        available = std::min(available, run.samples);
       }
-      continue;
     }
-    auto allocation = MutableValue::allocate(descriptor, box, phase.allocator);
-    if (!allocation.ok())
-      return Answer(allocation.status());
-    auto writer = allocation.take_value();
-    auto count = box.element_count();
-    if (!count.ok())
-      return Answer(count.status());
-    // Walk one output component at a time, independently of logical channel
-    // axis order. HWC generic tensors now fill SIMD batches too; the previous
-    // contiguous-output walk would degenerate to one lane when C was last.
-    const auto& channels = box.dimensions()[state.axis];
-    const auto spatial_count = count.value() / channels.extent;
-    for (auto channel = channels.offset;
-         channel < channels.offset + channels.extent; ++channel) {
-      auto plane_dimensions = box.dimensions();
-      plane_dimensions[state.axis] = {channel, 1};
-      const Region plane(std::move(plane_dimensions));
-      const int row = state.row(channel);
-      const unsigned terms = row >= 0 && !state.is_identity ? 3 : 1;
-      for (std::uint64_t offset = 0; offset < spatial_count;) {
-        if (phase.query.cancellation.cancelled())
-          return Answer(Status{ErrorCode::Cancelled, "FMT-10 cancelled"});
-        const auto n = static_cast<unsigned>(
-            std::min<std::uint64_t>(block_size, spatial_count - offset));
-        auto charged = phase.consume_work(n * 64);
-        if (!charged.ok())
-          return Answer(charged);
-        for (unsigned lane = 0; lane < n; ++lane) {
-          region_run_coordinate(plane, offset + lane, &at);
-          std::uint64_t packed = 0;
-          for (unsigned axis = 0; axis < at.size(); ++axis)
-            packed = packed * box.dimensions()[axis].extent + at[axis] -
-                     box.dimensions()[axis].offset;
-          work->packed_offsets[lane] = packed;
-          for (unsigned j = 0; j < terms; ++j) {
-            at[state.axis] = terms == 3 ? state.selected[j] : channel;
-            auto read = cursor.read(at, j, width, &work->raw[j][lane]);
-            if (!read.ok())
-              return Answer(read);
+    std::uint8_t* target = nullptr;
+    std::int64_t target_stride = 0;
+    if (writer) {
+      if (rectangles) {
+        const auto run = checked(writer->rectangle_run(at));
+        target = run.row.data;
+        target_stride = run.row_stride_bytes;
+        available = std::min(available, run.rows);
+      } else {
+        const auto run = checked(writer->row_run(at));
+        target = run.data;
+        target_stride = run.sample_stride_bytes;
+        available = std::min(available, run.samples);
+      }
+    }
+    for (std::uint64_t offset = 0; offset < available;) {
+      const auto n = static_cast<unsigned>(
+          std::min<std::uint64_t>(block_size, available - offset));
+      if (phase.query.cancellation.cancelled())
+        return {ErrorCode::Cancelled, "FMT-10 cancelled"};
+      checked(phase.consume_work(n * (64 + terms)));
+      if (!writer) {
+        for (unsigned lane = 0; state.semantic && row >= 0 && lane < n;
+             ++lane) {
+          std::uint64_t raw = 0;
+          std::memcpy(
+              &raw,
+              data[0] + static_cast<std::int64_t>(offset + lane) * strides[0],
+              width);
+          if (!finite_bits(raw, state.narrow)) {
+            auto coordinate = at;
+            coordinate[axis] += offset + lane;
+            return sample_failure("nonfinite identity input",
+                                  FailureReason::InvalidDomain, coordinate);
           }
         }
-        auto status = evaluate(work, n, row, state, report, [&](unsigned lane) {
-          std::vector<std::uint64_t> coordinate;
-          region_run_coordinate(plane, offset + lane, &coordinate);
+      } else {
+        for (unsigned j = 0; j < terms; ++j)
+          for (unsigned lane = 0; lane < n; ++lane) {
+            work->raw[j][lane] = 0;
+            std::memcpy(
+                &work->raw[j][lane],
+                data[j] + static_cast<std::int64_t>(offset + lane) * strides[j],
+                width);
+          }
+        checked(evaluate(work, n, row, state, report, [&](unsigned lane) {
+          auto coordinate = at;
+          coordinate[axis] += offset + lane;
           return coordinate;
-        });
-        if (!status.ok())
-          return Answer(status);
+        }));
         for (unsigned lane = 0; lane < n; ++lane)
-          std::memcpy(writer.data() + work->packed_offsets[lane] * width,
-                      &work->result[lane], width);
-        offset += n;
+          std::memcpy(
+              target + static_cast<std::int64_t>(offset + lane) * target_stride,
+              &work->result[lane], width);
       }
+      offset += n;
     }
-    auto value = std::move(writer).publish(facets, phase.query.resources);
-    if (!value.ok())
-      return Answer(value.status());
-    auto retained = publication.retain(value.take_value());
-    if (!retained.ok())
-      return Answer(retained.status());
-    values.push_back(retained.take_value());
+    at[axis] += available;
+    if (at[axis] < dims[axis].offset + dims[axis].extent)
+      continue;
+    at[axis] = dims[axis].offset;
+    bool next = false;
+    for (std::size_t i = dims.size(); i;) {
+      --i;
+      if (i == axis)
+        continue;
+      if (++at[i] < dims[i].offset + dims[i].extent) {
+        next = true;
+        break;
+      }
+      at[i] = dims[i].offset;
+    }
+    if (!next)
+      return Status::success();
   }
-  if (phase.query.cancellation.cancelled())
-    return Answer(Status{ErrorCode::Cancelled, "FMT-10 cancelled"});
-  return publication.finish(descriptor, phase.query.outputs, values.data(),
-                            values.size(), phase.sets, facets,
-                            phase.query.resources);
 }
 struct Continuation final {
   const Preparation* state;
   bool requested = false;
-  Workspace workspace;
+  Footprint output;
   explicit Continuation(const Preparation* p) : state(p) {}
-  Result<DependencyPoll> poll(const DependencyPhase& phase) {
+  Poll poll(const ResultProgramPhase& phase) try {
+    const auto& spec = phase.query.output.result_schema->tensors[0];
+    const auto shape = spec.sample_shape();
     if (!requested) {
       requested = true;
-      DependencyNeedBatch batch;
-      batch.static_mapping = true;
-      return Result<DependencyPoll>(std::move(batch));
+      output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
+                                          : checked(Footprint::all(shape));
+      std::vector<Region> regions;
+      unsigned roles = 9;
+      for (const auto& span : state->spans)
+        for (const auto& box : output.boxes()) {
+          checked(phase.consume_work(shape.size() + 1));
+          std::vector<RegionDimension> dims;
+          for (unsigned axis = 0; axis < shape.size(); ++axis) {
+            const auto a = span.region.dimensions()[axis];
+            const auto b = box.dimensions()[axis];
+            const auto first = std::max(a.offset, b.offset);
+            const auto last =
+                std::min(a.offset + a.extent, b.offset + b.extent);
+            if (last <= first)
+              break;
+            dims.push_back({first, last - first});
+          }
+          if (dims.size() != shape.size())
+            continue;
+          roles |= span.roles;
+          for (unsigned j = 0; j < span.terms; ++j) {
+            auto source = dims;
+            if (span.terms == 3)
+              source[state->axis] = {state->selected[j], 1};
+            regions.emplace_back(std::move(source));
+          }
+        }
+      ResultProgramNeed need;
+      need.tensors.push_back(
+          {0, 0, checked(Footprint::from_regions(shape, regions)), roles});
+      return Poll(std::move(need));
     }
     input_internal::Float32Environment environment;
     if (!environment.active())
-      return Result<DependencyPoll>(
-          mismatch("floating environment unavailable"));
-    ExactWorkScope scope(&phase.consume_work, &phase.query.cancellation);
+      return Poll(mismatch("floating environment unavailable"));
+    const std::function<Status(std::uint64_t)> consume = [&](std::uint64_t n) {
+      if (phase.query.cancellation.cancelled())
+        return Status{ErrorCode::Cancelled, "FMT-10 cancelled"};
+      return phase.consume_work(n);
+    };
+    ExactWorkScope scope(&consume, &phase.query.cancellation);
     auto report = diagnostics(*state);
-    auto result = [&]() -> Result<ValueFragments> {
+    auto result = [&]() -> Poll {
       try {
-        return publish(phase, *state, &workspace, &report);
+        auto builder = result_builder(phase, false);
+        const auto support = relation(phase, *state);
+        const bool view = state->is_identity && !state->materialize;
+        MutableBuffer scratch;
+        Workspace* work = nullptr;
+        if (!view) {
+          scratch = checked(phase.allocator.allocate(sizeof(Workspace)));
+          work = new (scratch.data()) Workspace();
+        }
+        checked(format_result::planes(spec, output, [&](const Region& box) {
+          if (view) {
+            std::array<ResultTensorReadWindow, 3> sources;
+            sources[0] = checked(phase.tensors->at({0, 0}).acquire(
+                box, phase.query.cancellation));
+            const auto channels = box.dimensions()[state->axis];
+            for (auto c = channels.offset;
+                 c < channels.offset + channels.extent; ++c) {
+              auto dims = box.dimensions();
+              dims[state->axis] = {c, 1};
+              checked(run_plane(phase, *state, nullptr, &report,
+                                Region(std::move(dims)), sources, nullptr));
+            }
+            format_result::PublicationCounts counts;
+            const auto status =
+                format_result::publish(phase, &builder, box, sources[0],
+                                       mapping(shape.size(), *state, 1, 0),
+                                       support, state->layout, 0, &counts);
+            report.copied_elements += counts.copied;
+            report.view_elements += counts.viewed;
+            return status;
+          }
+          return builder.publish_tensor_kernel(
+              0, box,
+              [&](const auto& writers) {
+                try {
+                  for (const auto& writer : writers) {
+                    const auto channels =
+                        writer.region().dimensions()[state->axis];
+                    for (auto c = channels.offset;
+                         c < channels.offset + channels.extent; ++c) {
+                      auto dims = writer.region().dimensions();
+                      dims[state->axis] = {c, 1};
+                      const Region plane(std::move(dims));
+                      const unsigned terms =
+                          state->row(c) >= 0 && !state->is_identity ? 3 : 1;
+                      std::array<ResultTensorReadWindow, 3> sources;
+                      for (unsigned j = 0; j < terms; ++j) {
+                        auto source = plane.dimensions();
+                        if (terms == 3)
+                          source[state->axis] = {state->selected[j], 1};
+                        sources[j] = checked(phase.tensors->at({0, 0}).acquire(
+                            Region(std::move(source)),
+                            phase.query.cancellation));
+                      }
+                      checked(run_plane(phase, *state, work, &report, plane,
+                                        sources, &writer));
+                    }
+                  }
+                  return Status::success();
+                } catch (const CheckedFailure& f) {
+                  return f.status;
+                } catch (const ExactWorkFailure& f) {
+                  return f.status;
+                }
+              },
+              support, {true, true, true, true}, phase.query.cancellation);
+        }));
+        checked(consume(1));
+        return Poll(ResultPublication{checked(builder.seal()), true});
+      } catch (const CheckedFailure& f) {
+        return Poll(f.status);
+      } catch (const Status& status) {
+        return Poll(status);
       } catch (const ExactWorkFailure& f) {
-        return Result<ValueFragments>(f.status);
+        return Poll(f.status);
       } catch (const std::bad_alloc&) {
-        return Result<ValueFragments>(
-            Status{ErrorCode::ResourceExhausted,
-                   "FMT-10 exact capacity/allocation exhausted",
-                   FailureReason::CapacityLimit});
+        return Poll(Status{ErrorCode::ResourceExhausted,
+                           "FMT-10 exact capacity/allocation exhausted",
+                           FailureReason::CapacityLimit});
       }
     }();
-    if (phase.report_numeric) {
-      auto status = phase.report_numeric(report);
-      if (!status.ok())
-        return Result<DependencyPoll>(status);
-    }
-    return result.ok() ? Result<DependencyPoll>(result.take_value())
-                       : Result<DependencyPoll>(result.status());
+    if (phase.report_numeric)
+      checked(phase.report_numeric(report));
+    return result;
+  } catch (const CheckedFailure& failure) {
+    return Poll(failure.status);
   }
 };
-template <bool Narrow>
-Status planar_impl(const PlanarOperationInvocation& call) {
-  input_internal::Float32Environment environment;
-  if (!environment.active())
-    return mismatch("floating environment unavailable");
-  if (!call.prepared || !call.prepared->state())
-    return {ErrorCode::Internal, "FMT-10 preparation absent"};
-  const auto& state = *static_cast<const Preparation*>(call.prepared->state());
-  const auto& layout = *call.output_metadata.planar_layout;
-  const auto& dimensions = call.output_region.dimensions();
-  const auto charge = [&](std::uint64_t amount) {
-    if (call.cancellation.cancelled())
-      return Status{ErrorCode::Cancelled, "FMT-10 cancelled"};
-    if (const auto* budget = resource_internal::metadata_budget())
-      return budget->consume({amount});
-    return Status::success();
-  };
-  const std::function<Status(std::uint64_t)> consume = charge;
-  ExactWorkScope scope(&consume, &call.cancellation);
-  // Accounted payload scratch rather than a hidden per-tile heap/cache.
-  auto scratch = call.allocator.allocate(sizeof(Workspace));
-  if (!scratch.ok())
-    return scratch.status();
-  auto scratch_buffer = scratch.take_value();
-  auto* work = new (scratch_buffer.data()) Workspace();
-  auto report = diagnostics(state);
-  std::vector<std::uint64_t> at(dimensions.size());
-  for (unsigned a = 0; a < at.size(); ++a)
-    at[a] = dimensions[a].offset;
-  constexpr auto width = Narrow ? 4U : 8U;
-  try {
-    for (std::uint64_t channel = dimensions[state.axis].offset;
-         channel <
-         dimensions[state.axis].offset + dimensions[state.axis].extent;
-         ++channel) {
-      const int row = state.row(channel);
-      const unsigned terms = row >= 0 && !state.is_identity ? 3 : 1;
-      for (std::uint64_t y = dimensions[layout.height_axis].offset;
-           y < dimensions[layout.height_axis].offset +
-                   dimensions[layout.height_axis].extent;
-           ++y) {
-        at[layout.height_axis] = y;
-        for (std::uint64_t x = dimensions[layout.width_axis].offset;
-             x < dimensions[layout.width_axis].offset +
-                     dimensions[layout.width_axis].extent;) {
-          at[layout.width_axis] = x;
-          at[state.axis] = channel;
-          auto target = call.output.row_run(at);
-          if (!target.ok())
-            return target.status();
-          std::array<PlanarRowRun, 3> source;
-          auto available = target.value().samples;
-          for (unsigned j = 0; j < terms; ++j) {
-            at[state.axis] = terms == 3 ? state.selected[j] : channel;
-            auto run = call.inputs[0].row_run(at);
-            if (!run.ok())
-              return run.status();
-            source[j] = run.take_value();
-            available = std::min(available, source[j].samples);
-          }
-          // Keep the validated row-run pointers across 64-lane math blocks.
-          // Reacquire only at an actual tile/coverage boundary, not every
-          // block.
-          for (std::uint64_t offset = 0; offset < available;) {
-            const auto n = static_cast<unsigned>(
-                std::min<std::uint64_t>(available - offset, block_size));
-            auto status = charge(n * (64 + terms));
-            if (!status.ok())
-              return status;
-            if (row < 0) {
-              // Bypass components are a bitwise transfer, never arithmetic.
-              std::memcpy(target.value().data + (offset * width),
-                          source[0].data + (offset * width), n * width);
-              report.copied_elements += n;
-            } else {
-              for (unsigned j = 0; j < terms; ++j)
-                for (unsigned lane = 0; lane < n; ++lane) {
-                  work->raw[j][lane] = 0;
-                  std::memcpy(&work->raw[j][lane],
-                              source[j].data + (offset + lane) * width, width);
-                }
-              at[state.axis] = channel;
-              status =
-                  evaluate(work, n, row, state, &report, [&](unsigned lane) {
-                    auto coordinate = at;
-                    coordinate[layout.width_axis] = x + offset + lane;
-                    return coordinate;
-                  });
-              if (!status.ok())
-                return status;
-              for (unsigned lane = 0; lane < n; ++lane)
-                std::memcpy(target.value().data + (offset + lane) * width,
-                            &work->result[lane], width);
-            }
-            offset += n;
-          }
-          x += available;
-        }
-      }
-    }
-  } catch (const ExactWorkFailure& f) {
-    return f.status;
-  } catch (const std::bad_alloc&) {
-    return {ErrorCode::ResourceExhausted,
-            "FMT-10 exact capacity/allocation exhausted",
-            FailureReason::CapacityLimit};
-  }
-  return charge(0);
-}
-Status planar(const PlanarOperationInvocation& call) {
-  if (!call.prepared || !call.prepared->state())
-    return {ErrorCode::Internal, "FMT-10 preparation absent"};
-  const auto& state = *static_cast<const Preparation*>(call.prepared->state());
-  return state.narrow ? planar_impl<true>(call) : planar_impl<false>(call);
-}
-template <bool Narrow>
-Status validate_mapped_impl(const PlanarMappedValidationInvocation& call) {
-  const auto& state = *static_cast<const Preparation*>(call.prepared->state());
-  if (!state.is_identity || !state.semantic || call.input_port != 0)
-    return Status{ErrorCode::Internal, "FMT-10 mapped validation invariant"};
-  const auto& dims = call.input.region().dimensions();
-  const auto& config = call.input.config();
-  std::vector<std::uint64_t> at(dims.size());
-  for (unsigned axis = 0; axis < at.size(); ++axis)
-    at[axis] = dims[axis].offset;
-  constexpr auto width = Narrow ? 4U : 8U;
-  for (auto channel = dims[state.axis].offset;
-       channel < dims[state.axis].offset + dims[state.axis].extent; ++channel) {
-    if (state.row(channel) < 0)
-      continue;
-    at[state.axis] = channel;
-    for (auto y = dims[config.height_axis].offset;
-         y < dims[config.height_axis].offset + dims[config.height_axis].extent;
-         ++y) {
-      at[config.height_axis] = y;
-      for (auto x = dims[config.width_axis].offset;
-           x <
-           dims[config.width_axis].offset + dims[config.width_axis].extent;) {
-        if (call.cancellation.cancelled())
-          return Status{ErrorCode::Cancelled,
-                        "FMT-10 view validation cancelled"};
-        at[config.width_axis] = x;
-        auto run = call.input.row_run(at);
-        if (!run.ok())
-          return run.status();
-        const auto available = run.value().samples;
-        for (std::uint64_t offset = 0; offset < available;) {
-          if (call.cancellation.cancelled())
-            return Status{ErrorCode::Cancelled,
-                          "FMT-10 view validation cancelled"};
-          const auto count =
-              std::min<std::uint64_t>(available - offset, block_size);
-          if (const auto* budget = resource_internal::metadata_budget()) {
-            auto status = budget->consume({count * (dims.size() + 1)});
-            if (!status.ok())
-              return status;
-          }
-          for (std::uint64_t lane = 0; lane < count; ++lane) {
-            std::uint64_t raw = 0;
-            std::memcpy(&raw, run.value().data + (offset + lane) * width,
-                        width);
-            if (!finite_bits(raw, Narrow)) {
-              at[config.width_axis] = x + offset + lane;
-              return sample_failure("nonfinite identity input",
-                                    FailureReason::InvalidDomain, at);
-            }
-          }
-          offset += count;
-        }
-        x += available;
-      }
-    }
-  }
-  return Status::success();
-}
-Status validate_mapped(const PlanarMappedValidationInvocation& call) {
-  const auto& state = *static_cast<const Preparation*>(call.prepared->state());
-  return state.narrow ? validate_mapped_impl<true>(call)
-                      : validate_mapped_impl<false>(call);
-}
 OperationDefinition definition(unsigned member, const std::string& suffix,
                                SequenceProfile profile) {
   const std::array<const char*, 3> names{
@@ -1239,10 +1140,12 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
   op.key = std::string("color.") + names[member] + '_' + suffix;
   auto& traits = op.traits;
   traits.input_count = 1;
-  traits.input_schema.resize(1);
+  OperationPortConstraint port;
+  port.kind = OperationPortKind::Result;
+  port.element_type_mask = 127;
+  traits.input_schema = {port};
   traits.requires_metadata_specialization = true;
   traits.cacheable = false;
-  traits.planar_storage_capable = true;
   traits.workspace_bytes = sizeof(Workspace) + 65536;
   for (const auto* name :
        {"metadata_mode", "group", "components", "metadata_override", "layout"})
@@ -1270,23 +1173,23 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
   }
   auto& output = traits.outputs[0];
   output.key = "values";
-  output.shape_rule = OperationShapeRule::Fixed;
-  output.fixed_output_shape = {1};
+  output.output_schema = port;
+  output.result_schema = tensor_ops::scalar_schema();
   output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 1;
+  output.dependency_version = 2;
   output.continuation_bytes = sizeof(Continuation);
   output.maximum_dependency_stages = 2;
   op.prepare_static = [member, profile](const auto& inputs,
                                         const auto& params) {
     return prepare(inputs, params, member, profile);
   };
-  op.start_dependency = [](const DependencyQuery& query,
-                           const BufferAllocator& allocator) {
-    return DependencyContinuation::make<Continuation>(
+  op.start_result = [](const ResultProgramQuery& query,
+                       const BufferAllocator& allocator) {
+    if (query.tensor_outputs && query.tensor_outputs->empty())
+      return ResultContinuation::stateless<empty_result>();
+    return ResultContinuation::make<Continuation>(
         allocator, static_cast<const Preparation*>(query.prepared->state()));
   };
-  op.planar_callback = planar;
-  op.validate_planar_mapped = validate_mapped;
   return op;
 }
 
@@ -1300,8 +1203,8 @@ OperationMetadata edge_metadata(const WorkflowDocument& document,
   for (const auto& declaration : document.inputs) {
     auto canonical = declaration;
     checked(input_internal::validate_declaration(&canonical));
-    OperationMetadata m{canonical.descriptor, canonical.facets};
-    m.planar_layout = canonical.planar_layout;
+    OperationMetadata m;
+    m.result_schema = canonical.result_schema;
     require(inputs.emplace(canonical.id, std::move(m)).second,
             "duplicate graph input id");
   }

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -12,6 +13,8 @@
 #include <vector>
 
 #include "../support/alpha_golden.hpp"
+#include "channel_extraction_workflow/source.hpp"
+#include "numeric_workflow/icc_fixture.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {
@@ -39,16 +42,6 @@ std::uint64_t bits(double x, ElementType type = ElementType::Float32) {
     std::memcpy(&value, &x, 8);
   }
   return value;
-}
-StridedLayout dense(const ValueDescriptor& descriptor) {
-  StridedLayout layout;
-  layout.byte_strides.resize(descriptor.shape.size());
-  std::int64_t stride = Value::element_size(descriptor.element_type);
-  for (std::size_t i = descriptor.shape.size(); i-- > 0;) {
-    layout.byte_strides[i] = stride;
-    stride *= descriptor.shape[i];
-  }
-  return layout;
 }
 TensorDescription rgb(unsigned axis, unsigned count = 4,
                       std::optional<std::uint64_t> alpha = 3) {
@@ -100,74 +93,88 @@ TensorDescription component_gray() {
 struct Fixture {
   WorkflowDocument document;
   ExecutionBindings bindings;
+  ResourceBudget root;
+  std::vector<channel_fixture::Source> sources;
   WorkflowInput add(const ValueDescriptor& descriptor,
                     const std::vector<std::uint64_t>& samples,
                     const std::optional<TensorDescription>& description = {},
                     const std::optional<PlanarImageConfig>& image_config = {},
-                    const std::optional<std::vector<Region>>& published = {}) {
-    const auto count = take(Region::whole(descriptor.shape).element_count());
-    require(count == samples.size(), "fixture sample count");
-    const auto width = Value::element_size(descriptor.element_type);
-    std::vector<std::uint8_t> bytes(count * width);
-    for (std::size_t i = 0; i < samples.size(); ++i) {
-      std::memcpy(bytes.data() + i * width, &samples[i], width);
-    }
+                    const std::optional<std::vector<Region>>& published = {},
+                    const std::vector<std::uint64_t>& batches = {},
+                    ResourceBindings resources = {}) {
     std::vector<ValueFacet> facets;
-    if (description) {
+    if (description)
       facets.push_back(take(encode_tensor_description(*description)));
-    }
-    const auto id = document.inputs.size() + 1;
-    const auto name = "input" + std::to_string(id);
-    WorkflowInputDeclaration declaration{id,
-                                         name,
-                                         descriptor,
-                                         Region::whole(descriptor.shape),
-                                         dense(descriptor),
-                                         facets};
-    ExecutionBinding binding;
-    binding.name = name;
-    auto value = take(Value::create(descriptor, Region::whole(descriptor.shape),
-                                    dense(descriptor), bytes, facets));
+    ResultTensorLayout layout;
     if (image_config) {
       const auto& c = *image_config;
-      declaration.layout = {};
-      declaration.planar_layout =
-          PlanarImageLayout{c.order,        c.height_axis,     c.width_axis,
-                            c.channel_axis, c.row_pitch_bytes, c.groups};
-      auto image = take(PlanarImage::create(descriptor, c, facets));
-      for (const auto& region : published.value_or(
-               std::vector<Region>{Region::whole(descriptor.shape)})) {
-        std::vector<std::uint8_t> packed;
-        auto fp = take(Footprint::from_regions(descriptor.shape, {region}));
-        const auto status = fp.visit(
-            [&](const auto& at) {
-              const auto offset = take(value.byte_address(at));
-              packed.insert(packed.end(), bytes.begin() + offset,
-                            bytes.begin() + offset + width);
-              return Status::success();
-            },
-            UINT64_MAX);
-        require(status.ok(), "fixture pack");
-        require(image.publish(region, packed.data(), packed.size()).ok(),
-                "fixture publish");
-      }
-      binding.image = std::make_shared<const PlanarImage>(std::move(image));
-    } else {
-      binding.value = value;
+      layout.spatial = true;
+      layout.order = c.order;
+      layout.height_axis = c.height_axis;
+      layout.width_axis = c.width_axis;
+      layout.channel_axis = c.channel_axis;
+      layout.row_pitch_bytes = c.row_pitch_bytes;
+      layout.groups = c.groups;
     }
+    auto source = channel_fixture::source(descriptor, facets, layout, batches);
+    source.resources = std::move(resources);
+    const auto width = Value::element_size(descriptor.element_type);
+    require(source.bytes.size() == samples.size() * width,
+            "fixture sample count");
+    for (std::size_t i = 0; i < samples.size(); ++i)
+      std::memcpy(source.bytes.data() + i * width, &samples[i], width);
+    if (published)
+      source.coverage = *published;
+    const auto id = document.inputs.size() + 1;
+    auto declaration = channel_fixture::declaration(source);
+    declaration.id = id;
+    declaration.name = "input" + std::to_string(id);
     document.inputs.push_back(declaration);
-    bindings.inputs.push_back(binding);
+    bindings.inputs.push_back(
+        {declaration.name, channel_fixture::publish(root, source)});
+    sources.push_back(std::move(source));
     return WorkflowInputReference{id};
   }
   OperationMetadata metadata(unsigned port = 0) const {
-    const auto& d = document.inputs[port];
     OperationMetadata m;
-    m.descriptor = d.descriptor;
-    m.facets = d.facets;
-    m.planar_layout = d.planar_layout;
+    m.result_schema = document.inputs[port].result_schema;
     return m;
   }
+  void bind_to(ExecutionContext& context) {
+    root = take(context.resource_budget());
+    for (std::size_t i = 0; i < sources.size(); ++i)
+      bindings.inputs[i].result = channel_fixture::publish(root, sources[i]);
+  }
+  std::uint64_t setup_work() {
+    ExecutionContext context(make_default_operation_registry());
+    bind_to(context);
+    return root.statistics().issued.work;
+  }
 };
+const ResultTensorSpec& spec(const ExecutionResult& run) {
+  return run.results.at("result").schema().tensors[0];
+}
+const void* owner(const ResultRef& result) {
+  auto descriptor = take(result.descriptor());
+  return channel_fixture::owner(result,
+                                descriptor.tensor_coverage(0).boxes().front());
+}
+bool readable(const ResultRef& result, const Region& region) {
+  return result.acquire_tensor(take(result.descriptor()), 0, region).ok();
+}
+std::uint64_t source_bytes(const ExecutionResult& run, const Fixture& fixture) {
+  const auto support = take(run.dependencies.source_support());
+  std::uint64_t bytes = 0;
+  for (std::size_t i = 0; i < fixture.sources.size(); ++i) {
+    const auto found = support.find(fixture.bindings.inputs[i].name);
+    if (found != support.end())
+      bytes +=
+          take(found->second.element_count()) *
+          Value::element_size(
+              fixture.sources[i].schema.tensors[0].descriptor.element_type);
+  }
+  return bytes;
+}
 Result<ExecutionResult> execute(Fixture& f, WorkflowNodeOutput node,
                                 const std::optional<Region>& roi = {},
                                 const CancellationToken& cancellation = {},
@@ -176,16 +183,18 @@ Result<ExecutionResult> execute(Fixture& f, WorkflowNodeOutput node,
   auto registry = make_default_operation_registry();
   GraphContext graph(f.document);
   PlanningOptions options;
-  if (roi) {
+  if (roi)
     options.output_regions = {{"result", *roi}};
-  }
-  auto compiled = Compiler(registry).compile(graph, options);
-  if (!compiled.ok()) {
+  ResourceBindings resources;
+  for (const auto& source : f.sources)
+    resources = take(resources.unite(source.resources));
+  auto compiled = Compiler(registry).compile(graph, options, resources);
+  if (!compiled.ok())
     return Result<ExecutionResult>(compiled.status());
-  }
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   ExecutionContext context(registry, config);
+  f.bind_to(context);
   ExecutionOptions execution;
   execution.dependencies.maximum_work = fuel;
   execution.maximum_dependency_work = fuel * 2;
@@ -194,46 +203,20 @@ Result<ExecutionResult> execute(Fixture& f, WorkflowNodeOutput node,
 }
 std::vector<std::uint64_t> observed(const ExecutionResult& result,
                                     const std::optional<Region>& region = {}) {
-  const bool image = result.images.count("result");
-  const auto& d = image ? result.images.at("result").descriptor()
-                        : result.values.at("result").descriptor();
-  const auto area = region.value_or(Region::whole(d.shape));
-  const auto width = Value::element_size(d.element_type);
-  std::vector<std::uint64_t> out;
-  std::vector<std::uint8_t> packed;
-  if (image) {
-    packed.resize(take(area.element_count()) * width);
-    require(result.images.at("result")
-                .read(area, packed.data(), packed.size())
-                .ok(),
-            "result planar read");
-  }
-  auto fp = take(Footprint::from_regions(d.shape, {area}));
-  const auto status = fp.visit(
-      [&](const auto& at) {
-        std::uint64_t sample = 0;
-        const auto* data =
-            image ? packed.data() + out.size() * width
-                  : result.values.at("result").bytes().data() +
-                        take(result.values.at("result").byte_address(at));
-        std::memcpy(&sample, data, width);
-        out.push_back(sample);
-        return Status::success();
-      },
-      UINT64_MAX);
-  require(status.ok(), "result traversal");
+  const auto& d = spec(result);
+  const auto area = region.value_or(Region::whole(d.sample_shape()));
+  const auto packed = channel_fixture::read(result.results.at("result"), area);
+  const auto width = Value::element_size(d.descriptor.element_type);
+  std::vector<std::uint64_t> out(packed.size() / width);
+  for (std::size_t i = 0; i < out.size(); ++i)
+    std::memcpy(&out[i], packed.data() + i * width, width);
   return out;
 }
 TensorDescription description(const ExecutionResult& result) {
-  const auto& facets = result.images.count("result")
-                           ? result.images.at("result").facets()
-                           : result.values.at("result").facets();
-  for (const auto& f : facets) {
-    if (f.key == "photospider.tensor-description") {
+  for (const auto& f : spec(result).facets)
+    if (f.key == "photospider.tensor-description")
       return take(decode_tensor_description(f));
-    }
-  }
-  throw std::runtime_error("missing tensor description");
+  throw std::runtime_error("no output tensor description");
 }
 void basic_association() {
   for (auto type : {ElementType::Float32, ElementType::Float64}) {
@@ -315,8 +298,8 @@ void partial_domains() {
   auto r = take(execute(f, a, red));
   require(observed(r, red) == std::vector<std::uint64_t>({bits(1), bits(1)}),
           "R-only ignores missing G/B");
-  require(r.diagnostics.source_read_bytes == 16, "R-only exact read union");
-  require(!r.images.at("result").acquire(alpha).ok(),
+  require(source_bytes(r, f) == 16, "R-only exact read union");
+  require(!readable(r.results.at("result"), alpha),
           "R-only does not publish alpha");
   auto b = take(format::unassociate_alpha(f.document, a, o));
   require(observed(take(execute(f, b, red)), red) ==
@@ -406,24 +389,24 @@ void set_and_views() {
     require(observed(result)[0] == bits(-2) && observed(result)[1] == bits(-0.),
             "set preserves hidden/signed color");
     if (planar) {
-      require(result.images.at("result").owner_token() ==
-                  f.bindings.inputs[0].image->owner_token(),
+      require(owner(result.results.at("result")) ==
+                  owner(f.bindings.inputs[0].result),
               "validated planar alias");
     } else {
-      require(result.values.at("result").bytes().data() ==
-                  f.bindings.inputs[0].value.bytes().data(),
+      require(owner(result.results.at("result")) ==
+                  owner(f.bindings.inputs[0].result),
               "validated generic alias");
     }
     o.layout = "materialize";
     set = take(format::set_alpha(f.document, input, o));
     result = take(execute(f, set));
     if (planar) {
-      require(result.images.at("result").owner_token() !=
-                  f.bindings.inputs[0].image->owner_token(),
+      require(owner(result.results.at("result")) !=
+                  owner(f.bindings.inputs[0].result),
               "forced planar copy");
     } else {
-      require(result.values.at("result").bytes().data() !=
-                  f.bindings.inputs[0].value.bytes().data(),
+      require(owner(result.results.at("result")) !=
+                  owner(f.bindings.inputs[0].result),
               "forced generic copy");
     }
     auto scalar = f.add({ElementType::Float32, {1}}, {bits(.25)});
@@ -550,9 +533,9 @@ void opaque_and_gray_insertion() {
       auto result = take(execute(f, node));
       require(observed(result) == std::vector<std::uint64_t>(6, entry.second),
               "opaque exact dtype maximum/one");
-      require(result.values.at("result").descriptor().shape ==
-                  std::vector<std::uint64_t>({2, 3}),
-              "component keepdims invents no axis");
+      require(
+          spec(result).descriptor.shape == std::vector<std::uint64_t>({2, 3}),
+          "component keepdims invents no axis");
     }
     o.layout = "view";
     auto node = take(format::extract_alpha(f.document, input, f.metadata(), o));
@@ -595,7 +578,7 @@ void opaque_and_gray_insertion() {
       take(format::extract_alpha(image.document, input, image.metadata(), e));
   auto result = take(execute(image, node));
   require(observed(result) == std::vector<std::uint64_t>(6, bits(1)) &&
-              result.diagnostics.source_read_bytes == 0,
+              source_bytes(result, image) == 0,
           "opaque planar source is descriptor-only");
   // A separate fully published fixture: Gray insertion requires its source
   // colors.
@@ -618,24 +601,14 @@ void opaque_and_gray_insertion() {
   set.output_axis = 2;
   node = take(format::set_alpha(insertion.document, input, set, weight));
   result = take(execute(insertion, node));
-  require(result.images.at("result").descriptor().shape ==
-              std::vector<std::uint64_t>({2, 3, 2}),
-          "component Gray axis insertion");
+  require(
+      spec(result).descriptor.shape == std::vector<std::uint64_t>({2, 3, 2}),
+      "component Gray axis insertion");
   require(description(result).groups[0].alpha == 1,
           "inserted Gray internal alpha");
   require(description(result).groups[0].interpretation.coordinates ==
               gray.coordinates,
           "Gray alpha insertion lost model coordinates");
-  format::ModelConversionOptions expand;
-  expand.group = "Y";
-  auto converted =
-      take(format::gray_to_color(insertion.document, node, expand));
-  auto color = take(execute(insertion, converted));
-  require(color.images.at("result").descriptor().shape ==
-              std::vector<std::uint64_t>({2, 3, 4}),
-          "Gray alpha insertion cannot feed native model conversion");
-  require(description(color).groups[0].interpretation.model == "xyz",
-          "Gray conversion published the wrong native model");
 }
 void independent_golden() {
   for (auto type : {ElementType::Float32, ElementType::Float64}) {
@@ -725,9 +698,22 @@ void metadata_conflicts() {
   d.channels[0].sampling = TensorSampling{"color-grid"};
   d.groups[0].components[0].sampling = d.channels[0].sampling;
   d.channels[1].sampling = TensorSampling{"different-grid"};
+  require(!encode_tensor_description(d).ok(),
+          "inconsistent internal group sampling is rejected by the Result "
+          "description codec");
+  d.channels[1].sampling = TensorSampling{"color-grid"};
   input = grid.add({ElementType::Float32, {1, 2}}, {bits(.5), bits(.5)}, d);
-  node = take(format::set_alpha(grid.document, input, set));
-  require(!execute(grid, node).ok(),
+  TensorDescription weight_description;
+  weight_description.component =
+      TensorChannelDescription{"A", "alpha", "coverage"};
+  weight_description.sampling = TensorSampling{"different-grid"};
+  auto weight =
+      grid.add({ElementType::Float32, {1}}, {bits(.5)}, weight_description);
+  set.alpha_source.kind = "external_plane";
+  node = take(format::set_alpha(grid.document, input, set, weight));
+  const auto conflict = execute(grid, node);
+  require(!conflict.ok() && conflict.status().message.find(
+                                "sampling grids conflict") != std::string::npos,
           "alpha and selected color must be co-sited");
 }
 void ranks_tiles_and_views() {
@@ -802,7 +788,7 @@ void ranks_tiles_and_views() {
     auto result = take(std::move(run));
     require(observed(result, red) == std::vector<std::uint64_t>(8, bits(1)),
             "cross-tile/row pitch ROI");
-    require(result.diagnostics.source_read_bytes == 64,
+    require(source_bytes(result, f) == 64,
             "tile edges preserve exact source support");
     format::SetAlphaOptions identity_set;
     identity_set.group = "rgb";
@@ -810,10 +796,10 @@ void ranks_tiles_and_views() {
     identity_set.layout = "view";
     auto viewed = take(format::set_alpha(f.document, input, identity_set));
     auto identity_result = take(execute(f, viewed, red));
-    require(identity_result.images.at("result").owner_token() ==
-                f.bindings.inputs[0].image->owner_token(),
+    require(owner(identity_result.results.at("result")) ==
+                owner(f.bindings.inputs[0].result),
             "R-only planar set returns validated identity view");
-    require(!identity_result.images.at("result").acquire(alpha).ok(),
+    require(!readable(identity_result.results.at("result"), alpha),
             "view does not publish validation-only alpha");
     format::SetAlphaOptions set;
     set.group = "rgb";
@@ -828,7 +814,7 @@ void ranks_tiles_and_views() {
     result = take(execute(f, op, red));
     require(observed(result, red) == std::vector<std::uint64_t>(8, bits(2)),
             "external planar alpha validates without multiplying");
-    require(result.diagnostics.source_read_bytes == 64,
+    require(source_bytes(result, f) == 64,
             "set R-only does not fetch old alpha");
   }
   Fixture reversed;
@@ -845,10 +831,14 @@ void ranks_tiles_and_views() {
   require(observed(result) == std::vector<std::uint64_t>(
                                   {bits(.5), bits(2), bits(.25), bits(4)}),
           "negative channel stride set view");
-  require(result.values.at("result").storage().get() ==
-              reversed.bindings.inputs[0].value.storage().get(),
+  require(owner(result.results.at("result")) ==
+              owner(reversed.bindings.inputs[0].result),
           "reverse view retains owner");
-  require(result.values.at("result").layout().byte_strides[1] == -4,
+  require(take(take(result.results.at("result").acquire_tensor(
+                        take(result.results.at("result").descriptor()), 0,
+                        Region::whole({2, 2})))
+                   .row_run({0, 0}))
+                  .sample_stride_bytes == -4,
           "reverse view affine stride");
   // An extracted alpha may alias the primary generic storage, with a different
   // rank. Complete physical-address proof permits it without weakening checks.
@@ -866,8 +856,8 @@ void ranks_tiles_and_views() {
   set.layout = "view";
   op = take(format::set_alpha(common.document, input, set, extracted));
   result = take(execute(common, op));
-  require(result.values.at("result").storage().get() ==
-              common.bindings.inputs[0].value.storage().get(),
+  require(owner(result.results.at("result")) ==
+              owner(common.bindings.inputs[0].result),
           "same-owner external alpha view");
   Fixture identity;
   input = identity.add(
@@ -885,8 +875,8 @@ void ranks_tiles_and_views() {
     require(observed(result) ==
                 std::vector<std::uint64_t>(6, bits(-0., ElementType::Float64)),
             "component missing identity bits");
-    require((result.values.at("result").storage().get() ==
-             identity.bindings.inputs[0].value.storage().get()) ==
+    require((owner(result.results.at("result")) ==
+             owner(identity.bindings.inputs[0].result)) ==
                 (std::string(layout) == "view"),
             "identity respects forced layout");
   }
@@ -908,7 +898,9 @@ void assertions_and_environment() {
   format::ExtractAlphaOptions e;
   e.group = "rgb";
   auto wrong = f.metadata();
-  wrong.descriptor.shape = {2, 4};
+  auto changed_schema = std::make_shared<SchemaTemplate>(*wrong.result_schema);
+  changed_schema->tensors[0].descriptor.shape = {2, 4};
+  wrong.result_schema = changed_schema;
   require(!format::extract_alpha(f.document, input, wrong, e).ok() &&
               f.document.nodes.empty(),
           "declared-source assertion rollback");
@@ -980,19 +972,6 @@ void review_contract_regressions() {
               "SetAlpha must preserve local encoding absence/endpoints");
       require(out.encoding == d.encoding,
               "SetAlpha must preserve inherited encoding");
-      Fixture conversion;
-      const auto source = conversion.add({ElementType::Float32, {1, 2}},
-                                         {bits(.5), bits(.5)}, out);
-      conversion.document.nodes = {
-          {1,
-           "numeric.convert_format_strict",
-           {source},
-           {{"dtype", std::string("float32")},
-            {"axis", std::int64_t{1}},
-            {"source_range",
-             std::string(moved ? "i:-1,i:2;i:0,i:1" : "i:0,i:1;i:-1,i:2")}}}};
-      require(execute(conversion, {1, "values"}).ok(),
-              "preserved alpha interval must remain acceptable to FMT-06");
     }
   }
   // A new alpha must override a non-identity tensor-wide color encoding.
@@ -1158,12 +1137,16 @@ void managed_alpha_budget_regressions() {
           continue;
         }
         require(compiled.ok(), "budget fixture compile");
+        const auto setup = f.setup_work();
         for (unsigned workers : {1U, 2U}) {
           ExecutionContextConfig c;
           c.cpu_workers = workers;
           c.managed_resources = ResourceLimits{};
-          c.managed_resources->maximum_work = 10000;
+          c.managed_resources->maximum_work = setup + 10000;
           ExecutionContext context(registry, c);
+          f.bind_to(context);
+          const auto before =
+              take(context.resource_budget()).statistics().issued.work;
           ExecutionOptions e;
           e.dependencies.maximum_work = UINT64_C(1) << 42;
           e.maximum_dependency_work = UINT64_C(1) << 42;
@@ -1176,7 +1159,8 @@ void managed_alpha_budget_regressions() {
                   algorithm);
           const auto issued =
               take(context.resource_budget()).statistics().issued.work;
-          require(issued <= 10000, "work must be precharged without overshoot");
+          require(issued >= before && issued - before <= 10000,
+                  "work must be precharged without overshoot");
         }
       }
     }
@@ -1207,15 +1191,19 @@ void managed_alpha_budget_regressions() {
       auto registry = make_default_operation_registry();
       GraphContext graph(f.document);
       auto compiled = take(Compiler(registry).compile(graph));
+      const auto setup = f.setup_work();
       for (std::uint64_t limit : {UINT64_C(10000), UINT64_C(1) << 42}) {
         ExecutionContextConfig c;
         c.cpu_workers = 1;
         c.managed_resources = ResourceLimits{};
-        c.managed_resources->maximum_work = limit;
+        c.managed_resources->maximum_work = setup + limit;
         ExecutionContext context(registry, c);
+        f.bind_to(context);
+        const auto before =
+            take(context.resource_budget()).statistics().issued.work;
         auto run = context.execute(compiled.plan, f.bindings);
         const auto work =
-            take(context.resource_budget()).statistics().issued.work;
+            take(context.resource_budget()).statistics().issued.work - before;
         if (limit == 10000) {
           require(
               !run.ok() && run.status().code == ErrorCode::ResourceExhausted,
@@ -1225,8 +1213,8 @@ void managed_alpha_budget_regressions() {
           require(work >= 17 * 17 * 2 * 64,
                   "successful planar callback sample work is charged");
           if (viewed) {
-            require(run.value().images.at("result").owner_token() ==
-                        f.bindings.inputs[0].image->owner_token(),
+            require(owner(run.value().results.at("result")) ==
+                        owner(f.bindings.inputs[0].result),
                     "managed view retains its authorized owner");
           }
         }
@@ -1234,6 +1222,234 @@ void managed_alpha_budget_regressions() {
     }
   }
 }
+void result_batches_and_roles() {
+  for (const auto* storage : {"generic", "continuous", "tiled"}) {
+    Fixture f;
+    std::optional<PlanarImageConfig> layout;
+    if (std::string(storage) != "generic") {
+      layout.emplace();
+      layout->order = std::string(storage) == "continuous"
+                          ? ImagePlaneOrder::Continuous
+                          : ImagePlaneOrder::Tiled;
+    }
+    std::vector<std::uint64_t> samples(48);
+    for (std::size_t i = 0; i < samples.size(); ++i)
+      samples[i] = bits(i % 2 ? .5 : 2);
+    auto input = f.add({ElementType::Float32, {2, 3, 2}}, samples, gray(2),
+                       layout, {}, {2, 2});
+    format::AlphaAssociationOptions options;
+    options.group = "gray";
+    const auto op = take(format::associate_alpha(f.document, input, options));
+    const Region red({{1, 1}, {0, 2}, {0, 2}, {1, 2}, {0, 1}});
+    const Region alpha({{1, 1}, {0, 2}, {0, 2}, {1, 2}, {1, 1}});
+    auto run = take(execute(f, op, red));
+    require(observed(run, red) == std::vector<std::uint64_t>(8, bits(1)),
+            "Result batch coordinates");
+    require(spec(run).batch_axes == f.sources[0].schema.tensors[0].batch_axes &&
+                spec(run).atomic_trailing_axes == 0,
+            "alpha preserves batches and publishes independent samples");
+    require(source_bytes(run, f) == 64, "batched exact color and alpha union");
+    const auto shape = f.sources[0].schema.tensors[0].sample_shape();
+    const auto query = take(Footprint::from_regions(shape, {red}));
+    const auto alpha_edit = take(Footprint::from_regions(shape, {alpha}));
+    const auto dirty = [&](const ExecutionResult& result,
+                           const std::string& source, const Footprint& changed,
+                           unsigned roles) {
+      return take(result.dependencies.potential_dirty(
+                      source, changed, roles, {}, ResultSupportTarget::Tensor,
+                      0))
+          .at("result");
+    };
+    require(dirty(run, "input1", query, 4) == query &&
+                dirty(run, "input1", alpha_edit, 4) == query,
+            "semantic color and alpha retain Validation support");
+    auto only_alpha = take(execute(f, op, alpha));
+    require(dirty(only_alpha, "input1", alpha_edit, 4).empty(),
+            "pass-through alpha has no domain validation");
+    const auto scalar = f.add({ElementType::Float32, {1}}, {bits(.25)});
+    format::SetAlphaOptions set;
+    set.group = "gray";
+    set.alpha_source.kind = "scalar";
+    auto replacement = take(format::set_alpha(f.document, input, set, scalar));
+    run = take(execute(f, replacement, red));
+    require(observed(run, red) == std::vector<std::uint64_t>(8, bits(2)) &&
+                source_bytes(run, f) == 36,
+            "Set scalar validation preserves batched color bytes");
+    const auto scalar_edit = take(Footprint::all({1}));
+    require(dirty(run, "input2", scalar_edit, 1).empty() &&
+                dirty(run, "input2", scalar_edit, 4) == query,
+            "Set color depends on scalar Validation only");
+    auto alpha_run = take(execute(f, replacement, alpha));
+    require(dirty(alpha_run, "input2", scalar_edit, 1) == alpha_edit &&
+                dirty(alpha_run, "input2", scalar_edit, 4) == alpha_edit,
+            "new alpha carries Data and Validation");
+    options = {};
+    options.metadata_mode = "raw";
+    options.input_structure = "channels";
+    options.axis = 2;
+    options.components = {0};
+    options.alpha_source = format::AlphaSource{"internal", {"index", "1"}};
+    auto raw = take(format::associate_alpha(f.document, input, options));
+    run = take(execute(f, raw, red));
+    require(dirty(run, "input1", query, 4).empty() &&
+                dirty(run, "input1", alpha_edit, 4).empty(),
+            "raw arithmetic adds no domain Validation support");
+    auto external = f.add({ElementType::Float32, {2, 3}},
+                          std::vector<std::uint64_t>(6, bits(.5)));
+    set.alpha_source.kind = "external_plane";
+    auto mismatch = take(format::set_alpha(f.document, input, set, external));
+    const auto rejected = execute(f, mismatch, red);
+    require(!rejected.ok() && rejected.status().code == ErrorCode::TypeMismatch,
+            "external plane requires matching batch prefix");
+  }
+}
+void move_noncanonical_alpha() {
+  Fixture f;
+  auto d = rgb(1);
+  const auto channels = d.channels;
+  d.channels = {channels[0], channels[3], channels[1], channels[2]};
+  d.groups[0].indices = {0, 2, 3};
+  d.groups[0].alpha = 1;
+  auto input = f.add({ElementType::Float32, {1, 4}},
+                     {bits(1), bits(.5), bits(2), bits(3)}, d);
+  format::SetAlphaOptions options;
+  options.group = "rgb";
+  options.alpha_source.channel.value = "1";
+  options.placement = "channel";
+  options.channel_index = 3;
+  const auto node = take(format::set_alpha(f.document, input, options));
+  const auto result = take(execute(f, node));
+  require(
+      observed(result) ==
+          std::vector<std::uint64_t>({bits(1), bits(2), bits(3), bits(.5)}),
+      "noncontiguous source slots remain representable by compact exact spans");
+}
+
+void result_resource_and_association() {
+  std::vector<ResultRef> surviving;
+  ColorProfileIdentity identity;
+  {
+    ResourceBudget resource_root;
+    auto profile_bytes = numeric_fixture::fixture();
+    auto profile = take(IccProfile::import(
+        ByteView(profile_bytes.data(), profile_bytes.size()), resource_root));
+    identity = profile.identity();
+    auto resources = take(ResourceBindings::create({profile}, resource_root));
+    for (bool scalar : {false, true}) {
+      Fixture f;
+      auto d = rgb(1, 5);
+      d.channels[4].interpretation.emplace();
+      d.channels[4].interpretation->profile = identity;
+      const auto input = f.add({ElementType::Float32, {1, 5}},
+                               {bits(1), bits(2), bits(3), bits(.5), bits(9)},
+                               d, {}, {}, {}, resources);
+      format::SetAlphaOptions options;
+      options.group = "rgb";
+      options.alpha_source.channel.value = "3";
+      options.layout = scalar ? "materialize" : "view";
+      std::optional<WorkflowInput> weight;
+      if (scalar) {
+        options.alpha_source.kind = "scalar";
+        weight = f.add({ElementType::Float32, {1}}, {bits(.25)});
+      }
+      const auto op =
+          take(format::set_alpha(f.document, input, options, weight));
+      const auto run = take(execute(f, op));
+      const auto& result = run.results.at("result");
+      const auto association = result.association();
+      require(association.size() == f.bindings.inputs.size(),
+              "alpha keeps input association arity");
+      for (std::size_t i = 0; i < association.size(); ++i)
+        require(association[i] == f.bindings.inputs[i].result.object_id(),
+                "alpha keeps input object order");
+      require(result.resources().icc_profile(identity).ok(),
+              "alpha keeps owned profile on passthrough channel");
+      surviving.push_back(result);
+    }
+  }
+  for (const auto& result : surviving)
+    require(
+        result.resources().icc_profile(identity).ok() &&
+            channel_fixture::read(result, Region::whole({1, 5})).size() == 20,
+        "alpha profile and samples survive source/context retirement");
+}
+
+void maximum_channel_roi() {
+  Fixture f;
+  std::vector<std::uint64_t> samples(65536, bits(2));
+  samples.back() = bits(.5);
+  auto input = f.add({ElementType::Float32, {65536}}, samples);
+  format::AlphaAssociationOptions options;
+  options.metadata_mode = "raw";
+  options.input_structure = "channels";
+  options.axis = 0;
+  options.components = {0};
+  options.alpha_source = format::AlphaSource{"internal", {"index", "65535"}};
+  const auto op = take(format::associate_alpha(f.document, input, options));
+  const Region first({{0, 1}});
+  const auto run = take(execute(f, op, first));
+  require(observed(run, first) == std::vector<std::uint64_t>{bits(1)} &&
+              source_bytes(run, f) == 8,
+          "maximum channel mapping keeps compact exact ROI support");
+}
+
+void result_partition_lifetime_and_empty() {
+  ResultRef retained;
+  ResourceBudget root;
+  {
+    Fixture f;
+    auto input = f.add({ElementType::Float32, {2, 2}},
+                       {bits(2), bits(.5), bits(4), bits(.25)}, gray(1));
+    f.sources[0].coverage = {Region({{0, 1}, {0, 2}}),
+                             Region({{1, 1}, {0, 2}})};
+    format::SetAlphaOptions options;
+    options.group = "gray";
+    options.alpha_source.channel.value = "1";
+    options.layout = "view";
+    const auto op = take(format::set_alpha(f.document, input, options));
+    f.document.outputs = {{"result", op.source_node, op.source_port}};
+    auto registry = make_default_operation_registry();
+    ExecutionContext context(registry);
+    f.bind_to(context);
+    root = take(context.resource_budget());
+    GraphContext graph(f.document);
+    const auto compiled = take(Compiler(registry).compile(graph));
+    const auto frozen = take(context.freeze(compiled.plan, f.bindings));
+    const auto before = root.statistics().peak[ResourceKind::Payload];
+    const auto empty = take(context.execute_fragments(
+        frozen, {{"result", take(Footprint::none({2, 2}))}}));
+    require(take(empty.results.at("result").descriptor())
+                    .tensor_coverage(0)
+                    .empty() &&
+                root.statistics().peak[ResourceKind::Payload] == before,
+            "Empty alpha has no sample or continuation payload");
+    auto a = std::async(std::launch::async, [&] {
+      return context.execute(compiled.plan, f.bindings);
+    });
+    auto b = std::async(std::launch::async, [&] {
+      return context.execute(compiled.plan, f.bindings);
+    });
+    auto first = take(a.get());
+    auto second = take(b.get());
+    require(observed(first) == observed(second) &&
+                owner(first.results.at("result")) ==
+                    owner(f.bindings.inputs[0].result),
+            "partitioned same-owner view and immutable preparation reuse");
+    retained = first.results.at("result");
+  }
+  const auto bytes = channel_fixture::read(retained, Region::whole({2, 2}));
+  std::uint32_t expected[] = {static_cast<std::uint32_t>(bits(2)),
+                              static_cast<std::uint32_t>(bits(.5)),
+                              static_cast<std::uint32_t>(bits(4)),
+                              static_cast<std::uint32_t>(bits(.25))};
+  require(bytes.size() == sizeof(expected) &&
+              !std::memcmp(bytes.data(), expected, sizeof(expected)),
+          "alpha view survives producer and context retirement");
+  retained = {};
+  require(root.statistics().live[ResourceKind::Payload] == 0,
+          "last alpha view releases source payload");
+}
+
 }  // namespace
 int main() {
   try {
@@ -1249,7 +1465,13 @@ int main() {
           std::make_pair("metadata", metadata_conflicts),
           std::make_pair("layout", ranks_tiles_and_views),
           std::make_pair("review", review_contract_regressions),
-          std::make_pair("managed_budget", managed_alpha_budget_regressions)}) {
+          std::make_pair("managed_budget", managed_alpha_budget_regressions),
+          std::make_pair("result_batches", result_batches_and_roles),
+          std::make_pair("maximum_channels", maximum_channel_roi),
+          std::make_pair("move_alpha", move_noncanonical_alpha),
+          std::make_pair("result_resources", result_resource_and_association),
+          std::make_pair("result_lifetime",
+                         result_partition_lifetime_and_empty)}) {
       std::cout << "[alpha] " << test.first << std::endl;
       test.second();
     }

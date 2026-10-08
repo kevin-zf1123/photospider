@@ -4,7 +4,7 @@
 
 ## W0 当前已存在的使用基础
 
-[Unified Result image workflow](../../../examples/unified_result_workflow/README.md) 是当前 public 图像执行示例，使用示例定义的最小 operation。保留的 [image vertical source](../../../examples/image_vertical/main.cpp) 使用旧 Value 图像接口，不能作为当前可执行图像 workflow。
+[image vertical](../../../examples/image_vertical/README.md) 与 [regional image vertical](../../../examples/regional_image_vertical/README.md) 是当前基于 Result API 的内置图像 workflow 示例，分别覆盖小型 exposure/opacity 图和 Gaussian 组合图的区域执行。它们取代这两个目录此前的 Value workflow 示例入口；[Unified Result image workflow](../../../examples/unified_result_workflow/README.md) 仍展示 test/example-only minimal operation。
 05-filter 新规格与 oracle 仍是 Proposed，不列为已运行的内核流程。
 
 ## 已交付的公开 workflow
@@ -13,21 +13,26 @@
 | --- | --- | --- |
 | [Foundations](../../../examples/foundations_workflow)；W1 子集 | 默认 registry 的 numeric 与 expression/LUT 场景 | LUT x=.25→.125；RGB/滤镜流程尚无当前可运行实现 |
 | [G4](../../../examples/g4_workflow/README.md)；W5 数据依赖子集 | radius scatter/gather、动态 demand、dependency cache 与 scan/reduction | 稀疏读取与依赖变化的预期输出见示例；图像 STMap 旧源码不能通过当前 Result 图像路径执行 |
+| [Image vertical](../../../examples/image_vertical/README.md) | 默认 registry；Result RGBA input → `image.exposure_gain` → `image.opacity` → named Result output | `{frame=0,layer=0,y=0,x=1}` 单像素 ROI；独立 binary-fraction oracle、精确 source support、scalar control support 与四个 raw benchmark samples。本地 `example_image_vertical` 与安装包 `installed_image_vertical` 测试均通过。 |
+| [Regional image vertical](../../../examples/regional_image_vertical/README.md) | 默认 registry；Result Gaussian → exposure → mask → source-over graph | 独立二维 Gaussian oracle、whole/ROI bitwise 对照、四种 power-of-two tile layout、broadcast/reversed input、halo 与 `UINT64_MAX` 检查，以及 zero-stride `65536²` source 上的 `5×7` ROI payload-budget 边界。本地 `example_regional_image_vertical` 与安装包 `installed_regional_image_vertical` 测试均通过。 |
+| [S3 image workflow](../../../examples/s3_image_workflow/README.md) | 默认 registry；Result 图像场景、brush Result patch、slider、preview 与 export 的应用协调器 | Brush FIFO 容量 8、slider 取最新值、每 tick 最多一次编辑与一次图像步骤；kernel plan 使用 4×4 physical tile，而 export 独立发出 20 个 4×4 Result 请求。`preview` 与 `cache` 使用 CPU；它不是旧 Value tile-stream 的重现。本地与安装包 tests 均通过。 |
+| [S4 GPU workflow](../../../examples/s4_gpu_workflow/README.md) | 默认 registry；Result 图像节点在 CPU 或 native Metal 上运行，含 resident-chain 与八项算法场景 | Whole、tiled、ROI、cache、preview/export、fallback 场景分开验证；CPU oracle 和 native Metal dispatch 独立说明。Metal 测试只在要求 native 且设备可用时作为 native 证据。本地 12/12、安装包 10/10 tests 通过。 |
 | [Multi-output](../../../examples/multi_output_workflow/README.md) | 默认 registry 的 `image.split_horizontal` 源码使用 Value 图像端口 | 当前编译器要求图像使用 Result；可运行的 Result 输出选择示例见 [Unified Result](../../../examples/unified_result_workflow/README.md) |
-| [Statistics](../../../examples/statistics_workflow/README.md) | 显式 `make_statistics_operation`；Int64 source + UInt8 mask → histogram → parameters → grade → active sink | `x[i]=(3*i+1)%8`，target=2；Counter/有理数 oracle 检查频数/mean/每个 pixel；空或零 mean 的 grade 明确失败 |
-| [FFT](../../../examples/fft_workflow/README.md)；W10 频域子集 | 显式 `make_fft_operation`；Float64 source → FFT + imported response → multiply → inverse → sink | response `exp(-2*pi*i*(u/H+v/W))` 使图像循环下移/右移各一像素；独立 direct DFT；Full/Half、奇偶维度和 imaginary residual；PSD/Wiener 未交付 |
-| [Components](../../../examples/components_workflow/README.md) | 显式 `make_component_operation`；UInt8 mask → labels → associated area → filter | `101/111` 的 `[id,area,min]=[1,5,0]`；filter 为 `label!=0 && area>=minimum_area`；BFS oracle、空 K、跨页细桥 |
-| [Layer](../../../examples/layer_workflow/README.md)；W8 扩展 | 显式 `make_layer_operation`；assemble/over/emission/flatten 与 contributions→weighted reduce→optional | RGBA `[12.5,-2,1.25,1]`；W=0 valid=false；midpoint tree、严格 association underflow、最终 window 释放 |
+| [Statistics](../../../examples/statistics_workflow/README.md) | 显式 `make_statistics_operation`；variant UInt8 `{1}` Result → 按需 Int64/UInt8 tensor Results → histogram → parameters → grade → Float64 tensor Result sink | `x[i]=(3*i+1)%8`，target=2；Counter/有理数 oracle 检查频数/mean/每个 pixel；空或零 mean 的 grade 明确失败 |
+| [FFT](../../../examples/fft_workflow/README.md)；W10 频域子集 | 显式 `make_fft_operation`；variant Result → 按需 Float64 HW/HW2/HK2 tensor Results → FFT + imported response → multiply → inverse → Result sink | response `exp(-2*pi*i*(u/H+v/W))` 使图像循环下移/右移各一像素；独立 direct DFT；Full/Half、奇偶维度和 imaginary residual；PSD/Wiener 未交付 |
+| [Components](../../../examples/components_workflow/README.md) | 显式 `make_component_operation`；variant Result → 按需 UInt8 HW tensor Result → labels → area → filter → Float64 tensor Result sink | `101/111` 的 `[id,area,min]=[1,5,0]`；filter 为 `label!=0 && area>=minimum_area`；BFS oracle、空 K、跨页细桥 |
 | [Representations](../../kernel-architecture/Structured-Representations.md) | 有版本 schema → paged producer → Result consumer | Haar `[1,3,5,7,9]` 重建、空/动态字段、brush 分批、迭代 `[3,4]`；表示/helper 子集，不代表通用图像效果节点 |
 | [Atom outcomes](../../../examples/atom_outcomes_workflow/README.md) | 公开 `execute_atoms` 与 joint contract 2 | 独立坐标结果、upstream failure provenance、Measured/受限 CertifiedBound；普通 execute 仍 fail-fast |
 | [PNT-05A source](../09-composite/inpaint-ns-implementation.md) | Native Navier-Stokes implementation and optional OpenCV adapter remain in source; both expose the legacy Value image contract | 当前生产代码尚未适配 Result image slots，算法 callback 不能作为 public Result 图像 workflow 执行；数学与资源模型见链接 |
+
+Layer 的纯 C++ 值 helper 不是已交付的 workflow。当前没有 Layer operation 或可运行的 Layer workflow；六种 Layer Result schema 和 Layer facet 均被拒绝。纯 helper 说明见 [Layer Runtime](../../kernel-architecture/Layer-Runtime.md)，W8 的图像集成仍属于原 roadmap 中的 Proposed 概念范围。
 
 各个当前可运行的 numeric/result 示例链接包含仓库内构建、运行或安装包 consumer 命令。已有配置目录可按相关目标运行，
 以下是入口说明：
 
 ```sh
-cmake --build <build-dir> --target photospider_statistics_workflow photospider_fft_workflow photospider_components_workflow photospider_layer_workflow -j 8
-ctest --test-dir <build-dir> -R '^(example_statistics_workflow|example_fft_workflow|example_components_workflow|photospider_layer_workflow)$' --output-on-failure
+cmake --build <build-dir> --target photospider_statistics_workflow photospider_fft_workflow photospider_components_workflow -j 8
+ctest --test-dir <build-dir> -R '^(example_statistics_workflow|example_fft_workflow|example_components_workflow)$' --output-on-failure
 ```
 
 统计的 `--stage-admission` 可单独检查 stage admission：2048×2048/B65536 在源绑定前拒绝；

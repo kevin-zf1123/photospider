@@ -49,6 +49,9 @@ BufferAllocator::BufferAllocator(Reserve reserve,
 bool BufferAllocator::owns(const CpuStorage& storage) const noexcept {
   return domain_ && domain_ == storage.domain_;
 }
+bool BufferAllocator::same_owner(const BufferAllocator& other) const noexcept {
+  return domain_ && domain_ == other.domain_;
+}
 BufferAllocator BufferAllocator::limited(std::uint64_t maximum_bytes,
                                          FailureObserver failure) const {
   return limited_impl(maximum_bytes, std::move(failure), false);
@@ -108,6 +111,14 @@ BufferAllocator BufferAllocator::limited_impl(std::uint64_t maximum_bytes,
       result.reserve_ = limited_reserve(reserve_);
       result.native_shared_reserve_ = limited_reserve(
           native_shared_reserve_ ? native_shared_reserve_ : reserve_);
+      if (allocation_committed_) {
+        result.allocation_committed_ = [parent = allocation_committed_](
+                                           const std::shared_ptr<void>& owner,
+                                           std::uint64_t bytes) {
+          const auto lease = std::static_pointer_cast<Lease>(owner);
+          parent(lease->parent, bytes);
+        };
+      }
     }
     result.allocation_scopes_.push_back(state);
     result.failure_ = [parent = failure_, observer = failure](ErrorCode code) {
@@ -168,7 +179,8 @@ Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
       requested_lease = reserved.take_value();
     }
     if (native_allocate_) {
-      auto result = native_allocate_(size, reserve_, domain_);
+      auto result =
+          native_allocate_(size, reserve_, domain_, allocation_committed_);
       if (!result.ok())
         return reject(result.status());
       result.value().storage_->allocation_scopes_ = allocation_scopes_;
@@ -195,6 +207,8 @@ Result<MutableBuffer> BufferAllocator::allocate(std::uint64_t size) const {
     result.storage_->allocated_ =
         std::make_unique<std::uint8_t[]>(static_cast<std::size_t>(size));
     result.storage_->capacity_ = size;
+    if (allocation_committed_)
+      allocation_committed_(result.storage_->lease_, size);
     return Result<MutableBuffer>(std::move(result));
   } catch (const std::bad_alloc&) {
     return reject(

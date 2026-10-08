@@ -45,30 +45,36 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
 }
 }  // namespace curve_detail
 /** @brief Shared contract for the four independent interpolation constructors.
- * x[K], y[K] (single) or y[K,C] (multi), query[N] independently accept
- * Float32/64. K=2..65536; positive logical products <=2^40. Output values has
- * shape [N] or [N,C] (including C=1), selected dtype and empty facets. Compiler
- * checks actual edges; helpers own metadata and may be used concurrently.
- * Allocation may throw bad_alloc. Invalid helper parameters fail
+ * Each input is a Result containing one tensor member under any schema id and
+ * member key. Its sample_shape() is x[K], y[K] (single) or y[K,C] (multi),
+ * and query[N]. Each input independently accepts Float32/64. K=2..65536 and
+ * positive logical products are <=2^40. The output port `values` is a Result
+ * with schema photospider.tensor, member `samples`, shape [N] or [N,C]
+ * (including C=1), selected dtype and empty facets. Batch dimensions are
+ * ordinary output axes. Compiler checks actual input edges; helpers own node
+ * metadata and may be used concurrently. Nonempty Whole execution requests
+ * Data, Validation and Descriptor (role 13) for all three inputs, computes all
+ * queries and columns, and publishes a complete dense output. The Result
+ * association names the actual source ObjectIds. Allocation may throw
+ * bad_alloc. Invalid helper parameters fail
  * InvalidArgument/InvalidDomain/Schema; invalid edge metadata fails
- * TypeMismatch. Nonempty requests validate all x as finite/strictly increasing,
- * and collect complete y/query with typed validation. One Whole callback
- * evaluates all queries/columns and allocates the complete dense output even
- * for sparse demand. Mathematical knot/clamp uses one y; linear two, PCHIP
- * up to four. Generic y outside all evaluated stencils is numerically unused.
- * Nonfinite used input/rejected query fails OperationFailed/InvalidDomain at
- * Run scope; final overflow fails ArithmeticOverflow. Unrequested rows/columns
- * and upstream failures can fail the run. Output owns immutable packed storage
+ * TypeMismatch. It validates all x knots before y arithmetic. Exact knot/clamp
+ * uses one y; linear uses two endpoints; PCHIP uses its fixed local stencil.
+ * Generic y values outside evaluated stencils are numerically unused. Nonfinite
+ * used input/rejected query fails OperationFailed/InvalidDomain at Run scope;
+ * final overflow fails ArithmeticOverflow. Unrequested rows/columns and
+ * upstream failures can fail the run. Output owns immutable packed storage
  * beyond context lifetime. Typed, resource, stale and cancellation failures
  * retain their categories. Any input edit invalidates output demand. Empty
- * reads none. Strict rounds complete exact rational formulas once. Accelerated
- * follows CpuNumericProfile's bound while preserving cross-query monotonicity;
- * the current fast Float32 path requires a uniquely rounded enclosure and
- * Float64 uses exact formulas. Caller fenv is preserved. Ordinary exact zero is
- * -0 only for two -0 segment endpoints; node/clamp retains y zero. CPU-specific
- * profiles require their target. PCHIP extrapolates its endpoint tangent;
- * linear extrapolates its endpoint secant. See numeric_workflow examples for
- * explicit resource budgets and executable composition.
+ * reads no payload. Strict rounds complete exact rational formulas once.
+ * Accelerated follows CpuNumericProfile's bound while preserving cross-query
+ * monotonicity; the current fast Float32 path requires a uniquely rounded
+ * enclosure and Float64 uses exact formulas. Caller fenv is preserved.
+ * Ordinary exact zero is -0 only for two -0 segment endpoints; node/clamp
+ * retains y zero. CPU-specific profiles require their target. PCHIP
+ * extrapolates its endpoint tangent; linear extrapolates its endpoint secant.
+ * See the numeric_workflow README for current Result test coverage and
+ * compositions.
  */
 /** @brief Piecewise-linear single-function interpolation; shared contract
  * above. */

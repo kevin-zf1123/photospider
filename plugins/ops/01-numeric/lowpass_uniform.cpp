@@ -13,6 +13,7 @@
 
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/lowpass_uniform_math.hpp"
+#include "01-numeric/numeric_tensor_program.hpp"
 #include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -50,24 +51,23 @@ struct UniformState {
   ResourceVector<numeric_ops::FastInterval> coefficients;
   numeric_ops::FastInterval normalizer;
   bool coefficients_ready = false;
-  const OperationInvocation& call;
-  const ResourceBudget* budget;
+  const ResultProgramPhase& phase;
+  numeric_ops::MathTensorReader input;
   std::function<Status(std::uint64_t)> consume;
   UniformState(LowpassParameters p, unsigned dimension, unsigned count,
                std::string extension, SequenceProfile selected,
-               const OperationInvocation& invocation)
+               const ResultProgramPhase& invocation)
       : parameters(p),
         axis(dimension),
         radius(count),
         boundary(std::move(extension)),
         profile(selected),
-        call(invocation),
-        budget(resource_internal::metadata_budget()),
-        consume([this](auto amount) {
-          if (call.cancellation.cancelled())
-            return Status{ErrorCode::Cancelled, {}};
-          return budget ? budget->consume({amount}) : Status::success();
-        }) {}
+        samples(ResourceAllocator<std::uint64_t>(invocation.resources)),
+        coefficients(
+            ResourceAllocator<numeric_ops::FastInterval>(invocation.resources)),
+        phase(invocation),
+        input(invocation.tensors->at({0, 0}), invocation.query.cancellation),
+        consume(invocation.consume_work) {}
   std::optional<std::uint64_t> mapped(std::uint64_t center, int offset,
                                       std::uint64_t size) const {
     const auto at = static_cast<std::int64_t>(center) + offset;
@@ -88,25 +88,20 @@ struct UniformState {
                ? period - reduced
                : reduced;
   }
-  Result<Value> execute() {
-    using Answer = Result<Value>;
-    const auto& input = call.inputs[0];
-    const auto& descriptor = input.descriptor();
-    const auto& shape = descriptor.shape;
+  Status execute(const ResultTensorWriteWindow& window) {
+    const auto& tensor = phase.query.output.result_schema->tensors[0];
+    const auto& descriptor = tensor.descriptor;
+    const auto shape = tensor.sample_shape();
     samples.resize(2 * radius + 1);
     if (profile != SequenceProfile::Strict) {
       coefficients.resize(radius + 1);
       auto prepared = arithmetic.prepare(
           parameters, radius, coefficients.data(), &normalizer, consume);
       if (!prepared.ok())
-        return Answer(prepared.status());
+        return prepared.status();
       coefficients_ready = prepared.value();
     }
-    auto allocated =
-        MutableValue::allocate(descriptor, call.output_region, call.allocator);
-    if (!allocated.ok())
-      return Answer(allocated.status());
-    auto output = allocated.take_value();
+    numeric_ops::MathTensorWriter output(window);
     const bool narrow = descriptor.element_type == ElementType::Float32;
     const unsigned width = narrow ? 4 : 8;
     std::uint64_t count = 1;
@@ -122,7 +117,7 @@ struct UniformState {
            offset <= static_cast<int>(radius); ++offset) {
         auto status = consume(shape.size() + 1);
         if (!status.ok())
-          return Answer(status);
+          return status;
         auto& bits = samples[offset + radius];
         bits = 0;
         // Complete collection does not make zero-weight samples numerical
@@ -134,16 +129,13 @@ struct UniformState {
         if (!source)
           continue;
         at[axis] = *source;
-        auto address = input.byte_address(at);
-        if (!address.ok())
-          return Answer(address.status());
-        std::memcpy(&bits, input.bytes().data() + address.value(), width);
+        bits = input.bits(at);
       }
       std::optional<std::uint64_t> fast;
       if (coefficients_ready) {
         auto status = consume((radius + 1) * 32);
         if (!status.ok())
-          return Answer(status);
+          return status;
         fast = arithmetic.fast(parameters, radius, samples.data(), narrow,
                                coefficients.data(), normalizer,
                                environment && environment->active());
@@ -152,12 +144,12 @@ struct UniformState {
                         : arithmetic.evaluate(parameters, radius,
                                               samples.data(), narrow, consume);
       if (!value.ok())
-        return Answer(value.status());
+        return value.status();
       auto status = consume(1);
       if (!status.ok())
-        return Answer(status);
+        return status;
       const auto bits = value.value();
-      std::memcpy(output.data() + row * width, &bits, width);
+      std::memcpy(output.address(coordinate), &bits, width);
       for (auto i = shape.size(); i; --i) {
         if (++coordinate[i - 1] < shape[i - 1])
           break;
@@ -165,35 +157,33 @@ struct UniformState {
       }
     }
     auto status = consume(1);
-    return status.ok() ? std::move(output).publish() : Answer(status);
+    return status;
   }
 };
-Result<Value> execute_uniform(const OperationInvocation& call,
-                              LowpassKernel kernel, SequenceProfile profile) {
-  using Answer = Result<Value>;
-  try {
-    auto scratch = call.allocator.allocate(sizeof(UniformState));
-    if (!scratch.ok())
-      return Answer(scratch.status());
-    auto buffer = scratch.take_value();
+struct UniformPrepared final {
+  LowpassParameters parameters;
+  unsigned axis;
+  unsigned radius;
+  std::string boundary;
+  SequenceProfile profile;
+};
+struct UniformKernel final {
+  Status write(const ResultProgramPhase& phase,
+               const ResourceVector<ResultTensorWriteWindow>& writers) {
+    const auto& prepared =
+        *static_cast<const UniformPrepared*>(phase.query.prepared->state());
+    auto memory =
+        numeric_ops::math_take(phase.allocator.allocate(sizeof(UniformState)));
+    static_assert(alignof(UniformState) <= alignof(std::max_align_t));
     std::unique_ptr<UniformState, void (*)(UniformState*)> state(
-        new (buffer.data()) UniformState(
-            parameters(kernel, call.parameters),
-            static_cast<unsigned>(
-                std::get<std::int64_t>(call.parameters.at("axis"))),
-            static_cast<unsigned>(
-                std::get<std::int64_t>(call.parameters.at("radius"))),
-            std::get<std::string>(call.parameters.at("boundary")), profile,
-            call),
+        new (memory.data())
+            UniformState(prepared.parameters, prepared.axis, prepared.radius,
+                         prepared.boundary, prepared.profile, phase),
         [](auto* value) { value->~UniformState(); });
-    return state->execute();
-  } catch (const std::bad_alloc&) {
-    return Answer(Status{ErrorCode::ResourceExhausted,
-                         {},
-                         FailureReason::CapacityLimit,
-                         {FailureOrigin::Resource, FailureScope::Run}});
+    return state->execute(writers[0]);
   }
-}
+};
+using UniformProgram = numeric_ops::WholeTensorProgram<UniformKernel>;
 
 OperationDefinition operation(const std::string& name, LowpassKernel kernel,
                               SequenceProfile profile) {
@@ -202,6 +192,7 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
   auto& traits = definition.traits;
   traits.input_count = 1;
   traits.input_schema.resize(1);
+  traits.input_schema[0].kind = OperationPortKind::Result;
   traits.input_schema[0].element_type_mask = 12;
   traits.parameter_schema = {{"axis", OperationParameterType::Int64},
                              {"radius", OperationParameterType::Int64},
@@ -213,22 +204,25 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
     traits.parameter_schema.push_back(
         {"beta", OperationParameterType::Float64});
   traits.requires_metadata_specialization = true;
-  auto& output = traits.outputs[0];
-  output.key = "values";
-  output.region_rule = OperationRegionRule::Whole;
-  output.requires_dense_output = true;
+  numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
+                                       sizeof(UniformProgram));
   traits.workspace_bytes = sizeof(UniformState);
-  definition.specialize_metadata = [profile](const auto& inputs,
-                                             const auto& p) {
-    using Answer = Result<std::vector<OperationOutputSpecialization>>;
-    if (inputs.size() != 1 || inputs[0].result_schema ||
-        (inputs[0].descriptor.element_type != ElementType::Float32 &&
-         inputs[0].descriptor.element_type != ElementType::Float64))
+  definition.prepare_static = [kernel, profile](const auto& inputs,
+                                                const auto& p) {
+    using Answer = Result<OperationPreparation>;
+    if (inputs.size() != 1 || !inputs[0].result_schema ||
+        !inputs[0].result_schema->fields.empty() ||
+        inputs[0].result_schema->tensors.size() != 1 ||
+        (inputs[0].result_schema->tensors[0].descriptor.element_type !=
+             ElementType::Float32 &&
+         inputs[0].result_schema->tensors[0].descriptor.element_type !=
+             ElementType::Float64))
       return Answer(Status{ErrorCode::TypeMismatch,
                            "lowpass input requires Float32/64",
                            FailureReason::None,
                            {FailureOrigin::Schema, FailureScope::Unspecified}});
-    const auto& shape = inputs[0].descriptor.shape;
+    const auto& tensor = inputs[0].result_schema->tensors[0];
+    const auto shape = tensor.sample_shape();
     std::uint64_t count = 1;
     if (shape.empty() || shape.size() > 8)
       return Answer(numeric_ops::array_parameter_error("lowpass rank 1..8"));
@@ -263,12 +257,18 @@ OperationDefinition operation(const std::string& name, LowpassKernel kernel,
     if (!available.ok())
       return Answer(available);
     OperationOutputSpecialization resolved;
-    resolved.metadata.descriptor = inputs[0].descriptor;
-    return Answer(
-        std::vector<OperationOutputSpecialization>{std::move(resolved)});
+    resolved.metadata.result_schema = std::make_shared<const SchemaTemplate>(
+        numeric_ops::numeric_tensor_schema(tensor.descriptor.element_type,
+                                           shape));
+    OperationPreparation prepared;
+    prepared.outputs.push_back(std::move(resolved));
+    prepared.state = std::make_shared<const UniformPrepared>(
+        UniformPrepared{parameters(kernel, p), static_cast<unsigned>(axis),
+                        static_cast<unsigned>(radius), boundary, profile});
+    return Answer(std::move(prepared));
   };
-  definition.callback = [kernel, profile](const OperationInvocation& call) {
-    return execute_uniform(call, kernel, profile);
+  definition.start_result = [](const auto&, const auto& allocator) {
+    return ResultContinuation::make<UniformProgram>(allocator);
   };
   return definition;
 }

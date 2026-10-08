@@ -76,11 +76,14 @@ Status inputs(Op op, const ComponentsSpec& spec,
   for (unsigned i = 0; i < metadata.size(); ++i) {
     const auto& input = metadata[i];
     if (op == Op::Labels) {
-      if (input.result_schema ||
-          input.descriptor.element_type != ElementType::UInt8 ||
-          input.descriptor.shape !=
+      if (!input.result_schema || !input.result_schema->fields.empty() ||
+          input.result_schema->tensors.size() != 1)
+        return invalid("components4 labels requires one Result tensor");
+      const auto& tensor = input.result_schema->tensors[0];
+      if (tensor.descriptor.element_type != ElementType::UInt8 ||
+          tensor.descriptor.shape !=
               std::vector<std::uint64_t>{spec.height, spec.width} ||
-          !input.facets.empty())
+          !tensor.facets.empty() || !tensor.batch_axes.empty())
         return invalid("components4 labels requires facet-free UInt8 HW");
     } else {
       auto expected = i ? component_area_schema(spec) : components_schema(spec);
@@ -156,25 +159,29 @@ struct State {
   }
   Result<ResultRelation> relation(const ResultProgramPhase& p,
                                   std::uint64_t outputs) {
-    std::array<ResultRelation, 4> parts;
+    std::array<ResultRelation, 5> parts;
     unsigned used = 0;
     for (unsigned i = 0; i < p.query.inputs.size(); ++i) {
-      const auto samples = op == Op::Labels ? n
-                           : i              ? descriptors[i].rows(0) * 2
-                                            : n + descriptors[i].rows(1) * 3;
-      auto made = ResultRelation::cartesian(
-          p.resources, outputs, {i, input[i].valid() ? 7U : 15U, 0, samples},
-          DependencyGuarantee::Conservative);
-      if (!made.ok())
-        return made;
-      parts[used++] = made.take_value();
-      if (input[i].valid()) {
-        made = ResultRelation::cartesian(p.resources, outputs, {i, 8, 0, 1},
-                                         DependencyGuarantee::Conservative);
+      const auto fields = op == Op::Labels || i ? 1U : 2U;
+      for (unsigned field = 0; field < fields; ++field) {
+        auto made = ResultRelation::cartesian(
+            p.resources, outputs,
+            {i, 7, 0, op == Op::Labels ? n : descriptors[i].rows(field),
+             op == Op::Labels ? ResultSupportTarget::Tensor
+                              : ResultSupportTarget::Field,
+             field},
+            DependencyGuarantee::Conservative);
         if (!made.ok())
           return made;
         parts[used++] = made.take_value();
       }
+      auto made = ResultRelation::cartesian(
+          p.resources, outputs,
+          {i, 8, 0, 1, ResultSupportTarget::Descriptor, 0},
+          DependencyGuarantee::Conservative);
+      if (!made.ok())
+        return made;
+      parts[used++] = made.take_value();
     }
     auto lease = p.resources.reserve(ResourceCapacity::host(
         used * sizeof(ResultRelation), used * sizeof(ResultRelation)));
@@ -375,13 +382,13 @@ struct State {
           if (!status.ok())
             return Poll(status);
           stage = Created;
-          return Poll(ResultProgramNeed{{}, {}, {ResultCreateTemporary{}}});
+          return Poll(ResultProgramNeed{{}, {ResultCreateTemporary{}}});
         }
         case Created:
           tree = std::get<TemporaryStorage>(p.io.at(0));
           stage = Extended;
           return Poll(
-              ResultProgramNeed{{}, {}, {ResultExtendTemporary{tree, n * 32}}});
+              ResultProgramNeed{{}, {ResultExtendTemporary{tree, n * 32}}});
         case Extended:
           stage = Source;
           break;
@@ -394,13 +401,15 @@ struct State {
           batch = std::min({n - position, spec.width - position % spec.width,
                             window(p) / 32});
           auto requested = Footprint::from_regions(
-              p.query.inputs[0].descriptor.shape,
+              p.query.inputs[0].result_schema->tensors[0].sample_shape(),
               {Region({{position / spec.width, 1},
                        {position % spec.width, batch}})});
           if (!requested.ok())
             return Poll(requested.status());
           stage = SourceReady;
-          return Poll(ResultProgramNeed{{{0, requested.take_value()}}, {}, {}});
+          ResultProgramNeed need;
+          need.tensors.push_back({0, 0, requested.take_value(), 15});
+          return Poll(std::move(need));
         }
         case SourceReady: {
           auto memory = p.allocator.allocate(batch * 32);
@@ -412,9 +421,9 @@ struct State {
             return Poll(fuel);
           for (std::uint64_t i = 0; i < batch; ++i) {
             std::uint8_t mask = 0;
-            auto status =
-                p.read(0, {position / spec.width, position % spec.width + i},
-                       &mask, 1);
+            auto status = p.read_tensor(
+                0, 0, {position / spec.width, position % spec.width + i}, &mask,
+                1);
             if (!status.ok())
               return Poll(status);
             if (mask) {
@@ -428,7 +437,6 @@ struct State {
           stage = Source;
           return Poll(ResultProgramNeed{
               {},
-              {},
               {ResultWriteTemporary{tree, offset,
                                     std::move(buffer).freeze()}}});
         }
@@ -440,7 +448,6 @@ struct State {
             page.rows = 0;
             return Poll(ResultProgramNeed{
                 {},
-                {},
                 {ResultWriteTemporary{tree, page.first * 32,
                                       std::move(page.bytes).freeze()}}});
           }
@@ -451,7 +458,6 @@ struct State {
         case CacheRead:
           stage = CacheReady;
           return Poll(ResultProgramNeed{
-              {},
               {},
               {ResultReadTemporary{tree, cache_first * 32, cache_rows * 32}}});
         case CacheReady: {
@@ -638,7 +644,7 @@ struct State {
           if (!read.ok())
             return Poll(read.status());
           stage = AreaReady;
-          return Poll(ResultProgramNeed{{}, {}, {read.take_value()}});
+          return Poll(ResultProgramNeed{{}, {read.take_value()}});
         }
         case AreaReady: {
           auto memory = p.allocator.allocate(batch * 16);
@@ -659,7 +665,7 @@ struct State {
             return Poll(write.status());
           position += batch;
           stage = AreaWritten;
-          return Poll(ResultProgramNeed{{}, {}, {write.take_value()}});
+          return Poll(ResultProgramNeed{{}, {write.take_value()}});
         }
         case AreaWritten:
           stage = Area;
@@ -682,7 +688,6 @@ struct State {
           stage = VerifyReady;
           return Poll(
               ResultProgramNeed{{},
-                                {},
                                 {original.take_value(), index.take_value()}});
         }
         case VerifyReady: {
@@ -714,7 +719,7 @@ struct State {
           if (!read.ok())
             return Poll(read.status());
           stage = LabelReady;
-          return Poll(ResultProgramNeed{{}, {}, {read.take_value()}});
+          return Poll(ResultProgramNeed{{}, {read.take_value()}});
         }
         case LabelReady: {
           label_page = std::get<std::shared_ptr<const CpuStorage>>(p.io.at(0));
@@ -738,7 +743,7 @@ struct State {
             label_page.reset();
             position += batch;
             stage = FilterWritten;
-            return Poll(ResultProgramNeed{{}, {}, {write.take_value()}});
+            return Poll(ResultProgramNeed{{}, {write.take_value()}});
           }
           if (current_label < 0) {
             std::memcpy(&current_label,
@@ -770,7 +775,7 @@ struct State {
               return Poll(read.status());
             index_page.reset();
             stage = IndexReady;
-            return Poll(ResultProgramNeed{{}, {}, {read.take_value()}});
+            return Poll(ResultProgramNeed{{}, {read.take_value()}});
           }
           std::array<std::int64_t, 2> property;
           std::memcpy(property.data(),
@@ -849,13 +854,28 @@ Result<OperationDefinition> make_component_operation(
           i ? "photospider.component_area_index" : "photospider.components";
       traits.input_schema[i].result_schema_version = 1;
     }
+  } else {
+    auto& port = traits.input_schema[0];
+    port.kind = OperationPortKind::Result;
+    port.element_type = static_cast<std::uint32_t>(ElementType::UInt8);
+    port.rank = 2;
   }
   if (operation == Op::Filter)
     traits.parameter_schema.push_back(
         {"minimum_area", OperationParameterType::Int64, true, false, 0, 0});
-  definition.validate_dependency = [operation, spec](const auto& metadata,
-                                                     const auto& parameters) {
-    return inputs(operation, spec, metadata, parameters);
+  traits.requires_metadata_specialization = true;
+  definition.specialize_metadata =
+      [operation, spec, schema = *out.result_schema](const auto& metadata,
+                                                     const auto& parameters)
+      -> Result<std::vector<OperationOutputSpecialization>> {
+    auto status = inputs(operation, spec, metadata, parameters);
+    if (!status.ok())
+      return Result<std::vector<OperationOutputSpecialization>>(status);
+    OperationOutputSpecialization output;
+    output.metadata.result_schema =
+        std::make_shared<const SchemaTemplate>(schema);
+    return Result<std::vector<OperationOutputSpecialization>>(
+        std::vector<OperationOutputSpecialization>{std::move(output)});
   };
   definition.start_result = [operation, spec](
                                 const ResultProgramQuery& query,

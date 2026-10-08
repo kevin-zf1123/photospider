@@ -10,12 +10,10 @@ kind: composite_workflow
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+verification_status: focused_result_validation_passed
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+repository_commit: current working tree
 ---
 
 # CRV-08B: linear_shaper_inverse
@@ -28,12 +26,17 @@ values remain exact.
 
 ## Interface and formula
 
-Ordered dynamic ports are input, lower[1], upper[1], all same Float32/Float64
-dtype. Output values preserves input dtype/shape with empty facets. Input rank
-is 1..8, positive extents and logical count <=2^40. Bounds are shared finite
-scalars satisfying lower<upper. No implicit clipping occurs.
+Ordered inputs are Results named input, lower and upper. Each has one tensor
+member under any schema id/version/key; use its full `sample_shape()`, including
+batch axes. `input` is Float32/64, rank 1..8, positive extents and at most 2^40
+elements. Bounds are same-dtype scalar tensors of shape [1], finite and ordered
+lower<upper. Output port `values` is an immutable Result using
+`photospider.tensor` v1/member `samples`, preserving input shape/dtype with
+empty facets. No implicit clipping occurs.
 The mathematical formula is lower+input*(upper-lower), with whole-expression final rounding.
-This named authoring template expands remap_range and explicit broadcast/constant nodes. Static profile is strict/apple_silicon/x86_64, default strict; it does not register a new primitive.
+This named authoring template expands Result-based remap_range and explicit
+broadcast/constant nodes. Static profile is strict/apple_silicon/x86_64, default
+strict; it does not register a new primitive.
 The mandatory inverse lower<upper guard is the scalar remap_range composition specified in CRV-08; do not inherit permissive target-bound order unchecked.
 
 Inherit the [complete shaper contract](CRV-08_shaper.md) for exact endpoints,
@@ -44,10 +47,12 @@ These operations do not modify a color description or implement tone mapping.
 
 ## Execution and failures
 
-Nonempty Q collects the complete input and both bounds, including at exact
-endpoints or NaN. Empty Q reads no payload. Inherit Whole dirty scope, complete
-typed/upstream validation, full-output allocation, sparse public delivery,
-arbitrary input strides, ownership, budgets and cancellation from CRV-08.
+Nonempty Whole requests all three inputs with Data, Validation and Descriptor
+(role 13), including complete typed/upstream validation. The remap Result program
+reads authorized windows directly; it does not collect or copy the complete
+input through Value. Empty reads no payload. Inherit full-output allocation,
+full dirty scope, sparse public delivery, arbitrary input strides, ownership,
+budgets and cancellation from CRV-08.
 Account all internal guard/broadcast/remap state, not only the exported output.
 Invalid bounds use InvalidArgument/InvalidDomain; shape/dtype mismatch uses
 TypeMismatch. Numeric special results succeed. Resource, backend, stale,
@@ -68,8 +73,13 @@ specification remains Proposed.
 
 ## Maintained implementation and validation
 
-The public entry point is `linear_shaper_inverse` in `photospider/numeric/shapers.hpp`. This linear helper expands to existing remap/constant nodes and is not a linear primitive.
+The public entry point is `linear_shaper_inverse` in
+`photospider/numeric/shapers.hpp`. This linear helper expands to existing Result
+remap/constant nodes and is not a linear primitive.
 See [the CRV-08 family contract](CRV-08_shaper.md) and [the shaper workflow README](../../../../examples/numeric_workflow/README.md)
-for the shared command, fixture and validation evidence. Native Clang 21
-strict/Apple pass 4,196 Fraction/directed-MPFR cases and six manual groups covering
-all four forms. No new x86 or installed-package execution is claimed.
+for the shared command, fixture and validation evidence. The current Result
+focused CTest passes 1/1; six manual groups pass under Strict and the local Apple
+profile, and the Result probe passes 4,196 Fraction/directed-MPFR 4.2.2 cases
+under each profile. The installed consumer passes 1/1, including public
+composition and output lifetime checks. x86 numerical, GPU, maximum-size and
+performance validation are not covered.

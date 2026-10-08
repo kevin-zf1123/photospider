@@ -43,7 +43,7 @@ def main():
         rows.append(row+'\n')
         expected.append('error' if want is None else ' '.join(f'{b:x}' for b in want))
 
-    for dtype,width in [(1,8),(2,64),(3,64),(4,32)]:
+    for dtype,width in [(1,8),(2,64),(3,64),(4,32),(5,8),(6,16),(7,16)]:
         raw_special = [0,1,(1<<width)-1,1<<(width-1)]
         if dtype == 3:
             raw_special += [0x7ff0000000000001,0xfff8000000001234,0x7ff0000000000000]

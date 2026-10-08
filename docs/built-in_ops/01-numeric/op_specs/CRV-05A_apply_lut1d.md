@@ -13,13 +13,10 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
-verification_status: manual_public_workflows_and_independent_oracle
+verification_status: focused_result_math_ctest_and_installed_consumer
 clarification_status: complete
 repository_branch: ops-specs
-repository_commit: 6617c78c
+repository_commit: current working tree
 ---
 
 # CRV-05A: apply_lut1d
@@ -45,12 +42,15 @@ multi-table operation and of a scalar-to-vector color ramp.
 
 ## Confirmed dynamic interface
 
-Use required dynamic inputs input, table[L] and axis[3], in that order. Input is
-a generic numeric array of arbitrary supported rank. Axis carries start/end/step
-and directly connects to CRV-04's named axis output; table connects to values.
-The exact sample-grid definition uses start/end and table length L. The supplied
-step is checked for consistency, not repeatedly accumulated to create knots.
-Output values preserves input shape. Detailed axis and dtype rules follow.
+Use required Result inputs input, table[L] and axis[3], in that order. Each
+contains one tensor member under any schema id/version and member key; use its
+complete `sample_shape()`, including batch axes. Input is a numeric array of
+arbitrary supported rank. Axis carries start/end/step and can connect to CRV-04's
+named axis output; table connects to values. The exact sample-grid definition uses
+start/end and table length L. The supplied step is checked for consistency, not
+repeatedly accumulated to create knots. Output `values` is a Result using schema
+`photospider.tensor` v1/member `samples`, preserving the complete input shape,
+selected dtype and empty facets. Detailed axis and dtype rules follow.
 
 ## Confirmed interpolation method
 
@@ -88,9 +88,10 @@ validated; a one-entry table does not erase that dependency or its errors.
 ## Confirmed dtype mapping
 
 Input and table independently accept Float32/Float64 and may mix dtypes. Axis
-is always Float64 [3]. Output dtype statically selects Float32/Float64, with
-the constructor default matching input dtype. Direct nodes supply the selected
-dtype explicitly. Neither table dtype nor axis dtype forces an implicit output
+is always Float64 [3]. Output dtype statically selects Float32/Float64. The
+constructor defaults it from the authoring `input_type` hint; this hint does not
+infer the dtype of the bound Result input, which the compiler validates
+independently. Direct nodes supply the selected dtype explicitly. Neither table dtype nor axis dtype forces an implicit output
 promotion. Integer numeric inputs require explicit conversion before application.
 
 ## Confirmed numerical quality and table demand
@@ -112,15 +113,18 @@ obligation even for a one-entry table read.
 
 ## Complete descriptors and axis formula
 
-Require 1<=L<=1048576. Input has rank 1..8, positive extents and logical element
-count <=2^40. Table is rank-1 [L]; axis is Float64 [3]. Output values preserves
-input shape, has the chosen floating dtype and empty facets. No input semantic
+Require 1<=L<=1048576. Each Result has one tensor member under any schema
+id/version/key. Input `sample_shape()` has rank 1..8, positive extents and logical
+element count <=2^40; table shape is [L] and axis shape is Float64 [3]. Output
+port `values` uses `photospider.tensor` v1/member `samples`, preserves complete
+input shape, has the chosen floating dtype and empty facets. Batch dimensions are
+part of that shape. No input semantic
 facet, color role or unit is inferred or propagated to the generic output;
 complete collected recognized typed inputs retain their validation obligations.
 
 Required static String dtype is float32/float64 and out_of_domain is
-reject/clamp/linear_extrapolate. The constructor writes input's dtype and reject
-by default; direct nodes supply both. No interpolation-method, axis-shape or
+reject/clamp/linear_extrapolate. The constructor writes the authoring `input_type` hint and reject by default;
+direct nodes supply both static parameters explicitly. No interpolation-method, axis-shape or
 runtime output-shape parameter is introduced. Static metadata checks cover every
 declared edge independently of requested data and infer output without evaluation.
 
@@ -152,42 +156,44 @@ coordinates, not unrounded ideal positions or a rounded fractional index.
 
 ## Exact demand and invalidation
 
-Every nonempty request uses one CPU Whole callback over complete input, table
-and axis Values, including recognized typed validation and upstream failures.
-Validate the complete reconstructed axis first, then every finite/domain query
-before table arithmetic. Compute every output element/channel and publish one
-immutable dense owner with the complete input shape. Sparse demand restricts
-returned coverage, not computation or full output memory. Empty reads no payload;
-all static metadata checks still apply.
+Every nonempty Whole request requests complete input, table and axis Results
+with Data, Validation and Descriptor (role 13), including typed validation and
+upstream failures. It validates the complete reconstructed axis first, then every
+finite/domain query before table arithmetic. It computes every output element and
+publishes one immutable packed dense Result of the complete input shape, with full
+certified coverage and global coordinates. The Result association records the
+actual source ObjectIds. Empty reads no payload; static metadata checks still
+apply.
 
 Mathematical table selection is unchanged: knot/clamp/singleton converts one
 entry; interpolation/extrapolation uses its adjacent pair, independently per
 channel. Generic entries outside all evaluated stencils receive no additional
 finite scan. Typed validation and upstream collection cover the complete table.
 Errors in otherwise-unrequested queries or evaluated channels can fail the Run.
-Any input/table/axis edit invalidates recorded output demand. Cache identity
-retains all input versions, profile, metadata and parameters. There is no
+Any input/table/axis edit invalidates recorded output demand; dirty mapping
+follows that recorded demand. Cache identity retains all input versions, profile,
+metadata and parameters. There is no
 per-channel Atom success isolation. Output dtype, shape and empty facets remain
 unchanged; arbitrary input offsets, unaligned and signed/zero strides remain
 legal. The complete immutable owner survives context destruction.
 
 ## Algorithm, resource and failure contract
 
-For M total input elements, work is O(L+M log L) plus exact arithmetic, full
-input collection and typed validation. Singleton lookup is constant time per
-query. The callback retains a host-accounted Float64 grid of 8*L element bytes
-(up to 8 MiB) plus allocator/metadata overhead, fixed exact workspace and O(rank)
-coordinate state. It retains no per-output certificates, rows or lookup table.
-Output costs dtype_bytes*M, regardless of requested coverage. Complete table
-collection costs its full L (or L*C) logical payload when a dense collect is
-needed; retained source owners are accounted separately.
+For M input elements, work is O(L+M log L) plus exact arithmetic and typed
+validation. Singleton lookup is constant time per query. `UniformAxis` stores
+the directly reconstructed Float64 grid in a Root-owned, host-accounted 8*L-byte
+buffer (up to 8 MiB), plus allocator/metadata overhead; fixed exact workspace
+and O(rank) coordinate state are also admitted. Input/table reads use authorized zero-copy Root windows over source storage; the operation does not
+create a dense copy of the complete table merely to collect it. Root accounts
+actual retained owners and provided windows. The operator retains no per-output certificates, rows or
+lookup table. Output costs dtype_bytes*M, regardless of requested coverage.
 
 The complete axis uses endpoint-weighted RN64 coordinates. One caller-preserving
 floating environment covers axis reconstruction and curve evaluation; unresolved
 accelerated bounds still use the same exact fallback. Work/cancellation is checked
 in axis generation, input reads, lookup and exact arithmetic, and before publishing.
 Resource failure never authorizes skipping axis validation or weaker arithmetic.
-Unpublished output/workspace is released; no partial success is published.
+Unpublished output/workspace is released; the output transaction is all-or-nothing.
 Numeric InvalidDomain/ArithmeticOverflow failures have Run scope. Typed, upstream,
 resource, stale, backend and cancellation failures retain their categories.
 Whole does not expose per-value fallback counters; report those as unavailable.
@@ -226,25 +232,40 @@ as recorded below.
 ### Maintained implementation and verification
 
 `plugins/ops/01-numeric/lut1d_application.cpp` registers the six scalar/channels
-profile keys. `UniformAxis` validates all three raw axis values, exact step and
-the entire directly reconstructed grid, retaining an admitted 8L-byte index.
-All queries are validated before table arithmetic. Descending pairs reorder
-x and y together before using ExactCurve's positive-denominator formula. Existing
-numerical quality, singleton and signed-zero classifications are preserved.
+profile keys as Whole Result operations. `UniformAxis` validates the three axis
+values and exact step, then stores the complete endpoint-weighted RN64 grid in a
+Root allocation charged to Metadata. The program validates every query before
+table arithmetic, and descending segments reorder x and y together for the
+positive-denominator `ExactCurve` formula. It reads input and table data through
+authorized Result windows and publishes one complete immutable packed Result.
 
-`apply_lut1d_node` / `apply_lut1d_channels_node` retain their three dynamic inputs
-and output dtype hint. Six native manual groups cover scalar/channels, all domain
-policies, full support/dirty/Run errors, Float32/64 direct layouts/fenv, active
-axis/arithmetic cancellation, work/output/workspace admission, cache/typed and
-upstream failures. A complete L=1048576 grid with scalar-backed constant source
-runs with a 16 MiB payload cap for full table collection; a 2^39-channel sparse
-request is a complete-output budget rejection. The six CRV-04 consumer chains
-retain their independent discretization checks. The Fraction oracle evaluates
-all output cells before selecting requested observations. Current native
-strict/Apple each pass 1416 cases; other CPUs were not rerun for Whole.
-See the public workflow README and math-implementation for actual commands,
-sampling/configuration and Instruments limits. The manual target remains
-excluded from default builds and CTest.
+The Result manual fixture passes seven groups under Strict and locally available
+Apple profiles; the independent Fraction driver passes 1,416 bit-equal cases per
+profile. Scalar coverage includes ascending and descending axes, input/table
+mixed dtypes, reversed unaligned inputs, zero-stride layouts, caller and worker
+floating-point modes, clamp and extrapolation, singleton axes/tables, selected
+negative zero, invalid queries and axes, typed validation, and upstream failure.
+The fixture also checks Empty, static descriptor limits, cache association after
+source replacement, static preparation reuse, sparse requests with full Whole
+coverage, the six CRV-04 baking chains, resource rejection, cancellation, and
+Result/read-window lifetime.
+
+The maximum L=1,048,576 dynamic grid succeeds with its 8*L-byte allocation
+charged to Metadata and Payload below 8*L, confirming no dense table copy. A
+sparse 2^39-channel output fails at the LUT node with
+`ResourceExhausted/CapacityLimit`. Output and an authorized read window retain a
+single 16-byte Payload owner after source/context teardown; releasing both
+returns all Root resources to zero. The full maximum physical channel-table
+allocation and x86 numerical execution were not run. The focused root selection
+passed the manual LUT1D and existing math integration tests 2/2 in 4.74 seconds.
+The installed consumer compiled this same source against package 0.32.0 and
+passed 1/1 under Strict in 0.38 seconds; its direct Apple run passed all seven
+groups. The independent oracle, test identities and reproduction commands are
+summarized in the [family verification section](CRV-05_apply_lut1d.md#maintained-implementation-and-validation)
+and [numeric workflow
+README](../../../../examples/numeric_workflow/README.md#lut1d-application-crv-05).
+Earlier performance measurements use the package 0.18 Value adapter and are
+historical, not Result performance evidence.
 
 - [Family decisions](CRV-05_apply_lut1d.md).
 - [Baking templates](CRV-04_bake_lut1d.md).

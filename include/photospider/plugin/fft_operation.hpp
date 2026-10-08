@@ -30,18 +30,23 @@ PHOTOSPIDER_API Result<SpectrumSpec> fft_spectrum_spec(
 PHOTOSPIDER_API Result<SchemaTemplate> fft_spatial_schema(
     const SpectrumSpec& spectrum);
 /** @brief Registers one executable stage of the external DIF radix-2 recipe.
- * ForwardReal takes facet-free Float64 HW; ImportResponse takes Float64 HW2
- * (or HK2 for half packing); Multiply takes two identically described spectra;
- * InverseReal takes one spectrum. Complete static identity is checked before
- * source reads or allocation. Forward/response/multiply emit validated spectra.
- * InverseReal expands the omitted half by reflected-axis conjugation and emits
- * an explicit real projection with a measured imaginary residual.
+ * ForwardReal takes a Result with one unbatched, facet-free Float64 HW tensor
+ * and no fields. ImportResponse takes the same Result form with Float64 HW2
+ * (or HK2 for half packing). These numeric inputs are validated by tensor
+ * shape/type rather than a fixed Result schema ID. Multiply takes two
+ * identically described Spectrum Results; InverseReal takes one. Complete
+ * static Spectrum identity is checked before source reads or allocation.
+ * Forward/response/multiply emit validated Spectrum Results. InverseReal
+ * expands the omitted half by reflected-axis conjugation and emits an explicit
+ * real projection with a measured imaginary residual.
  * Two mandatory full complex generations and bounded windows implement DIF
  * butterflies, odd-leaf direct DFT and transposition without a whole-axis RAM
- * allocation. Arithmetic, pages, generations, stages and I/O consume root
+ * allocation. Arithmetic, pages, generations, stages and I/O consume Root
  * resources. Nonfinite arithmetic and exhausted limits fail explicitly.
- * Whole-transform support remains Conservative; all results own their backing
- * and input associations independently of the context and optional cache.
+ * Whole-transform support remains Conservative. Published Results own their
+ * backing; associations store source ObjectIds but do not own source payload.
+ * A loaded field CpuStorage retains its read plan and Result implementation,
+ * keeping that field backing readable until the last window is released.
  */
 PHOTOSPIDER_API Result<OperationDefinition> make_fft_operation(
     FftOperation operation, const SpectrumSpec& spectrum);

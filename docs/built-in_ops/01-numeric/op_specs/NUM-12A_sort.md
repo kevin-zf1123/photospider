@@ -13,83 +13,104 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
 repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
+repository_commit: current working tree
 ---
 
 # NUM-12A: sort
 
-Numeric profile: strict retains the exact reference defined below. Floating
-arithmetic in accelerated profiles follows the shared
-[final FP32 four-ULP contract](NUM_accelerated_contract.md), including its
-range/fallback rules. Discrete results, copies, selected endpoints and special
-values remain exact.
-
 Inherit the [NUM baseline](NUM_common_contract.md) for specification status,
-registration, shared execution and acceptance requirements; explicit rules below
-and in the named family contract take precedence.
+registration and shared error conventions. This member specifies stable
+ascending sorting of every logical line along one static axis. Its specification
+status remains Proposed; that status does not imply the keys are absent from the
+runtime.
 
-Stable ascending sort of every logical line along required static Int64 axis.
-Input `input` supports UInt8/Int64/Float32/Float64. Named outputs `values` and
-`indices` both have input shape; values preserves dtype and indices is Int64,
-containing each selected element's original coordinate on the sorted axis.
-Output facets are empty. Axis is nonnegative and less than rank; no descending,
-unstable, implicit cast or image-semantic mode is provided.
+## Tensor ports and output selection
 
-Numerical values sort in ascending order, including infinities. Signed zeros
-compare equal. All NaNs sort after all non-NaNs and compare equal for ordering;
-original input-axis order breaks every equality tie. Preserve original value bits,
-including sNaNs and payloads, rather than quieting them. Use bit classification
-before comparison to avoid signaling exceptions. Integer order is exact without
-floating conversion. The three CPU profiles produce identical output bits.
+The `input` port is a `Result` containing exactly one tensor member at index
+zero. Its `ResultTensorSpec::key` may be any key. Supported element types are
+UInt8, Int64, Float32 and Float64. The input `sample_shape()` includes declared
+batch axes. Its rank is 1..8, all extents are positive, and the complete logical
+element count is at most 2^40.
 
-Input rank is 1..8 with positive extents and logical element count <=2^40.
-Both output shapes are inferred statically; original axis indices therefore fit
-Int64. Only axis is a static numeric parameter. Each selected output owns complete dense storage; there is no view/dense parameter.
+`axis` is a required static Int64 parameter in `0..rank-1`, measured against
+the full sample shape, including batch-prefix axes. There is no descending,
+unstable, implicit-cast or image-semantic mode.
 
-## Multi-output demand and invalidation
+The operation exposes two independently selectable named outputs. `values` is
+a `Result` with schema `photospider.tensor`, tensor key `samples`, source
+element type and full input shape. `indices` has the same shape and schema but
+Int64 elements; each value is the original coordinate on the sorted axis.
+Batch axes become ordinary output axes and both output tensor specs have empty
+facets. Each selected output produces its own complete Result payload. A joint
+workflow therefore has distinct Result owners for `values` and `indices`.
 
-Any nonempty demand reads and validates the complete source, including all lines
-and indices-only requests. Every source edit invalidates all recorded output
-observations; source/typed/resource failures affect the Run. Empty reads nothing.
-Each selected public output executes an independent Whole callback and allocates
-only that complete output. Both callbacks may sort the same lines independently.
-A single callback builds one permutation per line and reuses it for all positions.
-No cross-output or changed-q permutation block cache is promised. Public keys,
-output identities, stable ties and raw-value rules are unchanged.
+## Ordering and value preservation
 
-## Algorithms, resources and errors
+For each line, sort by `(numerical key, original axis index)`. Integer keys use
+exact signed order without floating conversion. Floating values, including
+infinities, use ascending numerical order. Signed zeros compare equal. Every
+NaN sorts after every non-NaN, and NaNs compare equal for ordering. The original
+axis index breaks ties, so equal values and NaNs retain their source order.
 
-Iterative heapsort sorts (numerical key, original axis index). Keys are classified
-once per line and comparisons reuse them. For length L, permutation and keys
-require16*L element bytes plus ResourceAllocator headers/alignment/Entries,
-charged as metadata; keys die after sorting and permutation after outputting the
-line. Fixed comparison/exact state is admitted as payload workspace. The old
-16-times-input-payload workspace bound and staged publication are removed.
-Dense output and full source collection are additional allocations. Work is
-O(total_input*log L), with checked reads/ordering and bounded cancellation.
-No rounded rank, disk spill or private cache is introduced.
+The `values` output copies original bits. Signaling NaNs and payloads are not
+quieted or otherwise changed by sorting. The `indices` output records the
+corresponding source-axis position. All three declared CPU profiles preserve
+these discrete results.
 
-Malformed dtype/rank/shape/axis remains a schema failure. Generic NaN/Inf sorts
-successfully, arbitrary legal input strides are supported, and output preserves
-raw bits. Failed Whole attempts release unpublished output, state and metadata;
-returned output survives context destruction. Sparse requests require the same
-complete selected output storage and may regress in time/memory.
+## Whole demand and execution
 
-## Acceptance and implementation status
+Every nonempty selected-output request uses Whole execution. It requests the
+complete source tensor with Data, Validation and Descriptor roles, sorts every
+line, writes the complete selected output and then satisfies the consumer
+projection. An indices-only request still reads the complete source to build
+the permutation. Any source change invalidates every recorded observation for
+each selected output. An Empty request reads no input payload and performs no
+sample arithmetic; it publishes the declared schema with empty sample
+coverage.
 
-Fixture: input=[3,1,1,2], axis=0 yields values=[1,1,2,3] and
-indices=[1,2,3,0]. Independent stable ordering with original-index tie breaks
-is the oracle. Float fixture [3,-0,+0,NaN_a,2,NaN_b] yields indices
-[1,2,4,0,3,5], preserving both NaN bit patterns and zero order in values.
+`values` and `indices` are independent outputs, not one callback that always
+allocates both. Selecting them separately invokes independent Whole callbacks;
+selecting both in one workflow produces two Results and two payloads. A callback
+builds one permutation per line and uses it to write its selected output. No
+cross-output permutation cache is promised.
 
-Test each output alone and joint equality, partial sorted positions, unrequested
-lines with failing upstream values, all-NaN lines, singleton lines, repeated
-integers above 2^53, reverse/zero input strides, multi-axis shapes, source-read
-logs, full-line dirty propagation, sorting scratch limits, cancellation and
-result lifetime. The formal keys use Whole. Current public workflow, independent
-oracle and separate public/core performance evidence are in
-[NUM-12 Whole execution](../ordering-whole.md). Older regional WSL/installed
-records predate Whole and do not establish current platform acceptance.
+## Algorithm, resources and errors
+
+The implementation classifies each source sample once to form a numerical key,
+then uses iterative stable heapsort on `(key, original index)`. A line of length
+L takes O(L log L) ordering work. Its key and permutation vectors use 16*L element bytes plus
+allocator headers, alignment and Entries reservations. They are charged as
+Root metadata. Keys are released after sorting; the permutation is released
+after that line is written. Fixed `OrderingState` uses the phase allocator's
+Payload capacity. Authorized input read windows and the selected full output
+payload coexist with this state; the operation does not first pack the complete
+input.
+
+Work is O(M log L) for M total input elements and axis length L. The callback
+charges reads, comparisons, permutation construction and output writes to the
+execution Root and observes cancellation through those work calls. Capacity,
+work-limit, cancellation or source failure aborts the transactional Whole
+writer; unpublished output and ordering state are released, and no partial
+coverage is published.
+
+Malformed dtype, rank, shape or axis is rejected during metadata specialization
+or static parameter validation. NaNs and infinities are successful sort values.
+Arbitrary valid affine source strides are read through owning tensor windows.
+
+## Current behavior checks
+
+The current public behavior entry is `examples/numeric_workflow/ordering.cpp`,
+registered as `test_numeric_ordering_result`; the same source is built as the
+installed consumer `installed_numeric_ordering_result`. It checks
+`[3,1,1,2]` values and indices, separate output selection, full publication for
+sparse demand, stable non-last-axis sorting, dirty support, and ordering of
+signed zeros, infinities and signaling-NaN payloads. The existing
+`test_numeric_result_math.cpp` integration fixture contains additional ordering
+cases, but it was not rerun for this Result migration. See [NUM-12 Result Whole
+execution](../ordering-whole.md) for commands and current evidence limits.
+
+`test_numeric_ordering_result` and `installed_numeric_ordering_result` each
+pass 1/1. The independent ordering oracle passes 2,072 cases in both Strict and
+Apple profiles. The checks do not claim x86 arithmetic execution, performance
+or complete typed-facet/error/resource coverage. The specification remains
+Proposed.

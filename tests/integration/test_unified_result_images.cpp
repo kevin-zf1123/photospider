@@ -14,10 +14,10 @@ void require(bool condition, std::string_view message) {
   if (!condition)
     throw std::runtime_error(std::string(message));
 }
-void run() {
+std::pair<ResultRef, ResultRef> run() {
   auto registry = std::make_shared<OperationRegistry>();
   require(unified_example::register_gather(registry.get()).ok(),
-          "register mixed outputs");
+          "register Result outputs");
   require(registry->freeze().ok(), "freeze");
   WorkflowDocument doc;
   auto schema =
@@ -32,9 +32,8 @@ void run() {
   WorkflowInputDeclaration control;
   control.id = 3;
   control.name = "control";
-  control.descriptor = {ElementType::Int64, {2, 2, 2, 4}};
-  control.region = Region::whole(control.descriptor.shape);
-  control.layout.byte_strides = {128, 64, 32, 8};
+  control.result_schema =
+      std::make_shared<SchemaTemplate>(unified_example::numeric_schema());
   doc.inputs = {image_a, image_b, control};
   doc.nodes = {{1,
                 "example.gather",
@@ -57,25 +56,25 @@ void run() {
   b.name = "b";
   b.result = unified_example::input_image(budget, 5000);
   std::vector<std::int64_t> selectors(32, 0);
-  auto writer = MutableValue::allocate(control.descriptor, control.region,
-                                       BufferAllocator{})
-                    .take_value();
-  std::memcpy(writer.data(), selectors.data(), selectors.size() * 8);
-  auto bound = std::move(writer).publish();
-  require(bound.ok(), "control binding");
   ExecutionBinding c;
   c.name = "control";
-  c.value = bound.take_value();
+  c.result = unified_example::input_control(budget, selectors);
   auto executed = context.execute(planned.value().plan, {{a, b, c}});
   require(executed.ok(), executed.status().message);
   auto& result = executed.value().results.at("out");
   auto facts = result.descriptor().take_value();
   float pixel = 0;
-  require(result.read_image(facts, 0, {1, 1, 1, 3}, &pixel, 4).ok() &&
+  require(result.read_tensor(facts, 0, {1, 1, 1, 3}, &pixel, 4).ok() &&
               pixel == 1113,
           "frame/layer sample");
-  require(executed.value().values.at("count").bytes().size() == 8,
-          "numeric sibling");
+  std::int64_t count = 0;
+  const auto& count_result = executed.value().results.at("count");
+  require(count_result
+                  .read_tensor(count_result.descriptor().value(), 0, {0},
+                               &count, sizeof(count))
+                  .ok() &&
+              count == 32,
+          "numeric Result sibling");
   auto frozen = context.freeze(planned.value().plan, {{a, b, c}});
   require(frozen.ok(), "freeze typed Result bindings");
   auto wanted = Footprint::from_regions(
@@ -85,10 +84,11 @@ void run() {
   require(sparse.ok(), sparse.status().message);
   auto sparse_result = sparse.value().results.at("out");
   auto captured = sparse_result.descriptor().take_value();
-  require(sparse_result.read_image(captured, 0, {1, 0, 1, 2}, &pixel, 4).ok() &&
-              pixel == 1012,
-          "sparse sample");
-  require(!sparse_result.read_image(captured, 0, {1, 0, 1, 1}, &pixel, 4).ok(),
+  require(
+      sparse_result.read_tensor(captured, 0, {1, 0, 1, 2}, &pixel, 4).ok() &&
+          pixel == 1012,
+      "sparse sample");
+  require(!sparse_result.read_tensor(captured, 0, {1, 0, 1, 1}, &pixel, 4).ok(),
           "hole is unauthorized");
   auto dirty = sparse.value().dependencies.potential_dirty("control", wanted);
   require(dirty.ok() && dirty.value().at("out") == wanted, "control transpose");
@@ -97,11 +97,7 @@ void run() {
   auto initial = handle.request({{"out", wanted}});
   require(initial.ok(), initial.status().message);
   selectors[22] = 3;
-  auto change_writer = MutableValue::allocate(control.descriptor,
-                                              control.region, BufferAllocator{})
-                           .take_value();
-  std::memcpy(change_writer.data(), selectors.data(), selectors.size() * 8);
-  c.value = std::move(change_writer).publish().take_value();
+  c.result = unified_example::input_control(budget, selectors);
   auto changed = handle.replace_bindings({{a, b, c}});
   require(changed.ok(), changed.status().message);
   require(changed.value().potential_dirty.at("out") == wanted,
@@ -110,11 +106,17 @@ void run() {
   require(updated.ok(), updated.status().message);
   auto updated_result = updated.value().results.at("out");
   require(updated_result
-                  .read_image(updated_result.descriptor().value(), 0,
-                              {1, 0, 1, 2}, &pixel, 4)
+                  .read_tensor(updated_result.descriptor().value(), 0,
+                               {1, 0, 1, 2}, &pixel, 4)
                   .ok() &&
               pixel == 6013,
           "new branch/support executes");
+  const auto sources = updated_result.association();
+  require(sources.size() == 2 && sources[0] == b.result.object_id() &&
+              sources[1] == c.result.object_id(),
+          "image retains ordered branch and control source identities");
+  require(count_result.association().empty(),
+          "constant count has no source association");
   auto new_data = Footprint::from_regions(
                       {2, 2, 2, 4}, {Region({{1, 1}, {0, 1}, {1, 1}, {3, 1}})})
                       .take_value();
@@ -125,22 +127,79 @@ void run() {
   require(old_dirty.ok() && old_dirty.value().at("out").empty(),
           "old evidence is immutable");
   selectors[0] = 7;
-  change_writer = MutableValue::allocate(control.descriptor, control.region,
-                                         BufferAllocator{})
-                      .take_value();
-  std::memcpy(change_writer.data(), selectors.data(), selectors.size() * 8);
-  c.value = std::move(change_writer).publish().take_value();
+  c.result = unified_example::input_control(budget, selectors);
   auto unrelated =
       handle.replace_bindings({{a, b, c}}, SnapshotAccessOptions{2, {}});
   require(unrelated.ok(), unrelated.status().message);
   require(unrelated.value().potential_dirty.at("out").empty(),
           "unconsumed Control remains clean");
+  const auto evaluate = [&](const DemandQuery& query) {
+    auto current = context.freeze(planned.value().plan, {{a, b, c}});
+    require(current.ok(), current.status().message);
+    return context.execute_fragments(current.value(), query);
+  };
+  selectors[0] = 99;
+  c.result = unified_example::input_control(budget, selectors);
+  auto bounded = evaluate({{"out", wanted}});
+  require(bounded.ok(), bounded.status().message);
+  const auto scalar = Footprint::all({1}).take_value();
+  auto count_only = evaluate({{"count", scalar}});
+  require(count_only.ok(), count_only.status().message);
+  const auto& independent = count_only.value().results.at("count");
+  require(independent
+                  .read_tensor(independent.descriptor().value(), 0, {0}, &count,
+                               sizeof(count))
+                  .ok() &&
+              count == 32,
+          "count does not read invalid unneeded selectors");
+  auto empty = evaluate({{"out", Footprint::none({2, 2, 2, 4}).take_value()},
+                         {"count", Footprint::none({1}).take_value()}});
+  require(empty.ok(), empty.status().message);
+  for (const auto& entry : empty.value().results)
+    require(entry.second.descriptor().value().tensor_coverage(0).empty(),
+            "empty Result demand publishes no samples");
+  auto invalid_at =
+      Footprint::from_regions({2, 2, 2, 4},
+                              {Region({{0, 1}, {0, 1}, {0, 1}, {0, 1}})})
+          .take_value();
+  for (auto invalid : {-1, 8}) {
+    selectors[0] = invalid;
+    c.result = unified_example::input_control(budget, selectors);
+    auto rejected = evaluate({{"out", invalid_at}});
+    require(
+        !rejected.ok() && rejected.status().code == ErrorCode::InvalidArgument,
+        "consumed selector outside 0..7 is rejected");
+  }
+  for (std::size_t port : {0U, 2U}) {
+    auto malformed = doc;
+    auto wrong =
+        std::make_shared<SchemaTemplate>(*malformed.inputs[port].result_schema);
+    wrong->tensors[0].descriptor.shape.back() = 3;
+    malformed.inputs[port].result_schema = std::move(wrong);
+    auto rejected = compiler.compile(GraphContext(std::move(malformed)));
+    require(!rejected.ok() && rejected.status().code == ErrorCode::TypeMismatch,
+            "gather validates fixed Result dimensions before execution");
+  }
+  return {independent, updated_result};
 }
 }  // namespace
 int main() {
   try {
-    run();
-    std::cout << "unified Result images passed\n";
+    auto retained = run();
+    std::int64_t count = 0;
+    float sample = 0;
+    require(retained.first
+                    .read_tensor(retained.first.descriptor().value(), 0, {0},
+                                 &count, sizeof(count))
+                    .ok() &&
+                count == 32 &&
+                retained.second
+                    .read_tensor(retained.second.descriptor().value(), 0,
+                                 {1, 0, 1, 2}, &sample, sizeof(sample))
+                    .ok() &&
+                sample == 6013,
+            "both Result outputs survive context retirement");
+    std::cout << "unified Result tensors passed\n";
     return 0;
   } catch (const std::exception& e) {
     std::cerr << e.what() << '\n';

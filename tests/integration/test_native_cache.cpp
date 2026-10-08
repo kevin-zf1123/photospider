@@ -58,12 +58,12 @@ void typed_residency() {
                      "kernel void copy_bits(device const uint* a "
                      "[[buffer(0)]], device uint* b [[buffer(1)]], uint i "
                      "[[thread_position_in_grid]]) { b[i]=a[i]; }";
-                 ps_gpu_buffer_binding_v11 buffers[] = {
-                     {sizeof(ps_gpu_buffer_binding_v11), 0, source, 0,
+                 ps_gpu_buffer_binding_v1 buffers[] = {
+                     {sizeof(ps_gpu_buffer_binding_v1), 0, source, 0,
                       output.size(), 0},
-                     {sizeof(ps_gpu_buffer_binding_v11), 1, destination, 0,
+                     {sizeof(ps_gpu_buffer_binding_v1), 1, destination, 0,
                       output.size(), 1}};
-                 ps_gpu_dispatch_v11 command{};
+                 ps_gpu_dispatch_v1 command{};
                  command.struct_size = sizeof(command);
                  command.source = shader;
                  command.source_size = sizeof(shader) - 1;
@@ -109,7 +109,7 @@ void typed_residency() {
                 "typed native cached oracle");
   }
   s3::require(execution.cache_statistics().native_retained_bytes > 0,
-              "typed images did not retain native owners");
+              "typed tensors did not retain native owners");
 }
 /** @brief Exercises real native shared work and subscriber-owned cancellation.
  */

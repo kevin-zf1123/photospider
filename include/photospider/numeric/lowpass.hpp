@@ -58,8 +58,8 @@ inline Result<WorkflowNode> uniform(std::uint64_t id, const char* kernel,
 }
 }  // namespace lowpass_detail
 /** @brief Filters a sampled signal with a centered Hann-windowed sinc.
- * Input Float32/64 rank 1..8, positive count<=2^40; output values retains shape
- * and dtype with generic facets. axis selects independent signals. Required
+ * A single-tensor Result is the input; output values retains its full shape and
+ * dtype with generic facets. axis selects independent signals. Required
  * radius=1..4096 and cutoff in (0,.5) cycles/sample define the exact full
  * kernel. boundary defaults Reflect, period 2*(N-1) without repeated endpoints
  * (N=1 maps to zero); Replicate clamps, Wrap uses Euclidean modulo, Zero adds
@@ -85,13 +85,26 @@ inline Result<WorkflowNode> uniform(std::uint64_t id, const char* kernel,
  * retain their bits, including -0. Other exact zero is +0; nonzero underflow
  * keeps its sign. Caller fenv is preserved.
  *
- * All formal profiles use Whole: nonempty demand collects complete input and
- * publishes a dense output of the same shape. Any input edit invalidates all
- * outputs. Full typed/upstream validation can fail outside delivered positions.
- * Empty reads nothing. Legal strides and owning output remain supported.
- * Complete input/output, fixed math state and coefficient/tap vectors consume
- * managed capacity/work. Sparse demand can exhaust full-output capacity.
- * Failure/cancellation publishes no partial output and releases temporaries.
+ * `input` is a Result with exactly one tensor member and no fields under any
+ * structurally valid schema id/version/member key. Use its complete
+ * `sample_shape()`, including batch axes: Float32/64, rank 1..8, positive
+ * extents and logical count <=2^40. Output port `values` is an immutable
+ * `photospider.tensor` v1/member `samples` Result with the same shape/dtype and
+ * generic facets. The output schema selects its own resources instead of
+ * copying source-only facets/resources.
+ *
+ * All formal profiles use Whole. A nonempty request declares Data, Validation
+ * and Descriptor (role 13) for the complete input tensor. Typed/upstream
+ * validation can fail outside requested delivery. The callback reads
+ * authorized windows without collecting or copying the complete input. Empty
+ * reads no sample payload after static preflight. Any input edit invalidates
+ * the complete recorded output demand. The Result writer publishes the full
+ * same-shape output transactionally with full coverage and global coordinates.
+ * Legal source strides remain supported; the owner survives context teardown.
+ * Source windows, full output, fixed math state and coefficient/tap vectors
+ * consume managed capacity, so sparse requests can exhaust full-output
+ * capacity. Failure/cancellation publishes no partial output and releases
+ * temporary state.
  * Whole fallback counters are unavailable. An unresolved
  * normalizer or final rounding returns ResourceExhausted; no unconverged
  * approximation is published. Finite radius has transition/stopband leakage;
@@ -185,11 +198,16 @@ inline Result<WorkflowNode> nonuniform(std::uint64_t id, const char* kernel,
 }
 }  // namespace lowpass_detail
 /** @brief Convolves the continuous piecewise-linear signal with a Hann sinc.
- * positions[K] and values independently accept Float32/64; positions is finite
- * strictly increasing, K=2..1048576. values rank 1..8/count<=2^40, with the
- * selected axis of length K; other dimensions are independent signals.
- * Output samples retains values shape/dtype with generic facets at the same
- * original positions. support_radius>0 uses coordinate units; cutoff>0 is in
+ * `positions` and `values` are Results with one tensor member and no fields
+ * under any structurally valid schema id/version/member key. Use complete
+ * `sample_shape()` values, including batch axes. `positions` is [K], finite
+ * strictly increasing Float32/64, K=2..1048576. `values` independently accepts
+ * Float32/64, rank 1..8/count<=2^40, with the selected axis of length K; other
+ * dimensions are independent signals. Output `samples` is a
+ * `photospider.tensor` v1/member `samples` Result preserving full values
+ * shape/dtype with generic facets at the original positions. The output schema
+ * selects its own resources instead of copying source-only facets/resources.
+ * support_radius>0 uses coordinate units; cutoff>0 is in
  * cycles per coordinate unit, with no 0.5 upper bound. Gaussian uses sigma>0
  * in coordinate units instead; Kaiser additionally requires beta>=0.
  *
@@ -211,19 +229,25 @@ inline Result<WorkflowNode> nonuniform(std::uint64_t id, const char* kernel,
  * OperationFailed/InvalidDomain; final overflow fails ArithmeticOverflow.
  * Caller floating state is preserved.
  *
- * All formal profiles use Whole: nonempty demand collects complete positions
- * and values, validates topology and computes every center/column. Each
- * integral retains its exact positive-length support and endpoint rules. Any
- * input edit invalidates all outputs; invalid or overflowing undelivered
- * positions fail Domain/Run. Empty reads no payload. Complete inputs and dense
- * output consume managed capacity; only one output's pieces are retained at a
- * time. Arbitrary strides, owned output and cancellation/work checks remain
- * supported. No partial output is published on failure. Whole
- * numerical/fallback counters are N/A. Huge period counts or unresolved
- * precision/order fail ResourceExhausted. Reconstruction/filter/resampling
- * quality must be measured for the caller's downsampling task; there is no
- * universal Nyquist inferred from nonuniform positions or promise of zero
- * aliasing.
+ * All formal profiles use Whole. A nonempty request declares Data, Validation
+ * and Descriptor (role 13) for both complete input tensors. Typed/upstream
+ * validation covers every input element. The callback reads positions through
+ * authorized windows into Root-owned promoted geometry state. It reads values
+ * through authorized windows without collecting or copying the complete values
+ * tensor. It computes every center and
+ * column with the exact positive-length support and endpoint rules. Input edits
+ * invalidate complete recorded output demand; invalid or overflowing
+ * undelivered positions fail Domain/Run. Empty reads no sample payload after
+ * static preflight. The Result writer publishes the complete output
+ * transactionally with full coverage and global coordinates. Root charges
+ * promoted positions, source windows, the full output, fixed math state and the
+ * reused piece vector. Arbitrary strides and output ownership survive context
+ * teardown. Failure or cancellation publishes no partial output and releases
+ * temporary state. Whole numerical/fallback counters are N/A. Huge period
+ * counts or unresolved precision/order fail ResourceExhausted.
+ * Reconstruction/filter/resampling quality must be measured for the caller's
+ * downsampling task; there is no universal Nyquist inferred from nonuniform
+ * positions or promise of zero aliasing.
  */
 inline Result<WorkflowNode> lowpass_nonuniform_hann_sinc_node(
     std::uint64_t id, WorkflowInput positions, WorkflowInput values,

@@ -7,7 +7,7 @@ kind: primitive
 category: 03-generation
 status: Accepted
 implementation_status: implemented_subset
-clarification_status: gpu_implementation_validated_on_intel_vulkan
+clarification_status: result_gpu_validated_on_metal
 operation_keys:
   - noise.perlin2002_3d_v1_strict_cpu_whole
   - noise.perlin2002_3d_v1_strict_cpu_tiled
@@ -16,93 +16,32 @@ operation_keys:
 
 # NOI-04A: perlin2002 3d
 
-Inherit [NOI-04](NOI-04_gradient_noise_contract.md), [GEN
-common](GEN_common_contract.md), and the applicable [random](NOI_random_contract.md) and
-[geometry](PTH_geometry_contract.md) contracts. The three operation keys listed above are registered. A key includes algorithm version and profile; within one version/profile, output bits and discrete decisions are fixed.
+Inherit [NOI-04](NOI-04_gradient_noise_contract.md), [GEN common](GEN_common_contract.md), [random](NOI_random_contract.md), and [geometry](PTH_geometry_contract.md). The fixed permutation and gradient selection are specified in [NOI_perlin2002_permutation](NOI_perlin2002_permutation.md). Upstream operations construct coordinates and define their units.
 
-## Interface and representation
+## Result interface
 
-coordinates[S...,3] finite Float32/64; values[S...], rank>=1.
+Each operation accepts one Result input containing one numeric tensor coordinates[S...,3]. The input schema selects its sole tensor member, so callers may choose any valid member key; coordinates is the operation's semantic role. Elements are Float32 or Float64, rank is 2..8, every extent is positive, and the complete tensor contains at most 2^40 scalar elements. Valid numeric facets may accompany the input. The output port is values and publishes a generic photospider.tensor version 1 Result whose tensor key is samples and whose shape is S...; it has no inferred image or color semantics. Optional static String dtype is float32 or float64, default float64.
 
-## Parameters and domain
+## Shared mathematical behavior
 
-dtype default Float64; no seed/frame/custom permutation; period 256 on each axis.
+The implementation uses the fixed 256-entry permutation, exact floor and modulo-256 reduction, the quintic fade 6t^5-15t^4+10t^3, and the specified grad(hash & 15) corner rule in [NOI_perlin2002_permutation](NOI_perlin2002_permutation.md). It evaluates the eight exact corner contributions and rounds once to the requested IEEE output format, ties-to-even. Integer lattice inputs produce positive zero; a negative nonzero value that underflows to zero retains negative zero. The period is 256 on each axis and the conservative magnitude bound is 2; the contract does not claim strict [-1,1] range or Java bit identity. No seed, custom permutation, coordinate origin, frequency, or hidden color parameter is provided.
 
-## Mathematical specialization
+## Execution contracts
 
-Exact floor and modulo256; fade(f)=6f^5-15f^4+10f^3. Use the fixed 256-entry permutation
-and grad(hash&15): u=x when h<8 else y; v=y when h<4, x for h=12/14, otherwise z; bits
-0/1 choose signs. Sum all eight weighted corner dots before RN. See
-NOI_perlin2002_permutation.md.
+The CPU Whole and GPU operations request and validate the complete coordinate tensor. A source change dirties the complete output. CPU Whole uses host range parallelism when available; worker count does not change result bits.
 
-## Registered CPU implementations
+The CPU tiled operation uses a Result Dependency-v2 map. Each requested output sample reads the corresponding three coordinate components as Data and Validation support. Descriptor support is declared independently. It partitions requested boxes into bounded tiles and publishes completed output in traversal order, so a Result prefix can exist while later tiles remain. The host cpu_tiles service schedules the granted stage; tile callbacks do not create their own threads. An empty request reads no coordinate payload and performs no Perlin arithmetic.
 
-`noise.perlin2002_3d_v1_strict_cpu_whole` is registered. Its single positional
-input is generic `coordinates[S...,3]`, Float32 or Float64, with S rank 1..7
-and complete coordinate element count <=2^40. Output `values[S...]` is generic
-numeric data. Optional static String `dtype` is `float32` or `float64`, default
-`float64`. There are no seed, permutation, origin, frequency or hidden color
-parameters. Upstream nodes define the coordinates and their units.
+All three operations reject nonfinite coordinates. The native GPU operation requires a supported native backend and has no CPU fallback. Metal and Vulkan use integer shaders. The current Result GPU focused test passes on native Metal, including same-device affine input ownership. Installed-consumer checks and the 1,566-case Fraction oracle pass for CPU Whole, CPU tiled, and Metal GPU. Earlier Vulkan validation exercised the former Value path and does not establish validation of this Result implementation.
 
-This explicit Whole form computes and validates all coordinates. A source edit
-invalidates the complete output. It uses only CPU, with synchronous host ranges
-and a 1..64 worker grant; changing the grant preserves output bits. Three
-fixed-capacity integer tiers cover common fractional denominator q<=31, q<=63
-and the entire binary64 domain q<=1074. All input coordinates are interpreted
-exactly and only the final result is rounded. Nonfinite coordinates reject;
-no result is published after any domain, work, allocation or cancellation error.
-Scratch is allocated through the invocation allocator before workers execute and
-retired only after the range barrier. The current declared workspace conservatively
-reserves 64 complete slot workspaces, even for a smaller host quota.
+## Resources and failures
 
-`noise.perlin2002_3d_v1_strict_cpu_tiled` implements the Regional rule below,
-with the same ports, parameter and exact arithmetic. A static Dependency-v1 map
-requires all three coordinates only for each requested output observation.
-Every tile callback executes on one host thread; the kernel controls tile
-concurrency and ordered publication. Managed decoded scratch requires 72 bytes
-per output sample. Empty requests perform no payload reads.
+CPU arithmetic reserves a conservative per-sample bound before evaluation and checks local credit during multiplication. The maximum current bound is 763,702 units per sample at q=1074. CPU tiers use 8, 16, and 272 64-bit limbs for q<=31, q<=63, and q<=1074. GPU tiers use 16, 32, and 544 32-bit words per integer and 17 integers per active sample. The full GPU tier processes at most four samples per dispatch.
 
-`noise.perlin2002_3d_v1_strict_gpu` uses Whole demand and invalidation, with the
-same ports and final exact IEEE result. Metal executes its MSL integer shader;
-Vulkan executes a SPIR-V 1.5 shader generated from `perlin.slang`. Both compute
-the complete integer polynomial; host finite-input admission and work bounding do
-not calculate output values. The GPU entry has no CPU fallback. Vulkan also
-requires device 64-bit integer and 8-bit storage-buffer features. The FreeBSD
-Intel UHD 770 implementation passes the independent 1,566-case Fraction/IEEE
-comparison and focused GPU tests. NVIDIA for this Perlin port and Linux hardware
-remain untested. The accepted CPU mathematical contract and CPU/SIMD behavior are
-unchanged. See [Perlin implementation](../perlin-implementation.md) and the
-[public workflow](../../../../examples/perlin_workflow/README.md) for registration,
-native execution, independent bit comparisons and platform evidence.
+Shape/type errors fail specialization. Nonfinite data, work exhaustion, allocation failure, cancellation, or an unavailable native backend fails execution with its corresponding status. A tiled Result may retain successfully published prefix tiles if a later tile fails; it does not mark that prefix as a complete output.
 
-## Dependencies, resources and failures
+## Acceptance and implementation evidence
 
-Execution rule: **Regional**. Compute requested output coordinates only. Read
-corresponding query/sample inputs and necessary controls; path/mesh/resource validation
-may require complete control data without computing the whole output canvas. Full
-shared-control/topology/resource changes conservatively invalidate dependent output;
-sample changes follow the actual dependency map. Empty requests perform static preflight
-without payload reads or advancing a random sequence. Compute only requested output
-mathematics, retaining required shared validation.
+The CPU Whole and tiled integration tests exercise Result bindings, output schema, exact reads, nonzero and disjoint regions, outside-region NaN, finite work and scratch failures, and cancellation/error paths. For a 17-by-35 Float64 field, the tiled ROI y=[3,14), x=[5,32) yields 12 source reads totaling 7,128 bytes and 12 ordered publications covering 297 samples. The native Metal Result test covers dispatch, affine native input, cancellation, bitwise CPU comparison, and result lifetime. Four focused tests and six installed-consumer tests pass; the independent Fraction oracle passes 1,566 cases for CPU Whole, CPU tiled, and Metal GPU. The oracle covers a finite fixture set rather than the complete input domain or every GPU device.
 
-Regional coordinate samples, O(8*count(Q)); arbitrary finite coordinate reduction is
-exact.
-
-All output, scratch, indices, validation work and retained owners are accounted. Poll
-cancellation in bounded loops. Preserve schema, domain, NoSolution, NotConverged,
-InvalidQuality, ArithmeticOverflow and host resource failures as distinct outcomes.
-Never replace budget/cancellation failure with a lower-quality successful prefix. Views,
-lifetime and actual returned coverage inherit GEN-common.
-
-## Independent fixtures and acceptance
-
-Integer lattice +0, period256, negative and huge coordinates, independent Fraction
-polynomial; conservative abs(noise)<=2, no strict [-1,1] claim or Java bit identity.
-
-Check requested-region/full-output equivalence, actual read/work bounds, legal
-strides/offsets, separate/joint outputs, cache identity, low budgets, cancellation,
-associations and retained owners as applicable. The [oracle
-coverage](../oracle-coverage.md) describes the available finite reference subset; it does
-not exhaust the mathematical input domain or certify every GPU device. Vulkan Perlin
-results on Intel UHD 770 match the independent oracle for the recorded finite fixture set;
-this does not establish NVIDIA, Linux, or other Vulkan implementations.
+See [Perlin implementation](../perlin-implementation.md) for current execution details and the [public workflow](../../../../examples/perlin_workflow/README.md) for build and run commands.

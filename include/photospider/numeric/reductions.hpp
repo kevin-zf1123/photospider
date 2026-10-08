@@ -80,9 +80,10 @@ inline Result<WorkflowNode> with_dtype(Result<WorkflowNode> result,
  * arguments return InvalidArgument/InvalidDomain/Schema; allocation may throw
  * bad_alloc. Runtime source/resource/cancellation errors are preserved; integer
  * final overflow is Domain/Run OperationFailed/ArithmeticOverflow at its
- * output, including an unrequested group. Whole may own a full packed input
- * plus complete output and fixed exact state. Results retain immutable owned
- * backing after the execution context retires.
+ * output, including an unrequested group. Whole reads authorized Result
+ * windows and owns the complete output plus fixed exact state; it does not
+ * first pack the full input. Results retain immutable owned backing after the
+ * execution context retires.
  */
 inline Result<WorkflowNode> reduce_sum_node(
     std::uint64_t id, WorkflowInput input, std::vector<std::uint64_t> axes,
@@ -130,9 +131,11 @@ inline Result<WorkflowNode> reduce_mean_node(
       dtype);
 }
 /** @brief Metadata-only exact Int64 group count; no numeric input is read.
- * Whole excludes the runtime input port and owns one8-byte zero-stride complete
- * output. Input-byte changes do not
- * invalidate counts; shape and axes remain descriptor dependencies.
+ * Specialization validates the input schema and axes, then removes the input
+ * from the runtime projection. Count creates no source observation or
+ * association, and does not schedule an upstream sample producer. It owns one
+ * 8-byte zero-stride complete output. Input-byte changes do not invalidate
+ * counts; schema shape/type and axes determine the result.
  */
 inline Result<WorkflowNode> reduce_count_node(
     std::uint64_t id, WorkflowInput input, std::vector<std::uint64_t> axes,
