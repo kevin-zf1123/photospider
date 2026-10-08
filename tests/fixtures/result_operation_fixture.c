@@ -1,4 +1,5 @@
 #include <stdatomic.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "photospider/plugin/result_operation_plugin_api.h"

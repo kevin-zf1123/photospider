@@ -114,8 +114,9 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   const ps::Status registered =
       operations->register_operation(ps::OperationDefinition{
           "fuzz.operation", std::move(traits),
-          [](const ps::OperationInvocation&) -> ps::Result<ps::Value> {
-            return ps::Result<ps::Value>(ps::Value::from_float64(0.0));
+          [](const ps::ResultProgramQuery&, const ps::BufferAllocator&) {
+            return ps::Result<ps::ResultContinuation>(ps::Status::failure(
+                ps::ErrorCode::OperationFailed, "fuzz operation is not run"));
           }});
   if (!registered.ok()) {
     return duplicate_schema ? OperationContractIrStage::DuplicateSchemaRejected

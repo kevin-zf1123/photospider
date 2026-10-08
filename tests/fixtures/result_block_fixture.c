@@ -1,6 +1,7 @@
 #include <fenv.h>
 #include <math.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "photospider/plugin/result_operation_plugin_api.h"
