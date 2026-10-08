@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "data/input_validation.hpp"
+#include "data/value_validation.hpp"
 
 namespace ps {
 namespace {
@@ -153,7 +153,7 @@ Result<ValueFragments> ValueFragments::create_view(
           Status::failure(ErrorCode::TypeMismatch,
                           "image fragments require structural planar storage"));
   }
-  status = input_internal::validate_port_metadata({}, descriptor, facets);
+  status = input_internal::validate_value_metadata(descriptor, facets);
   if (!status.ok())
     return Result<ValueFragments>(status);
   if (!resources.size() && count && fragments[0].valid())

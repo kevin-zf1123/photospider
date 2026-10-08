@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-#include "data/input_validation.hpp"
+#include "data/value_validation.hpp"
 
 namespace ps {
 namespace {
@@ -151,7 +151,7 @@ Result<Value> Value::from_storage(ValueDescriptor descriptor, Region region,
   status = input_internal::canonicalize_facets(&facets);
   if (!status.ok())
     return Result<Value>(status);
-  if (input_internal::structural_image_metadata({descriptor, facets}))
+  if (input_internal::structural_image_metadata(descriptor, facets))
     return Result<Value>(
         Status{ErrorCode::TypeMismatch,
                "image publication requires a typed Result image slot"});

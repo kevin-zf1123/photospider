@@ -6,8 +6,8 @@
 #include <optional>
 #include <vector>
 
+#include "photospider/core/cancellation.hpp"
 #include "photospider/data/value.hpp"
-#include "photospider/execution/cancellation.hpp"
 
 namespace ps {
 

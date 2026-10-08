@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-#include "data/input_validation.hpp"
+#include "data/value_validation.hpp"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX

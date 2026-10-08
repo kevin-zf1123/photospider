@@ -8,15 +8,15 @@
 #include <utility>
 #include <vector>
 
-#include "execution/work_consumer.hpp"
-#include "photospider/execution/cancellation.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "core/work_consumer.hpp"
+#include "photospider/core/cancellation.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps::data_internal::format_numeric {
 struct ExactWorkFailure final {
   Status status;
 };
-inline thread_local const execution_internal::WorkConsumer* exact_work_charge =
+inline thread_local const core_internal::WorkConsumer* exact_work_charge =
     nullptr;  // NOLINT(whitespace/indent_namespace)
 inline thread_local const CancellationToken* exact_work_cancellation = nullptr;
 class ExactWorkScope final {
@@ -36,8 +36,8 @@ class ExactWorkScope final {
   }
 
  private:
-  execution_internal::WorkConsumer charge_;
-  const execution_internal::WorkConsumer* previous_;
+  core_internal::WorkConsumer charge_;
+  const core_internal::WorkConsumer* previous_;
   const CancellationToken* previous_cancellation_;
 };
 // Exact binary rational arithmetic for one bounded scalar conversion. The

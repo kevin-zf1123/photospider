@@ -4,9 +4,10 @@
 #include <string>
 #include <utility>
 
+#include "photospider/core/cancellation.hpp"
+#include "photospider/core/resources.hpp"
 #include "photospider/data/color_profile_identity.hpp"
-#include "photospider/execution/cancellation.hpp"
-#include "photospider/execution/resources.hpp"
+#include "photospider/data/storage.hpp"
 
 namespace ps {
 /**

@@ -12,7 +12,7 @@
 
 #include "data/result_neighborhood.hpp"
 #include "data/result_reshape.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps {
 namespace {
@@ -1072,6 +1072,66 @@ Status ResultRelation::validate_tuple_closure(
     return true;
   };
   if (compact) {
+    ResourceVector<const Node*> global{
+        ResourceAllocator<const Node*>(impl_->budget)};
+    ResourceVector<const Node*> mapped{
+        ResourceAllocator<const Node*>(impl_->budget)};
+    // A proof only compares mappings of this input/slot and source shape.
+    // Channel intervals and publication masks are verified after lookup.
+    auto less = [&](const Node* a, const Node* b) {
+      auto work = tick(shape.size() * 6 + 1);
+      if (!work.ok())
+        throw work;
+      if (a->value->output_shape != b->value->output_shape)
+        return a->value->output_shape < b->value->output_shape;
+      for (std::size_t axis = 0; axis < shape.size(); ++axis) {
+        if (axis == channel)
+          continue;
+        const auto& x = a->value->mapping[axis];
+        const auto& y = b->value->mapping[axis];
+        const auto left = std::tie(x.output_axis, x.source_origin, x.step,
+                                   x.extent, x.output_origin);
+        const auto right = std::tie(y.output_axis, y.source_origin, y.step,
+                                    y.extent, y.output_origin);
+        if (left != right)
+          return left < right;
+      }
+      return false;
+    };
+    bool needs_index = false;
+    for (const auto& entry : leaves) {
+      auto charged = tick(shape.size() + 4 * entry.mask.boxes().size() + 1);
+      if (!charged.ok())
+        return charged;
+      if ((entry.value->support.roles & 3U) && !complete(entry)) {
+        needs_index = true;
+        break;
+      }
+    }
+    if (needs_index) {
+      for (const auto& entry : leaves) {
+        auto charged = tick(shape.size() + 1);
+        if (!charged.ok())
+          return charged;
+        const auto* validation = entry.value;
+        if (validation->kind != Impl::Kind::Mapped ||
+            !(validation->support.roles & 4U) ||
+            !std::equal(validation->input_shape.begin(),
+                        validation->input_shape.end(), shape.begin(),
+                        shape.end()))
+          continue;
+        bool all = true;
+        for (std::size_t i = 0; i < validation->mapping.size(); ++i) {
+          const auto& axis = validation->mapping[i];
+          all = all && (axis.output_axis < 0 || !axis.step) &&
+                !axis.source_origin && axis.extent >= shape[i];
+        }
+        if (all)
+          global.push_back(&entry);
+        mapped.push_back(&entry);
+      }
+      std::sort(mapped.begin(), mapped.end(), less);
+    }
     bool proved = true;
     for (const auto& data_entry : leaves) {
       const auto* data = data_entry.value;
@@ -1085,25 +1145,11 @@ Status ResultRelation::validate_tuple_closure(
       if (complete(data_entry))
         continue;
       bool global_validation = false;
-      for (const auto& entry : leaves) {
-        auto charged = tick(shape.size() + 1);
+      for (const auto* global_entry : global) {
+        const auto& entry = *global_entry;
+        auto charged = tick(1);
         if (!charged.ok())
           return charged;
-        const auto* validation = entry.value;
-        if (validation->kind != Impl::Kind::Mapped ||
-            !(validation->support.roles & 4U) ||
-            !std::equal(validation->input_shape.begin(),
-                        validation->input_shape.end(), shape.begin(),
-                        shape.end()))
-          continue;
-        bool all = true;
-        for (std::size_t axis = 0; axis < shape.size(); ++axis) {
-          const auto& mapping = validation->mapping[axis];
-          all = all && (mapping.output_axis < 0 || !mapping.step) &&
-                !mapping.source_origin && mapping.extent >= shape[axis];
-        }
-        if (!all)
-          continue;
         auto missing = data_entry.mask.subtract(entry.mask, limits);
         if (!missing.ok())
           return missing.status();
@@ -1124,28 +1170,14 @@ Status ResultRelation::validate_tuple_closure(
       auto covered = Footprint::none({channels}, limits);
       if (!covered.ok())
         return covered.status();
-      for (const auto& validation_entry : leaves) {
+      auto first =
+          std::lower_bound(mapped.begin(), mapped.end(), &data_entry, less);
+      for (auto it = first; it != mapped.end() && !less(&data_entry, *it);
+           ++it) {
+        const auto& validation_entry = **it;
         const auto* validation = validation_entry.value;
-        auto status = tick(shape.size() + 1);
-        if (!status.ok())
-          return status;
-        if (validation->kind != Impl::Kind::Mapped ||
-            !(validation->support.roles & 4U) ||
-            validation->input_shape != data->input_shape ||
-            validation->output_shape != data->output_shape)
-          continue;
-        bool same = true;
-        for (std::size_t axis = 0; axis < shape.size(); ++axis) {
-          if (axis == channel)
-            continue;
-          const auto& a = data->mapping[axis];
-          const auto& b = validation->mapping[axis];
-          same = same && a.output_axis == b.output_axis &&
-                 a.source_origin == b.source_origin && a.step == b.step &&
-                 a.extent == b.extent && a.output_origin == b.output_origin;
-        }
         const auto& axis = validation->mapping[channel];
-        if (!same || (axis.output_axis >= 0 && axis.step))
+        if (axis.output_axis >= 0 && axis.step)
           continue;
         auto missing = needed.subtract(validation_entry.mask, limits);
         if (!missing.ok())
@@ -1338,6 +1370,8 @@ Status ResultRelation::validate_tuple_closure(
                                          : failure();
       },
       limits.maximum_work, limits.cancellation);
+} catch (const Status& status) {
+  return status;
 } catch (const std::bad_alloc&) {
   return {ErrorCode::ResourceExhausted, {}};
 }

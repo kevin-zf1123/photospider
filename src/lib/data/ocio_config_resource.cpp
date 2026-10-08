@@ -7,9 +7,9 @@
 #include <string>
 #include <utility>
 
+#include "core/utf8_validation.hpp"
 #include "data/content_digest.hpp"
-#include "photospider/execution/resource_allocator.hpp"
-#include "plugin/utf8_validation.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps {
 namespace {
@@ -17,7 +17,7 @@ Status invalid(const char* message) {
   return {ErrorCode::InvalidArgument, message, FailureReason::InvalidDomain};
 }
 bool name(const std::string& s) {
-  return !s.empty() && s.size() <= 128 && plugin_internal::valid_utf8_key(s);
+  return !s.empty() && s.size() <= 128 && core_internal::valid_utf8_key(s);
 }
 std::uint64_t read(ByteView bytes, std::size_t* offset) {
   std::uint64_t n = 0;

@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <utility>
 
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps::color_internal {
 namespace {

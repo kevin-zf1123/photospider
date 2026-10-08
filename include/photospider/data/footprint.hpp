@@ -5,9 +5,9 @@
 #include <memory>
 #include <vector>
 
+#include "photospider/core/cancellation.hpp"
+#include "photospider/core/resources.hpp"
 #include "photospider/data/region.hpp"
-#include "photospider/execution/cancellation.hpp"
-#include "photospider/execution/resources.hpp"
 
 namespace ps {
 

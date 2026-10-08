@@ -5,8 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "photospider/core/cancellation.hpp"
 #include "photospider/data/value.hpp"
-#include "photospider/execution/cancellation.hpp"
 
 namespace ps {
 /** @brief Per-call sample/copy bound and cooperative cancellation.

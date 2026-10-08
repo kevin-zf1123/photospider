@@ -7,11 +7,11 @@
 #include <string_view>
 #include <vector>
 
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/footprint.hpp"
 #include "photospider/data/planar_image.hpp"
 #include "photospider/data/result_relation.hpp"
 #include "photospider/data/value.hpp"
-#include "photospider/execution/resource_allocator.hpp"
 
 namespace ps {
 namespace plugin_internal {
@@ -19,7 +19,9 @@ class ResultPayloadBound;
 }
 namespace execution_internal {
 class StructuredExecution;
+class ResultPublicationValidator;
 class ResultCache;
+class StructuredResultCache;
 struct DependencyBundle;
 class ResultWindowAccess;
 }  // namespace execution_internal
@@ -153,7 +155,7 @@ class WeakResultRef;
  * Copies contain fixed-size facts and never gain authorization as production
  * proceeds. Only the host publisher can construct a valid descriptor.
  */
-class ResultDescriptor final {
+class PHOTOSPIDER_API ResultDescriptor final {
  public:
   std::uint64_t object_id() const noexcept { return object_; }
   std::uint64_t revision() const noexcept { return revision_; }
@@ -269,7 +271,9 @@ class PHOTOSPIDER_API ResultRef final {
   friend class ResultTensorReadWindow;
   friend class WeakResultRef;
   friend class execution_internal::StructuredExecution;
+  friend class execution_internal::ResultPublicationValidator;
   friend class execution_internal::ResultCache;
+  friend class execution_internal::StructuredResultCache;
   struct CacheStorage {
     const void* owner = nullptr;
     std::uint64_t bytes = 0;

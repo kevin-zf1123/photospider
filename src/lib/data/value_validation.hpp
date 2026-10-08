@@ -8,10 +8,10 @@
 #include <vector>
 
 #include "photospider/data/color_array.hpp"
-#include "photospider/plugin/operation_registry.hpp"
+#include "photospider/data/result.hpp"
+#include "photospider/data/semantic.hpp"
 
 namespace ps::input_internal {
-
 /**
  * @brief Scoped binary32 nearest/gradual-underflow environment.
  * @note Floating state is thread-local. Save and restore the embedding's
@@ -42,17 +42,21 @@ struct DenseMetadata final {
 
 /** @brief Checks descriptor, signed canonical strides and host byte bounds. */
 Result<DenseMetadata> dense_metadata(const ValueDescriptor& descriptor);
+
 /** @brief Canonicalizes the same bounded facet vocabulary as Value::create. */
 Status canonicalize_facets(std::vector<ValueFacet>* facets);
+
 /** @brief Exact canonical facet comparison without coercion. */
 bool same_facets(const std::vector<ValueFacet>& left,
                  const std::vector<ValueFacet>& right) noexcept;
+
 /** @brief Detects structural image metadata independent of port kind. */
-inline bool structural_image_metadata(const OperationMetadata& metadata) {
-  for (const auto& facet : metadata.facets) {
+inline bool structural_image_metadata(const ValueDescriptor& descriptor,
+                                      const std::vector<ValueFacet>& facets) {
+  for (const auto& facet : facets) {
     if (facet.key == "photospider.image" ||
         (facet.key == "photospider.color-array" &&
-         metadata.descriptor.shape.size() >= 3))
+         descriptor.shape.size() >= 3))
       return true;
     if (facet.key == "photospider.semantic") {
       auto semantic = decode_semantic(facet);
@@ -64,63 +68,14 @@ inline bool structural_image_metadata(const OperationMetadata& metadata) {
   }
   return false;
 }
+
 /** @brief Tests exact whole logical coverage without allocation. */
 bool whole_region(const Region& region,
                   const std::vector<std::uint64_t>& shape) noexcept;
-/** @brief Validates and canonicalizes a metadata-only declaration. */
-Status validate_declaration(WorkflowInputDeclaration* declaration);
-/** @brief Checks a bound Value against already canonical declaration facts. */
 
-/** @brief Checks all closed port schema combinations before registration. */
-Status validate_port_schema(const OperationTraits& traits);
-/** @brief Checks declarative output/repeated-input records before publication.
- */
-Status validate_operation_contract(const OperationTraits& traits);
-/** @brief Checks scalar/image descriptors and exact profile facet metadata. */
-/** @brief Resolve and validate a named logical tensor member in Result
- * metadata. An omitted member key is unambiguous only for a single-tensor
- * representation. This performs no payload access or production.
- */
-/** @brief Whether this Result constraint selects a tensor member. Without a
- * key a dtype/rank/facet predicate requires one unambiguous tensor member.
- */
-bool tensor_member_predicate(const OperationPortConstraint& port) noexcept;
-Result<std::uint32_t> resolve_tensor_member(const OperationPortConstraint& port,
-                                            const OperationMetadata& metadata);
-Status validate_port_metadata(const OperationPortConstraint& port,
-                              const OperationMetadata& metadata);
-Status validate_port_metadata(const OperationPortConstraint& port,
-                              const ValueDescriptor& descriptor,
-                              const std::vector<ValueFacet>& facets);
-/** @brief Shared checked Whole/elementwise/halo demand rule for planning and
- * direct invocation. Halo traits must have their static parameter resolved.
- */
-Result<Region> derive_input_demand(
-    const OperationTraits& traits, const Region& output_demand,
-    const std::vector<std::uint64_t>& output_shape,
-    const std::vector<std::uint64_t>& input_shape, OperationPortKind kind);
 /** @brief Returns the canonical image-v2 RGBA facet. */
 ValueFacet image_facet();
-/**
- * @brief Checks dense port metadata and numeric domain without coercion.
- * @note stop is observed periodically while scanning, and returns Ok or a
- * prioritized Cancelled/Stale code without allocating diagnostic strings.
- */
-Status validate_port_value(const OperationPortConstraint& port,
-                           const Value& value, ErrorCode numeric_failure,
-                           const std::function<ErrorCode()>& stop);
-/** @brief Validate a bounded scalar tensor using captured immutable coverage.
- * Reads its logical sample through Result access without dense-layout
- * assumptions. numeric_failure distinguishes external admission from computed
- * input failure.
- */
-Status validate_port_tensor(const OperationPortConstraint& port,
-                            const ResultRef& result,
-                            const ResultDescriptor& descriptor,
-                            const OperationMetadata& metadata,
-                            ErrorCode numeric_failure,
-                            const CancellationToken& cancellation,
-                            const std::function<ErrorCode()>& stop);
+
 /** @brief Validate recognized typed numeric domains over exact tensor samples.
  * Only explicit Validation obligations call this; empty sets and raw facets
  * read no payload. Batch and cell axes remain distinct. Windows retain exact
@@ -134,20 +89,24 @@ Status validate_tensor_samples(const ResultRef& result,
                                const CancellationToken& cancellation,
                                const std::function<ErrorCode()>& stop,
                                const std::function<Status(uint64_t)>& consume);
+
 /** @brief Checks nonempty image demand including complete channel coverage. */
 bool image_demand(const Region& region) noexcept;
+
 /** @brief Recognized semantic keys; ColorArray is independent of SemanticKind.
  */
 inline bool typed_facet(const std::string& key) noexcept {
   return key == "photospider.image" || key == "photospider.semantic" ||
          key == "photospider.color-array";
 }
+
 /** @brief Recognizes the independent generic ColorArray facet. */
 inline bool color_array(const std::vector<ValueFacet>& facets) noexcept {
   return std::any_of(facets.begin(), facets.end(), [](const auto& facet) {
     return facet.key == "photospider.color-array";
   });
 }
+
 /** @brief Validates a requested Region and closes ColorArray output channels.
  * Image requests retain their existing all-channel admission rule. This is an
  * output observation rule, not authorization to widen an input read.
@@ -155,35 +114,46 @@ inline bool color_array(const std::vector<ValueFacet>& facets) noexcept {
 Result<Region> color_output_region(const ValueDescriptor& descriptor,
                                    const std::vector<ValueFacet>& facets,
                                    const Region& requested);
+
 /** @brief ColorArray output-observation closure; preserves other sample sets.
  */
-Result<Footprint> color_output_samples(const OperationMetadata& metadata,
+Result<Footprint> color_output_samples(const ValueDescriptor& descriptor,
+                                       const std::vector<ValueFacet>& facets,
                                        const Footprint& requested,
                                        const FootprintLimits& limits = {});
+
 /** @brief Last channel axis for validated Image/ColorArray, otherwise absent.
  */
 std::optional<std::size_t> tuple_channel_axis(
     const ValueDescriptor& descriptor,
     const std::vector<ValueFacet>& facets) noexcept;
+
 /** @brief Requires full logical C for validated Image/ColorArray metadata.
  * @note Generic and other typed kinds add no channel-coverage restriction.
  */
 bool complete_tuple_channels(const ValueDescriptor& descriptor,
                              const std::vector<ValueFacet>& facets,
                              const Region& region) noexcept;
+
 /** @brief Expands only Validation to full colors; Data/Control stay local.
  * @note Caller has validated metadata. Empty remains Empty; limits and
  * cancellation propagate from Footprint operations without hidden supply reads.
  */
 Result<Footprint> validation_closure(
-    const OperationMetadata& metadata, const Footprint& support,
-    const FootprintLimits& limits,
+    const ValueDescriptor& descriptor, const std::vector<ValueFacet>& facets,
+    const Footprint& support, const FootprintLimits& limits,
     const std::function<Status(std::uint64_t)>& consume = {});
-/** @brief Copies a static need as Validation with fixed full channel interval.
- * @note Caller has validated metadata and mapping rank. Source tags and all
- * leading-axis relations remain unchanged.
- */
-DependencyMappedNeed validation_map(DependencyMappedNeed support,
-                                    const OperationMetadata& metadata);
 
+// Structural admission precedes port predicates; semantic descriptor checks
+// follow them so a rejected predicate performs no additional decoding work.
+Status validate_value_structure(const ValueDescriptor&,
+                                const std::vector<ValueFacet>&);
+Status validate_value_semantics(const ValueDescriptor&,
+                                const std::vector<ValueFacet>&);
+Status validate_value_metadata(const ValueDescriptor&,
+                               const std::vector<ValueFacet>&);
+
+// Borrowed Value stays alive through the synchronous typed-domain scan.
+Status validate_value_samples(const Value& value, ErrorCode numeric_failure,
+                              const std::function<ErrorCode()>& stop);
 }  // namespace ps::input_internal

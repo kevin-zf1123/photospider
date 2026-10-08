@@ -8,9 +8,9 @@
 #include <utility>
 #include <vector>
 
-#include "data/input_validation.hpp"
+#include "core/utf8_validation.hpp"
 #include "data/typed_sample_validation.hpp"
-#include "plugin/utf8_validation.hpp"
+#include "data/value_validation.hpp"
 
 namespace ps {
 namespace {
@@ -37,7 +37,7 @@ bool one_of(const std::string& text,
 }
 bool text_valid(const std::string& text) {
   return text.size() <= 128 &&
-         (text.empty() || plugin_internal::valid_utf8_key(text));
+         (text.empty() || core_internal::valid_utf8_key(text));
 }
 Status validate(const SemanticDescriptor& s) {
   const auto kind = static_cast<std::uint32_t>(s.kind);

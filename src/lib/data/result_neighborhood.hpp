@@ -5,8 +5,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/footprint.hpp"
-#include "photospider/execution/resource_allocator.hpp"
 
 namespace ps::neighborhood_internal {
 inline Result<Footprint> expand(const ResourceBudget& budget,

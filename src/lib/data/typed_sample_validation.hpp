@@ -5,7 +5,7 @@
 #include <functional>
 #include <vector>
 
-#include "data/input_validation.hpp"
+#include "data/value_validation.hpp"
 #include "photospider/data/color_array.hpp"
 #include "photospider/data/semantic.hpp"
 

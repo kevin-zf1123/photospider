@@ -10,8 +10,8 @@
 #include <string_view>
 #include <utility>
 
-#include "data/input_validation.hpp"
 #include "data/lut3d_bake_validation.hpp"
+#include "data/value_validation.hpp"
 #include "photospider/data/layer.hpp"
 #include "photospider/data/lut3d_bake.hpp"
 

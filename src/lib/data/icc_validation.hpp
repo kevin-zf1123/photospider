@@ -2,8 +2,8 @@
 
 #include <functional>
 
+#include "photospider/core/resources.hpp"
 #include "photospider/data/storage.hpp"
-#include "photospider/execution/resources.hpp"
 
 namespace ps::color_internal {
 // The profile is already frozen. This parser checks supported endpoint profile

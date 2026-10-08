@@ -7,8 +7,8 @@
 #include <vector>
 
 #include "data/color_array_exact.hpp"
-#include "data/input_validation.hpp"
 #include "data/typed_sample_validation.hpp"
+#include "data/value_validation.hpp"
 
 namespace ps {
 namespace {

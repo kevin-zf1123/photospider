@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "data/content_digest.hpp"
-#include "data/input_validation.hpp"
+#include "data/value_validation.hpp"
 #include "execution/memory_budget.hpp"
 
 namespace ps {
@@ -105,8 +105,12 @@ Status validate_value(const Value& value,
       coverage(value.descriptor(), value.facets(), value.region(), options);
   if (!status.ok())
     return status;
-  status = input_internal::validate_port_value(
-      {}, value, ErrorCode::InvalidArgument, [&] {
+  status = input_internal::validate_value_metadata(value.descriptor(),
+                                                   value.facets());
+  if (!status.ok())
+    return status;
+  status = input_internal::validate_value_samples(
+      value, ErrorCode::InvalidArgument, [&] {
         return options.cancellation.cancelled() ? ErrorCode::Cancelled
                                                 : ErrorCode::Ok;
       });

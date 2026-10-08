@@ -6,8 +6,8 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/footprint.hpp"
-#include "photospider/execution/resource_allocator.hpp"
 
 namespace ps::reshape_internal {
 // Eight uint64 axes fit in 512 bits. Ordinals never depend on dense byte size.

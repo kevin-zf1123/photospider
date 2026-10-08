@@ -7,8 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/dependency.hpp"
-#include "photospider/execution/resource_allocator.hpp"
 
 namespace ps::dependency_internal {
 struct MetadataOwner final {

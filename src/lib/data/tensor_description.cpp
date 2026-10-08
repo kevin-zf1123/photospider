@@ -10,9 +10,9 @@
 #include <utility>
 #include <vector>
 
+#include "core/utf8_validation.hpp"
 #include "data/exact_numeric.hpp"
 #include "data/model_coordinates.hpp"
-#include "plugin/utf8_validation.hpp"
 
 namespace ps {
 namespace {
@@ -25,7 +25,7 @@ Status invalid(const char* message) {
 }
 bool valid_text(const std::string& text) {
   return text.size() <= 128 &&
-         (text.empty() || plugin_internal::valid_utf8_key(text));
+         (text.empty() || core_internal::valid_utf8_key(text));
 }
 using data_internal::format_numeric::Natural;
 using data_internal::format_numeric::Rational;

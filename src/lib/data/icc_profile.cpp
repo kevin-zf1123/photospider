@@ -10,7 +10,7 @@
 
 #include "data/content_digest.hpp"
 #include "data/icc_validation.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps {
 namespace {

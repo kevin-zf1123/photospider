@@ -6,9 +6,9 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/color_array.hpp"
 #include "photospider/data/tensor_description.hpp"
-#include "photospider/execution/resource_allocator.hpp"
 
 namespace ps {
 namespace {

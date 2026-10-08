@@ -6,8 +6,8 @@
 #include <optional>
 #include <string_view>
 
+#include "photospider/core/cancellation.hpp"
 #include "photospider/data/storage.hpp"
-#include "photospider/execution/cancellation.hpp"
 
 namespace ps {
 /** @brief Numerical evidence strength, independent of dependency guarantees. */

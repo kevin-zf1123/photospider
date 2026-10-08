@@ -6,14 +6,16 @@
 #include <optional>
 #include <vector>
 
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/footprint.hpp"
 #include "photospider/data/temporary_storage.hpp"
-#include "photospider/execution/resource_allocator.hpp"
 
 namespace ps {
 namespace execution_internal {
 class StructuredExecution;
-}
+class ResultPublicationValidator;
+class StructuredResultCache;
+}  // namespace execution_internal
 /** @brief Strength of a declared support relation, independent of numerics. */
 enum class DependencyGuarantee : std::uint32_t {
   Exact = 1,
@@ -244,6 +246,8 @@ class PHOTOSPIDER_API ResultRelation final {
  private:
   friend class ResultBuilder;
   friend class execution_internal::StructuredExecution;
+  friend class execution_internal::ResultPublicationValidator;
+  friend class execution_internal::StructuredResultCache;
   Status validate_tuple_closure(const Footprint& outputs, std::uint32_t input,
                                 std::uint32_t slot,
                                 const std::vector<std::uint64_t>& shape,
