@@ -67,9 +67,7 @@ new accelerated registry profiles.
   "inputs": {"input": [[0, 0.5, 1]]},
   "params": {"threshold": 0.5, "comparison": "ge"}
 }
-```
-
-```sh
+sh
 python oracle/ops/mask_morphology/run_cases.py --case /tmp/case.json
 ```
 

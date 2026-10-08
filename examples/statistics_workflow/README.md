@@ -56,4 +56,4 @@ The executable compares sparse bins against an independent map and checks intege
 
 For the scalar domain and exact mean algorithm, see [Integer Statistics](../../docs/kernel-architecture/Integer-Statistics.md). The focused test targets are `test_statistics` and `example_statistics_workflow`.
 
-Default cases passed locally and through the installed 0.30 consumer. The local `--large` run also passed with 40,000 populated bins, count 40,000 and total 1,309,905,304; the installed consumer was checked on the default run only. The local large run measured Root Host peak 273,268 bytes, Payload peak 6,224 bytes, Referenced peak 360,000 bytes, and 119,196 aggregate `issued_stages`. These managed Root counters are not process RSS or a fixed metadata cost.
+The local large run measured Root Host peak 273,268 bytes, Payload peak 6,224 bytes, Referenced peak 360,000 bytes, and 119,196 aggregate `issued_stages`. These managed Root counters are not process RSS or a fixed metadata cost.

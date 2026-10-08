@@ -18,8 +18,7 @@ build/generation-oracle-venv/bin/python oracle/ops/generation/run_oracles.py --s
 build/generation-oracle-venv/bin/python oracle/ops/generation/run_oracles.py --input oracle/ops/generation/sample_requests.jsonl --candidate oracle/ops/generation/sample_expected.jsonl --profile strict --report build/generation-oracle/candidate-check.json
 ```
 
-Reports/logs go under ignored `build/`, not into source fixtures. Exit codes:
-0 passed, 1 failed comparison/tests, 2 invalid request or unsupported reference.
+Reports/logs go under ignored `build/`, not into source fixtures.
 Test results are written by the current invocation.
 
 ## Evidence and limits
@@ -108,7 +107,7 @@ python3 oracle/ops/generation/check_perlin_runtime.py \
 
 The first runner exercises the C++ integer calculator. The second compiles and
 executes actual public CPU Whole workflows, or CPU tiled with `--tiled`.
-Each mode checks the same 1566 cases independently. GPU is not exercised.
+Each mode checks the same 1566 cases independently.
 Worker, layout, ROI and resource behavior is checked separately by
 `test_perlin_workflow`, `test_perlin_tiled` and `test_cpu_tiles`; finite oracle
 coverage is not exhaustive correctness proof.

@@ -48,8 +48,7 @@ RES-07C/F 的均值域逆只提供诊断参考，不能当 strict golden。
 应在产品中报域错误。浮点最终溢出返回 Inf，迭代参考使用主输入 dtype 的阶段舍入。
 
 尚未覆盖：全部成员的非有限值/payload 组合、早停判据与并发调度、band 延迟载荷的
-运行时表示、实际第三方 BM3D/CBM3D/SMAA 对照以及图像质量评分。报告的 passed 仅指
-列出的断言。未覆盖范围不能从成员出现在测试索引中推导为已通过。
+运行时表示、实际第三方 BM3D/CBM3D/SMAA 对照以及图像质量评分。未覆盖范围不能从成员出现在测试索引中推导为已通过。
 
 可选均值逆诊断依赖可以隔离安装：
 
@@ -77,13 +76,7 @@ dtype、五种边界、特殊值、零半径、系数下溢和不能提前窄化
 参数错误、owner、非平凡布局、work/capacity 预算和取消由原生 integration tests
 单独验证。`--tiled` 运行实际 Regional 实现。GPU 校验使用 `--runner build/kernel-dev/test_gaussian_gpu`，要求原生 dispatch 且无 fallback。
 这些检查不构成所有输入的完备证明。使用 Vulkan kernel build 时，同一 runner
-选择 SPIR-V；配置 kernel 时传入 `-DPHOTOSPIDER_ENABLE_VULKAN=ON`。本轮
-FreeBSD Intel UHD 770 的 [Vulkan test](../../../out/gpu-whole-tiled/raw/gaussian-vulkan-intel-tests.log)、
-[MPFR/Fraction result](../../../out/gpu-whole-tiled/raw/gaussian-vulkan-intel-oracle.json)
-及 [validation-layer log](../../../out/gpu-whole-tiled/raw/gaussian-vulkan-oracle-validation.log)
-分别记录 focused pass、94 workflows/707 exact matches 和无验证错误。macOS Metal
-focused test 见 [此日志](../../../out/gpu-whole-tiled/raw/gaussian-vulkan-metal-test.log)。
-NVIDIA 和 Linux Gaussian Vulkan 尚未实测。
+选择 SPIR-V；配置 kernel 时传入 `-DPHOTOSPIDER_ENABLE_VULKAN=ON`。
 
 Vulkan Gaussian 在 FreeBSD Intel UHD 770 上通过真实 public workflow。94 个
 workflow 的 707 个输出 bit 均匹配 MPFR 系数、Fraction 表达式和直接 IEEE 舍入；

@@ -29,17 +29,8 @@ optional OpenCV 4.12.0 adapter can select
 `image.local_inpaint_navier_stokes_openCV`; the default selects the native CPU
 implementation. Neither key selects a GPU backend.
 
-The native integration suite passed 16 numerical cases and checks for typed
-validation, rounding, concurrency, ROI, cache, layouts, batch planes, Result
-lifetime, Root payload capacity boundaries, work exhaustion, active
-cancellation, static dimension limits, and Empty demand. Installed native
-package checks passed for the operation and executable; a separate standalone
-native consumer also configured, built, and ran successfully.
-
 The optional adapter was built against OpenCV 4.12.0 with
-`-fno-fast-math -frounding-math -ffp-contract=off`. Its 288-case comparison
-matrix and behavior checks passed. Three installed adapter checks passed: the
-288-case consumer, the native example, and the OpenCV example. The native-only
+`-fno-fast-math -frounding-math -ffp-contract=off`. The native-only
 consumer executable has no unresolved OpenCV symbols. These checks do not cover
 deterministic frontier-cancellation injection or host Stale-priority injection;
 OpenCV's internal allocations also remain outside the kernel Root's hard

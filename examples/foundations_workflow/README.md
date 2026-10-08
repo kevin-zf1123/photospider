@@ -27,7 +27,7 @@ build/kernel-dev/examples/foundations_workflow/photospider_foundations_workflow 
 ctest --test-dir build/kernel-dev -R '^(test_workflow_numeric_reductions|test_workflow_expression_lut)$' --output-on-failure
 ```
 
-Pass `--scenario numeric`, `--scenario expression-lut`, or `--scenario generator-gain` to run one scenario. The all-scenarios run prints `Foundations scenarios=3 oracle=passed backend=cpu`. CTest registers the numeric and expression/LUT scenarios; run `generator-gain` explicitly to check plan reuse and its concurrent bindings. An error prints `Foundations failed: ...` and exits with status 1.
+Pass `--scenario numeric`, `--scenario expression-lut`, or `--scenario generator-gain` to run one scenario. CTest registers the numeric and expression/LUT scenarios; run `generator-gain` explicitly to check plan reuse and its concurrent bindings. An error prints `Foundations failed: ...` and exits with status 1.
 
 The standalone CMake project requires an installed Photospider 0.32 package. For example, configure it with:
 

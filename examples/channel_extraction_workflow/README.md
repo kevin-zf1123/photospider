@@ -44,9 +44,7 @@ cmake --build build/channel-extraction-consumer -j 8
 build/channel-extraction-consumer/photospider_channel_extraction_workflow
 ```
 
-The current `test_channel_extraction` integration test passed 483 arbitrary-axis
-bit-copy cases, plus batch, spatial layout, fragmented backing views, metadata,
-resource and limit checks. The public workflow passed on the native CPU. These
+These
 checks do not cover a subsequent channel-assembly chain, and no current Result
 performance benchmark has been run. The older [channel extraction performance
 workload](../channel_extraction_performance/README.md) reports Value/planar

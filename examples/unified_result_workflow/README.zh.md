@@ -13,13 +13,6 @@ build/kernel-dev/examples/unified_result_workflow/photospider_unified_result_wor
 
 在已配置的 installed consumer 构建目录中编译示例与 installed consumer executable，然后运行两个 installed tests：
 
-```sh
-cmake --build build/kernel-dev/consumer-build \
-  --target photospider_unified_result_workflow photospider_unified_result_consumer
-ctest --test-dir build/kernel-dev/consumer-build \
-  -R '^installed_unified_result_(workflow|cpp)$' --output-on-failure
-```
-
 运行成功时会输出：
 
 ```text

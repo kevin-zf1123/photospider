@@ -13,13 +13,6 @@ build/kernel-dev/examples/unified_result_workflow/photospider_unified_result_wor
 
 Build the example and its installed-consumer executable in the already configured consumer build, then run both installed tests:
 
-```sh
-cmake --build build/kernel-dev/consumer-build \
-  --target photospider_unified_result_workflow photospider_unified_result_consumer
-ctest --test-dir build/kernel-dev/consumer-build \
-  -R '^installed_unified_result_(workflow|cpp)$' --output-on-failure
-```
-
 A successful run prints:
 
 ```text
@@ -48,4 +41,4 @@ The image output records one Control dependency and one selected image Data depe
 
 `DemandQuery` maps an output name to a `Footprint` in the output's full sample shape. `ExecutionContext::execute_fragments` evaluates only requested coverage and leaves holes unauthorized. An empty footprint for either output publishes descriptor metadata with zero tensor coverage and reads no sample payload. A count-only request remains independent of invalid or unrequested selectors. A selector outside 0..7 fails when that selector is consumed. The fixed image and Control schemas are checked during metadata specialization, before execution.
 
-The integration test also verifies that published Results remain readable after the `ExecutionContext` retires. Current validation passes locally for the runnable example and `test_unified_result_images`; installed consumers `installed_unified_result_workflow` and `installed_unified_result_cpp` pass 2/2. These checks cover CPU Result behavior and do not claim GPU execution. The example demonstrates Result ownership, two named Result outputs, N/L coordinates, sparse demand, dynamic support, and dirty transpose. Production image operation availability is documented in [Image operations](../../docs/kernel-architecture/Image-Operations.md).
+The integration test also verifies that published Results remain readable after the `ExecutionContext` retires. These checks cover CPU Result behavior and do not claim GPU execution. The example demonstrates Result ownership, two named Result outputs, N/L coordinates, sparse demand, dynamic support, and dirty transpose. Production image operation availability is documented in [Image operations](../../docs/kernel-architecture/Image-Operations.md).

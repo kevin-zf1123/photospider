@@ -20,7 +20,7 @@ build/kernel-dev/examples/foundations_workflow/photospider_foundations_workflow 
 ctest --test-dir build/kernel-dev -R '^(test_workflow_numeric_reductions|test_workflow_expression_lut)$' --output-on-failure
 ```
 
-可传入 `--scenario numeric`、`--scenario expression-lut` 或 `--scenario generator-gain` 单独运行。三个场景均通过后，程序打印 `Foundations scenarios=3 oracle=passed backend=cpu`。CTest 注册 `numeric` 和 expression/LUT 两个场景；要检查 plan reuse 和并发绑定，请显式运行 `generator-gain`。发生错误时打印 `Foundations failed: ...` 并以状态码 1 退出。
+可传入 `--scenario numeric`、`--scenario expression-lut` 或 `--scenario generator-gain` 单独运行。CTest 注册 `numeric` 和 expression/LUT 两个场景；要检查 plan reuse 和并发绑定，请显式运行 `generator-gain`。发生错误时打印 `Foundations failed: ...` 并以状态码 1 退出。
 
 独立 CMake 项目要求已安装 Photospider 0.30。配置示例：
 

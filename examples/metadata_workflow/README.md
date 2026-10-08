@@ -40,10 +40,7 @@ The older [metadata performance workload](../metadata_performance/README.md)
 measures the previous Value/planar implementation. Its timings are not
 performance evidence for the current Result operations.
 
-The current focused integration set passed five CTest cases covering metadata
-assignment, global Result behavior, execution, metadata budgets, and image
-contracts. The public example passed, as did the metadata and extraction
-installed consumers. The metadata-to-extraction configuration/resource chain
+The metadata-to-extraction configuration/resource chain
 is covered; a chain through `channel.assemble` is not.
 
 See the [metadata contract](../../docs/built-in_ops/02-format-color/op_specs/FMT-08_metadata_assignment_contract.md)

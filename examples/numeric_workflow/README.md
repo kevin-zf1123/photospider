@@ -16,26 +16,11 @@ for the prepared workflow and `photospider_numeric_math_batch`, plus
 `test_numeric_resampling_result`, `test_numeric_lowpass_result`,
 `test_numeric_lowpass_nonuniform_result` and
 `test_numeric_lowpass_execution_result`.
-The installed consumer registers `installed_numeric_sequences_result`,
-`installed_numeric_comparisons_result`,
-`installed_numeric_ranges_result`, `installed_numeric_interpolation_result`,
-`installed_numeric_layouts_result`, `installed_numeric_indexing_result`,
-`installed_numeric_reductions_result`, `installed_numeric_ordering_result`,
-`installed_numeric_scans_result`, `installed_numeric_calculus_result`,
-`installed_numeric_lut1d_result`, `installed_numeric_lut3d_result`,
-`installed_numeric_baking3d_result`, `installed_numeric_bezier_result`,
-`installed_numeric_parametric_result`, `installed_numeric_inverse_result`,
-`installed_numeric_resampling_result`, `installed_numeric_lowpass_result`,
-`installed_numeric_lowpass_nonuniform_result` and
-`installed_numeric_lowpass_execution_result`
-for the corresponding example sources
-linked to the SDK's `Photospider::kernel` target.
-Building `test_numeric_result_math` also builds the unary, binary, expression,
-sequence, range, interpolation, layout, indexing, reduction, ordering, scan,
-calculus, LUT1D, LUT3D, measured LUT3D baking, Bezier, parametric Bezier,
-inverse, resampling, uniform and nonuniform lowpass, lowpass execution and
-math-batch executables.
-This is not a complete list of the category's CTest targets.
+The numeric integration coverage is split by family under
+`tests/integration/numeric/`. CMake registers family targets for
+arithmetic, arrays, sequences, statistics, matrix, calculus, curves, Bezier,
+LUT1D, LUT3D, baking, expression, filters and color ramps. Each family has a
+corresponding `test_numeric_result_math_<family>` CTest and source file.
 The [implementation table](../../docs/built-in_ops/01-numeric/implementation.md)
 records completed families and delivery validation.
 
@@ -51,31 +36,15 @@ See [the contract](../../docs/built-in_ops/01-numeric/op_specs/NUM_accelerated_c
 and [current implementation and measurements](../../docs/built-in_ops/01-numeric/op_specs/NUM_accelerated_contract.md#current-implementation).
 
 ```sh
-cmake --build build/numeric --target photospider_numeric_expression photospider_numeric_unary photospider_numeric_binary photospider_numeric_category_benchmark photospider_numeric_inventory -j 6
 build/numeric/examples/numeric_workflow/photospider_numeric_expression apple
 python3 oracle/ops/numeric/expression_oracle.py build/numeric/examples/numeric_workflow/photospider_numeric_expression apple
-build/numeric/examples/numeric_workflow/photospider_numeric_expression apple benchmark_quick
-build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark apple
-build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark apple extended
-build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark apple legacy
-build/numeric/examples/numeric_workflow/photospider_numeric_expression apple benchmark_wide
-python3 examples/numeric_workflow/cost_inventory.py build/numeric/examples/numeric_workflow/photospider_numeric_inventory
 ```
 
 `photospider_numeric_category_benchmark` builds Result-bound cases and reads
-Result outputs, including current `reduce_sum` and `prefix_sum` diagnostics.
-The historical Value-path CSV records below remain evidence for their recorded
-Value runs only. To inspect current accumulator-attempt and fallback counters,
+Result outputs, including current `reduce_sum` and `prefix_sum` diagnostics. To inspect current accumulator-attempt and fallback counters,
 filter the Strict default cases:
 
-```sh
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_category_benchmark strict default reduce_sum
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_category_benchmark strict default prefix_sum
-```
-
-Each command produced rows for N=1 and N=256. All four rows passed output
-checks; `evaluated_values` was 1 and 256 respectively, with zero strict
-fallbacks. This is a diagnostics smoke check, not a performance comparison.
+Each command produced rows for N=1 and N=256. This is a diagnostics smoke check, not a performance comparison.
 
 Use `x86` on AVX2/FMA hosts and `strict` for exact references. Benchmark drivers
 perform one warmup and seven measured runs, reporting median and maximum; plan
@@ -84,8 +53,7 @@ worker is used. The expression quick benchmark retains N=65536 Whole and sparse
 queries. Its public checks include nonlinear Whole/ROI/tail equality and resource
 failure cleanup. The ordering workflow includes non-last-axis and disjoint-box
 line reuse under a fixed work budget. `extended` covers the remaining 49 modern
-basenames, and `legacy` covers 20 legacy value keys plus four individually timed
-Result callbacks within the bake workflow. Source-support counts are unique
+basenames. Source-support counts are unique
 certified elements, not internal read-call counts. Callback times and whole
 execution times remain separately labeled.
 
@@ -224,8 +192,7 @@ The runnable graph declares `inks` as a Result input, binds a `ResultRef`, and
 publishes a Result output. The compiler resolves declared and inferred profile
 identities, including for Empty demand. The example's small Value fixtures only
 check typed backing and facet behavior; they are not the workflow's public input
-or output path. A generic numeric Result operation drops the ICC owner when its
-output facet no longer references the profile.
+or output path.
 
 The manual `manual.profile_output` operation exercises direct and structured
 Result execution. It verifies that an Empty no-fields request retains the
@@ -360,7 +327,7 @@ owners survive context teardown.
 
 ### Current validation
 
-The focused `test_numeric_result_math` CTest passes 1/1 in 6.93 seconds. Its
+Its
 `color_ramp_workflows`, `color_ramp_boundaries`, `color_ramp_icc` and
 `color_ramp_active_cancel` cases cover Empty ICC execution, generic clamp
 resource selection, ICC ownership, and cancellation during exact arithmetic in
@@ -368,21 +335,17 @@ both an RGB 640-limb slot and a coordinate 144-limb slot. The active-cancellatio
 cases return all Root resources to baseline after context teardown. ICC and
 successful Result lifetime cases retain their valid owners after teardown.
 
-Seven public manual groups pass under Strict and the locally available Apple
-profile. The Result `--probe` matches 1,784 independent Fraction/Machin-pi
+ The Result `--probe` matches 1,784 independent Fraction/Machin-pi
 cases per profile and 352 RGB rational/root/Decimal cases per profile. Coverage
 includes all nine models, hue entrypoints, batched and strided layouts, complete
-typed/upstream validation, and Result output resource ownership. The installed
-`installed_result_numeric` consumer passes 1/1 in 0.21 seconds; it calls public
-XYZ and CMYK helpers and reads ColorArray output and its ICC owner after context
-teardown. Repeated requests return consistent values and rebinding updates the
+typed/upstream validation, and Result output resource ownership. Repeated requests return consistent values and rebinding updates the
 source association; these checks do not demonstrate a warm-cache hit.
 
 Reproduce the focused suite, manual groups and independent oracles with:
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_result_math photospider_numeric_color_ramps -j8
-ctest --test-dir build/kernel-dev -R '^test_numeric_result_math$' --output-on-failure
+cmake --build build/kernel-dev --target test_numeric_result_math_color_ramps photospider_numeric_color_ramps -j8
+ctest --test-dir build/kernel-dev -R '^test_numeric_result_math_color_ramps$' --output-on-failure
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps strict
 python3 oracle/ops/numeric/color_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps strict
 python3 oracle/ops/numeric/rgb_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps strict
@@ -391,7 +354,6 @@ python3 oracle/ops/numeric/color_ramp_oracle.py build/kernel-dev/examples/numeri
 python3 oracle/ops/numeric/rgb_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps apple
 ```
 
-Historical performance measurements were not rerun for this Result execution.
 There is no x86 numerical or maximum-shape result, and CRV-06 has no GPU
 variant. MPFR and the Fraction references are independent test oracles only.
 The ColorArray v1 CIELAB/CIELCh lightness metadata difference from native
@@ -458,47 +420,32 @@ table. A separate 2^38-position sparse query is rejected as `CapacityLimit` at
 node 1 because the complete output exceeds capacity; it does not test
 successful numerical execution at that output size.
 
-The independent Fraction oracle passes 1,062 cases for each Strict and Apple
-profile, with exact expected-string checks unchanged. The registered
+ The registered
 `test_numeric_lut3d_result` runs the same manual fixture under Strict; the
-shared `test_numeric_result_math` covers separate LUT workflow, boundary,
+shared `test_numeric_result_math_lut3d` covers separate LUT workflow, boundary,
 preparation, and resource integration fixtures and is not evidence for those
 six manual groups.
 
-The LUT3D-specific root CTest passed 1/1 in 1.48 s (1.49 s total). The shared
-`test_numeric_result_math` passed in a separate CTest selection that also
-included baking coverage (4.83 s); it was not paired with the LUT3D test. After
-installing the current 0.32.0 package and rebuilding the consumer from the
-current source, the three-test installed selection passed 3/3 in 5.71 s;
-`installed_numeric_lut3d_result` took 2.36 s. The installed consumer's direct
-Apple run also passed all six groups.
+The current LUT3D family source is `tests/integration/numeric/test_numeric_result_math_lut3d.cpp`.
 
 Reproduce the focused Result test with:
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_lut3d_result test_numeric_result_math -j8
+cmake --build build/kernel-dev --target test_numeric_lut3d_result test_numeric_result_math_lut3d -j8
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_lut3d strict
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_lut3d apple
 python3 oracle/ops/numeric/lut3d_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_lut3d strict
 python3 oracle/ops/numeric/lut3d_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_lut3d apple
-ctest --test-dir build/kernel-dev -R '^(test_numeric_lut3d_result|test_numeric_result_math)$' --output-on-failure
+ctest --test-dir build/kernel-dev -R '^(test_numeric_lut3d_result|test_numeric_result_math_lut3d)$' --output-on-failure
 ```
 
 Reproduce the installed public-consumer check with:
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/result-only-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer -DPhotospider_DIR="$PWD/build/kernel-dev/result-only-install/lib/cmake/Photospider" -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-only-install"
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_lut3d_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_lut3d_result$' --output-on-failure
-build/kernel-dev/repeated-result-consumer/photospider_numeric_lut3d_consumer apple
 ```
 
-The installed consumer compiles this same manual source against the installed
-`Photospider::kernel` package (0.32.0); its CTest runs Strict, and the final
-command runs Apple directly. The existing 0.18 Value-path benchmark is
-historical and is not evidence of current Result performance. No x86 execution
-or native GPU execution was run for this Result fixture. The
+The registered CTest runs Strict, and the final command runs Apple directly. The
 [CRV-07 contract](../../docs/built-in_ops/01-numeric/op_specs/CRV-07_apply_lut3d.md)
 and [method specifications](../../docs/built-in_ops/01-numeric/op_specs/CRV-07A_apply_lut3d_trilinear.md)
 retain the formulas, color support, limits, errors and acceptance requirements.
@@ -560,9 +507,7 @@ python3 oracle/ops/numeric/sequence_oracle.py build/kernel-dev/examples/numeric_
 
 The strict and available accelerated profiles run different registered keys;
 an unavailable x86 profile returns `BackendUnavailable` rather than selecting a
-different key. The oracle is independent of the sequence implementation, but
-historical oracle counts and WSL/AVX2 runs below are not evidence for this
-Result workflow or for native x86 execution.
+different key. The oracle is independent of the sequence implementation.
 
 Expected results include `linspace(0,1,5)` values `[0,.25,.5,.75,1]`, axis
 `[0,1,.25]`, and Int64 `arange(3,-2,4)` values `[3,1,-1,-3]`, axis `[3,-3,-2]`.
@@ -572,10 +517,7 @@ independent axis overflow, static schema errors, cache dependencies, work and
 capacity failures, strided input, cancellation, and Result readability after
 context teardown. It also covers count-one exclusion of a failing second
 producer while preserving static schema validation, count-two upstream failure,
-and Empty requests without producer work or sample support. The latest completed
-root and installed consumer CTests each passed 1/1; the complete `apple_silicon`
-workflow also exited successfully. The independent Fraction/IEEE oracle passed
-960 cases for each of `strict` and `apple_silicon`. Each oracle case checks a
+and Empty requests without producer work or sample support. Each oracle case checks a
 selected global output index from Whole execution; it does not demonstrate
 ROI-local sequence arithmetic. A step change from 0.5 to 1 recomputes the full
 256-sample values Result: index 255 becomes 255 and `computed_elements` is 256.
@@ -604,37 +546,6 @@ the consumer's compiled input metadata; a direct joint start with mismatched
 static grouping returns `Stale`. The example also reports both
 `OperationTiming.numeric.evaluated_values` and `computed_elements` to show that
 arithmetic work and published output samples are separate counts.
-
-## Installed consumer
-
-Build the kernel as above, then compile the example sources against its
-installation:
-
-```sh
-cmake --install build/kernel-dev --prefix "$PWD/build/kernel-dev/sequence-install"
-cmake -S tests/consumer -B build/kernel-dev/sequence-consumer -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/sequence-install" -DPhotospider_DIR="$PWD/build/kernel-dev/sequence-install/lib/cmake/Photospider" -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/kernel-dev/sequence-consumer --target photospider_numeric_sequences_consumer -j8
-ctest --test-dir build/kernel-dev/sequence-consumer -R '^installed_numeric_sequences_result$' --output-on-failure
-cmake --build build/kernel-dev/sequence-consumer --target photospider_numeric_interpolation_consumer -j8
-ctest --test-dir build/kernel-dev/sequence-consumer -R '^installed_numeric_interpolation_result$' --output-on-failure
-```
-
-The sequence and interpolation installed-consumer tests compile their example
-sources against the installed `Photospider::kernel` package. Historical
-Value-workflow and WSL/AVX2 results are not current evidence for the Result
-source path or native x86 support. These examples make no performance claim.
-
-The range consumer can be built against the same installed SDK:
-
-```sh
-cmake --install build/kernel-dev --prefix build/kernel-dev/result-repeat-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-repeat-install" -DPhotospider_DIR="$PWD/build/kernel-dev/result-repeat-install/lib/cmake/Photospider" -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_ranges_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_ranges_result$' --output-on-failure
-```
-
-The installed range consumer passed 1/1 and links the installed
-`Photospider::kernel` package.
 
 ## Expression sampling and static preparation: NUM-01
 
@@ -692,10 +603,6 @@ python3 oracle/ops/numeric/expression_oracle.py \
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_expression apple
 python3 oracle/ops/numeric/expression_oracle.py \
   build/kernel-dev/examples/numeric_workflow/photospider_numeric_expression apple
-cmake --build build/kernel-dev/repeated-result-consumer \
-  --target photospider_numeric_expression_workflow_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer \
-  -R '^installed_numeric_expression_result$' --output-on-failure
 ```
 
 `expression.cpp` builds a `WorkflowDocument`, binds source Results and invokes
@@ -704,12 +611,7 @@ the fixture publishes them under the execution Root and accounts their storage
 as Referenced. It does not use the separate unsuffixed
 `numeric.sample_expression` operation.
 
-The root registers `test_numeric_expression_result` for the strict example and
-`installed_numeric_expression_result` for the same source linked only to the
-installed `Photospider::kernel` target. Both tests passed after the balanced
-128-coefficient, association and Empty checks were added. The strict and Apple
-default runs passed, and the independent Fraction/MPFR oracle passed 715 cases
-per profile with MPFR 4.2.2. The focused expression test checks that both
+The focused expression test checks that both
 output programs share the prepared AST, mixed Float32/Float64 scalar inputs,
 and a balanced 128-coefficient expression (255 AST nodes, height 8) over 130
 declared ports.
@@ -720,7 +622,7 @@ axis-only omission of coefficient inputs, full-domain failure outside a
 requested ROI, duplicate adjacent coordinates, invalid input metadata,
 Float32 overflow, and Result lifetime. A valid Empty values+axis
 request leaves both coverages empty, computes zero elements, and does not start
-the failing coefficient producer. The broader `test_numeric_result_math`
+the failing coefficient producer. The broader `test_numeric_result_math_expression`
 kernel suite also covers Empty expression queries.
 
 Cache checks distinguish two paths: repeating a request on the same Frozen
@@ -733,26 +635,10 @@ the callback has admitted at least 10000 units, and final Root resource release.
 The cancellation check does not identify a particular expression node or
 refinement step as the interruption point.
 
-The expression executable keeps `benchmark`, `benchmark_quick`, and
-`benchmark_wide`. The quick mode runs `2*x+1` and `exp(x)` at N=65536 for both
-Whole and three-point ROI queries, producing four rows; the wide mode uses the
-same count with a wider interval. Each row has one warmup and seven timed
 executions. `invocations` is the operation poll count, while
 `computed_elements` reports the full N because the Whole operation computes
 before projection. The evaluated-value, strict-math-call and fallback columns
 are `N/A` for this Whole Result path.
-
-The strict quick run's four rows passed their output checks: each reported
-poll_count 2 and computed_elements 65536 for both Whole and ROI. The shared
-context's cumulative Root Payload peak was 765520 bytes, including warmup.
-This records the run's managed Payload use; it is not a speed comparison.
-
-Workflow timing covers `execute_fragments`; source creation, compilation,
-freezing, output reads and bit checks are outside the timer. The reported
-`peak_payload_bytes` is the Root's cumulative Payload peak across setup, warmup
-and timed runs, excluding input storage charged as Referenced. It is not RSS.
-These fields describe the benchmark boundary and do not provide a speed
-comparison with the older Value/callback measurements.
 
 ### Whole static preparation in `prepared.cpp`
 
@@ -941,8 +827,7 @@ Dense requests materialize the complete target before consumer projection.
 Source edits invalidate the complete output. Constant Dense fills packed output
 by growing a repeated prefix and copying blocks of at most 64 KiB between
 cancellation polls. Broadcast uses Scalar/NEON/AVX2 32-byte gather-copy blocks
-and exact tails. These are current implementation behaviors, not claims about
-the historical timing rows. The [NUM-03 Whole execution page](../../docs/built-in_ops/01-numeric/arrays-whole.md)
+and exact tails. The [NUM-03 Whole execution page](../../docs/built-in_ops/01-numeric/arrays-whole.md)
 documents the current Result behavior and keeps earlier timing records
 separate. `array_owner_and_payload_cache()` exercises Result cache identity and
 the lifetime of scalar-copy and borrowed-window owners.
@@ -959,10 +844,7 @@ axis of extent 2 and cell shape `[3]`; the last coordinate is `[1,2]`.
 Published Results and acquired windows remain readable after context teardown
 until their final owners are released.
 
-Final validation on this host passed the local Result array and output-payload
-tests (2/2), with the array behavior test also passing five repeat-until-fail
-runs. The fresh installed consumer passed `installed_result_arrays` and
-`installed_result_output_payload` (2/2). Standalone imported-package runs of
+Standalone imported-package runs of
 `photospider_numeric_arrays` with `_strict` and
 `_accelerated_apple_silicon` each exited successfully.
 
@@ -971,17 +853,10 @@ cmake --build build/kernel-dev --target test_numeric_result_arrays -j8
 ctest --test-dir build/kernel-dev -R '^test_numeric_result_arrays$' --output-on-failure
 ```
 
-The installed consumer is registered as `installed_result_arrays`, and that
-consumer has passed. Configure a fresh imported-package build and run it with:
+Configure a fresh imported-package build and run it with:
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/arrays-result-install
-cmake -S tests/consumer -B build/kernel-dev/arrays-result-consumer \
-  -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/arrays-result-install" \
-  -DPhotospider_DIR="$PWD/build/kernel-dev/arrays-result-install/lib/cmake/Photospider" \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/kernel-dev/arrays-result-consumer --target photospider_result_arrays_consumer -j8
-ctest --test-dir build/kernel-dev/arrays-result-consumer -R '^installed_result_arrays$' --output-on-failure
 ```
 
 The focused Result cap probe is separate from those array workflows. CMake
@@ -1063,14 +938,10 @@ strides, shifted origins, singleton axes, 65-element Float32 tails, and global
 coordinate projection. Every input's dirty mapping for sparse demand returns
 the observed output footprint, while publication remains complete. Work,
 Payload, scratch and cancellation failures release unpublished output. The
-separate `test_numeric_result_math.cpp` integration fixture retains broader
+separate `[test_numeric_result_math_sequences.cpp](../../tests/integration/numeric/test_numeric_result_math_sequences.cpp)` integration fixture retains broader
 clamp/remap checks but was not rerun for this migration. Profile names are `_strict`,
 `_accelerated_apple_silicon` and `_accelerated_x86_64`; an unavailable profile
-returns `BackendUnavailable` rather than falling back to another key. The
-current root Result test passed 1/1 and the Apple Silicon default workflow
-exited successfully. The independent exact Fraction oracle passed 2,826 cases
-for each of the strict and Apple Silicon profiles. The installed range consumer
-passed 1/1. No native GPU, x86 execution or performance result is claimed. See
+returns `BackendUnavailable` rather than falling back to another key. No native GPU, x86 execution or performance result is claimed. See
 [NUM-06 Whole behavior and checks](../../docs/built-in_ops/01-numeric/range-whole.md).
 
 ## Interpolation: NUM-08
@@ -1119,11 +990,9 @@ cancellation failures release unpublished results; a retained Result remains
 readable after context teardown, and its final release returns all Root
 resources to zero.
 
-The current Result test passed 1/1, the Apple Silicon default workflow exited
-successfully, and the installed consumer passed 1/1. The independent IEEE/Fraction
-oracle passed 5,244 cases for each of the strict and Apple Silicon profiles. No
+No
 x86 execution, native GPU support or performance result is claimed. The separate
-`test_numeric_result_math.cpp` integration fixture retains additional batch,
+`[test_numeric_result_math_sequences.cpp](../../tests/integration/numeric/test_numeric_result_math_sequences.cpp)` integration fixture retains additional batch,
 special-value and pre-cancellation coverage; that broader fixture was not
 rerun for this Result update. See [NUM-08 Whole behavior and checks](../../docs/built-in_ops/01-numeric/interpolation-whole.md).
 
@@ -1152,9 +1021,6 @@ SDK package:
 
 ```sh
 cmake --install build/kernel-dev --prefix "$PWD/build/kernel-dev/layouts-result-install"
-cmake -S tests/consumer -B build/kernel-dev/layouts-result-consumer -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/layouts-result-install" -DPhotospider_DIR="$PWD/build/kernel-dev/layouts-result-install/lib/cmake/Photospider" -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/kernel-dev/layouts-result-consumer --target photospider_numeric_layouts_consumer -j8
-ctest --test-dir build/kernel-dev/layouts-result-consumer -R '^installed_numeric_layouts_result$' --output-on-failure
 ```
 
 The CLI profile arguments are `strict`, `apple` and `x86`; each selects its
@@ -1188,9 +1054,7 @@ fragment joining, independent-owner rejection, escaped Result/window lifetime,
 and final Root resource release. The operation reports the selected
 implementation and `view_elements` or `copied_elements`. The current Root
 focused test and strict/Apple seven-dtype oracle results are recorded in
-[NUM-09 Whole execution](../../docs/built-in_ops/01-numeric/layouts-whole.md).
-The installed CTest `installed_numeric_layouts_result` passes 1/1 against
-`Photospider::kernel`. There is no current x86 execution, native GPU execution
+[NUM-09 Whole execution](../../docs/built-in_ops/01-numeric/layouts-whole.md). There is no current x86 execution, native GPU execution
 or performance claim.
 
 ## Indexing and scatter: NUM-10
@@ -1254,9 +1118,6 @@ The installed consumer builds the same source against the installed SDK:
 
 ```sh
 cmake --install build/kernel-dev --prefix "$PWD/build/kernel-dev/indexing-result-install"
-cmake -S tests/consumer -B build/kernel-dev/indexing-result-consumer -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/indexing-result-install" -DPhotospider_DIR="$PWD/build/kernel-dev/indexing-result-install/lib/cmake/Photospider" -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/kernel-dev/indexing-result-consumer --target photospider_numeric_indexing_consumer -j8
-ctest --test-dir build/kernel-dev/indexing-result-consumer -R '^installed_numeric_indexing_result$' --output-on-failure
 ```
 
 The `strict`, `apple` and `x86` arguments select registered CPU profiles;
@@ -1264,13 +1125,7 @@ accelerated profiles require a compatible host. The independent coordinate,
 contributor and Fraction oracle is in
 [`index_oracle.py`](../../oracle/ops/numeric/index_oracle.py). It independently
 checks output bits across generated cases, including exceptional-value and
-signed-zero ordering. The focused
-`test_numeric_indexing_result` CTest passes 1/1, the strict and Apple public
-workflows exit successfully, and the oracle passes 3,858 cases per profile. The
-installed consumer `installed_numeric_indexing_result` passes 1/1 against the
-installed `Photospider::kernel` package. The existing `test_numeric_result_math`
-integration fixture contains additional indexing coverage; it was not rerun for
-this Result migration. No current x86, native GPU or performance result is
+signed-zero ordering. No current x86, native GPU or performance result is
 claimed. See [NUM-10 Whole execution](../../docs/built-in_ops/01-numeric/indexing-whole.md)
 for resource and evidence boundaries.
 
@@ -1305,8 +1160,7 @@ The `[1,2,3],[4,5,6]` example reduces axis 1 to sums `[6,15]`, minima `[1,4]`,
 maxima `[3,6]`, means `[2,5]`, counts `[3,3]`, variances `[2/3,2/3]` and
 standard deviations `[sqrt(2/3),sqrt(2/3)]`, with destination rounding.
 `reduction_oracle.py` checks 4,740 independent cases per strict and available
-Apple Silicon profile. The current root CTest passes 1/1, and both available
-default workflow profiles exit successfully. The workflow checks all seven
+Apple Silicon profile. The workflow checks all seven
 reducers under four rounding modes on the actual worker and caller, plus
 unaligned, negative- and zero-stride inputs, typed validation, invalid `ddof`,
 Empty, unrequested-group overflow, work limits, cancellation, and a generated
@@ -1343,24 +1197,11 @@ with:
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/result-repeat-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer \
-  -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-repeat-install" \
-  -DPhotospider_DIR="$PWD/build/kernel-dev/result-repeat-install/lib/cmake/Photospider" \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_reductions_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_reductions_result$' --output-on-failure
 ```
 
-The final focused root selection completed 40 tests in 19.79 seconds: 39
-passed and one skipped, with zero failures. It included
-`test_numeric_reductions_result` and the shared `test_numeric_result_math`
-fixture. Root resource tests passed 3/3, and the installed numeric selection
-passed 10/10. The independent reduction oracle passes 4,740 cases per Strict
-and Apple profile, and both default manual profiles exit successfully.
-Sibling-source 4 MiB and 5 MiB Root Payload peak assertions passed in the
-complete `test_dependency_program` run. The skipped test was
-`test_vulkan_gpu`, with return code 77. x86 execution, Vulkan execution and new
-performance measurements were not run. The installed consumer compile
+It included
+`test_numeric_reductions_result` and the shared `test_numeric_result_math_statistics`
+fixture.   The installed consumer compile
 uses only the installed prefix's `include` directory plus
 `-fno-fast-math -frounding-math -ffp-contract=off`, and links the prefix's
 `lib/libphotospider.a`.
@@ -1425,15 +1266,7 @@ same source with the installed `Photospider::kernel` package:
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/result-repeat-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-repeat-install" -DPhotospider_DIR="$PWD/build/kernel-dev/result-repeat-install/lib/cmake/Photospider" -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_ordering_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_ordering_result$' --output-on-failure
 ```
-
-The current Root workflow test and installed consumer each pass 1/1. The
-ordering oracle passes 2,072 cases in both Strict and Apple profiles. The
-separate C block fixture also passes in the Root and installed consumer tests;
-its exact coverage is described in [Global Results](../../docs/kernel-architecture/Global-Results.md).
 
 See [NUM-12 Whole execution](../../docs/built-in_ops/01-numeric/ordering-whole.md)
 for current behavior boundaries and validation limits.
@@ -1456,8 +1289,7 @@ python3 oracle/ops/numeric/comparison_oracle.py \
 
 Use `_accelerated_apple_silicon` on Apple Silicon or
 `_accelerated_x86_64` on x86-64. An unsupported host reports
-`BackendUnavailable`. The example expects
-`NUM-07: six predicates; select=[10,2,30] ... passed`. All 24 formal keys
+`BackendUnavailable`. All 24 formal keys
 use Whole Result execution. Each input is a Result with one tensor in slot 0;
 the full `sample_shape()` must match across inputs, including batch axes. A
 nonempty Whole poll requests each active input with Data, Validation and
@@ -1489,12 +1321,8 @@ zero-stride layouts. A typed RGBA Result image input with alpha `1` succeeds;
 alpha `2` is rejected on either input port.
 `comparison_oracle.py` compares raw IEEE relations and tolerance arithmetic
 against an independent Fraction oracle. The root CTest entry is
-`test_numeric_comparisons_result`; the installed consumer registers
-`installed_numeric_comparisons_result` from the same example source against
-`Photospider::kernel`. Current Result evidence: strict and Apple manual runs
-exit 0, root and installed CTests each pass 1/1, and the oracle passes 3,760
-cases per profile.
-See [NUM-07 implementation and historical measurements](../../docs/built-in_ops/01-numeric/comparison-whole.md).
+`test_numeric_comparisons_result`.
+See [NUM-07 Whole execution](../../docs/built-in_ops/01-numeric/comparison-whole.md).
 
 ## Prefix sums and integral image: NUM-13
 
@@ -1551,9 +1379,6 @@ The installed consumer compiles the same source against the installed
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/result-repeat-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-repeat-install" -DPhotospider_DIR="$PWD/build/kernel-dev/result-repeat-install/lib/cmake/Photospider" -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_scans_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_scans_result$' --output-on-failure
 ```
 
 The scan reports one local `NumericDiagnostics` record at callback completion.
@@ -1568,15 +1393,8 @@ report from merging, while window acquisition/read `Status` and outer
 `std::bad_alloc` handling can bypass the local report attempt. Cache hits add no
 new attempts; Empty demand performs no sample arithmetic.
 
-The final focused root selection completed 40 tests in 19.79 seconds: 39
-passed and one skipped, with zero failures. It included
-`test_numeric_scans_result` and `test_numeric_result_math`. Both Strict and
-Apple default workflows exit successfully, and the independent scan oracle
-passes 2,544 cases per profile. The installed numeric selection passed 10/10.
-Root resource tests passed 3/3. Sibling-source 4 MiB and 5 MiB Root Payload
-peak assertions passed in the complete `test_dependency_program` run. The
-skipped test was `test_vulkan_gpu`, with return code 77. x86 execution, Vulkan
-execution and new performance measurements were not run.
+It included
+`test_numeric_scans_result` and `test_numeric_result_math_statistics`.
 This is a focused consumer selection, not a full package matrix.
 
 ## Exact affine matrix transforms: NUM-14
@@ -1604,15 +1422,14 @@ The current focused Result math coverage is run from the existing macOS
 `build/kernel-dev` tree, configured with Accelerate enabled and SME disabled:
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_result_math -j8
-ctest --test-dir build/kernel-dev -R '^test_numeric_result_math$' --output-on-failure
+cmake --build build/kernel-dev --target test_numeric_result_math_matrix -j8
+ctest --test-dir build/kernel-dev -R '^test_numeric_result_math_matrix$' --output-on-failure
 ```
 
-The `matrix_*` integration cases in `test_numeric_result_math` cover all
+The `matrix_*` integration cases in `test_numeric_result_math_matrix` cover all
 Cin/Cout combinations from 2 through 4 over 130 vectors, negative strides,
 batch axes, block tails, Float64 rank-one vectors, special values, complete
-typed input validation, Empty demand, work/resource limits, and pre-cancellation.
-The recorded focused CTest run passed 1/1. It does not run the manual executable's
+typed input validation, Empty demand, work/resource limits, and pre-cancellation. It does not run the manual executable's
 additional preparation, association, owner-lifetime, or checked-worker fixtures.
 This focused test does not establish that Accelerate or SME hardware instructions
 ran individually.
@@ -1637,33 +1454,6 @@ python3 oracle/ops/numeric/matrix_oracle.py \
 python3 oracle/ops/numeric/matrix_oracle.py \
   build/kernel-dev/examples/numeric_workflow/photospider_numeric_matrix apple
 ```
-
-The independent oracle passed 1,598 exact Fraction cases in Strict and 1,598 in
-Apple. The installed-package consumer passed `installed_numeric_matrix_result`
-1/1 under Strict, and its Apple profile completed the full manual checks
-successfully:
-
-```sh
-ctest --test-dir build/kernel-dev/repeated-result-consumer \
-  -R '^installed_numeric_matrix_result$' --output-on-failure
-build/kernel-dev/repeated-result-consumer/photospider_numeric_matrix_consumer apple
-```
-
-The bounded CLI checks also passed bitwise comparison and reported the complete
-output count with two polls for each workload:
-
-```sh
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_matrix apple benchmark 4096 4 4 float32
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_matrix strict benchmark 65 4 3 float64 cancellation
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_matrix apple grid 8
-```
-
-These bounded checks validate the named workloads; they are not a performance
-campaign. Benchmark elapsed time includes Result coordination, digest, and
-polling work. Historical Value-path performance measurements are not current
-Result performance data. The CMake example and installed consumer use
-`-fno-fast-math -frounding-math -ffp-contract=off`. Neither these checks nor the
-focused CTest establish that Accelerate or SME instructions executed on hardware.
 
 ## Discrete derivatives and cumulative integration: NUM-15
 
@@ -1692,21 +1482,17 @@ Fraction corpus. Strict is checked bit-for-bit; Apple uses the shared accelerate
 FP32-scaled acceptance bound, so it is not a bit-exact claim.
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_result_math -j8
+cmake --build build/kernel-dev --target test_numeric_result_math_calculus -j8
 ctest --test-dir build/kernel-dev \
-  -R '^(test_numeric_calculus_result|test_numeric_result_math)$' --output-on-failure
+  -R '^(test_numeric_calculus_result|test_numeric_result_math_calculus)$' --output-on-failure
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_calculus strict
 python3 oracle/ops/numeric/calculus_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_calculus strict
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_calculus apple
 python3 oracle/ops/numeric/calculus_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_calculus apple
 ```
 
-The root focused CTest passed 2/2 (`test_numeric_calculus_result` and
-`test_numeric_result_math`, 4.67 s). The manual executable completed all six
-check groups under Strict and Apple. Each oracle profile passed all 1,810 cases;
-Strict was bit-exact and Apple used the shared FP32-scaled bound. The installed
-consumer built from package 0.32.0 and passed its Strict CTest 1/1 (0.07 s); its
-Apple profile completed all six check groups. The installed consumer compiles
+The manual executable completed all six
+check groups under Strict and Apple. The installed consumer compiles
 the same source against the imported `Photospider::kernel` package. See
 [NUM-15 Whole execution](../../docs/built-in_ops/01-numeric/calculus-whole.md)
 for the focused coverage and package-consumer commands.
@@ -1798,33 +1584,6 @@ caller-thread fenv modes/flags, full-input support and dirty projection,
 typed-schema validation, Whole integer/denominator errors, upstream failure,
 work/cancellation/capacity cleanup, retained Result lifetime, and warm-cache
 changes to NaN sign/payload. Use `apple` or `x86` only on a host with that CPU
-profile. Current strict and Apple C++ checks and the independent 7,524-case
-integer/Fraction/MPFR oracle for each profile passed with MPFR 4.2.2. The
-installed `Photospider::kernel` consumer passed `installed_numeric_unary_result`
-(1/1) in `build/kernel-dev/repeated-result-consumer`.
-
-```sh
-ctest --test-dir build/kernel-dev/repeated-result-consumer \
-  -R '^installed_numeric_unary_result$' --output-on-failure
-```
-
-Native local timing is available separately:
-
-```sh
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_unary strict benchmark
-```
-
-The CSV reports all 22 functions at N=1 and N=256, Float64, Whole demand, one
-worker, cache off, seven measured repetitions, median/max microseconds,
-`peak_payload_bytes`, and an `N/A` fallbacks field. The timer covers each synchronous
-`execute_fragments` call, including workflow execution and result assembly;
-source construction, compilation, freezing, readback and verification are
-outside it. The reported peak is the execution Root's cumulative Payload peak
-observed across source setup, warmup and measured runs. It excludes source
-backing accounted as Referenced and is not an RSS measurement. Every run checks
-computed elements and output bits. Ordinary rational timing uses p/q=1/7. These
-are public Result workflow timings, not callback medians or a comparison with
-historical Value/core measurements.
 
 ## Binary mathematics: NUM-05
 
@@ -1854,19 +1613,6 @@ do not suppress the other input's obligation. Integer overflow anywhere fails
 the Whole invocation with Run scope and no Atom key. IEEE nonfinite results
 follow the operation-specific rules.
 
-```sh
-cmake --build build/kernel-dev --target photospider_numeric_binary -j8
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_binary strict
-ctest --test-dir build/kernel-dev -R '^test_numeric_binary_result$' --output-on-failure
-python3 oracle/ops/numeric/binary_oracle.py \
-  build/kernel-dev/examples/numeric_workflow/photospider_numeric_binary strict
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_binary apple
-python3 oracle/ops/numeric/binary_oracle.py \
-  build/kernel-dev/examples/numeric_workflow/photospider_numeric_binary apple
-ctest --test-dir build/kernel-dev/repeated-result-consumer \
-  -R '^installed_numeric_binary_result$' --output-on-failure
-```
-
 The executable constructs its `WorkflowDocument` and Result bindings through the
 public C++ API. Its `Value` arrays are local immutable typed backing; the fixture
 publishes them as source Results under the execution Root, with the source
@@ -1877,11 +1623,7 @@ allocation charged as Referenced. The `cache_and_composition` fixture computes
 checks independently rounded pi bits. The MPFR 4.2+ oracle supports strict and
 Apple runs; use `apple` or `x86` only on a host with that CPU profile.
 
-The focused `test_numeric_binary_result` CTest runs the strict profile, and the
-installed `Photospider::kernel` consumer runs the same example source as
-`installed_numeric_binary_result`; both passed. Strict and Apple example runs
-also passed, with 14,174 independent integer/Fraction/MPFR oracle cases for
-each profile. Manual checks cover nine operations, exact fixtures, full-input
+Manual checks cover nine operations, exact fixtures, full-input
 support and dirty mapping, Whole UInt8/Int64 overflow, typed validation on both
 ports, required upstream producers, negative and zero-stride inputs, unaligned
 storage, worker and caller floating environments, work/cancellation/capacity
@@ -1896,10 +1638,7 @@ repetitions. It times `execute_fragments`; source construction, compile, freeze,
 readback and output checks are outside the timer. `peak_payload_bytes` is the
 execution Root's cumulative Payload peak, including source setup and warmup but
 excluding input storage accounted as Referenced. It is not an RSS measure. Each
-run checks the computed-element count and every output bit. This is Result
-workflow timing, not a callback median or a comparison with historical
-Value/core measurements. The earlier NUM-05 measurements in [math implementation](../../docs/built-in_ops/01-numeric/math-implementation.md#num-05-validation-and-native-timing)
-are historical Value/callback evidence, not current Result performance results.
+run checks the computed-element count and every output bit. The timing covers the complete Result workflow, not a single callback.
 
 ## Explicit-query curves: CRV-01
 
@@ -1920,38 +1659,15 @@ Build and run the Result manual fixture under Strict and Apple, then run the
 registered focused tests and independent exact Fraction oracles with:
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_result_math test_result_image_contracts -j8
+cmake --build build/kernel-dev --target test_numeric_result_math_curves test_result_image_contracts -j8
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_curves strict
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_curves apple
-ctest --test-dir build/kernel-dev -R '^(test_numeric_curves_result|test_numeric_result_math|test_result_image_contracts)$' --output-on-failure
+ctest --test-dir build/kernel-dev -R '^(test_numeric_curves_result|test_numeric_result_math_curves|test_result_image_contracts)$' --output-on-failure
 python3 oracle/ops/numeric/curve_oracle.py ./build/kernel-dev/examples/numeric_workflow/photospider_numeric_curves strict
 python3 oracle/ops/numeric/curve_oracle.py ./build/kernel-dev/examples/numeric_workflow/photospider_numeric_curves apple
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_curves strict benchmark
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_curves apple benchmark
 ```
 
-`test_numeric_curves_result` runs the manual Result fixtures in `curves.cpp` under Strict; the direct invocations above run the same six fixture groups under Strict and Apple. Both manual runs passed. Coverage includes Result declaration, binding and reads; sparse Whole full-input support, dirty mapping and errors; negative-stride/unaligned and zero-stride layouts across all ports with worker and caller floating-environment checks; Empty and static metadata; computation work, cancellation, output and scratch limits; fresh-source content-cache reuse with refreshed associations; same-demand retention; query/topology rebinding with static preparation reuse; upstream errors; giant sparse-demand rejection as `CapacityLimit` at node 1; typed Mask validation (`input_id=2`); and source-owner retirement with retained Result/read-window access, 16 live Payload bytes and final Root release. The focused CTest run passed 3/3 in 5.09 seconds. The independent exact Fraction oracle passed 2,487 bit-exact cases under each profile; its corpus covers all four operation forms, mixed input and destination dtypes, all three domain policies, extreme values and the monotonicity regression. The installed package 0.32 consumer was recompiled and linked against `build/kernel-dev/result-only-install`; `installed_numeric_curves_result` passed 1/1 under Strict in 0.36 seconds, and the consumer's direct Apple run passed all six fixture groups.
-
-Build and run the installed consumer against an installed package with:
-
-```sh
-cmake --install build/kernel-dev --prefix build/kernel-dev/result-only-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-only-install" -DPhotospider_DIR="$PWD/build/kernel-dev/result-only-install/lib/cmake/Photospider"
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_curves_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_curves_result$' --output-on-failure
-build/kernel-dev/repeated-result-consumer/photospider_numeric_curves_consumer apple
-```
-
-The optional `benchmark` mode reports eight rows per profile: N=1 and N=64 for four operations with K=17, C=1/2, Float64, one CPU worker, cache disabled, dependency-cache proof disabled, and three repetitions. Its timer surrounds `execute_fragments`, identified by `timing_scope=result_execute_fragments`: it includes coordinator discovery, continuation polls, computation, publication and digest work, while excluding source construction, compile, freeze, readback and output checks. Each row reported two continuation polls and N*C computed elements. The CSV `peak_payload_bytes` field records the managed Root Payload peak from `diagnostics.managed_resources`; the fixture checks that the peak covers at least the complete output bytes (8*N*C). The Strict and Apple bounded smoke runs both passed all eight rows. Their Root Payload peaks, equal across profiles, were:
-
-| N | C | Root Payload peak (bytes) |
-| ---: | ---: | ---: |
-| 1 | 1 | 288536 |
-| 64 | 1 | 289040 |
-| 1 | 2 | 288544 |
-| 64 | 2 | 289552 |
-
-These are correctness and timing-scope smoke results; they do not establish a performance improvement or a platform matrix. They are not comparable to historical Value/callback measurements described in [math implementation](../../docs/built-in_ops/01-numeric/math-implementation.md#crv-01-exact-interpolation).
+`test_numeric_curves_result` runs the manual Result fixtures in `curves.cpp` under Strict; the direct invocations above run the same six fixture groups under Strict and Apple. Coverage includes Result declaration, binding and reads; sparse Whole full-input support, dirty mapping and errors; negative-stride/unaligned and zero-stride layouts across all ports with worker and caller floating-environment checks; Empty and static metadata; computation work, cancellation, output and scratch limits; fresh-source content-cache reuse with refreshed associations; same-demand retention; query/topology rebinding with static preparation reuse; upstream errors; giant sparse-demand rejection as `CapacityLimit` at node 1; typed Mask validation (`input_id=2`); and source-owner retirement with retained Result/read-window access, 16 live Payload bytes and final Root release. The installed package 0.32 consumer was recompiled and linked against `build/kernel-dev/result-only-install`.
 
 ## Bezier function sampling: CRV-02
 
@@ -1969,7 +1685,7 @@ For anchors=[[0,0],[1,1]], handles=[[[0,.25],[-1,-.25]]], start=[0], end=[1], th
 
 The Whole Result continuation requests active inputs with Data, Validation and Descriptor roles (role 13). For `values` it validates the complete x topology and generated coordinates before y arithmetic, computes every sample, and publishes one dense Result with full certified coverage in global sample coordinates, even for a sparse request. Empty demand reads no input payload and executes no numeric kernel; the runtime can still poll metadata and seal the Result. The `axis` output reads only its active endpoint inputs and does not read controls. Each output uses its own all-or-nothing Result transaction. Query and domain errors precede y arithmetic; generic y data outside the selected mathematical stencil is not scanned, while recognized typed validation still covers each active input. Published output owners and authorized read windows keep the output payload alive past context teardown; source-owner weak-reference checks confirm all source owners can retire while retained outputs remain readable.
 
-The manual fixture in `bezier.cpp` uses Results for declarations, bindings, outputs and authorized reads. Value objects provide only immutable source backing. Its six groups exercise Result reads, errors, layouts, resource limits, cancellation, cache association and owner lifetimes. Both Strict and Apple runs passed all six groups. The independent Fraction oracle passed 382 numerical/error cases and four full-output capacity-rejection cases under each profile. Build and run the focused root test and oracle with:
+The manual fixture in `bezier.cpp` uses Results for declarations, bindings, outputs and authorized reads. Value objects provide only immutable source backing. Its six groups exercise Result reads, errors, layouts, resource limits, cancellation, cache association and owner lifetimes. Build and run the focused root test and oracle with:
 
 ```sh
 cmake --build build/kernel-dev --target photospider_numeric_bezier -j8
@@ -1982,21 +1698,9 @@ python3 oracle/ops/numeric/bezier_oracle.py ./build/kernel-dev/examples/numeric_
 
 The fixture checks same-demand Result identity, two current cached outputs for fresh-source content-cache hits with current source associations, static `PreparedOperation` reuse after binding changes, full Whole output coverage, request-recorded dependency mapping, and separate `values` and `axis` Results. Count-one specialization excludes `end`; `axis` never reads controls. It checks that all source owners can retire while retained value and axis read windows remain readable, then releases the final owners and verifies all Root usage returns to zero. Negative, zero and unaligned input strides are exercised across all ports with worker and caller floating-environment checks. Work limits, cancellation, output and scratch capacity failures use the real continuation path. Typed validation rejects the invalid unrequested sample 1.5 in an otherwise valid Mask input before numeric arithmetic; the facet itself is valid. Unused generic y samples remain unscanned. The maximum count case verifies rejection of the complete dense output under a 1 MiB Payload budget; it is a capacity test, not a successful million-sample run. Full numerical formulas, topology checks and resource bounds are in the [CRV-02 specification](../../docs/built-in_ops/01-numeric/op_specs/CRV-02_sample_bezier_function.md).
 
-The focused root tests `test_numeric_result_math` and `test_numeric_bezier_result` passed 2/2 in 4.99 seconds (4.39 seconds for the shared integration executable and 0.60 seconds for the manual fixture). The independent code and contract review found no unresolved blocker or required change.
+Current Bezier family cases are in `tests/integration/numeric/test_numeric_result_math_bezier.cpp`. The independent code and contract review found no unresolved blocker or required change.
 
-The installed consumer compiles the same `bezier.cpp` fixture against the installed package. Reproduce it with:
-
-```sh
-cmake --install build/kernel-dev --prefix build/kernel-dev/result-only-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-only-install" -DPhotospider_DIR="$PWD/build/kernel-dev/result-only-install/lib/cmake/Photospider"
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_bezier_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_bezier_result$' --output-on-failure
-build/kernel-dev/repeated-result-consumer/photospider_numeric_bezier_consumer apple
-```
-
-The package 0.32.0 consumer compiled and linked against `result-only-install`; `installed_numeric_bezier_result` passed 1/1 under Strict in 0.71 seconds, and the direct Apple invocation passed all six groups.
-
-The separate `test_numeric_result_math` integration target continues to cover `bezier_workflows`, `bezier_boundaries`, `bezier_projection` and `bezier_resources`; its 22 golden words include six function outputs and sixteen CRV-03 parametric outputs. Those shared integration checks do not replace the manual `bezier.cpp` fixture or its installed consumer. The bounded benchmark times `execute_fragments`, with cache and dependency-cache proof disabled. Strict and Apple each passed 16 regular rows across degree 2/3, K=2/64, N=17/129 and Whole/ROI demand; all used Float64 and three repetitions. Each row reported two polls and N computed elements. Root Payload peaks were 523,368 bytes for N=17 and 524,264 bytes for N=129. Each profile also passed two stress rows, with two polls, one computed element and a 523,240-byte Root Payload peak. Timing scope is `result_execute_fragments`; it includes coordinator discovery, continuation polling, computation, publication and digest, and excludes compilation, source creation, freeze, readback and output checks. Whole execution does not expose per-value root-solver or fallback counters; those fields remain N/A. These are bounded behavior and timing-scope smoke checks and do not establish performance improvement. x86 and maximum physical K/N execution were not tested.
+The separate `test_numeric_result_math_bezier` integration target continues to cover `bezier_workflows`, `bezier_boundaries`, `bezier_projection` and `bezier_resources`; its 22 golden words include six function outputs and sixteen CRV-03 parametric outputs. Those shared integration checks do not replace the manual `bezier.cpp` fixture or its installed consumer. The bounded benchmark times `execute_fragments`, with cache and dependency-cache proof disabled. Root Payload peaks were 523,368 bytes for N=17 and 524,264 bytes for N=129. Timing scope is `result_execute_fragments`; it includes coordinator discovery, continuation polling, computation, publication and digest, and excludes compilation, source creation, freeze, readback and output checks. Whole execution does not expose per-value root-solver or fallback counters; those fields remain N/A.
 
 ## Parametric Bezier evaluation: CRV-03
 
@@ -2052,31 +1756,24 @@ caller and actual worker floating-environment preservation; nine malformed stati
 resource limits, cancellation, and release of all Root allocations. Cache
 checks cover repeated demand identity, one content-cache hit with four current
 source associations, and reuse of the prepared operation after segment/t
-replacement. A sparse query returns full Whole coverage. Public constant-node
-composition with 2^39 columns and with 2^40 rows confirms that full output
-capacity is required and rejects at the parametric node with
-ResourceExhausted/CapacityLimit; these tests verify rejection and do not run
-successful physical maximum-shape numerical workloads. Typed RGBA handles use
+replacement. A sparse query returns full Whole coverage. Typed RGBA handles use
 the Result schema's spatial/channel metadata; invalid alpha is rejected during
 Whole validation even for t=0.
 
 Build and run the focused root behavior test and independent oracle with:
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_result_math photospider_numeric_parametric -j8
+cmake --build build/kernel-dev --target test_numeric_result_math_bezier photospider_numeric_parametric -j8
 ctest --test-dir build/kernel-dev \
-  -R '^(test_numeric_result_math|test_numeric_parametric_result)$' --output-on-failure
+  -R '^(test_numeric_result_math_bezier|test_numeric_parametric_result)$' --output-on-failure
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_parametric apple
 PYTHONPYCACHEPREFIX=build/kernel-dev/python-pycache python3 oracle/ops/numeric/parametric_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_parametric strict
 PYTHONPYCACHEPREFIX=build/kernel-dev/python-pycache python3 oracle/ops/numeric/parametric_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_parametric apple
 ```
 
-Strict and Apple each passed all six manual groups and all 1,428 independent
-Fraction Bernstein/RN64 oracle cases bit-for-bit. The focused root CTest selection passed
-`test_numeric_result_math` and `test_numeric_parametric_result` 2/2 in 4.67
-seconds (4.50 seconds and 0.17 seconds respectively). The root target also
+Current Bezier family cases are in `tests/integration/numeric/test_numeric_result_math_bezier.cpp`. The root target also
 builds the manual executable. The separate
-`test_numeric_result_math` integration fixture continues to cover
+`test_numeric_result_math_bezier` integration fixture continues to cover
 `bezier_workflows`, `bezier_boundaries`, `bezier_projection` and
 `bezier_resources`; its 22 Fraction golden words include six function and 16
 parametric results. Those integration cases complement the new manual fixture
@@ -2086,23 +1783,10 @@ and do not replace it. The installed consumer compiles this same
 ```sh
 cmake --install build/kernel-dev \
   --prefix "$PWD/build/kernel-dev/result-only-install"
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer \
-  -DPhotospider_DIR="$PWD/build/kernel-dev/result-only-install/lib/cmake/Photospider"
-cmake --build build/kernel-dev/repeated-result-consumer \
-  --target photospider_numeric_parametric_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer \
-  -R '^installed_numeric_parametric_result$' --output-on-failure
-build/kernel-dev/repeated-result-consumer/photospider_numeric_parametric_consumer apple
 ```
 
 The installed 0.32.0 consumer compiled and linked against
-`result-only-install`; `installed_numeric_parametric_result` passed 1/1 under
-Strict in 0.17 seconds, and its direct Apple invocation passed all six groups.
-The independent 1428-case Bernstein/RN64 oracle remains unchanged and passes
-against the Result-backed manual executable under Strict and Apple. The earlier
-package 0.18 Value-path performance measurements remain historical evidence
-only; they do not measure the current Result implementation. x86 and successful
-maximum physical K/N execution were not tested.
+`result-only-install`.
 
 ## LUT1D baking templates: CRV-04
 
@@ -2138,17 +1822,7 @@ All templates require `count` in `[1,1048576]`; output dtype defaults to Float64
 cmake --build build/kernel-dev --target photospider_numeric_baking -j 8
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_baking strict
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_baking apple
-ctest --test-dir build/kernel-dev -R '^(test_numeric_baking_result|test_numeric_result_math)$' --output-on-failure
-```
-
-To compile and run the same example against the installed kernel package, configure the existing Unix Makefiles consumer tree with an explicit package location:
-
-```sh
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer \
-  -DPhotospider_DIR="$PWD/build/kernel-dev/result-only-install/lib/cmake/Photospider" \
-  -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-only-install"
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_baking_consumer -j 8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_baking_result$' --output-on-failure
+ctest --test-dir build/kernel-dev -R '^(test_numeric_baking_result|test_numeric_result_math_baking)$' --output-on-failure
 ```
 
 The manual executable accepts `strict`, `apple` or `x86`; run accelerated profiles on a matching CPU. Its graph comparison covers six templates, two table dtypes and four demand modes (full values, axis-only, joint values and axis, and sparse values), or 48 generated/hand-authored graph pairs per selected profile. The fixture checks each emitted tensor against a separate analytic value set and compares graph output descriptors, Result bits, source dependencies and dirty mapping. Those graph fixtures establish template equivalence; independent numeric oracle cases for the underlying operations remain separate evidence.
@@ -2163,8 +1837,7 @@ The fixture exercises cache reuse for repeated demand and fresh same-content sou
 
 The lifecycle group covers all six templates and both output dtypes. It retires every input backing while retaining the independently published values and axis Results and their authorized read windows. The values and axis buffers have separate Root Payload owners; each remains readable after its Result handle is released, and releasing the final windows returns live Root resource counts to zero.
 
-A linear LUT over samples `[0,.25,1]` returns `.125` at query `.25`, while continuous `x^2` is `.0625`. Baking stores discrete samples; CRV-05 interpolates that table and does not retain the source interpolation method. The root focused selection passed `test_numeric_baking_result` and `test_numeric_result_math` 2/2 (0.38 and 4.83 seconds; 5.22 seconds total). Strict and Apple direct runs each passed all seven manual groups. The freshly compiled installed 0.32.0 consumer passed the broader baking/inverse/LUT3D selection 3/3 in 5.71 seconds; the baking case took 2.39 seconds, and the installed Apple invocation passed all seven groups. The CTest durations include work from concurrent CPU tests and are not performance measurements. The manual example target is excluded from the default build; `test_numeric_baking_result` registers its direct behavior entry.
-
+A linear LUT over samples `[0,.25,1]` returns `.125` at query `.25`, while continuous `x^2` is `.0625`. Baking stores discrete samples; CRV-05 interpolates that table and does not retain the source interpolation method. Current baking family cases are in `tests/integration/numeric/test_numeric_result_math_baking.cpp`. The CTest durations include work from concurrent CPU tests and are not performance measurements. The manual example target is excluded from the default build; `test_numeric_baking_result` registers its direct behavior entry.
 
 ## LUT1D application: CRV-05
 
@@ -2228,18 +1901,16 @@ requirements.
 Run the current focused Result test with:
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_result_math -j8
+cmake --build build/kernel-dev --target test_numeric_result_math_lut1d -j8
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_lut1d strict
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_lut1d apple
 python3 oracle/ops/numeric/lut1d_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_lut1d strict
 python3 oracle/ops/numeric/lut1d_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_lut1d apple
-ctest --test-dir build/kernel-dev -R '^(test_numeric_lut1d_result|test_numeric_result_math)$' --output-on-failure
+ctest --test-dir build/kernel-dev -R '^(test_numeric_lut1d_result|test_numeric_result_math_lut1d)$' --output-on-failure
 ```
 
 The `test_numeric_lut1d_result` manual workflow exercises seven groups under
-Strict and the locally available Apple profile. Its independent Fraction driver
-passes 1,416 bit-equal cases per profile; those cases do not claim to cover every
-table size, channel count or input domain. The adapted fixture also checks the
+Strict and the locally available Apple profile. The adapted fixture also checks the
 six CRV-04 baking-to-LUT chains, static preparation reuse across input/table/axis
 replacement, cache associations refreshed to the current source Results, and
 full Whole output coverage after a sparse query. It covers all-port reversed
@@ -2253,13 +1924,8 @@ Root resources to zero. A [2^39]-channel sparse output request fails at the LUT
 node with `ResourceExhausted/CapacityLimit`; a separate L=1,048,576 case succeeds
 with the axis grid charged to Metadata and without a dense table copy.
 
-The latest focused root CTest selection passed `test_numeric_lut1d_result` and
-`test_numeric_result_math` 2/2 in 4.74 seconds; the existing math integration
-test took 4.42 seconds and the LUT1D manual test took 0.31 seconds. The installed
-consumer compiled and linked this same source against package 0.32.0, then passed
-`installed_numeric_lut1d_result` 1/1 under Strict in 0.38 seconds (0.39 seconds
-total). Its direct Apple run also passed all seven groups. These tests are
-separate: `test_numeric_result_math` is the existing integration fixture, while
+Current LUT1D family cases are in `tests/integration/numeric/test_numeric_result_math_lut1d.cpp`. These tests are
+separate: `test_numeric_result_math_lut1d` is the existing integration fixture, while
 the new manual and installed tests execute `lut1d.cpp`.
 
 The existing integration fixture retains its LUT1D boundary and resource
@@ -2270,26 +1936,17 @@ when the full Float64 output needs 2 MiB under a 1 MiB Payload cap, and accepts 
 zero-stride Float32 table [262145] under that cap with only the 8-byte output
 added to live Payload.
 
-The installed `installed_numeric_lut1d_result` CTest test runs the
-`photospider_numeric_lut1d_consumer` executable, which compiles the same
-`lut1d.cpp` against the installed `Photospider::kernel` package. Use the
+Use the
 installed prefix and explicit `Photospider_DIR` when configuring the consumer
 tree. The tested commands and result are:
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/result-only-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer -DPhotospider_DIR="$PWD/build/kernel-dev/result-only-install/lib/cmake/Photospider"
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_lut1d_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_lut1d_result$' --output-on-failure
-build/kernel-dev/repeated-result-consumer/photospider_numeric_lut1d_consumer apple
 ```
 
 The Result oracle is an independent exact Fraction comparison for the enumerated
 cases, not a claim that all Float32 inputs meet a stronger bound than the
-published accelerated contract. The full dynamic axis grid at maximum L was
-exercised; the complete maximum physical channel-table allocation and x86 numeric
-execution were not run. The old package 0.18 Value-adapter performance
-measurements remain historical and do not measure this Result workflow.
+published accelerated contract.
 
 ## Scalar coordinate shapers
 
@@ -2353,24 +2010,22 @@ ResourceExhausted. Whole fallback/evaluation counters are unavailable.
 Run the focused Result CTest and the Strict and Apple manual/oracle probes with:
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_result_math photospider_numeric_shapers -j8
-ctest --test-dir build/kernel-dev -R '^test_numeric_result_math$' --output-on-failure
+cmake --build build/kernel-dev --target test_numeric_result_math_filters photospider_numeric_shapers -j8
+ctest --test-dir build/kernel-dev -R '^test_numeric_result_math_filters$' --output-on-failure
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_shapers strict
 python3 oracle/ops/numeric/shaper_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_shapers strict
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_shapers apple
 python3 oracle/ops/numeric/shaper_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_shapers apple
 ```
 
-The Result CTest passes 1/1 in 7.22 seconds. It covers `shaper_workflows`,
+It covers `shaper_workflows`,
 `shaper_boundaries`, `shaper_preparation_and_cancel` and the existing
-`result_shaper_authoring` checks. All six manual fixture groups pass under Strict
-and the local Apple profile. The independent Fraction/directed-MPFR 4.2.2 oracle
-passes 4,196 cases under each profile against the Result probe. The fixtures
+`result_shaper_authoring` checks. The fixtures
 cover all four forms and both dtypes, joint and reversed partitions, typed
 inputs, negative and unaligned strides, floating-environment preservation,
 zero and large budgets, cancellation and upstream failures.
 
-The installed consumer passes 1/1 in 0.33 seconds. It exercises public log
+It exercises public log
 forward/inverse composition, linear inverse wiring and reads outputs after
 context teardown. Reproduce the installed check with:
 
@@ -2382,10 +2037,7 @@ ctest --test-dir build/kernel-dev/consumer-build -R '^installed_result_numeric$'
 ```
 
 Whole execution certifies the complete output and retains global coordinates;
-a sparse request does not reduce the Result descriptor's coverage. Repeated
-requests return consistent values, but these checks do not establish a warm
-cache hit. x86 numerical execution, GPU execution, maximum-size shapes and
-performance were not tested. MPFR 4.2.2 is used only by the independent oracle.
+a sparse request does not reduce the Result descriptor's coverage. MPFR 4.2.2 is used only by the independent oracle.
 
 ## Measured three-dimensional LUT baking
 
@@ -2489,8 +2141,7 @@ Identity passes zero tolerance. For the source `(r*r,g,b)`, a 2×2×2 grid and
 center `[.5,.5,.5]` give reference `[.25,.5,.5]`, applied LUT `[.5,.5,.5]` and
 maximum errors `[.25,0,0]`. For a source that squares each component on a
 2×2×2 grid, the center reference is `[.25,.25,.25]`, while either applied LUT gives
-`[.5,.5,.5]`. With atol=.1/rtol=0, the report has passed=false, failed_count=1,
-max_abs_error=`[.25,.25,.25]`, first_failure_index=0. Table requests fail with
+`[.5,.5,.5]`. Table requests fail with
 `LutApproximationToleranceExceeded`, including a request for one exact grid
 vertex; axis-only remains independent. The relative test uses
 `abs(lut-reference)<=atol+rtol*abs(reference)` with exact arithmetic.
@@ -2511,7 +2162,7 @@ fragments. Different shared parameter snapshots cause a new measurement;
 matching shapes alone are insufficient.
 
 The `baking3d.cpp` manual executable accepts `strict` and `apple`; each runs 12
-behavior groups. The Fraction oracle passes 384 cases per profile. The cases
+behavior groups. The cases
 cover all five geometries, both table dtypes, reversed and unaligned layouts,
 table/axis/report demand, Empty and source-error ordering, cache hits and current
 ObjectId association, preparation reuse and rebinding, report quality gating,
@@ -2533,33 +2184,21 @@ build/kernel-dev/examples/numeric_workflow/photospider_numeric_baking3d apple
 PYTHONPYCACHEPREFIX=build/kernel-dev/python-pycache python3 oracle/ops/numeric/baking3d_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_baking3d apple
 ```
 
-The final root focused selection passed 9/9 tests in 15.30 seconds: eight
-manual workflow tests, including `test_numeric_baking3d_result` (5.12 seconds),
-and the shared `test_numeric_result_math` integration test (4.58 seconds). The
+Current baking family cases are in `tests/integration/numeric/test_numeric_result_math_baking.cpp`. The
 shared test's bake assertions provide independent fixture coverage, not all
 `baking3d.cpp` cases.
 
-The installed SDK consumer builds the same example against
-`Photospider::kernel` and registers `installed_numeric_baking3d_result`.
 Reproduce it with the configured 0.32.0 install prefix:
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/result-only-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer -DPhotospider_DIR="$PWD/build/kernel-dev/result-only-install/lib/cmake/Photospider" -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-only-install"
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_baking3d_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_baking3d_result$' --output-on-failure
 ```
-
-The fresh 0.32.0 installed-consumer selection passed 8/8 tests in 14.63 seconds;
-`installed_numeric_baking3d_result` passed in 5.91 seconds. Running the installed
-consumer directly with `apple` passed all 12 behavior groups.
 
 Report reading requires a Result window large enough for its largest fixed-size
 field (72 bytes). The measured quality guarantee applies at the listed centers
 and extra points using the chosen interpolation and table dtype. It is not a
 continuous-domain bound. This validation does not establish x86, maximum-shape
-success or native-GPU execution. Historical 0.18 Value-path timings and raw
-traces do not measure the current Result implementation.
+success or native-GPU execution.
 
 Table, axis and report can be requested, retained and released independently.
 Releasing the report handle does not promise immediate release of all report
@@ -2604,15 +2243,12 @@ python3 oracle/ops/numeric/inverse_oracle.py build/kernel-dev/examples/numeric_w
 ctest --test-dir build/kernel-dev -R '^test_numeric_inverse_result$' --output-on-failure
 ```
 
-The manual fixture, shared integration cases and independent oracle provide separate evidence: the manual source owns its Result bindings and owner-lifetime checks; `test_numeric_result_math` covers `inverse_workflows` and `inverse_boundaries`; the 407-case Fraction oracle checks numerical outputs. Strict and Apple manual runs each pass five groups, and each oracle run passes all 407 cases. Strict matches the exact reference; Apple is checked against the shared FP32-scaled bound, not bitwise equality. The dedicated `test_numeric_inverse_result` CTest passes 1/1 in 0.89 seconds (0.94 seconds total for its focused selection). The separate `test_numeric_result_math` integration test passed in a distinct selection alongside `test_numeric_baking_result`; the selection passed 2/2 in 5.22 seconds, with 4.83 seconds in the shared math executable. An independent source/contract review and worker verification found no blocker or required changes.
+The manual fixture, shared integration cases and independent oracle provide separate evidence: the manual source owns its Result bindings and owner-lifetime checks; `test_numeric_result_math_curves` covers `inverse_workflows` and `inverse_boundaries`; the 407-case Fraction oracle checks numerical outputs. Strict matches the exact reference; Apple is checked against the shared FP32-scaled bound, not bitwise equality. An independent source/contract review and worker verification found no blocker or required changes.
 
-The installed consumer target `photospider_numeric_inverse_consumer` uses the 0.32.0 SDK package, and CTest names it `installed_numeric_inverse_result`. The installed consumer selection for baking, inverse and LUT3D passed 3/3 in 5.71 seconds; the inverse case took 0.94 seconds. Its direct Apple run passed all five groups. Reproduce that consumer check with:
+Reproduce that consumer check with:
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/result-only-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer -DPhotospider_DIR="$PWD/build/kernel-dev/result-only-install/lib/cmake/Photospider" -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-only-install"
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_inverse_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_inverse_result$' --output-on-failure
 ```
 
 ## Signal resampling
@@ -2644,31 +2280,24 @@ document.outputs.insert(document.outputs.end(), exports.begin(), exports.end());
 
 With old positions `[0,1,2,3,4,5,6,7]`, signal `[1,-1,1,-1,1,-1,1,-1]` and new positions `[0,2,4,6]`, Strict samples have Float64 bits `0x3fcc6b828682ab42`, the once-rounded value of `(pi-2)/(pi+2)`. Accelerated profiles use the shared FP32 four-ULP bound. This finite filter leaves a positive Nyquist residual, so this example does not remove all aliasing. The exported positions are exactly `[0,2,4,6]`; select and measure other parameters for a different quality requirement.
 
-The manual executable passes eight groups under each of Strict and Apple. It retains CRV-01's exact-copy and numeric-accuracy checks and has no independent resampling oracle. Float64 layouts cover all four templates, eight source-layout combinations, and all four caller/actual-worker rounding modes. Float32 coverage separately checks special-bit forwarding, typed validation and owner lifetime; it does not run the full fenv matrix. Typed `SampledSignal` validation is output-specific: a valid requested positions element succeeds, a requested typed NaN fails with `InvalidArgument` at input 3, and a samples request validates the complete query and rejects a remote NaN at input 3. The manual fixture binds source backing as Referenced without creating Root Payload copies. A mapped positions Result and its authorized read window keep the query owner alive after the Result handle is released; releasing the last window retires that owner. K=65536 performs a real endpoint interpolation. At N=2^40 the positions view succeeds without materialization, while the complete Whole samples output fails with `ResourceExhausted/CapacityLimit` at node 1. This checks rejection of the full output allocation, not numerical execution at that size.
+ It retains CRV-01's exact-copy and numeric-accuracy checks and has no independent resampling oracle. Float64 layouts cover all four templates, eight source-layout combinations, and all four caller/actual-worker rounding modes. Float32 coverage separately checks special-bit forwarding, typed validation and owner lifetime. Typed `SampledSignal` validation is output-specific: a valid requested positions element succeeds, a requested typed NaN fails with `InvalidArgument` at input 3, and a samples request validates the complete query and rejects a remote NaN at input 3. The manual fixture binds source backing as Referenced without creating Root Payload copies. A mapped positions Result and its authorized read window keep the query owner alive after the Result handle is released; releasing the last window retires that owner. K=65536 performs a real endpoint interpolation. At N=2^40 the positions view succeeds without materialization, while the complete Whole samples output fails with `ResourceExhausted/CapacityLimit` at node 1. This checks rejection of the full output allocation, not numerical execution at that size.
 
 Build the manual example and its focused behavior test, then run the shared integration fixture separately:
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_result_math photospider_numeric_resampling -j8
-ctest --test-dir build/kernel-dev -R '^(test_numeric_resampling_result|test_numeric_result_math)$' --output-on-failure
+cmake --build build/kernel-dev --target test_numeric_result_math_curves photospider_numeric_resampling -j8
+ctest --test-dir build/kernel-dev -R '^(test_numeric_resampling_result|test_numeric_result_math_curves)$' --output-on-failure
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_resampling strict
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_resampling apple
 ```
 
-The dedicated `test_numeric_resampling_result` checks this manual behavior; `test_numeric_result_math` is a separate shared integration fixture. The root focused test passed, and the two fixture scopes must not be treated as an independent resampling oracle.
+The dedicated `test_numeric_resampling_result` checks this manual behavior; `test_numeric_result_math_curves` is a separate shared integration fixture.
 
-The installed 0.32.0 consumer compiles the same public example through `Photospider::kernel`. Its Strict CTest passed 1/1, and the direct Apple run passed all eight groups:
+The installed 0.32.0 consumer compiles the same public example through `Photospider::kernel`.
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/result-only-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer \
-  -DPhotospider_DIR="$PWD/build/kernel-dev/result-only-install/lib/cmake/Photospider"
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_resampling_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_resampling_result$' --output-on-failure
-build/kernel-dev/repeated-result-consumer/photospider_numeric_resampling_consumer apple
 ```
-
-Use `x86` only on a supported AVX2 build; no x86 run or Result performance run is recorded for this revision.
 
 ## Uniform lowpass
 
@@ -2720,8 +2349,8 @@ For `[0,0,1,0,0]`, radius 2 and center index 2, the exact Float64 fixtures are:
 | Gaussian | sigma=1 | `3fd9c486742831f7` |
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_result_math photospider_numeric_lowpass photospider_numeric_lowpass_execution -j8
-ctest --test-dir build/kernel-dev -R '^(test_numeric_lowpass_result|test_numeric_lowpass_execution_result|test_numeric_result_math)$' --output-on-failure
+cmake --build build/kernel-dev --target test_numeric_result_math_filters photospider_numeric_lowpass photospider_numeric_lowpass_execution -j8
+ctest --test-dir build/kernel-dev -R '^(test_numeric_lowpass_result|test_numeric_lowpass_execution_result|test_numeric_result_math_filters)$' --output-on-failure
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_lowpass strict
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_lowpass apple
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_lowpass_execution strict
@@ -2754,30 +2383,14 @@ allocation failure. The 2^40-element sparse-demand case rejects the complete
 Whole output at node 1 with `CapacityLimit`, rather than attempting a numerical
 run at that size.
 
-Under both Strict and Apple, the uniform and nonuniform executables pass two groups each, and the execution executable passes four groups. `lowpass_period_cancel` enters `geometry.partition`, cancels on its 8192-unit work charge and checks payload rollback and Root retirement. No x86 numerical execution, native GPU run or Result performance run was done. The benchmark tables below are historical Value-path measurements.
+ `lowpass_period_cancel` enters `geometry.partition`, cancels on its 8192-unit work charge and checks payload rollback and Root retirement.
 
 Reproduce the focused Result run with:
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_result_math photospider_numeric_lowpass photospider_numeric_lowpass_nonuniform photospider_numeric_lowpass_execution -j8
-ctest --test-dir build/kernel-dev -R '^(test_numeric_lowpass_result|test_numeric_lowpass_nonuniform_result|test_numeric_lowpass_execution_result|test_numeric_result_math)$' --output-on-failure
+cmake --build build/kernel-dev --target test_numeric_result_math_filters photospider_numeric_lowpass photospider_numeric_lowpass_nonuniform photospider_numeric_lowpass_execution -j8
+ctest --test-dir build/kernel-dev -R '^(test_numeric_lowpass_result|test_numeric_lowpass_nonuniform_result|test_numeric_lowpass_execution_result|test_numeric_result_math_filters)$' --output-on-failure
 ```
-
-The dedicated `test_numeric_lowpass_result` and `test_numeric_lowpass_execution_result` CTests pass. The shared `test_numeric_result_math` fixture also passes, and the final focused cross-family root selection passed 9/9 in 15.30 seconds. The installed 0.32.0 `Photospider::kernel` consumers below use separate test registrations from those root tests.
-
-Reproduce the installed public consumer check with:
-
-```sh
-cmake --install build/kernel-dev --prefix build/kernel-dev/result-only-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer \
-  -DPhotospider_DIR="$PWD/build/kernel-dev/result-only-install/lib/cmake/Photospider"
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_lowpass_consumer photospider_numeric_lowpass_execution_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^(installed_numeric_lowpass_result|installed_numeric_lowpass_execution_result)$' --output-on-failure
-build/kernel-dev/repeated-result-consumer/photospider_numeric_lowpass_consumer apple
-build/kernel-dev/repeated-result-consumer/photospider_numeric_lowpass_execution_consumer apple
-```
-
-The installed uniform consumer passes its Strict CTest and two direct Apple groups; the execution consumer passes its Strict CTest and four direct Apple groups. These tests compile the public example sources against the installed 0.32.0 package without private headers. The performance tables below describe the earlier Value path and do not measure Result performance.
 
 ## Nonuniform lowpass
 
@@ -2823,8 +2436,8 @@ the exact half-minimum result rounds to +0; with three minima it rounds to two
 minima, in both Float32 and Float64.
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_result_math photospider_numeric_lowpass_nonuniform -j8
-ctest --test-dir build/kernel-dev -R '^(test_numeric_lowpass_nonuniform_result|test_numeric_result_math)$' --output-on-failure
+cmake --build build/kernel-dev --target test_numeric_result_math_filters photospider_numeric_lowpass_nonuniform -j8
+ctest --test-dir build/kernel-dev -R '^(test_numeric_lowpass_nonuniform_result|test_numeric_result_math_filters)$' --output-on-failure
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_lowpass_nonuniform strict
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_lowpass_nonuniform apple
 PYTHONPYCACHEPREFIX=build/kernel-dev/python-pycache python3 oracle/ops/numeric/nonuniform_lowpass_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_lowpass_nonuniform strict
@@ -2850,123 +2463,16 @@ vectors and growth overlap are admitted explicitly. This implementation
 prioritizes certified results and composability; it makes no throughput claim.
 The manual example target is excluded from the default build, and its direct
 behavior is registered as `test_numeric_lowpass_nonuniform_result`. The shared
-`test_numeric_result_math` integration fixture is separate from that manual CTest.
+`test_numeric_result_math_filters` integration fixture is separate from that manual CTest.
 
-The nonuniform manual executable passes two groups under each of Strict and
-Apple. Its independent Fraction/directed-MPFR oracle passes 245 cases per profile
-with exact `got == want` bits. The dedicated root CTest and shared math fixture
-pass; both are included in the final focused cross-family selection, which passed
-9/9 in 15.30 seconds. The selection also includes adjacent numeric families. No
-x86 numerical execution, native GPU run, full CTest or Result performance run was
-done. The timing tables below are historical measurements from the earlier Value
-implementation.
+ The selection also includes adjacent numeric families.
 
 The installed 0.32.0 consumer compiles this source against the public
-`Photospider::kernel` package. Its Strict CTest passed 1/1, and its direct Apple
-run passed two groups:
+`Photospider::kernel` package.
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/result-only-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer \
-  -DPhotospider_DIR="$PWD/build/kernel-dev/result-only-install/lib/cmake/Photospider"
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_lowpass_nonuniform_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_lowpass_nonuniform_result$' --output-on-failure
-build/kernel-dev/repeated-result-consumer/photospider_numeric_lowpass_nonuniform_consumer apple
 ```
-## Historical regional signal timing and accounting
-
-The following table predates Whole and is retained as historical measurement.
-Current counters and storage differ; use the CRV-10/11 math notes for this revision.
-
-`signal_benchmark.cpp` runs inverse-linear/PCHIP and all ten lowpass kernels
-through public Compiler/ExecutionContext. It verifies analytic raw bits before
-accepting every timed result and prints source-support counts, fallback counts,
-output bytes, managed payload/metadata peaks and owners retained after context
-destruction. Bindings, compilation and freeze precede each timed execution.
-
-```sh
-cmake --build build/clang21-numeric --target photospider_numeric_signal_benchmark -j 6
-build/clang21-numeric/examples/numeric_workflow/photospider_numeric_signal_benchmark strict
-build/clang21-numeric/examples/numeric_workflow/photospider_numeric_signal_benchmark apple
-```
-
-Measured on Apple M5, native Clang21 RelWithDebInfo, one CPU worker, cache off,
-three repetitions per case, Float64. The small fixture requests one output; the
-representative larger fixture requests 256. Inverse uses 33 identity knots and
-Whole query demand. Lowpass uses 1025 regularly spaced values containing isolated
-unit impulses, requesting 256 disjoint impulse centers. Uniform radius is 2,
-continuous radius is .5, sinc cutoff is .25, Kaiser beta=0, Gaussian sigma=1.
-The independent continuous impulse bits come from the Fraction/MPFR oracle.
-This declares a bounded sparse workload, not a full-limit throughput benchmark.
-
-| Operation, 256 requested | Strict median / max (ms) | Apple median / max (ms) |
-| --- | --- | --- |
-| `invert_linear` | 11.019 / 11.697 | 10.179 / 10.223 |
-| `invert_pchip` | 669.863 / 674.808 | 672.903 / 673.073 |
-| `lowpass_uniform_hann_sinc` | 444.593 / 451.396 | 446.980 / 449.168 |
-| `lowpass_uniform_hamming_sinc` | 452.191 / 452.363 | 447.984 / 448.620 |
-| `lowpass_uniform_blackman_sinc` | 454.561 / 455.322 | 449.111 / 452.224 |
-| `lowpass_uniform_kaiser_sinc` | 441.216 / 446.360 | 437.927 / 439.528 |
-| `lowpass_uniform_gaussian` | 445.108 / 448.195 | 437.444 / 439.143 |
-| `lowpass_nonuniform_hann_sinc` | 1681.032 / 1721.745 | 1664.975 / 1677.099 |
-| `lowpass_nonuniform_hamming_sinc` | 1668.530 / 1672.319 | 1683.545 / 1693.331 |
-| `lowpass_nonuniform_blackman_sinc` | 4892.051 / 4941.196 | 4850.130 / 4866.580 |
-| `lowpass_nonuniform_kaiser_sinc` | 1836.944 / 1837.451 | 1816.246 / 1819.265 |
-| `lowpass_nonuniform_gaussian` | 889.141 / 897.047 | 902.272 / 909.420 |
-
-All 48 cases passed all three repetitions, exact output checks and final-owner
-release. Every 256-output case retains 2048 payload bytes after context teardown.
-Inverse peaks were 289928 payload / 11481032 metadata bytes; its retained metadata
-was 5792 bytes. Uniform peaks were 207616 / 3878176 bytes; continuous peaks were
-207720 / 8706912 bytes. Their 256 separate fragments retained 336272 metadata
-bytes. The peak payload column combines output and continuation scratch; the
-current public ledger does not separately attribute scratch. Metadata includes
-limbs in ResourceVectors, interval maps, coefficients and dependency structures.
-Caller-preallocated source backing and legacy STL/shared-owner bookkeeping
-exclusions are not standalone scratch measurements. The executable prints the
-small-fixture rows and exact unique source support counts as well.
-
-All accelerated lowpass and non-knot PCHIP inverse evaluations reported strict
-fallback; inverse-linear did not. These timings include dependency planning,
-validation and publication, and establish no speedup. The present continuous
-Blackman global polynomial path and disjoint certificate construction are costly;
-callers should use explicit budgets and small requests while composing workflows.
-WSL timing is intentionally not used as a performance reference.
-
-## Category benchmark diagnostics and historical Value measurements
-
-The current category benchmark binds Result sources and checks Result outputs
-against its fixtures. The filtered Strict commands above verify the NUM-11 and
-NUM-13 diagnostic counters. The CSV and timing records in this section are
-historical Value-path measurements and do not describe current Result
-performance.
-
-```sh
-cmake --build build/numeric --target photospider_numeric_category_benchmark -j 4
-build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark strict > build/category-strict.csv
-build/numeric/examples/numeric_workflow/photospider_numeric_category_benchmark apple > build/category-apple.csv
-```
-
-The historical Value-path run produced 36 CSV rows per profile. The recorded run
-used Apple M5, Clang 21, RelWithDebInfo, one CPU
-worker, CPU-only execution, and both result/dependency caches disabled. There
-are three repetitions per row. These are workflow execution times, including
-planning of runtime dependencies, validation and output publication. Graph
-construction, compilation, freeze, result checking and result destruction are
-outside the timer. The context is reused for three executions; there is no
-separate discarded warm-up. Median and maximum are reported, with no statistical
-percentile or throughput claim from three samples. No build or other acceptance
-process ran concurrently with these measurements. WSL is used only for numerical
-correctness and supplies no timing reference.
-
-The earlier benchmark fixtures used a small analytic case and a larger
-exploratory shape: N=1 and N=256, except integration uses N+1 samples and baking
-uses cube side 2 and 5. These shapes describe that Value-path benchmark, not the
-current Result implementation; they do not establish maximum-shape throughput
-or cover every primitive, parameter, model and dtype in a cluster. Values use Float64, with Int64 gather
-and Bézier indices and a UInt8 comparison output. All requests are Whole.
-CRV-04 has no separate arithmetic primitive; its public baking composition is
-covered by the LUT and expression workflows above.
 
 | Cluster / measured operation | Inputs and exact expected result |
 | --- | --- |
@@ -2988,87 +2494,9 @@ covered by the LUT and expression workflows above.
 | CRV-07 apply_lut3d_trilinear | Identity 2x2x2 XYZ table; N colors [.25,.5,.75] returned unchanged |
 | CRV-08 log2_shaper | N copies of 4, scalar bounds [1,16]; .5 each |
 | CRV-09 bake_lut3d template | Identity XYZ source, side 2/5, axis 0..1, trilinear, atol=rtol=0; globally gated table equals exact grid coordinates |
-
-Times below are **median / maximum in milliseconds**. Larger shape refers to
-the declared N=256 or side-5 fixture, not an implementation limit.
-
-| Cluster | Small Strict | Small Apple | Larger Strict | Larger Apple |
-| --- | ---: | ---: | ---: | ---: |
-| NUM-02 | 0.112 / 0.536 | 0.101 / 0.176 | 62.565 / 63.224 | 67.225 / 67.619 |
-| NUM-03 | 0.078 / 0.116 | 0.081 / 0.099 | 0.080 / 0.094 | 0.082 / 0.084 |
-| NUM-06 | 0.122 / 0.137 | 0.119 / 0.122 | 109.375 / 110.556 | 114.585 / 114.942 |
-| NUM-07 | 0.099 / 0.130 | 0.093 / 0.099 | 0.184 / 0.184 | 0.167 / 0.169 |
-| NUM-08 | 0.106 / 0.116 | 0.100 / 0.105 | 82.447 / 85.433 | 82.208 / 82.611 |
-| NUM-09 | 0.101 / 0.146 | 0.098 / 0.112 | 0.137 / 0.139 | 0.135 / 0.136 |
-| NUM-10 | 0.100 / 0.112 | 0.100 / 0.109 | 2.182 / 2.263 | 2.229 / 2.350 |
-| NUM-11 | 0.103 / 0.121 | 0.081 / 0.088 | 0.210 / 0.219 | 0.198 / 0.213 |
-| NUM-12 | 0.084 / 0.108 | 0.074 / 0.087 | 163.261 / 185.410 | 157.608 / 157.656 |
-| NUM-13 | 0.093 / 0.137 | 0.067 / 0.100 | 126.692 / 127.284 | 125.140 / 127.949 |
-| NUM-14 | 0.146 / 0.165 | 0.142 / 0.160 | 8.836 / 9.116 | 8.484 / 8.819 |
-| NUM-15 | 0.126 / 0.160 | 0.128 / 0.137 | 194.473 / 195.772 | 195.033 / 202.138 |
-| CRV-03 | 0.270 / 0.301 | 0.253 / 0.287 | 30.289 / 30.487 | 26.653 / 26.772 |
-| CRV-05 | 0.143 / 0.177 | 0.156 / 0.168 | 9.060 / 9.152 | 8.292 / 8.358 |
-| CRV-06 | 2.085 / 2.119 | 2.076 / 2.116 | 43.732 / 43.760 | 36.195 / 36.374 |
-| CRV-07 | 0.391 / 0.408 | 0.367 / 0.401 | 64.018 / 65.629 | 59.307 / 59.877 |
-| CRV-08 | 0.135 / 0.165 | 0.119 / 0.156 | 4.111 / 4.250 | 4.100 / 4.120 |
-| CRV-09 | 19.823 / 19.893 | 19.309 / 19.476 | 70.785 / 71.746 | 68.568 / 69.089 |
-
-Managed measurements below are bytes, written **small → larger**. Payload peak
-includes admitted arithmetic/continuation scratch and published storage; the
-current public counter does not separate those two contributions. Metadata peak
-covers the context's freeze and all three executions. Retained payload/metadata
-are read after context/frozen-plan destruction with only the output retained.
-These exact resource counts were equal between the two profiles. Source payloads
-are allocated before the context and excluded; legacy STL bookkeeping/control
-blocks and process RSS are outside this admission model. Output payload bytes
-equal retained payload bytes in these fixtures.
-
-| Cluster | Peak payload | Peak metadata | Retained payload | Retained metadata | Source support elements | Numeric evaluations |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| NUM-02 | 1120 → 3160 | 4960 → 1141504 | 8 → 2048 | 544 → 139264 | 1 → 2 | 1 → 256 |
-| NUM-03 | 48 → 2088 | 4272 → 4272 | 8 → 2048 | 544 → 544 | 1 → 1 | 1 → 256 |
-| NUM-06 | 3144 → 5184 | 11080 → 2214520 | 8 → 2048 | 544 → 139264 | 5 → 1280 | 1 → 256 |
-| NUM-07 | 2329 → 2584 | 5528 → 5528 | 1 → 256 | 544 → 544 | 2 → 512 | 1 → 256 |
-| NUM-08 | 7864 → 9904 | 7768 → 1828328 | 8 → 2048 | 544 → 139264 | 3 → 768 | 1 → 256 |
-| NUM-09 | 408 → 4488 | 10168 → 10168 | 16 → 4096 | 5968 → 5968 | 2 → 512 | 2 → 512 |
-| NUM-10 | 5216 → 7256 | 21832 → 3261352 | 8 → 2048 | 5792 → 5792 | 2 → 512 | 1 → 256 |
-| NUM-11 | 4176 → 4176 | 40952 → 40952 | 8 → 8 | 5792 → 5792 | 1 → 256 | 1 → 256 |
-| NUM-12 | 4224 → 38904 | 27464 → 2049328 | 8 → 2048 | 5792 → 1482752 | 1 → 256 | 1 → 256 |
-| NUM-13 | 6176 → 10256 | 96704 → 6367808 | 16 → 2056 | 5792 → 5792 | 1 → 256 | 1 → 256 |
-| NUM-14 | 2936 → 7016 | 63080 → 13586248 | 16 → 4096 | 5968 → 5968 | 8 → 518 | 2 → 512 |
-| NUM-15 | 6024 → 10104 | 81296 → 10274824 | 16 → 2056 | 5792 → 5792 | 4 → 259 | 2 → 257 |
-| CRV-03 | 519680 → 527840 | 143752 → 20597608 | 16 → 4096 | 5968 → 5968 | 8 → 518 | 2 → 512 |
-| CRV-05 | 287000 → 291080 | 110736 → 9984072 | 8 → 2048 | 5792 → 5792 | 6 → 261 | 1 → 256 |
-| CRV-06 | 723936 → 736176 | 70648 → 8192248 | 24 → 6144 | 5968 → 5968 | 9 → 264 | 3 → 768 |
-| CRV-07 | 522024 → 534264 | 129976 → 15114776 | 24 → 6144 | 5968 → 5968 | 36 → 801 | 3 → 768 |
-| CRV-08 | 208384 → 212464 | 75568 → 8832952 | 8 → 2048 | 5792 → 5792 | 3 → 258 | 1 → 256 |
-| CRV-09 | 543248 → 550808 | 424380 → 4001956 | 192 → 3000 | 6032 → 6032 | unavailable → unavailable | 3 → 192 |
-
 `source_elements` is the unique named source support union, not physical read
-calls. NUM-11/13 additionally assert actual accumulator attempts. NUM-15 reports
-2/257 sample accumulator attempts and includes two scalar controls in source
-support. CRV-09's Result path currently returns no sample dependency-evidence
 object; its source support is explicitly `unavailable`, not zero. Its only
-external source is the nine-value axis. Its 3/192 numeric evaluations are the
-interpolated validation-center components, not a claim that all generated table
-components were included in that counter. The table request still executes the
 global zero-tolerance quality gate; all expected table values are checked.
-
-Every case in the historical run passed exact bits and reported zero strict
-fallbacks in that fixture. That describes those chosen exact/dyadic cases only; general logarithms, transfer
-functions and other accelerated operations can take the documented Strict
-fallback paths. Both profiles' CSVs include the same raw fields for every row.
-
-The driver explicitly admits 256 MiB live payload, 128 MiB managed metadata and
-64 MiB per-session state, with work limits of 64*2^30 execution and 32*2^30
-per-dependency units. The first attempted 256-query Bézier run reached the
-16 MiB default metadata ceiling; the final measured peak is shown above. This is
-an example of explicit caller admission, not a change to library defaults.
-Large dense association sets remain expensive, particularly sequence/remap,
-sort and prefix/integration requests. These measurements complement the sparse,
-streamed, resource-limit and independent numerical acceptance cases; they do not
-justify a production throughput promise.
-
 ### NUM-04 exp SIMD implementation
 
 The formal Float32 accelerated exp helpers use a certified normal-range NEON or
@@ -3077,55 +2505,10 @@ SLEEF binary64 enclosures in [-80,80], without narrowing their inputs. The
 [implementation and performance report](../../docs/built-in_ops/01-numeric/exp-performance.md)
 provides scope, accuracy, platform results and profiler limitations.
 
-```sh
-mkdir -p build/num04-exp
-cmake --build build/kernel-dev --target photospider_numeric_exp_benchmark -j8
-python3 oracle/ops/numeric/exp_bound.py
-python3 oracle/ops/numeric/exp_oracle.py build/num04-exp/oracle.bin
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_exp_benchmark check build/num04-exp/oracle.bin
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_exp_benchmark --timing-scopes
-python3 examples/numeric_workflow/exp_measure.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_exp_benchmark build/num04-exp/timings.csv
-```
-
 The corpus generator requires independent MPFR 4.2+. Its acceptance executable
 checks each input in six partitions, enforces the four-step bound, and checks
-layout, floating-environment, resource, and cancellation behavior. A recent
-Result-path run passed all 20,503 cases across six partitions with a maximum
-distance of two steps. The benchmark is a manual target available with
+layout, floating-environment, resource, and cancellation behavior. The benchmark is a manual target available with
 `BUILD_TESTING=ON`; its `public` and `core` layers execute a Result workflow.
-Append a Linux CPU number to `exp_measure.py` for `taskset` affinity. The
-maintained driver measures the production IQK implementation only. The example
-`photospider_numeric_exp_benchmark public 262144 10 7` measures seven public
-runs after one warmup.
-
-The timing fixture uses a private `Value` only to create immutable numeric
-backing. It publishes that backing as a source tensor Result under the execution
-Root, compiles the benchmark workflow once per input schema, and freezes a fresh
-binding for each new source Result. The Result cache is disabled and the
-workflow has one CPU worker. `public` times `Workflow::run`, including its
-`ExecutionContext::execute` call, coordinator work, continuation factory and
-initial Need, digest calculation, host publication, and the small wrapper that
-reads Root statistics and extracts the `ResultRef`. Benchmark operation
-definition creation and registration, source construction/publication, compile
-and static preparation, freeze, and output readback are outside that timer.
-`core` measures only `ResultContinuation::poll` on a CPU worker phase that has
-supplied tensors. It includes the checked `consume_work` observer and Result
-publication, and excludes continuation factory setup, initial Need, coordinator
-work, source admission, compile/freeze, and readback. `raw` retains the
-preallocated SIMD kernel timer. The public layer reports peak Root Payload,
-including Root-owned state, scratch, and output; immutable caller input storage
-is accounted as Referenced. This is managed Root accounting, not process RSS. Core and raw do
-not report a Payload peak.
-
-The exp A/B tables in the linked report retain their original Value/callback
-timing boundaries; they are historical and are not same-scope comparisons with
-the current Result workflow and computation-poll layers. A small smoke set of
-21 public/core/raw runs across exp and the six trig functions completed, using
-unaligned public input, reverse core input, and a 65-sample tail. It checks that
-the current paths run and report valid timings; it is not a performance campaign
-or a platform matrix. `--timing-scopes` reports each executable's timer
-boundary, and the CSV drivers append it to every timing row.
-The SLEEF comparison backends were removed after the recorded A/B evaluation.
 `exp64_oracle.py UNARY_EXECUTABLE [strict|apple|x86]` separately checks Float64
 exp against independent MPFR, including admission boundaries, strict special /
 range handling and inputs that cannot be represented in Float32.
@@ -3158,45 +2541,15 @@ Build and run the focused executable with:
 ```sh
 cmake --build build/kernel-dev --target photospider_numeric_math_batch -j8
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_math_batch
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_math_batch time 262144
 ctest --test-dir build/kernel-dev -R '^test_numeric_math_batch$' --output-on-failure
 ```
-
-The `time` mode writes `scalar_math_us` and `result_workflow_us`. It times the
-scalar `CertifiedMath::evaluate` loop and, separately, `ExecutionContext::execute`
-on a frozen Result workflow. Source construction, compilation, and freezing are
-outside the workflow timer; output readback and bit comparison are outside both
-timers. The workflow uses one CPU worker and disables the Result cache. These
-measurements are not callback medians and are not directly comparable with the
-historical core/callback measurements in [the NUM/CRV batch report](../../docs/built-in_ops/01-numeric/batch-performance.md).
-The [packed adapter and FP64 exp update](../../docs/built-in_ops/01-numeric/adapter-performance.md)
-records the newer CPU-instruction reductions, Apple/FreeBSD paired measurements,
-and added exp/binary64/multidimensional-layout checks.
 
 `trig_bound.py` analytically certifies the actual SIMD coefficients and rounding
 graph. `trig_oracle.py OUTPUT_DIRECTORY` generates independent MPFR corpora;
 `photospider_numeric_trig_benchmark check FUNCTION CORPUS` checks each corpus
 through six batch partitions, layouts, floating modes and resource/cancellation
-fixtures. `trig_measure.py CURRENT [BASELINE]` records the timer boundary
-reported by each executable in its `timing_scope` CSV column. An older
-executable that does not support `--timing-scopes` is marked `unknown`; rows
-with unknown or different scopes are not directly comparable. The current
-`core` scope differs from the historical callback timer, so do not use an old
-baseline's core row as a paired comparison. See [the trig report](../../docs/built-in_ops/01-numeric/trig-performance.md).
-
-`freebsd_analysis.py CURRENT_TRIG BASELINE_TRIG EXP [OUTPUT]` also writes a
-`timing_scope` field for every row. Historical baseline rows whose executable
-does not advertise a scope are marked `unknown`; use only matching known scopes
-for comparisons. To reproduce the historical FreeBSD campaign, build both
-executables with Clang 22 and the same C++ runtime; this does not make different
-timer scopes comparable. The command is:
-
-```sh
-cpuset -l 2 python3.12 examples/numeric_workflow/freebsd_analysis.py \
-  build/examples/numeric_workflow/photospider_numeric_trig_benchmark \
-  baseline-build/examples/numeric_workflow/photospider_numeric_trig_benchmark \
-  build/examples/numeric_workflow/photospider_numeric_exp_benchmark timing-final.csv
-```
+fixtures. The SIMD algorithms and proved domains are described in
+[certified SIMD trigonometric kernels](../../docs/built-in_ops/01-numeric/trig-performance.md).
 
 The trig timing CLI accepts `FUNCTION LAYER N SPAN REPETITIONS
 [profile|measure] [normal|mixed|outside|landmark|tiny] [LAYOUT]`. Layout 0/1/2/3
@@ -3207,8 +2560,3 @@ use `measure` for latency campaigns. `photospider_numeric_math_batch time [N]`
 selects the Result workflow array size.
 The signal benchmark accepts `PROFILE FILTER [float32|float64] [REPETITIONS]`;
 the dtype option applies only to inverse output, while lowpass remains Float64.
-
-See [the full scoped FreeBSD analysis](../../docs/built-in_ops/01-numeric/freebsd-full-analysis.md)
-for the 721 timing rows, additional CRV commands/artifacts, profiling boundaries,
-correctness checks and observed regressions. `freebsd_plot.py DATA_DIR OUTPUT.png`
-generates a PNG and SVG overview from these CSVs and requires optional matplotlib.

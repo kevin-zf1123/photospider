@@ -16,14 +16,7 @@ This executable takes no arguments. It also supports an independent build agains
 ```sh
 cmake -S examples/image_vertical -B build/image-vertical-consumer -DCMAKE_PREFIX_PATH=<install-prefix>
 cmake --build build/image-vertical-consumer
-```
-
-The installed-consumer project also provides an `installed_image_vertical` test:
-
-```sh
-cmake -S tests/consumer -B build/image-consumer -DCMAKE_PREFIX_PATH=<install-prefix>
-cmake --build build/image-consumer --target photospider_image_vertical
-ctest --test-dir build/image-consumer -R '^installed_image_vertical$' --output-on-failure
+sh
 ```
 
 ## Small full-graph and raw benchmark example
@@ -32,4 +25,4 @@ ctest --test-dir build/image-consumer -R '^installed_image_vertical$' --output-o
 
 The fixture contains binary fractions and checks every output channel against an independent binary-fraction oracle. It executes two source/control bindings through the same compiled plan and requires different output digests. The raw benchmark then checks two repetitions for each binding against the same oracle; its four benchmark samples must retain the compiled plan and result identities. The program reports the output values, execution timing, peak payload observed by the shared root, and oracle result.
 
-The local `example_image_vertical` test passes. The installed-package consumer test `installed_image_vertical` also passes against the installed kernel package. See [Image operations](../../docs/kernel-architecture/Image-Operations.md) for the current built-in image contract.
+ See [Image operations](../../docs/kernel-architecture/Image-Operations.md) for the current built-in image contract.

@@ -101,4 +101,4 @@ does not prove connectivity of an arbitrary imported labelset.
 These are managed-capacity and exact fixture checks, not process RSS bounds.
 See [the runtime contract](../../docs/kernel-architecture/Paged-Components.md).
 
-Default cases passed locally and through the installed 0.30 consumer. The local `--large` empty and connected cases also passed the independent label, area-row, and filter checks; installed validation covered the default workflow only. Their Root Host peaks were 244,437 and 236,485 bytes, Payload peaks were 9,600 and 9,624 bytes, Referenced peak was 1,000,000 bytes for each case, and aggregate `issued_stages` were 150,929 and 213,400. These counters are managed Root usage, not process RSS.
+Their Root Host peaks were 244,437 and 236,485 bytes, Payload peaks were 9,600 and 9,624 bytes, Referenced peak was 1,000,000 bytes for each case, and aggregate `issued_stages` were 150,929 and 213,400. These counters are managed Root usage, not process RSS.
