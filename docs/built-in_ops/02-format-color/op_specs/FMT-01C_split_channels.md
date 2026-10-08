@@ -8,7 +8,6 @@ category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-verification_status: focused_ctest_installed_consumer_and_example_passed
 ---
 
 # FMT-01C: author one extraction node per channel
@@ -62,8 +61,7 @@ mapping behavior.
 The public [workflow example](../../../../examples/channel_extraction_workflow/README.md)
 builds a described UInt8 `[2,2,4]` B/A/R/G Result, calls `split_channels`, and
 publishes only `c2`. Its nonzero ROI returns `[12,13]`; diagnostics confirm that
-no sibling extraction node ran. `test_channel_extraction` passed this behavior
-and the expanded Result mapping tests. It also verifies that a schema with three
+no sibling extraction node ran. It also verifies that a schema with three
 4,096-byte opaque facets, whose canonical form exceeds 8,192 bytes, can be split
 and executed, while changing an opaque byte makes the producer assertion fail
 at compile time. This does not verify a subsequent cross-family channel-assembly

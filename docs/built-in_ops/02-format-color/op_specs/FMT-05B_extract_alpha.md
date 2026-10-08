@@ -28,9 +28,7 @@ including batch and cell axes, is at most 8, and full sample count is at most
 2^40. Required source assertions bind the complete schema and physical layout.
 The helper is a compile-time composition over registered Result operations; it
 does not add an alpha-specific runtime key. The separate alpha math tests cover
-numeric kernels, not a new native alpha arithmetic key. Historical Value/planar
-measurements are not evidence for the current Result path; no Result performance
-claim is made here. Inherit target alpha semantics
+numeric kernels, not a new native alpha arithmetic key. Inherit target alpha semantics
 from the complete [FMT-05 contract](FMT-05_alpha_editing_contract.md).
 
 ## Interface and inference

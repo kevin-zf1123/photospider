@@ -13,9 +13,6 @@ status: Proposed
 spec_revision: 0.2.0
 document_maturity: D1_draft
 implementation_status: implemented
-verification_status: focused_result_workflow_and_installed_consumer
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-01: sample_expression
@@ -571,10 +568,8 @@ source associations. It checks expression failure
 outside the requested values region, duplicate-coordinate rejection with
 axis-only behavior, the N=1 end producer exclusion, invalid input scalar
 schemas, Float32 final overflow, floating-environment restoration, WorkLimit,
-pre-cancellation and output lifetime. The root and installed consumer tests each
-passed. Strict and Apple default runs and the independent Fraction/MPFR 4.2.2
-oracle also passed, with 715 cases per profile. The broader
-`test_numeric_result_math` kernel suite separately covers Empty expression
+pre-cancellation and output lifetime. The broader
+`test_numeric_result_math_expression` kernel suite separately covers Empty expression
 queries. Commands are in the [NUM-01 Whole execution](../expression-whole.md).
 
 ## 9. Related requirements

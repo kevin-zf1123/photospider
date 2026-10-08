@@ -1,6 +1,6 @@
 # 软件功能覆盖与需求映射
 
-本页按功能族整理七款产品，目标是发现可复用计算与支持缺口。证据为英文官方指南、发行页面及研究论文，访问2026-09-09。版本入口与功能页面日期分开；某功能页较旧不能证明当前版本行为完全不变。本次未逐菜单穷举、运行商业软件黑盒对照或计算无依据的覆盖百分比。
+本页按功能族整理七款产品，目标是发现可复用计算与支持缺口。版本入口与功能页面日期分开；某功能页较旧不能证明当前版本行为完全不变。本次未逐菜单穷举、运行商业软件黑盒对照或计算无依据的覆盖百分比。
 
 ## 产品版本与代表性使用面
 
@@ -55,10 +55,6 @@
 
 ## 来源
 
-[^ps]: Adobe，[*Photoshop What's New*](https://helpx.adobe.com/photoshop/desktop/whats-new/whats-new-in-adobe-photoshop-on-desktop.html)，2026-08-28；[Content-Aware Fill settings](https://helpx.adobe.com/photoshop/desktop/repair-retouch/remove-objects-fill-space/adjust-content-aware-fill-settings.html)，2026-02-23。
 [^lr]: Adobe，[*Lightroom Classic What's New*](https://helpx.adobe.com/lightroom-classic/desktop/introduction-to-lightroom-classic/whats-new.html)、[*Lightroom desktop What's New*](https://helpx.adobe.com/lightroom/desktop/introduction/whats-new.html)，2026-08；[Masking](https://helpx.adobe.com/lightroom-classic/desktop/process-and-develop-photos/masking.html)。
-[^acr]: Adobe，[*Camera Raw Release Notes*](https://helpx.adobe.com/camera-raw/desktop/whats-new/release-notes.html)，2026-08-27；[Enhance](https://helpx.adobe.com/camera-raw/desktop/edit-and-enhance-images/sharpening-and-noise/enhance.html)，2024-10-14。
 [^resolve]: Blackmagic Design，[*Photo*](https://www.blackmagicdesign.com/products/davinciresolve/photo)、[*Color*](https://www.blackmagicdesign.com/products/davinciresolve/color)，页面Resolve21；[21 New Features Guide](https://documents.blackmagicdesign.com/SupportNotes/DaVinci_Resolve_21_New_Features_Guide.pdf)，2026-04，具体功能与正式发行状态分开。
 [^csp]: CELSYS，[*User Manual*](https://help.clip-studio.com/en-us/)，在线版5.0；[Advanced Fill](https://help.clip-studio.com/en-us/manual_en/420_fill/Advanced_Fill.htm)、[Smart Tools](https://help.clip-studio.com/en-us/manual_en/390_filters/Smart_Tools.htm)。
-[^nuke]: Foundry，[*Nuke17.1v1 Release Notes*](https://learn.foundry.com/nuke/content/release_notes/17.1/nuke_17.1v1_releasenotes.html)，2026-08-20；[17.0v3](https://learn.foundry.com/nuke/content/release_notes/17.0/nuke_17.0v3_releasenotes.html)，2026-06-09，legacy OFX移除。
-[^ae]: Adobe，[*After Effects Release Notes*](https://helpx.adobe.com/after-effects/desktop/what-s-new/release-notes-after-effects.html)，2026-06-17；[Keying](https://helpx.adobe.com/after-effects/desktop/animate-in-after-effects/keying/keying.html)、[Time Effects](https://helpx.adobe.com/after-effects/desktop/apply-effects-and-animation-presets/list-of-effects/time-effects.html)。

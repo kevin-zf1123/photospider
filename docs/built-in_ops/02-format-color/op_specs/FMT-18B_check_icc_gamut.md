@@ -12,8 +12,6 @@ clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
 proposed_operation_keys:
   - color.gamut_alarm_lcms2_19_1_source_dims_v1_cpu
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-18B: Independent ICC gamut alarm

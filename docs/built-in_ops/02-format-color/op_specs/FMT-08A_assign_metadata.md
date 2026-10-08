@@ -8,7 +8,6 @@ category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
-verification_status: focused_and_installed_result_tests_passed
 operation_keys:
   - metadata.assign_strict
   - metadata.assign_accelerated_apple_silicon
@@ -22,9 +21,7 @@ The current CPU registrations use Result operation ABI 2, WorkflowDocument 4,
 OperationTraits 21 and package 0.30.0. The specification status remains
 Proposed. A publishes updated immutable metadata through a Result tensor while
 preserving the logical samples and Result schema. It is neither a validation
-certificate nor a numeric conversion. Focused Result tests pass for metadata
-edits, Result execution/global behavior, resource budgets and image contracts;
-the public example and two installed consumer tests pass. The metadata-to-
+certificate nor a numeric conversion. The metadata-to-
 `channel.extract` configuration/resource chain is covered; `channel.assemble`
 composition is not.
 

@@ -6,10 +6,7 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-verification_status: focused_result_validation_passed
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-08: scalar coordinate shapers
@@ -31,7 +28,6 @@ turn a composite template or structured Result into a generic NUM Value primitiv
 A stated four-ULP final bound uses the shared FP32-scaled contract for both
 Float32 and Float64 outputs.
 Classification, exact landmarks and signed-zero rules are checked separately.
-
 
 The initial scope has separately named linear_shaper, log2_shaper and their
 inverse forms. These are explicit numerical domain transforms: ordinary
@@ -203,13 +199,9 @@ expression with a strict certified scalar fallback and preserves monotonicity an
 independence. Refinement precision is bounded to 128..4096; unresolved capacity or
 rounding returns `ResourceExhausted`.
 
-The focused `test_numeric_result_math` CTest passes 1/1 and covers the Result
+The focused `test_numeric_result_math_filters` CTest passes 1/1 and covers the Result
 workflows, boundaries, prepared-state rebinding and cancellation, plus the
-existing authoring checks. The six manual fixture groups pass under Strict and
-the local Apple profile. The independent Fraction/directed-MPFR 4.2.2 oracle
-passes 4,196 cases under each profile against the Result probe. The installed
-consumer test passes 1/1 for public log forward/inverse composition, linear
-inverse wiring and output reads after context teardown. See [the workflow
+existing authoring checks. See [the workflow
 README](../../../../examples/numeric_workflow/README.md) for reproducible
 commands. These results do not cover x86 numerical execution, GPU execution,
 maximum-size shapes or performance.

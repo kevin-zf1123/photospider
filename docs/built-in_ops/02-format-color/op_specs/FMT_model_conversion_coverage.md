@@ -10,8 +10,7 @@ clarification_status: current_active_member_coverage_complete
 
 # Color-model descriptions and conversion coverage
 
-The maintainer confirmed the basis-pair and explicit-composition coverage on
-2026-09-23. This proposal fills the model-level gaps in the [format/color catalog](../representation.md).
+This proposal fills the model-level gaps in the [format/color catalog](../representation.md).
 Its coverage direction is confirmed; it is not a completed member specification,
 new registry API or declaration of runtime support. FMT-09..15 and FMT-18 now have member specifications, including external engines
 and explicit rendering families. They remain unimplemented. The
@@ -25,8 +24,7 @@ OKLab/OKLCh, HSL/HSV, YCbCr, CMYK and ACES. Naming a model does not specify its
 conversion graph. Existing ColorArray v1 supplies nine model descriptions and
 some NUM/CRV helpers, with last-axis and restricted alpha rules. It has no Gray,
 HSV or xyY enum. Its ramp/interpolation/validation helpers are not arbitrary
-source-to-target conversion operators. The old format/color runtime is removed;
-FMT target specifications, including clarified FMT-09/10/11, do not implement
+source-to-target conversion operators. FMT target specifications, including clarified FMT-09/10/11, do not implement
 model transforms by themselves.
 
 Complete coverage needs all three layers:

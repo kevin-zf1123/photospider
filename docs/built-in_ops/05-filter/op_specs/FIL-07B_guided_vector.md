@@ -18,7 +18,7 @@ oracle_scope: mathematical_reference
 
 # FIL-07B: guided_vector
 
-Vector guided filter. Status **Proposed / D2_draft**; legacy test kernels and their behavior are not compatibility targets.
+Vector guided filter. Status **Proposed / D2_draft**.
 
 Inherits [FIL-07 family contract](FIL-07_contract.md) and [FILTER common contract](FILTER_common_contract.md) and [NUM numerical/accuracy contract](../../01-numeric/op_specs/NUM_common_contract.md) and [FMT metadata/straight semantics](../../02-format-color/op_specs/FMT_common_contract.md). The family and member specifications together form the complete draft; do not override their RN, underflow, or accelerated-error requirements.
 

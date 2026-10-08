@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-impl
-repository_commit: current working tree
 ---
 
 # NUM-07H: select
@@ -57,8 +55,7 @@ An unselected branch source or typed failure affects the invocation. Input
 collection and typed validation may fail before the callback can diagnose an
 invalid condition. After successful input collection, an invalid byte anywhere,
 including outside the consumer projection, fails with InvalidArgument/InvalidDomain,
-Run scope and no Atom key. No partial output is published. This eager input
-behavior was explicitly selected for the Whole migration on 2026-09-21.
+Run scope and no Atom key. No partial output is published.
 
 Any edit to condition or either branch invalidates all observed outputs, including
 edits at unselected locations. Numerical bit selection remains unchanged; source
@@ -84,8 +81,6 @@ fails the invocation, and edits to either branch invalidate cache reuse.
 Cover all-true/all-false/alternating conditions, all four branch dtypes, distinct
 sNaN payloads, strides, output budgets, cancellation and escaped output owners.
 
-The public manual workflow verifies these Whole rules locally for strict/Apple.
-The earlier 2026-09-14 WSL/installed-consumer checks described the pre-Whole
-staged implementation and do not verify this migration. Current commands and
+The public manual workflow verifies these Whole rules locally for strict/Apple. Current commands and
 public/core measurements are in [NUM-07 measurements](../comparison-whole.md).
 No integration registration is added; specification status remains Proposed.

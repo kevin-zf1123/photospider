@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-13A: prefix_sum
@@ -98,9 +96,7 @@ The current `test_numeric_scans_result` workflow checks `[1,2,3] -> [0,1,3,6]`,
 independent small-integer enumeration, batch and nonadjacent axes, negative and
 unaligned strides, special values, zero-boundary validation, Empty demand,
 resource budgets and cancellation. It checks complete-output integer overflow,
-including coordinates outside the requested projection. The older
-`test_numeric_result_math.cpp` integration fixture contains additional scan
-cases, but it was not rerun for this Result migration.
+including coordinates outside the requested projection.
 
 ## Implementation and executable acceptance
 

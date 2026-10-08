@@ -14,8 +14,7 @@ production runtime, asynchronous stopping, owner, demand, named-backend or quali
 acceptance from this oracle. Band-lazy runtime carriers and complete nonfinite
 restoration trajectories are not implemented. Oracle work caps are not spec size limits.
 
-Mean-domain inverse diagnostics need mpmath and remain uncertified even when their
-self-tests pass. Native BM3D/CBM3D/SMAA comparisons need pinned implementations and actual
+ Native BM3D/CBM3D/SMAA comparisons need pinned implementations and actual
 runs. No synthetic substitute is used as their golden output. Quality metric formulas,
 datasets and thresholds remain implementation-time work under the agreed principles.
 

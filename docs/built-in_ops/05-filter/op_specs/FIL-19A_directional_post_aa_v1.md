@@ -20,7 +20,7 @@ research_sources:
 
 # FIL-19A: directional_post_aa_v1
 
-Bounded-direction post-process AA. Status **Proposed / D2_draft**; the legacy test kernel and its behavior are not compatibility targets.
+Bounded-direction post-process AA. Status **Proposed / D2_draft**.
 
 Inherits the [FIL-19 family contract](FIL-19_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT metadata/straight-semantics contract](../../02-format-color/op_specs/FMT_common_contract.md). The family contract and this member together form the complete draft. Do not override the RN, underflow, or accelerated-error baseline.
 

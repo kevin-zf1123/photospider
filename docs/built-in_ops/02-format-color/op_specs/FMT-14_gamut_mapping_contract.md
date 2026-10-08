@@ -8,13 +8,10 @@ document_maturity: D1_draft
 implementation_status: not_implemented
 clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-14: explicit native RGB gamut mapping
 
-The maintainer delegated the remaining design decisions on 2026-09-24.
 This Proposed specification completes the family design; it supplies no runtime
 implementation. Inherit [FMT-common](FMT_common_contract.md), the exact RGB basis
 of [FMT-10](FMT-10_basis_math.md), and the fixed OKLab mathematics of

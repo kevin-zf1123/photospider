@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-12A: sort
@@ -100,17 +98,12 @@ Arbitrary valid affine source strides are read through owning tensor windows.
 ## Current behavior checks
 
 The current public behavior entry is `examples/numeric_workflow/ordering.cpp`,
-registered as `test_numeric_ordering_result`; the same source is built as the
-installed consumer `installed_numeric_ordering_result`. It checks
+registered as `test_numeric_ordering_result`. It checks
 `[3,1,1,2]` values and indices, separate output selection, full publication for
 sparse demand, stable non-last-axis sorting, dirty support, and ordering of
-signed zeros, infinities and signaling-NaN payloads. The existing
-`test_numeric_result_math.cpp` integration fixture contains additional ordering
-cases, but it was not rerun for this Result migration. See [NUM-12 Result Whole
+signed zeros, infinities and signaling-NaN payloads. See [NUM-12 Result Whole
 execution](../ordering-whole.md) for commands and current evidence limits.
 
-`test_numeric_ordering_result` and `installed_numeric_ordering_result` each
-pass 1/1. The independent ordering oracle passes 2,072 cases in both Strict and
-Apple profiles. The checks do not claim x86 arithmetic execution, performance
+ The checks do not claim x86 arithmetic execution, performance
 or complete typed-facet/error/resource coverage. The specification remains
 Proposed.

@@ -1,6 +1,6 @@
 # FMT-10 候选实现说明
 
-本文件描述此次交接的实现，而非更改原始 op_specs 的数学契约或宣称上游验收完成。原始规格文件的 Proposed/not_implemented 前置字段保留，便于 Codex 按原始要求独立审查。实测记录以本轮交接包的 `validation/` 与 `performance/` 为准；历史审查数据单独保留来源。
+本文件描述此次交接的实现，而非更改原始 op_specs 的数学契约或宣称上游验收完成。原始规格文件的 Proposed/not_implemented 前置字段保留，便于 Codex 按原始要求独立审查。
 
 ## 1. 覆盖范围和接口
 
@@ -81,9 +81,6 @@ Python stdlib Fraction + Gaussian elimination 独立生成 28 个矩阵（七 pr
 
 当前 planar callback 的公开接口不提供 NumericDiagnostics reporter，所以其 numeric 统计的 0 代表未暴露；generic 的 strict_fallbacks 沿用既有含义，只对 accelerated → exact 计数。要分析 strict 内部 certificate miss 比例，需在 `evaluate`/`certify` 加临时非计时 instrumentation 或 profiler，而不是误读这些列。
 
-
-## 6. 2026-09-25 审查修复与热点优化
-
 D helper 不再把调用者 registry 的 opaque state 当作内部 Preparation。源白点由
 内建私有准备结果获取（仍执行真实 metadata/override/analytic binding 规则），实际
 A/C/B 节点继续由调用者 registry 准备。空 state、合法外来 state、失败时事务回滚有回归。
@@ -92,9 +89,7 @@ A/C/B 节点继续由调用者 registry 准备。空 state、合法外来 state�
 mapped validator 和普通 planar callback 共用 worker、waiting admission、资源 Queue/Entries
 租约、异常围栏及退休等待。一个 bounded mapped piece 集合只占一次回调队列项。
 调用后包括普通异常和 bad_alloc 都按 Cancelled > Stale > 普通失败判定；回调引用在退休前
-保持有效。验证完成后，仅本次复制使用 map 的 Data-only 投影；公共 copy_planar_region
-仍拒绝 Data|Validation，防止其他入口绕过验证。Auto 强制 fallback 通过不兼容的
-Continuous/Tiled 输出布局回归；view 与显式 materialize 也分别测试。
+保持有效。图像操作通过 Result tensor publication、Need-authorized tensor windows，以及 affine view 或显式 materialization 路径访问和发布数据；相关行为入口见 [Tensor storage and region access](../../kernel-specs/Tensor-Storage-and-Region-Access.md)。View 与显式 materialize 路径分别有测试覆盖。
 
 `RowUnsigned` 只初始化和复制实际有效的 32-bit limb 前缀，最多 256 limb（8192 bit）。
 每行三个乘积、带符号累加和最终至多 54-bit 商除法使用固定栈暂存，不再为每次减法、
@@ -120,18 +115,13 @@ SIMD 仍为原有 AVX2/Apple NEON 候选，运行时 ISA admission 未改变。
 预期字不变。仓库默认忽略规则明确放行 benchmark、说明、对照脚本及 oracle 生成器。
 目标机仍须执行仓库指定 ClangFormat/cpplint 版本以及 ARM64 NEON 原生编译运行。
 
-## 7. 2026-09-26 原生审核与验证
-
 修复版已在 `ops-impl-FMT10` 工作区继续审核。共享 planar 调度入口补充每次
 提交前的 root stage 扣账，及 admission/提交拒绝/提交异常后的统一
 `Cancelled > Stale > ordinary failure` 选择。新增 stage 上限 0/1、跨执行累计
 限制和 12 个提交失败/停止事件组合回归；独立复审关闭这两项 required。
 
-本轮 macOS Apple M5 / Clang 21.1.3 与 FreeBSD 15.1 i9-12900 / Clang 22.1.7
-分别通过 8/8 focused CTest，以及 F32/F64 × A/B/C/D/identity 的 10 个完整
-33×33 strict 请求门禁。本机只消费安装包的独立 executable 也通过同样门禁。
+本机只消费安装包的独立 executable 也通过同样门禁。
 ClangFormat 21.1.3、cpplint 2.0.2 和 Fraction fixture 再生成检查通过。
-以上更新此前“目标机尚未验证”的记录；不代表完整 CTest、GPU 或 sanitizer 验收。
 
 同机补丁前后、相同 profile 的 1024² A/B/C/D accelerated 对照，本机为
 1.98–2.30 倍，FreeBSD 为 1.97–2.04 倍；128² strict Float64 为
@@ -140,6 +130,4 @@ Float64 为 2.04 倍与 1.96 倍。均为单 worker、cache off、输入预发�
 多次执行去掉首样本后的中位数；不是跨机器比较或全帧独立 oracle 证明。
 小 ROI 未证明稳定提升，generic 仅提升约 5–6%，四 worker 未改善单图内部吞吐。
 
-本轮本地完整审核、计时口径、限制、命令、原始 CSV 与 profiler 分析位于
-`out/fmt10-native-20260926/REVIEW.md` 和 `out/fmt10-native-20260926/PERFORMANCE.md`。
-FreeBSD 对应目录为 `/home/alex/fmt10-native-20260926`。这些为忽略的本次运行产物。
+这些为忽略的本次运行产物。

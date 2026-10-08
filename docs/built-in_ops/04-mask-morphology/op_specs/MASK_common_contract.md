@@ -13,8 +13,7 @@ clarification_status: draft_for_review
 
 This specification defines the selected MASK-01..17 semantics through explicit
 members and family contracts. Native implementation remains pending. The target
-registry keys are declared by the member specifications;
-no legacy key aliases or compatibility implementations are part of this specification.
+registry keys are declared by the member specifications.
 The separately owned paged-components factory is outside this replacement scope.
 The supplied Python oracles evaluate proposed mathematics independently of the
 C++ kernel. Passing them is not evidence that any proposed key is registered.
@@ -27,8 +26,7 @@ Inherit [NUM-common](../../01-numeric/op_specs/NUM_common_contract.md),
 [FMT-COLOR](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md),
 [relative coordinates](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 and the [planar/codec boundary](../../02-format-color/op_specs/FMT_codec_boundary.md).
-Precedence: member > family > this file > inherited generic baseline; FMT's later
-metadata-consumption policy supersedes historical blanket facet clearing, not
+Precedence: member > family > this file > inherited generic baseline; FMT's metadata-consumption policy replaces blanket facet clearing, not
 NUM numerical accuracy. References import only the named shared obligations,
 not another operation's ports, defaults or Whole callback.
 

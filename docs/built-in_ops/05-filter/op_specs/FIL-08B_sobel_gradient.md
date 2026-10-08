@@ -18,7 +18,7 @@ oracle_scope: mathematical_reference
 
 # FIL-08B: sobel_gradient
 
-Sobel gradient. Status **Proposed / D1_draft**; legacy test kernels and their behavior are not compatibility targets.
+Sobel gradient. Status **Proposed / D1_draft**.
 
 Inherits [FIL-08 family contract](FIL-08_contract.md) and [FILTER common contract](FILTER_common_contract.md) and [NUM numerical/accuracy contract](../../01-numeric/op_specs/NUM_common_contract.md) and [FMT metadata/straight semantics](../../02-format-color/op_specs/FMT_common_contract.md). The family and member specifications together form the complete draft; do not override their RN, underflow, or accelerated-error requirements.
 

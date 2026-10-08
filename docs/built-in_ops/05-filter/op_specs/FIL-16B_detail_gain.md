@@ -20,7 +20,7 @@ research_sources:
 
 # FIL-16B: detail_gain
 
-Explicit base/detail gain. Status **Proposed / D1_draft**; the legacy test kernel and its behavior are not compatibility targets.
+Explicit base/detail gain. Status **Proposed / D1_draft**.
 
 Inherits the [FIL-16 family contract](FIL-16_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT metadata/straight-semantics contract](../../02-format-color/op_specs/FMT_common_contract.md). The family contract and this member together form the complete draft. Do not override the RN, underflow, or accelerated-error baseline.
 

@@ -30,8 +30,6 @@ precision requirements and zero-length handling are specified independently.
 
 ## S04 — W3C CSS Color 4
 
-Source: <https://www.w3.org/TR/2026/CRD-css-color-4-20260913/>
-
 Adoption boundary: interpolation spaces, hue and alpha semantics. Concrete model
 calculations reuse repository CRV/FMT contracts; browser defaults are not normative.
 

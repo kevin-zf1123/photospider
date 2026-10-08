@@ -14,8 +14,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-01A: interpolate_linear
@@ -46,7 +44,7 @@ named operations with separate specifications; this operation has no method
 switch. For a selected segment with distinct endpoint abscissas x[j], x[j+1],
 the linear mathematical expression is
 
-    t = (query[i] - x[j]) / (x[j+1] - x[j])
+t = (query[i] - x[j]) / (x[j+1] - x[j])
     values[i] = (1-t)*y[j] + t*y[j+1]
 
 ## Confirmed knot and query ordering
@@ -207,13 +205,13 @@ irregular-spacing fixture [3,1,3] and the three domain-policy outcomes, plus:
   low work/capacity, cancellation, and owner lifetime after context teardown.
 
 Numerical precision, exact dependency support and resource behavior are separate
-acceptance obligations. These cases remain acceptance requirements; coverage listed below is the current focused evidence and does not imply that every historical or listed acceptance case has been rerun.
+acceptance obligations. These cases remain acceptance requirements.
 
 ## Actual focused validation
 
-`test_numeric_result_math` exercises the Result workflows and independent small-input checks. Coverage includes exact linear and nonlinear PCHIP results, all four operation forms, locally available profiles, Float32/Float64 inputs, knot and clamp signed-zero behavior, typed Whole validation, query/domain error precedence, resource limits, pre-cancellation, source associations and output lifetime. `curve_composition` checks `linspace -> bake_lut1d_pchip` and `resample_linear`.
+`test_numeric_result_math_curves` exercises the Result workflows and independent small-input checks. Coverage includes exact linear and nonlinear PCHIP results, all four operation forms, locally available profiles, Float32/Float64 inputs, knot and clamp signed-zero behavior, typed Whole validation, query/domain error precedence, resource limits, pre-cancellation, source associations and output lifetime. `curve_composition` checks `linspace -> bake_lut1d_pchip` and `resample_linear`.
 
-The current focused command is `cmake --build build/kernel-dev --target test_numeric_result_math -j8` followed by `ctest --test-dir build/kernel-dev -R '^test_numeric_result_math$' --output-on-failure`. Historical manual Value-path fixtures, oracle runs and performance records are not evidence for this Result path.
+The current focused command is `cmake --build build/kernel-dev --target test_numeric_result_math_curves -j8` followed by `ctest --test-dir build/kernel-dev -R '^test_numeric_result_math_curves$' --output-on-failure`.
 
 ## Existing implementation distinction
 
@@ -242,11 +240,5 @@ the Whole contract above; mathematical y stencils remain unchanged.
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
 contains the shared arithmetic/resource details and current validation boundary.
 See [the editable workflow](../../../../examples/numeric_workflow/README.md#explicit-query-curves-crv-01)
-for construction, commands and checked expected results. The shared Result
-manual fixture passed all six groups under direct Strict and Apple runs; the
-strengthened Fraction oracle passed 2,487 bit-exact cases per profile, covering
-all four forms, mixed input/destination dtypes and domain policies. The focused
-CTest selection passed 3/3; the installed package 0.32 consumer passed under
-Strict (CTest 1/1) and direct Apple execution. The bounded eight-row-per-profile
-benchmark smoke passed, with no performance improvement claimed. This
+for construction, commands and checked expected results. This
 operation's specification status remains Proposed.

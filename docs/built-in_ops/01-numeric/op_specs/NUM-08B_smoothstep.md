@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-08B: smoothstep
@@ -48,6 +46,6 @@ Metadata specialization rejects unsupported dtype, rank, shape, extents, or samp
 
 ## Acceptance and implementation evidence
 
-The current Result workflow uses input `[-1,0,0.25,0.5,0.75,1,2]` with broadcast edges 0 and 1 and produces `[0,0,0.15625,0.5,0.84375,1,1]`; it then mixes that output with endpoints 10 and 20, producing `[10,10,11.5625,15,18.4375,20,20]`. The focused workflow checks invalid-edge precedence outside a sparse query, all-port support and dirty mapping, Empty output, and global-coordinate projection. Shared mix cases check Straight-alpha validation on unselected channels, signaling-NaN endpoint bit copying, and retained output lifetime; smoothstep-specific checks include cubic execution with caller and worker floating-environment restoration. The separate `test_numeric_result_math.cpp` integration fixture retains additional infinity/NaN, batch-axis, negative-stride and pre-cancellation cases; it was not rerun for this Result update. See [NUM-08 Result Whole execution](../interpolation-whole.md) for current commands and evidence.
+The current Result workflow uses input `[-1,0,0.25,0.5,0.75,1,2]` with broadcast edges 0 and 1 and produces `[0,0,0.15625,0.5,0.84375,1,1]`; it then mixes that output with endpoints 10 and 20, producing `[10,10,11.5625,15,18.4375,20,20]`. The focused workflow checks invalid-edge precedence outside a sparse query, all-port support and dirty mapping, Empty output, and global-coordinate projection. Shared mix cases check Straight-alpha validation on unselected channels, signaling-NaN endpoint bit copying, and retained output lifetime; smoothstep-specific checks include cubic execution with caller and worker floating-environment restoration. The separate `test_numeric_result_math_sequences.cpp` integration fixture retains additional infinity/NaN, batch-axis, negative-stride and pre-cancellation cases; it was not rerun for this Result update. See [NUM-08 Result Whole execution](../interpolation-whole.md) for current commands and evidence.
 
 The three versioned keys implement the dynamic-edge contract through synchronous Result Whole execution. The existing `field.smoothstep` remains a separate rank-2 operation with static Float64 edges and Float32 coverage output. The current strict and Apple Silicon oracle, root test, and installed consumer results are summarized in [NUM-08 Result Whole execution](../interpolation-whole.md). No x86 execution, native GPU support or performance result is claimed. The specification remains Proposed; implementation status describes code presence, not specification acceptance or cross-platform validation.

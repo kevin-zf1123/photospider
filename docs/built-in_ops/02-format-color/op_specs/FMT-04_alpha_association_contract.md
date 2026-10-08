@@ -17,7 +17,6 @@ The default registry provides `alpha.associate_<profile>` and
 plane/scalar calls may bind a second Result. The family and its members remain
 Proposed; status records design acceptance separately from implementation.
 
-
 Inherit [FMT-common](FMT_common_contract.md), its NUM baseline and the
 [kernel storage contract](../../../kernel-specs/Tensor-Storage-and-Region-Access.md).
 Members [A associate](FMT-04A_associate_alpha.md) and
@@ -93,9 +92,7 @@ no implicit squeeze, broadcast or resizing occurs. Empty S uses internal/scalar
 raw weights rather than rank-zero external planes. Structure, selectors, group
 state and source kinds are static; input samples may change between executions.
 
-Every connected input receives Descriptor support. Semantic color and consumed
-alpha samples receive Data and Validation support; pass-through-only values do
-not gain sample validation. Raw arithmetic uses Data without semantic-domain
+Every connected input receives Descriptor support. Raw arithmetic uses Data without semantic-domain
 Validation. There is no Control support. Each member has strict, Apple Silicon
 and x86-64 CPU profile entries. Association and unassociation always materialize;
 they have no layout parameter. They publish transactionally under Root budgets,
@@ -129,8 +126,7 @@ or signed zero is allowed. The special a=0 branch is canonical positive zero;
 for a>0, zero signs follow NUM arithmetic. Internal alpha and other pass-through
 components are copied bit-for-bit, preserving even the sign of zero.
 
-Strict multiplication/division rounds the exact result once to t, as in NUM-05C/D;
-do not introduce the legacy Float64-intermediate-then-Float32 reference. Named
+Strict multiplication/division rounds the exact result once to t, as in NUM-05C/D. Named
 accelerated arithmetic inherits those NUM profile guarantees, including exact
 classification, predicates, copied values and required fallback. It does not
 change semantic validity/overflow decisions or gain a new FMT-specific tolerance.
@@ -279,12 +275,10 @@ Correctness gates timing. Eight focused CTest targets pass, including
 `test_alpha_operations` and `test_alpha_authoring`; the native operation suite
 covers 16 groups. Fourteen small benchmark smoke cases pass their output oracle,
 including named Apple Silicon SIMD, Float64 reference, and zero-copy Set/extract/
-remove observations. The full performance matrix has not run. Historical
-Value/planar timing records remain separate from Result measurements.
+remove observations.
 
 The native CPU implementation provides the registered Result members described
 above. Acceptance still requires independent checks of bit patterns, semantic
 domain failures, partial-region dependencies, transactional publication, Root
 resource limits, cancellation and retained-owner lifetime. The current native run covers `test_alpha_operations`, `test_alpha_authoring`,
-`test_alpha_math`, and five reused primitive test targets. Historical Value/planar
-runs do not establish Result operation validation.
+`test_alpha_math`, and five reused primitive test targets.

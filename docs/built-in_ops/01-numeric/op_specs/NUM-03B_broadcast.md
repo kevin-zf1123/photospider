@@ -13,8 +13,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-impl
-repository_commit: current working tree
 ---
 
 # NUM-03B: broadcast
@@ -176,8 +174,6 @@ with explicit rows over 64 queries, 8 dirty subsets and 3 roles, including
 large replication and bounded materialization.
 
 The following dated implementation/acceptance record predates Whole.
-Manual acceptance on 2026-09-14 passed local AppleClang 21 strict/Apple profiles
-and Ubuntu WSL Clang 18 strict/x86 profiles, plus an installed public consumer.
 It includes negative-stride unaligned permutation, independent owners, image Data
 versus complete-pixel Validation, invalid unselected alpha, bit patterns, Empty,
 collector cancellation, StageLimit, capacity/schema/profile failures, final source

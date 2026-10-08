@@ -10,8 +10,7 @@ implementation_status: not_implemented
 # GEN-01: Constant fields and images
 
 Raw bit filling and complete described image construction are separate. A raw component
-count never implies RGB/alpha. Images use straight planar FMT representation; old
-field.constant implementation is retired.
+count never implies RGB/alpha. Images use straight planar FMT representation.
 
 ## Members
 

@@ -6,10 +6,7 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_subset
-verification_status: focused_result_math_ctest_and_installed_consumer
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-07: three-dimensional LUT application
@@ -19,11 +16,10 @@ repository_commit: current working tree
 The [current shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
 LUT input axes and output table coordinates. Finite values outside 0..1 remain
-legal. Opponent/chroma scales and arithmetic formulas are unchanged. Runtime
-ColorArray v1 still encodes the old implicit L* units: public metadata, fixtures
-and consumers need explicit migration before this revised target is fully aligned.
-Historical implementation/test evidence below does not establish that migration;
-no silent old/new unit alias or sample-magnitude inference is permitted.
+legal. Opponent/chroma scales and arithmetic formulas are unchanged. The current runtime ColorArray v1 encodes L* in its implicit 0..100 unit;
+this target scale applies only after public metadata, fixtures and consumers
+adopt it explicitly. No implicit unit alias or inference from sample magnitude
+is permitted.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -39,7 +35,6 @@ caller floating environment is preserved. This is limited inheritance: the ports
 output kinds/facets, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
 turn a composite template or structured Result into a generic NUM Value primitive.
-
 
 ## Discrete table and explicit interpolation selection
 
@@ -284,20 +279,13 @@ and read windows retain storage after context retirement. `UniformAxis` owns the
 Root grids, while output and exact-arithmetic workspace use managed Root
 resources.
 
-The `lut3d.cpp` manual Result workflow passes six groups under Strict and
-Apple. The independent Fraction oracle passes 1,062 cases per profile with its
-existing expected-string gate unchanged. The registered
+ The registered
 `test_numeric_lut3d_result` runs this manual fixture under Strict;
-`test_numeric_result_math` exercises separate LUT workflow, boundary,
+`test_numeric_result_math_lut3d` exercises separate LUT workflow, boundary,
 preparation, and resource fixtures. The installed consumer compiles the same
 public workflow source against the installed 0.32.0 `Photospider::kernel`
 package; commands and direct coverage are in the
-[public workflow section](../../../../examples/numeric_workflow/README.md#joint-three-axis-color-luts).
-The root LUT3D-specific CTest passed 1/1 in 1.48 s (1.49 s total). The shared
-math test passed in a separate CTest selection that also included baking
-coverage (4.83 s). The fresh installed-consumer selection passed 3/3 in 5.71 s,
-with `installed_numeric_lut3d_result` taking 2.36 s; its direct Apple run
-passed all six groups. These timings distinguish the LUT3D-specific test from
+[public workflow section](../../../../examples/numeric_workflow/README.md#joint-three-axis-color-luts). These timings distinguish the LUT3D-specific test from
 shared integration coverage.
 
 The maximum 256^3 Float64 table shape succeeds with an 8-byte backing read
@@ -305,9 +293,7 @@ window under an 8 MiB Root Payload cap, proving that the implementation does
 not make a dense table copy. A separate sparse request requiring 2^38 output
 positions is rejected as `CapacityLimit` at node 1 because the complete output
 exceeds the cap; that case does not establish numerical execution at this size.
-These checks do not establish x86 or native GPU execution. The 0.18.0 benchmark
-data in the math implementation is historical Value-path evidence and does not
-measure the Result implementation. Runtime ColorArray v1 still encodes the
+These checks do not establish x86 or native GPU execution. Runtime ColorArray v1 still encodes the
 earlier implicit CIELAB lightness units; the revised `l=L*/100` contract remains
 a known gap, and no silent conversion is performed. Specification acceptance
 remains Proposed.

@@ -18,10 +18,9 @@ registered_operation_keys:
 # FMT-05A: set or add an internal alpha plane
 
 The default registry provides `alpha.set_<profile>` for the three CPU profiles.
-The operation uses Result ABI 2; the specification remains Proposed. Focused native alpha tests and fourteen small benchmark smoke cases pass; no full matrix is claimed. It preserves
+The operation uses Result ABI 2; the specification remains Proposed. It preserves
 straight color samples while assigning or inserting the selected group's alpha
 channel.
-
 
 Inherit the complete [FMT-05 contract](FMT-05_alpha_editing_contract.md).
 The key takes one or two single-tensor Results without fields. It preserves straight

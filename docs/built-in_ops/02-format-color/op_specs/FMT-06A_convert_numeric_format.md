@@ -136,10 +136,6 @@ Empty/bit-stride, ICC-resource, concurrent-plan-reuse and payload-release checks
 pass. The SME test passes, and `test_alpha_numeric_interop` covers four
 inherited/moved cases.
 
-`installed_numeric_conversion` and `installed_alpha_numeric_interop` pass; the
-standalone numeric-conversion performance consumer configures and builds.
 Thirteen serial Result performance smoke cases pass their bitwise output oracle.
 A debugger-confirmed SME dispatch verifies the Float32→UInt8 tiled path is reached;
-this is dispatch evidence, not a timing conclusion. The full performance matrix has
-not run. Historical Value/planar measurements remain separate from current Result
-behavior.
+this is dispatch evidence, not a timing conclusion.

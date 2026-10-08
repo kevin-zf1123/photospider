@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-15B: integrate_1d
@@ -36,7 +34,7 @@ input may use any tensor member key; all share Float32 or Float64 dtype. Require
 no facets. There are no static numeric parameters or
 implicit casts/axis extraction.
 
-    values[0] = initial
+values[0] = initial
     values[i] = initial + step * sum_{k=0..i-1}(samples[k]+samples[k+1])/2
 
 Output0 copies initial raw bits, including sNaN/Inf/signed zero. When N=1,
@@ -51,7 +49,7 @@ At i>0, evaluate the entire initial-plus-area expression mathematically, roundin
 only once to output dtype. Strict is bitwise reproducible; accelerated floating results use the shared FP32-scaled bound.
 For finite sources, an equivalent exact expression is
 
-    initial + step/2 * (samples[0] + 2*sum(samples[1:i]) + samples[i])
+initial + step/2 * (samples[0] + 2*sum(samples[1:i]) + samples[i])
 
 Do not round trapezoids, prefixes or the area before adding initial. Unrequested
 intermediate output overflows do not fail a later representable requested value.
@@ -112,7 +110,6 @@ Empty demand also starts no producer. For N>1, an output-zero request starts
 required producers and propagates their failure; statically excluding step still
 retains dtype validation. This trapezoidal rule approximates an underlying
 function's integral; exact rounding concerns the stated discrete formula.
-
 
 ## Implementation and executable acceptance
 

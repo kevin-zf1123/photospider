@@ -40,7 +40,6 @@ Letter suffixes identify distinct mathematical or interface objects, not quality
 
 ## Shared Mathematics, Units, and Profiles
 
-
 ### Analysis and Synthesis Profiles
 **haar_mean_lifting_v1**: Apply the 1D transform along x first, then along y separately for x-low and x-high. Pair e=x[2i], o=x[2i+1]; for odd lengths, set the final o=e (duplicate-last). Compute d=RN_t(o-e), s=RN_t(e+d/2). Inverse: e=RN_t(s-d/2), o=RN_t(d+e), then crop to the saved original length. Each level’s four bands have size ceil(H/2),ceil(W/2): LL is x-low/y-low, LH_y is x-low/y-high, HL_x is x-high/y-low, and HH is x-high/y-high. Recursively decompose only LL at each level and publish the detail bands and final LL. Detail is a difference and low is a mean, not an orthonormal sqrt(2) scaling. Floating-point lifting does not claim bit-perfect reconstruction.
 
@@ -52,7 +51,6 @@ Every profile defines RN_t at each pair and axis stage; fusion may not change ro
 
 Integer-reversible CDF 5/3, Daubechies, Symlet, dual-tree, and complex wavelets are outside this family. Each future addition requires its own named profile and complete specification; an arbitrary wavelet string may not dispatch to a library-defined basis.
 
-
 ## Shared Execution and Numeric Requirements
 
 E denotes an exact expression rounded once to RN_t; B denotes explicitly generated and fixed coefficients; S denotes explicit staged rounding. See [numeric reference](FILTER_numeric_reference.md). NUM defines NaN/Inf and floating-point overflow behavior; this family adds no category-wide finite-only rule. Strict bits, final FP32-scaled four-ULP bounds, gradual underflow, copy behavior, and exact discrete branches inherit NUM.
@@ -63,7 +61,7 @@ Positive-weight normalized filters, signed kernels, local regression, and global
 
 The member support set is normative. Having a halo does not mean that an arbitrarily cropped ROI can run independently; paged access does not remove a whole-image dependency. Follow each member definition for staged rounding, global connectivity, transforms, and iterative state. Independently requested outputs must not turn validation of an unrequested component payload into a hidden whole-image dependency.
 
-All members must follow the [common acceptance protocol](FILTER_oracle_protocol.md). See the [oracle usage guide](../../../../oracle/ops/filter/README.md) for mathematical references and associated self-tests. No new implementation was run in the Photospider runtime. D1/D2 indicate draft maturity, not acceptance rates.
+All members must follow the [common acceptance protocol](FILTER_oracle_protocol.md). See the [oracle usage guide](../../../../oracle/ops/filter/README.md) for mathematical references and associated self-tests. D1/D2 indicate draft maturity, not acceptance rates.
 
 ## Sources and Review
 

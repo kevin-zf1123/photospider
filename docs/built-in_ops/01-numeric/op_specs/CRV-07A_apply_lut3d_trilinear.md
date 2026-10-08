@@ -13,10 +13,7 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_subset
-verification_status: focused_result_math_ctest_and_installed_consumer
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-07A: apply_lut3d_trilinear
@@ -26,11 +23,10 @@ repository_commit: current working tree
 The [current shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
 LUT input axes and output table coordinates. Finite values outside 0..1 remain
-legal. Opponent/chroma scales and arithmetic formulas are unchanged. Runtime
-ColorArray v1 still encodes the old implicit L* units: public metadata, fixtures
-and consumers need explicit migration before this revised target is fully aligned.
-Historical implementation/test evidence below does not establish that migration;
-no silent old/new unit alias or sample-magnitude inference is permitted.
+legal. Opponent/chroma scales and arithmetic formulas are unchanged. The current runtime ColorArray v1 encodes L* in its implicit 0..100 unit;
+this target scale applies only after public metadata, fixtures and consumers
+adopt it explicitly. No implicit unit alias or inference from sample magnitude
+is permitted.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -116,10 +112,6 @@ All profiles use exact product weights and a single final rounding; only
 positive-weight complete vertices participate in the mathematics. See the
 [shared implementation](CRV-07_apply_lut3d.md#maintained-implementation-and-validation)
 for current Result coverage, source-owner and read-window lifetime, focused
-acceptance evidence, and limits on maximum-output, x86, GPU, and historical
-performance claims. The maximum 256^3 table-shape check uses an 8-byte
-zero-stride backing view; it does not execute a maximum-sized output.
-The root manual-fixture CTest passed 1/1 in 1.48 s; a fresh installed consumer
-selection passed 3/3 in 5.71 s, with the LUT3D case taking 2.36 s. Its direct
-Apple run passed all six manual groups. The shared math integration timing is
+acceptance evidence. The maximum 256^3 table-shape check uses an 8-byte
+zero-stride backing view; it does not execute a maximum-sized output. The shared math integration timing is
 reported separately in the [family implementation record](../math-implementation.md#crv-07-joint-three-dimensional-lut-application).

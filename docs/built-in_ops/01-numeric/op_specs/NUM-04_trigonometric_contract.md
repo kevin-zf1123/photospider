@@ -6,11 +6,6 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 ---
 
 # NUM-04: shared trigonometric contract
@@ -104,9 +99,6 @@ fallback for unsupported fast argument ranges and common public execution,
 Whole demand and lifetime/resource cases. Implementation evidence is recorded
 separately below; Proposed specification status does not imply missing runtime keys.
 
-
-## LLVM libc candidate backend (source review, 2026-09-14)
-
 LLVM libc provides a CPU `sinpif` entry point delegating to its internal
 `math::sinpif(float)` implementation. Its [official accuracy table](https://libc.llvm.org/headers/math/index.html)
 marks Float32 sinpi/cospi/tanpi as correctly rounded in all four rounding modes;
@@ -124,8 +116,7 @@ It must also enforce this contract's landmarks, floating environment and
 resource behavior independently of a candidate library's defaults.
 
 The upstream [sinpif exhaustive test source](https://github.com/llvm/llvm-project/blob/main/libc/test/src/math/exhaustive/sinpif_test.cpp)
-uses an MPFR Sinpi oracle and exercises rounding modes. This source review did
-not run those tests. Adoption requires a pinned LLVM revision, recorded build
+uses an MPFR Sinpi oracle and exercises rounding modes. Adoption requires a pinned LLVM revision, recorded build
 options and target features, and actual conformance checks on both CPU targets;
 mutable upstream links describe candidate evidence, not a frozen dependency.
 
@@ -145,9 +136,5 @@ read no payload. Per-value fallback/evaluation diagnostics are unavailable (N/A)
 on this callback path; numerical fallback behavior is unchanged.
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
-cover this operation. The combined NUM-04 family suite passed 7,524 independent
-integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.0-p12; revalidated 2026-09-21)
-and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
-local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
-record the scope and limitations. Manual targets have no CTest/integration
+cover this operation. Manual targets have no CTest/integration
 registration; MPFR is used only by the independent Python oracle.

@@ -54,7 +54,7 @@ The linked reference function is a small mathematical oracle, not a production k
 
 See the member's linked reference source and oracle README.
 
-Fixture coverage identifiers: `boundary_reflect_half`, `boundary_reflect_whole`, `boundary_wrap`, `boundary_clamp`, `asymmetric_correlate_float32`, `asymmetric_correlate_float64`, `convolution_origins`. This catalog records fixture scope only; it makes no current pass claim.
+Fixture coverage identifiers: `boundary_reflect_half`, `boundary_reflect_whole`, `boundary_wrap`, `boundary_clamp`, `asymmetric_correlate_float32`, `asymmetric_correlate_float64`, `convolution_origins`.
 
 ## Backend and registration
 

@@ -53,7 +53,7 @@ The linked reference function is a small mathematical oracle, not a production k
 
 See the member's linked reference source and oracle README.
 
-Fixture coverage identifiers: `box_True_float32`, `box_True_float64`. This catalog records fixture scope only; it makes no current pass claim.
+Fixture coverage identifiers: `box_True_float32`, `box_True_float64`.
 
 Reference callable: `box(image,height,width,anchor,*,mean=True,boundary='reflect_half',cval=0,dtype='float64')` in [spatial.py](../../../../oracle/ops/filter/oracles/spatial.py). These oracle helper defaults do not define graph-node constructors; every node parameter remains explicitly required.
 

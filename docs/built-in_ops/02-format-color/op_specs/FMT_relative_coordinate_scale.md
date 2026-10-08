@@ -7,13 +7,11 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_metadata
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # Relative color-coordinate scales
 
-Confirmed on 2026-09-23 during FMT-11 clarification. This target revises the
+This target revises the
 CIELAB/CIELCh lightness coordinate used by NUM/CRV/FMT descriptions. It supersedes
 earlier native L*=0..100 storage statements, including earlier FMT-11 decisions.
 Ordinary NUM rounding, arithmetic, demand and precision are unchanged. Package 0.22.0 implements the explicit v3 metadata convention described in the
@@ -75,14 +73,12 @@ compatibility alias. The selected runtime discriminator is now tensor-descriptio
 Closing the [shared representation implementation gate](FMT_common_contract.md#shared-representation-implementation-gate)
 is mandatory before registering consumers or persisting the revised descriptions.
 The document front matter's `spec_schema_version: 1` versions the specification
-format only; it cannot identify either old or revised runtime coordinate units.
+format only; it cannot identify which coordinate unit a runtime value uses.
 
-The existing interpolation algorithms are scale-linear, but that fact alone
-does not migrate their public metadata or runtime evidence. Affected specs mark
-the revised semantic portion pending. Historical implementation sections and
-their test counts describe the old representation, not conformance to this
-target. Future acceptance includes reference white l=1, extended values,
-same-scale metadata matching and rejection of silently mixed old/new meanings.
+The interpolation algorithms are scale-linear; adopting this scale still requires
+updating their public metadata. Affected specs mark the revised semantic portion
+as pending. Acceptance includes reference white l=1, extended values,
+same-scale metadata matching and rejection of silently mixed meanings.
 
 Sources: [CIE CIELAB definition](https://cie.co.at/eilvterm/17-23-076) defines
 standard L*. Division by 100 and the scope of this storage change are explicit

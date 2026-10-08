@@ -12,8 +12,6 @@ clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
 proposed_operation_keys:
   - color.convert_display_luminance_strict
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-15B: Display relative and nits conversion

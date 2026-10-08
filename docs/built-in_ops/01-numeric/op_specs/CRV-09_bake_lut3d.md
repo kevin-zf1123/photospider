@@ -9,10 +9,7 @@ kind: composite_workflow
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_subset
-verification_status: focused_result_math_ctest_and_installed_consumer
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-09: bake_lut3d workflow template
@@ -22,11 +19,10 @@ repository_commit: current working tree
 The [2026-09-23 shared scale revision](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
 LUT input axes and output table coordinates. Finite values outside 0..1 remain
-legal. Opponent/chroma scales and arithmetic formulas are unchanged. Runtime
-ColorArray v1 still encodes the old implicit L* units: public metadata, fixtures
-and consumers need explicit migration before this revised target is fully aligned.
-Historical implementation/test evidence below does not establish that migration;
-no silent old/new unit alias or sample-magnitude inference is permitted.
+legal. Opponent/chroma scales and arithmetic formulas are unchanged. The current runtime ColorArray v1 encodes L* in its implicit 0..100 unit;
+this target scale applies only after public metadata, fixtures and consumers
+adopt it explicitly. No implicit unit alias or inference from sample magnitude
+is permitted.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -42,7 +38,6 @@ caller floating environment is preserved. This is limited inheritance: the ports
 output kinds/facets, observation units, mathematical rounding boundaries and
 explicit numerical/error rules in this specification take precedence. It does not
 turn a composite template or structured Result into a generic NUM Value primitive.
-
 
 Proposed authoring template name: curve.bake_lut3d. No operation key named
 compose or opaque chain object is registered by this specification.
@@ -96,7 +91,7 @@ rounding guarantee of CRV-07 interpolation.
 
 Validation covers every grid-cell center and optional caller-supplied dynamic
 Float64 Result tensor `validation_points` with `sample_shape()` [M,3]. The quality label is Measured, meaning evaluation
-at the listed finite points completed; passed separately records acceptance.
+at the listed finite points completed.
 It is not a CertifiedBound over the continuous domain, whether passed is true
 or false.
 A certified whole-domain variant is outside this initial scope. Each cell center
@@ -110,10 +105,8 @@ axis. report-only observation triggers the global baking/validation work. An
 error-threshold violation yields a successful report with passed=false while
 table remains gated and fails. Source computation errors, invalid inputs,
 cancellation or insufficient resources make dependent report/table evaluation
-fail; these are not successful completed reports with passed=false. Axis remains
-independent. Report is a fixed-size summary: passed, Measured quality, grid shape,
-method/tolerances, validation count/failed count, per-component maximum absolute
-error and its point, plus the first failed point and source/LUT values. Never
+fail. Axis remains
+independent. Never
 store all per-point results. Process cell centers in logical row-major order,
 then extra points in array order; this defines the first failure independently
 of scheduling. Failed count counts points with any failing component.
@@ -187,20 +180,6 @@ fits the current <=16-field structural vocabulary. Use `ExecutionContext::execut
 to observe these fields; `execute_fragments()` requests tensor footprints and
 does not treat the report's fixed fields as a generic [1] tensor.
 
-| Field | Dtype | Rows / record shape | Meaning |
-| --- | --- | --- | --- |
-| passed | UInt8 | 1 / scalar | 1 iff every validation point passes |
-| axis | Float64 | 3 / [3] | Validated dynamic axis used for this bake |
-| validation_count | Int64 | 1 / scalar | All centers plus extra points, including repeats |
-| failed_count | Int64 | 1 / scalar | Number of points failing one or more components |
-| max_abs_error | Float64 | 1 / [3] | Per-component maximum, rounded upward; overflow +Inf |
-| max_error_point | Float64 | 3 / [3] | Actual coordinate of each component's maximum |
-| max_error_index | Int64 | 1 / [3] | First validation ordinal attaining each exact maximum |
-| first_failure_index | Int64 | 1 / scalar | First failed ordinal, or -1 on pass |
-| first_failure_input | Float64 | 1 / [3] | Actual query, or all +0 on pass |
-| first_failure_reference | Float64 | 1 / [3] | Source color, or all +0 on pass |
-| first_failure_lut | Float64 | 1 / [3] | Applied table color, or all +0 on pass |
-
 Compare errors and tolerances using exact arithmetic before report rounding.
 Choose maxima by exact absolute error, breaking ties with the earliest ordinal.
 Report +Inf is a diagnostic bound for an unrepresentable error, not a nonfinite
@@ -265,23 +244,16 @@ retain established host categories and affect only dependent outputs.
 
 A completed measurement with failed_count>0 leaves report successful but causes
 table observation to fail OperationFailed/InvalidDomain with diagnostic tag
-LutApproximationToleranceExceeded and first-failure details. This is a diagnostic
-tag, not a new FailureReason enum. axis is unaffected by quality failure. table
-success requires both the global source/model validation and passed report state.
+LutApproximationToleranceExceeded and first-failure details.
 
-Conceptual identity workflow on a 2x2x2 [0,1]^3 RGB grid passes with atol=rtol=0
-under either interpolation method. For source (r,g,b)->(r*r,g,b), the same grid
-and center [0.5,0.5,0.5] give source [0.25,0.5,0.5] versus LUT [0.5,0.5,0.5].
-With atol=0.1,rtol=0, report passed=0,failed_count=1,max_abs_error[0]=0.25,
-first_failure_index=0; table fails and axis-only still succeeds. Adding the same
+ For source (r,g,b)->(r*r,g,b), the same grid
+and center [0.5,0.5,0.5] give source [0.25,0.5,0.5] versus LUT [0.5,0.5,0.5]. Adding the same
 center as an extra point increments validation_count and failed_count separately.
 
 Output-dtype scope fixture: let the source explicitly cast Float64 colors to
 Float32, with one grid axis [1,1+2^-23] and other axes [0,1]. At the cell center,
 the first component is 1+2^-24 before source rounding. Both source and internal
 Float32 LUT output round it to 1, so a zero-tolerance measurement can pass.
-Applying that table later with Float64 output instead returns 1+2^-24 there;
-that different output-dtype configuration is not covered by the passed report.
 
 Validate exact report maxima/tie order, both methods/dtypes, mixed source precision,
 explicit source casts, hue multi-turn values, XYZ white scale, shared parameter
@@ -361,8 +333,7 @@ released, and verifies that external axis backing expires after context and
 fixture retirement. A small requested table ROI does not reduce source
 evaluation, Whole outputs or global measurement work.
 
-The current harness runs twelve behavior groups under each of Strict and Apple;
-its independent Fraction oracle passes 384 cases per profile. The tests cover
+ The tests cover
 both table dtypes, all five geometries, layouts, demand and source-error order,
 Empty requests, cache association with current inputs, preparation reuse and
 rebinding, report gating, view and owner lifetime. A huge-grid case verifies
@@ -373,18 +344,12 @@ It observes 14 cache hits in this run, while its assertion requires only a
 positive count; the observed count is not a contract. The metadata limit counts
 proof units rather than bytes.
 
-The root focused selection passed 9/9 tests in 15.30 seconds: eight manual
-workflow tests, including `test_numeric_baking3d_result` (5.12 seconds), and the
-shared `test_numeric_result_math` integration test (4.58 seconds). Its bake
+Its bake
 assertions are independent fixture coverage, not all cases from the baking3d
-harness. The fresh 0.32.0 installed-consumer selection passed 8/8
-tests in 14.63 seconds, including `installed_numeric_baking3d_result` (5.91
-seconds); the installed Apple run passed all twelve groups. Exact focused CTest
+harness. Exact focused CTest
 and installed-consumer commands are maintained in the
 [workflow section](../../../../examples/numeric_workflow/README.md#measured-three-dimensional-lut-baking).
 No current x86, native-GPU or maximum-shape-success validation is claimed.
-Historical 0.18 Value-path timings and raw artifacts do not establish current
-Result performance.
 
 - [3D LUT application](CRV-07_apply_lut3d.md).
 - [1D baking templates](CRV-04_bake_lut1d.md).

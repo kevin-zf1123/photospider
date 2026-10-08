@@ -7,8 +7,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-01: interpolation family
@@ -137,17 +135,7 @@ and cancellation failures preserve their failure categories.
 
 The manual Result fixture, exact Fraction oracle and installed consumer are
 defined in the [numeric workflow README](../../../../examples/numeric_workflow/README.md).
-The root focused CTest selection covers `test_numeric_curves_result`,
-`test_numeric_result_math`, and `test_result_image_contracts`; it passed 3/3 in
-5.09 seconds. The separate installed consumer test
-`installed_numeric_curves_result` passed 1/1 in 0.36 seconds under Strict.
-Their command lines and coverage are documented there. The manual fixture's six
-groups passed under direct Strict and Apple runs. The installed consumer's direct
-Apple run also passed.
-The strengthened independent Fraction oracle passed 2,487 bit-exact cases for
-each profile. The bounded benchmark passed eight rows per profile with two
+Their command lines and coverage are documented there. The bounded benchmark passed eight rows per profile with two
 polls, N*C computed elements and `timing_scope=result_execute_fragments`; its
 Root Payload peaks are listed in the workflow README. These bounded timing
-checks do not establish a performance improvement. Historical Value-path
-measurements are in [math implementation](../math-implementation.md#crv-01-exact-interpolation)
-and do not validate the Result workflow.
+checks do not establish a performance improvement.

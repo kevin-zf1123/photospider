@@ -12,10 +12,7 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-verification_status: focused_result_validation_passed
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-08D: log2_shaper_inverse
@@ -37,7 +34,6 @@ elements. Bounds are same-dtype scalar tensors of shape [1], finite and satisfy
 empty facets. No implicit clipping occurs.
 The mathematical formula is lower*(upper/lower)^input, with whole-expression final rounding.
 The independent operation key selects the CPU profile; there is no additional static mode parameter.
-
 
 Inherit the [complete shaper contract](CRV-08_shaper.md) for exact endpoints,
 zero signs, NaN quieting/payloads, infinity/domain extensions and overflow as
@@ -79,9 +75,6 @@ whole-expression evaluation with a strict certified scalar fallback, preserves
 monotonicity and partition independence, and may return `ResourceExhausted` when
 128..4096 refinement capacity is unresolved. See [the CRV-08 family contract](CRV-08_shaper.md)
 and [the shaper workflow README](../../../../examples/numeric_workflow/README.md)
-for the shared command, fixture and validation evidence. The current Result
-focused CTest passes 1/1; six manual groups pass under Strict and the local Apple
-profile, and the Result probe passes 4,196 Fraction/directed-MPFR 4.2.2 cases
-under each profile. The installed consumer passes 1/1, including public log
+for the shared command, fixture and validation evidence. The installed consumer passes 1/1, including public log
 composition and output lifetime checks. x86 numerical, GPU, maximum-size and
 performance validation are not covered.

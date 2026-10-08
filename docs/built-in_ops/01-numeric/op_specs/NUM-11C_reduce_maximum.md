@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-11C: reduce_maximum

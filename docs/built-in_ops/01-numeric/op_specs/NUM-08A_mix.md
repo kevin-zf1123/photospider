@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-08A: mix
@@ -48,6 +46,6 @@ Source Results retain their original typed backing under the execution Root, and
 
 ## Acceptance and implementation evidence
 
-The current public Result workflow composes seven smoothstep samples `input=[-1,0,0.25,0.5,0.75,1,2]` using broadcast edges 0 and 1 with mix endpoints 10 and 20. The mix output is `[10,10,11.5625,15,18.4375,20,20]`. The focused workflow checks endpoint source failures for both branches, full support and sparse dirty mapping, typed validation of an unselected endpoint, Empty support, cache association/invalidation, and output readability after context retirement. The broader `test_numeric_result_math.cpp` integration fixture retains separate batch-axis, negative-stride, special-value and pre-cancellation cases; it was not rerun for this Result update. See [NUM-08 Result Whole execution](../interpolation-whole.md) for current commands and evidence.
+The current public Result workflow composes seven smoothstep samples `input=[-1,0,0.25,0.5,0.75,1,2]` using broadcast edges 0 and 1 with mix endpoints 10 and 20. The mix output is `[10,10,11.5625,15,18.4375,20,20]`. The focused workflow checks endpoint source failures for both branches, full support and sparse dirty mapping, typed validation of an unselected endpoint, Empty support, cache association/invalidation, and output readability after context retirement. The broader `test_numeric_result_math_sequences.cpp` integration fixture retains separate batch-axis, negative-stride, special-value and pre-cancellation cases; it was not rerun for this Result update. The related image operation `image.mix` is covered separately by [test_result_image_composite.cpp](../../../../tests/integration/image/test_result_image_composite.cpp). See [NUM-08 Result Whole execution](../interpolation-whole.md) for current commands and evidence.
 
 Strict execution implements the exact blend through the current Result Whole path. The accelerated profiles are registered under the three keys above; platform availability depends on the selected profile and host. The current strict and Apple Silicon oracle, root test, and installed consumer results are summarized in [NUM-08 Result Whole execution](../interpolation-whole.md). No x86 execution, native GPU support or performance result is claimed. The specification remains Proposed; implementation status describes code presence, not specification acceptance or cross-platform validation.

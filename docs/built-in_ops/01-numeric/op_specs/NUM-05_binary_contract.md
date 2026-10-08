@@ -6,11 +6,6 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 ---
 
 # NUM-05: shared binary contract
@@ -136,9 +131,4 @@ The [public example and commands](../../../../examples/numeric_workflow/README.m
 include an editable add/multiply composition, independent integer/Fraction/MPFR
 oracles and direct error/resource checks. `test_numeric_binary_result` covers
 the strict Result workflow; the installed consumer exercises the same example
-source through `Photospider::kernel`. Strict and Apple example runs each passed
-14,174 independent integer/Fraction/MPFR cases. The installed consumer test also
-passed. These checks establish CPU behavior, not GPU support. Earlier
-measurements in [the NUM-05 validation record](../math-implementation.md#num-05-validation-and-native-timing)
-belong to the former Value/callback path and do not measure current Result
-execution performance.
+source through `Photospider::kernel`. These checks establish CPU behavior, not GPU support.

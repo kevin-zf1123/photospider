@@ -6,12 +6,7 @@ kind: shared_operator_contract
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: 6617c78c
 ---
 
 # CRV-11: signal resampling and antialias filtering
@@ -106,4 +101,4 @@ these are Proposed templates, not new registered interpolation primitives.
 
 The four public resampling templates are maintained through the public `resampling.hpp` authoring helpers. Each helper appends a CRV-01 samples node and a `core.identity` positions node with collision-free IDs; it leaves existing workflow exports unchanged and returns both node outputs for explicit use or export. Samples and positions are Results throughout compilation, binding and execution. The identity output is a mapped view of the bound query Result, so a positions-only demand does not read curve data or allocate a copied position payload. The four helpers introduce no registered interpolation operation of their own.
 
-The maintained resampling executable passes eight manual groups under each of Strict and Apple. It retains the existing CRV-01 exact-copy and numeric-accuracy checks and does not define an independent resampling oracle. The tests cover scalar and multi-column linear/PCHIP results, independent raw and typed position forwarding, position-only dependency support, complete Whole sample support and dirty mapping, two fresh-content cache hits with current direct-source associations, static preparation reuse after binding replacement, upstream failure order, arbitrary source layouts, worker/caller floating-environment preservation and escaped owners. Float64 layout checks cover all four templates and eight source layouts under each caller/worker rounding mode; Float32 checks separately cover bit-preserving positions, typed validation and owner lifetime. K=65536 executes a real endpoint interpolation. At N=2^40 the positions output successfully exposes a zero-copy mapped view, while a samples request is rejected because the complete Whole output exceeds the Root Payload budget. The latter is a capacity rejection, not a numerical run at that output size. The installed 0.32.0 consumer passes its Strict CTest and eight direct Apple groups through the public package. See the [signal-resampling workflow](../../../../examples/numeric_workflow/README.md#signal-resampling).
+ It retains the existing CRV-01 exact-copy and numeric-accuracy checks and does not define an independent resampling oracle. The tests cover scalar and multi-column linear/PCHIP results, independent raw and typed position forwarding, position-only dependency support, complete Whole sample support and dirty mapping, two fresh-content cache hits with current direct-source associations, static preparation reuse after binding replacement, upstream failure order, arbitrary source layouts, worker/caller floating-environment preservation and escaped owners. Float64 layout checks cover all four templates and eight source layouts under each caller/worker rounding mode; Float32 checks separately cover bit-preserving positions, typed validation and owner lifetime. K=65536 executes a real endpoint interpolation. At N=2^40 the positions output successfully exposes a zero-copy mapped view, while a samples request is rejected because the complete Whole output exceeds the Root Payload budget. The latter is a capacity rejection, not a numerical run at that output size. See the [signal-resampling workflow](../../../../examples/numeric_workflow/README.md#signal-resampling).

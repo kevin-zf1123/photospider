@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-06B: remap_range
@@ -120,7 +118,7 @@ remap-to-clamp composition, invalid bounds outside sparse demand, all five input
 obligations, Empty, Whole support, typed validation through clamp, cache
 invalidation, and rational work exhaustion. The strict and Apple Silicon
 oracles cover the remap formulas and boundary values. The separate
-[`test_numeric_result_math.cpp`](../../../../tests/integration/test_numeric_result_math.cpp)
+[`test_numeric_result_math_sequences.cpp`](../../../../tests/integration/numeric/test_numeric_result_math_sequences.cpp)
 fixture retains checks for an overflowing intermediate subtraction, invalid
 bounds despite input NaN, batch-axis flattening and pre-cancellation; it was not
 rerun for this update.

@@ -14,9 +14,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 clarification_status: complete
-repository_branch: ops-specs
-verification_status: focused_result_validation_passed
-repository_commit: current working tree
 ---
 
 # CRV-06G2: color_ramp_hsl_pi

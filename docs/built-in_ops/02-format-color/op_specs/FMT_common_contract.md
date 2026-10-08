@@ -7,12 +7,10 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: not_implemented
 clarification_status: common_scope_complete
-inspection_commit: 548b2667
 ---
 
 # FMT: scope and shared specification decisions
 
-This file records the category-wide clarification requested on 2026-09-22.
 It precedes individual FMT operator specifications. The maintainer selected a
 unified tensor/metadata target after the initial category discussion; raw and
 override policies are confirmed below. Individual formulas, ports and
@@ -131,10 +129,10 @@ relative linear/sRGB/gamma descriptor.
 
 ## Current implementation constraints
 
-Inspected at the commit recorded above:
+Current public types:
 
 - [ElementType](../../../../include/photospider/data/value.hpp) has UInt8,
-  Int64, Float32 and Float64. Int8/UInt16/Int16/Float16 and other widths require
+  Int8, UInt16, Int16, Int64, Float32 and Float64. Float16 and other widths require
   a separately implemented public dtype extension or an explicitly defined
   encoding in an existing container. An interval such as 0..65535 is not itself
   a native UInt16 storage type.
@@ -143,18 +141,13 @@ Inspected at the commit recorded above:
   HSV or xyY model; alpha is currently RGB-only. Transfer is linear/sRGB/gamma.
   Integer-coded colors and additional models cannot use unchanged v1 metadata
   while claiming validation under the current contract.
-- Package 0.20.0 [removes the old channel/color and numeric-format operations](FMT_legacy_retirement.md),
-  including numeric.cast, numeric.encode_range and color.rgb_to_ycbcr420.
-  Their inspected HWC/Whole and fixed 420 behavior is historical; it does not
-  implement the clarified FMT contracts. No compatibility aliases remain.
+
 - ICC byte validation/ownership for CMYK ramps is implemented. This is not an
   implementation of an ICC color transform or arbitrary profile-class admission.
 
 ## Shared decisions
 
-The maintainer confirmed the category decisions on 2026-09-22 and then selected
-unified tensors/tensor collections plus composable metadata, removing Image/Layer
-as special semantic types from the target. That decision supersedes the initial
+That decision supersedes the initial
 ColorArray-plus-Image/Layer-adapters direction. The later planar/virtual-storage
 decisions are specified in the shared kernel contract linked below; operator-local
 and migration details remain explicit.
@@ -212,11 +205,11 @@ cannot replace actual storage/resource ownership.
 
 The generic metadata design is a target shared-contract change. Shared
 SemanticKind vocabulary and the ColorArray codec remain for maintained consumers.
-Legacy Image invocation paths and Layer Result schemas are already rejected by
-the planar migration gates; their retained declarations do not provide a usable
-compatibility path. Existing v1 bytes cannot silently acquire new meanings.
-Implementing the new metadata consumers is a prerequisite, not an implicit
-adapter layer or an implementation performed by these documentation changes.
+Image invocation paths outside the Result contract and Layer Result schemas
+are rejected; the declarations that remain in headers are not a usable path.
+Current v1 bytes cannot silently acquire new meanings.
+Implementing the new metadata consumers is a prerequisite; no implicit adapter
+layer exists.
 
 Without explicit override, the attached description is the source of truth.
 An ordinary supplied source declaration asserts agreement; conflicts fail before
@@ -426,7 +419,7 @@ proofing from an OCIO display/view label.
 
 This is a shared representation/consumer change, not merely deletion of type
 names. Its implementation must replace the current implicit validation hooks in
-[input_validation.cpp](../../../../src/lib/data/input_validation.cpp), reconcile
+[value_validation.cpp](../../../../src/lib/data/value_validation.cpp), reconcile
 NUM facet propagation and complete-color closure, and migrate Image/Layer
 operations to declared tensor/metadata consumption. Compiler inference, source
 bindings, partial requests, cache/validation identity, immutable resources and
@@ -463,10 +456,8 @@ These are required future acceptance cases, not tests run in this session.
 Runtime update (0.22.0): [TensorDescription v3 and FMT-08](../../../kernel-architecture/Tensor-Semantic-Metadata.md)
 freeze the canonical metadata, typed endpoint, sampling, configured-space and
 immutable-resource representation used by FMT-01/02/03/08. V1/v2 tensor facets
-reject; legacy ColorArray remains an explicit separate old-coordinate contract
-and cannot mix with v3. Numerical FMT-06/09/10/11 and external FMT-12/13 consumer
+reject. Numerical FMT-06/09/10/11 and external FMT-12/13 consumer
 implementation gates remain separate; descriptive OCIO snapshots run no engine.
-
 
 Before registering a member that consumes the revised descriptions or emitting
 persisted workflows using them, freeze and review the following shared artifacts:
@@ -580,8 +571,7 @@ this documentation revision.
 Current members of FMT-01..06, FMT-08..15 and FMT-18 are now specified in their
 family/member documents. [FMT-14](FMT-14_gamut_mapping_contract.md) fixes native
 mapping and geometric masks; [FMT-15](FMT-15_tone_view_contract.md) fixes native
-luminance/unit mapping and explicit view composition. FMT-14/15/18 decisions
-were delegated by the maintainer on 2026-09-24. Their Proposed status and
+luminance/unit mapping and explicit view composition. Their Proposed status and
 not_implemented state remain distinct from completed design.
 
 Further FMT-06 code constraints, BT.2020 CL, GRD-29/30, external codec
@@ -604,8 +594,6 @@ These are reference material,
 not automatic adoption of CSS rendering behavior or a fixed OCIO implementation.
 No operator execution or numerical acceptance test is performed by this
 documentation-only clarification.
-
-## Same-size color planes and codec boundary (2026-09-23)
 
 The maintainer confirmed that internal color planes, including Y/Cb/Cr, retain
 same-size 1:1:1 sampling, with alpha in the same tensor. External chroma

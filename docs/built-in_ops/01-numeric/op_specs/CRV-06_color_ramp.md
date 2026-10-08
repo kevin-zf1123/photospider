@@ -7,9 +7,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_subset
 clarification_status: complete
-repository_branch: ops-specs
-verification_status: focused_result_validation_passed
-repository_commit: current working tree
 ---
 
 # CRV-06: color-ramp family
@@ -19,11 +16,10 @@ repository_commit: current working tree
 The [shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
 LUT input axes and output table coordinates. Finite values outside 0..1 remain
-legal. Opponent/chroma scales and arithmetic formulas are unchanged. Runtime
-ColorArray v1 still encodes the old implicit L* units: public metadata, fixtures
-and consumers need explicit migration before this revised target is implemented.
-Historical implementation/test evidence below does not establish that migration;
-no silent old/new unit alias or sample-magnitude inference is permitted.
+legal. Opponent/chroma scales and arithmetic formulas are unchanged. The current runtime ColorArray v1 encodes L* in its implicit 0..100 unit;
+this target scale applies only after public metadata, fixtures and consumers
+adopt it explicitly. No implicit unit alias or inference from sample magnitude
+is permitted.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -52,7 +48,6 @@ and output logical element products are limited to 2^40. Only a mathematically
 selected RationalPi denominator q must be positive; an unselected generic
 q<=0 value adds no mathematical-domain failure. Typed/upstream validation still
 covers every input tensor.
-
 
 The maintainer requires separate implementations/specifications for RGB, CMYK,
 XYZ, CIELAB, CIELCh(ab), OKLab, OKLCh, HSL and YCbCr. They are implemented as
@@ -132,7 +127,7 @@ relevant certified steps, not the integer-capacity bound. Accelerated RGB permit
 the shared FP32 4 ULP by contract. Current implementations return strict bits,
 while the same accelerated allowance applies to non-RGB arithmetic.
 
-The Result CTest `test_numeric_result_math` passes 1/1 in 6.93 seconds. Its
+Its
 `color_ramp_workflows`, `color_ramp_boundaries`, `color_ramp_icc` and
 `color_ramp_active_cancel` coverage includes Empty ICC behavior, generic clamp
 resource selection, ICC ownership, and cancellation during actual exact work
@@ -140,12 +135,9 @@ resource selection, ICC ownership, and cancellation during actual exact work
 cancellation paths return Root resources to baseline after context teardown.
 Successful ICC and Result-lifetime cases retain their valid owners.
 
-Seven manual groups pass for each of Strict and the locally available Apple
-profile. Against the Result `--probe`, `color_ramp_oracle.py` passes 1,784
+ Against the Result `--probe`, `color_ramp_oracle.py` passes 1,784
 Fraction/Machin-pi cases per profile and `rgb_ramp_oracle.py` passes 352
-rational/root/Decimal cases per profile. The installed `installed_result_numeric`
-consumer passes 1/1 in 0.21 seconds; it exercises public XYZ/CMYK helpers and
-reads the ColorArray Result, including its ICC owner, after context teardown.
+rational/root/Decimal cases per profile.
 Repeated requests return consistent values and rebinding changes associations;
 these checks do not establish a warm-cache hit.
 
@@ -153,8 +145,8 @@ Reproduce the focused suite, Strict/Apple manual groups and independent oracles
 with:
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_result_math photospider_numeric_color_ramps -j8
-ctest --test-dir build/kernel-dev -R '^test_numeric_result_math$' --output-on-failure
+cmake --build build/kernel-dev --target test_numeric_result_math_color_ramps photospider_numeric_color_ramps -j8
+ctest --test-dir build/kernel-dev -R '^test_numeric_result_math_color_ramps$' --output-on-failure
 build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps strict
 python3 oracle/ops/numeric/color_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps strict
 python3 oracle/ops/numeric/rgb_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps strict

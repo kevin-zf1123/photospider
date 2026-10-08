@@ -16,8 +16,7 @@ clarification_status: complete
 Runtime contract: this installed helper expands transactionally into the
 registered FMT-02C Result operation. Scalar literals use prepared native bits
 through the registered `channel.scalar_literal_<profile>` provider. The helper
-has no separate operation key. The specification decision remains Proposed;
-the performance guide records focused Result smokes and labels its earlier Value/planar measurements as historical.
+has no separate operation key.
 
 Inherit the complete [FMT-03 family contract](FMT-03_channel_editing_contract.md).
 The public authoring helper `replace_channels` takes a graph, `base`, any

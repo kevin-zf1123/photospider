@@ -1,13 +1,10 @@
 # 公共数据与执行约定
 
-2026-09-13：本页对齐 package 0.10.0 / C operation ABI 9，合并依据见
-[当前实现](current-state.md)。已实现契约以英文 ADR、公开头文件和
-`docs/kernel-architecture/` 为准；下文明确标注的建议及未实现功能保持 Proposed。
-分类页中的参数是研究建议，调用已实现节点时须遵循对应实现契约。
+本页保留研究期数据、空间、颜色与数值设计约定。涉及当前运行行为时，以 0.33.0 package 的公开头文件和[kernel 架构指南](../../kernel-architecture/README.md)为准，尤其是[数据模型](../../kernel-architecture/Data-Model.md)、[依赖采样](../../kernel-architecture/Dependency-Sampling.md)、[资源](../../kernel-architecture/Managed-Resources.md)和[全局结果](../../kernel-architecture/Global-Results.md)。本文中的 Proposed 设计不是当前实现承诺；分类页参数仍须与已实现节点的具体规格区分。
 
 ## 数据对象与输出
 
-| 对象 | 当前承载 / 逻辑形状 | 必须附带的解释 |
+| 概念对象 | 研究期形状示意 | 规格需要说明的语义 |
 | --- | --- | --- |
 | scalar / sampled signal | Value `[1]` / `[N,C]`，单通道可约定 `[N]` | 自变量、间距/positions、端点、单位；已有 computed scalar 可连接 bounded 输入 |
 | image / image plane | typed Float32 HWC / HW ImagePlane | 颜色模型、通道角色、transfer、primaries/white、reference、alpha；plane origin/step 与实际 source support 分开 |
@@ -80,28 +77,24 @@ protocol 1 的 `DependencyCertificate` 为 Exact-only。protocol 2 的 `ResultRe
 
 每个输出分别声明每个输入的 data/control/validation/descriptor demand、坐标映射、
 返回 Region/布局/owner 和 dirty 正向传播。LUT/kernel 可全表读取、图像可局部读取；
-已有 G4 接口支持这种拆分，但旧 `field.apply_lut_1d` 等 Whole 节点并未自动升级。
+每个已注册节点的实际 demand 以其 operation contract 和测试为准；whole-region 节点不会因为本页的研究分类而自动获得局部执行能力。
 见[依赖采样](../../kernel-architecture/Dependency-Sampling.md)和
 [Region](../../kernel-architecture/Region-Semantics.md)。
 
 ## 资源、缓存与生命周期
 
-structured CPU 执行要求 `ExecutionContextConfig::managed_resources`。
-共享 root 统一准入 Host/Device/Shared/Metadata/Referenced/Payload、临时 Disk、entries/files、
+`ExecutionContext` 持有共享的受管资源 Root。调用方可用 `ExecutionContextConfig::managed_resources` 指定限额；省略时使用 `ResourceLimits{}` 默认值。共享 Root 统一准入 Host/Device/Shared/Metadata/Referenced/Payload、临时 Disk、entries/files、
 I/O slots/queue，以及累计 work/bytes/requests/stages；`maximum_live_bytes` 仍是 Payload 子限额。
 重叠维度不能相加解释为物理内存。先预留再分配，增长计入新旧同时存活容量。
 已提交 work、stage 和 I/O 在失败/取消后不退还；不足时返回 ResourceExhausted。
 
-mandatory backing 独立于可选 completed cache；关闭 cache 仍需保留活动消费者的结果。
-派生 Result 保守保留直接输入 ObjectIds/ResultRefs，可能保留整个祖先链。
-结果和 owning read window 可超过 ExecutionContext 生命周期，最后 owner 释放 backing。
-I/O 由 continuation yield 显式计划后执行，不能在 structured callback 中隐式阻塞读写。
+mandatory backing 独立于可选 completed cache；关闭 cache 仍需保留活动消费者正在使用的结果。Result 的 association 记录有序源 ObjectId，用于 lineage 与 dependency reporting；opaque `ResultEvidenceOwner` 保留 payload-free dependency ancestry。两者都不强持输入 `ResultRef` 或祖先 payload。活动 `ResultObjectInputs`、`ResultTensorInput` capability 和已取得的 read window 在各自生命周期内持有被请求的 Result 或 backing；physical tensor view 持有它发布字节所依赖的 source Results。结果和 owning read window 可超过 `ExecutionContext` 生命周期，backing 在最后一个实际 owner 释放后回收。详见[Global Results](../../kernel-architecture/Global-Results.md)。I/O 由 continuation yield 显式计划后执行，不能在 structured callback 中隐式阻塞读写。
 
 每份规格给输出、scratch、阶段 state、页窗口、临时文件、校验成本和峰值同时存活对象，
 同时给算法 work/stage 上界或显式拒绝条件。例如整数直方图有扫描 stage 下界准入，
 FFT 有两代完整临时 complex backing，连通域有独立于最终 K 的 union backing。
 `WithinBudgetOrFail` 覆盖受管理容量；allocator 内部、legacy 未埋点 metadata、线程栈、
-驱动及 OS cache 等属于排除范围。实测 managed peak 不代表 RSS 上界或完成保证。
+驱动及 OS cache 等属于排除范围。
 详见[Managed resources](../../kernel-architecture/Managed-Resources.md)。
 
 执行身份包含 operation contract、参数、ordered inputs、冻结输入身份和 canonical schema；
@@ -115,8 +108,7 @@ Result 的页大小、文件偏移、descriptor revision 和资源限额不进�
 Atom、ValidationDomain、Association 为语义失败范围；Group、Run、Waiter 记录运行影响范围。
 失败保留实际 upstream node/input 身份。host read/work/allocation 失败是 sticky，callback
 不能返回成功掩盖它。发布前检查整个 envelope 与关联字段；失败不得附带成功 Value/证书。
-普通 `execute` 保持 fail-fast；`execute_atoms` 对满足 Atomic/PerAtomOutcome 的 managed CPU
-Value plans 收集独立 observation；structured Result 按自身 finality 策略发布。
+普通 `execute` 保持 fail-fast；`execute_atoms` 从满足 Atomic/PerAtomOutcome 契约的 CPU structured Result dependency plan 收集独立 observation，并使用该 context 的受管 Root。普通 structured Result 同样使用 context Root；默认构造 context 时无需显式提供 `managed_resources`。
 已认证前缀可在之后运行失败时保留，不能称作完整成功结果。
 
 `QualityReport` 区分 Measured 与 CertifiedBound。有限 residual 包括零 residual 都不自动
@@ -132,6 +124,6 @@ Value plans 收集独立 observation；structured Result 按自身 finality 策�
 每项节点规格提供实际公开入口 workflow、独立 oracle、输入/参数、可检查预期结果和运行方法。
 有限浮点的 `atol=1e-6, rtol=1e-5` 仅可作新研究候选；已有算子的精确舍入、bitwise 或
 特定容差契约优先。局部算法按需要检查 whole/ROI/tile；全局 Result 检查页大小、动态/空 count、
-关联、cache-off、取消、低预算、上下文销毁后寿命。只报告本轮实际运行的验证。
+关联、cache-off、取消、低预算、上下文销毁后寿命。
 
 [^random]: John K. Salmon 等，*Parallel Random Numbers: As Easy as 1, 2, 3*，SC11，2011；[作者与项目页](https://random123.com/)。原研究参考；Photospider 随机键布局仍为建议。

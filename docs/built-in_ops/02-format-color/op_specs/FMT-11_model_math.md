@@ -7,8 +7,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu_result_abi_2
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-11: model conversion mathematics
@@ -24,10 +22,10 @@ All literal fractions below are exact, not rounded decimal approximations.
 
 Let delta=6/29 and epsilon=delta^3. Define
 
-    f(t) = cbrt(t)                 if t > epsilon
+f(t) = cbrt(t)                 if t > epsilon
            (841/108)*t + 4/29     otherwise
 
-    g(u) = u^3                    if u > delta
+g(u) = u^3                    if u > delta
            (108/841)*(u - 4/29)  otherwise
 
 The branches agree at each exact threshold. Use the real positive cube root in
@@ -36,13 +34,13 @@ inverse of this extended f on the reals.
 
 A has the complete finite formulas
 
-    l = (116*f(Y) - 16)/100
+l = (116*f(Y) - 16)/100
     a* = 500*(f(X/Wx) - f(Y))
     b* = 200*(f(Y) - f(Z/Wz))
 
 B has
 
-    fy = (100*l + 16)/116
+fy = (100*l + 16)/116
     X = Wx*g(fy + a*/500)
     Y = g(fy)
     Z = Wz*g(fy - b*/200)
@@ -84,7 +82,7 @@ without mixing their opponent scales or white definitions. Their first
 coordinate (normalized l for CIELAB, L for OKLab) copies its
 stored bits. For finite forward inputs:
 
-    C = sqrt(a*a + b*b)
+C = sqrt(a*a + b*b)
     theta = +0                    if a == 0 and b == 0
             atan2(b,a)           otherwise
     h = theta                    for radian
@@ -97,7 +95,7 @@ case; a nonzero tiny pair is not achromatic. No epsilon is introduced.
 For inverse finite inputs, theta is the exact stored radian value or the exact
 stored pi_multiple value times mathematical pi:
 
-    a = C*cos(theta)
+a = C*cos(theta)
     b = C*sin(theta)
 
 Semantic C=0 validates finite hue and yields +0 for each requested a/b instead
@@ -121,14 +119,6 @@ hue in semantic mode and L-only requests with invalid C/h to establish support.
 ## E/F: fixed XYZ and OKLab transform
 
 The two forward matrices, in row-major notation, are:
-
-    M1 = [ 0.8190224379967030  0.3619062600528904 -0.1288737815209879
-           0.0329836539323885  0.9292868615863434  0.0361446663506424
-           0.0481771893596242  0.2642395317527308  0.6335478284694309 ]
-
-    M2 = [ 0.2104542683093140  0.7936177747023054 -0.0040720430116193
-           1.9779985324311684 -2.4285922420485799  0.4505937096174110
-           0.0259040424655478  0.7827717124575296 -0.8086757549230774 ]
 
 Each printed decimal is an exact rational. E is M2*cbrt(M1*XYZ), with real
 componentwise cube root, including negative LMS. F is
@@ -161,7 +151,7 @@ explicit H/S=+0 achromatic exception; mixed zero signs give L=+0. Hue sector
 tie priority below does not override these numeric zero-selection rules.
 For d=0 set H=+0,S=+0. Otherwise let the six-sector hue coordinate q be:
 
-    q = ((G-B)/d) mod 6    when R==M
+q = ((G-B)/d) mod 6    when R==M
         (B-R)/d + 2       otherwise when G==M
         (R-G)/d + 4       otherwise
 
@@ -213,20 +203,20 @@ Preset names choose only these coefficients, not transfer or primaries.
 
 M, with no separately rounded intermediate Y':
 
-    Y' = Kr*R' + Kg*G' + Kb*B'
+Y' = Kr*R' + Kg*G' + Kb*B'
     Cb = (B'-Y')/(2*(1-Kb))
     Cr = (R'-Y')/(2*(1-Kr))
 
 N, with no separately rounded reconstructed R'/B' inside G':
 
-    R' = Y' + 2*(1-Kr)*Cr
+R' = Y' + 2*(1-Kr)*Cr
     B' = Y' + 2*(1-Kb)*Cb
     G' = Y' - (2*Kb*(1-Kb)/Kg)*Cb - (2*Kr*(1-Kr)/Kg)*Cr
 
 Strict computes the exact expanded linear form plus +0 bias and rounds once.
 The expanded forward rows, also used for raw Inf classification, are:
 
-    [ Kr,                 Kg,                  Kb   ]
+[ Kr,                 Kg,                  Kb   ]
     [-Kr/(2*(1-Kb)),     -Kg/(2*(1-Kb)),        1/2  ]
     [ 1/2,              -Kg/(2*(1-Kr)),       -Kb/(2*(1-Kr)) ]
 

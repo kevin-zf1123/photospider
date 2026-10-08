@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-10F: scatter_maximum
@@ -72,8 +70,6 @@ index changes, global invalid-index rejection and shared resource/lifetime tests
 The public workflow checks all four scatter variants and the aggregate's
 first-NaN quieting behavior on its focused Float64 fixture. The independent
 `index_oracle.py` checks maximum's NaN and signed-zero ordering across generated
-cases for strict and Apple profiles. The existing `test_numeric_result_math`
-integration fixture contains additional scatter cases; it was not rerun for this
-Result migration and does not establish a complete dtype/backend matrix. See
+cases for strict and Apple profiles. See
 [NUM-10 Whole execution](../indexing-whole.md) for runnable commands and
 evidence boundaries.

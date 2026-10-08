@@ -15,8 +15,7 @@ Runtime contract: FMT-03A/B are installed public authoring helpers over the
 registered FMT-02C Result operation. Scalar sources use prepared native bits
 through the registered `channel.scalar_literal_<profile>` operation. There is
 no native swizzle or replace key. The FMT specification decision remains
-Proposed. The performance guide distinguishes current Result smoke coverage
-from historical Value/planar measurements; it reports no full Result matrix.
+Proposed.
 
 This operator-local draft inherits [FMT-common](FMT_common_contract.md), its
 NUM numerical baseline and the accepted
@@ -346,8 +345,6 @@ No user-facing behavior question remains open. The specifications remain
 Proposed; old runtime tests or kernel page-window tests alone
 cannot establish conformance. The current CPU evidence is linked above.
 
-During clarification, an independent byte-coordinate scatter/gather check passed
-164 rank/axis/map combinations, including scalar-only source support, overwritten
-base nonreads, simultaneous swaps and dirty fan-out. This checks the equations
+This checks the equations
 and finite dependency sets only; it does not execute the proposed helpers,
 validate their graph lowering, or establish physical storage conformance.

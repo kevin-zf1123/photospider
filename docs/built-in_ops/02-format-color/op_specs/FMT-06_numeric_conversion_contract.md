@@ -311,11 +311,6 @@ Six focused CTest targets pass: `test_numeric_conversion`,
 suite covers 49 dtype pairs, randomized oracles, ROI, cold-lookup budget,
 failure-order, floating-environment and identity views. Additional batch/view/
 Empty/bit-stride, ICC-resource, concurrent-plan-reuse and payload-release checks
-pass. `test_alpha_numeric_interop` covers four inherited/moved cases. The two
-installed consumers `installed_numeric_conversion` and
-`installed_alpha_numeric_interop` pass; the standalone numeric-conversion
-performance consumer configures and builds. These checks establish behavior, not
+pass. `test_alpha_numeric_interop` covers four inherited/moved cases. These checks establish behavior, not
 performance. Thirteen Result performance smoke cases pass their byte oracle, but
-their timings have not been interpreted as performance evidence. The full matrix
-has not run. Historical Value/planar measurements do not describe the current
-Result execution path.
+their timings have not been interpreted as performance evidence.

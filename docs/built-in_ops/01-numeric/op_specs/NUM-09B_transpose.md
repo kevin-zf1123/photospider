@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-09B: transpose
@@ -91,5 +89,4 @@ sNaN payloads, view/auto/dense choices, disjoint requests and inverse dirty sets
 The nine formal profile keys use CPU Whole and disable cross-run content caching
 because content alone does not prove physical owner/stride identity; same-Run
 sharing remains available. See [NUM-09 Whole execution](../layouts-whole.md) for
-the current Result workflow and validation. Timing data there describes the
-earlier Value Whole implementation, not this Result path.
+the current Result workflow and validation.

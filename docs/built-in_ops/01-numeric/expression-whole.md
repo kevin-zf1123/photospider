@@ -64,15 +64,10 @@ directory:
 ```sh
 cmake --build build/kernel-dev --target photospider_numeric_expression -j8
 ctest --test-dir build/kernel-dev -R '^test_numeric_expression_result$' --output-on-failure
-cmake --build build/kernel-dev/repeated-result-consumer \
-  --target photospider_numeric_expression_workflow_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer \
-  -R '^installed_numeric_expression_result$' --output-on-failure
 ```
 
 The root CTest `test_numeric_expression_result` runs the strict example through
-the public C++ API. `installed_numeric_expression_result` builds the same source
-against the installed `Photospider::kernel`; both tests passed. Focused coverage
+the public C++ API. Focused coverage
 asserts that both output programs share one prepared AST. It also checks mixed
 Float32/Float64 bindings, a balanced 128-coefficient expression (255 AST nodes,
 height 8) over 130 declared ports, three Need polls for the 129 active inputs,

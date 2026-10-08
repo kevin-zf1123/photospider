@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-10A: concatenate
@@ -86,10 +84,9 @@ it does not imply that Dense copying is invalid.
 
 The public workflow test checks a same-owner affine view and Dense result,
 independent owners, unselected input failures and escaped Result/window lifetime.
-The existing `test_numeric_result_math` integration fixture separately contains
+The existing `test_numeric_result_math_arrays` integration fixture separately contains
 singleton-fragment stride inference, a negative global stride, reordered inputs
-under partial demand, Empty demand and 65-/256-input repeated-reference cases.
-That broader fixture was not rerun for this Result migration. The multi-envelope
+under partial demand, Empty demand and 65-/256-input repeated-reference cases. The multi-envelope
 cases should not be read as current `indexing.cpp` default-workflow coverage.
 Neither test covers every dtype, owner arrangement or concatenate geometry. See
 [NUM-10 Whole execution](../indexing-whole.md) for the current test entry and

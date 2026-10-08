@@ -11,7 +11,7 @@ implementation_status: not_implemented
 
 Canvas geometry is explicit; xy components and scalar axis sources are separate. Pixel
 centers define identity sampling coordinates, while normalized_edge uses W/H, not
-W-1/H-1. The old field.coordinate implementation is retired.
+W-1/H-1.
 
 ## Members
 

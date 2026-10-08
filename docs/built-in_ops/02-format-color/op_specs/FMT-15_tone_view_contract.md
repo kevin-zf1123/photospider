@@ -8,13 +8,11 @@ document_maturity: D1_draft
 implementation_status: not_implemented
 clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-15: luminance mapping and explicit view composition
 
-The maintainer delegated these design decisions on 2026-09-24. All members are
+All members are
 Proposed and unimplemented. Inherit [FMT-common](FMT_common_contract.md),
 [FMT-10 exact geometry](FMT-10_basis_math.md), and the native NUM numerical,
 resource, cancellation and immutable publication contracts.
@@ -84,7 +82,7 @@ FMT-10 Y weights. A color with a negative component but nonnegative Y is allowed
 If Y<0 and negative_luminance=reject, fail; otherwise put z=gain*abs(Y).
 Define the gain applied to every selected component:
 
-    k = gain/(1+z)                              # simple
+k = gain/(1+z)                              # simple
     k = gain*(1+z/(white*white))/(1+z)           # white_extended
     out_i = RN_dtype(k*x_i)
 
@@ -114,7 +112,7 @@ required: relative_to_nits or nits_to_relative. Finite Float64 parameters
 `black_nits` and `white_nits` are mandatory, 0<=black_nits<white_nits.
 They are exact stored rationals; no 100/203/1000-nit default is inferred.
 
-    nits_i = RN_dtype(black_nits + (white_nits-black_nits)*relative_i)
+nits_i = RN_dtype(black_nits + (white_nits-black_nits)*relative_i)
     relative_i = RN_dtype((nits_i-black_nits)/(white_nits-black_nits))
 
 Each expression rounds once. In RGB the same neutral offset/scale applies to
@@ -166,12 +164,12 @@ listed; no duplicate rendering is added by the helper.
 
 Order is observable and never sorted. For example:
 
-    FMT-09A -> FMT-10D -> FMT-15A -> FMT-14B -> FMT-09B
+FMT-09A -> FMT-10D -> FMT-15A -> FMT-14B -> FMT-09B
 
 is an explicit relative SDR recipe only when all descriptor prerequisites match.
 A D65 target is necessary for B. A PQ recipe may explicitly use
 
-    FMT-15A -> FMT-14C -> FMT-15B(relative_to_nits) -> FMT-09B(PQ)
+FMT-15A -> FMT-14C -> FMT-15B(relative_to_nits) -> FMT-09B(PQ)
 
 with matching target basis, display reference and caller-specified peak <=10000
 nits. These are conceptual examples, not canned defaults or registered APIs.

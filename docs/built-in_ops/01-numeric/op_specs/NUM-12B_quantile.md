@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-12B: quantile
@@ -131,17 +129,12 @@ not an Atom-scoped sample result.
 ## Current behavior checks
 
 The current public behavior entry is `examples/numeric_workflow/ordering.cpp`,
-registered as `test_numeric_ordering_result`; the same source is built as the
-installed consumer `installed_numeric_ordering_result`. It checks the 7.5
+registered as `test_numeric_ordering_result`. It checks the 7.5
 landmark, q-schema validation, axis-length-one q exclusion despite a failing q
-producer, source-failure precedence, source/q replacement, and output lifetime.
-The existing `test_numeric_result_math.cpp` integration fixture contains
-additional quantile cases, but it was not rerun for this Result migration. See
+producer, source-failure precedence, source/q replacement, and output lifetime. See
 [NUM-12 Result Whole execution](../ordering-whole.md) for the current commands
 and evidence boundaries.
 
-`test_numeric_ordering_result` and `installed_numeric_ordering_result` each
-pass 1/1. The independent ordering oracle passes 2,072 cases in both Strict and
-Apple profiles. The checks do not claim x86 arithmetic execution, performance
+ The checks do not claim x86 arithmetic execution, performance
 or a complete q semantic-facet/error/resource matrix. The specification
 remains Proposed.

@@ -14,8 +14,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-01B: interpolate_pchip
@@ -58,7 +56,7 @@ Static out_of_domain is reject, clamp or linear_extrapolate, default reject.
 Reject fails an out-of-domain observation. Clamp returns the selected endpoint y.
 Linear extrapolation uses the corresponding PCHIP endpoint derivative m:
 
-    left:  y[0]   + (query-x[0])*m[0]
+left:  y[0]   + (query-x[0])*m[0]
     right: y[K-1] + (query-x[K-1])*m[K-1]
 
 This follows the endpoint tangent, not the endpoint secant or continued cubic
@@ -113,13 +111,13 @@ h[j]=x[j+1]-x[j] and d[j]=(y[j+1]-y[j])/h[j]. For K=2, both node derivatives
 equal d[0]. For an interior node i, set m[i]=0 if either adjacent secant is
 zero or their signs differ. Otherwise use
 
-    w1 = 2*h[i] + h[i-1]
+w1 = 2*h[i] + h[i-1]
     w2 = h[i] + 2*h[i-1]
     m[i] = (w1+w2) / (w1/d[i-1] + w2/d[i])
 
 For K>=3 define an endpoint function E(h0,h1,d0,d1):
 
-    e = ((2*h0+h1)*d0 - h0*d1)/(h0+h1)
+e = ((2*h0+h1)*d0 - h0*d1)/(h0+h1)
     if sign(e) != sign(d0): return 0
     if sign(d0) != sign(d1) and abs(e) > 3*abs(d0): return 3*d0
     return e
@@ -128,7 +126,7 @@ Here sign(0)=0. Then m[0]=E(h[0],h[1],d[0],d[1]) and
 m[K-1]=E(h[K-2],h[K-3],d[K-2],d[K-3]). For segment j, set
 t=(query-x[j])/h[j] and evaluate
 
-    H(t) = (2*t^3-3*t^2+1)*y[j] + (t^3-2*t^2+t)*h[j]*m[j]
+H(t) = (2*t^3-3*t^2+1)*y[j] + (t^3-2*t^2+t)*h[j]*m[j]
          + (-2*t^3+3*t^2)*y[j+1] + (t^3-t^2)*h[j]*m[j+1]
 
 Exact knot/clamp paths select a y before this formula. Exterior queries use
@@ -258,11 +256,5 @@ the Whole contract above; mathematical y stencils remain unchanged.
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
 contains the shared arithmetic/resource details and current validation boundary.
 See [the editable workflow](../../../../examples/numeric_workflow/README.md#explicit-query-curves-crv-01)
-for construction, commands and checked expected results. The shared Result
-manual fixture passed all six groups under direct Strict and Apple runs; the
-strengthened Fraction oracle passed 2,487 bit-exact cases per profile, covering
-all four forms, mixed input/destination dtypes and domain policies. The focused
-CTest selection passed 3/3; the installed package 0.32 consumer passed under
-Strict (CTest 1/1) and direct Apple execution. The bounded eight-row-per-profile
-benchmark smoke passed, with no performance improvement claimed. This
+for construction, commands and checked expected results. This
 operation's specification status remains Proposed.

@@ -14,8 +14,6 @@ status: Proposed
 spec_revision: 0.2.0
 document_maturity: D1_draft
 implementation_status: implemented
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-02B: arange

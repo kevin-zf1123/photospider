@@ -5,9 +5,6 @@ kind: shared_operator_contract
 category: 01-numeric
 status: Proposed
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 ---
 
 # NUM/CRV accelerated precision and range
@@ -110,8 +107,7 @@ strict fallback and unmeasured parameter coverage.
 
 ## Current implementation
 
-The following describes the maintained implementation on 2026-09-21, based on
-`ops-impl@eb0e90c8`. Specification acceptance remains Proposed. The default public
+Specification acceptance remains Proposed. The default public
 registry resolves 330 profile keys (110 basenames) and 24 maintained legacy keys.
 The inventory driver checks this mapping against the runtime registry. Extended
 and legacy benchmark modes provide an ordinary workload for each basename and
@@ -150,92 +146,28 @@ admitted ranges are listed above. Wider legal inputs remain supported by strict.
 | Matrix | Whole callback with complete input/output and fixed block64 workspace; Apple Float32 selectable Accelerate DGEMM/direct SME FP64/scalar candidates, unique-RN32 certification and exact replay. Float64 retains exact arithmetic; all three candidate implementations are retained for comparison. See NUM-14 for configuration and resource boundaries. |
 | Other families | Shared arithmetic improvements apply where called. Nonuniform lowpass retains strict directed integration; LUT3D/parametric formulas retain exact construction; mix retains staged per-observation source selection. No private worker pool or general reduction/2D-scan rewrite is implemented. |
 
-### Measured workload scope
-
-Apple M5, Homebrew Clang 21.1.3, RelWithDebInfo, one CPU worker, result cache off.
-Compilation/freeze is excluded; one warmup precedes seven measured executions.
-The baseline is `eb0e90c8` with matching timing drivers. Times below are
-median / maximum microseconds for Apple accelerated Float64 outputs. These
-measurements describe the stated fixtures, not a universal throughput guarantee.
-
-| Public workload | Before (us) | Current (us) | Median speedup |
-| --- | ---: | ---: | ---: |
-| NUM-01 exp(x), [0,1], N=65536, Whole | 9,261,697 / 9,340,981 | 29,687 / 30,055 | 312.0x |
-| NUM-01 2*x+1, [0,1], N=65536, Whole | 796,695 / 831,235 | 28,716 / 30,103 | 27.7x |
-| NUM-04 exp, N=256 | 36,342 / 36,540 | 198 / 210 | 183.5x |
-| NUM-04 ln, N=256 | 14,992 / 15,072 | 194 / 201 | 77.3x |
-| NUM-04 sin / cos / tan, N=256 | 64,946 / 65,610; 64,066 / 65,076; 73,550 / 74,797 | 200 / 210; 196 / 202; 201 / 205 | 324.7x / 326.9x / 365.9x |
-| NUM-05 pow, N=256 | 43,478 / 44,109 | 232 / 237 | 187.4x |
-| Remap, N=256 | 119,946 / 120,467 | 385 / 391 | 311.5x |
-| Smoothstep, N=256 | 88,322 / 89,634 | 1,276 / 1,499 | 69.2x |
-| Stable sort values, N=256 | 169,426 / 214,594 | 611 / 640 | 277.3x |
-| Prefix sum, 256 inputs / 257 outputs | 133,406 / 133,945 | 2,943 / 3,361 | 45.3x |
-| Cumulative integral, 256 inputs / 257 outputs | 207,105 / 208,306 | 6,724 / 7,186 | 30.8x |
-| PCHIP inverse, 33 collinear knots / 256 queries | 704,835 / 708,815 | 8,344 / 8,420 | 84.5x |
-
-NUM-01 reaches 0.453 us/point for exp and 0.438 us/point for affine evaluation,
-meeting the respective 2 and 1 us/point targets. Supplementary [-8,8] workloads
-measure exp 27,219 / 27,684 us and affine 26,987 / 27,671 us with zero strict
-fallbacks. The internal 256-value exp math benchmark measures 28,701 / 28,803
-versus 17 / 20 us; this kernel-only timing is separate from public execution.
-Ordinary transcendental fixtures meet the 20x target with zero strict fallback.
-
-Targets are not uniformly met. Mix measures 92,185 -> 89,080 us median (1.03x),
-and integral_image [256,2] measures 822,018 -> 800,423 us (1.03x); their repeated
-execution/association work remains. Matrix is about 1.1x, LUT3D 1.5x,
-parametric Bezier 1.8x and linear inverse 1.7x. Uniform lowpass's five radius-2,
-256-disjoint-output fixtures improve only 1.15–1.35x despite zero strict fallback.
-They retain 256 fragments/certificates; the shared fragment constructor performs
-32,640 pairwise overlap checks. Sinc windows demand 768 unique source samples;
-Gaussian uses 1,280 logical taps over 1,025 unique samples. Nonuniform lowpass
-improves 1.22–1.64x and retains 256/256 strict fallback. Collinear PCHIP inverse
-speedup does not establish speedup for general nonlinear curves. Repeated paired
-checks found no sustained >10% regression in the measured cheap paths.
-
-Per-key cost coverage, source support, managed peaks and fallback counts can be
-regenerated with `cost_inventory.py` and the workflow drivers. Unique source
-support is distinct from repeated reads. Allocation-call counts and stage-time
-percentages are not exposed and are not assumed zero. Raw CSV and logs remain
-in ignored build directories. Reproduction commands and editable public workflows
-are in the [workflow README](../../../../examples/numeric_workflow/README.md).
-
 ### Current validation
 
-Native strict/Apple and Ubuntu WSL strict/AVX2 passed the independent oracle
-groups: expression 715, unary 7524, binary 14174, range 2826, interpolation 5244,
-ordering 2072, scans 2280, calculus 1810, linear/PCHIP 2487, inverse 407 and
-uniform lowpass 474 cases per profile. Native Python used MPFR 4.2.0-p12;
-WSL used Clang 18 and MPFR 4.2.1. WSL results establish correctness only.
-Additional native strict/Apple groups passed reductions 4740, matrix 1110,
-LUT1D 1416, LUT3D 1062, parametric Bezier 1428, shapers 4196, non-RGB color
-ramps 1784 and RGB 352 cases. Strict uses bitwise comparisons; accelerated
+ WSL results establish correctness only. Strict uses bitwise comparisons; accelerated
 acceptance checks final FP32-scaled error directly, including Float64 error.
 
 Public checks cover Whole/ROI, partitions and tails; negative/unaligned/zero
 strides; caller fenv; cache changes; typed/upstream failures; resource limits,
 cancellation and returned/unpublished owner lifetime. Regressions include
 neighboring PCHIP queries, exact collinearity versus underflowed slopes,
-non-last-axis/disjoint sort lines and upper-edge smoothstep. Five focused CTests
-(numeric operations, dependency sampling, dependency, resources and compiler)
-passed on both targets. Native and WSL static/shared installed consumers link
+non-last-axis/disjoint sort lines and upper-edge smoothstep. Native and WSL static/shared installed consumers link
 only `Photospider::kernel` and run the expression workflow; the SLEEF license is
-installed. ClangFormat 21 and cpplint passed for 51 changed C++ files. Independent
+installed. Independent
 code and contract review findings were corrected and checked. These checks do
 not constitute exhaustive parameter/platform or all-input refinement coverage.
-
-#### NUM-04 exp implementation update (2026-09-24)
 
 Float32 exp in [-80,80] now uses the IQK-derived NEON/AVX2 polynomial with an
 exact-rational whole-domain certificate for this admitted interval. It satisfies
 the existing final-output rule without evaluating a runtime SLEEF enclosure.
-The 2026-09-25 update restores SLEEF binary64 exp for Float64 NUM-04 and NUM-01
-AST intervals in [-80,80], using the binary64 enclosure and final-result guard.
 The Float32 IQK certificate is not used as a binary64 expression enclosure.
 Range/classification uncertainty retains strict evaluation. See the
 [adapter update](../adapter-performance.md) and [exp implementation report](../exp-performance.md) for the
 coefficient source, proof, per-lane consistency and measured platform scope.
-
-#### NUM-04 trigonometric implementation update (2026-09-24)
 
 Float32 sin/cos/sinc now use certified explicit-FMA polynomials on [-1,1];
 sinpi/cospi use [-1/4,1/4] with exact quarter-turn landmarks kept in the

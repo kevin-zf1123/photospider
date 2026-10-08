@@ -6,11 +6,6 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 ---
 
 # NUM-04: shared unary contract
@@ -58,8 +53,7 @@ All remain Proposed until their completed specifications are accepted.
 
 For radian functions and independent pi-multiple functions, also inherit the
 [trigonometric contract](NUM-04_trigonometric_contract.md). These files define
-target behavior; the legacy current registry remains a separate implementation
-fact, including its different finite-only abs policy.
+target behavior.
 
 ## Selected nonfinite behavior
 
@@ -212,12 +206,5 @@ this Whole callback; execution-level computed-element diagnostics are separate.
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
 document the constructors, Result bindings, manual checks and oracle entry
-points. The root registers `test_numeric_unary_result`, which runs the strict
-Result workflow; the testing build includes the manual target through the
-`test_numeric_result_math` dependency. Current strict and Apple C++ checks and
-the independent 7,524-case integer/Fraction/MPFR oracle for each profile passed
-with MPFR 4.2.2. The installed `Photospider::kernel` consumer also passed
-`installed_numeric_unary_result` (1/1). MPFR is used only by the independent
-Python oracle. The [historical validation and
-native timing](../math-implementation.md#num-04-validation-and-native-timing)
-remain scoped to the runs documented there.
+points. The root registers `test_numeric_unary_result`, which builds and runs the strict
+Result workflow. MPFR is used only by the independent Python oracle.

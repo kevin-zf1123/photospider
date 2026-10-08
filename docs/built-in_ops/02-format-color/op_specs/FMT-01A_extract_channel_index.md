@@ -8,7 +8,6 @@ category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-verification_status: focused_ctest_installed_consumer_and_example_passed
 operation_keys:
   - channel.extract_index_strict
   - channel.extract_index_accelerated_apple_silicon
@@ -83,9 +82,6 @@ axis 2 and index 2 select the red values. A request for the second row returns
 `[12,13]`; the source stores the same samples at coordinates `[1,0,2]` and
 `[1,1,2]`.
 
-The current `test_channel_extraction` integration test passed 483 arbitrary-axis
-bit-copy cases and additional batch, planar, fragmented-view, metadata, resource
-and limit checks. The public split workflow also passed and confirmed that only
-the requested handle executes. This does not claim a cross-family workflow
+ This does not claim a cross-family workflow
 through channel assembly. The older [performance workload](../../../../examples/channel_extraction_performance/README.md)
 measures the Value/planar path; it is not current Result performance evidence.

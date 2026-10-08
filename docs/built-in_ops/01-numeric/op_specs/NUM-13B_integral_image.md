@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-13B: integral_image
@@ -108,9 +106,7 @@ result, not exact recovery from arbitrary downstream subtraction. Test exact
 integer fixtures separately from floating retrieval accuracy. The current
 `test_numeric_scans_result` covers independent small-integer enumeration,
 cross-plane NaN/layout cases, resource limits, cancellation, Empty demand and
-zero-boundary input validation. The older `test_numeric_result_math.cpp`
-integration fixture contains additional integral-image cases, but it was not
-rerun for this Result migration.
+zero-boundary input validation.
 
 ## Implementation and executable acceptance
 

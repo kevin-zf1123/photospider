@@ -12,11 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 ---
 
 # NUM-05C: multiply
@@ -88,8 +83,3 @@ The [public example and commands](../../../../examples/numeric_workflow/README.m
 include this operation, an editable add/multiply composition, independent
 integer/Fraction/MPFR oracles and direct error/resource checks. The manual target
 is excluded from default builds and has no CTest/integration registration.
-
-The combined family passed 14,174 independent cases per profile on native
-Clang strict/Apple and Ubuntu WSL Clang strict/AVX2, plus expanded manual and
-local installed-consumer checks. [Measured validation scope](../math-implementation.md#num-05-validation-and-native-timing)
-records oracle versions, native timings and limitations.

@@ -7,8 +7,6 @@ status: Retired
 document_maturity: D1_draft
 implementation_status: not_applicable
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-07: retired catalog entry
@@ -26,10 +24,7 @@ plus default/explicit per-channel interval mapping, with pure-cast mode. A secon
 basic interval encoder would duplicate that behavior. The remaining requirements
 are assigned to the appropriate existing or future families below instead.
 
-The maintainer subsequently authorized removal of the legacy numeric.encode_range
-implementation together with numeric.cast and the old format/color nodes.
-Package 0.20.0 performs that [separate implementation retirement](FMT_legacy_retirement.md).
-Neither old path is retained as a conforming FMT-06 implementation.
+
 
 ## Confirmed successor allocation
 
@@ -68,8 +63,7 @@ is no unresolved dependency on FMT-07.
 
 ## Verification and delivery boundary
 
-This change retires a specification ID, allocates successors and resolves an
-existing specification dependency. It implements none of those operators,
-removes no legacy runtime code and claims no executable workflow or benchmark.
+This retired entry assigns its requirements to successor families and defines no
+operator.
 Validate links and the exact opaque-code examples when updating the dependent
 specifications; future runtime work needs its own public API acceptance evidence.

@@ -149,22 +149,9 @@ operation's output cacheable across changed inputs or profiles.
 | Cancellation | Cancelled; admitted buffers are released |
 | Unsupported backend | BackendUnavailable; no GPU or alternative algorithm fallback |
 
-The native Result suite passes 16 numerical cases, validation and rounding
-checks, concurrency, ROI behavior, cache policy, strided layouts, batch planes,
-and result ownership. It also passes six Root payload capacity boundaries,
-work exhaustion, active cancellation, invalid dimensions through UINT64_MAX
-metadata, and Empty-demand checks. A full-mask plane fails as specified.
+A full-mask plane fails as specified.
 
-The OpenCV adapter test passes a 288-case reference matrix: 144 cases per
-backend across shapes, patterns, radii 1/3/8/32 and all mask families. Its
-validation, rounding, concurrency, ROI, cache, layout and batch checks pass.
-Both adapters passed the 5x5 constant-color public example. The strict OpenCV
-4.12.0 library was built from the 4.12 tag with
-`-fno-fast-math -frounding-math -ffp-contract=off`.
-
-The standalone native consumer configures, builds, and runs against package
-0.30.0. The installed adapter consumer passes three tests: the 288-case
-consumer, native example, and OpenCV example. A native-only package also passes
+ A native-only package also passes
 its two installed checks, and its executable has no OpenCV undefined symbols.
 The native suite also verifies complete-output invalidation after a one-sample
 input change. Same-context results after changing image, mask, radius, or image
@@ -180,7 +167,7 @@ constructs typed Result inputs, binds them to a public WorkflowDocument, runs th
 native operation, and checks the named `image` output. Its 5x5 constant-color
 fixture verifies the output and retained image semantic facet.
 
-    cmake --build build/kernel-dev --target photospider_inpaint_ns_workflow -j 8
+cmake --build build/kernel-dev --target photospider_inpaint_ns_workflow -j 8
     build/kernel-dev/examples/inpaint_ns_workflow/photospider_inpaint_ns_workflow
 
 For the optional adapter, use the strictly built OpenCV 4.12.0 package and enable

@@ -12,11 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 ---
 
 # NUM-04R: sincpi
@@ -89,14 +84,8 @@ atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
-cover this operation. The combined NUM-04 family suite passed 7,524 independent
-integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.0-p12; revalidated 2026-09-21)
-and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
-local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
-record the scope and limitations. Manual targets have no CTest/integration
+cover this operation. Manual targets have no CTest/integration
 registration; MPFR is used only by the independent Python oracle.
-
-### SIMD polynomial update (2026-09-24)
 
 Float32 accelerated sincpi covers all finite binary32 inputs using exact integer-unit reduction. For `n = round_even(abs(x))` and `r = abs(x)-n`, it evaluates a central sincpi polynomial and reconstructs `(-1)^n*(r/abs(x))*sincpi(r)`. The central polynomial, hardware division and multiply use SIMD binary64 intermediates before final Float32 rounding. The `n=0` branch uses the central polynomial directly; zero returns one, nonzero integers return positive zero, and finite magnitudes at least `2^23` are all integers.
 

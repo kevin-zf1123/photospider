@@ -8,7 +8,6 @@ category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
-verification_status: focused_and_installed_result_tests_passed
 ---
 
 # FMT-08B: remove selected semantic descriptions or annotations
@@ -19,10 +18,7 @@ edge, static targets and family options, returning one `values` edge. It lowers
 to [A assign metadata](FMT-08A_assign_metadata.md) in patch mode with no set
 entries and the target list as remove. It creates no separate registry key; the
 lowered node selects A's CPU profile. Result operation ABI is 2,
-WorkflowDocument is 4 and OperationTraits is 21. FMT-08B remains Proposed.
-Focused Result tests pass for metadata edits, Result execution/global behavior,
-resource budgets and image contracts; the public workflow and two installed
-consumer tests pass. The metadata-to-`channel.extract` configuration/resource
+WorkflowDocument is 4 and OperationTraits is 21. FMT-08B remains Proposed. The metadata-to-`channel.extract` configuration/resource
 chain is covered; `channel.assemble` composition is outside this evidence.
 
 ## Interface and lowering

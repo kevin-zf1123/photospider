@@ -1,16 +1,16 @@
 # 当前实现与规格前置条件
 
-Photospider 0.30.0 的 operation plugin 使用 Result C ABI 2。本文概括当前包内可核对的注册入口、数据类型和执行边界；单个算子的端口、参数、数值行为和 Region 规则以对应实现契约为准。
+当前 package 为 Photospider 0.33.0，operation plugin 使用 Result C ABI 2，OperationTraits 为 25。本文概括当前包内可核对的注册入口、数据类型和执行边界；单个算子的端口、参数、数值行为和 Region 规则以对应实现契约为准。公共 C++ 契约有破坏性变更，consumer 必须重建。
 
 ## 默认 registry 与类型边界
 
 默认 registry 的注册入口位于[`builtin_operations.cpp`](../../../src/lib/plugin/builtin_operations.cpp)，公开 operation C ABI 定义于[`result_operation_plugin_api.h`](../../../include/photospider/plugin/result_operation_plugin_api.h)。当前分类指南描述的是各族已实现子集；逐 key 的参数、dtype、shape、Region 与错误契约仍以对应专题为准。
 
-存在 key 只说明 registry 接受该定义，不单独证明任意存储路径都可执行。`OperationTraits::planar_storage_capable` 和结构化 callback 决定 operation 能否进入 planar 执行路径；[`operation_registry.cpp`](../../../src/lib/plugin/operation_registry.cpp) 实施该门控。
+存在 key 只说明 registry 接受该定义，不单独证明任意存储路径都可执行。当前 operation 契约通过 `OperationTraits` 的输入约束、backend 能力和有序 `OperationOutputTraits` 声明输入输出；输出的 `result_schema`、metadata resolver 与 `ResultTensorSpec` 定义 Result 类型和 tensor 描述。Result-only operation 按其注册的 callback、schema 和 backend 契约执行，没有独立的 planar-storage capability flag。实现入口见[`operation_registry.hpp`](../../../include/photospider/plugin/operation_registry.hpp)和[`operation_registry.cpp`](../../../src/lib/plugin/operation_registry.cpp)。
 
 [`ElementType` in `value.hpp`](../../../include/photospider/data/value.hpp) 定义七种内建元素类型：`UInt8`、`Int8`、`UInt16`、`Int16`、`Int64`、`Float32` 和 `Float64`。descriptor 的 rank 为 1 到 8，各轴长度必须大于零。浮点 `Value` 可保留通用位模式；算子的数值契约可施加更窄的限制。
 
-图像 operation 按各自声明支持的语义描述符、布局、类型和 Region 执行。图像样本通过 Result Tensor storage 进入和离开图像 operation；`PlanarImage` 只作为该存储路径的 typed backing。仅有旧式 image `Value` callback 的节点不因此获得 Result 图像执行能力。`SchemaTemplate::validate` 会拒绝六种 Layer Result schema ID 及 `photospider.layer` facet，并返回 `TypeMismatch`；拒绝分支见[`result.cpp`](../../../src/lib/data/result.cpp)。
+图像 operation 按各自声明支持的语义描述符、布局、类型和 Region 执行。图像样本通过 Result Tensor storage 进入和离开图像 operation；`PlanarImage` 只作为该存储路径的 typed backing。仅有旧式 image `Value` callback 的节点不因此获得 Result 图像执行能力。`SchemaTemplate::validate` 会拒绝六种 Layer Result schema ID 及 `photospider.layer` facet，并返回 `TypeMismatch`；拒绝分支见[`result_schema.cpp`](../../../src/lib/data/result_schema.cpp)。
 
 ## 当前能力入口
 
@@ -33,6 +33,6 @@ Photospider 0.30.0 的 operation plugin 使用 Result C ABI 2。本文概括当�
 
 ## 规格状态、边界与修订入口
 
-规格的 `Proposed` 或 `Accepted` 状态描述目标契约状态，不表示实现已经注册。oracle 覆盖、operation 注册、planar storage 能力和 CPU/GPU backend 支持是不同事实，应分别按对应实现文档核对。
+规格的 `Proposed` 或 `Accepted` 状态描述目标契约状态，不表示实现已经注册。oracle 覆盖、operation 注册、Result storage 能力和 CPU/GPU backend 支持是不同事实，应分别按对应实现文档核对。
 
 通用路径光栅、任意 solver、RAW、时域、Deep 和 ML 等能力不由现有基础设施自动提供；只有当前 registry、factory 或明确执行接口实现的部分才属于可调用能力。按[规格模板](spec-template.md)选择规格、实现说明或 workflow 的维护位置。

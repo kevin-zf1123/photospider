@@ -17,9 +17,7 @@ twelve Result operation ABI 2 CPU keys: `assemble`, `concatenate`,
 The public authoring helpers are installed in
 `photospider/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
 specification decision remains Proposed; implementation status is recorded
-separately. The performance guide records small current Result smoke cases separately from
-historical Value/planar measurements; no full Result benchmark matrix is claimed.
-
+separately.
 
 This is the operator-local clarification for the Proposed FMT-02 family. Inherit
 [FMT-common](FMT_common_contract.md), the NUM numerical/resource conventions
@@ -442,9 +440,7 @@ sample bits; descriptor/discrete results are exact. Include these cases:
   teardown. Verify backing charges retire with the last owner.
 
 The public assembly integration fixture exercises WorkflowDocument, Compiler,
-ExecutionContext, exact output bytes and partial channel ROIs. The current
-performance guide records focused Result smoke coverage and keeps the historical
-Value/planar timings separate.
+ExecutionContext, exact output bytes and partial channel ROIs.
 
 Benchmark correctness first, then A assembling four independent Float32
 [4096,4096] planes and B concatenating RGB plus alpha for the same spatial
@@ -462,8 +458,7 @@ The byte-copy and index equations are specified directly; no external commercial
 pixel-compatibility claim is made (U: unverified under the template's convention).
 No operator-local behavior question remains open. The current implementation supplies canonical metadata and mapping encodings,
 native dtypes, exact dependency/publication support, legal view checks and the
-member registrations. The performance guide records small byte-oracle-checked Result smokes; its older
-Value/planar measurements remain historical and do not measure Result latency.
+member registrations.
 
 Documentation-level verification compared independent coordinate scatter and
 gather equations for 105 A cases, 141 B cases and 204 C cases across legal ranks

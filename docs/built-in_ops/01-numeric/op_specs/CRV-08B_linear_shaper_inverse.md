@@ -10,10 +10,7 @@ kind: composite_workflow
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-verification_status: focused_result_validation_passed
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-08B: linear_shaper_inverse
@@ -77,9 +74,6 @@ The public entry point is `linear_shaper_inverse` in
 `photospider/numeric/shapers.hpp`. This linear helper expands to existing Result
 remap/constant nodes and is not a linear primitive.
 See [the CRV-08 family contract](CRV-08_shaper.md) and [the shaper workflow README](../../../../examples/numeric_workflow/README.md)
-for the shared command, fixture and validation evidence. The current Result
-focused CTest passes 1/1; six manual groups pass under Strict and the local Apple
-profile, and the Result probe passes 4,196 Fraction/directed-MPFR 4.2.2 cases
-under each profile. The installed consumer passes 1/1, including public
+for the shared command, fixture and validation evidence. The installed consumer passes 1/1, including public
 composition and output lifetime checks. x86 numerical, GPU, maximum-size and
 performance validation are not covered.

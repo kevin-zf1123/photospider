@@ -23,9 +23,7 @@ with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
 The public authoring helpers are installed in
 `photospider/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
 specification decision remains Proposed; implementation status is recorded
-separately. The performance guide records focused Result smokes and labels its earlier
-Value/planar measurements as historical; no full Result matrix is reported.
-
+separately.
 
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md) for
 exact copying, same dtype, spatial agreement, metadata modes, planar storage,
@@ -226,5 +224,4 @@ The conceptual public workflow is `RGBA + independent plane -> mapped assembly
 example with a partial channel request and checked bytes. Benchmark the family
 [4096,4096] workload with identity, reorder and repeated-source maps, full and
 one-channel requests, recording mapping size and descriptor-resolution time
-separately. This Proposed specification does not claim a Result performance measurement. The
-legacy performance driver still exercises Value/planar execution.
+separately.

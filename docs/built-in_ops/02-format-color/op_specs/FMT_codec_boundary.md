@@ -10,8 +10,7 @@ clarification_status: image_boundary_confirmed_codec_details_pending
 
 # Canonical image planes and I/O codec boundary
 
-The maintainer confirmed the following image boundary on 2026-09-23, superseding
-the heterogeneous-plane alternatives in the FMT-09..18 scope review. This record
+This record
 assigns responsibilities; it does not implement a codec or select resampling
 algorithms. [FMT-16](FMT-16_retired.md) and [FMT-17](FMT-17_retired.md) are retired catalog IDs;
 no replacement kernel operators are assigned to them.

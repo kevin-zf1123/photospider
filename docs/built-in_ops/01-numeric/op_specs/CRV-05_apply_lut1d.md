@@ -6,10 +6,7 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-verification_status: focused_result_math_ctest_and_installed_consumer
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-05: apply_lut1d family
@@ -101,8 +98,7 @@ copy the entire table into dense storage. The Whole continuation publishes the
 complete packed Result, records current source ObjectIds, and releases temporary
 state on failure or cancellation.
 
-The Result manual fixture passes seven groups under Strict and locally available
-Apple profiles. Its independent Fraction driver passes 1,416 bit-equal cases per
+ Its independent Fraction driver passes 1,416 bit-equal cases per
 profile. Manual coverage includes scalar and channel Float32/Float64, all-port
 reversed unaligned inputs, zero-stride aliases, caller and worker floating-point
 modes, recognized typed RGBA validation of an unrequested alpha, upstream Result
@@ -112,7 +108,7 @@ for fresh equivalent source Results with associations updated to those sources,
 and reuse of static preparation after input/table/axis replacement. All six CRV-04
 baking templates feed the Result application nodes.
 
-The same focused selection also runs the existing `test_numeric_result_math`
+The same focused selection also runs the existing `test_numeric_result_math_lut1d`
 integration fixture; its LUT1D groups cover custom Result schemas, channel batch
 shape [2,2,2], eight scalar Fraction golden bits, axis/query/table failure
 precedence, cancellation inside a 352-limb `ExactCurve` slot, and the existing
@@ -128,19 +124,8 @@ axis allocation charged to Metadata while Payload remains below 8*L, so the
 operator does not materialize a dense table copy. A sparse request with 2^39
 channels fails with `ResourceExhausted/CapacityLimit` at the LUT node. Escaped
 scalar and channel Results each retain 16 Payload bytes while a read window is
-alive; releasing both handles returns every Root resource to zero. The full
-maximum physical channel-table allocation and x86 numerical execution were not
-run.
+alive; releasing both handles returns every Root resource to zero.
 
-The focused root CTest selection passed `test_numeric_lut1d_result` and
-`test_numeric_result_math` 2/2 in 4.74 seconds. The existing math integration
-test took 4.42 seconds; the new manual test took 0.31 seconds. The separate
-`installed_numeric_lut1d_result` test compiled and linked the same manual source
-against the installed 0.32.0 `Photospider::kernel` package, then passed 1/1 under
-Strict in 0.38 seconds (0.39 seconds total); its direct Apple run passed all
-seven groups. `test_numeric_result_math` and the manual/installed tests are
+`test_numeric_result_math_lut1d` and the manual/installed tests are
 distinct fixtures. Reproduction commands are in the [numeric workflow
 README](../../../../examples/numeric_workflow/README.md#lut1d-application-crv-05).
-The old package 0.18 Value-adapter measurements in the [math implementation
-notes](../math-implementation.md#crv-05-dynamic-axis-lut1d) are historical and do
-not establish Result performance.

@@ -13,8 +13,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-impl
-repository_commit: current working tree
 ---
 
 # NUM-03A: constant
@@ -161,8 +159,6 @@ zero strides, including result ownership after context destruction, and dense
 `[2,3]` execution.
 
 The following acceptance and regional implementation record predates Whole.
-Manual acceptance on 2026-09-14 passed local AppleClang 21 strict/Apple profiles
-and Ubuntu WSL Clang 18 strict/x86 profiles, plus an installed public consumer.
 Coverage includes all UInt8 values, integer extrema and IEEE bit patterns,
 view/dense output, shape errors, cancellation during collection, StageLimit,
 metadata/output capacity, semantic validation, oversized unaligned source release,
@@ -175,7 +171,7 @@ status of this specification.
 
 - [NUM-03 category](../core.md).
 - [Existing scalar producer](../../../../plugins/ops/00-foundation/core_constant.cpp).
-- [Generation specification](../../03-generation/op_specs/GEN-01A_constant_tensor.md); the legacy field producer implementation is retired.
+- [Generation specification](../../03-generation/op_specs/GEN-01A_constant_tensor.md).
 - [Operator template](../../00-foundation/spec-template.md).
 
 Current Whole validation and timing: [array Whole](../arrays-whole.md).

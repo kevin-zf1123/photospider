@@ -7,8 +7,6 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-impl
-repository_commit: current working tree
 ---
 
 # NUM-07: exact comparisons
@@ -88,10 +86,7 @@ collection/typed failure may precede InvalidCondition. Any input edit invalidate
 all observations. Invalid condition anywhere fails with Run scope and no Atom key.
 All NUM-07 Whole callbacks have per-value numeric diagnostics N/A.
 
-The manual [numeric workflow](../../../../examples/numeric_workflow/README.md)
-and 3760-case independent Fraction oracle passed for the pre-Whole implementation on 2026-09-14 with local
-AppleClang 21 strict/Apple and Ubuntu WSL Clang 18 strict/x86. The installed
-consumer passed. Source support, typed closure, sNaN environment preservation,
+Source support, typed closure, sNaN environment preservation,
 condition/error isolation, cache changes and resource cleanup are separately
 checked. These manual executables have no integration-test registration and
 establish no performance claim. Specification status remains Proposed.

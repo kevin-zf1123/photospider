@@ -24,8 +24,7 @@ batch prefix and exact sample bits, and performs no sample-domain validation.
 The cell-axis `axis` excludes the Result batch prefix. Full sample rank,
 including batch and cell axes, is at most 8; full sample count is at most 2^40.
 The helper is a compile-time composition over registered Result operations; it
-does not add an alpha-specific runtime key. Historical Value/planar measurements
-are not evidence for the current Result path; no Result performance claim is made.
+does not add an alpha-specific runtime key.
 
 ## Interface and output inference
 
@@ -103,5 +102,4 @@ tile boundaries. Check surviving source/view owners after context retirement,
 final release, low budgets, cancellation and rollback of failed helper expansion.
 `test_alpha_authoring` exercises the public compile/execute path and passes.
 Fourteen small alpha performance smoke cases pass their output oracle; no full
-matrix is claimed. Historical Value/planar timings are not Result performance
-evidence.
+matrix is claimed.

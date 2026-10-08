@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-06A: clamp
@@ -94,7 +92,7 @@ Float32/Float64 paths, negative and zero-stride Int64 layouts, invalid bounds
 outside sparse demand, typed validation, Whole support, Empty, resource
 exhaustion, cache behavior and global-coordinate projection. The independent
 oracle covers UInt8 and Int64 boundary values. The separate
-[`test_numeric_result_math.cpp`](../../../../tests/integration/test_numeric_result_math.cpp)
+[`test_numeric_result_math_sequences.cpp`](../../../../tests/integration/numeric/test_numeric_result_math_sequences.cpp)
 fixture retains additional checks for all four dtypes, integer extrema,
 batch-axis flattening, negative zero and pre-cancellation; it was not rerun for
 this update.

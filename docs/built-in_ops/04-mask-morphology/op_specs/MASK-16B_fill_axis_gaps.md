@@ -32,8 +32,7 @@ No hidden default, conversion, color/alpha inference or optional port is added.
 ## Mathematics and exact request behavior
 
 Filter S=seeds AND NOT original after Binary validation. Prepare base closure T,
-then E=original OR (T AND NOT S); only newly added seed-site barriers are cleared.
-Do not rerun closure; flood S against E. Empty S produces empty fill. Export E as barrier, seeds AND original as
+then E=original OR (T AND NOT S); only newly added seed-site barriers are cleared. Empty S produces empty fill. Export E as barrier, seeds AND original as
 ignored_seeds, and T AND S as reopened_barrier.
 
 A temporary closure, seed-site override, then barrier flood; original-barrier seeds are ignored.

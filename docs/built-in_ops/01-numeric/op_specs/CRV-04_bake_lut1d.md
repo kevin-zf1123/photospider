@@ -6,13 +6,7 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
-verification_status: manual_public_graph_equivalence
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: 6617c78c
 ---
 
 # CRV-04: bake_lut1d workflow templates
@@ -122,9 +116,9 @@ For every template and CPU profile, construct the generated graph and its explic
 
 Behavior coverage includes count one with a failing end producer, count greater than one with a failing end producer, empty demand with a real failing source continuation, source-specific equal-endpoint/domain rules, independent axis demand, mixed endpoint/table dtypes, fresh-source cache hits and current associations, repeated-demand Result identity, static preparation reuse after binding changes, work/payload rejection, cancellation after computation starts and recovery. Test reversed, unaligned and scalar zero-stride source layouts across every input port, and verify caller and worker floating-environment preservation. Exercise source owner retirement, independent values/axis ownership, Result and read-window lifetime, and release of all Root resources. A sparse million-row PCHIP request under a 1 MiB Payload budget returns `ResourceExhausted / CapacityLimit` at node 1 before the complete linspace query Result can be admitted; this checks full-query admission and does not claim successful maximum-size execution. Injected computation WorkLimit and cancellation also return with live Payload at zero.
 
-The maintained `examples/numeric_workflow/baking.cpp` fixture declares Result schemas, binds immutable source Results backed by local `Value` storage and runs both generated and hand-authored graphs through `ExecutionContext`. For each profile it compares 48 graph pairs (six templates by two table dtypes by four demand modes) and separately checks the analytic values encoded in its fixtures. Its numeric oracle is separate. The fixture's seven groups also exercise source failure ordering, cache and association behavior, preparation reuse, authoring boundaries, layouts, cancellation and Result ownership. Direct Strict and Apple runs each passed all seven groups. The focused root CTest selection passed `test_numeric_baking_result` and `test_numeric_result_math` 2/2 in 5.22 seconds (0.38 and 4.83 seconds). The freshly compiled consumer against the reinstalled 0.32.0 package passed the installed baking/inverse/LUT3D selection 3/3 in 5.71 seconds, with 2.39 seconds for baking; its direct Apple run passed all seven groups. These CTest durations include work from concurrent CPU tests and are not performance measurements. These results document this implementation run and do not change the Proposed status of this contract. x86 and successful maximum-physical-size sampling were not run.
+The maintained `examples/numeric_workflow/baking.cpp` fixture declares Result schemas, binds immutable source Results backed by local `Value` storage and runs both generated and hand-authored graphs through `ExecutionContext`. For each profile it compares 48 graph pairs (six templates by two table dtypes by four demand modes) and separately checks the analytic values encoded in its fixtures. Its numeric oracle is separate. The fixture's seven groups also exercise source failure ordering, cache and association behavior, preparation reuse, authoring boundaries, layouts, cancellation and Result ownership.
 
-No additional numeric primitive is introduced. Numerical arithmetic and independent numeric oracles for the underlying operations remain in NUM-01/02 and CRV-01/02; generated/explicit graph equivalence alone does not prove their numerical contracts. Historical package 0.18 Value-path measurements are retained in the implementation notes as history and do not measure the current Result path. Other platforms and native GPU behavior require their own direct evidence.
+No additional numeric primitive is introduced. Numerical arithmetic and independent numeric oracles for the underlying operations remain in NUM-01/02 and CRV-01/02; generated/explicit graph equivalence alone does not prove their numerical contracts. Other platforms and native GPU behavior require their own direct evidence.
 
 See the maintained [public example and commands](../../../../examples/numeric_workflow/README.md#lut1d-baking-templates-crv-04).
 The source specifications remain Proposed independently of implementation.

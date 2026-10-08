@@ -7,8 +7,6 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-10: scatter into a base tensor

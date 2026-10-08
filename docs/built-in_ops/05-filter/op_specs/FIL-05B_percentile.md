@@ -53,7 +53,7 @@ The linked reference function is a small mathematical oracle, not a production k
 
 See the member's linked reference source and oracle README.
 
-Fixture coverage identifiers: `percentile_linear_float32`, `percentile_linear_float64`, `median_even_lower`, `median_even_higher`, `median_even_nearest_even`, `median_even_midpoint`, `rank_signed_zero_copy`. This catalog records fixture scope only; it makes no current pass claim.
+Fixture coverage identifiers: `percentile_linear_float32`, `percentile_linear_float64`, `median_even_lower`, `median_even_higher`, `median_even_nearest_even`, `median_even_midpoint`, `rank_signed_zero_copy`.
 
 Reference callable: `percentile(image,footprint,anchor,*,q=Q(1,2),interpolation='linear',boundary='reflect_half',cval=0,empty='error',dtype='float64')` in [spatial.py](../../../../oracle/ops/filter/oracles/spatial.py). These oracle helper defaults do not define graph-node constructors; every node parameter remains explicitly required.
 

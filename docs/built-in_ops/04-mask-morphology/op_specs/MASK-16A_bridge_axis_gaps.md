@@ -31,8 +31,6 @@ No hidden default, conversion, color/alpha inference or optional port is added.
 
 ## Mathematics and exact request behavior
 
-Fill original zero-runs bounded by ones with length<=maximum_gap, one simultaneous pass.
-
 H: cross-shaped axis support with reach maximum_gap+1, not square; max_gap0 only Q. Empty Q has no runtime sample/control/validation reads. Descriptor
 checks still run. The family defines validation closure, border extension,
 stage rounding, dynamic witnesses and the forward dirty relation. A bounding

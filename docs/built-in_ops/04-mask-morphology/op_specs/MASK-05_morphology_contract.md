@@ -13,7 +13,7 @@ clarification_status: draft_for_review
 
 Inherit the complete [MASK baseline](MASK_common_contract.md), including its
 precision, descriptor, error, demand, ownership and acceptance obligations.
-This family proposes distinct members; it registers no dispatcher or legacy alias.
+This family proposes distinct members.
 
 ## Members
 
@@ -32,7 +32,7 @@ minus with no leading zeros, no +, no -0). Pairs are unique, lexicographically
 sorted; (0,0) is present and B=-B. Reject empty/noncanonical/asymmetric sets.
 Factories may canonicalize before serialization; direct nodes must be canonical.
 The array ABI is not extended for this static encoding. Coordinate/demand
-arithmetic is checked; a large radius is not silently limited to legacy 64.
+arithmetic is checked.
 
 B_square={(dy,dx):max(abs(dy),abs(dx))<=r}; B_diamond uses abs(dy)+abs(dx)<=r;
 B_disk uses exact integer dy²+dx²<=r². These are pixel-grid footprints, NOT

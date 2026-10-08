@@ -7,12 +7,7 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: 6617c78c
 ---
 
 # NUM-04: exact rational pi-multiple inputs
@@ -190,8 +185,5 @@ diagnostics remain separate.
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
 document Result bindings and the independent oracle. The root registers
-`test_numeric_unary_result` for the strict Result workflow. Current strict and
-Apple C++ checks and the independent 7,524-case integer/Fraction/MPFR oracle for
-each profile passed with MPFR 4.2.2. The installed `Photospider::kernel`
-consumer passed `installed_numeric_unary_result` (1/1). MPFR is used only by
+`test_numeric_unary_result` for the strict Result workflow. MPFR is used only by
 the independent Python oracle.

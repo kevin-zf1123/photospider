@@ -8,13 +8,11 @@ document_maturity: D1_draft
 implementation_status: not_implemented
 clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-18: ICC softproof colors and independent gamut alarms
 
-The maintainer delegated the remaining design on 2026-09-24. This family is
+This family is
 Proposed and unimplemented. It reuses the complete
 [FMT-12 engine contract](FMT-12_icc_transform_contract.md), including immutable
 ICC v2/v4 resources, Little CMS 2.19.1 CPU, endpoint bindings, native units,
@@ -113,8 +111,7 @@ coordinates can be finite negative/HDR if the engine produces them.
 ## B: lcms2.19.1_gamut_source_dims_v1
 
 This member deliberately identifies a corrected source-domain gamut algorithm,
-not an unmodified stock transform. Pin upstream source at
-`21c582a594fe5279f90c0b93437c398f93bf62b0` (lcms2.19.1). The stock gamut builder
+not an unmodified stock transform. The stock gamut builder
 uses the proof channel count for its source-domain CLUT, while its input sampler
 consumes source channels. This is invalid for RGB/CMYK and Gray/RGB mismatches.
 The required numerical integration correction consists of:
@@ -256,14 +253,6 @@ commands and actual engine/profile corpus results. No CMM execution occurred in
 this documentation step.
 
 ## Primary source evidence and remaining implementation work
-
-- [Pinned proof transform and borrowed gamut accessor](https://github.com/mm2/Little-CMS/blob/21c582a594fe5279f90c0b93437c398f93bf62b0/src/cmsxform.c):
-  actual four-stage arrays, softproof flags, alarm-color collision and ownership.
-- [Pinned gamut builder/sampler](https://github.com/mm2/Little-CMS/blob/21c582a594fe5279f90c0b93437c398f93bf62b0/src/cmsgmt.c):
-  source/proof dimension distinction, private helper flags, heuristic and table construction.
-- [Pinned grid policy](https://github.com/mm2/Little-CMS/blob/21c582a594fe5279f90c0b93437c398f93bf62b0/src/cmspcs.c)
-  and [CLUT evaluation](https://github.com/mm2/Little-CMS/blob/21c582a594fe5279f90c0b93437c398f93bf62b0/src/cmslut.c):
-  fixed grid dimensions and normalized Float32/u16 conversion/interpolation.
 
 These fixed source paths were inspected; they are not runtime test evidence.
 The source-dimension fix, resource/cancellation hooks, metadata migration and

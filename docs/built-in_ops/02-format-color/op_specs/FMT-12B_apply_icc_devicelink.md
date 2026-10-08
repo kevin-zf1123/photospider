@@ -11,8 +11,6 @@ implementation_status: not_implemented
 clarification_status: complete
 proposed_operation_keys:
   - color.icc_apply_devicelink_lcms2_19_1_cpu
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-12B: apply an ICC DeviceLink

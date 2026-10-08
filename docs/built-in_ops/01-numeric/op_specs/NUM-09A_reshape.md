@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-09A: reshape
@@ -51,7 +49,7 @@ obligations.
 
 Let input shape be I and target shape O. For an output coordinate o, define
 
-    k = sum_j o[j] * product_{m>j} O[m]
+k = sum_j o[j] * product_{m>j} O[m]
     s[j] = floor(k / product_{m>j} I[m]) mod I[j]
 
 The mapping defines numerical selection; execution uses CPU Whole for all formal
@@ -104,6 +102,4 @@ auto fallback and dense results without comparing incidental physical addresses.
 All nine formal profile keys use Whole and disable cross-run content caching
 because content alone does not establish physical owner/stride identity;
 same-Run sharing remains available. The current Result workflow, oracle and
-resource checks are in [NUM-09 Whole execution](../layouts-whole.md). The timing
-table there is historical Value Whole evidence, not a measurement of this Result
-implementation.
+resource checks are in [NUM-09 Whole execution](../layouts-whole.md).

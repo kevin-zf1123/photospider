@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-09C: slice
@@ -105,5 +103,4 @@ axes, metadata limits, source strides/owners, auto/view/dense and disjoint reads
 All formal profiles use Whole and disable cross-run content caching because
 content does not prove physical owner/stride identity; same-Run sharing remains
 available. The current Result workflow and oracle are recorded in
-[NUM-09 Whole execution](../layouts-whole.md). Timing there is historical Value
-Whole evidence, not a performance measurement of this Result implementation.
+[NUM-09 Whole execution](../layouts-whole.md).

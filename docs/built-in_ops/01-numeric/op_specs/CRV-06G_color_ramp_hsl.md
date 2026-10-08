@@ -9,9 +9,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 clarification_status: complete
-repository_branch: ops-specs
-verification_status: focused_result_validation_passed
-repository_commit: current working tree
 ---
 
 # CRV-06G: HSL ramps
@@ -91,7 +88,3 @@ separate conversion specifications, not guessed by this interpolation operation.
 - [Rational pi entrypoint](CRV-06G3_color_ramp_hsl_rational_pi.md).
 - [CIELCh unnormalized-hue contract](CRV-06D_color_ramp_cielch.md).
 - [Color-array description](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).
-
-## Maintained implementation and validation
-The public helpers `color_ramp_hsl_node`, `color_ramp_hsl_pi_node` and `color_ramp_hsl_rational_pi_node` are declared in [`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp); `color_ramps.cpp` implements their Whole Result programs. Coordinate values and original hue ratios use exact rational interpolation. Cross-unit conversion in either direction multiplies or divides by certified pi, with a 4096-bit precision ceiling; same-unit RationalPi expressions cancel pi symbolically.
-The focused Result CTest, Strict/Apple manual groups, independent Fraction/Machin-pi and RGB rational/root/Decimal oracles, and installed consumer have passed. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation) and [workflow README](../../../../examples/numeric_workflow/README.md#color-ramps) for coverage and unsupported platforms/shapes.

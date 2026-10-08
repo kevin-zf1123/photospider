@@ -14,9 +14,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 clarification_status: complete
-repository_branch: ops-specs
-verification_status: focused_result_validation_passed
-repository_commit: current working tree
 ---
 
 # CRV-06B: color_ramp_cmyk
@@ -186,7 +183,3 @@ claim a general ICC color-management engine or arbitrary profile-type support.
 - [Color-array description dependency](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).
 - [Color-management category](../../02-format-color/representation.md).
 - [Operator specification template](../../00-foundation/spec-template.md).
-
-## Maintained implementation and validation
-Public `color_ramp_cmyk_node` is declared in [`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp); `color_ramps.cpp` implements the Whole Result program. The component interpolation uses exact rational arithmetic with one destination rounding.
-The focused Result CTest, Strict/Apple manual groups, independent Fraction/Machin-pi and RGB rational/root/Decimal oracles, and installed consumer have passed. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation) and [workflow README](../../../../examples/numeric_workflow/README.md#color-ramps) for coverage and unsupported platforms/shapes.

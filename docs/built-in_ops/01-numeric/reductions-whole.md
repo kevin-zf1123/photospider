@@ -38,25 +38,16 @@ Each Whole write keeps one `NumericDiagnostics` record local to the callback. `e
 
 The callback reports diagnostics after normal completion or a status it handles locally, preserving the first operation failure if reporting is rejected. WorkLimit or cancellation can prevent the report from merging. A `Status` thrown during tensor-window acquisition/read or `std::bad_alloc` caught by the outer math callback can bypass this local report. Cache hits add no new accumulator attempts; Empty demand does no sample arithmetic.
 
-The final focused root selection completed 40 tests in 19.79 seconds: 39 passed and one skipped, with zero failures. It included this dedicated test and the shared `test_numeric_result_math` fixture. Root resource tests passed 3/3, and the installed numeric selection passed 10/10. The independent reduction oracle passes 4,740 cases per Strict and Apple profile. Sibling-source 4 MiB and 5 MiB Root Payload peak assertions passed in the complete `test_dependency_program` run. The skipped test was `test_vulkan_gpu`, with return code 77. x86 execution, Vulkan execution and new performance measurements were not run.
-
 Typed-boundary checks use a straight-alpha RGB Result. A green-only request still validates the complete typed input, so an invalid alpha outside that selected channel fails each of the six numerical reducers with `InvalidArgument` / `InvalidDomain`; metadata-only count succeeds without reading it. Empty demand has empty coverage, support and computed-element count. Pre-cancellation, same-schema valid typed input, logical-order NaN priority across strided windows, unaligned/negative/zero strides, final overflow, and invalid `ddof` are also checked.
 
 The installed consumer uses the same workflow source and links `Photospider::kernel`. To check it against a local install, run:
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/result-repeat-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer \
-  -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-repeat-install" \
-  -DPhotospider_DIR="$PWD/build/kernel-dev/result-repeat-install/lib/cmake/Photospider" \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_reductions_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_reductions_result$' --output-on-failure
 ```
 
-The installed selection above includes `installed_numeric_reductions_result`.
 Its compile uses only the installed prefix's `include` directory plus
 `-fno-fast-math -frounding-math -ffp-contract=off`, and links the prefix's
 `lib/libphotospider.a`.
 
-These checks do not establish x86 execution, GPU support, maximum-shape throughput or an RSS bound. Historical Value-path measurements are not evidence for the current Result implementation. The seven specifications remain Proposed; their formulas and acceptance rules are linked from [the shared contract](op_specs/NUM-11_reduction_contract.md).
+These checks do not establish x86 execution, GPU support, maximum-shape throughput or an RSS bound. The seven specifications remain Proposed; their formulas and acceptance rules are linked from [the shared contract](op_specs/NUM-11_reduction_contract.md).

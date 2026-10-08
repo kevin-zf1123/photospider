@@ -20,7 +20,7 @@ research_sources:
 
 # FIL-17A: local_contrast_tanh
 
-Local contrast with bounded detail. Status **Proposed / D2_draft**; the legacy test kernel and its behavior are not compatibility targets.
+Local contrast with bounded detail. Status **Proposed / D2_draft**.
 
 Inherits the [FIL-17 family contract](FIL-17_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT metadata/straight-semantics contract](../../02-format-color/op_specs/FMT_common_contract.md). The family contract and this member together form the complete draft. Do not override the RN, underflow, or accelerated-error baseline.
 

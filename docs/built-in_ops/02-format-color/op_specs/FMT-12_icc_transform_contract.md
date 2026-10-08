@@ -7,13 +7,10 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: not_implemented
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-12: ICC profile transforms
 
-This document records the completed FMT-12 clarification on 2026-09-23.
 It specifies a future external-engine adapter and registers no operation.
 Engine integration, numerical corpus and public runtime acceptance remain
 implementation prerequisites, not evidence supplied by this specification.
@@ -484,8 +481,6 @@ not enable gamut checking and retain this family's numerical recipe.
 
 - [ICC introduction to the profile format](https://www.color.org/getting-started/):
   profile connection space and rendering-intent context.
-- [Little CMS 2.19.1](https://github.com/mm2/Little-CMS/releases/tag/lcms2.19.1):
-  selected CPU engine release, inspected on 2026-09-23.
 - [Pinned float formatters](https://github.com/mm2/Little-CMS/blob/lcms2.19.1/src/cmspack.c):
   external units and Float64-to-Float32 pipeline boundary.
 - [Pinned transform linker](https://github.com/mm2/Little-CMS/blob/lcms2.19.1/src/cmscnvrt.c):

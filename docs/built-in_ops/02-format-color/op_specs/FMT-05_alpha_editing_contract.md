@@ -24,9 +24,7 @@ support the seven native copy dtypes, preserve the batch prefix, and avoid
 sample-domain validation. Axes are cell-relative and exclude the Result batch
 prefix. The complete sample rank, including batch and cell axes, is at most 8;
 full sample count is at most 2^40. Native FMT-04/FMT-05A operations execute as Result ABI 2 operations. B/C are
-compile-time compositions over registered Result operations. Historical
-Value/planar measurements do not describe the current Result path; the migrated
-performance driver is described separately and has no result claim here.
+compile-time compositions over registered Result operations.
 
 Inherit [FMT-common](FMT_common_contract.md), its NUM baseline and the
 [kernel storage contract](../../../kernel-specs/Tensor-Storage-and-Region-Access.md).
@@ -38,8 +36,7 @@ and [C remove](FMT-05C_remove_alpha.md).
 
 FMT-05A requests selected source colors as Data and Validation. For those color
 outputs, the new alpha source adds a separate Validation-only dependency. The
-published alpha channel requests its source as Data and Validation. FMT-04 semantic color and consumed alpha operands each use
-Data and Validation; pass-through-only samples do not gain sample validation.
+published alpha channel requests its source as Data and Validation.
 All connected inputs receive Descriptor support; no Control support is declared.
 Raw association uses arithmetic Data without semantic-domain Validation. A channel
 axis contains at most 65,536 slots. The operation preserves
@@ -48,7 +45,6 @@ transactionally under Root budgets and cancellation, and is stateless for Empty
 observations. Generic views require a complete single-owner affine proof;
 spatial set views are limited to internal identity mappings. Auto copies only on
 physical `ViewUnavailable`.
-
 
 ## Purpose and representation
 
@@ -65,9 +61,7 @@ cross-tensor alpha binding. B produces a standalone alpha component tensor;
 that result does not remain semantically attached to the source image.
 Ordinary input/view lifetime ownership still follows the kernel contract.
 
-A and C preserve straight color samples bit-for-bit. The former A choices
-keep_samples/preserve_straight_color and C choices keep_samples/restore_straight
-are removed: they no longer distinguish behavior for canonical inputs.
+A and C preserve straight color samples bit-for-bit.
 Neither setting alpha=0 nor removing alpha erases finite hidden straight color.
 Premultiplied boundary payloads must first be explicitly converted to canonical
 straight images; this family does not silently accept or normalize them.
@@ -125,7 +119,7 @@ bit depth. Existing integer alpha extraction and removal remain bit copies,
 retaining applicable encoding without decode/re-encode. A float alpha carrying
 a conflicting numeric encoding still requires explicit decoding/reinterpretation
 before A's normalized semantic use. Generic encoding metadata and missing native
-dtypes are implementation prerequisites; FMT-07 is no longer a prerequisite.
+dtypes are implementation prerequisites.
 
 | Common static parameter | Contract |
 | --- | --- |
@@ -310,8 +304,7 @@ Lower B to exact FMT-01A extraction or a conforming constant source containing
 the exact opaque code with explicit result shape/storage/metadata. Lower C to FMT-02C/FMT-03 channel mapping
 and explicit target grouping; when only metadata changes, use a conforming
 identity/remap that still honors layout. These helpers must not add sample checks
-from A or retain a reference removed by C. No new runtime registration is implied
-by a helper name. Host graph/arity/resource limits remain applicable.
+from A or retain a reference removed by C. Host graph/arity/resource limits remain applicable.
 
 Initial optional sample-only completed-result caching is disabled, following the
 inherited primitives. Any later cache needs source/descriptor/coverage/layout
@@ -343,14 +336,10 @@ Focused integration coverage should inspect output samples, descriptors, Data an
 Validation support, and failure rollback. The native FMT-04/FMT-05A implementation
 has a dedicated Result integration test; the B/C authoring compositions have
 separate integration coverage. Numeric alpha math tests do not establish Result
-operation behavior. The latest native validation passes eight focused CTest
-targets: `test_alpha_operations`, `test_alpha_authoring`, `test_alpha_math`, and
-five reused primitive tests. Fourteen small performance smoke cases pass their
-output oracle; the full performance matrix has not run. Installed-consumer
+operation behavior. Installed-consumer
 validation remains separate.
 
-The migrated alpha performance driver uses the Result API and reports dependency
+The alpha performance driver uses the Result API and reports dependency
 support and Root resource counters. Its CSV fields and accounting boundaries are
-documented in the [performance guide](../../../../examples/alpha_performance/README.md).
-Historical Value/planar measurements are not Result performance evidence. No
+documented in the [performance guide](../../../../examples/alpha_performance/README.md). No
 throughput claim is made here without measured Result runs.

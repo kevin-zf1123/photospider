@@ -82,9 +82,7 @@ up to 256 output lanes on Metal and 64 on Vulkan, with at most 16 taps per lane.
 A submission may group two ordered dispatches, so each lane processes at most 32
 taps between submission drains. Cancellation stops later submissions and
 publication while retaining all owners until completion. The Result migration
-passes the native Metal test and independent oracle. Earlier FreeBSD Intel UHD
-770 Vulkan verification exercised the former Value path; the current Vulkan
-Result path has not been revalidated. See the [current implementation](../gaussian-implementation.md)
+passes the native Metal test and independent oracle. See the [current implementation](../gaussian-implementation.md)
 and [public workflow](../../../../examples/gaussian_workflow/README.md).
 
 ## Oracle, fixtures, and acceptance
@@ -95,7 +93,7 @@ The linked reference function is a mathematical oracle, not a production kernel 
 
 The reference helpers are `gaussian_kernel(sigma,radius)` in [transcend.py](../../../../oracle/ops/filter/oracles/transcend.py) and `separable(image,kx,ky,anchor=(0,0),**kwargs)` in [spatial.py](../../../../oracle/ops/filter/oracles/spatial.py). See also the [oracle README](../../../../oracle/ops/filter/README.md).
 
-Fixture coverage identifiers: `gaussian_constant`, `straight_alpha_zero_hidden_color`, `straight_all_zero_alpha`, `straight_alpha_underflow_hidden_color`. This catalog records fixture scope only; it makes no current pass claim.
+Fixture coverage identifiers: `gaussian_constant`, `straight_alpha_zero_hidden_color`, `straight_all_zero_alpha`, `straight_alpha_underflow_hidden_color`.
 
 ## Backend and registration
 

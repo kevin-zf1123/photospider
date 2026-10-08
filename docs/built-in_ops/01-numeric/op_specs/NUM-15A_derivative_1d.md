@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-15A: derivative_1d
@@ -42,7 +40,7 @@ static numeric parameters or implicit casts/axis extraction.
 
 Use first-order one-sided endpoints and central interior differences:
 
-    D[0]   = (samples[1]-samples[0]) / step
+D[0]   = (samples[1]-samples[0]) / step
     D[N-1] = (samples[N-1]-samples[N-2]) / step
     D[i]   = (samples[i+1]-samples[i-1]) / (2*step), 0<i<N-1
 
@@ -92,7 +90,6 @@ disjoint source-read witnesses, dirty inverse stencils, budgets and cancellation
 Focused Result math coverage exercises public workflows, exact small examples,
 negative step, N=2, exceptional values, budgets, pre-cancellation, and output
 lifetime after context retirement.
-
 
 ## Implementation and executable acceptance
 

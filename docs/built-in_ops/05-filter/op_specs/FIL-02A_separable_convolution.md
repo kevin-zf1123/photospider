@@ -53,7 +53,7 @@ The linked reference function is a small mathematical oracle, not a production k
 
 See the member's linked reference source and oracle README.
 
-Fixture coverage identifiers: `separable_convolve`. This catalog records fixture scope only; it makes no current pass claim.
+Fixture coverage identifiers: `separable_convolve`.
 
 Reference callable: `separable(image,kx,ky,anchor=(0,0),**kwargs)` in [spatial.py](../../../../oracle/ops/filter/oracles/spatial.py). These oracle helper defaults do not define graph-node constructors; every node parameter remains explicitly required.
 

@@ -6,20 +6,16 @@ category: 02-format-color
 status: Proposed
 implementation_status: not_implemented
 clarification_status: all_active_families_complete
-inspection_commit: 1b403fb9
 ---
 
 # FMT-09 through FMT-18: scope and prerequisite review
 
 This review applies the confirmed [FMT common contract](FMT_common_contract.md)
 and FMT-01..08 decisions to the remaining catalog. It records the completed active-family designs and the remaining implementation
-prerequisites. FMT-14/15/18 decisions were delegated by the maintainer on
-2026-09-24. The member contracts remain Proposed, not runtime acceptance.
+prerequisites. The member contracts remain Proposed, not runtime acceptance.
 The subsequent maintainer decision retires FMT-16/17 and assigns their external
 sampling/layout work to input/output codecs; the same-size planar boundary
 below supersedes the original heterogeneous-plane alternatives.
-Existing implementation retirement is recorded in
-[the retirement record](FMT_legacy_retirement.md).
 
 ## Changes that already follow from confirmed contracts
 
@@ -87,7 +83,7 @@ Existing implementation retirement is recorded in
 4. **I/O codec details outside the FMT operator catalog.** Same-size planes and
    planar internal storage are settled. External codecs still need filters,
    siting, odd edges, packed formats, regions, resources and exact output
-   metadata. They no longer block the internal model-conversion carrier.
+   metadata.
 5. **Complete model coverage.** The [coverage proposal](FMT_model_conversion_coverage.md)
    identifies descriptions, basis pairs and explicit routes for every named
    model, including Gray/Black-White and ACES encodings. Basis-pair coverage is
@@ -95,8 +91,7 @@ Existing implementation retirement is recorded in
    name or ramp helper is not a
    completed conversion spec.
 6. **External engines.** Select and pin ICC/OCIO engines/resources only in their
-   own clarification. Native precision policies, current profile parsers and
-   historical source code are insufficient engine conformance evidence.
+   own clarification. Native precision policies, profile parsers and source inspection do not establish engine conformance.
 
 ## Implementation order and remaining extensions
 

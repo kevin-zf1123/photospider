@@ -11,8 +11,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-14: matrix_transform
@@ -220,24 +218,15 @@ The implementation preserves `-fno-fast-math -frounding-math -ffp-contract=off`.
 The current executable is `photospider_numeric_matrix`; its default path runs the
 Result workflow checks, while `oracle`, `benchmark`, and `grid` modes remain
 available. CTest registers its default path as `test_numeric_matrix_result`.
-The separate `test_numeric_result_math` integration executable contains the
+The separate `test_numeric_result_math_matrix` integration executable contains the
 `matrix_*` cases for shape, exact values, typed validation, Empty demand,
 resources, and cancellation. The manual-only preparation, fresh-source
 association, and escaped-owner assertions belong to `test_numeric_matrix_result`.
 
 The Fraction oracle independently checks exact dot products and source-NaN
-priority. Strict and Apple each passed 1,598 exact Fraction cases. The installed
-consumer passed `installed_numeric_matrix_result` 1/1 under Strict, and its
-Apple profile completed the full manual checks. Three bounded CLI workloads
-also passed bitwise comparison while reporting full output counts and two polls:
-Apple Float32 `benchmark 4096 4 4`, Strict Float64 cancellation-heavy
-`benchmark 65 4 3`, and Apple `grid 8`. These checks are correctness samples, not
+priority. These checks are correctness samples, not
 a performance campaign. Benchmark elapsed time includes Result coordination,
-digest, and polling work, so historical Value-path performance records do not
-measure current Result execution. CMake registers the installed consumer target
-as `photospider_numeric_matrix_consumer` / `installed_numeric_matrix_result`;
-both example and consumer compile with
-`-fno-fast-math -frounding-math -ffp-contract=off`. Reproduction commands and
+digest. Reproduction commands and
 current verification boundaries are documented in the NUM-14 section of
 `examples/numeric_workflow/README.md`.
 

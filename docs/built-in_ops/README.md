@@ -1,10 +1,10 @@
 # 内建图像算子需求与研究规格
 
-2026-09-13 更新：已对齐本地 `ops@66b16339` 的合并记录及当前 `ops-specs@6e429e4b`。package 0.10.0 / C operation ABI 9 已提供命名多输出、managed resources、分页全局结果、结构化表示、Layer/alpha/emission 和 atom 错误/质量模型。统计、FFT、连通域与 Layer 的已有流程按各自实现入口记录；05-filter 的旧内建实现已退役，新契约仍是 Proposed。具体 key、注册方式、提交依据和限制见[当前实现](00-foundation/current-state.md)。
+本文是内建算子规格与主题页的中文导航。当前已实现接口以公开头文件、[kernel 架构指南](../kernel-architecture/README.md)及[当前实现状态](00-foundation/current-state.md)为准；本目录中标为 Proposed 的内容是目标需求，不代表已注册能力。当前 package 为 0.33.0，OperationTraits 为 25，Result operation C ABI 为 2。旧研究快照中的版本和实现状态仅描述其记录时点。
 
 本目录面向 Photospider 算子实现者、workflow 作者和使用这些能力的图像应用。目标是覆盖 Photoshop、Lightroom、Camera Raw、DaVinci Resolve、Clip Studio Paint、Nuke、After Effects 中主要的图像处理与分析能力，并拆解为可组合、可验证的计算接口。
 
-本目录同时记录**已实现子集**与 **Proposed 扩展需求**。分类表保留稳定需求 ID 和研究参数，已实现状态由各页的实现入口明确标注；同名提议的扩展参数不自动成为当前接口。商业软件逐像素兼容仍须独立证据。既有英文 ADR 与 `docs/kernel-architecture/` 继续分别记录已接受决策与当前实现。研究检索日期为 2026-09-09；网页版本、手册版本和不可访问的材料在来源处注明。
+本目录同时记录**已实现子集**与 **Proposed 扩展需求**。分类表保留稳定需求 ID 和研究参数，已实现状态由各页的实现入口明确标注；同名提议的扩展参数不自动成为当前接口。商业软件逐像素兼容仍须独立证据。既有英文 ADR 与 `docs/kernel-architecture/` 继续分别记录已接受决策与当前实现。
 
 默认采用明确的数学与颜色科学语义。商业软件兼容模式只有在版本、工作空间、位深、alpha 和结果证据充分时建立。首期集中于确定性的静态图像计算；时域、跟踪、机器学习、深度合成纳入依赖规划。
 
@@ -36,7 +36,6 @@
 | [RAW 与摄影流程](11-raw-photo/pipeline.md) | 传感器校正、去马赛克、HDR/堆栈/全景 |
 | [时域、模型与特殊数据](12-temporal-ml/requirements.md) | 帧序列、光流、跟踪、推理、deep/AOV |
 | [软件覆盖矩阵](13-coverage/software-matrix.md) | 七款产品的功能族映射与证据范围 |
-| [原始需求映射](13-coverage/request-map.md) | 本轮每项需求对应位置、拆分、去重与缺口 |
 | [执行路线](14-roadmap/implementation.md) | 前置契约、可执行阶段与验收关口 |
 | [工作流验收](14-roadmap/workflows.md) | 可检查的端到端使用链路 |
 | [来源与证据边界](15-references/sources.md) | 一手来源索引、私有材料与待验证问题 |

@@ -18,7 +18,7 @@ research_sources:
 
 # FIL-13B: hysteresis_edges
 
-Weak/strong edge connectivity. Status **Proposed / D1_draft**; the legacy test kernel and its behavior are not compatibility targets.
+Weak/strong edge connectivity. Status **Proposed / D1_draft**.
 
 Inherits the [FIL-13 family contract](FIL-13_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT metadata/straight-semantics contract](../../02-format-color/op_specs/FMT_common_contract.md). The family contract and this member together form the complete draft. Do not override the RN, underflow, or accelerated-error baseline.
 

@@ -1,6 +1,6 @@
 # 时域、机器学习与特殊图像数据
 
-状态Proposed，D3覆盖与依赖规划。本篇不阻挡首期静态确定性算子，不声称现有内核已经具有序列/Deep/模型运行时。2026-09-13 已有 DynamicPoints、PathSet、BrushState、IterativeState 等结构化表示和 managed Result 基础，见[表示契约](../../kernel-architecture/Structured-Representations.md)。这些子集可供复用；逐族落地前仍须补 D1/D2 专用规格和节点。
+状态Proposed，D3覆盖与依赖规划。本篇不阻挡首期静态确定性算子，不声称现有内核已经具有序列/Deep/模型运行时。这些子集可供复用；逐族落地前仍须补 D1/D2 专用规格和节点。
 
 ## 时间数据
 

@@ -8,9 +8,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 clarification_status: complete
-repository_branch: ops-specs
-verification_status: focused_result_validation_passed
-repository_commit: current working tree
 ---
 
 # CRV-11: uniformly sampled low-pass family
@@ -32,7 +29,6 @@ turn a composite template or structured Result into a generic NUM Value primitiv
 A stated four-ULP final bound uses the shared FP32-scaled contract for both
 Float32 and Float64 outputs.
 Classification, exact landmarks and signed-zero rules are checked separately.
-
 
 Five independent kernels are windowed sinc (Hann/Hamming/Blackman/Kaiser) and
 truncated Gaussian. Input Float32/Float64 arrays are filtered along a static axis;
@@ -227,17 +223,11 @@ implementation use exact tap support and certified whole sums. Accelerated keys
 prepare 128-bit coefficient enclosures in managed per-Whole callback state, then
 bound the complete hardware convolution and normalization before final-error
 acceptance. Unresolved coefficients or outputs dispatch strict convolution.
-Certified strict precision is 128..4096 bits and may fail `ResourceExhausted`.
-The maintained manual workflow passes two groups per profile under Strict and
-Apple. Its independent MPFR oracle has 474 accepted-value cases per profile:
+Certified strict precision is 128..4096 bits and may fail `ResourceExhausted`. Its independent MPFR oracle has 474 accepted-value cases per profile:
 Strict matches exact reference bits, while Apple applies the shared final FP32
 bound. The focused root CTests `test_numeric_lowpass_result` and
 `test_numeric_lowpass_execution_result` pass, as does the separate shared math
-integration fixture. The installed 0.32.0 consumers pass
-`installed_numeric_lowpass_result` and
-`installed_numeric_lowpass_execution_result` under Strict; direct Apple runs
-pass two uniform groups and four execution groups through the public package.
-No x86 numerical execution, native GPU run, full CTest or Result performance run is recorded. Whole
+integration fixture. Whole
 numerical/fallback counters are unavailable. See the
 [uniform-lowpass workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
 and [CRV-11 umbrella](CRV-11_resample_signal.md).

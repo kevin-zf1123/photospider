@@ -54,7 +54,7 @@ The linked reference function is a small mathematical oracle, not a production k
 
 The reference helper is `gaussian_kernel(sigma,radius)` in [transcend.py](../../../../oracle/ops/filter/oracles/transcend.py). See also the [oracle README](../../../../oracle/ops/filter/README.md).
 
-Fixture coverage identifiers: `gaussian_coefficients`, `gaussian_zero_sigma`, `gaussian_zero_sigma_nonzero_radius`. This catalog records fixture scope only; it makes no current pass claim.
+Fixture coverage identifiers: `gaussian_coefficients`, `gaussian_zero_sigma`, `gaussian_zero_sigma_nonzero_radius`.
 
 ## Backend and registration
 

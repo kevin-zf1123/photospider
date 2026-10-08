@@ -2,17 +2,14 @@
 
 已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)。规格表中的 Proposed 表示契约状态，不表示当前 runtime 未注册；NUM-01～15 与 CRV-01～11 合计 330 个 primitive keys 已进入当前 public registry，详细实现事实和验证边界见[实现进度](implementation.md)及对应 workflow README。分类表中的建议参数不覆盖现有接口。
 
-状态 Proposed。CRV-01～11 本轮范围的具体规格为 D1 草稿；规格状态与运行时状态独立。NUM-01～15 与 CRV-01～11 合计 330 个 primitive keys 已进入当前 public registry，各簇实现事实、workflow 命令和验证边界以对应规格、README 与[实现进度](implementation.md)为准。输入使用Float32/64；控制点、表和采样位置都是显式数据，G3/G4/G5 已提供静态 shape、按端口辅助表需求和 computed scalar。
+状态 Proposed。NUM-01～15 与 CRV-01～11 合计 330 个 primitive keys 已进入当前 public registry，各簇实现事实、workflow 命令和验证边界以对应规格、README 与[实现进度](implementation.md)为准。输入使用Float32/64；控制点、表和采样位置都是显式数据，G3/G4/G5 已提供静态 shape、按端口辅助表需求和 computed scalar。
 
-本轮控制点 generator 选择二次/三次 Bézier 锚点与相对控制柄，见
-[CRV-02 具体规格](op_specs/CRV-02_sample_bezier_function.md)。每个节点静态选择 degree，
+每个节点静态选择 degree，
 anchors/handles/start/end 动态输入，输出 `values` 与 `axis`；输出默认 Float64。
 strict 与 Apple Silicon CPU、x86-64 CPU accelerated 分别命名。以下其他族的建议不覆盖该具体规格。
 
 各族 profile 路径的 Value/Result 类型与 Whole 规则以对应规格行为准，不能
-据此推断 CRV-01～11 全部采用同一种 Result 路径。CRV-09 本轮的 15 个
-几何 profile keys 为 Whole Result，带 role 13 输入验证；pack、measure、
-unpack、gate 四个结构化 keys 为 Result-only 操作。六个 LUT1D baking、两个
+据此推断 CRV-01～11 全部采用同一种 Result 路径。六个 LUT1D baking、两个
 linear shaper、四个 resampling 和一个 LUT3D baking 仍是组合模板。
 `curve.sample_linear` / `curve.sample_monotone` 是当前 controls-based Result
 接口，接收 `[K,2]` 控制点并与 CRV-02 的 Bézier function sampler 分属不同算子。
@@ -22,9 +19,7 @@ linear shaper、四个 resampling 和一个 LUT3D baking 仍是组合模板。
 远端 typed/upstream 错误和规定的数值错误可以导致 Run 失败。数学 stencil、
 零权重选择、颜色身份和每族精度契约保持不变。稀疏请求也需要完整输入/输出
 内存；Empty 不读取 payload。模板的独立输出投影、count=1 不读取 end，
-以及 resampling positions 的独立转发仍按各自契约执行。逐簇验证以对应
-workflow README 为准；CRV-09 的 focused Result CTest 与安装消费检查已通过，
-但新路径仅有本机 Strict 测试证据。CRV-09 旧 Value 人工流程、oracle、性能
+以及 resampling positions 的独立转发仍按各自契约执行。CRV-09 旧 Value 人工流程、oracle、性能
 测量、x86 与 GPU 尚未验证。逐簇公开延迟、数值核心、范围和 Instruments 证据见
 [实现与性能说明](math-implementation.md)。
 

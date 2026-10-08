@@ -13,10 +13,7 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-verification_status: focused_result_math_ctest_and_installed_consumer
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-05B: apply_lut1d_channels
@@ -123,9 +120,7 @@ WorkflowDocument fixture must connect a multi-function CRV-04 table/axis and
 inspect requested output channels through Compiler/ExecutionContext.
 
 The maintained constructor preserves the channel shape, including C=1 and
-rank-1 vectors, in the six Whole Result profile keys. The Result manual fixture
-passes seven groups under Strict and locally available Apple profiles, and its
-independent Fraction driver passes 1,416 bit-equal cases per profile. Manual
+rank-1 vectors, in the six Whole Result profile keys. Manual
 channel coverage includes independent queries and table columns, all-port
 reversed unaligned layouts, zero strides, mixed dtypes, typed RGBA rejection of
 an invalid unrequested alpha, upstream failure propagation and all six CRV-04
@@ -133,7 +128,7 @@ baking chains. Sparse demand returns full Whole output coverage, while dirty
 mapping follows the recorded query region. Replacing source Results retains the
 static preparation and refreshes cache associations.
 
-The focused root selection also runs the existing `test_numeric_result_math`
+The focused root selection also runs the existing `test_numeric_result_math_lut1d`
 integration fixture, which checks channel batch shape [2,2,2], custom Result
 schemas, scalar Fraction golden bits, axis/query/table failure precedence, and
 the original 1 MiB sparse-output and zero-stride table resource cases. These
@@ -144,16 +139,10 @@ Metadata and no dense table copy charged to Payload. A sparse output request wit
 2^39 channels is rejected at the LUT node with `CapacityLimit`. A retained
 channel Result and authorized read window share one 16-byte Payload owner after
 all sources and the execution context retire; releasing them returns Root
-resources to zero. The full maximum physical channel-table allocation and x86
-numeric execution were not run. The focused root selection passed the manual
-LUT1D and existing math integration tests 2/2 in 4.74 seconds. The installed
-consumer compiled the same source against package 0.32.0 and passed 1/1 under
-Strict in 0.38 seconds; its direct Apple run passed all seven groups. See the
+resources to zero. See the
 [family verification section](CRV-05_apply_lut1d.md#maintained-implementation-and-validation)
 and [numeric workflow README](../../../../examples/numeric_workflow/README.md#lut1d-application-crv-05)
-for test identities and run evidence. Historical package 0.18 Value-adapter
-measurements do not establish Result performance; specification status remains
-Proposed.
+for test identities and run evidence.
 
 - [Family decisions](CRV-05_apply_lut1d.md).
 - [Operator template](../../00-foundation/spec-template.md).

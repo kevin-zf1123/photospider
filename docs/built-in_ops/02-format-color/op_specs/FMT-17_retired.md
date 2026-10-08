@@ -10,7 +10,7 @@ clarification_status: retirement_confirmed
 
 # FMT-17: retired physical image layout conversion family
 
-The maintainer confirmed retirement of this catalog ID on 2026-09-23. Preserve
+Preserve
 the number for traceability; do not reuse it, renumber subsequent families or
 create an FMT-17 operation/compatibility alias.
 
@@ -30,5 +30,4 @@ introduce a second internal image layout or heterogeneous-plane carrier.
 The [shared codec boundary](FMT_codec_boundary.md) records the selected scope.
 Its detailed codecs, algorithms, interfaces, resources and regional contracts
 still require separate specifications. No codec implementation is delivered by
-this retirement record. This catalog decision is distinct from the already
-recorded [old implementation removal](FMT_legacy_retirement.md).
+this retirement record.

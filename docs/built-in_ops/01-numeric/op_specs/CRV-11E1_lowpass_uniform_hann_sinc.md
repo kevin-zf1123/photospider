@@ -13,16 +13,11 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 clarification_status: complete
-repository_branch: ops-specs
-verification_status: focused_result_validation_passed
-repository_commit: current working tree
 ---
 
 # CRV-11E1: lowpass_uniform_hann_sinc
 
 The dynamic inputs inherit the [family Result tensor-port contract](CRV-11_uniform_lowpass_contract.md): each port is a Result with exactly one tensor member and no fields under any structurally valid schema id/version/member key. Shapes use complete `sample_shape()` values, including batch axes.
-
-
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -88,4 +83,4 @@ whole-sum evaluation, with Whole fallback counters unavailable. Support and spec
 shortcuts remain exact.
 Certified precision is bounded to 128..4096 bits; unresolved
 capacity or rounding may return `ResourceExhausted`. See the [shared workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
-and [CRV-11 umbrella](CRV-11_resample_signal.md). The focused Result CTest, Strict/Apple manual workflows, independent Result oracles and installed consumer pass. Historical performance measurements are from the earlier Value implementation; no Result performance or x86 numerical execution was run. See the shared workflow for exact coverage and commands.
+and [CRV-11 umbrella](CRV-11_resample_signal.md). See the shared workflow for exact coverage and commands.

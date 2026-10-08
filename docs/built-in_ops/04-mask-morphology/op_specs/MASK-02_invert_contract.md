@@ -13,7 +13,7 @@ clarification_status: draft_for_review
 
 Inherit the complete [MASK baseline](MASK_common_contract.md), including its
 precision, descriptor, error, demand, ownership and acceptance obligations.
-This family proposes distinct members; it registers no dispatcher or legacy alias.
+This family proposes distinct members.
 
 ## Members
 

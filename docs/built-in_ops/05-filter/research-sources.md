@@ -1,6 +1,6 @@
 # 资料核对与设计来源
 
-访问日期：2026-09-26。材料限原作者项目/论文与项目官方文档；滚动页面显示版本是本轮核对记录，不宣称与 oracle 安装依赖相同。本文是摘要和设计对照，不随包复制受限论文、第三方代码或资源。
+本文是摘要和设计对照，不随包复制受限论文、第三方代码或资源。
 
 用户给定的 NUM/FMT 才是项目数值与语义基线；外部资料不覆盖它们。旧 05-filter 只用于提取44个需求ID，不以其实现章节制定兼容目标。
 
@@ -64,7 +64,7 @@ filter2D 是相关而非卷积；本稿 FIL-01A/B 明确分开，并将导数 un
 
 [原始资料](https://www.iryoku.com/smaa/)。版本/定位：Eurographics 2012；作者页列 v2.8。
 
-SMAA 的空间与时间变体不同。仅拟议静态1x，原生算法的 Area/Search 纹理与采样状态必须共同固定；本轮未引入其代码/资源。
+SMAA 的空间与时间变体不同。仅拟议静态1x，原生算法的 Area/Search 纹理与采样状态必须共同固定。
 
 <a id="s09"></a>
 ### S09 · FFTW: DFT definition
@@ -148,14 +148,14 @@ patch相似性与search支持是NLM基础；self=1、是否减2sigma²以及反�
 
 [原始资料](https://webpages.tuni.fi/foi/GCF-BM3D/)。版本/定位：作者页：Python v4.0.3，2024-09-06。
 
-算法与软件许可分离。作者实现有用途限制，本轮不复制软件、不生成冒充真实引擎的golden；采用原生实现并与固定第三方实现对照，差异需逐项解释。
+算法与软件许可分离。作者实现有用途限制，不复制软件、不生成冒充真实引擎的golden；采用原生实现并与固定第三方实现对照，差异需逐项解释。
 
 <a id="s21"></a>
 ### S21 · Mäkitalo, Foi: inverse Anscombe research
 
 [原始资料](https://webpages.tuni.fi/foi/invansc/)。版本/定位：2011/2013 论文与作者项目。
 
-均值域逆不是简单平方代数逆，也不是任意denoiser的普遍无偏保证。严格inverse需要尾/积分/求根证书，本轮两函数明确只有诊断级。
+均值域逆不是简单平方代数逆，也不是任意denoiser的普遍无偏保证。
 
 <a id="s22"></a>
 ### S22 · scikit-image restoration
@@ -169,7 +169,7 @@ patch相似性与search支持是NLM基础；self=1、是否减2sigma²以及反�
 
 [原始资料](https://people.csail.mit.edu/kaiming/cvpr09/index.html)。版本/定位：CVPR 2009 / TPAMI 2011。
 
-DCP是先验估计，不是实测透射率/depth。本稿linear RGB域、top-k tie、airlight选整像素和apply分离是明确接口选择。
+本稿linear RGB域、top-k tie、airlight选整像素和apply分离是明确接口选择。
 
 <a id="s24"></a>
 ### S24 · scikit-image rolling-ball example
@@ -194,7 +194,7 @@ DCP是先验估计，不是实测透射率/depth。本稿linear RGB域、top-k t
 
 ## 软件许可与对照资源
 
-BM3D/CBM3D及inverse-Anscombe作者软件的使用条件需按目标用途审阅；数学论文公开不等于作者binary可以商业分发。本包只含本轮独立写的参考程序与引用，没有这些作者软件，也没有SMAA shader/纹理。MPFR、mpmath及诊断性NumPy/SciPy由运行环境独立安装，使用者应管理其各自版本与许可证。
+BM3D/CBM3D及inverse-Anscombe作者软件的使用条件需按目标用途审阅；数学论文公开不等于作者binary可以商业分发。MPFR、mpmath及诊断性NumPy/SciPy由运行环境独立安装，使用者应管理其各自版本与许可证。
 
 ## 尚未闭合的研究/工程问题
 

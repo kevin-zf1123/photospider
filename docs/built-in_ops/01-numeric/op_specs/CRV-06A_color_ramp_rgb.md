@@ -14,9 +14,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 clarification_status: complete
-repository_branch: ops-specs
-verification_status: focused_result_validation_passed
-repository_commit: current working tree
 ---
 
 # CRV-06A: color_ramp_rgb
@@ -189,7 +186,7 @@ Let D be signed transfer decoding and E encoding. linear is identity. For gamma,
 D(c)=sign(c)*abs(c)^gamma and E(l)=sign(l)*abs(l)^(1/gamma). For sRGB, apply
 the following exact-real positive-magnitude formulas and restore sign:
 
-    D(c) = c/12.92                         if c<=0.04045
+D(c) = c/12.92                         if c<=0.04045
            ((c+0.055)/1.055)^(12/5)       otherwise
     E(l) = 12.92*l                         if l<=0.0031308
            1.055*l^(5/12)-0.055           otherwise
@@ -206,7 +203,7 @@ encoded RGB: stored RGB for straight, stored RGB/ai for premultiplied with ai>0.
 For ai=0 use premultiplied-linear qi=0 without decoding hidden color. Otherwise
 qi=ai*D(ui). Validate complete source colors even on the zero-contribution path.
 
-    A = (1-w)*a0 + w*a1
+A = (1-w)*a0 + w*a1
     Q = (1-w)*q0 + w*q1
     encoded = E(Q/A)                         when A>0
     rgb_out = encoded                       for straight/none
@@ -315,7 +312,3 @@ below; the document remains Proposed.
 
 - [Color management category](../../02-format-color/representation.md).
 - [Operator specification template](../../00-foundation/spec-template.md).
-
-## Maintained implementation and validation
-Public `color_ramp_rgb_node` is declared in [`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp); `color_ramps.cpp` implements the Whole Result program. Direct, linear and gamma=2 paths use exact rational/root arithmetic; other gamma and sRGB paths use certified whole-expression enclosures. The accelerated RGB contract permits up to four ULP while alpha and failure classification remain exact.
-The focused Result CTest, Strict/Apple manual groups, independent Fraction/Machin-pi and RGB rational/root/Decimal oracles, and installed consumer have passed. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation) and [workflow README](../../../../examples/numeric_workflow/README.md#color-ramps) for coverage and unsupported platforms/shapes.

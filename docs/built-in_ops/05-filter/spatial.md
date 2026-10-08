@@ -13,8 +13,7 @@ IndependentChunks，并在多个 tile poll 间复用系数 owner。
 native Metal Result 测试及安装消费检查通过。Whole、tiled 和 Metal oracle
 各通过 94 个 workflow、707 个输出 words；系数 oracle 通过 312 个用例。
 typed Result 检查覆盖 batch axes、下游 image split、tuple closure、ROI support、
-请求外 batch NaN、Empty 和 Result context 销毁后访问。此前 FreeBSD Intel UHD
-770 Vulkan 测试属于旧 Value 执行路径；当前 Vulkan Result 迁移尚未复验。具体
+请求外 batch NaN、Empty 和 Result context 销毁后访问。具体
 参数、数值与错误契约见 [Gaussian 实现说明](gaussian-implementation.md)。
 FIL-04B 数学规格仍为 Proposed。
 

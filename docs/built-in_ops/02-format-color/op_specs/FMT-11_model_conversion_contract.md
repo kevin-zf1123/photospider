@@ -122,8 +122,6 @@ The semantic zero-chroma shortcut does not waive hue validation.
 
 ## Confirmed OKLab coefficient definition
 
-E/F fix the two forward XYZ-to-LMS and LMS-to-OKLab matrices in
-[CSS Color 4, 2026-09-13](https://www.w3.org/TR/2026/CRD-css-color-4-20260913/#color-conversion-code).
 Their printed decimal coefficients are exact decimal rationals. F uses exact
 inverses of those same two matrices, not independently rounded inverse tables.
 NUM strict/accelerated arithmetic applies; JavaScript statement rounding is not

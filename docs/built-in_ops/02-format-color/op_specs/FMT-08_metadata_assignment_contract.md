@@ -6,7 +6,6 @@ category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu
-verification_status: focused_and_installed_result_tests_passed
 ---
 
 # FMT-08: assign and remove semantic interpretation
@@ -14,11 +13,7 @@ verification_status: focused_and_installed_result_tests_passed
 FMT-08A and FMT-08B currently use Result operation ABI 2 in package 0.30.0,
 WorkflowDocument 4 and OperationTraits 21. The specification status remains
 Proposed; it is separate from the CPU implementation status. Current execution
-uses one Result tensor and preserves its logical structure and sample bits.
-Focused Result tests pass: `test_metadata_assignment`, `test_global_results`,
-`test_result_execution`, `test_result_metadata_budget` and
-`test_result_image_contracts` (5/5 CTest), the public workflow, and two installed
-consumer tests. The metadata-to-`channel.extract` configuration/resource chain
+uses one Result tensor and preserves its logical structure and sample bits. The metadata-to-`channel.extract` configuration/resource chain
 is covered; a chain through `channel.assemble` is not. This does not claim that
 every FMT consumer has been validated. The older
 [metadata performance workload](../../../../examples/metadata_performance/README.md)
@@ -290,8 +285,5 @@ rollback and optimizer/cache preservation of semantic effects.
 
 The current focused CTest set passes 5/5: `test_metadata_assignment`,
 `test_global_results`, `test_result_execution`, `test_result_metadata_budget`,
-and `test_result_image_contracts`. The public workflow and two installed
-consumer tests also pass. These checks do not cover composition with migrated
-`channel.extract` or `channel.assemble` operations. Performance measurements in
-the older metadata workload cover the previous Value/planar path and are not
-Result execution evidence.
+and `test_result_image_contracts`. These checks do not cover composition with
+`channel.extract` or `channel.assemble` operations.

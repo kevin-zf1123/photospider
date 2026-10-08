@@ -23,9 +23,7 @@ with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
 The public authoring helpers are installed in
 `photospider/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
 specification decision remains Proposed; implementation status is recorded
-separately. The performance guide records focused Result smokes and labels its earlier
-Value/planar measurements as historical; no full Result matrix is reported.
-
+separately.
 
 Inherit the [FMT-02 family contract](FMT-02_channel_assembly_contract.md).
 The implemented keys are separate default-registry primitives.

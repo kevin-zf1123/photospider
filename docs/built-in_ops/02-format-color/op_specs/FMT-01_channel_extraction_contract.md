@@ -6,7 +6,6 @@ category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-verification_status: focused_ctest_installed_consumers_and_example_passed
 result_operation_abi: 2
 kernel_package: "0.30.0"
 ---
@@ -16,7 +15,7 @@ kernel_package: "0.30.0"
 FMT-01A and FMT-01B are CPU Result operations. FMT-01C is a public authoring
 helper that expands a source channel table into independent FMT-01A nodes. The
 specification status remains Proposed; implementation and validation status are
-separate. Seven focused CTest cases and the public split workflow pass. All four
+separate. All four
 installed consumer checks pass: metadata assignment and example, plus channel
 extraction and example.
 
@@ -212,9 +211,4 @@ and output limits. No samples are read to determine the channel count.
 | Forced view cannot represent the requested mapping | `InvalidArgument` / `InvalidDomain`, diagnostic `ViewUnavailable` |
 | Missing source coverage, work/resource exhaustion, cancellation or upstream failure | Preserve the corresponding Result/runtime status and scope |
 
-The current Result integration test and public workflow pass on the native CPU
-host. The four installed metadata and extraction consumer checks also pass. The
-bounded Result smoke cases described in the [channel extraction performance
-workload](../../../../examples/channel_extraction_performance/README.md) passed
-their byte oracle; its timing tables are historical Value/planar measurements,
-not current Result performance evidence.
+ The four installed metadata and extraction consumer checks also pass.

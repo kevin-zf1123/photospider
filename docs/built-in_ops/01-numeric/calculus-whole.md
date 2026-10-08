@@ -8,10 +8,7 @@ Result schema with tensor member `samples`, shape [N], input dtype, and no
 facets. Whole computes and publishes the
 complete output before applying the consumer projection.
 
-`numeric_tensor_program.hpp` supplies the Whole protocol. For nonempty demand,
-the program requests Data, Validation and Descriptor (role 13) for each active
-input, then passes authorized tensor read windows and one packed writer to the
-kernel. The writer borrows its window during publication; published Result
+`numeric_tensor_program.hpp` supplies the Whole protocol. The writer borrows its window during publication; published Result
 storage remains owned after context retirement. Logical row reads support
 strided and negative-stride input storage.
 
@@ -78,8 +75,8 @@ window readable; releasing the window returns all live Root counters to zero.
 The source and output owners are checked separately.
 
 The root manual test and installed consumer build and run
-`examples/numeric_workflow/calculus.cpp`. The separate `test_numeric_result_math`
-integration suite uses its own fixture in `tests/integration/test_numeric_result_math.cpp`.
+`examples/numeric_workflow/calculus.cpp`. The current family integration source is
+[`test_numeric_result_math_calculus.cpp`](../../../tests/integration/numeric/test_numeric_result_math_calculus.cpp).
 The independent oracle retains its 1,810 exact Fraction reference
 cases. Strict must match every bit. Apple is judged by the shared accelerated
 FP32-scaled bound, and the corpus includes a verified one-ULP difference, so
@@ -90,13 +87,13 @@ Run the focused root coverage and the independent oracle from the configured
 build directory:
 
 ```sh
-cmake --build build/kernel-dev --target test_numeric_result_math -j8
-ctest --test-dir build/kernel-dev \
-  -R '^(test_numeric_calculus_result|test_numeric_result_math)$' --output-on-failure
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_calculus strict
-python3 oracle/ops/numeric/calculus_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_calculus strict
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_calculus apple
-python3 oracle/ops/numeric/calculus_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_calculus apple
+cmake --build <build-dir> --target test_numeric_result_math_calculus photospider_numeric_calculus -j8
+ctest --test-dir <build-dir> \
+  -R '^(test_numeric_calculus_result|test_numeric_result_math_calculus)$' --output-on-failure
+<build-dir>/examples/numeric_workflow/photospider_numeric_calculus strict
+python3 oracle/ops/numeric/calculus_oracle.py <build-dir>/examples/numeric_workflow/photospider_numeric_calculus strict
+<build-dir>/examples/numeric_workflow/photospider_numeric_calculus apple
+python3 oracle/ops/numeric/calculus_oracle.py <build-dir>/examples/numeric_workflow/photospider_numeric_calculus apple
 ```
 
 For installed-package validation, install the configured build, configure the
@@ -104,22 +101,11 @@ consumer with the explicit package directory, then build and run its focused
 CTest:
 
 ```sh
-cmake --install build/kernel-dev --prefix build/kernel-dev/result-only-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer \
-  -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-only-install" \
-  -DPhotospider_DIR="$PWD/build/kernel-dev/result-only-install/lib/cmake/Photospider" \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_calculus_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer \
-  -R '^installed_numeric_calculus_result$' --output-on-failure
-build/kernel-dev/repeated-result-consumer/photospider_numeric_calculus_consumer apple
+cmake --install <build-dir> --prefix <build-dir>/result-only-install
 ```
 
-The root focused CTest passed 2/2 in 4.67 s: the calculus manual test and
-`test_numeric_result_math`. The manual executable completed six check groups in
-both Strict and Apple. Each oracle profile passed 1,810 cases; Strict was
-bit-exact, while Apple followed the shared FP32-scaled bound. The installed
-package 0.32.0 consumer passed Strict 1/1 in 0.07 s and completed the Apple
-profile's six check groups. These checks validate the named local and installed
+Its current family source is
+[`test_numeric_result_math_calculus.cpp`](../../../tests/integration/numeric/test_numeric_result_math_calculus.cpp). The manual executable completed six check groups in
+both Strict and Apple. These checks validate the named local and installed
 paths; they do not establish that Apple or x86 accelerated instructions executed
 on hardware.

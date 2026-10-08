@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-10D: scatter_sum
@@ -75,8 +73,6 @@ without a partial-sum overflow failure. The same grouping principle applies to
 finite floating cancellation; compare exact sums with one final rounding.
 
 The public workflow checks all four scatter variants, exact cancellation and
-final integer overflow. The existing `test_numeric_result_math` integration
-fixture contains additional scatter cases; it was not rerun for this Result
-migration and does not establish a complete dtype/backend matrix. See
+final integer overflow. See
 [NUM-10 Whole execution](../indexing-whole.md) for runnable commands and
 evidence boundaries.

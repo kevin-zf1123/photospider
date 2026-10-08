@@ -311,5 +311,3 @@ Exercise the registered operations through public Result workflows and independe
 coefficient/sample oracles. Preserve coverage for full, partial, disjoint and
 cross-tile requests, Empty demand, identity and materialized paths, D stage
 failures, cancellation, owner release and floating-environment restoration.
-Historical Value/planar measurements are not Result performance evidence; see the
-performance guide for the current evidence boundary.

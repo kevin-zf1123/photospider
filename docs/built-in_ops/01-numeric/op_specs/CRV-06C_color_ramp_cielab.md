@@ -14,9 +14,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_subset
 clarification_status: complete
-repository_branch: ops-specs
-verification_status: focused_result_validation_passed
-repository_commit: current working tree
 ---
 
 # CRV-06C: color_ramp_cielab
@@ -28,11 +25,10 @@ Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ram
 The [shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
 LUT input axes and output table coordinates. Finite values outside 0..1 remain
-legal. Opponent/chroma scales and arithmetic formulas are unchanged. Runtime
-ColorArray v1 still encodes the old implicit L* units: public metadata, fixtures
-and consumers need explicit migration before this revised target is implemented.
-Historical implementation/test evidence below does not establish that migration;
-no silent old/new unit alias or sample-magnitude inference is permitted.
+legal. Opponent/chroma scales and arithmetic formulas are unchanged. The current runtime ColorArray v1 encodes L* in its implicit 0..100 unit;
+this target scale applies only after public metadata, fixtures and consumers
+adopt it explicitly. No implicit unit alias or inference from sample magnitude
+is permitted.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -149,7 +145,3 @@ interpolation does not perform color-model conversion.
 
 - [Color-array dependency](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).
 - [Operator specification template](../../00-foundation/spec-template.md).
-
-## Maintained implementation and validation
-Public `color_ramp_cielab_node` is declared in [`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp); `color_ramps.cpp` implements the Whole Result program. The component interpolation uses exact rational arithmetic with one destination rounding.
-The focused Result CTest, Strict/Apple manual groups, independent Fraction/Machin-pi and RGB rational/root/Decimal oracles, and installed consumer have passed. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation) and [workflow README](../../../../examples/numeric_workflow/README.md#color-ramps) for coverage and unsupported platforms/shapes.

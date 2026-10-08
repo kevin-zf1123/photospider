@@ -59,8 +59,7 @@ auto integral = ps::numeric::integral_image_node(
 ```
 
 The current public workflow entry is `examples/numeric_workflow/scans.cpp`,
-registered as `test_numeric_scans_result`; the same source is built as the
-installed consumer `installed_numeric_scans_result`. It exercises independent
+registered as `test_numeric_scans_result`. It exercises independent
 small-integer prefix and rectangle enumeration, nonadjacent selected axes,
 batch axes, negative and unaligned strides, NaN and infinity ordering, exact
 cancellation, negative zero, typed validation at zero boundaries, Empty demand,
@@ -98,21 +97,9 @@ The installed consumer uses the same source against `Photospider::kernel`:
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/result-repeat-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-repeat-install" -DPhotospider_DIR="$PWD/build/kernel-dev/result-repeat-install/lib/cmake/Photospider" -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_scans_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_scans_result$' --output-on-failure
 ```
 
-The final focused root selection completed 40 tests in 19.79 seconds: 39
-passed and one skipped, with zero failures. It included this dedicated test
-and the shared `test_numeric_result_math` fixture. The Strict and Apple default
-workflows exit successfully. The independent scan oracle passes 2,544 cases
-per profile. The installed numeric selection passed 10/10. Root resource tests
-passed 3/3. Sibling-source 4 MiB and 5 MiB Root Payload peak assertions passed
-in the complete `test_dependency_program` run. The skipped test was
-`test_vulkan_gpu`, with return code 77. x86 execution, Vulkan execution and new
-performance measurements were not run. The installed
+   The installed
 consumer compiles against the installed prefix include directory
 with `-fno-fast-math`, `-frounding-math` and `-ffp-contract=off`, and links the
 installed `libphotospider.a`. This focused check is not a full package matrix.
-No x86 execution or performance result is claimed for this Result workflow.

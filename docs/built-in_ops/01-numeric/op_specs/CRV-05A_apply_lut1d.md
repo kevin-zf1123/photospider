@@ -13,10 +13,7 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-verification_status: focused_result_math_ctest_and_installed_consumer
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-05A: apply_lut1d
@@ -131,7 +128,7 @@ declared edge independently of requested data and infer output without evaluatio
 Let a=axis[0], b=axis[1], d=axis[2]. All must be finite. For L=1 require b
 to preserve a's bit pattern and d=+0; the singleton coordinate is a. For L>=2:
 
-    expected_step = RN64((exact(b)-exact(a))/(L-1))
+expected_step = RN64((exact(b)-exact(a))/(L-1))
     x[0] = a; x[L-1] = b
     x[j] = RN64(((L-1-j)*exact(a)+j*exact(b))/(L-1)), 0<j<L-1
 
@@ -146,7 +143,7 @@ the requested query hits an endpoint.
 For a non-knot query q inside the domain, find its unique adjacent bracketing
 pair j,j+1 in table order. Compute the exact mathematical value
 
-    ((x[j+1]-q)*table[j] + (q-x[j])*table[j+1])/(x[j+1]-x[j])
+((x[j+1]-q)*table[j] + (q-x[j])*table[j+1])/(x[j+1]-x[j])
 
 with one final destination rounding. For extrapolation use the nearest domain
 end's adjacent pair in the same formula, including negative denominators for a
@@ -225,9 +222,7 @@ instead takes a rank-2 field and same-dtype table, static increasing domain and
 reject/clip policy, validating the whole table under Whole execution. Current
 [lut.apply_1d](../../../../plugins/ops/01-numeric/lut_apply_1d.cpp) uses typed
 Float32 input/table with semantic sample origin/step. Neither is this generic
-three-input dynamic-axis, versioned contract. No runtime tests of the new keys
-are inferred from those legacy operations. The implemented target is validated
-as recorded below.
+three-input dynamic-axis, versioned contract.
 
 ### Maintained implementation and verification
 
@@ -239,9 +234,7 @@ table arithmetic, and descending segments reorder x and y together for the
 positive-denominator `ExactCurve` formula. It reads input and table data through
 authorized Result windows and publishes one complete immutable packed Result.
 
-The Result manual fixture passes seven groups under Strict and locally available
-Apple profiles; the independent Fraction driver passes 1,416 bit-equal cases per
-profile. Scalar coverage includes ascending and descending axes, input/table
+ Scalar coverage includes ascending and descending axes, input/table
 mixed dtypes, reversed unaligned inputs, zero-stride layouts, caller and worker
 floating-point modes, clamp and extrapolation, singleton axes/tables, selected
 negative zero, invalid queries and axes, typed validation, and upstream failure.
@@ -255,17 +248,10 @@ charged to Metadata and Payload below 8*L, confirming no dense table copy. A
 sparse 2^39-channel output fails at the LUT node with
 `ResourceExhausted/CapacityLimit`. Output and an authorized read window retain a
 single 16-byte Payload owner after source/context teardown; releasing both
-returns all Root resources to zero. The full maximum physical channel-table
-allocation and x86 numerical execution were not run. The focused root selection
-passed the manual LUT1D and existing math integration tests 2/2 in 4.74 seconds.
-The installed consumer compiled this same source against package 0.32.0 and
-passed 1/1 under Strict in 0.38 seconds; its direct Apple run passed all seven
-groups. The independent oracle, test identities and reproduction commands are
+returns all Root resources to zero. The independent oracle, test identities and reproduction commands are
 summarized in the [family verification section](CRV-05_apply_lut1d.md#maintained-implementation-and-validation)
 and [numeric workflow
 README](../../../../examples/numeric_workflow/README.md#lut1d-application-crv-05).
-Earlier performance measurements use the package 0.18 Value adapter and are
-historical, not Result performance evidence.
 
 - [Family decisions](CRV-05_apply_lut1d.md).
 - [Baking templates](CRV-04_bake_lut1d.md).

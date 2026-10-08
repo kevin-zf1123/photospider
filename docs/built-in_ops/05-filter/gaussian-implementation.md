@@ -19,8 +19,7 @@ and GPU demand the complete input and publish a complete output. CPU tiled
 publishes requested chunks under IndependentChunks. The GPU form selects Metal
 MSL or Vulkan SPIR-V from the active native service and has no CPU fallback. The
 Result migration passes the current focused GPU test and installed-consumer
-checks on Metal. Earlier FreeBSD Intel UHD 770 Vulkan tests exercised the former
-Value path; the migrated Vulkan Result path has not been revalidated.
+checks on Metal.
 
 ## Ports and explicit parameters
 
@@ -187,10 +186,7 @@ succeeds.
 Vulkan uses 64 output lanes per dispatch and a 512-byte std140 constants buffer.
 The complete coefficient table is bound at byte offset zero; constants provide
 the original x/y coefficient offsets so cropping retains its tap coordinates.
-The registry key and exact arithmetic are shared with Metal. Earlier native
-Vulkan verification on FreeBSD Intel UHD 770 belongs to the former Value path.
-The Vulkan implementation remains in source, but its Result migration has not
-been revalidated. The GPU entry has no CPU fallback.
+The registry key and exact arithmetic are shared with Metal. The GPU entry has no CPU fallback.
 `tools/compile_builtin_vulkan.py --operator gaussian` generates the SPIR-V with
 Slang 2026.18.2 and checks it with `spirv-val --target-env vulkan1.2`, including
 descriptor bindings, byte-storage types, the constants layout and local size.
@@ -201,95 +197,7 @@ within-kernel host polling or device preemption is promised. Deterministic nativ
 submission tests cancel immediately after commit, require Cancelled and no later
 submission, and check final managed payload release. Native service tests verify
 that submitted writes complete before the cancelled call returns. Observed drain
-latencies belong in platform performance reports, not in the numerical contract.
-The focused cancellation fixtures measured 9095.35 us from cancel to return on
-FreeBSD Intel Vulkan and 2028.5 us on macOS Metal. Each is one observation, not a
-worst-case bound or latency guarantee. See the [Intel log](../../../out/gpu-whole-tiled/raw/gaussian-cohort-intel-final.log)
-and [Metal log](../../../out/gpu-whole-tiled/raw/gaussian-cohort-metal-final.log).
-
-## Historical performance measurements
-
-The paired arithmetic, dispatch, and cohort measurements below are records from
-Value execution builds before the Result migration. They preserve the workloads
-and platform observations for those builds, but do not describe current Result
-publication, transfer costs, or end-to-end latency. This migration did not run a
-comparable performance benchmark.
-
-## Paired arithmetic and dispatch measurements
-
-The current paired files in `out/performance-review/` compare successive arithmetic
-changes on Apple M5/macOS 27.2. Each reported figure below is the median of five
-per-process measured-call medians; the ranges show the minimum and maximum of
-those five medians. The benchmark rows report bitwise equality with the Whole
-reference. These are focused public-workflow cases, not cross-platform estimates.
-
-| Comparison | Workload | Before, ms | After, ms | Paired observation |
-| --- | --- | ---: | ---: | --- |
-| Compact Gaussian tap product | Whole, 32 × 32, 1 worker | 30.758 (30.342–31.660) | 7.314 (7.266–7.484) | Issued work falls by 68 units; peak host bytes fall by 34,816. |
-| Compact Gaussian tap product | Whole, 64 × 64, 4 workers | 30.875 (30.742–31.134) | 7.297 (7.202–7.385) | Issued work falls by 272 units; peak host bytes fall by 34,816. |
-| Compact Gaussian tap product | Tiled, 32 × 32, 4 workers | 20.821 (20.581–21.677) | 12.057 (11.909–12.252) | Peak host bytes varied from 2,280,512 to 2,427,800 after the change. |
-| Reused normalizer | Whole, 32 × 32, 1 worker | 7.365 (7.302–7.507) | 6.181 (6.133–6.246) | Peak host bytes increase by 512. |
-| Reused normalizer | Whole, 64 × 64, 4 workers | 7.501 (7.316–7.574) | 6.311 (6.179–6.439) | Peak host bytes increase by 512. |
-| Reused normalizer | Tiled, 32 × 32, 4 workers | 12.161 (11.819–14.218) | 11.583 (11.428–12.162) | The timing ranges overlap. |
-
-The per-process timing ranges are narrow for the two Whole Gaussian pairs. The
-tiled compact-product case also improves in this workload, while its managed peak
-varies with active slots. Normalizer reuse has a smaller effect, especially in the
-tiled case. These measurements support the arithmetic changes for the tested
-cases only.
-
-For Gaussian GPU on Metal, the paired 32 × 32 case changes from 45.835 ms (45.711–45.857)
-to 11.799 ms (11.774–11.923), with native dispatches/submissions changing from
-32/16 to 8/4. At 128 × 128, the medians change from 733.153 ms
-(729.338–769.127) to 185.632 ms (184.896–185.975); dispatch/submission counts
-change from 512/256 to 128/64. The 256-lane Metal capacity accounts for the
-dispatch reduction in these paired runs. Vulkan retains 64 lanes per dispatch.
-The supplied rows retain byte equality and show higher declared host workspace
-for the wider Metal dispatch. These results apply to the recorded M5 Metal run.
-
-Raw files: `out/performance-review/gaussian-compact-paired.json`,
-`gaussian-normalizer-paired.json` and `gaussian-gpu-paired.json`.
-
-## Dispatch-cohort timing evidence
-
-The current cohort setting is two ordered dispatches per submission. Each
-dispatch covers at most 16 taps per lane, so grouping lowers the submission count
-by half when pairs are available. Outputs remained bitwise equal to the separately
-executed Whole reference in the paired benchmark runs.
-
-On FreeBSD Intel UHD 770, static cohort-1 and cohort-2 binaries ran in alternating
-order for three rounds, with one warmup and eleven measured calls per size and
-configuration. The public example leaves result caching disabled by default
-(`result_cache_bytes=0`, no disk cache); each timed call still compares its result
-with the Whole reference. Values below are the median of the three per-round
-medians in milliseconds.
-
-| Intel UHD 770 / FreeBSD | Cohort 1 | Cohort 2 | Change |
-| --- | ---: | ---: | ---: |
-| 8 × 8 | 15.746 | 15.2533 | −3.13% |
-| 16 × 16 | 52.6219 | 49.7157 | −5.52% |
-| 32 × 32 | 201.362 | 189.077 | −6.10% |
-
-The 8 × 8 p95 values varied across rounds and do not establish a stable small-case
-gain. At 32 × 32, cohort-1 p95 values of 212.868, 200.18 and 211.659 ms changed to
-198.762, 198.904 and 198.904 ms. The cohort-2 `peak_host_bytes` was 1080 bytes
-higher at every tested size. See [the paired Intel raw results](../../../out/gpu-whole-tiled/raw/gaussian-vulkan-cohort-paired.jsonl).
-
-One macOS M5 before/after set recorded these medians:
-
-| Apple M5 / macOS | Cohort 1 | Cohort 2 | Change |
-| --- | ---: | ---: | ---: |
-| 8 × 8 | 5.15671 | 3.24475 | −37.08% |
-| 16 × 16 | 13.9919 | 11.7485 | −16.03% |
-| 32 × 32 | 52.8873 | 46.3666 | −12.33% |
-
-This single M5 before/after set does not establish a general gain across runs.
-`peak_host_bytes` was unchanged on M5. Raw results are [cohort 1](../../../out/gpu-whole-tiled/raw/gaussian-metal-submit-before.jsonl)
-and [cohort 2](../../../out/gpu-whole-tiled/raw/gaussian-metal-submit-after.jsonl).
-Performance measurements ran with the Vulkan validation layer disabled; correctness
-validation ran separately in [the Intel validation log](../../../out/gpu-whole-tiled/raw/gaussian-vulkan-oracle-validation.log).
-
-## Execution and validation
+latencies belong in platform performance reports, not in the numerical contract. ## Execution and validation
 
 The [public workflow example](../../../examples/gaussian_workflow/README.md)
 binds a Result input, assembles published Result chunks, and compares output with
@@ -307,17 +215,10 @@ python3 oracle/ops/filter/check_gaussian_runtime.py --runner build/kernel-dev/te
 ```
 
 The five focused Gaussian Result tests cover coefficient range/refinement,
-arithmetic, Whole workflow, tiled support, and native GPU execution. Eight
-installed-consumer tests pass, including the standalone example in Whole, tiled,
-and GPU modes. The independent MPFR/Fraction oracle passes 94 workflows and 707
-output words for each of CPU Whole, CPU tiled, and native Metal GPU; coefficient
-validation passes 312 cases.
+arithmetic, Whole workflow, tiled support, and native GPU execution.
 
 Typed Result coverage checks retained CMYK ColorArray v1 facets and ICC
 resources, batch axes, a downstream image split, tuple closure, ROI support,
 outside-batch NaN handling, Empty output without payload allocation, and Result
 access after context retirement. These fixtures are finite evidence, not an
-exhaustive all-input proof. Earlier FreeBSD Intel Vulkan oracle results and timing
-records above belong to Value execution and do not validate the migrated Vulkan
-Result path. The raw performance reports are retained under ignored
-`out/gpu-whole-tiled/`; they do not report performance for this Result migration.
+exhaustive all-input proof.

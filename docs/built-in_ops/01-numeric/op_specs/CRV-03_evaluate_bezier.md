@@ -12,10 +12,7 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-verification_status: focused_result_manual_and_installed_consumer
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-03: evaluate_bezier
@@ -180,7 +177,7 @@ coincident/degenerate anchors are valid. No smoothing or monotonicity is imposed
 For demanded segment j and component c, reconstruct scalar controls P[0..d]
 as specified above. For 0<t<1 the exact mathematical value is
 
-    B_c(t) = sum_{r=0..d} binomial(d,r)*(1-t)^(d-r)*t^r*P[r]
+B_c(t) = sum_{r=0..d} binomial(d,r)*(1-t)^(d-r)*t^r*P[r]
 
 The strict result is direct RN_dtype(B_c(t)), with the explicit zero rule.
 de Casteljau is an implementation option, but sequentially rounded blends do
@@ -254,28 +251,18 @@ Result manual workflow exercises both rejection cases under Strict and Apple
 profiles; they do not establish successful numerical execution at either
 maximum shape.
 
-The public Result constructor is exercised by `test_numeric_parametric_result`
-and `installed_numeric_parametric_result`, which builds the same manual fixture
-against the installed package. Its source `Value` objects supply immutable
+Its source `Value` objects supply immutable
 storage referenced by source Results and charged as Referenced; output values,
 bindings, and reads use Results. Coverage includes both profiles, Float32/Float64,
 quadratic/cubic fixtures, all 16 combinations of reversed/unaligned inputs,
 zero-stride sources, caller and worker fenv, nine invalid static metadata cases, typed Whole
 validation, unused generic values, query/producer error ordering, endpoint
 selection, overflow, Empty, current association, demand dirty mapping, static
-preparation, exact-work cancellation, WorkLimit and complete Root release.
-Strict and Apple each passed all six manual groups and all 1428 independent
-Fraction oracle cases bit-for-bit. The focused root CTest selection passed
-`test_numeric_result_math` and `test_numeric_parametric_result` 2/2 in 4.67
-seconds (4.50 seconds and 0.17 seconds respectively). The installed 0.32.0
-package consumer passed `installed_numeric_parametric_result` 1/1 under Strict
-in 0.17 seconds; its direct Apple invocation passed all six groups. The separate
-`test_numeric_result_math` integration target
+preparation, exact-work cancellation, WorkLimit and complete Root release. The separate
+`test_numeric_result_math_bezier` integration target
 continues to cover 22 Fraction golden words across CRV-02 function sampling and
 CRV-03 parametric evaluation; these integration cases do not replace the manual
-fixture or its installed consumer. Exact commands and current validation results
-are recorded in the [numeric workflow README](../../../../examples/numeric_workflow/README.md#parametric-bezier-evaluation-crv-03).
-x86 and successful physical maximum-shape numerical execution were not tested.
+fixture or its installed consumer.
 
 Production retains RN64 reconstruction and exact integer power-Horner with one
 final rounding. All current profiles use the same exact numerical calculation;
@@ -289,7 +276,7 @@ Build/run commands and editable use are maintained in
 [the numeric workflow README](../../../../examples/numeric_workflow/README.md#parametric-bezier-evaluation-crv-03).
 The focused Result test command and coverage are in the numeric workflow README.
 See [implementation notes](../math-implementation.md#crv-03-parametric-bezier-evaluation)
-for unchanged arithmetic bounds and historical validation scope.
+for the arithmetic bounds.
 
 - [Curve category](../curves.md).
 - [Operator template](../../00-foundation/spec-template.md).

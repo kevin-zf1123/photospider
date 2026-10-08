@@ -10,9 +10,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_subset
 clarification_status: complete
-repository_branch: ops-specs
-verification_status: focused_result_validation_passed
-repository_commit: current working tree
 ---
 
 # CRV-06D: color_ramp_cielch
@@ -24,11 +21,10 @@ Dynamic inputs inherit the [family Result tensor-port contract](CRV-06_color_ram
 The [shared scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 requires native CIELAB/CIELCh l=L*/100, including ramp stops' color values,
 LUT input axes and output table coordinates. Finite values outside 0..1 remain
-legal. Opponent/chroma scales and arithmetic formulas are unchanged. Runtime
-ColorArray v1 still encodes the old implicit L* units: public metadata, fixtures
-and consumers need explicit migration before this revised target is implemented.
-Historical implementation/test evidence below does not establish that migration;
-no silent old/new unit alias or sample-magnitude inference is permitted.
+legal. Opponent/chroma scales and arithmetic formulas are unchanged. The current runtime ColorArray v1 encodes L* in its implicit 0..100 unit;
+this target scale applies only after public metadata, fixtures and consumers
+adopt it explicitly. No implicit unit alias or inference from sample magnitude
+is permitted.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -195,7 +191,3 @@ and do not replace the existing floating pi-multiple operations.
 - [CIELAB counterpart](CRV-06C_color_ramp_cielab.md).
 - [Color-array description](../../02-format-color/op_specs/FMT-COLOR_color_array_contract.md).
 - [Operator template](../../00-foundation/spec-template.md).
-
-## Maintained implementation and validation
-The public helpers `color_ramp_cielch_node`, `color_ramp_cielch_pi_node` and `color_ramp_cielch_rational_pi_node` are declared in [`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp); `color_ramps.cpp` implements their Whole Result programs. Coordinate values and original hue ratios use exact rational interpolation. Cross-unit conversion in either direction multiplies or divides by certified pi, with a 4096-bit precision ceiling; same-unit RationalPi expressions cancel pi symbolically.
-The focused Result CTest, Strict/Apple manual groups, independent Fraction/Machin-pi and RGB rational/root/Decimal oracles, and installed consumer have passed. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation) and [workflow README](../../../../examples/numeric_workflow/README.md#color-ramps) for coverage and unsupported platforms/shapes.

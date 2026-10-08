@@ -10,8 +10,6 @@ document_maturity: D1_draft
 implementation_status: not_implemented
 clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-15C: Explicit view composition

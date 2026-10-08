@@ -65,6 +65,5 @@ affine可映射矩形顶点后扩大filter footprint；homography须排除分母
 
 [^opencv]: OpenCV，[*Geometric Image Transformations*](https://docs.opencv.org/4.13.0/da/d54/group__imgproc__transform.html)，4.13.0。
 [^pbr]: Pharr、Jakob、Humphreys，[*Image Texture*](https://www.pbr-book.org/4ed/Textures_and_Materials/Image_Texture)，PBRT4，2023。
-[^liquify]: Adobe，[*Overview of Liquify filter*](https://helpx.adobe.com/photoshop/desktop/effects-filters/artistic-stylize-filters/overview-of-liquify-filter.html)，2026-02-23。
 [^mls]: Schaefer、McPhail、Warren，[*Image Deformation Using Moving Least Squares*](https://people.engr.tamu.edu/schaefer/research/mls.pdf)，SIGGRAPH2006。
 [^nuke]: Foundry，[*STMap*](https://learn.foundry.com/nuke/content/reference_guide/transform_nodes/stmap.html)，滚动参考；[SplineWarp](https://learn.foundry.com/nuke/content/reference_guide/transform_nodes/splinewarp.html)记录不同warp版本的影响范围差异。

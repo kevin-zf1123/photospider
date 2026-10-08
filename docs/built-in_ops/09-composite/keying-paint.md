@@ -66,7 +66,6 @@ CSP的参考层填充、close-gap、灰尘清除、线宽、亮度转透明度�
 
 [^ibk]: Foundry，[*IBKColor*](https://learn.foundry.com/nuke/content/reference_guide/keyer_nodes/ibkcolor.html)，滚动参考指南；clean plate与key组织。
 [^ae]: Adobe，[*Keying*](https://helpx.adobe.com/after-effects/desktop/animate-in-after-effects/keying/keying.html)，2024-10-24；key、cleaner与spill顺序。
-[^ps]: Adobe，[*Adjust Content-Aware Fill settings*](https://helpx.adobe.com/photoshop/desktop/repair-retouch/remove-objects-fill-space/adjust-content-aware-fill-settings.html)，2026-02-23；采样区等功能。
 [^patch]: Barnes等，[*PatchMatch: A Randomized Correspondence Algorithm for Structural Image Editing*](https://research.adobe.com/publication/patchmatch-a-randomized-correspondence-algorithm-for-structural-image-editing/)，Adobe Research，2009-08-02。
 [^poisson]: Pérez等，[*Poisson Image Editing*](https://www.inf.ed.ac.uk/publications/report/1094.html)，2003；作者机构原始论文记录。
 [^csp]: CELSYS，[*Advanced Fill*](https://help.clip-studio.com/en-us/manual_en/420_fill/Advanced_Fill.htm)、[*Other Layer Filters*](https://help.clip-studio.com/en-us/manual_en/390_filters/Other_Layer_Filters.htm)，CSP5.0在线手册；填充与插画处理。

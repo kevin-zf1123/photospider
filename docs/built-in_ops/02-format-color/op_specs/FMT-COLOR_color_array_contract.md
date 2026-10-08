@@ -7,27 +7,20 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_subset
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: 6617c78c
 ---
 
 # FMT-COLOR: generic color-array description
 
 ## Selected category target and current implementation
 
-The 2026-09-23 [relative-coordinate revision](FMT_relative_coordinate_scale.md)
-requires l=L*/100 for target CIELAB/CIELCh storage. Existing v1 bytes and runtime
-evidence below retain their historical implicit L* scale until explicit
-migration. This is not a compatibility mode or permission to mix the meanings.
+The [relative-coordinate scale contract](FMT_relative_coordinate_scale.md)
+requires l=L*/100 for target CIELAB/CIELCh storage. Current v1 bytes and the runtime
+behavior below use the implicit 0..100 L* unit until they adopt that scale.
+The two meanings are never mixed, and no compatibility mode exists.
 
-The 2026-09-22 [FMT shared specification](FMT_common_contract.md) selects generic
-tensors/tensor collections with composable metadata and consumer-declared
-semantic validation, including raw computation and explicit call-local override.
 It supersedes the Image/Layer coexistence direction for the future category
 target. The codec, shape restrictions and automatic validation described below
-remain current implementation facts pending migration. Reuse their color-science
-definitions where applicable; metadata presence alone will no longer impose a
-complete-color validation obligation on ordinary numeric consumers. This note
+remain current implementation facts pending migration. This note
 does not change existing v1 bytes or claim that migration has been implemented.
 
 The subsequent [kernel storage target](../../../kernel-specs/Tensor-Storage-and-Region-Access.md)
@@ -289,9 +282,6 @@ equivalence to older image descriptors with separately rounded XYZ white triples
 is claimed. Basis validation includes AP0's imaginary primary and all custom
 zero-y primary cases permitted by the homogeneous representation.
 
-Source coordinates: [W3C CSS Color 4 predefined spaces](https://www.w3.org/TR/2026/CRD-css-color-4-20260913/#predefined),
-[ACES2065-1](https://docs.acescentral.com/encodings/aces2065-1/),
-[ACEScg](https://docs.acescentral.com/encodings/acescg/).
 These identify preset data, not adoption of CSS interpolation or an ACES transform.
 
 ## Canonical encoding and authoring helpers
@@ -346,9 +336,7 @@ different rational matrix. Ordinary ramp arithmetic does not execute the matrix.
 Exact metadata comparisons cover all canonical fields, including reference,
 white, hue unit, association and profile identity; dtype/shape are checked separately.
 
-Canonical byte fixture: XYZ, display_relative, no alpha, interleaved layout,
-D65 xy=(RN64(0.3127),RN64(0.3290)) has the 20-byte payload
-`0202000088635ddc4603d43f75931804560ed53f`. The first four bytes are the
+The first four bytes are the
 model/reference/association/layout tags, followed by the two little-endian
 binary64 coordinates. Its facet key is photospider.color-array and version is 1;
 the helper's static String is exactly the lowercase hex above. No primary,

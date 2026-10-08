@@ -14,8 +14,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # CRV-01D: interpolate_pchip_multi
@@ -109,7 +107,6 @@ ArithmeticOverflow, with Run scope and offending port/index where available.
 
 ## Acceptance and implementation status
 
-
 - [Family specification](CRV-01_interpolate.md).
 - [Operator template](../../00-foundation/spec-template.md).
 
@@ -146,11 +143,5 @@ the Whole contract above; mathematical y stencils remain unchanged.
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
 contains the shared arithmetic/resource details and current validation boundary.
 See [the editable workflow](../../../../examples/numeric_workflow/README.md#explicit-query-curves-crv-01)
-for construction, commands and checked expected results. The shared Result
-manual fixture passed all six groups under direct Strict and Apple runs; the
-strengthened Fraction oracle passed 2,487 bit-exact cases per profile, covering
-all four forms, mixed input/destination dtypes and domain policies. The focused
-CTest selection passed 3/3; the installed package 0.32 consumer passed under
-Strict (CTest 1/1) and direct Apple execution. The bounded eight-row-per-profile
-benchmark smoke passed, with no performance improvement claimed. This
+for construction, commands and checked expected results. This
 operation's specification status remains Proposed.

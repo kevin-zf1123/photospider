@@ -12,8 +12,6 @@ clarification_status: complete
 decision_authority: maintainer_delegated_2026_09_24
 proposed_operation_keys:
   - color.reduce_oklab_chroma_v1_strict
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-14B: OKLab chroma reduction

@@ -12,11 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 ---
 
 # NUM-04A: abs
@@ -90,7 +85,6 @@ changed bindings. The delivery must provide the actual executable/command.
 The current `numeric.abs` accepts only finite Float32/64, preserves shape/dtype,
 and uses Elementwise registration. Its shared reader/writer rejects NaN/Inf;
 the new target adds UInt8/Int64 and the selected nonfinite/payload semantics.
-No removal/migration of the legacy key is performed by this specification.
 
 - [Current registration/callback](../../../../plugins/ops/01-numeric/numeric_abs.cpp).
 - [Current finite reader/writer](../../../../plugins/ops/00-foundation/basic_common.hpp).
@@ -104,9 +98,5 @@ atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
 The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
-cover this operation. The combined NUM-04 family suite passed 7,524 independent
-integer/Fraction/MPFR cases per profile: Clang 21 strict/Apple locally (MPFR 4.2.0-p12; revalidated 2026-09-21)
-and Clang 18 strict/AVX2 in Ubuntu WSL (MPFR 4.2.1). Expanded manual checks and
-local installed consumers passed. [Validation and native timing](../math-implementation.md#num-04-validation-and-native-timing)
-record the scope and limitations. Manual targets have no CTest/integration
+cover this operation. Manual targets have no CTest/integration
 registration; MPFR is used only by the independent Python oracle.

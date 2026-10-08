@@ -11,7 +11,6 @@ kind: primitive
 status: Specified
 implementation_scope: builtin_operations
 implementation_status: implemented
-verification_status: result_native_and_opencv_finite_regressions_and_oracle
 result_operation_abi: 2
 operation_api: Result
 workflow_schema: 4

@@ -82,20 +82,13 @@ The installed consumer compiles the same workflow source against
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/result-repeat-install
-cmake -S tests/consumer -B build/kernel-dev/repeated-result-consumer -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/result-repeat-install" -DPhotospider_DIR="$PWD/build/kernel-dev/result-repeat-install/lib/cmake/Photospider" -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build/kernel-dev/repeated-result-consumer --target photospider_numeric_ordering_consumer -j8
-ctest --test-dir build/kernel-dev/repeated-result-consumer -R '^installed_numeric_ordering_result$' --output-on-failure
 ```
 
-The Root `test_numeric_ordering_result` and installed
-`installed_numeric_ordering_result` each pass 1/1. The independent ordering
-oracle passes 2,072 cases in both Strict and Apple profiles. The separate
+ The separate
 `test_result_c_block` and installed `installed_result_c_block` also pass 1/1;
 they exercise the generic Result-v2 block-sharing contract, not the Whole sort
 or quantile callbacks.
 
-The existing `test_numeric_result_math.cpp` integration fixture contains
-additional ordering and quantile cases; it was not rerun for this migration.
 No x86 arithmetic execution or performance result is claimed. The current
 checks do not cover every q semantic-facet, error and resource combination.
 These are evidence boundaries, not changes to the Proposed specifications.

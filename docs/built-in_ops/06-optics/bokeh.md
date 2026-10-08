@@ -15,7 +15,7 @@
 | 固定核FFT，出口非负RGB/alpha clamp | `convolution.py:123-194` | 可供非负模糊参考，不是通用signed卷积 |
 | depth/猫眼/像差列后续 | `doc/physical_bokeh_solver_spec.md:957-989` | 不能称已有逐像素景深 |
 
-供本机阅读：[物理参数](/Users/zhufeng/document/code/phisical_bokeh/src/physical_bokeh_python/physics.py:18)、[卷积](/Users/zhufeng/document/code/phisical_bokeh/src/physical_bokeh_python/convolution.py:141)、[相邻规格](/Users/zhufeng/document/code/phisical_bokeh/doc/physical_bokeh_solver_spec.md:957)。这些绝对链接是私有工作区材料，公共读者需要另行取得源码；正文已给足可理解的观察边界。
+这些绝对链接是私有工作区材料，公共读者需要另行取得源码；正文已给足可理解的观察边界。
 
 ## 算子分解
 
@@ -33,7 +33,7 @@
 | OPT-10 wave PSF | pupil amplitude+OPD+lambda→PSF | wavelength/长度单位、Fraunhofer/Fresnel、采样间距 | 非负、energy、OPD=0、lambda尺度；D3 |
 | OPT-11 spectral apply | spectrum image或明确RGB代理→image | wavelengths、weights、sensor/CMFs、重建假设 | 色度积分与采样收敛；RGB代理不能标真光谱 |
 
-2026-09-13：可复用基础已有 named outputs、signed fields、Spectrum FFT、Layer/RawSum/WeightedSum 和 G4 radius gather/scatter。这里的 1D radius sum 不等于 2D 可变 PSF；PSFBank、CoC、visibility、波动光学和专用 scatter 节点仍需定义与实现。Layer 的 mass/weight/emission 规则见[实现契约](../../kernel-architecture/Layer-Runtime.md)。Foundry ZDefocus公开区分depth math、blur map、disc/bladed/image kernel和分层，支持以上接口拆分。[^nuke]
+这里的 1D radius sum 不等于 2D 可变 PSF；PSFBank、CoC、visibility、波动光学和专用 scatter 节点仍需定义与实现。Layer 的 mass/weight/emission 规则见[实现契约](../../kernel-architecture/Layer-Runtime.md)。Foundry ZDefocus公开区分depth math、blur map、disc/bladed/image kernel和分层，支持以上接口拆分。[^nuke]
 
 ## 薄透镜与像素单位
 
@@ -99,7 +99,6 @@ AE Camera Lens Blur的Diffraction Fringe名称不证明实现了Fourier光学；
 [^nuke]: Foundry，[*ZDefocus*](https://learn.foundry.com/nuke/content/reference_guide/filter_nodes/zdefocus.html)，滚动参考指南。
 [^kosloff]: Kosloff、Tao、Barsky，[*Depth of Field Postprocessing for Layered Scenes Using Constant-Time Rectangle Spreading*](https://graphics.berkeley.edu/papers/Kosloff-DOF-2009-05/Kosloff-DOF-2009-05.pdf)，GI2009，§5；已核验官方索引正文，完整PDF读取失败。[作者博士论文](https://escholarship.org/uc/item/0161q94f)，2010补充PSF结构相关方法。
 [^circular]: Garcia，[*Circular Separable Convolution Depth of Field*](https://media.gdcvault.com/gdc2018/presentations/Garcia_Kleber_CircularDepthOf.pdf)，EA/Frostbite，GDC2018。
-[^amd]: AMD GPUOpen，[*FidelityFX Depth of Field1.1*](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/depth-of-field/)，访问2026-09-09。
 [^poppy]: POPPY，[*Overview*](https://poppy-optics.readthedocs.io/en/latest/overview.html)、[*Extending POPPY*](https://poppy-optics.readthedocs.io/en/latest/extending.html)，滚动官方文档。
 [^color]: PBRT4，[*Color*](https://pbr-book.org/4ed/Radiometry%2C_Spectra%2C_and_Color/Color)，2023；光谱到颜色的多对一映射。
 [^ae]: Adobe，[*Blur and Sharpen Effects*](https://helpx.adobe.com/after-effects/desktop/apply-effects-and-animation-presets/list-of-effects/blur-sharpen-effects.html)，Camera Lens Blur段。

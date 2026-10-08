@@ -7,8 +7,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_cpu_result_abi_2
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-10 exact basis and adaptation mathematics

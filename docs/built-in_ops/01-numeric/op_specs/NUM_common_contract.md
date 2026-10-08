@@ -6,28 +6,24 @@ category: 01-numeric
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-repository_branch: ops-specs
-repository_commit: 30478d33
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 ---
 
 # NUM: specification and execution baseline
 
-The 2026-09-22 [FMT shared metadata target](../../02-format-color/op_specs/FMT_common_contract.md)
-selects a future revision of metadata consumption/propagation: ordinary numeric
+The [FMT shared metadata target](../../02-format-color/op_specs/FMT_common_contract.md)
+defines a target revision of metadata consumption/propagation: ordinary numeric
 operations do not validate color merely because a description is attached, and
 raw outputs retain applicable descriptions without inherited sample-validity
-guarantees. Explicit overrides are local to a consuming invocation. This is a
-pending shared-contract migration; the implemented facet-clearing and typed
-validation behavior documented below remains current until migrated. Numerical
-formulas, rounding and strict/accelerated precision are unchanged by that target.
+guarantees. Explicit overrides are local to a consuming invocation. The current
+implementation clears facets and performs the typed validation documented below
+until it adopts that target. Numerical formulas, rounding and strict/accelerated
+precision are unaffected by that target.
 
-The later [relative-coordinate scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
+The [relative-coordinate scale contract](../../02-format-color/op_specs/FMT_relative_coordinate_scale.md)
 sets native CIELAB/CIELCh lightness to l=L*/100 for the unified semantic target.
 It changes color interpretation, not ordinary numeric formulas or precision.
-Existing ColorArray v1 metadata and its consuming runtime remain pending migration.
+The current ColorArray v1 metadata and its consuming runtime use the implicit
+0..100 L* unit until they adopt that scale.
 
 Numeric profile: strict retains the exact reference defined below. Floating
 arithmetic in accelerated profiles follows the shared
@@ -48,11 +44,7 @@ it does not change the maintainer's selected formulas or dependency exceptions.
 
 Front matter separates specification status, document maturity and implementation
 status. D1_draft identifies a draft of the D1 mathematical scope; it is neither
-Accepted nor an implementation gate. The repository_branch/repository_commit fields retain the original
-source-inspection provenance, including historical working-tree labels. The implementation fields identify the
-maintained branch, its pre-change base and the latest verification date; the base
-commit does not contain the subsequent changes. Current implementation facts are
-versioned together with code in this commit. Shared contracts register no operation; the primitive specifications and
+Accepted nor an implementation gate. Shared contracts register no operation; the primitive specifications and
 [implementation table](../implementation.md) record the maintained runtime and
 its validation. Existing unsuffixed implementations are only the explicitly
 linked legacy subsets.
@@ -179,20 +171,6 @@ relevant shape, special-value, layout, lifetime, low-budget and cancellation cas
 listed in the primitive/family contracts. Maintained commands, independent
 oracles and actual results are linked from the individual implementation sections
 and the [public numeric workflows](../../../../examples/numeric_workflow/README.md).
-
-Performance evidence records an analytic fixture and a declared representative
-large shape within the operation's limits, dtype, requested region, backend and
-hardware, worker count, cache state, repetition count, median/tail elapsed time,
-output/scratch/retained managed peaks and quality/fallback results. Scans/reducers
-also report actual source elements processed; sparse reads report their support
-size. The [current implementation and measurements](NUM_accelerated_contract.md#current-implementation)
-record measured workload speedups and remaining bottlenecks; they are not
-throughput guarantees for every legal input. Accounting exclusions are explicit. The
-[native category driver](../../../../examples/numeric_workflow/README.md#native-category-timing-and-accounting)
-covers 18 representative clusters plus extended and legacy workloads; expression, unary/binary, interpolation,
-function sampling and inverse/lowpass measurements are linked from the same
-workflow README. Each measurement declares its representative operation and
-shape; it is not a complete parameter or platform matrix.
 
 No unresolved user-facing semantic choice is recorded by this baseline. Concrete
 backend selection, metadata specialization, diagnostics and runnable fixtures are

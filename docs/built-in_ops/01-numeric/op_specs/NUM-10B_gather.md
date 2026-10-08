@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-specs
-repository_commit: current working tree
 ---
 
 # NUM-10B: gather
@@ -68,8 +66,5 @@ typed-validation, resource and cancellation failures retain their established
 categories.
 
 The public workflow checks nonleading-axis gather, repeated and invalid indices,
-strided reads, Empty demand, and raw-bit preservation. The existing
-`test_numeric_result_math` integration fixture has additional nonleading-axis
-UInt8 and negative-stride index cases; it was not rerun for this Result
-migration. Current commands and evidence boundaries are listed in
+strided reads, Empty demand, and raw-bit preservation. Current commands and evidence boundaries are listed in
 [NUM-10 Whole execution](../indexing-whole.md).

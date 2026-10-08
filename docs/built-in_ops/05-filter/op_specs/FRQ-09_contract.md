@@ -31,7 +31,6 @@ Letter suffixes identify distinct mathematical or interface objects, not quality
 
 ## Shared Mathematics, Units, and Profiles
 
-
 ### Exact One-Dimensional Matrix Definitions
 k,n=0..N-1 .
 - Type I: A_kn=cos(πkn/(N-1))*w_n, with w_0=w_(N-1)=1 and all other w_n=2, for N>1.
@@ -40,7 +39,6 @@ k,n=0..N-1 .
 - IV:A_kn=2cos(π(2k+1)(2n+1)/(4N)).
 For backward normalization, the 2D DCT is A_y X A_xᵀ, evaluated as one exact whole-image expression and rounded once with RN_t. Use the true inverse matrices on each axis: type I inverse=A/[2(N-1)]; type II inverse=type III/[2N]; type III inverse=type II/[2N]; type IV inverse=type IV/[2N].
 Ortho matrices: type I is sqrt(2/(N-1))*c_k*c_n*cos(πkn/(N-1)), where endpoint c values are 1/sqrt2 and others are 1; type II is sqrt(2/N)*c_k*cos(πk(2n+1)/(2N)), where c_0=1/sqrt2; type III is the transpose of ortho type II; type IV is sqrt(2/N)*cos(π(2k+1)(2n+1)/(4N)). Each ortho inverse is the transpose of its selected matrix. Trigonometric and square-root values are not pre-baked as Float64 coefficients; recognize exact integer and half-integer mathematical phase cases exactly.
-
 
 ## Shared Execution and Numeric Requirements
 
@@ -52,7 +50,7 @@ Positive-weight normalized filters, signed kernels, local regression, and global
 
 The member support set is normative. Having a halo does not mean that an arbitrarily cropped ROI can run independently; paged access does not remove a whole-image dependency. Follow each member definition for staged rounding, global connectivity, transforms, and iterative state. Independently requested outputs must not turn validation of an unrequested component payload into a hidden whole-image dependency.
 
-All members must follow the [common acceptance protocol](FILTER_oracle_protocol.md). See the [oracle usage guide](../../../../oracle/ops/filter/README.md) for mathematical references and associated self-tests. No new implementation was run in the Photospider runtime. D1/D2 indicate draft maturity, not acceptance rates.
+All members must follow the [common acceptance protocol](FILTER_oracle_protocol.md). See the [oracle usage guide](../../../../oracle/ops/filter/README.md) for mathematical references and associated self-tests. D1/D2 indicate draft maturity, not acceptance rates.
 
 ## Sources and Review
 

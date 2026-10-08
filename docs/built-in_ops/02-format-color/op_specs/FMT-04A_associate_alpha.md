@@ -21,9 +21,8 @@ The default registry provides `alpha.associate_<profile>` for the three CPU
 profiles. The operation uses Result ABI 2 and preserves the declared tensor
 shape, dtype and channel positions. The specification remains Proposed. The current focused `test_alpha_operations` CTest and the fourteen small alpha benchmark smoke cases pass; no full matrix claim is made.
 
-
 Inherit the complete [FMT-04 boundary contract](FMT-04_alpha_association_contract.md).
-The operation accepts one single-tensor Result without fields, with optional second input only for raw explicit plane/scalar weights. All connected inputs are Descriptor-checked; semantic operands use Data and Validation, pass-through samples do not gain Validation, and no Control dependency is declared.
+The operation accepts one single-tensor Result without fields, with optional second input only for raw explicit plane/scalar weights.
 
 ## Interface and representation
 

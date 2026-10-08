@@ -8,9 +8,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
 clarification_status: complete
-repository_branch: ops-specs
-verification_status: focused_result_validation_passed
-repository_commit: current working tree
 ---
 
 # CRV-11: nonuniform low-pass family
@@ -32,7 +29,6 @@ turn a composite template or structured Result into a generic NUM Value primitiv
 A stated four-ULP final bound uses the shared FP32-scaled contract for both
 Float32 and Float64 outputs.
 Classification, exact landmarks and signed-zero rules are checked separately.
-
 
 Use shared positions[K] and values, with static axis naming the values dimension
 of length K. Other axes identify independent signals. Return values with the same
@@ -232,17 +228,12 @@ Root-owned storage and retains one reusable piece vector. The implementation
 uses exact partition and paired-affine integration plus global Taylor moments
 with a rigorous tail bound, not local adaptive quadrature. All accelerated keys
 currently use the strict fallback; 128..4096-bit precision and order <=512 may
-return `ResourceExhausted`. The maintained manual workflow passes two groups per
-profile under Strict and Apple. Its independent Fraction/directed-MPFR oracle
-passes 245 cases per profile with `got == want` bits. Tests cover complete input
+return `ResourceExhausted`. Tests cover complete input
 and dirty support, global position validation, remote-column Run errors, cache
 replacement with current source associations, static preparation reuse, active
 arithmetic cancellation and escaped Result/read-window owners. The focused root
 `test_numeric_lowpass_nonuniform_result` CTest passes, as does the separate
-shared math integration fixture. The installed 0.32.0 consumer passes
-`installed_numeric_lowpass_nonuniform_result` under Strict, and the direct Apple
-run passes two groups through the public package. No x86 numerical execution,
-native GPU run, full CTest or Result performance run is recorded.
+shared math integration fixture.
 Whole numerical/fallback counters are unavailable. See the
 [nonuniform-lowpass workflow](../../../../examples/numeric_workflow/README.md#nonuniform-lowpass)
 and [CRV-11 umbrella](CRV-11_resample_signal.md).

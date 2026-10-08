@@ -7,8 +7,6 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_handoff_pending_platform_review
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-09 scalar transfer definitions
@@ -127,7 +125,7 @@ would define a different transform and is not accepted here.
 ## HLG
 
 Use only [BT.2100-3 Table 5](https://www.itu.int/rec/R-REC-BT.2100) OETF and
-inverse OETF. Let a=0.17883277, b=1-4*a, c=1/2-a*ln(4*a). Derived b,c are exact
+inverse OETF. Derived b,c are exact
 expressions for the strict reference, not separately rounded decimal constants.
 
 - E(L)=sqrt(3*L) for L<=1/12; otherwise a*ln(12*L-b)+c.
@@ -145,10 +143,7 @@ it does not switch to an odd extension.
 
 ## ACEScc and ACEScct scalar curves
 
-Use the scalar encoding/decoding equations published in the Academy's
-[ACEScc](https://docs.acescentral.com/encodings/acescc/) and
-[ACEScct](https://docs.acescentral.com/encodings/acescct/) specifications,
-inspected 2026-09-23. The exact formulas in this contract identify the versioned
+The exact formulas in this contract identify the versioned
 behavior; future website changes do not silently change it. Full ACES color-space
 conversions also require the separately specified basis/reference conditions.
 
@@ -165,9 +160,6 @@ ACEScc decoding:
 1. V<=t: D(V)=2*(2^(17.52*V-9.72)-2^-16).
 2. t<V<h: D(V)=2^(17.52*V-9.72).
 3. V>=h: D(V)=65504.
-
-For ACEScct let A=10.5402377416545, B=0.0729055341958355,
-Xbreak=0.0078125, Ybreak=0.155251141552511, all exact listed decimals.
 
 - E(L)=A*L+B for L<=Xbreak; otherwise (log2(L)+9.72)/17.52.
 - D(V)=(V-B)/A for V<=Ybreak; otherwise 2^(17.52*V-9.72) for V<h,

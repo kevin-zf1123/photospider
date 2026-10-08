@@ -58,8 +58,7 @@ must round to a finite result. Static validity does not replace sample checks.
 | acescc | Scene-relative scalar transfer, basis stated separately. | Any finite input. Preserve the official nonpositive encoding floor and decoding cap at 65504. |
 | acescct | Scene-relative scalar transfer, basis stated separately. | Any finite input. Preserve the negative linear toe and official decoding cap at 65504. |
 
-No output-domain clamp is added. HLG's published rounded a=0.17883277 gives
-D(1) approximately 1.000000026934807 before rounding. This valid semantic decode
+No output-domain clamp is added. This valid semantic decode
 can exceed the next semantic encoder's [0,1] input domain in Float64, so that
 next call rejects it. Preserve the formula, not an unrequested normalization or
 endpoint fix. A caller needing [0,1] applies an explicit clamp. No full-range
@@ -277,7 +276,6 @@ floating-environment restoration. A view must not bypass identity validation.
 
 Validate the Result operations with independent high-precision references,
 partial-component and ROI requests, Empty demand, identity views, owner lifetime,
-resource limits, cancellation and floating-environment restoration. Historical
-Value/planar measurements do not establish Result performance. Future camera-log
+resource limits, cancellation and floating-environment restoration. Future camera-log
 variants require separately specified transfer definitions; they are outside
 these registered keys.

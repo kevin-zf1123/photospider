@@ -8,7 +8,6 @@ category: 02-format-color
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-verification_status: focused_ctest_installed_consumer_and_example_passed
 operation_keys:
   - channel.extract_named_strict
   - channel.extract_named_accelerated_apple_silicon
@@ -63,9 +62,6 @@ The selector `name=A` resolves to the coverage-role position but does not valida
 that its samples lie in `[0,1]`. A duplicated role makes only that role selector
 ambiguous; a unique name can still resolve.
 
-The current `test_channel_extraction` integration test passed named selector,
-metadata, exact-byte, layout and dependency coverage as part of its Result test
-suite. The public workflow validates the index-based C composition; the named
+The public workflow validates the index-based C composition; the named
 case is covered by the integration test. No current Result performance figure is
-claimed. The linked [performance workload](../../../../examples/channel_extraction_performance/README.md)
-contains measurements for the former Value/planar path only.
+claimed.

@@ -10,12 +10,7 @@ kind: composite_workflow
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: 6617c78c
 ---
 
 # CRV-11C: resample_linear_multi
@@ -76,11 +71,4 @@ This template is maintained through the public helper in
 `photospider/numeric/resampling.hpp` and ordinary workflow composition. The
 resampling executable passes eight groups under each of Strict and Apple; it
 retains CRV-01's exact-copy and numerical-accuracy checks and defines no separate
-resampling oracle. The focused root `test_numeric_resampling_result` passes 1/1.
-The installed 0.32.0 consumer passes `installed_numeric_resampling_result` 1/1
-under Strict, and its direct Apple run passes all eight groups through the public
-`Photospider::kernel` package. See
-[signal-resampling](../../../../examples/numeric_workflow/README.md#signal-resampling)
-and the [CRV-11 umbrella](CRV-11_resample_signal.md) for complete fixture and
-shared validation details. x86 numerical execution and Result performance were
-not run. Whole numerical/fallback counters are N/A.
+resampling oracle. The focused root `test_numeric_resampling_result` passes 1/1. Whole numerical/fallback counters are N/A.

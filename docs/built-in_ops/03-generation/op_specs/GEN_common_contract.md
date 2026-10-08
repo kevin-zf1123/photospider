@@ -45,7 +45,7 @@ strict fallback, not only sampled agreement.
 PathSet controls are finite Float64; exact polygon Results use their separately
 specified rational representation. DynamicPoints use finite Float64 positions and
 associated Int64-width IDs. Zero Result counts are valid; ordinary Value extents are
-positive. No new unsigned runtime dtype follows from internal RNG words.
+positive.
 
 ## Publication, resources and error boundaries
 
@@ -86,9 +86,6 @@ behavior require a new version when they change otherwise legal outputs. Bit-pre
 optimization can retain the version. Contract violations are bugs; a version bump does
 not legalize them. A correction affecting stored results must invalidate affected caches
 and document its impact.
-
-The field.constant and field.coordinate keys are unavailable; there are no compatibility
-aliases.
 
 ## Execution and backend scope
 

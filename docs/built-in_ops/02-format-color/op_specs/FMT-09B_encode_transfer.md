@@ -66,8 +66,7 @@ samples retain their source witnesses and can still fail input validation.
 
 1. Gamma=2: [-4,-0,0.25,4] -> [-2,-0,0.5,2] exactly. Gamma=1 raw copies all
    bits, while semantic identity rejects nonfinite participating samples.
-2. sRGB real-number anchor: E(0.0031308)=0.040449936 before final rounding.
-   The decimal breakpoint is not an exactly representable Float32/64 sample.
+The decimal breakpoint is not an exactly representable Float32/64 sample.
    Test each dtype's actual bit patterns adjacent to the exact rational threshold
    with an independent branch oracle. For example Float32 0x3b4d2e1c denotes
    approximately 0.0031308000907301903, lies above the threshold, and takes the
@@ -77,9 +76,8 @@ samples retain their source witnesses and can still fail input validation.
    Metadata records the explicit variant regardless of dtype or export plan.
 4. BT.1886 with Lb=1,Lw=100: E(1)=0, E(100)=1 exactly. Semantic E(0) fails;
    raw E(0) gives -b using the selected exact black/white parameters.
-5. PQ: E(10000)=1; E(0)=RN_dtype(c1^m2), approximately 7.309559025784e-7,
-   not zero. Negative/above-10000 semantic input fails without clipping.
-6. HLG: E(0)=0; E(1) is approximately 0.9999999950661306 before rounding.
+5. Negative/above-10000 semantic input fails without clipping.
+6. HLG: E(0)=0.
    Compare exact input values on either side of 1/12 to the high-precision
    reference; do not pretend rounded input 1/12 is the exact breakpoint.
 7. ACEScc: -1 and either zero encode to RN_dtype((-16+9.72)/17.52).

@@ -12,8 +12,6 @@ kind: primitive
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented_manual_acceptance
-repository_branch: ops-impl
-repository_commit: current working tree
 ---
 
 # NUM-07D: less_equal
@@ -49,11 +47,7 @@ comparison helper. Include Int64 extrema and values above 2^53, signed zeros,
 subnormal neighbors, infinities, signaling/quiet NaNs in either input position
 and the shared disjoint/strided/resource/typed-validation acceptance cases.
 
-The default registry implements all three Whole profile keys. Historical
-pre-Whole checks on 2026-09-14 covered the
-public workflow and 3760-case independent comparison/Fraction oracle passed
-with AppleClang 21 strict/Apple locally and Ubuntu WSL Clang 18 strict/x86.
-The installed public consumer also passed. The manual workflow checks source
+The default registry implements all three Whole profile keys. The manual workflow checks source
 support, special bits, typed validation, strided inputs, cancellation/resources
 and composition with select. No integration-test registration or performance
 claim is included; the specification remains Proposed.

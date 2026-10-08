@@ -7,14 +7,11 @@ status: Proposed
 document_maturity: D1_draft
 implementation_status: not_implemented
 clarification_status: complete
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-13: configured OpenColorIO transforms
 
-This document records completed clarification on 2026-09-23 directly in operator
-specs. It registers no runtime operation. Engine hooks, numerical corpus and
+It registers no runtime operation. Engine hooks, numerical corpus and
 public workflow validation remain implementation prerequisites. Inherit the unified tensor/metadata, planar
 storage, straight internal color and explicit interpretation rules from
 [FMT-common](FMT_common_contract.md). OCIO requires its own external-engine
@@ -441,7 +438,7 @@ display selection. Cross-config use requires explicit intermediate interpretatio
 and graph composition; no new implicit inter-config processor is introduced.
 ACES support is through explicit versioned config/builtin transforms, not a
 promise that a space name adopts all ACES workflows. FMT-15/18 retain their own
-native rendering/proofing contracts. No legacy aliases are restored.
+native rendering/proofing contracts.
 
 ## Primary sources inspected
 

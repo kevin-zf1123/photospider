@@ -11,8 +11,6 @@ implementation_status: not_implemented
 clarification_status: complete
 proposed_operation_keys:
   - color.icc_transform_lcms2_19_1_cpu
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-12A: ordinary ICC profile conversion

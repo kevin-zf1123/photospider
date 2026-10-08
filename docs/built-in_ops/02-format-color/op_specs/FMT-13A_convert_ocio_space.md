@@ -11,8 +11,6 @@ implementation_status: not_implemented
 clarification_status: complete
 proposed_operation_keys:
   - color.ocio_convert_space_2_5_2_cpu
-repository_branch: ops-specs
-inspection_commit: 1b403fb9
 ---
 
 # FMT-13A: configured color-space conversion

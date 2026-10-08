@@ -1,6 +1,6 @@
 # Research sources and compatibility boundaries
 
-Research date: **2026-09-25**. These are primary standards, official project
+These are primary standards, official project
 manuals or author-hosted research. Source support is scoped below; project API,
 exact tie/rounding, resource and metadata decisions are not attributed to a
 library merely because the library has a similarly named operation.
@@ -22,147 +22,147 @@ All paths below are relative to this document.
 <a id="s01"></a>
 ## S01 — W3C — Compositing and Blending Level 1
 
-[Primary source](https://www.w3.org/TR/compositing-1/). W3C technical report; accessed 2026-09-25. Accessed 2026-09-25.
+[Primary source](https://www.w3.org/TR/compositing-1/). W3C technical report.
 
 Alpha/compositing equations supply context for independent coverage and explicit alpha application. This does not infer exact subpixel intersection from two scalar coverages. Fuzzy min/max and the member-specific branch/rounding policies are project choices, not claims of a W3C mask API.
 
 <a id="s02"></a>
 ## S02 — OpenCV — Miscellaneous Image Transformations
 
-[Primary source](https://docs.opencv.org/4.13.0/d7/d1b/group__imgproc__misc.html). Opened documentation identifies OpenCV 4.13.0. Accessed 2026-09-25.
+[Primary source](https://docs.opencv.org/4.13.0/d7/d1b/group__imgproc__misc.html). Opened documentation identifies OpenCV 4.13.0.
 
 Threshold and floodFill document fixed-seed versus neighboring-pixel comparison. MASK uses exact symmetric tolerance and explicitly defines multi-seed union; it does not inherit OpenCV buffer mutation, asymmetric differences or mask border conventions. MASK distance validity and nearest ties are independently specified.
 
 <a id="s03"></a>
 ## S03 — CIE — CIE 1976 L*a*b* colour space
 
-[Primary source](https://cie.co.at/eilvterm/17-23-076). CIE International Lighting Vocabulary entry. Accessed 2026-09-25.
+[Primary source](https://cie.co.at/eilvterm/17-23-076). CIE International Lighting Vocabulary entry.
 
 Primary vocabulary for CIELAB meaning. Native MASK/FMT storage remains l=L*/100, with a* and b* unchanged, as required by the repository. CIE coordinate definitions do not themselves establish repository storage normalization or an accepted runtime metadata codec.
 
 <a id="s04"></a>
 ## S04 — scikit-image — color.deltaE_cie76
 
-[Primary source](https://scikit-image.org/docs/stable/api/skimage.color.html#skimage.color.deltaE_cie76). Opened stable documentation identifies skimage 0.26.0. Accessed 2026-09-25.
+[Primary source](https://scikit-image.org/docs/stable/api/skimage.color.html#skimage.color.deltaE_cie76). Opened stable documentation identifies skimage 0.26.0.
 
 Documents Euclidean Lab color difference. MASK-04B substitutes exact 100*(l-l_target) for the lightness difference before one final rounding. DeltaE2000 is a different function and is intentionally not aliased. Raw scaled-coordinate and wrapped-hue selectors are separately defined project members.
 
 <a id="s05"></a>
 ## S05 — SciPy — ndimage.grey_dilation
 
-[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.grey_dilation.html). Opened manual identifies SciPy 1.18.0. Accessed 2026-09-25.
+[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.grey_dilation.html). Opened manual identifies SciPy 1.18.0.
 
 Flat grayscale dilation is a maximum over the selected neighborhood. MASK restricts footprints to symmetric origin-containing sets and specifies tie provenance. Library reflect/default boundaries are not adopted.
 
 <a id="s06"></a>
 ## S06 — SciPy — ndimage.grey_erosion
 
-[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.grey_erosion.html). Opened manual identifies SciPy 1.18.0. Accessed 2026-09-25.
+[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.grey_erosion.html). Opened manual identifies SciPy 1.18.0.
 
 Flat grayscale erosion is a minimum over a neighborhood. The draft deliberately chooses infinite-lattice zero extension with final-only cropping for compound opening/closing. It does not assume a library call on a canvas-sized intermediate has that contract.
 
 <a id="s07"></a>
 ## S07 — SciPy — ndimage.maximum_filter1d
 
-[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.maximum_filter1d.html). Opened manual identifies SciPy 1.18.0. Accessed 2026-09-25.
+[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.maximum_filter1d.html). Opened manual identifies SciPy 1.18.0.
 
 The documented MAXLIST approach has input-length-linear work independent of window length. This motivates a rectangular-footprint optimization candidate; exact tie handling, sparse support, signed-zero behavior and the repository resource model still require proof.
 
 <a id="s08"></a>
 ## S08 — Felzenszwalb and Huttenlocher — Distance Transforms of Sampled Functions
 
-[Primary source](https://cs.brown.edu/people/pfelzens/papers/dt-final.pdf). Theory of Computing 8 (2012), 415–428; author-hosted paper; published 2012-09-02. Accessed 2026-09-25.
+[Primary source](https://cs.brown.edu/people/pfelzens/papers/dt-final.pdf). Theory of Computing 8 (2012), 415–428; author-hosted paper; published 2012-09-02.
 
 The lower-envelope formulation supports separable exact sampled-grid distance-transform algorithms. The PDF text and rendered pages 1 and 5 were inspected. This is not a continuous-contour offset algorithm, a certification of arbitrary binary64 comparisons, or a prescribed tie order. MASK-07D exact polygon membership/projection and fixed-grid coverage are project-defined; no area-error theorem is attributed to this paper.
 
 <a id="s09"></a>
 ## S09 — SciPy — ndimage.distance_transform_edt
 
-[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.distance_transform_edt.html). Opened manual identifies SciPy 1.18.0. Accessed 2026-09-25.
+[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.distance_transform_edt.html). Opened manual identifies SciPy 1.18.0.
 
 Provides sampled Euclidean distances, anisotropic sampling and nearest-feature indices. MASK separately defines feature polarity, lexicographic ties, exterior sites, signed center convention, valid/within flags and finite no-feature payloads. The external routine is only a differential check of matched nondegenerate distances.
 
 <a id="s10"></a>
 ## S10 — SciPy — ndimage.gaussian_filter
 
-[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.gaussian_filter.html). Opened manual identifies SciPy 1.18.0. Accessed 2026-09-25.
+[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.gaussian_filter.html). Opened manual identifies SciPy 1.18.0.
 
 Documents explicit radius, boundary extension and separable filtering with output-dtype intermediate arrays. MASK instead defines one correctly rounded complete normalized sum. Matching sigma and radius does not make ordinary library arithmetic a strict oracle.
 
 <a id="s11"></a>
 ## S11 — GNU MPFR — MPFR 4.2.2 Manual
 
-[Primary source](https://www.mpfr.org/mpfr-current/mpfr.html). Opened manual identifies MPFR 4.2.2; local library version is separately recorded. Accessed 2026-09-25.
+[Primary source](https://www.mpfr.org/mpfr-current/mpfr.html). Opened manual identifies MPFR 4.2.2; local library version is separately recorded.
 
 Directed rounding permits lower/upper enclosures and a destination-rounding certificate. The Gaussian oracle certifies equality of the two destination bit patterns, refining otherwise. MPFR is only a manual reference dependency, not a production dependency or proof of managed memory/cancellation behavior.
 
 <a id="s12"></a>
 ## S12 — Microsoft Learn — HLSL smoothstep
 
-[Primary source](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-smoothstep). Visible page last-updated date 2026-06-01; formula content accessible. Accessed 2026-09-25.
+[Primary source](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-smoothstep).
 
 Documents clamped cubic Hermite interpolation t*t*(3-2*t). MASK uses this mathematical polynomial with exact construction and one RN_T, not the HLSL instruction rounding path. Reversed distance ramp, closed hard-step fallback and zero-width behavior are explicitly project-defined. A Khronos full-page open failed, so it was not used as the normative external citation.
 
 <a id="s13"></a>
 ## S13 — Tan and collaborators — Parallel Banding Algorithm
 
-[Primary source](https://www.comp.nus.edu.sg/~tants/pba.html). Author-hosted project page. Accessed 2026-09-25.
+[Primary source](https://www.comp.nus.edu.sg/~tants/pba.html). Author-hosted project page.
 
 An exact Euclidean-distance GPU algorithm candidate. Its existence does not prove conformance of a new backend to MASK arbitrary spacings, deterministic ties, output rounding, sparse requests or memory ownership.
 
 <a id="s14"></a>
 ## S14 — Rong and Tan — Jump Flooding Algorithm
 
-[Primary source](https://www.comp.nus.edu.sg/~tants/jfa.html). Author-hosted project page. Accessed 2026-09-25.
+[Primary source](https://www.comp.nus.edu.sg/~tants/jfa.html). Author-hosted project page.
 
 Approximate Voronoi/distance propagation is relevant to fast previews. It is not silently admitted as exact nearest-feature selection; even a small distance error can alter a hard membership decision. Exact repair or a separately specified approximate product is needed.
 
 <a id="s15"></a>
 ## S15 — scikit-image — segmentation.flood
 
-[Primary source](https://scikit-image.org/docs/stable/api/skimage.segmentation.html#skimage.segmentation.flood). Opened stable documentation identifies skimage 0.26.0. Accessed 2026-09-25.
+[Primary source](https://scikit-image.org/docs/stable/api/skimage.segmentation.html#skimage.segmentation.flood). Opened stable documentation identifies skimage 0.26.0.
 
 Seed-relative flood and connectivity provide a comparison point. MASK explicitly distinguishes fixed and neighbor graphs, barriers, multiple seeds, exact comparisons and Whole validation, rather than inheriting undocumented traversal choices.
 
 <a id="s16"></a>
 ## S16 — SciPy — ndimage.label
 
-[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.label.html). Opened manual identifies SciPy 1.18.0. Accessed 2026-09-25.
+[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.label.html). Opened manual identifies SciPy 1.18.0.
 
 Connected-component labeling and centrosymmetric connectivity are relevant. MASK foreground truthiness, compact/MinPixel ID rules, imported-label interpretation, dynamic attribute tables and real ObjectId associations are project contracts, not promises made by SciPy.
 
 <a id="s17"></a>
 ## S17 — SciPy — ndimage.binary_fill_holes
 
-[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.binary_fill_holes.html). Opened manual identifies SciPy 1.18.0. Accessed 2026-09-25.
+[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.binary_fill_holes.html). Opened manual identifies SciPy 1.18.0.
 
 Explains filling holes via invasion of the complement from the outer boundary. MASK fixes complementary foreground/background connectivity and exact area inequalities. A background component touching the canvas is never an enclosed hole.
 
 <a id="s18"></a>
 ## S18 — scikit-image — morphology
 
-[Primary source](https://scikit-image.org/docs/stable/api/skimage.morphology.html). Opened stable documentation identifies skimage 0.26.0. Accessed 2026-09-25.
+[Primary source](https://scikit-image.org/docs/stable/api/skimage.morphology.html). Opened stable documentation identifies skimage 0.26.0.
 
 Official reference for remove-small, reconstruction, skeletonization and residual morphology concepts. MASK deliberately does not label its immediate row-major or distance-priority thinning as Zhang–Suen, Guo–Hall or medial axis. Existing library algorithm selection and thresholds are not silently imported.
 
 <a id="s19"></a>
 ## S19 — SciPy — ndimage.binary_propagation; scikit-image reconstruction
 
-[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.binary_propagation.html). SciPy 1.18.0 manual; reconstruction details also inspected in S18. Accessed 2026-09-25.
+[Primary source](https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.binary_propagation.html). SciPy 1.18.0 manual; reconstruction details also inspected in S18.
 
 Propagation until convergence supports the reconstruction/flood distinction. Grayscale marker/limit equations and fixed-point ordering are specified in MASK-15. The deterministic topology thinning schedule is project-defined and not derived from binary_propagation.
 
 <a id="s20"></a>
 ## S20 — Krita Manual — Fill Tool / Close Gap
 
-[Primary source](https://docs.krita.org/en/reference_manual/tools/fill.html). Page marks Close Gap as added in version 5.3.0. Accessed 2026-09-25.
+[Primary source](https://docs.krita.org/en/reference_manual/tools/fill.html). Page marks Close Gap as added in version 5.3.0.
 
 Establishes the user-facing close-gap fill capability, not a disclosed algorithm or compatibility target. MASK defines two reproducible proposals: original-axis bounded runs, or morphological temporary barriers followed by flood. Neither claims Krita/Photoshop parity.
 
 <a id="s21"></a>
 ## S21 — Repository NUM/FMT baseline — exact normalization and selected endpoints
 
-[Primary source](../01-numeric/op_specs/NUM-11D_reduce_mean.md). Local uploaded revision 99901466389c27a9c40ccea7256792efc06a9452. Accessed 2026-09-25.
+[Primary source](../01-numeric/op_specs/NUM-11D_reduce_mean.md).
 
 MASK-17 restricted weighted mean is a project-defined extension, constructed as an exact weighted numerator/denominator and rounded once. It is not a claim that existing reduce_mean accepts masks. Selected arithmetic channels consume zero-weight operands under the MASK-17 contract; explicitly bypassed channels follow NUM copy rules. Internal straight alpha and semantic consumption follow FMT.
 

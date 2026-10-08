@@ -10,13 +10,7 @@ kind: composite_workflow
 status: Proposed
 document_maturity: D1_draft
 implementation_status: implemented
-implementation_branch: numeric-optimize
-implementation_base_commit: eb0e90c8
-implementation_updated: 2026-09-21
-verification_status: manual_public_graph_equivalence
 clarification_status: complete
-repository_branch: ops-specs
-repository_commit: 6617c78c
 ---
 
 # CRV-04E: bake_lut1d_linear_multi
@@ -67,8 +61,7 @@ partial output, low shared budgets, cancellation, cache-off and exported-owner
 lifetime. Templates do not compute on construction, freeze results or create files.
 Use source mathematical fixtures independently of graph equivalence, which alone
 could reproduce a shared numerical bug. The maintained public constructor in `photospider/numeric/lut1d.hpp` and
-`examples/numeric_workflow/baking.cpp` execute this fixture. Current native Clang
-strict/Apple passed the Whole template manual acceptance described in [CRV-04](CRV-04_bake_lut1d.md). The example is
+`examples/numeric_workflow/baking.cpp` execute this fixture. The example is
 excluded from default builds and CTest/integration registration. See the
 [numeric workflow README](../../../../examples/numeric_workflow/README.md#lut1d-baking-templates-crv-04)
 for build/run commands and editable public-API use.

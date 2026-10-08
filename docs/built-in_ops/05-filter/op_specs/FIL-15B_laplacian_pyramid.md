@@ -20,7 +20,7 @@ research_sources:
 
 # FIL-15B: laplacian_pyramid
 
-Laplacian pyramid. Status **Proposed / D2_draft**; the legacy test kernel and its behavior are not compatibility targets.
+Laplacian pyramid. Status **Proposed / D2_draft**.
 
 Inherits the [FIL-15 family contract](FIL-15_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numerical/precision contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT metadata/straight-semantics contract](../../02-format-color/op_specs/FMT_common_contract.md). The family contract and this member together form the complete draft. Do not override the RN, underflow, or accelerated-error baseline.
 

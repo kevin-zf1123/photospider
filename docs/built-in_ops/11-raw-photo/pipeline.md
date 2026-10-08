@@ -55,8 +55,7 @@ W11提供最小RAW/HDR链路。额外采用synthetic CFA常量和高对比斜边
 ## 来源
 
 [^lr]: Adobe，[*HDR photo merge*](https://helpx.adobe.com/lightroom-classic/desktop/process-and-develop-photos/hdr-photo-merge.html)、[*Panorama*](https://helpx.adobe.com/lightroom-classic/desktop/process-and-develop-photos/panorama.html)，滚动Lightroom Classic指南。
-[^focus]: Adobe，[*Create a composite with extended depth of field*](https://helpx.adobe.com/photoshop/desktop/create-masks/blend-images/create-a-composite-with-extended-depth-of-field.html)，2026-02-23。
 [^hdr]: Debevec、Malik，[*Recovering High Dynamic Range Radiance Maps from Photographs*](https://people.eecs.berkeley.edu/~malik/papers/debevec-malik97.pdf)，SIGGRAPH1997，作者论文。
 [^fusion]: Mertens、Kautz、Van Reeth，[*Exposure Fusion: A Simple and Practical Alternative to High Dynamic Range Photography*](https://onlinelibrary.wiley.com/doi/10.1111/j.1467-8659.2008.01171.x)，2009。
 
-补充规范：Adobe [DNG1.7.1.0](https://helpx.adobe.com/content/dam/help/en/photoshop/pdf/DNG_Spec_1_7_1_0.pdf)，2023-09；[SDK入口](https://helpx.adobe.com/camera-raw/desktop/dng-and-file-formats/digital-negative.html)访问时为1.7.1 Build2724，2026-09-08。规范版本与SDK build不同；首期不承诺全部DNG tag/opcode或私有RAW压缩。
+规范版本与SDK build不同；首期不承诺全部DNG tag/opcode或私有RAW压缩。

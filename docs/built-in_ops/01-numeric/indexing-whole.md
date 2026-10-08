@@ -82,13 +82,9 @@ cancellation/overflow, typed RGB validation, Empty and pre-cancelled requests,
 negative/zero-stride reads, floating-environment preservation, cache
 reassociation after source edits, escaped Result/window lifetime, and work,
 payload and metadata cleanup. The focused `test_numeric_indexing_result` CTest
-passes 1/1; the strict and Apple public workflows exit successfully. The
-independent coordinate/contributor/Fraction oracle passes 3,858 cases for each
-profile. The installed `installed_numeric_indexing_result` consumer passes 1/1
-against the installed `Photospider::kernel` package. No current x86, native GPU
+passes 1/1; the strict and Apple public workflows exit successfully. No current x86, native GPU
 or performance result is claimed.
 
-The existing `test_numeric_result_math` integration fixture contains additional
+The existing `test_numeric_result_math_arrays` integration fixture contains additional
 indexing cases, including multi-envelope concatenate requests with 65 and 256
-repeated references under Dense and View. That broader integration fixture was
-not rerun for this Result migration.
+repeated references under Dense and View.

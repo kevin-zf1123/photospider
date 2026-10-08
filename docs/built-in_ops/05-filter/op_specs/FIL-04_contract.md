@@ -16,7 +16,7 @@ research_sources:
 ---
 # FIL-04: Finite discrete Gaussian
 
-Fixed baked64 coefficient profile. Coefficient generation and kernel application are separate operations; legacy radius limits do not apply.
+Fixed baked64 coefficient profile. Coefficient generation and kernel application are separate operations.
 
 Inherit [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT](../../02-format-color/op_specs/FMT_common_contract.md). Every member remains Proposed and is not implemented unless its metadata says otherwise.
 
@@ -48,7 +48,6 @@ All members use the [acceptance protocol](FILTER_oracle_protocol.md). Mathematic
 ## Sources and review
 
 Project choices for boundaries, ties, numeric domains, explicit parameters, public schemas, and proposed keys are defined by the member specifications. Algorithm sources do not define project defaults or grant third-party license.
-
 
 ## Sources
 

@@ -18,7 +18,7 @@ oracle_scope: mathematical_reference
 
 # FIL-09A: gradient_magnitude
 
-Gradient magnitude. Status **Proposed / D1_draft**; legacy test kernels and their behavior are not compatibility targets.
+Gradient magnitude. Status **Proposed / D1_draft**.
 
 Inherits the [FIL-09 family contract](FIL-09_contract.md), [FILTER common contract](FILTER_common_contract.md), [NUM numerical/accuracy contract](../../01-numeric/op_specs/NUM_common_contract.md), and [FMT metadata/straight semantics](../../02-format-color/op_specs/FMT_common_contract.md). The family and member specifications together form the complete draft; do not override their RN, underflow, or accelerated-error requirements.
 
