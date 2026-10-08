@@ -282,7 +282,6 @@ void slice(ps::CpuNumericProfile profile) {
   output.output_schema.result_schema_id = output.result_schema->id;
   output.output_schema.result_schema_version = output.result_schema->version;
   output.region_rule = ps::OperationRegionRule::Whole;
-  output.dependency_version = 2;
   output.continuation_bytes = 1;
   output.maximum_dependency_stages = 1;
   failure.start_result =
@@ -393,7 +392,6 @@ void physical_layouts(ps::CpuNumericProfile profile) {
     split.traits.input_schema.clear();
     auto& output = split.traits.outputs[0];
     output.region_rule = ps::OperationRegionRule::Dependency;
-    output.dependency_version = 2;
     output.regional_atomic = true;
     output.output_schema.kind = ps::OperationPortKind::Result;
     output.result_schema = rf::source_schema(array({2, 2}, {0, 1, 2, 3}));

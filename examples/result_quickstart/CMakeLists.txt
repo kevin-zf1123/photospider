@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.21)
+if(NOT TARGET Photospider::kernel)
+  project(PhotospiderResultQuickstart LANGUAGES CXX)
+  find_package(Photospider 0.33 CONFIG REQUIRED COMPONENTS kernel)
+endif()
+add_executable(photospider_result_quickstart main.cpp)
+target_link_libraries(photospider_result_quickstart PRIVATE Photospider::kernel)
+target_compile_features(photospider_result_quickstart PRIVATE cxx_std_17)

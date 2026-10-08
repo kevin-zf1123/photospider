@@ -508,7 +508,6 @@ ps::OperationDefinition probe_definition(const ps::SchemaTemplate& schema,
   output.output_schema = operation.traits.input_schema[0];
   output.result_schema = schema;
   output.region_rule = ps::OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(ColorProbe);
   output.maximum_dependency_stages = 3;
   operation.start_result = [wrong, history](const auto&,
@@ -716,7 +715,6 @@ void joint_partial_validation(const ps::ValueFacet& facet, unsigned mode = 0) {
   output.output_schema.result_schema_version = 1;
   output.result_schema = output_schema;
   output.region_rule = ps::OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = 256;
   output.maximum_dependency_stages = 3;
   output.failure_delivery = ps::FailureDelivery::PerAtomOutcome;

@@ -135,8 +135,7 @@ inline ps::WorkflowNode checked_node(
   adapter.key = "manual.checked." + original_key;
   adapter.traits = take(registry->find_traits(original_key));
   require(
-      adapter.traits.outputs[0].region_rule == ps::OperationRegionRule::Whole &&
-          adapter.traits.outputs[0].dependency_version == 2,
+      adapter.traits.outputs[0].region_rule == ps::OperationRegionRule::Whole,
       "checked adapter requires Whole Result continuation");
   adapter.traits.cacheable = false;
   adapter.traits.requires_metadata_specialization = true;

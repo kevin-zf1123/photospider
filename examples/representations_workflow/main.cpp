@@ -434,7 +434,6 @@ OperationTraits staged(std::uint64_t bytes) {
   t.input_count = 1;
   t.input_schema.resize(1);
   t.outputs[0].region_rule = OperationRegionRule::Dependency;
-  t.outputs[0].dependency_version = 2;
   t.outputs[0].continuation_bytes = bytes;
   t.outputs[0].maximum_dependency_stages = 100000;
   t.workspace_bytes = 4096;

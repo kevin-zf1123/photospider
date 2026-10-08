@@ -181,7 +181,6 @@ ps::OperationDefinition payload_probe(bool borrow, unsigned* calls = nullptr) {
   output.output_schema.tensor_key = "samples";
   output.result_schema = payload_schema();
   output.region_rule = ps::OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(PayloadProbe);
   output.maximum_dependency_stages = 2;
   output.maximum_output_payload_bytes = borrow ? 0 : 8;
@@ -862,11 +861,45 @@ void dense_and_schema() {
   std::cout << "constant Result dense [2,3]=[7,7,7,7,7,7], authoring and shape "
                "errors passed\n";
 }
+struct CancelArrayProgram {
+  ps::ResultContinuation inner;
+  ps::CancellationSource cancellation;
+  bool during_copy;
+  std::uint64_t output_bytes, copied_work = 0;
+  std::shared_ptr<bool> observed;
+  CancelArrayProgram(ps::ResultContinuation continuation,
+                     ps::CancellationSource stop, bool copying,
+                     std::uint64_t bytes, std::shared_ptr<bool> entered)
+      : inner(std::move(continuation)),
+        cancellation(std::move(stop)),
+        during_copy(copying),
+        output_bytes(bytes),
+        observed(std::move(entered)) {}
+  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
+    auto controlled = phase;
+    controlled.consume_work = [&](std::uint64_t amount) {
+      auto status = phase.consume_work(amount);
+      if (status.ok() &&
+          phase.resources.statistics().live[ps::ResourceKind::Payload] >=
+              output_bytes) {
+        copied_work += amount;
+        if (!during_copy || copied_work >= 100000) {
+          *observed = true;
+          cancellation.cancel();
+        }
+      }
+      return status;
+    };
+    return inner.poll(controlled);
+  }
+};
 void cancel_dense_array(const std::string& profile, bool constant,
                         bool during_copy) {
   constexpr std::uint64_t count = 1048576;
-  ArrayWorkflow workflow(ps::make_default_operation_registry(), 16 * 1048576);
-  auto input = workflow.source(scalar(ps::ElementType::Int64, 7));
+  auto registry = ps::make_default_operation_registry(false);
+  auto seed = scalar(ps::ElementType::Int64, 7);
+  auto input_schema = numeric_result_fixture::source_schema(seed);
+  input_schema.id = "manual.array.input";
   auto node = constant ? take(ps::numeric::constant_node(
                              1, ps::WorkflowInputReference{1}, {count},
                              ps::numeric::ArrayLayout::Dense))
@@ -874,59 +907,64 @@ void cancel_dense_array(const std::string& profile, bool constant,
                              1, ps::WorkflowInputReference{1}, {count}, {0},
                              ps::numeric::ArrayLayout::Dense));
   node.operation.replace(node.operation.find("_strict"), 7, profile);
+  const auto original = node.operation;
+  ps::OperationMetadata metadata;
+  metadata.result_schema =
+      std::make_shared<const ps::SchemaTemplate>(input_schema);
+  auto traits =
+      take(registry->resolve_traits(original, {metadata}, node.parameters));
+  traits.requires_metadata_specialization = false;
+  ps::CancellationSource cancellation;
+  auto observed = std::make_shared<bool>(false);
+  ps::OperationDefinition controlled;
+  controlled.key = "test.cancel_dense_array";
+  controlled.traits = std::move(traits);
+  controlled.traits.outputs[0].continuation_bytes +=
+      sizeof(CancelArrayProgram) + 1024;
+  const auto weak = std::weak_ptr<ps::OperationRegistry>(registry);
+  controlled.start_result = [weak, original, cancellation, observed,
+                             during_copy](
+                                const ps::ResultProgramQuery& query,
+                                const ps::BufferAllocator& allocator) {
+    auto owner = weak.lock();
+    if (!owner)
+      return ps::Result<ps::ResultContinuation>(
+          ps::Status{ps::ErrorCode::Stale, {}});
+    auto nested = query;
+    nested.prepared.reset();
+    auto inner = owner->start_result(original, nested, allocator);
+    if (!inner.ok())
+      return inner;
+    return ps::ResultContinuation::make<CancelArrayProgram>(
+        allocator, inner.take_value(), cancellation, during_copy, count * 8,
+        observed);
+  };
+  require(registry->register_operation(std::move(controlled)).ok(),
+          "controlled array registration");
+  require(registry->freeze().ok(), "controlled array registry");
+  node.operation = "test.cancel_dense_array";
+  ArrayWorkflow workflow(registry, 16 * 1048576);
+  auto input = workflow.source(seed);
   ps::GraphContext graph(ArrayWorkflow::document(node, input));
-  auto compiled = take(ps::Compiler(workflow.registry).compile(graph));
+  auto compiled = take(ps::Compiler(registry).compile(graph));
   auto frozen =
       take(workflow.context->freeze(compiled.plan, {{{"input", input}}}));
   const auto before = workflow.root.statistics();
-  ps::CancellationSource cancellation;
-  std::atomic<bool> ready{false}, done{false}, copy_observed{false};
-  std::thread watcher([&] {
-    std::optional<std::uint64_t> allocation_work;
-    ready.store(true);
-    while (!done.load()) {
-      const auto observed = workflow.root.statistics();
-      if (observed.peak[ps::ResourceKind::Payload] >= count * 8) {
-        if (!during_copy) {
-          cancellation.cancel();
-          return;
-        }
-        if (!allocation_work) {
-          allocation_work = observed.issued.work;
-        } else if (observed.issued.work - *allocation_work >= 100000) {
-          copy_observed.store(true);
-          cancellation.cancel();
-          return;
-        }
-      }
-      std::this_thread::yield();
-    }
-  });
-  while (!ready.load())
-    std::this_thread::yield();
-  ps::Status status;
-  try {
-    status = workflow.context
-                 ->execute_fragments(
-                     frozen, {{"values", take(ps::Footprint::all({count}))}},
-                     cancellation.token())
-                 .status();
-  } catch (...) {
-    done.store(true);
-    watcher.join();
-    throw;
-  }
-  done.store(true);
-  watcher.join();
+  const auto status =
+      workflow.context
+          ->execute_fragments(frozen,
+                              {{"values", take(ps::Footprint::all({count}))}},
+                              cancellation.token())
+          .status();
   const auto after = workflow.root.statistics();
   require(
-      status.code == ps::ErrorCode::Cancelled &&
+      *observed && status.code == ps::ErrorCode::Cancelled &&
           after.peak[ps::ResourceKind::Payload] >= count * 8 &&
           after.live[ps::ResourceKind::Payload] ==
-              before.live[ps::ResourceKind::Payload] &&
-          (!during_copy || copy_observed.load()),
+              before.live[ps::ResourceKind::Payload],
       "cancel allocated/active Whole Result dense output and release payload");
 }
+
 void array_boundaries(const std::string& profile) {
   cancel_dense_array(profile, false, false);
   ArrayWorkflow workflow;
@@ -1020,7 +1058,6 @@ void staged_array_support(const std::string& profile) {
   output.output_schema.result_schema_version = schema.version;
   output.result_schema = std::move(schema);
   output.region_rule = ps::OperationRegionRule::Whole;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(ArraySplitSource);
   output.maximum_dependency_stages = 1;
   split.start_result = [&](const auto&, const auto& allocator) {
@@ -1498,7 +1535,6 @@ ps::OperationDefinition structured_last() {
   output.output_schema.result_schema_version = schema.version;
   output.result_schema = std::move(schema);
   output.region_rule = ps::OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(StructuredLast);
   output.maximum_dependency_stages = 2;
   operation.start_result = [](const auto&, const auto& allocator) {

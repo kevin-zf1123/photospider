@@ -55,7 +55,6 @@ inline ps::OperationOutputTraits output(const ps::SchemaTemplate& schema,
   result.output_schema.result_schema_version = schema.version;
   result.result_schema = schema;
   result.region_rule = ps::OperationRegionRule::Dependency;
-  result.dependency_version = 2;
   result.continuation_bytes = state_bytes;
   result.maximum_dependency_stages = stages;
   return result;

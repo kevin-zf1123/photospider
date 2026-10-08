@@ -176,7 +176,6 @@ void run(const char* name, std::uint64_t h, std::uint64_t w,
                              sizeof(Sink), 1000000)};
   auto& out = traits.outputs[0];
   out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 2;
   out.continuation_bytes = sizeof(Sink);
   out.maximum_dependency_stages = 1000000;
   sink.start_result = [&reference](const auto&, const auto& allocator) {

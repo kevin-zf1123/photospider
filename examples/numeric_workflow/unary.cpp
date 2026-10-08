@@ -545,7 +545,6 @@ void schema_and_upstream(ps::CpuNumericProfile profile) {
   output.output_schema.result_schema_id = failure_schema.id;
   output.output_schema.result_schema_version = 1;
   output.result_schema = failure_schema;
-  output.dependency_version = 2;
   output.continuation_bytes = 1;
   output.maximum_dependency_stages = 1;
   output.region_rule = ps::OperationRegionRule::Whole;

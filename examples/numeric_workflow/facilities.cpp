@@ -142,7 +142,6 @@ ps::OperationDefinition probe(bool fail = true, bool upstream = false,
   output.output_schema.result_schema_version = 1;
   output.result_schema = schema(fail ? 2 : 5, grouping);
   output.region_rule = ps::OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(NumericProbe);
   output.maximum_dependency_stages = 2;
   output.failure_delivery = ps::FailureDelivery::PerAtomOutcome;
@@ -234,7 +233,6 @@ ps::OperationDefinition consumer(std::uint32_t grouping) {
   output.output_schema = operation.traits.input_schema[0];
   output.result_schema = schema(1);
   output.region_rule = ps::OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(StructuredSum);
   output.maximum_dependency_stages = 2;
   operation.validate_dependency = [grouping](const auto& inputs, const auto&) {

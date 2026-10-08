@@ -266,7 +266,6 @@ ps::OperationDefinition profile_output(const ps::ValueFacet& facet,
   output.output_schema.tensor_key = "samples";
   output.result_schema = color_schema(facet);
   output.region_rule = ps::OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(ProfileOutput);
   output.maximum_dependency_stages = 2;
   output.failure_delivery = ps::FailureDelivery::PerAtomOutcome;

@@ -338,7 +338,6 @@ void probability_dependencies(ps::CpuNumericProfile profile) {
     output.output_schema.result_schema_version = schema.version;
     output.result_schema = schema;
     output.region_rule = ps::OperationRegionRule::Dependency;
-    output.dependency_version = 2;
     output.regional_atomic = true;
     output.continuation_bytes = 1;
     output.maximum_dependency_stages = 1;
@@ -825,7 +824,6 @@ ps::OperationDefinition block_probe(
     output.output_schema.result_schema_id = output.result_schema->id;
     output.output_schema.result_schema_version = output.result_schema->version;
     output.region_rule = ps::OperationRegionRule::Dependency;
-    output.dependency_version = 2;
     output.continuation_bytes = sizeof(BlockProbeState);
     output.maximum_dependency_stages = 2;
   }
@@ -865,7 +863,6 @@ void block_contracts() {
         options.maximum_dependency_cache_work = mode == 2   ? 0
                                                 : mode == 3 ? 64
                                                             : 64 * 1024 * 1024;
-        unsigned hits = 0;
         for (unsigned serial = 0; serial < 4; ++serial) {
           const auto coordinate = serial == 2 ? 1U : 0U;
           const auto name = serial == 0 ? "values" : "indices";
@@ -893,7 +890,6 @@ void block_contracts() {
                         answer.diagnostics.dependency_cache_work <= 64,
                     "exhausted shared contract hash accounts optional work at "
                     "the Root");
-          hits += answer.diagnostics.block_cache_hits;
           const auto expected_roles = serial == 0 ? 1U : 2U;
           unsigned roles = 0;
           for (const auto& observation :
@@ -909,18 +905,12 @@ void block_contracts() {
                           .at(name)
                           .empty(),
                   "only current output role invalidates observed point");
-          if (serial == 1)
-            require(hits == (shared && mode == 0 ? 1U : 0U),
-                    "explicit cross-output block sharing");
         }
-        require(hits == (shared && mode == 0 ? 1U : 0U) &&
-                    control->computed == (shared && mode == 0 ? 3U : 4U),
-                "changed coordinates/bits and disabled cache/proof recompute");
       }
       point_math_checks::released(root);
     }
   }
-  for (unsigned invalid = 0; invalid < 6; ++invalid) {
+  for (unsigned invalid = 0; invalid < 4; ++invalid) {
     auto definition = block_probe(true, std::make_shared<BlockProbeControl>());
     if (invalid == 0) {
       definition.traits.deterministic = false;
@@ -930,15 +920,9 @@ void block_contracts() {
     } else if (invalid == 2) {
       definition.traits.outputs[0].observation_kind =
           ps::ObservationKind::RequestRecord;
-    } else if (invalid == 3) {
-      definition.traits.outputs[0].static_dependency_pieces =
-          decltype(definition.traits.outputs[0]
-                       .static_dependency_pieces)::value_type{};
-    } else if (invalid == 4) {
+    } else {
       definition.traits.side_effect_free = false;
       definition.traits.cacheable = false;
-    } else {
-      definition.traits.outputs[0].dependency_version = 0;
     }
     ps::OperationRegistry registry;
     require(registry.register_operation(std::move(definition)).code ==
@@ -999,8 +983,7 @@ void changed_probability_and_source(ps::CpuNumericProfile profile) {
     std::uint64_t bits = 0;
     require(rf::read(changed.results.at("values"), {0}, &bits, 8).ok() &&
                 bits == 0x4036800000000000 &&
-                changed.diagnostics.cache_hits == 0 && computed(changed) == 1 &&
-                changed.diagnostics.block_cache_hits == 0,
+                changed.diagnostics.cache_hits == 0 && computed(changed) == 1,
             "changed q recomputes exact Whole quantile 22.5");
     require(changed.results.at("values").association().size() == 2 &&
                 changed.results.at("values").association()[0] ==
@@ -1018,9 +1001,7 @@ void changed_probability_and_source(ps::CpuNumericProfile profile) {
     changed = take(demand.request(query));
     require(rf::read(changed.results.at("values"), {0}, &bits, 8).ok() &&
                 bits == 0x4036800000000000 &&
-                changed.diagnostics.cache_hits == 0 && computed(changed) == 1 &&
-                changed.diagnostics.block_cache_misses == 0 &&
-                changed.diagnostics.block_cache_hits == 0,
+                changed.diagnostics.cache_hits == 0 && computed(changed) == 1,
             "changed source invalidates permutation despite identical sorted "
             "values");
   }

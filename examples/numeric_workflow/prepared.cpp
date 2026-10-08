@@ -53,7 +53,6 @@ ps::OperationOutputTraits prepared_result_output(std::string key,
   output.output_schema.result_schema_version = schema.version;
   output.result_schema = std::move(schema);
   output.region_rule = ps::OperationRegionRule::Whole;
-  output.dependency_version = 2;
   output.continuation_bytes = 1;
   output.maximum_dependency_stages = 2;
   return output;

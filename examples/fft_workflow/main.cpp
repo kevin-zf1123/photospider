@@ -175,7 +175,6 @@ void run(std::uint64_t h, std::uint64_t w, SpectrumPacking packing,
                              sizeof(Sink), 1000000)};
   auto& out = traits.outputs[0];
   out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 2;
   out.continuation_bytes = sizeof(Sink);
   out.maximum_dependency_stages = 1000000;
   sink.start_result = [h, w, variant](const auto&, const auto& allocator) {

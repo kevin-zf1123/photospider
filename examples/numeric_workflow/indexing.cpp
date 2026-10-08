@@ -146,7 +146,6 @@ void concatenate(ps::CpuNumericProfile profile) {
     output.output_schema.result_schema_version = output.result_schema->version;
     output.maximum_dependency_stages = 1;
     output.region_rule = ps::OperationRegionRule::Dependency;
-    output.dependency_version = 2;
     output.regional_atomic = true;
     output.continuation_bytes = 1;
     failed.start_result = [&](const auto& query, const auto&) {
@@ -272,9 +271,9 @@ void gather(ps::CpuNumericProfile profile) {
 void scatter(ps::CpuNumericProfile profile) {
   for (unsigned kind = 0; kind < 4; ++kind) {
     auto node = kind == 0   ? take(ps::numeric::scatter_replace_node(
-                                  1, ps::WorkflowInputReference{1},
-                                  ps::WorkflowInputReference{2},
-                                  ps::WorkflowInputReference{3}, 0, profile))
+                                1, ps::WorkflowInputReference{1},
+                                ps::WorkflowInputReference{2},
+                                ps::WorkflowInputReference{3}, 0, profile))
                 : kind == 1 ? take(ps::numeric::scatter_sum_node(
                                   1, ps::WorkflowInputReference{1},
                                   ps::WorkflowInputReference{2},
@@ -359,11 +358,11 @@ struct MetadataProgram {
       if (status.ok() && phase.tensors && !phase.tensors->empty() &&
           amount == 16384 && !reservation) {
         const auto remaining =
-            UINT64_C(1000000) -
-            phase.resources.statistics().live[ps::ResourceKind::Metadata];
-        require(remaining > 128, "metadata fixture leaves room for setup");
-        auto admitted = phase.resources.reserve(
-            ps::ResourceCapacity::host(remaining - 128, remaining - 128));
+            phase.resources.available_capacity()[ps::ResourceKind::Metadata];
+        const auto overhead = ps::ResourceBudget::lease_metadata_bytes() + 128;
+        require(remaining > overhead, "metadata fixture leaves room for setup");
+        auto admitted = phase.resources.reserve(ps::ResourceCapacity::host(
+            remaining - overhead, remaining - overhead));
         if (!admitted.ok())
           return admitted.status();
         reservation = admitted.take_value();

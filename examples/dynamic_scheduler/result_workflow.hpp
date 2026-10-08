@@ -199,7 +199,6 @@ inline ps::OperationDefinition operation(bool increment) {
   output.output_schema.kind = OperationPortKind::Result;
   output.output_schema.element_type = static_cast<std::uint32_t>(type);
   output.result_schema = schema(type, {1});
-  output.dependency_version = 2;
   output.region_rule = OperationRegionRule::Whole;
   output.maximum_dependency_stages = 2;
   output.continuation_bytes = sizeof(Program);

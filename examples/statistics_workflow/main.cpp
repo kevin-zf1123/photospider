@@ -69,7 +69,6 @@ OperationOutputTraits tensor_output(const SchemaTemplate& schema,
   output.output_schema.result_schema_version = schema.version;
   output.result_schema = schema;
   output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = state_bytes;
   output.maximum_dependency_stages = stages;
   return output;

@@ -337,8 +337,7 @@ void graph_equivalence(ps::CpuNumericProfile profile) {
       for (const auto& node : generated.document.nodes) {
         auto traits = take(generated.registry->find_traits(node.operation));
         for (const auto& output : traits.outputs)
-          require(output.region_rule == ps::OperationRegionRule::Whole &&
-                      output.dependency_version == 2,
+          require(output.region_rule == ps::OperationRegionRule::Whole,
                   "all expanded formal source outputs use Whole");
       }
       for (unsigned mode = 0; mode < 4; ++mode) {

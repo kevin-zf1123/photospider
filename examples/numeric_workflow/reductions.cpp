@@ -323,7 +323,6 @@ void source_node(Fixture* fixture,
   output.output_schema.result_schema_id = output.result_schema->id;
   output.output_schema.result_schema_version = output.result_schema->version;
   output.region_rule = ps::OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.regional_atomic = true;
   output.continuation_bytes = sizeof(SourceProgram);
   output.maximum_dependency_stages = fail_tail ? 2 : 1;
@@ -415,7 +414,6 @@ void metadata_count(ps::CpuNumericProfile profile) {
   output.output_schema.result_schema_id = schema.id;
   output.output_schema.result_schema_version = schema.version;
   output.region_rule = ps::OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.regional_atomic = true;
   output.continuation_bytes = 1;
   output.maximum_dependency_stages = 1;

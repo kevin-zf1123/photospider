@@ -214,7 +214,6 @@ void bounds_and_demand(const std::string& profile) {
   output.result_schema = *endpoint.document.inputs[4].result_schema;
   output.output_schema.result_schema_id = output.result_schema->id;
   output.output_schema.result_schema_version = output.result_schema->version;
-  output.dependency_version = 2;
   output.continuation_bytes = 1;
   output.maximum_dependency_stages = 1;
   output.region_rule = ps::OperationRegionRule::Whole;

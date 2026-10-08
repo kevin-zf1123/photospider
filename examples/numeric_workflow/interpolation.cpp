@@ -81,7 +81,6 @@ struct Fixture {
     output.output_schema.result_schema_id = output.result_schema->id;
     output.output_schema.result_schema_version = output.result_schema->version;
     output.region_rule = ps::OperationRegionRule::Dependency;
-    output.dependency_version = 2;
     output.continuation_bytes = 1;
     output.maximum_dependency_stages = 1;
     const auto shape = output.result_schema->tensors[0].sample_shape();

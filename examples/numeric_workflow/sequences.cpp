@@ -56,7 +56,6 @@ struct Fixture {
       output.result_schema = *document.inputs[1].result_schema;
       output.output_schema.result_schema_id = output.result_schema->id;
       output.output_schema.result_schema_version = 1;
-      output.dependency_version = 2;
       output.continuation_bytes = 1;
       output.maximum_dependency_stages = 1;
       output.region_rule = ps::OperationRegionRule::Whole;

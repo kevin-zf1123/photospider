@@ -144,7 +144,6 @@ void failing_input(Fixture* fixture, unsigned port, const char* message,
   output.output_schema.result_schema_id = std::string(output.result_schema->id);
   output.output_schema.result_schema_version = output.result_schema->version;
   output.region_rule = ps::OperationRegionRule::Whole;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(FailingSource);
   output.maximum_dependency_stages = 2;
   operation.traits.outputs = {std::move(output)};

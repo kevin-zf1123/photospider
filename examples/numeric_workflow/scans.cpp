@@ -791,7 +791,6 @@ void source_node(Fixture* fixture,
   output.output_schema.result_schema_id = output.result_schema->id;
   output.output_schema.result_schema_version = output.result_schema->version;
   output.region_rule = ps::OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.regional_atomic = true;
   output.continuation_bytes = sizeof(SourceProgram);
   output.maximum_dependency_stages = fail_tail ? 2 : 1;

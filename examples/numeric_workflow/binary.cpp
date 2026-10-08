@@ -401,7 +401,6 @@ void schema_typed_and_upstream(ps::CpuNumericProfile profile) {
       output.output_schema.result_schema_id = "manual.binary.metadata";
       output.output_schema.result_schema_version = 1;
       output.result_schema = *metadata(Type::Float64, {1}).result_schema;
-      output.dependency_version = 2;
       output.continuation_bytes = 1;
       output.maximum_dependency_stages = 1;
       output.region_rule = ps::OperationRegionRule::Whole;

@@ -62,7 +62,6 @@ inline ps::OperationTraits traits(std::uint32_t inputs, std::uint64_t state) {
   traits.input_count = inputs;
   traits.input_schema.resize(inputs);
   auto& output = traits.outputs[0];
-  output.dependency_version = 2;
   output.region_rule = ps::OperationRegionRule::Dependency;
   output.continuation_bytes = state;
   output.maximum_dependency_stages = 128;

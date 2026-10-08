@@ -432,7 +432,6 @@ void cache_validation_and_owners(ps::CpuNumericProfile profile) {
     output.output_schema.result_schema_id = "manual.lowpass.input";
     output.output_schema.result_schema_version = 1;
     output.result_schema = source_schema(inputs.back());
-    output.dependency_version = 2;
     output.region_rule = ps::OperationRegionRule::Whole;
     output.continuation_bytes = sizeof(FailedSource);
     output.maximum_dependency_stages = 1;

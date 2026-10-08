@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderRgbBasisPerformance LANGUAGES CXX)
 if(NOT TARGET Photospider::kernel)
-  find_package(Photospider 0.32 CONFIG REQUIRED COMPONENTS kernel)
+  find_package(Photospider 0.33 CONFIG REQUIRED COMPONENTS kernel)
 endif()
 add_executable(photospider_fmt10_performance main.cpp)
 target_link_libraries(photospider_fmt10_performance PRIVATE Photospider::kernel)

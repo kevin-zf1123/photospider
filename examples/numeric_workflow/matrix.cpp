@@ -15,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 #include "result_fixture.hpp"     // NOLINT(build/include_subdir)
@@ -474,7 +474,6 @@ void whole_contract(ps::CpuNumericProfile profile) {
       registry->prepare_operation(node.operation, metadata, node.parameters));
   const auto& traits = prepared->traits();
   require(traits.outputs[0].region_rule == ps::OperationRegionRule::Whole &&
-              traits.outputs[0].dependency_version == 2 &&
               traits.outputs[0].result_schema &&
               traits.outputs[0].result_schema->tensors[0].sample_shape() ==
                   std::vector<std::uint64_t>({1, 1, 2}),
@@ -662,7 +661,6 @@ void strides_and_failures(ps::CpuNumericProfile profile) {
   output.result_schema = *tensor_metadata(Type::Float64, {2, 2}).result_schema;
   output.output_schema.result_schema_id = std::string(output.result_schema->id);
   output.output_schema.result_schema_version = output.result_schema->version;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(FailedSource);
   output.maximum_dependency_stages = 1;
   failure.start_result = [&calls](const auto&, const auto& allocator) {

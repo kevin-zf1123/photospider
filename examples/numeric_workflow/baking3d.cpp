@@ -95,7 +95,6 @@ void register_source(const std::shared_ptr<ps::OperationRegistry>& registry,
   auto& output = producer.traits.outputs[0];
   output.key = "values";
   output.region_rule = ps::OperationRegionRule::Whole;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(StaticSource);
   output.maximum_dependency_stages = 1;
   output.result_schema = schema ? *schema : rf::source_schema(backing);
@@ -699,7 +698,6 @@ void specialization_contract(ps::CpuNumericProfile profile) {
     auto& out = definition.traits.outputs[0];
     out.key = "report";
     out.region_rule = ps::OperationRegionRule::Dependency;
-    out.dependency_version = 2;
     out.continuation_bytes = 1;
     out.maximum_dependency_stages = 1;
     out.result_schema = schema;
@@ -1001,7 +999,6 @@ void upstream_failures(ps::CpuNumericProfile profile) {
   auto& output = definition.traits.outputs[0];
   output.key = "values";
   output.region_rule = ps::OperationRegionRule::Whole;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(FailedSource);
   output.maximum_dependency_stages = 1;
   output.result_schema =

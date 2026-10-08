@@ -176,7 +176,6 @@ inline ps::OperationDefinition operation(int mode, std::string key) {
   output.output_schema = operation.traits.input_schema[0];
   output.result_schema = schema();
   output.region_rule = ps::OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(Single);
   output.maximum_dependency_stages = 8;
   output.failure_delivery = ps::FailureDelivery::PerAtomOutcome;

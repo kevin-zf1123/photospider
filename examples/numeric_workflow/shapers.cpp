@@ -630,7 +630,6 @@ void public_resources_and_upstream(ps::CpuNumericProfile profile) {
     output.output_schema.result_schema_version = 1;
     output.result_schema = fixture.values[0].schema();
     output.key = "value";
-    output.dependency_version = 2;
     output.continuation_bytes = sizeof(FailingSource);
     output.maximum_dependency_stages = 1;
     producer.start_result = [](const auto&, const auto& allocator) {
