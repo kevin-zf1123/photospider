@@ -11,13 +11,13 @@
 #include <thread>
 #include <utility>
 
-#include "data/input_validation.hpp"
+#include "core/resource_observation.hpp"
 #include "data/result_host_access.hpp"
 #include "execution/cpu_range_context.hpp"
-#include "execution/resource_observation.hpp"
 #include "execution/waiting_admission.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/plugin/cpu_parallel_api.h"
+#include "plugin/port_validation.hpp"
 
 namespace ps::execution_internal {
 
@@ -36,7 +36,7 @@ class CpuRangeQueue final {
     bool caller_participates = true;
     ps_cpu_range_callback_v1 callback = nullptr;
     data_internal::ResultHostAccessScope::Observer host_access;
-    PayloadCapture payload_capture;
+    core_internal::PayloadCapture payload_capture;
     void* user = nullptr;
     const CancellationToken* cancellation = nullptr;
     const ResourceBudget* resources = nullptr;
@@ -91,7 +91,7 @@ class CpuRangeQueue final {
     try {
       ErrorCode metadata_failure = ErrorCode::Ok;
       std::optional<ResourceAllocationScope> resources;
-      std::optional<ResourcePayloadScope> payload;
+      std::optional<core_internal::ResourcePayloadScope> payload;
       if (job.resources) {
         resources.emplace(*job.resources, &metadata_failure);
         payload.emplace(*job.resources, job.payload_capture);
@@ -182,7 +182,8 @@ class CpuRangeQueue final {
     job.cancellation = &cancellation;
     job.resources = resources;
     if (resources)
-      job.payload_capture = ResourcePayloadScope::capture(*resources);
+      job.payload_capture =
+          core_internal::ResourcePayloadScope::capture(*resources);
     job.current = &current;
     ResourceLease lease;
     if (resources) {
@@ -280,7 +281,8 @@ class CpuRangeQueue final {
     job.cancellation = &cancellation;
     job.resources = resources;
     if (resources)
-      job.payload_capture = ResourcePayloadScope::capture(*resources);
+      job.payload_capture =
+          core_internal::ResourcePayloadScope::capture(*resources);
     job.current = &current;
     job.completion = &completion;
     ResourceLease lease;

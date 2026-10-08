@@ -8,8 +8,8 @@
 #include <optional>
 #include <utility>
 
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/footprint.hpp"
-#include "photospider/execution/resource_allocator.hpp"
 
 namespace ps::execution_internal {
 /** @brief One incremental direct-edge propagation item in a fixed generation.

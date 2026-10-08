@@ -9,13 +9,13 @@
 #include <vector>
 
 #include "photospider/compiler/compiler.hpp"
+#include "photospider/core/cancellation.hpp"
+#include "photospider/core/resource_allocator.hpp"
+#include "photospider/core/resources.hpp"
 #include "photospider/core/status.hpp"
 #include "photospider/data/input_snapshot.hpp"
 #include "photospider/data/value.hpp"
-#include "photospider/execution/cancellation.hpp"
 #include "photospider/execution/dependencies.hpp"
-#include "photospider/execution/resource_allocator.hpp"
-#include "photospider/execution/resources.hpp"
 
 namespace ps {
 namespace execution_internal {
@@ -320,7 +320,9 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   /** @brief Completed internal state transitions reused/computed after keyed
    * lookup. */
   std::uint64_t block_cache_hits = 0, block_cache_misses = 0;
-  /** @brief Active computations joined without duplicating producer timings. */
+  /** @brief Actual non-producer acquires, including active joins and completed
+   * weak reuse. Repeated lookup of the same Run actor is not an acquire;
+   * reused work never duplicates producer callback timings. */
   std::uint64_t shared_computations = 0;
   /** @brief Successful source reads used to assemble Result inputs. */
   std::uint64_t source_read_count = 0;

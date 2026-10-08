@@ -11,7 +11,7 @@
 #include <type_traits>
 #include <utility>
 
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps::gpu_internal {
 // Fixed device bootstrap state. Dynamic blocks retain this explicit root;

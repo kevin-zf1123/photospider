@@ -21,25 +21,35 @@
 #include <vector>
 
 #include "core/numeric_diagnostics.hpp"
+#include "core/resource_observation.hpp"
 #include "core/stored_failure.hpp"
 #include "data/content_digest.hpp"
-#include "data/input_validation.hpp"
 #include "data/whole_input_view.hpp"
 #include "execution/cpu_range_context.hpp"
 #include "execution/dependency_records.hpp"
 #include "execution/publication_diagnostics.hpp"
-#include "execution/resource_observation.hpp"
 #include "execution/result_blocks.hpp"
 #include "execution/result_cache.hpp"
+#include "execution/result_cache_proof.hpp"
 #include "execution/result_callback_scope.hpp"
 #include "execution/result_checkpoints.hpp"
+#include "execution/result_fallback.hpp"
+#include "execution/result_gpu_service.hpp"
+#include "execution/result_io.hpp"
 #include "execution/result_native.hpp"
+#include "execution/result_protocol.hpp"
+#include "execution/result_publication_validation.hpp"
 #include "execution/result_subscription.hpp"
 #include "execution/shared_results.hpp"
+#include "execution/structured_actor_lifecycle.hpp"
+#include "execution/structured_joint_state.hpp"
+#include "execution/structured_need.hpp"
+#include "execution/structured_result_cache.hpp"
 #include "photospider/data/representation.hpp"
 #include "plugin/dependency_identity.hpp"
 #include "plugin/failure_latch.hpp"
 #include "plugin/operation_identity.hpp"
+#include "plugin/port_validation.hpp"
 #include "plugin/result_need_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
@@ -48,78 +58,6 @@
 
 namespace ps::execution_internal {
 namespace {
-// Native failures must enter the shared first-error latch before the caller
-// can invoke another host service. The table and its context live for one poll.
-template <class Observe>
-class ResultGpuService final {
- public:
-  ResultGpuService(const ps_gpu_service_v1* source,
-                   const std::function<Status()>& status,
-                   const Observe& observe)
-      : source_(source), status_(status), observe_(observe) {
-    if (!source_)
-      return;
-    service_ = *source_;
-    service_.context = this;
-    service_.buffer = [](void* context, const std::uint8_t* bytes,
-                         std::uint64_t size, std::uint32_t writable,
-                         std::uint64_t* token) noexcept {
-      if (!context)
-        return static_cast<int>(PS_GPU_RESULT_FAILURE_V1);
-      auto& self = *static_cast<ResultGpuService*>(context);
-      return self.finish(self.source_->buffer(self.source_->context, bytes,
-                                              size, writable, token));
-    };
-    service_.execute = [](void* context, const ps_gpu_dispatch_v1* commands,
-                          std::uint32_t count) noexcept {
-      if (!context)
-        return static_cast<int>(PS_GPU_RESULT_FAILURE_V1);
-      auto& self = *static_cast<ResultGpuService*>(context);
-      return self.finish(
-          self.source_->execute(self.source_->context, commands, count));
-    };
-    service_.release = [](void* context, std::uint64_t token) noexcept {
-      if (!context)
-        return static_cast<int>(PS_GPU_RESULT_FAILURE_V1);
-      auto& self = *static_cast<ResultGpuService*>(context);
-      return self.finish(self.source_->release(self.source_->context, token));
-    };
-  }
-  const ps_gpu_service_v1* get() const { return source_ ? &service_ : nullptr; }
-
- private:
-  int finish(int result) noexcept {
-    // The underlying service records illegal cross-thread calls atomically.
-    // Only the owner may read poll-local flags; the final poll check collects
-    // thread violations after the operator's workers have joined.
-    if (std::this_thread::get_id() != owner_ || !status_)
-      return result;
-    try {
-      auto failed = status_();
-      if (failed.code == ErrorCode::InvalidArgument) {
-        failed.reason = FailureReason::UnauthorizedRead;
-        failed.detail = {FailureOrigin::Protocol, FailureScope::Group};
-      }
-      if (!failed.ok())
-        observe_(failed);
-    } catch (...) {
-      observe_(Status{ErrorCode::ResourceExhausted, {}});
-      return PS_GPU_RESULT_FAILURE_V1;
-    }
-    return result;
-  }
-  const ps_gpu_service_v1* source_;
-  const std::function<Status()>& status_;
-  const Observe& observe_;
-  const std::thread::id owner_ = std::this_thread::get_id();
-  ps_gpu_service_v1 service_{};
-};
-Status protocol(const char* message) {
-  return Status{ErrorCode::InvalidArgument,
-                message,
-                FailureReason::MalformedEnvelope,
-                {FailureOrigin::Protocol, FailureScope::Group}};
-}
 // Boundary arrays retain the legacy vector ABI. Their declared element blocks
 // and copied static members are admitted before construction; implementation-
 // private STL nodes/headers remain in the documented legacy accounting scope.
@@ -240,7 +178,8 @@ class StructuredExecution final
         bindings_(std::move(bindings)),
         operations_(std::move(operations)),
         resources_(std::move(resources)),
-        payload_capture_(ResourcePayloadScope::capture(resources_)),
+        payload_capture_(
+            core_internal::ResourcePayloadScope::capture(resources_)),
         options_(options),
         atom_outcomes_(atom_outcomes),
         maximum_parallelism_(maximum_parallelism),
@@ -258,7 +197,7 @@ class StructuredExecution final
         snapshot_input_(snapshot.data(), snapshot.size(),
                         ResourceAllocator<char>(resources_)),
         remaining_(options.maximum_dependency_work),
-        cache_remaining_(options.maximum_dependency_cache_work),
+        cache_state_(resources_, options.maximum_dependency_cache_work),
         actors_(ResourceAllocator<std::weak_ptr<Actor>>(resources_)),
         actor_aliases_(ResourceAllocator<std::shared_ptr<Actor>>(resources_)),
         actor_queries_(make_resource_map<ActorRegistration>(resources_)),
@@ -274,10 +213,7 @@ class StructuredExecution final
         requested_roots_(ResourceAllocator<std::shared_ptr<Actor>>(resources_)),
         shareable_closure_(ResourceAllocator<bool>(resources_)),
         checkpoint_shareable_(ResourceAllocator<bool>(resources_)),
-        result_cacheable_(ResourceAllocator<bool>(resources_)),
-        checkpoint_scopes_(
-            make_resource_map<std::shared_ptr<ResultCheckpointScope>>(
-                resources_)) {}
+        result_cacheable_(ResourceAllocator<bool>(resources_)) {}
 
   ~StructuredExecution() override { drain(); }
   /** @brief Waits for pending callback retirement before clearing actor state.
@@ -286,7 +222,8 @@ class StructuredExecution final
   void drain() noexcept override {
     std::lock_guard<std::recursive_mutex> lock(driver_mutex_);
     detaching_ = false;
-    ResourcePayloadScope payload_scope(resources_, payload_capture_);
+    core_internal::ResourcePayloadScope payload_scope(resources_,
+                                                      payload_capture_);
     wait_pending();
     for (const auto& weak : actors_)
       if (auto actor = weak.lock())
@@ -316,7 +253,8 @@ class StructuredExecution final
     DriverScope driving(driver_active_);
     detaching_ = false;
     ResourceAllocationScope coordinator_scope(resources_);
-    ResourcePayloadScope payload_scope(resources_, payload_capture_);
+    core_internal::ResourcePayloadScope payload_scope(resources_,
+                                                      payload_capture_);
     if (running_pending()) {
       if (!drain_unneeded || pending_peers())
         return false;
@@ -384,7 +322,8 @@ class StructuredExecution final
     DriverScope driving(driver_active_);
     const auto started = std::chrono::steady_clock::now();
     ResourceAllocationScope coordinator_scope(resources_);
-    ResourcePayloadScope payload_scope(resources_, payload_capture_);
+    core_internal::ResourcePayloadScope payload_scope(resources_,
+                                                      payload_capture_);
     Result<ExecutionResult> result(Status{ErrorCode::Internal, {}});
     try {
       auto admitted = plan_.resources().reference(resources_);
@@ -507,7 +446,7 @@ class StructuredExecution final
     using Answer = Result<ExecutionResult>;
     if (!options_.maximum_result_window_bytes ||
         options_.maximum_result_window_bytes > INT64_MAX)
-      return Answer(protocol("invalid structured I/O window"));
+      return Answer(protocol_failure("invalid structured I/O window"));
     auto traversal = consume(plan_.steps().size() + 1);
     if (!traversal.ok())
       return Answer(traversal);
@@ -669,7 +608,7 @@ class StructuredExecution final
       for (const auto& item : *requested) {
         const auto found = plan_.outputs().find(item.first);
         if (found == plan_.outputs().end() || !item.second.valid())
-          return Answer(protocol("invalid structured named query"));
+          return Answer(protocol_failure("invalid structured named query"));
         const auto& output = plan_.steps()[found->second];
         const auto shape =
             output.output_result_schema &&
@@ -679,7 +618,7 @@ class StructuredExecution final
                 ? std::vector<std::uint64_t>{1}
                 : output.output_descriptor.shape;
         if (item.second.shape() != shape)
-          return Answer(protocol("structured query domain mismatch"));
+          return Answer(protocol_failure("structured query domain mismatch"));
         auto allowed = atom_outcomes_ && output.output_result_schema &&
                                output.output_result_schema->tensors.empty()
                            ? Footprint::all({1}, set_limits())
@@ -692,7 +631,7 @@ class StructuredExecution final
         if (!outside.ok())
           return Answer(outside.status());
         if (!outside.value().empty())
-          return Answer(protocol("structured query exceeds plan"));
+          return Answer(protocol_failure("structured query exceeds plan"));
       }
     }
     diagnostics_.plan_digest =
@@ -734,6 +673,14 @@ class StructuredExecution final
         return Answer(created.status());
       requested_roots_.push_back(created.take_value());
     }
+    struct NamedRoot {
+      const std::string* name;
+      std::size_t index;
+      Footprint coverage;
+      std::shared_ptr<const DependencyBundle> ancestry;
+    };
+    ResourceVector<NamedRoot> completed_roots{
+        ResourceAllocator<NamedRoot>(resources_)};
     ExecutionResult result;
     result.results = make_resource_map<ResultRef>(resources_);
     for (const auto& named : plan_.outputs()) {
@@ -765,20 +712,29 @@ class StructuredExecution final
           return Answer(object.status());
         auto object_coverage =
             demand ? *demand : Footprint::all({1}, set_limits()).take_value();
-        auto evidence = record_object(named.second, object.value());
-        if (!evidence.ok())
-          return Answer(evidence);
         const auto ancestry = object.value().dependencies();
         if (!ancestry || ancestry->roots.empty())
-          return Answer(protocol("Result has no publication ancestry"));
-        evidence = records_->output(named.first, named.second, object_coverage,
-                                    ancestry->roots[0]->scope);
-        if (!evidence.ok())
-          return Answer(evidence);
+          return Answer(protocol_failure("Result has no publication ancestry"));
+        completed_roots.push_back(
+            {&named.first, named.second, std::move(object_coverage), ancestry});
         result.results.emplace(named.first, object.take_value());
         continue;
       }
-      return Answer(protocol("operation output requires Result schema"));
+      return Answer(
+          protocol_failure("operation output requires Result schema"));
+    }
+    // Backend rollback can replace the mutable evidence table while another
+    // named root has already completed. Install root selections only after all
+    // requested outputs are resolved, using their captured query scopes.
+    for (const auto& root : completed_roots) {
+      const auto& object =
+          result.results.find(std::string_view(*root.name))->second;
+      auto evidence = record_object(root.index, object);
+      if (evidence.ok())
+        evidence = records_->output(*root.name, root.index, root.coverage,
+                                    root.ancestry->roots[0]->scope);
+      if (!evidence.ok())
+        return Answer(evidence);
     }
     auto status = consume(0);
     if (!status.ok())
@@ -927,7 +883,7 @@ class StructuredExecution final
     using Answer = Result<ExecutionResult>;
     if (!requested)
       return Answer(
-          protocol("Result atom collection requires explicit demand"));
+          protocol_failure("Result atom collection requires explicit demand"));
     struct Observation {
       std::string_view name;
       std::size_t step;
@@ -1121,7 +1077,8 @@ class StructuredExecution final
           return Answer(evidence);
         const auto bundle = outcome.value().dependencies();
         if (!bundle || bundle->roots.empty())
-          return Answer(protocol("Result atom has no publication ancestry"));
+          return Answer(
+              protocol_failure("Result atom has no publication ancestry"));
         auto samples = item.samples;
         if (!samples) {
           auto singleton = Footprint::all({1}, set_limits());
@@ -1161,58 +1118,12 @@ class StructuredExecution final
   }
 
  private:
-  struct StartPhase {
-    std::chrono::steady_clock::time_point started =
-        std::chrono::steady_clock::now();
-    Status dispatched;
-    Result<ResultContinuation> result{Status{ErrorCode::Internal, {}}};
-    ErrorCode sticky = ErrorCode::Ok;
-  };
-  struct PollPhase {
-    std::chrono::steady_clock::time_point started =
-        std::chrono::steady_clock::now();
-    NumericDiagnostics numeric;
-    std::uint64_t native_dispatches = 0;
-    bool invoked = false;
-    Result<ResultProgramPoll> result{Status{ErrorCode::Internal, {}}};
-    ErrorCode sticky = ErrorCode::Ok;
-  };
+  using StartPhase = StructuredStartPhase;
+  using PollPhase = StructuredPollPhase;
   struct Actor;
-  struct JointActor;
-  /** @brief Progress through one retained input in a Need request.
-   * @details Each input has an independent cursor. `producer` keeps its
-   * requested upstream Actor alive while the consumer waits and remains set
-   * until the requested object is available. The Need phase rotates among
-   * inputs that can make progress; a traversal visit prevents a deep Actor
-   * chain from being recursively revisited within that traversal.
-   */
-  struct NeedCursor {
-    std::size_t next = 0, total = 0;
-    bool initialized = false;
-    std::optional<Footprint> tensor_samples;
-    std::optional<Footprint> tensor_supply_samples;
-    bool tensor_payload = false;
-    std::shared_ptr<Actor> producer;
-    bool tensor_atoms_initialized = false;
-    std::size_t tensor_atom_next = 0;
-    ResourceVector<Footprint> tensor_atoms;
-    ResourceVector<std::shared_ptr<Actor>> tensor_producers;
-    ResourceVector<ResultTensorInput::Piece> tensor_pieces;
-    ResourceVector<std::shared_ptr<NeedCursor>> requests;
-    std::size_t supplied = 0, turn = 0;
-    bool complete() const { return initialized && next == total; }
-  };
-  /** @brief Poll response retained until all requested inputs are supplied.
-   * @details The coordinator validates the full envelope before progressing
-   * independent input cursors. A supply exception terminates the producer's
-   * Need phase. A completed I/O request is not replayed if retaining its reply
-   * fails.
-   */
-  struct NeedPhase {
-    explicit NeedPhase(ResultProgramNeed value) : request(std::move(value)) {}
-    ResultProgramNeed request;
-    NeedCursor cursor;
-  };
+  using JointActor = StructuredJointState;
+  using NeedCursor = StructuredNeedCursor<Actor>;
+  using NeedPhase = StructuredNeedPhase<Actor>;
   /** @brief One operation instance and its resumable execution state.
    * @details The Root-owned pending-task list retains this Actor while its
    * callback is queued or submitted. `waiting` retains an upstream Actor for
@@ -1220,7 +1131,7 @@ class StructuredExecution final
    * same-thread recursive dependency servicing. Aliases share the Actor's
    * publication and release accounting.
    */
-  struct Actor {
+  struct Actor : StructuredActorLifecycle<NeedPhase>, JointParticipant {
     explicit Actor(const PlanStep& step, const ResourceBudget& budget)
         : query(*step.structured_metadata, step.parameters),
           key(ResourceAllocator<char>(budget)),
@@ -1234,7 +1145,7 @@ class StructuredExecution final
           results(std::less<std::uint32_t>{},
                   ResourceAllocator<ResultObjectInputs::value_type>(budget)),
           io(ResourceAllocator<ResultIoReply>(budget)),
-          cache_replay(ResourceAllocator<StructuredCacheNeed>(budget)),
+          cache(budget),
           input_bundles(ResourceAllocator<InputBundle>(budget)),
           failure(std::allocate_shared<std::atomic<ErrorCode>>(
               ResourceAllocator<std::atomic<ErrorCode>>(budget),
@@ -1242,19 +1153,17 @@ class StructuredExecution final
           service_failure(std::allocate_shared<plugin_internal::FailureLatch>(
               ResourceAllocator<plugin_internal::FailureLatch>(budget))),
           node_id(step.node_id) {}
+    ~Actor() { retire_owned_storage(); }
     ResourceLease lease;
     ResultProgramQuery query;
     AtomKey observation;
     ResourceString key, dependency_scope;
     ResourceVector<std::size_t> aliases;
     std::weak_ptr<Actor> self;
-    ResultContinuation continuation;
     std::shared_ptr<JointActor> joint;
     std::size_t index = 0, joint_slot = 0, registry_slot = 0;
     bool deferred_start = false, joint_disabled = false, scalar_restart = false;
     std::atomic<std::uint64_t> discovery_work_remaining{0};
-    std::variant<std::monostate, StartPhase, PollPhase, NeedPhase> phase;
-    std::optional<StructuredSubmission> pending;
     std::shared_ptr<Actor> waiting;
     std::thread::id driver;
     ResultTensorInputs tensors;
@@ -1265,37 +1174,110 @@ class StructuredExecution final
     ResourceVector<ResultIoReply> io;
     ResultRef published;
     std::optional<QualityReport> quality;
-    ResourceVector<StructuredCacheNeed> cache_replay;
-    struct InputBundle {
-      InputBundle(std::size_t producer,
-                  std::shared_ptr<const DependencyBundle> bundle,
-                  std::uint32_t input_port = UINT32_MAX,
-                  std::uint64_t object = 0, std::uint64_t revision = 0)
-          : first(producer),
-            second(std::move(bundle)),
-            port(input_port),
-            object_id(object),
-            revision(revision) {}
-      std::size_t first;
-      std::shared_ptr<const DependencyBundle> second;
-      std::uint32_t port;
-      std::uint64_t object_id, revision;
-    };
+    StructuredActorCache cache;
+    using InputBundle = StructuredInputBundle;
     ResourceVector<InputBundle> input_bundles;
-    std::unique_ptr<DependencyRecords> attempt_records;
-    bool cache_disabled = false, fallback_taint = false;
+    ResultFallbackState fallback;
     SharedResults::Lease shared;
     ResultRelation input_obligations;
     std::shared_ptr<std::atomic<ErrorCode>> failure;
     std::shared_ptr<plugin_internal::FailureLatch> service_failure;
     ErrorCode terminal = ErrorCode::Ok;
     std::uint64_t node_id = 0;
-    std::uint32_t polls = 0;
-    bool retry_safe = true, native_block_reuse = false;
+    bool native_block_reuse = false;
     std::uint64_t published_revision = 0, native_dispatches = 0;
-    bool complete = false, busy = false, driving = false, initialized = false;
-    bool queued = false;
-    std::uint64_t visit = 0;
+    bool complete = false;
+  };
+  static std::shared_ptr<Actor> joint_actor(
+      const std::shared_ptr<JointParticipant>& participant) {
+    return std::static_pointer_cast<Actor>(participant);
+  }
+  struct JointHost final : StructuredJointHost {
+    explicit JointHost(StructuredExecution& owner) : owner(owner) {}
+    static Actor& actor(JointParticipant& participant) {
+      return static_cast<Actor&>(participant);
+    }
+    static const Actor& actor(const JointParticipant& participant) {
+      return static_cast<const Actor&>(participant);
+    }
+    JointMemberState state(const JointParticipant& participant) const override {
+      const auto& value = actor(participant);
+      return {value.complete, value.terminal};
+    }
+    bool pending(const JointParticipant& participant) const override {
+      return actor(participant).pending.has_value();
+    }
+    void retire_submission(
+        const std::shared_ptr<JointParticipant>& participant) override {
+      auto carrier = joint_actor(participant);
+      if (!carrier->queued) {
+        carrier->pending->wait();
+        owner.finish_actor(carrier);
+      } else {
+        owner.forget_pending(*carrier);
+        carrier->pending.reset();
+        carrier->queued = false;
+      }
+    }
+    void clear_submission(JointParticipant& participant) override {
+      auto& value = actor(participant);
+      value.pending.reset();
+      value.queued = false;
+      value.busy = false;
+    }
+    void install_records(std::unique_ptr<DependencyRecords> baseline) override {
+      owner.records_ = std::move(baseline);
+    }
+    Status import_completed(const JointParticipant& participant) override {
+      const auto& value = actor(participant);
+      if (!value.published.valid())
+        return Status::success();
+      auto bundle = value.published.dependencies();
+      return bundle ? owner.records_->import_bundle(*bundle, value.index)
+                    : Status::success();
+    }
+    void detach(JointParticipant& participant) override {
+      auto& value = actor(participant);
+      value.joint.reset();
+      value.joint_disabled = true;
+    }
+    Status discard_attempt(JointParticipant& participant) override {
+      auto& value = actor(participant);
+      if (const auto* completed = std::get_if<PollPhase>(&value.phase)) {
+        auto recorded = owner.record_poll_diagnostics(
+            value, *completed, completed->result.status().code);
+        if (!recorded.ok())
+          return recorded;
+      }
+      value.phase.emplace<std::monostate>();
+      value.waiting.reset();
+      value.results.clear();
+      value.tensors.clear();
+      value.io.clear();
+      value.history.clear();
+      value.input_facts.clear();
+      value.input_bundles.clear();
+      value.input_obligations = {};
+      value.cache.replay.clear();
+      return Status::success();
+    }
+    void restart(JointParticipant& participant) override {
+      auto& value = actor(participant);
+      value.deferred_start = true;
+      value.scalar_restart = true;
+    }
+    void retire(JointParticipant& participant, const Status& failure,
+                bool record_poll) override {
+      auto& value = actor(participant);
+      if (record_poll) {
+        if (const auto* completed = std::get_if<PollPhase>(&value.phase);
+            completed && !value.pending)
+          owner.record_failed_poll(value, *completed, failure);
+      }
+      owner.retire(value, failure);
+    }
+    void fallback_observed() override { ++owner.diagnostics_.joint_fallbacks; }
+    StructuredExecution& owner;
   };
   struct PendingTask {
     std::shared_ptr<Actor> actor;
@@ -1313,59 +1295,6 @@ class StructuredExecution final
     std::weak_ptr<Actor> observed;
     std::shared_ptr<Actor> pending;
     std::shared_ptr<FailedObservation> failed;
-  };
-  struct JointActor {
-    struct Member {
-      std::size_t index = 0;
-      std::weak_ptr<Actor> actor;
-      SharedResults::Lease shared;
-      CancellationToken token;
-      std::shared_ptr<plugin_internal::FailureLatch> failure;
-      std::shared_ptr<std::atomic<bool>> done;
-    };
-    explicit JointActor(const ResourceBudget& root)
-        : payload(std::make_shared<PayloadObservation>()),
-          members(ResourceAllocator<Member>(root)),
-          pending_members(ResourceAllocator<std::weak_ptr<Actor>>(root)),
-          failure(std::allocate_shared<plugin_internal::FailureLatch>(
-              ResourceAllocator<plugin_internal::FailureLatch>(root))) {}
-    std::shared_ptr<PayloadObservation> payload;
-    ResourceVector<Member> members;
-    ResourceVector<std::weak_ptr<Actor>> pending_members;
-    std::shared_ptr<plugin_internal::FailureLatch> failure;
-    mutable CancellationSource cancellation;
-    std::unique_ptr<DependencyRecords> saved_records;
-    ResultJointContinuation continuation;
-    Result<ResultJointContinuation> started{Status{ErrorCode::Internal, {}}};
-    Result<ResourceVector<ResultJointOutcome>> polled{
-        Status{ErrorCode::Internal, {}}};
-    bool pending = false, starting = false, entered = false;
-    std::uint64_t visit = 0;
-    bool contract2 = false;
-    std::atomic<bool> driving{false};
-    void refresh() const {
-      bool active = false;
-      for (const auto& member : members) {
-        if (member.done->load())
-          continue;
-        member.shared.refresh();
-        active |= !member.token.cancelled();
-      }
-      if (!active)
-        cancellation.cancel();
-    }
-    bool peers() const {
-      for (const auto& member : members)
-        if (!member.done->load() && !member.token.cancelled() &&
-            member.shared.continue_for_peers())
-          return true;
-      return false;
-    }
-    bool complete() const {
-      return std::all_of(
-          members.begin(), members.end(),
-          [](const auto& member) { return member.done->load(); });
-    }
   };
   /** @brief Per-thread scope for one callback's structured execution state.
    * @details Installs services, effective producer state, replay mode, service
@@ -1425,7 +1354,7 @@ class StructuredExecution final
     std::shared_ptr<JointActor> previous;
     const SharedResults::Lease*& producer;
     const SharedResults::Lease* prior_producer;
-    ResourcePayloadScope payload_scope;
+    core_internal::ResourcePayloadScope payload_scope;
     JointScope(StructuredExecution& owner, std::shared_ptr<JointActor> group)
         : target(owner.active_joint()),
           previous(target),
@@ -1579,7 +1508,7 @@ class StructuredExecution final
         return failure;
       if (auto group = task.actor->joint) {
         for (const auto& weak : group->pending_members)
-          if (auto member = weak.lock()) {
+          if (auto member = joint_actor(weak.lock())) {
             failure = phase_failure(*member);
             if (!failure.ok())
               return failure;
@@ -1609,7 +1538,7 @@ class StructuredExecution final
           task.actor->pending->immediate = accepted.status();
           if (task.actor->joint) {
             for (const auto& weak : task.actor->joint->pending_members)
-              if (auto member = weak.lock()) {
+              if (auto member = joint_actor(weak.lock())) {
                 member->queued = false;
                 member->pending = task.actor->pending;
               }
@@ -1621,7 +1550,7 @@ class StructuredExecution final
         task.actor->pending = std::move(stage);
         if (task.actor->joint) {
           for (const auto& weak : task.actor->joint->pending_members)
-            if (auto member = weak.lock()) {
+            if (auto member = joint_actor(weak.lock())) {
               member->queued = false;
               member->pending = task.actor->pending;
             }
@@ -1683,26 +1612,10 @@ class StructuredExecution final
     return Status::success();
   }
   void retire_joint_submission(const std::shared_ptr<JointActor>& group) {
-    if (auto carrier = group->pending_members.front().lock();
-        carrier && carrier->pending) {
-      group->refresh();
-      if (!carrier->queued) {
-        carrier->pending->wait();
-        finish_actor(carrier);
-      } else {
-        forget_pending(*carrier);
-        carrier->pending.reset();
-        carrier->queued = false;
-      }
-    }
-    for (const auto& weak : group->pending_members)
-      if (auto member = weak.lock()) {
-        member->pending.reset();
-        member->queued = false;
-        member->busy = false;
-      }
-    group->pending_members.clear();
-    group->pending = false;
+    // The strong cohort guard survives member detach and carrier retirement.
+    const auto guard = group;
+    JointHost host(*this);
+    guard->retire_submission(host);
   }
   void drain_actor(Actor& actor) {
     if (actor.joint && actor.joint->pending) {
@@ -1785,7 +1698,7 @@ class StructuredExecution final
   struct ActiveScope {
     const SharedResults::Lease*& target;
     const SharedResults::Lease* previous;
-    ResourcePayloadScope payload_scope;
+    core_internal::ResourcePayloadScope payload_scope;
     ActiveScope(StructuredExecution& owner, const SharedResults::Lease& lease)
         : target(owner.active_shared()),
           previous(target),
@@ -1796,9 +1709,9 @@ class StructuredExecution final
     }
     ~ActiveScope() { target = previous; }
   };
-  PayloadCapture producer_capture(
-      std::shared_ptr<PayloadObservation> producer) const {
-    auto capture = ResourcePayloadScope::capture(resources_);
+  core_internal::PayloadCapture producer_capture(
+      std::shared_ptr<core_internal::PayloadObservation> producer) const {
+    auto capture = core_internal::ResourcePayloadScope::capture(resources_);
     if (producer)
       capture.producer = std::move(producer);
     return capture;
@@ -1811,11 +1724,11 @@ class StructuredExecution final
     const auto optional = work_mode();
     const auto depth = service_depth();
     auto joint = active_joint();
-    auto payload = ResourcePayloadScope::capture(resources_);
+    auto payload = core_internal::ResourcePayloadScope::capture(resources_);
     return [this, task = std::move(task), shared = std::move(shared), optional,
             depth, actor, joint, payload,
             observations](const StructuredServices& services) {
-      ResourcePayloadScope payload_scope(resources_, payload);
+      core_internal::ResourcePayloadScope payload_scope(resources_, payload);
       CallbackContext context(this, actor, &services, shared, optional, depth,
                               joint);
       ResultNativeScope native_scope(
@@ -1919,7 +1832,7 @@ class StructuredExecution final
                  item.backend == actor.query.backend;
         });
     if (timing == diagnostics_.operation_timings.end())
-      return protocol("missing admitted Result poll diagnostics");
+      return protocol_failure("missing admitted Result poll diagnostics");
     const auto elapsed = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - completed.started)
@@ -1957,7 +1870,7 @@ class StructuredExecution final
                       Backend backend = Backend::Cpu, bool whole = false,
                       bool tiles = false, bool joint_task = false) {
     if (actor->pending)
-      return protocol("structured actor already has a pending stage");
+      return protocol_failure("structured actor already has a pending stage");
     if (!joint_task && std::holds_alternative<PollPhase>(actor->phase)) {
       auto admitted = admit_poll_diagnostics(*actor);
       if (!admitted.ok())
@@ -1984,19 +1897,20 @@ class StructuredExecution final
     return Status::success();
   }
   Status finish_actor(const std::shared_ptr<Actor>& actor) {
-    if (!actor->pending || actor->queued)
-      return protocol("structured actor has no submitted stage");
+    if (!actor->has_submitted_stage())
+      return protocol_failure("structured actor has no submitted stage");
     struct Reset {
       StructuredExecution& owner;
       Actor& actor;
       ~Reset() {
-        actor.pending.reset();
+        actor.release_stage();
         if (!owner.callback_context())
           owner.forget_pending(actor);
       }
     } reset{*this, *actor};
     ++progress_;
-    auto finished = await(*actor->pending);
+    auto finished =
+        actor->await_stage([this](const auto& stage) { return await(stage); });
     if (actor->joint && actor->joint->starting && actor->joint->entered) {
       ++diagnostics_.joint_groups;
       actor->joint->entered = false;
@@ -2007,7 +1921,6 @@ class StructuredExecution final
     return step.backend == Backend::Cpu && step.output_result_schema &&
            (step.traits.joint_contract == 1 ||
             step.traits.joint_contract == 2) &&
-           step.traits.outputs[0].dependency_version == 2 &&
            step.traits.outputs[0].observation_kind == ObservationKind::Atomic;
   }
   bool joint_observation(const Actor& actor) const {
@@ -2034,81 +1947,21 @@ class StructuredExecution final
     return true;
   }
   void release_joint(const std::shared_ptr<JointActor>& group, bool fallback) {
-    if (fallback)
-      ++diagnostics_.joint_fallbacks;
-    Status restored = Status::success();
-    if (fallback && group->saved_records) {
-      records_ = std::move(group->saved_records);
-      for (const auto& member : group->members)
-        if (auto actor = member.actor.lock();
-            actor && actor->complete && actor->published.valid()) {
-          auto bundle = actor->published.dependencies();
-          if (bundle && restored.ok())
-            restored = records_->import_bundle(*bundle, actor->index);
-        }
-    }
-    group->continuation = {};
-    group->started =
-        Result<ResultJointContinuation>(Status{ErrorCode::Stale, {}});
-    for (auto& member : group->members)
-      if (auto actor = member.actor.lock()) {
-        actor->joint.reset();
-        actor->joint_disabled = true;
-        if (!restored.ok() && !actor->complete &&
-            actor->terminal == ErrorCode::Ok)
-          retire(*actor, restored);
-        if (fallback && !actor->complete && actor->terminal == ErrorCode::Ok) {
-          if (const auto* completed = std::get_if<PollPhase>(&actor->phase)) {
-            auto recorded = record_poll_diagnostics(
-                *actor, *completed, completed->result.status().code);
-            if (!recorded.ok()) {
-              retire(*actor, recorded);
-              continue;
-            }
-          }
-          actor->phase.emplace<std::monostate>();
-          actor->waiting.reset();
-          actor->results.clear();
-          actor->tensors.clear();
-          actor->io.clear();
-          actor->history.clear();
-          actor->input_facts.clear();
-          actor->input_bundles.clear();
-          actor->input_obligations = {};
-          actor->cache_replay.clear();
-        }
-        if (fallback && !actor->complete && actor->terminal == ErrorCode::Ok) {
-          actor->deferred_start = true;
-          actor->scalar_restart = true;
-        }
-      }
+    const auto guard = group;
+    JointHost host(*this);
+    guard->release(fallback, host);
   }
   Status fail_joint(const std::shared_ptr<JointActor>& group,
                     const Status& failure) {
-    for (auto& member : group->members)
-      if (auto actor = member.actor.lock();
-          actor && !actor->complete && actor->terminal == ErrorCode::Ok) {
-        if (const auto* completed = std::get_if<PollPhase>(&actor->phase);
-            completed && !actor->pending)
-          record_failed_poll(*actor, *completed, failure);
-        retire(*actor, failure);
-      }
-    release_joint(group, false);
-    return Status::success();
-  }
-  bool optional_joint_failure(const Status& failure) const {
-    return failure.code != ErrorCode::Cancelled &&
-           failure.code != ErrorCode::Stale &&
-           failure.detail.origin != FailureOrigin::Protocol &&
-           failure.detail.origin != FailureOrigin::Domain &&
-           failure.detail.origin != FailureOrigin::Schema &&
-           failure.detail.scope == FailureScope::Unspecified;
+    const auto guard = group;
+    JointHost host(*this);
+    return guard->fail(failure, host);
   }
   Status submit_joint(const std::shared_ptr<JointActor>& group,
                       ResourceVector<std::shared_ptr<Actor>> ready,
                       bool starting) {
     if (ready.empty())
-      return protocol("empty structured joint task");
+      return protocol_failure("empty structured joint task");
     if (!starting) {
       for (const auto& actor : ready) {
         auto admitted = admit_poll_diagnostics(*actor);
@@ -2193,8 +2046,8 @@ class StructuredExecution final
                   if (found != results.end())
                     actor->quality = found->quality;
                   return found == results.end()
-                             ? Result<ResultProgramPoll>(
-                                   protocol("missing structured joint outcome"))
+                             ? Result<ResultProgramPoll>(protocol_failure(
+                                   "missing structured joint outcome"))
                              : std::move(found->outcome);
                 });
             if (!status.ok())
@@ -2220,13 +2073,13 @@ class StructuredExecution final
     if (!submitted.ok()) {
       group->pending = false;
       for (const auto& weak : group->pending_members)
-        if (auto actor = weak.lock())
+        if (auto actor = joint_actor(weak.lock()))
           actor->busy = false;
       group->pending_members.clear();
       return submitted;
     }
     for (const auto& weak : group->pending_members)
-      if (auto actor = weak.lock(); actor && actor != carrier) {
+      if (auto actor = joint_actor(weak.lock()); actor && actor != carrier) {
         actor->pending = carrier->pending;
         actor->queued = carrier->queued;
       }
@@ -2342,7 +2195,7 @@ class StructuredExecution final
       }
       auto status = submit_joint(group, std::move(candidates), true);
       if (!status.ok()) {
-        if (!contract2 && optional_joint_failure(status))
+        if (!contract2 && ResultFallbackState::optional_joint_failure(status))
           release_joint(group, true);
         else
           fail_joint(group, status);
@@ -2350,12 +2203,12 @@ class StructuredExecution final
       return Result<bool>(true);
     } catch (const std::bad_alloc&) {
       if (group && group->pending && !group->pending_members.empty()) {
-        auto carrier = group->pending_members.front().lock();
+        auto carrier = joint_actor(group->pending_members.front().lock());
         if (carrier && carrier->pending)
           throw;
         group->pending = false;
         for (const auto& weak : group->pending_members)
-          if (auto actor = weak.lock())
+          if (auto actor = joint_actor(weak.lock()))
             actor->busy = false;
         group->pending_members.clear();
       }
@@ -2510,10 +2363,10 @@ class StructuredExecution final
   }
   Status finish_joint_impl(const std::shared_ptr<JointActor>& group) {
     if (group->pending_members.empty())
-      return protocol("missing structured joint retirement owner");
-    auto carrier = group->pending_members.front().lock();
+      return protocol_failure("missing structured joint retirement owner");
+    auto carrier = joint_actor(group->pending_members.front().lock());
     if (!carrier || !carrier->pending)
-      return protocol("missing structured joint submission");
+      return protocol_failure("missing structured joint submission");
     std::array<std::shared_ptr<Actor>, 64> storage;
     struct Ready {
       std::shared_ptr<Actor>* items;
@@ -2524,7 +2377,7 @@ class StructuredExecution final
       auto& operator[](std::size_t i) { return items[i]; }
     } ready{storage.data()};
     for (const auto& weak : group->pending_members)
-      if (auto actor = weak.lock())
+      if (auto actor = joint_actor(weak.lock()))
         storage[ready.count++] = std::move(actor);
     auto status = finish_actor(carrier);
     for (const auto& actor : ready) {
@@ -2534,7 +2387,8 @@ class StructuredExecution final
     group->pending_members.clear();
     group->pending = false;
     if (!status.ok()) {
-      if (!group->contract2 && optional_joint_failure(status))
+      if (!group->contract2 &&
+          ResultFallbackState::optional_joint_failure(status))
         release_joint(group, true);
       else
         fail_joint(group, status);
@@ -2545,7 +2399,8 @@ class StructuredExecution final
       if (first.ok() && !group->started.ok())
         first = group->started.status();
       if (!first.ok()) {
-        if (!group->contract2 && optional_joint_failure(first))
+        if (!group->contract2 &&
+            ResultFallbackState::optional_joint_failure(first))
           release_joint(group, true);
         else
           fail_joint(group, first);
@@ -2557,7 +2412,8 @@ class StructuredExecution final
     }
     if (!group->polled.ok()) {
       const auto first = group->polled.status();
-      if (!group->contract2 && optional_joint_failure(first))
+      if (!group->contract2 &&
+          ResultFallbackState::optional_joint_failure(first))
         release_joint(group, true);
       else
         fail_joint(group, first);
@@ -2575,15 +2431,17 @@ class StructuredExecution final
         auto member =
             std::find_if(group->members.begin(), group->members.end(),
                          [&](const auto& item) {
-                           auto actor = item.actor.lock();
+                           auto actor = joint_actor(item.actor.lock());
                            return actor && actor->observation == reply.key;
                          });
         if (member == group->members.end() || ready.count == storage.size())
-          return fail_joint(group, protocol("unknown structured atom reply"));
-        auto actor = member->actor.lock();
+          return fail_joint(group,
+                            protocol_failure("unknown structured atom reply"));
+        auto actor = joint_actor(member->actor.lock());
         if (reply.outcome.ok() || actor->complete ||
             actor->terminal != ErrorCode::Ok)
-          return fail_joint(group, protocol("invalid Waiting atom reply"));
+          return fail_joint(group,
+                            protocol_failure("invalid Waiting atom reply"));
         actor->waiting.reset();
         actor->phase.emplace<PollPhase>();
         std::get<PollPhase>(actor->phase).result = std::move(reply.outcome);
@@ -2600,7 +2458,8 @@ class StructuredExecution final
         auto& domain = validation_domains_.at(domain_key(*actor));
         if (domain.semantic_terminal)
           return fail_joint(
-              group, protocol("Result validation domain revoked a Run atom"));
+              group,
+              protocol_failure("Result validation domain revoked a Run atom"));
       }
       for (const auto& actor : ready) {
         const auto& result = std::get<PollPhase>(actor->phase).result;
@@ -2674,7 +2533,8 @@ class StructuredExecution final
             failed.code == ErrorCode::InvalidArgument ||
             failed.code == ErrorCode::TypeMismatch) {
           if (failed.detail.origin != FailureOrigin::Protocol)
-            failed = protocol("invalid structured joint publication evidence");
+            failed = protocol_failure(
+                "invalid structured joint publication evidence");
           records_ = std::move(original);
           return fail_joint(group, failed);
         }
@@ -2727,9 +2587,10 @@ class StructuredExecution final
     JointScope scope(*this, group);
     group->refresh();
     if (group->pending) {
-      auto carrier = group->pending_members.front().lock();
+      auto carrier = joint_actor(group->pending_members.front().lock());
       if (!carrier || !carrier->pending)
-        return fail_joint(group, protocol("missing structured joint task"));
+        return fail_joint(group,
+                          protocol_failure("missing structured joint task"));
       if (carrier->queued)
         return Status::success();
       if (!carrier->pending->ready()) {
@@ -2767,7 +2628,7 @@ class StructuredExecution final
       return Status::success();
     }
     for (auto& member : group->members) {
-      auto actor = member.actor.lock();
+      auto actor = joint_actor(member.actor.lock());
       if (!actor || member.done->load())
         continue;
       if (auto* need = std::get_if<NeedPhase>(&actor->phase)) {
@@ -2788,7 +2649,7 @@ class StructuredExecution final
     ResourceVector<std::shared_ptr<Actor>> ready{
         ResourceAllocator<std::shared_ptr<Actor>>(resources_)};
     for (auto& member : group->members) {
-      auto actor = member.actor.lock();
+      auto actor = joint_actor(member.actor.lock());
       if (!actor || member.done->load() || actor->waiting || actor->pending ||
           !std::holds_alternative<std::monostate>(actor->phase))
         continue;
@@ -2798,23 +2659,23 @@ class StructuredExecution final
         retire(*actor, charged);
         continue;
       }
-      if (actor->polls >= std::min(plan_.steps()[member.index]
-                                       .traits.outputs[0]
-                                       .maximum_dependency_stages,
-                                   options_.dependencies.maximum_stages)) {
-        retire(*actor, Status{ErrorCode::ResourceExhausted,
-                              "structured joint stage limit"});
+      auto admitted = actor->begin_poll(
+          std::min(plan_.steps()[member.index]
+                       .traits.outputs[0]
+                       .maximum_dependency_stages,
+                   options_.dependencies.maximum_stages),
+          actor->failure->load(), "structured joint stage limit");
+      if (!admitted.ok()) {
+        retire(*actor, admitted);
         continue;
       }
-      ++actor->polls;
-      actor->phase.emplace<PollPhase>();
-      std::get<PollPhase>(actor->phase).sticky = actor->failure->load();
       ready.push_back(std::move(actor));
     }
     if (!ready.empty()) {
       auto status = submit_joint(group, std::move(ready), false);
       if (!status.ok()) {
-        if (!group->contract2 && optional_joint_failure(status))
+        if (!group->contract2 &&
+            ResultFallbackState::optional_joint_failure(status))
           release_joint(group, true);
         else
           fail_joint(group, status);
@@ -3133,17 +2994,15 @@ class StructuredExecution final
       std::uint32_t tensor_slot = 0, bool defer_start = false) {
     using Answer = Result<std::shared_ptr<Actor>>;
     if (index >= plan_.steps().size())
-      return Answer(protocol("invalid result step"));
+      return Answer(protocol_failure("invalid result step"));
     const auto& step = plan_.steps()[index];
-    if (step.traits.outputs[0].dependency_version != 2)
-      return Answer(protocol("structured continuation required"));
     if (step.traits.joint_contract == 2 && step.backend != Backend::Cpu)
       return Answer(Status{ErrorCode::BackendUnavailable,
                            "Result atom joints require the CPU lane"});
     if (!step.traits.side_effect_free && step.output_result_schema &&
         !step.output_result_schema->tensors.empty()) {
       if (tensor_slot >= step.output_result_schema->tensors.size())
-        return Answer(protocol("invalid effect tensor slot"));
+        return Answer(protocol_failure("invalid effect tensor slot"));
       tensor_slot = 0;
       auto full = Footprint::all(
           step.output_result_schema->tensors[tensor_slot].sample_shape(),
@@ -3195,7 +3054,6 @@ class StructuredExecution final
             shared->aliases.end())
           shared->aliases.push_back(index);
         actor_aliases_[index] = shared;
-        ++diagnostics_.shared_computations;
         return Answer(std::move(shared));
       }
     }
@@ -3206,7 +3064,7 @@ class StructuredExecution final
     if (!lease.ok())
       return Answer(lease.status());
     if (!step.structured_metadata)
-      return Answer(protocol("missing compiled stage metadata"));
+      return Answer(protocol_failure("missing compiled stage metadata"));
     auto created = std::shared_ptr<Actor>(new Actor(step, resources_));
     created->discovery_work_remaining = options_.dependencies.maximum_work;
     created->lease = lease.take_value();
@@ -3318,7 +3176,7 @@ class StructuredExecution final
       auto saved = records_->fork_result_attempt();
       if (!saved.ok())
         return retire(*created, saved.status());
-      created->attempt_records = saved.take_value();
+      created->fallback.records = saved.take_value();
     }
     if (created->deferred_start)
       return Status::success();
@@ -3329,14 +3187,9 @@ class StructuredExecution final
                         const std::shared_ptr<Actor>& current,
                         StartPhase started) {
     const auto& step = plan_.steps()[index];
-    if (started.dispatched.ok() && !started.result.ok() &&
-        plugin_internal::FailureLatch::retryable_backend_failure(
-            started.result.status()) &&
-        current->query.backend == Backend::Gpu && step.traits.supports_cpu &&
-        step.traits.allows_cpu_fallback && step.traits.deterministic &&
-        step.traits.side_effect_free && started.sticky == ErrorCode::Ok &&
-        current->failure->load() == ErrorCode::Ok &&
-        current->service_failure->snapshot().ok() &&
+    if (ResultFallbackState::can_retry_start(
+            step.traits, current->query.backend, started, *current->failure,
+            *current->service_failure) &&
         active_stop() == ErrorCode::Ok) {
       auto capacity = legacy_capacity(
           resources_, 2 * (step.operation.size() +
@@ -3352,8 +3205,8 @@ class StructuredExecution final
       diagnostics_.operation_timings.push_back(
           {step.result_ref(), Backend::Gpu, elapsed,
            ErrorCode::BackendUnavailable, 1, 0});
-      current->attempt_records.reset();
-      current->fallback_taint = true;
+      current->fallback.records.reset();
+      current->fallback.taint = true;
       current->query.backend = Backend::Cpu;
       auto retry = consume(1);
       if (!retry.ok())
@@ -3470,10 +3323,10 @@ class StructuredExecution final
     const auto& traits = plan_.steps()[index].traits;
     if (!block &&
         traits.outputs[0].observation_kind == ObservationKind::RequestRecord)
-      return protocol("terminal Result cannot use checkpoint services");
+      return protocol_failure("terminal Result cannot use checkpoint services");
     return traits.deterministic && traits.side_effect_free
                ? Status::success()
-               : protocol("checkpoint requires a pure Result program");
+               : protocol_failure("checkpoint requires a pure Result program");
   }
   Result<ResourceString> checkpoint_key(std::size_t index, const Actor& actor) {
     auto charged =
@@ -3494,35 +3347,13 @@ class StructuredExecution final
   }
   std::shared_ptr<ResultCheckpointScope> checkpoint_scope(
       const ResourceString& key) {
-    auto found = checkpoint_scopes_.find(key);
-    if (found != checkpoint_scopes_.end())
-      return found->second;
-    const auto maximum = options_.dependencies.sets.maximum_boxes;
-    auto scope = checkpoints_
-                     ? checkpoints_->acquire(key, resources_, maximum)
-                     : std::allocate_shared<ResultCheckpointScope>(
-                           ResourceAllocator<ResultCheckpointScope>(resources_),
-                           resources_, maximum);
-    if (scope)
-      checkpoint_scopes_.emplace(key, scope);
-    return scope;
+    return cache_state_.scope(key, checkpoints_,
+                              options_.dependencies.sets.maximum_boxes);
   }
   Status checkpoint_cache_work(std::uint64_t units) {
-    std::lock_guard<std::recursive_mutex> lock(callback_metadata_mutex_);
-    const auto stopped = active_stop();
-    if (stopped != ErrorCode::Ok)
-      return Status{stopped, {}};
-    if (units > cache_remaining_)
-      return Status{ErrorCode::ResourceExhausted,
-                    "Result checkpoint cache work exhausted",
-                    FailureReason::WorkLimit,
-                    {FailureOrigin::Resource, FailureScope::Run}};
-    auto status = resources_.consume({units});
-    if (!status.ok())
-      return status;
-    cache_remaining_ -= units;
-    diagnostics_.dependency_cache_work += units;
-    return Status::success();
+    CacheWork work(*this);
+    return cache_state_.charge(units, callback_metadata_mutex_, work,
+                               diagnostics_.dependency_cache_work);
   }
   Result<std::optional<ResultCheckpoint>> checkpoint_before(
       std::size_t index, Actor& actor, std::uint32_t phase,
@@ -3533,9 +3364,9 @@ class StructuredExecution final
     if (!status.ok())
       return Answer(status);
     if (!phase)
-      return Answer(protocol("zero checkpoint phase"));
-    if (!cache_remaining_ || !checkpoint_shareable_[index] ||
-        actor.fallback_taint)
+      return Answer(protocol_failure("zero checkpoint phase"));
+    if (!cache_state_.remaining() || !checkpoint_shareable_[index] ||
+        actor.fallback.taint)
       return Answer(std::optional<ResultCheckpoint>{});
     Result<ResourceString> key(Status{ErrorCode::Internal, {}});
     ResultCheckpoint found;
@@ -3560,8 +3391,8 @@ class StructuredExecution final
         std::static_pointer_cast<const ResultCheckpointWitness>(found.witness_);
     if (witness->scope != key.value() || found.phase() != phase ||
         found.sequence() > before || !found.state().owned_by(resources_))
-      return Answer(protocol("Result checkpoint scope mismatch"));
-    if (witness->weight > cache_remaining_)
+      return Answer(protocol_failure("Result checkpoint scope mismatch"));
+    if (witness->weight > cache_state_.remaining())
       return Answer(std::optional<ResultCheckpoint>{});
     status = checkpoint_cache_work(witness->weight);
     if (!status.ok())
@@ -3570,7 +3401,7 @@ class StructuredExecution final
     for (const auto& entry : witness->needs) {
       const auto& [port, target, slot, roles] = entry.first;
       if (port >= inputs.size())
-        return Answer(protocol("invalid checkpoint input port"));
+        return Answer(protocol_failure("invalid checkpoint input port"));
       status = records_->bind_domain(inputs[port], target, slot,
                                      entry.second.shape());
       if (!status.ok())
@@ -3603,10 +3434,10 @@ class StructuredExecution final
     }
     for (const auto& [port, bundle] : witness->ancestry) {
       if (port >= inputs.size() || !bundle)
-        return Answer(protocol("invalid checkpoint ancestry"));
+        return Answer(protocol_failure("invalid checkpoint ancestry"));
       const auto* producer = std::get_if<PlanStepInput>(&inputs[port]);
       if (!producer)
-        return Answer(protocol("checkpoint producer became a source"));
+        return Answer(protocol_failure("checkpoint producer became a source"));
       status = records_->import_bundle(*bundle, producer->step_index);
       if (!status.ok())
         return Answer(status);
@@ -3628,12 +3459,12 @@ class StructuredExecution final
     if (!status.ok())
       return status;
     if (!phase || state.request_record_ || !state.owned_by(resources_))
-      return protocol("invalid Result checkpoint state");
+      return protocol_failure("invalid Result checkpoint state");
     auto descriptor = state.descriptor();
     if (!descriptor.ok())
       return descriptor.status();
-    if (!cache_remaining_ || !checkpoint_shareable_[index] ||
-        actor.fallback_taint)
+    if (!cache_state_.remaining() || !checkpoint_shareable_[index] ||
+        actor.fallback.taint)
       return Status::success();
     // Optional retention has its own allocation fence: a missed cache
     // admission cannot replace a successfully computed state with failure.
@@ -3787,7 +3618,7 @@ class StructuredExecution final
   }
   Result<std::string> shared_block_contract(std::size_t index,
                                             const ResultProgramPhase& phase) {
-    auto available = cache_remaining_;
+    auto available = cache_state_.remaining();
     Status admission;
     contract_internal::DependencyTemplateDigest hash(
         &available, [&](std::uint64_t count) {
@@ -3833,7 +3664,7 @@ class StructuredExecution final
     if (!admission.ok() && admission.code != ErrorCode::ResourceExhausted)
       return Result<std::string>(admission);
     if (key.empty())
-      cache_remaining_ = 0;
+      cache_state_.disable();
     return Result<std::string>(std::move(key));
   }
   Result<ResultRef> evaluate_block(
@@ -3850,9 +3681,9 @@ class StructuredExecution final
     if (!status.ok())
       return Answer(status);
     if (!kind || begin >= end || !compute)
-      return Answer(protocol("invalid Result block request"));
+      return Answer(protocol_failure("invalid Result block request"));
     if (incoming.request_record_)
-      return Answer(protocol("terminal Result cannot be block state"));
+      return Answer(protocol_failure("terminal Result cannot be block state"));
     status = result_block_state(incoming, resources_);
     if (!status.ok())
       return Answer(status);
@@ -3861,8 +3692,8 @@ class StructuredExecution final
     Value cached;
     // Object fields and I/O remain mandatory coordinator access. Optional
     // content hashing never loads them or starts production inside a callback.
-    if (blocks_ && checkpoint_shareable_[index] && !actor.fallback_taint &&
-        plan_.steps()[index].traits.cacheable && cache_remaining_ &&
+    if (blocks_ && checkpoint_shareable_[index] && !actor.fallback.taint &&
+        plan_.steps()[index].traits.cacheable && cache_state_.remaining() &&
         actor.results.empty() && actor.io.empty() &&
         incoming.resources().size() == 0) {
       ResourceAllocationScope optional_scope(resources_);
@@ -4006,7 +3837,7 @@ class StructuredExecution final
       const auto& spec = incoming.schema().tensors[0];
       if (cached.descriptor().element_type != spec.descriptor.element_type ||
           cached.descriptor().shape != spec.sample_shape())
-        return Answer(protocol("cached Result block state mismatch"));
+        return Answer(protocol_failure("cached Result block state mismatch"));
       // The copy contains no old source owners, associations or witness. The
       // current actor retains its current successful Needs independently.
       return unpack_block_state(cached, incoming.schema(), phase);
@@ -4027,12 +3858,12 @@ class StructuredExecution final
     if (!status.ok())
       return Answer(status);
     if (result.value().request_record_)
-      return Answer(protocol("terminal Result cannot be block state"));
+      return Answer(protocol_failure("terminal Result cannot be block state"));
     status = result_block_state(result.value(), resources_);
     if (!status.ok() || !result.value().schema().same_schema(incoming.schema()))
-      return Answer(status.ok()
-                        ? protocol("computed Result block state mismatch")
-                        : status);
+      return Answer(
+          status.ok() ? protocol_failure("computed Result block state mismatch")
+                      : status);
     const bool native_computed =
         actor.query.backend != Backend::Gpu ||
         (active_services() && active_services()->gpu_dispatches &&
@@ -4066,7 +3897,7 @@ class StructuredExecution final
                              std::uint64_t object = 0,
                              std::uint64_t revision = 0) {
     if (!bundle)
-      return protocol("input Result has no dependency ancestry");
+      return protocol_failure("input Result has no dependency ancestry");
     auto charged = consume(1 + actor.input_bundles.size());
     if (!charged.ok())
       return charged;
@@ -4122,7 +3953,7 @@ class StructuredExecution final
       if (const auto* source =
               std::get_if<PlanWorkflowInput>(&step.inputs[port]);
           source && bindings_[source->declaration_index].result.request_record_)
-        return protocol("terminal Result cannot be an operation input");
+        return protocol_failure("terminal Result cannot be an operation input");
       const auto& constraint = step.traits.input_schema[port];
       if (!constraint.scalar_bounds ||
           (actor.query.tensor_outputs && actor.query.tensor_outputs->empty() &&
@@ -4370,8 +4201,8 @@ class StructuredExecution final
       auto object = std::move(*ready.value());
       auto bundle = object.dependencies();
       if (!bundle)
-        return Answer(
-            protocol("shared Result has no captured dependency ancestry"));
+        return Answer(protocol_failure(
+            "shared Result has no captured dependency ancestry"));
       records_->set_cancellation(active_token());
       auto bound = records_->bind_result(PlanStepInput{index}, object);
       if (!bound.ok())
@@ -4380,7 +4211,7 @@ class StructuredExecution final
       if (!imported.ok())
         return Answer(imported);
       current->query.backend = current->shared.backend();
-      current->fallback_taint = current->shared.fallback_taint();
+      current->fallback.taint = current->shared.fallback_taint();
       diagnostics_.selected_backends[plan_.steps()[index].result_ref()] =
           current->query.backend;
       current->published = object;
@@ -4409,7 +4240,7 @@ class StructuredExecution final
         return Answer(current->service_failure->snapshot());
       }
       if (current->complete)
-        return Answer(protocol("requested result field is absent"));
+        return Answer(protocol_failure("requested result field is absent"));
       auto status = advance(index, *current);
       if (!status.ok())
         return Answer(status);
@@ -4426,7 +4257,7 @@ class StructuredExecution final
             &plan_.steps()[index].structured_metadata->inputs) {
       auto bundle = current->published.dependencies();
       if (!bundle)
-        return Answer(protocol("completed Result has no ancestry"));
+        return Answer(protocol_failure("completed Result has no ancestry"));
       records_->set_cancellation(active_token());
       auto imported = records_->import_bundle(*bundle, index);
       if (!imported.ok())
@@ -4473,8 +4304,8 @@ class StructuredExecution final
         return Result<ResultRef>(ready.status());
       if (ready.value()) {
         if (consumer)
-          consumer->fallback_taint |=
-              current->fallback_taint ||
+          consumer->fallback.taint |=
+              current->fallback.taint ||
               current->query.backend != plan_.steps()[index].backend;
         return Result<ResultRef>(std::move(*ready.value()));
       }
@@ -4507,10 +4338,10 @@ class StructuredExecution final
       const auto& object = bindings_.at(source->declaration_index).result;
       if (object.request_record_)
         return Result<ResultRef>(
-            protocol("terminal Result cannot be an operation input"));
+            protocol_failure("terminal Result cannot be an operation input"));
       if (!object.owned_by(resources_))
-        return Result<ResultRef>(
-            protocol("Result binding belongs to a different resource root"));
+        return Result<ResultRef>(protocol_failure(
+            "Result binding belongs to a different resource root"));
       return Result<ResultRef>(object);
     }
     auto ready = result_object(std::get<PlanStepInput>(input).step_index, need,
@@ -4553,8 +4384,8 @@ class StructuredExecution final
     auto retained = retain_input_bundle(consumer, input, *ready.value(), port);
     if (!retained.ok())
       return Answer(retained);
-    consumer.fallback_taint |=
-        cursor.producer->fallback_taint ||
+    consumer.fallback.taint |=
+        cursor.producer->fallback.taint ||
         cursor.producer->query.backend != plan_.steps()[index].backend;
     consumer.waiting.reset();
     cursor.producer.reset();
@@ -4590,7 +4421,8 @@ class StructuredExecution final
       if (!outside.ok())
         return Answer(outside.status());
       if (!outside.value().empty())
-        return Answer(protocol("tensor Need is outside published coverage"));
+        return Answer(
+            protocol_failure("tensor Need is outside published coverage"));
       ResultTensorInput grant;
       grant.result_ = std::move(*ready.value());
       grant.descriptor_ = descriptor.take_value();
@@ -4635,7 +4467,8 @@ class StructuredExecution final
                               65536, options_.dependencies.sets.maximum_boxes))
         return Answer(
             count.ok() && !count.value()
-                ? protocol("empty Result atom tensor Need has no source object")
+                ? protocol_failure(
+                      "empty Result atom tensor Need has no source object")
                 : Status{ErrorCode::ResourceExhausted,
                          "tensor Need atom count limit"});
       cursor.tensor_atoms.reserve(count.value());
@@ -4687,8 +4520,8 @@ class StructuredExecution final
       auto descriptor = ready.value()->descriptor();
       if (!descriptor.ok())
         return Answer(descriptor.status());
-      consumer.fallback_taint |=
-          source->fallback_taint ||
+      consumer.fallback.taint |=
+          source->fallback.taint ||
           source->query.backend != plan_.steps()[index].backend;
       cursor.tensor_pieces.push_back(
           {std::move(*ready.value()), descriptor.take_value(),
@@ -4749,50 +4582,14 @@ class StructuredExecution final
     return Status::success();
   }
   Result<ResultIoReply> io(const ResultIoRequest& request) {
-    using Answer = Result<ResultIoReply>;
-    auto charged = consume(1);
-    if (!charged.ok())
-      return Answer(charged);
-    if (const auto* read = std::get_if<ResultReadPlan>(&request)) {
-      auto ready =
-          read->load(options_.maximum_result_window_bytes, active_token());
-      return ready.ok() ? Answer(ResultIoReply{ready.take_value()})
-                        : Answer(ready.status());
-    }
-    if (const auto* write = std::get_if<ResultWritePlan>(&request)) {
-      auto applied = write->apply(active_token());
-      return applied.ok() ? Answer(ResultIoReply{std::monostate{}})
-                          : Answer(applied);
-    }
-    if (std::holds_alternative<ResultCreateTemporary>(request)) {
-      auto file = TemporaryStorage::create(resources_);
-      return file.ok() ? Answer(ResultIoReply{file.take_value()})
-                       : Answer(file.status());
-    }
-    if (const auto* read = std::get_if<ResultReadTemporary>(&request)) {
-      auto ready = read->storage.read(read->offset, read->bytes,
-                                      options_.maximum_result_window_bytes,
-                                      active_token());
-      return ready.ok() ? Answer(ResultIoReply{ready.take_value()})
-                        : Answer(ready.status());
-    }
-    if (const auto* write = std::get_if<ResultWriteTemporary>(&request)) {
-      if (!write->bytes)
-        return Answer(protocol("missing temporary write payload"));
-      auto storage = write->storage;
-      auto retained = resources_.reference(write->bytes);
-      if (!retained.ok())
-        return Answer(retained.status());
-      auto applied = storage.write(write->offset, retained.value()->bytes(),
-                                   active_token());
-      return applied.ok() ? Answer(ResultIoReply{std::monostate{}})
-                          : Answer(applied);
-    }
-    const auto& extend = std::get<ResultExtendTemporary>(request);
-    auto storage = extend.storage;
-    auto applied = storage.append_zeroed(extend.bytes, active_token());
-    return applied.ok() ? Answer(ResultIoReply{applied.value()})
-                        : Answer(applied.status());
+    const std::function<Status(std::uint64_t)> work = [this](auto n) {
+      return consume(n);
+    };
+    const std::function<CancellationToken()> token = [this] {
+      return active_token();
+    };
+    return execute_result_io(request, resources_,
+                             options_.maximum_result_window_bytes, work, token);
   }
   Status notify(Actor& actor) {
     if (!subscription_.enabled())
@@ -4834,569 +4631,113 @@ class StructuredExecution final
             break;
           }
       }
-      if (source && (source->fallback_taint ||
+      if (source && (source->fallback.taint ||
                      source->query.backend !=
                          plan_.steps()[producer->step_index].backend))
-        actor.fallback_taint = true;
+        actor.fallback.taint = true;
     }
   }
-  Status cache_facts(content_internal::Sha256& hash, const ResultRef& object,
-                     const ResultDescriptor& facts) {
-    auto charged =
-        checkpoint_cache_work(1 + object.schema().id.size() +
-                              facts.field_count() + facts.tensor_count());
-    if (!charged.ok())
-      return charged;
-    for (std::uint32_t slot = 0; slot < facts.tensor_count(); ++slot) {
-      const auto& coverage = facts.tensor_coverage(slot);
-      charged = checkpoint_cache_work(coverage.shape().size() +
-                                      coverage.boxes().size() *
-                                          (1 + 2 * coverage.shape().size()));
-      if (!charged.ok())
-        return charged;
+  struct CacheWork final : StructuredCacheWorkServices {
+    explicit CacheWork(StructuredExecution& owner) : owner(owner) {}
+    Status charge(std::uint64_t n) override {
+      return owner.checkpoint_cache_work(n);
     }
-    hash.integer(facts.sealed());
-    hash.integer(facts.field_count());
-    for (std::uint32_t field = 0; field < facts.field_count(); ++field)
-      hash.integer(facts.rows(field));
-    hash.integer(facts.tensor_count());
-    for (std::uint32_t slot = 0; slot < facts.tensor_count(); ++slot)
-      append_block_footprint(&hash, facts.tensor_coverage(slot));
-    hash.text(object.schema().id);
-    hash.integer(object.schema().version);
-    return Status::success();
+    CancellationToken cancellation() override { return owner.active_token(); }
+    ErrorCode stop() override { return owner.active_stop(); }
+    StructuredExecution& owner;
+  };
+  StructuredCacheContext cache_context() {
+    return {plan_,
+            bindings_,
+            templates_,
+            snapshot_,
+            options_.dependencies.sets,
+            result_cacheable_,
+            blocks_,
+            block_epoch_,
+            options_.maximum_result_window_bytes,
+            diagnostics_.dependency_cache_records_visited};
+  }
+  static StructuredCacheActorView cache_actor(Actor& actor) {
+    return {actor.query,
+            actor.cache,
+            actor.tensors,
+            actor.results,
+            actor.history,
+            actor.input_facts,
+            actor.input_obligations,
+            actor.input_bundles,
+            actor.io,
+            actor.published,
+            actor.quality,
+            actor.fallback.taint,
+            actor.busy};
   }
   Result<ResourceString> supplied_cache_facts(const Actor& actor) {
-    content_internal::Sha256 hash;
-    hash.text("photospider.result-cache-direct-facts.v2");
-    for (const auto& input : actor.results) {
-      auto status = checkpoint_cache_work(1);
-      if (!status.ok())
-        return Result<ResourceString>(status);
-      auto facts = input.second.descriptor(false);
-      if (!facts.ok())
-        return Result<ResourceString>(facts.status());
-      hash.integer(input.first);
-      status = cache_facts(hash, input.second, facts.value());
-      if (!status.ok())
-        return Result<ResourceString>(status);
-    }
-    for (const auto& input : actor.tensors) {
-      auto status =
-          checkpoint_cache_work(1 + input.second.samples_.boxes().size());
-      if (!status.ok())
-        return Result<ResourceString>(status);
-      hash.integer(input.first.first);
-      hash.integer(input.first.second);
-      hash.integer(input.second.pieces_.size());
-      if (input.second.pieces_.empty()) {
-        status =
-            cache_facts(hash, input.second.result_, input.second.descriptor_);
-        if (!status.ok())
-          return Result<ResourceString>(status);
-      } else {
-        for (const auto& piece : input.second.pieces_) {
-          status = cache_facts(hash, piece.result, piece.descriptor);
-          if (!status.ok())
-            return Result<ResourceString>(status);
-          status = checkpoint_cache_work(
-              1 + piece.samples.boxes().size() *
-                      (1 + 2 * piece.samples.shape().size()));
-          if (!status.ok())
-            return Result<ResourceString>(status);
-          append_block_footprint(&hash, piece.samples);
-        }
-      }
-      append_block_footprint(&hash, input.second.samples_);
-    }
-    return Result<ResourceString>(
-        ResourceString(hash.finish(), ResourceAllocator<char>(resources_)));
+    CacheWork work(*this);
+    return cache_state_.supplied_facts(actor.results, actor.tensors,
+                                       options_.maximum_result_window_bytes,
+                                       work);
   }
   Result<ResourceString> source_cache_digest(
       const ResourceVector<SourceObservation>& sources) {
-    content_internal::Sha256 hash;
-    hash.text("photospider.result-cache-sources.v1");
-    auto initial = checkpoint_cache_work(1 + sources.size());
-    if (!initial.ok())
-      return Result<ResourceString>(initial);
-    for (const auto& source : sources) {
-      auto status =
-          checkpoint_cache_work(bindings_.size() + source.input.size() +
-                                source.samples.boxes().size());
-      if (!status.ok())
-        return Result<ResourceString>(status);
-      auto found = std::find_if(bindings_.begin(), bindings_.end(),
-                                [&](const auto& binding) {
-                                  return std::string_view(binding.name) ==
-                                         std::string_view(source.input);
-                                });
-      if (found == bindings_.end())
-        return Result<ResourceString>(Status{ErrorCode::NotFound, {}});
-      hash.text(source.input);
-      hash.integer(static_cast<std::uint32_t>(source.target));
-      hash.integer(source.slot);
-      hash.integer(source.roles);
-      append_block_footprint(&hash, source.samples);
-      if (!found->result.valid())
-        return Result<ResourceString>(Status{ErrorCode::NotFound, {}});
-      auto descriptor = found->result.descriptor(false);
-      if (!descriptor.ok())
-        return Result<ResourceString>(descriptor.status());
-      if (source.target == ResultSupportTarget::Descriptor) {
-        auto charged =
-            checkpoint_cache_work(found->result.schema().canonical_size() + 1 +
-                                  descriptor.value().field_count() +
-                                  descriptor.value().tensor_count());
-        if (!charged.ok())
-          return Result<ResourceString>(charged);
-        hash.text(found->result.schema().canonical());
-        charged = cache_facts(hash, found->result, descriptor.value());
-        if (!charged.ok())
-          return Result<ResourceString>(charged);
-        continue;
-      }
-      auto count = source.samples.element_count();
-      if (!count.ok())
-        return Result<ResourceString>(count.status());
-      if (source.target == ResultSupportTarget::Field) {
-        auto width = found->result.schema().row_bytes(source.slot);
-        if (!width.ok() ||
-            width.value() > options_.maximum_result_window_bytes ||
-            (width.value() && count.value() > UINT64_MAX / width.value()))
-          return Result<ResourceString>(
-              Status{ErrorCode::ResourceExhausted, {}});
-        status = checkpoint_cache_work(count.value() * width.value());
-        if (!status.ok())
-          return Result<ResourceString>(status);
-        status = source.samples.visit(
-            [&](const auto& at) {
-              auto active = checkpoint_cache_work(0);
-              if (!active.ok())
-                return active;
-              auto plan = found->result.prepare_read(descriptor.value(),
-                                                     source.slot, at[0], 1);
-              if (!plan.ok())
-                return plan.status();
-              auto bytes = plan.value().load(
-                  options_.maximum_result_window_bytes, active_token());
-              if (!bytes.ok())
-                return bytes.status();
-              hash.bytes(bytes.value()->bytes().data(),
-                         bytes.value()->bytes().size());
-              return Status::success();
-            },
-            count.value(), active_token());
-      } else if (source.target == ResultSupportTarget::Tensor) {
-        if (source.slot >= found->result.schema().tensors.size())
-          return Result<ResourceString>(Status{ErrorCode::NotFound, {}});
-        const auto width = Value::element_size(found->result.schema()
-                                                   .tensors[source.slot]
-                                                   .descriptor.element_type);
-        status = checkpoint_cache_work(count.value());
-        if (!status.ok())
-          return Result<ResourceString>(status);
-        for (const auto& box : source.samples.boxes()) {
-          auto window = found->result.acquire_tensor(
-              descriptor.value(), source.slot, box, active_token());
-          if (!window.ok())
-            return Result<ResourceString>(window.status());
-          auto samples = Footprint::from_regions(source.samples.shape(), {box});
-          if (!samples.ok())
-            return Result<ResourceString>(samples.status());
-          status = samples.value().visit(
-              [&](const auto& at) {
-                auto active = checkpoint_cache_work(0);
-                if (!active.ok())
-                  return active;
-                auto run = window.value().row_run(at);
-                if (!run.ok())
-                  return run.status();
-                hash.bytes(run.value().data, width);
-                return Status::success();
-              },
-              count.value(), active_token());
-          if (!status.ok())
-            break;
-        }
-      } else {
-        return Result<ResourceString>(Status{ErrorCode::NotFound, {}});
-      }
-      if (!status.ok())
-        return Result<ResourceString>(status);
-    }
-    auto active = checkpoint_cache_work(0);
-    if (!active.ok())
-      return Result<ResourceString>(active);
-    return Result<ResourceString>(
-        ResourceString(hash.finish(), ResourceAllocator<char>(resources_)));
-  }
-  std::string completed_cache_key(std::size_t index, const Actor& actor) {
-    content_internal::Sha256 hash;
-    hash.text("photospider.completed-result.v1");
-    hash.text(templates_[index]);
-    hash.integer(actor.query.output_index);
-    hash.integer(static_cast<std::uint32_t>(plan_.steps()[index].backend));
-    hash.integer(actor.query.tensor_slot);
-    hash.integer(actor.query.tensor_outputs.has_value());
-    if (actor.query.tensor_outputs)
-      append_block_footprint(&hash, *actor.query.tensor_outputs);
-    return hash.finish();
+    CacheWork work(*this);
+    return cache_state_.source_digest(cache_context(), sources, work);
   }
   void retain_cache_need(std::size_t index, Actor& actor,
                          const ResultProgramNeed& need) noexcept {
-    if (!blocks_ || !result_cacheable_[index] || actor.cache_disabled)
-      return;
-    try {
-      auto count = 1 + need.tensors.size() + need.results.size();
-      if (actor.cache_replay.size() >= blocks_->dependency_metadata_limit() ||
-          !checkpoint_cache_work(count).ok()) {
-        actor.cache_disabled = true;
-        actor.cache_replay.clear();
-        return;
-      }
-      auto facts = supplied_cache_facts(actor);
-      if (!facts.ok()) {
-        actor.cache_disabled = true;
-        actor.cache_replay.clear();
-        return;
-      }
-      StructuredCacheNeed saved;
-      saved.request.tensors = need.tensors;
-      saved.request.results = need.results;
-      saved.facts = facts.take_value();
-      actor.cache_replay.push_back(std::move(saved));
-    } catch (...) {
-      actor.cache_disabled = true;
-      actor.cache_replay.clear();
-    }
-  }
-  Result<ResourceVector<SourceObservation>> completed_source_proof(
-      std::size_t index, const ResultRef& result) {
-    auto bundle = result.dependencies();
-    if (!bundle)
-      return Result<ResourceVector<SourceObservation>>(
-          Status{ErrorCode::NotFound, {}});
-    auto limits = options_.dependencies.sets;
-    limits.maximum_work = std::min(limits.maximum_work, cache_remaining_);
-    limits.consume_work = [&](std::uint64_t n) {
-      return checkpoint_cache_work(n);
-    };
-    limits.cancellation = active_token();
-    auto charged = checkpoint_cache_work(1 + plan_.input_declarations().size() +
-                                         snapshot_.size() + bindings_.size());
-    if (!charged.ok())
-      return Result<ResourceVector<SourceObservation>>(charged);
-    for (const auto& declaration : plan_.input_declarations()) {
-      const auto rank =
-          declaration.result_schema &&
-                  !declaration.result_schema->tensors.empty()
-              ? declaration.result_schema->tensors[0].batch_axes.size() +
-                    declaration.result_schema->tensors[0]
-                        .descriptor.shape.size()
-              : 0;
-      charged = checkpoint_cache_work(1 + declaration.name.size() + rank);
-      if (!charged.ok())
-        return Result<ResourceVector<SourceObservation>>(charged);
-    }
-    DependencyRecords proof(plan_, std::string(snapshot_), limits);
-    for (std::size_t i = 0; i < bindings_.size(); ++i)
-      if (bindings_[i].result.valid()) {
-        const auto& schema = bindings_[i].result.schema();
-        charged = checkpoint_cache_work(1 + schema.fields.size() +
-                                        schema.tensors.size());
-        if (!charged.ok())
-          return Result<ResourceVector<SourceObservation>>(charged);
-        for (const auto& tensor : schema.tensors) {
-          charged = checkpoint_cache_work(2 + tensor.descriptor.shape.size() +
-                                          tensor.batch_axes.size());
-          if (!charged.ok())
-            return Result<ResourceVector<SourceObservation>>(charged);
-        }
-        auto status =
-            proof.bind_result(PlanWorkflowInput{i}, bindings_[i].result);
-        if (!status.ok())
-          return Result<ResourceVector<SourceObservation>>(status);
-      }
-    auto imported = proof.import_bundle(*bundle, index, [&](std::uint64_t n) {
-      return checkpoint_cache_work(n);
-    });
-    if (!imported.ok())
-      return Result<ResourceVector<SourceObservation>>(imported);
-    return proof.source_observations();
+    CacheWork work(*this);
+    cache_state_.record_need(index, cache_actor(actor), cache_context(), need,
+                             work);
   }
   void retain_cached_result(std::size_t index, Actor& actor) noexcept {
-    if (!blocks_ || !result_cacheable_[index] || actor.cache_disabled ||
-        actor.fallback_taint || actor.quality ||
-        actor.query.backend != plan_.steps()[index].backend ||
-        !cache_remaining_ || blocks_->epoch() != block_epoch_)
-      return;
-    try {
-      auto sources = completed_source_proof(index, actor.published);
-      if (!sources.ok())
-        return;
-      auto content = source_cache_digest(sources.value());
-      if (!content.ok())
-        return;
-      auto charged = checkpoint_cache_work(1 + actor.cache_replay.size() +
-                                           sources.value().size());
-      if (!charged.ok())
-        return;
-      auto manifest = std::allocate_shared<StructuredCacheManifest>(
-          ResourceAllocator<StructuredCacheManifest>(resources_));
-      manifest->content = content.take_value();
-      manifest->sources = sources.take_value();
-      manifest->replay = actor.cache_replay;
-      manifest->obligations = actor.input_obligations;
-      manifest->bundle = actor.published.dependencies();
-      manifest->result = actor.published;
-      manifest->backend = actor.query.backend;
-      manifest->epoch = block_epoch_;
-      manifest->metadata =
-          1 + manifest->replay.size() + manifest->sources.size();
-      const auto maximum = blocks_->dependency_metadata_limit();
-      const auto add_metadata = [&](std::uint64_t count) {
-        if (count > maximum || manifest->metadata > maximum - count)
-          return false;
-        manifest->metadata += count;
-        return checkpoint_cache_work(count).ok();
-      };
-      ResourceVector<const void*> relation_owners;
-      ResourceVector<const DependencyRecord*> pending;
-      std::set<const DependencyRecord*, std::less<const DependencyRecord*>,
-               ResourceAllocator<const DependencyRecord*>>
-          seen;
-      if (!add_metadata(manifest->bundle->roots.size()))
-        return;
-      std::set<const TerminalResultRequest*,
-               std::less<const TerminalResultRequest*>,
-               ResourceAllocator<const TerminalResultRequest*>>
-          requests;
-      for (const auto& record : manifest->bundle->roots)
-        pending.push_back(record.get());
-      while (!pending.empty()) {
-        if (!checkpoint_cache_work(1).ok())
-          return;
-        const auto* record = pending.back();
-        pending.pop_back();
-        if (!seen.insert(record).second)
-          continue;
-        ++diagnostics_.dependency_cache_records_visited;
-        if (record->request && requests.insert(record->request.get()).second) {
-          if (!add_metadata(1 + record->request->identity.size() +
-                            record->request->manifest.size()))
-            return;
-          for (const auto& need : record->request->manifest)
-            if (!add_metadata(need.tags.size() * 3 +
-                              need.samples.shape().size() +
-                              need.samples.boxes().size() *
-                                  (1 + 2 * need.samples.shape().size())))
-              return;
-        }
-
-        if (!add_metadata(1 + record->identity.size() + record->scope.size() +
-                          record->input_queries.size() +
-                          record->samples.shape().size() +
-                          record->samples.boxes().size() *
-                              (1 + 2 * record->samples.shape().size()) +
-                          record->routes.size() + record->upstream.size() +
-                          record->upstream_ports.size() +
-                          record->domains.size() + record->manifest.size()))
-          return;
-        for (const auto& input : record->input_queries)
-          if (!add_metadata(input.identity.size()))
-            return;
-        for (const auto& domain : record->domains)
-          if (!add_metadata(domain.shape.size()))
-            return;
-        for (const auto& need : record->manifest)
-          if (!add_metadata(need.tags.size() * 3 + need.samples.shape().size() +
-                            need.samples.boxes().size() *
-                                (1 + 2 * need.samples.shape().size())))
-            return;
-        if (record->certificate &&
-            !add_metadata(record->certificate->storage_entries()))
-          return;
-        for (const auto& relation : {record->relation, record->descriptor}) {
-          auto weight = relation.cache_metadata(
-              relation_owners, maximum - manifest->metadata,
-              [&](std::uint64_t n) { return checkpoint_cache_work(n); });
-          if (!weight.ok())
-            return;
-          manifest->metadata += weight.value();
-        }
-        for (const auto& child : record->upstream)
-          pending.push_back(child.get());
-      }
-      for (const auto& source : manifest->sources)
-        if (!add_metadata(source.input.size() + source.samples.shape().size() +
-                          source.samples.boxes().size() *
-                              (1 + 2 * source.samples.shape().size())))
-          return;
-      auto obligations = manifest->obligations.cache_metadata(
-          relation_owners, maximum - manifest->metadata,
-          [&](std::uint64_t n) { return checkpoint_cache_work(n); });
-      if (!obligations.ok())
-        return;
-      manifest->metadata += obligations.value();
-      for (const auto& log : manifest->replay) {
-        manifest->metadata += log.facts.size() + log.request.results.size() +
-                              log.request.tensors.size();
-        for (const auto& tensor : log.request.tensors)
-          manifest->metadata +=
-              tensor.samples.boxes().size() + tensor.samples.shape().size();
-      }
-      if (manifest->metadata > blocks_->dependency_metadata_limit() ||
-          !checkpoint_cache_work(manifest->metadata).ok())
-        return;
-      const auto key = completed_cache_key(index, actor);
-      content_internal::Sha256 storage;
-      storage.text("photospider.completed-result-payload.v1");
-      storage.text(key);
-      storage.text(manifest->content);
-      for (const auto& log : manifest->replay)
-        storage.text(log.facts);
-      manifest->key = ResourceString("result/" + storage.finish(),
-                                     ResourceAllocator<char>(resources_));
-      blocks_->put_structured(key, std::move(manifest), [&](std::uint64_t n) {
-        return checkpoint_cache_work(n);
-      });
-    } catch (...) {
-    }
+    CacheWork work(*this);
+    cache_state_.store_completed(index, cache_actor(actor), cache_context(),
+                                 work);
   }
   Result<bool> reuse_cached_result(std::size_t index, Actor& actor) {
-    if (!blocks_ || !plan_.steps()[index].output_result_schema ||
-        !result_cacheable_[index] || !cache_remaining_ ||
-        actor.query.output.result_schema->id == "photospider.path_set")
-      return Result<bool>(false);
-    bool replayed = false;
-    struct InitialState {
-      ResultTensorInputs tensors;
-      ResultObjectInputs results;
-      ResultNeedHistory history;
-      ResultInputFacts facts;
-      ResultRelation obligations;
-      ResourceVector<Actor::InputBundle> bundles;
-    };
-    std::optional<InitialState> initial;
-    const auto reset = [&]() {
-      actor.busy = false;
-      actor.cache_replay.clear();
-      actor.io.clear();
-      actor.tensors.clear();
-      actor.results.clear();
-      actor.history.clear();
-      actor.input_facts.clear();
-      actor.input_bundles.clear();
-      actor.input_obligations = {};
-      if (initial) {
-        actor.tensors = std::move(initial->tensors);
-        actor.results = std::move(initial->results);
-        actor.history = std::move(initial->history);
-        actor.input_facts = std::move(initial->facts);
-        actor.input_obligations = std::move(initial->obligations);
-        actor.input_bundles = std::move(initial->bundles);
+    struct Host final : StructuredCacheReplayHost {
+      Host(StructuredExecution& owner, std::size_t index, Actor& actor)
+          : owner(owner), index(index), actor(actor) {}
+      Status charge(std::uint64_t n) override {
+        return owner.checkpoint_cache_work(n);
       }
-      return Status::success();
-    };
-    try {
-      auto charged = checkpoint_cache_work(templates_[index].size() + 1);
-      if (!charged.ok())
-        return charged.code == ErrorCode::ResourceExhausted
-                   ? Result<bool>(false)
-                   : Result<bool>(charged);
-      auto candidates = blocks_->structured_candidates(
-          completed_cache_key(index, actor), block_epoch_);
-      if (candidates.empty())
-        return Result<bool>(false);
-      for (const auto& candidate : candidates) {
-        auto content = source_cache_digest(candidate->sources);
-        if (!content.ok()) {
-          if (content.status().code == ErrorCode::Cancelled ||
-              content.status().code == ErrorCode::Stale)
-            return Result<bool>(content.status());
-          continue;
-        }
-        if (content.value() != candidate->content)
-          continue;
-        charged = checkpoint_cache_work(
-            1 + 64 * actor.tensors.size() + actor.results.size() +
-            actor.history.size() + actor.input_facts.size());
-        if (!charged.ok())
-          return charged.code == ErrorCode::ResourceExhausted
-                     ? Result<bool>(false)
-                     : Result<bool>(charged);
-        initial.emplace(InitialState{
-            actor.tensors, actor.results, actor.history, actor.input_facts,
-            actor.input_obligations, actor.input_bundles});
-        bool matched = true;
-        replayed = true;
-        actor.busy = true;
-        for (const auto& log : candidate->replay) {
-          auto status = replay_need(index, actor, log.request);
-          if (!status.ok()) {
-            actor.busy = false;
-            if (detaching_)
-              reset();
-            if (status.code == ErrorCode::Cancelled ||
-                status.code == ErrorCode::Stale)
-              return Result<bool>(status);
-            matched = false;
-            break;
-          }
-          auto facts = supplied_cache_facts(actor);
-          if (!facts.ok() || facts.value() != log.facts) {
-            matched = false;
-            break;
-          }
-        }
-        actor.busy = false;
-        if (actor.fallback_taint) {
-          actor.cache_disabled = true;
-          matched = false;
-        }
-        if (!matched) {
-          break;
-        }
-        if (!blocks_->structured_verified(candidate))
-          break;
-        ResourceVector<std::uint64_t> association{
-            ResourceAllocator<std::uint64_t>(resources_)};
-        for (const auto& facts : actor.input_facts)
-          association.push_back(facts.first.second);
-        auto rebound = candidate->result.rebind_cached(
-            actor.query.semantic_key, association, active_token(),
-            [&](std::uint64_t n) { return checkpoint_cache_work(n); });
+      CancellationToken cancellation() override { return owner.active_token(); }
+      ErrorCode stop() override { return owner.active_stop(); }
+      Status supply(const ResultProgramNeed& need) override {
+        return owner.replay_need(index, actor, need);
+      }
+      bool detaching() const override { return owner.detaching_; }
+      Result<bool> adopt(
+          const StructuredCacheManifest& candidate,
+          const ResourceVector<std::uint64_t>& association) override {
+        auto rebound = candidate.result.rebind_cached(
+            actor.query.semantic_key, association, owner.active_token(),
+            [&](std::uint64_t n) { return charge(n); });
         if (!rebound.ok()) {
           if (rebound.status().code == ErrorCode::Cancelled ||
               rebound.status().code == ErrorCode::Stale)
             return Result<bool>(rebound.status());
-          break;
+          return Result<bool>(false);
         }
-        actor.input_obligations = candidate->obligations;
-        actor.query.backend = candidate->backend;
-        auto status =
-            publish_object(index, actor, {rebound.take_value(), true}, true);
+        actor.input_obligations = candidate.obligations;
+        actor.query.backend = candidate.backend;
+        auto status = owner.publish_object(index, actor,
+                                           {rebound.take_value(), true}, true);
         if (!status.ok())
           return Result<bool>(status);
-        ++diagnostics_.cache_hits;
-        diagnostics_.selected_backends[plan_.steps()[index].result_ref()] =
+        ++owner.diagnostics_.cache_hits;
+        owner.diagnostics_
+            .selected_backends[owner.plan_.steps()[index].result_ref()] =
             actor.query.backend;
         return Result<bool>(true);
       }
-      if (!replayed)
-        return Result<bool>(false);
-      auto scalar = reset();
-      return scalar.ok() ? Result<bool>(false) : Result<bool>(scalar);
-    } catch (const std::bad_alloc&) {
-      if (!replayed)
-        return Result<bool>(false);
-      try {
-        auto status = reset();
-        return status.ok() ? Result<bool>(false) : Result<bool>(status);
-      } catch (const std::bad_alloc&) {
-        return Result<bool>(Status{ErrorCode::ResourceExhausted, {}});
-      }
-    }
+      StructuredExecution& owner;
+      std::size_t index;
+      Actor& actor;
+    } host(*this, index, actor);
+    return cache_state_.try_reuse(index, cache_actor(actor), cache_context(),
+                                  host);
   }
   Status supply_need_step(std::size_t index, Actor& actor,
                           const ResultProgramNeed& need, NeedCursor& cursor,
@@ -5431,38 +4772,16 @@ class StructuredExecution final
     }
     const auto inputs = need.results.size() + need.tensors.size();
     if (!replay && inputs > 1 && cursor.next < inputs) {
-      if (cursor.requests.empty()) {
-        cursor.requests = ResourceVector<std::shared_ptr<NeedCursor>>(
-            ResourceAllocator<std::shared_ptr<NeedCursor>>(resources_));
-        cursor.requests.reserve(inputs);
-        for (std::size_t i = 0; i < inputs; ++i) {
-          auto progress = std::allocate_shared<NeedCursor>(
-              ResourceAllocator<NeedCursor>(resources_));
-          progress->initialized = true;
-          progress->next = i;
-          progress->total = cursor.total;
-          cursor.requests.push_back(std::move(progress));
-        }
-      }
-      for (std::size_t tried = 0; tried < inputs; ++tried) {
-        const auto position = cursor.turn++ % inputs;
-        auto& progress = *cursor.requests[position];
-        if (progress.next != position)
-          continue;
-        // Supplying one entry reuses its own producer/footprint/atom state.
-        auto status = supply_one_need_step(index, actor, need, progress, false);
-        if (!status.ok())
-          return status;
-        if (progress.next != position) {
-          ++cursor.supplied;
-          ++progress_;
-          if (cursor.supplied == inputs) {
-            cursor.next = inputs;
-            cursor.requests.clear();
-            actor.waiting.reset();
-          }
-          return Status::success();
-        }
+      auto advanced =
+          cursor.advance_inputs(inputs, resources_, [&](NeedCursor& progress) {
+            return supply_one_need_step(index, actor, need, progress, false);
+          });
+      if (!advanced.ok())
+        return advanced.status();
+      if (advanced.value()) {
+        ++progress_;
+        if (cursor.supplied == inputs)
+          actor.waiting.reset();
       }
       return Status::success();
     }
@@ -5614,7 +4933,8 @@ class StructuredExecution final
       };
       auto outside = closed.subtract(capability.samples_, set_limits());
       if (!outside.ok() || !outside.value().empty())
-        return fail(protocol("tensor Need is outside supplied coverage"));
+        return fail(
+            protocol_failure("tensor Need is outside supplied coverage"));
       if (capability.pieces_.empty()) {
         auto checked = validate(capability.result_, capability.descriptor_,
                                 capability.samples_);
@@ -5668,7 +4988,7 @@ class StructuredExecution final
     }
     if (cursor.next < cursor.total) {
       const auto& request = need.io[cursor.next - tensors_end];
-      actor.retry_safe = false;
+      actor.fallback.retry_safe = false;
       auto ready = io(request);
       if (!ready.ok())
         return fail(ready.status());
@@ -5692,187 +5012,34 @@ class StructuredExecution final
   }
   Status validate_publication(std::size_t index, Actor& actor,
                               const ResultPublication& published) {
-    const auto& step = plan_.steps()[index];
-    if (!step.output_result_schema || !published.result.owned_by(resources_) ||
-        !published.result.schema().same_schema(*step.output_result_schema) ||
-        !published.result.matches_scope(actor.query.semantic_key) ||
-        (actor.published.valid() &&
-         actor.published.object_id() != published.result.object_id()))
-      return protocol("structured publication identity mismatch");
-    published.result.bind_producer(actor.node_id);
-    auto descriptor = published.result.descriptor(published.complete);
-    if (!descriptor.ok() ||
-        descriptor.value().revision() <= actor.published_revision ||
-        descriptor.value().sealed() != published.complete)
-      return protocol("invalid descriptor publication");
-    auto facts_work = consume(actor.input_facts.size());
-    if (!facts_work.ok())
-      return facts_work;
-    ResourceVector<std::uint64_t> association{
-        ResourceAllocator<std::uint64_t>(resources_)};
-    association.reserve(actor.input_facts.size());
-    for (const auto& input : actor.input_facts)
-      association.push_back(input.first.second);
-    auto retained = published.result.retain_association(
-        association, [&](auto n) { return consume(n); });
-    if (!retained.ok())
-      return retained;
-    for (uint32_t slot = 0; slot < published.result.schema().tensors.size();
-         ++slot) {
-      auto relation = published.result.tensor_relation(slot);
-      if (!relation.ok())
-        return relation.status();
-      for (uint32_t port = 0; port < actor.query.inputs.size(); ++port) {
-        const auto& schema = actor.query.inputs[port].result_schema;
-        if (!schema)
-          continue;
-        for (uint32_t member = 0; member < schema->tensors.size(); ++member) {
-          const auto& tensor = schema->tensors[member];
-          const auto channel = input_internal::tuple_channel_axis(
-              tensor.descriptor, tensor.facets);
-          if (!channel)
-            continue;
-          auto witness = relation.value();
-          if (step.traits.outputs[0].region_rule ==
-              OperationRegionRule::Whole) {
-            ResourceVector<ResultRelation> obligations{
-                ResourceAllocator<ResultRelation>(resources_)};
-            obligations.push_back(witness);
-            for (const auto& history : actor.history) {
-              auto charged = consume(1);
-              if (!charged.ok())
-                return charged;
-              if (std::get<0>(history.first) != port ||
-                  std::get<1>(history.first) != ResultSupportTarget::Tensor ||
-                  std::get<2>(history.first) != member ||
-                  !(std::get<3>(history.first) & 4U))
-                continue;
-              for (const auto& box : history.second.boxes()) {
-                auto scratch = resources_.reserve(
-                    ResourceCapacity::host(8 * sizeof(ResultMappedAxis),
-                                           8 * sizeof(ResultMappedAxis)));
-                if (!scratch.ok())
-                  return scratch.status();
-                auto lease = scratch.take_value();
-                std::vector<ResultMappedAxis> axes;
-                axes.reserve(8);
-                for (const auto dimension : box.dimensions())
-                  axes.push_back({-1, dimension.offset, 0, dimension.extent});
-                const auto& shape =
-                    published.result.schema().tensors[slot].sample_shape();
-                auto obligation = ResultRelation::mapped(
-                    resources_, shape, Region::whole(shape),
-                    tensor.sample_shape(), axes,
-                    {port, 4, 0, 0, ResultSupportTarget::Tensor, member});
-                if (!obligation.ok())
-                  return obligation.status();
-                obligations.push_back(obligation.take_value());
-              }
-            }
-            while (obligations.size() > 1) {
-              ResourceVector<ResultRelation> next{
-                  ResourceAllocator<ResultRelation>(resources_)};
-              for (size_t i = 0; i < obligations.size(); i += 2) {
-                if (i + 1 == obligations.size()) {
-                  next.push_back(obligations[i]);
-                  continue;
-                }
-                auto joined = ResultRelation::unite(
-                    resources_, {obligations[i], obligations[i + 1]});
-                if (!joined.ok())
-                  return joined.status();
-                next.push_back(joined.take_value());
-              }
-              obligations = std::move(next);
-            }
-            witness = obligations.front();
-          }
-          const auto& output_tensor = published.result.schema().tensors[slot];
-          const auto output_shape = output_tensor.sample_shape();
-          uint32_t grouped_axes = 0;
-          for (size_t axis =
-                   output_shape.size() - output_tensor.atomic_trailing_axes;
-               axis < output_shape.size(); ++axis)
-            grouped_axes |= 1U << axis;
-          const auto output_channel = input_internal::tuple_channel_axis(
-              output_tensor.descriptor, output_tensor.facets);
-          if (output_channel)
-            grouped_axes |=
-                1U << (*output_channel + output_tensor.batch_axes.size());
-          auto checked = witness.validate_tuple_closure(
-              descriptor.value().tensor_coverage(slot), port, member,
-              tensor.sample_shape(), *channel + tensor.batch_axes.size(),
-              grouped_axes, set_limits());
-          if (!checked.ok())
-            return checked;
-        }
+    struct Services final : PublicationValidationServices {
+      explicit Services(StructuredExecution& owner) : owner(owner) {}
+      Status consume(std::uint64_t n) override { return owner.consume(n); }
+      Status operation_work(std::uint64_t n) override {
+        return owner.operation_work(n);
       }
-    }
-    if (step.traits.outputs[0].output_schema.scalar_bounds) {
-      auto checked = input_internal::validate_port_tensor(
-          step.traits.outputs[0].output_schema, published.result,
-          descriptor.value(), actor.query.output, ErrorCode::OperationFailed,
-          active_token(), [&] { return active_stop(); });
-      if (!checked.ok())
-        return checked;
-    }
-    for (uint32_t slot = 0; slot < published.result.schema().tensors.size();
-         ++slot) {
-      auto checked = input_internal::validate_tensor_samples(
-          published.result, descriptor.value(), slot,
-          descriptor.value().tensor_coverage(slot), resources_,
-          ErrorCode::OperationFailed, active_token(),
-          [&] { return active_stop(); },
-          [&](uint64_t n) { return operation_work(n); });
-      if (!checked.ok()) {
-        if (checked.detail.origin == FailureOrigin::Unspecified &&
-            checked.code == ErrorCode::OperationFailed)
-          checked.detail.origin = FailureOrigin::Domain;
-        checked.detail.node_id = actor.node_id;
-        return checked;
+      Status run_work(std::uint64_t n) override {
+        return owner.admit_run_work(n);
       }
-    }
-    auto validated = validate_representation(
-        published.result, resources_, options_.maximum_result_window_bytes,
-        active_token(), [&](std::uint64_t count) {
-          const auto stopped = active_stop();
-          if (stopped != ErrorCode::Ok)
-            return Status{stopped, {}};
-          return admit_run_work(count);
-        });
-    if (!validated.ok()) {
-      if ((validated.detail.origin == FailureOrigin::Unspecified ||
-           validated.detail.origin == FailureOrigin::Domain ||
-           validated.detail.origin == FailureOrigin::Schema) &&
-          validated.code != ErrorCode::ResourceExhausted &&
-          validated.code != ErrorCode::Cancelled &&
-          validated.code != ErrorCode::Stale) {
-        if (validated.detail.origin == FailureOrigin::Unspecified)
-          validated.detail.origin = FailureOrigin::Schema;
-        validated.detail.scope = FailureScope::Association;
-        validated.detail.association = published.result.object_id();
-      }
-      return validated;
-    }
-    const bool request_record =
-        plan_.steps()[index].traits.outputs[0].observation_kind ==
-        ObservationKind::RequestRecord;
-    if (request_record && !published.complete)
-      return protocol("terminal Result requires complete publication");
-    if (request_record && actor.query.tensor_outputs &&
-        descriptor.value().tensor_coverage(actor.query.tensor_slot) !=
-            *actor.query.tensor_outputs)
-      return retire(
-          actor,
-          protocol("terminal Result coverage differs from captured query"));
-    if (published.complete && actor.query.tensor_outputs) {
-      auto outside = actor.query.tensor_outputs->subtract(
-          descriptor.value().tensor_coverage(actor.query.tensor_slot),
-          set_limits());
-      if (!outside.ok() || !outside.value().empty())
-        return protocol("image publication omitted captured demand");
-    }
-    return Status::success();
+      ErrorCode stop() override { return owner.active_stop(); }
+      CancellationToken cancellation() override { return owner.active_token(); }
+      FootprintLimits set_limits() override { return owner.set_limits(); }
+      StructuredExecution& owner;
+    } services(*this);
+    PublicationValidationView view{plan_.steps()[index],
+                                   actor.query,
+                                   actor.published,
+                                   actor.published_revision,
+                                   actor.node_id,
+                                   actor.input_facts,
+                                   actor.history,
+                                   resources_,
+                                   options_.maximum_result_window_bytes,
+                                   services};
+    bool retire_actor = false;
+    auto checked =
+        ResultPublicationValidator::validate(view, published, retire_actor);
+    return retire_actor ? retire(actor, checked) : checked;
   }
   Result<ResultRef> stage_publication(std::size_t index, Actor& actor,
                                       const ResultPublication& published) {
@@ -5921,7 +5088,7 @@ class StructuredExecution final
       for (std::uint32_t field = 0; field < facts.field_count(); ++field) {
         const auto before = previous ? previous->rows(field) : 0;
         if (facts.rows(field) < before)
-          return retire(actor, protocol("Result rows regressed"));
+          return retire(actor, protocol_failure("Result rows regressed"));
         add(facts.rows(field) - before);
       }
       for (std::uint32_t slot = 0; slot < facts.tensor_count(); ++slot) {
@@ -5959,8 +5126,8 @@ class StructuredExecution final
                      item.backend == actor.query.backend;
             });
         if (timing == diagnostics_.operation_timings.end())
-          return retire(actor,
-                        protocol("missing Result publication diagnostics"));
+          return retire(actor, protocol_failure(
+                                   "missing Result publication diagnostics"));
         add_computed_elements(&timing->computed_elements,
                               &timing->computed_elements_saturated, elements,
                               saturated);
@@ -5974,19 +5141,19 @@ class StructuredExecution final
         actor.observation.rank)
       validation_domains_.at(domain_key(actor)).semantic_terminal = true;
     actor.shared.publish(actor.published, actor.complete, actor.query.backend,
-                         actor.fallback_taint, actor.quality);
+                         actor.fallback.taint, actor.quality);
     if (send_notification)
       status = notify(actor);
     if (!status.ok())
       return status;
     if (actor.complete) {
-      actor.attempt_records.reset();
+      actor.fallback.records.reset();
       actor.input_bundles.clear();
       if (!from_cache)
         retain_cached_result(index, actor);
       if (actor.joint)
         actor.joint->members[actor.joint_slot].done->store(true);
-      actor.cache_replay.clear();
+      actor.cache.replay.clear();
       actor.continuation = {};
       actor.results.clear();
       actor.tensors.clear();
@@ -6128,11 +5295,11 @@ class StructuredExecution final
         CallbackContext scope(this, current.get(), services, current->shared,
                               optional, depth, joint);
         if (in_discovery) {
-          auto failed = protocol("checkpoint inside GPU discovery");
+          auto failed = protocol_failure("checkpoint inside GPU discovery");
           observe_failure(failed);
           return Answer(failed);
         }
-        actor.retry_safe = false;
+        actor.fallback.retry_safe = false;
         auto found = checkpoint_before(index, actor, kind, before);
         if (found.ok() && found.value()) {
           auto charged = work(actor.input_facts.size());
@@ -6167,11 +5334,11 @@ class StructuredExecution final
         CallbackContext scope(this, current.get(), services, current->shared,
                               optional, depth, joint);
         if (in_discovery) {
-          auto failed = protocol("checkpoint inside GPU discovery");
+          auto failed = protocol_failure("checkpoint inside GPU discovery");
           observe_failure(failed);
           return failed;
         }
-        actor.retry_safe = false;
+        actor.fallback.retry_safe = false;
         published = checkpoint_publish(index, actor, kind, sequence, state);
       } catch (const std::bad_alloc&) {
         published = Status{ErrorCode::ResourceExhausted, {}};
@@ -6191,7 +5358,8 @@ class StructuredExecution final
         CallbackContext context(this, current.get(), services, current->shared,
                                 optional, depth, joint);
         if (in_discovery || in_block) {
-          auto failed = protocol("nested Result pure block or GPU discovery");
+          auto failed =
+              protocol_failure("nested Result pure block or GPU discovery");
           observe_failure(failed);
           return Answer(failed);
         }
@@ -6200,7 +5368,7 @@ class StructuredExecution final
           ~Scope() { value = false; }
         } scope{in_block};
         in_block = true;
-        actor.retry_safe = false;
+        actor.fallback.retry_safe = false;
         auto result = evaluate_block(index, actor, phase, kind, begin, end,
                                      mode, incoming, compute);
         if (!result.ok())
@@ -6237,13 +5405,14 @@ class StructuredExecution final
           auto result = [&]() -> Answer {
             try {
               if (in_block || in_discovery || !phase.gpu)
-                return Answer(protocol("invalid Result GPU discovery scope"));
+                return Answer(
+                    protocol_failure("invalid Result GPU discovery scope"));
               struct Scope {
                 bool& value;
                 ~Scope() { value = false; }
               } scope{in_discovery};
               in_discovery = true;
-              actor.retry_safe = false;
+              actor.fallback.retry_safe = false;
               const auto before = active_services()->gpu_dispatches();
               auto needs = ResultNativeScope::discover(
                   phase.query, capacity, candidates, compute, work);
@@ -6289,8 +5458,8 @@ class StructuredExecution final
       auto response = polled.take_value();
       auto* need = std::get_if<ResultProgramNeed>(&response);
       if (!need) {
-        observe_failure(
-            protocol("GPU discovery requires supply before completion"));
+        observe_failure(protocol_failure(
+            "GPU discovery requires supply before completion"));
       } else {
         auto charged = work(discovered_count + need->tensors.size());
         const auto maximum = std::min<std::uint64_t>(
@@ -6390,7 +5559,7 @@ class StructuredExecution final
     ActiveScope producer_scope(*this, actor.shared);
     auto current = actor.self.lock();
     if (!current)
-      return protocol("structured Actor owner is absent");
+      return protocol_failure("structured Actor owner is absent");
     struct ExceptionDrain {
       Actor& actor;
       int exceptions = std::uncaught_exceptions();
@@ -6423,7 +5592,8 @@ class StructuredExecution final
       if (grouped.value())
         return Status::success();
       if (step.traits.joint_contract == 2)
-        return retire(actor, protocol("Result atom has no admitted joint"));
+        return retire(actor,
+                      protocol_failure("Result atom has no admitted joint"));
       if (actor.scalar_restart) {
         auto ready = prepare_scalars(index, actor);
         if (!ready.ok())
@@ -6455,19 +5625,23 @@ class StructuredExecution final
     }
     if (std::holds_alternative<StartPhase>(actor.phase)) {
       auto dispatched = finish_actor(current);
-      auto started = std::move(std::get<StartPhase>(actor.phase));
-      actor.phase.emplace<std::monostate>();
-      started.dispatched = std::move(dispatched);
+      auto started = actor.take_start(std::move(dispatched));
       return complete_start(index, current, std::move(started));
     }
-    if (auto* need = std::get_if<NeedPhase>(&actor.phase)) {
+    if (std::holds_alternative<NeedPhase>(actor.phase)) {
       if (!actor.busy) {
         actor.busy = true;
         actor.driver = std::this_thread::get_id();
       }
       Status supplied;
       try {
-        supplied = supply_need_step(index, actor, need->request, need->cursor);
+        supplied = actor.advance_need(
+            [&](const auto& request, auto& cursor) {
+              return supply_need_step(index, actor, request, cursor);
+            },
+            [&](const auto& request) {
+              retain_cache_need(index, actor, request);
+            });
       } catch (const std::bad_alloc&) {
         return retire(actor, Status{ErrorCode::ResourceExhausted, {}});
       } catch (...) {
@@ -6475,10 +5649,6 @@ class StructuredExecution final
       }
       if (!supplied.ok())
         return supplied;
-      if (need->cursor.complete()) {
-        retain_cache_need(index, actor, need->request);
-        actor.phase.emplace<std::monostate>();
-      }
       return Status::success();
     }
     Status status;
@@ -6486,16 +5656,14 @@ class StructuredExecution final
       auto charged = consume(1);
       if (!charged.ok())
         return retire(actor, charged);
-      if (actor.polls >=
+      auto admitted = actor.begin_poll(
           std::min(step.traits.outputs[0].maximum_dependency_stages,
-                   options_.dependencies.maximum_stages))
-        return retire(actor, Status{ErrorCode::ResourceExhausted,
-                                    "structured stage limit"});
-      ++actor.polls;
+                   options_.dependencies.maximum_stages),
+          actor.failure->load(), "structured stage limit");
+      if (!admitted.ok())
+        return retire(actor, admitted);
       actor.busy = true;
       actor.driver = std::this_thread::get_id();
-      actor.phase.emplace<PollPhase>();
-      std::get<PollPhase>(actor.phase).sticky = actor.failure->load();
       status = submit_actor(
           current,
           [this, index, current] {
@@ -6518,8 +5686,7 @@ class StructuredExecution final
     }
     if (status.ok())
       status = finish_actor(current);
-    auto completed = std::move(std::get<PollPhase>(actor.phase));
-    actor.phase.emplace<std::monostate>();
+    auto completed = actor.take_poll();
     return complete_poll(index, current, std::move(status),
                          std::move(completed));
   }
@@ -6541,19 +5708,10 @@ class StructuredExecution final
                       {FailureOrigin::Protocol, FailureScope::Group}};
     const auto& failed = status.ok() ? polled.status() : status;
     const auto operation_failure = actor.failure->load();
-    const bool retryable_host_failure =
-        host_failure.ok() ||
-        plugin_internal::FailureLatch::retryable_backend_failure(host_failure);
-    if (plugin_internal::FailureLatch::retryable_backend_failure(failed) &&
-        actor.query.backend == Backend::Gpu && step.traits.supports_cpu &&
-        step.traits.allows_cpu_fallback && step.traits.deterministic &&
-        step.traits.side_effect_free && actor.retry_safe &&
-        !actor.native_dispatches && !actor.published.valid() &&
-        sticky == ErrorCode::Ok &&
-        (operation_failure == ErrorCode::Ok ||
-         operation_failure == ErrorCode::BackendUnavailable) &&
-        retryable_host_failure &&
-        actor.service_failure->backend_retry_allowed() &&
+    if (actor.fallback.can_retry_poll(
+            step.traits, actor.query.backend, failed, host_failure,
+            *actor.service_failure, actor.native_dispatches,
+            actor.published.valid(), sticky, operation_failure) &&
         active_stop() == ErrorCode::Ok) {
       // The retry is a new attempt. Escaped old capabilities retain their old
       // failure owners, while CPU preparation receives fresh sticky records.
@@ -6584,25 +5742,48 @@ class StructuredExecution final
       actor.history.clear();
       actor.input_facts.clear();
       actor.input_bundles.clear();
-      if (!actor.attempt_records)
-        return retire(actor, protocol("missing Result attempt records"));
+      if (!actor.fallback.records)
+        return retire(actor,
+                      protocol_failure("missing Result attempt records"));
       auto restore_work = consume(1 + actors_.size());
       if (!restore_work.ok())
         return retire(actor, restore_work);
-      records_ = std::move(actor.attempt_records);
+      records_ = std::move(actor.fallback.records);
       for (const auto& weak : actors_) {
         auto peer = weak.lock();
-        if (!peer || peer.get() == &actor || peer->complete ||
-            peer->terminal != ErrorCode::Ok)
+        if (!peer || peer.get() == &actor || peer->terminal != ErrorCode::Ok)
           continue;
+        if (peer->complete) {
+          // Another named root may finish after this attempt's baseline was
+          // forked. Preserve its captured ancestry, without restoring the
+          // speculative producer rows requested only by the failed attempt.
+          if (std::find(requested_roots_.begin(), requested_roots_.end(),
+                        peer) == requested_roots_.end() ||
+              !peer->published.valid())
+            continue;
+          auto bundle = peer->published.dependencies();
+          if (!bundle)
+            return retire(actor,
+                          protocol_failure("completed root has no ancestry"));
+          auto bound = records_->bind_result(PlanStepInput{peer->index},
+                                             peer->published);
+          if (!bound.ok())
+            return retire(actor, bound);
+          auto imported = records_->import_bundle(
+              *bundle, peer->index,
+              [&](std::uint64_t n) { return consume(n); });
+          if (!imported.ok())
+            return retire(actor, imported);
+          continue;
+        }
         auto imported = import_input_bundles(*peer);
         if (!imported.ok())
           return retire(actor, imported);
       }
       actor.input_obligations = {};
-      actor.cache_replay.clear();
-      actor.cache_disabled = true;
-      actor.fallback_taint = true;
+      actor.cache.replay.clear();
+      actor.cache.disabled = true;
+      actor.fallback.taint = true;
       actor.query.backend = Backend::Cpu;
       auto ready = prepare_scalars(index, actor);
       if (!ready.ok())
@@ -6643,7 +5824,7 @@ class StructuredExecution final
   std::vector<ExecutionBinding> bindings_;
   std::shared_ptr<OperationRegistry> operations_;
   ResourceBudget resources_;
-  PayloadCapture payload_capture_;
+  core_internal::PayloadCapture payload_capture_;
   ResourceBindings bindings_resources_;
   ExecutionOptions options_;
   bool atom_outcomes_;
@@ -6689,7 +5870,7 @@ class StructuredExecution final
   ResourceString snapshot_;
   ResourceString snapshot_input_;
   std::atomic<std::uint64_t> remaining_;
-  std::uint64_t cache_remaining_;
+  StructuredResultCache cache_state_;
   bool optional_replay_ = false;
   bool rollback_possible_ = false;
   ResourceVector<std::weak_ptr<Actor>> actors_;
@@ -6722,7 +5903,6 @@ class StructuredExecution final
   ResourceVector<bool> shareable_closure_, checkpoint_shareable_,
       result_cacheable_;
 
-  ResourceMap<std::shared_ptr<ResultCheckpointScope>> checkpoint_scopes_;
   ExecutionDiagnostics diagnostics_;
   std::unique_ptr<DependencyRecords> records_;
 };

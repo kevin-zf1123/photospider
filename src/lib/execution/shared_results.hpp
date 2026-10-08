@@ -16,8 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/resource_observation.hpp"
 #include "core/stored_failure.hpp"
-#include "execution/resource_observation.hpp"
 #include "photospider/data/quality.hpp"
 #include "photospider/data/result.hpp"
 #include "photospider/plugin/operation_types.hpp"
@@ -309,9 +309,9 @@ class SharedResults final {
   }
   // Counter owners outlive an epoch without retaining its waiters or driver.
   struct ProducerPayload {
-    PayloadObservation own;
+    core_internal::PayloadObservation own;
     mutable std::mutex mutex;
-    std::shared_ptr<PayloadObservation> joint;
+    std::shared_ptr<core_internal::PayloadObservation> joint;
     std::uint64_t peak() const noexcept {
       std::lock_guard<std::mutex> lock(mutex);
       return std::max(own.peaks().first, joint ? joint->peaks().first : 0);
@@ -382,20 +382,23 @@ class SharedResults final {
     bool valid() const noexcept { return waiter_ != nullptr; }
     bool producer() const noexcept { return producer_; }
     CancellationToken token() const { return token_; }
-    std::shared_ptr<PayloadObservation> payload_observation() const {
+    std::shared_ptr<core_internal::PayloadObservation> payload_observation()
+        const {
       if (!waiter_ || !producer_)
         return {};
       auto payload = waiter_->entry->payload;
       std::lock_guard<std::mutex> lock(payload->mutex);
       return payload->joint
                  ? payload->joint
-                 : std::shared_ptr<PayloadObservation>(payload, &payload->own);
+                 : std::shared_ptr<core_internal::PayloadObservation>(
+                       payload, &payload->own);
     }
     std::shared_ptr<ProducerPayload> active_payload() const {
       return waiter_ && active_epoch_ ? waiter_->entry->payload : nullptr;
     }
     void observe_joint_payload(
-        const std::shared_ptr<PayloadObservation>& observation) const {
+        const std::shared_ptr<core_internal::PayloadObservation>& observation)
+        const {
       if (!waiter_ || !producer_)
         return;
       auto payload = waiter_->entry->payload;

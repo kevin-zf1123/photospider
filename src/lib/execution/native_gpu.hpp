@@ -8,8 +8,8 @@
 #include <vector>
 
 #include "execution/native_gpu_metadata.hpp"
+#include "photospider/core/cancellation.hpp"
 #include "photospider/data/storage.hpp"
-#include "photospider/execution/cancellation.hpp"
 #include "photospider/plugin/native_gpu_api.h"
 
 namespace ps::gpu_internal {

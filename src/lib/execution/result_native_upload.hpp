@@ -6,8 +6,8 @@
 #include <string_view>
 #include <utility>
 
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/value.hpp"
-#include "photospider/execution/resource_allocator.hpp"
 
 namespace ps::execution_internal {
 class NativeRunUploads;

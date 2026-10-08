@@ -11,8 +11,8 @@
 #include <string>
 #include <utility>
 
+#include "photospider/core/resources.hpp"
 #include "photospider/data/storage.hpp"
-#include "photospider/execution/resources.hpp"
 
 namespace ps::execution_internal {
 class MemoryReservation;

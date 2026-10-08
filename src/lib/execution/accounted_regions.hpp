@@ -5,8 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/region.hpp"
-#include "photospider/execution/resource_allocator.hpp"
 
 namespace ps::execution_internal {
 // Public Regions use ordinary vectors. This private bridge admits their
