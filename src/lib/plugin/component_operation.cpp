@@ -835,7 +835,6 @@ Result<OperationDefinition> make_component_operation(
   traits.workspace_bytes = operation == Op::Labels ? 8192 : 4096;
   auto& out = traits.outputs[0];
   out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 2;
   out.continuation_bytes = sizeof(State);
   out.maximum_dependency_stages = 1000000;
   auto schema = operation == Op::Labels ? components_schema(spec)

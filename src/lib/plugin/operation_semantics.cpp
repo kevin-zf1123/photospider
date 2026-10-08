@@ -7,8 +7,8 @@
 #include <utility>
 #include <vector>
 
-#include "data/input_validation.hpp"
 #include "plugin/expression.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::contract_internal {
 namespace {

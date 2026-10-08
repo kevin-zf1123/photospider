@@ -27,6 +27,11 @@
 
 namespace ps {
 class PreparedOperation;
+namespace execution_internal {
+class ResultCacheProof;
+template <class Producer>
+struct StructuredNeedCursor;
+}  // namespace execution_internal
 /** @brief Execution-scoped limits for structured Result continuations.
  * These bounds are separate from compile-time traits and Root resource limits.
  */
@@ -183,6 +188,9 @@ class PHOTOSPIDER_API ResultTensorInput final {
 
  private:
   friend class execution_internal::StructuredExecution;
+  friend class execution_internal::ResultCacheProof;
+  template <class>
+  friend struct execution_internal::StructuredNeedCursor;
   friend class FragmentAtlasPlan;
   friend struct ResultProgramPhase;
   friend class plugin_internal::ResultPayloadBound;

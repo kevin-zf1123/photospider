@@ -18,7 +18,7 @@
 #include <utility>
 #include <vector>
 
-#include "data/input_validation.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::expression_internal {
 namespace {

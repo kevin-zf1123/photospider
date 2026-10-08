@@ -7,12 +7,12 @@
 #include <utility>
 #include <vector>
 
-#include "data/input_validation.hpp"
 #include "execution/result_callback_scope.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "photospider/plugin/result_program.hpp"
 #include "plugin/failure_latch.hpp"
 #include "plugin/operation_exception.hpp"
+#include "plugin/port_validation.hpp"
 #include "plugin/result_need_validation.hpp"
 #include "plugin/result_payload_bound.hpp"
 

@@ -16,14 +16,14 @@
 #include <utility>
 #include <vector>
 
-#include "data/input_validation.hpp"
+#include "core/utf8_validation.hpp"
 #include "execution/result_callback_scope.hpp"
 #include "plugin/builtin_operations.hpp"
 #include "plugin/operation_exception.hpp"
 #include "plugin/operation_resources.hpp"
+#include "plugin/port_validation.hpp"
 #include "plugin/result_payload_bound.hpp"
 #include "plugin/result_plugin.hpp"
-#include "plugin/utf8_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
 #include "plugin/library_test_hooks.hpp"
@@ -100,7 +100,7 @@ bool empty_tensor_query(const ResultProgramQuery& query) {
  * @note Unicode normalization is intentionally outside operation identity.
  */
 bool valid_key(const std::string& key) noexcept {
-  return plugin_internal::valid_utf8_key(key);
+  return core_internal::valid_utf8_key(key);
 }
 
 /**
@@ -381,16 +381,13 @@ Status validate_selected_traits(const OperationTraits& traits) {
                           traits.outputs[0].fixed_output_shape.end(),
                           [](std::uint64_t extent) { return extent == 0U; }))
           : traits.outputs[0].fixed_output_shape.empty();
-  if (traits.workspace_input_multiplier > 16 || traits.version != 24U ||
-      traits.outputs[0].dependency_version != 2 ||
+  if (traits.workspace_input_multiplier > 16 || traits.version != 25U ||
       (!traits.supports_cpu && !traits.supports_gpu) || !known_shape ||
       !known_region ||
       (traits.share_blocks_across_outputs &&
        (!traits.deterministic || !traits.side_effect_free ||
-        traits.outputs[0].dependency_version != 2 ||
         traits.outputs[0].observation_kind != ObservationKind::Atomic ||
-        traits.outputs[0].regional_atomic ||
-        traits.outputs[0].static_dependency_pieces)) ||
+        traits.outputs[0].regional_atomic)) ||
       (traits.allows_cpu_fallback &&
        (!traits.supports_gpu || !traits.supports_cpu)) ||
       (traits.cacheable &&
@@ -478,9 +475,6 @@ Status validate_traits(const OperationTraits& traits) {
     auto status = validate_selected_traits(selected.value());
     if (!status.ok())
       return status;
-    if (output.dependency_version != traits.outputs[0].dependency_version)
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "outputs must share an execution protocol");
   }
   return Status::success();
 }
@@ -638,7 +632,6 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
   const Status traits_status = validate_traits(definition.traits);
   if (!traits_status.ok())
     return traits_status;
-  const bool structured = definition.traits.outputs[0].dependency_version == 2;
   if (!valid_key(definition.key) ||
       definition.traits.requires_metadata_specialization !=
           (static_cast<bool>(definition.specialize_metadata) ||
@@ -653,7 +646,7 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
           (definition.traits.joint_contract != 0) ||
       definition.traits.joint_contract > 2 ||
       (definition.start_result_joint &&
-       (!structured || !definition.traits.joint_contract ||
+       (!definition.traits.joint_contract ||
         (definition.traits.joint_contract == 1 &&
          definition.traits.outputs.size() < 2) ||
         !definition.traits.joint_continuation_bytes ||
@@ -901,7 +894,7 @@ OperationRegistry::prepare_operation(
         auto& metadata = specialization.metadata;
         if (specialization.input_indices) {
           if (output.region_rule != OperationRegionRule::Whole ||
-              output.dependency_version != 2 || traits.supports_gpu)
+              traits.supports_gpu)
             return Answer(
                 Status{ErrorCode::InvalidArgument,
                        "specialized input projection requires CPU Whole"});
@@ -917,7 +910,6 @@ OperationRegistry::prepare_operation(
 
         if (output.result_schema || metadata.result_schema) {
           if (!output.result_schema || !metadata.result_schema ||
-              output.dependency_version != 2 ||
               output.output_schema.kind != OperationPortKind::Result ||
               (!output.output_schema.result_schema_id.empty() &&
                (output.result_schema->id != metadata.result_schema->id ||
@@ -929,7 +921,6 @@ OperationRegistry::prepare_operation(
               specialization.preserve_output_views ||
               specialization.requires_input_views ||
               specialization.maximum_output_payload_bytes ||
-              specialization.static_dependency_pieces ||
               (specialization.data_movement != DataMovementKind::None &&
                specialization.data_movement !=
                    DataMovementKind::BitwiseMapped) ||
@@ -979,8 +970,6 @@ OperationRegistry::prepare_operation(
         output.requires_input_views = specialization.requires_input_views;
         output.maximum_output_payload_bytes =
             specialization.maximum_output_payload_bytes;
-        output.static_dependency_pieces =
-            std::move(specialization.static_dependency_pieces);
         output.data_movement = specialization.data_movement;
         output.data_movement_view_policy =
             specialization.data_movement_view_policy;
@@ -1142,8 +1131,6 @@ Result<ResultProgramQuery> OperationRegistry::prepare_result_query(
   try {
     if (!definition->start_result ||
         query.output_index >= definition->traits.outputs.size() ||
-        definition->traits.outputs[query.output_index].dependency_version !=
-            2 ||
         query.semantic_key.empty() || query.semantic_key.size() > 4096 ||
         !query.page_bytes)
       return Answer(
@@ -1175,10 +1162,15 @@ Result<ResultProgramQuery> OperationRegistry::prepare_result_query(
     if (!expected.ok())
       return Answer(expected.status());
     const auto& metadata = expected.value();
-    if (input_internal::structural_image_metadata(metadata) ||
-        input_internal::structural_image_metadata(query.output) ||
+    if (input_internal::structural_image_metadata(metadata.descriptor,
+                                                  metadata.facets) ||
+        input_internal::structural_image_metadata(query.output.descriptor,
+                                                  query.output.facets) ||
         std::any_of(query.inputs.begin(), query.inputs.end(),
-                    input_internal::structural_image_metadata))
+                    [](const auto& input) {
+                      return input_internal::structural_image_metadata(
+                          input.descriptor, input.facets);
+                    }))
       return Answer(Status{ErrorCode::TypeMismatch,
                            "image structured output requires Result schema"});
     if (!metadata.result_schema || !query.output.result_schema ||
@@ -1482,16 +1474,18 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
   }
   try {
     if (!definition->start_result ||
-        query.output_index >= definition->traits.outputs.size() ||
-        definition->traits.outputs[query.output_index].dependency_version !=
-            2 ||
-        !failure || query.semantic_key.empty() ||
-        query.semantic_key.size() > 4096 || !query.page_bytes)
+        query.output_index >= definition->traits.outputs.size() || !failure ||
+        query.semantic_key.empty() || query.semantic_key.size() > 4096 ||
+        !query.page_bytes)
       return Answer(
           Status{ErrorCode::InvalidArgument, "invalid compiled result start"});
-    if (input_internal::structural_image_metadata(query.output) ||
+    if (input_internal::structural_image_metadata(query.output.descriptor,
+                                                  query.output.facets) ||
         std::any_of(query.inputs.begin(), query.inputs.end(),
-                    input_internal::structural_image_metadata))
+                    [](const auto& input) {
+                      return input_internal::structural_image_metadata(
+                          input.descriptor, input.facets);
+                    }))
       return Answer(Status{ErrorCode::TypeMismatch,
                            "image structured output requires Result schema"});
     auto prepared = query.prepared;
@@ -1503,8 +1497,7 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
     if (!sealed.ok())
       return Answer(sealed);
     const auto& resolved = prepared->traits();
-    if (query.output_index >= resolved.outputs.size() ||
-        resolved.outputs[query.output_index].dependency_version != 2)
+    if (query.output_index >= resolved.outputs.size())
       return Answer(Status{ErrorCode::Stale,
                            "compiled Result preparation protocol mismatch"});
     // Metadata and static validation were checked by Compiler. The context

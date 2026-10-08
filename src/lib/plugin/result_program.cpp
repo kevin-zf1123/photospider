@@ -7,13 +7,13 @@
 #include <vector>
 
 #include "data/affine_view.hpp"
-#include "data/input_validation.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_window_access.hpp"
 #include "execution/result_native.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "plugin/failure_latch.hpp"
 #include "plugin/operation_exception.hpp"
+#include "plugin/port_validation.hpp"
 #include "plugin/result_payload_bound.hpp"
 
 namespace ps {

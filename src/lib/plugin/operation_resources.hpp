@@ -3,7 +3,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/plugin/operation_types.hpp"
 
 namespace ps::plugin_internal {

@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-#include "data/input_validation.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps {
 namespace {
@@ -489,7 +489,6 @@ Result<OperationDefinition> make_statistics_operation(
   traits.workspace_bytes = 16384;
   auto& out = traits.outputs[0];
   out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 2;
   out.continuation_bytes = sizeof(State);
   out.maximum_dependency_stages = kStatisticsMaximumStages;
   out.result_schema = schema.take_value();

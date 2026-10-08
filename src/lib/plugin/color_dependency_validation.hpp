@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "data/dependency_metadata.hpp"
-#include "data/input_validation.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::dependency_internal {
 // ColorArray validation is a per-observation certificate obligation. A fetch
@@ -55,8 +55,8 @@ inline Status validate_color_needs(const std::vector<OperationMetadata>& inputs,
         validation = joined.take_value();
       }
     }
-    auto closure =
-        input_internal::validation_closure(inputs[port], observed, limits);
+    auto closure = input_internal::validation_closure(
+        inputs[port].descriptor, inputs[port].facets, observed, limits);
     if (!closure.ok())
       return closure.status();
     auto missing = closure.value().subtract(validation, limits);

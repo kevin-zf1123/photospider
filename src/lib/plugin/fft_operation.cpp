@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-#include "data/input_validation.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps {
 namespace {
@@ -848,7 +848,6 @@ Result<OperationDefinition> make_fft_operation(Op operation,
   traits.workspace_bytes = 4096;
   auto& out = traits.outputs[0];
   out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 2;
   out.continuation_bytes = sizeof(State);
   out.maximum_dependency_stages = 1000000;
   auto schema = operation == Op::InverseReal ? fft_spatial_schema(spectrum)

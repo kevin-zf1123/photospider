@@ -9,8 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/utf8_validation.hpp"
 #include "photospider/plugin/data_provider_api.h"
-#include "plugin/utf8_validation.hpp"
 
 #if defined(PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS)
 #include "plugin/library_test_hooks.hpp"
@@ -34,7 +34,7 @@ namespace {
  * @note Key normalization remains provider/application policy.
  */
 bool valid_schema_key(const std::string& key) noexcept {
-  return plugin_internal::valid_utf8_key(key);
+  return core_internal::valid_utf8_key(key);
 }
 
 /**

@@ -4,8 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "photospider/core/cancellation.hpp"
 #include "photospider/core/status.hpp"
-#include "photospider/execution/cancellation.hpp"
 
 namespace ps::expression_internal {
 enum class Kind : std::uint8_t {

@@ -7,9 +7,9 @@
 #include <utility>
 #include <vector>
 
-#include "data/input_validation.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "plugin/operation_semantics.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps {
 namespace {
@@ -46,15 +46,12 @@ Result<OperationTraits> resolve_operation_traits(
     return Result<OperationTraits>(status);
   auto result = traits;
   if (std::any_of(traits.outputs.begin(), traits.outputs.end(),
-                  [](const auto& output) {
-                    return output.dependency_version != 2 ||
-                           !output.result_schema;
-                  }) ||
+                  [](const auto& output) { return !output.result_schema; }) ||
       std::any_of(traits.input_schema.begin(), traits.input_schema.end(),
                   [](const auto& input) {
                     return input.kind != OperationPortKind::Result;
                   }) ||
-      count > 1024 || traits.version != 24)
+      count > 1024 || traits.version != 25)
     return Result<OperationTraits>(invalid("invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
     if (traits.input_schema.size() != traits.input_count + 1 ||
@@ -96,8 +93,7 @@ Result<OperationMetadata> infer_operation_output(
   if (t.requires_metadata_specialization)
     return Result<OperationMetadata>(invalid(
         "operation template requires registry metadata specialization"));
-  if (t.version != 24 || t.outputs.size() != 1 ||
-      t.outputs[0].dependency_version != 2 || !t.outputs[0].result_schema)
+  if (t.version != 25 || t.outputs.size() != 1 || !t.outputs[0].result_schema)
     return Result<OperationMetadata>(
         invalid("select one output for singleton inference"));
   const auto mismatch = [](const char* message) {
@@ -228,7 +224,7 @@ Status validate_operation_contract(const OperationTraits& t) {
   if (t.outputs.size() != 1)
     return invalid("select one output contract");
   const auto& selected = t.outputs[0];
-  if (selected.dependency_version != 2 || !selected.result_schema ||
+  if (!selected.result_schema ||
       std::any_of(t.input_schema.begin(), t.input_schema.end(),
                   [](const auto& input) {
                     return input.kind != OperationPortKind::Result;
@@ -244,17 +240,14 @@ Status validate_operation_contract(const OperationTraits& t) {
     return invalid("unknown data movement view policy");
   if ((selected.data_movement != DataMovementKind::None ||
        selected.data_movement_view_policy != DataMovementViewPolicy::Auto) &&
-      (selected.dependency_version != 2 || !selected.result_schema ||
+      (!selected.result_schema ||
        selected.data_movement != DataMovementKind::BitwiseMapped))
     return invalid("bitwise movement requires a mapped Result continuation");
   const bool staged_atomic =
-      selected.region_rule == OperationRegionRule::Dependency &&
-      selected.dependency_version == 2;
-  const bool whole = selected.region_rule == OperationRegionRule::Whole &&
-                     selected.dependency_version == 2;
+      selected.region_rule == OperationRegionRule::Dependency;
+  const bool whole = selected.region_rule == OperationRegionRule::Whole;
   if (t.cpu_staged_tiles &&
       (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
-       selected.dependency_version != 2 ||
        (selected.region_rule != OperationRegionRule::Whole &&
         selected.region_rule != OperationRegionRule::Dependency)))
     return invalid("CPU stages require a CPU-only Result continuation");
@@ -268,13 +261,6 @@ Status validate_operation_contract(const OperationTraits& t) {
   if (selected.requires_input_views &&
       (!whole || !selected.preserve_output_views))
     return invalid("original input views require CPU Whole view output");
-  if (t.outputs[0].static_dependency_pieces &&
-      (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
-       t.outputs[0].observation_kind != ObservationKind::Atomic ||
-       t.outputs[0].region_rule != OperationRegionRule::Dependency ||
-       t.outputs[0].dependency_version != 1))
-    return invalid(
-        "static mapping requires CPU singleton/regional Atomic execution");
   if (t.outputs[0].maximum_output_payload_bytes &&
       (!t.supports_cpu || t.supports_gpu || !(staged_atomic || whole) ||
        t.outputs[0].requires_dense_output))
@@ -282,11 +268,10 @@ Status validate_operation_contract(const OperationTraits& t) {
         "explicit output payload bound requires a CPU Whole or staged view");
 
   const bool whole_result =
-      selected.dependency_version == 2 && whole && !t.joint_contract &&
+      whole && !t.joint_contract &&
       selected.observation_kind == ObservationKind::Atomic &&
       selected.failure_delivery == FailureDelivery::RequestFailureOnly;
-  if (selected.dependency_version && !whole_result &&
-      (!t.deterministic || !t.side_effect_free))
+  if (!whole_result && (!t.deterministic || !t.side_effect_free))
     return invalid(
         "regional programs require deterministic side-effect-free behavior");
   if ((t.outputs[0].observation_kind != ObservationKind::Atomic &&
@@ -294,34 +279,22 @@ Status validate_operation_contract(const OperationTraits& t) {
       (t.outputs[0].failure_delivery != FailureDelivery::RequestFailureOnly &&
        t.outputs[0].failure_delivery != FailureDelivery::PerAtomOutcome) ||
       (t.outputs[0].failure_delivery == FailureDelivery::PerAtomOutcome &&
-       (t.outputs[0].observation_kind != ObservationKind::Atomic ||
-        !t.outputs[0].dependency_version)) ||
-      t.outputs[0].dependency_version > 2 ||
-      (((t.outputs[0].dependency_version != 0) !=
-        (t.outputs[0].region_rule == OperationRegionRule::Dependency)) &&
-       !(t.outputs[0].dependency_version == 2 &&
-         t.outputs[0].region_rule == OperationRegionRule::Whole)) ||
-      (t.outputs[0].dependency_version == 0 &&
-       (t.outputs[0].continuation_bytes ||
-        t.outputs[0].maximum_dependency_stages)) ||
-      (t.outputs[0].dependency_version != 0 &&
-       (!t.outputs[0].continuation_bytes ||
-        !t.outputs[0].maximum_dependency_stages ||
-        t.outputs[0].maximum_dependency_stages > 1048576)))
+       t.outputs[0].observation_kind != ObservationKind::Atomic) ||
+      (!whole && !staged_atomic) || !selected.continuation_bytes ||
+      !selected.maximum_dependency_stages ||
+      selected.maximum_dependency_stages > 1048576)
     return invalid("invalid dependency observation/phase contract");
   const auto& output = t.outputs[0];
   if (output.atomic_trailing_axes &&
       (output.atomic_trailing_axes > 8 ||
-       (output.dependency_version != 1 &&
-        output.region_rule != OperationRegionRule::Whole) ||
+       output.region_rule != OperationRegionRule::Whole ||
        output.observation_kind != ObservationKind::Atomic || t.supports_gpu))
     return invalid("tuple grouping requires CPU Whole or staged Atomic output");
   if (output.result_schema.has_value() !=
       (output.output_schema.kind == OperationPortKind::Result))
     return invalid("structured output requires a complete schema template");
   if (output.result_schema &&
-      (output.dependency_version != 2 ||
-       !output.result_schema->validate().ok() ||
+      (!output.result_schema->validate().ok() ||
        (output.output_schema.result_schema_id.empty()
             ? (!t.requires_metadata_specialization ||
                !tensor_member_predicate(output.output_schema))
@@ -334,10 +307,6 @@ Status validate_operation_contract(const OperationTraits& t) {
        output.output_semantic_rule != OperationSemanticRule::Drop ||
        !output.output_facets.empty()))
     return invalid("invalid structured output template");
-  for (const auto& port : t.input_schema)
-    if (port.kind == OperationPortKind::Result &&
-        output.dependency_version != 2)
-      return invalid("Result inputs require structured stage protocol");
   const auto spec = [&](const std::string& name, OperationParameterType type) {
     return std::any_of(t.parameter_schema.begin(), t.parameter_schema.end(),
                        [&](const auto& p) {

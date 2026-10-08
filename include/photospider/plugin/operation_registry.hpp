@@ -10,12 +10,12 @@
 #include <vector>
 
 #include "photospider/compiler/workflow_document.hpp"
+#include "photospider/core/cancellation.hpp"
+#include "photospider/core/data_movement.hpp"
 #include "photospider/core/status.hpp"
 #include "photospider/data/planar_image.hpp"
 #include "photospider/data/semantic.hpp"
 #include "photospider/data/value.hpp"
-#include "photospider/execution/cancellation.hpp"
-#include "photospider/execution/data_movement.hpp"
 #include "photospider/plugin/cpu_parallel_api.h"
 #include "photospider/plugin/cpu_tiles_api.h"
 #include "photospider/plugin/native_gpu_api.h"
@@ -327,11 +327,6 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
    * against the Root before publication.
    */
   std::optional<std::uint64_t> maximum_output_payload_bytes = {};
-  /** @brief Legacy static dependency-map metadata.
-   * Current operation registration rejects nonempty values; staged dependency
-   * execution uses the Result Need and relation contracts instead.
-   */
-  std::optional<std::vector<DependencyMapPiece>> static_dependency_pieces = {};
   /** @brief Marks a CPU, non-joint staged Result output as regional Atomic.
    * The selected query remains governed by the Result continuation and its
    * Need/publication contract. Included in operation identities.
@@ -369,10 +364,6 @@ struct PHOTOSPIDER_API OperationOutputTraits final {
    * compiled identity; it does not limit typed validation.
    */
   bool requires_input_views = false;
-  /** @brief Result execution protocol version. The supported value is 2;
-   * other values are rejected during registration.
-   */
-  std::uint32_t dependency_version = 2;
   /** @brief Host-allocated state bound and finite poll limit for staged code.
    */
   std::uint64_t continuation_bytes = 0;
@@ -426,8 +417,8 @@ struct PHOTOSPIDER_API OperationTraits final {
    * state; current Needs and dependency evidence remain tied to the selected
    * output. Retention is optional and budgeted; misses recompute. This does not
    * synchronize concurrent producers or promise one evaluation per Run.
-   * Available only to pure deterministic Atomic Result-v2 operations, with no
-   * regional-atomic outputs or static dependency pieces.
+   * Available only to pure deterministic Atomic Result operations, with no
+   * regional-atomic outputs.
    * The default preserves output-scoped block keys.
    */
   bool share_blocks_across_outputs = false;
@@ -476,7 +467,7 @@ struct PHOTOSPIDER_API OperationTraits final {
    */
   std::uint64_t estimated_bytes = 0;
   /** @brief Version of this complete semantic trait record. */
-  std::uint32_t version = 24U;
+  std::uint32_t version = 25U;
   /** @brief Registered template requires pure per-node metadata resolution.
    * Free inference rejects templates. OperationRegistry::resolve_traits
    * clears this flag only after validated specialization.
@@ -619,7 +610,6 @@ struct OperationOutputSpecialization final {
   bool preserve_output_views = false;
   bool requires_input_views = false;
   std::optional<std::uint64_t> maximum_output_payload_bytes = {};
-  std::optional<std::vector<DependencyMapPiece>> static_dependency_pieces = {};
   /** @brief Optional static-parameter-derived input projection for CPU Whole.
    * Absent preserves the registered projection; an empty vector excludes all
    * runtime inputs. Indices are unique original ports in complete metadata.
