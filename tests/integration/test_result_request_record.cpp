@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "support/bad_result_table_fixture.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
@@ -590,12 +591,11 @@ int direct_terminal() {
   return 0;
 }
 int c_terminal_requests() {
-  for (const auto* path : {PS_BAD_REQUEST_RECORD_1, PS_BAD_REQUEST_RECORD_2,
-                           PS_BAD_REQUEST_RECORD_3, PS_BAD_REQUEST_RECORD_4}) {
-    OperationRegistry registry;
-    PS_CHECK(registry.load_plugin(path).code == ErrorCode::InvalidArgument);
-    PS_CHECK(registry.keys().empty());
-  }
+  PS_CHECK(ps::test::check_bad_result_tables(PS_BAD_REQUEST_RECORD_FIXTURE,
+                                             {{1, "observation kind"},
+                                              {2, "terminal failure delivery"},
+                                              {3, "output size"},
+                                              {4, "failure delivery kind"}}));
   auto handle = std::shared_ptr<void>(
       dlopen(PS_REQUEST_RECORD_FIXTURE, RTLD_NOW), [](void* library) {
         if (library)

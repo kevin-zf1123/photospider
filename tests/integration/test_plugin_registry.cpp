@@ -15,11 +15,11 @@
 #include <variant>
 #include <vector>
 
+#include "core/dense_layout_validation.hpp"
 #include "photospider/compiler/compiler.hpp"
 #include "photospider/execution/execution.hpp"
 #include "photospider/plugin/data_definition_registry.hpp"
 #include "photospider/plugin/operation_registry.hpp"
-#include "plugin/dense_layout_validation.hpp"
 #include "plugin/library_test_hooks.hpp"
 #include "support/operation_result_fixture.hpp"
 #include "support/result_diagnostics_fixture.hpp"
@@ -247,7 +247,6 @@ ps::OperationDefinition copy_aware_definition(
   output.output_schema.result_schema_id = std::string(output.result_schema->id);
   output.output_schema.result_schema_version = output.result_schema->version;
   output.region_rule = ps::OperationRegionRule::Whole;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(CopyAwareOutput);
   output.maximum_dependency_stages = 1;
   definition.traits.workspace_bytes = 8;
@@ -599,19 +598,18 @@ class LibraryObserver final {
 int verify_dense_byte_size_contract() noexcept {
   constexpr std::uint64_t kUint32Maximum = UINT64_C(4294967295);
   constexpr std::uint64_t kMaximumLegalSignedRange = UINT64_C(1) << 63U;
+  static_assert(ps::core_internal::dense_byte_size_representable<std::uint32_t>(
+                    kUint32Maximum),
+                "32-bit size maximum must remain inclusive");
   static_assert(
-      ps::plugin_internal::dense_byte_size_representable<std::uint32_t>(
-          kUint32Maximum),
-      "32-bit size maximum must remain inclusive");
-  static_assert(
-      !ps::plugin_internal::dense_byte_size_representable<std::uint32_t>(
+      !ps::core_internal::dense_byte_size_representable<std::uint32_t>(
           kUint32Maximum + UINT64_C(1)),
       "32-bit size overflow must be rejected");
-  PS_CHECK(ps::plugin_internal::dense_byte_size_representable<std::uint64_t>(
+  PS_CHECK(ps::core_internal::dense_byte_size_representable<std::uint64_t>(
       kMaximumLegalSignedRange));
-  PS_CHECK(!ps::plugin_internal::dense_byte_size_representable<std::uint64_t>(
+  PS_CHECK(!ps::core_internal::dense_byte_size_representable<std::uint64_t>(
       kMaximumLegalSignedRange + UINT64_C(1)));
-  PS_CHECK(!ps::plugin_internal::dense_byte_size_representable<std::uint32_t>(
+  PS_CHECK(!ps::core_internal::dense_byte_size_representable<std::uint32_t>(
       UINT64_C(0)));
   return 0;
 }

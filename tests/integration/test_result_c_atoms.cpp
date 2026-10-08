@@ -59,6 +59,8 @@ int direct(unsigned mode, bool cancelled_waiting = false,
   std::vector<OperationMetadata> inputs{input};
   std::map<std::string, ParameterValue> parameters{
       {"mode", static_cast<std::int64_t>(mode)}};
+  traits =
+      take(registry.resolve_traits("fixture.result_atoms", inputs, parameters));
   auto outputs = take(infer_operation_outputs(traits, inputs, parameters));
   ResultProgramMetadata metadata{inputs, outputs[0]};
   ResourceVector<ResultProgramQuery> queries;

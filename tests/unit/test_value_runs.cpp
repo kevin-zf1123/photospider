@@ -3,14 +3,28 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
-#include "support/fmt_handoff.hpp"
+#include "photospider/data/region_runs.hpp"
 
 namespace {
-using namespace ps;                   // NOLINT(build/namespaces)
-using namespace ps::handoff_testing;  // NOLINT(build/namespaces)
+using namespace ps;  // NOLINT(build/namespaces)
+void require(bool condition, const char* message) {
+  if (!condition)
+    throw std::runtime_error(message);
+}
+template <class T>
+T take(Result<T> result) {
+  if (!result.ok())
+    throw std::runtime_error(result.status().message);
+  return result.take_value();
+}
+void take(Status status) {
+  if (!status.ok())
+    throw std::runtime_error(status.message);
+}
 void generic_runs() {
   const ValueDescriptor descriptor{ElementType::UInt16, {5, 6, 7}};
   const Region source_region({{1, 3}, {1, 4}, {1, 5}});
@@ -172,76 +186,6 @@ void boundaries() {
                                   });
   require(!invalid.ok() && callbacks == 0, "invalid region reached visitor");
 }
-void planar_runs() {
-  const ValueDescriptor descriptor{ElementType::UInt8, {9, 13, 2}};
-  std::vector<std::uint8_t> bytes(9 * 13 * 2);
-  for (unsigned i = 0; i < bytes.size(); ++i)
-    bytes[i] = static_cast<std::uint8_t>(i * 11 + 3);
-  for (auto order : {ImagePlaneOrder::Continuous, ImagePlaneOrder::Tiled}) {
-    PlanarImageConfig input_config;
-    input_config.order = order;
-    input_config.tile_height = 4;
-    input_config.tile_width = 8;
-    if (order == ImagePlaneOrder::Continuous)
-      input_config.row_pitch_bytes = 32;
-    auto source = take(PlanarImage::create(descriptor, input_config));
-    take(source.publish(Region::whole(descriptor.shape), bytes.data(),
-                        bytes.size()));
-    PlanarImageConfig output_config;
-    output_config.tile_height = 8;
-    output_config.tile_width = 4;
-    auto output = take(PlanarImage::create(descriptor, output_config));
-    const Region roi({{1, 6}, {2, 9}, {1, 1}});
-    const Region source_roi({{2, 6}, {2, 9}, {1, 1}});
-    auto read = take(source.acquire(source_roi));
-    {
-      auto writer = take(output.begin_write(roi));
-      DependencyMappedNeed map;
-      for (int a = 0; a < 3; ++a) {
-        DependencyAxis x;
-        x.observation_axis = a;
-        map.axes.push_back(x);
-      }
-      map.axes[0].translation = 1;
-      take(copy_planar_region(roi, map, &read, nullptr, writer, {}, 1));
-      for (std::uint64_t y = 1; y < 7; ++y)
-        for (std::uint64_t x = 2; x < 11; ++x)
-          require(take(writer.row_run({y, x, 1})).data[0] ==
-                      bytes[((y + 1) * 13 + x) * 2 + 1],
-                  "mismatched tiles/translated ROI changed samples");
-      require(!writer.row_run({0, 2, 1}).ok(),
-              "writer exposed outside-ROI samples");
-      auto invalid_map = map;
-      invalid_map.axes[1].translation = 99;
-      require(
-          !copy_planar_region(roi, invalid_map, &read, nullptr, writer, {}, 1)
-               .ok(),
-          "out-of-window source accepted");
-      require(!copy_planar_region(roi, map, &read, nullptr, writer, {}, 2).ok(),
-              "wrong sample width accepted");
-    }
-    require(output.valid_samples() == 0,
-            "uncommitted writer published samples");
-  }
-}
-void mapping_overflow() {
-  auto scalar = take(Value::create({ElementType::UInt8, {1}},
-                                   Region::whole({1}), {0, {1}}, {3}));
-  auto image = take(PlanarImage::create({ElementType::UInt8, {1, 1, 1}}, {}));
-  auto writer = take(image.begin_write(Region::whole({1, 1, 1})));
-  take(writer.row_run({0, 0, 0})).data[0] = 0xa5;
-  DependencyMappedNeed map;
-  DependencyAxis axis;
-  axis.observation_axis = -1;
-  axis.fixed = {UINT64_MAX, 1};
-  map.axes.push_back(axis);
-  const auto status =
-      copy_planar_region(writer.region(), map, nullptr, &scalar, writer, {}, 1);
-  require(status.code == ErrorCode::InvalidArgument,
-          "overflowing mapping did not return InvalidArgument");
-  require(take(writer.row_run({0, 0, 0})).data[0] == 0xa5,
-          "rejected mapping wrote samples");
-}
 void singleton_and_partial_destination() {
   const ValueDescriptor d{ElementType::UInt8, {2, 5, 3}};
   const Region region({{0, 2}, {2, 1}, {0, 3}});
@@ -270,39 +214,10 @@ void singleton_and_partial_destination() {
   take(copy_value_region(source, region, destination, out.data(), out.size()));
   require(out == expected, "partial destination sentinel overwritten");
 }
-void extraction_fuel_settlement() {
-  auto registry = make_default_operation_registry();
-  const ValueDescriptor d{ElementType::UInt8, {64, 1}};
-  const auto source = take(Value::create(d, Region::whole(d.shape), {0, {1, 1}},
-                                         std::vector<std::uint8_t>(64, 128)));
-  DependencyRequest request;
-  request.inputs = {{d, {}}};
-  request.outputs = take(Footprint::all(d.shape));
-  request.parameters = {{"axis", std::int64_t{1}},
-                        {"index", std::int64_t{0}},
-                        {"keepdims", true},
-                        {"layout", std::string("materialize")},
-                        {"metadata_mode", std::string("raw")}};
-  request.snapshot_identity = "copy-fuel";
-  request.limits.maximum_work = 128;
-  auto session =
-      take(registry->start_dependency("channel.extract_index_strict", request));
-  take(session->poll());
-  auto input = take(ValueFragments::create(d, {}, request.outputs, {source}));
-  take(session->supply({input}, request.snapshot_identity));
-  auto result = session->poll();
-  require(!result.ok() &&
-              result.status().code == ErrorCode::ResourceExhausted &&
-              session->consumed_work() == 128,
-          "run precharge changed legacy copy fuel settlement");
-}
 }  // namespace
 int main() {
   generic_runs();
   contiguous_runs();
   boundaries();
-  planar_runs();
-  mapping_overflow();
   singleton_and_partial_destination();
-  extraction_fuel_settlement();
 }

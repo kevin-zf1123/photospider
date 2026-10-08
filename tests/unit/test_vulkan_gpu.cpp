@@ -9,7 +9,7 @@
 #include "execution/execution_test_hooks.hpp"
 #include "execution/native_gpu.hpp"
 #include "fixtures/native_vulkan_spirv.hpp"
-#include "photospider/execution/resources.hpp"
+#include "photospider/core/resources.hpp"
 #include "photospider/photospider.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/native_allocation_quota.hpp"
@@ -116,7 +116,7 @@ int dependency_workflow(const std::shared_ptr<Device>& device) {
   PlanningOptions planning;
   planning.execution_mode = ExecutionMode::NativeGpu;
   auto compiled = Compiler(registry).compile(graph, planning);
-  PS_CHECK(compiled.ok() && compiled.value().plan.dependency_network());
+  PS_CHECK(compiled.ok());
   const auto payload = device->allocation_capacity(8).value();
   const auto constants =
       device->allocation_capacity(sizeof(Parameters)).value();

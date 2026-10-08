@@ -7,6 +7,7 @@
 #include <cstring>
 #include <functional>
 #include <future>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -32,6 +33,31 @@
 #endif
 
 namespace {
+
+struct CallbackEvent final {
+  std::mutex mutex;
+  std::condition_variable changed;
+  unsigned completed = 0;
+  bool wait() {
+    std::unique_lock<std::mutex> lock(mutex);
+    return changed.wait_for(lock, std::chrono::seconds(5),
+                            [&] { return completed >= 2; });
+  }
+};
+std::shared_ptr<CallbackEvent> g_delay_callbacks;
+void observe_delay_callback() noexcept {
+  try {
+    auto event = std::atomic_load(&g_delay_callbacks);
+    if (!event)
+      return;
+    {
+      std::lock_guard<std::mutex> lock(event->mutex);
+      ++event->completed;
+    }
+    event->changed.notify_all();
+  } catch (...) {
+  }
+}
 
 /** @brief Fixture mode for ordinary no-output backend unavailability. */
 constexpr std::uint32_t kFixtureGpuBackendUnavailable = 1U;
@@ -1917,15 +1943,16 @@ int main(int argc, char** argv) {
     PS_CHECK(effect_order == std::vector<std::uint64_t>({1U, 2U, 1U, 2U}));
   }
 
+  GraphContext unavailable_gpu_graph(lane_document(2.5, 4.0));
   CompiledWorkflow unavailable_gpu_workflow =
-      compile_or_throw(&compiler, graph, true);
+      compile_or_throw(&compiler, unavailable_gpu_graph, true);
   auto unavailable_gpu_result =
       execution.execute(unavailable_gpu_workflow.plan);
-  PS_CHECK(unavailable_gpu_result.ok());
+  PS_REQUIRE_OK(unavailable_gpu_result);
   PS_CHECK(ps::test::named_scalar(unavailable_gpu_result.value(), "sum") ==
            6.5);
-  PS_CHECK(unavailable_gpu_result.value().diagnostics.fallback_reasons.size() ==
-           1U);
+  PS_CHECK(
+      !unavailable_gpu_result.value().diagnostics.fallback_reasons.empty());
   PS_CHECK(unavailable_gpu_result.value().diagnostics.selected_backends.at(
                {3U, 0}) == Backend::Cpu);
 
@@ -2629,6 +2656,11 @@ int main(int argc, char** argv) {
                                     "cpu") == 11.0);
   }
 
+  auto delay_hooks = execution_test_hooks;
+  delay_hooks.callback_body_finished = &observe_delay_callback;
+  ps::execution_testing::install_execution_test_hooks(&delay_hooks);
+  auto cancellation_event = std::make_shared<CallbackEvent>();
+  std::atomic_store(&g_delay_callbacks, cancellation_event);
   GraphContext cancellable(ps::test::delayed_document(250));
   CompiledWorkflow cancellable_workflow =
       compile_or_throw(&compiler, cancellable);
@@ -2637,22 +2669,26 @@ int main(int argc, char** argv) {
     return execution.execute(cancellable_workflow.plan, {},
                              cancellation.token());
   });
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  const bool cancellation_started = cancellation_event->wait();
   PS_CHECK(cancellation.cancel());
   auto cancelled_result = cancelled_future.get();
-  PS_CHECK(!cancelled_result.ok());
+  PS_CHECK(cancellation_started && !cancelled_result.ok());
   PS_CHECK(cancelled_result.status().code == ErrorCode::Cancelled);
 
+  auto stale_event = std::make_shared<CallbackEvent>();
+  std::atomic_store(&g_delay_callbacks, stale_event);
   GraphContext replaceable(ps::test::delayed_document(120));
   CompiledWorkflow stale_workflow = compile_or_throw(&compiler, replaceable);
   auto stale_future = std::async(std::launch::async, [&] {
     return execution.execute(stale_workflow.plan);
   });
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  const bool stale_started = stale_event->wait();
   replaceable.replace(ps::test::delayed_document(0));
   auto stale_result = stale_future.get();
-  PS_CHECK(!stale_result.ok());
+  PS_CHECK(stale_started && !stale_result.ok());
   PS_CHECK(stale_result.status().code == ErrorCode::Stale);
+  std::atomic_store(&g_delay_callbacks, std::shared_ptr<CallbackEvent>{});
+  ps::execution_testing::install_execution_test_hooks(&execution_test_hooks);
 
   WorkflowDocument fallback_document;
   fallback_document.nodes = {

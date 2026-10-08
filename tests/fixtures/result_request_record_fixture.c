@@ -4,6 +4,9 @@
 
 #include "photospider/plugin/result_operation_plugin_api.h"
 
+#define PS_BAD_RESULT_TABLE_COUNT 4U
+#include "bad_result_table_support.h"
+
 static const ps_result_tensor_spec_v2 tensor = {
     .struct_size = sizeof(tensor),
     .key = "number",
@@ -129,6 +132,7 @@ static void destroy(void* user, void* raw) {
 }
 static void destroy_plugin(void* user) {
   (void)user;
+  ps_test_bad_result_retired();
 }
 static ps_result_operation_v2 operation = {
     .struct_size = sizeof(operation),
@@ -157,14 +161,31 @@ PS_RESULT_EXPORT void ps_request_record_counts(uint64_t* entered,
 }
 PS_RESULT_EXPORT const ps_result_operation_plugin_api_v2*
 ps_result_operation_plugin_get_api_v2(void) {
-#if PS_BAD_REQUEST_RECORD_CASE == 1
-  outputs[0].observation_kind = 2;
-#elif PS_BAD_REQUEST_RECORD_CASE == 2
-  outputs[0].failure_delivery = 1;
-#elif PS_BAD_REQUEST_RECORD_CASE == 3
-  outputs[0].struct_size = offsetof(ps_result_output_v2, observation_kind);
-#elif PS_BAD_REQUEST_RECORD_CASE == 4
-  outputs[1].failure_delivery = UINT32_MAX;
+#ifdef PS_RESULT_BAD_TABLES
+  static ps_result_operation_plugin_api_v2 bad_api;
+  static ps_result_operation_v2 bad_operation;
+  static ps_result_output_v2 bad_outputs[sizeof(outputs) / sizeof(outputs[0])];
+  bad_api = api;
+  bad_operation = operation;
+  memcpy(bad_outputs, outputs, sizeof(outputs));
+  bad_operation.outputs = bad_outputs;
+  bad_api.operations = &bad_operation;
+  switch (ps_test_bad_case) {
+    case 1:
+      bad_outputs[0].observation_kind = 2;
+      break;
+    case 2:
+      bad_outputs[0].failure_delivery = 1;
+      break;
+    case 3:
+      bad_outputs[0].struct_size =
+          offsetof(ps_result_output_v2, observation_kind);
+      break;
+    case 4:
+      bad_outputs[1].failure_delivery = UINT32_MAX;
+      break;
+  }
+  return &bad_api;
 #endif
   return &api;
 }

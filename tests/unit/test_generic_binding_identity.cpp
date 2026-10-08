@@ -65,7 +65,6 @@ int static_constraint_identity() {
     output.output_schema.result_schema_id = schema.id;
     output.output_schema.result_schema_version = 1;
     output.result_schema = schema;
-    output.dependency_version = 2;
     output.region_rule = OperationRegionRule::Dependency;
     output.continuation_bytes = sizeof(Identity);
     output.maximum_dependency_stages = 2;

@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
-#include "s4_gpu_workflow/image_fixture.hpp"
+#include "support/image_scene_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
@@ -86,7 +86,6 @@ struct Fixture {
     output.output_schema.result_schema_id = schema.id;
     output.output_schema.result_schema_version = schema.version;
     output.result_schema = schema;
-    output.dependency_version = 2;
     output.region_rule = OperationRegionRule::Dependency;
     output.maximum_dependency_stages = 1;
     output.continuation_bytes = sizeof(Scale);
@@ -171,9 +170,9 @@ Result<ResultProgramPoll> Scale::poll(const ResultProgramPhase& call) {
   return Result<ResultProgramPoll>(
       ResultPublication{take(builder.seal()), true});
 }
-s4_fixture::Scene scene(const ResourceBudget& root, unsigned kind = 0,
-                        int layout = 0, int mode = 0) {
-  auto result = s4_fixture::scene(root, kind);
+image_scene::Scene scene(const ResourceBudget& root, unsigned kind = 0,
+                         int layout = 0, int mode = 0) {
+  auto result = image_scene::scene(root, kind);
   const std::size_t port = kind == 7 ? 4 : 1;
   result.document.nodes[0].inputs[port] = WorkflowNodeOutput{5, "value"};
   result.document.nodes.insert(result.document.nodes.begin(),
@@ -208,7 +207,7 @@ int valid_views(const std::shared_ptr<OperationRegistry>& base) {
           PS_CHECK(compiled.ok());
           auto result = execution.execute(compiled.value().plan, s.bindings);
           PS_CHECK(result.ok());
-          s4_fixture::check(s, result.value().results.at("result"));
+          image_scene::check(s, result.value().results.at("result"));
           dispatches += result.value().diagnostics.native_dispatch_count;
           if (mode == ExecutionMode::NativeGpu && execution.gpu_enabled())
             PS_CHECK(result.value().diagnostics.native_dispatch_count == 1 &&
@@ -238,7 +237,7 @@ int reuse_and_errors(const std::shared_ptr<OperationRegistry>& base) {
     for (std::size_t i = 0; i < oracle.expected.size(); ++i)
       if (i % 4 != 3)
         oracle.expected[i] *= coefficient;
-    s4_fixture::check(oracle, result.value().results.at("result"));
+    image_scene::check(oracle, result.value().results.at("result"));
     return true;
   };
   for (float coefficient : {.5F, 1.F, 2.F, 8.F})
@@ -336,7 +335,7 @@ int payload_admission(const std::shared_ptr<OperationRegistry>& base) {
   PS_CHECK(root.statistics().live[ResourceKind::Payload] == baseline);
   auto retried = execution.execute(plan, input.bindings);
   PS_CHECK(retried.ok() && fixture.producers == 2 && fixture.consumers == 1);
-  s4_fixture::check(input, retried.value().results.at("result"));
+  image_scene::check(input, retried.value().results.at("result"));
   return 0;
 }
 int semantic_binding_identity(const std::shared_ptr<OperationRegistry>& base) {
@@ -372,7 +371,7 @@ int semantic_binding_identity(const std::shared_ptr<OperationRegistry>& base) {
     for (std::size_t i = 0; i < s.expected.size(); ++i)
       if (i % 4 != 3)
         s.expected[i] *= static_cast<float>((2 + origin) / 2);
-    s4_fixture::check(s, output.value().results.at("result"));
+    image_scene::check(s, output.value().results.at("result"));
   }
   return 0;
 }
@@ -387,9 +386,9 @@ int shared_invalid_and_cancel(const std::shared_ptr<OperationRegistry>& base) {
     entered = true;
     producer_token = call.query.cancellation;
     changed.notify_all();
-    s4_fixture::require(changed.wait_for(lock, std::chrono::seconds(15),
-                                         [&] { return release; }),
-                        "shared scalar callback gate timed out");
+    image_scene::require(changed.wait_for(lock, std::chrono::seconds(15),
+                                          [&] { return release; }),
+                         "shared scalar callback gate timed out");
   };
   ExecutionContext execution(f.registry, config());
   const auto root = take(execution.resource_budget());
@@ -476,7 +475,6 @@ int metadata_rejection() {
     out.output_schema.result_schema_version = 1;
     out.result_schema = schema;
     out.region_rule = OperationRegionRule::Whole;
-    out.dependency_version = 2;
     out.maximum_dependency_stages = 1;
     out.continuation_bytes = sizeof(Scale);
     unsigned starts = 0;

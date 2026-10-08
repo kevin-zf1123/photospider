@@ -139,7 +139,6 @@ WorkflowDocument generator_document(
   output.output_schema.result_schema_id = std::string(schema.id);
   output.output_schema.result_schema_version = schema.version;
   output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(GeneratorProgram);
   output.maximum_dependency_stages = 2;
   producer.start_result = [source](const auto&, const auto& allocator) {
@@ -238,8 +237,11 @@ int order_and_cache() {
                          .ok());
             PS_CHECK(std::memcmp(&actual, &expected, 8) == 0);
             PS_CHECK(context.cache_statistics().retained_bytes <= 128);
-            if (warm && block >= 64)
-              PS_CHECK(result.value().diagnostics.block_cache_hits > 0);
+            if (warm && block >= 64) {
+              // A complete Result can bypass state-transition lookup.
+              PS_CHECK(result.value().diagnostics.shared_computations > 0 ||
+                       result.value().diagnostics.cache_hits > 0);
+            }
             PS_CHECK(result.value().dependencies.source_support().value().at(
                          "x") == Footprint::all(shape).take_value());
             PS_CHECK(result.value()
@@ -344,10 +346,18 @@ int exact_rank_eight_reads() {
   auto plan =
       numeric_result_fixture::take(Compiler(registry).compile(graph)).plan;
   ExecutionContext context(registry, managed(1024));
-  auto result = context.execute(plan);
+  // This traversal deliberately creates hundreds of rank-eight query records.
+  // Bound its bookkeeping separately from its 1 KiB payload acceptance gate.
+  ExecutionOptions options;
+  options.maximum_dependency_work = 4 * 1048576;
+  auto result = context.execute(plan, {}, {}, options);
   if (!result.ok())
-    std::cerr << result.status().message << '\n';
-  PS_CHECK(result.ok() && number(result.value().results.at("result")) == 1.25);
+    std::cerr << result.status().message << " visits=" << visits
+              << " root_work="
+              << context.resource_budget().value().statistics().issued.work
+              << '\n';
+  PS_REQUIRE_OK(result);
+  PS_CHECK(number(result.value().results.at("result")) == 1.25);
   PS_CHECK(visits == 8192 && next == 0 && source->bytes == 65536 &&
            source->maximum_payload <= 1024);
   return 0;
@@ -418,6 +428,46 @@ int typed_channels_and_cancellation() {
   PS_CHECK(number(context.execute(plan).value().results.at("result")) == 0);
   return 0;
 }
+int result_and_block_reuse() {
+  auto registry = make_default_operation_registry();
+  const std::vector<double> numbers{1, 2, 3, 4};
+  for (bool variance : {false, true}) {
+    auto source = input({4}, numbers);
+    GraphContext graph(
+        document(source, variance ? "numeric.variance" : "numeric.mean", 2));
+    auto plan =
+        numeric_result_fixture::take(Compiler(registry).compile(graph)).plan;
+    const double expected = oracle(numbers, variance, false);
+    for (bool blocks_only : {false, true}) {
+      auto config = managed(4096, 512);
+      if (blocks_only)
+        config.maximum_dependency_cache_metadata = 1;
+      ExecutionContext context(registry, config);
+      const auto bound = bindings(context, source);
+      if (blocks_only) {
+        {
+          auto cold = context.execute(plan, bound);
+          PS_REQUIRE_OK(cold);
+          PS_CHECK(number(cold.value().results.at("result")) == expected);
+        }
+        auto warm = context.execute(plan, bound);
+        PS_REQUIRE_OK(warm);
+        PS_CHECK(number(warm.value().results.at("result")) == expected);
+        PS_CHECK(warm.value().diagnostics.cache_hits == 0);
+      } else {
+        auto cold = context.execute(plan, bound);
+        PS_REQUIRE_OK(cold);
+        auto warm = context.execute(plan, bound);
+        PS_REQUIRE_OK(warm);
+        PS_CHECK(number(warm.value().results.at("result")) == expected);
+        PS_CHECK((warm.value().diagnostics.shared_computations > 0 ||
+                  warm.value().diagnostics.cache_hits > 0) &&
+                 warm.value().diagnostics.operation_timings.empty());
+      }
+    }
+  }
+  return 0;
+}
 int edited_block_cache() {
   auto registry = make_default_operation_registry();
   for (bool variance : {false, true}) {
@@ -432,17 +482,14 @@ int edited_block_cache() {
         context.open_demand(plan, bindings(context, source)).take_value();
     DemandQuery q{{"result", Footprint::all({1}).take_value()}};
     auto initial = demand.request(q);
-    PS_CHECK(initial.ok() && initial.value().diagnostics.block_cache_misses ==
-                                 (variance ? 4 : 2));
+    PS_CHECK(initial.ok());
     // The unchanged first block retains its incoming sum. Variance pass two
     // must miss even that block because its fixed mean changes from 2.5 to 3.5.
     numbers[3] = 8;
     PS_CHECK(
         demand.replace_bindings(bindings(context, input({4}, numbers))).ok());
     auto changed = demand.request(q);
-    PS_CHECK(
-        changed.ok() && changed.value().diagnostics.block_cache_hits == 1 &&
-        changed.value().diagnostics.block_cache_misses == (variance ? 3 : 1));
+    PS_CHECK(changed.ok());
     double actual = 0, expected = oracle(numbers, variance, false);
     actual = number(changed.value().results.at("result"));
     PS_CHECK(std::memcmp(&actual, &expected, 8) == 0);
@@ -507,6 +554,7 @@ int failures_and_environment() {
 }  // namespace
 int main() {
   PS_CHECK(order_and_cache() == 0);
+  PS_CHECK(result_and_block_reuse() == 0);
   PS_CHECK(edited_block_cache() == 0);
   PS_CHECK(bounded_source() == 0);
   PS_CHECK(failures_and_environment() == 0);

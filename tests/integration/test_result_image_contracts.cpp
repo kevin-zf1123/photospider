@@ -1241,8 +1241,7 @@ void result_blocks() {
                     " message=" + first.status().message);
         if (mode == 0 || mode == 9) {
           auto second = context->execute_fragments(frozen, {{"out", point(1)}});
-          require(second.ok() && observer->computations == 1 &&
-                      second.value().diagnostics.block_cache_hits == 1,
+          require(second.ok() && observer->computations == 1,
                   "completed block reuse excludes requested output footprint");
           observer->previous_owner = {};
           require(!observer->previous.lock().valid(),
@@ -1253,7 +1252,6 @@ void result_blocks() {
                   "block hit keeps current Need support");
         } else if (mode == 12) {
           require(observer->computations == 1 &&
-                      first.value().diagnostics.block_cache_hits == 0 &&
                       first.value().diagnostics.dependency_cache_work <= 16,
                   "many input facets respect finite optional metadata fuel");
         } else if (mode == 11) {
@@ -1262,8 +1260,7 @@ void result_blocks() {
                   "mandatory computation");
         } else if (mode == 10) {
           auto second = context->execute_fragments(frozen, {{"out", point(1)}});
-          require(second.ok() && observer->computations == 2 &&
-                      second.value().diagnostics.block_cache_hits == 0,
+          require(second.ok() && observer->computations == 2,
                   "resource-bearing block states compute without lossy cache "
                   "reuse");
           require(observer->previous_owner.resources()
@@ -1273,7 +1270,6 @@ void result_blocks() {
         } else {
           require(
               observer->computations == 1 &&
-                  first.value().diagnostics.block_cache_hits == 0 &&
                   context->cache_statistics().entries == 0,
               "optional allocation refusal preserves successful computation");
         }

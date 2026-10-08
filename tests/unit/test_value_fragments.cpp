@@ -1,5 +1,6 @@
 #include <cstring>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "photospider/data/value_fragments.hpp"
@@ -307,16 +308,47 @@ int main() {
                      .take_value();
   PS_CHECK(ValueFragments::create(image, {}, channel, {generic}).ok());
   const auto facet = encode_semantic(rgba_semantics()).take_value();
-  auto typed = Value::create(image, generic.region(), generic.layout(),
-                             generic.copy_bytes(), {facet})
-                   .take_value();
-  PS_CHECK(!ValueFragments::create(image, {facet}, channel, {typed}).ok());
-  auto head = typed.view(Region({{0, 1}, {0, 1}, {0, 2}})).take_value();
-  auto tail = typed.view(Region({{0, 1}, {0, 1}, {2, 2}})).take_value();
-  PS_CHECK(!ValueFragments::create(image, {facet},
-                                   Footprint::all(image.shape).take_value(),
-                                   {head, tail})
-                .ok());
+  auto rejected_image = Value::create(image, generic.region(), generic.layout(),
+                                      generic.copy_bytes(), {facet});
+  PS_CHECK(rejected_image.status().code == ErrorCode::TypeMismatch);
+  SchemaTemplate typed_schema;
+  typed_schema.id = "test.fragment.image";
+  ResultTensorSpec pixels;
+  pixels.key = "pixels";
+  pixels.descriptor = image;
+  pixels.facets = {facet};
+  pixels.layout.spatial = true;
+  pixels.layout.channel_axis = 2;
+  typed_schema.tensors.push_back(std::move(pixels));
+  ResourceBudget root;
+  for (const auto& region :
+       {Region({{0, 1}, {0, 1}, {3, 1}}), Region({{0, 1}, {0, 1}, {0, 2}})}) {
+    auto made = ResultBuilder::start(root, typed_schema, "partial.image");
+    PS_REQUIRE_OK(made);
+    auto builder = made.take_value();
+    auto witness = ResultRelation::cartesian(root, 4, {}).take_value();
+    PS_CHECK(!builder
+                  .publish_tensor(0, region,
+                                  ByteView(generic.bytes().data(), 16), witness,
+                                  {true, true, true, true})
+                  .ok());
+  }
+  auto made = ResultBuilder::start(root, typed_schema, "complete.image");
+  PS_REQUIRE_OK(made);
+  auto builder = made.take_value();
+  PS_REQUIRE_OK(builder.bind_descriptor_relation(
+      ResultRelation::cartesian(root, 1, {}).take_value()));
+  PS_REQUIRE_OK(builder.publish_tensor(
+      0, generic.region(), ByteView(generic.bytes().data(), 16),
+      ResultRelation::cartesian(root, 4, {}).take_value(),
+      {true, true, true, true}));
+  auto typed = builder.seal();
+  PS_REQUIRE_OK(typed);
+  float component = 1;
+  PS_REQUIRE_OK(
+      typed.value().read_tensor(typed.value().descriptor().take_value(), 0,
+                                {0, 0, 3}, &component, sizeof(component)));
+  PS_CHECK(component == 0);
 
   return 0;
 }

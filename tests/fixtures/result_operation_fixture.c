@@ -4,6 +4,9 @@
 
 #include "photospider/plugin/result_operation_plugin_api.h"
 
+#define PS_BAD_RESULT_TABLE_COUNT 14U
+#include "bad_result_table_support.h"
+
 static const ps_result_tensor_spec_v2 image = {
     .struct_size = sizeof(image),
     .key = "pixels",
@@ -1079,6 +1082,7 @@ static void destroy_state(void* user, void* state) {
 }
 static void destroy_plugin(void* context) {
   (void)context;
+  ps_test_bad_result_retired();
 }
 #define COPY_OP(KEY, OUTPUT, TILES)                                   \
   {.struct_size = sizeof(ps_result_operation_v2),                     \
@@ -2082,51 +2086,71 @@ ps_result_operation_plugin_get_api_v2(void) {
   operations[12].flags = PS_RESULT_FLAG_GPU_V2 |
                          PS_RESULT_FLAG_DETERMINISTIC_V2 |
                          PS_RESULT_FLAG_SIDE_EFFECT_FREE_V2;
-#ifdef PS_BAD_RESULT_CASE
-#if PS_BAD_RESULT_CASE == 1
-  api.struct_size -= 4;
-#elif PS_BAD_RESULT_CASE == 2
-  api.abi_version = 3;
-#elif PS_BAD_RESULT_CASE == 3
-  operations[0].inputs = NULL;
-#elif PS_BAD_RESULT_CASE == 4
-  operations[1].struct_size -= 4;
-#elif PS_BAD_RESULT_CASE == 5
-  operations[0].outputs = &gpu_output;
-  operations[0].cpu_staged_tiles = 99;
-#elif PS_BAD_RESULT_CASE == 7
-  operations[23].flags &= ~PS_RESULT_FLAG_GPU_V2;
-#elif PS_BAD_RESULT_CASE == 8
-  operations[23].flags &= ~PS_RESULT_FLAG_CPU_V2;
-#elif PS_BAD_RESULT_CASE >= 9 && PS_BAD_RESULT_CASE <= 14
-  {
-    static ps_result_output_v2 invalid;
-    invalid = whole_view_outputs[0];
-#if PS_BAD_RESULT_CASE == 9
-    invalid.flags |= 8;
-#elif PS_BAD_RESULT_CASE == 10
-    invalid.flags = PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V2;
-#elif PS_BAD_RESULT_CASE == 11
-    invalid.flags |= PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V2;
-    invalid.execution = PS_RESULT_REGIONAL_V2;
-#elif PS_BAD_RESULT_CASE == 12
-    operations[0].flags |= PS_RESULT_FLAG_GPU_V2;
-#elif PS_BAD_RESULT_CASE == 13
-    invalid.flags = 0;
-    invalid.maximum_output_payload_bytes = 32;
-#elif PS_BAD_RESULT_CASE == 14
-    invalid.struct_size = offsetof(ps_result_output_v2, flags);
-#endif
-    operations[0].outputs = &invalid;
+#ifdef PS_RESULT_BAD_TABLES
+  static ps_result_operation_plugin_api_v2 bad_api;
+  static ps_result_operation_v2
+      bad_operations[sizeof(operations) / sizeof(operations[0])];
+  static ps_result_output_v2 invalid;
+  bad_api = api;
+  memcpy(bad_operations, operations, sizeof(operations));
+  bad_api.operations = bad_operations;
+  invalid = whole_view_outputs[0];
+  switch (ps_test_bad_case) {
+    case 1:
+      bad_api.struct_size -= 4;
+      break;
+    case 2:
+      bad_api.abi_version = 3;
+      break;
+    case 3:
+      bad_operations[0].inputs = NULL;
+      break;
+    case 4:
+      bad_operations[1].struct_size -= 4;
+      break;
+    case 5:
+      bad_operations[0].outputs = &gpu_output;
+      bad_operations[0].cpu_staged_tiles = 99;
+      break;
+    case 6:
+      invalid = scalar_output;
+      invalid.port.element_type_mask = 0x8000;
+      bad_operations[0].outputs = &invalid;
+      break;
+    case 7:
+      bad_operations[23].flags &= ~PS_RESULT_FLAG_GPU_V2;
+      break;
+    case 8:
+      bad_operations[23].flags &= ~PS_RESULT_FLAG_CPU_V2;
+      break;
+    case 9:
+      invalid.flags |= 8;
+      bad_operations[0].outputs = &invalid;
+      break;
+    case 10:
+      invalid.flags = PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V2;
+      bad_operations[0].outputs = &invalid;
+      break;
+    case 11:
+      invalid.flags |= PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V2;
+      invalid.execution = PS_RESULT_REGIONAL_V2;
+      bad_operations[0].outputs = &invalid;
+      break;
+    case 12:
+      bad_operations[0].flags |= PS_RESULT_FLAG_GPU_V2;
+      bad_operations[0].outputs = &invalid;
+      break;
+    case 13:
+      invalid.flags = 0;
+      invalid.maximum_output_payload_bytes = 32;
+      bad_operations[0].outputs = &invalid;
+      break;
+    case 14:
+      invalid.struct_size = offsetof(ps_result_output_v2, flags);
+      bad_operations[0].outputs = &invalid;
+      break;
   }
-#elif PS_BAD_RESULT_CASE == 6
-  {
-    static ps_result_output_v2 invalid;
-    invalid = scalar_output;
-    invalid.port.element_type_mask = 0x8000;
-    operations[0].outputs = &invalid;
-  }
-#endif
+  return &bad_api;
 #endif
   return &api;
 }

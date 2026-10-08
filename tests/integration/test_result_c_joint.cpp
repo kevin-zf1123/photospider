@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "support/bad_result_table_fixture.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
@@ -328,12 +329,18 @@ int first_cause(unsigned mode) {
 }
 
 }  // namespace
-int main(int argc, char** argv) try {
-  if (argc == 2) {
-    OperationRegistry registry;
-    PS_CHECK(!registry.load_plugin(argv[1]).ok());
-    return 0;
-  }
+int main() try {
+  PS_CHECK(ps::test::check_bad_result_tables(PS_BAD_JOINT_FIXTURE,
+                                             {{1, "joint size"},
+                                              {2, "joint contract"},
+                                              {3, "destroy callback"},
+                                              {4, "state bytes"},
+                                              {5, "observation kind"},
+                                              {6, "operation size"},
+                                              {7, "query size"},
+                                              {8, "member size"},
+                                              {9, "outcome size"},
+                                              {10, "services size"}}));
   for (unsigned mode = 0; mode <= 11; ++mode)
     PS_CHECK(workflow(mode) == 0);
   PS_CHECK(workflow(0, true) == 0);

@@ -148,7 +148,6 @@ OperationDefinition definition(std::shared_ptr<Counts> counts, int failure,
     output.key = i ? "right" : "left";
     output.input_indices = std::vector<std::uint32_t>{i};
     output.region_rule = OperationRegionRule::Dependency;
-    output.dependency_version = 2;
     output.continuation_bytes = sizeof(Single);
     output.maximum_dependency_stages = 3;
     output.failure_delivery = FailureDelivery::RequestFailureOnly;
@@ -540,7 +539,7 @@ int cancellation_with_external_waiter(bool peer_left, unsigned held_poll) {
   const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while (!execution.cache_statistics().shared_computations &&
          std::chrono::steady_clock::now() < until)
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::yield();
   const bool subscribed = execution.cache_statistics().shared_computations != 0;
   cancelled.cancel();
   {

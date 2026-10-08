@@ -63,7 +63,6 @@ int main() {
     output.result_schema = schema;
     output.region_rule =
         tiled ? OperationRegionRule::Dependency : OperationRegionRule::Whole;
-    output.dependency_version = 2;
     output.continuation_bytes = sizeof(Computation);
     output.maximum_dependency_stages = 1;
     operation.start_result = [&, tiled](const ResultProgramQuery&,

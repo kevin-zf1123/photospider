@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 

@@ -91,7 +91,7 @@ int observe(bool enabled) {
       pending = context.scheduler_statistics();
       if (pending.cpu.accepted_callbacks == 4)
         break;
-      std::this_thread::sleep_for(std::chrono::microseconds(100));
+      std::this_thread::yield();
     } while (std::chrono::steady_clock::now() < deadline);
   }
   ErrorCode rejected = ErrorCode::Ok;

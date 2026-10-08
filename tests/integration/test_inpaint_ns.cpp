@@ -562,7 +562,7 @@ void active_cancellation() {
         entered = true;
         break;
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      std::this_thread::yield();
     }
     stop.cancel();
     auto result = running.get();

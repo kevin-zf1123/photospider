@@ -298,7 +298,6 @@ int callback_failure_copy_exhaustion() {
   OperationDefinition op;
   op.key = "test.callback_failure";
   auto& output = op.traits.outputs[0];
-  output.dependency_version = 2;
   output.region_rule = OperationRegionRule::Dependency;
   output.continuation_bytes = sizeof(State);
   output.maximum_dependency_stages = 1;

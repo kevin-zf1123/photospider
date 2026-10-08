@@ -103,7 +103,6 @@ inline ps::OperationOutputTraits output(
   output.output_schema.result_schema_id = std::string(schema.id);
   output.output_schema.result_schema_version = schema.version;
   output.result_schema = schema;
-  output.dependency_version = 2;
   output.region_rule = ps::OperationRegionRule::Dependency;
   output.maximum_dependency_stages = 2;
   output.continuation_bytes = 256;

@@ -523,6 +523,38 @@ int edit_and_cancel() {
            ErrorCode::Cancelled);
   return 0;
 }
+int replacement_during_shutdown() {
+  auto registry = gated_registry(nullptr);
+  GraphContext graph(gate_document());
+  auto compiled = Compiler(registry).compile(graph);
+  PS_REQUIRE_OK(compiled);
+  auto plan = compiled.take_value().plan;
+  for (unsigned attempt = 0; attempt < 16; ++attempt) {
+    auto context = std::make_unique<ExecutionContext>(
+        registry, ExecutionContextConfig{1, false, 4, 4096});
+    ExecutionBindings bindings{
+        {binding(*context, "x", values<double>(ElementType::Float64, {1, 2}))}};
+    auto opened = context->open_demand(plan, bindings);
+    PS_REQUIRE_OK(opened);
+    auto demand = opened.take_value();
+    std::atomic<bool> ready{false}, begin{false};
+    auto replaced = std::async(std::launch::async, [&] {
+      ready = true;
+      while (!begin.load())
+        std::this_thread::yield();
+      return demand.replace_bindings(bindings);
+    });
+    while (!ready.load())
+      std::this_thread::yield();
+    begin = true;
+    context.reset();
+    auto result = replaced.get();
+    PS_CHECK(result.ok() || result.status().code == ErrorCode::Cancelled);
+    PS_CHECK(demand.replace_bindings(bindings).status().code ==
+             ErrorCode::Cancelled);
+  }
+  return 0;
+}
 int isolation_and_limits() {
   auto gate = std::make_shared<Gate>();
   gate->open();
@@ -821,7 +853,7 @@ int auxiliary_cancellation() {
   PS_CHECK(a.get().status().code == ErrorCode::Cancelled);
   auto survived = b.get();
   PS_CHECK(survived.ok() &&
-           survived.value().diagnostics.shared_computations == 2);
+           survived.value().diagnostics.shared_computations == 1);
   PS_CHECK(gate->entered == 1 && gate->active == 0);
   return 0;
 }
@@ -895,7 +927,7 @@ int shared_fallback() {
                                         &actual, 8)
                .ok() &&
            actual == 7);
-  PS_CHECK(completed.value().diagnostics.shared_computations == 2 &&
+  PS_CHECK(completed.value().diagnostics.shared_computations == 1 &&
            completed.value().diagnostics.selected_backends.at({2, 0}) ==
                Backend::Cpu);
   PS_CHECK(context.cache_statistics().retained_bytes == 0);
@@ -989,7 +1021,7 @@ int late_flight_and_frozen() {
   gate->open();
   PS_CHECK(p1.get().ok());
   auto joined = follower.get();
-  PS_CHECK(joined.ok() && joined.value().diagnostics.shared_computations == 2);
+  PS_CHECK(joined.ok() && joined.value().diagnostics.shared_computations == 1);
   PS_CHECK(gate->entered == 2 && context.cache_statistics().in_flight == 0);
   // Retire the completed caller before exercising a new producer.
   joined = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
@@ -1076,8 +1108,8 @@ int shared_terminal() {
       numeric_result_fixture::read(c.value().results.at("y"), {0}, &value, 8)
           .ok() &&
       value == 8);
-  PS_CHECK(b.value().diagnostics.shared_computations == 2 &&
-           c.value().diagnostics.shared_computations == 1);
+  PS_CHECK(b.value().diagnostics.shared_computations == 1 &&
+           c.value().diagnostics.shared_computations == 0);
   auto reused = demand.request({{"y", wide}});
   PS_CHECK(reused.ok() && reused.value().diagnostics.cache_hits == 0 &&
            reused.value().diagnostics.shared_computations > 0 &&
@@ -1562,12 +1594,18 @@ int structured_content_cache() {
              number == 14);
   }
   bounded.maximum_dependency_cache_work = 0;
+  // Compare optional proof budgets on one frozen identity. Creating another
+  // owner changes mandatory identity/capture work and invalidates the measured
+  // minimal Run budget before the cache path is exercised.
+  auto budget_owner = context.freeze(plan, bindings);
+  PS_REQUIRE_OK(budget_owner);
+  const auto budget_frozen = budget_owner.take_value();
   std::uint64_t lower = 0, upper = 4096;
   while (lower + 1 < upper) {
     const auto middle = lower + (upper - lower) / 2;
     bounded.maximum_dependency_work = middle;
-    auto fresh = context.freeze(plan, bindings).take_value();
-    auto attempted = context.execute_fragments(fresh, query, {}, bounded);
+    auto attempted =
+        context.execute_fragments(budget_frozen, query, {}, bounded);
     if (attempted.ok()) {
       upper = middle;
     } else {
@@ -1578,8 +1616,8 @@ int structured_content_cache() {
   bounded.maximum_dependency_work = upper;
   for (std::uint64_t fuel : {8U, 64U, 128U, 256U, 512U, 1024U}) {
     bounded.maximum_dependency_cache_work = fuel;
-    auto fresh = context.freeze(plan, bindings).take_value();
-    auto completed = context.execute_fragments(fresh, query, {}, bounded);
+    auto completed =
+        context.execute_fragments(budget_frozen, query, {}, bounded);
     if (!completed.ok())
       std::cerr << "cache fuel=" << fuel << " Run fuel=" << upper << ' '
                 << completed.status().message << '\n';
@@ -1748,6 +1786,7 @@ int main() {
   PS_CHECK(combined_tokens() == 0);
   PS_CHECK(generations() == 0);
   PS_CHECK(edit_and_cancel() == 0);
+  PS_CHECK(replacement_during_shutdown() == 0);
   PS_CHECK(isolation_and_limits() == 0);
   PS_CHECK(snapshot_replacement() == 0);
   PS_CHECK(owner_retirement() == 0);

@@ -641,7 +641,6 @@ int custom_registry_authoring() {
           output.result_schema->version;
       output.output_schema.tensor_key = "samples";
       output.region_rule = OperationRegionRule::Dependency;
-      output.dependency_version = 2;
       output.continuation_bytes = 1;
       output.maximum_dependency_stages = 1;
       for (const auto* name :

@@ -4,6 +4,9 @@
 
 #include "photospider/plugin/result_operation_plugin_api.h"
 
+#define PS_BAD_RESULT_TABLE_COUNT 10U
+#include "bad_result_table_support.h"
+
 static const ps_result_tensor_spec_v2 tensor = {
     .struct_size = sizeof(tensor),
     .key = "number",
@@ -251,6 +254,7 @@ static void joint_destroy(void* raw, void* user) {
 }
 static void plugin_destroy(void* raw) {
   (void)raw;
+  ps_test_bad_result_retired();
 }
 static ps_result_joint_program_v2 joint = {sizeof(joint),
                                            1,
@@ -295,36 +299,58 @@ PS_RESULT_EXPORT void ps_result_joint_counts(uint64_t* counts) {
 }
 PS_RESULT_EXPORT const ps_result_operation_plugin_api_v2*
 ps_result_operation_plugin_get_api_v2(void) {
-#if PS_BAD_RESULT_JOINT_CASE == 1
-  joint.struct_size = offsetof(ps_result_joint_program_v2, destroy);
-#elif PS_BAD_RESULT_JOINT_CASE == 2
-  joint.contract = 2;
-#elif PS_BAD_RESULT_JOINT_CASE == 3
-  joint.destroy = NULL;
-#elif PS_BAD_RESULT_JOINT_CASE == 4
-  joint.state_bytes = 0;
-#elif PS_BAD_RESULT_JOINT_CASE == 5
-  outputs[1].observation_kind = PS_RESULT_REQUEST_RECORD_V2;
-#elif PS_BAD_RESULT_JOINT_CASE == 6
-  operation.struct_size = offsetof(ps_result_operation_v2, joint);
-#elif PS_BAD_RESULT_JOINT_CASE == 7
-  joint.query_size = 0;
-#elif PS_BAD_RESULT_JOINT_CASE == 8
-  joint.member_size = 0;
-#elif PS_BAD_RESULT_JOINT_CASE == 9
-  joint.outcome_size = 0;
-#elif PS_BAD_RESULT_JOINT_CASE == 10
-  joint.services_size = 0;
+#ifdef PS_RESULT_BAD_TABLES
+  static ps_result_joint_program_v2 bad_joint;
+  static ps_result_output_v2 bad_outputs[sizeof(outputs) / sizeof(outputs[0])];
+  ps_result_operation_v2 selected = operation;
+  bad_joint = joint;
+  memcpy(bad_outputs, outputs, sizeof(outputs));
+  selected.joint = &bad_joint;
+  selected.outputs = bad_outputs;
+  switch (ps_test_bad_case) {
+    case 1:
+      bad_joint.struct_size = offsetof(ps_result_joint_program_v2, destroy);
+      break;
+    case 2:
+      bad_joint.contract = 2;
+      break;
+    case 3:
+      bad_joint.destroy = NULL;
+      break;
+    case 4:
+      bad_joint.state_bytes = 0;
+      break;
+    case 5:
+      bad_outputs[1].observation_kind = PS_RESULT_REQUEST_RECORD_V2;
+      break;
+    case 6:
+      selected.struct_size = offsetof(ps_result_operation_v2, joint);
+      break;
+    case 7:
+      bad_joint.query_size = 0;
+      break;
+    case 8:
+      bad_joint.member_size = 0;
+      break;
+    case 9:
+      bad_joint.outcome_size = 0;
+      break;
+    case 10:
+      bad_joint.services_size = 0;
+      break;
+  }
+#else
+  const ps_result_operation_v2 selected = operation;
 #endif
-  operations[0] = operation;
+  operations[0] = selected;
   roi_tensor = tensor;
   roi_tensor.shape[0] = 2;
   roi_schema = schema;
   roi_schema.tensors = &roi_tensor;
-  roi_outputs[0] = outputs[0];
-  roi_outputs[1] = outputs[1];
+  roi_outputs[0] = selected.outputs[0];
+  roi_outputs[1] = selected.outputs[1];
   roi_outputs[1].port.schema = &roi_schema;
-  operations[1] = operation;
+  operations[1] = selected;
   operations[1].key = "fixture.result_joint_roi";
   operations[1].key_size = 24;
   operations[1].outputs = roi_outputs;
@@ -332,10 +358,10 @@ ps_result_operation_plugin_get_api_v2(void) {
   wide_tensor.shape[0] = UINT64_C(1) << 61;
   wide_schema = schema;
   wide_schema.tensors = &wide_tensor;
-  wide_outputs[0] = outputs[0];
-  wide_outputs[1] = outputs[1];
+  wide_outputs[0] = selected.outputs[0];
+  wide_outputs[1] = selected.outputs[1];
   wide_outputs[1].port.schema = &wide_schema;
-  operations[2] = operation;
+  operations[2] = selected;
   operations[2].key = "fixture.result_joint_wide";
   operations[2].key_size = 25;
   operations[2].outputs = wide_outputs;

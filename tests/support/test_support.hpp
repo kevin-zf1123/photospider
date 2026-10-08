@@ -29,6 +29,43 @@ inline bool check(bool condition, const char* expression, const char* file,
   return condition;
 }
 
+/** @brief Prints the full failure before a test attempts to unwrap a result. */
+inline bool require_ok(const Status& status, const char* expression,
+                       const char* file, int line) {
+  if (status.ok())
+    return true;
+  std::cerr << file << ':' << line << ": " << expression
+            << " failed: code=" << static_cast<int>(status.code)
+            << " reason=" << static_cast<int>(status.reason)
+            << " origin=" << static_cast<int>(status.detail.origin)
+            << " scope=" << static_cast<int>(status.detail.scope)
+            << " node=" << status.detail.node_id
+            << " input=" << status.detail.input_id
+            << " association=" << status.detail.association;
+  if (status.detail.atom) {
+    const auto& atom = *status.detail.atom;
+    std::cerr << " atom=" << atom.output_index << '[';
+    for (std::uint32_t axis = 0; axis < atom.rank; ++axis)
+      std::cerr << (axis ? "," : "") << atom.coordinate[axis];
+    std::cerr << ']';
+  }
+  if (status.detail.domain) {
+    const auto& domain = *status.detail.domain;
+    std::cerr << " domain=" << domain.first.output_index << '[';
+    for (std::uint32_t axis = 0; axis < domain.first.rank; ++axis)
+      std::cerr << (axis ? "," : "") << domain.first.coordinate[axis] << '+'
+                << domain.extent[axis];
+    std::cerr << ']';
+  }
+  std::cerr << " message=" << status.message << '\n';
+  return false;
+}
+template <class T>
+inline bool require_ok(const Result<T>& result, const char* expression,
+                       const char* file, int line) {
+  return require_ok(result.status(), expression, file, line);
+}
+
 /**
  * @brief Builds a deterministic two-constant addition document.
  * @param left First scalar.
@@ -105,4 +142,11 @@ inline double named_scalar(const ExecutionResult& result,
                            __FILE__, __LINE__)) {                      \
       return 1;                                                        \
     }                                                                  \
+  } while (false)
+
+#define PS_REQUIRE_OK(expression)                                    \
+  do {                                                               \
+    if (!::ps::test::require_ok((expression), #expression, __FILE__, \
+                                __LINE__))                           \
+      return 1;                                                      \
   } while (false)

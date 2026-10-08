@@ -93,6 +93,20 @@ OperationContractIrStage exercise_operation_contract_ir_input(
     traits.outputs[0].fixed_output_shape = {
         static_cast<std::uint64_t>(reader.next() % 16U)};
   }
+  auto& output = traits.outputs[0];
+  output.continuation_bytes = 1;
+  output.maximum_dependency_stages = 1;
+  ps::SchemaTemplate schema;
+  schema.id = "fuzz.output";
+  schema.version = 1;
+  ps::ResultTensorSpec tensor;
+  tensor.key = "samples";
+  tensor.descriptor = {output.output_element_type, {1}};
+  schema.tensors.push_back(std::move(tensor));
+  output.result_schema = std::move(schema);
+  output.output_schema.kind = ps::OperationPortKind::Result;
+  output.output_schema.result_schema_id = "fuzz.output";
+  output.output_schema.result_schema_version = 1;
   bool duplicate_schema = false;
   const std::uint8_t schema_count = reader.next() % 6U;
   for (std::uint8_t index = 0U; index < schema_count; ++index) {
@@ -111,16 +125,29 @@ OperationContractIrStage exercise_operation_contract_ir_input(
         key, static_cast<ps::OperationParameterType>((reader.next() % 6U) + 1U),
         reader.next() % 2U != 0U});
   }
-  const ps::Status registered =
-      operations->register_operation(ps::OperationDefinition{
-          "fuzz.operation", std::move(traits),
-          [](const ps::ResultProgramQuery&, const ps::BufferAllocator&) {
-            return ps::Result<ps::ResultContinuation>(ps::Status::failure(
-                ps::ErrorCode::OperationFailed, "fuzz operation is not run"));
-          }});
+  const auto start = [](const ps::ResultProgramQuery&,
+                        const ps::BufferAllocator&) {
+    return ps::Result<ps::ResultContinuation>(ps::Status::failure(
+        ps::ErrorCode::OperationFailed, "fuzz operation is not run"));
+  };
+  const ps::Status registered = operations->register_operation(
+      ps::OperationDefinition{"fuzz.operation", traits, start});
   if (!registered.ok()) {
-    return duplicate_schema ? OperationContractIrStage::DuplicateSchemaRejected
-                            : OperationContractIrStage::RegistrationRejected;
+    if (duplicate_schema) {
+      // Prove the duplicate is the sole registration defect, rather than
+      // mistaking an unrelated malformed template for duplicate coverage.
+      std::map<std::string, ps::OperationParameterSpec> unique;
+      for (const auto& parameter : traits.parameter_schema)
+        unique.emplace(parameter.key, parameter);
+      traits.parameter_schema.clear();
+      for (const auto& parameter : unique)
+        traits.parameter_schema.push_back(parameter.second);
+      if (operations
+              ->register_operation({"fuzz.control", std::move(traits), start})
+              .ok())
+        return OperationContractIrStage::DuplicateSchemaRejected;
+    }
+    return OperationContractIrStage::RegistrationRejected;
   }
   operations->freeze();
   ps::WorkflowDocument document;
@@ -145,7 +172,7 @@ OperationContractIrStage exercise_operation_contract_ir_input(
 }  // namespace ps::fuzz_testing
 
 /**
- * @brief Fuzzes C++ traits, C ABI 9 element vocabulary and typed IR
+ * @brief Fuzzes Result C++ traits, schema templates and typed IR
  * gates.
  * @param data Arbitrary libFuzzer bytes.
  * @param size Exact byte count.

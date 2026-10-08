@@ -12,8 +12,8 @@
 
 #include "02-format-color/rgb_basis_limb.hpp"
 #include "02-format-color/rgb_basis_math.hpp"
-#include "data/input_validation.hpp"
 #include "fixtures/fmt10_oracles.hpp"
+#include "plugin/port_validation.hpp"
 #include "support/test_support.hpp"
 
 namespace {

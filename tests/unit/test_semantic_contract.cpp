@@ -123,7 +123,7 @@ struct TensorProgram {
              take(Footprint::all(phase.query.inputs[i]
                                      .result_schema->tensors[0]
                                      .sample_shape())),
-             copy_samples && i == 0 ? 9U : 8U});
+             copy_samples && i == 0 ? 13U : 8U});
       return Result<ResultProgramPoll>(std::move(need));
     }
     const auto count = take(demand.element_count());
@@ -181,6 +181,14 @@ struct TensorProgram {
         relation = take(ResultRelation::mapped(
             phase.resources, shape, box, input.sample_shape(), axes,
             {0, 1, 0, 1, ResultSupportTarget::Tensor, 0}));
+        std::vector<ResultMappedAxis> validation(input.sample_shape().size());
+        for (unsigned axis = 0; axis < validation.size(); ++axis)
+          validation[axis].extent = input.sample_shape()[axis];
+        auto tuples = take(ResultRelation::mapped(
+            phase.resources, shape, box, input.sample_shape(), validation,
+            {0, 4, 0, 1, ResultSupportTarget::Tensor, 0}));
+        relation =
+            take(ResultRelation::unite(phase.resources, {relation, tuples}));
       }
       check(builder.publish_tensor(0, box, ByteView(bytes.data(), bytes.size()),
                                    std::move(relation),

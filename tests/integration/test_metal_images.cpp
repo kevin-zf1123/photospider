@@ -7,12 +7,12 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
-#include "s4_gpu_workflow/image_fixture.hpp"
+#include "support/image_scene_fixture.hpp"
 
 namespace {
+using image_scene::require;
 using s1_fixture::check;
 using s1_fixture::take;
-using s4_fixture::require;
 using Poll = ps::Result<ps::ResultProgramPoll>;
 struct NativeImage {
   bool channel_origin;
@@ -83,7 +83,6 @@ void check_native_alignment(bool channel_origin) {
   out.output_schema.result_schema_id = "photospider.image";
   out.output_schema.result_schema_version = 1;
   out.result_schema = s1_fixture::schema({1, 1, 4});
-  out.dependency_version = 2;
   out.region_rule = ps::OperationRegionRule::Whole;
   out.continuation_bytes = sizeof(NativeImage);
   out.maximum_dependency_stages = 1;
@@ -122,7 +121,7 @@ void check_native_alignment(bool channel_origin) {
     require(reinterpret_cast<std::uintptr_t>(row.data) % 4 ==
                 (channel_origin ? 0 : 1),
             "native source must retain its sample alignment");
-    const auto samples = s4_fixture::samples(published);
+    const auto samples = image_scene::samples(published);
     require(samples == std::vector<float>({1, 1, 1, 1}),
             "native producer bytes or origin mapping changed");
     const auto& diagnostics = result.diagnostics;
@@ -141,9 +140,9 @@ void check_native_alignment(bool channel_origin) {
               << " fallbacks=" << diagnostics.fallback_reasons.size() << '\n';
     retained = result.results.at("result");
   }
-  require(
-      s4_fixture::samples(retained) == std::vector<float>({.5F, .5F, .5F, .5F}),
-      "native image mapping or context retirement lost output samples");
+  require(image_scene::samples(retained) ==
+              std::vector<float>({.5F, .5F, .5F, .5F}),
+          "native image mapping or context retirement lost output samples");
 }
 void check_domain_failures(
     ps::ExecutionContext& execution,
@@ -153,7 +152,7 @@ void check_domain_failures(
   const auto root = take(execution.resource_budget());
   unsigned rejected_samples = 0, rejected_schemas = 0;
   for (unsigned kind = 0; kind < 8; ++kind) {
-    auto scene = s4_fixture::scene(root, kind);
+    auto scene = image_scene::scene(root, kind);
     ps::GraphContext graph(scene.document);
     ps::PlanningOptions options;
     options.execution_mode = mode;
@@ -161,7 +160,7 @@ void check_domain_failures(
     for (unsigned failure = 0; failure < 5; ++failure) {
       auto bindings = scene.bindings;
       const auto& original = bindings.inputs[0].result;
-      auto pixels = s4_fixture::samples(original);
+      auto pixels = image_scene::samples(original);
       const float invalid =
           failure == 0   ? std::numeric_limits<float>::quiet_NaN()
           : failure == 1 ? std::numeric_limits<float>::infinity()

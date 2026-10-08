@@ -218,7 +218,7 @@ int shared_prefix(unsigned mode) {
   while (!module.gate(0) && std::chrono::steady_clock::now() < deadline &&
          first.wait_for(std::chrono::milliseconds(0)) !=
              std::future_status::ready)
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::yield();
   PS_CHECK(module.gate(0));
   const auto before = module.counts();
   auto second = context.execute_fragments(frozen, {{"value", point(4)}});
@@ -275,7 +275,7 @@ int cancelled_read() {
   while (!module.gate(0) && std::chrono::steady_clock::now() < deadline &&
          pending.wait_for(std::chrono::milliseconds(0)) !=
              std::future_status::ready)
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::yield();
   PS_CHECK(module.gate(0));
   cancellation.cancel();
   module.gate(2);

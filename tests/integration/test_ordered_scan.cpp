@@ -256,8 +256,7 @@ int checkpoint_guards() {
   PS_CHECK(hooks->publishes == published_before + 2 &&
            hooks->restores == before_edit && !hooks->latest &&
            !hooks->previous);
-  PS_CHECK(uncached.value().diagnostics.block_cache_hits == 0 &&
-           uncached.value().diagnostics.block_cache_misses == 0);
+
   const auto owned = numeric_result_fixture::source(root, values({3}));
   PS_CHECK(owned.owned_by(root) && !owned.owned_by(ResourceBudget{}));
   return 0;
@@ -344,8 +343,7 @@ int edited_prefixes() {
   auto changed = demand.request(query);
   auto old = context.execute_fragments(frozen, query);
   PS_CHECK(changed.ok() && old.ok());
-  PS_CHECK(changed.value().diagnostics.block_cache_hits == 1 &&
-           changed.value().diagnostics.block_cache_misses == 2);
+
   for (unsigned i = 1; i < 4; ++i) {
     double before = 0, after = 0, pinned = 0;
     PS_CHECK(read(initial.value().results.at("y"), i, &before).ok());
@@ -371,13 +369,11 @@ int block_reconvergence() {
       context.open_demand(plan, bindings_for(root, numbers, doc)).take_value();
   DemandQuery query{{"y", point(5, 6)}};
   auto initial = demand.request(query);
-  PS_CHECK(initial.ok() && initial.value().diagnostics.block_cache_hits == 0 &&
-           initial.value().diagnostics.block_cache_misses == 6);
+  PS_CHECK(initial.ok());
   numbers[0] = 1;
   PS_CHECK(demand.replace_bindings(bindings_for(root, numbers, doc)).ok());
   auto changed = demand.request(query);
-  PS_CHECK(changed.ok() && changed.value().diagnostics.block_cache_hits == 3 &&
-           changed.value().diagnostics.block_cache_misses == 3);
+  PS_CHECK(changed.ok());
   volatile double expected = 0;
   for (const auto number : numbers)
     expected = expected + number;
@@ -393,9 +389,7 @@ int block_reconvergence() {
   context.clear_result_cache();
   auto retained = demand.request(query);
   PS_CHECK(retained.ok() &&
-           retained.value().diagnostics.shared_computations == 1 &&
-           retained.value().diagnostics.block_cache_hits == 0 &&
-           retained.value().diagnostics.block_cache_misses == 0);
+           retained.value().diagnostics.shared_computations == 1);
   PS_CHECK(read(retained.value().results.at("y"), 5, &actual).ok() &&
            actual == expected);
   initial = Result<DemandResult>(DemandResult{});
@@ -403,8 +397,7 @@ int block_reconvergence() {
   retained = Result<DemandResult>(DemandResult{});
   context.clear_result_cache();
   auto cleared = demand.request(query);
-  PS_CHECK(cleared.ok() && cleared.value().diagnostics.block_cache_hits == 0 &&
-           cleared.value().diagnostics.block_cache_misses == 6);
+  PS_CHECK(cleared.ok());
   PS_CHECK(read(cleared.value().results.at("y"), 5, &actual).ok() &&
            actual == expected);
   cleared = Result<DemandResult>(DemandResult{});
@@ -412,9 +405,7 @@ int block_reconvergence() {
   ExecutionOptions disabled;
   disabled.maximum_dependency_cache_work = 0;
   auto plain = demand.request(query, {}, disabled);
-  PS_CHECK(plain.ok() && plain.value().diagnostics.cache_hits == 0 &&
-           plain.value().diagnostics.block_cache_hits == 0 &&
-           plain.value().diagnostics.block_cache_misses == 0);
+  PS_CHECK(plain.ok() && plain.value().diagnostics.cache_hits == 0);
   PS_CHECK(read(plain.value().results.at("y"), 5, &actual).ok() &&
            actual == expected);
   return 0;

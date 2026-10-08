@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "fixtures/native_scale_spirv.h"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/photospider.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"

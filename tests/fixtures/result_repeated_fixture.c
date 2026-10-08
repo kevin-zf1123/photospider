@@ -4,9 +4,8 @@
 
 #include "photospider/plugin/result_operation_plugin_api.h"
 
-#ifndef PS_BAD_REPEATED_CASE
-#define PS_BAD_REPEATED_CASE 0
-#endif
+#define PS_BAD_RESULT_TABLE_COUNT 6U
+#include "bad_result_table_support.h"
 
 static _Atomic uint32_t starts, destroys;
 PS_RESULT_EXPORT uint32_t fixture_repeated_starts(void) {
@@ -247,6 +246,7 @@ static ps_result_operation_v2 operations[] = {
        &heterogeneous_prefix)};
 static void destroy_plugin(void* context) {
   (void)context;
+  ps_test_bad_result_retired();
 }
 static const ps_result_operation_plugin_api_v2 api = {
     sizeof(api), PS_RESULT_OPERATION_ABI_VERSION_2,
@@ -254,18 +254,34 @@ static const ps_result_operation_plugin_api_v2 api = {
     NULL,        destroy_plugin};
 PS_RESULT_EXPORT const ps_result_operation_plugin_api_v2*
 ps_result_operation_plugin_get_api_v2(void) {
-#if PS_BAD_REPEATED_CASE == 1
-  operations[1].repeated_minimum = 0;
-#elif PS_BAD_REPEATED_CASE == 2
-  operations[1].repeated_maximum = 1024;
-#elif PS_BAD_REPEATED_CASE == 3
-  operations[1].repeated_match = 2;
-#elif PS_BAD_REPEATED_CASE == 4
-  operations[1].repeated_input = NULL;
-#elif PS_BAD_REPEATED_CASE == 5
-  operations[1].repeated_maximum = 0;
-#elif PS_BAD_REPEATED_CASE == 6
-  operations[0].repeated_match = 0;
+#ifdef PS_RESULT_BAD_TABLES
+  static ps_result_operation_plugin_api_v2 bad_api;
+  static ps_result_operation_v2
+      bad_operations[sizeof(operations) / sizeof(operations[0])];
+  bad_api = api;
+  memcpy(bad_operations, operations, sizeof(operations));
+  bad_api.operations = bad_operations;
+  switch (ps_test_bad_case) {
+    case 1:
+      bad_operations[1].repeated_minimum = 0;
+      break;
+    case 2:
+      bad_operations[1].repeated_maximum = 1024;
+      break;
+    case 3:
+      bad_operations[1].repeated_match = 2;
+      break;
+    case 4:
+      bad_operations[1].repeated_input = NULL;
+      break;
+    case 5:
+      bad_operations[1].repeated_maximum = 0;
+      break;
+    case 6:
+      bad_operations[0].repeated_match = 0;
+      break;
+  }
+  return &bad_api;
 #endif
   return &api;
 }

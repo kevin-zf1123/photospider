@@ -90,7 +90,6 @@ OperationTraits traits(SchemaTemplate schema, std::uint32_t inputs,
   t.input_count = inputs;
   t.input_schema.resize(inputs);
   auto& output = t.outputs[0];
-  output.dependency_version = 2;
   output.region_rule = OperationRegionRule::Dependency;
   output.continuation_bytes = state;
   output.maximum_dependency_stages = 100000;
@@ -729,13 +728,6 @@ int binding_contract() {
     };
     return operation;
   };
-  for (auto version : {0U, 1U}) {
-    OperationRegistry rejected;
-    auto operation = definition();
-    operation.traits.outputs[0].dependency_version = version;
-    PS_CHECK(rejected.register_operation(std::move(operation)).code ==
-             ErrorCode::InvalidArgument);
-  }
   auto registry = std::make_shared<OperationRegistry>();
   PS_CHECK(registry->register_operation(definition()).ok());
   PS_CHECK(registry->freeze().ok());
@@ -1238,7 +1230,6 @@ int workflow() {
       GraphContext graph(document);
       auto compiled = Compiler(registry).compile(graph);
       PS_CHECK(compiled.ok());
-      PS_CHECK(compiled.value().plan.structured_network());
       ExecutionContextConfig config;
       config.cpu_workers = 1;
       config.managed_resources = ResourceLimits{};

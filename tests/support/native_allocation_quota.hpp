@@ -5,7 +5,7 @@
 #include <utility>
 
 #include "execution/native_gpu.hpp"
-#include "photospider/execution/resources.hpp"
+#include "photospider/core/resources.hpp"
 #include "support/test_support.hpp"
 
 inline int native_requested_quota(

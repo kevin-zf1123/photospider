@@ -16,7 +16,6 @@
 #include <vector>
 
 #include "../../examples/numeric_workflow/result_fixture.hpp"
-#include "execution/dependency_flights.hpp"
 #include "execution/dependency_records.hpp"
 #include "execution/memory_budget.hpp"
 #include "photospider/photospider.hpp"
@@ -387,89 +386,15 @@ int terminal_and_graph() {
   document.outputs = {{"result", 2, "value"}, {"record", 1, "value"}};
   GraphContext allowed(document);
   auto compiled = Compiler(registry).compile(allowed);
-  PS_CHECK(compiled.ok() && compiled.value().plan.dependency_network());
+  PS_CHECK(compiled.ok());
   PS_CHECK(!compiled.value().semantic.nodes()[0].outputs[0].effective_atomic &&
            compiled.value().semantic.nodes()[1].outputs[0].effective_atomic);
   PS_CHECK(compiled.value().plan.tile_plan("record", Region({{0, 2}})).ok());
   return 0;
 }
 
-int flight_lifetime() {
-  using execution_internal::DependencyFlights;
-  using execution_internal::DependencyFlightValue;
+int dependency_record_retirement() {
   using execution_internal::DependencyRecord;
-  using Outcome = Result<std::shared_ptr<const DependencyFlightValue>>;
-  auto value = std::make_shared<DependencyFlightValue>();
-  value->value =
-      ValueFragments::create({ElementType::Float64, {1}}, {},
-                             Footprint::all({1}).take_value(),
-                             {values<double>(ElementType::Float64, {42})})
-          .take_value();
-  DependencyFlights directory(8);
-  CancellationSource old_stop;
-  auto p0 = directory
-                .claim("same-atom",
-                       [&] {
-                         return old_stop.token().cancelled()
-                                    ? ErrorCode::Cancelled
-                                    : ErrorCode::Ok;
-                       })
-                .take_value();
-  old_stop.cancel();
-  auto p1 =
-      directory.claim("same-atom", [] { return ErrorCode::Ok; }).take_value();
-  PS_CHECK(p0->producer() && p1->producer() && p0->id() != p1->id());
-  PS_CHECK(directory.statistics().first == 2);
-  directory.clear();
-  auto next_epoch =
-      directory.claim("other-atom", [] { return ErrorCode::Ok; }).take_value();
-  PS_CHECK(next_epoch->epoch() == p1->epoch() + 1);
-  // Late P0 cannot erase the replacement P1 or accept a new subscriber.
-  p0->complete(Outcome(value));
-  PS_CHECK(p0->wait().status().code == ErrorCode::Cancelled);
-  auto joined =
-      directory.claim("same-atom", [] { return ErrorCode::Ok; }).take_value();
-  PS_CHECK(!joined->producer() && joined->id() == p1->id());
-  p1->complete(Outcome(value));
-  auto result = joined->wait();
-  double answer = 0;
-  PS_CHECK(result.ok() && result.value()->value.read({0}, &answer, 8).ok() &&
-           answer == 42);
-  next_epoch->complete(Outcome(value));
-  PS_CHECK(directory.statistics().first == 0);
-  unsigned retired_candidates = 0;
-  const auto candidate = [&] {
-    return std::shared_ptr<const DependencyFlightValue>(
-        new DependencyFlightValue(*value),
-        [&](const DependencyFlightValue* rejected) {
-          directory.statistics();
-          ++retired_candidates;
-          delete rejected;
-        });
-  };
-  // Discarded candidates may own external allocation leases whose destructors
-  // reenter the directory. Both cancellation and duplicate completion unlock.
-  p1->complete(Outcome(candidate()));
-  PS_CHECK(retired_candidates == 1);
-  CancellationSource stopped;
-  auto cancelled = directory
-                       .claim("cancelled-candidate",
-                              [&] {
-                                return stopped.token().cancelled()
-                                           ? ErrorCode::Cancelled
-                                           : ErrorCode::Ok;
-                              })
-                       .take_value();
-  stopped.cancel();
-  cancelled->complete(Outcome(candidate()));
-  PS_CHECK(retired_candidates == 2);
-  DependencyFlights bounded(1);
-  auto active = bounded.claim("a", [] { return ErrorCode::Ok; }).take_value();
-  PS_CHECK(bounded.claim("b", [] { return ErrorCode::Ok; }).status().code ==
-           ErrorCode::ResourceExhausted);
-  active->complete(Outcome(value));
-  active.reset();
-  PS_CHECK(bounded.claim("b", [] { return ErrorCode::Ok; }).ok());
   // Structural owners can outlive all pixel owners. Retiring a deep chain
   // must not recurse through the C++ stack or allocate during destruction.
   std::shared_ptr<const DependencyRecord> chain;
@@ -511,7 +436,6 @@ int field_prefix_evidence() {
   op.traits.input_schema[0].result_schema_id = source_schema.id;
   op.traits.input_schema[0].result_schema_version = source_schema.version;
   auto& output = op.traits.outputs[0];
-  output.dependency_version = 2;
   output.continuation_bytes = 64;
   output.maximum_dependency_stages = 8;
   output.region_rule = OperationRegionRule::Dependency;
@@ -1396,7 +1320,7 @@ int main() {
   PS_CHECK(concurrent_and_reentrant() == 0);
   PS_CHECK(root_work_resume() == 0);
   PS_CHECK(dependency_record_rollback() == 0);
-  PS_CHECK(flight_lifetime() == 0);
+  PS_CHECK(dependency_record_retirement() == 0);
   PS_CHECK(sibling_admission() == 0);
   PS_CHECK(execution_network() == 0);
   PS_CHECK(progressive() == 0);

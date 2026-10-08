@@ -12,6 +12,7 @@
 
 #include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "photospider/photospider.hpp"
+#include "support/bad_result_table_fixture.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
@@ -260,16 +261,13 @@ int main() try {
   PS_CHECK(admission(registry, starts) == 0);
   PS_CHECK(execute_groups(registry, starts, destroys) == 0);
   PS_CHECK(heterogeneous(registry, starts, destroys) == 0);
-#ifdef PS_BAD_REPEATED_1
-  for (const char* path :
-       {PS_BAD_REPEATED_1, PS_BAD_REPEATED_2, PS_BAD_REPEATED_3,
-        PS_BAD_REPEATED_4, PS_BAD_REPEATED_5, PS_BAD_REPEATED_6}) {
-    ps::OperationRegistry empty;
-    auto failed = empty.load_plugin(path);
-    PS_CHECK(failed.code == ps::ErrorCode::InvalidArgument &&
-             empty.keys().empty());
-  }
-#endif
+  PS_CHECK(ps::test::check_bad_result_tables(
+      PS_BAD_REPEATED_FIXTURE, {{1, "minimum count"},
+                                {2, "maximum count"},
+                                {3, "match flag"},
+                                {4, "group schema"},
+                                {5, "maximum without repeated group"},
+                                {6, "unresolved heterogeneous group"}}));
   return 0;
 } catch (const std::exception& error) {
   std::cerr << error.what() << '\n';

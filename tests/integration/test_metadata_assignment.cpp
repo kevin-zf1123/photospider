@@ -780,7 +780,7 @@ void dependency_boundaries() {
   metadata.result_schema = f.document.inputs[0].result_schema;
   auto traits = take(
       f.registry->resolve_traits("metadata.assign_strict", {metadata}, source));
-  require(!traits.cacheable && traits.outputs[0].dependency_version == 2,
+  require(!traits.cacheable,
           "Result dependency program disables sample-only caching");
 #if defined(__aarch64__) && defined(__APPLE__)
   cascade.profile = "accelerated_apple_silicon";

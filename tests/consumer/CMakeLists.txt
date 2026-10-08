@@ -56,9 +56,31 @@ if(NOT PHOTOSPIDER_CONSUMER_SANITIZER STREQUAL "none")
 endif()
 
 find_package(
-  Photospider 0.32 CONFIG REQUIRED
+  Photospider 0.33 CONFIG REQUIRED
   COMPONENTS kernel operation_sdk data_provider_sdk)
 
+
+enable_testing()
+include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/BehaviorTests.cmake)
+function(photospider_add_consumer target)
+  add_executable(${target} ${ARGN})
+  target_link_libraries(${target} PRIVATE Photospider::kernel)
+  target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
+endfunction()
+function(photospider_add_installed_test)
+  cmake_parse_arguments(PS "" "NAME;TARGET;TIMEOUT;SKIP_RETURN_CODE" "COMMAND;SOURCES;FIXTURES;DEPENDENCIES;LABELS" ${ARGN})
+  if(PS_SOURCES)
+    photospider_add_consumer(${PS_TARGET} ${PS_SOURCES})
+  endif()
+  set(_core)
+  if(PS_NAME MATCHES "^installed_(package_exports|result_cpp_minimal|unified_result_c11|result_repeated|expression_contract|result_backend_admission|result_execution|execution_demand|execution_dependencies|semantic_contract|resources|gpu_sync_fallback)$")
+    set(_core CORE)
+  endif()
+  photospider_register_test(NAME ${PS_NAME} TARGET ${PS_TARGET}
+    COMMAND ${PS_COMMAND} FIXTURES ${PS_FIXTURES} DEPENDENCIES ${PS_DEPENDENCIES}
+    LABELS ${PS_LABELS} TIMEOUT "${PS_TIMEOUT}"
+    SKIP_RETURN_CODE "${PS_SKIP_RETURN_CODE}" ${_core})
+endfunction()
 foreach(
   _photospider_cxx17_target
   IN ITEMS Photospider::kernel Photospider::operation_sdk)
@@ -88,259 +110,147 @@ foreach(_photospider_provider_feature IN LISTS
   endif()
 endforeach()
 add_library(photospider_sdk_consumer OBJECT sdk_smoke.c)
+
 target_link_libraries(
   photospider_sdk_consumer
   PRIVATE Photospider::operation_sdk Photospider::data_provider_sdk)
-target_compile_options(
-  photospider_sdk_consumer PRIVATE ${_photospider_consumer_compile_options})
+
 set_target_properties(
   photospider_sdk_consumer
   PROPERTIES C_STANDARD 11
              C_STANDARD_REQUIRED ON
              C_EXTENSIONS OFF)
 
-add_library(photospider_repeated_c_fixture MODULE ../fixtures/result_repeated_fixture.c)
-target_link_libraries(photospider_repeated_c_fixture PRIVATE Photospider::operation_sdk)
-target_compile_options(photospider_repeated_c_fixture PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_repeated_c_fixture PRIVATE ${_photospider_consumer_link_options})
-set_target_properties(photospider_repeated_c_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-add_executable(photospider_repeated_result_consumer ../integration/test_result_repeated.cpp)
-target_include_directories(photospider_repeated_result_consumer PRIVATE ..)
+photospider_add_result_table_fixture(photospider_repeated_c_fixture ../fixtures/result_repeated_fixture.c)
+
+photospider_add_installed_test(NAME installed_result_repeated TARGET photospider_repeated_result_consumer
+  SOURCES ../integration/test_result_repeated.cpp
+  COMMAND photospider_repeated_result_consumer)
+
 target_link_libraries(photospider_repeated_result_consumer PRIVATE Photospider::kernel ${CMAKE_DL_LIBS})
+
 target_compile_definitions(photospider_repeated_result_consumer PRIVATE PS_REPEATED_FIXTURE="$<TARGET_FILE:photospider_repeated_c_fixture>")
-target_compile_options(photospider_repeated_result_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_repeated_result_consumer PRIVATE ${_photospider_consumer_link_options})
-add_dependencies(photospider_repeated_result_consumer photospider_repeated_c_fixture)
-add_test(NAME installed_result_repeated COMMAND photospider_repeated_result_consumer)
 
-# Source packages consume only the installed public targets above.
-add_executable(photospider_layer_values_consumer ../unit/test_layer.cpp)
-target_include_directories(photospider_layer_values_consumer PRIVATE ..)
-target_link_libraries(photospider_layer_values_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_layer_values_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_layer_values_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_layer_values COMMAND photospider_layer_values_consumer)
 
-add_executable(photospider_result_c_checkpoint_consumer ../integration/test_result_c_checkpoint.cpp)
-target_include_directories(photospider_result_c_checkpoint_consumer PRIVATE ..)
-target_link_libraries(photospider_result_c_checkpoint_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_result_c_checkpoint_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_result_c_checkpoint_consumer PRIVATE ${_photospider_consumer_link_options})
+photospider_add_installed_test(NAME installed_layer_values TARGET photospider_layer_values_consumer
+  SOURCES ../unit/test_layer.cpp
+  COMMAND photospider_layer_values_consumer)
+
+
+photospider_add_installed_test(NAME installed_result_c_checkpoint TARGET photospider_result_c_checkpoint_consumer
+  SOURCES ../integration/test_result_c_checkpoint.cpp
+  COMMAND photospider_result_c_checkpoint_consumer)
+
 add_library(photospider_result_checkpoint_fixture MODULE ../fixtures/result_checkpoint_fixture.c)
+
 target_link_libraries(photospider_result_checkpoint_fixture PRIVATE Photospider::operation_sdk)
+
 set_target_properties(photospider_result_checkpoint_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+
 target_compile_definitions(photospider_result_c_checkpoint_consumer PRIVATE PS_RESULT_CHECKPOINT_FIXTURE="$<TARGET_FILE:photospider_result_checkpoint_fixture>")
-add_dependencies(photospider_result_c_checkpoint_consumer photospider_result_checkpoint_fixture)
-add_test(NAME installed_result_c_checkpoint COMMAND photospider_result_c_checkpoint_consumer)
-add_executable(photospider_result_c_block_consumer ../integration/test_result_c_block.cpp)
-target_include_directories(photospider_result_c_block_consumer PRIVATE ..)
-target_link_libraries(photospider_result_c_block_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_result_c_block_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_result_c_block_consumer PRIVATE ${_photospider_consumer_link_options})
+
+
+photospider_add_installed_test(NAME installed_result_c_block TARGET photospider_result_c_block_consumer
+  SOURCES ../integration/test_result_c_block.cpp
+  COMMAND photospider_result_c_block_consumer)
+
 add_library(photospider_result_block_fixture MODULE ../fixtures/result_block_fixture.c)
+
 target_link_libraries(photospider_result_block_fixture PRIVATE Photospider::operation_sdk)
+
 if(UNIX)
   target_link_libraries(photospider_result_block_fixture PRIVATE m)
 endif()
+
 target_compile_options(photospider_result_block_fixture PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
+
 set_target_properties(photospider_result_block_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+
 target_compile_definitions(photospider_result_c_block_consumer PRIVATE PS_RESULT_BLOCK_FIXTURE="$<TARGET_FILE:photospider_result_block_fixture>")
-add_dependencies(photospider_result_c_block_consumer photospider_result_block_fixture)
-add_test(NAME installed_result_c_block COMMAND photospider_result_c_block_consumer)
-add_executable(photospider_result_queries_consumer ../integration/test_result_queries.cpp)
-target_include_directories(photospider_result_queries_consumer PRIVATE ..)
-target_link_libraries(photospider_result_queries_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_result_queries_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_result_queries_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_result_queries COMMAND photospider_result_queries_consumer)
-add_executable(photospider_result_exceptions_consumer ../integration/test_result_exceptions.cpp)
-target_include_directories(photospider_result_exceptions_consumer PRIVATE ..)
-target_link_libraries(photospider_result_exceptions_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_result_exceptions_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_result_exceptions_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_result_exceptions COMMAND photospider_result_exceptions_consumer)
-add_executable(photospider_backend_admission_consumer ../integration/test_backend_admission.cpp)
-target_include_directories(photospider_backend_admission_consumer PRIVATE ..)
-target_link_libraries(photospider_backend_admission_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_backend_admission_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_backend_admission_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_result_backend_admission COMMAND photospider_backend_admission_consumer)
 
-add_executable(photospider_numeric_prepared_consumer ../../examples/numeric_workflow/prepared.cpp)
-target_link_libraries(photospider_numeric_prepared_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_prepared_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_numeric_prepared_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_prepared COMMAND photospider_numeric_prepared_consumer)
-add_executable(photospider_numeric_unary_consumer ../../examples/numeric_workflow/unary.cpp)
-target_link_libraries(photospider_numeric_unary_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_unary_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_unary_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_unary_result COMMAND photospider_numeric_unary_consumer strict)
 
-add_executable(photospider_numeric_binary_consumer ../../examples/numeric_workflow/binary.cpp)
-target_link_libraries(photospider_numeric_binary_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_binary_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_binary_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_binary_result COMMAND photospider_numeric_binary_consumer strict)
+photospider_add_installed_test(NAME installed_result_queries TARGET photospider_result_queries_consumer
+  SOURCES ../integration/test_result_queries.cpp
+  COMMAND photospider_result_queries_consumer)
 
-add_executable(photospider_numeric_comparisons_consumer ../../examples/numeric_workflow/comparisons.cpp)
-target_link_libraries(photospider_numeric_comparisons_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_comparisons_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_comparisons_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_comparisons_result COMMAND photospider_numeric_comparisons_consumer _strict)
 
-add_executable(photospider_numeric_color_array_consumer ../../examples/numeric_workflow/color_array.cpp)
-target_link_libraries(photospider_numeric_color_array_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_color_array_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_color_array_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_color_array_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_color_array_result COMMAND photospider_numeric_color_array_consumer)
+photospider_add_installed_test(NAME installed_result_exceptions TARGET photospider_result_exceptions_consumer
+  SOURCES ../integration/test_result_exceptions.cpp
+  COMMAND photospider_result_exceptions_consumer)
 
-add_executable(photospider_numeric_curves_consumer ../../examples/numeric_workflow/curves.cpp)
-target_link_libraries(photospider_numeric_curves_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_curves_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_curves_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_curves_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_curves_result COMMAND photospider_numeric_curves_consumer strict)
 
-add_executable(photospider_numeric_matrix_consumer ../../examples/numeric_workflow/matrix.cpp)
-target_link_libraries(photospider_numeric_matrix_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_matrix_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_matrix_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_matrix_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_matrix_result COMMAND photospider_numeric_matrix_consumer strict)
+photospider_add_installed_test(NAME installed_result_backend_admission TARGET photospider_backend_admission_consumer
+  SOURCES ../integration/test_backend_admission.cpp
+  COMMAND photospider_backend_admission_consumer)
 
-add_executable(photospider_numeric_expression_workflow_consumer ../../examples/numeric_workflow/expression.cpp)
-target_link_libraries(photospider_numeric_expression_workflow_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_expression_workflow_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_expression_workflow_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_expression_result COMMAND photospider_numeric_expression_workflow_consumer strict)
 
-add_executable(photospider_numeric_sequences_consumer ../../examples/numeric_workflow/sequences.cpp)
-target_link_libraries(photospider_numeric_sequences_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_sequences_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_sequences_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_sequences_result COMMAND photospider_numeric_sequences_consumer strict)
+photospider_add_installed_test(NAME installed_numeric_prepared TARGET photospider_numeric_prepared_consumer
+  SOURCES ../../examples/numeric_workflow/prepared.cpp
+  COMMAND photospider_numeric_prepared_consumer)
 
-add_executable(photospider_numeric_ranges_consumer ../../examples/numeric_workflow/ranges.cpp)
-target_link_libraries(photospider_numeric_ranges_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_ranges_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_ranges_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_ranges_result COMMAND photospider_numeric_ranges_consumer _strict)
 
-add_executable(photospider_numeric_interpolation_consumer ../../examples/numeric_workflow/interpolation.cpp)
-target_link_libraries(photospider_numeric_interpolation_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_interpolation_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_interpolation_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_interpolation_result COMMAND photospider_numeric_interpolation_consumer _strict)
+photospider_add_installed_test(NAME installed_result_c_atoms TARGET photospider_result_c_atoms_consumer
+  SOURCES ../integration/test_result_c_atoms.cpp
+  COMMAND photospider_result_c_atoms_consumer)
 
-add_executable(photospider_numeric_layouts_consumer ../../examples/numeric_workflow/layouts.cpp)
-target_link_libraries(photospider_numeric_layouts_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_layouts_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_layouts_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_layouts_result COMMAND photospider_numeric_layouts_consumer strict)
-
-add_executable(photospider_numeric_indexing_consumer ../../examples/numeric_workflow/indexing.cpp)
-target_link_libraries(photospider_numeric_indexing_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_indexing_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_indexing_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_indexing_result COMMAND photospider_numeric_indexing_consumer strict)
-
-add_executable(photospider_numeric_reductions_consumer ../../examples/numeric_workflow/reductions.cpp)
-target_link_libraries(photospider_numeric_reductions_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_reductions_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_reductions_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_reductions_result COMMAND photospider_numeric_reductions_consumer strict)
-add_executable(photospider_numeric_ordering_consumer ../../examples/numeric_workflow/ordering.cpp)
-target_link_libraries(photospider_numeric_ordering_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_ordering_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_ordering_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_ordering_result COMMAND photospider_numeric_ordering_consumer strict)
-add_executable(photospider_numeric_scans_consumer ../../examples/numeric_workflow/scans.cpp)
-target_link_libraries(photospider_numeric_scans_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_numeric_scans_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_scans_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_scans_result COMMAND photospider_numeric_scans_consumer strict)
-add_executable(photospider_result_c_atoms_consumer ../integration/test_result_c_atoms.cpp)
-target_include_directories(photospider_result_c_atoms_consumer PRIVATE ..)
-target_link_libraries(photospider_result_c_atoms_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_result_c_atoms_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_result_c_atoms_consumer PRIVATE ${_photospider_consumer_link_options})
 add_library(photospider_result_atoms_fixture MODULE ../fixtures/result_atoms_fixture.c)
+
 target_link_libraries(photospider_result_atoms_fixture PRIVATE Photospider::operation_sdk)
+
 set_target_properties(photospider_result_atoms_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+
 target_compile_definitions(photospider_result_c_atoms_consumer PRIVATE PS_RESULT_ATOMS_FIXTURE="$<TARGET_FILE:photospider_result_atoms_fixture>")
-add_dependencies(photospider_result_c_atoms_consumer photospider_result_atoms_fixture)
+
 add_library(photospider_result_atoms_wide_fixture MODULE ../fixtures/result_atoms_fixture.c)
+
 target_link_libraries(photospider_result_atoms_wide_fixture PRIVATE Photospider::operation_sdk)
+
 target_compile_definitions(photospider_result_atoms_wide_fixture PRIVATE PS_RESULT_ATOMS_WIDTH=64)
+
 set_target_properties(photospider_result_atoms_wide_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+
 target_compile_definitions(photospider_result_c_atoms_consumer PRIVATE PS_RESULT_ATOMS_WIDE_FIXTURE="$<TARGET_FILE:photospider_result_atoms_wide_fixture>")
-add_dependencies(photospider_result_c_atoms_consumer photospider_result_atoms_wide_fixture)
-add_test(NAME installed_result_c_atoms COMMAND photospider_result_c_atoms_consumer)
-add_executable(photospider_result_atoms_consumer ../integration/test_result_atoms.cpp)
-target_include_directories(photospider_result_atoms_consumer PRIVATE ..)
-target_link_libraries(photospider_result_atoms_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_result_atoms_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_result_atoms_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_result_atoms COMMAND photospider_result_atoms_consumer)
-add_executable(photospider_result_c_joint_consumer ../integration/test_result_c_joint.cpp)
-target_include_directories(photospider_result_c_joint_consumer PRIVATE ..)
-target_link_libraries(photospider_result_c_joint_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_result_c_joint_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_result_c_joint_consumer PRIVATE ${_photospider_consumer_link_options})
-add_library(photospider_result_joint_fixture MODULE ../fixtures/result_joint_fixture.c)
-target_link_libraries(photospider_result_joint_fixture PRIVATE Photospider::operation_sdk)
-set_target_properties(photospider_result_joint_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+
+
+photospider_add_installed_test(NAME installed_result_c_joint TARGET photospider_result_c_joint_consumer
+  SOURCES ../integration/test_result_c_joint.cpp
+  COMMAND photospider_result_c_joint_consumer)
+
+photospider_add_result_table_fixture(photospider_result_joint_fixture ../fixtures/result_joint_fixture.c)
+
 target_compile_definitions(photospider_result_c_joint_consumer PRIVATE PS_RESULT_JOINT_FIXTURE="$<TARGET_FILE:photospider_result_joint_fixture>")
-add_dependencies(photospider_result_c_joint_consumer photospider_result_joint_fixture)
+
 add_library(photospider_result_joint_throw_fixture MODULE ../fixtures/result_joint_throw_fixture.cpp)
+
 target_link_libraries(photospider_result_joint_throw_fixture PRIVATE Photospider::operation_sdk Threads::Threads)
+
 target_compile_features(photospider_result_joint_throw_fixture PRIVATE cxx_std_17)
+
 target_compile_definitions(photospider_result_c_joint_consumer PRIVATE PS_RESULT_JOINT_THROW_FIXTURE="$<TARGET_FILE:photospider_result_joint_throw_fixture>")
-add_dependencies(photospider_result_c_joint_consumer photospider_result_joint_throw_fixture)
-add_test(NAME installed_result_c_joint COMMAND photospider_result_c_joint_consumer)
-add_executable(photospider_result_joint_consumer ../integration/test_result_joint.cpp)
-target_include_directories(photospider_result_joint_consumer PRIVATE ..)
-target_link_libraries(photospider_result_joint_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_result_joint_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_result_joint_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_result_joint COMMAND photospider_result_joint_consumer)
 
-add_executable(photospider_request_record_consumer ../integration/test_result_request_record.cpp)
-target_include_directories(photospider_request_record_consumer PRIVATE ..)
-target_link_libraries(photospider_request_record_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_request_record_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_request_record_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_result_request_record COMMAND photospider_request_record_consumer)
-add_library(photospider_request_record_fixture MODULE ../fixtures/result_request_record_fixture.c)
-target_link_libraries(photospider_request_record_fixture PRIVATE Photospider::operation_sdk)
-set_target_properties(photospider_request_record_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+
+photospider_add_installed_test(NAME installed_result_joint TARGET photospider_result_joint_consumer
+  SOURCES ../integration/test_result_joint.cpp
+  COMMAND photospider_result_joint_consumer)
+
+
+photospider_add_installed_test(NAME installed_result_request_record TARGET photospider_request_record_consumer
+  SOURCES ../integration/test_result_request_record.cpp
+  COMMAND photospider_request_record_consumer)
+
+
+photospider_add_result_table_fixture(photospider_request_record_fixture ../fixtures/result_request_record_fixture.c)
+
 target_compile_definitions(photospider_request_record_consumer PRIVATE PS_REQUEST_RECORD_FIXTURE="$<TARGET_FILE:photospider_request_record_fixture>")
-add_dependencies(photospider_request_record_consumer photospider_request_record_fixture)
-foreach(_case RANGE 1 4)
-  add_library(photospider_bad_request_record_${_case} MODULE ../fixtures/result_request_record_fixture.c)
-  target_link_libraries(photospider_bad_request_record_${_case} PRIVATE Photospider::operation_sdk)
-  set_target_properties(photospider_bad_request_record_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
-  target_compile_definitions(photospider_bad_request_record_${_case} PRIVATE PS_BAD_REQUEST_RECORD_CASE=${_case})
-  target_compile_definitions(photospider_request_record_consumer PRIVATE PS_BAD_REQUEST_RECORD_${_case}="$<TARGET_FILE:photospider_bad_request_record_${_case}>")
-  add_dependencies(photospider_request_record_consumer photospider_bad_request_record_${_case})
-endforeach()
 
-add_subdirectory(../../examples/foundations_workflow foundations_workflow)
-add_subdirectory(../../examples/g4_workflow dependency_workflow)
-target_compile_options(photospider_dependency_workflow PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_dependency_workflow PRIVATE ${_photospider_consumer_link_options})
-target_compile_options(photospider_foundations_workflow PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_foundations_workflow PRIVATE ${_photospider_consumer_link_options})
+photospider_add_result_table_fixture(photospider_bad_request_record_fixture ../fixtures/result_request_record_fixture.c BAD)
+target_compile_definitions(photospider_request_record_consumer PRIVATE PS_BAD_REQUEST_RECORD_FIXTURE=\"$<TARGET_FILE:photospider_bad_request_record_fixture>\")
 
 add_library(photospider_consumer_bridge SHARED pipeline_bridge.cpp)
+
 target_link_libraries(
   photospider_consumer_bridge PRIVATE Photospider::kernel)
-target_compile_options(
-  photospider_consumer_bridge PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(
-  photospider_consumer_bridge PRIVATE ${_photospider_consumer_link_options})
+
 set_target_properties(
   photospider_consumer_bridge
   PROPERTIES CXX_STANDARD 14
@@ -348,18 +258,16 @@ set_target_properties(
              CXX_EXTENSIONS OFF
              WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
-add_executable(
-  photospider_consumer
-  main.cpp
-  $<TARGET_OBJECTS:photospider_sdk_consumer>)
+photospider_add_installed_test(NAME installed_package_exports TARGET photospider_consumer
+  SOURCES main.cpp
+  $<TARGET_OBJECTS:photospider_sdk_consumer>
+  COMMAND photospider_consumer)
+
 target_link_libraries(
   photospider_consumer
   PRIVATE photospider_consumer_bridge Photospider::operation_sdk
           Photospider::data_provider_sdk)
-target_compile_options(
-  photospider_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(
-  photospider_consumer PRIVATE ${_photospider_consumer_link_options})
+
 set_target_properties(
   photospider_consumer
   PROPERTIES CXX_STANDARD 14
@@ -367,508 +275,235 @@ set_target_properties(
              CXX_EXTENSIONS OFF)
 
 add_library(photospider_contract_fixture MODULE ../fixtures/operation_contract_fixture.c)
+
 target_link_libraries(photospider_contract_fixture PRIVATE Photospider::operation_sdk)
+
 set_target_properties(photospider_contract_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-add_executable(photospider_semantic_consumer ../unit/test_semantic_contract.cpp)
-target_include_directories(photospider_semantic_consumer PRIVATE ..)
-target_link_libraries(photospider_semantic_consumer PRIVATE Photospider::kernel)
+
+photospider_add_installed_test(NAME installed_semantic_contract TARGET photospider_semantic_consumer
+  SOURCES ../unit/test_semantic_contract.cpp
+  COMMAND photospider_semantic_consumer)
+
 target_compile_definitions(photospider_semantic_consumer PRIVATE PS_CONTRACT_FIXTURE="$<TARGET_FILE:photospider_contract_fixture>")
-target_compile_options(photospider_semantic_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_semantic_consumer PRIVATE ${_photospider_consumer_link_options})
-add_dependencies(photospider_semantic_consumer photospider_contract_fixture)
-add_test(NAME installed_semantic_contract COMMAND photospider_semantic_consumer)
 
-add_library(photospider_expression_contract MODULE ../fixtures/expression_contract_fixture.c)
-target_link_libraries(photospider_expression_contract PRIVATE Photospider::operation_sdk)
+
+add_library(photospider_expression_contract MODULE
+  ../fixtures/expression_contract_fixture.c
+  ../fixtures/expression_contract_metadata.cpp)
+target_link_libraries(photospider_expression_contract PRIVATE Photospider::kernel)
+
 set_target_properties(photospider_expression_contract PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-add_executable(photospider_expression_consumer ../integration/test_expression_operations.cpp)
-target_include_directories(photospider_expression_consumer PRIVATE ..)
-target_link_libraries(photospider_expression_consumer PRIVATE Photospider::kernel)
+
+photospider_add_installed_test(NAME installed_expression_contract TARGET photospider_expression_consumer
+  SOURCES ../integration/test_expression_operations.cpp
+  COMMAND photospider_expression_consumer)
+
 target_compile_definitions(photospider_expression_consumer PRIVATE PS_EXPRESSION_CONTRACT_FIXTURE="$<TARGET_FILE:photospider_expression_contract>")
-target_compile_options(photospider_expression_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_expression_consumer PRIVATE ${_photospider_consumer_link_options})
-add_dependencies(photospider_expression_consumer photospider_expression_contract)
 
-add_executable(photospider_basic_consumer ../integration/test_basic_operations.cpp)
-target_include_directories(photospider_basic_consumer PRIVATE ../../examples)
-target_link_libraries(photospider_basic_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_basic_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_basic_consumer PRIVATE ${_photospider_consumer_link_options})
+photospider_add_installed_test(NAME installed_execution_dependencies TARGET photospider_execution_dependencies_consumer
+  SOURCES ../integration/test_execution_dependencies.cpp
+  COMMAND photospider_execution_dependencies_consumer)
 
-add_executable(photospider_sampling_consumer ../integration/test_dependency_sampling.cpp)
-target_include_directories(photospider_sampling_consumer PRIVATE ..)
-target_link_libraries(photospider_sampling_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_sampling_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_sampling_consumer PRIVATE ${_photospider_consumer_link_options})
 
-# Public structural-image DAG through the installed C++ package.
+photospider_add_installed_test(NAME installed_execution_demand TARGET photospider_execution_demand_consumer
+  SOURCES ../integration/test_execution_demand.cpp
+  COMMAND photospider_execution_demand_consumer)
 
-add_executable(photospider_execution_dependencies_consumer ../integration/test_execution_dependencies.cpp)
-target_include_directories(photospider_execution_dependencies_consumer PRIVATE ..)
-target_link_libraries(photospider_execution_dependencies_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_execution_dependencies_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_execution_dependencies_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_execution_dependencies COMMAND photospider_execution_dependencies_consumer)
 
-add_executable(photospider_execution_demand_consumer ../integration/test_execution_demand.cpp)
-target_include_directories(photospider_execution_demand_consumer PRIVATE ..)
-target_link_libraries(photospider_execution_demand_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_execution_demand_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_execution_demand_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_execution_demand COMMAND photospider_execution_demand_consumer)
+photospider_add_installed_test(NAME installed_dependency_gpu SKIP_RETURN_CODE 77 TARGET photospider_dependency_gpu_consumer
+  SOURCES ../unit/test_dependency_gpu.cpp
+  COMMAND photospider_dependency_gpu_consumer)
 
-add_executable(photospider_dependency_gpu_consumer ../unit/test_dependency_gpu.cpp)
-target_include_directories(photospider_dependency_gpu_consumer PRIVATE ..)
-target_link_libraries(photospider_dependency_gpu_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_dependency_gpu_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_dependency_gpu_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_dependency_gpu COMMAND photospider_dependency_gpu_consumer)
-set_tests_properties(installed_dependency_gpu PROPERTIES SKIP_RETURN_CODE 77)
 
-add_executable(photospider_gpu_discovery_consumer ../unit/test_gpu_discovery.cpp)
-target_include_directories(photospider_gpu_discovery_consumer PRIVATE ..)
-target_link_libraries(photospider_gpu_discovery_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_gpu_discovery_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_gpu_discovery_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_gpu_discovery COMMAND photospider_gpu_discovery_consumer)
-set_tests_properties(installed_gpu_discovery PROPERTIES SKIP_RETURN_CODE 77)
-add_library(gpu_discovery_fixture MODULE ../../examples/g4_gpu_workflow/discovery_plugin.c)
+photospider_add_installed_test(NAME installed_gpu_discovery SKIP_RETURN_CODE 77 TARGET photospider_gpu_discovery_consumer
+  SOURCES ../unit/test_gpu_discovery.cpp
+  COMMAND photospider_gpu_discovery_consumer)
+
+
+add_library(gpu_discovery_fixture MODULE ../fixtures/gpu_result_discovery_plugin.c)
+
 target_link_libraries(gpu_discovery_fixture PRIVATE Photospider::operation_sdk)
+
 target_compile_definitions(gpu_discovery_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+
 set_target_properties(gpu_discovery_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-add_executable(test_gpu_discovery_workflow ../../examples/g4_gpu_workflow/discovery_main.cpp)
-target_link_libraries(test_gpu_discovery_workflow PRIVATE Photospider::kernel)
+
+photospider_add_installed_test(NAME installed_gpu_discovery_workflow SKIP_RETURN_CODE 77 TARGET test_gpu_discovery_workflow
+  SOURCES ../integration/gpu/test_gpu_discovery_workflow.cpp
+  COMMAND test_gpu_discovery_workflow)
+
 target_compile_options(test_gpu_discovery_workflow PRIVATE ${_photospider_consumer_compile_options})
+
 target_link_options(test_gpu_discovery_workflow PRIVATE ${_photospider_consumer_link_options})
+
 target_compile_definitions(test_gpu_discovery_workflow PRIVATE PS_GPU_DISCOVERY_PLUGIN="$<TARGET_FILE:gpu_discovery_fixture>")
-add_dependencies(test_gpu_discovery_workflow gpu_discovery_fixture)
 
-add_library(gpu_dependency_c_fixture MODULE ../../examples/g4_gpu_workflow/c_plugin.c)
+add_library(gpu_dependency_c_fixture MODULE ../fixtures/gpu_result_c_plugin.c)
+
 target_link_libraries(gpu_dependency_c_fixture PRIVATE Photospider::operation_sdk)
-target_compile_definitions(gpu_dependency_c_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
-set_target_properties(gpu_dependency_c_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-add_executable(test_gpu_c_abi_execution ../../examples/g4_gpu_workflow/c_main.cpp)
-target_link_libraries(test_gpu_c_abi_execution PRIVATE Photospider::kernel)
-target_compile_options(test_gpu_c_abi_execution PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(test_gpu_c_abi_execution PRIVATE ${_photospider_consumer_link_options})
-target_compile_definitions(test_gpu_c_abi_execution PRIVATE PS_GPU_DEPENDENCY_PLUGIN="$<TARGET_FILE:gpu_dependency_c_fixture>")
-add_dependencies(test_gpu_c_abi_execution gpu_dependency_c_fixture)
 
-add_executable(test_gpu_sync_fallback ../../examples/g4_gpu_workflow/sync_main.cpp)
-target_link_libraries(test_gpu_sync_fallback PRIVATE Photospider::kernel)
+target_compile_definitions(gpu_dependency_c_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
+
+set_target_properties(gpu_dependency_c_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+
+photospider_add_installed_test(NAME installed_gpu_c_abi_execution SKIP_RETURN_CODE 77 TARGET test_gpu_c_abi_execution
+  SOURCES ../integration/gpu/test_gpu_c_abi_execution.cpp
+  COMMAND test_gpu_c_abi_execution)
+
+target_compile_options(test_gpu_c_abi_execution PRIVATE ${_photospider_consumer_compile_options})
+
+target_link_options(test_gpu_c_abi_execution PRIVATE ${_photospider_consumer_link_options})
+
+target_compile_definitions(test_gpu_c_abi_execution PRIVATE PS_GPU_DEPENDENCY_PLUGIN="$<TARGET_FILE:gpu_dependency_c_fixture>")
+
+photospider_add_installed_test(NAME installed_gpu_sync_fallback SKIP_RETURN_CODE 77 TARGET test_gpu_sync_fallback
+  SOURCES ../integration/gpu/test_gpu_sync_fallback.cpp
+  COMMAND test_gpu_sync_fallback)
+
 target_compile_options(test_gpu_sync_fallback PRIVATE ${_photospider_consumer_compile_options})
+
 target_link_options(test_gpu_sync_fallback PRIVATE ${_photospider_consumer_link_options})
 
-add_executable(test_gpu_fragment_execution ../../examples/g4_gpu_workflow/main.cpp)
-target_link_libraries(test_gpu_fragment_execution PRIVATE Photospider::kernel)
+photospider_add_installed_test(NAME installed_gpu_fragment_execution SKIP_RETURN_CODE 77 TARGET test_gpu_fragment_execution
+  SOURCES ../integration/gpu/test_gpu_fragment_execution.cpp
+  COMMAND test_gpu_fragment_execution)
+
 target_compile_options(test_gpu_fragment_execution PRIVATE ${_photospider_consumer_compile_options})
+
 target_link_options(test_gpu_fragment_execution PRIVATE ${_photospider_consumer_link_options})
 
-add_executable(photospider_fragment_atlas_consumer ../unit/test_fragment_atlas.cpp)
-target_include_directories(photospider_fragment_atlas_consumer PRIVATE ..)
-target_link_libraries(photospider_fragment_atlas_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_fragment_atlas_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_fragment_atlas_consumer PRIVATE ${_photospider_consumer_link_options})
+photospider_add_installed_test(NAME installed_fragment_atlas TARGET photospider_fragment_atlas_consumer
+  SOURCES ../unit/test_fragment_atlas.cpp
+  COMMAND photospider_fragment_atlas_consumer)
 
-add_executable(photospider_ordered_scan_consumer ../integration/test_ordered_scan.cpp)
-target_include_directories(photospider_ordered_scan_consumer PRIVATE ..)
-target_link_libraries(photospider_ordered_scan_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_ordered_scan_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_ordered_scan_consumer PRIVATE ${_photospider_consumer_link_options})
+photospider_add_installed_test(NAME installed_resources TARGET photospider_resource_consumer
+  SOURCES ../unit/test_resources.cpp
+  COMMAND photospider_resource_consumer)
 
-add_executable(photospider_ordered_reduction_consumer ../integration/test_ordered_reduction.cpp)
-target_include_directories(photospider_ordered_reduction_consumer PRIVATE ..)
-target_link_libraries(photospider_ordered_reduction_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_ordered_reduction_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_ordered_reduction_consumer PRIVATE ${_photospider_consumer_link_options})
 
-add_subdirectory(../../examples/multi_output_workflow multi-output)
-target_compile_options(photospider_multi_output_workflow PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_multi_output_workflow PRIVATE ${_photospider_consumer_link_options})
+photospider_add_installed_test(NAME installed_result_execution TARGET photospider_result_consumer
+  SOURCES ../integration/test_result_execution.cpp
+  COMMAND photospider_result_consumer)
 
-add_custom_target(
-  run_photospider_consumer
-  COMMAND "$<TARGET_FILE:photospider_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_execution_dependencies_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_execution_demand_consumer>"
-  COMMAND "${CMAKE_CTEST_COMMAND}" --test-dir "${CMAKE_CURRENT_BINARY_DIR}"
-          -R "^installed_(dependency_gpu|gpu_discovery)$" --output-on-failure
-  COMMAND "$<TARGET_FILE:photospider_fragment_atlas_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_ordered_scan_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_ordered_reduction_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_model_metadata_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_expression_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_basic_consumer>"
-  COMMAND "$<TARGET_FILE:photospider_semantic_consumer>"
-  DEPENDS test_gpu_sync_fallback test_gpu_discovery_workflow photospider_gpu_discovery_consumer test_gpu_c_abi_execution test_gpu_fragment_execution photospider_dependency_gpu_consumer photospider_fragment_atlas_consumer photospider_ordered_scan_consumer photospider_ordered_reduction_consumer photospider_execution_demand_consumer photospider_execution_dependencies_consumer photospider_basic_consumer photospider_foundations_workflow photospider_expression_consumer photospider_semantic_consumer photospider_consumer
-  USES_TERMINAL
-  VERBATIM)
 
-# Focused installed managed-resource consumer; only installed kernel headers.
-add_executable(photospider_resource_consumer ../unit/test_resources.cpp)
-target_include_directories(photospider_resource_consumer PRIVATE ..)
-target_link_libraries(photospider_resource_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_resource_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_resource_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_resources COMMAND photospider_resource_consumer)
+photospider_add_installed_test(NAME installed_result_diagnostics TARGET photospider_result_diagnostics_consumer
+  SOURCES ../integration/test_result_diagnostics.cpp
+  COMMAND photospider_result_diagnostics_consumer)
 
-# Public staged ResultRef DAG against the installed package only.
-add_executable(photospider_result_consumer ../integration/test_result_execution.cpp)
-target_include_directories(photospider_result_consumer PRIVATE ..)
-target_link_libraries(photospider_result_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_result_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_result_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_result_execution COMMAND photospider_result_consumer)
 
-add_executable(photospider_result_diagnostics_consumer ../integration/test_result_diagnostics.cpp)
-target_include_directories(photospider_result_diagnostics_consumer PRIVATE ..)
-target_link_libraries(photospider_result_diagnostics_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_result_diagnostics_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_result_diagnostics_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_result_diagnostics COMMAND photospider_result_diagnostics_consumer)
-
-add_subdirectory(../../examples/representations_workflow representations_workflow)
-
-# Format/color family gates use only installed public kernel headers.
-foreach(_format_kind IN ITEMS model_metadata)
-  add_executable(photospider_${_format_kind}_consumer
-    ../integration/test_${_format_kind}.cpp)
-  target_include_directories(photospider_${_format_kind}_consumer PRIVATE ..)
-  target_link_libraries(photospider_${_format_kind}_consumer PRIVATE Photospider::kernel)
-  target_compile_options(photospider_${_format_kind}_consumer PRIVATE ${_photospider_consumer_compile_options})
-  target_link_options(photospider_${_format_kind}_consumer PRIVATE ${_photospider_consumer_link_options})
-  add_dependencies(run_photospider_consumer photospider_${_format_kind}_consumer)
-endforeach()
-
-add_executable(photospider_scheduler_consumer ../../examples/dynamic_scheduler/main.cpp)
-target_link_libraries(photospider_scheduler_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_scheduler_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_scheduler_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_scheduler_consumer PRIVATE ${_photospider_consumer_link_options})
-
-# Unified Result workflow and C11 DSO consume only the installed kernel/SDK.
 add_subdirectory(../../examples/unified_result_workflow unified_result_workflow)
-add_subdirectory(../../examples/image_vertical image_vertical)
-add_subdirectory(../../examples/regional_image_vertical regional_image_vertical)
-add_subdirectory(../../examples/s3_image_workflow s3_image_workflow)
-add_subdirectory(../../examples/s4_gpu_workflow s4_gpu_workflow)
-add_executable(photospider_unified_result_consumer ../integration/test_unified_result_images.cpp)
-target_include_directories(photospider_unified_result_consumer PRIVATE ..)
-target_link_libraries(photospider_unified_result_consumer PRIVATE Photospider::kernel)
-add_executable(photospider_builtin_result_images_consumer ../integration/test_builtin_result_images.cpp)
-target_link_libraries(photospider_builtin_result_images_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_builtin_result_images_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_builtin_result_images_consumer PRIVATE ${_photospider_consumer_link_options})
-add_executable(photospider_image_domain_consumer ../integration/test_metal_images.cpp)
+
+photospider_add_installed_test(NAME installed_unified_result_cpp TARGET photospider_unified_result_consumer
+  SOURCES ../integration/test_unified_result_images.cpp
+  COMMAND photospider_unified_result_consumer)
+
+photospider_add_installed_test(NAME installed_image_domain TARGET photospider_image_domain_consumer
+  SOURCES ../integration/test_metal_images.cpp
+  COMMAND photospider_image_domain_consumer)
+
 target_include_directories(photospider_image_domain_consumer PRIVATE ../../examples)
-target_link_libraries(photospider_image_domain_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_image_domain_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_image_domain_consumer PRIVATE ${_photospider_consumer_link_options})
-add_executable(photospider_computed_scalar_consumer ../integration/test_computed_scalar.cpp)
+
+photospider_add_installed_test(NAME installed_computed_scalar TARGET photospider_computed_scalar_consumer
+  SOURCES ../integration/test_computed_scalar.cpp
+  COMMAND photospider_computed_scalar_consumer)
+
 target_include_directories(photospider_computed_scalar_consumer PRIVATE .. ../../examples)
-target_link_libraries(photospider_computed_scalar_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_computed_scalar_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_computed_scalar_consumer PRIVATE ${_photospider_consumer_link_options})
-add_executable(photospider_result_contract_consumer ../integration/test_result_image_contracts.cpp)
-target_link_libraries(photospider_result_contract_consumer PRIVATE Photospider::kernel)
-add_library(result_consumer_fixture MODULE ../fixtures/result_operation_fixture.c)
-target_link_libraries(result_consumer_fixture PRIVATE Photospider::operation_sdk)
-set_target_properties(result_consumer_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-add_executable(photospider_result_c_consumer ../integration/test_result_plugin.cpp)
-add_executable(photospider_result_output_payload_consumer ../../examples/numeric_workflow/arrays.cpp)
-target_link_libraries(photospider_result_output_payload_consumer PRIVATE Photospider::kernel)
+
+photospider_add_installed_test(NAME installed_unified_result_contracts TARGET photospider_result_contract_consumer
+  SOURCES ../integration/test_result_image_contracts.cpp
+  COMMAND photospider_result_contract_consumer)
+
+photospider_add_result_table_fixture(result_consumer_fixture ../fixtures/result_operation_fixture.c)
+
+photospider_add_installed_test(NAME installed_unified_result_c11 TARGET photospider_result_c_consumer
+  SOURCES ../integration/test_result_plugin.cpp
+  COMMAND photospider_result_c_consumer)
+
+photospider_add_installed_test(NAME installed_result_output_payload TARGET photospider_result_output_payload_consumer
+  SOURCES ../../examples/numeric_workflow/arrays.cpp
+  COMMAND photospider_result_output_payload_consumer)
+
 target_compile_definitions(photospider_result_output_payload_consumer PRIVATE PS_RESULT_PAYLOAD_TEST)
-add_executable(photospider_result_arrays_consumer ../../examples/numeric_workflow/arrays.cpp)
-target_link_libraries(photospider_result_arrays_consumer PRIVATE Photospider::kernel)
-target_compile_definitions(photospider_result_arrays_consumer PRIVATE PS_RESULT_ARRAY_TEST)
-target_link_libraries(photospider_result_c_consumer PRIVATE Photospider::kernel)
+
 target_compile_definitions(photospider_result_c_consumer PRIVATE PS_RESULT_FIXTURE="$<TARGET_FILE:result_consumer_fixture>")
-add_dependencies(photospider_result_c_consumer result_consumer_fixture)
-foreach(_case RANGE 1 14)
-  add_library(result_consumer_bad_${_case} MODULE ../fixtures/result_operation_fixture.c)
-  target_link_libraries(result_consumer_bad_${_case} PRIVATE Photospider::operation_sdk)
-  set_target_properties(result_consumer_bad_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-  target_compile_definitions(result_consumer_bad_${_case} PRIVATE PS_BAD_RESULT_CASE=${_case})
-  target_compile_definitions(photospider_result_c_consumer PRIVATE PS_BAD_RESULT_${_case}="$<TARGET_FILE:result_consumer_bad_${_case}>")
-  add_dependencies(photospider_result_c_consumer result_consumer_bad_${_case})
-endforeach()
-enable_testing()
-add_test(NAME installed_gpu_fragment_execution COMMAND test_gpu_fragment_execution)
-set_tests_properties(installed_gpu_fragment_execution PROPERTIES SKIP_RETURN_CODE 77)
-add_test(NAME installed_gpu_c_abi_execution COMMAND test_gpu_c_abi_execution)
-set_tests_properties(installed_gpu_c_abi_execution PROPERTIES SKIP_RETURN_CODE 77)
-add_test(NAME installed_gpu_discovery_workflow COMMAND test_gpu_discovery_workflow)
-set_tests_properties(installed_gpu_discovery_workflow PROPERTIES SKIP_RETURN_CODE 77)
-add_test(NAME installed_gpu_sync_fallback COMMAND test_gpu_sync_fallback)
-set_tests_properties(installed_gpu_sync_fallback PROPERTIES SKIP_RETURN_CODE 77)
-foreach(_joint on off)
-  add_test(NAME installed_multi_output_${_joint} COMMAND photospider_multi_output_workflow --joint ${_joint})
-endforeach()
-add_test(NAME installed_dependency_workflow COMMAND photospider_dependency_workflow)
-add_test(NAME installed_dependency_radius_workflow COMMAND photospider_dependency_workflow --radius-only)
-add_executable(photospider_result_numeric_consumer result_numeric.cpp)
-target_link_libraries(photospider_result_numeric_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_result_numeric_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_result_numeric_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_result_numeric COMMAND photospider_result_numeric_consumer)
-add_test(NAME installed_dependency_sampling COMMAND photospider_sampling_consumer)
-add_test(NAME installed_unified_result_workflow COMMAND photospider_unified_result_workflow)
-add_test(NAME installed_image_vertical COMMAND photospider_image_vertical)
-add_test(NAME installed_regional_image_vertical COMMAND photospider_regional_image_vertical)
-foreach(_scenario preview cache)
-  add_test(NAME installed_s3_${_scenario} COMMAND photospider_s3_image_workflow --scenario ${_scenario})
-endforeach()
-foreach(_scenario resident-chain all-operations cache-edits preview-export fallback)
-  add_test(NAME installed_s4_${_scenario}_cpu COMMAND photospider_s4_gpu_workflow --scenario ${_scenario} --backend cpu)
-  add_test(NAME installed_s4_${_scenario}_metal COMMAND photospider_s4_gpu_workflow --scenario ${_scenario} --backend metal --require-native)
-  set_tests_properties(installed_s4_${_scenario}_metal PROPERTIES SKIP_RETURN_CODE 77)
-endforeach()
-add_test(NAME installed_unified_result_cpp COMMAND photospider_unified_result_consumer)
-add_test(NAME installed_unified_result_contracts COMMAND photospider_result_contract_consumer)
-add_test(NAME installed_builtin_result_images COMMAND photospider_builtin_result_images_consumer)
-add_test(NAME installed_builtin_result_images_native COMMAND photospider_builtin_result_images_consumer --native-only)
-set_tests_properties(installed_builtin_result_images_native PROPERTIES SKIP_RETURN_CODE 77)
-add_test(NAME installed_image_domain COMMAND photospider_image_domain_consumer)
-add_test(NAME installed_image_domain_native COMMAND photospider_image_domain_consumer --native-only)
-set_tests_properties(installed_image_domain_native PROPERTIES SKIP_RETURN_CODE 77)
-add_test(NAME installed_computed_scalar COMMAND photospider_computed_scalar_consumer)
-add_test(NAME installed_computed_scalar_sharing COMMAND photospider_computed_scalar_consumer --sharing-only)
-add_test(NAME installed_unified_result_c11 COMMAND photospider_result_c_consumer)
-add_test(NAME installed_result_output_payload COMMAND photospider_result_output_payload_consumer)
-add_test(NAME installed_result_arrays COMMAND photospider_result_arrays_consumer)
-add_test(NAME installed_unified_result_native_gpu COMMAND photospider_result_c_consumer --gpu-only)
-set_tests_properties(installed_unified_result_native_gpu PROPERTIES SKIP_RETURN_CODE 77)
-add_custom_target(run_unified_result_consumer
-  COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R "^installed_unified_result_"
-  DEPENDS photospider_unified_result_workflow photospider_unified_result_consumer photospider_result_contract_consumer photospider_result_c_consumer)
 
-add_subdirectory(../../examples/perlin_workflow perlin_workflow)
-foreach(_kind workflow tiled gpu)
-  add_executable(photospider_perlin_${_kind}_consumer ../integration/test_perlin_${_kind}.cpp)
-  target_include_directories(photospider_perlin_${_kind}_consumer PRIVATE ..)
-  target_link_libraries(photospider_perlin_${_kind}_consumer PRIVATE Photospider::kernel)
-  add_test(NAME installed_perlin_${_kind} COMMAND photospider_perlin_${_kind}_consumer)
-endforeach()
-set_tests_properties(installed_perlin_gpu PROPERTIES SKIP_RETURN_CODE 77)
-foreach(_mode whole tiled gpu)
-  add_test(NAME installed_perlin_example_${_mode}
-    COMMAND photospider_perlin_workflow ${_mode} 257 4 1 32)
-endforeach()
-set_tests_properties(installed_perlin_example_gpu PROPERTIES SKIP_RETURN_CODE 77)
+photospider_add_result_table_fixture(result_consumer_bad_fixture ../fixtures/result_operation_fixture.c BAD)
+target_compile_definitions(photospider_result_c_consumer PRIVATE PS_BAD_RESULT_FIXTURE=\"$<TARGET_FILE:result_consumer_bad_fixture>\")
 
-add_subdirectory(../../examples/gaussian_workflow gaussian_workflow)
-foreach(_kind workflow tiled)
-  add_executable(photospider_gaussian_${_kind}_consumer ../integration/test_gaussian_${_kind}.cpp)
-  target_include_directories(photospider_gaussian_${_kind}_consumer PRIVATE ..)
-  target_link_libraries(photospider_gaussian_${_kind}_consumer PRIVATE Photospider::kernel)
-  add_test(NAME installed_gaussian_${_kind} COMMAND photospider_gaussian_${_kind}_consumer)
-endforeach()
-foreach(_mode whole tiled gpu)
-  add_test(NAME installed_gaussian_example_${_mode}
-    COMMAND photospider_gaussian_workflow 9 4 1 ${_mode} 4)
-endforeach()
-set_tests_properties(installed_gaussian_example_gpu PROPERTIES SKIP_RETURN_CODE 77)
-add_executable(photospider_neighborhood_consumer ../unit/test_result_neighborhood.cpp)
-target_include_directories(photospider_neighborhood_consumer PRIVATE ..)
-target_link_libraries(photospider_neighborhood_consumer PRIVATE Photospider::kernel)
-add_test(NAME installed_result_neighborhood COMMAND photospider_neighborhood_consumer)
 
-add_subdirectory(../../examples/inpaint_ns_workflow inpaint_ns_workflow)
-add_executable(photospider_inpaint_ns_consumer ../integration/test_inpaint_ns.cpp)
-target_include_directories(photospider_inpaint_ns_consumer PRIVATE ../../examples)
-target_link_libraries(photospider_inpaint_ns_consumer PRIVATE Photospider::kernel)
-option(PHOTOSPIDER_CONSUMER_INPAINT_OPENCV "Exercise the optional inpaint OpenCV operation" OFF)
-if(PHOTOSPIDER_CONSUMER_INPAINT_OPENCV)
-  find_package(OpenCV 4.12.0 EXACT REQUIRED COMPONENTS core photo)
-  target_compile_definitions(photospider_inpaint_ns_consumer PRIVATE PHOTOSPIDER_TEST_INPAINT_OPENCV)
-  target_include_directories(photospider_inpaint_ns_consumer SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})
-  target_link_libraries(photospider_inpaint_ns_consumer PRIVATE ${OpenCV_LIBS})
-endif()
-add_test(NAME installed_inpaint_ns COMMAND photospider_inpaint_ns_consumer)
-add_test(NAME installed_inpaint_ns_example COMMAND photospider_inpaint_ns_workflow)
-if(PHOTOSPIDER_CONSUMER_INPAINT_OPENCV)
-  add_test(NAME installed_inpaint_ns_opencv_example COMMAND photospider_inpaint_ns_workflow image.local_inpaint_navier_stokes_openCV)
-endif()
 
-add_subdirectory(../../examples/metadata_workflow metadata_workflow)
-add_executable(photospider_metadata_assignment_consumer ../integration/test_metadata_assignment.cpp)
-target_include_directories(photospider_metadata_assignment_consumer PRIVATE ../../examples/numeric_workflow)
-target_link_libraries(photospider_metadata_assignment_consumer PRIVATE Photospider::kernel)
-add_test(NAME installed_metadata_assignment COMMAND photospider_metadata_assignment_consumer)
-add_test(NAME installed_metadata_example COMMAND photospider_metadata_workflow)
 
-add_subdirectory(../../examples/channel_extraction_workflow channel_extraction_workflow)
-add_executable(photospider_channel_extraction_consumer ../integration/test_channel_extraction.cpp)
-target_include_directories(photospider_channel_extraction_consumer PRIVATE .. ../../examples ../../examples/numeric_workflow)
-target_link_libraries(photospider_channel_extraction_consumer PRIVATE Photospider::kernel)
-add_test(NAME installed_channel_extraction COMMAND photospider_channel_extraction_consumer)
-add_test(NAME installed_channel_extraction_example COMMAND photospider_channel_extraction_workflow)
 
-add_executable(photospider_channel_literal_consumer ../integration/test_channel_literal_like.cpp)
-target_include_directories(photospider_channel_literal_consumer PRIVATE ../../examples)
-target_link_libraries(photospider_channel_literal_consumer PRIVATE Photospider::kernel)
-add_test(NAME installed_channel_literal COMMAND photospider_channel_literal_consumer)
+photospider_add_installed_test(NAME installed_result_numeric TARGET photospider_result_numeric_consumer
+  SOURCES result_numeric.cpp
+  COMMAND photospider_result_numeric_consumer)
 
-add_subdirectory(../../examples/channel_editing channel_editing)
-foreach(_channel_family assembly editing)
-  add_executable(photospider_channel_${_channel_family}_consumer ../integration/test_channel_${_channel_family}.cpp)
-  target_include_directories(photospider_channel_${_channel_family}_consumer PRIVATE .. ../../examples ../../examples/numeric_workflow)
-  target_link_libraries(photospider_channel_${_channel_family}_consumer PRIVATE Photospider::kernel)
-  add_test(NAME installed_channel_${_channel_family} COMMAND photospider_channel_${_channel_family}_consumer)
-endforeach()
-add_test(NAME installed_channel_editing_example COMMAND photospider_channel_editing)
 
-add_executable(photospider_alpha_authoring_consumer ../integration/test_alpha_authoring.cpp)
-target_include_directories(photospider_alpha_authoring_consumer PRIVATE ../../examples)
-target_link_libraries(photospider_alpha_authoring_consumer PRIVATE Photospider::kernel)
-add_test(NAME installed_alpha_authoring COMMAND photospider_alpha_authoring_consumer)
+photospider_add_installed_test(NAME installed_unified_result_workflow COMMAND photospider_unified_result_workflow)
 
-add_executable(photospider_alpha_operations_consumer ../integration/test_alpha_operations.cpp)
-target_include_directories(photospider_alpha_operations_consumer PRIVATE ../../examples)
-target_link_libraries(photospider_alpha_operations_consumer PRIVATE Photospider::kernel)
-add_test(NAME installed_alpha_operations COMMAND photospider_alpha_operations_consumer)
 
-add_executable(photospider_numeric_conversion_consumer ../integration/test_numeric_conversion.cpp)
+
+
+photospider_add_installed_test(NAME installed_image_domain_native SKIP_RETURN_CODE 77 COMMAND photospider_image_domain_consumer --native-only)
+
+
+photospider_add_installed_test(NAME installed_computed_scalar_sharing COMMAND photospider_computed_scalar_consumer --sharing-only)
+
+
+
+photospider_add_installed_test(NAME installed_unified_result_native_gpu SKIP_RETURN_CODE 77 COMMAND photospider_result_c_consumer --gpu-only)
+
+photospider_add_installed_test(NAME installed_numeric_conversion TARGET photospider_numeric_conversion_consumer
+  SOURCES ../integration/test_numeric_conversion.cpp
+  COMMAND photospider_numeric_conversion_consumer)
+
 target_include_directories(photospider_numeric_conversion_consumer PRIVATE ../../examples)
-target_link_libraries(photospider_numeric_conversion_consumer PRIVATE Photospider::kernel)
-add_test(NAME installed_numeric_conversion COMMAND photospider_numeric_conversion_consumer)
 
-add_executable(photospider_alpha_numeric_interop_consumer ../integration/test_alpha_numeric_interop.cpp)
-target_include_directories(photospider_alpha_numeric_interop_consumer PRIVATE ../../examples)
-target_link_libraries(photospider_alpha_numeric_interop_consumer PRIVATE Photospider::kernel)
-add_test(NAME installed_alpha_numeric_interop COMMAND photospider_alpha_numeric_interop_consumer)
 
-foreach(_transfer_suite operations runtime)
-  add_executable(photospider_transfer_${_transfer_suite}_consumer ../integration/test_transfer_${_transfer_suite}.cpp)
-  target_include_directories(photospider_transfer_${_transfer_suite}_consumer PRIVATE .. ../../examples)
-  target_link_libraries(photospider_transfer_${_transfer_suite}_consumer PRIVATE Photospider::kernel)
-  target_compile_options(photospider_transfer_${_transfer_suite}_consumer PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
-  add_test(NAME installed_transfer_${_transfer_suite} COMMAND photospider_transfer_${_transfer_suite}_consumer)
-endforeach()
+add_subdirectory(../../examples/result_quickstart result_quickstart)
 
-add_executable(photospider_rgb_basis_consumer ../integration/test_rgb_basis.cpp)
-target_include_directories(photospider_rgb_basis_consumer PRIVATE .. ../../examples)
-target_link_libraries(photospider_rgb_basis_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_rgb_basis_consumer PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
-add_test(NAME installed_rgb_basis COMMAND photospider_rgb_basis_consumer)
+photospider_add_installed_test(NAME installed_result_cpp_minimal COMMAND photospider_result_quickstart)
 
-foreach(_model_suite model_conversion model_result alpha_model_interop)
-  add_executable(photospider_${_model_suite}_consumer ../integration/test_${_model_suite}.cpp)
-  target_include_directories(photospider_${_model_suite}_consumer PRIVATE .. ../../examples)
-  target_link_libraries(photospider_${_model_suite}_consumer PRIVATE Photospider::kernel)
-  target_compile_options(photospider_${_model_suite}_consumer PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
-  add_test(NAME installed_${_model_suite} COMMAND photospider_${_model_suite}_consumer)
-endforeach()
 
-foreach(_result_joint_test dependency_joint joint_execution result_dag_parallel)
-  add_executable(photospider_${_result_joint_test}_consumer ../integration/test_${_result_joint_test}.cpp)
-  target_include_directories(photospider_${_result_joint_test}_consumer PRIVATE ..)
-  target_link_libraries(photospider_${_result_joint_test}_consumer PRIVATE Photospider::kernel Threads::Threads)
-  target_compile_options(photospider_${_result_joint_test}_consumer PRIVATE ${_photospider_consumer_compile_options})
-  target_link_options(photospider_${_result_joint_test}_consumer PRIVATE ${_photospider_consumer_link_options})
-  add_test(NAME installed_${_result_joint_test} COMMAND photospider_${_result_joint_test}_consumer)
-endforeach()
-set_tests_properties(installed_result_dag_parallel PROPERTIES TIMEOUT 30)
-add_executable(photospider_result_joint_color_validation_consumer ../../examples/numeric_workflow/color_array.cpp)
-target_link_libraries(photospider_result_joint_color_validation_consumer PRIVATE Photospider::kernel)
-target_compile_options(photospider_result_joint_color_validation_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_result_joint_color_validation_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_result_joint_color_validation COMMAND photospider_result_joint_color_validation_consumer --joint-validation)
+photospider_add_result_table_fixture(photospider_bad_joint_fixture ../fixtures/result_joint_fixture.c BAD)
+target_compile_definitions(photospider_result_c_joint_consumer PRIVATE PS_BAD_JOINT_FIXTURE=\"$<TARGET_FILE:photospider_bad_joint_fixture>\")
 
-add_executable(photospider_cpu_parallel_consumer ../integration/test_cpu_parallel.cpp)
-target_include_directories(photospider_cpu_parallel_consumer PRIVATE ..)
-target_link_libraries(photospider_cpu_parallel_consumer PRIVATE Photospider::kernel Threads::Threads)
-target_compile_options(photospider_cpu_parallel_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_cpu_parallel_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_cpu_parallel COMMAND photospider_cpu_parallel_consumer)
+photospider_add_result_table_fixture(photospider_bad_repeated_fixture ../fixtures/result_repeated_fixture.c BAD)
+target_compile_definitions(photospider_repeated_result_consumer PRIVATE PS_BAD_REPEATED_FIXTURE=\"$<TARGET_FILE:photospider_bad_repeated_fixture>\")
 
-add_executable(photospider_scheduler_timing_consumer ../integration/test_scheduler_timing.cpp)
-target_include_directories(photospider_scheduler_timing_consumer PRIVATE ..)
-target_link_libraries(photospider_scheduler_timing_consumer PRIVATE Photospider::kernel Threads::Threads)
-target_compile_options(photospider_scheduler_timing_consumer PRIVATE ${_photospider_consumer_compile_options})
-target_link_options(photospider_scheduler_timing_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_scheduler_timing COMMAND photospider_scheduler_timing_consumer)
+# Apply the matching sanitizer to every local target, including DSO fixtures
+# and public examples created by subdirectories. Exported flags are not assumed.
+function(photospider_configure_consumer_directory directory)
+  get_property(_targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(_target IN LISTS _targets)
+    get_target_property(_type ${_target} TYPE)
+    if(_type STREQUAL "MODULE_LIBRARY")
+      photospider_configure_test_module(${_target} "${PHOTOSPIDER_CONSUMER_SANITIZER}")
+    elseif(NOT _type STREQUAL "UTILITY" AND NOT _type STREQUAL "INTERFACE_LIBRARY")
+      target_compile_options(${_target} PRIVATE ${_photospider_consumer_compile_options})
+      if(NOT _type STREQUAL "OBJECT_LIBRARY")
+        target_link_options(${_target} PRIVATE ${_photospider_consumer_link_options})
+      endif()
+    endif()
+  endforeach()
+  get_property(_directories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+  foreach(_child IN LISTS _directories)
+    photospider_configure_consumer_directory("${_child}")
+  endforeach()
+endfunction()
+photospider_configure_consumer_directory("${CMAKE_CURRENT_SOURCE_DIR}")
 
-add_executable(photospider_numeric_calculus_consumer ../../examples/numeric_workflow/calculus.cpp)
-target_link_libraries(photospider_numeric_calculus_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_calculus_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_calculus_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_calculus_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_calculus_result COMMAND photospider_numeric_calculus_consumer strict)
-
-add_executable(photospider_numeric_lut1d_consumer ../../examples/numeric_workflow/lut1d.cpp)
-target_link_libraries(photospider_numeric_lut1d_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_lut1d_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_lut1d_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_lut1d_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_lut1d_result COMMAND photospider_numeric_lut1d_consumer strict)
-
-add_executable(photospider_numeric_bezier_consumer ../../examples/numeric_workflow/bezier.cpp)
-target_link_libraries(photospider_numeric_bezier_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_bezier_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_bezier_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_bezier_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_bezier_result COMMAND photospider_numeric_bezier_consumer strict)
-
-add_executable(photospider_numeric_parametric_consumer ../../examples/numeric_workflow/parametric.cpp)
-target_link_libraries(photospider_numeric_parametric_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_parametric_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_parametric_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_parametric_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_parametric_result COMMAND photospider_numeric_parametric_consumer strict)
-
-add_executable(photospider_numeric_baking_consumer ../../examples/numeric_workflow/baking.cpp)
-target_link_libraries(photospider_numeric_baking_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_baking_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_baking_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_baking_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_baking_result COMMAND photospider_numeric_baking_consumer strict)
-
-add_executable(photospider_numeric_inverse_consumer ../../examples/numeric_workflow/inverse.cpp)
-target_link_libraries(photospider_numeric_inverse_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_inverse_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_inverse_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_inverse_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_inverse_result COMMAND photospider_numeric_inverse_consumer strict)
-
-add_executable(photospider_numeric_lut3d_consumer ../../examples/numeric_workflow/lut3d.cpp)
-target_link_libraries(photospider_numeric_lut3d_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_lut3d_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_lut3d_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_lut3d_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_lut3d_result COMMAND photospider_numeric_lut3d_consumer strict)
-
-add_executable(photospider_numeric_resampling_consumer ../../examples/numeric_workflow/resampling.cpp)
-target_link_libraries(photospider_numeric_resampling_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_resampling_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_resampling_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_resampling_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_resampling_result COMMAND photospider_numeric_resampling_consumer strict)
-
-add_executable(photospider_numeric_lowpass_consumer ../../examples/numeric_workflow/lowpass.cpp)
-target_link_libraries(photospider_numeric_lowpass_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_lowpass_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_lowpass_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_lowpass_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_lowpass_result COMMAND photospider_numeric_lowpass_consumer strict)
-
-add_executable(photospider_numeric_lowpass_nonuniform_consumer ../../examples/numeric_workflow/lowpass_nonuniform.cpp)
-target_link_libraries(photospider_numeric_lowpass_nonuniform_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_lowpass_nonuniform_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_lowpass_nonuniform_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_lowpass_nonuniform_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_lowpass_nonuniform_result COMMAND photospider_numeric_lowpass_nonuniform_consumer strict)
-
-add_executable(photospider_numeric_lowpass_execution_consumer ../../examples/numeric_workflow/lowpass_execution.cpp)
-target_link_libraries(photospider_numeric_lowpass_execution_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_lowpass_execution_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_lowpass_execution_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_lowpass_execution_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_lowpass_execution_result COMMAND photospider_numeric_lowpass_execution_consumer strict)
-
-add_executable(photospider_numeric_baking3d_consumer ../../examples/numeric_workflow/baking3d.cpp)
-target_link_libraries(photospider_numeric_baking3d_consumer PRIVATE Photospider::kernel)
-target_compile_features(photospider_numeric_baking3d_consumer PRIVATE cxx_std_17)
-target_compile_options(photospider_numeric_baking3d_consumer PRIVATE ${_photospider_consumer_compile_options} -fno-fast-math -frounding-math -ffp-contract=off)
-target_link_options(photospider_numeric_baking3d_consumer PRIVATE ${_photospider_consumer_link_options})
-add_test(NAME installed_numeric_baking3d_result COMMAND photospider_numeric_baking3d_consumer strict)
+# Gate membership and build dependencies derive from the same test declarations.
+photospider_finalize_behavior_targets()
+get_property(_core_targets GLOBAL PROPERTY PHOTOSPIDER_CORE_TARGETS)
+get_property(_all_targets GLOBAL PROPERTY PHOTOSPIDER_INSTALLED_TARGETS)
+list(REMOVE_DUPLICATES _core_targets)
+list(REMOVE_DUPLICATES _all_targets)
+add_custom_target(run_photospider_consumer
+  COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_CURRENT_BINARY_DIR} --output-on-failure -L package_core
+  DEPENDS ${_core_targets}
+  USES_TERMINAL VERBATIM)
+add_custom_target(run_photospider_consumer_all
+  COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_CURRENT_BINARY_DIR} --output-on-failure -L installed
+  DEPENDS ${_all_targets}
+  USES_TERMINAL VERBATIM)

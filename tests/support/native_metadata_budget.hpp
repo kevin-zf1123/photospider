@@ -6,7 +6,7 @@
 
 #include "execution/execution_test_hooks.hpp"
 #include "execution/native_gpu.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 #include "support/test_support.hpp"
 
 namespace native_metadata_testing {

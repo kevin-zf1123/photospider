@@ -2,6 +2,7 @@
 #include <cfenv>  // NOLINT(build/c++11)
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <future>
@@ -9,6 +10,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
 #include <thread>
@@ -16,6 +18,7 @@
 #include <vector>
 
 #include "../../examples/numeric_workflow/result_fixture.hpp"
+#include "execution/execution_test_hooks.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
@@ -35,6 +38,66 @@ Value data(ElementType type, std::vector<std::uint64_t> shape,
 Footprint footprint(const std::vector<std::uint64_t>& shape,
                     const Region& region) {
   return Footprint::from_regions(shape, {region}).take_value();
+}
+struct CallbackGate final {
+  std::mutex mutex;
+  std::condition_variable changed;
+  bool entered = false, released = false, timed_out = false;
+  void hold() noexcept {
+    std::unique_lock<std::mutex> lock(mutex);
+    entered = true;
+    changed.notify_all();
+    if (!changed.wait_for(lock, std::chrono::seconds(20),
+                          [&] { return released; }))
+      timed_out = true;
+  }
+  bool wait() {
+    std::unique_lock<std::mutex> lock(mutex);
+    return changed.wait_for(lock, std::chrono::seconds(10),
+                            [&] { return entered; });
+  }
+  void release() {
+    std::lock_guard<std::mutex> lock(mutex);
+    released = true;
+    changed.notify_all();
+  }
+};
+CallbackGate* cancellation_gate = nullptr;
+void hold_callback_retirement() noexcept {
+  cancellation_gate->hold();
+}
+struct HookScope final {
+  explicit HookScope(const execution_testing::ExecutionTestHooks& hooks) {
+    execution_testing::install_execution_test_hooks(&hooks);
+  }
+  ~HookScope() { execution_testing::install_execution_test_hooks(nullptr); }
+};
+template <class Run>
+int cancel_active(const ResourceBudget& root, Run run) {
+  const auto baseline = root.statistics().live[ResourceKind::Payload];
+  const auto work = root.statistics().issued.work;
+  CallbackGate gate;
+  cancellation_gate = &gate;
+  execution_testing::ExecutionTestHooks hooks;
+  hooks.callback_body_finished = hold_callback_retirement;
+  HookScope installed(hooks);
+  CancellationSource stop;
+  auto active =
+      std::async(std::launch::async, [&] { return run(stop.token()); });
+  const bool entered = gate.wait();
+  stop.cancel();
+  gate.release();
+  auto interrupted = active.get();
+  PS_CHECK(entered && !gate.timed_out);
+  PS_CHECK(root.statistics().issued.work > work);
+  PS_CHECK(!interrupted.ok());
+  if (interrupted.status().code != ErrorCode::Cancelled) {
+    ps::test::require_ok(interrupted, "cancelled sampling callback", __FILE__,
+                         __LINE__);
+    return 1;
+  }
+  PS_CHECK(root.statistics().live[ResourceKind::Payload] == baseline);
+  return 0;
 }
 struct RadiusDriver {
   std::shared_ptr<OperationRegistry> registry;
@@ -377,26 +440,10 @@ int radius_contracts(const std::shared_ptr<OperationRegistry>& registry) {
       data(ElementType::Float64, {100000}, std::vector<double>(100000, 1)));
   auto radii = driver.input(
       data(ElementType::Int64, {100000}, std::vector<std::int64_t>(100000, 0)));
-  const auto baseline = driver.root.statistics().live[ResourceKind::Payload];
-  const auto work = driver.root.statistics().issued.work;
-  CancellationSource stop;
-  auto active = std::async(std::launch::async, [&] {
-    return driver.run("numeric.radius_scatter", {many, radii},
-                      footprint({100000}, Region({{0, 1}})), {}, stop.token());
-  });
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(3);
-  while (driver.root.statistics().issued.work < work + 10000 &&
-         active.wait_for(std::chrono::milliseconds(0)) !=
-             std::future_status::ready &&
-         std::chrono::steady_clock::now() < deadline)
-    std::this_thread::yield();
-  const bool progressed = driver.root.statistics().issued.work >= work + 10000;
-  stop.cancel();
-  auto interrupted = active.get();
-  PS_CHECK(progressed && !interrupted.ok() &&
-           interrupted.status().code == ErrorCode::Cancelled &&
-           driver.root.statistics().live[ResourceKind::Payload] == baseline);
+  PS_CHECK(cancel_active(driver.root, [&](const CancellationToken& stop) {
+             return driver.run("numeric.radius_scatter", {many, radii},
+                               footprint({100000}, Region({{0, 1}})), {}, stop);
+           }) == 0);
   return 0;
 }
 
@@ -678,9 +725,10 @@ int stmap_results(const std::shared_ptr<OperationRegistry>& registry) {
       driver.root.statistics().live[ResourceKind::Payload];
   auto full = driver.run(image, full_map, "clamp",
                          Footprint::all({1, 1, 10, 10, 4}).take_value());
-  PS_CHECK(full.ok() && driver.root.statistics().live[ResourceKind::Payload] -
-                                payload_before <
-                            UINT64_C(1048576));
+  PS_REQUIRE_OK(full);
+  PS_CHECK(driver.root.statistics().live[ResourceKind::Payload] -
+               payload_before <
+           UINT64_C(1048576));
   float last = 0;
   const auto& complete = full.value().results.at("result");
   PS_CHECK(complete
@@ -748,30 +796,11 @@ int stmap_results(const std::shared_ptr<OperationRegistry>& registry) {
   auto cancelled = driver.run(image, point_map, "clamp", q, {}, stop.token());
   PS_CHECK(!cancelled.ok() && cancelled.status().code == ErrorCode::Cancelled);
   auto large_map = driver.map(std::vector<double>(5000, .5), {50, 50, 2});
-  const auto cancel_baseline =
-      driver.root.statistics().live[ResourceKind::Payload];
-  const auto baseline_work = driver.root.statistics().issued.work;
-  CancellationSource active_stop;
-  auto active = std::async(std::launch::async, [&] {
-    return driver.run(image, large_map, "clamp",
-                      Footprint::all({1, 1, 50, 50, 4}).take_value(), {},
-                      active_stop.token());
-  });
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(3);
-  while (driver.root.statistics().issued.work < baseline_work + 10000 &&
-         active.wait_for(std::chrono::milliseconds(0)) !=
-             std::future_status::ready &&
-         std::chrono::steady_clock::now() < deadline)
-    std::this_thread::yield();
-  const bool progressed =
-      driver.root.statistics().issued.work >= baseline_work + 10000;
-  active_stop.cancel();
-  auto interrupted = active.get();
-  PS_CHECK(progressed && !interrupted.ok() &&
-           interrupted.status().code == ErrorCode::Cancelled &&
-           driver.root.statistics().live[ResourceKind::Payload] ==
-               cancel_baseline);
+  PS_CHECK(cancel_active(driver.root, [&](const CancellationToken& token) {
+             return driver.run(image, large_map, "clamp",
+                               Footprint::all({1, 1, 50, 50, 4}).take_value(),
+                               {}, token);
+           }) == 0);
   ResultRef surviving;
   {
     StmapDriver temporary(registry);

@@ -57,6 +57,14 @@ int main() {
   PS_CHECK(exercise_operation_contract_ir_input(valid.data(), valid.size()) ==
            OperationContractIrStage::CompilerAccepted);
 
+  auto invalid_workflow = valid;
+  invalid_workflow[7] =
+      0;  // Select an unknown operation after valid registration.
+  PS_CHECK(exercise_operation_contract_ir_input(invalid_workflow.data(),
+                                                invalid_workflow.size()) ==
+           OperationContractIrStage::CompilerRejected);
+  PS_CHECK(exercise_operation_contract_ir_input(nullptr, 0) ==
+           OperationContractIrStage::RegistrationRejected);
   const auto current_version = ps::OperationTraits{}.version;
   for (const auto version : {0U, current_version - 1U, current_version + 1U}) {
     auto unsupported = valid;

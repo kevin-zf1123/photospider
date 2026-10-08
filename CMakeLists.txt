@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(
   Photospider
-  VERSION 0.32.0
+  VERSION 0.33.0
   DESCRIPTION "Embeddable typed graph compiler and local execution kernel"
   LANGUAGES C CXX)
 
@@ -13,6 +13,7 @@ endif()
 
 include(CMakePackageConfigHelpers)
 include(CTest)
+include(cmake/BehaviorTests.cmake)
 include(GNUInstallDirs)
 
 option(PHOTOSPIDER_ENABLE_ACCELERATE "Enable Apple Accelerate matrix candidates" ${APPLE})
@@ -280,10 +281,18 @@ set(
   src/lib/plugin/fft_operation.cpp
   src/lib/plugin/component_operation.cpp
   src/lib/data/result.cpp
+  src/lib/data/result_builder.cpp
+  src/lib/data/result_tensor_store.cpp
+  src/lib/data/result_tensor_publication.cpp
+  src/lib/data/result_fields.cpp
+  src/lib/data/result_tensor_window.cpp
+  src/lib/data/result_capture.cpp
+  src/lib/data/result_schema.cpp
+  src/lib/data/result_support.cpp
   src/lib/data/result_relation.cpp
-  src/lib/execution/resources.cpp
-  src/lib/execution/cancellation.cpp
-  src/lib/execution/data_movement.cpp
+  src/lib/core/resources.cpp
+  src/lib/data/resource_storage.cpp
+  src/lib/core/cancellation.cpp
   src/lib/data/value.cpp
   src/lib/data/tensor_description.cpp
   src/lib/data/planar_image.cpp
@@ -295,21 +304,46 @@ set(
   src/lib/data/resource_bindings.cpp
   src/lib/plugin/result_program.cpp
   src/lib/plugin/result_joint.cpp
-  src/lib/plugin/result_plugin.cpp
+  src/lib/plugin/result_plugin_import.cpp
+  src/lib/plugin/result_c_codec.cpp
+  src/lib/plugin/result_c_member.cpp
+  src/lib/plugin/result_c_poll_lease.cpp
+  src/lib/plugin/result_c_joint.cpp
   src/lib/plugin/dependency_discovery.cpp
   src/lib/plugin/operation_contract.cpp
   src/lib/plugin/operation_semantics.cpp
   src/lib/plugin/expression.cpp
-  src/lib/data/input_validation.cpp
+  src/lib/data/value_validation.cpp
+  src/lib/plugin/port_validation.cpp
   src/lib/data/input_snapshot.cpp
   src/lib/execution/execution.cpp
+  src/lib/execution/execution_context_resources.cpp
+  src/lib/execution/result_run.cpp
+  src/lib/execution/native_upload_codec.cpp
+  src/lib/execution/execution_device.cpp
+  src/lib/execution/callback_pool.cpp
+  src/lib/execution/result_stage_submission.cpp
+  src/lib/execution/execution_bindings.cpp
+  src/lib/execution/frozen_execution.cpp
+  src/lib/execution/demand_query.cpp
+  src/lib/execution/demand_handle.cpp
+  src/lib/execution/result_cache_proof.cpp
+  src/lib/execution/result_publication_validation.cpp
+  src/lib/execution/result_io.cpp
+  src/lib/execution/result_fallback.cpp
+  src/lib/execution/structured_joint_state.cpp
+  src/lib/execution/structured_result_cache.cpp
+  src/lib/execution/structured_cache_state.cpp
   src/lib/execution/structured_execution.cpp
+  src/lib/execution/dependency_record.cpp
+  src/lib/execution/dependency_queries.cpp
+  src/lib/execution/dependency_capture.cpp
   src/lib/execution/dependency_records.cpp
   src/lib/execution/native_gpu.cpp
   src/lib/graph/graph_context.cpp
   src/lib/plugin/data_definition_registry.cpp
   src/lib/plugin/operation_registry.cpp
-  src/lib/plugin/utf8_validation.cpp)
+  src/lib/core/utf8_validation.cpp)
 if(PHOTOSPIDER_ENABLE_METAL AND APPLE)
   list(APPEND PHOTOSPIDER_KERNEL_SOURCES src/lib/execution/native_gpu_metal.mm)
   set_source_files_properties(src/lib/execution/native_gpu_metal.mm PROPERTIES
@@ -322,7 +356,8 @@ endif()
 set_source_files_properties(${PHOTOSPIDER_OPERATION_SOURCES}
 
   src/lib/plugin/expression.cpp src/lib/plugin/operation_semantics.cpp
-  src/lib/data/input_validation.cpp src/lib/compiler/compiler.cpp
+  src/lib/data/value_validation.cpp
+  src/lib/plugin/port_validation.cpp src/lib/compiler/compiler.cpp
   src/lib/data/layer.cpp src/lib/data/representation.cpp
   src/lib/data/quality.cpp
   src/lib/data/statistics.cpp
@@ -407,7 +442,30 @@ else()
   string(SHA256 PHOTOSPIDER_CACHE_BUILD_ID "${_cache_identity};${CMAKE_BUILD_TYPE}")
   configure_file(cmake/cache_build_identity.hpp.in "generated/${CMAKE_BUILD_TYPE}/cache_build_identity.hpp" @ONLY)
 endif()
-add_library(photospider ${PHOTOSPIDER_KERNEL_SOURCES})
+# Common translation units are compiled once for the package and internal tests.
+set(PHOTOSPIDER_SEAM_SOURCES
+  src/lib/benchmark/raw_benchmark.cpp
+  src/lib/execution/execution_context_resources.cpp
+  src/lib/execution/result_run.cpp
+  src/lib/execution/native_upload_codec.cpp
+  src/lib/execution/execution_device.cpp
+  src/lib/execution/callback_pool.cpp
+  src/lib/execution/result_stage_submission.cpp
+  src/lib/execution/structured_execution.cpp
+  src/lib/plugin/data_definition_registry.cpp
+  src/lib/plugin/operation_registry.cpp)
+foreach(_native IN ITEMS src/lib/execution/native_gpu_metal.mm src/lib/execution/native_gpu_vulkan.cpp)
+  if(_native IN_LIST PHOTOSPIDER_KERNEL_SOURCES)
+    list(APPEND PHOTOSPIDER_SEAM_SOURCES ${_native})
+  endif()
+endforeach()
+set(PHOTOSPIDER_COMMON_SOURCES ${PHOTOSPIDER_KERNEL_SOURCES})
+list(REMOVE_ITEM PHOTOSPIDER_COMMON_SOURCES ${PHOTOSPIDER_SEAM_SOURCES})
+add_library(photospider_common_objects OBJECT ${PHOTOSPIDER_COMMON_SOURCES})
+add_library(photospider_runtime_objects OBJECT ${PHOTOSPIDER_SEAM_SOURCES})
+add_library(photospider
+  $<TARGET_OBJECTS:photospider_common_objects>
+  $<TARGET_OBJECTS:photospider_runtime_objects>)
 add_library(Photospider::kernel ALIAS photospider)
 
 add_library(photospider_operation_sdk INTERFACE)
@@ -429,7 +487,10 @@ target_include_directories(
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 function(photospider_configure_kernel_target target)
-  target_sources(${target} PRIVATE $<TARGET_OBJECTS:photospider_numeric_math>)
+  get_target_property(_kind ${target} TYPE)
+  if(NOT _kind STREQUAL "OBJECT_LIBRARY")
+    target_sources(${target} PRIVATE $<TARGET_OBJECTS:photospider_numeric_math>)
+  endif()
   set_target_properties(
     ${target}
     PROPERTIES CXX_EXTENSIONS OFF
@@ -481,6 +542,8 @@ function(photospider_configure_kernel_target target)
   endif()
 endfunction()
 
+photospider_configure_kernel_target(photospider_common_objects)
+photospider_configure_kernel_target(photospider_runtime_objects)
 photospider_configure_kernel_target(photospider)
 set_target_properties(photospider PROPERTIES
   EXPORT_NAME kernel
@@ -488,14 +551,17 @@ set_target_properties(photospider PROPERTIES
   SOVERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
 if(NOT BUILD_SHARED_LIBS)
   target_compile_definitions(photospider PUBLIC PHOTOSPIDER_STATIC)
+  target_compile_definitions(photospider_common_objects PRIVATE PHOTOSPIDER_STATIC)
+  target_compile_definitions(photospider_runtime_objects PRIVATE PHOTOSPIDER_STATIC)
 endif()
 
 if(PHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS)
   if(PHOTOSPIDER_ENABLE_TSAN)
     message(FATAL_ERROR "manual libFuzzer targets cannot be combined with TSAN")
   endif()
-  target_compile_options(
-    photospider PRIVATE -fsanitize=fuzzer-no-link -fno-omit-frame-pointer)
+  foreach(_objects IN ITEMS photospider_common_objects photospider_runtime_objects)
+    target_compile_options(${_objects} PRIVATE -fsanitize=fuzzer-no-link -fno-omit-frame-pointer)
+  endforeach()
   target_link_options(
     photospider INTERFACE "$<BUILD_INTERFACE:-fsanitize=fuzzer-no-link>")
   add_executable(
@@ -560,24 +626,29 @@ add_subdirectory(examples/channel_extraction_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_extraction_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/regional_image_vertical EXCLUDE_FROM_ALL)
-add_subdirectory(examples/s3_image_workflow EXCLUDE_FROM_ALL)
-add_subdirectory(examples/s4_gpu_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/foundations_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/numeric_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/codec_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/dynamic_scheduler EXCLUDE_FROM_ALL)
 add_subdirectory(examples/perlin_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/gaussian_workflow EXCLUDE_FROM_ALL)
-add_subdirectory(examples/g4_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/multi_output_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/unified_result_workflow EXCLUDE_FROM_ALL)
+add_subdirectory(examples/result_quickstart EXCLUDE_FROM_ALL)
 
 if(BUILD_TESTING)
-  # Legacy image examples are retained as migration sources, not active
-  # executable storage contracts. The planar workflow below is the image gate.
+  photospider_register_test(NAME test_result_quickstart COMMAND photospider_result_quickstart)
+  add_library(photospider_internal_kernel STATIC EXCLUDE_FROM_ALL
+    $<TARGET_OBJECTS:photospider_common_objects>
+    $<TARGET_OBJECTS:photospider_runtime_objects>)
+  photospider_configure_kernel_target(photospider_internal_kernel)
+  target_compile_definitions(photospider_internal_kernel PUBLIC PHOTOSPIDER_STATIC)
+
+  # Fault injection recompiles only translation units that contain a seam.
   add_library(
     photospider_test_kernel STATIC EXCLUDE_FROM_ALL
-    ${PHOTOSPIDER_KERNEL_SOURCES}
+    $<TARGET_OBJECTS:photospider_common_objects>
+    ${PHOTOSPIDER_SEAM_SOURCES}
     src/lib/benchmark/raw_benchmark_test_hooks.cpp
     src/lib/execution/execution_test_hooks.cpp
     src/lib/plugin/library_test_hooks.cpp)
@@ -589,6 +660,12 @@ if(BUILD_TESTING)
             PHOTOSPIDER_ENABLE_LIBRARY_TEST_HOOKS
             PHOTOSPIDER_ENABLE_RAW_BENCHMARK_TEST_HOOKS)
 
+  if(PHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS)
+    foreach(_archive IN ITEMS photospider_internal_kernel photospider_test_kernel)
+      target_link_options(${_archive} INTERFACE "$<BUILD_INTERFACE:-fsanitize=fuzzer-no-link>")
+    endforeach()
+  endif()
+
   function(photospider_add_test target kernel_target)
     add_executable(${target} ${ARGN})
     target_link_libraries(${target} PRIVATE ${kernel_target})
@@ -597,7 +674,7 @@ if(BUILD_TESTING)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
       target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
-    add_test(NAME ${target} COMMAND ${target})
+    photospider_register_test(NAME ${target} COMMAND ${target})
   endfunction()
 
   add_library(operation_fixture MODULE tests/fixtures/operation_fixture.cpp)
@@ -714,8 +791,8 @@ if(BUILD_TESTING)
   target_compile_definitions(test_multi_output_contract PRIVATE PS_MULTI_OUTPUT_FIXTURE="$<TARGET_FILE:multi_output_fixture>")
   add_dependencies(test_multi_output_contract multi_output_fixture)
   photospider_add_test(test_joint_execution Photospider::kernel tests/integration/test_joint_execution.cpp)
-  add_test(NAME test_result_joint_color_validation COMMAND photospider_numeric_color_array --joint-validation)
-  add_test(NAME test_numeric_color_array_result COMMAND photospider_numeric_color_array)
+  photospider_register_test(NAME test_result_joint_color_validation COMMAND photospider_numeric_color_array --joint-validation)
+  photospider_register_test(NAME test_numeric_color_array_result COMMAND photospider_numeric_color_array)
   add_dependencies(test_joint_execution photospider_numeric_color_array)
   photospider_add_test(test_multi_output_execution Photospider::kernel tests/integration/test_multi_output_execution.cpp)
   photospider_add_test(test_result_c_checkpoint Photospider::kernel tests/integration/test_result_c_checkpoint.cpp)
@@ -735,9 +812,7 @@ if(BUILD_TESTING)
   target_compile_definitions(test_result_c_checkpoint PRIVATE PS_RESULT_CHECKPOINT_FIXTURE="$<TARGET_FILE:result_checkpoint_fixture>")
   add_dependencies(test_result_c_checkpoint result_checkpoint_fixture)
   photospider_add_test(test_result_c_joint Photospider::kernel tests/integration/test_result_c_joint.cpp)
-  add_library(result_joint_fixture MODULE tests/fixtures/result_joint_fixture.c)
-  target_link_libraries(result_joint_fixture PRIVATE Photospider::operation_sdk)
-  set_target_properties(result_joint_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+  photospider_add_result_table_fixture(result_joint_fixture tests/fixtures/result_joint_fixture.c)
   target_compile_definitions(test_result_c_joint PRIVATE PS_RESULT_JOINT_FIXTURE="$<TARGET_FILE:result_joint_fixture>")
   add_dependencies(test_result_c_joint result_joint_fixture)
   add_library(result_joint_throw_fixture MODULE tests/fixtures/result_joint_throw_fixture.cpp)
@@ -745,14 +820,8 @@ if(BUILD_TESTING)
   target_compile_features(result_joint_throw_fixture PRIVATE cxx_std_17)
   target_compile_definitions(test_result_c_joint PRIVATE PS_RESULT_JOINT_THROW_FIXTURE="$<TARGET_FILE:result_joint_throw_fixture>")
   add_dependencies(test_result_c_joint result_joint_throw_fixture)
-  foreach(_case RANGE 1 10)
-    add_library(result_bad_joint_${_case} MODULE tests/fixtures/result_joint_fixture.c)
-    target_link_libraries(result_bad_joint_${_case} PRIVATE Photospider::operation_sdk)
-    set_target_properties(result_bad_joint_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
-    target_compile_definitions(result_bad_joint_${_case} PRIVATE PS_BAD_RESULT_JOINT_CASE=${_case})
-    add_dependencies(test_result_c_joint result_bad_joint_${_case})
-    add_test(NAME result_joint_bad_table_${_case} COMMAND test_result_c_joint $<TARGET_FILE:result_bad_joint_${_case}>)
-  endforeach()
+  photospider_add_result_table_fixture(result_bad_joint_fixture tests/fixtures/result_joint_fixture.c BAD)
+  target_compile_definitions(test_result_c_joint PRIVATE PS_BAD_JOINT_FIXTURE=\"$<TARGET_FILE:result_bad_joint_fixture>\")
   photospider_add_test(test_result_joint Photospider::kernel tests/integration/test_result_joint.cpp)
   photospider_add_test(test_result_exceptions Photospider::kernel tests/integration/test_result_exceptions.cpp)
   photospider_add_test(test_result_queries Photospider::kernel tests/integration/test_result_queries.cpp)
@@ -772,21 +841,12 @@ if(BUILD_TESTING)
   photospider_add_test(test_result_joint_retirement photospider_test_kernel tests/integration/test_result_joint.cpp)
   target_include_directories(test_result_joint_retirement PRIVATE src/lib)
   target_compile_definitions(test_result_joint_retirement PRIVATE PHOTOSPIDER_JOINT_RETIREMENT_TEST)
-  set_tests_properties(test_result_joint_retirement PROPERTIES TIMEOUT 30)
   photospider_add_test(test_result_request_record Photospider::kernel tests/integration/test_result_request_record.cpp)
-  add_library(result_request_record_fixture MODULE tests/fixtures/result_request_record_fixture.c)
-  target_link_libraries(result_request_record_fixture PRIVATE Photospider::operation_sdk)
-  set_target_properties(result_request_record_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+  photospider_add_result_table_fixture(result_request_record_fixture tests/fixtures/result_request_record_fixture.c)
   target_compile_definitions(test_result_request_record PRIVATE PS_REQUEST_RECORD_FIXTURE="$<TARGET_FILE:result_request_record_fixture>")
   add_dependencies(test_result_request_record result_request_record_fixture)
-  foreach(_case RANGE 1 4)
-    add_library(result_bad_request_record_${_case} MODULE tests/fixtures/result_request_record_fixture.c)
-    target_link_libraries(result_bad_request_record_${_case} PRIVATE Photospider::operation_sdk)
-    set_target_properties(result_bad_request_record_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
-    target_compile_definitions(result_bad_request_record_${_case} PRIVATE PS_BAD_REQUEST_RECORD_CASE=${_case})
-    target_compile_definitions(test_result_request_record PRIVATE PS_BAD_REQUEST_RECORD_${_case}="$<TARGET_FILE:result_bad_request_record_${_case}>")
-    add_dependencies(test_result_request_record result_bad_request_record_${_case})
-  endforeach()
+  photospider_add_result_table_fixture(result_bad_request_record_fixture tests/fixtures/result_request_record_fixture.c BAD)
+  target_compile_definitions(test_result_request_record PRIVATE PS_BAD_REQUEST_RECORD_FIXTURE=\"$<TARGET_FILE:result_bad_request_record_fixture>\")
   target_compile_definitions(test_multi_output_execution PRIVATE PS_MULTI_OUTPUT_FIXTURE="$<TARGET_FILE:multi_output_fixture>")
   add_dependencies(test_multi_output_execution multi_output_fixture)
   photospider_add_test(test_semantic_contract Photospider::kernel tests/unit/test_semantic_contract.cpp)
@@ -807,28 +867,15 @@ if(BUILD_TESTING)
   photospider_add_test(test_generic_binding_identity Photospider::kernel tests/unit/test_generic_binding_identity.cpp)
   target_include_directories(test_generic_binding_identity PRIVATE examples)
   set_property(TARGET photospider_image_vertical photospider_regional_image_vertical PROPERTY EXCLUDE_FROM_ALL FALSE)
-  add_test(NAME example_image_vertical COMMAND photospider_image_vertical)
-  add_test(NAME example_regional_image_vertical COMMAND photospider_regional_image_vertical)
-  set_property(TARGET photospider_s3_image_workflow photospider_s4_gpu_workflow PROPERTY EXCLUDE_FROM_ALL FALSE)
-  foreach(_scenario preview cache)
-    add_test(NAME example_s3_${_scenario} COMMAND photospider_s3_image_workflow --scenario ${_scenario})
-  endforeach()
-  foreach(_scenario resident-chain all-operations cache-edits preview-export fallback)
-    add_test(NAME example_s4_${_scenario}_cpu COMMAND photospider_s4_gpu_workflow --scenario ${_scenario} --backend cpu)
-    add_test(NAME example_s4_${_scenario}_metal COMMAND photospider_s4_gpu_workflow --scenario ${_scenario} --backend metal --require-native)
-    set_tests_properties(example_s4_${_scenario}_metal PROPERTIES SKIP_RETURN_CODE 77)
-  endforeach()
-  add_test(NAME example_s4_roi COMMAND photospider_s4_gpu_workflow --scenario resident-chain --backend metal --require-native --layout roi --explain)
-  add_test(NAME example_s4_tiled COMMAND photospider_s4_gpu_workflow --scenario resident-chain --backend metal --require-native --layout tiled --no-cache)
-  set_tests_properties(example_s4_roi example_s4_tiled PROPERTIES SKIP_RETURN_CODE 77)
-
+  photospider_register_test(NAME example_image_vertical COMMAND photospider_image_vertical)
+  photospider_register_test(NAME example_regional_image_vertical COMMAND photospider_regional_image_vertical)
   set_property(TARGET photospider_multi_output_workflow PROPERTY EXCLUDE_FROM_ALL FALSE)
   foreach(_joint on off)
-    add_test(NAME example_multi_output_${_joint} COMMAND photospider_multi_output_workflow --joint ${_joint})
+    photospider_register_test(NAME example_multi_output_${_joint} COMMAND photospider_multi_output_workflow --joint ${_joint})
   endforeach()
   set_property(TARGET photospider_foundations_workflow PROPERTY EXCLUDE_FROM_ALL FALSE)
-  add_test(NAME test_workflow_numeric_reductions COMMAND photospider_foundations_workflow --scenario numeric)
-  add_test(NAME test_workflow_expression_lut COMMAND photospider_foundations_workflow --scenario expression-lut)
+  photospider_register_test(NAME test_workflow_numeric_reductions COMMAND photospider_foundations_workflow --scenario numeric)
+  photospider_register_test(NAME test_workflow_expression_lut COMMAND photospider_foundations_workflow --scenario expression-lut)
   photospider_add_test(test_basic_operations Photospider::kernel tests/integration/test_basic_operations.cpp)
   target_include_directories(test_basic_operations PRIVATE examples)
   photospider_add_test(test_expression_operations Photospider::kernel tests/integration/test_expression_operations.cpp)
@@ -848,7 +895,7 @@ if(BUILD_TESTING)
   target_include_directories(test_alpha_operations PRIVATE examples)
   photospider_add_test(test_alpha_authoring Photospider::kernel tests/integration/test_alpha_authoring.cpp)
   target_include_directories(test_alpha_authoring PRIVATE examples)
-  photospider_add_test(test_alpha_math Photospider::kernel tests/unit/test_alpha_math.cpp)
+  photospider_add_test(test_alpha_math photospider_internal_kernel tests/unit/test_alpha_math.cpp)
   target_include_directories(test_alpha_math PRIVATE plugins/ops src/lib)
   target_compile_options(test_alpha_math PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
   photospider_add_test(test_channel_assembly Photospider::kernel tests/integration/test_channel_assembly.cpp)
@@ -866,19 +913,19 @@ if(BUILD_TESTING)
   target_link_libraries(test_model_rational PRIVATE Photospider::kernel)
   target_compile_options(test_model_rational PRIVATE -Wall -Wextra -Wpedantic -Werror)
   # This test reads an independently generated exact Fraction oracle.
-  add_test(NAME test_model_rational COMMAND test_model_rational
+  photospider_register_test(NAME test_model_rational COMMAND test_model_rational
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/fmt11/rational_oracles.txt")
   photospider_add_test(test_numeric_neighbors Photospider::kernel tests/unit/test_numeric_neighbors.cpp)
   foreach(_fmt11_test IN ITEMS test_model_rational test_numeric_neighbors)
     target_include_directories(${_fmt11_test} PRIVATE plugins/ops src/lib)
     target_compile_options(${_fmt11_test} PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
   endforeach()
-  add_test(NAME test_package_version
+  photospider_register_test(NAME test_package_version
     COMMAND ${CMAKE_COMMAND}
       -DVERSION_FILE=${CMAKE_CURRENT_BINARY_DIR}/PhotospiderConfigVersion.cmake
       -DCURRENT_VERSION=${PROJECT_VERSION}
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_package_version.cmake)
-  photospider_add_test(test_model_math photospider_test_kernel tests/unit/test_model_math.cpp)
+  photospider_add_test(test_model_math photospider_internal_kernel tests/unit/test_model_math.cpp)
   target_include_directories(test_model_math PRIVATE plugins/ops src/lib)
   target_compile_options(test_model_math PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
   photospider_add_test(test_model_conversion Photospider::kernel tests/integration/test_model_conversion.cpp)
@@ -891,10 +938,10 @@ if(BUILD_TESTING)
   photospider_add_test(test_rgb_basis Photospider::kernel tests/integration/test_rgb_basis.cpp)
   target_include_directories(test_rgb_basis PRIVATE examples)
   target_compile_options(test_rgb_basis PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
-  photospider_add_test(test_rgb_basis_math photospider_test_kernel tests/unit/test_rgb_basis_math.cpp)
+  photospider_add_test(test_rgb_basis_math photospider_internal_kernel tests/unit/test_rgb_basis_math.cpp)
   target_include_directories(test_rgb_basis_math PRIVATE src/lib plugins/ops)
   target_compile_options(test_rgb_basis_math PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
-  photospider_add_test(test_transfer_simd photospider_test_kernel tests/unit/test_transfer_simd.cpp)
+  photospider_add_test(test_transfer_simd photospider_internal_kernel tests/unit/test_transfer_simd.cpp)
   photospider_add_test(test_transfer_operations Photospider::kernel tests/integration/test_transfer_operations.cpp)
   target_include_directories(test_transfer_operations PRIVATE examples)
   target_compile_options(test_transfer_operations PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
@@ -904,7 +951,7 @@ if(BUILD_TESTING)
   target_include_directories(test_transfer_simd PRIVATE src/lib plugins/ops)
   target_compile_options(test_transfer_simd PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
   set_tests_properties(test_transfer_simd PROPERTIES SKIP_RETURN_CODE 77)
-  photospider_add_test(test_transfer_math photospider_test_kernel tests/unit/test_transfer_math.cpp)
+  photospider_add_test(test_transfer_math photospider_internal_kernel tests/unit/test_transfer_math.cpp)
   target_include_directories(test_transfer_math PRIVATE src/lib plugins/ops)
   target_compile_options(test_transfer_math PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
   if(PHOTOSPIDER_ENABLE_NUMERIC_CONVERSION_SME AND PHOTOSPIDER_COMPILER_HAS_CONVERSION_SME_ACLE)
@@ -912,68 +959,44 @@ if(BUILD_TESTING)
     target_include_directories(test_numeric_conversion_sme PRIVATE include src/lib tests)
     target_compile_features(test_numeric_conversion_sme PRIVATE cxx_std_17)
     target_link_libraries(test_numeric_conversion_sme PRIVATE Threads::Threads)
-    add_test(NAME test_numeric_conversion_sme COMMAND test_numeric_conversion_sme)
+    photospider_register_test(NAME test_numeric_conversion_sme COMMAND test_numeric_conversion_sme)
     set_tests_properties(test_numeric_conversion_sme PROPERTIES SKIP_RETURN_CODE 77)
   endif()
   photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)
-  photospider_add_test(test_numeric_result_math Photospider::kernel tests/integration/test_numeric_result_math.cpp)
-  target_include_directories(test_numeric_result_math PRIVATE src/lib)
-  add_dependencies(test_numeric_result_math photospider_numeric_math_batch)
-  add_dependencies(test_numeric_result_math photospider_numeric_unary)
-  add_dependencies(test_numeric_result_math photospider_numeric_binary)
-  add_dependencies(test_numeric_result_math photospider_numeric_comparisons)
-  add_dependencies(test_numeric_result_math photospider_numeric_expression)
-  add_dependencies(test_numeric_result_math photospider_numeric_sequences)
-  add_dependencies(test_numeric_result_math photospider_numeric_ranges)
-  add_dependencies(test_numeric_result_math photospider_numeric_interpolation)
-  add_dependencies(test_numeric_result_math photospider_numeric_layouts)
-  add_dependencies(test_numeric_result_math photospider_numeric_indexing)
-  add_dependencies(test_numeric_result_math photospider_numeric_reductions)
-  add_dependencies(test_numeric_result_math photospider_numeric_ordering)
-  add_dependencies(test_numeric_result_math photospider_numeric_scans)
-  add_dependencies(test_numeric_result_math photospider_numeric_matrix)
-  add_dependencies(test_numeric_result_math photospider_numeric_curves)
-  add_dependencies(test_numeric_result_math photospider_numeric_calculus)
-  add_dependencies(test_numeric_result_math photospider_numeric_lut1d)
-  add_dependencies(test_numeric_result_math photospider_numeric_bezier)
-  add_dependencies(test_numeric_result_math photospider_numeric_parametric)
-  add_dependencies(test_numeric_result_math photospider_numeric_baking)
-  add_dependencies(test_numeric_result_math photospider_numeric_baking3d)
-  add_dependencies(test_numeric_result_math photospider_numeric_lowpass_execution)
-  add_dependencies(test_numeric_result_math photospider_numeric_lowpass_nonuniform)
-  add_dependencies(test_numeric_result_math photospider_numeric_lowpass)
-  add_dependencies(test_numeric_result_math photospider_numeric_resampling)
-  add_dependencies(test_numeric_result_math photospider_numeric_lut3d)
-  add_dependencies(test_numeric_result_math photospider_numeric_inverse)
-  add_test(NAME test_numeric_unary_result COMMAND photospider_numeric_unary strict)
-  add_test(NAME test_numeric_binary_result COMMAND photospider_numeric_binary strict)
-  add_test(NAME test_numeric_comparisons_result COMMAND photospider_numeric_comparisons _strict)
-  add_test(NAME test_numeric_expression_result COMMAND photospider_numeric_expression strict)
-  add_test(NAME test_numeric_sequences_result COMMAND photospider_numeric_sequences strict)
-  add_test(NAME test_numeric_ranges_result COMMAND photospider_numeric_ranges _strict)
-  add_test(NAME test_numeric_interpolation_result COMMAND photospider_numeric_interpolation _strict)
-  add_test(NAME test_numeric_layouts_result COMMAND photospider_numeric_layouts strict)
-  add_test(NAME test_numeric_indexing_result COMMAND photospider_numeric_indexing strict)
-  add_test(NAME test_numeric_reductions_result COMMAND photospider_numeric_reductions strict)
-  add_test(NAME test_numeric_ordering_result COMMAND photospider_numeric_ordering strict)
-  add_test(NAME test_numeric_scans_result COMMAND photospider_numeric_scans strict)
-  add_test(NAME test_numeric_matrix_result COMMAND photospider_numeric_matrix strict)
-  add_test(NAME test_numeric_curves_result COMMAND photospider_numeric_curves strict)
-  add_test(NAME test_numeric_calculus_result COMMAND photospider_numeric_calculus strict)
-  add_test(NAME test_numeric_lut1d_result COMMAND photospider_numeric_lut1d strict)
-  add_test(NAME test_numeric_bezier_result COMMAND photospider_numeric_bezier strict)
-  add_test(NAME test_numeric_parametric_result COMMAND photospider_numeric_parametric strict)
-  add_test(NAME test_numeric_baking_result COMMAND photospider_numeric_baking strict)
-  add_test(NAME test_numeric_baking3d_result COMMAND photospider_numeric_baking3d strict)
-  add_test(NAME test_numeric_lowpass_execution_result COMMAND photospider_numeric_lowpass_execution strict)
-  add_test(NAME test_numeric_lowpass_nonuniform_result COMMAND photospider_numeric_lowpass_nonuniform strict)
-  add_test(NAME test_numeric_lowpass_result COMMAND photospider_numeric_lowpass strict)
-  add_test(NAME test_numeric_resampling_result COMMAND photospider_numeric_resampling strict)
-  add_test(NAME test_numeric_lut3d_result COMMAND photospider_numeric_lut3d strict)
-  add_test(NAME test_numeric_inverse_result COMMAND photospider_numeric_inverse strict)
-  add_test(NAME test_numeric_math_batch COMMAND photospider_numeric_math_batch)
+  foreach(_numeric_family IN ITEMS arithmetic arrays sequences statistics matrix calculus curves bezier lut1d lut3d baking expression filters color_ramps)
+    photospider_add_test(test_numeric_result_math_${_numeric_family} Photospider::kernel
+      tests/integration/numeric/test_numeric_result_math_${_numeric_family}.cpp)
+  endforeach()
+  target_include_directories(test_numeric_result_math_arrays PRIVATE src/lib)
+  photospider_register_test(NAME test_numeric_unary_result COMMAND photospider_numeric_unary strict)
+  photospider_register_test(NAME test_numeric_binary_result COMMAND photospider_numeric_binary strict)
+  photospider_register_test(NAME test_numeric_comparisons_result COMMAND photospider_numeric_comparisons _strict)
+  photospider_register_test(NAME test_numeric_expression_result COMMAND photospider_numeric_expression strict)
+  photospider_register_test(NAME test_numeric_sequences_result COMMAND photospider_numeric_sequences strict)
+  photospider_register_test(NAME test_numeric_ranges_result COMMAND photospider_numeric_ranges _strict)
+  photospider_register_test(NAME test_numeric_interpolation_result COMMAND photospider_numeric_interpolation _strict)
+  photospider_register_test(NAME test_numeric_layouts_result COMMAND photospider_numeric_layouts strict)
+  photospider_register_test(NAME test_numeric_indexing_result COMMAND photospider_numeric_indexing strict)
+  photospider_register_test(NAME test_numeric_reductions_result COMMAND photospider_numeric_reductions strict)
+  photospider_register_test(NAME test_numeric_ordering_result COMMAND photospider_numeric_ordering strict)
+  photospider_register_test(NAME test_numeric_scans_result COMMAND photospider_numeric_scans strict)
+  photospider_register_test(NAME test_numeric_matrix_result COMMAND photospider_numeric_matrix strict)
+  photospider_register_test(NAME test_numeric_curves_result COMMAND photospider_numeric_curves strict)
+  photospider_register_test(NAME test_numeric_calculus_result COMMAND photospider_numeric_calculus strict)
+  photospider_register_test(NAME test_numeric_lut1d_result COMMAND photospider_numeric_lut1d strict)
+  photospider_register_test(NAME test_numeric_bezier_result COMMAND photospider_numeric_bezier strict)
+  photospider_register_test(NAME test_numeric_parametric_result COMMAND photospider_numeric_parametric strict)
+  photospider_register_test(NAME test_numeric_baking_result COMMAND photospider_numeric_baking strict)
+  photospider_register_test(NAME test_numeric_baking3d_result COMMAND photospider_numeric_baking3d strict)
+  photospider_register_test(NAME test_numeric_lowpass_execution_result COMMAND photospider_numeric_lowpass_execution strict)
+  photospider_register_test(NAME test_numeric_lowpass_nonuniform_result COMMAND photospider_numeric_lowpass_nonuniform strict)
+  photospider_register_test(NAME test_numeric_lowpass_result COMMAND photospider_numeric_lowpass strict)
+  photospider_register_test(NAME test_numeric_resampling_result COMMAND photospider_numeric_resampling strict)
+  photospider_register_test(NAME test_numeric_lut3d_result COMMAND photospider_numeric_lut3d strict)
+  photospider_register_test(NAME test_numeric_inverse_result COMMAND photospider_numeric_inverse strict)
+  photospider_register_test(NAME test_numeric_math_batch COMMAND photospider_numeric_math_batch)
   set_tests_properties(test_numeric_math_batch PROPERTIES SKIP_RETURN_CODE 77)
-  photospider_add_test(test_matrix_certificate photospider_test_kernel tests/unit/test_matrix_certificate.cpp)
+  photospider_add_test(test_matrix_certificate photospider_internal_kernel tests/unit/test_matrix_certificate.cpp)
   target_include_directories(test_matrix_certificate PRIVATE plugins/ops src/lib)
   target_compile_options(test_matrix_certificate PRIVATE -fno-fast-math -frounding-math -ffp-contract=off)
   photospider_add_test(test_ordered_reduction Photospider::kernel tests/integration/test_ordered_reduction.cpp)
@@ -981,24 +1004,37 @@ if(BUILD_TESTING)
   photospider_add_test(test_scan_waiters photospider_test_kernel tests/integration/test_scan_waiters.cpp)
   target_include_directories(test_scan_waiters PRIVATE src/lib)
   # This test directly exercises private cache validation and allocation code.
-  photospider_add_test(test_generic_result_cache photospider_test_kernel tests/integration/test_generic_result_cache.cpp)
+  photospider_add_test(test_generic_result_cache photospider_internal_kernel tests/integration/test_generic_result_cache.cpp)
   target_include_directories(test_generic_result_cache PRIVATE src/lib)
   photospider_add_test(test_frozen_execution Photospider::kernel tests/integration/test_frozen_execution.cpp)
-  photospider_add_test(test_dependency_sampling Photospider::kernel tests/integration/test_dependency_sampling.cpp)
+  photospider_add_test(test_dependency_sampling photospider_test_kernel tests/integration/test_dependency_sampling.cpp)
+  target_include_directories(test_dependency_sampling PRIVATE src/lib)
   photospider_add_test(test_execution_dependencies Photospider::kernel tests/integration/test_execution_dependencies.cpp)
   photospider_add_test(test_execution_demand Photospider::kernel tests/integration/test_execution_demand.cpp)
   photospider_add_test(test_dependency_joint Photospider::kernel tests/integration/test_dependency_joint.cpp)
-  set_tests_properties(test_dependency_joint PROPERTIES TIMEOUT 120)
-  photospider_add_test(test_dependency_program photospider_test_kernel tests/integration/test_dependency_program.cpp)
+  photospider_add_test(test_dependency_program photospider_internal_kernel tests/integration/test_dependency_program.cpp)
   photospider_add_test(test_numeric_prepared Photospider::kernel examples/numeric_workflow/prepared.cpp)
   target_include_directories(test_dependency_program PRIVATE src/lib)
   photospider_add_test(test_dependency_dirty Photospider::kernel tests/unit/test_dependency_dirty.cpp)
   target_include_directories(test_dependency_dirty PRIVATE src/lib)
   photospider_add_test(test_dependency Photospider::kernel tests/unit/test_dependency.cpp)
-  add_dependencies(test_dependency photospider_dependency_workflow)
-  add_test(NAME test_dependency_workflow COMMAND photospider_dependency_workflow)
-  add_test(NAME test_dependency_radius_workflow COMMAND photospider_dependency_workflow --radius-only)
+  add_executable(test_dependency_workflows
+    tests/integration/dependency_workflows/main.cpp
+    tests/integration/dependency_workflows/progressive.cpp
+    tests/integration/dependency_workflows/dynamic.cpp
+    tests/integration/dependency_workflows/demand.cpp
+    tests/integration/dependency_workflows/sharing.cpp
+    tests/integration/dependency_workflows/reductions.cpp
+    tests/integration/dependency_workflows/scan.cpp
+    tests/integration/dependency_workflows/blocks.cpp)
+  target_link_libraries(test_dependency_workflows PRIVATE Photospider::kernel)
+  target_include_directories(test_dependency_workflows PRIVATE tests ${CMAKE_CURRENT_SOURCE_DIR})
+  foreach(_behavior IN ITEMS data progressive shared reductions scan blocks dynamic demand radius)
+    photospider_register_test(NAME test_dependency_workflows_${_behavior}
+      COMMAND test_dependency_workflows --scenario ${_behavior})
+  endforeach()
   photospider_add_test(test_footprint Photospider::kernel tests/unit/test_footprint.cpp)
+  photospider_add_test(test_value_runs Photospider::kernel tests/unit/test_value_runs.cpp)
   photospider_add_test(test_value_fragments Photospider::kernel tests/unit/test_value_fragments.cpp)
   photospider_add_test(test_fragment_atlas Photospider::kernel tests/unit/test_fragment_atlas.cpp)
   photospider_add_test(test_input_snapshot Photospider::kernel tests/unit/test_input_snapshot.cpp)
@@ -1013,31 +1049,33 @@ if(BUILD_TESTING)
   set_tests_properties(test_native_dependency PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_dependency_gpu Photospider::kernel tests/unit/test_dependency_gpu.cpp)
   set_tests_properties(test_dependency_gpu PROPERTIES SKIP_RETURN_CODE 77)
-  photospider_add_test(test_gpu_sync_fallback Photospider::kernel examples/g4_gpu_workflow/sync_main.cpp)
+  photospider_add_test(test_gpu_sync_fallback Photospider::kernel tests/integration/gpu/test_gpu_sync_fallback.cpp)
+  photospider_add_test(test_result_gpu_service Photospider::kernel tests/unit/test_result_gpu_service.cpp)
+  target_include_directories(test_result_gpu_service PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/lib")
   set_tests_properties(test_gpu_sync_fallback PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_gpu_discovery Photospider::kernel tests/unit/test_gpu_discovery.cpp)
   set_tests_properties(test_gpu_discovery PROPERTIES SKIP_RETURN_CODE 77)
-  photospider_add_test(test_result_gpu_discovery photospider_test_kernel tests/unit/test_result_gpu_discovery.cpp)
+  photospider_add_test(test_result_gpu_discovery photospider_internal_kernel tests/unit/test_result_gpu_discovery.cpp)
   target_include_directories(test_result_gpu_discovery PRIVATE src/lib)
-  add_library(gpu_discovery_fixture MODULE examples/g4_gpu_workflow/discovery_plugin.c)
+  add_library(gpu_discovery_fixture MODULE tests/fixtures/gpu_result_discovery_plugin.c)
   target_link_libraries(gpu_discovery_fixture PRIVATE Photospider::operation_sdk)
   target_compile_definitions(gpu_discovery_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
   set_target_properties(gpu_discovery_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-  photospider_add_test(test_gpu_discovery_workflow Photospider::kernel examples/g4_gpu_workflow/discovery_main.cpp)
+  photospider_add_test(test_gpu_discovery_workflow Photospider::kernel tests/integration/gpu/test_gpu_discovery_workflow.cpp)
   target_compile_definitions(test_gpu_discovery_workflow PRIVATE PS_GPU_DISCOVERY_PLUGIN="$<TARGET_FILE:gpu_discovery_fixture>")
   add_dependencies(test_gpu_discovery_workflow gpu_discovery_fixture)
   set_tests_properties(test_gpu_discovery_workflow PROPERTIES SKIP_RETURN_CODE 77)
-  add_library(gpu_dependency_c_fixture MODULE examples/g4_gpu_workflow/c_plugin.c)
+  add_library(gpu_dependency_c_fixture MODULE tests/fixtures/gpu_result_c_plugin.c)
   target_link_libraries(gpu_dependency_c_fixture PRIVATE Photospider::operation_sdk)
   target_compile_definitions(gpu_dependency_c_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
   set_target_properties(gpu_dependency_c_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-  photospider_add_test(test_gpu_c_abi_execution Photospider::kernel examples/g4_gpu_workflow/c_main.cpp)
+  photospider_add_test(test_gpu_c_abi_execution Photospider::kernel tests/integration/gpu/test_gpu_c_abi_execution.cpp)
   target_compile_definitions(test_gpu_c_abi_execution PRIVATE PS_GPU_DEPENDENCY_PLUGIN="$<TARGET_FILE:gpu_dependency_c_fixture>")
   add_dependencies(test_gpu_c_abi_execution gpu_dependency_c_fixture)
   set_tests_properties(test_gpu_c_abi_execution PROPERTIES SKIP_RETURN_CODE 77)
-  photospider_add_test(test_gpu_fragment_execution Photospider::kernel examples/g4_gpu_workflow/main.cpp)
+  photospider_add_test(test_gpu_fragment_execution Photospider::kernel tests/integration/gpu/test_gpu_fragment_execution.cpp)
   set_tests_properties(test_gpu_fragment_execution PROPERTIES SKIP_RETURN_CODE 77)
-  photospider_add_test(test_fragment_atlas_gpu photospider_test_kernel tests/unit/test_fragment_atlas_gpu.cpp)
+  photospider_add_test(test_fragment_atlas_gpu photospider_internal_kernel tests/unit/test_fragment_atlas_gpu.cpp)
   target_include_directories(test_fragment_atlas_gpu PRIVATE src/lib)
   set_tests_properties(test_fragment_atlas_gpu PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_native_gpu photospider_test_kernel tests/unit/test_native_gpu.cpp)
@@ -1051,10 +1089,9 @@ if(BUILD_TESTING)
   photospider_add_test(test_memory_liveness photospider_test_kernel tests/integration/test_memory_liveness.cpp)
   target_include_directories(test_memory_liveness PRIVATE src/lib)
   photospider_add_test(test_result_dag_parallel Photospider::kernel tests/integration/test_result_dag_parallel.cpp)
-  set_tests_properties(test_result_dag_parallel PROPERTIES TIMEOUT 30)
   photospider_add_test(test_representations Photospider::kernel tests/unit/test_representations.cpp)
   add_subdirectory(examples/atom_outcomes_workflow)
-  add_test(NAME example_atom_outcomes_workflow COMMAND photospider_atom_outcomes_workflow)
+  photospider_register_test(NAME example_atom_outcomes_workflow COMMAND photospider_atom_outcomes_workflow)
   photospider_add_test(test_atom_outcomes Photospider::kernel tests/integration/test_atom_outcomes.cpp)
   photospider_add_test(test_statistics_callback Photospider::kernel tests/unit/test_statistics_callback.cpp)
   photospider_add_test(test_statistics Photospider::kernel tests/unit/test_statistics.cpp)
@@ -1063,34 +1100,23 @@ if(BUILD_TESTING)
   photospider_add_test(test_fft_contract Photospider::kernel tests/unit/test_fft_contract.cpp)
   photospider_add_test(test_component_contract Photospider::kernel tests/unit/test_component_contract.cpp)
   add_subdirectory(examples/components_workflow)
-  add_test(NAME example_components_workflow COMMAND photospider_components_workflow)
+  photospider_register_test(NAME example_components_workflow COMMAND photospider_components_workflow)
   add_subdirectory(examples/fft_workflow)
-  add_test(NAME example_fft_workflow COMMAND photospider_fft_workflow)
+  photospider_register_test(NAME example_fft_workflow COMMAND photospider_fft_workflow)
   add_subdirectory(examples/statistics_workflow)
-  add_test(NAME example_statistics_workflow COMMAND photospider_statistics_workflow)
+  photospider_register_test(NAME example_statistics_workflow COMMAND photospider_statistics_workflow)
   photospider_add_test(photospider_representations_workflow Photospider::kernel examples/representations_workflow/main.cpp)
   photospider_add_test(test_result_execution Photospider::kernel tests/integration/test_result_execution.cpp)
   photospider_add_test(test_structured_submission photospider_test_kernel tests/integration/test_structured_submission.cpp)
   target_include_directories(test_structured_submission PRIVATE src/lib)
-  set_tests_properties(test_structured_submission PROPERTIES TIMEOUT 30)
   photospider_add_test(test_result_neighborhood Photospider::kernel tests/unit/test_result_neighborhood.cpp)
-  add_library(result_repeated_fixture MODULE tests/fixtures/result_repeated_fixture.c)
-  target_link_libraries(result_repeated_fixture PRIVATE Photospider::operation_sdk)
-  set_target_properties(result_repeated_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  photospider_add_result_table_fixture(result_repeated_fixture tests/fixtures/result_repeated_fixture.c)
   photospider_add_test(test_result_repeated Photospider::kernel tests/integration/test_result_repeated.cpp)
   target_compile_definitions(test_result_repeated PRIVATE PS_REPEATED_FIXTURE="$<TARGET_FILE:result_repeated_fixture>")
   add_dependencies(test_result_repeated result_repeated_fixture)
-  foreach(_case RANGE 1 6)
-    add_library(result_bad_repeated_${_case} MODULE tests/fixtures/result_repeated_fixture.c)
-    target_link_libraries(result_bad_repeated_${_case} PRIVATE Photospider::operation_sdk)
-    set_target_properties(result_bad_repeated_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-    target_compile_definitions(result_bad_repeated_${_case} PRIVATE PS_BAD_REPEATED_CASE=${_case})
-    target_compile_definitions(test_result_repeated PRIVATE PS_BAD_REPEATED_${_case}="$<TARGET_FILE:result_bad_repeated_${_case}>")
-    add_dependencies(test_result_repeated result_bad_repeated_${_case})
-  endforeach()
-  add_library(result_operation_fixture MODULE tests/fixtures/result_operation_fixture.c)
-  target_link_libraries(result_operation_fixture PRIVATE Photospider::operation_sdk)
-  set_target_properties(result_operation_fixture PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  photospider_add_result_table_fixture(result_bad_repeated_fixture tests/fixtures/result_repeated_fixture.c BAD)
+  target_compile_definitions(test_result_repeated PRIVATE PS_BAD_REPEATED_FIXTURE=\"$<TARGET_FILE:result_bad_repeated_fixture>\")
+  photospider_add_result_table_fixture(result_operation_fixture tests/fixtures/result_operation_fixture.c)
   photospider_add_test(test_result_plugin Photospider::kernel tests/integration/test_result_plugin.cpp)
   photospider_add_test(test_result_output_payload Photospider::kernel examples/numeric_workflow/arrays.cpp)
   target_compile_definitions(test_result_output_payload PRIVATE PS_RESULT_PAYLOAD_TEST)
@@ -1098,31 +1124,27 @@ if(BUILD_TESTING)
   target_compile_definitions(test_numeric_result_arrays PRIVATE PS_RESULT_ARRAY_TEST)
   target_compile_definitions(test_result_plugin PRIVATE PS_RESULT_FIXTURE="$<TARGET_FILE:result_operation_fixture>")
   add_dependencies(test_result_plugin result_operation_fixture)
-  foreach(_case RANGE 1 14)
-    add_library(result_bad_fixture_${_case} MODULE tests/fixtures/result_operation_fixture.c)
-    target_link_libraries(result_bad_fixture_${_case} PRIVATE Photospider::operation_sdk)
-    set_target_properties(result_bad_fixture_${_case} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
-    target_compile_definitions(result_bad_fixture_${_case} PRIVATE PS_BAD_RESULT_CASE=${_case})
-    target_compile_definitions(test_result_plugin PRIVATE PS_BAD_RESULT_${_case}="$<TARGET_FILE:result_bad_fixture_${_case}>")
-    add_dependencies(test_result_plugin result_bad_fixture_${_case})
-  endforeach()
-  add_test(NAME test_result_native_gpu COMMAND test_result_plugin --gpu-only)
+  photospider_add_result_table_fixture(result_bad_fixture tests/fixtures/result_operation_fixture.c BAD)
+  target_compile_definitions(test_result_plugin PRIVATE PS_BAD_RESULT_FIXTURE=\"$<TARGET_FILE:result_bad_fixture>\")
+  photospider_register_test(NAME test_result_native_gpu COMMAND test_result_plugin --gpu-only)
   set_tests_properties(test_result_native_gpu PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_result_image_contracts Photospider::kernel tests/integration/test_result_image_contracts.cpp)
-  photospider_add_test(test_builtin_result_images Photospider::kernel tests/integration/test_builtin_result_images.cpp)
-  add_test(NAME test_builtin_result_images_native COMMAND test_builtin_result_images --native-only)
-  set_tests_properties(test_builtin_result_images_native PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_metal_images Photospider::kernel tests/integration/test_metal_images.cpp)
   target_include_directories(test_metal_images PRIVATE examples)
-  add_test(NAME test_metal_images_native COMMAND test_metal_images --native-only)
+  photospider_register_test(NAME test_metal_images_native COMMAND test_metal_images --native-only)
   set_tests_properties(test_metal_images_native PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_computed_scalar Photospider::kernel tests/integration/test_computed_scalar.cpp)
   target_include_directories(test_computed_scalar PRIVATE examples)
-  add_test(NAME test_computed_scalar_sharing COMMAND test_computed_scalar --sharing-only)
+  photospider_register_test(NAME test_computed_scalar_sharing COMMAND test_computed_scalar --sharing-only)
+  foreach(_image_family IN ITEMS backing views relations execution format filter transform composite native)
+    photospider_add_test(test_result_image_${_image_family} Photospider::kernel
+      tests/integration/image/test_result_image_${_image_family}.cpp)
+  endforeach()
+  set_tests_properties(test_result_image_native PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_unified_result_images Photospider::kernel tests/integration/test_unified_result_images.cpp)
   photospider_add_test(test_global_results Photospider::kernel tests/unit/test_global_results.cpp)
-  photospider_add_test(test_shared_results photospider_test_kernel tests/unit/test_shared_results.cpp)
-  photospider_add_test(test_result_metadata_budget photospider_test_kernel tests/unit/test_result_metadata_budget.cpp)
+  photospider_add_test(test_shared_results photospider_internal_kernel tests/unit/test_shared_results.cpp)
+  photospider_add_test(test_result_metadata_budget photospider_internal_kernel tests/unit/test_result_metadata_budget.cpp)
   if(PHOTOSPIDER_ENABLE_TSAN)
     # TSAN defines strong global new/delete interceptors. Keep the ordinary
     # budget/lifetime checks, while native builds retain allocator injection.
@@ -1134,7 +1156,7 @@ if(BUILD_TESTING)
   photospider_add_test(test_resources Photospider::kernel tests/unit/test_resources.cpp)
   photospider_add_test(test_resource_observation photospider_test_kernel tests/unit/test_resource_observation.cpp)
   target_include_directories(test_resource_observation PRIVATE src/lib)
-  photospider_add_test(test_resource_internals photospider_test_kernel tests/unit/test_resource_internals.cpp)
+  photospider_add_test(test_resource_internals photospider_internal_kernel tests/unit/test_resource_internals.cpp)
   target_include_directories(test_resource_internals PRIVATE src/lib)
   photospider_add_test(test_expression_literals Photospider::kernel tests/unit/test_expression_literals.cpp)
   target_include_directories(test_expression_literals PRIVATE src/lib)
@@ -1160,6 +1182,7 @@ if(BUILD_TESTING)
   photospider_add_test(test_perlin_workflow Photospider::kernel tests/integration/test_perlin_workflow.cpp)
   photospider_add_test(test_perlin_tiled Photospider::kernel tests/integration/test_perlin_tiled.cpp)
   photospider_add_test(test_backend_admission Photospider::kernel tests/integration/test_backend_admission.cpp)
+  photospider_add_test(test_result_tuple_validation Photospider::kernel tests/integration/test_result_tuple_validation.cpp)
   photospider_add_test(test_perlin_gpu Photospider::kernel tests/integration/test_perlin_gpu.cpp)
   set_tests_properties(test_perlin_gpu PROPERTIES SKIP_RETURN_CODE 77)
   photospider_add_test(test_cpu_tiles Photospider::kernel tests/integration/test_cpu_tiles.cpp)
@@ -1184,7 +1207,7 @@ if(BUILD_TESTING)
     test_execution photospider_test_kernel
     tests/integration/test_execution.cpp)
   target_include_directories(test_execution PRIVATE src/lib)
-  add_test(NAME test_execution_result_dso_native COMMAND test_execution --result-dso-native)
+  photospider_register_test(NAME test_execution_result_dso_native COMMAND test_execution --result-dso-native)
   set_tests_properties(test_execution_result_dso_native PROPERTIES SKIP_RETURN_CODE 77)
   add_dependencies(test_execution operation_fixture)
   target_compile_definitions(
@@ -1256,7 +1279,7 @@ if(BUILD_TESTING)
             PS_DATA_PROVIDER_INVALID_UTF8_OVERLONG_FIXTURE_PATH="$<TARGET_FILE:data_provider_invalid_utf8_overlong_fixture>"
             PS_DATA_PROVIDER_UNICODE_FIXTURE_PATH="$<TARGET_FILE:data_provider_unicode_fixture>")
 
-  add_test(
+  photospider_register_test(
     NAME test_installed_consumer
     COMMAND
       ${CMAKE_COMMAND}
@@ -1268,6 +1291,30 @@ if(BUILD_TESTING)
       "-DPHOTOSPIDER_GENERATOR_TOOLSET:STRING=${CMAKE_GENERATOR_TOOLSET}"
       "-DPHOTOSPIDER_CONSUMER_SANITIZER:STRING=${PHOTOSPIDER_SANITIZER_MODE}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunInstalledConsumer.cmake")
+  photospider_finalize_behavior_targets()
+  get_property(_behavior_targets GLOBAL PROPERTY PHOTOSPIDER_BEHAVIOR_TARGETS)
+  list(REMOVE_DUPLICATES _behavior_targets)
+  add_custom_target(photospider_tests ALL DEPENDS ${_behavior_targets})
+  # Tests that call private symbols cannot link the hidden shared package.
+  # Their private include paths declare that boundary explicitly.
+  get_property(_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(_target IN LISTS _test_targets)
+    get_target_property(_type ${_target} TYPE)
+    if(_type STREQUAL "MODULE_LIBRARY")
+      photospider_configure_test_module(${_target} "${PHOTOSPIDER_SANITIZER_MODE}")
+    endif()
+    if(NOT _type STREQUAL "EXECUTABLE")
+      continue()
+    endif()
+    get_target_property(_includes ${_target} INCLUDE_DIRECTORIES)
+    get_target_property(_links ${_target} LINK_LIBRARIES)
+    if(_includes MATCHES "${CMAKE_CURRENT_SOURCE_DIR}/(src/lib|plugins/ops)(;|$)" AND
+       "Photospider::kernel" IN_LIST _links)
+      list(REMOVE_ITEM _links Photospider::kernel)
+      list(APPEND _links photospider_internal_kernel)
+      set_property(TARGET ${_target} PROPERTY LINK_LIBRARIES ${_links})
+    endif()
+  endforeach()
 endif()
 
 install(FILES plugins/ops/09-composite/inpaint_ns_license.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/Photospider)

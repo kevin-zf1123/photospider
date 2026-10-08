@@ -72,7 +72,7 @@ struct Shared {
     if (counts->hook)
       counts->hook();
     check(phase.consume_work(7));
-    if (mode == 26 || mode == 28)
+    if (mode == 26 || mode == 28 || (mode == 35 && stage == 2))
       return Result<ResourceVector<ResultJointOutcome>>(
           Status{ErrorCode::BackendUnavailable, "optional shared failure"});
     if (mode == 8) {
@@ -96,7 +96,7 @@ struct Shared {
         for (unsigned i = 0; i < 4096; ++i)
           need.tensors.push_back({0, 0, samples, 8});
         outcomes.push_back({key, Result<ResultProgramPoll>(std::move(need))});
-      } else if (mode >= 29 && stage == 0) {
+      } else if (mode >= 29 && (stage == 0 || (mode == 35 && index == 1))) {
         ResultProgramNeed need;
         need.results.push_back({0, 0, true, 0});
         outcomes.push_back({key, Result<ResultProgramPoll>(std::move(need))});
@@ -180,7 +180,7 @@ struct Singleton {
                  "local domain",
                  FailureReason::DivideByZero,
                  {FailureOrigin::Domain, FailureScope::Unspecified}});
-    if (mode == 0 && index == 0 && !requested) {
+    if (((mode == 0 && index == 0) || mode == 35) && !requested) {
       requested = true;
       ResultProgramNeed need;
       need.results.push_back({0, 0, true, 0});
@@ -193,9 +193,10 @@ struct Singleton {
       if (value != 3)
         return Result<ResultProgramPoll>(Status{ErrorCode::TypeMismatch, {}});
     }
-    const auto number = mode == 0 && index == 0
-                            ? multi_result::number(phase.results.at(0)) + 4
-                            : 7 + 4 * index;
+    const auto number =
+        (mode == 0 && index == 0) || mode == 35
+            ? multi_result::number(phase.results.at(0)) + 4 * (index + 1)
+            : 7 + 4 * index;
     return Result<ResultProgramPoll>(publish(phase, number));
   }
 };
@@ -229,6 +230,9 @@ OperationDefinition definition(std::shared_ptr<Counts> counts, unsigned mode) {
   }
   if (mode == 25)
     result.traits.outputs.push_back(multi_result::output("third"));
+  if (mode == 35)
+    for (auto& output : result.traits.outputs)
+      output.maximum_dependency_stages = 8;
   result.traits.joint_contract = 1;
   result.traits.joint_continuation_bytes = 256;
   result.traits.joint_workspace_bytes = 64;
@@ -665,13 +669,14 @@ int workflow_extra(unsigned mode, bool empty_first) {
   } else {
     PS_CHECK(multi_result::number(result.results.at("left")) == 7);
     PS_CHECK(counts->starts == 1 && counts->destroys == 1 &&
-             counts->single_starts == 2 && counts->single_destroys == 2);
-    if (mode == 28) {
+             counts->single_starts == (mode == 35 ? 1 : 2) &&
+             counts->single_destroys == (mode == 35 ? 1 : 2));
+    if (mode == 28 || mode == 35) {
       auto dirty = take(result.dependencies.potential_dirty("source", point));
       PS_CHECK(dirty.at("left") == point && dirty.at("right") == point);
     }
     PS_CHECK(result.diagnostics.joint_groups == 1 &&
-             result.diagnostics.joint_polls == 1 &&
+             result.diagnostics.joint_polls == (mode == 35 ? 3 : 1) &&
              result.diagnostics.joint_fallbacks == 1);
   }
   return 0;
@@ -949,6 +954,7 @@ int main() try {
   PS_CHECK(workflow_extra(25, true) == 0);
   PS_CHECK(workflow_extra(26, false) == 0);
   PS_CHECK(workflow_extra(28, false) == 0);
+  PS_CHECK(workflow_extra(35, false) == 0);
   PS_CHECK(workflow_need_budget() == 0);
   PS_CHECK(workflow_peer() == 0);
   PS_CHECK(workflow_nested() == 0);

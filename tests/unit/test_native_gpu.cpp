@@ -8,7 +8,7 @@
 #include "execution/execution_test_hooks.hpp"
 #include "execution/memory_budget.hpp"
 #include "execution/native_gpu.hpp"
-#include "photospider/execution/resources.hpp"
+#include "photospider/core/resources.hpp"
 #include "support/native_allocation_quota.hpp"
 #include "support/native_atlas_budget.hpp"
 #include "support/native_metadata_budget.hpp"

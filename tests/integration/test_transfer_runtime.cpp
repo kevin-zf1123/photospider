@@ -11,7 +11,7 @@
 
 #include "../support/transfer_result_fixture.hpp"
 #include "numeric_workflow/icc_fixture.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -264,7 +264,6 @@ void whole_failure() {
     output.output_schema.result_schema_version = output.result_schema->version;
     output.output_schema.tensor_key = "samples";
     output.region_rule = OperationRegionRule::Whole;
-    output.dependency_version = 2;
     output.maximum_dependency_stages = 1;
     output.continuation_bytes = sizeof(WholeFailure);
     unsigned calls = 0;

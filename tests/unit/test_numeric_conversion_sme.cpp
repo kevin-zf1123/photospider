@@ -10,13 +10,13 @@
 #include <thread>
 #include <vector>
 
-#include "execution/cancellation_poll.hpp"
+#include "core/cancellation_poll.hpp"
 #include "support/test_support.hpp"
 
 namespace ps::plugin_internal::format_numeric {
 std::uint64_t sme_conversion_vector_bytes();
 std::uint64_t sme_f32_u8_tile(const std::uint8_t*, std::uint8_t*, std::uint64_t,
-                              const execution_internal::CancellationPoll&);
+                              const core_internal::CancellationPoll&);
 }  // namespace ps::plugin_internal::format_numeric
 int main(int argc, char** argv) {
   for (const char* name :
@@ -36,7 +36,7 @@ int main(int argc, char** argv) {
   }
   using ps::plugin_internal::format_numeric::sme_f32_u8_tile;
   std::atomic<bool> primary{false}, secondary{false};
-  ps::execution_internal::CancellationPoll poll;
+  ps::core_internal::CancellationPoll poll;
   poll.flags[0] = &primary;
   poll.flags[1] = &secondary;
   poll.size = 2;

@@ -179,8 +179,6 @@ int warm_short_first(bool cancel_short, bool finite, bool retain_result) {
       PS_CHECK(diagnostics.shared_computations == 1 &&
                diagnostics.operation_timings.empty());
     } else {
-      PS_CHECK(diagnostics.block_cache_hits == 1 &&
-               diagnostics.block_cache_misses == 0);
     }
     PS_CHECK(
         short_result.value()

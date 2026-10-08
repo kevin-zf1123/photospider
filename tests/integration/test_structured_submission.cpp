@@ -236,7 +236,6 @@ struct Fixture {
     out.output_schema.result_schema_version = 1;
     out.result_schema = schema;
     out.region_rule = OperationRegionRule::Whole;
-    out.dependency_version = 2;
     out.continuation_bytes = io_mode ? sizeof(BatchIo) : sizeof(Source);
     out.maximum_dependency_stages = io_mode ? 4 : 1;
     source.start_result = [this, io_mode](const auto&, const auto& allocator) {
@@ -1135,7 +1134,6 @@ int joint_protocol_survives_external_stop() {
       output.output_schema.result_schema_version = schema.version;
       output.result_schema = schema;
       output.region_rule = OperationRegionRule::Whole;
-      output.dependency_version = 2;
       output.continuation_bytes = sizeof(JointProtocolSingle);
       output.maximum_dependency_stages = 1;
     }
