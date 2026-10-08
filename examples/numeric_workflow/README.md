@@ -261,7 +261,7 @@ windows and frozen snapshots.
 The importer validates ICC v2/v4 CMYK output-device structure; optional and
 private tag payloads are not a CMM transform certification. The example does
 not perform color conversion or ICC LUT evaluation. Public C++ consumers must
-rebuild against package 0.30.0. These manual targets have no integration/CTest
+rebuild against package 0.32.0. These manual targets have no integration/CTest
 registration.
 
 ## Color ramps

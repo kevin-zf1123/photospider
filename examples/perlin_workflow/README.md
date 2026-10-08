@@ -11,7 +11,7 @@ Whole evaluates and validates the complete coordinate tensor. Tiled computes bou
 
 Arguments are mode (whole, tiled, or gpu), sample count (1..65536), host workers (1..64), measured repetitions (1..10000), and tile width (power of two, 1..4096). Defaults are tiled 16384 4 5 128. Coordinates are deterministic: flattened element i is ((i*1709+719)%131071)/65536-1. This example uses Float64 coordinates and the default Float64 output.
 
-The standalone project requires Photospider 0.30.0 and can build against an installed kernel package:
+The standalone project requires Photospider 0.32.0 and can build against an installed kernel package:
 
     cmake -S examples/perlin_workflow -B build/perlin-consumer \
       -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/consumer-install"

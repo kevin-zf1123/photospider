@@ -61,7 +61,7 @@ ctest --test-dir build/kernel-dev -R '^test_dependency_(workflow|radius_workflow
 
 The full workflow test invokes the no-argument mode. The radius test invokes `--radius-only`.
 
-The same executable can be built against an installed Photospider 0.30 package. The consumer test project also provides `photospider_sampling_consumer`; the dependency workflow tests cover the no-argument and radius-only modes.
+The same executable can be built against an installed Photospider 0.32 package. The consumer test project also provides `photospider_sampling_consumer`; the dependency workflow tests cover the no-argument and radius-only modes.
 
 ```sh
 cmake --install build/kernel-dev --prefix "$PWD/build/kernel-dev/consumer-install"

@@ -23,7 +23,7 @@ cmake --build build/kernel-dev --target photospider_multi_output_workflow -j 8
 build/kernel-dev/examples/multi_output_workflow/photospider_multi_output_workflow --joint on
 ```
 
-To configure and build against an installed Photospider 0.30 kernel package:
+To configure and build against an installed Photospider 0.32 kernel package:
 
 ```sh
 cmake -S examples/multi_output_workflow -B build/multi-output-consumer \
@@ -32,4 +32,4 @@ cmake --build build/multi-output-consumer --target photospider_multi_output_work
 build/multi-output-consumer/photospider_multi_output_workflow --joint off
 ```
 
-The standalone project uses `find_package(Photospider 0.30 CONFIG REQUIRED COMPONENTS kernel)`. The focused multi-output behavior tests are `test_multi_output_execution` and `test_multi_output_contract`; the top-level build also registers `example_multi_output_on` and `example_multi_output_off`.
+The standalone project uses `find_package(Photospider 0.32 CONFIG REQUIRED COMPONENTS kernel)`. The focused multi-output behavior tests are `test_multi_output_execution` and `test_multi_output_contract`; the top-level build also registers `example_multi_output_on` and `example_multi_output_off`.

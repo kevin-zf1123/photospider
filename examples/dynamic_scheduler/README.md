@@ -15,7 +15,7 @@ build/kernel-dev/examples/dynamic_scheduler/photospider_mixed_scheduler \
   build/pixeloe/result-build/libphotospider_pixeloe.so metal 22 2 2 8 1024 1 0
 ```
 
-An independent consumer can configure against a compatible Photospider 0.30 SDK and links only `Photospider::kernel`:
+An independent consumer can configure against a compatible Photospider 0.32 SDK and links only `Photospider::kernel`:
 
 ```sh
 cmake --install build/kernel-dev --prefix build/kernel-dev/consumer-install
@@ -25,7 +25,7 @@ cmake --build build/dynamic-scheduler-consumer \
   --target photospider_dynamic_scheduler photospider_mixed_scheduler -j 8
 ```
 
-The standalone CMake project uses `find_package(Photospider 0.30 CONFIG REQUIRED COMPONENTS kernel)`. Its UNIX allocation targets are available when configured on a UNIX system. The private `photospider_dynamic_costs` and `photospider_mixed_transfers` targets require an in-tree Photospider build with `BUILD_TESTING=ON`; they are not part of the installed SDK consumer.
+The standalone CMake project uses `find_package(Photospider 0.32 CONFIG REQUIRED COMPONENTS kernel)`. Its UNIX allocation targets are available when configured on a UNIX system. The private `photospider_dynamic_costs` and `photospider_mixed_transfers` targets require an in-tree Photospider build with `BUILD_TESTING=ON`; they are not part of the installed SDK consumer.
 
 ## Scalar Result chain
 

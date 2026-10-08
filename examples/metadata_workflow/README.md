@@ -1,7 +1,7 @@
 # Metadata assignment and removal
 
 This C++17 workflow demonstrates the public Result API in Photospider package
-0.30.0. It creates a one-tensor Result containing Float32 values with the exact
+0.32.0. It creates a one-tensor Result containing Float32 values with the exact
 bit patterns for `1.6`, a signaling NaN, negative zero, and positive infinity.
 `metadata.assign_strict` adds a component description and an opaque annotation;
 `format::remove_metadata` lowers the annotation deletion to a second

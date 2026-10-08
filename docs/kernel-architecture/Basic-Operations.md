@@ -1,6 +1,6 @@
 # Basic operations
 
-The default registry provides CPU operations for curves, fields, scalar statistics, levels, elementwise numeric arrays, and images. Every operation listed on this page uses Result inputs and outputs; its input schema and region contract are defined per key. The foundations workflow also demonstrates the unsuffixed expression and LUT operations through Result. The legacy C operation ABI is version 11; the separate Result operation plugin interface is version 2, and planar extension ABI 3 remains a separate contract.
+The default registry provides CPU operations for curves, fields, scalar statistics, levels, elementwise numeric arrays, and images. Every operation listed on this page uses Result inputs and outputs; its input schema and region contract are defined per key. The foundations workflow also demonstrates the unsuffixed expression and LUT operations through Result. The Result operation C ABI 2 is the only operation-plugin C table; see [Plugin ABI](Plugin-ABI.md).
 
 ## Operation inputs and outputs
 

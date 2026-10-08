@@ -1,6 +1,6 @@
 # 基础算子
 
-默认 registry 提供 CPU 曲线、场、标量统计、levels、逐元素数值和图像算子，通过公开 workflow、compiler 和 execution API 使用。本页列出的所有算子均使用 Result 输入和输出；输入 schema 与 Region 契约按 key 分别定义。Foundations workflow 也展示了通过 Result 使用未带后缀表达式与 LUT 算子。旧 C operation ABI 为版本 11；独立的 Result operation plugin 接口为版本 2，planar extension ABI 3 是另一份契约。
+默认 registry 提供 CPU 曲线、场、标量统计、levels、逐元素数值和图像算子，通过公开 workflow、compiler 和 execution API 使用。本页列出的所有算子均使用 Result 输入和输出；输入 schema 与 Region 契约按 key 分别定义。Foundations workflow 也展示了通过 Result 使用未带后缀表达式与 LUT 算子。Result operation C ABI 2 是唯一的 operation plugin C 表；见 [Plugin ABI](Plugin-ABI.zh.md)。
 
 ## 输入与输出契约
 

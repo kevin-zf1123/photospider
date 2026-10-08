@@ -18,7 +18,7 @@ out/components-consumer/photospider_components_workflow
 out/components-consumer/photospider_components_workflow --large
 ```
 
-The standalone CMake project requires a compatible Photospider 0.30 package.
+The standalone CMake project requires a compatible Photospider 0.32 package.
 
 ## Result inputs and ownership
 

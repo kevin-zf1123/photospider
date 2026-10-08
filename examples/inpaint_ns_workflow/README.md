@@ -7,7 +7,7 @@ linear-sRGB premultiplied RGBA image with one center hole, radius 3, and an
 opaque alpha channel. The check also confirms that the output retains the image
 semantic facet.
 
-The workflow uses Photospider package 0.30.0. Build it from the repository with:
+The workflow uses Photospider package 0.32.0. Build it from the repository with:
 
 ```sh
 cmake --build build/kernel-dev --target photospider_inpaint_ns_workflow -j 8

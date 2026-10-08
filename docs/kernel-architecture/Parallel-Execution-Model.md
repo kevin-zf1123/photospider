@@ -135,4 +135,4 @@ When every CPU worker is busy, a ready callback waits in its lane queue. If the 
 
 Cancellation latency is bounded by the remaining time in active blocks and submitted dispatches. Long CPU blocks must poll cancellation; slow callbacks delay result cleanup and context shutdown. A single GPU callback lane serializes callbacks for that context, and planar boundary copies add transfer cost.
 
-The waiting-queue limit and managed memory/work limits govern separate resources. Runs retain inputs, intermediates, callback state, and result storage through their documented owner lifetimes. Operation ABI and planar extension compatibility is specified in [Plugin ABI](Plugin-ABI.md).
+The waiting-queue limit and managed memory/work limits govern separate resources. Runs retain inputs, intermediates, callback state, and result storage through their documented owner lifetimes. Operation ABI compatibility is specified in [Plugin ABI](Plugin-ABI.md).

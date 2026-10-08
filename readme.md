@@ -6,9 +6,9 @@ Photospider is a C++17, single-machine graph compiler and execution kernel for e
 
 The installed `Photospider::kernel` target provides:
 
-- schema-3 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
+- schema-5 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
 - typed semantic IR and optimized IR;
-- operation ABI v11 semantic traits with closed typed parameter schemas, optimization, and Region-demand-aware local physical planning;
+- Result operation C ABI 2 and OperationTraits 24 with closed typed parameter schemas, optimization, and Region-demand-aware local physical planning;
 - CPU-required and GPU-optional local execution;
 - operation support is defined by each registered contract; see [image operations](docs/kernel-architecture/Image-Operations.md) and the [built-in operations index](docs/built-in_ops/README.md);
 - reusable numeric, channel/alpha/color, bounded expression/LUT and component operations;
@@ -39,7 +39,7 @@ cmake --install build --prefix /desired/photospider-prefix
 ```
 
 ```cmake
-find_package(Photospider 0.30 CONFIG REQUIRED COMPONENTS kernel)
+find_package(Photospider 0.32 CONFIG REQUIRED COMPONENTS kernel)
 target_link_libraries(app PRIVATE Photospider::kernel)
 ```
 
@@ -59,7 +59,7 @@ The separate [`photospider-daemon`](https://github.com/kevin-zf1123/photospider-
 
 ## Composable workflows
 
-The self-contained [foundations example](examples/foundations_workflow) builds against an installed 0.30 package. Its default `all` selector runs numeric and expression/LUT scenarios with result checks. The README documents repository and installed-package build commands.
+The self-contained [foundations example](examples/foundations_workflow) builds against an installed 0.32 package. Its default `all` selector runs numeric and expression/LUT scenarios with result checks. The README documents repository and installed-package build commands.
 
 ## Documentation
 
@@ -76,7 +76,7 @@ The self-contained [foundations example](examples/foundations_workflow) builds a
 | Build and validation | [Testing and validation](docs/development/Testing-and-Validation.md) |
 | Architecture decisions | [ADR index](docs/adr/README.md) |
 
-English documentation is authoritative. Official documents under `docs/` have maintained Chinese mirrors in their corresponding `zh/` directories.
+English documentation is authoritative. Official documents under `docs/adr/`, `docs/kernel-architecture/`, `docs/development/`, and other `docs/` areas that contain a `zh/` directory have maintained Chinese mirrors there. `docs/built-in_ops/` is maintained in Chinese without a separate mirror.
 
 ## License
 

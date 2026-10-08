@@ -1,6 +1,6 @@
 # Channel extraction from a Result tensor
 
-This public C++17 workflow uses Photospider package 0.30.0. It builds one
+This public C++17 workflow uses Photospider package 0.32.0. It builds one
 single-tensor Result with a B/A/R/G channel description, calls
 `format::split_channels`, and publishes only handle `c2`. That handle selects the
 red cell-axis component. The example requests the second row and checks the exact

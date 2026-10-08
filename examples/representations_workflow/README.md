@@ -4,7 +4,7 @@ This example turns a compact byte wire into typed Result records, checks the rec
 
 ## Build and run
 
-The example requires Photospider 0.30 or newer. From the repository root, build and run the registered target:
+The example requires a compatible Photospider 0.32 package. From the repository root, build and run the registered target:
 
 ```sh
 cmake --build build/kernel-dev --target photospider_representations_workflow -j8

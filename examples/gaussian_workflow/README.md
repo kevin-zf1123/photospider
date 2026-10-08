@@ -19,7 +19,7 @@ build/kernel-dev/examples/gaussian_workflow/photospider_gaussian_workflow 32 4 5
 
 Arguments are side length (1..4096), workers (1..64), measured repetitions (1..10000), mode (`whole`, `tiled`, or `gpu`), and tile width (power of two, 1..4096). Tiled mode uses the same value for tile height and width. Defaults are `32 4 5 whole 8`. The example size limit bounds this sample program, not the operation's legal tensor domain. Large choices may exceed available resources.
 
-The standalone project requires Photospider `0.30.0` and builds against the installed kernel package:
+The standalone project requires Photospider `0.32.0` and builds against the installed kernel package:
 
 ```sh
 cmake -S examples/gaussian_workflow -B build/gaussian-consumer \

@@ -18,7 +18,7 @@ out/fft-consumer/photospider_fft_workflow
 out/fft-consumer/photospider_fft_workflow --large
 ```
 
-The standalone CMake project requires a compatible Photospider 0.30 package.
+The standalone CMake project requires a compatible Photospider 0.32 package.
 
 ## Result inputs and ownership
 
