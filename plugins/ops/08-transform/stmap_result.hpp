@@ -12,7 +12,7 @@
 
 #include "00-foundation/image_program.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "data/input_validation.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::stmap_result {
 using namespace numeric_ops;  // NOLINT(build/namespaces)
@@ -113,11 +113,15 @@ struct Program final {
     std::vector<ResultRelation> parts;
     auto add = [&](std::uint32_t port, std::uint32_t roles,
                    const Region& region) {
-      parts.push_back(support(phase, port, roles, region));
       const auto& spec = phase.query.inputs[port].result_schema->tensors[0];
       auto footprint =
           math_take(Footprint::from_regions(spec.sample_shape(), {region}));
       auto closed = math_take(spec.close_samples(footprint));
+      if (closed == footprint) {
+        parts.push_back(support(phase, port, roles | 4U, region));
+        return;
+      }
+      parts.push_back(support(phase, port, roles, region));
       for (const auto& closure : closed.boxes())
         parts.push_back(support(phase, port, 4, closure));
     };

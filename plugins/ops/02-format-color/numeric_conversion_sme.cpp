@@ -3,7 +3,7 @@
 
 #include <cstdint>
 
-#include "execution/cancellation_poll.hpp"
+#include "core/cancellation_poll.hpp"
 
 namespace ps::plugin_internal::format_numeric {
 __arm_locally_streaming std::uint64_t sme_conversion_vector_bytes() {
@@ -18,7 +18,7 @@ __arm_locally_streaming std::uint64_t sme_conversion_vector_bytes() {
 // environment.
 __arm_locally_streaming std::uint64_t sme_f32_u8_tile(
     const std::uint8_t* source, std::uint8_t* target, std::uint64_t count,
-    const execution_internal::CancellationPoll& cancellation) {
+    const core_internal::CancellationPoll& cancellation) {
   const auto flag_count = cancellation.size;
   const auto* flags = cancellation.flags.data();
   const auto cancelled = [&]() {

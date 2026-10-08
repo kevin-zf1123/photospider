@@ -113,7 +113,7 @@ struct PerlinExact final {
   }
   Result<std::uint64_t> evaluate(
       const std::array<PerlinCoordinate, 3>& coordinates, bool output_narrow,
-      const execution_internal::WorkConsumer& consume) {
+      const core_internal::WorkConsumer& consume) {
     using Answer = Result<std::uint64_t>;
     unsigned q = 0;
     for (const auto& coordinate : coordinates)

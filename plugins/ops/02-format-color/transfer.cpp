@@ -81,7 +81,7 @@ inline const char* sample_problem(const Preparation& state,
 class Runner final {
   const Preparation& state_;
   const BufferAllocator& allocator_;
-  const execution_internal::WorkConsumer& consume_;
+  const core_internal::WorkConsumer& consume_;
   bool environment_active_;
   Workspace<StrictMath> strict_;
   Workspace<CompactMath> compact_;
@@ -91,7 +91,7 @@ class Runner final {
   NumericDiagnostics diagnostics;
   std::uint64_t failed_lane = 0;
   Runner(const Preparation& state, const BufferAllocator& allocator,
-         const execution_internal::WorkConsumer& consume, bool active)
+         const core_internal::WorkConsumer& consume, bool active)
       : state_(state),
         allocator_(allocator),
         consume_(consume),
@@ -576,7 +576,7 @@ struct Continuation final {
       return phase.consume_work(n);
     };
     ExactWorkScope exact(&consume, &phase.query.cancellation);
-    execution_internal::WorkConsumer checkpoint(consume);
+    core_internal::WorkConsumer checkpoint(consume);
     Runner runner(*state, phase.allocator, checkpoint, environment.active());
     auto result = [&]() -> Poll {
       try {
@@ -667,7 +667,6 @@ OperationDefinition operation(bool encode, SequenceProfile profile,
   out.output_schema = port;
   out.result_schema = tensor_ops::scalar_schema();
   out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 2;
   out.continuation_bytes = sizeof(Continuation);
   out.maximum_dependency_stages = 2;
   d.prepare_static = [encode, profile](const auto& inputs, const auto& params) {

@@ -210,7 +210,6 @@ inline OperationTraits traits(std::uint32_t inputs, std::uint64_t state,
   auto& output = traits.outputs[0];
   output.output_schema = port();
   output.result_schema = scalar_schema();
-  output.dependency_version = 2;
   output.region_rule = OperationRegionRule::Dependency;
   output.continuation_bytes = state;
   output.maximum_dependency_stages = stages;

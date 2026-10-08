@@ -17,10 +17,10 @@
 #include "00-foundation/tensor_program.hpp"
 #include "02-format-color/result_mapping.hpp"
 #include "02-format-color/rgb_basis_math.hpp"
-#include "data/input_validation.hpp"
 #include "photospider/data/region_runs.hpp"
 #include "photospider/numeric/workflow_authoring.hpp"
 #include "plugin/builtin_operations.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::basis_ops {
 namespace {
@@ -1176,7 +1176,6 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
   output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(Continuation);
   output.maximum_dependency_stages = 2;
   op.prepare_static = [member, profile](const auto& inputs,

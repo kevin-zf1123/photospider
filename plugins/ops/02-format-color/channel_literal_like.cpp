@@ -306,7 +306,6 @@ Status register_channel_literal_like(OperationRegistry* registry) {
     output.output_schema = port;
     output.result_schema = tensor_ops::scalar_schema();
     output.region_rule = OperationRegionRule::Dependency;
-    output.dependency_version = 2;
     output.continuation_bytes = sizeof(LiteralState);
     output.maximum_dependency_stages = 2;
     d.prepare_static = [kind = profile.second](const auto& inputs,

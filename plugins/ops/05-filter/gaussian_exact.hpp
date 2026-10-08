@@ -47,7 +47,7 @@ struct GaussianExact final {
   // Reuse only after a successful begin() with the same immutable kernel.
   // The denominator is never modified by add() or finish().
   Status reset(std::uint64_t nx, std::uint64_t ny, bool output_narrow,
-               const execution_internal::WorkConsumer& consume) {
+               const core_internal::WorkConsumer& consume) {
     if (!nx || !ny || nx > UINT64_MAX / ny)
       return {ErrorCode::ResourceExhausted, "Gaussian tap product overflow"};
     const auto status = consume(68 * 4);
@@ -63,7 +63,7 @@ struct GaussianExact final {
   }
   Status begin(const std::uint64_t* kx, std::uint64_t nx,
                const std::uint64_t* ky, std::uint64_t ny, bool output_narrow,
-               const execution_internal::WorkConsumer& consume) {
+               const core_internal::WorkConsumer& consume) {
     const auto status = reset(nx, ny, output_narrow, consume);
     if (!status.ok())
       return status;
@@ -93,8 +93,7 @@ struct GaussianExact final {
   // Call in logical kernel row-major order, including repeated boundary taps.
   // The caller must still perform every authorized read after a NaN/Inf.
   Status add(std::uint64_t kx, std::uint64_t ky, std::uint64_t raw,
-             bool input_narrow,
-             const execution_internal::WorkConsumer& consume) {
+             bool input_narrow, const core_internal::WorkConsumer& consume) {
     if (!remaining)
       return {ErrorCode::Internal, "Gaussian tap count exceeded"};
     --remaining;
@@ -146,8 +145,7 @@ struct GaussianExact final {
     ratio.add_term(sample.negative);
     return Status::success();
   }
-  Result<std::uint64_t> finish(
-      const execution_internal::WorkConsumer& consume) {
+  Result<std::uint64_t> finish(const core_internal::WorkConsumer& consume) {
     using Answer = Result<std::uint64_t>;
     const auto status = consume(1);
     if (!status.ok())

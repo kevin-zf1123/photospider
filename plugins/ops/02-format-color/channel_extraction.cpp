@@ -11,11 +11,11 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "core/utf8_validation.hpp"
 #include "data/content_digest.hpp"
 #include "photospider/data/tensor_description.hpp"
 #include "photospider/format/channel.hpp"
 #include "plugin/builtin_operations.hpp"
-#include "plugin/utf8_validation.hpp"
 
 namespace ps::format::detail {
 std::string schema_assertion(const SchemaTemplate& schema) {
@@ -216,7 +216,8 @@ Result<OperationPreparation> prepare_extraction(
     const auto& selector = std::get<std::string>(parameters.at("selector"));
     if (match != "name" && match != "role")
       return Prepared(invalid("match must be name or role"));
-    if (selector.empty() || selector.size() > 128 || !valid_utf8_key(selector))
+    if (selector.empty() || selector.size() > 128 ||
+        !core_internal::valid_utf8_key(selector))
       return Prepared(
           invalid("selector must be strict UTF-8 of at most 128 bytes"));
     if (!description || !description->channel_axis ||
@@ -448,7 +449,6 @@ OperationDefinition extraction(const std::string& key, bool named,
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
   output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(ChannelState);
   output.maximum_dependency_stages = 2;
   definition.prepare_static = [named, profile](const auto& inputs,

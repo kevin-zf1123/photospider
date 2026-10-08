@@ -590,7 +590,6 @@ OperationDefinition operation(Kind kind) {
             : kind == Kind::Pack  ? "table"
                                   : "values";
   out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 2;
   out.continuation_bytes =
       kind == Kind::Measure ? sizeof(MeasureState) : sizeof(TensorViewState);
   out.maximum_dependency_stages = 1048576;

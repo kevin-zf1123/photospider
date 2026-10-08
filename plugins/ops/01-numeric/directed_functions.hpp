@@ -17,7 +17,7 @@ struct DirectedFunctions final {
   using Frame = DirectedInterval::Frame;
   explicit DirectedFunctions(
       SequenceProfile profile,
-      const execution_internal::WorkConsumer* initialization = nullptr)
+      const core_internal::WorkConsumer* initialization = nullptr)
       : math(profile, initialization) {}
   // Precondition: finite positive input, already classified by the adapter.
   void logarithm(Interval output, const BinaryParts& input) {

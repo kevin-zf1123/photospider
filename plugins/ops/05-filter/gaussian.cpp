@@ -15,7 +15,7 @@
 #include "05-filter/gaussian_exact.hpp"
 #include "05-filter/gaussian_gpu.hpp"
 #include "data/result_window_access.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -87,7 +87,7 @@ struct PreparedKernel final {
   Status status{};
 };
 Status generate(PreparedKernel& work,
-                const execution_internal::WorkConsumer& consume) {
+                const core_internal::WorkConsumer& consume) {
   auto* math = new (work.arena) GaussianCoefficients(consume);
   struct Destroy {
     GaussianCoefficients* value;
@@ -140,8 +140,7 @@ Result<std::uint64_t> evaluate_point(
     Slot* slot, const Parameters& p, const std::uint64_t* kx, std::uint64_t nx,
     const std::uint64_t* ky, std::uint64_t ny,
     const std::vector<std::uint64_t>& shape, const std::uint64_t* coordinate,
-    const Read& read, bool narrow,
-    const execution_internal::WorkConsumer& consume) {
+    const Read& read, bool narrow, const core_internal::WorkConsumer& consume) {
   using Answer = Result<std::uint64_t>;
   if (!p.rx && !p.ry)
     return read(coordinate[p.y], coordinate[p.x]);

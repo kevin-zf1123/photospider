@@ -5,7 +5,7 @@
 #include <functional>
 
 #include "01-numeric/exact_product.hpp"
-#include "execution/work_consumer.hpp"
+#include "core/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Direct RN(sqrt(A/B * 2^scale)); no rounded variance is formed. Scratch lives
@@ -16,7 +16,7 @@ namespace ps::plugin_internal::numeric_ops {
 template <std::size_t Words>
 Result<std::uint64_t> round_sqrt_ratio(
     ExactRatioWorkspace<Words>* ratio, bool narrow, int scale,
-    const execution_internal::WorkConsumer& consume) {
+    const core_internal::WorkConsumer& consume) {
   using Workspace = ExactRatioWorkspace<Words>;
   using Answer = Result<std::uint64_t>;
   const auto capacity = [] {

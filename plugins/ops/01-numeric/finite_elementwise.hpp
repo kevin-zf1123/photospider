@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "data/input_validation.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 enum class FiniteElementwise { Abs, Minimum, Maximum };

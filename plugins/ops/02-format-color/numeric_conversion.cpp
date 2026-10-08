@@ -22,7 +22,7 @@
 #if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
 #include <sys/sysctl.h>
 
-#include "execution/cancellation_poll.hpp"
+#include "core/cancellation_poll.hpp"
 #endif
 
 #include "02-format-color/result_mapping.hpp"
@@ -36,7 +36,7 @@ namespace ps::plugin_internal {
 namespace format_numeric {
 std::uint64_t sme_conversion_vector_bytes();
 std::uint64_t sme_f32_u8_tile(const std::uint8_t*, std::uint8_t*, std::uint64_t,
-                              const execution_internal::CancellationPoll&);
+                              const core_internal::CancellationPoll&);
 }  // namespace format_numeric
 #endif
 namespace {
@@ -1239,8 +1239,8 @@ Status convert_window(const ResultProgramPhase& phase, const Preparation& state,
           // Admission and conversion poll internally. A rejected tile stores
           // nothing; bounded row conversion then supplies the exact diagnostic.
           require(checkpoint(phase, tile_samples));
-          const auto polling = execution_internal::CancellationPoll::borrow(
-              phase.query.cancellation);
+          const auto polling =
+              core_internal::CancellationPoll::borrow(phase.query.cancellation);
           const auto used = format_numeric::sme_f32_u8_tile(
               src.row.data, dst.row.data, tile_samples, polling);
           require(checkpoint(phase, 0));
@@ -1416,7 +1416,6 @@ OperationDefinition conversion() {
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
   output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(Continuation);
   output.maximum_dependency_stages = 2;
   definition.prepare_static = [](const auto& inputs, const auto& params) {

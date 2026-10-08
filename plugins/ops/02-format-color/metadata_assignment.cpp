@@ -1561,7 +1561,6 @@ OperationDefinition definition(
   out.output_schema = port;
   out.result_schema = plugin_internal::tensor_ops::scalar_schema();
   out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 2;
   out.continuation_bytes = sizeof(State);
   out.maximum_dependency_stages = 2;
   op.prepare_static = [profile](const auto& inputs, const auto& params) {

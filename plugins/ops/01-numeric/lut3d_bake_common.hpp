@@ -10,9 +10,9 @@
 #include "01-numeric/exact_predicate.hpp"
 #include "01-numeric/exact_sampling.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "data/input_validation.hpp"
 #include "photospider/data/lut3d_bake.hpp"
 #include "photospider/plugin/operation_registry.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::bake_ops {
 using Parameters = std::map<std::string, ParameterValue>;

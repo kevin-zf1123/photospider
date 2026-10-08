@@ -18,7 +18,7 @@
 #include "01-numeric/exact_elementary.hpp"
 #include "01-numeric/exp_simd.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "photospider/plugin/result_program.hpp"
 

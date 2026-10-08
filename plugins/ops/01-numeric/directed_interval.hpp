@@ -9,7 +9,7 @@
 
 #include "01-numeric/exact_product.hpp"
 #include "01-numeric/math_constants.hpp"
-#include "execution/work_consumer.hpp"
+#include "core/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Fixed-capacity signed dyadic enclosures. The full pool is owned/admitted as
@@ -39,31 +39,31 @@ struct DirectedIntervalStorage final {
   std::size_t used = 0;
   unsigned precision = 128;
   unsigned product_checkpoint_words = 0;
-  execution_internal::WorkConsumer consume;
+  core_internal::WorkConsumer consume;
   // A runtime initialization consumer admits and polls between complete slots.
   // Keep Number's ordinary zero-initialization semantics for external users.
   static Number initialized_number(
-      const execution_internal::WorkConsumer* initialization, std::size_t) {
+      const core_internal::WorkConsumer* initialization, std::size_t) {
     if (initialization)
       initialization->check(kWords + 1);
     return Number{};
   }
   template <std::size_t... I>
   static std::array<Number, kSlots> initialized_pool(
-      const execution_internal::WorkConsumer* initialization,
+      const core_internal::WorkConsumer* initialization,
       std::index_sequence<I...>) {
     return {{initialized_number(initialization, I)...}};
   }
   static SequenceProfile initialized_profile(
       SequenceProfile profile,
-      const execution_internal::WorkConsumer* initialization) {
+      const core_internal::WorkConsumer* initialization) {
     if (initialization)
       initialization->check(5 * kWords + 11);
     return profile;
   }
   explicit DirectedIntervalStorage(
       SequenceProfile profile,
-      const execution_internal::WorkConsumer* initialization = nullptr)
+      const core_internal::WorkConsumer* initialization = nullptr)
       : pool(initialized_pool(initialization,
                               std::make_index_sequence<kSlots>{})),
         rounding(initialized_profile(profile, initialization)) {}

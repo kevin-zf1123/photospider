@@ -8,7 +8,7 @@
 #include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/comparison_profiles.hpp"
 #include "01-numeric/exact_predicate.hpp"
-#include "execution/work_consumer.hpp"
+#include "core/work_consumer.hpp"
 #include "photospider/core/status.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
@@ -101,7 +101,7 @@ struct ExactRatioWorkspace final {
     add_term((a.negative != b.negative) != subtract);
   }
   Result<std::uint64_t> round(bool narrow,
-                              const execution_internal::WorkConsumer& consume,
+                              const core_internal::WorkConsumer& consume,
                               int scale = -1074, bool approximate = false) {
     using Answer = Result<std::uint64_t>;
     const auto capacity = [] {

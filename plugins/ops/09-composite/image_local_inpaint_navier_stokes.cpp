@@ -10,9 +10,9 @@
 #include "00-foundation/image_program.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "09-composite/inpaint_ns.hpp"
-#include "data/input_validation.hpp"
 #include "data/result_window_access.hpp"
 #include "plugin/builtin_operations.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -324,7 +324,6 @@ Status add(OperationRegistry* registry, const char* key, bool adapter) {
   out.output_schema = image;
   out.result_schema = image_ops::image_schema();
   out.region_rule = OperationRegionRule::Whole;
-  out.dependency_version = 2;
   out.continuation_bytes = sizeof(Program);
   out.maximum_dependency_stages = 2;
   op.prepare_static = [](const auto& inputs,

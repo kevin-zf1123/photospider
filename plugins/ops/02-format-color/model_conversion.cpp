@@ -16,8 +16,8 @@
 #include "02-format-color/model_math.hpp"
 #include "02-format-color/model_simd.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/tensor_description.hpp"
-#include "photospider/execution/resource_allocator.hpp"
 #include "photospider/format/channel.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -1448,7 +1448,6 @@ OperationDefinition definition(Kind kind, SequenceProfile profile,
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
   output.region_rule = OperationRegionRule::Dependency;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(State);
   output.maximum_dependency_stages = 2;
   def.prepare_static = [kind, profile](const auto& inputs, const auto& params) {

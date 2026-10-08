@@ -14,11 +14,11 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "core/utf8_validation.hpp"
 #include "data/model_coordinates.hpp"
 #include "photospider/data/region_runs.hpp"
 #include "photospider/format/channel_editing.hpp"
 #include "plugin/builtin_operations.hpp"
-#include "plugin/utf8_validation.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -93,7 +93,7 @@ Result<std::string> unhex(const std::string& text) {
       return Result<std::string>(invalid("invalid selector hex"));
     out += static_cast<char>((a << 4) | b);
   }
-  if (!valid_utf8_key(out))
+  if (!core_internal::valid_utf8_key(out))
     return Result<std::string>(invalid("invalid UTF-8 selector"));
   return Result<std::string>(std::move(out));
 }
@@ -1083,7 +1083,6 @@ OperationDefinition definition(const std::string& key, int member,
   out.output_schema = port;
   out.result_schema = tensor_ops::scalar_schema();
   out.region_rule = OperationRegionRule::Dependency;
-  out.dependency_version = 2;
   out.continuation_bytes = sizeof(State);
   out.maximum_dependency_stages = 17;
   op.prepare_static = [member, profile](const auto& inputs,
@@ -1143,7 +1142,6 @@ OperationDefinition scalar_literal(const std::string& key,
   out.output_schema.element_type_mask = 127;
   out.result_schema = tensor_ops::scalar_schema();
   out.region_rule = OperationRegionRule::Whole;
-  out.dependency_version = 2;
   out.continuation_bytes = sizeof(ScalarState);
   out.maximum_dependency_stages = 1;
   op.prepare_static =

@@ -17,7 +17,7 @@
 #include <vector>
 
 #include "00-foundation/numeric_common.hpp"
-#include "data/input_validation.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::core_ops {
 inline Result<std::int64_t> integer_parameter(

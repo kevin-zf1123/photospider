@@ -6,7 +6,7 @@
 #include <functional>
 
 #include "02-format-color/transfer_program.hpp"
-#include "execution/work_consumer.hpp"
+#include "core/work_consumer.hpp"
 
 #ifndef PHOTOSPIDER_TRANSFER_FAST_MATH
 #define PHOTOSPIDER_TRANSFER_FAST_MATH 1
@@ -45,7 +45,7 @@ class FastMath final {
   Status evaluate(const Program& p, unsigned branch, const double* input,
                   unsigned count, bool narrow, bool strict,
                   std::uint64_t* output, bool* accepted,
-                  const execution_internal::WorkConsumer& consume,
+                  const core_internal::WorkConsumer& consume,
                   bool environment_active) {
     for (unsigned lane = 0; lane < count; ++lane)
       accepted[lane] = PHOTOSPIDER_TRANSFER_FAST_MATH && environment_active &&

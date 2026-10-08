@@ -12,9 +12,9 @@
 
 #include "00-foundation/basic_common.hpp"
 #include "00-foundation/image_native.hpp"
-#include "data/input_validation.hpp"
 #include "data/result_window_access.hpp"
 #include "photospider/data/tensor_description.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::image_ops {
 namespace {
@@ -684,7 +684,6 @@ Status register_image_algorithm(OperationRegistry* registry,
     out.output_schema = image_port();
     out.result_schema = image_schema(kind);
     out.region_rule = OperationRegionRule::Dependency;
-    out.dependency_version = 2;
     out.continuation_bytes = sizeof(Program);
     out.maximum_dependency_stages = traits.supports_gpu ? 4 : 2;
   }

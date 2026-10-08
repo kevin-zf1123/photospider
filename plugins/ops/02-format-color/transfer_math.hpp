@@ -95,7 +95,7 @@ class StrictMathStorage final {
   // Whole-program rational fallback also resolves exact midpoint ties in toes,
   // squares and sqrt(3*x); no binary64 intermediate is introduced.
   std::uint64_t algebraic(const Program& p, double x, bool narrow,
-                          const execution_internal::WorkConsumer& consume) {
+                          const core_internal::WorkConsumer& consume) {
     auto& values = algebraic_values_;
     if (algebraic_program_ != &p) {
       for (auto& value : values)
@@ -282,9 +282,8 @@ class StrictMathStorage final {
 
  public:
   explicit StrictMathStorage(SequenceProfile profile) : functions_(profile) {}
-  Result<std::uint64_t> evaluate(
-      const Program& p, double x, bool narrow,
-      const execution_internal::WorkConsumer& consume) {
+  Result<std::uint64_t> evaluate(const Program& p, double x, bool narrow,
+                                 const core_internal::WorkConsumer& consume) {
     using R = Result<std::uint64_t>;
     auto& m = functions_.functions.math;
     m.consume = &consume;

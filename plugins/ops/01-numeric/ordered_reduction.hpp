@@ -10,7 +10,7 @@
 
 #include "00-foundation/numeric_common.hpp"
 #include "01-numeric/ordered_result.hpp"
-#include "data/input_validation.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 /** @brief Exact rectangular decomposition of one logical row-major interval.
@@ -201,7 +201,6 @@ inline OperationDefinition ordered_reduction(const char* key, bool variance) {
   traits.outputs[0].requires_dense_output = true;
   traits.outputs[0].key = "value";
   traits.outputs[0].region_rule = OperationRegionRule::Dependency;
-  traits.outputs[0].dependency_version = 2;
   traits.outputs[0].continuation_bytes = sizeof(OrderedReductionState);
   traits.workspace_bytes = 24;
   traits.outputs[0].maximum_dependency_stages = 1048576;

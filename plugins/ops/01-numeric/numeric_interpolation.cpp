@@ -9,7 +9,7 @@
 
 #include "01-numeric/exact_interpolation.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {

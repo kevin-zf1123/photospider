@@ -4,7 +4,7 @@
 #include <functional>
 
 #include "01-numeric/exact_ratio.hpp"
-#include "execution/work_consumer.hpp"
+#include "core/work_consumer.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Inputs may alias each other; output must be distinct. Every stored word and
@@ -13,7 +13,7 @@ namespace ps::plugin_internal::numeric_ops {
 template <std::size_t Words>
 Status multiply_fixed(const FixedInteger<Words>& a,
                       const FixedInteger<Words>& b, FixedInteger<Words>* output,
-                      const execution_internal::WorkConsumer& consume,
+                      const core_internal::WorkConsumer& consume,
                       unsigned checkpoint_words = 0) {
   const auto& status = consume(4 * Words);
   if (!status.ok())

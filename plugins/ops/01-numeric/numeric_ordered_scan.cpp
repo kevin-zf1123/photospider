@@ -8,8 +8,8 @@
 #include <vector>
 
 #include "01-numeric/ordered_result.hpp"
-#include "data/input_validation.hpp"
 #include "plugin/builtin_operations.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal {
 namespace {

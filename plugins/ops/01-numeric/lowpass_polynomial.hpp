@@ -5,7 +5,7 @@
 #include <utility>
 
 #include "01-numeric/lowpass_kernel.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // A polynomial in u^2 plus a uniform absolute error on |u|<=1. Coefficients

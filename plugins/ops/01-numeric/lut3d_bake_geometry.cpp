@@ -11,7 +11,7 @@
 
 #include "01-numeric/lut3d_bake_common.hpp"
 #include "01-numeric/uniform_axis.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {

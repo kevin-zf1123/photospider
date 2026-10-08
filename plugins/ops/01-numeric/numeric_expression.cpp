@@ -15,7 +15,7 @@
 #include "01-numeric/expression_evaluator.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/sequence_profiles.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/numeric/expression.hpp"
 #include "plugin/builtin_operations.hpp"
 

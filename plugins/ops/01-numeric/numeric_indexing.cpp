@@ -16,10 +16,10 @@
 #include "01-numeric/array_profiles.hpp"
 #include "01-numeric/exact_aggregate.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "data/input_validation.hpp"
+#include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/semantic.hpp"
-#include "photospider/execution/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal {
 namespace {

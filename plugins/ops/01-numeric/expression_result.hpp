@@ -12,9 +12,9 @@
 
 #include "00-foundation/numeric_common.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "data/input_validation.hpp"
 #include "plugin/expression.hpp"
 #include "plugin/operation_semantics.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::expression_result {
 using namespace numeric_ops;  // NOLINT(build/namespaces)

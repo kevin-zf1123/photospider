@@ -5,7 +5,7 @@
 #include <string>
 
 #include "01-numeric/directed_interval.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Exact world coordinates in units 2^-1074, never IEEE-rounded boundary math.

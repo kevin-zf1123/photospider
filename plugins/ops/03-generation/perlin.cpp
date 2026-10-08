@@ -30,7 +30,7 @@ struct PerlinSlot final {
 Result<std::uint64_t> sample(PerlinSlot* slot,
                              const std::array<PerlinCoordinate, 3>& coordinates,
                              bool narrow,
-                             const execution_internal::WorkConsumer& consume,
+                             const core_internal::WorkConsumer& consume,
                              const CancellationToken& cancellation) {
   unsigned q = 0;
   for (const auto& coordinate : coordinates)

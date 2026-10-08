@@ -10,7 +10,7 @@
 
 #include "01-numeric/exp_simd.hpp"
 #include "01-numeric/trig_simd.hpp"
-#include "data/input_validation.hpp"
+#include "plugin/port_validation.hpp"
 
 extern "C" void photospider_sleef_evaluate(unsigned kind, const double* a,
                                            const double* b, double* output,

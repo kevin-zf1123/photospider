@@ -7,7 +7,7 @@
 
 #include "01-numeric/exact_predicate.hpp"
 #include "01-numeric/exact_sampling.hpp"
-#include "photospider/execution/resource_allocator.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Dynamic uniform-axis consumer. Knots are individually rounded weighted

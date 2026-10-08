@@ -123,7 +123,6 @@ inline void set_whole_tensor_output(OperationTraits& traits, ElementType type,
   output.output_schema.result_schema_version = 1;
   output.result_schema = numeric_tensor_schema(type, {1});
   output.region_rule = OperationRegionRule::Whole;
-  output.dependency_version = 2;
   output.continuation_bytes = continuation;
   output.maximum_dependency_stages = 2;
 }

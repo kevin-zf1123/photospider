@@ -1,6 +1,6 @@
 #pragma once
 
-#include "photospider/execution/cancellation.hpp"
+#include "photospider/core/cancellation.hpp"
 
 namespace ps::plugin_internal::inpaint_ns {
 struct Stopped {};

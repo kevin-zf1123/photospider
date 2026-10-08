@@ -11,7 +11,7 @@ struct GaussianCoefficients final {
   numeric_ops::DirectedFunctions functions;
   GaussianCoefficients() : functions(numeric_ops::SequenceProfile::Strict) {}
   explicit GaussianCoefficients(
-      const execution_internal::WorkConsumer& initialization)
+      const core_internal::WorkConsumer& initialization)
       : functions(numeric_ops::SequenceProfile::Strict, &initialization) {}
   using Wide = unsigned __int128;
   static unsigned bits(Wide value) {
@@ -35,7 +35,7 @@ struct GaussianCoefficients final {
   }
   Result<std::uint64_t> coefficient(
       std::uint64_t sigma_bits, std::uint64_t offset,
-      const execution_internal::WorkConsumer& consume) {
+      const core_internal::WorkConsumer& consume) {
     using Answer = Result<std::uint64_t>;
     using Math = numeric_ops::DirectedInterval;
     const auto sigma = numeric_ops::BinaryParts::decode(sigma_bits, false);

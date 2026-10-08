@@ -728,7 +728,6 @@ int main(int argc, char** argv) try {
   schema.tensors.push_back(tensor);
   output.result_schema = schema;
   output.region_rule = ps::OperationRegionRule::Whole;
-  output.dependency_version = 2;
   output.continuation_bytes = sizeof(StageProgram);
   output.maximum_dependency_stages = 1;
   operation.start_result = [expected_backend](
