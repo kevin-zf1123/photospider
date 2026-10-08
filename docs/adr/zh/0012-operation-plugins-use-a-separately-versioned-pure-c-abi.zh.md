@@ -29,9 +29,9 @@ ps_result_operation_plugin_get_api_v2(void);
 const ps_data_provider_api_v1 *ps_data_provider_get_api_v1(void);
 ```
 
-Operation-plugin C 契约使用 standalone Result ABI 2 table，声明 Result ports、tensor members、fields、staged callbacks、dependency relations 和 Result publication。Data-provider C table 仍单独使用 ABI 1。旧基础 operation ABI 11 和 planar operation C table 已移除；C++ `Value` 与 dependency API 仍是独立的进程内接口。当前 table 布局与 callback 契约见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。
+Operation-plugin C 契约使用 standalone Result ABI 2 table，声明 Result ports、tensor members、fields、staged callbacks、dependency relations 和 Result publication。Data-provider C table 仍单独使用 ABI 1。当前 table 布局与 callback 契约见 [Plugin ABI](../../kernel-architecture/Plugin-ABI.md)。
 
-Result callback 借用 query 与 phase-service records。Host 校验 Needs、typed relations、publication coverage、resource limits、cancellation 和 backend fallback 后才发布 Result。GPU allocation tokens 和 owning tensor windows 在 release 或 callback retirement 前保留 backing ownership；普通 service pointers 在 callback 返回后失效。Result ABI 2 不会回退到已移除的 Base C ABI。
+Result callback 借用 query 与 phase-service records。Host 校验 Needs、typed relations、publication coverage、resource limits、cancellation 和 backend fallback 后才发布 Result。GPU allocation tokens 和 owning tensor windows 在 release 或 callback retirement 前保留 backing ownership；普通 service pointers 在 callback 返回后失效。
 
 Loader 会核对准确的 Result ABI 版本和结构尺寸、自然对齐、指针与计数配对、记录数量和 key 长度上限、严格 UTF-8 key、算术溢出、封闭 enum/flag 组合、必需 callback、input/output schema 约束、parameter/facet 限额及恰好一次的 destroy 所有权。Runtime publication 会校验实际 tensor 和 field coverage。多记录更新采用 copy-then-swap，因此分配失败或后续记录无效时不会发布部分前缀。刚打开库时取得的 guard 会在可安全读取 destroy callback 后接管它，并在任何拒绝路径关闭库。Unload 前先销毁已发布的 plugin 表。
 

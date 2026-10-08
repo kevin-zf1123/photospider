@@ -2,16 +2,12 @@
 
 ## 模块边界与职责 (Scope & Ownership)
 
-只有配置 `ExecutionContextConfig::managed_resources` 后，`ExecutionContext` 才创建供受控 CPU/GPU 工作共享的资源根。`ExecutionContext::resource_budget()` 返回 `Result`；未启用托管资源时返回 `NotFound`。租约可在 context 销毁后继续存活。计量覆盖已申报的容量，不等于进程 RSS 上限；线程栈、驱动私有分配、操作系统页缓存和未使用托管分配器的内存不在范围内。
-
-预算跟踪 Host、Device、Shared、Metadata、Referenced、TemporaryDisk、Entries、Files、I/O slots、Queue 和 Payload。部分维度描述同一物理字节：Host 包含 Metadata 与 Shared，Device 包含 Shared，不能把重叠计数相加。context 的 Payload 另受 `maximum_live_bytes` 限制；调用方原有存储通过 Referenced 单独准入，不计入 Payload 子限额。
-
-## 核心数据结构与内存布局 (Data Layout & Memory)
+每个 `ExecutionContext` 都创建供受控 CPU/GPU 工作共享的资源根。若提供 `ExecutionContextConfig::managed_resources`，其中的 limits 用于该 root；否则使用默认 `ResourceLimits`。`ExecutionContext::resource_budget()` 以 `Result` 返回已初始化的 budget。租约可在 context 销毁后继续存活。计量覆盖已申报的容量，不等于进程 RSS 上限；线程栈、驱动私有分配、操作系统页缓存和未使用托管分配器的内存不在范围内。
 
 ```cpp
 #include <cstdint>
 
-#include "photospider/execution/resources.hpp"
+#include "photospider/core/resources.hpp"
 
 namespace ps {
 Result<ResourceLease> reserve_capacity(const ResourceBudget& budget,
@@ -20,6 +16,12 @@ Result<ResourceLease> reserve_capacity(const ResourceBudget& budget,
 }
 }
 ```
+
+`CancellationToken`、`ResourceBudget`、`ResourceLease`、`ResourceAllocationScope` 和 `ResourceAllocator` 是 `photospider/core/` 下声明的 public facilities。Cancellation 是协作且单调的；`ResourceBudget::consume` 原子准入累计 work。失败或取消不会退还已发出的 work 与 I/O。资源计量覆盖受 instrument 的 capacity 和 work，不限制进程 RSS。
+
+预算跟踪 Host、Device、Shared、Metadata、Referenced、Disk、Entries、Files、I/O slots、Queue 和 Payload。部分维度描述同一物理字节：Host 包含 Metadata 与 Shared，Device 包含 Shared，不能把重叠计数相加。context 的 Payload 另受 `maximum_live_bytes` 限制；调用方原有存储通过 Referenced 单独准入，不计入 Payload 子限额。
+
+## 核心数据结构与内存布局 (Data Layout & Memory)
 
 `ResourceLease` 的副本共享同一 reservation，容量直到最后一个 lease owner 销毁后才释放。`grow` 原子地准入增量；只有关联存储释放后调用方才可 `shrink`。容量不足立即返回带 capacity-limit 状态的 `ResourceExhausted`，不会等待其他 owner 释放。
 
@@ -50,11 +52,11 @@ void allocate_with_quotas(BufferAllocator allocator,
 
 `consume(ResourceWork)` 原子准入 work、byte、request 和 stage 计数。work 或 I/O 超限返回 `ResourceExhausted` 和 `WorkLimit`；stage 超限返回 `StageLimit`。失败不增加已发放计数，已发放工作不会因失败、回退或取消退款。回调提交还会消耗跨 Run 累计的 root stage。普通 callback 提交使用 Queue 计量等待 worker 开始的回调，worker 取走 callback 时释放 Queue slot；callback envelope metadata 保留到回调退出。CPU tile job 会保留等待准入和 managed Queue lease，直到所有已提交 tile 退出且 job 从队列摘除。
 
-Staged dependency 的 `NeedBatch` 和 certificate 副本各自取得 metadata owner；复制向量不会转移源 owner 的计费。宿主在接受最终可变 batch 前重新封装 metadata。dependency session 记录 session 开始时的 root；continuation 在没有活动 `ResourceAllocationScope` 时恢复此 root 进行 metadata 分配，活动 scope 始终优先。
+Coordinator 在提供 capability 前，会按 input schema 和已发布 coverage 校验每个 `ResultObjectNeed` 与 `ResultTensorNeed`。`ResultTensorInput` 只授权读取请求的 samples。Tensor window acquisition 保留获准的 backing owners 与 leases；只要 owning handle 仍存活，window 可在 callback 返回后继续使用。`TemporaryStorage` 接收单独传入的 `ResourceBudget`，用它计量有界私有临时文件容量和返回的 buffers。
 
-Structured Result execution 使用同一 root 管理图像页、不可变 sample coverage、relation witnesses、field storage 和 retained source owners。Result image slot 为每个 frame 和 layer 持有一个有界 planar backing。Metadata 与 coverage maps 计入 Metadata；planar pixel capacity 计入 Payload。Image read capability 保留 Result 和授权其 sample Region 的 captured descriptor。复制 capability 也会保留 backing 和 accounting lease。`ResultRef::capture()` 固定一份不可变的 descriptor revision、coverage、relations 和 dependency evidence；共享 waiter 消费该 publication snapshot，不观察生产者之后的 revision。
+Structured Result execution 使用同一 root 管理图像页、不可变 sample coverage、relation witnesses、field storage 和 retained source owners。图像 publication 选择 PlanarImage materialization 时，每个 frame 和 layer 使用有界 backing；metadata 与 coverage maps 计入 Metadata，planar pixel capacity 计入 Payload。其他 tensor publication 路径可保留 affine 或 `CpuStorage` backing 及 source Result owners，而不复制 payload；这些 owner 继续持有原有 accounting leases。Image read capability 保留 Result 和授权其 sample Region 的 captured descriptor。复制 capability 也会保留 backing 和 accounting lease。`ResultRef::capture()` 固定一份不可变的 descriptor revision、coverage、relations 和 dependency evidence；共享 waiter 消费该 publication snapshot，不观察生产者之后的 revision。
 
-Result relation rows 与已发布图像 payload 使用所选 resource root 计量。每次 publication 都必须符合配置的 payload、work、I/O 和 stage 限额。`Exact`、`Conservative` 与 `Unknown` 具有不同的 dirty-propagation 行为；未解析的 relation 不能证明输出为 clean。发布图像时，宿主先将字节复制到 Result 管理的 PlanarImage backing，并在公开 sample coverage 前计入该 payload。Schema selection 只保留声明过的 typed image 与 Result metadata resources，包括 ICC 和 OCIO bindings。Compiler 将嵌套 Result schemas 及其 resource identities 带入 plan；runtime Result bindings 会在 execution root 下重新准入所需 owners。
+Result relation rows 与已发布图像 payload 使用所选 resource root 计量。每次 publication 都必须符合配置的 payload、work、I/O 和 stage 限额。`Exact`、`Conservative` 与 `Unknown` 具有不同的 dirty-propagation 行为；未解析的 relation 不能证明输出为 clean。PlanarImage materialization 会将字节复制到 managed backing，并在公开 sample coverage 前计入 payload；affine 与 storage-view publication 则保留 source owners 及其 accounting，不复制 tensor bytes。Schema selection 只保留声明过的 typed image 与 Result metadata resources，包括 ICC 和 OCIO bindings。Compiler 将嵌套 Result schemas 及其 resource identities 带入 plan；runtime Result bindings 会在 execution root 下重新准入所需 owners。
 
 `ExecutionDependencies` 返回的 coverage 和 guarantee maps 使用同一 resource root 的 `ResourceMap` allocator。`source_support()` 与 `potential_dirty()` 返回 root-owned `ResourceMap<Footprint>`；`source_observations()` 返回 root-owned `ResourceVector<SourceObservation>`。每条 observation 自有其 `ResourceString` input name 和 `Footprint`，并记录 typed target、slot 与 roles。这些值可比 `ExecutionDependencies` 对象和 `ExecutionContext` 活得更久；其 allocator owners 会让 accounting root 保持存活，直到最后一个 map、vector、name 或 footprint 释放。
 
@@ -69,7 +71,7 @@ auto observations = dependencies.source_observations();
 
 Maps 和 observation sequence 是复制后的 snapshots。调用方可以保留或移动这些值而不借用 dependency object，其 root-owned storage 会继续计入预算。
 
-GPU context 在创建可选 device 前创建资源 root，并显式把同一 root 传入 native 分配。未配置托管资源时，device 使用普通分配。Invocation metadata 使用显式独立的计量域。native pipeline cache 最多保留 64 个 entry；单批最多保留 32 条命令，每条最多 31 个 storage binding；一次 invocation 最多 1024 个存活 view token。地址映射仅持有弱 `CpuStorage` 引用，不拥有 native buffer。
+GPU context 在创建 device 时使用 execution context 的资源 root 进行 native 分配；无论是否提供自定义 managed-resource limits，该 root 都存在。Invocation metadata 使用显式独立的计量域。native pipeline cache 最多保留 64 个 entry；单批最多保留 32 条命令，每条最多 31 个 storage binding；一次 invocation 最多 1024 个存活 view token。地址映射仅持有弱 `CpuStorage` 引用，不拥有 native buffer。
 
 托管 native metadata 准入失败后，device 清空 native pipeline cache 并重试一次。GPU payload 准入可先回收可丢弃的待写磁盘缓存和 result-cache owner，再原子预留实际 native capacity。这些恢复路径不会重试 operation callback。
 

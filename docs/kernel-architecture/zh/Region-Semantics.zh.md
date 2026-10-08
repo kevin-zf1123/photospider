@@ -57,6 +57,6 @@ $$
 
 越界 regions、无效 frame/layer 乘积、未授权读取、不完整发布和重叠 image writes 均会校验失败。Semantic image 和 ColorArray requests 会在访问前扩展到完整 channel tuples；无效 tuple description 或超出 slot domain 的 closure 会校验失败。Resource exhaustion、取消、stale binding replacement、sticky callback failure 和 protocol errors 保留各自状态，不会变成 Empty coverage。Coordinator 复用借用存储前，所有已准入 callbacks 都会退出。
 
-空 output demand 不执行 image sample 工作，但 descriptor 和 control obligations 仍需明确记录。成功的 image publication 必须覆盖 captured output demand，并提供 relation evidence。此前已发布的 Result prefixes 保持不可变；后续 producer failure 不会扩大旧 descriptor 的授权。
+空 output demand 不执行 image sample 工作，但 descriptor 和 control obligations 仍需明确记录。成功的 image publication 必须覆盖 captured output demand，并提供 relation evidence。
 
-Focused Result validation 已通过 N/L image samples、分阶段 Control 到 Data support、binding replacement、dirty transpose 和 semantic-alias diamond rebind。Installed Result contracts 与 public-workflow consumers 均通过。C11 fixture 验证了 runtime Field rows，包括零行与非零行之间的替换。`test_result_image_contracts` 覆盖跨 frame support 和各 slot 独立 dirty。
+Installed Result contracts 与 public-workflow consumers 均通过。C11 fixture 验证了 runtime Field rows，包括零行与非零行之间的替换。`test_result_image_contracts` 覆盖跨 frame support 和各 slot 独立 dirty。

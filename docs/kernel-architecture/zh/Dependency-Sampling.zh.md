@@ -45,21 +45,7 @@ Program 的状态、tensor windows、workspace、输出和 work 都计入 Root l
 
 `test_dependency_sampling` 覆盖五种 boundary、map frame/layer broadcast、三像素 identity map，以及从由 16 payload bytes 支持的 2^40 x 2^40 broadcast source 稀疏读取。它还检查零权重 tap 仍保留 dirty evidence、constant boundary tap 不请求 source payload、Empty 跳过非有限 map，以及 10x10 fixture 在执行前后测量到的 live payload 增量小于 1 MiB。该 fixture 增量不是 context payload 限额、峰值内存或 RSS 声明。Source 设置 `atomic_trailing_axes=2` 时，Validation 会闭包到完整 source row（fixture 中 `H=1,W=3`），Data 仍只覆盖选中 taps。零权重 typed tap 的 RGB 非有限分量会由 source validation 返回 `InvalidArgument`；非有限 map 坐标则先由算子返回 `OperationFailed`。四种 caller rounding mode 得到相同 tie 结果，并恢复调用方模式。测试还检查 work 准入后的 active cancellation 将 payload 释放回 baseline；context 退休后仍可从保留 Result 读取值 7，并确认 association 含两个 source。
 
-运行仓库内 focused test：
-
-```sh
-cmake --build build/kernel-dev --target test_dependency_sampling -j8
-ctest --test-dir build/kernel-dev -R '^test_dependency_sampling$' --output-on-failure
-```
-
-Installed consumers 使用公开 Result workflow 检查 STMap 和 radius，包括 demand 替换与 generation 行为。复现安装包检查：
-
-```sh
-cmake --install build/kernel-dev --prefix build/kernel-dev/consumer-install
-cmake -S tests/consumer -B build/kernel-dev/consumer-build -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/consumer-install"
-cmake --build build/kernel-dev/consumer-build --target photospider_dependency_workflow photospider_sampling_consumer -j8
-ctest --test-dir build/kernel-dev/consumer-build -R '^(installed_dependency_sampling|installed_dependency_radius_workflow)$' --output-on-failure
-```
+端到端动态 demand 与 radius 测试位于 [`dependency_workflows/demand.cpp`](../../../tests/integration/dependency_workflows/demand.cpp)、[`dynamic.cpp`](../../../tests/integration/dependency_workflows/dynamic.cpp) 和 [`dependency_workflow_fixture.hpp`](../../../tests/support/dependency_workflow_fixture.hpp)。这些源码是当前行为覆盖入口。
 
 ## Result radius gather 与 scatter
 
@@ -103,7 +89,7 @@ Coordinator 在每轮 poll 提供由当前 Result Needs 授权的 object/tensor 
 
 STMap 与 radius definitions 使用 `OperationDefinition::specialize_metadata` 执行静态 Result 校验。Registry 提供完整的 input Result metadata 和 parameters；specializer 校验声明的约束，并在执行前返回推导的 output schema。它不读取 tensor payload。`OperationRegistry::start_result` 随后校验已解析的 `ResultProgramQuery`，并调用 definition factory 创建 continuation。执行期间，`ResultContinuation::poll` 接收当前的 `ResultProgramPhase`，其中包含 callback 当前获准的 Result inputs 和 services；Coordinator 在各次 poll 之间履行 Needs。
 
-`test_dependency_sampling` 检查有 seed 的 gather/scatter 结果、精确 Data/Control/Validation support、输出位不变但依赖关系变化的 radius edit、typed 与 opaque facets、命中非有限值、有序求和、Empty demand、取消和 Root 回滚。`N=2^40` 的 broadcast view 可用每个输入 8 字节的 backing gather 最后一个样本，无需扫描远端 Control 值。[G4 `--radius-only` workflow](../../../examples/g4_workflow/README.md) 检查 Result-based 动态编辑、demand 替换和保留输出行为。STMap 覆盖见上文。
+`tests/integration/test_dependency_sampling.cpp` 检查有 seed 的 gather/scatter 结果、精确 Data/Control/Validation support、输出位不变但依赖关系变化的 radius edit、typed 与 opaque facets、命中非有限值、有序求和、Empty demand、取消和 Root 回滚。`N=2^40` 的 broadcast view 可用每个输入 8 字节的 backing gather 最后一个样本，无需扫描远端 Control 值。[dependency workflow demand scenario](../../../tests/integration/dependency_workflows/demand.cpp) 检查 Result-based 动态编辑、demand 替换和保留输出行为。STMap 覆盖见上文。
 
 ## 算法观察组与数值诊断
 

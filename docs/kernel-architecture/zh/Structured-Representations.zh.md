@@ -100,7 +100,7 @@ Component ID 可以是 `1+min_position`，也可以按最小位置顺序紧凑�
 
 Brush identity 记录 stroke、next event、已定稿 event 前缀和 dab 数、初始/当前 canvas 版本、generation、seed/counter 及 end 状态。Carry 保存 last position、到下个 dab 的剩余距离、预乘 `P[3]`、coverage `A` 和独立 emission `E[3]`。Position 必须有限且非递减；emission 有限且允许带符号；`A` 在 `[0,1]`，且 `A=0` 时 `P=0`。Pending event IDs 与 positions 数量匹配且有界；ended state 不含 pending 项。State consistency 对已定稿 dab 与携带 spacing 的允许差值为 `32*epsilon*max(|a|,|b|,spacing)+32*denorm_min`，其中 `a,b` 是比较的位置。该容差用于状态校验，不是渲染误差界。Helper 执行一维恒定 spacing fold，并跨 batch 携带 phase；不执行 smoothing 或 smudge。Dab vector 使用 Payload allocator role；复制仍受 Payload 子限额约束，增长时旧、新内存块同时计入准入。Spacing 在 binary64 中无法前进时失败，之前状态保持不变。
 
-Iterative identity 包含 system snapshot、初始化、规模、迭代上限和收敛策略。Stop reason 为 `Converged=0` 和 `IterationLimit=1`。零初始化要求 `x0=0`。Validator 检查停止策略，并用分别舍入的乘积重算测得的 infinity residual：
+Iterative identity 包含 system snapshot、初始化、规模、迭代上限和收敛策略。Stop reason 为 `Converged=0` 和 `IterationLimit=1`。零初始化要求 `x0=0`。
 
 $$
 r_\infty = \max_i |b_i - \operatorname{round}_{64}(a_i x_i)|.

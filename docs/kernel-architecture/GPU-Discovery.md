@@ -81,29 +81,15 @@ A C receipt contains normalized `ps_result_discovery_request_v2` records with in
 
 Table bytes, rounded native capacity, candidate work, decoding work, and request metadata are charged independently to their Root and dependency bounds. Read and atlas access remain limited to current Needs. Discovery cannot issue another Need, publish output, enter a block callback, or recursively invoke discovery. A native callback that submits no work fails with `OperationFailed`. Submitted dispatches drain before table owners retire.
 
-### G4 Result discovery workflow
+## Registered workflow and decoder coverage
 
-`examples/g4_gpu_workflow/discovery_plugin.c` registers a Result ABI 2 C operation. Its inputs are rank-one Float32 data and Int64 control Results with 8,192 samples. The GPU callback reads an already supplied Control sample through its atlas, emits the selected data rectangles, and dispatches the Result discovery shader. The host attaches those rectangles as tensor Needs; the next poll reads the newly supplied data and publishes the output tensor.
+The current C discovery fixture is [`tests/fixtures/gpu_result_discovery_plugin.c`](../../tests/fixtures/gpu_result_discovery_plugin.c), loaded by [`tests/integration/gpu/test_gpu_discovery_workflow.cpp`](../../tests/integration/gpu/test_gpu_discovery_workflow.cpp). The fixture binds rank-one Float32 data and Int64 control Results, acquires the current Control Need through an atlas, emits selected data intervals, and publishes only after the next poll supplies those intervals. Its independent expected outputs are `8` and `24`; the Metal path asserts four native dispatches. A Control edit changes the selected Data support, while a frozen execution retains its captured Result. The same integration source exercises malformed records, overflow, missing device, failed publication, cancellation, Root cleanup and retry.
 
-The current workflow returns `8,24` on CPU and Metal; the Metal path submits four dispatches. Its real GPU query uses rank-one tensors at slot 0. Editing Control changes the first result to 24 and replaces its Data support with `{1,4097}`. A frozen execution still returns 8. The workflow checks invalid Control values, table overflow, premature publication, and discovery disabled with `maximum_gpu_requests=0`.
+The decoder and normalization source tests are [`tests/unit/test_gpu_discovery.cpp`](../../tests/unit/test_gpu_discovery.cpp) and [`tests/unit/test_result_gpu_discovery.cpp`](../../tests/unit/test_result_gpu_discovery.cpp). They cover rank-8 coordinates, nonzero tensor slots, batch/channel closure, role grouping, malformed ranges and resource limits. CMake registers `installed_gpu_discovery_workflow` in `tests/consumer/CMakeLists.txt`; it uses the installed package and returns the configured skip code when native Metal is unavailable. These registrations identify executable coverage and do not report a previous run result.
 
-`test_result_gpu_discovery` separately checks the decoder with rank-8 coordinates, tensor slot 1, batch/channel closure, and distinct role groups. Those are decoder cases; they are not the shape or slot used by the native workflow.
+Discovery must run on the active callback entry thread. In C++, `ResultProgramPhase::consume_work` may charge from worker threads; C discovery services remain entry-thread-only. Work and metadata bounds persist across calls in an active poll, and each call also consumes Run and Root work. Duplicate records still consume emission and normalization work.
 
-Discovery must be invoked on the active callback entry thread. In the C++ API, `ResultProgramPhase::consume_work` may charge from worker threads; C discovery services remain entry-thread-only. A worker-thread call to `discover` fails before running its compute callback. The thread fixture charges 4,096 units through `consume_work` from each of two workers: the 8,512 limit rejects the request and 8,513 admits it with one native dispatch. The workflow also tests both discovery-work and Run-work limits across poll boundaries: a one-sample request fits an 8,192-unit limit, while a two-sample request exhausts it on later polling rather than receiving a fresh budget.
-
-The C workflow holds its receipt handle in operation state until the resumed poll copies the normalized request records and releases the handle. The request-table pointer is borrowed only during the synchronous discovery callback. The GPU token follows the enclosing poll lifetime, but the host freezes the table when discovery returns; a later write through that token fails. Failure fixtures confirm that discovery table/atlas owners return to the original source-only Root Payload level, do not seed the result cache, and allow a fresh native retry.
-
-Run the native workflow and standalone decoder test with:
-
-```sh
-cmake --build build --target test_gpu_discovery_workflow test_result_gpu_discovery -j 8
-ctest --test-dir build -R '^(test_gpu_discovery_workflow|test_result_gpu_discovery)$' --output-on-failure
-```
-
-The installed workflow consumer is `installed_gpu_discovery_workflow` in the configured `build/consumer-build` tree. Its test uses the installed kernel package; it exercises the same rank-one, slot-zero native workflow.
-
-The capacity-128 admission case uses a Root live-payload boundary of 132,400 bytes: 98,304 bytes of bound inputs, 1,160 bytes of continuation state, 32,768 bytes of rounded table storage, and 168 bytes for the Control atlas. It rejects 132,399 and admits 132,400 for this fixture. After the failed admission, the table owners retire and a new native query succeeds at the admitted capacity.
-
+The capacity, candidate, Root and dependency bounds are independent. Reads and atlas access remain limited to current Needs. Discovery cannot issue another Need, publish output, enter a block callback or recursively invoke discovery. A native callback that submits no work fails with `OperationFailed`. Submitted dispatches drain before the table owners retire.
 ## MSL discovery emitters and wire compatibility
 
 `PS_RESULT_GPU_DISCOVERY_MSL_V2` is the Result emitter and writes input, tensor slot, roles, and rank into the first four words of each record. `PS_GPU_DISCOVERY_MSL_V11` remains as a wire-compatible emitter for slot-zero records: its fourth word is always zero. The v11 macro defines the record layout; execution and Need attachment use the Result APIs above.

@@ -81,7 +81,7 @@ class ExecutionContext {
 
 The class excerpts omit unrelated members.
 
-These C++ declarations show the routing fields; surrounding types and validation are omitted. `OperationTraits` contains a declaration-ordered output vector. The current record is version 20; this package is 0.28.0 and the C operation ABI is 11. Every output has a unique key and a separately inferred descriptor and facet set. The C operation descriptor has the same ordered model, with at most 64 output records. Multiple outputs require deterministic, side-effect-free behavior. Singleton operations explicitly declare `value`.
+These C++ declarations show the routing fields; surrounding types and validation are omitted. `OperationTraits` contains a declaration-ordered output vector.  Every output has a unique key and a separately inferred descriptor and facet set. The C operation descriptor has the same ordered model, with at most 64 output records. Multiple outputs require deterministic, side-effect-free behavior. Singleton operations explicitly declare `value`.
 
 Workflow edges select an exact producer port by name. A caller-visible `WorkflowOutput` names a selected node and port, then assigns a unique result label. The compiler resolves output names to declaration-order indices and records each result as `ValueRef`. Static inference receives complete input metadata; an output's `input_indices` projection controls its executable input ancestry and callback view. Projected C callback inputs retain their original schema indices.
 

@@ -46,14 +46,14 @@ These Result programs read authorized tensor windows and publish through the Res
 
 Invalid static parameters return `InvalidArgument`. Incompatible dtype, shape, facets, or image metadata return `TypeMismatch`. Nonfinite arithmetic samples, collapsed numerical coordinates, counter overflow, or unrepresentable results return `OperationFailed`. Typed Result source validation follows its input error contract and can return `ErrorCode::InvalidArgument` with `FailureReason::InvalidDomain`, preserving the source `input_id`. Cancellation and resource exhaustion retain their own status codes. These Result operations publish only after their Result transaction succeeds.
 
-The image Result contract is carried by `photospider.image` v1, one `pixels` tensor, canonical RGBA or coverage semantics, and the layout declared by its tensor spec. It does not use the legacy `Value` planar capability flag.
+The image Result contract is carried by `photospider.image` v1, one `pixels` tensor, canonical RGBA or coverage semantics, and the layout declared by its tensor spec.
 
 ## Public workflows and checks
 
-[`examples/numeric_workflow/README.md#basic-curves-fields-and-analysis-results`](../../examples/numeric_workflow/README.md#basic-curves-fields-and-analysis-results) shows the Result curve, field, level, histogram, and smoothstep-to-mask workflow. [`examples/foundations_workflow`](../../examples/foundations_workflow/README.md) demonstrates Result-based numeric, expression/LUT, and generator-gain scenarios. [`test_basic_operations.cpp`](../../tests/integration/test_basic_operations.cpp) covers the basic Result contracts alongside remaining field and image behaviors; [`test_numeric_result_math.cpp`](../../tests/integration/test_numeric_result_math.cpp) exercises finite elementwise Result keys; [`test_builtin_result_images.cpp`](../../tests/integration/test_builtin_result_images.cpp) exercises Result image programs including `image.mix`.
+[`examples/numeric_workflow/README.md#basic-curves-fields-and-analysis-results`](../../examples/numeric_workflow/README.md#basic-curves-fields-and-analysis-results) shows the Result curve, field, level, histogram, and smoothstep-to-mask workflow. [`examples/foundations_workflow`](../../examples/foundations_workflow/README.md) demonstrates Result-based numeric, expression/LUT, and generator-gain scenarios. [`test_basic_operations.cpp`](../../tests/integration/test_basic_operations.cpp) covers the basic Result contracts alongside remaining field and image behaviors; [`test_numeric_result_math_arithmetic.cpp`](../../tests/integration/numeric/test_numeric_result_math_arithmetic.cpp) exercises arithmetic Result keys; [`test_result_image_composite.cpp`](../../tests/integration/image/test_result_image_composite.cpp) exercises Result image composition including `image.mix`.
 
 ```sh
-cmake --build build/kernel-dev --target test_basic_operations photospider_numeric_basic -j8
-ctest --test-dir build/kernel-dev -R '^test_basic_operations$' --output-on-failure
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_basic
+cmake --build <build-dir> --target test_basic_operations test_numeric_result_math_arithmetic test_result_image_composite photospider_numeric_basic -j8
+ctest --test-dir <build-dir> -R '^(test_basic_operations|test_numeric_result_math_arithmetic|test_result_image_composite)$' --output-on-failure
+<build-dir>/examples/numeric_workflow/photospider_numeric_basic
 ```

@@ -57,4 +57,4 @@ Out-of-domain regions, invalid frame/layer products, unauthorized reads, incompl
 
 An empty output demand performs no image sample work, while descriptor and control obligations remain explicit. A successful image publication must cover the captured output demand and provide relation evidence. Previously published Result prefixes remain immutable; a later producer failure does not expand an older descriptor's authorization.
 
-Focused Result validation passed for N/L image samples, staged Control-to-Data support, binding replacement, dirty transpose and semantic-alias diamond rebind. The installed Result contracts and public-workflow consumers passed. The C11 fixture verified runtime Field rows, including replacement between zero and nonzero rows. Cross-frame support and independent slot dirtiness are covered by `test_result_image_contracts`.
+The C11 fixture verified runtime Field rows, including replacement between zero and nonzero rows. Cross-frame support and independent slot dirtiness are covered by `test_result_image_contracts`.

@@ -56,7 +56,7 @@ struct ExecutionResult final {
 
 `ExecutionBinding` 按名称匹配一个 declaration，并持有 Result reference。Executor 按多重集合验证名称，因此重复 binding 会被保留并在校验时失败，不会被静默覆盖。Executor 在调度 operation work 前验证 Result schema 兼容性。Run 会将 binding snapshot 和已准入 input owners 保留到 callbacks 退出。`ExecutionContext::execute` 在 callbacks 退出，且 cancellation 与 graph-currentness checks 允许完成后，将具名 Results 放在 `ExecutionResult::results` 中返回。
 
-`ExecutionOptions::result_publication` 是每次调用独立的 certified Result prefix observer。每个 caller 有独立的串行通知流。Caller 可在 callback 返回后继续保留 owning `ResultRef`。Prefix 不代表整次 execution 成功：observer failure 会停止 Run，而此前已认证的 prefixes 仍有效。Callback exceptions 转换为 typed execution failures；cancellation 和 callback retirement 遵循 Run 现有顺序。
+`ExecutionOptions::result_publication` 是每次调用独立的 certified Result prefix observer。每个 caller 有独立的串行通知流。Caller 可在 callback 返回后继续保留 owning `ResultRef`。Callback exceptions 转换为 typed execution failures；cancellation 和 callback retirement 遵循 Run 现有顺序。
 
 ## 4. 负面清单与边界 (Non-Goals & Explicit Boundaries)
 

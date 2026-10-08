@@ -1,6 +1,6 @@
 # 数值算子
 
-默认 registry 提供未带后缀的有限域算术与 clamp、分阶段标量归约、有序扫描，以及带 profile 的数值算子族。各 key 的参数、执行和输出契约不同，调用方应按完整 key 选择。旧 C operation ABI 为版本 11；独立的 Result operation plugin 接口为版本 2。
+默认 registry 提供未带后缀的有限域算术与 clamp、分阶段标量归约、有序扫描，以及带 profile 的数值算子族。各 key 的参数、执行和输出契约不同，调用方应按完整 key 选择。Operation plugin 使用 Result operation C ABI 2。
 
 ## 未带后缀的 Result 数值算子
 
@@ -39,9 +39,7 @@
 
 这三个操作遇到 Empty 输出 demand 时执行静态 preflight，并返回没有 tensor coverage 的 sealed Result，不发出 input Need。
 
-`ResultProgramPhase::block` 计算一个 block-state Result 的范围。输入状态和计算结果必须是相同 schema、相同 Root 下 sealed 的 `CompleteBundle` Result，且只能包含一个完整覆盖的 tensor、不能有 fields。算子将继续所需的所有值，包括 carry controls，放入该 tensor。调用参数标识 phase（`kind`）、半开逻辑范围 `[begin,end)`、mode、输入状态和受信任的 compute callback。
-
-启用 block cache 时，只有当前算子声明 cacheable 且 selected-input producer closure 纯且确定，host 才共享 block。内容 key 包含 selected operation contract、phase、range、mode、输入状态的 schema/coverage/raw bits，以及当前已供给 Tensor Need 的 coverage、metadata 和 raw bits；不包含输出 demand、execution snapshot、source ObjectIds、Object-Need 内容或 I/O。因此 compute callback 只能依赖 key 覆盖的逻辑 schema、coverage、raw bits，以及静态 operation metadata/parameters 与指定 phase/range/mode。它不能依赖 Result ObjectIds、`semantic_key`、source association、原始输出 demand，或本次调用未供应的早期 windows；这些 provenance 刻意不在内容 key 中。命中时，host 会用当前 schema 将缓存内容复制到新的 state Result。新状态不携带旧 source association 或 dependency proof；当前 actor 的成功 Need evidence 仍然保留。可选内容缓存要求输入状态和已供给 Tensor inputs 不带 resources。带 resources 的 Tensor inputs 仍可正常计算，但会跳过内容缓存；带 resources 的计算状态正常返回，不会打包到底层内部 Value-backed block-state LRU。可选 cache-work 耗尽时会跳过 hashing 或保留，并正常计算。Object Needs 和 I/O 始终属于 coordinator 的必需工作，不纳入可选 block 内容缓存。
+`ResultProgramPhase::block` callback 执行一个显式状态转换。输入和返回状态必须是相同 schema、相同 Root 的 sealed `CompleteBundle` Result，各含一个完整覆盖的 tensor 且不含 fields。Tensor 必须保存后续转换所需的所有值，包括 carry controls。Callback 收到转换 kind、半开范围 `[begin,end)`、mode、输入状态和 compute callback。可选内部 retention 在 proof 或资源限制不允许时可以跳过；算子仍会正常计算。Block cache 命中数与转换复用属于实现细节，不构成性能保证。
 
 ## 带 profile 后缀的逐元素算子
 
@@ -59,32 +57,18 @@
 
 `numeric.clamp_<profile>` 和 `numeric.remap_range_<profile>` 使用相同后缀。Clamp 按值、下界、上界顺序接收三个 shape/dtype 相同的输入；remap 按值、来源下界、来源上界、目标下界、目标上界顺序接收五个输入。两者保留输入 shape 和 dtype，要求 rank 1..8，使用 Whole Region，并在执行时拒绝无效边界。该 clamp 算子族与未带后缀、使用两个静态参数的 `numeric.clamp` 不同。
 
-Continuation 在完整 tensor Result 中携带归约状态。Variance 第二遍的 state 包含第一遍 mean。符合条件的成功 block 可在 state 和当前已供给输入匹配内容 key 时复用；失败 block 不缓存。Cache-work 耗尽会跳过可选查询或保留并继续计算；被逐出的 block 可以重算。
+Continuation 在完整 tensor Result 中携带归约状态。Variance 第二遍的 state 包含第一遍 mean。Block-state retention 是可选实现细节；逐个重算转换时算子结果保持不变。
 
 Profile-specific 逐元素和归约实现通过执行资源预算计量 work 和取消。主机无法选用指定 profile 时，准备阶段会失败；需要可移植路径时应选择 strict 后缀。Profile 名称不代表 GPU 执行。
 
 ## 输入、所有权与错误
 
-本页所述 numeric programs 使用 Result inputs 和 outputs。Tensor program 保留其 Result schema，并仅读取 Need 授权的 windows；具体 preparation、shape、batch 映射和发布要求按算子族规定。独立的 legacy Value/dependency APIs 仍供其他注册算子使用；它们不是 structured Result program 的输入或 publication 分支。
+本页所述 numeric programs 使用 Result inputs 和 outputs。Tensor program 保留其 Result schema，并仅读取 Need 授权的 windows；具体 preparation、shape、batch 映射和发布要求按算子族规定。`Value` 仍可作为私有 typed backing。
 
 静态参数非法返回 `InvalidArgument`。dtype、shape 或 schema metadata 不支持或不兼容返回 `TypeMismatch`。未带后缀有限域算术、分阶段归约和 scan 会按契约将非有限或不可表示情况报告为 operation failure。带后缀精确 kernel 按操作保留或分类 IEEE 值；类型化定义域错误可返回 `InvalidArgument/InvalidDomain`。资源耗尽和取消保留各自状态码。Whole Result 操作仅在完整输出成功后发布；staged Result operation 按已声明的 prefix 或 dependency contract 发布。
 
 ## 公开 workflow 与检查
 
-[`test_numeric_operations.cpp`](../../../tests/integration/test_numeric_operations.cpp) 与 [`test_numeric_result_math.cpp`](../../../tests/integration/test_numeric_result_math.cpp) 覆盖数值行为。`test_ordered_reduction.cpp` 覆盖当前 Result producers，通过 volatile 左折 oracle 检查 rank 1、4、8、Float32/64 和多种 block size。它还检查输入修改后的 block-cache 复用、rank-8 精确读取、算术前的 typed tuple validation、1024-byte Payload 限额、取消恢复、调用方浮点模式和全局失败下标。该 Payload 限额不包括 metadata、host allocations 或 RSS。
-
-[`test_ordered_scan.cpp`](../../../tests/integration/test_ordered_scan.cpp)、[`test_scan_waiters.cpp`](../../../tests/integration/test_scan_waiters.cpp) 和 [`test_result_image_contracts.cpp`](../../../tests/integration/test_result_image_contracts.cpp) 覆盖 Result scan workflow 及其执行边界。它们检查严格左折 prefix、非有限值失败下标、有序 prefix Tensor Need 和 typed support、binding 编辑与 frozen plan、dirty 传播、block reconvergence，以及 checkpoint 的 phase/sequence/Root/static `block_size` 隔离。可选 cache-work 耗尽时会跳过 cache 查询或保留并正常重算；调用方仍持有的 Result 也可能通过 weak completed-result sharing 复用。最后一个 Result 释放并清除 cache 后，cold request 会重新计算 blocks。包含 `core.identity` ancestor 的 256-sample case 将 Run work 设为 32 Mi units；这是功能预算 fixture，不代表 Payload、RSS、GPU 或性能结论。
-
-```sh
-cmake --build build/kernel-dev --target test_numeric_operations test_ordered_reduction test_ordered_scan test_scan_waiters test_result_image_contracts test_numeric_result_math photospider_numeric_ordered -j8
-ctest --test-dir build/kernel-dev -R '^(test_numeric_operations|test_ordered_reduction|test_ordered_scan|test_scan_waiters|test_result_image_contracts|test_numeric_result_math)$' --output-on-failure
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_ordered
-cmake --install build/kernel-dev --prefix build/kernel-dev/consumer-install
-cmake -S tests/consumer -B build/kernel-dev/consumer-build -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/consumer-install"
-cmake --build build/kernel-dev/consumer-build --target photospider_result_numeric_consumer -j8
-ctest --test-dir build/kernel-dev/consumer-build -R '^installed_result_numeric$' --output-on-failure
-```
-
-手动目标 `photospider_numeric_ordered` 在同一次执行中运行 mean、population variance 和 ordered scan，输入 `[1,2,3,4,5,6]`，检查结果 `3.5`、`35/12` 和前缀 `[1,3,6,10,15,21]`。该目标独立于 CTest。[G4 workflow](../../../examples/g4_workflow/README.md) 展示当前 Result dependency 路径，包括 sparse demand、staged source、reduction、scan 和 block-state reuse。其中 `InputSnapshotStore` 检查所用的局部 `Value` 只是独立 typed-backing 示例，不是 workflow binding。
+[`tests/integration/test_numeric_operations.cpp`](../../../tests/integration/test_numeric_operations.cpp) 覆盖注册的 arithmetic 行为。分族 Result numeric oracle 位于 [`tests/integration/numeric`](../../../tests/integration/numeric)，分别覆盖 arithmetic、arrays、sequences、statistics、matrix、calculus、curves、Bezier、LUT、baking、expression、filters 和 color ramps。Ordered reduction 与 scan 行为由 [`test_ordered_reduction.cpp`](../../../tests/integration/test_ordered_reduction.cpp)、[`test_ordered_scan.cpp`](../../../tests/integration/test_ordered_scan.cpp) 和 [`test_scan_waiters.cpp`](../../../tests/integration/test_scan_waiters.cpp) 覆盖。这些测试使用独立数值期望；block-cache 观察不构成性能证据。`installed_result_numeric` 是 `tests/consumer/CMakeLists.txt` 中的已安装 package consumer 入口。
 
 Generic 算术 key 未声明 planar image capability。注册这些 key 不代表 structural planar image 可以作为 generic numeric array 输入。

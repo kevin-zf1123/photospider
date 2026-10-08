@@ -17,8 +17,9 @@
 
 ## 工作流与专题
 
+- [Result quickstart](../../../examples/result_quickstart/README.md)：使用安装包 operation 与 workflow 的最小示例。
 - [Foundations 工作流](../../../examples/foundations_workflow/README.zh.md)：可运行的安装包示例及当前场景。
-- [G4 GPU 工作流](../../../examples/g4_gpu_workflow/README.md)：原生 GPU 执行示例。
+- [GPU 集成测试](../../../tests/integration/gpu/)：已注册的 GPU 行为覆盖；硬件相关用例在设备不可用时明确 skip。
 - [整数统计](Integer-Statistics.zh.md)：分页直方图与流式调色算子。
 - [外轴 FFT](External-FFT.zh.md)：分页 FFT 与资源边界。
 - [分页连通域](Paged-Components.zh.md)：连通域标签与分页筛选。

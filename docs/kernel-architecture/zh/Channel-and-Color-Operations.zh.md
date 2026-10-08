@@ -41,9 +41,6 @@ cmake --build build --target photospider_channel_extraction_workflow test_channe
 ctest --test-dir build -R '^test_channel_extraction$' --output-on-failure
 ```
 
-当前 Result integration test 和公开 workflow 已在 native CPU 上通过，不代表其他 ISA 或 GPU。旧 [性能 workflow](../../../examples/channel_extraction_performance/README.md) 的 Value/planar 测量不代表当前 Result 执行性能。
-
-
 ## Scalar literal primitive
 
 Default registry 注册三个 `channel.scalar_literal_<profile>` CPU keys。这个无输入
@@ -101,8 +98,7 @@ cell axes 的位置。包含 batch 与 cell axes 的完整 sample rank 不超过
 仍请求 Data。helpers 在 compile time 检查来源 schema 与 physical layout。
 FMT-05A `set_alpha` 和 FMT-04 association helpers 使用已注册的
 `alpha.set_<profile>`、`alpha.associate_<profile>` 与
-`alpha.unassociate_<profile>` native keys。历史 Value/planar alpha 测量不构成
-Result 性能证据。
+`alpha.unassociate_<profile>` native keys。
 
 ## FMT-06 数值格式转换
 
@@ -118,7 +114,7 @@ Validation 或 Control，不扫描未请求 samples，错误保持在请求的 o
 Axis 参数索引 cell axes，不包含 batch axes。数值规则、typed endpoint 格式与 metadata
 传播见 [FMT-06 contract](../../built-in_ops/02-format-color/op_specs/FMT-06_numeric_conversion_contract.md)。对完整 sample coordinate `q`，channel-table 项由
 `q[batch_prefix_length + axis]` 定位；`axis` 本身是 cell-axis index，不含 Result
-batch prefix。迁移后的 `test_numeric_conversion` suite 已通过 49 个 dtype pairs、随机 numeric oracle、ROI、cold-lookup budget、failure-order、floating-environment 与 same-coordinate identity-view 检查。额外的 batch/view/Empty/bit-stride、ICC resource、并发 plan 复用和最终 payload 释放检查均通过；SME 测试也通过。`test_alpha_numeric_interop` 的四种 inherited/moved 组合通过；这不代表 model-conversion interop 已验证。六项 numeric/alpha/resource focused CTests 均通过。installed numeric-conversion 和 alpha-numeric-interoperability consumers 均通过；standalone performance consumer 已完成 configure/build。13 个串行 Result smoke case 均通过逐位 oracle，但不据此得出 Result 性能结论。
+batch prefix。额外的 batch/view/Empty/bit-stride、ICC resource、并发 plan 复用和最终 payload 释放检查均通过；SME 测试也通过。`test_alpha_numeric_interop` 的四种 inherited/moved 组合通过；这不代表 model-conversion interop 已验证。六项 numeric/alpha/resource focused CTests 均通过。installed numeric-conversion 和 alpha-numeric-interoperability consumers 均通过；standalone performance consumer 已完成 configure/build。13 个串行 Result smoke case 均通过逐位 oracle，但不据此得出 Result 性能结论。
 
 仅当完整 declared mapping 是静态 identity，且源 storage 可表示该映射时，same-dtype
 转换才可发布 generic 或 spatial view。只请求一个恒等通道不能使整个变换结果可 view。
@@ -127,8 +123,7 @@ budgets 与 cancellation 约束下事务发布请求 target-width samples。Empt
 
 单一 strict key 使用精确 scalar 转换，并在内部选择 AArch64 NEON、runtime-checked
 amd64 AVX2 和符合条件的 Apple SME Float32→UInt8 路径，均遵守相同数值契约。没有 GPU
-实现。性能指南保留旧 Value/planar 测量与实验，它们不代表当前 Result 性能；当前 Result
-性能尚无结论。
+实现。
 
 ## FMT-09 Transfer 编码与解码
 
@@ -153,16 +148,11 @@ physical mapping 无法证明时，在 observation evaluation 返回失败。Aut
 变换或物理 view 无法表示时 materialize。物化在 Root budgets 和 cancellation 限制下
 事务发布请求区域，并遵守 Result owner 与 resource 生命周期。数值 workspace 延迟分配；
 简单路径每批最多 1024 samples，通用曲线路径每批最多 64。Strict fallback 与
-floating-environment 行为遵循 NUM。Transfer operations 没有 GPU backend。
-`test_transfer_operations`、`test_transfer_runtime`、`test_transfer_math` 与
-`test_transfer_simd` 已通过；六项 shared FMT 回归测试、`test_result_execution`
-和 `test_shared_results` 也通过。installed-package consumers
-`installed_transfer_operations` 与 `installed_transfer_runtime` 通过 2/2；独立的
-installed-package performance consumer 已 configure/build 成功。集成测试在 strict
+floating-environment 行为遵循 NUM。Transfer operations 没有 GPU backend。集成测试在 strict
 和 Apple Silicon profiles 上完成 16,760 次 golden 尝试；本机不具备 x86-64
 backend，因此跳过该 profile。25 个指定的串行 Result performance smoke case 均通过
 golden gate，每项包含两次 warmup 和一次测量执行。这些结果不代表完整矩阵，也不足以
-得出性能结论。历史 Value/planar 测量与当前 Result 分开记录，见[性能指南](../../../examples/transfer_performance/README.md)。
+得出性能结论。
 
 ## FMT-10 RGB 基底与 XYZ
 
@@ -196,8 +186,7 @@ Validation。精确 identity matrix 只读取对应的已选 sample，但 semant
 `materialize` 强制复制。Forced view 对静态非恒等 mapping 在 compile/direct preflight
 拒绝；identity 的 physical representation 无法证明时，在 observation evaluation
 失败。输出在 Root budgets 和 cancellation 约束下事务发布。Result cache 被禁用，
-保留的 owner 遵守 Result 生命周期。没有 GPU 实现。历史 Value/planar 性能记录不代表
-Result 性能，见[性能指南](../../../examples/rgb_basis_performance/README.md)。
+保留的 owner 遵守 Result 生命周期。没有 GPU 实现。
 
 `format::convert_linear_rgb` 先完整构建 expansion，并在静态校验成功后才修改
 WorkflowDocument。调用方必须串行化同一个 document 的写入；编译完成的 plan 及其不可变
@@ -206,18 +195,15 @@ prepared state 可以并发执行。D policy 选择 A→B、使用 `preserve_xyz
 `test_rgb_basis_math` 与 `test_rgb_basis` 已通过；integration suite 保留 4,032 项
 independent oracle 检查，并覆盖 batched inputs、三种 Result storage layouts、identity
 views、并发 plan 复用和 owner 释放。65,536-channel identity view 在 512 KiB Metadata
-预算下也通过。`installed_rgb_basis` consumer 与独立 installed-package performance
-consumer build 均通过；size-3 Float32 D case 的 36 个请求元素也通过 strict-reference
-gate。25 个性能 smoke case 通过的是同一实现 strict reference gate，不是 independent
+预算下也通过。25 个性能 smoke case 通过的是同一实现 strict reference gate，不是 independent
 oracle；完整矩阵和性能结论尚不可得。
 
 ## FMT-08 元数据赋值与删除
 
-注册表提供三个 Result CPU key：`metadata.assign_strict`、`metadata.assign_accelerated_apple_silicon` 和 `metadata.assign_accelerated_x86_64`。`format::assign_metadata` 构造 A；`format::remove_metadata` 将 B 事务式降低为 A。输入和输出均是无 fields 的 single-tensor Result；保留 schema id、tensor key、batch axes、descriptor、layout、source publication policy 和样本位。执行以 role 1 和 8 请求同坐标 Data 与 Descriptor support，不请求 Validation 或 Control。操作不扫描样本，并禁用 Result cache。Public header `photospider/format/metadata.hpp` 单独安装。[公开示例](../../../examples/metadata_workflow/README.md) 检查特殊值位模式与源不可变性。五个 focused Result CTest、example 和两个 installed consumer 检查通过；metadata 到 extraction 的 configuration/resource chain 已覆盖；`channel.assemble` 组合尚未覆盖。旧[性能说明](../../../examples/metadata_performance/README.md)测量 Value/planar 执行，不是当前 Result 路径性能证据。
-
+注册表提供三个 Result CPU key：`metadata.assign_strict`、`metadata.assign_accelerated_apple_silicon` 和 `metadata.assign_accelerated_x86_64`。`format::assign_metadata` 构造 A；`format::remove_metadata` 将 B 事务式降低为 A。输入和输出均是无 fields 的 single-tensor Result；保留 schema id、tensor key、batch axes、descriptor、layout、source publication policy 和样本位。执行以 role 1 和 8 请求同坐标 Data 与 Descriptor support，不请求 Validation 或 Control。操作不扫描样本，并禁用 Result cache。Public header `photospider/format/metadata.hpp` 单独安装。[公开示例](../../../examples/metadata_workflow/README.md) 检查特殊值位模式与源不可变性。metadata 到 extraction 的 configuration/resource chain 已覆盖；`channel.assemble` 组合尚未覆盖。
 
 ## FMT-11 颜色模型转换
 
 FMT-11 的 19 个 native members 在三个 CPU profiles 下注册，共 57 个 model-conversion keys。已安装的 `photospider/format/model_conversion.hpp` helpers 追加一个 key 并返回 `values` port；FMT-11S 追加已注册的 `mask.threshold_channel_<profile>` operation，没有 native color key。所有输入和输出都是无 fields 的单 tensor Result，dtype 为 Float32 或 Float64。完整 sample rank（batch 与 cell axes 合计）最多为 8；sample count 受 Result schema 可表示范围和执行资源限制约束。
 
-`axis` 和 `output_axis` 索引 cell axes，不包含 batch prefix。Q 将选中的三分量缩为一个分量；R 将一个 Gray 分量扩展为三个分量，有现有轴时将该轴的 extent 增加 2；axis-free 输入则插入一个长度为 3 的 cell axis。输出保留 schema id、tensor key 和 batches，更新模型 metadata，并将 `atomic_trailing_axes` 设为零。语义模式下被选中的 samples 请求 Data 与 Validation；raw T 验证 binary selector，raw S 和 bypass samples 只请求 Data，R 的常量输出只需 Descriptor。Empty demand 不保留运行状态。Q 只有在完整映射通过 generic affine 或 canonical spatial Result view 证明时才返回 view；证明失败时 forced view 返回 `ViewUnavailable`，`auto` 则物化。其他转换物化输出，即使请求只包含 bypass 也拒绝 forced view。发布采用事务方式，且未注册 GPU profile。六项 focused checks 和 `installed_model_conversion`、`installed_model_result`、`installed_alpha_model_interop` 三项 installed consumer 检查均已通过。sparse Q view 的测试使用符合 canonical spatial view proof 的预期。
+`axis` 和 `output_axis` 索引 cell axes，不包含 batch prefix。Q 将选中的三分量缩为一个分量；R 将一个 Gray 分量扩展为三个分量，有现有轴时将该轴的 extent 增加 2；axis-free 输入则插入一个长度为 3 的 cell axis。输出保留 schema id、tensor key 和 batches，更新模型 metadata，并将 `atomic_trailing_axes` 设为零。语义模式下被选中的 samples 请求 Data 与 Validation；raw T 验证 binary selector，raw S 和 bypass samples 只请求 Data，R 的常量输出只需 Descriptor。Empty demand 不保留运行状态。Q 只有在完整映射通过 generic affine 或 canonical spatial Result view 证明时才返回 view；证明失败时 forced view 返回 `ViewUnavailable`，`auto` 则物化。其他转换物化输出，即使请求只包含 bypass 也拒绝 forced view。发布采用事务方式，且未注册 GPU profile。sparse Q view 的测试使用符合 canonical spatial view proof 的预期。

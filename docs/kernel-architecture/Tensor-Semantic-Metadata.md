@@ -49,7 +49,7 @@ The `photospider.tensor-description` facet is bounded to 4096 bytes. Text is str
 
 ## 3. Execution and state machine
 
-`ps::format::assign_metadata` appends one node after checking edit syntax, types, options, path overlap, and bounded transaction encoding. The compiler then resolves source-relative selectors and validates the complete candidate. Current registrations use Result operation ABI 2, WorkflowDocument 5, OperationTraits 24 and package 0.32.0. Each input Result contains one tensor member and no fields. An internal node may supply an optional canonical-schema assertion; the public helper does not set it.
+`ps::format::assign_metadata` appends one node after checking edit syntax, types, options, path overlap, and bounded transaction encoding. The compiler then resolves source-relative selectors and validates the complete candidate. The current package is 0.33.0, WorkflowDocument schema is 5, OperationTraits version is 25, and the Result C operation ABI is 2. Each input Result contains one tensor member and no fields. An internal node may supply an optional canonical-schema assertion; the public helper does not set it.
 
 ```text
 authoring: validate edit syntax -> encode bounded transaction -> append node
@@ -116,4 +116,4 @@ An OCIO snapshot includes explicit config bytes, the complete sorted logical fil
 - Static authoring is bounded by facet and transaction limits. Its preparation path has no runtime cancellation token; runtime resource admission uses the applicable root budget and cancellation checks.
 - Metadata edits disable sample-only cache reuse because output identity includes metadata.
 
-Resource admission, copy, or hash failure prevents publication and releases unpublished owners. A Result header can drop one resource reference while an older view still retains sample backing; removing a facet does not promise immediate release of every ancestor allocation. The focused Result CTest set passes 5/5, the public workflow passes, and the installed consumer passes 2/2 checks. These tests do not exercise a cross-family workflow through `channel.extract` or `channel.assemble`. The older [metadata_performance](../../examples/metadata_performance/README.md) workload measures Value/planar execution and is not performance evidence for these Result operations.
+Resource admission, copy, or hash failure prevents publication and releases unpublished owners. A Result header can drop one resource reference while an older view still retains sample backing; removing a facet does not promise immediate release of every ancestor allocation. Current behavior is exercised by the registered metadata assignment tests and installed consumer fixtures. Result allocation and work admission are not RSS bounds, and block-cache observations do not establish performance.

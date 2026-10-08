@@ -2,18 +2,18 @@
 
 ## 当前契约
 
-当前 package version 为 **0.32.0**。C++ consumers 必须针对该 package 的 headers 重建。Package 使用 `SameMinorVersion` 兼容规则，因此不同 minor version 的请求不兼容。C operation-plugin interface 保持 Result ABI 2；table 和 record 的精确大小必须与已安装 SDK 一致。
+当前 package version 为 **0.33.0**。C++ consumers 必须针对该 package 的 headers 重建。Package 使用 `SameMinorVersion` 兼容规则，因此不同 minor version 的请求不兼容。C operation-plugin interface 保持 Result ABI 2；table 和 record 的精确大小必须与已安装 SDK 一致。
 
 | 契约 | 当前版本 |
 | --- | --- |
-| Package | 0.32.0 |
+| Package | 0.33.0 |
 | WorkflowDocument schema | 5 |
-| OperationTraits | 24 |
+| OperationTraits | 25 |
 | Operation plugin C table | Result ABI 2 |
 | Data provider C table | ABI 1 |
-| Semantic graph identity | `semantic-graph-ir-v19` |
-| Physical plan identity | `physical-plan-v19` |
-| Outer plan cache key | `plan-cache-key-v15` |
+| Semantic graph identity | `semantic-graph-ir-v20` |
+| Physical plan identity | `physical-plan-v20` |
+| Outer plan cache key | `plan-cache-key-v16` |
 | Optimizer identity | `optimizer-v5-canonical-noop` |
 | Tensor-description codecs | 按当前 codec 规则选择 TDM4/TDM5 |
 | Result schema canonical encoding | Version 3 |
@@ -24,7 +24,7 @@
 
 `WorkflowInputDeclaration` 由 id、精确 binding name 和必需的 `result_schema` 组成。`ExecutionBinding` 由 name 和 owning `ResultRef` 组成。`ExecutionResult` 与 `DemandResult` 提供具名 Results；Value 是 Result storage 和 codecs 使用的内部 typed backing。输入 `OperationMetadata` 携带 Result schema，其 Value descriptor 和 facets 保持为空。Tensor shape、layout 和 semantic facets 属于各自的 `ResultTensorSpec`。
 
-`OperationTraits` version 24 与 `WorkflowDocument` schema 5 标识当前 C++ 契约。算子通过 `start_result` 和其 `ResultContinuation` 执行；joint Result callback 仍是可选的分组执行契约。`ExecutionContext::execute` 返回具名 Results。增量 publication 使用 `ExecutionOptions::result_publication`，在前缀获得认证后逐步通知调用方，调用方可以保留 owning Result reference。前缀不代表整次执行成功。Callback failure 会停止 Run，并遵循现有 failure、cancellation 和 callback retirement 规则。
+`OperationTraits` version 25 与 `WorkflowDocument` schema 5 标识当前 C++ 契约。算子通过 `start_result` 和其 `ResultContinuation` 执行；joint Result callback 仍是可选的分组执行契约。`ExecutionContext::execute` 返回具名 Results。增量 publication 使用 `ExecutionOptions::result_publication`，在前缀获得认证后逐步通知调用方，调用方可以保留 owning Result reference。前缀不代表整次执行成功。Callback failure 会停止 Run，并遵循现有 failure、cancellation 和 callback retirement 规则。
 
 ## Result 与图像接口
 
@@ -38,4 +38,4 @@ Resolver 通过同步 metadata sink 对每个 output 提供一次 schema；host 
 
 Semantic identity 包含 operation contracts、typed Result schema、semantic metadata、parameters、ordered inputs，以及适用时的 selected output 和 captured query。Physical plan identity 包含影响执行的物理选择。Page offsets 和临时 addresses 不属于 semantic identity。内部 IR 和 plans 不是 serialization formats。
 
-已安装的 C++ headers、链接的 kernel library 和所选 C table 必须描述相同的 package 与 ABI。Loader 在导入 module 前验证精确的 C table 版本和大小。Native GPU 行为还要求选定 backend 和可用 device。Package 0.32.0 定义当前的 C++ interface 契约；保留 operation、examples 与 integration consumers 的迁移尚未全部完成。版本声明本身不能证明本地安装或 external consumer validation 已完成。
+已安装的 C++ headers、链接的 kernel library 和所选 C table 必须描述相同的 package 与 ABI。Loader 在导入 module 前验证精确的 C table 版本和大小。Native GPU 行为还要求选定 backend 和可用 device。C++ layout 和字段删除属于 breaking change；所有 C++ consumers 都必须针对已安装的 0.33.0 package 重建。Package version file 接受 0.33 minor line 内的兼容版本。版本声明本身不能证明本地 consumer build 已通过。

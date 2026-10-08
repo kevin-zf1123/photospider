@@ -29,7 +29,7 @@ private header, copied IR, or daemon-to-kernel source-tree include is a failure.
 
 Daemon CI validates local IPC v3, Session/Job lifecycle, cancellation, restart
 loss, result release, shutdown, package consumer, public dependency inventory,
-and malformed frames. It contains no IPC v2 four-cell compatibility gate.
+and malformed frames.
 
 ## Test ownership
 

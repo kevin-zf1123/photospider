@@ -56,7 +56,7 @@ typedef struct ps_cpu_parallel_service_v1 {
 
 该 service 借给 CPU Whole callback。它把 `[0, count)` 划分为有限、不相交且不超过 `grain` 的区间。`workers == 0` 使用最大 grant；正数请求 1 到最大参与者，其中包含调用线程。实际并行 block 数可以少于 grant。每个活动 block 获得唯一存活的 scratch slot。输入和 callback user data 借用至同步 barrier 返回；scratch 不得逃逸该调用。
 
-非空 run 在启动任何 block callback 前，先按 Root Host 和 Metadata 容量预留 job record 与一个 Root Entry，再扣除 `work=count` 和 `stages=ceil(count/grain)`。这些费用与本次执行此前已经发行的 work 共用 Root 预算，因此先前工作会减少剩余额度。预留或扣费失败时，run 返回 sticky resource failure，block callback 调用数为零。`count=0` 不创建 job，也不扣 work 或 stages；常规参数检查和取消检查仍会执行。
+非空 run 在启动任何 block callback 前，先按 Root Host 和 Metadata 容量预留 job record 与一个 Root Entry，再扣除 `work=count` 和 `stages=ceil(count/grain)`。预留或扣费失败时，run 返回 sticky resource failure，block callback 调用数为零。`count=0` 不创建 job，也不扣 work 或 stages；常规参数检查和取消检查仍会执行。
 
 一个参与者的 grant 或可装入一个 block 的 range 会在调用线程内联执行。长 block 必须轮询给定取消 token。Service 停止新领取，并在返回前等待活动 block 退出。Block 使用不可变输入和预分配输出；行访问、分配、发布、准备和诊断 service 属于 callback 线程，range block 不可调用。嵌套 range 调用会拒绝，service 违规保持 sticky。
 
@@ -75,7 +75,7 @@ Structured coordinator 登记请求的 named Result roots，并推进其 depende
 
 Frontier 有 queued callback work 时，coordinator 从 Root-owned pending list 提交最多 `maximum_parallelism` 个 task。它等待已提交 callback 退出，再读取 phase result 并串行应用，然后推进下一个 dependency frontier。该上限作用于已提交的 callback task，不是另建 Result graph scheduler。CPU staged-tile controller 与 GPU callback 仍使用各自的 inline/controller 和 single-lane 路径。
 
-每个 submission 的 transfer、tile 和 native observations 保留至 task 退出，再由 coordinator 合并。Joint worker 标记 callback 已进入并运行共享 callback；coordinator 在退休时只计一次该 group。Result poll timing 从 phase 创建计至 coordinator 退休，包括 queue 与 wave 等待，因此不是纯计算时长。同步 Run 完成和 shutdown 会先排空已提交工作，再释放借给 callback 的状态。
+Run coordinator 拥有调度策略和发布顺序。独立组件分别拥有每 Run cache quota 与 checkpoint scopes、actor phase/continuation state、Need producer cursor、joint 推进状态和每次 submission 的 stage 数据。Need cursor 拥有 producer 和每个输入的请求状态；coordinator 校验并登记每个已提供 envelope 后才推进 cursor。每个 submission 的 transfer、tile 和 native observations 保留至 task 退出，再由 coordinator 合并。Joint worker 标记 callback 已进入并运行共享 callback；coordinator 在退休时只计一次该 group。Result poll timing 从 phase 创建计至 coordinator 退休，包括 queue 与 wave 等待，因此不是纯计算时长。同步 Run 完成和 shutdown 会先排空已提交工作，再释放借给 callback 的状态。
 
 ### Planar staged tile service
 

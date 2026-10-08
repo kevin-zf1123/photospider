@@ -6,7 +6,7 @@ Layer value types and their pure arithmetic helpers remain available in the C++ 
 
 ## 1. Scope and ownership
 
-`layer.hpp` owns in-memory value contracts and pure calculations. It does not expose a Layer operation factory or a runnable Layer Result workflow. A `LayerPixel` can be passed directly to the value helpers without creating a Result.
+`photospider/data/layer.hpp` owns in-memory value contracts and pure calculations. Cancellation, resource budgets, and allocators used by the public Result helpers live under `photospider/core/` (for example, `photospider/core/resources.hpp` and `photospider/core/cancellation.hpp`). `layer.hpp` does not expose a Layer operation factory or a runnable Layer Result workflow. A `LayerPixel` can be passed directly to the value helpers without creating a Result.
 
 The image pipeline stores samples in Result Tensors and retains field or tensor backing through Result owners and read windows. `PlanarImage` may provide typed backing inside that pipeline. Layer's coverage/emission pair remains an in-memory value and does not define image Tensor storage or Region access.
 

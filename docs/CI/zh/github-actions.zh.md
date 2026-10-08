@@ -41,7 +41,5 @@ runtime product object 或 release authority。
 
 ## 本地一致性
 
-Developer 运行 native focused check 与
-[Testing and Validation](../../development/zh/Testing-and-Validation.zh.md) 描述的一次
-final native clean pass。本地不需要 Docker 或 architecture emulation 来模拟 hosted
+本地不需要 Docker 或 architecture emulation 来模拟 hosted
 CI。

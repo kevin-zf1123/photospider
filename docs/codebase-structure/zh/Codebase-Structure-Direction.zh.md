@@ -10,7 +10,6 @@ compiler/executor 与可信 operation/provider extension；local daemon orchestr
 
 ```text
 include/photospider/
-  benchmark/     raw benchmark observation 与 correctness oracle
   compiler/      WorkflowDocument、typed IR、plan、typed identity、compiler
   execution/     context、cancellation、result、raw diagnostic
   data/          Value、Region、explicit layout 与 immutable bytes
@@ -27,7 +26,6 @@ evidence 或 durable-result header。
 
 ```text
 src/lib/
-  benchmark/
   compiler/
   data/
   graph/
@@ -78,6 +76,6 @@ Type 使用 `PascalCase`；file、function、field、directory 与 internal targ
 公开 document、mirror 与 tracked Issue，且不留 alias。私有 OpenSpec working note
 对 rename 没有 authority。
 
-每个新增或修改 class、struct、enum、function、important field 与 anonymous helper
-都有完整 Doxygen，覆盖行为、parameter、return、exception、threading、ownership、
-lifetime 与 cache/scheduling effect。
+公共 API 文档说明适用的参数约束、返回值与错误行为、所有权、生命周期、线程安全，
+以及影响契约的缓存或调度约束。内部注释解释不明显的状态转移、预算归属和回收顺序；
+普通 helper 无需逐一编写完整 Doxygen。

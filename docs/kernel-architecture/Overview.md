@@ -2,7 +2,7 @@
 
 ## 1. Core summary (TL;DR)
 
-Photospider is an embeddable C++17 kernel that validates local workflows, compiles immutable plans, and executes them against caller-supplied bindings. A `GraphContext` owns source revisions; an `ExecutionContext` owns bounded workers, operation definitions, caches, and resource accounting. The daemon consumes the installed kernel API and owns its own sessions and process lifecycle.
+Photospider is an embeddable C++17 kernel that validates local workflows, compiles immutable plans, and executes them against caller-supplied Result bindings. A `GraphContext` owns source revisions; an `ExecutionContext` owns bounded workers, operation definitions, optional cache retention, and resource accounting. The daemon consumes the installed kernel API and owns its own sessions and process lifecycle.
 
 ## 2. Mental model and intuition
 
@@ -27,11 +27,11 @@ ExecutionBindings ----------------> Run
                  bounded CPU pool          GPU lane
                         +----------+----------+
                                    |
-                    named Values / PlanarImages
+                       named Result outputs
                            + diagnostics
 ```
 
-The compiler owns validation and planning. Each `ExecutionRun` owns its ready work, intermediate Values, cancellation observations, and diagnostics. Runs share the context's worker pools and byte ledger, while returned Values keep their storage leases alive independently.
+The compiler owns static validation and planning. Each execution owns its ready work, Result producers, cancellation state, dependency recorder, and diagnostics. Runs share the context's worker pools and resource root, while returned Results keep their backing and leases alive independently.
 
 ## 3. Contracts and interfaces
 
@@ -54,7 +54,7 @@ class ExecutionContext {
 };
 ```
 
-These are abbreviated declarations of public methods; unrelated members are omitted. Each stage returns a complete immutable value or a typed failure. The current optimizer copies semantic nodes into a distinct stage and computes a separate digest. Planning records named output demands and derives per-step input demands for Whole, Elementwise, and clipped Halo rules. Execution checks plan currentness and the frozen operation-registry identity before callbacks, then validates output descriptors and demanded coverage before publication. `analyze` accepts immutable `ResourceBindings` for static facets such as color profiles.
+These are abbreviated public signatures; unrelated members are omitted. Each stage returns a complete immutable value or a typed failure. Planning retains all static metadata needed for schema validation and identity, then derives executable demand from the selected output's input projection. Execution checks plan currentness and the frozen operation-registry identity before callbacks, then validates Result schemas, requested coverage, dependency evidence, and publication finality. `analyze` accepts immutable `ResourceBindings` for static facets such as color profiles.
 
 `CpuExact` is the default execution mode. `NativeGpu` permits placement only for operations that declare a native implementation and match the configured backend. CPU work uses the fixed context pool; native callbacks use the configured backend lane. Cancellation is cooperative, and callbacks already entered may finish before the Run returns.
 
@@ -68,4 +68,4 @@ These are abbreviated declarations of public methods; unrelated members are omit
 
 ## 5. Consequences
 
-Planning can be reused with new bindings, but runtime input addresses are not part of a plan. Queue admission and the shared byte ledger can reject a Run when configured bounds are exhausted; callers should treat returned status codes as the authoritative outcome. Retaining a result retains its storage lease, so callers control how long result memory remains charged. Native placement, fallback, transfers, and cache reuse are visible through diagnostics and can change the work and memory cost of a Run.
+Planning can be reused with new bindings, but runtime input addresses are not part of a plan. Queue admission and resource limits can reject a Run when configured bounds are exhausted; callers should use the returned status as the authoritative outcome. Retaining a Result retains its storage lease, so callers control how long that capacity remains charged. Native placement, fallback, transfers, and optional completed-result retention can change the work and memory cost of a Run. Block-state cache-hit counts are implementation observations, not performance guarantees.

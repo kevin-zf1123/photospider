@@ -57,7 +57,7 @@ serializes internal IR.
 
 Network service, authentication, tenant isolation, durable work, recovery,
 process workers, plugin sandboxing, policy DSOs, cryptographic plugin
-admission, durable result objects, and release evidence are removed or out of
+admission, durable result objects, and release evidence are outside the kernel's
 scope. They are not future or default-disabled kernel features.
 
 ## Active documentation
@@ -72,15 +72,12 @@ scope. They are not future or default-disabled kernel features.
 - Public live delivery status: GitHub Issues
 - Maintainer operational views: GitHub Projects, which mirror Issues and do
   not override them
-- Checked-in delivery snapshot:
-  `docs/development/Current-Development-Program.md`
 
 OpenSpec files in the private personal-overlay repository are maintainer
 working notes. They have no public architecture or delivery authority and do
 not gate implementation, review, or completion. A proposal becomes effective
 only after its accepted decisions and work are recorded in the applicable
 public ADR, current-fact or development document, and GitHub Issue.
-Archived OpenSpec changes remain historical working records.
 
 English documents are authoritative. Official Chinese mirrors are maintained
 in the matching `zh/` paths.

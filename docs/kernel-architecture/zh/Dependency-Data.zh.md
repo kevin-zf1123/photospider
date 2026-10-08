@@ -70,7 +70,7 @@ Focused 检查为 test_footprint、test_value_fragments、test_dependency、test
 
 ## 调度与状态机
 
-`OperationTraits` 使用语义版本 24 和 Result protocol 2。Result traits 描述 `Atomic` 或 terminal `RequestRecord`、failure delivery、continuation/workspace 上限和 typed output ports。除了声明的 Whole Atomic RequestFailureOnly 情况，staged Result program 必须 deterministic 且 side-effect-free。编译器检查所请求 output 和 side-effect root 可达的执行边，并按每个 output 的相关 input ancestry 计算 EffectiveAtomic；RequestRecord 不得供给活跃 consumer。Excluded ports 保留静态 metadata，不会运行 producer。Result plan 保留未解析 input demand，不生成矩形近似。普通 execution 会将每个非 side-effect-free operation 作为强制 root 执行，包括没有具名 output 请求的 operation。Fragment 和 atom execution 仅在 query 包含非空 demand 时执行这些 roots；完全空的 query 会跳过无关副作用 roots。同一 Run 内，副作用 tensor output 的内部 actor identity 使用 slot 0 和完整 coverage，后续请求复用该 actor。该规则不会扩大其他 slots 的授权：每个 slot 仍需自己的 Need 与有效 publication coverage。副作用工作不会跨 Run 共享或缓存。强制 root failure 或 cancellation 会使整个 Run 失败。
+`OperationTraits` 使用语义版本 25 和 Result protocol 2。Result traits 描述 `Atomic` 或 terminal `RequestRecord`、failure delivery、continuation/workspace 上限和 typed output ports。除了声明的 Whole Atomic RequestFailureOnly 情况，staged Result program 必须 deterministic 且 side-effect-free。编译器检查所请求 output 和 side-effect root 可达的执行边，并按每个 output 的相关 input ancestry 计算 EffectiveAtomic；RequestRecord 不得供给活跃 consumer。Excluded ports 保留静态 metadata，不会运行 producer。Result plan 保留未解析 input demand，不生成矩形近似。普通 execution 会将每个非 side-effect-free operation 作为强制 root 执行，包括没有具名 output 请求的 operation。Fragment 和 atom execution 仅在 query 包含非空 demand 时执行这些 roots；完全空的 query 会跳过无关副作用 roots。同一 Run 内，副作用 tensor output 的内部 actor identity 使用 slot 0 和完整 coverage，后续请求复用该 actor。该规则不会扩大其他 slots 的授权：每个 slot 仍需自己的 Need 与有效 publication coverage。副作用工作不会跨 Run 共享或缓存。强制 root failure 或 cancellation 会使整个 Run 失败。
 
 Operation execution 使用 `start_result`，query 捕获所选 output 和 tensor-slot demand。Staged poll 可以先请求 Control samples，再请求相应 Data samples。它通过 `ResultObjectNeed`、`ResultTensorNeed` 和 `ResultIoRequest` 请求 Result objects、tensor samples 或闭合 I/O。成功 publication 附带 `ResultRelation`，记录实际消费的 Control 和 Data support；`Exact`、`Conservative` 和 `Unknown` 在组合及 dirty query 中保留原义。C++ RequestRecord 和 Result continuation 保留所选 output 的 captured query；Whole region rule 不会扩大 RequestRecord 的 Q。Result C table 为 ABI 2，也是唯一的 operation-plugin C 接口。C operation 在 inference 或 start 前必须经过 registry preparation。定义了 `resolve_metadata` 时，preparation 会先校验完整 inputs，再调用 resolver；固定 schema operation 则由 importer 安装的 `specialize_metadata` 校验 input prototypes 并返回声明的 outputs。Direct callers 必须先使用 registry preparation/resolution 路径。Output record 声明 `observation_kind` 和 `failure_delivery`：没有 contract-2 joint callback 的 operation 使用 RequestFailureOnly，contract-2 operation 使用 PerAtomOutcome。Singleton callbacks 仍为必需，并返回普通 C status code；typed Atom failure 和 quality attachment 通过 contract-2 joint outcome 提供。
 
@@ -104,14 +104,13 @@ Callback 可分阶段执行。例如，先请求 Control tensor samples，在后
 
 在 compiled structured Tensor publication 中，host 还会针对每个 publication region、input port 和 slot 验证 ColorArray tuple closure。Data mapping 必须有同一 observation 对应完整 channel tuple 的 Validation support；其他 observation、port 或 slot 的 evidence 不能填补缺口。Output observation 会同时按 schema 声明的 `atomic_trailing_axes` 和 typed ColorArray channel axis 分组。Compact proof 可以处理分组后的 Data/Validation role-5 mappings，包括 identity view。需要更精确判断时，validator 将检查投影到请求的 output Footprint，并在 Run work 与 cancellation 限制下访问已声明的 support；它不会枚举 dense input domain。超出限制会返回错误，不会扩大 support。`SchemaTemplate::validate` 会拒绝 `atomic_trailing_axes > 1` 的 ColorArray tensor。该检查适用于 compiled structured Tensor publication；这里不对 field 或 direct continuation publication 声称 tuple closure 校验。`ResultRef` 仍可获取授权的 partial tensor window；`ResultBuilder` 则要求每个 ColorArray publication region 包含完整 tuple。
 
-
 每次 tensor publication 只会在 guarantee 非 `Unknown` 时认证所提交 samples 的 relation；所有 relation（包括 `Unknown`）都必须匹配 tensor slot 的完整 output shape，并限制到精确 publication region。互不相交的 region 保留各自 source spans、roles 和 targets；union 不会跨 hole 扩大 support，也不会升级 `Unknown`。Restricted relation 保存有界 region mask，不枚举完整 tensor canvas。随着 region 到达，coalescer 会重新检查 union frontier；只有 child witness 和 output shape 相同、至多一个轴不同且该轴区间重叠或相接的 mask 才合并。分离区间保持独立，不会用 bounding box 代替 union。对于 `Unknown` leaf，`visit_declared()` 遵守该 leaf 自己的 region mask；sibling mask 不会隐藏 leaf 区域内部已声明的 witness。`test_global_results.cpp` 覆盖 Exact/Unknown 混合的不相交 support、nested union、元素数相同但 shape 错误的拒绝，以及让未填充点继续 unresolved 的 frontier 压缩。`test_result_plugin.cpp::many_view_windows` 覆盖 1,024×1 和 1,024×2 frame/layer views（最多 2,048 个 windows），均在既有 Run-work 限额内执行。Descriptor 与 field relation 规则不变。
 
 `ExecutionDependencies` 和 shared dependency manifests 保留 relation evidence 与 source associations，不保留 pixel payload、`ResultRef` owners、source callbacks 或 workers。已发布的 `ResultRef` 另外拥有 typed tensor backing，并可通过单调 association 保留已消费的输入 Result owners。`ResultRef::capture()` 将 descriptor、relations 和 dependency evidence 固定在同一个认证 revision；host actor 发布该 captured view。`DemandHandle::replace_bindings` 提交新的 immutable inputs 时，会按旧 evidence 的 source support 对比字节，并沿 captured relation 计算 potential dirty。已消费的 Control sample 变化会使旧输出 relation dirty；下次 request 在新 binding generation 下发现新的 Data support。未消费的 controls 保持 clean。Semantic-alias diamond ancestry rebind 已由 focused Result contract fixture 验证。旧 evidence 保持不可变，继续描述旧 generation。
 
 每条 Result dependency record 都对应一个逻辑 output target、typed member 和 query scope。Scope 是完整 public semantic key 的 domain-separated SHA-256，用于区分 Q identity，不改变 public key。Record 按每个 input port 保存已消费的上游 query identity、support kind 和 slot。Capture 与 restriction 只保留可到达同一 typed child record 的 edge；dirty propagation 和 cache rebind 沿这些精确的 port/scope/kind/slot edge 路由，不会把同一 producer 的不同请求合并。WorkflowInput 变化会传播到各个已订阅的 query scope；computed input 变化则只沿已记录的 edge 传播。同一 port 再次消费同一个 producer object 时，payload-free dependency bundle 保留观察到的最大 revision。Terminal RequestRecord 将完整 Q 和 manifest 作为不可分割记录保留。
 
-如果 plan 位置、snapshot、routes、coverage、scope、relations 和 typed child edges 仍相同，不可变的 `DependencyBundle` 可以复用。Cached record rebind 仅在 record identity 绑定当前 plan 和 snapshot，且 logical step、routes、child mapping 均未变化时直接返回现有结构 owner。Logical step 或 plan 不同则沿当前 routes 重新绑定；别名的 child routes 无歧义时可以映射。Rebind 会共享不可变 relation owner，只复制结构 metadata，不复制 payload。已捕获的 `ResultRef` 持有自己的 bundle，因此 Run 的可变 record builder 后续变化不会改写此前 evidence。只有 Actor 均无 pending work，且每个 Actor 都 complete 或 terminal 时，builder 才会将 records 移入最终结果。只要 producer 仍可能服务 peer，Run 就返回 snapshot copy 并保留可变 builder。Record entries 和 capture/rebind traversal 消耗 Root capacity 与有界 Run work；payload 仍由 Result object 单独拥有。
+如果 plan 位置、snapshot、routes、coverage、scope、relations 和 typed child edges 仍相同，不可变的 `DependencyBundle` 可以复用。Cached record rebind 仅在 record identity 绑定当前 plan 和 snapshot，且 logical step、routes、child mapping 均未变化时直接返回现有结构 owner。Logical step 或 plan 不同则沿当前 routes 重新绑定；别名的 child routes 无歧义时可以映射。Rebind 会共享不可变 relation owner，只复制结构 metadata，不复制 payload。只有 Actor 均无 pending work，且每个 Actor 都 complete 或 terminal 时，builder 才会将 records 移入最终结果。只要 producer 仍可能服务 peer，Run 就返回 snapshot copy 并保留可变 builder。Record entries 和 capture/rebind traversal 消耗 Root capacity 与有界 Run work；payload 仍由 Result object 单独拥有。
 
 在一个 Run 内，structured actor registry 按编译后的 output template、snapshot、所选 output 或 tensor slot、request kind 和 canonical query Q 标识活动请求。键相同的请求复用同一个 Actor；不同 Q 使用独立 Actor。独立的 dependency scope 是该完整 semantic key 的 domain-separated digest，public semantic key 本身不变。Registry 强持有 pending Actor，完成后通常只保留 weak observation；contract-2 Actor 会保持注册至首次交付。公开 `ExecutionContext::execute_atoms` 会先校验命名 CPU Result query，再将请求的 sample Footprint 展开为 observation key，并收集各 Result 和其 Q-scoped dependency root。不同 Q 不会合并成一个 observation。每个逻辑 step 的 alias 指向该 step 最近一次请求；contract-1 policy 下，通过 weak lookup 取回已完成 Actor 仍需其他 owner 持有它。
 
@@ -134,7 +133,7 @@ poll 提交逐输出、逐端口和角色的精确 run 与 tag 关联。Atomic �
 | scratch 指针 | 在当前 poll callback 内有效，poll 返回即失效。 |
 | output 指针 | 成功发布时立即失效；未发布时最晚在 poll 返回时失效。 |
 
-`test_result_c_block.cpp` 使用有序 Float64 samples 检查不可变状态的 block scan。每个 block callback 读取 incoming state 并返回不同的 state handle；producer poll callback 负责请求下一个 tensor sample，因为 block callback 不能发出 Need。Fixture 将舍入模式设为 round-to-nearest，并按自身 scan 契约拒绝非有限输入和求和结果；generic Float64 block service 本身不强制有限值。首次启用缓存的请求记录六个 miss 和六次 block callback。改变第一个输入 sample 后，下一次请求在六个 blocks 中观察到三个 block-cache hit 和三个重新计算。关闭 Result cache 时六个 blocks 都会重算，cache hit/miss diagnostics 为零。重复失败的请求不会缓存，每个失败的 operation state 都会销毁。Context 和 inputs 离开作用域后，Root resource usage 全部归零。
+[`tests/integration/test_result_c_block.cpp`](../../../tests/integration/test_result_c_block.cpp) 覆盖 C block-state handle 生命周期和有序 Float64 fixture scan。Producer 通过 poll callback 请求后续输入样本，因为 block callback 不能发 Need。Finite input/sum 检查属于该 fixture；通用 Float64 block service 传输 canonical bytes。测试还检查失败清理与 Root ownership。Block-cache reuse 和 hit 数属于实现细节，不是性能契约。
 
 ### C checkpoint 服务
 
@@ -166,7 +165,7 @@ consumer-build 由 `test_installed_consumer` 创建；共享库安装将路径�
 
 `test_result_plugin.cpp` 的 `image_transport` case 覆盖两种情况：原本为空的 Result 在重复 restriction 后仍保留已消费的 Control/Validation source observation 和 `source_support()`；将非空 output restrict 为 Empty 则会移除 payload obligations。
 
-`test_execution_dependencies` 通过真实短/长菱形 workflow 验证 B/T 先收到 `{0}` 后再收到 `{1}`，用独立逐端口 oracle 核验，并在像素/context owner 释放后查询证据。 动态 scatter 验证排除项控制证据、相同输出的改边和旧证据隔离。Whole 和真实 C terminal 测试检查不可分割 manifest；同一检查消费安装后的静态库和共享库。 公开 G4 workflow 也检查 radius 编辑与 frozen 旧关系的运行时证据。证据保持不可变， 订阅由下面的 context demand API 管理。
+[`tests/integration/test_execution_dependencies.cpp`](../../../tests/integration/test_execution_dependencies.cpp)、[`dependency_workflows/dynamic.cpp`](../../../tests/integration/dependency_workflows/dynamic.cpp) 和 [`dependency_workflows/demand.cpp`](../../../tests/integration/dependency_workflows/demand.cpp) 覆盖逐 port dirty propagation、Control 驱动的 support 变化、frozen bindings 和独立 source oracle。[`dependency_workflow_fixture.hpp`](../../../tests/support/dependency_workflow_fixture.hpp) 提供当前共享测试算子。`test_result_request_record.cpp` 覆盖不可分割 terminal manifest。Evidence 保持 immutable；订阅由下文的 context-managed demand API 所有。
 
 ## 精确 demand 与 binding generation 状态机
 
@@ -178,7 +177,7 @@ consumer-build 由 `test_installed_consumer` 创建；共享库安装将路径�
 
 `maximum_demands` 限制存活且未取消的 handle，范围 1..65536、默认 1024；活跃 demand 调用上限为既有队列容量加 CPU worker 数再加一个 coordinator 槽。`DemandConfig::maximum_metadata_entries` 限制每个 handle 保留的 query/evidence/dirty metadata，范围 1..1048576、默认 65536。Handle 不拥有 worker 或像素 cache。Structured Result producer 使用既有 CPU/GPU pool、WaitingAdmission 和计费 allocator；兼容 producer 通过 `SharedResults` 共享。已完成 Result content reuse 使用可选像素 LRU 和有界结构证明，见[缓存模型](Cache-Model.zh.md)。GPU transport 见 [Fragment Atlas](Fragment-Atlas.zh.md)，有界 discovery 见 [GPU Discovery](GPU-Discovery.zh.md)。
 
-`test_execution_demand` 覆盖稀疏结果、typed snapshots、连续 dirty 累积、frozen 隔离、陈旧 publication、独立取消及 context drain。`test_result_request_record` 验证 terminal Result 查询和 exact-Q 行为。公开 `g4_workflow` demand 场景用直接 oracle 检查两次替换前后的 scatter 端点和。
+`test_execution_demand` 覆盖稀疏结果、typed snapshots、连续 dirty 累积、frozen 隔离、陈旧 publication、独立取消及 context drain。`test_result_request_record` 验证 terminal Result 查询和 exact-Q 行为。Radius 与 dynamic demand oracle 位于 [`tests/integration/dependency_workflows`](../../../tests/integration/dependency_workflows)，由 `test_dependency_workflows_{radius,dynamic,demand}` 注册。
 
 ## 活跃 Result demand sharing
 
@@ -188,21 +187,15 @@ Shared Result entries 和 waiters 使用自己的 Root `Entries`、`Host`、`Met
 
 `test_result_dag_parallel`、`test_joint_execution` 和 `test_scan_waiters` 覆盖活动 Result sharing、独立取消、结构 evidence reuse 和请求顺序。Fixture 检查 producer-wave admission、较小 Q 独立运行、joint outcome 隔离及真实 `numeric.ordered_scan`。
 
-## Result block transition cache
+## Result block 状态转移
 
-C++ `ResultProgramPhase::block` 和 C Result bridge 都可从显式 incoming state 与当前供给的 tensor data 计算一次状态转移。State 是 sealed、完整覆盖、单 tensor 且无 fields 的 `CompleteBundle` Result。Transition key 包含 operation contract、phase、半开 range、mode、incoming state schema/coverage/raw bits，以及当前供给 tensor 的 coverage、metadata 和 raw bits。Key 不包含 ObjectId、semantic key、association 或原 output query；转移若依赖这些差异，必须编码进 state 或 mode。
+`ResultProgramPhase::block` 和 C block service 作用于一个显式、已 sealed 的 `CompleteBundle` tensor state。Block callback 读取该 state，并返回它或一个新建的 state；它不发出 Need，也不发布 operation output。Producer 通过 poll callback 请求之后的 tensor 样本。Checkpoint 与 block 服务相互独立：checkpoint 恢复可导入成功的 dependency evidence，block state 只携带转移数据。可选的 block-state 保留可能跳过一次转移，或在资源限制下重新计算。其命中次数和转移复用属于实现细节，不构成性能承诺。
 
-可选 block content cache 要求 operation cacheable 且 selected-input producer closure 为 pure。Cache 不处理带 resources 的 state 和 tensor input。命中时会创建新的 state Result，不导入 source association 或 dependency evidence；当前 Need 和 evidence 仍属于当前 output。`maximum_dependency_cache_work` 限制 key 构造；为零或耗尽时仍会计算，但不查找或保留。失败 block 不缓存，miss 会重算。Public outputs、checkpoints 和 completed-result cache 各自独立。该服务不去重并发 producer，也不保证每个 Run 只计算一次。
-
-Block callback 读取不可变 incoming handle，并返回该 handle 或新建的 state handle。它不能发出 Need 或发布 operation Result。State backing 与 scratch 使用当前 phase allocator；state metadata、work 和保留 payload 仍受 Root limits 限制。Checkpoint 与 block 服务不同：checkpoint 可导入成功 dependency history；block hit 仅复用状态转移结果。
-
-`test_result_c_block.cpp` 使用有序 Float64 samples 检查不可变状态的 scan。Producer poll callback 负责请求下一个 tensor sample，因为 block callback 不能发出 Need。Fixture 使用 round-to-nearest，并按自身逻辑拒绝非有限输入和求和结果；generic block service 不会拒绝非有限 Float64 bytes。初次启用缓存的请求记录六次 miss 和六次 callback；修改第一个输入后记录三次 hit、三次重算。禁用 Result cache 时六块全部重算，cache hit/miss diagnostics 为零。失败 state 会销毁且不会缓存；Context 和 inputs 退出后 Root usage 全为零。
+[`tests/integration/test_result_c_block.cpp`](../../../tests/integration/test_result_c_block.cpp) 覆盖 C block-state handle 和 Float64 fixture scan，包括 state 生命周期与失败清理。Finite input 和 finite sum 规则属于该 fixture；通用 state service 传输 tensor 字节。
 
 ## GPU fragment 传输与执行
 
 [Fragment Atlas](Fragment-Atlas.zh.md) 说明已实现的精确 atlas/mask 目录、SDK MSL lookup helper 及原生传输验证。C++ staged GPU 执行已接入，[有界 discovery](GPU-Discovery.zh.md) 已实现。
-
-C++ staged GPU 已通过 [Fragment Atlas](Fragment-Atlas.zh.md) 接入现有 GPU worker 与共同 admission。每阶段按需 materialize 精确端口，工作量预扣、真实 native 容量独立计费， 错误 sticky，普通/stream/frozen Run 均保持辅助取消优先级。C staged GPU 桥接同样已接入，[有界 GPU discovery](GPU-Discovery.zh.md) 已实现。
 
 同步 GPU producer 也通过既有 native worker 执行，实际容量与 CPU 回退见 [Fragment Atlas](Fragment-Atlas.zh.md)。
 
@@ -218,7 +211,7 @@ Joint callback 通过 structured Result protocol 的 `OperationDefinition::start
 
 每次 poll 为就绪且未取消的成员子集调用 callback 一次。Callback 为每个成员返回一个以 `AtomKey` 标识的 Root-owned `ResultJointOutcome`：Result tensor/field Need、完整 Result publication 或局部错误。Contract 1 的 key 对应不同 output；Contract 2 可以返回同一 output 的不同 coordinate。Host 在暴露任何结果前校验整个 envelope，包括 outcome vector 和嵌套 Need containers 的 Root ownership、成员数量和身份、selected input projection、Need 的 slot/shape/roles、field index，以及每个成员 query 的 publication 完整性。整轮累计 Result Need entries 上限为 65,536。Host 在验证 Need entries 前预扣各个 envelope 的 entry count。Malformed envelope 会使 continuation 以 sticky group error 失败；合法的成员局部错误仍归属于对应 output。取消按成员返回，被取消成员不会传给 callback。
 
-Host 在交付本轮任何回复前，按 member、input port 和 tensor slot 分别验证 ColorArray tensor transport。它合并同一成员对同一 port 和 slot 的 Data、Control、Validation 请求，并要求合并后的 coverage 包含完整 channel tuple。同一成员可以用多个 Need 合并出完整 tuple；其他成员、port 或 slot 的请求不能填补缺口，host 也不会补齐缺失 channel。Descriptor-only request 不增加 payload transport。该检查闭合 ColorArray channel axis，但不额外闭合 `atomic_trailing_axes`；tuple 不完整时，在提交任何成员回复前返回 `Protocol/Group`。
+它合并同一成员对同一 port 和 slot 的 Data、Control、Validation 请求，并要求合并后的 coverage 包含完整 channel tuple。同一成员可以用多个 Need 合并出完整 tuple；其他成员、port 或 slot 的请求不能填补缺口，host 也不会补齐缺失 channel。Descriptor-only request 不增加 payload transport。该检查闭合 ColorArray channel axis，但不额外闭合 `atomic_trailing_axes`；tuple 不完整时，在提交任何成员回复前返回 `Protocol/Group`。
 
 Phase 为本轮提供一个受限 workspace allocator 和共享的 Run/root work charge。每个 member ResourceBudget 必须属于 continuation Root；phase 与 member allocator 必须共享其非空 accounting domain。Host 使用 outcome 和嵌套 Need storage 前会验证 Root ownership。Contract-2 quality report 必须属于成员 ResourceBudget 和 phase resources，并由 phase 或 shared workspace allocator 持有。`BufferAllocator::same_owner` 只比较 accounting-domain identity，不比较 quota 或 provenance，也不授予 payload 访问权限。Callback exception fence 会保留共享 allocation、work 或 I/O 错误中的首个错误。C++ Result factory 和 poll 将 `std::bad_alloc` 转为 `ResourceExhausted`，将标准异常转为带 `HostException` 的 `OperationFailed` 并保留诊断（`what()` 为 null 时 message 为空），将非标准异常转为带固定 `HostException` 诊断的 `OperationFailed`。Phase 已记录的 failure 优先于随后抛出的异常；host failure observer 抛出的异常不会替换 producer 已选定的错误。后续 poll 返回已锁存的 group failure；并发或重入 poll 会被拒绝，但不会覆盖活动 poll 的结果。
 
@@ -226,7 +219,7 @@ Contract 2 的 Atom failure 必须指定精确 `AtomKey`。`ValidationDomain` fa
 
 Structured execution 会通过 contract 1 或 contract 2 组合相同 node 上符合条件且已就绪的 CPU Result query。Contract 2 最多接受 64 个单 observation query，也可接收同一 output 的不同 Q；跨多个 observation 的 query 不会拆成 atom。已完成、已缓存、已剪枝或其他不符合条件的 Actor 不进入共享 start。关闭 C1 grouping 时，contract 1 走 singleton 路径；contract 2 仍使用必需的单成员 joint callback。Coordinator 调用 shared start、满足各成员的 Needs，并在成员就绪后提交后续轮次，发布前校验整轮结果。Contract-1 fallback 仅适用于其 optional unscoped-error predicate 接受的 failure，包括符合条件的 backend 或 admission failure；Cancelled、Stale、Protocol、Domain/Schema 和 Run-scope failure 不重试。Contract-2 group、protocol 和 Run failure 都是终局错误，不会回退到 singleton callback。
 
-Contract 2 的 Run ledger 按编译后的 producer semantic identity、output 和 tensor slot 保存 ValidationDomain failure 与 semantic-terminal observation。同一 compiled producer 的 semantic alias 共享终局记录；failure detail 仍指出实际失败的 workflow node。同一 cohort 中每个 output 固定使用一个 tensor slot；slot 冲突由后续 cohort 处理。Ledger 跨 cohort、completed-cache 复用和 Actor 退休继续有效。Domain failure 会作用于匹配的 Ready 和 Waiting member；后续 failure 不能撤销此前已终结的 observation。Coordinator 在 callback 前为每个 query 分配 payload-free failure 与 quality record，记录终局结果时无需再分配。Contract-2 Actor 会保持注册，直到其已完成或终止的结果首次交付；contract 1 保留原有 weak-completion 策略。Shared producer entry 会将 quality 与 publication 或 failure 一起提供给 waiter。Domain failure 的身份和 evidence 会继续向下游传播；成功 transformation 不继承输入 quality。带 quality 的 result 会跳过 completed-output content retention。`ExecutionContext::execute_atoms` 使用 structured coordinator 收集命名 Result observation 及其 Q-scoped dependency root。Structured Result joint execution 仅支持 CPU。
+Contract 2 的 Run ledger 按编译后的 producer semantic identity、output 和 tensor slot 保存 ValidationDomain failure 与 semantic-terminal observation。同一 compiled producer 的 semantic alias 共享终局记录；failure detail 仍指出实际失败的 workflow node。同一 cohort 中每个 output 固定使用一个 tensor slot；slot 冲突由后续 cohort 处理。Ledger 跨 cohort、completed-cache 复用和 Actor 退休继续有效。Coordinator 在 callback 前为每个 query 分配 payload-free failure 与 quality record，记录终局结果时无需再分配。Contract-2 Actor 会保持注册，直到其已完成或终止的结果首次交付；contract 1 保留原有 weak-completion 策略。Shared producer entry 会将 quality 与 publication 或 failure 一起提供给 waiter。Domain failure 的身份和 evidence 会继续向下游传播；成功 transformation 不继承输入 quality。带 quality 的 result 会跳过 completed-output content retention。`ExecutionContext::execute_atoms` 使用 structured coordinator 收集命名 Result observation 及其 Q-scoped dependency root。Structured Result joint execution 仅支持 CPU。
 
 C Result ABI 2 output record 声明 `observation_kind` 和 `failure_delivery`。可选 CPU `joint` program 支持 contract 1 和 contract 2；operation 仍须提供 singleton callbacks。Contract 1 要求至少两个 Atomic output，使用 RequestFailureOnly delivery，并按不同 output index 分组 2..64 个成员。Contract 2 要求 Atomic output 和 PerAtomOutcome delivery，通过 direct registry entry point 或 structured CPU workflow 接受 1..64 个完整 `AtomKey` 成员。不同 observation coordinate 可以指向同一 output，但必须使用该 output 固定的 tensor slot。Importer 要求 program 及嵌套结构采用当前完整结构大小。
 
@@ -268,13 +261,11 @@ Result joint group 只分配一次共享 continuation state 与宿主成员适�
 
 `DependencyCertificate::create_mapped` 保存不交覆盖片段和 port/role axis map，供 metadata relation 表示使用。每个 input axis 选择 observation axis 或固定区间，tags 独立保留。该表示可以在不枚举复制输出样本的情况下表达精确 broadcast/permutation 投影和 dirty transpose。Restriction 与相同 map 的 merge 使用集合几何；重叠区域的不同 map 可能需要有界逐行比较。`row` 解析一个观察，`materialize` 显式生成有界 rows，mapped certificate 调用 `rows()` 会抛异常。变换会限制工作量和保留 metadata，包括规范化 box 扩张。`storage_entries()` 统计实际保留的坐标、support 和 tag，独立于去重后的 source-support projection。Mapped certificate 描述 evidence，不定义 staged callback protocol。
 
-Structured Result tensor operation 通过 `ResultRelation` 发布完整 sample shape 的逻辑坐标依赖，包括 batch axes。Tensor description facets 参与声明的 metadata/validation support；物理 layout 不会发明依赖。当前 trait validation 会拒绝非空的 legacy `OperationOutputTraits::static_dependency_pieces`。
+Structured Result tensor operation 通过 `ResultRelation` 发布完整 sample shape 的逻辑坐标依赖，包括 batch axes。Tensor description facets 参与声明的 metadata/validation support；物理 layout 不会发明依赖。
 
 ### 跨 output 的 pure block sharing
 
-`share_blocks_across_outputs` 是 `OperationTraits` v24 中的可选字段，默认 false，仅适用于 pure deterministic Atomic Result-v2 operations。Host 按所有 resolved output contract、static parameters、backend/mode 和实际 input metadata 建立公共 block namespace，再用 phase、range、mode、incoming state 和 supplied tensor content 构造转移 key。Public outputs、checkpoints 和 completed-result cache 仍分别管理。Transition 不得依赖 selected output 或 output-specific metadata，除非将差异编码进 state 或 mode。Host 不会分析 callback 代码来推断 purity。跨输出 block sharing 不协调并发 producer，也不保证每个 Run 只计算一次。
-
-可选 retention 仅在 `result_cache_bytes` 为正且 proof-work budget 准入 key/retention 工作时使用 accounted result LRU。miss、关闭 cache 或 proof budget 耗尽时按相同 block transition 重算；不保证每个 Run 只执行一次。
+`share_blocks_across_outputs` 是 `OperationTraits` v25 的可选字段，默认关闭，适用于 pure deterministic Atomic Result operations。启用后，runtime 可在满足当前输出与输入契约的 block 状态转移间共享 retention；状态不兼容或 retention 不获准时仍会重新计算。Block retention 与完整 Result cache、checkpoint 和公开输出分开管理。命中次数与复用范围是当前实现细节，不构成性能保证。
 
 ## 限制与错误处理
 

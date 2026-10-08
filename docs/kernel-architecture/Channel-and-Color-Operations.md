@@ -40,8 +40,7 @@ cmake --build build --target test_channel_extraction -j 8
 ctest --test-dir build -R '^test_channel_extraction$' --output-on-failure
 ```
 
-The current Result integration test and public workflow pass on the native CPU host. This does not establish support for another ISA or a GPU. The older [channel extraction performance workflow](../../examples/channel_extraction_performance/README.md) contains Value/planar measurements. It is not timing evidence for the Result implementation.
-
+ This does not establish support for another ISA or a GPU. The older [channel extraction performance workflow](../../examples/channel_extraction_performance/README.md) contains Value/planar measurements. It is not timing evidence for the Result implementation.
 
 ## Scalar literal primitive
 
@@ -58,7 +57,7 @@ local to each run.
 The default registry registers `channel.literal_like_<profile>` for the three CPU profiles. Each operation accepts one Result containing one tensor member and publishes one Result with one tensor member. Execution requests Descriptor support only (role 8); it reads no source sample payload. The operation repeats same-dtype raw bits from `bits` over the requested output coordinates, using `output_description`, optional cell-axis `axis`, and `keepdims` to define the tensor. It retains batch axes, schema id, tensor key, opaque facets and owned resources. The full sample count is in `[1, 2^40]`. Its optional `axis` indexes cell axes
 and excludes the Result batch prefix.
 
-Required static parameters are `bits`, `expected_inputs`, `output_description`, `layout`, `authoring_member`, and `keepdims`; `axis` is optional. The `expected_inputs` assertion uses `result-v1`, a 64-character schema digest, and a physical-layout assertion. `auto` and `materialize` generate requested bytes; a nonempty forced `view` returns `ViewUnavailable`. Empty observations are stateless. `test_channel_literal_like` and its installed consumer pass on the native CPU host. This primitive can serve the opaque FMT-05B lowering path, but it is not the public `extract_alpha` helper.
+Required static parameters are `bits`, `expected_inputs`, `output_description`, `layout`, `authoring_member`, and `keepdims`; `axis` is optional. The `expected_inputs` assertion uses `result-v1`, a 64-character schema digest, and a physical-layout assertion. `auto` and `materialize` generate requested bytes; a nonempty forced `view` returns `ViewUnavailable`. Empty observations are stateless. This primitive can serve the opaque FMT-05B lowering path, but it is not the public `extract_alpha` helper.
 
 ## FMT-02 channel assembly
 
@@ -95,9 +94,7 @@ reads requested regions only. Each run owns independent prepared state, and
 empty observations keep no payload state. Need admission uses groups of 64;
 execution processes at most 16 groups plus publication. The 1024-input case
 requires explicit 64 MiB metadata capacity; the default 16 MiB capacity returns
-a controlled resource failure. The [performance guide](../../examples/channel_assembly_performance/README.md)
-records current Result smoke coverage and labels its earlier measurements as
-historical Value/planar evidence.
+a controlled resource failure.
 
 ## FMT-03 channel editing
 
@@ -124,9 +121,7 @@ cancellation. Public Result workflow output is documented in [the example](../..
 `alpha.associate_<profile>` and `alpha.unassociate_<profile>` Result operations.
 Each member has strict, Apple Silicon and x86-64 CPU profiles. Inputs use one
 single-tensor Result with no fields; optional second Result inputs are reserved
-for explicit raw alpha plane or scalar weights. Semantic color and consumed
-alpha receive Data and Validation support, pass-through-only values are copied
-without extra validation, and all connected inputs receive Descriptor support.
+for explicit raw alpha plane or scalar weights.
 No Control support is used. See the [FMT-04 contract](../built-in_ops/02-format-color/op_specs/FMT-04_alpha_association_contract.md)
 for formulas, raw-mode behavior, layout and error rules.
 
@@ -147,8 +142,7 @@ component Gray identity uses `metadata.assign` and still requests Data. The
 helpers assert source schema and physical layout at compile time. FMT-05A
 `set_alpha` and FMT-04 association helpers use the registered native keys
 `alpha.set_<profile>`, `alpha.associate_<profile>`, and
-`alpha.unassociate_<profile>`. Historical Value/planar alpha measurements are
-not Result performance evidence.
+`alpha.unassociate_<profile>`.
 
 ## FMT-06 numeric conversion
 
@@ -164,7 +158,7 @@ The operation requests source Data (role 1) and Descriptor (role 8). It requests
 no Validation or Control support, scans no unrequested samples, and keeps errors
 within the requested observation scope. Axis parameters index cell axes and
 exclude batch axes. Numerical behavior, typed endpoint formats and metadata
-propagation are defined in the [FMT-06 contract](../built-in_ops/02-format-color/op_specs/FMT-06_numeric_conversion_contract.md). The migrated `test_numeric_conversion` suite passes 49 dtype pairs, randomized oracles, ROI, cold-lookup budget, failure-order, floating-environment and same-coordinate identity-view coverage. Additional batch/view/Empty/bit-stride, ICC-resource, concurrent-plan-reuse and payload-release checks pass; `test_numeric_conversion_sme` passes. `test_alpha_numeric_interop` passes four inherited/moved cases; this does not establish model-conversion interoperability. The six focused numeric/alpha/resource CTests pass. The installed numeric-conversion and alpha-numeric-interoperability consumers pass; the standalone performance consumer builds. Thirteen serial Result smoke cases pass byte oracles, but no Result performance conclusion is drawn.
+propagation are defined in the [FMT-06 contract](../built-in_ops/02-format-color/op_specs/FMT-06_numeric_conversion_contract.md). Additional batch/view/Empty/bit-stride, ICC-resource, concurrent-plan-reuse and payload-release checks pass; `test_numeric_conversion_sme` passes. `test_alpha_numeric_interop` passes four inherited/moved cases; this does not establish model-conversion interoperability. The six focused numeric/alpha/resource CTests pass. Thirteen serial Result smoke cases pass byte oracles, but no Result performance conclusion is drawn.
 
 A same-dtype mapping may publish a generic or spatial view only when the complete
 declared mapping is a static identity and the source storage can represent it.
@@ -178,10 +172,7 @@ the Result batch prefix.
 
 The single strict key uses exact scalar conversion plus internal AArch64 NEON,
 runtime-checked amd64 AVX2 and eligible Apple SME Float32→UInt8 paths. These paths
-share one numerical contract. No GPU implementation is provided. The linked
-performance README preserves earlier Value/planar measurements and experiments;
-those are not current Result performance evidence. Result performance has no
-conclusion here.
+share one numerical contract. No GPU implementation is provided.
 
 ## FMT-09 transfer encoding and decoding
 
@@ -194,8 +185,7 @@ logical shape and batch axes, while updating semantic transfer facets and settin
 `atomic_trailing_axes` to zero. The complete sample rank, including batch and
 cell axes, is at most 8; the sample count is at most 2^40.
 
-Semantic mode selects an explicit RGB or Gray group. Participating color samples
-request Data and Validation; pass-through samples request Data only. Raw mode
+Semantic mode selects an explicit RGB or Gray group. Raw mode
 selects explicit components or all components and requests Data without semantic
 domain validation. Every connected input requests Descriptor support; these
 operations request no Control. `axis` is a cell-axis index, excluding the Result
@@ -215,16 +205,10 @@ fallback and floating-environment behavior follow NUM. Transfer operations have
 no GPU backend. The focused `test_transfer_operations` and
 `test_transfer_runtime`, `test_transfer_math` and `test_transfer_simd` pass, as do
 six shared FMT regression tests, `test_result_execution` and
-`test_shared_results`.
-The installed-package consumers `installed_transfer_operations` and
-`installed_transfer_runtime` pass 2/2, and the standalone installed-package
-performance consumer configures and builds. The integration test completed
+`test_shared_results`. The integration test completed
 16,760 golden attempts on strict and Apple Silicon profiles; x86-64 was skipped
-because the backend is unavailable on this host. Twenty-five selected serial
-Result performance smoke cases passed their golden gates, with two warmups and
-one measured execution each. They do not establish a full matrix or performance
-conclusion. Historical Value/planar measurements remain separate; see the
-[transfer performance guide](../../examples/transfer_performance/README.md).
+because the backend is unavailable on this host. They do not establish a full matrix or performance
+conclusion.
 
 ## FMT-10 RGB basis and XYZ
 
@@ -264,8 +248,7 @@ mapping during compile/direct preflight and rejects an identity mapping whose
 physical representation cannot be proven during observation evaluation. Output
 is published transactionally under Root budgets and cancellation. The Result
 cache is disabled; retained owners follow normal Result lifetime rules. There is
-no GPU implementation. Historical Value/planar performance records are not
-Result evidence; see the [performance guide](../../examples/rgb_basis_performance/README.md).
+no GPU implementation.
 
 `format::convert_linear_rgb` stages a complete expansion and mutates the supplied
 WorkflowDocument only after static validation succeeds. Callers must serialize
@@ -275,10 +258,7 @@ or A→C→B with an explicit method. The helper returns B's `values` edge and a
 no native D key. `test_rgb_basis_math` and `test_rgb_basis` pass; the integration
 suite retains 4,032 independent oracle checks and covers batched inputs, three
 Result storage layouts, identity views, concurrent reuse and owner release. The
-wide 65,536-channel identity view also passes under a 512 KiB Metadata budget.
-The `installed_rgb_basis` consumer and standalone installed-package performance
-consumer build pass; a size-3 Float32 D case also passes its full 36-element
-strict-reference gate. The 25 benchmark smoke cases pass a same-implementation
+wide 65,536-channel identity view also passes under a 512 KiB Metadata budget. The 25 benchmark smoke cases pass a same-implementation
 strict reference gate, not an independent oracle; no full matrix or speed
 conclusion is available.
 
@@ -286,9 +266,8 @@ conclusion is available.
 
 The registry provides three Result CPU keys: `metadata.assign_strict`, `metadata.assign_accelerated_apple_silicon` and `metadata.assign_accelerated_x86_64`. `format::assign_metadata` appends A; `format::remove_metadata` transactionally lowers B to A. The input and output are single-tensor Results with no fields. They preserve schema id, tensor key, batches, descriptor, layout, source publication policy and sample bits. Execution requests same-coordinate Data and Descriptor support with roles 1 and 8, without Validation or Control. The operation never scans sample values and disables Result caching. The public header `photospider/format/metadata.hpp` is installed separately. The [public example](../../examples/metadata_workflow/README.md) verifies special-value bits and source immutability. Five focused Result CTest cases, the example, and two installed consumer checks pass. The metadata-to-extraction configuration/resource chain is covered; composition through `channel.assemble` is not. The older [performance guide](../../examples/metadata_performance/README.md) measures Value/planar execution, not this Result path.
 
-
 ## FMT-11 model conversions
 
 FMT-11 registers 19 native members across three CPU profiles, for 57 model-conversion keys. The installed `photospider/format/model_conversion.hpp` helpers append one key and return the `values` port; FMT-11S appends the registered `mask.threshold_channel_<profile>` operation and has no native color key. All inputs and outputs are single-tensor Results without fields, using Float32 or Float64. The complete sample rank, including batch and cell axes, is at most 8; sample counts follow Result schema representability and execution resource limits.
 
-The `axis` and `output_axis` parameters index cell axes, excluding the batch prefix. Q reduces a selected triple to one component; R expands one Gray component to three, increasing the existing channel-axis extent by two or inserting one length-three cell axis for axis-free input. Outputs preserve schema id, tensor key and batches, while updating model metadata and setting `atomic_trailing_axes` to zero. Semantic selected samples request Data and Validation; raw T validates its binary selector, raw S and bypass samples request Data only, and constant R outputs require Descriptor support only. Empty demand is stateless. Q returns a view only when the complete mapping passes the generic affine or canonical spatial Result view proof; forced view reports `ViewUnavailable` if proof fails, while `auto` materializes. Other model conversions materialize and reject forced view, including bypass-only requests. Publication is transactional, and no GPU profile is registered. Six focused checks and the three installed consumers `installed_model_conversion`, `installed_model_result` and `installed_alpha_model_interop` pass. Sparse Q-view tests require a mapping that satisfies the canonical spatial view proof.
+The `axis` and `output_axis` parameters index cell axes, excluding the batch prefix. Q reduces a selected triple to one component; R expands one Gray component to three, increasing the existing channel-axis extent by two or inserting one length-three cell axis for axis-free input. Outputs preserve schema id, tensor key and batches, while updating model metadata and setting `atomic_trailing_axes` to zero. Semantic selected samples request Data and Validation; raw T validates its binary selector, raw S and bypass samples request Data only, and constant R outputs require Descriptor support only. Empty demand is stateless. Q returns a view only when the complete mapping passes the generic affine or canonical spatial Result view proof; forced view reports `ViewUnavailable` if proof fails, while `auto` materializes. Other model conversions materialize and reject forced view, including bypass-only requests. Publication is transactional, and no GPU profile is registered. Sparse Q-view tests require a mapping that satisfies the canonical spatial view proof.

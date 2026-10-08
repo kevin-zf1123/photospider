@@ -43,23 +43,7 @@ The program charges its state, tensor windows, workspace, output and work throug
 
 The Result writer uses affine backing for a requested output region when full spatial sample-byte geometry cannot be represented. Thus a sparse one-pixel request from a map with `Ho=Wo=2^40` writes four output samples under Root limits without allocating the full logical output domain; a full-domain write still has to fit the available Root budget. The same sparse mapping keeps the huge source case below from being enumerated.
 
-`test_dependency_sampling` covers the five boundaries, map frame/layer broadcasting, a three-pixel identity map, and a sparse read from a 2^40-by-2^40 broadcast source backed by 16 payload bytes. It also checks that a zero-weight tap remains dirty evidence, constant-boundary taps request no source payload, Empty skips a nonfinite map, and the 10-by-10 fixture adds less than 1 MiB of live payload between the before/after measurements. That fixture delta is not a context payload limit, peak-memory bound or RSS claim. With source `atomic_trailing_axes=2`, Validation closes over the complete source row (the fixture has `H=1,W=3`), while Data remains limited to selected taps. A nonfinite RGB component in a zero-weight typed tap fails source validation with `InvalidArgument`; a nonfinite map coordinate fails in the operation with `OperationFailed` first. Four caller rounding modes produce the same tie result and restore the caller mode. The test also checks active cancellation after work admission releases payload back to baseline, then reads value 7 from a retained Result after context retirement and verifies the two-source association.
-
-Run the focused repository test with:
-
-```sh
-cmake --build build/kernel-dev --target test_dependency_sampling -j8
-ctest --test-dir build/kernel-dev -R '^test_dependency_sampling$' --output-on-failure
-```
-
-Installed consumers exercise the public Result workflows for STMap and radius, including demand replacement and generation behavior. Reproduce the package checks with:
-
-```sh
-cmake --install build/kernel-dev --prefix build/kernel-dev/consumer-install
-cmake -S tests/consumer -B build/kernel-dev/consumer-build -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/consumer-install"
-cmake --build build/kernel-dev/consumer-build --target photospider_dependency_workflow photospider_sampling_consumer -j8
-ctest --test-dir build/kernel-dev/consumer-build -R '^(installed_dependency_sampling|installed_dependency_radius_workflow)$' --output-on-failure
-```
+`tests/integration/test_dependency_sampling.cpp` covers the five boundaries, map frame/layer broadcasting, a three-pixel identity map, and a sparse read from a 2^40-by-2^40 broadcast source backed by 16 payload bytes. It also checks that a zero-weight tap remains dirty evidence, constant-boundary taps request no source payload, Empty skips a nonfinite map, and the 10-by-10 fixture adds less than 1 MiB of live payload between the before/after measurements. That fixture delta is not a context payload limit, peak-memory bound or RSS claim. With source `atomic_trailing_axes=2`, Validation closes over the complete source row (the fixture has `H=1,W=3`), while Data remains limited to selected taps. A nonfinite RGB component in a zero-weight typed tap fails source validation with `InvalidArgument`; a nonfinite map coordinate fails in the operation with `OperationFailed` first. Four caller rounding modes produce the same tie result and restore the caller mode. The test also checks active cancellation after work admission releases payload back to baseline, then reads value 7 from a retained Result after context retirement and verifies the two-source association.
 
 ## Result radius gather and scatter
 
@@ -112,7 +96,7 @@ Radius state carries the requested-output cursor, at most 64 candidate indices, 
 
 STMap and radius definitions use `OperationDefinition::specialize_metadata` for static Result validation. The registry supplies complete input Result metadata and parameters; the specializer validates the declared constraints and returns the inferred output schema before execution. It does not read tensor payload. `OperationRegistry::start_result` then validates the resolved `ResultProgramQuery` and invokes the definition factory to create its continuation. During execution, `ResultContinuation::poll` receives the current `ResultProgramPhase`, including the callback's authorized Result inputs and services; the coordinator fulfills Needs between polls.
 
-`test_dependency_sampling` covers seeded gather/scatter cases, exact Data/Control/Validation supports, radius edits that change support without changing output bits, typed and opaque facets, included nonfinite values, ordered sums, Empty demand, cancellation and Root rollback. A broadcast view with `N=2^40` and eight payload bytes per input supports a gather of the last sample without scanning distant Control values. The [G4 `--radius-only` workflow](../../examples/g4_workflow/README.md) covers Result-based dynamic edits, demand replacement and retained-output behavior. STMap coverage is described above.
+`tests/integration/test_dependency_sampling.cpp` covers seeded gather/scatter cases, exact Data/Control/Validation supports, radius edits that change support without changing output bits, typed and opaque facets, included nonfinite values, ordered sums, Empty demand, cancellation and Root rollback. A broadcast view with `N=2^40` and eight payload bytes per input supports a gather of the last sample without scanning distant Control values. Current end-to-end demand and dynamic-binding coverage lives in [`dependency_workflows/demand.cpp`](../../tests/integration/dependency_workflows/demand.cpp), [`dynamic.cpp`](../../tests/integration/dependency_workflows/dynamic.cpp), and [`dependency_workflow_fixture.hpp`](../../tests/support/dependency_workflow_fixture.hpp). The independent STMap mapping, boundary and numeric oracle is in [`test_dependency_sampling.cpp`](../../tests/integration/test_dependency_sampling.cpp). These are the current behavior entry points.
 
 ## Generic tuple observations and numeric diagnostics
 

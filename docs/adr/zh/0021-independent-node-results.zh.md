@@ -81,7 +81,7 @@ class ExecutionContext {
 
 以上 class 摘录省略了其他无关成员。
 
-这些 C++ 声明展示结果路由字段，省略了外围类型和校验。`OperationTraits` 以声明顺序保存输出。当前记录版本是 20；当前 package 为 0.28.0，C operation ABI 为 11。每个输出都有唯一名称及独立推断的 descriptor 和 facet 集。C operation descriptor 采用相同的有序模型，最多包含 64 项。多输出 operation 必须确定且无副作用。单输出 operation 明确声明 `value`。
+这些 C++ 声明展示结果路由字段，省略了外围类型和校验。`OperationTraits` 以声明顺序保存输出。每个输出都有唯一名称及独立推断的 descriptor 和 facet 集。C operation descriptor 采用相同的有序模型，最多包含 64 项。多输出 operation 必须确定且无副作用。单输出 operation 明确声明 `value`。
 
 Workflow 边按名称选择精确的 producer 端口。调用方可见的 `WorkflowOutput` 选择 node 与 port，再为结果指定唯一标签。Compiler 将输出名解析为声明顺序索引，并用 `ValueRef` 记录结果。静态推断使用完整输入元数据；输出的 `input_indices` 投影决定其可执行输入祖先和 callback 视图。投影后的 C callback 输入仍携带原始 schema 索引。
 

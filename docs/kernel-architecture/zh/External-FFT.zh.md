@@ -30,7 +30,7 @@ Spectrum samples 是 Float64 实部/虚部对，按声明的慢到快轴顺序�
 
 ForwardReal 与 ImportResponse 的数值输入依据 tensor type 和精确 shape 验证，不要求固定的输入 Result schema ID。Multiply 和 InverseReal 的 Spectrum 输入必须匹配完整声明 schema。
 
-`photospider.fft_real_output` 保存 H*W 个 Float64 像素和一个 Float64 `imaginary_residual`。`fft_inverse_identity_v1` facet 保留完整 Spectrum 契约。残差为 `max(abs(imag(inverse/HW)))`，是实测诊断值，不是误差证书。
+`photospider.fft_real_output` 保存 H*W 个 Float64 像素和一个 Float64 `imaginary_residual`。`fft_inverse_identity_v1` facet 保留完整 Spectrum 契约。
 
 ## 3. 调度与状态机
 

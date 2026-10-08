@@ -49,7 +49,7 @@ Color coordinates 可记录空值或 `relative`/`absolute` scale、可选描述�
 
 ## 3. 调度与状态机
 
-`ps::format::assign_metadata` 先检查编辑语法、类型、选项、路径重叠和有界事务编码，再追加一个节点。Compiler 随后解析源相关 selectors 并校验完整候选。当前注册使用 Result operation ABI 2、WorkflowDocument 5、OperationTraits 24 和 package 0.32.0。每个输入 Result 恰有一个 tensor member 且没有 fields。内部 node 可以提供可选 canonical schema assertion；public helper 不会设置它。
+`ps::format::assign_metadata` 先检查编辑语法、类型、选项、路径重叠和有界事务编码，再追加一个节点。Compiler 随后解析源相关 selectors 并校验完整候选。当前注册使用 Result operation ABI 2、WorkflowDocument 5、OperationTraits 25 和 package 0.33.0。每个输入 Result 恰有一个 tensor member 且没有 fields。内部 node 可以提供可选 canonical schema assertion；public helper 不会设置它。
 
 ```text
 authoring：校验编辑语法 -> 编码有界事务 -> 追加节点
@@ -116,4 +116,4 @@ OCIO snapshot 包含显式 config 字节、完整排序的逻辑文件映射、�
 - 静态 authoring 受 facet 和 transaction 限制；其 preparation path 没有运行时 cancellation token。运行时资源准入使用对应的根预算与取消检查。
 - Metadata 编辑会禁用 sample-only cache reuse，因为输出 identity 包含 metadata。
 
-资源准入、复制或 hash 失败会阻止发布并释放未发布 owner。Result header 可以移除资源引用，而旧 view 仍持有样本 backing；删除 facet 不保证所有祖先分配立即释放。当前 Result focused CTest 5/5 通过，public workflow 通过，installed consumer 的 2/2 检查通过。这些测试没有覆盖与 `channel.extract` 或 `channel.assemble` 的跨家族组合。旧 [metadata_performance](../../../examples/metadata_performance/README.md) 测量 Value/planar 执行，不是这些 Result operation 的性能证据。
+资源准入、复制或 hash 失败会阻止发布并释放未发布 owner。Result header 可以移除资源引用，而旧 view 仍持有样本 backing；删除 facet 不保证所有祖先分配立即释放。当前行为由已注册的 metadata assignment 测试和 installed consumer fixture 覆盖。Result allocation 与 work admission 不限制 RSS，block-cache 观察也不构成性能结论。

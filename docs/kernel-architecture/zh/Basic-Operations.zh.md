@@ -46,14 +46,14 @@ Histogram 将 `[range_min,range_max]` 等分为多个区间。每个 bin 左闭�
 
 非法静态参数返回 `InvalidArgument`。dtype、shape、facets 或图像 metadata 不兼容返回 `TypeMismatch`。非有限算术样本、数值坐标塌缩、计数溢出或不可表示的结果返回 `OperationFailed`。Typed Result source validation 遵循其输入错误契约，可返回 `ErrorCode::InvalidArgument` 和 `FailureReason::InvalidDomain`，并保留来源 `input_id`。取消和资源耗尽保留各自状态码。这些 Result 操作仅在 Result transaction 成功后发布。
 
-图像 Result 契约使用 `photospider.image` v1、单个 `pixels` tensor、canonical RGBA 或 coverage semantics，以及 tensor spec 声明的 layout。它不使用 legacy `Value` planar capability flag。
+图像 Result 契约使用 `photospider.image` v1、单个 `pixels` tensor、canonical RGBA 或 coverage semantics，以及 tensor spec 声明的 layout。
 
 ## 公开 workflow 与检查
 
-[`examples/numeric_workflow/README.md#basic-curves-fields-and-analysis-results`](../../../examples/numeric_workflow/README.md#basic-curves-fields-and-analysis-results) 展示 Result 曲线、field、levels、histogram 和 smoothstep-to-mask workflow。[`examples/foundations_workflow`](../../../examples/foundations_workflow/README.zh.md) 展示 Result numeric、expression/LUT 和 generator-gain workflow。[`test_basic_operations.cpp`](../../../tests/integration/test_basic_operations.cpp) 覆盖这些基础 Result 契约和其余 field/image 行为；[`test_numeric_result_math.cpp`](../../../tests/integration/test_numeric_result_math.cpp) 覆盖有限逐元素 Result key；[`test_builtin_result_images.cpp`](../../../tests/integration/test_builtin_result_images.cpp) 覆盖 `image.mix` 等 Result 图像程序。
+[`examples/numeric_workflow/README.md#basic-curves-fields-and-analysis-results`](../../../examples/numeric_workflow/README.md#basic-curves-fields-and-analysis-results) 展示 Result 曲线、field、levels、histogram 和 smoothstep-to-mask workflow。[`examples/foundations_workflow`](../../../examples/foundations_workflow/README.zh.md) 展示 Result numeric、expression/LUT 和 generator-gain workflow。[`test_basic_operations.cpp`](../../../tests/integration/test_basic_operations.cpp) 覆盖这些基础 Result 契约和其余 field/image 行为；[`test_numeric_result_math_arithmetic.cpp`](../../../tests/integration/numeric/test_numeric_result_math_arithmetic.cpp) 覆盖算术 Result keys；[`test_result_image_composite.cpp`](../../../tests/integration/image/test_result_image_composite.cpp) 覆盖 `image.mix` 等 Result 图像合成。
 
 ```sh
-cmake --build build/kernel-dev --target test_basic_operations photospider_numeric_basic -j8
-ctest --test-dir build/kernel-dev -R '^test_basic_operations$' --output-on-failure
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_basic
+cmake --build <build-dir> --target test_basic_operations test_numeric_result_math_arithmetic test_result_image_composite photospider_numeric_basic -j8
+ctest --test-dir <build-dir> -R '^(test_basic_operations|test_numeric_result_math_arithmetic|test_result_image_composite)$' --output-on-failure
+<build-dir>/examples/numeric_workflow/photospider_numeric_basic
 ```

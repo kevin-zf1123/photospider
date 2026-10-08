@@ -2,13 +2,13 @@
 
 ## 1. Scope and ownership
 
-The compiler owns immutable descriptions of graph structure and inferred metadata. Each execution receives named input owners and creates runtime Values or PlanarImages. `ExecutionResult` owns the requested named outputs and diagnostics; returned storage remains alive through shared owners and resource leases.
+The compiler owns immutable workflow structure and inferred metadata. Structured operations exchange `ResultRef` owners through named bindings; a Result contains typed tensor slots, packed fields, or both. `Value` remains a typed backing and local data container, while `PlanarImage` provides image storage and import facilities. Returned Result owners retain their storage, resources, and accounting leases after the execution context retires.
 
 ## 2. Core structures and memory layout
 
 ```cpp
 struct WorkflowDocument {
-  std::uint32_t schema_version = 3;
+  std::uint32_t schema_version = 5;
   std::vector<WorkflowInputDeclaration> inputs;
   std::vector<WorkflowNode> nodes;
   std::vector<WorkflowOutput> outputs;
@@ -26,10 +26,7 @@ class Value {
 
 struct ExecutionBinding {
   std::string name;
-  Value value;
-  std::shared_ptr<const RegionalSource> source;
-  std::shared_ptr<const InputSnapshot> snapshot;
-  std::shared_ptr<const PlanarImage> image;
+  ResultRef result;
 };
 
 class PlanarImage {
@@ -42,7 +39,7 @@ class PlanarImage {
 };
 ```
 
-`WorkflowDocument` is copied compiler input. Its nodes carry operation keys, ordered input references, typed parameters, and named output selections. Input declarations describe fixed metadata; execution bindings provide the corresponding payload or image owner. Plans keep declaration metadata, not caller pixel addresses.
+`WorkflowDocument` is copied compiler input. Its nodes carry operation keys, ordered input references, typed parameters, and named output selections. Input declarations require a fixed `result_schema`; compiler validation rejects a missing schema with `InvalidArgument`. Execution bindings provide the corresponding owning `ResultRef`, whose schema and static metadata are checked against that declaration. Plans keep declarations and selected resource identities, not caller sample addresses.
 
 A generic `Value` has a nonzero rank-1-to-8 descriptor, a logical `Region`, a `StridedLayout`, up to 64 unique facets, and shared immutable CPU-accessible storage. Its element types are `UInt8`, `Int8`, `UInt16`, `Int16`, `Int64`, `Float32`, and `Float64`. `Value::create` validates shape and coverage, stride count and addressed byte span, element type, and facet/resource consistency before publishing. Negative and zero strides are valid when every addressed byte remains in the backing allocation. Copies share storage and expose no writable pointer.
 
@@ -64,27 +61,29 @@ WorkflowDocument -> declarations + inferred descriptors -> ExecutionPlan
                                                     ExecutionRun
                                            +-------------+-------------+
                                            |                           |
-                                     generic Value              PlanarImage
+                                  Result producers and typed tensor slots
                                            |                           |
-                                  named result Value          named result image
+                                  named Result outputs      dependency evidence
                                            +-------------+-------------+
                                                          v
                                                 ExecutionResult
 ```
 
-`ExecutionBindings` uses exact names. Ordinary generic execution accepts one of `Value`, `RegionalSource`, or `InputSnapshot` for a generic input; a planar declaration selects `image`. In planar execution, a non-planar declaration accepts a matching `Value` only, while a planar declaration requires `PlanarImage`. Execution checks declaration names and metadata before callbacks. Image binding also checks descriptor, facets, structural layout, and plan tile geometry. The plan does not capture runtime addresses, so separate immutable bindings can execute the same current plan independently or concurrently.
+`ExecutionBindings` uses exact names and supplies Result owners for structured operation inputs. Binding checks the declaration schema and static metadata before callbacks. The plan does not capture runtime addresses, so separate immutable bindings can execute the same current plan independently or concurrently. `Value` and `PlanarImage` may provide local or backing storage, but they are not alternate structured operation ports.
 
-Workflow input declaration ids and node ids use separate namespaces. A document may contain up to 4096 declarations; each declaration has a unique nonzero id and unique 1-to-128-byte printable ASCII name (`0x21` through `0x7e`). Compiler stages carry declarations in id order. Each declaration fixes a complete descriptor, whole Region, canonical dense input layout, and exact facet set; planar declarations use `planar_layout` with an empty affine layout.
+Planning retains two closures. The metadata closure follows every static input of output-reachable operations so schemas, specialization, and identity remain complete. The executable closure starts at named outputs and side-effect roots, then follows only each selected output's `input_indices`; when an output does not declare a projection, all of that node's inputs are executable. Backend placement and admission apply to the executable closure. An input used only for metadata still undergoes static validation and contributes to identity, but its producer does not run. A directly requested GPU-only output remains unavailable in `CpuExact` mode.
 
-During planar execution, the Run pins external image owners against publication and admits their stable resident capacity. Repeated references to the same owner and same-context result rebinding share one accounting entry. Ordinary read windows still permit publication to disjoint regions. See [Tensor storage and region access](../kernel-specs/Tensor-Storage-and-Region-Access.md) for page, tile, and publication geometry.
+Workflow input declaration ids and node ids use separate namespaces. A document may contain up to 4096 declarations; each declaration has a unique nonzero id and unique 1-to-128-byte printable ASCII name (`0x21` through `0x7e`). Compiler stages carry declarations in id order. Every Result input declaration carries its complete schema; a missing schema is rejected with `InvalidArgument`. The compiler resolves input-derived extents from static input domains without reading payload samples.
 
-`ExecutionResult` can contain named generic Values, named PlanarImages, supported structured results, and diagnostics. Planar images have no implicit dense Value export. Each result owner retains the leases needed by its storage until its final release.
+When a Result binding references storage outside the execution root, the runtime admits its retained capacity under `Referenced`. A published view keeps its source Result and backing owners alive. Result tensor reads use the captured descriptor and the requested authorized region; see [Structured Results and tensor slots](Global-Results.md) for publication and window ownership.
+
+`ExecutionResult` contains named Result outputs, dependency evidence, and diagnostics. Each returned Result retains the leases needed by its storage until its final owning reference is released.
 
 ## 4. Algorithms and validation
 
-For a dense generic input, the compiler validates the packed byte count using checked products without allocating payload. The byte count must be positive, the last addressable byte must fit `INT64_MAX`, and the total must fit `SIZE_MAX`; stored row-major strides must fit their signed representation. General runtime Values can use non-dense strided layouts and partial Regions when their addressed span fits storage.
+Result schemas describe logical sample domains; the compiler does not require their dense element product or packed byte count to fit a machine allocation size. For an output whose port kind is `RgbaFloat32`, the planner checks that the packed dense size is representable; Result planning does not estimate dense payload bytes. Actual `Value` backing creation validates allocation size and addressed byte span, and its strides must fit the signed representation. A Result may describe a much larger logical domain than its physical backing, for example a broadcast view over a small allocation.
 
-An image input declaration carries `planar_layout`; its affine layout is empty because tiled addresses cannot be represented by ordinary strides. The layout describes axes, storage mode, row pitch, and component groups. Each operation declares planar output support independently. `PlanningOptions` supplies one DAG tile geometry, which execution checks against bound images.
+Result tensor schemas describe logical axes and optional spatial layout. Physical tiled addresses are not represented by ordinary affine strides. Each operation declares supported Result metadata and execution behavior; `PlanningOptions` supplies physical tile geometry where spatial planning uses it.
 
 Float32 Values preserve binary32 payload bits. A scalar or operation contract validates any numeric domain it consumes; storage accepts the element representation independently from that domain.
 
@@ -92,5 +91,5 @@ Float32 Values preserve binary32 payload bits. A scalar or operation contract va
 
 - Results are in-memory values. They have no durable identity, receipt, serialization, or recovery contract.
 - The data-definition registry stores copied schema metadata from trusted startup registrations or DSOs; it does not allocate Values or provide storage.
-- Structural planar callback support is operation-trait and entry-point specific. An unsupported combination returns a typed failure before legacy image code can run.
+- Structural image support is declared by the Result tensor schema and operation contract; an unsupported combination returns a typed failure during validation or planning.
 - `CpuStorage` exposes CPU-accessible immutable bytes and may retain completed native storage. Device handles remain private.

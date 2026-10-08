@@ -17,8 +17,9 @@ These guides describe the kernel's current contracts and runtime behavior. Engli
 
 ## Workflows and focused topics
 
-- [Foundations workflows](../../examples/foundations_workflow/README.md): runnable installed-package example and its current scenarios.
-- [G4 GPU workflow](../../examples/g4_gpu_workflow/README.md): native GPU execution example.
+- [Result quickstart](../../examples/result_quickstart/README.md): a minimal installed-package operation and workflow.
+- [Foundations workflows](../../examples/foundations_workflow/README.md): runnable installed-package examples and their current scenarios.
+- [GPU integration tests](../../tests/integration/gpu/): registered GPU behavior coverage; hardware-dependent cases report skip when unavailable.
 - [Integer statistics](Integer-Statistics.md): paged histogram and streaming grade operations.
 - [External-axis FFT](External-FFT.md): bounded generations and FFT result contracts.
 - [Paged connected components](Paged-Components.md): connected-component labels and bounded filtering.

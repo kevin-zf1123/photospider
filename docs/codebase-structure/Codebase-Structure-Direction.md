@@ -10,7 +10,6 @@ Only `include/photospider/**` is installable:
 
 ```text
 include/photospider/
-  benchmark/     raw benchmark observations and correctness oracle
   compiler/      WorkflowDocument, typed IR, plan, typed identities, compiler
   execution/     context, cancellation, result, raw diagnostics
   data/          Value, Region, explicit layout and immutable bytes
@@ -27,7 +26,6 @@ policy, server, daemon, worker, evidence, or durable-result header.
 
 ```text
 src/lib/
-  benchmark/
   compiler/
   data/
   graph/
@@ -78,6 +76,8 @@ targets use `snake_case`. A complete rename updates declarations, definitions,
 includes, tests, CMake, public documents, mirrors, and tracked Issues without
 aliases. Private OpenSpec working notes have no authority over the rename.
 
-Every added or changed class, struct, enum, function, important field, and
-anonymous helper has complete Doxygen covering behavior, parameters, return,
-exceptions, threading, ownership, lifetime, and cache/scheduling effects.
+Public API documentation describes applicable parameter constraints, return and
+error behavior, ownership, lifetime, thread-safety, and cache or scheduling
+constraints when they affect the contract. Internal comments explain non-obvious
+state transitions, budget ownership, and reclamation order; routine helpers do not
+each need exhaustive Doxygen documentation.

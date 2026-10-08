@@ -8,7 +8,7 @@ The installed `Photospider::kernel` target provides:
 
 - schema-5 `WorkflowDocument` source graphs and immutable per-run `ExecutionBindings`;
 - typed semantic IR and optimized IR;
-- Result operation C ABI 2 and OperationTraits 24 with closed typed parameter schemas, optimization, and Region-demand-aware local physical planning;
+- Result operation C ABI 2 and OperationTraits 25 with closed typed parameter schemas, optimization, and Region-demand-aware local physical planning;
 - CPU-required and GPU-optional local execution;
 - operation support is defined by each registered contract; see [image operations](docs/kernel-architecture/Image-Operations.md) and the [built-in operations index](docs/built-in_ops/README.md);
 - reusable numeric, channel/alpha/color, bounded expression/LUT and component operations;
@@ -36,10 +36,8 @@ CPU exact execution is the default. `ExecutionMode::NativeGpu` grants native pla
 
 ```bash
 cmake --install build --prefix /desired/photospider-prefix
-```
-
-```cmake
-find_package(Photospider 0.32 CONFIG REQUIRED COMPONENTS kernel)
+cmake
+find_package(Photospider 0.33 CONFIG REQUIRED COMPONENTS kernel)
 target_link_libraries(app PRIVATE Photospider::kernel)
 ```
 
@@ -51,15 +49,13 @@ Extension authors request only the narrow component they use:
 | Operation ABI headers | `operation_sdk` | `Photospider::operation_sdk` |
 | Data-provider ABI header | `data_provider_sdk` | `Photospider::data_provider_sdk` |
 
-There is no policy SDK, worker executable, server component, evidence target, or legacy preset.
-
 ## Local daemon
 
 The separate [`photospider-daemon`](https://github.com/kevin-zf1123/photospider-daemon) repository owns local IPC and ephemeral Session/Job orchestration, while the kernel owns compilation, execution, values, and execution resources. The daemon consumes the installed public kernel package; compatibility with a particular daemon revision is not established by this repository.
 
 ## Composable workflows
 
-The self-contained [foundations example](examples/foundations_workflow) builds against an installed 0.32 package. Its default `all` selector runs numeric and expression/LUT scenarios with result checks. The README documents repository and installed-package build commands.
+The [Result quickstart](examples/result_quickstart/README.md) builds against the installed 0.33 package and runs a public Result operation through a compiled workflow. Its checked output is `answer=42`. The [foundations workflows](examples/foundations_workflow/README.md) provide broader current examples.
 
 ## Documentation
 
@@ -68,8 +64,8 @@ The self-contained [foundations example](examples/foundations_workflow) builds a
 | Current ownership and behavior | [Architecture overview](docs/kernel-architecture/Overview.md) |
 | Canonical terms | [Kernel terminology](docs/kernel-architecture/Terminology.md) |
 | Compiler and local execution | [Compiler and execution](docs/kernel-architecture/Compiler-and-Execution.md) |
-| Native GPU workflow example | [G4 GPU example](examples/g4_gpu_workflow/README.md) |
-| Composable foundations | [Foundations example](examples/foundations_workflow/README.md) |
+| Minimal public Result workflow | [Result quickstart](examples/result_quickstart/README.md) |
+| Composable workflows | [Foundations examples](examples/foundations_workflow/README.md) |
 | Image contracts and execution boundaries | [Image operations](docs/kernel-architecture/Image-Operations.md) |
 | Values and memory | [Data model](docs/kernel-architecture/Data-Model.md) |
 | Operation/provider ABI | [Plugin ABI](docs/kernel-architecture/Plugin-ABI.md) |

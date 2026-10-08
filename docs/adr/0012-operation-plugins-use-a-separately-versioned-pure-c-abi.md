@@ -29,11 +29,11 @@ ps_result_operation_plugin_get_api_v2(void);
 const ps_data_provider_api_v1 *ps_data_provider_get_api_v1(void);
 ```
 
-The operation-plugin C contract is the standalone Result ABI 2 table. It declares Result ports, tensor members, fields, staged callbacks, dependency relations, and Result publication. The data-provider C table remains independently versioned at ABI 1. The former base operation ABI 11 and planar operation C table have been removed; C++ `Value` and dependency APIs remain separate in-process interfaces. See [Plugin ABI](../kernel-architecture/Plugin-ABI.md) for the current table layout and callback contract.
+The operation-plugin C contract is the standalone Result ABI 2 table. It declares Result ports, tensor members, fields, staged callbacks, dependency relations, and Result publication. The data-provider C table remains independently versioned at ABI 1. See [Plugin ABI](../kernel-architecture/Plugin-ABI.md) for the current table layout and callback contract.
 
 The loader checks exact Result ABI version and structure size, natural pointer/array alignment, pointer/count pairs, bounded counts and key lengths, strict UTF-8 keys, checked arithmetic, closed enum/flag combinations, required callbacks, input/output schema constraints, parameter/facet bounds and exactly-once destroy ownership. Runtime publication checks actual tensor and field coverage. Multi-record updates use copy-then-swap, so allocation failure or a later invalid record cannot publish a valid prefix. A library guard acquires ownership immediately and invokes any safely readable destroy callback before closing each rejected library. Published plugin tables are destroyed before unload.
 
-Result callbacks receive borrowed query and phase-service records. The host checks Needs, typed relations, publication coverage, resource limits, cancellation, and backend fallback before exposing a Result. GPU allocation tokens and owning tensor windows retain backing ownership until release or callback retirement; ordinary service pointers expire when the callback returns. The registry is frozen before compiler and executor use. The former Base C ABI is not loaded as a fallback.
+Result callbacks receive borrowed query and phase-service records. The host checks Needs, typed relations, publication coverage, resource limits, cancellation, and backend fallback before exposing a Result. GPU allocation tokens and owning tensor windows retain backing ownership until release or callback retirement; ordinary service pointers expire when the callback returns. The registry is frozen before compiler and executor use.
 
 ## 4. Non-Goals & Explicit Boundaries
 - ABI validation is not a sandbox, signature verification, package admission, or crash isolation.

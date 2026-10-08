@@ -81,29 +81,15 @@ C receipt 返回规范化的 `ps_result_discovery_request_v2` records，其中�
 
 Table bytes、取整后的 native capacity、candidate work、decode work 与 request metadata 分别计入相应 Root/dependency 限额。Read 和 atlas 仍受当前 Need 限制。Discovery callback 不能发起新 Need、发布 output、进入 block callback 或递归调用 discovery。未执行 native work 的 callback 会以 `OperationFailed` 失败。已提交 dispatch 排空后才释放 table owners。
 
-### G4 Result discovery workflow
+## 已注册 workflow 与 decoder 覆盖
 
-`examples/g4_gpu_workflow/discovery_plugin.c` 注册 Result ABI 2 C operation。输入为 8,192 个样本的 rank-one Float32 data Result 与 Int64 control Result。GPU callback 通过 atlas 读取已供给的 Control sample，发出需要的数据 rectangles 并执行 Result discovery shader。Host 把这些 rectangles 附加为 tensor Needs；下一次 poll 读取新供给的数据并发布 output tensor。
+当前 C discovery fixture 是 [`tests/fixtures/gpu_result_discovery_plugin.c`](../../../tests/fixtures/gpu_result_discovery_plugin.c)，由 [`tests/integration/gpu/test_gpu_discovery_workflow.cpp`](../../../tests/integration/gpu/test_gpu_discovery_workflow.cpp) 加载。Fixture 绑定 rank-one Float32 data 与 Int64 control Results，通过 atlas 获取当前 Control Need，发出选定的数据 intervals，并在下一次 poll 供给这些 intervals 后才发布。独立期望输出为 `8` 和 `24`；Metal 路径断言四次 native dispatch。Control 编辑会改变选中的 Data support，frozen execution 则保留捕获时的 Result。同一 integration 源码还覆盖 malformed records、overflow、device 缺失、publication failure、取消、Root 清理和 retry。
 
-当前 workflow 在 CPU 和 Metal 上都返回 `8,24`；Metal 路径执行四次 dispatch。实际 GPU workflow 使用 rank-one tensor 和 slot 0。修改 Control 后，第一个结果变成 24，其 Data support 更新为 `{1,4097}`。Frozen execution 仍返回 8。Workflow 检查非法 Control 值、table overflow、过早 publication，以及通过 `maximum_gpu_requests=0` 禁用 discovery。
+Decoder 与 normalization 源测试为 [`tests/unit/test_gpu_discovery.cpp`](../../../tests/unit/test_gpu_discovery.cpp) 和 [`tests/unit/test_result_gpu_discovery.cpp`](../../../tests/unit/test_result_gpu_discovery.cpp)。它们覆盖 rank-8 坐标、非零 tensor slot、batch/channel closure、role grouping、非法范围和资源限制。CMake 在 `tests/consumer/CMakeLists.txt` 注册 `installed_gpu_discovery_workflow`；它使用安装包，并在 Metal 不可用时返回配置好的 skip code。这些注册项指出可执行覆盖，不表示以前某次运行已通过。
 
-`test_result_gpu_discovery` 独立检查 decoder 的 rank-8 坐标、tensor slot 1、batch/channel closure 与不同 role groups。这些是 decoder 用例，不是 native workflow 所用的 shape 或 slot。
+Discovery 必须在当前 callback entry thread 执行。C++ `ResultProgramPhase::consume_work` 可从 worker thread 计费；C discovery service 仍限于 entry thread。Work 与 metadata 限额跨 active poll 中的调用累计，每次调用也消耗 Run 和 Root work。重复记录仍消耗 emission 与 normalization work。
 
-Discovery 必须从当前 callback 的 entry thread 调用。C++ API 的 `ResultProgramPhase::consume_work` 可以由 worker threads 并发计费；C discovery services 仍只允许在 entry thread 调用。从 worker 调用 `discover` 会在 compute callback 执行前失败。线程用例由两个 worker 通过 `consume_work` 各计入 4,096 units：8,512 限额会拒绝，8,513 会准入并执行一次 native dispatch。Workflow 还检查跨 poll 的 discovery-work 和 Run-work：8,192-unit 限额可以完成单样本请求；双样本请求会在后续 poll 中耗尽累计预算，不会重新获得完整预算。
-
-C workflow 将 receipt handle 保存在 operation state 中，直到恢复后的 poll 复制规范化请求并释放 handle。Request-table pointer 仅在同步 discovery callback 期间借用。GPU token 遵循外层 poll 的生命周期，但 discovery 返回时 host 会冻结 table；之后通过该 token 写入会失败。失败用例检查 discovery table/atlas owners 退休后，Root Payload 恢复到仅保留 source 的水平，不进入 result cache，并允许重新执行一次 native retry。
-
-可用以下命令构建并运行 native workflow 与 standalone decoder 测试：
-
-```sh
-cmake --build build --target test_gpu_discovery_workflow test_result_gpu_discovery -j 8
-ctest --test-dir build -R '^(test_gpu_discovery_workflow|test_result_gpu_discovery)$' --output-on-failure
-```
-
-安装 consumer 测试名为 `installed_gpu_discovery_workflow`，位于已配置的 `build/consumer-build`。它使用安装后的 kernel package，并运行相同的 rank-one、slot-zero native workflow。
-
-容量为 128 的准入案例使用 132,400 字节 Root live-payload 边界：输入绑定占 98,304 字节，continuation state 占 1,160 字节，取整后的 table storage 占 32,768 字节，Control atlas 占 168 字节。Fixture 在 132,399 字节时拒绝，在 132,400 字节时准入。此准入失败后 table owners 退休；在准入容量下的新 native query 随后成功。该边界仅适用于此 fixture。
-
+Capacity、candidate、Root 和 dependency 限额相互独立。读取与 atlas access 仍受当前 Needs 限制。Discovery 不能再发 Need、发布 output、进入 block callback 或递归调用 discovery。未提交 GPU work 的 native callback 返回 `OperationFailed`。表 owner 退休前会排空已提交的 dispatch。
 ## MSL discovery emitter 与 wire 兼容性
 
 `PS_RESULT_GPU_DISCOVERY_MSL_V2` 是 Result emitter，会把 input、tensor slot、roles 和 rank 写入每条 record 的前四个字段。`PS_GPU_DISCOVERY_MSL_V11` 仍作为 slot-zero record 的 wire 兼容 emitter 保留：第四个字段始终写零。v11 macro 定义 record 布局；执行和 Need 附加仍通过上文的 Result API 进行。

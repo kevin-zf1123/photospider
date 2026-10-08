@@ -71,7 +71,7 @@ struct OperationTraits {
 };
 ```
 
-以上为契约摘录，不是完整构造代码。当前 C++ `OperationTraits` 记录版本为 22。Package 版本为 0.30.0，operation plugin 使用 Result C ABI 2；旧 Base C 与 planar operation tables 已移除。Plugin descriptor 最多声明 64 个命名输出；输出名称唯一，并映射到声明顺序的索引。单输出 operation 明确使用 `value`。
+以上为契约摘录，不是完整构造代码。Operation plugin 使用 Result C ABI 2。Plugin descriptor 最多声明 64 个命名输出；输出名称唯一，并映射到声明顺序的索引。单输出 operation 明确使用 `value`。
 
 `ValueDescriptor` 的 rank 为 1 到 8，extent 均非零。元素类型与语义解释及内存布局相互独立。`Value` 可以是 strided；shape 推断描述逻辑样本，不意味着内存连续。样本位是否合法由 operation 或类型化语义契约负责，不由通用 Value 容器统一限制。输入约束可指定精确 dtype 或允许的 dtype mask、rank、semantic kind/facets，或有限标量区间。Registry 会在发布前拒绝互相矛盾或未知的约束字段。
 

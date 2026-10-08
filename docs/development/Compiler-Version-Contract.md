@@ -2,18 +2,18 @@
 
 ## Current contract
 
-The current package version is **0.32.0**. C++ consumers must rebuild against the package headers. The package uses `SameMinorVersion` compatibility, so requests for a different minor version are incompatible. The C operation-plugin interface remains Result ABI 2; its exact table and record sizes must match the installed SDK.
+The current package version is **0.33.0**. C++ consumers must rebuild against the package headers. The package uses `SameMinorVersion` compatibility, so requests for a different minor version are incompatible. The C operation-plugin interface remains Result ABI 2; its exact table and record sizes must match the installed SDK.
 
 | Contract | Current version |
 | --- | --- |
-| Package | 0.32.0 |
+| Package | 0.33.0 |
 | WorkflowDocument schema | 5 |
-| OperationTraits | 24 |
+| OperationTraits | 25 |
 | Operation plugin C table | Result ABI 2 |
 | Data provider C table | ABI 1 |
-| Semantic graph identity | `semantic-graph-ir-v19` |
-| Physical plan identity | `physical-plan-v19` |
-| Outer plan cache key | `plan-cache-key-v15` |
+| Semantic graph identity | `semantic-graph-ir-v20` |
+| Physical plan identity | `physical-plan-v20` |
+| Outer plan cache key | `plan-cache-key-v16` |
 | Optimizer identity | `optimizer-v5-canonical-noop` |
 | Tensor-description codecs | TDM4/TDM5, selected by the current codec rules |
 | Result schema canonical encoding | Version 3 |
@@ -24,7 +24,7 @@ These versions describe independent compatibility axes. A C++ layout change requ
 
 `WorkflowInputDeclaration` contains an id, exact binding name, and required `result_schema`. `ExecutionBinding` contains a name and owning `ResultRef`. `ExecutionResult` and `DemandResult` expose named Results; Value is internal typed backing used by Result storage and codecs. Input `OperationMetadata` carries the Result schema while its Value descriptor and facets stay empty. Tensor shape, layout, and semantic facets belong to each `ResultTensorSpec`.
 
-`OperationTraits` version 24 and `WorkflowDocument` schema 5 identify the current C++ contracts. An operation executes through `start_result` and its `ResultContinuation`; joint Result callbacks remain an optional grouped execution contract. `ExecutionContext::execute` returns named Results. Incremental publication uses `ExecutionOptions::result_publication`, which receives certified prefixes as they become available and may retain the owning Result reference. A prefix is not complete execution success. Callback failure stops the Run and follows the existing failure, cancellation, and callback-retirement rules.
+`OperationTraits` version 25 and `WorkflowDocument` schema 5 identify the current C++ contracts. An operation executes through `start_result` and its `ResultContinuation`; joint Result callbacks remain an optional grouped execution contract. `ExecutionContext::execute` returns named Results. Incremental publication uses `ExecutionOptions::result_publication`, which receives certified prefixes as they become available and may retain the owning Result reference. A prefix is not complete execution success. Callback failure stops the Run and follows the existing failure, cancellation, and callback-retirement rules.
 
 ## Result and image interface
 
@@ -38,4 +38,4 @@ The resolver supplies each output schema once through its synchronous metadata s
 
 Semantic identity includes operation contracts, typed Result schema, semantic metadata, parameters, ordered inputs, selected output, and captured query where applicable. Physical plan identity includes physical choices that affect execution. Page offsets and transient addresses are not semantic identity. Internal IR and plans are not serialization formats.
 
-The installed C++ headers, linked kernel library, and selected C table must describe the same package and ABI. The loader validates exact C table version and size before importing a module. Native GPU behavior additionally requires the selected backend and an available device. Package 0.32.0 defines the current C++ interface contract. Migration of retained operations, examples, and integration consumers remains incomplete. A version declaration alone is not evidence of local installation or external consumer validation.
+The installed C++ headers, linked kernel library, and selected C table must describe the same package and ABI. The loader validates exact C table version and size before importing a module. Native GPU behavior additionally requires the selected backend and an available device. Package 0.33.0 defines the current C++ interface contract. C++ layout and field removals are breaking changes; rebuild every C++ consumer against the installed 0.33.0 package. The package version file accepts compatible releases in the 0.33 minor line.

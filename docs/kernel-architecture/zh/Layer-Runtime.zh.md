@@ -6,7 +6,7 @@ Layer 值类型及纯算术 helper 仍属于 C++ API。Result schema validator �
 
 ## 1. 模块边界与所有权
 
-`layer.hpp` 定义内存值契约和纯计算。它不再提供 Layer operation factory 或可运行的 Layer Result workflow。调用者仍可直接把 `LayerPixel` 传给值 helper，无需创建 Result。Result schema validator 拒绝六个 ID：`photospider.layer`、`photospider.layer_response`、`photospider.raw_rgba_sum`、`photospider.layer_contributions`、`photospider.weighted_layer_sum` 和 `photospider.optional_layer`。
+`photospider/data/layer.hpp` 定义内存值契约和纯计算。公共 Result helper 使用的 cancellation、resource budget 和 allocator 位于 `photospider/core/`（例如 `photospider/core/resources.hpp` 和 `photospider/core/cancellation.hpp`）。`layer.hpp` 不提供 Layer operation factory 或可运行的 Layer Result workflow。调用者仍可直接把 `LayerPixel` 传给值 helper，无需创建 Result。Result schema validator 拒绝六个 ID：`photospider.layer`、`photospider.layer_response`、`photospider.raw_rgba_sum`、`photospider.layer_contributions`、`photospider.weighted_layer_sum` 和 `photospider.optional_layer`。
 
 图像 pipeline 将样本存入 Result Tensor，并通过 Result owner 和 read window 保留字段或 tensor backing。`PlanarImage` 可作为该 pipeline 内部的 typed backing。Layer 的 coverage/emission pair 仍是内存值，不定义图像 Tensor 存储或 Region 访问。
 

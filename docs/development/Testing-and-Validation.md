@@ -1,406 +1,66 @@
 # Testing and Validation
 
-This document describes maintained validation for the current kernel package. Tests exercise observable software behavior through repository targets and installed consumers.
+This guide describes the registered behavior tests and installed-package gates. CMake declarations in `CMakeLists.txt`, `cmake/BehaviorTests.cmake`, and `tests/consumer/CMakeLists.txt` define the executable, fixtures, dependencies, command, labels, timeout, and skip code for each test.
 
-## Build prerequisite
+## Configure and run
 
-Before configuring a checkout or source archive, download the pinned SLEEF
-3.9.0 source into `third_party/sleef/` using the
-[documented commands](../../third_party/SLEEF.md). This ignored directory must
-also be supplied for offline builds. CI checks out the same upstream commit
-separately before configuration; CMake never downloads it. Installed-package
-consumers do not need this source dependency.
-
-## Development loop
-
-During implementation, use scoped formatting/lint, affected targets, and
-focused tests. When a task explicitly requests a clean full validation, remove
-the selected ignored build directory, configure it from scratch, build all
-registered targets, and run the complete CTest inventory. If a failure requires
-a source change, rebuild the affected targets and rerun the affected tests; then
-repeat the complete build and CTest pass against the final source state. A clean
-validation does not imply sanitizer or cross-platform matrix coverage. Do not
-use Docker or local architecture emulation for native validation.
-
-## Required behavior areas
-
-Kernel tests cover:
-
-- WorkflowDocument and graph/IR/plan validation;
-- typed stage identity and canonical digest separation;
-- cross-registry IR/plan rejection even for equal operation keys;
-- CPU compile-plan-execute and optional GPU selection/fallback;
-- multiple independent graph/execution contexts;
-- one ExecutionContext-wide waiting-callback bound shared across deterministic
-  CPU/GPU FIFOs, recovery after a worker pop, and ordinary mixed-lane
-  concurrent Runs;
-- first-failure priority across no-GPU fallback denial, waiting-admission
-  rejection, backend queue rejection, and submission exception fallback:
-  cancellation precedes graph `Stale`, which precedes the original failure,
-  with no stale result and exact waiting/in-flight/resource recovery. Backend
-  submit rejection and exception-fallback cases use a GPU-enabled context, an
-  explicitly GPU physical plan, a present GPU lane, and exact `Backend::Gpu`
-  hook consumption; they prove no CPU callback substitutes for the GPU path
-  and that clearing the hook restores successful GPU execution. A separate
-  CPU queue-rejection case retains independent CPU coverage. Separate
-  no-sleep cancellation and stale races occupy the sole CPU worker, hold a GPU
-  callback in the target Run, and fault only external-stop `Status`
-  construction. After the target CPU callback enters the FIFO, an independent
-  CPU Run queues a successor sentinel behind it before the worker occupant is
-  released. Sentinel completion proves that the target callback was popped and
-  finished abandonment. With the GPU callback still held, the target future
-  remains incomplete; releasing that callback returns the selected code with
-  an empty diagnostic. Both cancellation and stale cases retire every callback,
-  and the same context succeeds with the current snapshot. A separate no-sleep
-  queued-attempt regression occupies the sole CPU worker and holds the target
-  Run immediately after its post-submit external-stop observation, while the
-  Run mutex remains held and before condition-variable waiting. This proves the
-  single-node side-effecting/non-cacheable target is already in the CPU FIFO
-  after the coordinator's last check. Graph replacement followed by Run-gate
-  and occupant release must return `Stale` with zero target entries; cancelling
-  and replacing at the same boundary must return `Cancelled` with zero entries.
-  Both futures converge and the same execution context runs a newly compiled
-  current plan successfully;
-- bounded ready work and `ResourceLedger` settlement;
-- cross-backend copy/backend labels, cancellation, stale completion, and
-  exception fences. A private condition-variable barrier holds a nontrivial
-  vector result only after named Values, diagnostics, digests, and execute
-  timing are complete; post-hook cancellation, graph replacement, and both
-  return respectively `Cancelled`, `Stale`, and `Cancelled`, publish no
-  `ExecutionResult`, and each is followed by a healthy execute proving exact
-  cleanup;
-- Value/Region/strided-layout/facet/buffer negative contracts;
-- operation/provider ABI version/size/alignment/pointer/count/bounds/lifetime,
-  including Result operation ABI 2 typed parameter schemas, demand views, and
-  deterministic owner-allocation failure with exact destroy/close counts. The
-  copy-aware C++ embedding test registers an rvalue callable that supplies a
-  Result continuation factory, then arms it to reject copies. After registry
-  freeze, `start_result` and `poll` publish a Float64 value of 41 with exactly
-  one factory call and no additional callable copy. A Result query with an
-  extra input is rejected as `InvalidArgument` without another factory call.
-  Loading a valid Result DSO into a separate unfrozen registry also succeeds
-  without copying or invoking the registered callable, and checks transactional
-  DSO loading. These checks cover immutable callable handles;
-- `test_prepared_workspace` covers Whole and Dependency-v2 Result
-  continuations. Static preparation adds 0 or 4096 bytes to a 16-byte workspace
-  declaration, and two executions of one compiled plan do not prepare it again.
-  The UInt8 output is respectively 0 or 17. A 2048-byte Payload limit rejects
-  the 4096-byte case with `ResourceExhausted`, and an additional workspace
-  request that overflows `UINT64_MAX` is rejected during preparation. Successful
-  and failed executions release their Root Payload allocations;
-- `test_result_exceptions` checks direct and compiled Result scalar, contract-1,
-  and contract-2 start/poll boundaries. A standard exception becomes
-  `OperationFailed` with `HostException` and its `what()` text (empty when null);
-  `std::bad_alloc` becomes `ResourceExhausted`, and a non-standard exception
-  becomes `OperationFailed` with the fixed `HostException` diagnostic. An
-  earlier allocation failure remains authoritative over a later exception, a
-  throwing failure observer cannot replace the producer's selected failure, a
-  failed joint poll stays latched without another callback, and Root Payload
-  returns to zero after the direct and workflow cases;
-- `test_backend_admission` exercises Result registration and startup. It rejects
-  an operation with no supported backend and a CPU-fallback declaration with
-  no CPU target. For a GPU-only operation, direct startup and CPU compilation
-  return `BackendUnavailable`; native-GPU planning succeeds, but a
-  GPU-disabled context rejects execution before entering its factory. A
-  GPU-targeted dual-backend operation with CPU fallback instead enters only its
-  CPU factory in that context, publishes UInt8 value 17, and records one
-  fallback reason with zero GPU factory entries.
-  `tests/consumer/CMakeLists.txt` registers the same sources as
-  `installed_result_exceptions` and `installed_result_backend_admission`;
-- Result invocation prevalidation in `test_plugin_registry`: direct
-  `start_result` rejects an unsupported GPU backend before checking malformed
-  input metadata. Missing Result schema in the first or final input slot
-  returns `TypeMismatch`; the fixture's `prepare_static` checks the expected
-  single Float64 tensor and shape. Rejected metadata does not enter the
-  operation factory. Compiled callbacks that return an invalid Result, the
-  wrong output tensor type, or incomplete tensor coverage fail with
-  `InvalidArgument` and Protocol detail. Other in-process Value APIs remain
-  separate;
-- `test_result_diagnostics` exercises exact and saturated `computed_elements`
-  for full-coverage zero-stride Result publication. The shared fixture also
-  runs from `test_plugin_registry`. Both focused tests passed locally; the
-  imported-kernel consumer registers `installed_result_diagnostics`, which
-  also passed;
-- exact operation/provider library path validation before native loading: an
-  explicit-length valid fixture path followed by embedded NUL and suffix is
-  `InvalidArgument`, publishes no operation key/provider schema, and reaches
-  none of the owner-allocation, native-load, or native-close test hooks;
-- real-DSO output-sink at-most-once enforcement: accepted-then-duplicate and
-  rejected-then-duplicate callbacks record exact sink returns `(1,0)` and
-  `(0,0)`, while success, backend unavailable, ordinary failure, and unknown
-  callback results plus callback-reported cancellation all become the same
-  stable terminal `OperationFailed`.
-  Duplicate backend unavailability performs zero CPU invocations and publishes
-  no output; a deterministic callback-held cancellation case proves host
-  cancellation remains higher priority. A null sink context has no side effect,
-  the following valid publication succeeds, and registry retirement still
-  destroys descriptors and closes the native lease exactly once;
-- real-DSO dense fixed-shape boundaries at `INT64_MAX + 1` bytes and rank-two
-  `{2, 2^62}`, rejection immediately above both limits, 32-bit host-size
-  representability through a compile-safe helper, and transactional
-  multi-descriptor rejection with exact destroy/close counts;
-- parameter unknown/missing/wrong-type/conflict rejection before semantic IR;
-- side-effecting/non-cacheable operation preservation across semantic,
-  optimized, and plan stages, plus serial repeated-execution callback order,
-  invocation counts, and absence of result reuse;
-- Whole/Elementwise/Halo demand propagation and execution-time coverage;
-- raw benchmark diagnostics with a named oracle or explicit `unchecked`
-  identity and without verdict/evidence output, including rejected/throwing
-  oracles that retain completed compile/plan/execute/operation/backend/digest
-  observations while reporting correctness separately. An execution
-  `Cancelled` result at any iteration aborts the whole run without publishing
-  a partial/success report. The runner also observes cancellation immediately
-  before and after a caller oracle and again at the final report-publication
-  linearization point. The oracle receives no token and cannot be preempted;
-  cancellation observed after it returns false or raises an ordinary exception
-  takes precedence over that oracle outcome, while cancellation after the
-  final publication observation does not revoke the returned report. Other
-  execution failures remain samples and later iterations continue. An
-  ordinary oracle exception with null `what()` becomes an `OperationFailed`
-  sample with an empty reason: its completed raw compilation/execution
-  diagnostics stay intact and a later iteration can still succeed. A separate
-  null-diagnostic cancellation case proves the post-oracle cancellation fence
-  remains top-level authoritative. Duration
-  assertions permit zero because the monotonic clock may have microsecond
-  resolution. Deterministic regressions cover an oracle barrier cancelled by
-  another thread, self-cancelling true/false/throwing oracles, a two-iteration
-  null-diagnostic-then-success sequence with exact diagnostic-field checks,
-  and the no-oracle post-execute window through the noninstalled test-kernel
-  seam.
-
-Daemon tests live in `photospider-daemon` and cover local frame validation,
-local method routing, ephemeral Session/Job lifecycle, restart loss,
-multi-Session behavior, cancellation, Session close, result release, shutdown,
-and the isolated installed-kernel boundary.
-
-## Installed boundary
-
-The package gate configures and installs Photospider to a fresh prefix, then
-configures an external C/C++ consumer using only
-`find_package(Photospider CONFIG REQUIRED)`. CI runs this gate for both the
-default static kernel and `BUILD_SHARED_LIBS=ON`. It verifies:
-
-- installed public headers compile through the consumer sources;
-  `operation_plugin.hpp` is the consumer's first include with compile-time
-  `element_type_value` and `noexcept` assertions. Exhaustive header
-  self-containment is a separate manual check, not this CTest;
-- the linked C SDK compilation unit runs, and a downstream shared bridge links
-  `Photospider::kernel`, executes the C++ compile/execute pipeline, and is
-  called by the consumer executable; the default static archive is therefore
-  exercised as position-independent input to a real shared library;
-- `kernel`, `operation_sdk`, and `data_provider_sdk` component discovery
-  exports exactly `Photospider::kernel`, `Photospider::operation_sdk`, and
-  `Photospider::data_provider_sdk`; the SDK targets are header-only. Configure-
-  time property checks require both the kernel and operation SDK targets to
-  carry `cxx_std_17`, require the pure-C provider target not to carry that C++
-  feature, and reject any stray `data_definition_sdk` target;
-- the downstream bridge and final executable declare only
-  `CXX_STANDARD=14`, `CXX_STANDARD_REQUIRED=ON`, and `CXX_EXTENSIONS=OFF` on
-  themselves. Neither target privately requests C++17. The linked imported
-  kernel and operation SDK usage requirements raise their actual compilation
-  to C++17. Both translation units enforce that result with a compiler-
-  appropriate static assertion: `_MSVC_LANG` when that macro is defined by an
-  MSVC-compatible frontend, and `__cplusplus` otherwise. The consumer adds no
-  private `/std:c++17` flag and does not require `/Zc:__cplusplus`; the imported
-  usage requirements remain the source of dialect elevation. The linked pure-C
-  SDK probe remains an explicit C11 translation unit and receives no C++
-  standard flag;
-- the removed `data_definition_sdk` target is not exported.
-
-The nested consumer project exposes a generator-aware
-`run_photospider_consumer` target whose command uses its executable target-file
-expression. The outer gate passes its exact generator, platform/toolset when
-present, and active configuration, then builds that run target. Single-config
-and multi-config layouts therefore require no guessed build root, configuration
-directory, executable suffix, or bundle path. The outer gate also passes the
-closed producer sanitizer mode `none`, `address`, or `thread`. A sanitized
-nested project applies matching compile instrumentation to its C SDK object,
-shared bridge, and final executable and matching link instrumentation to both
-linked products. The final executable therefore owns the sanitizer runtime
-even though the static kernel is first embedded in a private downstream shared
-bridge. An ordinary consumer receives no sanitizer option, and installed
-`PhotospiderTargets.cmake` never contains a sanitizer flag.
-
-Daemon validation must use that isolated prefix, never a sibling checkout or
-private include directory.
-
-The deterministic scheduler tests use private callback-enqueue, pre-failure,
-queue-rejection, and diagnostic-construction hooks compiled only into the
-noninstalled `photospider_test_kernel`. They expose the otherwise unobservable
-no-GPU/admission/submit linearization windows and the allocation-free exception
-fallback. The construction hook selects the exact exception-fence or run-loop
-external-stop materialization point and fires immediately before owned
-diagnostic and `Status` construction. External-stop fallback runs under the
-already-held Run mutex without decrementing an in-flight slot; the exception
-helper retains its callback-retirement ownership. The callback-enqueue observer
-also records the target and successor admissions while the sole CPU worker is
-occupied; waiting for the successor Run proves FIFO retirement before the held
-GPU callback is released. The regression also feeds a null standard-exception
-diagnostic through the pointer-only call boundary; normal completion proves the
-failure is fenced, the in-flight count drains, and the empty-message fallback
-remains usable. With `BUILD_TESTING=ON`, the product archive, installed kernel,
-exports, and ordinary consumer remain hook-free; with `BUILD_TESTING=OFF`,
-neither the test-kernel target nor its execution-hook object exists.
-
-The same noninstalled execution-hook object exposes one no-throw
-`final_result_ready` observer after complete local result assembly and before
-the final stop check. It exists only to hold the success-publication
-linearization window, plus one no-throw post-submit observer after the
-coordinator reacquires the Run mutex and checks external stop but before it can
-wait. The latter proves queued worker-entry admission without adding a
-production notification path. The product archive and package contain neither
-observer symbol nor test string. Native-library path regressions similarly
-count loader, owner, and close boundaries only through the noninstalled
-test-kernel hook object.
-
-## Sanitizers and malformed-input validation
-
-ASAN and TSAN are mutually exclusive scoped CMake modes where the C++ compiler
-and linker support the requested instrumentation. Configuration fails instead
-of silently producing an uninstrumented target when that support is absent.
-Sanitizer compile and link options are private to the kernel product and are
-published only through its build-tree interface so every in-tree executable is
-closed over the runtime. The complete sanitizer CTest inventory retains the
-installed-consumer gate, whose explicitly matching nested mode tests the
-installed static/shared-bridge/final-executable topology without leaking
-instrumentation into the installed package export. The ordinary tests exercise
-malformed Value/Region/layout, graph documents, operation/provider records and
-exact library paths, and callback outputs. Malformed local IPC frames belong to
-the daemon repository.
-
-The long-lived manual target `photospider_operation_contract_ir_fuzz` exercises
-the current OperationTraits trait/parameter vocabulary and compiler validation. It is
-`EXCLUDE_FROM_ALL`, is never registered with CTest, and is enabled explicitly
-with `-DPHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS=ON` under Clang. Seed inputs are
-maintained in `tests/fuzz/corpus/operation_contract_ir/`; caller-selected crash
-or artifact directories remain untracked. A bounded smoke run is:
-
-```bash
-cmake -S . -B <fuzz-build> -DCMAKE_CXX_COMPILER=clang++ \
-  -DPHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS=ON -DBUILD_TESTING=OFF
-cmake --build <fuzz-build> --target photospider_operation_contract_ir_fuzz -j
-ps_operation_fuzz_corpus=$(mktemp -d)
-cp -R tests/fuzz/corpus/operation_contract_ir/. \
-  "$ps_operation_fuzz_corpus"/
-<fuzz-build>/photospider_operation_contract_ir_fuzz \
-  "$ps_operation_fuzz_corpus" -runs=1000 -max_len=256
-```
-
-The fixed negative DSO fixtures remain authoritative for raw ABI
-pointer/size/alignment/count/bounds cases that a byte-only in-process harness
-cannot construct safely.
-Use a Clang distribution that actually ships its libFuzzer runtime; a compiler
-identifying as Clang is insufficient when that archive is absent. The temporary
-working corpus prevents generated mutations from entering the maintained seed
-directory.
-
-The ordinary `test_operation_contract_ir_seeds` CTest reads the two committed
-seeds without generating mutations. It proves that `valid-source` reaches and
-passes the compiler path while `malformed-schema` constructs a duplicate
-parameter schema and reaches the named registry rejection. This deterministic
-stage seam complements, but does not register, the manual libFuzzer target.
-
-## CTest ownership
-
-CTest entries validate observable correctness, including numerical results,
-resource bounds, multithreading, error handling, package consumption, compilation
-and runtime boundaries. Performance measurements and timing-dependent diagnostics
-remain opt-in tools; elapsed-time thresholds do not define correctness. Do not register stale-term searches, source-layout audits,
-process checklists, Doxygen audits, Issue replay, or result/provenance
-orchestration. Manual source-quality tools require maintained English and
-Chinese documentation and remain outside CTest/CI. Direct source-tree and
-installed-tree header self-containment scans with Clang and GCC are such manual
-checks; they are not registered with CTest or CI.
-
-## Final commands
-
-The `kernel-dev` preset is the default clean local path. Removing `build/` clears
-all ignored build configurations in that directory; preserve source files and
-other ignored data outside it. Configure and build the preset, then run its full
-CTest inventory. The preset selects the local Clang, RelWithDebInfo,
-`BUILD_TESTING=ON`, and platform-default optional backends. CTest JUnit output is
-written to the explicit path passed to `--output-junit`; a relative path is
-resolved from the preset binary directory, `build/kernel-dev`.
-
-```bash
-rm -rf build
-cmake --preset kernel-dev
-cmake --build --preset kernel-dev -j
-ctest --preset kernel-dev --output-on-failure --output-junit ctest-results.xml
-```
-
-The complete CTest run includes `test_installed_consumer`, which installs to a
-fresh prefix and configures, builds and runs an external consumer. Run the
-separate installed gate manually only when its additional configuration is
-needed.
-
-Format changed C/C++ with ClangFormat 21 and lint the same files with
-`python3 -m cpplint`. Record unsupported sanitizer/GPU platforms as limitations
-rather than successful gates.
-
-## Focused Result validation
-
-The final focused core run passed these thirteen tests: `test_dependency_dirty`,
-`test_result_execution`, `test_result_plugin`, `test_result_native_gpu`,
-`test_result_image_contracts`, `test_unified_result_images`,
-`test_global_results`, `test_shared_results`, `test_result_metadata_budget`,
-`test_resources`, `test_execution_dependencies`, `test_multi_output_execution`,
-and `test_generic_result_cache`. Together they cover mixed C Result outputs, image schema
-resolution, prefix and zero-row fields, typed Field/Descriptor replacement,
-64 sparse fragments, named C++ outputs, dynamic Control-to-Data support,
-Unknown relation unions and declared input projections, returned dependency
-map ownership, multiple-output execution, shared Result caching, and dependency
-owner admission. The C fixture resolves output metadata with callback-local nested
-records through the synchronous sink; the host copies them before `set_output`
-returns. Image contract tests check typed image metadata admission before large
-facet allocations and C resolver rejection for invalid zero-slot/multi-slot
-schemas.
-
-`test_result_execution` also exercises zero, partial, and 8192-row discovery
-with 64-byte and 256-byte windows. Resource tests cover retained Result owners
-and bounded metadata. The focused suite completed in approximately three
-seconds.
-
-Native GPU tests use the separate native GPU service ABI with Result operation callbacks. They exercise dispatch, readback, sticky service errors, and bounded tensor-window transfers. The native CTest returns 77 when compatible hardware is absent; hardware execution must be reported separately from CPU fallback.
-
-To reproduce the core set, build the test executables and run their CTest cases:
+Provide the pinned SLEEF 3.9.0 source under `third_party/sleef/` before configuring; CMake does not download it. A standard local build uses:
 
 ```sh
-cmake --build build/kernel-dev --target test_dependency_dirty test_result_execution test_result_plugin test_unified_result_images test_global_results test_shared_results test_result_metadata_budget test_resources test_result_image_contracts test_execution_dependencies test_multi_output_execution test_generic_result_cache -j8
-ctest --test-dir build/kernel-dev -R '^test_(dependency_dirty|result_execution|result_plugin|result_native_gpu|result_image_contracts|unified_result_images|global_results|shared_results|result_metadata_budget|resources|execution_dependencies|multi_output_execution|generic_result_cache)$' --output-on-failure
+cmake -S . -B build/check -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
+cmake --build build/check -j8
+ctest --test-dir build/check --output-on-failure
 ```
 
-The final installed-package run passed these five tests after the source-support admission fence, numeric descriptor guard, and affine/broadcast Result changes:
-`installed_unified_result_workflow`, `installed_unified_result_cpp`,
-`installed_unified_result_contracts`, `installed_unified_result_c11`, and
-`installed_unified_result_native_gpu`. The native case used Metal and was not
-skipped. Its log is `build/kernel-dev/unified-consumer.log`.
+The build's `photospider_tests` target builds the registered test executables. CTest labels let you run a behavior family with `ctest --test-dir build/check -L 'unit|execution' --output-on-failure`, or inspect label membership with `ctest --test-dir build/check --print-labels`. Unit tests have 120-second timeouts, integration tests 300 seconds, and large numeric or image tests 600 seconds. Only the top-level `test_installed_consumer` has a timeout of 1800 seconds. The nested `installed_*` tests use the normal family limits: 120 seconds for unit tests, 300 seconds for integration tests, and 600 seconds for large numeric or image tests. Sanitizer builds multiply each applicable timeout by three.
+
+## Installed-package consumers
+
+`test_installed_consumer` installs the just-built package to an isolated prefix, configures `tests/consumer` with `find_package(Photospider CONFIG REQUIRED)`, and builds and runs the default package gate. The gate uses only installed public headers and exported targets. Its registration declarations derive test commands and build dependencies together, including fixture DSOs. Tests that require private symbols link a noninstalled static test library built from the normal kernel objects; fault-injection variants replace only translation units that contain the relevant test seam.
+
+The consumer project exposes two explicit targets:
 
 ```sh
-cmake --install build/kernel-dev --prefix build/unified-result-install
-cmake -S tests/consumer -B build/unified-result-consumer -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_PREFIX_PATH=/Users/zhufeng/document/code/photospider/build/unified-result-install
-cmake --build build/unified-result-consumer --target run_unified_result_consumer -j8
+cmake -S tests/consumer -B build/consumer-build \
+  -DCMAKE_PREFIX_PATH=/path/to/photospider-prefix
+cmake --build build/consumer-build --target run_photospider_consumer
+cmake --build build/consumer-build --target run_photospider_consumer_all
 ```
 
-The installed tests invoke the public C++ workflow, the C++ workflow consumer,
-the typed image-contract consumer, a C11 Result DSO consumer, and the native
-GPU Result DSO consumer. The installed contract consumer also exercises the typed
-source-support budget refusal. The native test covers current affine and broadcast
-transfer behavior on Metal. These focused checks do not represent full CTest,
-sanitizer, or release-matrix validation.
+`run_photospider_consumer` runs the 12-test core package gate. `run_photospider_consumer_all` builds the registered installed targets and runs all 40 installed tests. The latter includes optional hardware checks; an unavailable device returns the registered skip code 77.
 
-## Installed and optional coverage boundaries
+The top-level installed gate is run through CTest after configuring the kernel build. Its nested configure receives the active generator, platform, toolset, configuration, and sanitizer mode. Matching sanitizer instrumentation reaches the consumer's C/C++ compilation and link steps without adding sanitizer flags to the installed package export. Repository and installed-consumer `MODULE` fixtures receive the matching sanitizer instrumentation. C11 operation fixtures remain compiled as C. On macOS ASAN builds, each module also contains a test-only C++ atexit owner that unregisters compiler-rt image globals during module retirement by `dlclose`, before the image is unmapped; see the [module instrumentation helper](../../cmake/BehaviorTests.cmake) and [retirement owner](../../tests/support/asan_module_retirement.cpp).
 
-`test_installed_consumer` configures an isolated prefix, installs the package,
-and builds/runs an external consumer through `find_package(Photospider CONFIG
-REQUIRED)`. Read `tests/consumer/CMakeLists.txt` for its actual runtime command
-list. A target that appears only in `DEPENDS` is build coverage, not runtime
-coverage. The current `run_unified_result_consumer` target executes the public minimal
-workflow, C++ workflow consumer, typed image-contract consumer, C11 DSO consumer,
-and native GPU consumer.
+## C Result table rejection
 
-Result image behavior is covered by the Result fixtures and installed consumers listed above. Production image availability follows the current catalog and runtime contract in [Image operations](../kernel-architecture/Image-Operations.md).
+Bad Result table fixtures are compiled as C11 `MODULE` libraries by the shared [`photospider_add_result_table_fixture` helper](../../cmake/BehaviorTests.cmake). Four selector-driven DSOs cover 34 malformed-table cases: operation (14), joint (10), repeated input (6), and RequestRecord (4). The four base fixtures are [`result_operation_fixture.c`](../../tests/fixtures/result_operation_fixture.c), [`result_joint_fixture.c`](../../tests/fixtures/result_joint_fixture.c), [`result_repeated_fixture.c`](../../tests/fixtures/result_repeated_fixture.c), and [`result_request_record_fixture.c`](../../tests/fixtures/result_request_record_fixture.c); they share [bad-table selector support](../../tests/fixtures/bad_result_table_support.h). The [test helper](../../tests/support/bad_result_table_fixture.hpp) selects one case and calls the real `OperationRegistry::load_plugin`; each case checks the expected `Status.code`, an empty registry key list, and the exact plugin-destroy count. The registry and any candidate are destroyed before the observer handle is closed, so retirement is checked while the DSO is still mapped. The successful fixture modules and the separate throwing C++ joint fixture remain independent.
 
-For a custom compiler/runtime, pass the same `CC` and `CXX` environment to CTest
-because the installed gate configures a nested consumer. Report unsupported GPU
-or sanitizer capability as a limitation, not a successful test.
+The root integration tests are [`test_result_plugin`](../../tests/integration/test_result_plugin.cpp), [`test_result_c_joint`](../../tests/integration/test_result_c_joint.cpp), [`test_result_repeated`](../../tests/integration/test_result_repeated.cpp), and [`test_result_request_record`](../../tests/integration/test_result_request_record.cpp). Their fixture dependencies come from the [root CMake registrations](../../CMakeLists.txt). To build and run this focused set:
+
+```sh
+cmake --build build/check --target \
+  test_result_plugin test_result_c_joint test_result_repeated \
+  test_result_request_record -j8
+ctest --test-dir build/check \
+  -R '^(test_result_plugin|test_result_c_joint|test_result_repeated|test_result_request_record)$' \
+  --output-on-failure
+```
+
+The installed consumers in [`tests/consumer/CMakeLists.txt`](../../tests/consumer/CMakeLists.txt) reuse the same integration sources and bad-table helper: `installed_unified_result_c11`, `installed_result_c_joint`, `installed_result_repeated`, and `installed_result_request_record`. They are ordinary required tests in the installed suite, not hardware skips. After configuring `tests/consumer` as described above, run them with:
+
+```sh
+cmake --build build/consumer-build --target \
+  photospider_result_c_consumer photospider_result_c_joint_consumer \
+  photospider_repeated_result_consumer photospider_request_record_consumer
+ctest --test-dir build/consumer-build \
+  -R '^(installed_unified_result_c11|installed_result_c_joint|installed_result_repeated|installed_result_request_record)$' \
+  --output-on-failure
+```
+
+## Behavior boundaries
+
+The registered suite covers compiler validation and planning, Result operations and C ABI loading, execution and cancellation, dependency relations and shared work, resource limits, numeric and image behavior, and native backend dispatch. Installed consumers exercise package export, public C and C++ headers, expression metadata resolution, Result C and C++ workflows, repeated-input contracts, binding and demand behavior, cache behavior, cancellation, and backend admission.
+
+Hardware-specific tests are registered with skip return code 77. Their software contract may still be covered by deterministic CPU or fault-injection tests, but those do not establish native device execution. Report CPU/mock coverage and actual hardware execution separately.
+
+Tests assert observable values, error categories, resource limits, cancellation, publication, and ownership behavior. Cache internals such as block-cache hit counts are implementation details; performance benchmarking is tracked separately from this behavior suite.

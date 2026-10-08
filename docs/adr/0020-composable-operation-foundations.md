@@ -71,7 +71,7 @@ struct OperationTraits {
 };
 ```
 
-These are contract excerpts, not complete construction code. The current C++ `OperationTraits` record is version 22. The package is version 0.30.0, and operation plugins use Result C ABI 2; the former Base C and planar operation tables are removed. A plugin descriptor declares up to 64 named outputs; output names are unique and map to declaration-order indices. A single-output operation explicitly uses `value`.
+These are contract excerpts, not complete construction code. Operation plugins use Result C ABI 2. A plugin descriptor declares up to 64 named outputs; output names are unique and map to declaration-order indices. A single-output operation explicitly uses `value`.
 
 `ValueDescriptor` has rank 1 through 8 and nonzero extents. Its element type is independent of semantic interpretation and memory layout. A `Value` can be strided; shape inference describes logical samples and does not imply dense contiguous storage. Sample bit validity belongs to the operation or typed semantic contract rather than the generic Value container. Input constraints can specify an exact dtype or an allowed dtype mask, rank, semantic kind/facets, or a finite scalar interval. Registry validation rejects contradictory or unknown constraint fields before publication.
 
