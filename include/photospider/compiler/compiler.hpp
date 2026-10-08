@@ -570,14 +570,6 @@ class PHOTOSPIDER_API ExecutionPlan final {
   Result<ExecutionPlan> tile_plan(const std::string& output_name,
                                   const Region& region) const;
 
-  /** @brief True when this plan requires staged/terminal dependency execution.
-   * @note In this case input_demands are unresolved templates, not Whole or
-   * Empty evidence. Runtime certificates carry the actual exact dependencies.
-   */
-  bool dependency_network() const noexcept;
-  /** @brief Contains the structured result stage protocol. */
-  bool structured_network() const noexcept;
-
  private:
   friend class Compiler;
   friend class ExecutionContext;
@@ -585,9 +577,6 @@ class PHOTOSPIDER_API ExecutionPlan final {
 
   std::map<std::string, Region> output_regions_;
   ExecutionMode execution_mode_ = ExecutionMode::CpuExact;
-  /** @brief Preserve the graph-selected staged execution family after pruning.
-   */
-  bool dependency_protocol_ = false;
   std::vector<PhysicalStep> physical_steps_;
   std::vector<PlanExecutionGroup> execution_groups_;
   std::uint64_t tile_height_ = 128;

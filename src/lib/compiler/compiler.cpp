@@ -19,9 +19,9 @@
 #include <utility>
 #include <vector>
 
-#include "data/input_validation.hpp"
 #include "plugin/dependency_identity.hpp"
 #include "plugin/operation_identity.hpp"
+#include "plugin/port_validation.hpp"
 
 namespace ps {
 namespace {
@@ -193,7 +193,7 @@ std::string semantic_digest(
     const std::vector<WorkflowOutput>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations) {
   DigestBuilder digest;
-  digest.text("semantic-graph-ir-v19");
+  digest.text("semantic-graph-ir-v20");
   append_declarations(&digest, declarations);
   digest.integer(nodes.size());
   for (const SemanticNode& node : nodes) {
@@ -273,7 +273,7 @@ std::string physical_digest(
     std::uint64_t tile_height, std::uint64_t tile_width,
     ExecutionMode execution_mode, const std::vector<PhysicalStep>& physical) {
   DigestBuilder digest;
-  digest.text("physical-plan-v19");
+  digest.text("physical-plan-v20");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
   digest.integer(physical.size());
   for (const auto& access : physical) {
@@ -366,7 +366,7 @@ std::string physical_digest(
  */
 std::string plan_cache_key(const std::string& plan) {
   DigestBuilder digest;
-  digest.text("plan-cache-key-v15");
+  digest.text("plan-cache-key-v16");
   digest.text(plan);
   return digest.finish();
 }
@@ -389,22 +389,6 @@ std::uint64_t microseconds(
 }
 
 }  // namespace
-
-bool ExecutionPlan::structured_network() const noexcept {
-  for (const auto& step : steps_)
-    if (step.traits.outputs[0].dependency_version == 2)
-      return true;
-  return false;
-}
-
-bool ExecutionPlan::dependency_network() const noexcept {
-  if (dependency_protocol_)
-    return true;
-  for (const auto& step : steps_)
-    if (step.traits.outputs[0].dependency_version || !step.effective_atomic)
-      return true;
-  return false;
-}
 
 Result<ExecutionPlan> ExecutionPlan::tile_plan(
     const std::string& name, const Region& requested_region) const {
@@ -459,23 +443,19 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(
     return Result<ExecutionPlan>(Status::failure(
         ErrorCode::InvalidArgument, "tile must contain all image channels"));
   ExecutionPlan tile = *this;
-  if (dependency_network()) {
-    tile.outputs_ = {{name, named->second}};
-    tile.output_regions_ = {{name, region}};
-    tile.steps_[named->second].output_demand = region;
-    tile.physical_steps_.clear();
-    tile.digest_.value = physical_digest(
-        tile.optimized_digest_.value, tile.steps_, tile.outputs_,
-        tile.input_declarations_, tile.output_regions_, tile.tile_height_,
-        tile.tile_width_, tile.execution_mode_, tile.physical_steps_);
-    tile.cache_key_.value = plan_cache_key(tile.digest_.value);
-    if (!current())
-      return Result<ExecutionPlan>(
-          Status::failure(ErrorCode::Stale, "dependency template changed"));
-    return Result<ExecutionPlan>(std::move(tile));
-  }
-  return Result<ExecutionPlan>(Status{ErrorCode::InvalidArgument,
-                                      "plan has no Result dependency network"});
+  tile.outputs_ = {{name, named->second}};
+  tile.output_regions_ = {{name, region}};
+  tile.steps_[named->second].output_demand = region;
+  tile.physical_steps_.clear();
+  tile.digest_.value = physical_digest(
+      tile.optimized_digest_.value, tile.steps_, tile.outputs_,
+      tile.input_declarations_, tile.output_regions_, tile.tile_height_,
+      tile.tile_width_, tile.execution_mode_, tile.physical_steps_);
+  tile.cache_key_.value = plan_cache_key(tile.digest_.value);
+  if (!current())
+    return Result<ExecutionPlan>(
+        Status::failure(ErrorCode::Stale, "dependency template changed"));
+  return Result<ExecutionPlan>(std::move(tile));
 }
 
 /**
@@ -716,7 +696,7 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
           }
         }
       }
-      if (input_internal::structural_image_metadata({descriptor, facets}))
+      if (input_internal::structural_image_metadata(descriptor, facets))
         return Result<SemanticGraphIR>(
             Status{ErrorCode::TypeMismatch,
                    "image operations require typed Result ports"});
@@ -751,7 +731,8 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
     for (std::uint32_t oi = 0; oi < node.traits.outputs.size(); ++oi) {
       const auto& contract = node.traits.outputs[oi];
       const auto& metadata = output.value()[oi];
-      if (input_internal::structural_image_metadata(metadata))
+      if (input_internal::structural_image_metadata(metadata.descriptor,
+                                                    metadata.facets))
         return Result<SemanticGraphIR>(
             Status{ErrorCode::TypeMismatch,
                    "image output must be a typed Result slot"});
@@ -767,21 +748,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
       }
       if (!admitted.ok())
         return Result<SemanticGraphIR>(admitted);
-      auto selected = select_operation_output(node.traits, oi).take_value();
-      for (std::size_t i = 0;
-           i < input_descriptors.size() && !contract.dependency_version; ++i) {
-        if (contract.input_indices &&
-            std::find(contract.input_indices->begin(),
-                      contract.input_indices->end(),
-                      i) == contract.input_indices->end())
-          continue;
-        auto demand = input_internal::derive_input_demand(
-            selected, Region::whole(metadata.descriptor.shape),
-            metadata.descriptor.shape, input_descriptors[i].descriptor.shape,
-            selected.input_schema[i].kind);
-        if (!demand.ok())
-          return Result<SemanticGraphIR>(demand.status());
-      }
       bool ancestors_atomic = true;
       for (std::size_t i = 0; i < input_atomic.size(); ++i)
         if (!contract.input_indices ||
@@ -932,14 +898,31 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   // Retain the metadata closure of output-reachable results, including excluded
   // ports. Runtime demand only follows selected relevant ports. Side-effecting
   // singleton roots remain explicit even without a named consumer.
-  std::set<ValueRef> needed;
+  std::set<ValueRef> needed, executable;
   for (const auto& output : optimized.outputs())
-    needed.insert(result_ports.at({output.node_id, output.port}));
+    executable.insert(result_ports.at({output.node_id, output.port}));
+  needed = executable;
   for (auto it = optimized.nodes().rbegin(); it != optimized.nodes().rend();
        ++it) {
     const auto& node = *it;
-    if (!node.traits.side_effect_free)
+    if (!node.traits.side_effect_free) {
       needed.insert({node.id, 0});
+      executable.insert({node.id, 0});
+    }
+    for (std::uint32_t oi = 0; oi < node.outputs.size(); ++oi) {
+      if (!executable.count({node.id, oi}))
+        continue;
+      const auto& projection = node.traits.outputs[oi].input_indices;
+      for (std::uint32_t input = 0; input < node.inputs.size(); ++input) {
+        if (projection && std::find(projection->begin(), projection->end(),
+                                    input) == projection->end())
+          continue;
+        if (const auto* producer =
+                std::get_if<WorkflowNodeOutput>(&node.inputs[input]))
+          executable.insert(
+              result_ports.at({producer->source_node, producer->source_port}));
+      }
+    }
     bool used = false;
     for (std::uint32_t oi = 0; oi < node.outputs.size(); ++oi)
       used = used || needed.count({node.id, oi});
@@ -951,14 +934,6 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   }
   ExecutionPlan plan;
   plan.execution_mode_ = options.execution_mode;
-  // Pruning result tasks must not change the established Whole streaming
-  // behavior of a graph compiled for the staged execution family.
-  for (const auto& node : optimized.nodes())
-    for (const auto& output : node.traits.outputs)
-      plan.dependency_protocol_ =
-          plan.dependency_protocol_ || output.dependency_version != 0 ||
-          node.outputs.size() > 1 || output.input_indices.has_value();
-
   plan.tile_height_ = options.tile_height;
   plan.tile_width_ = options.tile_width;
   plan.revision_ = optimized.revision();
@@ -987,11 +962,14 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       step.output_descriptor = output.descriptor;
       step.output_result_schema = output.result_schema;
       step.output_facets = output.facets;
-      step.backend = options.execution_mode == ExecutionMode::NativeGpu &&
-                             node.traits.supports_gpu
-                         ? Backend::Gpu
-                         : Backend::Cpu;
-      if (step.backend == Backend::Cpu && !node.traits.supports_cpu) {
+      step.backend =
+          executable.count({node.id, oi}) &&
+                  options.execution_mode == ExecutionMode::NativeGpu &&
+                  node.traits.supports_gpu
+              ? Backend::Gpu
+              : Backend::Cpu;
+      if (executable.count({node.id, oi}) && step.backend == Backend::Cpu &&
+          !node.traits.supports_cpu) {
         return Result<ExecutionPlan>(
             Status::failure(ErrorCode::BackendUnavailable,
                             "operation has no required CPU implementation"));
@@ -1048,119 +1026,110 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   std::map<std::uint64_t, std::vector<std::size_t>> groups;
   for (std::size_t i = 0; i < plan.steps_.size(); ++i) {
     const auto& step = plan.steps_[i];
-    if (step.traits.joint_contract && step.backend == Backend::Cpu &&
+    if (executable.count({step.node_id, step.output_index}) &&
+        step.traits.joint_contract && step.backend == Backend::Cpu &&
         step.traits.outputs[0].observation_kind == ObservationKind::Atomic &&
         (step.traits.outputs[0].failure_delivery ==
              FailureDelivery::PerAtomOutcome ||
-         (step.traits.outputs[0].dependency_version == 2 &&
-          step.traits.joint_contract == 1)))
+         step.traits.joint_contract == 1))
       groups[step.node_id].push_back(i);
   }
   for (auto& group : groups)
     if (group.second.size() > 1 ||
         plan.steps_[group.second.front()].traits.joint_contract == 2)
       plan.execution_groups_.push_back({group.first, std::move(group.second)});
-  if (plan.dependency_network()) {
-    for (const auto& requested : options.output_regions)
-      if (!plan.outputs_.count(requested.first))
-        return Result<ExecutionPlan>(Status::failure(
-            ErrorCode::InvalidArgument, "unknown dependency output"));
-    for (auto& step : plan.steps_) {
-      step.output_demand = step.output_result_schema
-                               ? Region{}
-                               : Region::whole(step.output_descriptor.shape);
-      step.input_demands.clear();
-      step.planned_bytes =
-          0;  // A template has no resolved live-set reservation.
-    }
-    for (const auto& output : plan.outputs_) {
-      auto& step = plan.steps_[output.second];
-      const auto requested = options.output_regions.find(output.first);
-      if (step.output_result_schema) {
-        if (!step.output_result_schema->tensors.empty()) {
-          const auto shape =
-              step.output_result_schema->tensors[0].sample_shape();
-          auto region = requested == options.output_regions.end()
-                            ? Region::whole(shape)
-                            : requested->second;
-          auto samples = Footprint::from_regions(shape, {region});
-          if (!samples.ok())
-            return Result<ExecutionPlan>(samples.status());
-          auto closed = step.output_result_schema->tensors[0].close_samples(
-              samples.value());
-          if (!closed.ok() || closed.value().boxes().size() != 1)
-            return Result<ExecutionPlan>(Status{ErrorCode::InvalidArgument,
-                                                "invalid image output Region"});
-          plan.output_regions_.emplace(output.first, closed.value().boxes()[0]);
-          step.output_demand = closed.value().boxes()[0];
-          continue;
-        }
-        if (requested != options.output_regions.end())
-          return Result<ExecutionPlan>(Status{
-              ErrorCode::InvalidArgument,
-              "ResultRef outputs use descriptor ranges, not Value Regions"});
-        plan.output_regions_.emplace(output.first, Region{});
+  for (const auto& requested : options.output_regions)
+    if (!plan.outputs_.count(requested.first))
+      return Result<ExecutionPlan>(Status::failure(
+          ErrorCode::InvalidArgument, "unknown dependency output"));
+  for (auto& step : plan.steps_) {
+    step.output_demand = step.output_result_schema
+                             ? Region{}
+                             : Region::whole(step.output_descriptor.shape);
+    step.input_demands.clear();
+    step.planned_bytes = 0;  // A template has no resolved live-set reservation.
+  }
+  for (const auto& output : plan.outputs_) {
+    auto& step = plan.steps_[output.second];
+    const auto requested = options.output_regions.find(output.first);
+    if (step.output_result_schema) {
+      if (!step.output_result_schema->tensors.empty()) {
+        const auto shape = step.output_result_schema->tensors[0].sample_shape();
+        auto region = requested == options.output_regions.end()
+                          ? Region::whole(shape)
+                          : requested->second;
+        auto samples = Footprint::from_regions(shape, {region});
+        if (!samples.ok())
+          return Result<ExecutionPlan>(samples.status());
+        auto closed = step.output_result_schema->tensors[0].close_samples(
+            samples.value());
+        if (!closed.ok() || closed.value().boxes().size() != 1)
+          return Result<ExecutionPlan>(Status{ErrorCode::InvalidArgument,
+                                              "invalid image output Region"});
+        plan.output_regions_.emplace(output.first, closed.value().boxes()[0]);
+        step.output_demand = closed.value().boxes()[0];
         continue;
       }
-      auto region = requested == options.output_regions.end()
-                        ? Region::whole(step.output_descriptor.shape)
-                        : requested->second;
-      auto closed_region = input_internal::color_output_region(
-          step.output_descriptor, step.output_facets, region);
-      if (!closed_region.ok())
-        return Result<ExecutionPlan>(closed_region.status());
-      region = closed_region.take_value();
-      if (region.empty() ||
-          !region.validate(step.output_descriptor.shape).ok() ||
-          !input_internal::complete_tuple_channels(step.output_descriptor,
-                                                   step.output_facets, region))
-        return Result<ExecutionPlan>(Status::failure(
-            ErrorCode::InvalidArgument, "invalid dependency output region"));
-      plan.output_regions_.emplace(output.first, region);
-      step.output_demand = region;
+      if (requested != options.output_regions.end())
+        return Result<ExecutionPlan>(Status{
+            ErrorCode::InvalidArgument,
+            "ResultRef outputs use descriptor ranges, not Value Regions"});
+      plan.output_regions_.emplace(output.first, Region{});
+      continue;
     }
-    plan.optimized_digest_ = optimized.digest();
-    plan.digest_.value = physical_digest(
-        plan.optimized_digest_.value, plan.steps_, plan.outputs_,
-        plan.input_declarations_, plan.output_regions_, plan.tile_height_,
-        plan.tile_width_, plan.execution_mode_, plan.physical_steps_);
-    plan.cache_key_.value = plan_cache_key(plan.digest_.value);
-    plan.current_check_ = optimized.current_check_;
-    plan.operation_registry_ = operations_;
-    if (plan.dependency_network()) {
-      for (auto& step : plan.steps_) {
-        auto metadata = std::make_shared<ResultProgramMetadata>();
-        metadata->output = {step.output_descriptor, step.output_facets,
-                            step.output_result_schema,
-                            step.traits.outputs[0].atomic_trailing_axes};
-        for (const auto& input : step.inputs) {
-          if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
-            const auto& source = plan.steps_[producer->step_index];
-            metadata->inputs.push_back(
-                {source.output_descriptor, source.output_facets,
-                 source.output_result_schema,
-                 source.traits.outputs[0].atomic_trailing_axes});
-          } else {
-            const auto& source =
-                plan.input_declarations_[std::get<PlanWorkflowInput>(input)
-                                             .declaration_index];
-            metadata->inputs.push_back(
-                {ValueDescriptor{}, {}, source.result_schema});
-          }
-        }
-        step.structured_metadata = std::move(metadata);
-      }
-      auto work = UINT64_MAX;
-      plan.structured_templates_ =
-          contract_internal::dependency_cache_templates(plan, {}, &work, {});
-    }
-    if (!plan.current())
-      return Result<ExecutionPlan>(
-          Status::failure(ErrorCode::Stale, "dependency template changed"));
-    return Result<ExecutionPlan>(std::move(plan));
+    auto region = requested == options.output_regions.end()
+                      ? Region::whole(step.output_descriptor.shape)
+                      : requested->second;
+    auto closed_region = input_internal::color_output_region(
+        step.output_descriptor, step.output_facets, region);
+    if (!closed_region.ok())
+      return Result<ExecutionPlan>(closed_region.status());
+    region = closed_region.take_value();
+    if (region.empty() || !region.validate(step.output_descriptor.shape).ok() ||
+        !input_internal::complete_tuple_channels(step.output_descriptor,
+                                                 step.output_facets, region))
+      return Result<ExecutionPlan>(Status::failure(
+          ErrorCode::InvalidArgument, "invalid dependency output region"));
+    plan.output_regions_.emplace(output.first, region);
+    step.output_demand = region;
   }
-  return Result<ExecutionPlan>(Status{ErrorCode::InvalidArgument,
-                                      "plan has no Result dependency network"});
+  plan.optimized_digest_ = optimized.digest();
+  plan.digest_.value = physical_digest(
+      plan.optimized_digest_.value, plan.steps_, plan.outputs_,
+      plan.input_declarations_, plan.output_regions_, plan.tile_height_,
+      plan.tile_width_, plan.execution_mode_, plan.physical_steps_);
+  plan.cache_key_.value = plan_cache_key(plan.digest_.value);
+  plan.current_check_ = optimized.current_check_;
+  plan.operation_registry_ = operations_;
+  for (auto& step : plan.steps_) {
+    auto metadata = std::make_shared<ResultProgramMetadata>();
+    metadata->output = {step.output_descriptor, step.output_facets,
+                        step.output_result_schema,
+                        step.traits.outputs[0].atomic_trailing_axes};
+    for (const auto& input : step.inputs) {
+      if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
+        const auto& source = plan.steps_[producer->step_index];
+        metadata->inputs.push_back(
+            {source.output_descriptor, source.output_facets,
+             source.output_result_schema,
+             source.traits.outputs[0].atomic_trailing_axes});
+      } else {
+        const auto& source =
+            plan.input_declarations_[std::get<PlanWorkflowInput>(input)
+                                         .declaration_index];
+        metadata->inputs.push_back(
+            {ValueDescriptor{}, {}, source.result_schema});
+      }
+    }
+    step.structured_metadata = std::move(metadata);
+  }
+  auto work = UINT64_MAX;
+  plan.structured_templates_ =
+      contract_internal::dependency_cache_templates(plan, {}, &work, {});
+  if (!plan.current())
+    return Result<ExecutionPlan>(
+        Status::failure(ErrorCode::Stale, "dependency template changed"));
+  return Result<ExecutionPlan>(std::move(plan));
 }
 
 /**
