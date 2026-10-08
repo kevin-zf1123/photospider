@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/execution/resources.hpp"
+#include "photospider/core/resources.hpp"
 
 namespace ps {
 namespace resource_internal {

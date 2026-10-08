@@ -7,14 +7,18 @@
 #include <memory>
 
 #include "photospider/core/status.hpp"
-#include "photospider/data/storage.hpp"
 
 namespace ps {
 class ExecutionContext;
+class CpuStorage;
+class BufferAllocator;
 namespace execution_internal {
+class MemoryReservation;
+}  // namespace execution_internal
+namespace core_internal {
 struct ResourcePayloadAccess;
 class ResourcePayloadScope;
-}  // namespace execution_internal
+}  // namespace core_internal
 
 /** @brief Independent capacity constraints; overlapping dimensions are not
  * summed. Host includes Shared and Metadata; Device includes Shared. Referenced
@@ -112,7 +116,7 @@ class PHOTOSPIDER_API ResourceLease final {
  private:
   friend class ResourceBudget;
   friend class execution_internal::MemoryReservation;
-  friend struct execution_internal::ResourcePayloadAccess;
+  friend struct core_internal::ResourcePayloadAccess;
   // Classifies already-reserved payload as shared native bytes. Host/Payload
   // stay charged by this lease; Device/Shared are added atomically.
   Status add_shared_payload(std::uint64_t bytes);
@@ -173,7 +177,7 @@ class PHOTOSPIDER_API ResourceBudget final {
  private:
   friend class ResourceLease;
   friend class ExecutionContext;
-  friend class execution_internal::ResourcePayloadScope;
+  friend class core_internal::ResourcePayloadScope;
   void set_reclaimer(
       std::function<void(const ResourceCapacity&)> reclaim) const;
   struct Impl;
