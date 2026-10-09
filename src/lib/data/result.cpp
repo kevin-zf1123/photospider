@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/affine_view.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_state.hpp"
@@ -70,9 +71,10 @@ Result<ResourceVector<ResultRef::CacheStorage>> ResultRef::cache_storage(
       if (!storage.valid())
         continue;
       const auto size = storage.size();
-      if (size > UINT64_MAX - 4095)
+      std::uint64_t rounded = 0;
+      if (!core_internal::checked_align_up(size, 4096, &rounded))
         return Answer(Status{ErrorCode::ResourceExhausted, {}});
-      auto status = add(storage.impl_.get(), ((size + 4095) / 4096) * 4096);
+      auto status = add(storage.impl_.get(), rounded);
       if (!status.ok())
         return Answer(status);
     }

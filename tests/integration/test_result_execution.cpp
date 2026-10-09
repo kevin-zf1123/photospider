@@ -1038,22 +1038,33 @@ int foreign_scalar_validation() {
   PS_CHECK(foreign.statistics().issued.work == before);
   return 0;
 }
+struct SparseNeedPeaks {
+  std::uint64_t before = 0, supplied = 0;
+};
 struct ManyPartsState {
   const Footprint* requested;
   const Value* backing;
   bool waiting = false;
   std::atomic<unsigned>* needs;
   std::atomic<unsigned>* reads;
+  SparseNeedPeaks* peaks;
   ManyPartsState(const Footprint* need, const Value* value,
                  std::atomic<unsigned>* need_count,
-                 std::atomic<unsigned>* read_count)
-      : requested(need), backing(value), needs(need_count), reads(read_count) {}
+                 std::atomic<unsigned>* read_count, SparseNeedPeaks* observed)
+      : requested(need),
+        backing(value),
+        needs(need_count),
+        reads(read_count),
+        peaks(observed) {}
   Poll poll(const ResultProgramPhase& phase) {
     if (!waiting) {
       waiting = true;
       ++*needs;
-      return Poll(ResultProgramNeed{{}, {}, {{0, 0, *requested, 1}}});
+      auto need = Poll(ResultProgramNeed{{}, {}, {{0, 0, *requested, 1}}});
+      peaks->before = phase.resources.statistics().peak[ResourceKind::Metadata];
+      return need;
     }
+    peaks->supplied = phase.resources.statistics().peak[ResourceKind::Metadata];
     for (const auto& region : requested->boxes()) {
       std::uint8_t value = 1;
       auto status =
@@ -1065,7 +1076,7 @@ struct ManyPartsState {
     return ForeignBackingState(backing).poll(phase);
   }
 };
-int source_parts_budget() {
+int sparse_source_need_budget() {
   std::vector<Region> boxes;
   for (std::uint64_t i = 0; i < 128; ++i)
     boxes.emplace_back(std::vector<RegionDimension>{{2 * i, 1}});
@@ -1074,6 +1085,7 @@ int source_parts_budget() {
   const auto input_schema =
       tensor_schema(ElementType::UInt8, 256, "test.source_bytes");
   std::atomic<unsigned> needs{0}, reads{0};
+  SparseNeedPeaks peaks;
   auto registry = std::make_shared<OperationRegistry>();
   OperationDefinition operation;
   operation.key = "many_parts";
@@ -1083,8 +1095,8 @@ int source_parts_budget() {
   result_port(&operation.traits.input_schema[0], input_schema);
   operation.start_result = [&](const ResultProgramQuery&,
                                const BufferAllocator& allocator) {
-    return ResultContinuation::make<ManyPartsState>(allocator, &requested,
-                                                    &scalar, &needs, &reads);
+    return ResultContinuation::make<ManyPartsState>(
+        allocator, &requested, &scalar, &needs, &reads, &peaks);
   };
   PS_CHECK(registry->register_operation(std::move(operation)).ok());
   PS_CHECK(registry->freeze().ok());
@@ -1102,14 +1114,18 @@ int source_parts_budget() {
   auto input = Value::create({ElementType::UInt8, {256}}, Region::whole({256}),
                              {0, {1}}, std::vector<std::uint8_t>(256))
                    .take_value();
-  // Source setup peaks below 17 KiB; 32 KiB admits setup and the callback,
-  // then rejects the 128-part Need. The larger budget supplies every part.
-  constexpr std::uint64_t low_limit = 32768;
-  for (std::uint64_t limit : {low_limit, std::uint64_t{1048576}}) {
+  // Measure setup and sparse-Need admission on this platform first. Standard
+  // library object sizes affect managed metadata; no fixed KiB threshold can
+  // reliably separate these phases across supported toolchains.
+  std::uint64_t need_limit = 0;
+  for (bool constrained : {false, true}) {
     ExecutionContextConfig config;
+    config.cpu_workers = 1;
+    config.gpu_enabled = false;
     config.managed_resources = ResourceLimits{};
-    config.managed_resources->capacity[ResourceKind::Host] = limit;
-    config.managed_resources->capacity[ResourceKind::Metadata] = limit;
+    config.managed_resources->capacity[ResourceKind::Host] = 1048576;
+    config.managed_resources->capacity[ResourceKind::Metadata] =
+        constrained ? need_limit : 1048576;
     ExecutionContext context(registry, config);
     auto root = context.resource_budget().take_value();
     auto source = source_result(root, input_schema, input);
@@ -1121,18 +1137,20 @@ int source_parts_budget() {
     options.dependencies.sets.maximum_work = 100000000;
     auto result =
         context.execute(plan, {{{"source", source.value()}}}, {}, options);
-    if (limit != low_limit && !result.ok())
-      std::cerr << "source parts fixture: "
+    if ((!constrained && !result.ok()) || needs.load() != 1)
+      std::cerr << "sparse source Need fixture: "
                 << static_cast<int>(result.status().code) << " "
                 << result.status().message << "\n";
     PS_CHECK(needs.load() == 1);
-    if (limit == low_limit) {
+    if (constrained) {
       PS_CHECK(result.status().code == ErrorCode::ResourceExhausted);
       PS_CHECK(reads.load() == 0);
     } else {
       PS_CHECK(result.ok() &&
                scalar_result(result.value().results.at("value")) == 42);
       PS_CHECK(reads.load() == 128);
+      PS_CHECK(peaks.supplied > peaks.before);
+      need_limit = peaks.before + (peaks.supplied - peaks.before) / 2;
     }
   }
   return 0;
@@ -1668,6 +1686,6 @@ int main() {
   PS_CHECK(binding_contract() == 0);
   PS_CHECK(mandatory_effects() == 0);
   PS_CHECK(foreign_scalar_validation() == 0);
-  PS_CHECK(source_parts_budget() == 0);
+  PS_CHECK(sparse_source_need_budget() == 0);
   return 0;
 }

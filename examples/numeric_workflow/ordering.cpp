@@ -1,4 +1,4 @@
-#include "photospider/numeric/ordering.hpp"
+#include "photospider/ops/numeric/ordering.hpp"
 
 #include <fenv.h>  // NOLINT(build/c++11)
 

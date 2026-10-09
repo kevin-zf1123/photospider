@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "core/status_helpers.hpp"
 #include "plugin/result_plugin.hpp"
 
 namespace ps::plugin_internal::result_c {
@@ -75,7 +76,7 @@ bool array(const T* pointer, std::uint64_t count, std::uint64_t maximum) {
          (!pointer ||
           reinterpret_cast<std::uintptr_t>(pointer) % alignof(T) == 0);
 }
-Status invalid(const char* message);
+using core_internal::invalid;
 Status outcome(int code);
 int code(const Status& status);
 ps_result_atom_key_v2 atom_view(const AtomKey&);

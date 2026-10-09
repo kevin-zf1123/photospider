@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/content_digest.hpp"
 #include "execution/accounted_regions.hpp"
 #include "execution/dependency_dirty.hpp"
@@ -149,16 +150,14 @@ Status DependencyRecords::append_record(
     const auto new_weight = ExecutionDependencies::Impl::weight(candidate);
     const auto remainder =
         impl_->entries - ExecutionDependencies::Impl::weight(old);
-    if (new_weight > limits_.maximum_boxes ||
-        remainder > limits_.maximum_boxes - new_weight)
+    if (!core_internal::can_add(new_weight, remainder, limits_.maximum_boxes))
       return Status{ErrorCode::ResourceExhausted, {}};
     impl_->records[found->second] = std::move(candidate);
     impl_->entries = remainder + new_weight;
     return Status::success();
   }
   const auto weight = ExecutionDependencies::Impl::weight(candidate);
-  if (weight > limits_.maximum_boxes ||
-      impl_->entries > limits_.maximum_boxes - weight)
+  if (!core_internal::can_add(weight, impl_->entries, limits_.maximum_boxes))
     return Status{ErrorCode::ResourceExhausted, {}};
   const auto id = impl_->records.size();
   for (std::uint32_t port = 0; port < candidate.inputs.size(); ++port)
@@ -309,7 +308,7 @@ Status DependencyRecords::append_result(
       if (prior->result == step.result_ref() && prior->request &&
           prior->request->identity == request_identity) {
         const auto copied = prior->request->manifest.size();
-        if (copied > limits_.maximum_work - request_work)
+        if (!core_internal::can_add(copied, request_work, limits_.maximum_work))
           return Status{ErrorCode::ResourceExhausted, {}};
         if (limits_.consume_work) {
           auto charged = limits_.consume_work(copied);
@@ -514,8 +513,7 @@ Status DependencyRecords::append_relation(
     const auto cost = ExecutionDependencies::Impl::weight(record);
     const auto remainder =
         impl_->entries - ExecutionDependencies::Impl::weight(old);
-    if (cost > limits_.maximum_boxes ||
-        remainder > limits_.maximum_boxes - cost)
+    if (!core_internal::can_add(cost, remainder, limits_.maximum_boxes))
       return Status{ErrorCode::ResourceExhausted, {}};
     impl_->records[found->second] = std::move(record);
     impl_->subscribe(found->second);
@@ -523,8 +521,7 @@ Status DependencyRecords::append_relation(
     return Status::success();
   }
   const auto cost = ExecutionDependencies::Impl::weight(record);
-  if (cost > limits_.maximum_boxes ||
-      impl_->entries > limits_.maximum_boxes - cost)
+  if (!core_internal::can_add(cost, impl_->entries, limits_.maximum_boxes))
     return Status{ErrorCode::ResourceExhausted, {}};
   const auto id = impl_->records.size();
   impl_->records.push_back(std::move(record));
@@ -830,8 +827,7 @@ Status DependencyRecords::output(const std::string& name, std::size_t index,
   auto old = impl_->outputs.find(name);
   if (old == impl_->outputs.end()) {
     const auto weight = 1 + members.size() + samples.boxes().size();
-    if (weight > limits_.maximum_boxes ||
-        impl_->entries > limits_.maximum_boxes - weight)
+    if (!core_internal::can_add(weight, impl_->entries, limits_.maximum_boxes))
       return Status{ErrorCode::ResourceExhausted, {}};
     impl_->entries += weight;
     impl_->outputs.emplace(ResourceString(name.data(), name.size()),
@@ -873,8 +869,8 @@ Status DependencyRecords::output(const std::string& name, std::size_t index,
       return combined.status();
     const auto old_weight = old->second.samples.boxes().size();
     const auto new_weight = combined.value().boxes().size() + added_members;
-    if (new_weight > limits_.maximum_boxes ||
-        impl_->entries - old_weight > limits_.maximum_boxes - new_weight)
+    if (!core_internal::can_add(new_weight, impl_->entries - old_weight,
+                                limits_.maximum_boxes))
       return Status{ErrorCode::ResourceExhausted, {}};
     impl_->entries = impl_->entries - old_weight + new_weight;
     old->second.records = std::move(merged);

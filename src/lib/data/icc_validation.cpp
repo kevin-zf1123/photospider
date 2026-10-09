@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <utility>
 
+#include "core/checked_math.hpp"
+#include "core/status_helpers.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
 namespace ps::color_internal {
@@ -13,8 +15,7 @@ struct Stop {
   Status status;
 };
 [[noreturn]] void invalid(const char* message) {
-  throw Stop{
-      {ErrorCode::InvalidArgument, message, FailureReason::InvalidDomain}};
+  throw Stop{core_internal::invalid_domain(message)};
 }
 void checked(Status status) {
   if (!status.ok())
@@ -107,7 +108,7 @@ class Parser {
         invalid("ICC PCS illuminant is not D50 to four decimals");
     }
     const auto count = source_.integer(128);
-    if (count > (source_.bytes.size() - 132) / 12)
+    if (!core_internal::can_multiply_add(count, 12, 132, source_.bytes.size()))
       invalid("ICC tag directory count exceeds resource");
     directory_end_ = 132ULL + 12ULL * count;
     tags_.reserve(count);
@@ -318,7 +319,8 @@ class Parser {
         invalid("ICC description size mismatch");
     } else {
       const auto count = r.integer(8), stride = r.integer(12);
-      if (!count || stride < 12 || count > (r.bytes.size() - 16) / stride)
+      if (!count || stride < 12 ||
+          !core_internal::can_multiply_add(count, stride, 16, r.bytes.size()))
         invalid("invalid ICC multilingual record table");
       const auto end = 16ULL + static_cast<std::uint64_t>(count) * stride;
       for (std::uint64_t i = 0; i < count; ++i) {
@@ -406,7 +408,8 @@ class Parser {
         if (grid)
           invalid("nonzero unused ICC CLUT dimension");
       } else {
-        if (grid < 2 || bytes > r.bytes.size() / grid) {
+        if (grid < 2 ||
+            !core_internal::can_multiply(bytes, grid, r.bytes.size())) {
           invalid("ICC CLUT size exceeds resource");
         }
         bytes *= grid;
@@ -464,7 +467,7 @@ class Parser {
       invalid("invalid ICC LUT grid or table entries");
     std::uint64_t clut = outputs;
     for (unsigned i = 0; i < inputs; ++i) {
-      if (clut > r.bytes.size() / grid)
+      if (!core_internal::can_multiply(clut, grid, r.bytes.size()))
         invalid("ICC CLUT product exceeds resource");
       clut *= grid;
     }

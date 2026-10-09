@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "channel_editing/benchmark.hpp"
+#include "photospider/ops/format/channel_assembly.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)

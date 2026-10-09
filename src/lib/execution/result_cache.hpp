@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/memory_budget.hpp"
 #include "execution/structured_cache.hpp"
 #include "photospider/execution/execution.hpp"
@@ -157,7 +158,7 @@ class ResultCache final {
         return;
       std::uint64_t total = 0;
       for (const auto& allocation : footprint.value()) {
-        if (allocation.bytes > limit_ || total > limit_ - allocation.bytes)
+        if (!core_internal::can_add(total, allocation.bytes, limit_))
           return;
         total += allocation.bytes;
       }
@@ -188,17 +189,18 @@ class ResultCache final {
         if (!owners_.count(allocation.owner))
           fresh += allocation.bytes;
       while (!entries_.empty() &&
-             (entries_.size() >= 4096 || bytes_ > limit_ - fresh ||
-              structured_metadata_ >
-                  dependency_metadata_limit_ - manifest->metadata)) {
+             (entries_.size() >= 4096 ||
+              !core_internal::can_add(bytes_, fresh, limit_) ||
+              !core_internal::can_add(structured_metadata_, manifest->metadata,
+                                      dependency_metadata_limit_))) {
         retired.insert(evict());
         fresh = 0;
         for (const auto& allocation : footprint.value())
           if (!owners_.count(allocation.owner))
             fresh += allocation.bytes;
       }
-      if (structured_metadata_ >
-          dependency_metadata_limit_ - manifest->metadata)
+      if (!core_internal::can_add(structured_metadata_, manifest->metadata,
+                                  dependency_metadata_limit_))
         return;
       for (auto item = structured_manifests_.begin();
            item != structured_manifests_.end();) {
@@ -341,7 +343,8 @@ class ResultCache final {
         return;
       while (!entries_.empty() &&
              (entries_.size() >= 4096 ||
-              (!owners_.count(owner.get()) && bytes_ > limit_ - capacity)))
+              (!owners_.count(owner.get()) &&
+               !core_internal::can_add(bytes_, capacity, limit_))))
         retired.insert(evict());
       lru_.push_back(key);
       try {

@@ -12,11 +12,11 @@
 
 #include "icc_fixture.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/data/representation.hpp"
-#include "photospider/numeric/arrays.hpp"
-#include "photospider/numeric/binary.hpp"
-#include "photospider/numeric/color_ramps.hpp"
-#include "photospider/numeric/lut3d_baking.hpp"
-#include "photospider/numeric/matrix.hpp"
+#include "photospider/ops/numeric/arrays.hpp"
+#include "photospider/ops/numeric/binary.hpp"
+#include "photospider/ops/numeric/color_ramps.hpp"
+#include "photospider/ops/numeric/lut3d_baking.hpp"
+#include "photospider/ops/numeric/matrix.hpp"
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 #include "result_fixture.hpp"     // NOLINT(build/include_subdir)

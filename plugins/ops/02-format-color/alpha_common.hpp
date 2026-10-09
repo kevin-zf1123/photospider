@@ -11,7 +11,7 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
-#include "photospider/format/alpha.hpp"
+#include "photospider/ops/format/alpha.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal::alpha_ops {

@@ -13,7 +13,7 @@ namespace ps {
  * caller; no ambient environment, filesystem or network lookup is performed.
  * Spaces maps caller-declared canonical names to scene/display reference.
  * This is descriptor admission, not engine parsing or transform validation.
- * A future FMT-13 processor must verify the declared spaces against its pinned
+ * An OCIO processor must verify the declared spaces against its pinned
  * engine and resolve every selected dependency exclusively from this snapshot.
  */
 struct PHOTOSPIDER_API OcioConfigSnapshot final {

@@ -8,6 +8,7 @@
 #include <mutex>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_window_access.hpp"
 #include "photospider/plugin/result_program.hpp"
@@ -82,17 +83,17 @@ class ResultNativeScope final {
                                        window.spec().sample_shape()};
       const auto count = window.region().element_count();
       const auto width = Value::element_size(descriptor.element_type);
-      if (!count.ok() || count.value() > UINT64_MAX / width)
+      if (!count.ok() || !core_internal::can_multiply(count.value(), width))
         return Result<Value>(Status{ErrorCode::ResourceExhausted, {}});
       auto lookup = ResultWindowAccess::read_work(window);
       if (!lookup.ok())
         return Result<Value>(lookup.status());
-      if (lookup.value() > UINT64_MAX - width - window.region().rank() ||
-          count.value() >
-              UINT64_MAX / (lookup.value() + width + window.region().rank()))
+      std::uint64_t per_sample = 0;
+      if (!core_internal::checked_add(
+              lookup.value(), width + window.region().rank(), &per_sample) ||
+          !core_internal::can_multiply(count.value(), per_sample))
         return Result<Value>(Status{ErrorCode::ResourceExhausted, {}});
-      charged = work(count.value() *
-                     (lookup.value() + width + window.region().rank()));
+      charged = work(count.value() * per_sample);
       if (!charged.ok())
         return Result<Value>(charged);
       auto allocated = MutableValue::allocate(descriptor, window.region(),

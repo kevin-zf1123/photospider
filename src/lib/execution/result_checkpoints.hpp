@@ -11,6 +11,7 @@
 #include <tuple>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "execution/dependency_records.hpp"
 #include "photospider/plugin/result_program.hpp"
 
@@ -158,7 +159,8 @@ class ResultCheckpointScope final {
     if (entries_.count(key))
       return false;
     while (!entries_.empty() &&
-           (entries_.size() >= 64 || used_ > maximum_ - weight)) {
+           (entries_.size() >= 64 ||
+            !core_internal::can_add(used_, weight, maximum_))) {
       auto oldest = entries_.begin();
       used_ -= oldest->second.second;
       retired[retired_count++] = std::move(oldest->second.first);

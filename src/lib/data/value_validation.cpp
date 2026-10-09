@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "core/dense_layout_validation.hpp"
 #include "data/typed_sample_validation.hpp"
 #include "photospider/data/tensor_description.hpp"
@@ -57,7 +58,8 @@ Result<DenseMetadata> dense_metadata(const ValueDescriptor& descriptor) {
   result.layout.byte_strides.resize(descriptor.shape.size());
   for (std::size_t reverse = descriptor.shape.size(); reverse > 0; --reverse) {
     const auto axis = reverse - 1;
-    if (stride > INT64_MAX || stride > UINT64_MAX / descriptor.shape[axis]) {
+    if (stride > INT64_MAX ||
+        !core_internal::can_multiply(stride, descriptor.shape[axis])) {
       return Result<DenseMetadata>(failure(ErrorCode::ResourceExhausted,
                                            "dense stride or product overflow"));
     }
@@ -109,7 +111,7 @@ Status validate_facets(const std::vector<ValueFacet>& facets, bool canonical) {
       return failure(ErrorCode::InvalidArgument, "invalid or duplicate facet");
     }
     if (facet.payload.size() > 64 * 1024 ||
-        facet.payload.size() > 1024 * 1024 - total) {
+        !core_internal::can_add(facet.payload.size(), total, 1024 * 1024)) {
       return failure(ErrorCode::ResourceExhausted,
                      "facet payload bound exceeded");
     }

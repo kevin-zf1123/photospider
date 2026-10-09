@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 
+#include "core/checked_math.hpp"
 #include "photospider/execution/execution.hpp"
 
 namespace ps::execution_internal {
@@ -40,7 +41,7 @@ class CallbackQueueMeter final {
     return ns > 0 ? static_cast<std::uint64_t>(ns) : 0;
   }
   void add(std::uint64_t* value, std::uint64_t delta) noexcept {
-    if (delta > UINT64_MAX - *value) {
+    if (!core_internal::can_add(delta, *value)) {
       *value = UINT64_MAX;
       statistics_.saturated = true;
     } else {

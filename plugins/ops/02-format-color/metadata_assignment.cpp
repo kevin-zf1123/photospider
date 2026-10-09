@@ -14,8 +14,8 @@
 #include "00-foundation/tensor_program.hpp"
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
-#include "photospider/format/metadata.hpp"
-#include "photospider/numeric/workflow_authoring.hpp"
+#include "photospider/ops/format/metadata.hpp"
+#include "photospider/ops/numeric/workflow_authoring.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::metadata_internal {

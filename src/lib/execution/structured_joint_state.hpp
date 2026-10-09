@@ -13,8 +13,18 @@
 #include "plugin/failure_latch.hpp"
 
 namespace ps::execution_internal {
-// Type-erased participant marker; the Actor remains its owning control block.
+class StructuredExecution;
+// Only StructuredExecution's final Actor can construct this erased marker.
+// Its shared_ptr control block retains the concrete Actor deleter.
 class JointParticipant {
+ private:
+  friend class StructuredExecution;
+  JointParticipant() = default;
+  JointParticipant(const JointParticipant&) = delete;
+  JointParticipant& operator=(const JointParticipant&) = delete;
+  JointParticipant(JointParticipant&&) = delete;
+  JointParticipant& operator=(JointParticipant&&) = delete;
+
  protected:
   ~JointParticipant() = default;
 };

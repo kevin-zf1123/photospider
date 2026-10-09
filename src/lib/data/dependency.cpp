@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "core/status_helpers.hpp"
 #include "data/dependency_metadata.hpp"
 
@@ -14,10 +15,8 @@ namespace ps {
 namespace {
 
 Status stopped(const FootprintLimits& limits) {
-  return limits.cancellation.cancelled()
-             ? Status::failure(ErrorCode::Cancelled,
-                               "dependency operation cancelled")
-             : Status::success();
+  return core_internal::cancellation_status(limits.cancellation,
+                                            "dependency operation cancelled");
 }
 Status bounded(std::uint64_t count, const FootprintLimits& limits) {
   auto status = stopped(limits);
@@ -43,7 +42,7 @@ Result<std::uint64_t> row_weight(const AtomCertificate& row,
   std::uint64_t total = 1;
   for (const auto& need : row.inputs) {
     const auto extra = 1 + need.tags.size() + need.samples.boxes().size();
-    if (extra > limits.maximum_boxes || total > limits.maximum_boxes - extra)
+    if (!core_internal::can_add(extra, total, limits.maximum_boxes))
       return Result<std::uint64_t>(Status{ErrorCode::ResourceExhausted, {}});
     total += extra;
     auto status = bounded(total, limits);
@@ -154,8 +153,7 @@ Result<DependencyCertificate> DependencyCertificate::create_owned(
       for (std::uint32_t role = 1; role <= 8; role <<= 1) {
         if (!(need.roles & role))
           continue;
-        if (extra > limits.maximum_boxes ||
-            entries > limits.maximum_boxes - extra)
+        if (!core_internal::can_add(extra, entries, limits.maximum_boxes))
           return Result<DependencyCertificate>(Status::failure(
               ErrorCode::ResourceExhausted, "certificate edge limit"));
         entries += extra;
@@ -178,8 +176,8 @@ Result<DependencyCertificate> DependencyCertificate::create_owned(
     rows[i].inputs = canonical.take_value();
     for (const auto& need : rows[i].inputs) {
       const auto extra = need.tags.size() + need.samples.boxes().size() + 1;
-      if (extra > limits.maximum_boxes ||
-          published_entries > limits.maximum_boxes - extra)
+      if (!core_internal::can_add(extra, published_entries,
+                                  limits.maximum_boxes))
         return Result<DependencyCertificate>(Status::failure(
             ErrorCode::ResourceExhausted, "canonical certificate edge limit"));
       published_entries += extra;
@@ -253,14 +251,12 @@ Result<DependencyCertificate> DependencyCertificate::restrict(
       std::uint64_t extra = 1;
       for (const auto& need : row.inputs) {
         const auto count = 1 + need.tags.size() + need.samples.boxes().size();
-        if (count > limits.maximum_boxes ||
-            extra > limits.maximum_boxes - count)
+        if (!core_internal::can_add(count, extra, limits.maximum_boxes))
           return Result<DependencyCertificate>(
               Status{ErrorCode::ResourceExhausted, {}});
         extra += count;
       }
-      if (extra > limits.maximum_boxes ||
-          entries > limits.maximum_boxes - extra)
+      if (!core_internal::can_add(extra, entries, limits.maximum_boxes))
         return Result<DependencyCertificate>(
             Status{ErrorCode::ResourceExhausted, {}});
       entries += extra;
@@ -400,7 +396,7 @@ Result<DependencyCertificate> DependencyCertificate::merge(
     auto weight = row_weight(*row, limits);
     if (!weight.ok())
       return Result<DependencyCertificate>(weight.status());
-    if (entries > limits.maximum_boxes - weight.value())
+    if (!core_internal::can_add(entries, weight.value(), limits.maximum_boxes))
       return Result<DependencyCertificate>(
           Status{ErrorCode::ResourceExhausted, {}});
     status = consume_work(weight.value(), &work, limits);

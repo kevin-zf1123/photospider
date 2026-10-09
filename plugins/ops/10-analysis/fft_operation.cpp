@@ -1,4 +1,4 @@
-#include "photospider/plugin/fft_operation.hpp"
+#include "photospider/ops/fft_operation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -10,7 +10,8 @@
 #include <utility>
 #include <vector>
 
-#include "plugin/port_validation.hpp"
+#include "core/status_helpers.hpp"
+#include "data/value_validation.hpp"
 
 namespace ps {
 namespace {
@@ -23,12 +24,6 @@ Status invalid(const char* message) {
           FailureReason::InvalidDomain,
           {FailureOrigin::Schema, FailureScope::Group}};
 }
-Status overflow() {
-  return {ErrorCode::OperationFailed,
-          "external FFT nonfinite arithmetic",
-          FailureReason::ArithmeticOverflow,
-          {FailureOrigin::Domain, FailureScope::Group}};
-}
 bool finite(Complex value) {
   return std::isfinite(value[0]) && std::isfinite(value[1]);
 }
@@ -38,7 +33,8 @@ Result<Complex> multiply(Complex a, Complex b) {
   Complex result{ac - bd, ad + bc};
   if (!std::isfinite(ac) || !std::isfinite(bd) || !std::isfinite(ad) ||
       !std::isfinite(bc) || !finite(result))
-    return Result<Complex>(overflow());
+    return Result<Complex>(core_internal::arithmetic_overflow(
+        "external FFT nonfinite arithmetic"));
   return Result<Complex>(result);
 }
 std::uint64_t modular_product(std::uint64_t a, std::uint64_t b,
@@ -326,7 +322,8 @@ struct State {
   Poll poll(const ResultProgramPhase& p) {
     input_internal::Float32Environment environment;
     if (!environment.active())
-      return Poll(overflow());
+      return Poll(core_internal::arithmetic_overflow(
+          "external FFT nonfinite arithmetic"));
     if (!window(p))
       return Poll(Status{ErrorCode::ResourceExhausted,
                          "FFT complex record exceeds page window"});
@@ -410,7 +407,8 @@ struct State {
                 if (conjugate)
                   value[1] = -value[1];
                 if (!finite(value))
-                  return Poll(overflow());
+                  return Poll(core_internal::arithmetic_overflow(
+                      "external FFT nonfinite arithmetic"));
                 std::memcpy(buffer.data() + i * 16, value.data(), 16);
               }
               memory = Result<MutableBuffer>(std::move(buffer));
@@ -475,7 +473,8 @@ struct State {
             const Complex add{u[0] + v[0], u[1] + v[1]},
                 difference{u[0] - v[0], u[1] - v[1]};
             if (!finite(add) || !finite(difference))
-              return Poll(overflow());
+              return Poll(core_internal::arithmetic_overflow(
+                  "external FFT nonfinite arithmetic"));
             auto product =
                 multiply(difference, twiddle(local, span, inverse()));
             if (!product.ok())
@@ -569,7 +568,8 @@ struct State {
                 accumulated = {accumulated[0] + value[0],
                                accumulated[1] + value[1]};
                 if (!finite(accumulated))
-                  return Poll(overflow());
+                  return Poll(core_internal::arithmetic_overflow(
+                      "external FFT nonfinite arithmetic"));
               }
               std::memcpy(slab.data() + (fill + i) * 16, accumulated.data(),
                           16);
@@ -593,7 +593,8 @@ struct State {
               }
               sum = {sum[0] + value[0], sum[1] + value[1]};
               if (!finite(sum))
-                return Poll(overflow());
+                return Poll(core_internal::arithmetic_overflow(
+                    "external FFT nonfinite arithmetic"));
             }
             term += batch;
             if (term < odd) {
@@ -695,7 +696,8 @@ struct State {
               residual = std::max(residual, std::abs(value[1]));
             }
             if (!finite(value))
-              return Poll(overflow());
+              return Poll(core_internal::arithmetic_overflow(
+                  "external FFT nonfinite arithmetic"));
             std::memcpy(slab.data() + (fill + i) * (inverse() ? 8 : 16),
                         value.data(), inverse() ? 8 : 16);
           }

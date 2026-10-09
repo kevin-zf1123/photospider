@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "channel_extraction_workflow/source.hpp"
+#include "photospider/ops/format/channel_editing.hpp"
 
 namespace {
 template <class T>

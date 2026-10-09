@@ -1,5 +1,5 @@
 add_executable(photospider_model_conversion_performance main.cpp)
-target_link_libraries(photospider_model_conversion_performance PRIVATE Photospider::kernel)
+target_link_libraries(photospider_model_conversion_performance PRIVATE Photospider::kernel Photospider::ops_headers)
 target_include_directories(photospider_model_conversion_performance PRIVATE ../../plugins/ops ../../src/lib)
 target_compile_features(photospider_model_conversion_performance PRIVATE cxx_std_17)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")

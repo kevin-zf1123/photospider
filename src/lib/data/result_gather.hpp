@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "core/radix_sort.hpp"
 #include "data/footprint_index.hpp"
 #include "photospider/data/result_relation.hpp"
@@ -114,10 +115,10 @@ struct Table final {
   // the retained tape. Wide tuples still use bounded, at-most-two-word reads
   // per axis; only normalization needs its reference-key fallback.
   Status allocate(std::uint64_t rows, const FootprintLimits& limits) {
-    if (rows > UINT64_MAX / taps)
+    if (!core_internal::can_multiply(rows, taps))
       return {ErrorCode::ResourceExhausted, "gather table size"};
     const auto entries = rows * taps;
-    if (coordinate_bits && entries > UINT64_MAX / coordinate_bits)
+    if (!core_internal::can_multiply(entries, coordinate_bits))
       return {ErrorCode::ResourceExhausted, "gather coordinate bits"};
     const auto bits = entries * coordinate_bits;
     const auto presence_words = entries / 64 + (entries % 64 != 0);
@@ -298,7 +299,7 @@ struct Table final {
         const auto d = box.dimensions()[axis];
         at[axis] = d.offset;
         if (axis < prefix) {
-          if (d.extent && count > UINT64_MAX / d.extent)
+          if (!core_internal::can_multiply(count, d.extent))
             return {ErrorCode::ResourceExhausted, "gather tuple count"};
           count *= d.extent;
         }
@@ -315,7 +316,7 @@ struct Table final {
       }
       const auto unit =
           1 + taps * (source_work() + 1 + per_tap) + (contained ? 0 : lookup);
-      if (count > (UINT64_MAX - lookup) / unit)
+      if (!core_internal::can_multiply_add(count, unit, lookup))
         return {ErrorCode::ResourceExhausted, "gather work overflow"};
       auto charged = charge(count * unit + lookup, limits);
       if (!charged.ok())
@@ -458,7 +459,7 @@ struct Table final {
                              : input_coordinate(reference, sort_axes[axis]);
         },
         [&](auto n) {
-          if (n > UINT64_MAX / coordinate_cost)
+          if (!core_internal::can_multiply(n, coordinate_cost))
             return Status{ErrorCode::ResourceExhausted,
                           "gather radix work overflow"};
           return charge(n * coordinate_cost, limits);
@@ -467,7 +468,7 @@ struct Table final {
     if (!charged.ok())
       return Answer(charged);
     const auto unit = 3 * rank + source_work() + 1;
-    if (points.size() > UINT64_MAX / unit)
+    if (!core_internal::can_multiply(points.size(), unit))
       return Answer(
           Status{ErrorCode::ResourceExhausted, "gather normalization work"});
     charged = charge(points.size() * unit, limits);
@@ -493,11 +494,11 @@ struct Table final {
     const auto count = std::min(capacity, sample_count);
     if (!count)
       return 0;
-    const auto maximum = count > UINT64_MAX / 8 ? UINT64_MAX : 8 * count;
+    const auto maximum = core_internal::saturating_multiply(count, 8);
     std::uint64_t area = 1;
     for (std::size_t axis = 0; axis < input_shape.size(); ++axis) {
       const auto extent = upper[axis] - lower[axis] + 1;
-      if (extent > maximum / area)
+      if (!core_internal::can_multiply(extent, area, maximum))
         return 0;
       area *= extent;
     }
@@ -612,17 +613,18 @@ struct Table final {
       for (std::size_t axis = 0; axis < output_shape.size() - tuple_axes;
            ++axis) {
         const auto extent = box.dimensions()[axis].extent;
-        if (count > UINT64_MAX / extent)
+        if (!core_internal::can_multiply(count, extent))
           return Result<Footprint>(
               Status{ErrorCode::ResourceExhausted, "gather tuple count"});
         count *= extent;
       }
-      if (count > UINT64_MAX - capacity)
+      if (!core_internal::can_add(count, capacity))
         return Result<Footprint>(
             Status{ErrorCode::ResourceExhausted, "gather tuple count"});
       capacity += count;
     }
-    if (capacity > work.remaining / (input_shape.size() + 1))
+    if (!core_internal::can_multiply(capacity, input_shape.size() + 1,
+                                     work.remaining))
       return Result<Footprint>(
           Status{ErrorCode::ResourceExhausted, "gather query work limit"});
     if (limits.cancellation.cancelled())
@@ -736,7 +738,7 @@ struct Table final {
         }
       }
       for (std::size_t axis = input_shape.size(); axis-- > 0;) {
-        if (contiguous > UINT64_MAX / extent[axis])
+        if (!core_internal::can_multiply(contiguous, extent[axis]))
           return {ErrorCode::ResourceExhausted, "gather span overflow"};
         contiguous *= extent[axis];
         prefix = axis;
@@ -752,11 +754,12 @@ struct Table final {
           return charged;
         std::uint64_t first = 0;
         for (std::size_t axis = 0; axis < input_shape.size(); ++axis) {
-          if (first > (UINT64_MAX - coordinate[axis]) / input_shape[axis])
+          if (!core_internal::can_multiply_add(first, input_shape[axis],
+                                               coordinate[axis]))
             return {ErrorCode::ResourceExhausted, "gather position overflow"};
           first = first * input_shape[axis] + coordinate[axis];
         }
-        if (contiguous > UINT64_MAX - first)
+        if (!core_internal::can_add(contiguous, first))
           return {ErrorCode::ResourceExhausted, "gather span overflow"};
         auto span = support;
         span.first = first;

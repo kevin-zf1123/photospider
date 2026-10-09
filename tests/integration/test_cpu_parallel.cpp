@@ -1,10 +1,12 @@
 #include <atomic>
 #include <cfenv>  // NOLINT(build/c++11)
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <future>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -223,8 +225,125 @@ int run(unsigned workers, unsigned mode, unsigned grant, unsigned simultaneous,
   PS_CHECK(resources.live[ResourceKind::Queue] == 0);
   return 0;
 }
+struct MidloopProbe {
+  std::mutex mutex;
+  std::condition_variable changed;
+  bool entered = false, release = false;
+  std::atomic<unsigned> iterations{0}, active{0};
+  std::atomic<bool> observed_cancel{false};
+};
+struct MidloopWork {
+  MidloopProbe* probe;
+  CancellationToken cancellation;
+};
+int midloop_block(void* user, std::uint64_t begin, std::uint64_t end,
+                  std::uint32_t) {
+  auto& work = *static_cast<MidloopWork*>(user);
+  auto& probe = *work.probe;
+  ++probe.active;
+  struct Retire {
+    std::atomic<unsigned>& active;
+    ~Retire() { --active; }
+  } retire{probe.active};
+  for (auto i = begin; i < end; ++i) {
+    if (work.cancellation.cancelled()) {
+      probe.observed_cancel = true;
+      return 2;
+    }
+    if (++probe.iterations == 64) {
+      std::unique_lock<std::mutex> lock(probe.mutex);
+      probe.entered = true;
+      probe.changed.notify_all();
+      if (!probe.changed.wait_for(lock, std::chrono::seconds(10),
+                                  [&] { return probe.release; }))
+        return 1;
+    }
+  }
+  return 0;
+}
+int cancel_during_cpu_loop() {
+  constexpr std::uint64_t planned = 262144;
+  MidloopProbe probe;
+  auto operations = std::make_shared<OperationRegistry>();
+  OperationDefinition operation;
+  operation.key = "parallel.cancel_midloop";
+  operation.traits.cacheable = false;
+  auto output = multi_result::output(
+      "value", multi_result::schema(ElementType::Int64, {1}));
+  output.region_rule = OperationRegionRule::Whole;
+  struct Program {
+    MidloopProbe* probe;
+    explicit Program(MidloopProbe* state) : probe(state) {}
+    Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+      MidloopWork work{probe, phase.query.cancellation};
+      const auto* service = phase.cpu_parallel;
+      if (!service)
+        return Result<ResultProgramPoll>(
+            Status{ErrorCode::Internal, "missing CPU service"});
+      const auto code = service->run(service->context, planned, planned, 1,
+                                     midloop_block, &work);
+      return Result<ResultProgramPoll>(
+          Status{code == 2 ? ErrorCode::Cancelled : ErrorCode::Internal,
+                 "midloop cancellation probe"});
+    }
+  };
+  output.continuation_bytes = sizeof(Program);
+  operation.traits.outputs = {output};
+  operation.start_result = [&](const auto&, const auto& allocator) {
+    return ResultContinuation::make<Program>(allocator, &probe);
+  };
+  PS_CHECK(operations->register_operation(std::move(operation)).ok());
+  PS_CHECK(operations->freeze().ok());
+  WorkflowDocument document;
+  document.nodes = {{1, "parallel.cancel_midloop", {}, {}}};
+  document.outputs = {{"output", 1, "value"}};
+  GraphContext graph(document);
+  auto compiled = Compiler(operations).compile(graph);
+  PS_CHECK(compiled.ok());
+  ExecutionContextConfig config;
+  config.cpu_workers = 2;
+  config.gpu_enabled = false;
+  ExecutionContext context(operations, config);
+  CancellationSource cancellation;
+  auto future = std::async(std::launch::async, [&] {
+    return context.execute(compiled.value().plan, {}, cancellation.token());
+  });
+  struct Release {
+    MidloopProbe& probe;
+    CancellationSource& cancellation;
+    ~Release() {
+      cancellation.cancel();
+      {
+        std::lock_guard<std::mutex> lock(probe.mutex);
+        probe.release = true;
+      }
+      probe.changed.notify_all();
+    }
+  } release{probe, cancellation};
+  {
+    std::unique_lock<std::mutex> lock(probe.mutex);
+    PS_CHECK(probe.changed.wait_for(lock, std::chrono::seconds(10),
+                                    [&] { return probe.entered; }));
+    cancellation.cancel();
+    probe.release = true;
+  }
+  probe.changed.notify_all();
+  PS_CHECK(future.wait_for(std::chrono::seconds(10)) ==
+           std::future_status::ready);
+  const auto result = future.get();
+  PS_CHECK(result.status().code == ErrorCode::Cancelled);
+  PS_CHECK(probe.observed_cancel);
+  PS_CHECK(probe.iterations > 0 && probe.iterations < planned);
+  PS_CHECK(probe.active == 0);
+  PS_CHECK(context.resource_budget()
+               .take_value()
+               .statistics()
+               .live[ResourceKind::Queue] == 0);
+  return 0;
+}
 }  // namespace
 int main() try {
+  PS_CHECK(cancel_during_cpu_loop() == 0);
   PS_CHECK(run(1, 0, 0, 1) == 0);
   PS_CHECK(run(4, 1, 0, 1) == 0);
   PS_CHECK(run(4, 0, 1, 1) == 0);

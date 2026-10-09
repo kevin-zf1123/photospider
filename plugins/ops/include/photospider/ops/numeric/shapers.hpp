@@ -8,9 +8,9 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/numeric/arrays.hpp"
-#include "photospider/numeric/sequences.hpp"
-#include "photospider/numeric/workflow_authoring.hpp"
+#include "photospider/ops/numeric/arrays.hpp"
+#include "photospider/ops/numeric/sequences.hpp"
+#include "photospider/ops/numeric/workflow_authoring.hpp"
 
 namespace ps::numeric {
 namespace shaper_detail {

@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/content_digest.hpp"
 #include "execution/execution_timing.hpp"
 #include "plugin/port_validation.hpp"
@@ -19,7 +20,7 @@ Result<std::uint64_t> region_bytes(const ValueDescriptor& descriptor,
         Status::failure(ErrorCode::InvalidArgument, "invalid packed region"));
   auto count = region.element_count();
   const auto width = Value::element_size(descriptor.element_type);
-  if (!count.ok() || count.value() > UINT64_MAX / width)
+  if (!count.ok() || !core_internal::can_multiply(count.value(), width))
     return Result<std::uint64_t>(Status::failure(
         ErrorCode::ResourceExhausted, "regional byte count overflows"));
   return Result<std::uint64_t>(count.value() * width);

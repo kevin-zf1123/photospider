@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
 #include "support/channel_result_fixture.hpp"
 

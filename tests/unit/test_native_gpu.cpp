@@ -211,7 +211,13 @@ int main() {
   using ps::gpu_internal::allocation_capacity;
   using ps::gpu_internal::Device;
   using ps::gpu_internal::Invocation;
+  PS_CHECK(allocation_capacity(0) == 0);
+  PS_CHECK(allocation_capacity(1) == 1);
+  PS_CHECK(allocation_capacity(16384) == 16384);
   PS_CHECK(allocation_capacity(16385) == 32768);
+  PS_CHECK(allocation_capacity(INT64_MAX - UINT64_C(16384)) ==
+           INT64_MAX - UINT64_C(16383));
+  PS_CHECK(allocation_capacity(INT64_MAX - UINT64_C(16383)) == 0);
   PS_CHECK(allocation_capacity(UINT64_MAX) == 0);
   auto device = Device::create();
   if (!device) {

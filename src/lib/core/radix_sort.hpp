@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "photospider/core/cancellation.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
@@ -22,7 +23,8 @@ Status sort(ResourceVector<T>* values, std::size_t rank, Coordinate coordinate,
     return charge(UINT64_C(1));
   try {
     std::array<std::uint64_t, 8> base{}, varying{};
-    if (rank > base.size() || values->size() > UINT64_MAX / (rank + 2))
+    if (rank > base.size() ||
+        !core_internal::can_multiply(values->size(), rank + 2))
       return {ErrorCode::ResourceExhausted, "radix coordinate count"};
     auto status = charge(values->size() * rank);
     if (!status.ok())

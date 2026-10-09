@@ -1,4 +1,4 @@
-#include "photospider/numeric/calculus.hpp"
+#include "photospider/ops/numeric/calculus.hpp"
 
 #include <fenv.h>  // NOLINT(build/c++11)
 

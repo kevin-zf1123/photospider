@@ -1,4 +1,4 @@
-#include "photospider/numeric/lut3d.hpp"
+#include "photospider/ops/numeric/lut3d.hpp"
 
 #include <algorithm>
 #include <array>
@@ -13,8 +13,8 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/numeric/arrays.hpp"
-#include "photospider/numeric/color_ramps.hpp"
+#include "photospider/ops/numeric/arrays.hpp"
+#include "photospider/ops/numeric/color_ramps.hpp"
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 #include "result_fixture.hpp"     // NOLINT(build/include_subdir)

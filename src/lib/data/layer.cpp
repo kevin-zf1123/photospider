@@ -6,6 +6,7 @@
 #include <limits>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "data/value_validation.hpp"
 
 namespace ps {
@@ -75,7 +76,7 @@ unsigned kind(std::string_view id) {
 }
 bool dimensions(const LayerSpec& spec) {
   return spec.working_space == 1 && spec.height && spec.width &&
-         spec.height <= static_cast<std::uint64_t>(INT64_MAX) / 64 / spec.width;
+         core_internal::can_multiply(spec.height, spec.width, INT64_MAX / 64);
 }
 void word(ResourceVector<std::uint8_t>* bytes, std::uint64_t value) {
   for (unsigned i = 0; i < 8; ++i)

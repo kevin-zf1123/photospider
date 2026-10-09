@@ -8,15 +8,15 @@
 #include <vector>
 
 #include "../../examples/numeric_workflow/icc_fixture.hpp"
-#include "photospider/numeric/bezier.hpp"
-#include "photospider/numeric/color_ramps.hpp"
-#include "photospider/numeric/curves.hpp"
-#include "photospider/numeric/inverse_curves.hpp"
-#include "photospider/numeric/lowpass.hpp"
-#include "photospider/numeric/lut1d.hpp"
-#include "photospider/numeric/lut3d.hpp"
-#include "photospider/numeric/lut3d_baking.hpp"
-#include "photospider/numeric/shapers.hpp"
+#include "photospider/ops/numeric/bezier.hpp"
+#include "photospider/ops/numeric/color_ramps.hpp"
+#include "photospider/ops/numeric/curves.hpp"
+#include "photospider/ops/numeric/inverse_curves.hpp"
+#include "photospider/ops/numeric/lowpass.hpp"
+#include "photospider/ops/numeric/lut1d.hpp"
+#include "photospider/ops/numeric/lut3d.hpp"
+#include "photospider/ops/numeric/lut3d_baking.hpp"
+#include "photospider/ops/numeric/shapers.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {

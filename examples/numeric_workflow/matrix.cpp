@@ -1,4 +1,4 @@
-#include "photospider/numeric/matrix.hpp"
+#include "photospider/ops/numeric/matrix.hpp"
 
 #include <fenv.h>  // NOLINT(build/c++11)
 

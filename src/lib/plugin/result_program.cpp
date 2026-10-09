@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/affine_view.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_window_access.hpp"
@@ -406,13 +407,15 @@ Status ResultTensorInput::prepare_whole_view(
                     FailureReason::InvalidDomain,
                     {FailureOrigin::Domain, FailureScope::Group}};
     auto count = box.element_count();
-    if (!count.ok() || count.value() > UINT64_MAX / width)
+    if (!count.ok() || !core_internal::can_multiply(count.value(), width))
       return Status{ErrorCode::ResourceExhausted, {}};
     auto lookup = execution_internal::ResultWindowAccess::read_work(window);
     if (!lookup.ok())
       return lookup.status();
-    const auto per_sample = lookup.value() + width + box.rank();
-    if (per_sample < lookup.value() || count.value() > UINT64_MAX / per_sample)
+    std::uint64_t per_sample = 0;
+    if (!core_internal::checked_add(lookup.value(), width + box.rank(),
+                                    &per_sample) ||
+        !core_internal::can_multiply(count.value(), per_sample))
       return Status{ErrorCode::ResourceExhausted, {}};
     charged = consume_work(count.value() * per_sample);
     if (!charged.ok())

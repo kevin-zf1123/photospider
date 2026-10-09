@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "core/status_helpers.hpp"
 #include "plugin/port_validation.hpp"
 
@@ -161,8 +162,8 @@ Result<ResourceVector<ResultTensorNeed>> decode_result_discovery(
     if (!samples.ok())
       return Answer(samples.status());
     const auto count = samples.value().boxes().size() + 1;
-    if (*metadata_entries > limits.maximum_boxes ||
-        count > (limits.maximum_boxes - *metadata_entries) / roles)
+    if (!core_internal::can_multiply_add(count, roles, *metadata_entries,
+                                         limits.maximum_boxes))
       return Answer(
           Status{ErrorCode::ResourceExhausted, "GPU discovery metadata limit"});
     *metadata_entries += roles * count;

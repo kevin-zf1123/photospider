@@ -4,6 +4,8 @@
 #include <cstring>
 #include <limits>
 
+#include "core/checked_math.hpp"
+
 namespace ps {
 Status copy_value_region(
     const Value& source, const Region& region, const Region& destination,
@@ -16,13 +18,15 @@ Status copy_value_region(
   auto count = destination.element_count();
   if (!count.ok())
     return count.status();
-  if (count.value() > UINT64_MAX / width || bytes != count.value() * width ||
+  if (!core_internal::can_multiply(count.value(), width) ||
+      bytes != count.value() * width ||
       bytes > static_cast<std::uint64_t>(PTRDIFF_MAX))
     return Status{ErrorCode::InvalidArgument,
                   "region copy byte count mismatch"};
   const auto from = reinterpret_cast<std::uintptr_t>(source.bytes().data());
   const auto to = reinterpret_cast<std::uintptr_t>(data);
-  if (bytes > UINTPTR_MAX - to || source.bytes().size() > UINTPTR_MAX - from ||
+  if (!core_internal::can_add(bytes, to, UINTPTR_MAX) ||
+      !core_internal::can_add(source.bytes().size(), from, UINTPTR_MAX) ||
       (to < from + source.bytes().size() && from < to + bytes))
     return Status{ErrorCode::InvalidArgument, "region copy buffers overlap"};
   return visit_value_runs(

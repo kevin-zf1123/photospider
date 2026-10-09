@@ -12,13 +12,11 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "core/utf8_validation.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::result_c {
-Status invalid(const char* message) {
-  return {ErrorCode::InvalidArgument, message};
-}
 Status outcome(int code) {
   switch (code) {
     case PS_RESULT_STATUS_OK_V2:
@@ -152,7 +150,8 @@ Result<SchemaTemplate> schema(const ps_result_schema_v2* source) {
   for (std::uint32_t i = 0; i < source->tensor_count; ++i) {
     const auto& image = source->tensors[i];
     if (image.struct_size != sizeof(image) || image.rank < 1 ||
-        image.rank > 8 || image.batch_rank > 8 - image.rank ||
+        image.rank > 8 ||
+        !core_internal::can_add(image.rank, image.batch_rank, 8) ||
         image.spatial > 1 || !array(image.groups, image.group_count, 64))
       return Result<SchemaTemplate>(invalid("invalid typed image record"));
     auto key = text(image.key, image.key_size);

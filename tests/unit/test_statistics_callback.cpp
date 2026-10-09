@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/plugin/statistics_operation.hpp"
+#include "photospider/ops/statistics_operation.hpp"
 #include "support/test_support.hpp"
 
 namespace {

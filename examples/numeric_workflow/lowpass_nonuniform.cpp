@@ -12,8 +12,8 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/numeric/arrays.hpp"
-#include "photospider/numeric/lowpass.hpp"
+#include "photospider/ops/numeric/arrays.hpp"
+#include "photospider/ops/numeric/lowpass.hpp"
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 #include "result_fixture.hpp"     // NOLINT(build/include_subdir)

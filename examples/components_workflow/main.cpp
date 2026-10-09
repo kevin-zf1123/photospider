@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "../shared/result_source.hpp"
+#include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {

@@ -7,7 +7,7 @@
 #include <variant>
 #include <vector>
 
-#include "photospider/format/channel.hpp"
+#include "photospider/ops/format/channel.hpp"
 
 namespace ps::format {
 /** @brief Closed typed values accepted by the tensor-description-v4/v5

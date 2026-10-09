@@ -11,7 +11,7 @@
 #include "00-foundation/tensor_program.hpp"
 #include "data/content_digest.hpp"
 #include "data/result_window_access.hpp"
-#include "photospider/format/channel.hpp"
+#include "photospider/ops/format/channel.hpp"
 
 namespace ps::plugin_internal::format_result {
 using tensor_ops::require;

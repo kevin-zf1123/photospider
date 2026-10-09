@@ -1,4 +1,4 @@
-#include "photospider/plugin/component_operation.hpp"
+#include "photospider/ops/component_operation.hpp"
 
 #include <algorithm>
 #include <array>

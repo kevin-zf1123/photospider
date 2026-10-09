@@ -1,4 +1,4 @@
-#include "photospider/plugin/statistics_operation.hpp"
+#include "photospider/ops/statistics_operation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -10,7 +10,8 @@
 #include <utility>
 #include <vector>
 
-#include "plugin/port_validation.hpp"
+#include "core/status_helpers.hpp"
+#include "data/value_validation.hpp"
 
 namespace ps {
 namespace {
@@ -24,12 +25,6 @@ Status domain(const char* message) {
   return {ErrorCode::OperationFailed,
           message,
           FailureReason::InvalidDomain,
-          {FailureOrigin::Domain, FailureScope::Group}};
-}
-Status overflow() {
-  return {ErrorCode::OperationFailed,
-          "integer statistics arithmetic overflow",
-          FailureReason::ArithmeticOverflow,
           {FailureOrigin::Domain, FailureScope::Group}};
 }
 Status validate(Op op, StatisticsSpec spec,
@@ -278,7 +273,8 @@ struct State {
         return Poll(domain("grade requires consistent positive mean"));
       gain = std::get<double>(phase.query.parameters.at("target")) / mean;
       if (!std::isfinite(gain))
-        return Poll(overflow());
+        return Poll(core_internal::arithmetic_overflow(
+            "integer statistics arithmetic overflow"));
       stage = 2;
     }
     if (stage == 5)
@@ -317,7 +313,8 @@ struct State {
             return Poll(domain("noncanonical sparse histogram"));
           previous = id;
           if (count > INT64_MAX - n || (id && n > (INT64_MAX - total) / id))
-            return Poll(overflow());
+            return Poll(core_internal::arithmetic_overflow(
+                "integer statistics arithmetic overflow"));
           count += n;
           total += id * n;
           if (static_cast<std::uint64_t>(count) > size())
@@ -349,14 +346,16 @@ struct State {
               const auto bin = static_cast<std::uint64_t>(value);
               if (bin >= bin_first && bin - bin_first < counters.size()) {
                 if (counters[bin - bin_first] == INT64_MAX)
-                  return Poll(overflow());
+                  return Poll(core_internal::arithmetic_overflow(
+                      "integer statistics arithmetic overflow"));
                 ++counters[bin - bin_first];
               }
             }
           } else {
             const double graded = gain * static_cast<double>(value);
             if (!std::isfinite(graded))
-              return Poll(overflow());
+              return Poll(core_internal::arithmetic_overflow(
+                  "integer statistics arithmetic overflow"));
             std::memcpy(output.data() + i * 8, &graded, 8);
           }
         }

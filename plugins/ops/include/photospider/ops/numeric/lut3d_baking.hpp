@@ -7,8 +7,8 @@
 
 #include "photospider/compiler/compiler.hpp"
 #include "photospider/data/lut3d_bake.hpp"
-#include "photospider/numeric/lut3d.hpp"
-#include "photospider/numeric/workflow_authoring.hpp"
+#include "photospider/ops/numeric/lut3d.hpp"
+#include "photospider/ops/numeric/workflow_authoring.hpp"
 
 namespace ps::numeric {
 /** @brief Generated source input, always a Float64 Result tensor with final

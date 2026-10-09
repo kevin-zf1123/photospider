@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "cache_build_identity.hpp"  // NOLINT(build/include_subdir)
+#include "core/checked_math.hpp"
 #include "execution/native_gpu.hpp"
 #ifdef PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS
 #include "execution/execution_test_hooks.hpp"
@@ -336,8 +337,9 @@ Status Device::execute(
               found->second.maxTotalThreadsPerThreadgroup;
           if (c.group[0] > maximum.width || c.group[1] > maximum.height ||
               c.group[2] > maximum.depth || c.group[0] > limit ||
-              c.group[1] > limit / c.group[0] ||
-              c.group[2] > limit / (std::uint64_t{c.group[0]} * c.group[1]))
+              !core_internal::can_multiply(c.group[0], c.group[1], limit) ||
+              !core_internal::can_multiply(
+                  std::uint64_t{c.group[0]} * c.group[1], c.group[2], limit))
             return Status{ErrorCode::InvalidArgument,
                           "native group exceeds limit"};
         }

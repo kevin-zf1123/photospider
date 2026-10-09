@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "core/utf8_validation.hpp"
 #include "execution/result_callback_scope.hpp"
 #include "plugin/builtin_operations.hpp"
@@ -868,8 +869,8 @@ OperationRegistry::prepare_operation(
         if (!prepared.ok())
           return Answer(prepared.status());
         auto result = prepared.take_value();
-        if (result.additional_workspace_bytes >
-            UINT64_MAX - traits.workspace_bytes)
+        if (!core_internal::can_add(result.additional_workspace_bytes,
+                                    traits.workspace_bytes))
           return Answer(Status{ErrorCode::ResourceExhausted,
                                "prepared workspace bound overflows",
                                FailureReason::CapacityLimit});

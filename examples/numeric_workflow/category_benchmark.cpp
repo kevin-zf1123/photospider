@@ -11,19 +11,19 @@
 #include <vector>
 
 #include "icc_fixture.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/numeric/arrays.hpp"
-#include "photospider/numeric/bezier.hpp"
-#include "photospider/numeric/calculus.hpp"
-#include "photospider/numeric/color_ramps.hpp"
-#include "photospider/numeric/indexing.hpp"
-#include "photospider/numeric/layouts.hpp"
-#include "photospider/numeric/lut1d.hpp"
-#include "photospider/numeric/lut3d_baking.hpp"
-#include "photospider/numeric/matrix.hpp"
-#include "photospider/numeric/ordering.hpp"
-#include "photospider/numeric/scans.hpp"
-#include "photospider/numeric/sequences.hpp"
-#include "photospider/numeric/shapers.hpp"
+#include "photospider/ops/numeric/arrays.hpp"
+#include "photospider/ops/numeric/bezier.hpp"
+#include "photospider/ops/numeric/calculus.hpp"
+#include "photospider/ops/numeric/color_ramps.hpp"
+#include "photospider/ops/numeric/indexing.hpp"
+#include "photospider/ops/numeric/layouts.hpp"
+#include "photospider/ops/numeric/lut1d.hpp"
+#include "photospider/ops/numeric/lut3d_baking.hpp"
+#include "photospider/ops/numeric/matrix.hpp"
+#include "photospider/ops/numeric/ordering.hpp"
+#include "photospider/ops/numeric/scans.hpp"
+#include "photospider/ops/numeric/sequences.hpp"
+#include "photospider/ops/numeric/shapers.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {

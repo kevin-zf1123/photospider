@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/result_window_access.hpp"
 #include "execution/cpu_range_context.hpp"
 #include "plugin/result_c_poll_lease.hpp"
@@ -560,7 +561,7 @@ class CResultMemberBridge final {
               axis < tensor.batch_axes.size()
                   ? tensor.batch_axes[axis]
                   : tensor.descriptor.shape[axis - tensor.batch_axes.size()];
-          if (extent && count > UINT64_MAX / extent)
+          if (!core_internal::can_multiply(count, extent))
             return Result<uint64_t>(Status{ErrorCode::ResourceExhausted,
                                            "Cartesian tensor domain overflow"});
           count *= extent;
@@ -925,7 +926,7 @@ class CResultMemberBridge final {
           const auto width = Value::element_size(descriptor.element_type);
           if (!count.ok())
             return count.status();
-          if (!width || count.value() > UINT64_MAX / width ||
+          if (!width || !core_internal::can_multiply(count.value(), width) ||
               size != count.value() * width)
             return invalid("Result block state payload size mismatch");
           auto charged = state.phase_->consume_work(size);
@@ -981,7 +982,8 @@ class CResultMemberBridge final {
           const auto& spec = found->second.schema().tensors[0];
           auto count = spec.sample_count();
           const auto width = Value::element_size(spec.descriptor.element_type);
-          if (!count.ok() || count.value() > UINT64_MAX / width ||
+          if (!count.ok() ||
+              !core_internal::can_multiply(count.value(), width) ||
               size != count.value() * width)
             return invalid("Result block state read size mismatch");
           auto window = found->second.acquire_tensor(
@@ -993,8 +995,8 @@ class CResultMemberBridge final {
               execution_internal::ResultWindowAccess::read_work(window.value());
           if (!work.ok())
             return work.status();
-          if (work.value() > UINT64_MAX - width ||
-              count.value() > UINT64_MAX / (work.value() + width))
+          if (!core_internal::can_add(work.value(), width) ||
+              !core_internal::can_multiply(count.value(), work.value() + width))
             return Status{ErrorCode::ResourceExhausted, {}};
           auto charged = state.phase_->consume_work(count.value() *
                                                     (work.value() + width));
@@ -1045,7 +1047,7 @@ class CResultMemberBridge final {
     auto width = Value::element_size(tensor.descriptor.element_type);
     if (!count.ok())
       return Result<std::uint64_t>(count.status());
-    if (!width || count.value() > UINT64_MAX / width)
+    if (!width || !core_internal::can_multiply(count.value(), width))
       return Result<std::uint64_t>(Status{ErrorCode::ResourceExhausted, {}});
     return Result<std::uint64_t>(count.value() * width);
   }
@@ -1120,10 +1122,10 @@ class CResultMemberBridge final {
       if (!lookup.ok())
         return lookup.status();
       auto per_sample = lookup.value();
-      if (per_sample > UINT64_MAX - width - shape.size())
+      if (!core_internal::can_add(per_sample, width + shape.size()))
         return Status{ErrorCode::ResourceExhausted, {}};
       per_sample += width + shape.size();
-      if (last - first + 1 > UINT64_MAX / per_sample)
+      if (!core_internal::can_multiply(last - first + 1, per_sample))
         return Status{ErrorCode::ResourceExhausted, {}};
       auto charged =
           state.phase_->consume_work((last - first + 1) * per_sample);
@@ -1824,7 +1826,8 @@ class CResultMemberBridge final {
         return region_value.status();
       auto samples = region_value.value().region.element_count();
       const auto width = Value::element_size(spec.descriptor.element_type);
-      if (!samples.ok() || !width || samples.value() > UINT64_MAX / width ||
+      if (!samples.ok() || !width ||
+          !core_internal::can_multiply(samples.value(), width) ||
           samples.value() * width != size)
         return invalid("Result buffer publication size mismatch");
       auto domain = spec.sample_count();

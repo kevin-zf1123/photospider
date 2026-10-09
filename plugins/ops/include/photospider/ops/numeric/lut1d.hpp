@@ -9,11 +9,11 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/numeric/bezier.hpp"
-#include "photospider/numeric/curves.hpp"
-#include "photospider/numeric/expression.hpp"
-#include "photospider/numeric/sequences.hpp"
-#include "photospider/numeric/workflow_authoring.hpp"
+#include "photospider/ops/numeric/bezier.hpp"
+#include "photospider/ops/numeric/curves.hpp"
+#include "photospider/ops/numeric/expression.hpp"
+#include "photospider/ops/numeric/sequences.hpp"
+#include "photospider/ops/numeric/workflow_authoring.hpp"
 
 namespace ps::numeric {
 /** @brief Owning authoring references to a generic baked table and its axis.

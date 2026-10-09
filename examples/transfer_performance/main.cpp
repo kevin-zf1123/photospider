@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "fixtures/fmt09_sweep.hpp"
+#include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {

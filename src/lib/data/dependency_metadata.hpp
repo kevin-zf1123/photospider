@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/dependency.hpp"
 
@@ -26,7 +27,7 @@ struct MetadataOwner final {
 struct MetadataBytes final {
   std::uint64_t bytes = 0;
   void add(std::uint64_t count, std::uint64_t width = 1) {
-    if (count > (UINT64_MAX - bytes) / width)
+    if (!core_internal::can_multiply_add(count, width, bytes))
       throw std::bad_alloc();
     bytes += count * width;
   }
@@ -77,7 +78,7 @@ inline std::shared_ptr<const MetadataOwner> metadata_owner(
   if (!root)
     return {};
   try {
-    if (bytes > UINT64_MAX - sizeof(MetadataOwner))
+    if (!core_internal::can_add(bytes, sizeof(MetadataOwner)))
       throw std::bad_alloc();
     const auto total = bytes + sizeof(MetadataOwner);
     auto admitted = root->reserve(ResourceCapacity::host(total, total));

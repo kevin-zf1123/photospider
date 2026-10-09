@@ -1,9 +1,9 @@
 #include <atomic>
-#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "photospider/compiler/workflow_document.hpp"
 
 namespace ps {
@@ -97,7 +97,7 @@ std::uint64_t GraphContext::replace(WorkflowDocument document) {
   std::lock_guard<std::mutex> lock(mutex_);
   const std::uint64_t current =
       state_->revision.load(std::memory_order_relaxed);
-  if (current == std::numeric_limits<std::uint64_t>::max()) {
+  if (!core_internal::can_add(current, 1)) {
     throw std::overflow_error("GraphContext revision overflow");
   }
   const std::uint64_t next = current + 1U;

@@ -4,14 +4,14 @@
 #include <cstdint>
 #include <cstring>
 
-namespace ps::plugin_internal::numeric_ops {
+namespace ps::core_internal {
 /**
  * Exact signed sum of weighted binary64 inputs, in units of 2^-1074.
  * 68 base-2^32 limbs cover 2098 binary64 bits plus a 20-bit count and carry.
  * Storage is inline, so a containing host continuation owns all retained limbs.
  * Every loop has a fixed bound, independent of exponent gaps or sample count.
  */
-struct ExactSequence final {
+struct ExactBinarySum final {
   std::array<std::uint32_t, 68> words{};
   bool negative = false;
 
@@ -49,7 +49,7 @@ struct ExactSequence final {
     }
   }
 
-  void add(const ExactSequence& other) {
+  void add(const ExactBinarySum& other) {
     if (negative == other.negative) {
       std::uint64_t carry = 0;
       for (unsigned i = 0; i < words.size(); ++i) {
@@ -145,4 +145,4 @@ struct ExactSequence final {
            (exponent << fraction) | significand;
   }
 };
-}  // namespace ps::plugin_internal::numeric_ops
+}  // namespace ps::core_internal

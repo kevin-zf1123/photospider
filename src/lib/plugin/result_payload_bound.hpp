@@ -4,6 +4,7 @@
 #include <set>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "photospider/plugin/result_program.hpp"
 #include "plugin/failure_latch.hpp"
 
@@ -116,7 +117,7 @@ class ResultPayloadBound final {
         return failure_.record(charged);
       if (borrowed.count(allocation.owner))
         continue;
-      if (allocation.bytes > maximum_ - bytes)
+      if (!core_internal::can_add(allocation.bytes, bytes, maximum_))
         return failure_.record(
             Status{ErrorCode::ResourceExhausted,
                    "new Result backing exceeds its declared payload bound",

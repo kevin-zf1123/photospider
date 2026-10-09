@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/affine_view.hpp"
 #include "data/footprint_index.hpp"
 #include "data/result_host_access.hpp"
@@ -128,7 +129,8 @@ Result<ResultTensorReadWindow> execution_internal::ResultWindowAccess::compose(
   std::uint64_t rounds = 1;
   for (auto n = planar; n > 1; n >>= 1)
     ++rounds;
-  if (planar > UINT64_MAX / (rounds * (1 + result.spec().batch_axes.size())))
+  if (!core_internal::can_multiply(
+          planar, rounds * (1 + result.spec().batch_axes.size())))
     return Answer(Status{ErrorCode::ResourceExhausted, {}});
   auto charged =
       budget.consume({planar * rounds * (1 + result.spec().batch_axes.size())});
@@ -167,7 +169,8 @@ Result<std::uint64_t> execution_internal::ResultWindowAccess::read_work(
   }
   const auto pieces = affine + window.pieces_.size();
   const auto fixed = 4 * rank + 2;
-  if (pieces == UINT64_MAX || pieces + 1 > (UINT64_MAX - fixed) / (rank + 1))
+  if (pieces == UINT64_MAX ||
+      !core_internal::can_multiply_add(pieces + 1, rank + 1, fixed))
     return Result<std::uint64_t>(Status{ErrorCode::ResourceExhausted, {}});
   return Result<std::uint64_t>((pieces + 1) * (rank + 1) + fixed);
 }

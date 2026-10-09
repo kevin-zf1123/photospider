@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.21)
+project(PhotospiderValueAddressPerformance LANGUAGES CXX)
+if(NOT TARGET Photospider::kernel)
+  find_package(Photospider 0.33 CONFIG REQUIRED COMPONENTS kernel)
+endif()
+add_executable(photospider_value_address_performance main.cpp)
+target_link_libraries(photospider_value_address_performance PRIVATE Photospider::kernel)
+target_compile_features(photospider_value_address_performance PRIVATE cxx_std_17)

@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "core/status_helpers.hpp"
 #include "data/value_validation.hpp"
 
@@ -422,7 +423,7 @@ Result<std::uint64_t> ValueFragments::retained_bytes() const {
   for (const auto& value : fragments_)
     if (owners.insert(value.storage().get()).second) {
       const auto bytes = value.storage()->capacity();
-      if (bytes > UINT64_MAX - count)
+      if (!core_internal::can_add(count, bytes))
         return Result<std::uint64_t>(Status::failure(
             ErrorCode::ResourceExhausted, "fragment owner sum overflow"));
       count += bytes;
@@ -437,7 +438,7 @@ Result<std::uint64_t> ValueFragments::retained_bytes() const {
     if (!owners.insert(storage.get()).second)
       continue;
     const auto bytes = storage->capacity();
-    if (bytes > UINT64_MAX - count)
+    if (!core_internal::can_add(count, bytes))
       return Result<std::uint64_t>(Status::failure(
           ErrorCode::ResourceExhausted, "fragment resource sum overflow"));
     count += bytes;

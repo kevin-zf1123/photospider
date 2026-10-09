@@ -8,6 +8,7 @@
 #include <new>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "core/io_protocol_scope.hpp"
 
 #if defined(_WIN32)
@@ -15,6 +16,8 @@
 #else
 #include <unistd.h>
 #endif
+
+#include "core/status_helpers.hpp"
 
 namespace ps {
 namespace {
@@ -26,7 +29,7 @@ Status io_failure() {
                 {FailureOrigin::Io, FailureScope::Group}};
 }
 Status stopped() {
-  return Status::failure(ErrorCode::Cancelled, "temporary I/O cancelled");
+  return core_internal::cancelled("temporary I/O cancelled");
 }
 Status stale() {
   return Status::failure(ErrorCode::Stale,
@@ -132,11 +135,11 @@ Result<std::uint64_t> TemporaryStorage::append_zeroed(
   const auto old_end = impl_->end;
   if (!bytes)
     return Result<std::uint64_t>(old_end);
-  if (bytes > static_cast<std::uint64_t>(INT64_MAX) - (kBlock - 1) - old_end)
+  std::uint64_t end = 0, allocated = 0;
+  if (!core_internal::checked_add(old_end, bytes, &end, INT64_MAX) ||
+      !core_internal::checked_align_up(end, kBlock, &allocated, INT64_MAX))
     return Result<std::uint64_t>(Status::failure(
         ErrorCode::ResourceExhausted, "temporary extent is not addressable"));
-  const auto end = old_end + bytes;
-  const auto allocated = ((end + kBlock - 1) / kBlock) * kBlock;
   const auto growth = allocated - impl_->allocated;
   auto buffer = impl_->budget.allocator().allocate(std::min(kBlock, bytes));
   if (!buffer.ok())

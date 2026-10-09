@@ -28,11 +28,11 @@ namespace ps::numeric {
  * Finite exact zero is negative only when every product and bias are negative
  * zero; overflow to infinity succeeds.
  *
- * Shape and dtype failures return TypeMismatch/Schema. Source, typed validation,
- * budget, and cancellation failures retain their categories, and failed work
- * publishes no partial output. Full output storage and fixed callback scratch
- * must fit the host resource budget. Published Result storage owns its lifetime
- * beyond context retirement.
+ * Shape and dtype failures return TypeMismatch/Schema. Source, typed
+ * validation, budget, and cancellation failures retain their categories, and
+ * failed work publishes no partial output. Full output storage and fixed
+ * callback scratch must fit the host resource budget. Published Result storage
+ * owns its lifetime beyond context retirement.
  *
  * @param id Nonzero workflow node identifier.
  * @param vectors Workflow reference for the vectors Result input.

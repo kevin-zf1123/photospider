@@ -15,6 +15,7 @@
 #include "../support/alpha_golden.hpp"
 #include "channel_extraction_workflow/source.hpp"
 #include "numeric_workflow/icc_fixture.hpp"
+#include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {

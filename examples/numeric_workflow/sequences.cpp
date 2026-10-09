@@ -1,4 +1,4 @@
-#include "photospider/numeric/sequences.hpp"
+#include "photospider/ops/numeric/sequences.hpp"
 
 #include <fenv.h>  // NOLINT(build/c++11)
 

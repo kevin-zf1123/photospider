@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "core/status_helpers.hpp"
 #include "core/utf8_validation.hpp"
 #include "data/exact_numeric.hpp"
@@ -914,7 +915,8 @@ Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
         "invalid tensor description header"));
   if (axis != 255)
     value.channel_axis = axis;
-  if (count > (facet.payload.size() - reader.offset) / 3)
+  if (!core_internal::can_multiply_add(count, 3, reader.offset,
+                                       facet.payload.size()))
     return Answer(
         core_internal::invalid_schema_domain("truncated tensor channel table"));
   if (const auto* root = resource_internal::metadata_budget()) {
@@ -999,7 +1001,8 @@ Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
   std::uint16_t group_count = 0;
   if (!reader.u16(&group_count) || group_count > 128)
     return Answer(core_internal::invalid_schema_domain("invalid group count"));
-  if (group_count > (facet.payload.size() - reader.offset) / 15)
+  if (!core_internal::can_multiply_add(group_count, 15, reader.offset,
+                                       facet.payload.size()))
     return Answer(
         core_internal::invalid_schema_domain("truncated tensor group table"));
   value.groups.resize(group_count);
@@ -1008,7 +1011,8 @@ Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
     if (!reader.text(&group.name) || !reader.u16(&count) || count > 64)
       return Answer(
           core_internal::invalid_schema_domain("invalid group header"));
-    if (count > (facet.payload.size() - reader.offset) / 14)
+    if (!core_internal::can_multiply_add(count, 14, reader.offset,
+                                         facet.payload.size()))
       return Answer(
           core_internal::invalid_schema_domain("truncated group components"));
     group.indices.resize(count);

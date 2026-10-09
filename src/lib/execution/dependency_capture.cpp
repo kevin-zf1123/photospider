@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/content_digest.hpp"
 #include "execution/accounted_regions.hpp"
 #include "execution/dependency_dirty.hpp"
@@ -330,8 +331,8 @@ Result<std::shared_ptr<const DependencyRecord>> DependencyRecords::capture(
     return Answer(
         execution_internal::dependency_failure("missing direct record"));
   const auto cost = ExecutionDependencies::Impl::weight(*selected);
-  if (cost > limits_.maximum_work || upstream.size() > limits_.maximum_boxes ||
-      cost > limits_.maximum_boxes - upstream.size() ||
+  if (cost > limits_.maximum_work ||
+      !core_internal::can_add(cost, upstream.size(), limits_.maximum_boxes) ||
       imports_.size() >= limits_.maximum_boxes)
     return Answer(Status{ErrorCode::ResourceExhausted, {}});
   ResourceLease lease;
@@ -526,7 +527,8 @@ DependencyRecords::rebind_cached(
     }
     if (!item.ready) {
       if (pending.size() >= limits_.maximum_boxes ||
-          children.size() >= limits_.maximum_boxes - pending.size())
+          !core_internal::can_add(children.size(), pending.size(),
+                                  limits_.maximum_boxes - 1))
         return Answer(Status{ErrorCode::ResourceExhausted, {}});
       pending.push_back({item.record, item.step, true});
       for (std::size_t i = 0; i < children.size(); ++i)
@@ -641,7 +643,8 @@ Status DependencyRecords::import(
       continue;
     if (imports_.size() >= limits_.maximum_boxes ||
         pending.size() >= limits_.maximum_boxes ||
-        record->upstream.size() >= limits_.maximum_boxes - pending.size())
+        !core_internal::can_add(record->upstream.size(), pending.size(),
+                                limits_.maximum_boxes - 1))
       return Status{ErrorCode::ResourceExhausted, {}};
     if (!ready) {
       pending.emplace_back(record, true);

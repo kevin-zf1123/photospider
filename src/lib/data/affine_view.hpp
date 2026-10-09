@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "photospider/data/value_fragments.hpp"
 
 namespace ps::input_internal {
@@ -23,7 +24,7 @@ Result<std::optional<Value>> join_affine_view(
   const auto work = [&](uint64_t amount) {
     if (limits.cancellation.cancelled())
       return Status{ErrorCode::Cancelled, {}};
-    if (amount > limits.maximum_work - spent)
+    if (!core_internal::can_add(amount, spent, limits.maximum_work))
       return Status{ErrorCode::ResourceExhausted, {}, FailureReason::WorkLimit};
     spent += amount;
     return limits.consume_work ? limits.consume_work(amount)

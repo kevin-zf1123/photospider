@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "photospider/format/channel_assembly.hpp"
+#include "photospider/ops/format/channel_assembly.hpp"
 
 namespace ps::format {
 /** @brief Static source structure for one FMT-03 input.

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "icc_fixture.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {

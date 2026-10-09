@@ -1,4 +1,4 @@
-#include "photospider/numeric/arrays.hpp"
+#include "photospider/ops/numeric/arrays.hpp"
 
 #include <fenv.h>  // NOLINT(build/c++11)
 

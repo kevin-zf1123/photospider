@@ -1,4 +1,4 @@
-#include "photospider/numeric/lowpass.hpp"
+#include "photospider/ops/numeric/lowpass.hpp"
 
 #include <fenv.h>  // NOLINT(build/c++11)
 
@@ -15,7 +15,7 @@
 #include <vector>
 
 #include "accuracy.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/numeric/arrays.hpp"
+#include "photospider/ops/numeric/arrays.hpp"
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 #include "result_fixture.hpp"     // NOLINT(build/include_subdir)

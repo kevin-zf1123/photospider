@@ -6,6 +6,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
+#include "core/numeric_bits.hpp"
 #include "core/status_helpers.hpp"
 #include "data/color_array_exact.hpp"
 #include "data/typed_sample_validation.hpp"
@@ -14,17 +16,9 @@
 namespace ps {
 namespace {
 
-std::uint64_t bits(double value) {
-  std::uint64_t result;
-  std::memcpy(&result, &value, 8);
-  return result;
-}
-bool finite(double value) {
-  return ((bits(value) >> 52) & 2047) != 2047;
-}
 bool positive(double value) {
-  const auto raw = bits(value);
-  return finite(value) && !(raw >> 63) && raw != 0;
+  const auto raw = core_internal::binary64_bits(value);
+  return core_internal::finite_binary64(value) && !(raw >> 63) && raw != 0;
 }
 bool has_rgb(ColorModel model) {
   return model == ColorModel::Rgb || model == ColorModel::Hsl ||
@@ -64,14 +58,19 @@ Status validate(const ColorArrayDescriptor& s, bool static_source) {
                : core_internal::invalid_domain(
                      "ICC profile length is smaller than its header/directory");
   const auto& white = *s.white;
-  if (!finite(white[0]) || !finite(white[1]) ||
+  if (!core_internal::finite_binary64(white[0]) ||
+      !core_internal::finite_binary64(white[1]) ||
       !color_internal::positive_sum_below_one(white[0], white[1]))
     return core_internal::invalid_domain("invalid color white xy");
   if ((s.model == ColorModel::Oklab || s.model == ColorModel::Oklch) &&
-      (bits(white[0]) != bits(.3127) || bits(white[1]) != bits(.3290)))
+      (core_internal::binary64_bits(white[0]) !=
+           core_internal::binary64_bits(.3127) ||
+       core_internal::binary64_bits(white[1]) !=
+           core_internal::binary64_bits(.3290)))
     return core_internal::invalid_domain("OK coordinates require D65");
   if (s.primaries) {
-    if (!std::all_of(s.primaries->begin(), s.primaries->end(), finite) ||
+    if (!std::all_of(s.primaries->begin(), s.primaries->end(),
+                     core_internal::finite_binary64) ||
         !color_internal::valid_basis(*s.primaries, white))
       return core_internal::invalid_domain(
           "singular color primary basis or white normalization");
@@ -84,7 +83,8 @@ Status validate(const ColorArrayDescriptor& s, bool static_source) {
   }
   if (s.ncl_coefficients) {
     const auto& ncl = *s.ncl_coefficients;
-    if (!finite(ncl[0]) || !finite(ncl[1]) ||
+    if (!core_internal::finite_binary64(ncl[0]) ||
+        !core_internal::finite_binary64(ncl[1]) ||
         !color_internal::positive_sum_below_one(ncl[0], ncl[1]))
       return core_internal::invalid_domain("invalid NCL Kr/Kb");
   }
@@ -96,7 +96,7 @@ void integer(std::vector<std::uint8_t>* out, std::uint64_t value,
     out->push_back(static_cast<std::uint8_t>(value >> (8 * i)));
 }
 void number(std::vector<std::uint8_t>* out, double value) {
-  auto raw = bits(value);
+  auto raw = core_internal::binary64_bits(value);
   if (!(raw & 0x7fffffffffffffffULL))
     raw = 0;
   integer(out, raw, 8);
@@ -322,7 +322,7 @@ Status validate_color_array_descriptor(const ColorArrayDescriptor& s,
     return mismatch();
   std::uint64_t elements = 1;
   for (auto n : d.shape) {
-    if (!n || n > (1ULL << 40) / elements)
+    if (!n || !core_internal::can_multiply(n, elements, UINT64_C(1) << 40))
       return mismatch();
     elements *= n;
   }

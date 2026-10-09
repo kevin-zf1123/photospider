@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "core/work_consumer.hpp"
 #include "photospider/core/cancellation.hpp"
 #include "photospider/core/resource_allocator.hpp"
@@ -136,7 +137,7 @@ class Natural final {
       return;
     const auto size = words.size();
     const unsigned whole = b / 32, tail = b % 32;
-    if (size + whole + 1 > maximum_words)
+    if (!core_internal::can_add(size, std::uint64_t{whole} + 1, maximum_words))
       throw std::bad_alloc();
     words.resize(size + whole + (tail != 0));
     for (std::size_t j = words.size(); j > whole; --j) {
@@ -166,7 +167,8 @@ class Natural final {
     trim();
   }
   static Natural add(const Natural& a, const Natural& b) {
-    if (std::max(a.words.size(), b.words.size()) + 1 > maximum_words)
+    if (!core_internal::can_add(std::max(a.words.size(), b.words.size()), 1,
+                                maximum_words))
       throw std::bad_alloc();
     work(std::max(a.words.size(), b.words.size()) + 1);
     Natural out;
@@ -200,7 +202,7 @@ class Natural final {
     Natural out;
     if (a.zero() || b.zero())
       return out;
-    if (a.words.size() + b.words.size() > maximum_words)
+    if (!core_internal::can_add(a.words.size(), b.words.size(), maximum_words))
       throw std::bad_alloc();
     out.words.assign(a.words.size() + b.words.size(), 0);
     for (std::size_t i = 0; i < a.words.size(); ++i) {
@@ -282,7 +284,8 @@ class Natural final {
         work(0);
       r.shift_left(1);
       if (n.bit(i - 1)) {
-        if (std::max<std::size_t>(1, r.words.size()) + 1 > maximum_words)
+        if (!core_internal::can_add(std::max<std::size_t>(1, r.words.size()), 1,
+                                    maximum_words))
           throw std::bad_alloc();
         work(std::max<std::size_t>(1, r.words.size()) + 1);
         if (r.zero())

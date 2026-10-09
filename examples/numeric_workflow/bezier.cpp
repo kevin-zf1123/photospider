@@ -1,4 +1,4 @@
-#include "photospider/numeric/bezier.hpp"
+#include "photospider/ops/numeric/bezier.hpp"
 
 #include <fenv.h>  // NOLINT(build/c++11)
 

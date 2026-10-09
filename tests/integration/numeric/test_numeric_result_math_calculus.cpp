@@ -1,3 +1,4 @@
+#include <atomic>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -201,7 +202,7 @@ void calculus_boundaries() {
 void calculus_projection() {
   Driver d;
   auto registry = make_default_operation_registry(false);
-  auto starts = std::make_shared<unsigned>(0);
+  auto starts = std::make_shared<std::atomic<unsigned>>(0);
   for (unsigned count : {1U, 2U}) {
     OperationDefinition producer;
     producer.key = "test.calculus.source" + std::to_string(count);
@@ -219,7 +220,7 @@ void calculus_projection() {
     output.continuation_bytes = sizeof(FailingProducer);
     output.maximum_dependency_stages = 1;
     producer.start_result = [starts](const auto&, const auto& allocator) {
-      ++*starts;
+      starts->fetch_add(1, std::memory_order_relaxed);
       return ResultContinuation::make<FailingProducer>(allocator);
     };
     require(registry->register_operation(std::move(producer)).ok(),
@@ -245,7 +246,7 @@ void calculus_projection() {
   auto result = take(d.context->execute_fragments(
       take(d.context->freeze(compiled.plan, prepared.bindings)),
       {{"out", take(Footprint::all({1}))}}));
-  require(*starts == 0 &&
+  require(starts->load(std::memory_order_relaxed) == 0 &&
               read_bits(result.results.at("out"), {0}) == 0xff800123 &&
               result.results.at("out").association() ==
                   ResourceVector<uint64_t>{scalar.object_id()},
@@ -264,7 +265,7 @@ void calculus_projection() {
   auto empty = take(d.context->execute_fragments(
       frozen, {{"out", take(Footprint::none({2}))}}));
   require(
-      *starts == 0 &&
+      starts->load(std::memory_order_relaxed) == 0 &&
           take(empty.results.at("out").descriptor()).tensor_coverage(0).empty(),
       "Empty nonsingleton integral also leaves producers unstarted");
   auto failed = d.context->execute_fragments(
@@ -272,7 +273,7 @@ void calculus_projection() {
       {{"out", take(Footprint::from_regions({2}, {Region({{0, 1}})}))}});
   require(
       !failed.ok() && failed.status().message == "must stay lazy" &&
-          *starts != 0,
+          starts->load(std::memory_order_relaxed) != 0,
       "nonsingleton integral starts required producers even for output zero");
   OperationMetadata good, bad;
   good.result_schema = std::make_shared<SchemaTemplate>(scalar.schema());

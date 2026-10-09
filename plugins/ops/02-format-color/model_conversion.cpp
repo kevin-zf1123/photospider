@@ -16,9 +16,10 @@
 #include "02-format-color/model_math.hpp"
 #include "02-format-color/model_simd.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "core/status_helpers.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/tensor_description.hpp"
-#include "photospider/format/channel.hpp"
+#include "photospider/ops/format/channel.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -48,12 +49,6 @@ struct Preparation final {
   };
   std::vector<Span> spans;
 };
-Status invalid(const std::string& text) {
-  return {ErrorCode::InvalidArgument,
-          text,
-          FailureReason::InvalidDomain,
-          {FailureOrigin::Schema, FailureScope::Unspecified}};
-}
 Status mismatch(const std::string& text) {
   return {ErrorCode::TypeMismatch,
           text,
@@ -66,7 +61,7 @@ std::string text(const Params& p, const char* key, const char* fallback = "") {
 }
 void require(bool condition, const std::string& error) {
   if (!condition)
-    throw invalid(error);
+    throw core_internal::invalid_schema_domain(error);
 }
 bool single(Kind kind) {
   return kind == Kind::GrayToColor || kind == Kind::Threshold ||
@@ -100,7 +95,7 @@ GrayKind gray_kind(const std::string& kind) {
     return GrayKind::CielabL;
   if (kind == "oklab_l")
     return GrayKind::OklabL;
-  throw invalid(
+  throw core_internal::invalid_schema_domain(
       "gray_kind must explicitly identify one of four native Gray meanings");
 }
 const char* gray_name(GrayKind kind) {
@@ -249,7 +244,8 @@ std::optional<std::array<double, 2>> ncl_parameter(const Params& p) {
       return std::array<double, 2>{.2126, .0722};
     if (preset == "bt2020_ncl")
       return std::array<double, 2>{.2627, .0593};
-    throw invalid("ncl_matrix must be bt601, bt709 or bt2020_ncl");
+    throw core_internal::invalid_schema_domain(
+        "ncl_matrix must be bt601, bt709 or bt2020_ncl");
   }
   if (p.count("kr") || p.count("kb")) {
     auto pair = parameter_pair(p, "kr", "kb");
@@ -317,7 +313,7 @@ void legal_parameters(Kind kind, const Params& p, bool raw) {
     require(!p.count("group"), "raw forbids semantic group selection");
   if (!raw && (p.count("white_x") || p.count("white_y") ||
                p.count("gray_white_x") || p.count("gray_white_y")))
-    throw invalid(
+    throw core_internal::invalid_schema_domain(
         "semantic white comes from the effective description, not raw "
         "parameters");
 }
@@ -533,7 +529,8 @@ Result<OperationPreparation> prepare(
     } else if (!raw && description->channel_axis) {
       out.source_axis = description->channel_axis;
     } else {
-      throw invalid("source requires an explicit raw axis or axis_free=true");
+      throw core_internal::invalid_schema_domain(
+          "source requires an explicit raw axis or axis_free=true");
     }
     const unsigned input_count = single(kind) ? 1 : 3;
     const TensorColorGroup* group = nullptr;
@@ -781,7 +778,7 @@ Result<OperationPreparation> prepare(
           }
           if (conflict) {
             if (!raw)
-              throw invalid(
+              throw core_internal::invalid_schema_domain(
                   "another group refers to an edited/deleted color component");
             if (structural)
               continue;

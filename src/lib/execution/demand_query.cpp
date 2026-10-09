@@ -2,6 +2,7 @@
 
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "data/content_digest.hpp"
 namespace ps::execution_internal {
 Result<DemandKey> demand_key(const DemandQuery& query,
@@ -18,7 +19,7 @@ Result<DemandKey> demand_key(const DemandQuery& query,
       return Result<DemandKey>(Status{ErrorCode::InvalidArgument,
                                       "unknown or invalid demand query"});
     const auto weight = 1 + item.second.boxes().size();
-    if (weight > maximum || entries > maximum - weight)
+    if (!core_internal::can_add(weight, entries, maximum))
       return Result<DemandKey>(
           Status{ErrorCode::ResourceExhausted, "demand query metadata limit"});
     entries += weight;

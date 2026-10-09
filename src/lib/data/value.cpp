@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/value_validation.hpp"
 
 namespace ps {
@@ -18,13 +19,13 @@ namespace {
 /** @brief Computes a checked origin-relative address without signed overflow.
  */
 Result<std::size_t> address(const StridedLayout& layout,
-                            const std::vector<std::uint64_t>& coordinate) {
+                            const std::uint64_t* coordinate, std::size_t rank) {
   std::uint64_t positive = layout.byte_offset;
   std::uint64_t negative = 0;
   if (positive > INT64_MAX)
     return Result<std::size_t>(Status::failure(
         ErrorCode::InvalidArgument, "Value byte offset exceeds int64"));
-  for (std::size_t axis = 0; axis < coordinate.size(); ++axis) {
+  for (std::size_t axis = 0; axis < rank; ++axis) {
     const auto origin = layout.origin.empty() ? 0 : layout.origin[axis];
     const auto coord = coordinate[axis];
     const auto stride = layout.byte_strides[axis];
@@ -36,12 +37,12 @@ Result<std::size_t> address(const StridedLayout& layout,
     const auto distance = coord >= origin ? coord - origin : origin - coord;
     const auto magnitude =
         static_cast<std::uint64_t>(stride < 0 ? -stride : stride);
-    if (distance > static_cast<std::uint64_t>(INT64_MAX) / magnitude)
+    if (!core_internal::can_multiply(distance, magnitude, INT64_MAX))
       return Result<std::size_t>(Status::failure(
           ErrorCode::InvalidArgument, "Value coordinate span overflows"));
     const auto span = distance * magnitude;
     auto& sum = ((coord < origin) != (stride < 0)) ? negative : positive;
-    if (span > static_cast<std::uint64_t>(INT64_MAX) - sum)
+    if (!core_internal::can_add(sum, span, INT64_MAX))
       return Result<std::size_t>(Status::failure(
           ErrorCode::InvalidArgument, "Value address sum overflows"));
     sum += span;
@@ -131,8 +132,8 @@ Result<Value> Value::from_storage(ValueDescriptor descriptor, Region region,
       low.push_back(first);
       high.push_back(last);
     }
-    auto minimum = address(layout, low);
-    auto maximum = address(layout, high);
+    auto minimum = address(layout, low.data(), low.size());
+    auto maximum = address(layout, high.data(), high.size());
     if (!minimum.ok())
       return Result<Value>(minimum.status());
     if (!maximum.ok())
@@ -187,17 +188,22 @@ Result<Value> Value::view(const Region& region) const {
 
 Result<std::size_t> Value::byte_address(
     const std::vector<std::uint64_t>& coordinate) const {
-  if (!valid() || coordinate.size() != region_.rank())
+  return byte_address(coordinate.data(), coordinate.size());
+}
+
+Result<std::size_t> Value::byte_address(const std::uint64_t* coordinate,
+                                        std::size_t rank) const {
+  if (!valid() || !coordinate || rank != region_.rank())
     return Result<std::size_t>(Status::failure(
         ErrorCode::InvalidArgument, "invalid Value coordinate rank"));
-  for (std::size_t axis = 0; axis < coordinate.size(); ++axis) {
+  for (std::size_t axis = 0; axis < rank; ++axis) {
     const auto dim = region_.dimensions()[axis];
     if (coordinate[axis] < dim.offset ||
         coordinate[axis] - dim.offset >= dim.extent)
       return Result<std::size_t>(Status::failure(
           ErrorCode::InvalidArgument, "coordinate outside Value coverage"));
   }
-  return address(layout_, coordinate);
+  return address(layout_, coordinate, rank);
 }
 
 /**

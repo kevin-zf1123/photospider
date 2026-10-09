@@ -8,6 +8,7 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "core/status_helpers.hpp"
 #include "photospider/data/tensor_description.hpp"
 #include "plugin/builtin_operations.hpp"
 
@@ -39,12 +40,6 @@ void fill(const LiteralPreparation& s, std::uint8_t* out, std::uint64_t n) {
 using format_result::require;
 using format_result::take;
 using Poll = Result<ResultProgramPoll>;
-Status invalid(const std::string& message) {
-  return {ErrorCode::InvalidArgument,
-          message,
-          FailureReason::InvalidDomain,
-          {FailureOrigin::Schema, FailureScope::Unspecified}};
-}
 ResultBuilder builder(const ResultProgramPhase& phase, bool empty) {
   auto result = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
@@ -165,7 +160,7 @@ Result<OperationPreparation> prepare_channel_literal_like(
   }
   if (inputs.size() != 1 ||
       text(p, "expected_inputs") != source_assertion(inputs)) {
-    return R(invalid(
+    return R(core_internal::invalid_schema_domain(
         "literal-like requires its complete source descriptor assertion"));
   }
   status = tensor_ops::check_tensor(inputs[0]);
@@ -177,7 +172,8 @@ Result<OperationPreparation> prepare_channel_literal_like(
   if (!count.ok())
     return R(count.status());
   if (!count.value() || count.value() > (UINT64_C(1) << 40))
-    return R(invalid("logical count is outside [1,2^40]"));
+    return R(core_internal::invalid_schema_domain(
+        "logical count is outside [1,2^40]"));
   LiteralPreparation s;
   s.width = Value::element_size(input.descriptor.element_type);
   const auto bits = text(p, "bits");
@@ -191,18 +187,20 @@ Result<OperationPreparation> prepare_channel_literal_like(
     return -1;
   };
   if (bits.size() != s.width * 2) {
-    return R(invalid("literal width differs from dtype"));
+    return R(core_internal::invalid_schema_domain(
+        "literal width differs from dtype"));
   }
   for (std::size_t i = 0; i < s.width; ++i) {
     const auto a = hex(bits[i * 2]), b = hex(bits[i * 2 + 1]);
     if (a < 0 || b < 0) {
-      return R(invalid("invalid literal hexadecimal bytes"));
+      return R(core_internal::invalid_schema_domain(
+          "invalid literal hexadecimal bytes"));
     }
     s.bits[i] = static_cast<std::uint8_t>((a << 4) | b);
   }
   const auto policy = text(p, "layout");
   if (policy != "auto" && policy != "view" && policy != "materialize") {
-    return R(invalid("unknown literal layout"));
+    return R(core_internal::invalid_schema_domain("unknown literal layout"));
   }
   s.require_view = policy == "view";
   OperationOutputSpecialization output;
@@ -214,7 +212,8 @@ Result<OperationPreparation> prepare_channel_literal_like(
     if (axis < 0 ||
         static_cast<std::uint64_t>(axis) >= input.descriptor.shape.size() ||
         (!keep && input.descriptor.shape.size() == 1)) {
-      return R(invalid("invalid literal-like axis/rank"));
+      return R(core_internal::invalid_schema_domain(
+          "invalid literal-like axis/rank"));
     }
     if (keep) {
       tensor.descriptor.shape[axis] = 1;
@@ -228,7 +227,8 @@ Result<OperationPreparation> prepare_channel_literal_like(
       auto& l = tensor.layout;
       if (!l.channel_axis ||
           *l.channel_axis != static_cast<std::uint32_t>(axis)) {
-        return R(invalid("literal-like cannot erase a planar spatial axis"));
+        return R(core_internal::invalid_schema_domain(
+            "literal-like cannot erase a planar spatial axis"));
       }
       if (!keep) {
         l.channel_axis.reset();

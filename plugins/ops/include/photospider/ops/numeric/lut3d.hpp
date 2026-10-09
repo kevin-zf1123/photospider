@@ -6,7 +6,7 @@
 #include <utility>
 
 #include "photospider/data/color_array.hpp"
-#include "photospider/numeric/curves.hpp"
+#include "photospider/ops/numeric/curves.hpp"
 
 namespace ps::numeric {
 /** @brief Authoring choices shared by the independent 3D interpolation methods.

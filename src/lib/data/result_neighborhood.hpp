@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/footprint.hpp"
 
@@ -67,8 +68,8 @@ inline Result<Footprint> expand(const ResourceBudget& budget,
         }
       }
     }
-    if (variants > limits.maximum_boxes ||
-        candidates.size() > limits.maximum_boxes - variants)
+    if (!core_internal::can_add(variants, candidates.size(),
+                                limits.maximum_boxes))
       return Answer(
           Status{ErrorCode::ResourceExhausted, "neighborhood rectangle limit"});
     status = charge(variants * (rank + 1));

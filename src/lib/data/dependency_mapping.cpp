@@ -6,6 +6,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
+#include "core/status_helpers.hpp"
 #include "data/dependency_metadata.hpp"
 #include "photospider/data/dependency.hpp"
 
@@ -14,9 +16,6 @@ namespace {
 struct MappingStop {
   Status status;
 };
-Status invalid(const char* message) {
-  return Status{ErrorCode::InvalidArgument, message};
-}
 void check(Status status) {
   if (!status.ok())
     throw MappingStop{std::move(status)};
@@ -50,7 +49,7 @@ struct MappingBudget {
   }
   void work(std::uint64_t count = 1) { check(charge(count)); }
   void retain(std::uint64_t count) {
-    if (count > limits.maximum_boxes - entries)
+    if (!core_internal::can_add(count, entries, limits.maximum_boxes))
       throw MappingStop{Status{ErrorCode::ResourceExhausted,
                                "mapping metadata limit",
                                FailureReason::CapacityLimit}};
@@ -86,7 +85,8 @@ std::vector<DependencyMappedNeed> canonical_maps(
         (source.roles & ~15U) ||
         (!source.axes.empty() &&
          source.axes.size() != shapes[source.port].size()))
-      throw MappingStop{invalid("invalid mapped dependency port/axes/roles")};
+      throw MappingStop{
+          core_internal::invalid("invalid mapped dependency port/axes/roles")};
     budget->retain(1 + source.axes.size() + source.tags.size());
     auto need = source;
     std::uint32_t used = 0;
@@ -95,11 +95,13 @@ std::vector<DependencyMappedNeed> canonical_maps(
       auto& axis = need.axes[i];
       if (axis.observation_axis < -1 ||
           axis.observation_axis >= static_cast<std::int32_t>(output.size()))
-        throw MappingStop{invalid("mapped observation axis outside rank")};
+        throw MappingStop{
+            core_internal::invalid("mapped observation axis outside rank")};
       if (axis.observation_axis >= 0) {
         const auto bit = 1U << axis.observation_axis;
         if (used & bit)
-          throw MappingStop{invalid("mapped axes must be injective")};
+          throw MappingStop{
+              core_internal::invalid("mapped axes must be injective")};
         for (const auto& box : domain.boxes()) {
           budget->work();
           const auto range = box.dimensions()[axis.observation_axis];
@@ -107,20 +109,22 @@ std::vector<DependencyMappedNeed> canonical_maps(
               static_cast<__int128>(range.offset) + axis.translation;
           const auto end = begin + range.extent;
           if (begin < 0 || end > shapes[need.port][i])
-            throw MappingStop{invalid("translated mapped axis outside input")};
+            throw MappingStop{
+                core_internal::invalid("translated mapped axis outside input")};
         }
         used |= bit;
         axis.fixed = {0, 0};
       } else if (axis.translation || !axis.fixed.extent ||
                  axis.fixed.offset > shapes[need.port][i] ||
                  axis.fixed.extent > shapes[need.port][i] - axis.fixed.offset) {
-        throw MappingStop{invalid("mapped fixed interval outside input")};
+        throw MappingStop{
+            core_internal::invalid("mapped fixed interval outside input")};
       }
     }
     for (const auto& tag : need.tags) {
       budget->work();
       if (!tag.kind)
-        throw MappingStop{invalid("zero mapped tag kind")};
+        throw MappingStop{core_internal::invalid("zero mapped tag kind")};
     }
     std::sort(need.tags.begin(), need.tags.end());
     need.tags.erase(std::unique(need.tags.begin(), need.tags.end()),
@@ -251,10 +255,8 @@ std::vector<DependencyMapPiece> as_pieces(
 std::uint64_t DependencyCertificate::measure_storage() const noexcept {
   std::uint64_t total = 0;
   const auto add = [&](std::uint64_t count, std::uint64_t scale = 1) {
-    if (count > (UINT64_MAX - total) / scale)
+    if (!core_internal::checked_multiply_add(count, scale, total, &total))
       total = UINT64_MAX;
-    else
-      total += count * scale;
   };
   const auto footprint = [&](const Footprint& samples) {
     add(samples.shape().size());
@@ -312,7 +314,7 @@ Result<DependencyCertificate> DependencyCertificate::create_mapped_owned(
     if (identity.empty() || identity.size() > 4096 || !coverage.valid() ||
         input_shapes.size() > 1024)
       return Result<DependencyCertificate>(
-          invalid("invalid mapped certificate identity/domain"));
+          core_internal::invalid("invalid mapped certificate identity/domain"));
     for (const auto& shape : input_shapes)
       take(Footprint::none(shape, budget.geometry()));
     auto visited = take(Footprint::none(coverage.shape(), budget.geometry()));
@@ -321,11 +323,11 @@ Result<DependencyCertificate> DependencyCertificate::create_mapped_owned(
       budget.retain(1 + piece.coverage.boxes().size());
       if (!piece.coverage.valid() || piece.coverage.shape() != coverage.shape())
         return Result<DependencyCertificate>(
-            invalid("mapped piece domain mismatch"));
+            core_internal::invalid("mapped piece domain mismatch"));
       if (!take(piece.coverage.subtract(coverage, budget.geometry())).empty() ||
           !take(piece.coverage.intersect(visited, budget.geometry())).empty())
         return Result<DependencyCertificate>(
-            invalid("mapped pieces overlap or exceed coverage"));
+            core_internal::invalid("mapped pieces overlap or exceed coverage"));
       auto maps =
           canonical_maps(piece.inputs, piece.coverage, input_shapes, &budget);
       visited = take(visited.unite(piece.coverage, budget.geometry()));
@@ -333,8 +335,8 @@ Result<DependencyCertificate> DependencyCertificate::create_mapped_owned(
         normalized.push_back({std::move(piece.coverage), std::move(maps)});
     }
     if (visited != coverage)
-      return Result<DependencyCertificate>(
-          invalid("mapped certificate has unknown observations"));
+      return Result<DependencyCertificate>(core_internal::invalid(
+          "mapped certificate has unknown observations"));
     DependencyCertificate result;
     result.metadata_owner_ = dependency_internal::metadata_owner(
         dependency_internal::certificate_bytes(identity, coverage, input_shapes,
@@ -357,7 +359,7 @@ Result<DependencyCertificate> DependencyCertificate::with_identity(
     budget.retain(metadata_entries_);
     if (!valid() || identity.empty() || identity.size() > 4096)
       return Result<DependencyCertificate>(
-          invalid("invalid rebound certificate identity"));
+          core_internal::invalid("invalid rebound certificate identity"));
     DependencyCertificate result(*this, std::move(identity));
     result.storage_entries_ = result.measure_storage();
     return Result<DependencyCertificate>(std::move(result));
@@ -370,7 +372,7 @@ Result<AtomCertificate> DependencyCertificate::row(
     MappingBudget budget(limits);
     if (!valid() || !coverage_.contains(coordinate))
       return Result<AtomCertificate>(
-          invalid("unknown certificate observation"));
+          core_internal::invalid("unknown certificate observation"));
     auto subset = point(coverage_.shape(), coordinate, &budget);
     return Result<AtomCertificate>(
         AtomCertificate{coordinate, take(backward(subset, budget.geometry()))});
@@ -405,7 +407,7 @@ Result<DependencyCertificate> DependencyCertificate::restrict_mapped(
     MappingBudget budget(limits);
     if (!take(subset.subtract(coverage_, budget.geometry())).empty())
       return Result<DependencyCertificate>(
-          invalid("unknown mapped observation"));
+          core_internal::invalid("unknown mapped observation"));
     dependency_internal::MetadataBytes construction_bytes;
     construction_bytes.add(dependency_internal::certificate_bytes(
         identity_, subset, input_shapes_, {}, {}, true));
@@ -456,7 +458,7 @@ Result<std::vector<DependencyNeed>> DependencyCertificate::backward_mapped(
     MappingBudget budget(limits);
     if (!take(subset.subtract(coverage_, budget.geometry())).empty())
       return Result<std::vector<DependencyNeed>>(
-          invalid("unknown mapped observation"));
+          core_internal::invalid("unknown mapped observation"));
     std::map<std::pair<std::uint32_t, std::uint32_t>, DependencyNeed> needs;
     for (const auto& piece : pieces_) {
       budget.work();
@@ -496,10 +498,11 @@ Result<Footprint> DependencyCertificate::transpose_mapped(
     if (!valid() || dirty.port >= input_shapes_.size() || !dirty.roles ||
         (dirty.roles & ~15U) || !dirty.samples.valid() ||
         dirty.samples.shape() != input_shapes_[dirty.port])
-      return Result<Footprint>(invalid("invalid mapped transpose input"));
+      return Result<Footprint>(
+          core_internal::invalid("invalid mapped transpose input"));
     for (const auto& tag : dirty.tags)
       if (!tag.kind)
-        return Result<Footprint>(invalid("zero dirty tag kind"));
+        return Result<Footprint>(core_internal::invalid("zero dirty tag kind"));
     auto result = take(Footprint::none(coverage_.shape(), budget.geometry()));
     for (const auto& piece : pieces_) {
       budget.work();
@@ -570,7 +573,7 @@ Result<DependencyCertificate> DependencyCertificate::merge_mapped(
         other.pieces_, true));
     // Fixed-axis conversion replaces 16-byte region dimensions with 32-byte
     // axes; this bounded workspace also covers vector growth and both copies.
-    if (construction_bytes.bytes > UINT64_MAX / 4)
+    if (!core_internal::can_multiply(construction_bytes.bytes, 4))
       return Result<DependencyCertificate>(
           Status{ErrorCode::ResourceExhausted,
                  {},
@@ -599,7 +602,8 @@ Result<DependencyCertificate> DependencyCertificate::merge_mapped(
                 if (!same_needs(
                         project(prior.inputs, one, input_shapes_, &budget),
                         project(next.inputs, one, input_shapes_, &budget)))
-                  return invalid("inconsistent overlapping mapped certificate");
+                  return core_internal::invalid(
+                      "inconsistent overlapping mapped certificate");
                 return Status::success();
               },
               limits.maximum_work, limits.cancellation));

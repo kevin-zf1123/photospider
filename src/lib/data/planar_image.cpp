@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
+#include "core/status_helpers.hpp"
 #include "data/value_validation.hpp"
 
 #if defined(_WIN32)
@@ -24,8 +26,6 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
-
-#include "core/status_helpers.hpp"
 
 namespace ps {
 PlanarPageBudget::PlanarPageBudget(std::uint64_t maximum_bytes, Reserve reserve,
@@ -42,7 +42,7 @@ Result<std::shared_ptr<void>> PlanarPageBudget::charge(std::uint64_t bytes,
                                                        bool metadata,
                                                        bool already_accounted) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (bytes > maximum_bytes_ - live_bytes_)
+  if (!core_internal::can_add(bytes, live_bytes_, maximum_bytes_))
     return Result<std::shared_ptr<void>>(Status::failure(
         ErrorCode::ResourceExhausted, "aggregate image page budget exceeded"));
   std::shared_ptr<void> lease;
@@ -62,38 +62,19 @@ void PlanarPageBudget::release(std::uint64_t bytes) noexcept {
 namespace {
 using Interval = std::pair<std::uint64_t, std::uint64_t>;
 
-bool add(std::uint64_t a, std::uint64_t b, std::uint64_t* out) {
-  if (b > UINT64_MAX - a)
-    return false;
-  *out = a + b;
-  return true;
-}
-bool multiply(std::uint64_t a, std::uint64_t b, std::uint64_t* out) {
-  if (b && a > UINT64_MAX / b)
-    return false;
-  *out = a * b;
-  return true;
-}
-bool align_up(std::uint64_t value, std::uint64_t alignment,
-              std::uint64_t* out) {
-  if (!alignment)
-    return false;
-  const auto remainder = value % alignment;
-  return add(value, remainder ? alignment - remainder : 0, out);
-}
 bool metadata_capacity(std::uint64_t base, std::uint64_t rows,
                        std::uint64_t intervals, std::uint64_t pages,
                        std::uint64_t* out) {
   std::uint64_t row_bytes = 0, interval_bytes = 0, page_bytes = 0;
-  return multiply(rows, 128, &row_bytes) &&
-         multiply(intervals, 32, &interval_bytes) &&
-         multiply(pages, 192, &page_bytes) && add(base, row_bytes, out) &&
-         add(*out, interval_bytes, out) && add(*out, page_bytes, out);
+  return core_internal::checked_multiply(rows, 128, &row_bytes) &&
+         core_internal::checked_multiply(intervals, 32, &interval_bytes) &&
+         core_internal::checked_multiply(pages, 192, &page_bytes) &&
+         core_internal::checked_add(base, row_bytes, out) &&
+         core_internal::checked_add(*out, interval_bytes, out) &&
+         core_internal::checked_add(*out, page_bytes, out);
 }
 
-Status exhausted(const char* message) {
-  return Status::failure(ErrorCode::ResourceExhausted, message);
-}
+using core_internal::exhausted;
 std::uint64_t host_page_size() {
 #if defined(_WIN32)
   SYSTEM_INFO info;
@@ -227,7 +208,8 @@ Status PlanarImage::validate_layout(const ValueDescriptor& descriptor,
   }
   std::uint64_t row_bytes = 0;
   if (physical &&
-      !multiply(descriptor.shape[layout.width_axis], scalar_width, &row_bytes))
+      !core_internal::checked_multiply(descriptor.shape[layout.width_axis],
+                                       scalar_width, &row_bytes))
     return exhausted("planar row width overflow");
   if (layout.row_pitch_bytes &&
       ((physical && layout.row_pitch_bytes < row_bytes) ||
@@ -346,43 +328,50 @@ Result<PlanarImage> PlanarImage::create(
   if (!out->page || out->page > SIZE_MAX)
     return Result<PlanarImage>(exhausted("unsupported host page size"));
   std::uint64_t row_bytes = 0, span = 0, plane = 0, count = 0;
-  if (!multiply(out->width, out->scalar_width, &row_bytes) ||
-      !multiply(out->height, out->width, &count) ||
-      !multiply(count, out->channels, &out->sample_count))
+  if (!core_internal::checked_multiply(out->width, out->scalar_width,
+                                       &row_bytes) ||
+      !core_internal::checked_multiply(out->height, out->width, &count) ||
+      !core_internal::checked_multiply(count, out->channels,
+                                       &out->sample_count))
     return Result<PlanarImage>(exhausted("image size overflow"));
   if (out->config.order == ImagePlaneOrder::Continuous) {
     out->row_pitch =
         out->config.row_pitch_bytes ? out->config.row_pitch_bytes : row_bytes;
     if (out->row_pitch < row_bytes || out->row_pitch % out->scalar_width != 0 ||
-        !multiply(out->height, out->row_pitch, &span) ||
-        !align_up(span, out->page, &plane))
+        !core_internal::checked_multiply(out->height, out->row_pitch, &span) ||
+        !core_internal::checked_align_up(span, out->page, &plane))
       return Result<PlanarImage>(exhausted("continuous plane overflow"));
   } else {
     if (out->config.row_pitch_bytes)
       return Result<PlanarImage>(
           core_internal::invalid_argument("tiled row pitch is fixed"));
     std::uint64_t tile_row = 0, full_span = 0, edge_span = 0;
-    if (!multiply(out->config.tile_width, out->scalar_width, &tile_row) ||
-        !multiply(out->config.tile_height, tile_row, &full_span) ||
-        !align_up(full_span, out->page, &out->full_step))
+    if (!core_internal::checked_multiply(out->config.tile_width,
+                                         out->scalar_width, &tile_row) ||
+        !core_internal::checked_multiply(out->config.tile_height, tile_row,
+                                         &full_span) ||
+        !core_internal::checked_align_up(full_span, out->page, &out->full_step))
       return Result<PlanarImage>(exhausted("tile size overflow"));
     const auto rem = out->height % out->config.tile_height;
-    if (rem && (!multiply(rem, tile_row, &edge_span) ||
-                !align_up(edge_span, out->page, &out->edge_step)))
+    if (rem && (!core_internal::checked_multiply(rem, tile_row, &edge_span) ||
+                !core_internal::checked_align_up(edge_span, out->page,
+                                                 &out->edge_step)))
       return Result<PlanarImage>(exhausted("edge tile overflow"));
     out->columns = out->width / out->config.tile_width +
                    (out->width % out->config.tile_width != 0);
     const auto full_rows = out->height / out->config.tile_height;
     std::uint64_t row_steps = 0;
-    if (!multiply(full_rows, out->full_step, &row_steps) ||
-        !add(row_steps, out->edge_step, &row_steps) ||
-        !multiply(out->columns, row_steps, &plane))
+    if (!core_internal::checked_multiply(full_rows, out->full_step,
+                                         &row_steps) ||
+        !core_internal::checked_add(row_steps, out->edge_step, &row_steps) ||
+        !core_internal::checked_multiply(out->columns, row_steps, &plane))
       return Result<PlanarImage>(exhausted("tiled plane overflow"));
     out->row_pitch = tile_row;
   }
   out->plane_step = plane;
-  if (!multiply(plane, out->channels, &span) ||
-      !align_up(span, reservation_granularity(), &out->virtual_bytes) ||
+  if (!core_internal::checked_multiply(plane, out->channels, &span) ||
+      !core_internal::checked_align_up(span, reservation_granularity(),
+                                       &out->virtual_bytes) ||
       out->virtual_bytes > SIZE_MAX || out->virtual_bytes > INT64_MAX ||
       out->virtual_bytes > out->config.maximum_virtual_bytes)
     return Result<PlanarImage>(exhausted("image reservation overflow"));
@@ -898,7 +887,7 @@ Result<PlanarImageWriteWindow> PlanarImage::begin_write(
           ? region.dimensions()[*impl_->config.channel_axis].extent
           : 1;
   std::uint64_t row_records = 0;
-  if (!multiply(rows, channels, &row_records) ||
+  if (!core_internal::checked_multiply(rows, channels, &row_records) ||
       row_records > impl_->config.maximum_metadata_rows)
     return Result<PlanarImageWriteWindow>(
         exhausted("image coverage metadata limit"));
@@ -929,9 +918,12 @@ Result<PlanarImageWriteWindow> PlanarImage::begin_write(
     for (std::uint64_t row = y.offset; row < y.offset + y.extent; ++row)
       if (!impl_->coverage.count(impl_->row_key(channel, row)))
         ++new_rows;
-  if (!add(impl_->coverage.size(), new_rows, &upper_rows) ||
-      !add(current_intervals, row_records, &upper_intervals) ||
-      !add(impl_->pages.size(), possible_pages, &upper_pages) ||
+  if (!core_internal::checked_add(impl_->coverage.size(), new_rows,
+                                  &upper_rows) ||
+      !core_internal::checked_add(current_intervals, row_records,
+                                  &upper_intervals) ||
+      !core_internal::checked_add(impl_->pages.size(), possible_pages,
+                                  &upper_pages) ||
       !metadata_capacity(impl_->base_metadata, upper_rows, upper_intervals,
                          upper_pages, &candidate_metadata))
     return Result<PlanarImageWriteWindow>(
@@ -972,8 +964,8 @@ Result<PlanarImageWriteWindow> PlanarImage::begin_write(
     }
   std::uint64_t intervals = 0;
   for (const auto& row : prepared->next_coverage) {
-    if (row.second.size() >
-        impl_->config.maximum_metadata_intervals - intervals)
+    if (!core_internal::can_add(row.second.size(), intervals,
+                                impl_->config.maximum_metadata_intervals))
       return Result<PlanarImageWriteWindow>(
           exhausted("image interval metadata limit"));
     intervals += row.second.size();
@@ -1032,10 +1024,11 @@ Result<PlanarImageWriteWindow> PlanarImage::begin_write(
   for (const auto page : required)
     if (!impl_->pages.count(page))
       prepared->fresh.push_back(page);
-  if (impl_->pages.size() > impl_->config.maximum_backed_bytes / impl_->page ||
-      prepared->fresh.size() >
-          (impl_->config.maximum_backed_bytes / impl_->page -
-           impl_->pages.size()))
+  std::uint64_t total_pages = 0;
+  if (!core_internal::checked_add(impl_->pages.size(), prepared->fresh.size(),
+                                  &total_pages) ||
+      !core_internal::can_multiply(total_pages, impl_->page,
+                                   impl_->config.maximum_backed_bytes))
     return Result<PlanarImageWriteWindow>(
         exhausted("image page budget exceeded"));
   prepared->next_pages = impl_->pages;

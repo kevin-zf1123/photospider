@@ -1,4 +1,4 @@
-#include "photospider/format/rgb_basis.hpp"
+#include "photospider/ops/format/rgb_basis.hpp"
 
 #include <algorithm>
 #include <array>
@@ -18,7 +18,7 @@
 #include "02-format-color/result_mapping.hpp"
 #include "02-format-color/rgb_basis_math.hpp"
 #include "photospider/data/region_runs.hpp"
-#include "photospider/numeric/workflow_authoring.hpp"
+#include "photospider/ops/numeric/workflow_authoring.hpp"
 #include "plugin/builtin_operations.hpp"
 #include "plugin/port_validation.hpp"
 

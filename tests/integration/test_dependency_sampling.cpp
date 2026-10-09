@@ -1576,6 +1576,51 @@ int stmap_map_rows(const std::shared_ptr<OperationRegistry>& registry) {
   return 0;
 }
 
+int stmap_default_budget() {
+  using numeric_result_fixture::take;
+  ResourceBudget observed;
+  {
+    ExecutionContextConfig config;
+    config.cpu_workers = 1;
+    config.gpu_enabled = false;
+    StmapDriver driver(ps::make_default_operation_registry(), config);
+    observed = driver.root;
+    constexpr std::uint64_t side = 16;
+    auto image =
+        driver.source(image_schema(1, 3), {1, 0, 0, 1, 2, 0, 0, 1, 4, 0, 0, 1});
+    auto map =
+        driver.map(std::vector<double>(2 * side * side, .5), {side, side, 2});
+    auto full = take(Footprint::all({1, 1, side, side, 4}));
+    auto sparse =
+        take(footprint(full.shape(),
+                       Region({{0, 1}, {0, 1}, {1, 2}, {2, 3}, {0, 4}}))
+                 .unite(footprint(
+                     full.shape(),
+                     Region({{0, 1}, {0, 1}, {13, 2}, {12, 3}, {0, 4}}))));
+    for (const auto& query : {full, sparse}) {
+      // Use the public defaults for all dependency and set-work limits.
+      auto answer = driver.run(image, map, "clamp", query);
+      PS_REQUIRE_OK(answer);
+      const auto& result = answer.value().results.at("result");
+      const auto facts = take(result.descriptor());
+      PS_CHECK(facts.tensor_coverage(0) == query);
+      for (const auto& box : query.boxes()) {
+        const auto& d = box.dimensions();
+        for (auto y = d[2].offset; y < d[2].offset + d[2].extent; ++y)
+          for (auto x = d[3].offset; x < d[3].offset + d[3].extent; ++x)
+            for (std::uint64_t c = 0; c < 4; ++c) {
+              float value = -1;
+              PS_REQUIRE_OK(result.read_tensor(facts, 0, {0, 0, y, x, c},
+                                               &value, sizeof(value)));
+              PS_CHECK(value == (c == 0 || c == 3 ? 1.F : 0.F));
+            }
+      }
+    }
+  }
+  for (auto live : observed.statistics().live.values)
+    PS_CHECK(live == 0);
+  return 0;
+}
 int stmap_sparse_scaling() {
   std::uint64_t previous = 0;
   for (const std::uint64_t side : {16, 32, 64}) {
@@ -1705,6 +1750,7 @@ int main() {
   PS_CHECK(typed_validation_work_batches(registry) == 0);
   PS_CHECK(stmap_cpu_tiles(registry) == 0);
   PS_CHECK(stmap_map_rows(registry) == 0);
+  PS_CHECK(stmap_default_budget() == 0);
   PS_CHECK(stmap_scaling() == 0);
   PS_CHECK(stmap_sparse_scaling() == 0);
   return 0;

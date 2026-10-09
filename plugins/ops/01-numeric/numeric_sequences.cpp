@@ -8,20 +8,20 @@
 #include <utility>
 #include <vector>
 
-#include "01-numeric/exact_sequence.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/sequence_profiles.hpp"
+#include "core/exact_binary_sum.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "plugin/builtin_operations.hpp"
 #include "plugin/port_validation.hpp"
 namespace ps::plugin_internal {
 namespace {
-using numeric_ops::ExactSequence;
+using core_internal::ExactBinarySum;
 using numeric_ops::SequenceProfile;
 enum class Sequence { Linspace, Arange };
 struct SequenceMath {
   SequenceProfile profile;
-  ExactSequence first, second;
+  ExactBinarySum first, second;
   std::array<std::uint64_t, 68> products{};
   explicit SequenceMath(SequenceProfile selected) : profile(selected) {}
   std::uint64_t rounded(double a, double b, std::uint32_t wa, std::uint32_t wb,

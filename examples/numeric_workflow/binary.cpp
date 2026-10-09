@@ -1,4 +1,4 @@
-#include "photospider/numeric/binary.hpp"
+#include "photospider/ops/numeric/binary.hpp"
 
 #include <fenv.h>  // NOLINT(build/c++11)
 

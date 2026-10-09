@@ -11,6 +11,8 @@
 
 #include "channel_extraction_workflow/source.hpp"
 #include "icc_fixture.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/ops/format/channel.hpp"
+#include "photospider/ops/format/metadata.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)

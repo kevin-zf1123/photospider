@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/numeric/arrays.hpp"
+#include "photospider/ops/numeric/arrays.hpp"
 
 namespace ps::numeric {
 namespace indexing_detail {

@@ -16,7 +16,7 @@
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/sequence_profiles.hpp"
 #include "photospider/core/resource_allocator.hpp"
-#include "photospider/numeric/expression.hpp"
+#include "photospider/ops/numeric/expression.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal::numeric_ops {

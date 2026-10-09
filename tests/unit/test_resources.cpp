@@ -194,6 +194,17 @@ int failures() {
   {
     auto file = TemporaryStorage::create(root).take_value();
     PS_CHECK(file.append_zeroed(8).ok());
+    const auto before = root.statistics();
+    const auto unaddressable = file.append_zeroed(INT64_MAX);
+    PS_CHECK(unaddressable.status().code == ErrorCode::ResourceExhausted);
+    PS_CHECK(unaddressable.status().message ==
+             "temporary extent is not addressable");
+    PS_CHECK(file.size() == 8);
+    const auto after = root.statistics();
+    PS_CHECK(after.live.values == before.live.values);
+    PS_CHECK(after.issued.io_bytes == before.issued.io_bytes &&
+             after.issued.io_requests == before.issued.io_requests &&
+             after.issued.work == before.issued.work);
     PS_CHECK(!file.append_zeroed(4096).ok());
     PS_CHECK(file.size() == 8);
     PS_CHECK(root.statistics().live[ResourceKind::Disk] == 4096);
@@ -201,6 +212,10 @@ int failures() {
     cancel.cancel();
     PS_CHECK(file.append_zeroed(8, cancel.token()).status().code ==
              ErrorCode::Cancelled);
+    PS_CHECK(file.append_zeroed(INT64_MAX, cancel.token()).status().code ==
+             ErrorCode::Cancelled);
+    PS_CHECK(file.size() == 8 &&
+             root.statistics().live[ResourceKind::Disk] == 4096);
     PS_CHECK(file.read(0, 8, 8, cancel.token()).status().code ==
              ErrorCode::Cancelled);
   }

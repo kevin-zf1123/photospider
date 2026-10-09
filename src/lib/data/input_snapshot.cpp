@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
+#include "core/status_helpers.hpp"
 #include "data/content_digest.hpp"
 #include "data/memory_budget.hpp"
 #include "data/value_validation.hpp"
@@ -15,9 +17,8 @@
 namespace ps {
 namespace {
 Status stopped(const SnapshotAccessOptions& options) {
-  if (options.cancellation.cancelled())
-    return Status::failure(ErrorCode::Cancelled, "snapshot access cancelled");
-  return Status::success();
+  return core_internal::cancellation_status(options.cancellation,
+                                            "snapshot access cancelled");
 }
 Status coverage(const ValueDescriptor& descriptor,
                 const std::vector<ValueFacet>& facets, const Region& region,
@@ -263,7 +264,8 @@ Result<InputSnapshot> InputSnapshotStore::import_value(
             ? n
             : std::min<std::uint64_t>(n, impl_->config.block_size);
     const auto grid = n / extent + (n % extent != 0);
-    if (grid > impl_->config.maximum_blocks / blocks)
+    if (!core_internal::can_multiply(grid, blocks,
+                                     impl_->config.maximum_blocks))
       return Result<InputSnapshot>(Status::failure(ErrorCode::ResourceExhausted,
                                                    "snapshot block limit"));
     blocks *= grid;
@@ -336,7 +338,7 @@ Result<InputSnapshot> InputSnapshotStore::patch(
       return Result<InputSnapshot>(status);
     if (intersects(value.region(), replacement.region())) {
       const auto n = value.bytes().size();
-      if (n > UINT64_MAX - bytes)
+      if (!core_internal::can_add(bytes, n))
         return Result<InputSnapshot>(Status::failure(
             ErrorCode::ResourceExhausted, "patch size overflow"));
       bytes += n;

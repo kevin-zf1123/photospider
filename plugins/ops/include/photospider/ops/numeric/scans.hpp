@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/numeric/reductions.hpp"
+#include "photospider/ops/numeric/reductions.hpp"
 
 namespace ps::numeric {
 /** @brief Authors exact boundary prefix sums on one static axis.

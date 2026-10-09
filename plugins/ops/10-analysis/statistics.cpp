@@ -1,4 +1,4 @@
-#include "photospider/data/statistics.hpp"
+#include "photospider/ops/statistics.hpp"
 
 #include <cmath>
 #include <limits>

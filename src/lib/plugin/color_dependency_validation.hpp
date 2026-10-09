@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/dependency_metadata.hpp"
 #include "plugin/port_validation.hpp"
 
@@ -167,7 +168,7 @@ inline Status validate_color_certificate(
         MetadataBytes capacity;
         capacity.needs(row.inputs, true);
         capacity.needs(*prior_needs, true);
-        if (capacity.bytes > UINT64_MAX / 4)
+        if (!core_internal::can_multiply(capacity.bytes, 4))
           return {ErrorCode::ResourceExhausted, "color proof history capacity",
                   FailureReason::CapacityLimit};
         retained = metadata_owner(capacity.bytes * 4);

@@ -57,14 +57,14 @@ endif()
 
 find_package(
   Photospider 0.33 CONFIG REQUIRED
-  COMPONENTS kernel operation_sdk data_provider_sdk)
+  COMPONENTS kernel ops_headers operation_sdk data_provider_sdk)
 
 
 enable_testing()
 include(${CMAKE_CURRENT_LIST_DIR}/../../cmake/BehaviorTests.cmake)
 function(photospider_add_consumer target)
   add_executable(${target} ${ARGN})
-  target_link_libraries(${target} PRIVATE Photospider::kernel)
+  target_link_libraries(${target} PRIVATE Photospider::kernel Photospider::ops_headers)
   target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/..)
 endfunction()
 function(photospider_add_installed_test)
@@ -83,7 +83,7 @@ function(photospider_add_installed_test)
 endfunction()
 foreach(
   _photospider_cxx17_target
-  IN ITEMS Photospider::kernel Photospider::operation_sdk)
+  IN ITEMS Photospider::kernel Photospider::ops_headers Photospider::operation_sdk)
   get_target_property(
     _photospider_compile_features
     ${_photospider_cxx17_target}

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../support/transfer_result_fixture.hpp"
+#include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 

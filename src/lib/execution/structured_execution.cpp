@@ -20,6 +20,7 @@
 #include <variant>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "core/numeric_diagnostics.hpp"
 #include "core/resource_observation.hpp"
 #include "core/stored_failure.hpp"
@@ -769,7 +770,7 @@ class StructuredExecution final
               width.value() /
               Value::element_size(schema.fields[slot].element_type);
           if (width.value() > options_.maximum_result_window_bytes ||
-              (elements && rows > digest_samples / elements) ||
+              !core_internal::can_multiply(elements, rows, digest_samples) ||
               rows > digest_work) {
             hash_outputs = false;
             break;
@@ -949,7 +950,8 @@ class StructuredExecution final
       if (!atoms.ok())
         return Answer(atoms.status());
       auto count = atoms.value().element_count();
-      if (!count.ok() || count.value() > maximum - observations.size())
+      if (!count.ok() ||
+          !core_internal::can_add(count.value(), observations.size(), maximum))
         return Answer(Status{ErrorCode::ResourceExhausted,
                              "atom observation count limit"});
       if (count.value() && (!options_.dependencies.maximum_stages ||
@@ -1131,7 +1133,7 @@ class StructuredExecution final
    * same-thread recursive dependency servicing. Aliases share the Actor's
    * publication and release accounting.
    */
-  struct Actor : StructuredActorLifecycle<NeedPhase>, JointParticipant {
+  struct Actor final : StructuredActorLifecycle<NeedPhase>, JointParticipant {
     explicit Actor(const PlanStep& step, const ResourceBudget& budget)
         : query(*step.structured_metadata, step.parameters),
           key(ResourceAllocator<char>(budget)),
@@ -1774,7 +1776,7 @@ class StructuredExecution final
       return Status::success();
     auto& source = *pending.observations;
     const auto add = [](std::uint64_t& target, std::uint64_t& value) {
-      if (value > UINT64_MAX - target)
+      if (!core_internal::can_add(value, target))
         return false;
       target += std::exchange(value, 0);
       return true;
@@ -1845,9 +1847,9 @@ class StructuredExecution final
             std::chrono::steady_clock::now() - completed.started)
             .count());
     if (timing->invocation_count == UINT64_MAX ||
-        elapsed > UINT64_MAX - timing->duration_us ||
-        completed.native_dispatches >
-            UINT64_MAX - timing->native_dispatch_count)
+        !core_internal::can_add(elapsed, timing->duration_us) ||
+        !core_internal::can_add(completed.native_dispatches,
+                                timing->native_dispatch_count))
       return Status{ErrorCode::ResourceExhausted,
                     "Result poll diagnostic counter overflow"};
     auto merged =
@@ -3453,10 +3455,7 @@ class StructuredExecution final
       const auto maximum = options_.dependencies.sets.maximum_boxes;
       std::uint64_t weight = 1 + key.value().size();
       const auto add = [&](std::uint64_t units) {
-        if (units > maximum || weight > maximum - units)
-          return false;
-        weight += units;
-        return true;
+        return core_internal::checked_add(weight, units, &weight, maximum);
       };
       if (!add(actor.input_facts.size() * 3))
         return Status::success();
@@ -3684,10 +3683,7 @@ class StructuredExecution final
         const auto& contract = shared ? common : templates_[index];
         std::uint64_t cost = 1 + contract.size();
         const auto add = [&](std::uint64_t n) {
-          if (n > UINT64_MAX - cost)
-            return false;
-          cost += n;
-          return true;
+          return core_internal::checked_add(cost, n, &cost);
         };
         const auto set_cost = [&](const Footprint& samples,
                                   std::uint64_t lookup = 0) {
@@ -3696,8 +3692,11 @@ class StructuredExecution final
           if (!status.ok())
             return false;
           auto count = samples.element_count();
-          const auto scale = 9 + samples.shape().size() + lookup;
-          return count.ok() && count.value() <= UINT64_MAX / scale &&
+          std::uint64_t scale = 0;
+          return count.ok() &&
+                 core_internal::checked_add(lookup, 9 + samples.shape().size(),
+                                            &scale) &&
+                 core_internal::can_multiply(count.value(), scale) &&
                  add(count.value() * scale) &&
                  add(1 + samples.shape().size() +
                      samples.boxes().size() * (1 + 2 * samples.shape().size()));
@@ -3845,7 +3844,7 @@ class StructuredExecution final
       ResourceAllocationScope optional_scope(resources_);
       try {
         auto count = result.value().schema().tensors[0].sample_count();
-        if (count.ok() && count.value() <= UINT64_MAX / 9) {
+        if (count.ok() && core_internal::can_multiply(count.value(), 9)) {
           status = checkpoint_cache_work(count.value() * 9);
           if (status.ok()) {
             auto packed = pack_block_state(result.value(), phase);
@@ -5170,7 +5169,8 @@ class StructuredExecution final
         const auto factor =
             Value::element_size(type) *
             static_cast<std::uint64_t>(step.traits.workspace_input_multiplier);
-        if (!count.ok() || count.value() > (UINT64_MAX - limit) / factor)
+        if (!count.ok() ||
+            !core_internal::can_multiply_add(count.value(), factor, limit))
           return false;
         limit += count.value() * factor;
         return true;
@@ -5414,8 +5414,8 @@ class StructuredExecution final
                            "Result GPU discovery submitted no native work"});
               const auto maximum = std::min<std::uint64_t>(
                   65536, options_.dependencies.sets.maximum_boxes);
-              if (discovered_count > maximum ||
-                  needs.value().size() > maximum - discovered_count)
+              if (!core_internal::can_add(discovered_count,
+                                          needs.value().size(), maximum))
                 return Answer(Status{ErrorCode::ResourceExhausted,
                                      "GPU discovery need limit"});
               auto receipt = std::allocate_shared<ResultDiscoveryReceipt>(
@@ -5466,8 +5466,8 @@ class StructuredExecution final
         auto charged = work(discovered_count + need->tensors.size());
         const auto maximum = std::min<std::uint64_t>(
             65536, options_.dependencies.sets.maximum_boxes);
-        if (charged.ok() && (need->tensors.size() > maximum ||
-                             discovered_count > maximum - need->tensors.size()))
+        if (charged.ok() && !core_internal::can_add(need->tensors.size(),
+                                                    discovered_count, maximum))
           charged = {ErrorCode::ResourceExhausted,
                      "GPU discovery attachment limit"};
         if (!charged.ok()) {
@@ -5494,7 +5494,7 @@ class StructuredExecution final
         active_services()->gpu_dispatches) {
       const auto count = active_services()->gpu_dispatches();
       stage.native_dispatches = count;
-      if (count > UINT64_MAX - actor.native_dispatches)
+      if (!core_internal::can_add(count, actor.native_dispatches))
         observe_failure(Status{ErrorCode::ResourceExhausted,
                                "native dispatch counter overflow"});
       else
@@ -5825,8 +5825,6 @@ class StructuredExecution final
   const ExecutionPlan& plan_;
   std::vector<ExecutionBinding> bindings_;
   std::shared_ptr<OperationRegistry> operations_;
-  // cache_state_ borrows this wrapper, so resources_ must be declared and
-  // constructed first and destroyed last. Initializer order cannot enforce it.
   ResourceBudget resources_;
   core_internal::PayloadCapture payload_capture_;
   ResourceBindings bindings_resources_;

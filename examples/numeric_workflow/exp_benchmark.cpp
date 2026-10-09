@@ -18,7 +18,7 @@
 
 #include "01-numeric/numeric_math_operation.hpp"
 #include "math_benchmark_result.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/numeric/unary.hpp"
+#include "photospider/ops/numeric/unary.hpp"
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 

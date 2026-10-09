@@ -6,6 +6,7 @@
 #include <functional>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "photospider/plugin/result_program.hpp"
 
@@ -46,7 +47,8 @@ inline Status validate_result_io(const ResultIoRequest& request,
                : invalid_result_need("invalid temporary write window");
   if (const auto* extend = std::get_if<ResultExtendTemporary>(&request))
     return extend->storage.owned_by(resources) && extend->bytes &&
-                   extend->bytes <= INT64_MAX - extend->storage.size()
+                   core_internal::can_add(extend->storage.size(), extend->bytes,
+                                          INT64_MAX)
                ? Status::success()
                : invalid_result_need("invalid temporary extension");
   return Status::success();

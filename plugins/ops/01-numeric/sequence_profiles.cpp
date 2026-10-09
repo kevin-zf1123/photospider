@@ -59,8 +59,9 @@ Status sequence_profile_available(SequenceProfile profile) {
                 FailureReason::None,
                 {FailureOrigin::Backend, FailureScope::Group}};
 }
-void sequence_multiply(ExactSequence* value, std::uint32_t factor,
-                       SequenceProfile profile, std::uint64_t* products) {
+void sequence_multiply(core_internal::ExactBinarySum* value,
+                       std::uint32_t factor, SequenceProfile profile,
+                       std::uint64_t* products) {
   if (profile == SequenceProfile::Strict) {
     value->multiply(factor);
     return;

@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "01-numeric/exact_sequence.hpp"
+#include "core/exact_binary_sum.hpp"
 #include "photospider/core/status.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
@@ -13,6 +13,7 @@ const char* sequence_implementation();
  * Requires a successful capability check before entering the selected ISA.
  * Scratch holds 68 uint64 products and belongs to the host continuation.
  */
-void sequence_multiply(ExactSequence* value, std::uint32_t factor,
-                       SequenceProfile profile, std::uint64_t* products);
+void sequence_multiply(core_internal::ExactBinarySum* value,
+                       std::uint32_t factor, SequenceProfile profile,
+                       std::uint64_t* products);
 }  // namespace ps::plugin_internal::numeric_ops

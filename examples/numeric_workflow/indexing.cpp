@@ -1,4 +1,4 @@
-#include "photospider/numeric/indexing.hpp"
+#include "photospider/ops/numeric/indexing.hpp"
 
 #include <fenv.h>  // NOLINT(build/c++11)
 

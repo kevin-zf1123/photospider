@@ -7,6 +7,7 @@
 #include <string>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "core/status_helpers.hpp"
 #include "core/utf8_validation.hpp"
 #include "data/content_digest.hpp"
@@ -47,8 +48,10 @@ Result<OcioConfigResource> OcioConfigResource::import(
   if (snapshot.config.empty() || snapshot.engine_version != "2.5.2" ||
       !name(snapshot.build_identity) || !name(snapshot.settings) ||
       snapshot.spaces.empty() ||
-      snapshot.files.size() + snapshot.context.size() + snapshot.spaces.size() >
-          1024) {
+      !core_internal::can_add(snapshot.files.size(), snapshot.context.size(),
+                              1024) ||
+      !core_internal::can_add(snapshot.files.size() + snapshot.context.size(),
+                              snapshot.spaces.size(), 1024)) {
     return Answer(core_internal::invalid_domain(
         "invalid explicit OCIO resource snapshot"));
   }
@@ -112,10 +115,11 @@ Result<OcioConfigResource> OcioConfigResource::import(
   bool overflow = false;
   visit([&](const std::string& category, const std::string& key, const void*,
             std::size_t n) {
-    if (n > UINT64_MAX - size - 24 - category.size() - key.size()) {
+    std::uint64_t framed = 0;
+    if (!core_internal::checked_add(size, 24 + category.size() + key.size(),
+                                    &framed) ||
+        !core_internal::checked_add(framed, n, &size)) {
       overflow = true;
-    } else {
-      size += 24 + category.size() + key.size() + n;
     }
   });
   if (overflow || size > SIZE_MAX) {

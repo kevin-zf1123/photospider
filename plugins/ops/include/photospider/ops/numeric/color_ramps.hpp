@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "photospider/data/color_array.hpp"
-#include "photospider/numeric/curves.hpp"
+#include "photospider/ops/numeric/curves.hpp"
 
 namespace ps::numeric {
 /** @brief Common color-ramp authoring choices; no dynamic sample data. */

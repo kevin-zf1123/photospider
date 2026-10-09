@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/affine_view.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_state.hpp"
@@ -223,7 +224,7 @@ Status ResultBuilder::publish_tensor(
   const auto width =
       Value::element_size(impl_->schema.tensors[slot].descriptor.element_type);
   auto count = region.element_count();
-  if (!count.ok() || count.value() > UINT64_MAX / width ||
+  if (!count.ok() || !core_internal::can_multiply(count.value(), width) ||
       count.value() * width != packed.size() ||
       (packed.size() && !packed.data())) {
     auto status = data_internal::invalid_schema();
@@ -381,8 +382,8 @@ Status ResultBuilder::publish_tensor_kernel(
       return reject(coverage.status());
     auto count = samples.value().element_count();
     const auto width = Value::element_size(spec.descriptor.element_type);
-    if (!count.ok() || count.value() > UINT64_MAX / width || !write ||
-        owner->revision == UINT64_MAX)
+    if (!count.ok() || !core_internal::can_multiply(count.value(), width) ||
+        !write || owner->revision == UINT64_MAX)
       return reject(data_internal::invalid_schema());
     auto copied_work = owner->budget.consume({count.value()});
     if (!copied_work.ok())
@@ -406,8 +407,9 @@ Status ResultBuilder::publish_tensor_kernel(
     // A sparse logical domain need not have a representable full canvas.
     // Reuse the bounded affine transaction when planar byte geometry cannot
     // represent that domain; the typed schema and global coordinates persist.
-    const bool affine = !spec.layout.spatial || !domain_count.ok() ||
-                        domain_count.value() > UINT64_MAX / width;
+    const bool affine =
+        !spec.layout.spatial || !domain_count.ok() ||
+        !core_internal::can_multiply(domain_count.value(), width);
     if (affine && !samples.value().empty()) {
       auto allocated =
           owner->budget.allocator().allocate(count.value() * width);
@@ -667,7 +669,8 @@ Status ResultBuilder::publish_tensor_kernel(
     }
     auto count = samples.element_count();
     const auto width = Value::element_size(spec.descriptor.element_type);
-    if (!count.ok() || !width || count.value() > INT64_MAX / width)
+    if (!count.ok() || !width ||
+        !core_internal::can_multiply(count.value(), width, INT64_MAX))
       return reject({ErrorCode::ResourceExhausted, "batch tensor byte count"});
     const auto bytes = count.value() * width;
     if (bytes > owner->limits.maximum_bytes)
@@ -680,12 +683,13 @@ Status ResultBuilder::publish_tensor_kernel(
     const auto metadata_unit =
         sizeof(Value) +
         rank * (sizeof(RegionDimension) + 3 * sizeof(std::uint64_t));
-    if (boxes > UINT64_MAX / metadata_unit ||
-        boxes > target.affine.max_size() - target.affine.size())
+    if (!core_internal::can_multiply(boxes, metadata_unit) ||
+        !core_internal::can_add(boxes, target.affine.size(),
+                                target.affine.max_size()))
       return reject(
           {ErrorCode::ResourceExhausted, "batch tensor metadata count"});
     const auto metadata_bytes = boxes * metadata_unit;
-    if (metadata_bytes > UINT64_MAX - bytes)
+    if (!core_internal::can_add(metadata_bytes, bytes))
       return reject(
           {ErrorCode::ResourceExhausted, "batch tensor growth count"});
     auto metadata = owner->budget.reserve(
@@ -700,8 +704,9 @@ Status ResultBuilder::publish_tensor_kernel(
     if (!allocated.ok())
       return reject(allocated.status());
     auto buffer = allocated.take_value();
-    const auto growth_bytes = buffer.size() + metadata_bytes;
-    if (growth_bytes < metadata_bytes)
+    std::uint64_t growth_bytes = 0;
+    if (!core_internal::checked_add(buffer.size(), metadata_bytes,
+                                    &growth_bytes))
       return reject(
           {ErrorCode::ResourceExhausted, "batch tensor growth count"});
     auto growth = owner->image_budget->charge(growth_bytes, false, true);
@@ -1000,12 +1005,14 @@ Status ResultBuilder::publish_tensor_view(
             inner < 0 ? -static_cast<__int128>(inner) : inner;
         std::uint64_t product = 1;
         for (auto factor : chunks.back().factors) {
-          if (factor >
-              static_cast<unsigned __int128>(INT64_MAX) / magnitude / product) {
+          std::uint64_t next = 0;
+          if (!core_internal::checked_multiply(product, factor, &next) ||
+              !core_internal::can_multiply(
+                  next, static_cast<std::uint64_t>(magnitude), INT64_MAX)) {
             merge = false;
             break;
           }
-          product *= factor;
+          product = next;
         }
         merge = merge && static_cast<__int128>(product) * inner == stride;
       }
@@ -1039,7 +1046,7 @@ Status ResultBuilder::publish_tensor_view(
         if (needed != 1)
           return unavailable();
         if (chunk.stride) {
-          if (extent > UINT64_MAX / assigned)
+          if (!core_internal::can_multiply(extent, assigned))
             return unavailable();
           assigned *= extent;
         }

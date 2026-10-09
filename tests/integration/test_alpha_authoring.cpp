@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "../support/channel_result_fixture.hpp"
+#include "photospider/ops/format/alpha.hpp"
+#include "photospider/ops/format/metadata.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)

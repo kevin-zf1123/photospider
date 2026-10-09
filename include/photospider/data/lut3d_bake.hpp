@@ -48,7 +48,7 @@ struct Lut3dBakeReport {
   std::array<double, 3> first_failure_input{}, first_failure_reference{},
       first_failure_lut{};
 };
-/** @brief Creates the registered curve.bake_lut3d.report v1 CompleteBundle
+/** @brief Creates the registered LUT3D bake report v1 CompleteBundle
  * schema with 11 fixed fields, domain [1], quality=Measured and 289 data bytes.
  * Pure/thread-safe, no runtime input; allocation may throw bad_alloc. Invalid
  * metadata fails InvalidArgument/InvalidDomain. Acceptance remains measured
@@ -59,7 +59,7 @@ PHOTOSPIDER_API Result<SchemaTemplate> lut3d_bake_schema(
 /** @brief Owned sampled-table Result schema associated with its measured
  * report. Version 2 has one `colors` tensor [N0,N1,N2,3], the converted dtype,
  * ColorArray v1 facet and one atomic trailing component axis. No quality pass
- * is implied by this intermediate. Use bake_lut3d's gated table for
+ * is implied by this intermediate. Use the accepted table for
  * application.
  */
 PHOTOSPIDER_API Result<SchemaTemplate> lut3d_bake_table_schema(

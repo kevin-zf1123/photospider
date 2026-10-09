@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/affine_view.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_state.hpp"
@@ -212,10 +213,12 @@ Status ResultBuilder::append_to(const std::shared_ptr<ResultRef::Impl>& impl,
   if (field >= impl->schema.fields.size())
     return reject(data_internal::invalid_schema());
   auto& target = impl->fields[field];
-  if (rows > impl->limits.maximum_rows - target.written ||
-      rows > UINT64_MAX / target.row_bytes ||
+  if (!core_internal::can_add(rows, target.written,
+                              impl->limits.maximum_rows) ||
+      !core_internal::can_multiply(rows, target.row_bytes) ||
       rows * target.row_bytes != bytes.size() ||
-      bytes.size() > impl->limits.maximum_bytes - impl->bytes)
+      !core_internal::can_add(bytes.size(), impl->bytes,
+                              impl->limits.maximum_bytes))
     return reject(
         Status{ErrorCode::ResourceExhausted, "result append count/byte limit"});
   if (!rows)

@@ -5,8 +5,8 @@
 #include <type_traits>
 #include <utility>
 
-#include "photospider/numeric/curves.hpp"
-#include "photospider/numeric/workflow_authoring.hpp"
+#include "photospider/ops/numeric/curves.hpp"
+#include "photospider/ops/numeric/workflow_authoring.hpp"
 
 namespace ps::numeric {
 /** @brief Owning authoring references to independent samples and positions.

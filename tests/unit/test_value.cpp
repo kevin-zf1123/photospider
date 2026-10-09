@@ -131,6 +131,42 @@ int main() {
   PS_CHECK(!repeated_minimum_stride.ok());
   PS_CHECK(repeated_minimum_stride.status().code == ErrorCode::InvalidArgument);
 
+  // Borrowed addresses preserve reversed, broadcast, origin-relative and
+  // singleton-stride layouts, and reject invalid pointers/ranks/coverage.
+  const std::uint64_t last[] = {2};
+  PS_CHECK(reverse.value().byte_address(last, 1).value() == 0);
+  PS_CHECK(
+      reverse.value().byte_address(std::vector<std::uint64_t>{2}).value() ==
+      reverse.value().byte_address({2}).value());
+  const std::uint64_t far[] = {huge_extent - 1};
+  PS_CHECK(huge_broadcast.value().byte_address(far, 1).value() == 0);
+  PS_CHECK(singleton_minimum_stride.value().byte_address({0}).value() == 0);
+  PS_CHECK(reverse.value().byte_address(nullptr, 1).status().code ==
+           ErrorCode::InvalidArgument);
+  PS_CHECK(reverse.value().byte_address(last, 0).status().code ==
+           ErrorCode::InvalidArgument);
+  PS_CHECK(reverse.value().byte_address({3}).status().code ==
+           ErrorCode::InvalidArgument);
+  PS_CHECK(Value{}.byte_address(last, 1).status().code ==
+           ErrorCode::InvalidArgument);
+  auto origin_relative =
+      Value::create({ElementType::UInt8, {10}}, Region({{7, 3}}),
+                    {2, {-1}, {7}}, {11, 12, 13});
+  PS_CHECK(origin_relative.ok());
+  const std::uint64_t origin_end[] = {9};
+  ps::ValueView view(origin_relative.value());
+  PS_CHECK(view.byte_address(origin_end, 1).value() == 0);
+  PS_CHECK(view.byte_address({8}).value() == 1);
+  PS_CHECK(view.byte_address(std::vector<std::uint64_t>{7}).value() == 2);
+  const auto high_origin = UINT64_MAX - 3;
+  auto high_relative = Value::create({ElementType::UInt8, {UINT64_MAX}},
+                                     Region({{high_origin, 3}}),
+                                     {2, {-1}, {high_origin}}, {21, 22, 23});
+  PS_CHECK(high_relative.ok());
+  const std::uint64_t high_end[] = {UINT64_MAX - 1};
+  PS_CHECK(high_relative.value().byte_address(high_end, 1).value() == 0);
+  PS_CHECK(high_relative.value().byte_address({high_origin}).value() == 2);
+
   auto overflowing_element_count =
       Region::whole({std::numeric_limits<std::uint64_t>::max(), 2U})
           .element_count();

@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "plugin/port_validation.hpp"
 #include "plugin/result_c_codec.hpp"
 #include "plugin/result_c_joint.hpp"
@@ -40,14 +41,16 @@ Result<std::vector<OperationDefinition>> import_result_plugin(
     const auto& op = api->operations[i];
     if (op.struct_size != sizeof(op) ||
         !array(op.inputs, op.input_count, 1024) || op.repeated_match > 1 ||
-        (op.repeated_maximum ? (!op.repeated_minimum ||
-                                (!op.repeated_match && !op.resolve_metadata) ||
-                                op.repeated_minimum > op.repeated_maximum ||
-                                op.repeated_maximum > 1024 ||
-                                op.input_count > 1024 - op.repeated_maximum ||
-                                !array(op.repeated_input, 1, 1))
-                             : (op.repeated_input || op.repeated_minimum ||
-                                op.repeated_match)) ||
+        (op.repeated_maximum
+             ? (!op.repeated_minimum ||
+                (!op.repeated_match && !op.resolve_metadata) ||
+                op.repeated_minimum > op.repeated_maximum ||
+                op.repeated_maximum > 1024 ||
+                !core_internal::can_add(op.input_count, op.repeated_maximum,
+                                        1024) ||
+                !array(op.repeated_input, 1, 1))
+             : (op.repeated_input || op.repeated_minimum ||
+                op.repeated_match)) ||
         !array(op.outputs, op.output_count, 64) || !op.output_count ||
         !op.start || !op.poll || !op.destroy || op.state_bytes > 1048576 ||
         !op.maximum_stages || op.maximum_stages > 1048576 ||

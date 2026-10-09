@@ -8,12 +8,13 @@
 
 #include "01-numeric/accelerated_math.hpp"
 #include "01-numeric/sequence_profiles.hpp"
+#include "core/exact_binary_sum.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 // Shared finite-input endpoint interpolation, RN64 control reconstruction and
 // direct output conversion. All scratch is part of the caller's continuation.
 struct ExactSampling final {
-  ExactSequence first, second;
+  core_internal::ExactBinarySum first, second;
   std::array<std::uint64_t, 68> products{};
   SequenceProfile profile;
   // True only while a caller-owned Float32Environment covers every use.

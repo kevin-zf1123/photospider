@@ -17,6 +17,7 @@
 
 #include "../support/transfer_result_fixture.hpp"
 #include "fixtures/fmt09_sweep.hpp"
+#include "photospider/ops/format/transfer.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)

@@ -17,7 +17,7 @@ struct StructuredActorCache final {
 };
 
 // Owns the optional cache quota and this Run's acquired checkpoint scopes.
-// Root is borrowed from the coordinator, which outlives this component. Scope
+// Retains the shared Root independently of the coordinator's wrapper. Scope
 // owners retain their own Root leases. Calls borrow the coordinator's callback
 // metadata gate; no callback or table pointer escapes a call. Charge fails
 // before changing quota, and disabling optional reuse never refunds Root work.
@@ -36,7 +36,7 @@ class StructuredCacheState final {
                                                std::uint64_t maximum);
 
  private:
-  const ResourceBudget& root_;
+  ResourceBudget root_;
   std::uint64_t remaining_;
   ResourceMap<std::shared_ptr<ResultCheckpointScope>> scopes_;
 };

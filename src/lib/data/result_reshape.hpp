@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/footprint.hpp"
 
@@ -220,9 +221,6 @@ inline uint64_t projection_cost(const std::vector<uint64_t>& from_shape,
                                 const Footprint& requested,
                                 const std::vector<uint64_t>& to_shape,
                                 uint64_t cap) {
-  const auto multiply = [cap](uint64_t a, uint64_t b) {
-    return !b || a <= cap / b ? a * b : cap;
-  };
   std::array<Axis, 8> from{}, to{};
   size_t nf = 0, nt = 0;
   for (size_t i = 0; i < from_shape.size(); ++i)
@@ -254,11 +252,14 @@ inline uint64_t projection_cost(const std::vector<uint64_t>& from_shape,
       const auto span_axis = prefix_end == fb ? fb : prefix_end - 1;
       uint64_t spans = 1;
       for (size_t i = fb; i < span_axis; ++i)
-        spans = multiply(spans, query.dimensions()[from[i].index].extent);
+        spans = core_internal::saturating_multiply(
+            spans, query.dimensions()[from[i].index].extent, cap);
       const auto rectangles = prefix_end == fb ? 1 : 2 * (t - tb) - 1;
-      pieces = multiply(pieces, multiply(spans, rectangles));
+      pieces = core_internal::saturating_multiply(
+          pieces, core_internal::saturating_multiply(spans, rectangles, cap),
+          cap);
     }
-    if (pieces >= cap - total)
+    if (!core_internal::can_add(pieces, total, cap) || pieces + total == cap)
       return cap;
     total += pieces;
   }
@@ -313,8 +314,8 @@ inline Result<Footprint> project(const ResourceBudget& budget,
       all.remaining = block.remaining;
       if (!status.ok())
         return Answer(status);
-      if (!block.boxes.empty() &&
-          combined.size() > limits.maximum_boxes / block.boxes.size())
+      if (!core_internal::can_multiply(combined.size(), block.boxes.size(),
+                                       limits.maximum_boxes))
         return Answer(Status{ErrorCode::ResourceExhausted,
                              "reshape projection rectangle limit"});
       ResourceVector<Box> next{ResourceAllocator<Box>(budget)};

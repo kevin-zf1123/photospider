@@ -81,7 +81,7 @@ class StructuredCacheReplayHost : public StructuredCacheWorkServices {
 // candidate replay transactions. Context/table/actor views are one-call
 // borrows. Strong candidates survive eviction; epoch clear rejects adoption
 // without retiring an independently held candidate.
-// The component retires before the coordinator's ResourceBudget and tables.
+// Retains the shared ResourceBudget independently of the caller's wrapper.
 class StructuredResultCache final {
  public:
   StructuredResultCache(const ResourceBudget& root, std::uint64_t work)
@@ -118,7 +118,7 @@ class StructuredResultCache final {
   Result<ResourceVector<SourceObservation>> source_proof(
       std::size_t, const ResultRef&, const StructuredCacheContext&,
       StructuredCacheWorkServices&);
-  const ResourceBudget& resources_;
+  ResourceBudget resources_;
   StructuredCacheState quota_;
 };
 }  // namespace ps::execution_internal

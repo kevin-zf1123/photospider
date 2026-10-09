@@ -11,10 +11,11 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "core/status_helpers.hpp"
 #include "core/utf8_validation.hpp"
 #include "data/content_digest.hpp"
 #include "photospider/data/tensor_description.hpp"
-#include "photospider/format/channel.hpp"
+#include "photospider/ops/format/channel.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::format::detail {
@@ -32,12 +33,6 @@ namespace {
 using numeric_ops::SequenceProfile;
 using Answer = Result<std::vector<OperationOutputSpecialization>>;
 
-Status invalid(const std::string& message) {
-  return {ErrorCode::InvalidArgument,
-          message,
-          FailureReason::InvalidDomain,
-          {FailureOrigin::Schema, FailureScope::Unspecified}};
-}
 enum class Layout { Auto, View, Materialize };
 struct Selection final {
   std::uint32_t axis = 0;
@@ -141,22 +136,26 @@ Result<OperationPreparation> prepare_extraction(
   const auto expected_layout = parameters.find("expected_source_layout");
   if ((expected_schema != parameters.end()) !=
       (expected_layout != parameters.end()))
-    return Prepared(invalid("source metadata assertions must be complete"));
+    return Prepared(core_internal::invalid_schema_domain(
+        "source metadata assertions must be complete"));
   if (expected_schema != parameters.end() &&
       (std::get<std::string>(expected_schema->second) !=
            format::detail::schema_assertion(input_schema) ||
        std::get<std::string>(expected_layout->second) !=
            format::detail::layout_assertion(input.layout)))
-    return Prepared(invalid("source schema assertion disagrees with input"));
+    return Prepared(core_internal::invalid_schema_domain(
+        "source schema assertion disagrees with input"));
   const auto& mode = std::get<std::string>(parameters.at("metadata_mode"));
   if (mode != "respect" && mode != "raw" && mode != "override")
-    return Prepared(invalid("metadata_mode must be respect, raw or override"));
+    return Prepared(core_internal::invalid_schema_domain(
+        "metadata_mode must be respect, raw or override"));
   if (named && mode == "raw")
-    return Prepared(invalid("named extraction requires interpreted metadata"));
+    return Prepared(core_internal::invalid_schema_domain(
+        "named extraction requires interpreted metadata"));
   const auto override_it = parameters.find("metadata_override");
   if ((mode == "override") != (override_it != parameters.end()))
-    return Prepared(
-        invalid("metadata_override must occur exactly in override mode"));
+    return Prepared(core_internal::invalid_schema_domain(
+        "metadata_override must occur exactly in override mode"));
   Status metadata_status = Status::success();
   std::optional<TensorDescription> description;
   if (mode == "override") {
@@ -183,25 +182,30 @@ Result<OperationPreparation> prepare_extraction(
   if (axis_it != parameters.end()) {
     const auto axis = std::get<std::int64_t>(axis_it->second);
     if (axis < 0 || static_cast<std::uint64_t>(axis) >= shape.size())
-      return Prepared(invalid("channel axis is outside tensor rank"));
+      return Prepared(core_internal::invalid_schema_domain(
+          "channel axis is outside tensor rank"));
     selected.axis = static_cast<std::uint32_t>(axis);
     if (mode != "raw" && description && description->channel_axis &&
         selected.axis != *description->channel_axis)
-      return Prepared(invalid("axis assertion disagrees with metadata"));
+      return Prepared(core_internal::invalid_schema_domain(
+          "axis assertion disagrees with metadata"));
   } else if (mode != "raw" && description && description->channel_axis) {
     selected.axis = *description->channel_axis;
   } else {
-    return Prepared(invalid("channel axis must be explicit or described"));
+    return Prepared(core_internal::invalid_schema_domain(
+        "channel axis must be explicit or described"));
   }
   const auto expected = parameters.find("expected_channels");
   if (expected != parameters.end() &&
       (std::get<std::int64_t>(expected->second) <= 0 ||
        static_cast<std::uint64_t>(std::get<std::int64_t>(expected->second)) !=
            shape[selected.axis]))
-    return Prepared(invalid("channel count assertion disagrees with input"));
+    return Prepared(core_internal::invalid_schema_domain(
+        "channel count assertion disagrees with input"));
   selected.keepdims = std::get<bool>(parameters.at("keepdims"));
   if (!selected.keepdims && shape.size() == 1)
-    return Prepared(invalid("rank-one extraction requires keepdims=true"));
+    return Prepared(core_internal::invalid_schema_domain(
+        "rank-one extraction requires keepdims=true"));
   const auto& layout = std::get<std::string>(parameters.at("layout"));
   if (layout == "auto")
     selected.layout = Layout::Auto;
@@ -210,21 +214,23 @@ Result<OperationPreparation> prepare_extraction(
   else if (layout == "materialize")
     selected.layout = Layout::Materialize;
   else
-    return Prepared(invalid("layout must be auto, view or materialize"));
+    return Prepared(core_internal::invalid_schema_domain(
+        "layout must be auto, view or materialize"));
   if (named) {
     const auto& match = std::get<std::string>(parameters.at("match"));
     const auto& selector = std::get<std::string>(parameters.at("selector"));
     if (match != "name" && match != "role")
-      return Prepared(invalid("match must be name or role"));
+      return Prepared(
+          core_internal::invalid_schema_domain("match must be name or role"));
     if (selector.empty() || selector.size() > 128 ||
         !core_internal::valid_utf8_key(selector))
-      return Prepared(
-          invalid("selector must be strict UTF-8 of at most 128 bytes"));
+      return Prepared(core_internal::invalid_schema_domain(
+          "selector must be strict UTF-8 of at most 128 bytes"));
     if (!description || !description->channel_axis ||
         *description->channel_axis != selected.axis ||
         description->channels.size() != shape[selected.axis])
-      return Prepared(
-          invalid("named extraction requires a complete channel table"));
+      return Prepared(core_internal::invalid_schema_domain(
+          "named extraction requires a complete channel table"));
     bool found = false;
     for (std::uint64_t index = 0; index < description->channels.size();
          ++index) {
@@ -233,27 +239,30 @@ Result<OperationPreparation> prepare_extraction(
       if (field != selector)
         continue;
       if (found)
-        return Prepared(invalid("named channel selector is ambiguous"));
+        return Prepared(core_internal::invalid_schema_domain(
+            "named channel selector is ambiguous"));
       selected.index = index;
       found = true;
     }
     if (!found)
-      return Prepared(invalid("named channel selector is absent"));
+      return Prepared(core_internal::invalid_schema_domain(
+          "named channel selector is absent"));
   } else {
     const auto index = std::get<std::int64_t>(parameters.at("index"));
     if (index < 0 || static_cast<std::uint64_t>(index) >= shape[selected.axis])
-      return Prepared(invalid("channel index is outside selected axis"));
+      return Prepared(core_internal::invalid_schema_domain(
+          "channel index is outside selected axis"));
     selected.index = static_cast<std::uint64_t>(index);
   }
   if (parameters.count("expected_inputs") &&
       format_result::text(parameters, "expected_inputs") !=
           format_result::source_assertion(inputs))
-    return Prepared(
-        invalid("FMT-05B source metadata disagrees with inference"));
+    return Prepared(core_internal::invalid_schema_domain(
+        "FMT-05B source metadata disagrees with inference"));
   if (parameters.count("output_description") &&
       (format_result::text(parameters, "authoring_member") != "FMT-05B" ||
        !parameters.count("expected_inputs")))
-    return Prepared(invalid(
+    return Prepared(core_internal::invalid_schema_domain(
         "complete extraction metadata requires FMT-05B source assertions"));
   OperationOutputSpecialization output;
   auto schema = input_schema;

@@ -1,4 +1,4 @@
-#include "photospider/numeric/layouts.hpp"
+#include "photospider/ops/numeric/layouts.hpp"
 
 #include <fenv.h>  // NOLINT(build/c++11)
 
@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/numeric/arrays.hpp"
+#include "photospider/ops/numeric/arrays.hpp"
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 #include "result_fixture.hpp"     // NOLINT(build/include_subdir)

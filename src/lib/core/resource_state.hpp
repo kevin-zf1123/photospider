@@ -8,6 +8,7 @@
 #include <mutex>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "core/resource_observation.hpp"
 #include "photospider/core/resources.hpp"
 
@@ -62,7 +63,7 @@ struct ResourceBudget::Impl {
       return true;
     auto prior = issued_work.load(std::memory_order_relaxed);
     do {
-      if (amount > limits.maximum_work - prior)
+      if (!core_internal::can_add(amount, prior, limits.maximum_work))
         return false;
     } while (!issued_work.compare_exchange_weak(prior, prior + amount,
                                                 std::memory_order_relaxed,
@@ -70,11 +71,14 @@ struct ResourceBudget::Impl {
     return true;
   }
   bool fits(const ResourceCapacity& c) const {
-    for (std::size_t i = 0; i < c.values.size(); ++i)
-      if (c.values[i] > limits.capacity.values[i] -
-                            stats.protected_cleanup.values[i] -
-                            stats.live.values[i])
+    for (std::size_t i = 0; i < c.values.size(); ++i) {
+      const auto limit = limits.capacity.values[i];
+      std::uint64_t used = 0;
+      if (!core_internal::checked_add(stats.protected_cleanup.values[i],
+                                      stats.live.values[i], &used, limit) ||
+          !core_internal::can_add(used, c.values[i], limit))
         return false;
+    }
     return true;
   }
   void add(const ResourceCapacity& c) {

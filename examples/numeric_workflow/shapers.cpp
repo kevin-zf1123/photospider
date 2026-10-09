@@ -1,4 +1,4 @@
-#include "photospider/numeric/shapers.hpp"
+#include "photospider/ops/numeric/shapers.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/numeric/color_ramps.hpp"
+#include "photospider/ops/numeric/color_ramps.hpp"
 #include "photospider/photospider.hpp"
 #include "photospider/plugin/result_program.hpp"
 

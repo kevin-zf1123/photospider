@@ -1,4 +1,4 @@
-#include "photospider/numeric/expression.hpp"
+#include "photospider/ops/numeric/expression.hpp"
 
 #include <fenv.h>  // NOLINT(build/c++11)
 

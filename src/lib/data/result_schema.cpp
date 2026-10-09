@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/result_support.hpp"
 #include "data/value_validation.hpp"
 #include "photospider/data/representation.hpp"
@@ -35,7 +36,7 @@ bool extent_valid(const ResultExtent& extent, bool resolved,
     return false;
   switch (extent.kind) {
     case ResultExtentKind::Fixed:
-      return extent.value <= UINT64_MAX - extent.offset;
+      return core_internal::can_add(extent.value, extent.offset);
     case ResultExtentKind::InputAxis:
     case ResultExtentKind::InputElements:
       return !resolved;
@@ -118,7 +119,8 @@ Status SchemaTemplate::validate(bool resolved) const {
     return Status::failure(ErrorCode::TypeMismatch,
                            "legacy layer schema requires planar storage");
   if (!key_valid(id, 128) || !version || (fields.empty() && tensors.empty()) ||
-      fields.size() + tensors.size() > 16 || domain.size() > 8 ||
+      !core_internal::can_add(fields.size(), tensors.size(), 16) ||
+      domain.size() > 8 ||
       (publication != PublishPolicy::CompleteBundle &&
        publication != PublishPolicy::IndependentChunks &&
        publication != PublishPolicy::StablePrefix) ||
@@ -186,7 +188,7 @@ Status SchemaTemplate::validate(bool resolved) const {
   for (const auto& facet : metadata) {
     if (!key_valid(facet.key, 256) || !facet.version || !add_key(facet.key) ||
         facet.payload.size() > 65536 ||
-        payload > 1048576 - facet.payload.size())
+        !core_internal::can_add(payload, facet.payload.size(), 1048576))
       return data_internal::invalid_schema();
     payload += facet.payload.size();
   }
@@ -235,7 +237,7 @@ Result<std::uint64_t> SchemaTemplate::row_bytes(std::uint32_t field) const {
     return Result<std::uint64_t>(data_internal::invalid_schema());
   std::uint64_t bytes = Value::element_size(fields[field].element_type);
   for (const auto extent : fields[field].record_shape) {
-    if (!extent || bytes > static_cast<std::uint64_t>(INT64_MAX) / extent)
+    if (!extent || !core_internal::can_multiply(bytes, extent, INT64_MAX))
       return Result<std::uint64_t>(data_internal::invalid_schema());
     bytes *= extent;
   }
@@ -263,7 +265,7 @@ Result<SchemaTemplate> SchemaTemplate::resolve(
       if (shape.empty())
         return data_internal::invalid_schema();
       for (auto n : shape) {
-        if (n && count > UINT64_MAX / n)
+        if (!core_internal::can_multiply(count, n))
           return Status{ErrorCode::ResourceExhausted,
                         "schema input domain overflow"};
         count *= n;

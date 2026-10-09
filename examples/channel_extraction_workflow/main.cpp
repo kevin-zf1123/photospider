@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 
+#include "photospider/ops/format/channel.hpp"
 #include "source.hpp"  // NOLINT(build/include_subdir)
 
 int main() try {

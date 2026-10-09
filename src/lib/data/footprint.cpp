@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "core/radix_sort.hpp"
 #include "data/footprint_index.hpp"
 #include "photospider/core/resource_allocator.hpp"
@@ -500,7 +501,7 @@ Result<std::uint64_t> Footprint::element_count() const {
     auto count = box.element_count();
     if (!count.ok())
       return count;
-    if (count.value() > UINT64_MAX - sum)
+    if (!core_internal::can_add(sum, count.value()))
       return Result<std::uint64_t>(Status::failure(ErrorCode::ResourceExhausted,
                                                    "footprint count overflow"));
     sum += count.value();

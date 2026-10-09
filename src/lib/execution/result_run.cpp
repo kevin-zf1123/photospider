@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "core/resource_observation.hpp"
 #include "data/memory_budget.hpp"
 #include "execution/callback_pool.hpp"
@@ -245,15 +246,15 @@ Result<ExecutionResult> run_result_plan(
                     const auto per_sample = 1 + source.region().rank();
                     if (!count.ok())
                       return Answer(count.status());
-                    if (count.value() <=
-                        (UINT64_MAX - bytes.value()) / per_sample) {
+                    if (core_internal::can_multiply_add(
+                            count.value(), per_sample, bytes.value())) {
                       const auto device_identity = native_device->identity();
                       const auto framing = 32 + device_identity.size() +
                                            3 * source.region().rank();
                       const auto sample_work =
                           bytes.value() + count.value() * per_sample;
                       auto issued =
-                          sample_work <= UINT64_MAX - framing
+                          core_internal::can_add(sample_work, framing)
                               ? cache_work(sample_work + framing)
                               : Status{ErrorCode::ResourceExhausted, {}};
                       if (!issued.ok() &&
@@ -288,8 +289,8 @@ Result<ExecutionResult> run_result_plan(
                     const auto per_sample = 1 + source.region().rank();
                     if (!count.ok())
                       return Answer(count.status());
-                    if (count.value() >
-                        (UINT64_MAX - bytes.value()) / per_sample)
+                    if (!core_internal::can_multiply_add(
+                            count.value(), per_sample, bytes.value()))
                       return Answer(Status{ErrorCode::ResourceExhausted, {}});
                     auto issued = stage_root->consume(
                         {bytes.value() + count.value() * per_sample});

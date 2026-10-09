@@ -9,7 +9,9 @@
 #include <stdexcept>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "core/resource_state.hpp"
+#include "core/status_helpers.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
 namespace ps {
@@ -95,11 +97,6 @@ bool coherent(const ResourceCapacity& c) {
          c[ResourceKind::Shared] <= c[ResourceKind::Host] &&
          c[ResourceKind::Shared] <= c[ResourceKind::Device];
 }
-Status exhausted() {
-  return Status{ErrorCode::ResourceExhausted,
-                "managed resource capacity exhausted",
-                FailureReason::CapacityLimit};
-}
 }  // namespace
 
 ResourceCapacity ResourceCapacity::host(std::uint64_t bytes,
@@ -176,11 +173,11 @@ Result<ResourceLease> ResourceBudget::reserve(ResourceCapacity capacity) const {
   }
   const auto failure = [&] {
     resource_internal::metadata_failure(*this, ErrorCode::ResourceExhausted);
-    return Result<ResourceLease>(exhausted());
+    return Result<ResourceLease>(core_internal::capacity_exhausted());
   };
   const auto overhead = lease_metadata_bytes();
-  if (capacity[ResourceKind::Host] > UINT64_MAX - overhead ||
-      capacity[ResourceKind::Metadata] > UINT64_MAX - overhead)
+  if (!core_internal::can_add(capacity[ResourceKind::Host], overhead) ||
+      !core_internal::can_add(capacity[ResourceKind::Metadata], overhead))
     return failure();
   capacity[ResourceKind::Host] += overhead;
   capacity[ResourceKind::Metadata] += overhead;
@@ -240,7 +237,7 @@ Status ResourceLease::grow(ResourceCapacity additional) {
     if (impl_->quarantined)
       return Status::failure(ErrorCode::Stale, "quarantined resource lease");
     if (!impl_->root->fits(additional))
-      return exhausted();
+      return core_internal::capacity_exhausted();
   }
   impl_->root->add(additional);
   if (!impl_->amount[ResourceKind::Payload] &&
@@ -262,7 +259,7 @@ Status ResourceLease::add_shared_payload(std::uint64_t bytes) {
     return Status::failure(ErrorCode::Stale, "quarantined resource lease");
   const auto payload = impl_->amount[ResourceKind::Payload];
   const auto shared = impl_->amount[ResourceKind::Shared];
-  if (shared > payload || bytes > payload - shared)
+  if (!core_internal::can_add(shared, bytes, payload))
     return Status::failure(ErrorCode::InvalidArgument,
                            "native classification exceeds reserved payload");
   ResourceCapacity additional;
@@ -274,12 +271,12 @@ Status ResourceLease::add_shared_payload(std::uint64_t bytes) {
     lock.lock();
     if (impl_->quarantined)
       return Status::failure(ErrorCode::Stale, "quarantined resource lease");
-    if (bytes > impl_->amount[ResourceKind::Payload] -
-                    impl_->amount[ResourceKind::Shared])
+    if (!core_internal::can_add(bytes, impl_->amount[ResourceKind::Shared],
+                                impl_->amount[ResourceKind::Payload]))
       return Status::failure(ErrorCode::InvalidArgument,
                              "native classification exceeds reserved payload");
     if (!impl_->root->fits(additional))
-      return exhausted();
+      return core_internal::capacity_exhausted();
   }
   impl_->root->add(additional);
   impl_->amount[ResourceKind::Device] += bytes;
@@ -352,11 +349,15 @@ bool ResourceBudget::try_consume(ResourceWork work, Status& failure) const {
   auto& issued = impl_->stats.issued;
   const auto& limit = impl_->limits;
   const bool work_limit =
-      work.work > limit.maximum_work -
-                      impl_->issued_work.load(std::memory_order_relaxed) ||
-      work.io_bytes > limit.maximum_io_bytes - issued.io_bytes ||
-      work.io_requests > limit.maximum_io_requests - issued.io_requests;
-  if (work_limit || work.stages > limit.maximum_stages - issued.stages)
+      !core_internal::can_add(
+          work.work, impl_->issued_work.load(std::memory_order_relaxed),
+          limit.maximum_work) ||
+      !core_internal::can_add(work.io_bytes, issued.io_bytes,
+                              limit.maximum_io_bytes) ||
+      !core_internal::can_add(work.io_requests, issued.io_requests,
+                              limit.maximum_io_requests);
+  if (work_limit ||
+      !core_internal::can_add(work.stages, issued.stages, limit.maximum_stages))
     return failed(work_limit);
   // All other dimensions are locked and validated. After this CAS no failure
   // or throwing operation occurs before committing their counters.

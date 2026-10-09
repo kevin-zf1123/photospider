@@ -14,10 +14,11 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "core/status_helpers.hpp"
 #include "core/utf8_validation.hpp"
 #include "data/model_coordinates.hpp"
 #include "photospider/data/region_runs.hpp"
-#include "photospider/format/channel_editing.hpp"
+#include "photospider/ops/format/channel_editing.hpp"
 #include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
@@ -25,12 +26,6 @@ namespace {
 using format_result::require;
 using format_result::take;
 using numeric_ops::SequenceProfile;
-Status invalid(const std::string& text) {
-  return {ErrorCode::InvalidArgument,
-          text,
-          FailureReason::InvalidDomain,
-          {FailureOrigin::Schema, FailureScope::Unspecified}};
-}
 Status mismatch(const std::string& text) {
   return {ErrorCode::TypeMismatch,
           text,
@@ -73,14 +68,15 @@ Result<std::vector<std::string>> records(const Params& p, const char* key) {
     return Answer(std::vector<std::string>{});
   auto fields = split(std::get<std::string>(found->second), ';');
   if (fields.size() < 2 || fields[0] != "v1")
-    return Answer(
-        invalid(std::string(key) + ": expected canonical v1 records"));
+    return Answer(core_internal::invalid_schema_domain(
+        std::string(key) + ": expected canonical v1 records"));
   fields.erase(fields.begin());
   return Answer(std::move(fields));
 }
 Result<std::string> unhex(const std::string& text) {
   if (text.empty() || text.size() % 2 || text.size() > 256)
-    return Result<std::string>(invalid("invalid selector hex length"));
+    return Result<std::string>(
+        core_internal::invalid_schema_domain("invalid selector hex length"));
   const auto digit = [](char c) {
     return c >= '0' && c <= '9'   ? c - '0'
            : c >= 'a' && c <= 'f' ? c - 'a' + 10
@@ -90,11 +86,13 @@ Result<std::string> unhex(const std::string& text) {
   for (std::size_t i = 0; i < text.size(); i += 2) {
     const int a = digit(text[i]), b = digit(text[i + 1]);
     if (a < 0 || b < 0)
-      return Result<std::string>(invalid("invalid selector hex"));
+      return Result<std::string>(
+          core_internal::invalid_schema_domain("invalid selector hex"));
     out += static_cast<char>((a << 4) | b);
   }
   if (!core_internal::valid_utf8_key(out))
-    return Result<std::string>(invalid("invalid UTF-8 selector"));
+    return Result<std::string>(
+        core_internal::invalid_schema_domain("invalid UTF-8 selector"));
   return Result<std::string>(std::move(out));
 }
 TensorInterpretation interpretation(const TensorDescription& d) {
@@ -136,10 +134,12 @@ Status overlay(TensorInterpretation* value, const TensorInterpretation& target,
       !text(&value->transfer, target.transfer) ||
       !text(&value->reference, target.reference) ||
       !text(&value->association, target.association))
-    return invalid("conflicting component interpretation");
+    return core_internal::invalid_schema_domain(
+        "conflicting component interpretation");
   if (!empty(target)) {
     if (assertion && described && value->convention != target.convention)
-      return invalid("conflicting coordinate conventions");
+      return core_internal::invalid_schema_domain(
+          "conflicting coordinate conventions");
     value->convention = target.convention;
   }
   const auto field = [assertion](auto* a, const auto& b) {
@@ -157,7 +157,8 @@ Status overlay(TensorInterpretation* value, const TensorInterpretation& target,
       !field(&value->analytic_binding, target.analytic_binding) ||
       !data_internal::overlay_model_coordinates(&value->coordinates,
                                                 target.coordinates, assertion))
-    return invalid("conflicting component reference");
+    return core_internal::invalid_schema_domain(
+        "conflicting component reference");
   return Status::success();
 }
 Status overlay(TensorChannelDescription* value,
@@ -168,17 +169,20 @@ Status overlay(TensorChannelDescription* value,
     if (pair.second->empty())
       continue;
     if (assertion && !pair.first->empty() && *pair.first != *pair.second)
-      return invalid("conflicting destination component field");
+      return core_internal::invalid_schema_domain(
+          "conflicting destination component field");
     *pair.first = *pair.second;
   }
   if (target.encoding) {
     if (assertion && value->encoding && !(*value->encoding == *target.encoding))
-      return invalid("conflicting component encoding");
+      return core_internal::invalid_schema_domain(
+          "conflicting component encoding");
     value->encoding = target.encoding;
   }
   if (target.sampling) {
     if (assertion && value->sampling && !(*value->sampling == *target.sampling))
-      return invalid("conflicting component sampling");
+      return core_internal::invalid_schema_domain(
+          "conflicting component sampling");
     value->sampling = target.sampling;
   }
   if (target.interpretation) {
@@ -233,22 +237,24 @@ Result<OperationPreparation> prepare(
   if (p.count("expected_inputs") &&
       std::get<std::string>(p.at("expected_inputs")) !=
           assembly_source_assertion(inputs))
-    return Answer(
-        invalid("FMT-03 authoring descriptors disagree with inference"));
+    return Answer(core_internal::invalid_schema_domain(
+        "FMT-03 authoring descriptors disagree with inference"));
   if (inputs.empty())
-    return Answer(invalid("assembly requires at least one input"));
+    return Answer(core_internal::invalid_schema_domain(
+        "assembly requires at least one input"));
   const auto mode = std::get<std::string>(p.at("metadata_mode"));
   const auto layout = std::get<std::string>(p.at("layout"));
   if (mode != "respect" && mode != "raw" && mode != "override")
-    return Answer(invalid("invalid metadata_mode"));
+    return Answer(
+        core_internal::invalid_schema_domain("invalid metadata_mode"));
   if (layout != "auto" && layout != "view" && layout != "materialize")
-    return Answer(invalid("invalid layout"));
+    return Answer(core_internal::invalid_schema_domain("invalid layout"));
   auto override_records = records(p, "input_overrides");
   if (!override_records.ok())
     return Answer(override_records.status());
   if ((mode == "override") != !override_records.value().empty())
-    return Answer(
-        invalid("input_overrides must occur exactly in override mode"));
+    return Answer(core_internal::invalid_schema_domain(
+        "input_overrides must occur exactly in override mode"));
   std::map<std::uint32_t, TensorDescription> overrides;
   std::uint64_t previous = 0;
   for (const auto& row : override_records.value()) {
@@ -256,8 +262,8 @@ Result<OperationPreparation> prepare(
     std::uint64_t port = 0;
     if (fields.size() != 2 || !number(fields[0], &port) ||
         port >= inputs.size() || (!overrides.empty() && port <= previous))
-      return Answer(
-          invalid("input_overrides requires sorted unique input ordinals"));
+      return Answer(core_internal::invalid_schema_domain(
+          "input_overrides requires sorted unique input ordinals"));
     auto value = tensor_description_from_parameter(fields[1]);
     if (!value.ok())
       return Answer(value.status());
@@ -270,8 +276,8 @@ Result<OperationPreparation> prepare(
     return Answer(axis_records.status());
   if ((member == 2 || !axis_records.value().empty()) &&
       axis_records.value().size() != inputs.size())
-    return Answer(
-        invalid("axis/structure list length differs from input arity"));
+    return Answer(core_internal::invalid_schema_domain(
+        "axis/structure list length differs from input arity"));
   Assembly assembly;
   assembly.layout = layout;
   std::vector<std::optional<TensorDescription>> descriptions;
@@ -290,7 +296,8 @@ Result<OperationPreparation> prepare(
     if (!extent.ok())
       return Answer(extent.status());
     if (extent.value() == 0 || extent.value() > (1ULL << 40))
-      return Answer(invalid(where + "invalid element count"));
+      return Answer(core_internal::invalid_schema_domain(
+          where + "invalid element count"));
     std::optional<TensorDescription> description;
     if (overrides.count(i)) {
       description = overrides.at(i);
@@ -316,7 +323,8 @@ Result<OperationPreparation> prepare(
     }
     bool scalar = member == 2 && axis_records.value()[i] == "s";
     if (scalar && (!p.count("authoring_member") || !p.count("expected_inputs")))
-      return Answer(invalid("scalar fill is an internal FMT-03 lowering"));
+      return Answer(core_internal::invalid_schema_domain(
+          "scalar fill is an internal FMT-03 lowering"));
     bool single = member == 0;
     std::optional<std::uint32_t> axis;
     if (member != 0) {
@@ -326,14 +334,16 @@ Result<OperationPreparation> prepare(
         single = field == "c" || scalar;
         if (!single) {
           if (field.empty() || field[0] != 'h')
-            return Answer(invalid(where + "structure must be c or h<axis>"));
+            return Answer(core_internal::invalid_schema_domain(
+                where + "structure must be c or h<axis>"));
           field.erase(field.begin());
         }
       }
       if (!single && field != "_") {
         std::uint64_t number_axis = 0;
         if (!number(field, &number_axis) || number_axis >= dimensions.size())
-          return Answer(invalid(where + "channel axis out of range"));
+          return Answer(core_internal::invalid_schema_domain(
+              where + "channel axis out of range"));
         axis = number_axis;
       }
     }
@@ -344,18 +354,18 @@ Result<OperationPreparation> prepare(
     } else if (single) {
       if (dimensions.size() > 7 ||
           (mode != "raw" && description && description->channel_axis))
-        return Answer(invalid(
+        return Answer(core_internal::invalid_schema_domain(
             where + "component has an existing channel axis or rank eight"));
     } else {
       if (mode != "raw" && description && description->channel_axis) {
         if (axis && *axis != *description->channel_axis)
-          return Answer(
-              invalid(where + "axis assertion conflicts with description"));
+          return Answer(core_internal::invalid_schema_domain(
+              where + "axis assertion conflicts with description"));
         axis = description->channel_axis;
       }
       if (!axis)
-        return Answer(
-            invalid(where + "channel axis must be supplied or described"));
+        return Answer(core_internal::invalid_schema_domain(
+            where + "channel axis must be supplied or described"));
     }
     if (mode == "raw" && description && description->channel_axis != axis)
       description.reset();
@@ -364,7 +374,8 @@ Result<OperationPreparation> prepare(
       nonchannel.erase(nonchannel.begin() + *axis);
     if (i == 0) {
       if (scalar)
-        return Answer(invalid("first source must establish the spatial grid"));
+        return Answer(core_internal::invalid_schema_domain(
+            "first source must establish the spatial grid"));
       shape = nonchannel;
     } else if (!scalar && (shape != nonchannel ||
                            input.batch_axes != tensor(inputs[0]).batch_axes)) {
@@ -374,7 +385,7 @@ Result<OperationPreparation> prepare(
       any_image = true;
       auto structural = input.layout;
       if (structural.channel_axis != axis)
-        return Answer(invalid(
+        return Answer(core_internal::invalid_schema_domain(
             where + "interpretation cannot relabel physical image axes"));
       if (axis) {
         if (structural.height_axis > *axis)
@@ -400,7 +411,8 @@ Result<OperationPreparation> prepare(
   if (output_axis < 0 ||
       static_cast<std::uint64_t>(output_axis) > shape.size() ||
       shape.size() >= 8)
-    return Answer(invalid("output channel axis out of range"));
+    return Answer(core_internal::invalid_schema_domain(
+        "output channel axis out of range"));
   assembly.axis = output_axis;
   std::map<std::uint64_t, TensorChannelDescription> mapped_targets;
   std::uint64_t channels = 0;
@@ -410,7 +422,8 @@ Result<OperationPreparation> prepare(
                        ? tensor(inputs[i]).descriptor.shape[*assembly.axes[i]]
                        : 1;
       if (count > (1ULL << 40) - channels)
-        return Answer(invalid("channel prefix overflow"));
+        return Answer(
+            core_internal::invalid_schema_domain("channel prefix overflow"));
       assembly.spans.push_back(
           {static_cast<std::uint32_t>(i), channels, 0, count});
       channels += count;
@@ -421,7 +434,8 @@ Result<OperationPreparation> prepare(
       return Answer(rows.status());
     channels = rows.value().size();
     if (!channels)
-      return Answer(invalid("mapping must be nonempty"));
+      return Answer(
+          core_internal::invalid_schema_domain("mapping must be nonempty"));
     std::set<std::uint64_t> destinations;
     for (const auto& row : rows.value()) {
       auto fields = split(row, ',');
@@ -429,7 +443,7 @@ Result<OperationPreparation> prepare(
       if (fields.size() != 5 || !number(fields[0], &port) ||
           port >= inputs.size() || !number(fields[3], &dest) ||
           dest >= channels || !destinations.insert(dest).second)
-        return Answer(invalid(
+        return Answer(core_internal::invalid_schema_domain(
             "mapping has invalid source, duplicate destination or hole"));
       auto selector = unhex(fields[2]);
       if (!selector.ok())
@@ -440,15 +454,17 @@ Result<OperationPreparation> prepare(
               : 1;
       if (fields[1] == "index") {
         if (!number(selector.value(), &selected) || selected >= count)
-          return Answer(invalid("source selector index out of range"));
+          return Answer(core_internal::invalid_schema_domain(
+              "source selector index out of range"));
       } else {
         if (mode == "raw" || (fields[1] != "name" && fields[1] != "role"))
-          return Answer(invalid("raw permits only index selectors"));
+          return Answer(core_internal::invalid_schema_domain(
+              "raw permits only index selectors"));
         const auto& desc = descriptions[port];
         if (!desc || (assembly.axes[port] && desc->channels.size() != count) ||
             (!assembly.axes[port] && !desc->component))
-          return Answer(
-              invalid("named selector requires component descriptions"));
+          return Answer(core_internal::invalid_schema_domain(
+              "named selector requires component descriptions"));
         bool found = false;
         for (std::uint64_t index = 0; index < count; ++index) {
           const auto& c =
@@ -456,12 +472,14 @@ Result<OperationPreparation> prepare(
           if ((fields[1] == "name" ? c.name : c.role) != selector.value())
             continue;
           if (found)
-            return Answer(invalid("ambiguous named source selector"));
+            return Answer(core_internal::invalid_schema_domain(
+                "ambiguous named source selector"));
           selected = index;
           found = true;
         }
         if (!found)
-          return Answer(invalid("source selector absent"));
+          return Answer(
+              core_internal::invalid_schema_domain("source selector absent"));
       }
       if (fields[4] != "_") {
         auto target = tensor_description_from_parameter(fields[4]);
@@ -472,8 +490,8 @@ Result<OperationPreparation> prepare(
         auto canonical = tensor_description_parameter(only);
         if (!only.component || !canonical.ok() ||
             canonical.value() != fields[4])
-          return Answer(
-              invalid("mapping destination must contain only a component"));
+          return Answer(core_internal::invalid_schema_domain(
+              "mapping destination must contain only a component"));
         mapped_targets.emplace(dest, *only.component);
       }
       assembly.spans.push_back(
@@ -496,7 +514,8 @@ Result<OperationPreparation> prepare(
   if (!output_count.ok())
     return Answer(output_count.status());
   if (output_count.value() > (1ULL << 40))
-    return Answer(invalid("output exceeds element limit"));
+    return Answer(
+        core_internal::invalid_schema_domain("output exceeds element limit"));
   TensorDescription result;
   result.channel_axis = assembly.axis;
   std::optional<TensorDescription> target;
@@ -512,8 +531,8 @@ Result<OperationPreparation> prepare(
       return Answer(status);
     if ((target->channel_axis && *target->channel_axis != assembly.axis) ||
         target->component)
-      return Answer(
-          invalid("output description disagrees with channel structure"));
+      return Answer(core_internal::invalid_schema_domain(
+          "output description disagrees with channel structure"));
     result.groups = target->groups;
   }
   // Coordinate assertions apply to every connected input, including unused
@@ -539,8 +558,8 @@ Result<OperationPreparation> prepare(
             (!old.unit.empty() && !fresh.unit.empty() &&
              old.unit != fresh.unit) ||
             old.origin != fresh.origin || old.step != fresh.step)
-          return Answer(invalid("input " + std::to_string(i) +
-                                ": conflicting nonchannel grid"));
+          return Answer(core_internal::invalid_schema_domain(
+              "input " + std::to_string(i) + ": conflicting nonchannel grid"));
         if (old.name != fresh.name)
           old.name.clear();
         if (old.unit != fresh.unit)
@@ -563,8 +582,8 @@ Result<OperationPreparation> prepare(
         if ((!a.name.empty() && !b.name.empty() && a.name != b.name) ||
             (!a.unit.empty() && !b.unit.empty() && a.unit != b.unit) ||
             a.origin != b.origin || a.step != b.step)
-          return Answer(
-              invalid("target cannot override nonchannel coordinate grid"));
+          return Answer(core_internal::invalid_schema_domain(
+              "target cannot override nonchannel coordinate grid"));
       }
     }
     result.axes = target->axes;
@@ -572,7 +591,8 @@ Result<OperationPreparation> prepare(
   const bool complete = p.count("output_description_complete") &&
                         std::get<bool>(p.at("output_description_complete"));
   if (complete && !target)
-    return Answer(invalid("complete output description is absent"));
+    return Answer(core_internal::invalid_schema_domain(
+        "complete output description is absent"));
   bool semantic = target.has_value() || !mapped_targets.empty();
   for (const auto& d : descriptions)
     semantic =
@@ -784,7 +804,8 @@ struct Projected final {
   std::array<std::int64_t, 8> strides{};
 };
 Status unavailable_view() {
-  return invalid("ViewUnavailable: no common affine owner mapping");
+  return core_internal::invalid_schema_domain(
+      "ViewUnavailable: no common affine owner mapping");
 }
 // Retain the pre-Result whole-query view predicate, including cross-box owners.
 Status generic_view(const ResultProgramPhase& phase, const Assembly& a,
@@ -1102,24 +1123,28 @@ Result<std::vector<std::uint8_t>> literal_bytes(const Params& params) {
   using Answer = Result<std::vector<std::uint8_t>>;
   const auto raw_type = std::get<std::int64_t>(params.at("dtype"));
   if (raw_type < 0 || raw_type > UINT32_MAX)
-    return Answer(invalid("unsupported typed literal dtype"));
+    return Answer(core_internal::invalid_schema_domain(
+        "unsupported typed literal dtype"));
   const auto type = static_cast<ElementType>(raw_type);
   if (type != ElementType::UInt8 && type != ElementType::Int8 &&
       type != ElementType::UInt16 && type != ElementType::Int16 &&
       type != ElementType::Int64 && type != ElementType::Float32 &&
       type != ElementType::Float64)
-    return Answer(invalid("unsupported typed literal dtype"));
+    return Answer(core_internal::invalid_schema_domain(
+        "unsupported typed literal dtype"));
   const auto width = Value::element_size(type);
   const auto& bits = std::get<std::string>(params.at("bits"));
   if (!width || bits.size() != width * 2)
-    return Answer(invalid("typed literal dtype/bit width mismatch"));
+    return Answer(core_internal::invalid_schema_domain(
+        "typed literal dtype/bit width mismatch"));
   std::vector<std::uint8_t> result;
   for (std::size_t i = 0; i < bits.size(); i += 2) {
     unsigned byte = 0;
     for (unsigned j = 0; j < 2; ++j) {
       const auto c = bits[i + j];
       if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
-        return Answer(invalid("typed literal requires lowercase hex bytes"));
+        return Answer(core_internal::invalid_schema_domain(
+            "typed literal requires lowercase hex bytes"));
       byte = byte * 16 + (c <= '9' ? c - '0' : c - 'a' + 10);
     }
     result.push_back(byte);
@@ -1215,24 +1240,29 @@ Result<std::uint64_t> edit_select(const format::ChannelSelector& selector,
   std::uint64_t selected = 0;
   if (selector.match == "index") {
     if (!number(selector.value, &selected) || selected >= count)
-      return Answer(invalid("FMT-03 index outside source/destination"));
+      return Answer(core_internal::invalid_schema_domain(
+          "FMT-03 index outside source/destination"));
     return Answer(selected);
   }
   if (raw || (selector.match != "name" && selector.match != "role") ||
       selector.value.empty() || selector.value.size() > 128 || !desc ||
       (channels ? desc->channels.size() != count : !desc->component))
-    return Answer(invalid("FMT-03 invalid name/role selector"));
+    return Answer(core_internal::invalid_schema_domain(
+        "FMT-03 invalid name/role selector"));
   bool found = false;
   for (std::uint64_t i = 0; i < count; ++i) {
     const auto& c = channels ? desc->channels[i] : *desc->component;
     if ((selector.match == "name" ? c.name : c.role) == selector.value) {
       if (found)
-        return Answer(invalid("FMT-03 ambiguous name/role selector"));
+        return Answer(core_internal::invalid_schema_domain(
+            "FMT-03 ambiguous name/role selector"));
       selected = i;
       found = true;
     }
   }
-  return found ? Answer(selected) : Answer(invalid("FMT-03 selector absent"));
+  return found ? Answer(selected)
+               : Answer(core_internal::invalid_schema_domain(
+                     "FMT-03 selector absent"));
 }
 Result<WorkflowNodeOutput> edit_channels(
     WorkflowDocument& document, std::vector<format::ChannelEditInput> inputs,
@@ -1245,16 +1275,18 @@ Result<WorkflowNodeOutput> edit_channels(
       (options.metadata_mode != "respect" && options.metadata_mode != "raw" &&
        options.metadata_mode != "override") ||
       (options.metadata_mode == "override") != !options.input_overrides.empty())
-    return Answer(invalid("FMT-03 invalid base/metadata mode/arity"));
+    return Answer(core_internal::invalid_schema_domain(
+        "FMT-03 invalid base/metadata mode/arity"));
   if (!replacements) {
     for (std::size_t i = 1; i < inputs.size(); ++i)
       if (!inputs[i].structure.scalar)
-        return Answer(
-            invalid("FMT-03A external inputs must be explicit scalars"));
+        return Answer(core_internal::invalid_schema_domain(
+            "FMT-03A external inputs must be explicit scalars"));
   }
   for (const auto& entry : options.input_overrides)
     if (entry.first >= inputs.size())
-      return Answer(invalid("FMT-03 override input ordinal is absent"));
+      return Answer(core_internal::invalid_schema_domain(
+          "FMT-03 override input ordinal is absent"));
   const auto& base = tensor(inputs[0].metadata);
   const auto dtype = base.descriptor.element_type;
   if (dtype != ElementType::UInt8 && dtype != ElementType::Int8 &&
@@ -1271,18 +1303,21 @@ Result<WorkflowNodeOutput> edit_channels(
   auto desc = base_description.take_value();
   if (options.metadata_mode != "raw" && desc && desc->channel_axis) {
     if (axis && axis != desc->channel_axis)
-      return Answer(invalid("FMT-03 base axis disagrees with metadata"));
+      return Answer(core_internal::invalid_schema_domain(
+          "FMT-03 base axis disagrees with metadata"));
     axis = desc->channel_axis;
   }
   if (!axis || *axis >= base.descriptor.shape.size())
-    return Answer(invalid("FMT-03 base axis required/in range"));
+    return Answer(core_internal::invalid_schema_domain(
+        "FMT-03 base axis required/in range"));
   if (options.metadata_mode == "raw" && desc && desc->channel_axis != axis)
     desc.reset();
   inputs[0].structure.axis = axis;
   const auto count = base.descriptor.shape[*axis];
   const auto output_count = replacements ? count : slots.size();
   if (!output_count || output_count > 1024 || count > (1ULL << 40))
-    return Answer(invalid("FMT-03 empty slots or mapping capacity exceeded"));
+    return Answer(core_internal::invalid_schema_domain(
+        "FMT-03 empty slots or mapping capacity exceeded"));
   std::vector<format::ChannelEditSource> effective = slots;
   std::set<std::uint64_t> changed;
   if (replacements) {
@@ -1295,7 +1330,8 @@ Result<WorkflowNodeOutput> edit_channels(
       if (!destination.ok())
         return Answer(destination.status());
       if (!changed.insert(destination.value()).second)
-        return Answer(invalid("FMT-03B duplicate destination"));
+        return Answer(core_internal::invalid_schema_domain(
+            "FMT-03B duplicate destination"));
       effective[destination.value()] = r.source;
     }
   }
@@ -1321,7 +1357,8 @@ Result<WorkflowNodeOutput> edit_channels(
       return Answer(mismatch("FMT-03 literal dtype differs from base"));
     const auto width = Value::element_size(literal.dtype);
     if (!width || literal.bytes.size() != width)
-      return Answer(invalid("FMT-03 malformed typed literal"));
+      return Answer(core_internal::invalid_schema_domain(
+          "FMT-03 malformed typed literal"));
     const auto bits = format::detail::assembly_hex(
         std::string(literal.bytes.begin(), literal.bytes.end()));
     if (!literals.count(bits)) {
@@ -1346,7 +1383,8 @@ Result<WorkflowNodeOutput> edit_channels(
     e.selector = {};
   }
   if (inputs.size() > 1024)
-    return Answer(invalid("FMT-03 expanded input capacity exceeded"));
+    return Answer(core_internal::invalid_schema_domain(
+        "FMT-03 expanded input capacity exceeded"));
   std::vector<OperationMetadata> metadata;
   std::vector<format::ChannelEditStructure> structures;
   references.clear();
@@ -1354,7 +1392,8 @@ Result<WorkflowNodeOutput> edit_channels(
     if ((input.structure.component && input.structure.axis) ||
         (input.structure.scalar &&
          (input.structure.component || input.structure.axis)))
-      return Answer(invalid("FMT-03 conflicting source structure"));
+      return Answer(core_internal::invalid_schema_domain(
+          "FMT-03 conflicting source structure"));
     require(tensor_ops::check_tensor(input.metadata));
     // Supplied declaration metadata is checked before committing the expansion.
     if (const auto* ref = std::get_if<WorkflowInputReference>(&input.input)) {
@@ -1365,12 +1404,13 @@ Result<WorkflowNodeOutput> edit_channels(
           actual.result_schema = declaration.result_schema;
           if (assembly_source_assertion({actual}) !=
               assembly_source_assertion({input.metadata}))
-            return Answer(
-                invalid("FMT-03 descriptor disagrees with declaration"));
+            return Answer(core_internal::invalid_schema_domain(
+                "FMT-03 descriptor disagrees with declaration"));
           found = true;
         }
       if (!found)
-        return Answer(invalid("FMT-03 input declaration absent"));
+        return Answer(core_internal::invalid_schema_domain(
+            "FMT-03 input declaration absent"));
     }
     metadata.push_back(input.metadata);
     references.push_back(input.input);
@@ -1387,7 +1427,8 @@ Result<WorkflowNodeOutput> edit_channels(
     const auto& e = effective[k];
     if (e.input >= inputs.size() ||
         (!replacements && e.input != 0 && !inputs[e.input].structure.scalar))
-      return Answer(invalid("FMT-03A source must be base or scalar"));
+      return Answer(core_internal::invalid_schema_domain(
+          "FMT-03A source must be base or scalar"));
     auto d = edit_description(metadata[e.input], e.input, options);
     if (!d.ok())
       return Answer(d.status());
@@ -1446,7 +1487,8 @@ Result<WorkflowNodeOutput> edit_channels(
       return Answer(valid);
     if (explicit_target.component ||
         (explicit_target.channel_axis && explicit_target.channel_axis != axis))
-      return Answer(invalid("FMT-03 output channel structure mismatch"));
+      return Answer(core_internal::invalid_schema_domain(
+          "FMT-03 output channel structure mismatch"));
     for (std::size_t k = 0; k < output_count; ++k) {
       auto assigned = target.channels[k];
       auto global = interpretation(explicit_target);
@@ -1481,7 +1523,8 @@ Result<WorkflowNodeOutput> edit_channels(
       if (replacements && !changed.count(k) &&
           tensor_description_parameter(before).value() !=
               tensor_description_parameter(after).value())
-        return Answer(invalid("FMT-03B target changes an unlisted component"));
+        return Answer(core_internal::invalid_schema_domain(
+            "FMT-03B target changes an unlisted component"));
       target.channels[k] = std::move(assigned);
     }
     if (!explicit_target.axes.empty())
@@ -1538,7 +1581,8 @@ Result<WorkflowNodeOutput> edit_channels(
     for (const auto& p : n.parameters)
       if (const auto* value = std::get_if<std::string>(&p.second);
           value && value->size() > 8192)
-        return Answer(invalid("FMT-03 parameter capacity exceeded"));
+        return Answer(core_internal::invalid_schema_domain(
+            "FMT-03 parameter capacity exceeded"));
   const auto profile = options.profile == "strict" ? SequenceProfile::Strict
                        : options.profile == "accelerated_apple_silicon"
                            ? SequenceProfile::AppleSilicon

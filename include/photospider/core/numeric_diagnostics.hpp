@@ -58,10 +58,6 @@ struct NumericDiagnostics final {
   CpuNumericProfile profile = CpuNumericProfile::Unspecified;
   std::array<char, 256> implementation{};
   /** @brief Admitted numeric evaluations, including later failed attempts.
-   * Most operations count output-value attempts. Exact reductions and
-   * cumulative scans count accumulator input attempts; metadata-only
-   * reduce_count reports zero. OperationTiming::computed_elements separately
-   * counts output elements.
    */
   std::uint64_t evaluated_values = 0;
   std::uint64_t strict_fallbacks = 0;
@@ -74,9 +70,6 @@ struct NumericDiagnostics final {
   std::uint64_t copied_elements = 0;
   std::array<std::uint64_t, 4> fallback_reasons{};
   /** @brief Reported strict mathematical-call attempts, including failed calls.
-   * Expression generators report every dispatched mathematical primitive;
-   * Bezier function samplers report exact Bx sign evaluations in root
-   * refinement. These counts exclude topology checks and interval/gcd work.
    * Operators without call-level instrumentation leave this field zero.
    */
   std::uint64_t strict_math_calls = 0;

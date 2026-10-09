@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <utility>
 
+#include "core/checked_math.hpp"
+
 namespace ps::data_internal {
 Status invalid_schema() {
   return Status{ErrorCode::TypeMismatch,
@@ -13,7 +15,7 @@ Status unavailable() {
 }
 Result<std::uint64_t> scaled(const ResultExtent& extent, std::uint64_t count) {
   count = count / extent.divisor + (count % extent.divisor != 0);
-  if (count > UINT64_MAX - extent.offset)
+  if (!core_internal::can_add(count, extent.offset))
     return Result<std::uint64_t>(
         Status{ErrorCode::ResourceExhausted, "result extent overflow"});
   return Result<std::uint64_t>(count + extent.offset);
@@ -24,7 +26,7 @@ PlanarImageLayout planar_layout(const ResultTensorLayout& layout) {
 }
 Status tensor_topology(const ResultTensorSpec& spec) {
   const auto rank = spec.descriptor.shape.size();
-  if (!rank || rank > 8 || spec.batch_axes.size() > 8 - rank ||
+  if (!rank || !core_internal::can_add(rank, spec.batch_axes.size(), 8) ||
       spec.atomic_trailing_axes > rank ||
       std::any_of(spec.descriptor.shape.begin(), spec.descriptor.shape.end(),
                   [](auto n) { return !n; }) ||

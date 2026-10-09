@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "photospider/data/tensor_description.hpp"
-#include "photospider/numeric/workflow_authoring.hpp"
+#include "photospider/ops/numeric/workflow_authoring.hpp"
 #include "photospider/plugin/operation_types.hpp"
 
 namespace ps::format {

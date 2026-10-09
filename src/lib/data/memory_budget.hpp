@@ -11,6 +11,7 @@
 #include <string>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "photospider/core/resources.hpp"
 #include "photospider/data/storage.hpp"
 
@@ -105,7 +106,7 @@ class MemoryReservation final
             lease->local = local;
             {
               std::lock_guard<std::mutex> lock(local->mutex);
-              if (bytes > limit - local->used)
+              if (!core_internal::can_add(bytes, local->used, limit))
                 return Result<std::shared_ptr<void>>(
                     Status::failure(ErrorCode::ResourceExhausted,
                                     "invocation exceeds declared workspace"));
@@ -213,7 +214,7 @@ class MemoryReservation final
     lease->metadata_lease = std::move(metadata);
     lease->owner = shared_from_this();
     std::unique_lock<std::mutex> lock(budget_->mutex_);
-    if (sealed_ || bytes > capacity_ - used_)
+    if (sealed_ || !core_internal::can_add(bytes, used_, capacity_))
       return Result<std::shared_ptr<void>>(
           Status::failure(ErrorCode::ResourceExhausted,
                           "operation exceeds reserved working set"));
@@ -255,7 +256,7 @@ inline bool MemoryBudget::can_allocate(std::uint64_t bytes, bool shared) const {
                         sizeof(MemoryReservation::Allocation) +
                         sizeof(CpuStorage) +
                         2 * ResourceBudget::lease_metadata_bytes();
-  if (bytes > UINT64_MAX - metadata)
+  if (!core_internal::can_add(bytes, metadata))
     return false;
   auto need = ResourceCapacity::host(bytes + metadata, metadata);
   need[ResourceKind::Payload] = bytes;
@@ -314,13 +315,13 @@ inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(
     return Result<std::shared_ptr<MemoryReservation>>(Status::failure(
         ErrorCode::ResourceExhausted, "minimum working set exceeds budget"));
   for (;;) {
-    while (reserved_ > maximum_ - bytes) {
+    while (!core_internal::can_add(reserved_, bytes, maximum_)) {
       if (reclaim) {
         const auto epoch = admission_epoch_;
         lock.unlock();
         reclaim();
         lock.lock();
-        if (reserved_ <= maximum_ - bytes)
+        if (core_internal::can_add(reserved_, bytes, maximum_))
           break;
         // A producer can publish a new cache entry while reclamation runs.
         // Revisit it after its admission/seal transition before declaring
@@ -345,7 +346,7 @@ inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(
     if (resources_) {
       constexpr auto metadata =
           sizeof(MemoryReservation) + sizeof(MemoryObservation);
-      if (bytes > UINT64_MAX - metadata)
+      if (!core_internal::can_add(bytes, metadata))
         return Result<std::shared_ptr<MemoryReservation>>(
             Status{ErrorCode::ResourceExhausted, {}});
       auto capacity = ResourceCapacity::host(bytes + metadata, metadata);
@@ -355,7 +356,7 @@ inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(
       if (!admitted.ok())
         return Result<std::shared_ptr<MemoryReservation>>(admitted.status());
       lock.lock();
-      if (reserved_ > maximum_ - bytes) {
+      if (!core_internal::can_add(reserved_, bytes, maximum_)) {
         lock.unlock();
         admitted = Result<ResourceLease>(ResourceLease{});
         lock.lock();

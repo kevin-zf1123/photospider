@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "photospider/data/tensor_description.hpp"
-#include "photospider/numeric/workflow_authoring.hpp"
+#include "photospider/ops/numeric/workflow_authoring.hpp"
 
 namespace ps::format {
 /** @brief Same-dtype finite constants for two-level Gray selection. The bit

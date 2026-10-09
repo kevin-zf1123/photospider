@@ -10,6 +10,8 @@
 #include <string_view>
 #include <utility>
 
+#include "core/checked_math.hpp"
+#include "core/status_helpers.hpp"
 #include "data/lut3d_bake_validation.hpp"
 #include "data/value_validation.hpp"
 #include "photospider/data/layer.hpp"
@@ -28,22 +30,6 @@ constexpr const char* kIds[] = {"",
                                 "photospider.brush",
                                 "photospider.iterative"};
 // NOLINTEND
-Status invalid(const char* message = "invalid representation schema") {
-  return Status{ErrorCode::TypeMismatch, message};
-}
-Status exhausted() {
-  return Status{ErrorCode::ResourceExhausted,
-                "representation budget exhausted"};
-}
-bool finite(double value) {
-  return std::isfinite(value);
-}
-bool word_product(std::uint64_t a, std::uint64_t b, std::uint64_t* result) {
-  if (a && b > static_cast<std::uint64_t>(INT64_MAX) / a)
-    return false;
-  *result = a * b;
-  return true;
-}
 struct Writer {
   ResultFacet facet{"photospider.representation", 1, {}};
   void word(std::uint64_t value) {
@@ -89,7 +75,7 @@ struct Reader {
     auto bits = word();
     double result = 0;
     std::memcpy(&result, &bits, 8);
-    if (!finite(result))
+    if (!std::isfinite(result))
       valid = false;
     return result;
   }
@@ -158,7 +144,8 @@ bool shape_count(Parsed* p) {
     return false;
   p->count = 1;
   for (std::uint32_t i = 0; i < p->rank; ++i)
-    if (!p->shape[i] || !word_product(p->count, p->shape[i], &p->count))
+    if (!p->shape[i] || !core_internal::checked_multiply(p->count, p->shape[i],
+                                                         &p->count, INT64_MAX))
       return false;
   return true;
 }
@@ -177,17 +164,17 @@ Status parse(const SchemaTemplate& schema, Parsed* p) {
       schema.metadata.size() != 1 ||
       schema.metadata[0].key != "photospider.representation" ||
       schema.metadata[0].version != 1)
-    return invalid();
+    return core_internal::type_mismatch("invalid representation schema");
   const auto& bytes = schema.metadata[0].payload;
   Reader r{bytes.data(), bytes.size()};
   if (r.word() != p->kind || r.word() != 1)
-    return invalid();
+    return core_internal::type_mismatch("invalid representation schema");
   if (p->kind == 1) {
     p->rank = r.words(&p->shape);
     p->axes_count = r.words(&p->axes);
     if (r.words(&p->order) != p->rank || r.words(&p->shifts) != p->rank ||
         !r.reals(&p->origin, p->rank) || !r.reals(&p->step, p->rank))
-      return invalid();
+      return core_internal::type_mismatch("invalid representation schema");
     for (unsigned i = 0; i < 5; ++i)
       p->u[i] = r.word();
     p->f[0] = r.real();
@@ -200,23 +187,23 @@ Status parse(const SchemaTemplate& schema, Parsed* p) {
         !permutation(p->order, p->rank, p->rank) || p->u[0] < 1 ||
         p->u[0] > 2 || p->u[1] >= p->rank || p->u[2] > 1 || p->u[3] < 1 ||
         p->u[3] > 3 || p->u[4] < 1 || p->u[4] > 3 || p->f[0] < 0 || p->f[1] < 0)
-      return invalid();
+      return core_internal::type_mismatch("invalid representation schema");
     if (p->u[4] == 2 && (p->f[0] != 0 || p->f[1] != 0))
-      return invalid();
+      return core_internal::type_mismatch("invalid representation schema");
     bool packed_transformed = false;
     for (std::uint32_t i = 0; i < p->axes_count; ++i)
       packed_transformed |= p->axes[i] == p->u[1];
     p->stored_count = p->count;
     if (p->u[0] == 2) {
       if (!packed_transformed || p->u[4] == 1)
-        return invalid();
+        return core_internal::type_mismatch("invalid representation schema");
       p->stored_count =
           p->count / p->shape[p->u[1]] * (p->shape[p->u[1]] / 2 + 1);
     }
     for (std::uint32_t i = 0; i < p->rank; ++i)
       if (p->step[i] <= 0 || p->shifts[i] >= p->shape[i] ||
           (p->u[0] == 2 && p->shifts[i] != 0))
-        return invalid();
+        return core_internal::type_mismatch("invalid representation schema");
   } else if (p->kind == 2) {
     p->rank = r.words(&p->shape);
     p->axes_count = r.words(&p->axes);
@@ -227,7 +214,7 @@ Status parse(const SchemaTemplate& schema, Parsed* p) {
         !permutation(p->axes, p->axes_count, p->rank) || p->u[0] > 16 ||
         p->text[0] != "haar-average-difference-v1" ||
         count != 1 + ((1U << p->rank) - 1) * p->u[0] || count > 49)
-      return invalid();
+      return core_internal::type_mismatch("invalid representation schema");
     p->band_count = static_cast<std::uint32_t>(count);
     for (std::uint32_t i = 0; i < count; ++i) {
       auto& b = p->bands[i];
@@ -236,16 +223,16 @@ Status parse(const SchemaTemplate& schema, Parsed* p) {
       if (r.words(&b.shape) != p->rank || r.words(&b.parent) != p->rank ||
           !r.reals(&b.origin, p->rank) || !r.reals(&b.step, p->rank) ||
           !r.reals(&b.phase, p->rank))
-        return invalid();
+        return core_internal::type_mismatch("invalid representation schema");
       auto zero = r.word();
       if (zero > 1 || b.level > p->u[0] || b.mask >= (1U << p->rank) ||
           (b.mask == 0 ? b.level != p->u[0] : b.level == 0))
-        return invalid();
+        return core_internal::type_mismatch("invalid representation schema");
       b.zero = zero != 0;
       b.count = 1;
       for (std::uint32_t j = 0; j < i; ++j)
         if (p->bands[j].level == b.level && p->bands[j].mask == b.mask)
-          return invalid();
+          return core_internal::type_mismatch("invalid representation schema");
       for (std::uint32_t axis = 0; axis < p->rank; ++axis) {
         auto parent = p->shape[axis];
         for (std::uint64_t level = 1; level < b.level; ++level)
@@ -254,13 +241,14 @@ Status parse(const SchemaTemplate& schema, Parsed* p) {
         if (b.parent[axis] != parent || b.shape[axis] != shape ||
             b.step[axis] != std::ldexp(1.0, static_cast<int>(b.level)) ||
             b.origin[axis] != 0 || b.phase[axis] != 0 ||
-            !word_product(b.count, shape, &b.count))
-          return invalid();
+            !core_internal::checked_multiply(b.count, shape, &b.count,
+                                             INT64_MAX))
+          return core_internal::type_mismatch("invalid representation schema");
       }
       b.offset = p->stored_count;
       if (!b.zero) {
-        if (b.count > static_cast<std::uint64_t>(INT64_MAX) - p->stored_count)
-          return invalid();
+        if (!core_internal::can_add(b.count, p->stored_count, INT64_MAX))
+          return core_internal::type_mismatch("invalid representation schema");
         p->stored_count += b.count;
       }
     }
@@ -270,31 +258,31 @@ Status parse(const SchemaTemplate& schema, Parsed* p) {
     p->text[0] = r.text();
     if (p->u[0] < 1 || p->u[0] > 2 || !p->u[1] || !p->u[2] ||
         p->u[1] > INT64_MAX || p->u[2] > INT64_MAX || p->u[3] > 32)
-      return invalid();
+      return core_internal::type_mismatch("invalid representation schema");
   } else if (p->kind == 4) {
     for (unsigned i = 0; i < 5; ++i)
       p->u[i] = r.word();
     p->text[0] = r.text();
     if (p->u[0] < 2 || p->u[0] > 3 || !p->u[1] || p->u[1] > 64 || p->u[2] < 1 ||
         p->u[2] > 2 || p->u[3] > INT64_MAX || p->u[4] > INT64_MAX)
-      return invalid();
+      return core_internal::type_mismatch("invalid representation schema");
   } else if (p->kind == 5 || p->kind == 6) {
     p->rank = 2;
     p->shape[0] = r.word();
     p->shape[1] = r.word();
     if (!shape_count(p))
-      return invalid();
+      return core_internal::type_mismatch("invalid representation schema");
     if (p->kind == 5) {
       p->u[0] = r.word();
       p->u[1] = r.word();
       if (p->u[0] > INT64_MAX || p->u[1] < 1 || p->u[1] > 2)
-        return invalid();
+        return core_internal::type_mismatch("invalid representation schema");
     } else {
       for (unsigned i = 0; i < 3; ++i)
         p->text[i] = r.text();
       if (p->text[0] != "srgb-d65" || p->text[1] != "bt709" ||
           (p->text[2] != "display" && p->text[2] != "scene"))
-        return invalid();
+        return core_internal::type_mismatch("invalid representation schema");
       p->stored_count = (p->shape[0] / 2 + p->shape[0] % 2) *
                         (p->shape[1] / 2 + p->shape[1] % 2);
     }
@@ -305,7 +293,7 @@ Status parse(const SchemaTemplate& schema, Parsed* p) {
     p->text[0] = r.text();
     if (p->f[0] <= 0 || p->u[0] > 1048576 || p->u[1] > p->u[0] ||
         p->text[0] != "constant-spacing-1d-v1")
-      return invalid();
+      return core_internal::type_mismatch("invalid representation schema");
   } else {
     p->rank = 1;
     p->shape[0] = r.word();
@@ -316,9 +304,11 @@ Status parse(const SchemaTemplate& schema, Parsed* p) {
     p->text[1] = r.text();
     if (!shape_count(p) || p->u[0] > INT64_MAX || p->f[0] < 0 || p->u[1] > 1 ||
         (p->text[1] != "zero" && p->text[1] != "explicit"))
-      return invalid();
+      return core_internal::type_mismatch("invalid representation schema");
   }
-  return r.valid && r.position == r.size ? Status::success() : invalid();
+  return r.valid && r.position == r.size
+             ? Status::success()
+             : core_internal::type_mismatch("invalid representation schema");
 }
 // This one layout function is used both to emit and to check the closed schema.
 // Independent tests must also check contents and malformed cross-field cases.
@@ -437,12 +427,12 @@ Status validate_representation_schema(const SchemaTemplate& schema) {
       });
   if (!matched || index != schema.fields.size() ||
       schema.domain.size() != p.rank)
-    return invalid();
+    return core_internal::type_mismatch("invalid representation schema");
   for (std::uint32_t i = 0; i < p.rank; ++i) {
     const auto& e = schema.domain[i];
     if (e.kind != ResultExtentKind::Fixed || e.value != p.shape[i] || e.input ||
         e.axis || e.field || e.offset || e.divisor != 1)
-      return invalid();
+      return core_internal::type_mismatch("invalid representation schema");
   }
   return Status::success();
 }
@@ -451,7 +441,8 @@ Result<SchemaTemplate> spectrum_schema(const SpectrumSpec& s) {
       s.transformed_axes.size() > 8 || s.axis_order.size() > 8 ||
       s.shifts.size() > 8 || s.sample_origin.size() > 8 ||
       s.sample_step.size() > 8 || s.unit.size() > 256)
-    return Result<SchemaTemplate>(invalid());
+    return Result<SchemaTemplate>(
+        core_internal::type_mismatch("invalid representation schema"));
   auto w = begin(1);
   w.words(s.original_shape);
   w.words(s.transformed_axes);
@@ -472,12 +463,14 @@ Result<SchemaTemplate> spectrum_schema(const SpectrumSpec& s) {
 Result<SchemaTemplate> bands_schema(const BandsSpec& s) {
   if (s.original_shape.size() > 8 || s.axes.size() > 8 || s.bands.size() > 49 ||
       s.filter_snapshot.size() > 256)
-    return Result<SchemaTemplate>(invalid());
+    return Result<SchemaTemplate>(
+        core_internal::type_mismatch("invalid representation schema"));
   for (const auto& b : s.bands)
     if (b.shape.size() > 8 || b.parent_shape.size() > 8 ||
         b.logical_origin.size() > 8 || b.sample_step.size() > 8 ||
         b.phase.size() > 8)
-      return Result<SchemaTemplate>(invalid());
+      return Result<SchemaTemplate>(
+          core_internal::type_mismatch("invalid representation schema"));
   auto w = begin(2);
   w.words(s.original_shape);
   w.words(s.axes);
@@ -498,7 +491,8 @@ Result<SchemaTemplate> bands_schema(const BandsSpec& s) {
 }
 Result<SchemaTemplate> path_set_schema(const PathSetSpec& s) {
   if (s.coordinate_system.size() > 256)
-    return Result<SchemaTemplate>(invalid());
+    return Result<SchemaTemplate>(
+        core_internal::type_mismatch("invalid representation schema"));
   auto w = begin(3);
   w.word(static_cast<unsigned>(s.authority));
   w.word(s.maximum_segments);
@@ -509,7 +503,8 @@ Result<SchemaTemplate> path_set_schema(const PathSetSpec& s) {
 }
 Result<SchemaTemplate> point_set_schema(const PointSetSpec& s) {
   if (s.coordinate_system.size() > 256)
-    return Result<SchemaTemplate>(invalid());
+    return Result<SchemaTemplate>(
+        core_internal::type_mismatch("invalid representation schema"));
   auto w = begin(4);
   w.word(s.dimensions);
   w.word(s.attribute_width);
@@ -530,7 +525,8 @@ Result<SchemaTemplate> components_schema(const ComponentsSpec& s) {
 Result<SchemaTemplate> ycbcr420_schema(const YCbCr420Spec& s) {
   if (s.primaries.size() > 256 || s.transfer.size() > 256 ||
       s.reference.size() > 256)
-    return Result<SchemaTemplate>(invalid());
+    return Result<SchemaTemplate>(
+        core_internal::type_mismatch("invalid representation schema"));
   auto w = begin(6);
   w.word(s.height);
   w.word(s.width);
@@ -541,7 +537,8 @@ Result<SchemaTemplate> ycbcr420_schema(const YCbCr420Spec& s) {
 }
 Result<SchemaTemplate> brush_schema(const BrushSpec& s) {
   if (s.algorithm.size() > 256)
-    return Result<SchemaTemplate>(invalid());
+    return Result<SchemaTemplate>(
+        core_internal::type_mismatch("invalid representation schema"));
   auto w = begin(7);
   w.real(s.spacing);
   w.word(s.maximum_pending);
@@ -551,7 +548,8 @@ Result<SchemaTemplate> brush_schema(const BrushSpec& s) {
 }
 Result<SchemaTemplate> iterative_schema(const IterativeSpec& s) {
   if (s.system_snapshot.size() > 256 || s.initialization.size() > 256)
-    return Result<SchemaTemplate>(invalid());
+    return Result<SchemaTemplate>(
+        core_internal::type_mismatch("invalid representation schema"));
   auto w = begin(8);
   w.word(s.size);
   w.word(s.maximum_iterations);
@@ -565,7 +563,8 @@ Result<SpectrumSpec> spectrum_spec(const SchemaTemplate& schema) {
   auto checked = schema.validate(true);
   Parsed p;
   if (!checked.ok() || schema.id != kIds[1] || !parse(schema, &p).ok())
-    return Result<SpectrumSpec>(invalid());
+    return Result<SpectrumSpec>(
+        core_internal::type_mismatch("invalid representation schema"));
   SpectrumSpec s;
   for (std::uint32_t i = 0; i < p.rank; ++i) {
     s.original_shape.push_back(p.shape[i]);
@@ -608,7 +607,7 @@ class Pages {
   bool ok() const { return status_.ok(); }
   void reject(const char* detail) {
     if (ok())
-      status_ = invalid(detail);
+      status_ = core_internal::type_mismatch(detail);
   }
   void reject_domain(const char* detail) {
     if (ok()) {
@@ -654,7 +653,8 @@ class Pages {
     if (!page_ || field != field_ || row < first_ || row >= first_ + count_) {
       page_.reset();
       if (maximum_ < width.value()) {
-        status_ = exhausted();
+        status_ = core_internal::resource_exhausted(
+            "representation budget exhausted");
         return value;
       }
       count_ = std::min(rows(field) - row, maximum_ / width.value());
@@ -690,7 +690,7 @@ class Pages {
           const auto value = type == ElementType::Float64
                                  ? get<double>(field, row, component)
                                  : get<float>(field, row, component);
-          if (!finite(value))
+          if (!std::isfinite(value))
             reject("nonfinite representation sample");
         }
     }
@@ -757,7 +757,7 @@ Magnitude norm(Magnitude a, Magnitude b) {
 }
 Magnitude difference(double a, double b) {
   const auto value = a - b;
-  if (finite(value))
+  if (std::isfinite(value))
     return magnitude(value);
   constexpr auto exponent = std::numeric_limits<double>::max_exponent - 1;
   return magnitude(std::scalbn(a, -exponent) - std::scalbn(b, -exponent),
@@ -932,7 +932,7 @@ void path_attributes(Pages* pages, std::uint64_t subpaths,
       break;
     }
     std::uint64_t size = 0;
-    if (!word_product(count, a[2], &size) ||
+    if (!core_internal::checked_multiply(count, a[2], &size, INT64_MAX) ||
         size > pages->rows(13) - std::min(next_values, pages->rows(13))) {
       pages->reject("path attribute span mismatch");
       break;
@@ -1175,7 +1175,8 @@ void brush_values(const Parsed& p, Pages* pages) {
   }
   if (pages->rows(4)) {
     const auto distance = last_position - last_dab;
-    if (!finite(distance) || distance < -tolerance(last_position, last_dab) ||
+    if (!std::isfinite(distance) ||
+        distance < -tolerance(last_position, last_dab) ||
         std::abs((p.f[0] - distance) - remaining) >
             tolerance(last_position, last_dab))
       pages->reject("brush final dab and carried phase disagree");
@@ -1211,7 +1212,7 @@ void iterative_values(const Parsed& p, Pages* pages) {
       pages->reject("iteration zero contradicts zero initialization");
     volatile double product = a * x;
     const double residual = b - product;
-    if (!finite(residual))
+    if (!std::isfinite(residual))
       pages->reject("nonfinite measured residual");
     measured = std::max(measured, std::abs(residual));
   }
@@ -1229,7 +1230,7 @@ Status validate_representation(
     std::uint64_t maximum_window, const CancellationToken& cancellation,
     const std::function<Status(std::uint64_t)>& consume_work) {
   if (!result.valid() || !result.owned_by(resources))
-    return invalid("foreign representation owner");
+    return core_internal::type_mismatch("foreign representation owner");
   if (result.schema().id == "curve.bake_lut3d.table" ||
       result.schema().id == "curve.bake_lut3d.report") {
     auto admission = resources.reserve(ResourceCapacity::host(65536, 65536));
@@ -1258,7 +1259,7 @@ Status validate_representation(
     return Status{ErrorCode::OperationFailed,
                   "representation numeric environment unavailable"};
   if (!maximum_window)
-    return exhausted();
+    return core_internal::resource_exhausted("representation budget exhausted");
   auto charged = resources.consume({result.schema().canonical_size()});
   if (charged.ok() && consume_work)
     charged = consume_work(result.schema().canonical_size());
@@ -1316,16 +1317,17 @@ Result<BrushAdvance> advance_causal_brush(
   if (!environment.active())
     return Answer(Status{ErrorCode::OperationFailed,
                          "brush numeric environment unavailable"});
-  if (!finite(spec.spacing) || spec.spacing <= 0 || spec.lookahead != 0 ||
-      spec.maximum_pending > 1048576 ||
+  if (!std::isfinite(spec.spacing) || spec.spacing <= 0 ||
+      spec.lookahead != 0 || spec.maximum_pending > 1048576 ||
       spec.algorithm != "constant-spacing-1d-v1" || (count && !events) ||
-      previous.ended || !finite(previous.last_position) ||
-      !finite(previous.remaining) || previous.remaining < 0 ||
+      previous.ended || !std::isfinite(previous.last_position) ||
+      !std::isfinite(previous.remaining) || previous.remaining < 0 ||
       previous.remaining > spec.spacing ||
       (!previous.started &&
        (previous.next_event || previous.dab_count || previous.remaining != 0 ||
         previous.last_position != 0)))
-    return Answer(invalid("invalid causal brush state or mode"));
+    return Answer(
+        core_internal::type_mismatch("invalid causal brush state or mode"));
   try {
     BrushAdvance result{previous,
                         ResourceVector<double>(ResourceAllocator<double>(
@@ -1337,18 +1339,19 @@ Result<BrushAdvance> advance_causal_brush(
       if (!status.ok())
         return Answer(status);
       if (events[i].id != result.state.next_event ||
-          events[i].id == UINT64_MAX || !finite(events[i].position) ||
+          events[i].id == UINT64_MAX || !std::isfinite(events[i].position) ||
           (result.state.started &&
            events[i].position < result.state.last_position))
-        return Answer(invalid("brush event order mismatch"));
+        return Answer(
+            core_internal::type_mismatch("brush event order mismatch"));
       if (!result.state.started) {
         result.state.started = true;
         result.state.last_position = events[i].position;
         result.state.remaining = 0;
       }
       auto distance = events[i].position - result.state.last_position;
-      if (!finite(distance))
-        return Answer(invalid("brush distance overflow"));
+      if (!std::isfinite(distance))
+        return Answer(core_internal::type_mismatch("brush distance overflow"));
       auto position = result.state.last_position;
       while (distance >= result.state.remaining) {
         if (cancellation.cancelled())
@@ -1357,9 +1360,11 @@ Result<BrushAdvance> advance_causal_brush(
         if (!status.ok())
           return Answer(status);
         const auto next = position + result.state.remaining;
-        if (!finite(next) || (result.state.remaining > 0 && next <= position) ||
+        if (!std::isfinite(next) ||
+            (result.state.remaining > 0 && next <= position) ||
             result.state.dab_count == UINT64_MAX)
-          return Answer(invalid("brush spacing cannot advance in binary64"));
+          return Answer(core_internal::type_mismatch(
+              "brush spacing cannot advance in binary64"));
         result.dabs.push_back(next);
         ++result.state.dab_count;
         distance -= result.state.remaining;
@@ -1373,14 +1378,15 @@ Result<BrushAdvance> advance_causal_brush(
     result.state.ended = end;
     return Answer(std::move(result));
   } catch (const std::bad_alloc&) {
-    return Answer(exhausted());
+    return Answer(
+        core_internal::resource_exhausted("representation budget exhausted"));
   }
 }
 namespace {
 Status decode_schema(const SchemaTemplate& schema, unsigned kind, Parsed* p) {
   auto checked = schema.validate(true);
   if (!checked.ok() || schema.id != kIds[kind])
-    return invalid();
+    return core_internal::type_mismatch("invalid representation schema");
   return parse(schema, p);
 }
 }  // namespace
@@ -1482,7 +1488,8 @@ Result<IterativeSpec> iterative_spec(const SchemaTemplate& schema) {
 Result<BandRange> band_range(const ResultRef& result, std::uint32_t level,
                              std::uint32_t mask) {
   if (!result.valid())
-    return Result<BandRange>(invalid());
+    return Result<BandRange>(
+        core_internal::type_mismatch("invalid representation schema"));
   Parsed p;
   auto checked = decode_schema(result.schema(), 2, &p);
   if (!checked.ok())

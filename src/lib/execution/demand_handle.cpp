@@ -13,6 +13,7 @@
 #include <tuple>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "execution/accounted_regions.hpp"
 #include "execution/demand_context.hpp"
 #include "execution/demand_query.hpp"
@@ -27,8 +28,9 @@ using execution_internal::demand_key;
 namespace {
 // Checked publication metadata weight; failure leaves the old generation
 // intact.
-Result<std::uint64_t> checked_add(std::uint64_t left, std::uint64_t right) {
-  if (right > std::numeric_limits<std::uint64_t>::max() - left) {
+Result<std::uint64_t> diagnostic_byte_sum(std::uint64_t left,
+                                          std::uint64_t right) {
+  if (!core_internal::can_add(left, right)) {
     return Result<std::uint64_t>(
         Status::failure(ErrorCode::ResourceExhausted,
                         "execution diagnostic byte count overflows uint64"));
@@ -199,7 +201,7 @@ Status unite_named(DemandQuery* target, const NamedValues& values,
   std::uint64_t entries = 0;
   for (const auto& item : *target) {
     const auto cost = 1 + item.second.boxes().size();
-    if (cost > limits.maximum_boxes || entries > limits.maximum_boxes - cost)
+    if (!core_internal::can_add(cost, entries, limits.maximum_boxes))
       return Status{ErrorCode::ResourceExhausted, {}};
     entries += cost;
   }
@@ -466,12 +468,12 @@ Result<DemandResult> DemandHandle::request(
       return failure(empty.status());
     publication->dirty.emplace(item.first, empty.take_value());
   }
-  const auto base = checked_add(
+  const auto base = diagnostic_byte_sum(
       key.value().entries, execution_internal::DependencyRecords::metadata_size(
                                result.dependencies));
   if (!base.ok())
     return failure(base.status());
-  auto weight = checked_add(base.value(), publication->dirty.size());
+  auto weight = diagnostic_byte_sum(base.value(), publication->dirty.size());
   if (!weight.ok())
     return failure(weight.status());
   publication->weight = weight.value();
@@ -489,8 +491,8 @@ Result<DemandResult> DemandHandle::request(
   const auto remainder =
       impl_->metadata_entries -
       (old == impl_->publications.end() ? 0 : old->second->weight);
-  if (publication->weight > impl_->config.maximum_metadata_entries ||
-      remainder > impl_->config.maximum_metadata_entries - publication->weight)
+  if (!core_internal::can_add(publication->weight, remainder,
+                              impl_->config.maximum_metadata_entries))
     return Result<DemandResult>(
         Status{ErrorCode::ResourceExhausted, "retained demand metadata limit"});
   impl_->publications.insert_or_assign(key.value().value, publication);
@@ -616,7 +618,8 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
     auto source = item.second->dependencies.source_observations(limits);
     if (!source.ok())
       return failure(source.status());
-    if (source.value().size() > limits.maximum_boxes - support.size())
+    if (!core_internal::can_add(source.value().size(), support.size(),
+                                limits.maximum_boxes))
       return failure(Status{ErrorCode::ResourceExhausted, {}});
     support.insert(support.end(), source.value().begin(), source.value().end());
   }
@@ -648,22 +651,22 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
                           impl_->config.maximum_metadata_entries);
     if (!key.ok())
       return failure(key.status());
-    auto weight =
-        checked_add(key.value().entries,
-                    execution_internal::DependencyRecords::metadata_size(
-                        publication->dependencies));
+    auto weight = diagnostic_byte_sum(
+        key.value().entries,
+        execution_internal::DependencyRecords::metadata_size(
+            publication->dependencies));
     if (!weight.ok())
       return failure(weight.status());
     std::uint64_t cost = weight.value();
     for (const auto& dirty : publication->dirty) {
-      weight = checked_add(cost, 1 + dirty.second.boxes().size());
+      weight = diagnostic_byte_sum(cost, 1 + dirty.second.boxes().size());
       if (!weight.ok())
         return failure(weight.status());
       cost = weight.value();
     }
     publication->weight = cost;
-    if (cost > impl_->config.maximum_metadata_entries ||
-        entries > impl_->config.maximum_metadata_entries - cost)
+    if (!core_internal::can_add(cost, entries,
+                                impl_->config.maximum_metadata_entries))
       return failure(Status{ErrorCode::ResourceExhausted,
                             "updated demand metadata limit"});
     entries += cost;

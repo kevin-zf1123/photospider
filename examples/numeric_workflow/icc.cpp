@@ -13,7 +13,7 @@
 #include "photospider/data/color_array.hpp"
 #include "photospider/data/icc_profile.hpp"
 #include "photospider/data/resource_bindings.hpp"
-#include "photospider/numeric/unary.hpp"
+#include "photospider/ops/numeric/unary.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {

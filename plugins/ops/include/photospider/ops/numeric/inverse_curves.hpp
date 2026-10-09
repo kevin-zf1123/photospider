@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <utility>
 
-#include "photospider/numeric/curves.hpp"
+#include "photospider/ops/numeric/curves.hpp"
 
 namespace ps::numeric {
 namespace inverse_curve_detail {

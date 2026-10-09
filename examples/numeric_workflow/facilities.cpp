@@ -235,11 +235,22 @@ ps::OperationDefinition consumer(std::uint32_t grouping) {
   output.region_rule = ps::OperationRegionRule::Dependency;
   output.continuation_bytes = sizeof(StructuredSum);
   output.maximum_dependency_stages = 2;
-  operation.validate_dependency = [grouping](const auto& inputs, const auto&) {
-    return inputs[0].result_schema->tensors[0].atomic_trailing_axes == grouping
-               ? ps::Status::success()
-               : ps::Status{ps::ErrorCode::TypeMismatch,
-                            "producer grouping was lost"};
+  operation.traits.requires_metadata_specialization = true;
+  operation.specialize_metadata = [grouping,
+                                   result_schema = *output.result_schema](
+                                      const auto& inputs, const auto&)
+      -> ps::Result<std::vector<ps::OperationOutputSpecialization>> {
+    using Answer = ps::Result<std::vector<ps::OperationOutputSpecialization>>;
+    if (inputs.size() != 1 || !inputs[0].result_schema ||
+        inputs[0].result_schema->tensors.size() != 1 ||
+        inputs[0].result_schema->tensors[0].atomic_trailing_axes != grouping)
+      return Answer(ps::Status{ps::ErrorCode::TypeMismatch,
+                               "producer grouping was lost"});
+    ps::OperationOutputSpecialization specialized;
+    specialized.metadata.result_schema =
+        std::make_shared<const ps::SchemaTemplate>(result_schema);
+    return Answer(
+        std::vector<ps::OperationOutputSpecialization>{std::move(specialized)});
   };
   operation.start_result = [](const auto&, const auto& allocator) {
     return ps::ResultContinuation::make<StructuredSum>(allocator);
@@ -257,6 +268,14 @@ void structured_diagnostics() {
   check(registry->register_operation(probe(false, false, true)));
   check(registry->register_operation(consumer(0)));
   check(registry->freeze());
+  ps::OperationMetadata grouped_input;
+  grouped_input.result_schema =
+      std::make_shared<const ps::SchemaTemplate>(schema(5, 1));
+  auto rejected =
+      registry->resolve_traits("manual.structured_sum", {grouped_input}, {});
+  require(
+      !rejected.ok() && rejected.status().code == ps::ErrorCode::TypeMismatch,
+      "structured consumer must reject mismatched grouping");
   ps::WorkflowDocument document;
   ps::WorkflowInputDeclaration declaration;
   declaration.id = 1;

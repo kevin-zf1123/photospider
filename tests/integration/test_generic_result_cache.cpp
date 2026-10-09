@@ -9,17 +9,62 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "data/memory_budget.hpp"
 #include "execution/result_cache.hpp"
+#include "execution/structured_joint_state.hpp"
+#include "execution/structured_result_cache.hpp"
 #include "photospider/photospider.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
+struct ExternalParticipantProbe : ps::execution_internal::JointParticipant {};
+static_assert(!std::is_default_constructible_v<ExternalParticipantProbe>);
+static_assert(!std::is_copy_constructible_v<ExternalParticipantProbe>);
+
+int cache_retains_resource_root() {
+  using namespace ps;  // NOLINT(build/namespaces)
+  using execution_internal::StructuredCacheState;
+  using execution_internal::StructuredResultCache;
+  ResourceBudget original, replacement;
+  std::unique_ptr<StructuredCacheState> state;
+  std::unique_ptr<StructuredResultCache> cache;
+  struct Host final : execution_internal::StructuredCacheWorkServices {
+    Status charge(std::uint64_t) override { return Status::success(); }
+    CancellationToken cancellation() override { return {}; }
+    ErrorCode stop() override { return ErrorCode::Ok; }
+  } host;
+  std::recursive_mutex gate;
+  std::uint64_t observed = 0;
+  {
+    ResourceBudget wrapper = original;
+    state = std::make_unique<StructuredCacheState>(wrapper, 1000);
+    cache = std::make_unique<StructuredResultCache>(wrapper, 1000);
+    wrapper = replacement;
+    PS_CHECK(state->charge(7).ok());
+    PS_CHECK(cache->charge(11, gate, host, observed).ok());
+    PS_CHECK(original.statistics().issued.work == 18);
+    PS_CHECK(replacement.statistics().issued.work == 0);
+    auto facts = cache->supplied_facts({}, {}, 4096, host);
+    PS_CHECK(facts.ok());
+    PS_CHECK(facts.value().get_allocator().owned_by(original));
+  }
+  // Both components outlive the caller's wrapper and keep the same root.
+  PS_CHECK(state->charge(13).ok());
+  PS_CHECK(cache->charge(17, gate, host, observed).ok());
+  PS_CHECK(original.statistics().issued.work == 48);
+  PS_CHECK(replacement.statistics().issued.work == 0);
+  PS_CHECK(observed == 28);
+  auto facts = cache->supplied_facts({}, {}, 4096, host);
+  PS_CHECK(facts.ok());
+  PS_CHECK(facts.value().get_allocator().owned_by(original));
+  return 0;
+}
 enum class CacheMode { Constant, First, Sum };
 struct CacheProgram {
   CacheMode mode;
@@ -286,6 +331,9 @@ int fragment_lru_storage() {
   const auto epoch = cache.epoch();
   cache.put("old-head", old[0], epoch);
   cache.put("old-tail", old[1], epoch);
+  PS_CHECK(cache.statistics().retained_bytes == 24 &&
+           cache.statistics().entries == 2 &&
+           cache.statistics().evictions == 0);
   cache.put("unrelated", make(Region({{2, 2}})), cache.epoch());
   PS_CHECK(!cache.get("old-head").valid());
   PS_CHECK(cache.get("old-tail").valid());
@@ -480,6 +528,7 @@ int concurrent_reclamation() {
 }
 }  // namespace
 int main() {
+  PS_CHECK(cache_retains_resource_root() == 0);
   PS_CHECK(opaque_result_cache_preservation() == 0);
   PS_CHECK(concurrent_reclamation() == 0);
   PS_CHECK(result_content_bits() == 0);

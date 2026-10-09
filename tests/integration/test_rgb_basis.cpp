@@ -18,6 +18,7 @@
 #include "../support/transfer_result_fixture.hpp"
 #include "fixtures/fmt10_oracles.hpp"
 #include "numeric_workflow/icc_fixture.hpp"
+#include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 

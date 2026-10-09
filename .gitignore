@@ -311,3 +311,7 @@ __pycache__/
 !examples/unified_result_workflow/*.md
 !examples/shared/
 !examples/shared/*.hpp
+
+!examples/value_address_performance/
+!examples/value_address_performance/*.cpp
+!examples/value_address_performance/CMakeLists.txt

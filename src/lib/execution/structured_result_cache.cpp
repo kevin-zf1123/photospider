@@ -8,6 +8,7 @@
 #include <string>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "execution/result_blocks.hpp"
 #include "execution/result_cache_proof.hpp"
 
@@ -178,7 +179,7 @@ void StructuredResultCache::store_completed(
     manifest->metadata = 1 + manifest->replay.size() + manifest->sources.size();
     const auto maximum = ctx.table->dependency_metadata_limit();
     const auto add_metadata = [&](std::uint64_t count) {
-      if (count > maximum || manifest->metadata > maximum - count)
+      if (!core_internal::can_add(count, manifest->metadata, maximum))
         return false;
       manifest->metadata += count;
       return host.charge(count).ok();

@@ -3,18 +3,14 @@
 #include <new>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "core/resource_state.hpp"
+#include "core/status_helpers.hpp"
 #include "photospider/core/resources.hpp"
 #include "photospider/data/storage.hpp"
 
 namespace ps {
-namespace {
-Status exhausted() {
-  return Status{ErrorCode::ResourceExhausted,
-                "managed resource capacity exhausted",
-                FailureReason::CapacityLimit};
-}
-}  // namespace
+namespace {}  // namespace
 // Each alias owns storage and a lease. Registration removal and lease release
 // are serialized; physical storage retires after releasing the admission lock.
 struct ResourceBudget::Impl::Reference {
@@ -129,8 +125,9 @@ BufferAllocator ResourceBudget::allocator() const {
   const auto reserve = [root = *this](bool shared) {
     return BufferAllocator::Reserve([root, shared](std::uint64_t bytes) {
       constexpr auto metadata = sizeof(CpuStorage);
-      if (bytes > UINT64_MAX - metadata)
-        return Result<std::shared_ptr<void>>(exhausted());
+      if (!core_internal::can_add(bytes, metadata))
+        return Result<std::shared_ptr<void>>(
+            core_internal::capacity_exhausted());
       auto capacity = ResourceCapacity::host(bytes + metadata, metadata);
       capacity[ResourceKind::Payload] = bytes;
       if (shared) {

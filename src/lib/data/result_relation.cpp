@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/result_gather.hpp"
 #include "data/result_neighborhood.hpp"
 #include "data/result_reshape.hpp"
@@ -21,7 +22,7 @@ namespace {
 bool valid_support(ResultSupport support) {
   return support.roles && !(support.roles & ~15U) && support.input < 1024 &&
          static_cast<std::uint32_t>(support.target) <= 3 && support.slot < 16 &&
-         support.count <= UINT64_MAX - support.first;
+         core_internal::can_add(support.count, support.first);
 }
 bool valid_guarantee(DependencyGuarantee guarantee) {
   return guarantee == DependencyGuarantee::Exact ||
@@ -47,7 +48,7 @@ Result<std::uint64_t> ResultMappedAxis::source_coordinate(
                                   : static_cast<std::uint64_t>(step);
   const bool subtract = (output < output_origin) != (step < 0);
   const auto available = subtract ? source_origin : UINT64_MAX - source_origin;
-  if (distance > available / magnitude)
+  if (!core_internal::can_multiply(distance, magnitude, available))
     return Result<std::uint64_t>(invalid_relation());
   const auto delta = distance * magnitude;
   return Result<std::uint64_t>(subtract ? source_origin - delta
@@ -251,7 +252,8 @@ struct ResultRelation::Impl {
         }
         uint64_t first = 0;
         for (size_t axis = 0; axis < input_shape.size(); ++axis) {
-          if (first > (UINT64_MAX - source_at[axis]) / input_shape[axis])
+          if (!core_internal::can_multiply_add(first, input_shape[axis],
+                                               source_at[axis]))
             return {ErrorCode::ResourceExhausted,
                     "reshape support cannot be flattened"};
           first = first * input_shape[axis] + source_at[axis];
@@ -304,7 +306,8 @@ struct ResultRelation::Impl {
               return status;
             std::uint64_t first = 0;
             for (std::size_t axis = 0; axis < output_shape.size(); ++axis) {
-              if (first > (UINT64_MAX - at[axis]) / output_shape[axis])
+              if (!core_internal::can_multiply_add(first, output_shape[axis],
+                                                   at[axis]))
                 return {ErrorCode::ResourceExhausted,
                         "neighborhood support cannot be flattened"};
               first = first * output_shape[axis] + at[axis];
@@ -312,7 +315,7 @@ struct ResultRelation::Impl {
             auto span = support;
             span.first = first;
             span.count = box.dimensions()[last].extent;
-            if (span.count > UINT64_MAX - first)
+            if (!core_internal::can_add(span.count, first))
               return {ErrorCode::ResourceExhausted, {}};
             status = visitor(span);
             if (!status.ok())
@@ -357,14 +360,15 @@ struct ResultRelation::Impl {
           if (axis + 1 == input_shape.size()) {
             stride[axis] = 1;
           } else {
-            if (stride[axis + 1] > UINT64_MAX / input_shape[axis + 1])
+            if (!core_internal::can_multiply(stride[axis + 1],
+                                             input_shape[axis + 1]))
               return {ErrorCode::ResourceExhausted,
                       "tensor support cannot be flattened"};
             stride[axis] = stride[axis + 1] * input_shape[axis + 1];
           }
         }
         for (std::size_t axis = input_shape.size(); axis-- > 0;) {
-          if (contiguous > UINT64_MAX / extent[axis])
+          if (!core_internal::can_multiply(contiguous, extent[axis]))
             return {ErrorCode::ResourceExhausted,
                     "tensor support count cannot be flattened"};
           contiguous *= extent[axis];
@@ -378,12 +382,12 @@ struct ResultRelation::Impl {
             return status;
           std::uint64_t first = 0;
           for (std::size_t axis = 0; axis < input_shape.size(); ++axis) {
-            if (at[axis] > (UINT64_MAX - first) / stride[axis])
+            if (!core_internal::can_multiply_add(at[axis], stride[axis], first))
               return {ErrorCode::ResourceExhausted,
                       "tensor support position cannot be flattened"};
             first += at[axis] * stride[axis];
           }
-          if (contiguous > UINT64_MAX - first)
+          if (!core_internal::can_add(contiguous, first))
             return {ErrorCode::ResourceExhausted,
                     "tensor support span cannot be flattened"};
           auto span = support;
@@ -509,14 +513,11 @@ Result<std::uint64_t> ResultRelation::cache_metadata(
       continue;
     std::uint64_t count = 1;
     const auto add = [&](std::uint64_t n) {
-      if (n > maximum || count > maximum - n)
-        return false;
-      count += n;
-      return true;
+      return core_internal::checked_add(count, n, &count, maximum);
     };
-    if (node->row_count > maximum / 7 ||
-        node->samples.capacity() > maximum / 7 ||
-        node->mapping.capacity() > maximum / 5 ||
+    if (!core_internal::can_multiply(node->row_count, 7, maximum) ||
+        !core_internal::can_multiply(node->samples.capacity(), 7, maximum) ||
+        !core_internal::can_multiply(node->mapping.capacity(), 5, maximum) ||
         !add(node->output_shape.capacity()) ||
         !add(node->input_shape.capacity()) || !add(node->radii.capacity()) ||
         !add(node->mapping.capacity() * 5) ||
@@ -544,7 +545,7 @@ Result<std::uint64_t> ResultRelation::cache_metadata(
                (1 + 2 * node->input_shape.size())) ||
           !add(node->gather->full_validation.boxes().size() *
                (1 + 2 * node->input_shape.size())))) ||
-        total > maximum - count)
+        !core_internal::can_add(total, count, maximum))
       return Result<std::uint64_t>(Status{ErrorCode::ResourceExhausted, {}});
     charged = work(count);
     if (!charged.ok())
@@ -577,7 +578,7 @@ Result<ResultRelation> ResultRelation::restrict_to(
   for (auto n : shape) {
     if (!n)
       return Answer(invalid_relation());
-    count = count > UINT64_MAX / n ? UINT64_MAX : count * n;
+    count = core_internal::saturating_multiply(count, n);
   }
   if (count != coverage())
     return Answer(invalid_relation());
@@ -714,8 +715,7 @@ Result<ResultRelation> ResultRelation::mapped(
   for (auto n : output_shape) {
     if (!n)
       return Answer(invalid_relation());
-    output_count =
-        output_count > UINT64_MAX / n ? UINT64_MAX : output_count * n;
+    output_count = core_internal::saturating_multiply(output_count, n);
   }
   for (auto n : input_shape)
     if (!n)
@@ -832,7 +832,7 @@ Result<ResultRelation> ResultRelation::gather(
         if (d.offset || d.extent != output_shape[axis])
           return Answer(invalid_relation());
       } else {
-        if (count > UINT64_MAX / d.extent)
+        if (!core_internal::can_multiply(count, d.extent))
           return Answer(
               Status{ErrorCode::ResourceExhausted, "gather table size"});
         count *= d.extent;
@@ -842,7 +842,7 @@ Result<ResultRelation> ResultRelation::gather(
       bounding[axis].offset = std::min(bounding[axis].offset, d.offset);
       bounding[axis].extent = last - bounding[axis].offset;
     }
-    if (count > UINT64_MAX - rows)
+    if (!core_internal::can_add(count, rows))
       return Answer(Status{ErrorCode::ResourceExhausted, "gather table size"});
     rows += count;
   }
@@ -882,13 +882,13 @@ Result<ResultRelation> ResultRelation::gather(
       table->upper[axis] = std::max(first, last);
     }
   }
-  if (rows > UINT64_MAX / samples_per_tuple)
+  if (!core_internal::can_multiply(rows, samples_per_tuple))
     return Answer(Status{ErrorCode::ResourceExhausted, "gather table size"});
   // Validate, bound and pack each indexed field. Tape clearing is charged by
   // allocate() before allocation and runs in cancellation-bounded chunks.
   const auto unit =
       1 + samples_per_tuple * (input_shape.size() + 5 * columns + 4);
-  if (rows > work.remaining / unit)
+  if (!core_internal::can_multiply(rows, unit, work.remaining))
     return Answer(
         Status{ErrorCode::ResourceExhausted, "gather table work limit"});
   table->output_shape =
@@ -966,7 +966,7 @@ Result<ResultRelation> ResultRelation::neighborhood(
   for (auto extent : shape) {
     if (!extent)
       return Answer(invalid_relation());
-    count = count > UINT64_MAX / extent ? UINT64_MAX : count * extent;
+    count = core_internal::saturating_multiply(count, extent);
   }
   ResourceAllocationScope scope(budget);
   auto made = Impl::make(budget, count);
@@ -1020,7 +1020,7 @@ Result<ResultRelation> ResultRelation::reshape(
     return Answer(invalid_relation());
   uint64_t count = 1;
   for (auto n : output_shape)
-    count = count > UINT64_MAX / n ? UINT64_MAX : count * n;
+    count = core_internal::saturating_multiply(count, n);
   auto made = Impl::make(budget, count);
   if (!made.ok())
     return Answer(made.status());
@@ -1081,7 +1081,7 @@ Result<Footprint> clip_projection(const ResourceBudget& budget,
   }
   if (contained)
     return Result<Footprint>(outputs);
-  if (cost > limits.maximum_work - cost)
+  if (!core_internal::can_add(cost, cost, limits.maximum_work))
     return Result<Footprint>(Status{ErrorCode::ResourceExhausted, {}});
   // Intersect canonical rectangles directly with one rectangular mask instead
   // of sweeping both sets on every axis. Normalize the clipped pieces once.
@@ -1130,7 +1130,7 @@ Result<Footprint> ResultRelation::Impl::clip(
       // Compare immutable canonical boxes before rebuilding their intersection;
       // equal cardinality alone must never authorize a different sparse set.
       const auto rank = requested.shape().size();
-      if (rank && requested.boxes().size() > (UINT64_MAX - 1) / rank)
+      if (!core_internal::can_multiply_add(requested.boxes().size(), rank, 1))
         return Result<Footprint>(Status{ErrorCode::ResourceExhausted, {}});
       const auto cost = requested.boxes().size() * rank + 1;
       if (cost > remaining.maximum_work)
@@ -1719,7 +1719,7 @@ Status ResultRelation::validate_tuple_closure(
           for (std::size_t inner = axis; inner < shape.size(); ++inner)
             dimensions[inner] = {0, shape[inner]};
         }
-        if (stride > UINT64_MAX / shape[current])
+        if (!core_internal::can_multiply(stride, shape[current]))
           break;
         stride *= shape[current];
       }
@@ -1807,8 +1807,8 @@ Status ResultRelation::validate_tuple_closure(
                   return work;
                 std::uint64_t output = 0;
                 for (std::size_t axis = 0; axis < coordinate.size(); ++axis) {
-                  if (output >
-                      (UINT64_MAX - coordinate[axis]) / outputs.shape()[axis])
+                  if (!core_internal::can_multiply_add(
+                          output, outputs.shape()[axis], coordinate[axis]))
                     return Status{ErrorCode::ResourceExhausted,
                                   "tuple proof output overflow"};
                   output = output * outputs.shape()[axis] + coordinate[axis];
@@ -1928,7 +1928,8 @@ Status ResultRelation::certify(const Footprint& outputs,
       [&](const auto& at) {
         std::uint64_t row = 0;
         for (std::size_t axis = 0; axis < at.size(); ++axis) {
-          if (row > (UINT64_MAX - at[axis]) / outputs.shape()[axis])
+          if (!core_internal::can_multiply_add(row, outputs.shape()[axis],
+                                               at[axis]))
             return Status{ErrorCode::ResourceExhausted,
                           "tensor witness coordinate cannot be flattened"};
           row = row * outputs.shape()[axis] + at[axis];
@@ -2005,7 +2006,7 @@ Result<Footprint> ResultRelation::preimage(const Footprint& outputs,
         return Status::success();
       std::uint64_t domain = 1;
       for (auto n : changed.shape()) {
-        if (domain > UINT64_MAX / n)
+        if (!core_internal::can_multiply(domain, n))
           return invalid_relation();
         domain *= n;
       }
@@ -2043,9 +2044,10 @@ Result<Footprint> ResultRelation::preimage(const Footprint& outputs,
                                              validation, limits);
       if (!selected.ok())
         return selected.status();
-      if (selected.value().boxes().size() >
-          limits.maximum_boxes -
-              std::min<std::uint64_t>(limits.maximum_boxes, boxes.size()))
+      if (!core_internal::can_add(
+              selected.value().boxes().size(),
+              std::min<std::uint64_t>(limits.maximum_boxes, boxes.size()),
+              limits.maximum_boxes))
         return {ErrorCode::ResourceExhausted, "gather inverse box limit"};
       for (const auto& box : selected.value().boxes()) {
         const auto bytes = box.rank() * sizeof(RegionDimension);
@@ -2092,9 +2094,10 @@ Result<Footprint> ResultRelation::preimage(const Footprint& outputs,
       auto requested = expanded.value().intersect(outputs, limits);
       if (!requested.ok())
         return requested.status();
-      if (requested.value().boxes().size() >
-          limits.maximum_boxes -
-              std::min<std::uint64_t>(limits.maximum_boxes, boxes.size()))
+      if (!core_internal::can_add(
+              requested.value().boxes().size(),
+              std::min<std::uint64_t>(limits.maximum_boxes, boxes.size()),
+              limits.maximum_boxes))
         return Status{ErrorCode::ResourceExhausted, {}};
       for (const auto& box : requested.value().boxes()) {
         const auto bytes = box.rank() * sizeof(RegionDimension);
@@ -2175,9 +2178,10 @@ Result<Footprint> ResultRelation::preimage(const Footprint& outputs,
       auto inside = projected.value().intersect(requested.value(), limits);
       if (!inside.ok())
         return inside.status();
-      if (inside.value().boxes().size() >
-          limits.maximum_boxes -
-              std::min<uint64_t>(limits.maximum_boxes, boxes.size()))
+      if (!core_internal::can_add(
+              inside.value().boxes().size(),
+              std::min<uint64_t>(limits.maximum_boxes, boxes.size()),
+              limits.maximum_boxes))
         return Status{ErrorCode::ResourceExhausted,
                       "reshape inverse rectangle limit"};
       for (const auto& box : inside.value().boxes()) {
@@ -2297,7 +2301,7 @@ Result<ResultRelation> ResultRelation::rows(
     const std::function<Result<ResultRelationRow>(std::uint64_t)>& reader,
     DependencyGuarantee guarantee) {
   if (!reader || !valid_guarantee(guarantee) ||
-      count > UINT64_MAX / sizeof(ResultRelationRow))
+      !core_internal::can_multiply(count, sizeof(ResultRelationRow)))
     return Result<ResultRelation>(invalid_relation());
   auto made = Impl::make(budget, outputs);
   if (!made.ok())

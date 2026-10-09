@@ -1,4 +1,4 @@
-#include "photospider/numeric/scans.hpp"
+#include "photospider/ops/numeric/scans.hpp"
 
 #include <fenv.h>  // NOLINT(build/c++11)
 

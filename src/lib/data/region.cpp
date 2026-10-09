@@ -5,22 +5,9 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
+
 namespace ps {
-namespace {
-
-/**
- * @brief Checks unsigned addition without performing overflowing arithmetic.
- * @param left First addend.
- * @param right Second addend.
- * @return True when `left + right` fits in uint64.
- * @throws Nothing.
- * @note This helper has no state or side effects.
- */
-bool can_add(std::uint64_t left, std::uint64_t right) noexcept {
-  return right <= std::numeric_limits<std::uint64_t>::max() - left;
-}
-
-}  // namespace
 
 /**
  * @brief Implements checked Region construction.
@@ -32,7 +19,7 @@ Region::Region(std::vector<RegionDimension> dimensions)
     throw std::invalid_argument("Region rank exceeds 8");
   }
   for (const RegionDimension& dimension : dimensions_) {
-    if (!can_add(dimension.offset, dimension.extent)) {
+    if (!core_internal::can_add(dimension.offset, dimension.extent)) {
       throw std::invalid_argument("Region interval overflows uint64");
     }
   }
@@ -85,7 +72,8 @@ Status Region::validate(const std::vector<std::uint64_t>& shape) const {
   }
   for (std::size_t index = 0; index < shape.size(); ++index) {
     if (shape[index] == 0U ||
-        !can_add(dimensions_[index].offset, dimensions_[index].extent) ||
+        !core_internal::can_add(dimensions_[index].offset,
+                                dimensions_[index].extent) ||
         dimensions_[index].offset + dimensions_[index].extent > shape[index]) {
       return Status::failure(ErrorCode::InvalidArgument,
                              "Region is outside the descriptor shape");
@@ -104,7 +92,7 @@ Result<std::uint64_t> Region::element_count() const {
   }
   std::uint64_t count = 1U;
   for (const RegionDimension& dimension : dimensions_) {
-    if (dimension.extent > std::numeric_limits<std::uint64_t>::max() / count) {
+    if (!core_internal::can_multiply(count, dimension.extent)) {
       return Result<std::uint64_t>(
           Status::failure(ErrorCode::ResourceExhausted,
                           "Region element count overflows uint64"));

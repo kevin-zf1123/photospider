@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "execution/result_callback_scope.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "photospider/plugin/result_program.hpp"
@@ -470,7 +471,7 @@ Result<ResourceVector<ResultJointOutcome>> ResultJointContinuation::poll_ready(
                   std::get_if<ResultProgramNeed>(&outcome.outcome.value())) {
             const auto count =
                 need->results.size() + need->tensors.size() + need->io.size();
-            if (count > 65536 - need_entries)
+            if (!core_internal::can_add(need_entries, count, 65536))
               return Answer(
                   protocol("Result joint Need round exceeds entry limit"));
             need_entries += count;

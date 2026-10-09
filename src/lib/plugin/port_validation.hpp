@@ -39,15 +39,6 @@ Result<Region> derive_input_demand(
     const std::vector<std::uint64_t>& output_shape,
     const std::vector<std::uint64_t>& input_shape, OperationPortKind kind);
 
-/**
- * @brief Checks dense port metadata and numeric domain without coercion.
- * @note stop is observed periodically while scanning, and returns Ok or a
- * prioritized Cancelled/Stale code without allocating diagnostic strings.
- */
-Status validate_port_value(const OperationPortConstraint& port,
-                           const Value& value, ErrorCode numeric_failure,
-                           const std::function<ErrorCode()>& stop);
-
 /** @brief Validate a bounded scalar tensor using captured immutable coverage.
  * Reads its logical sample through Result access without dense-layout
  * assumptions. numeric_failure distinguishes external admission from computed

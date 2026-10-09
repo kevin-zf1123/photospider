@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "icc_fixture.hpp"  // NOLINT(build/include_subdir)
+#include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
 #include "support/channel_result_fixture.hpp"
 

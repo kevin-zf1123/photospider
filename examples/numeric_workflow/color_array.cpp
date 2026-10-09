@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/numeric/unary.hpp"
+#include "photospider/ops/numeric/unary.hpp"
 #include "photospider/photospider.hpp"
 #include "point_math_checks.hpp"  // NOLINT(build/include_subdir)
 #include "result_fixture.hpp"     // NOLINT(build/include_subdir)

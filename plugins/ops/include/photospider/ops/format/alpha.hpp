@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "photospider/format/channel_editing.hpp"
+#include "photospider/ops/format/channel_editing.hpp"
 
 namespace ps::format {
 /** @brief An explicit alpha source declaration for FMT-04A/FMT-05A.

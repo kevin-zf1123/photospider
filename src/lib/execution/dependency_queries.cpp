@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "data/content_digest.hpp"
 #include "execution/accounted_regions.hpp"
 #include "execution/dependency_dirty.hpp"
@@ -358,12 +359,12 @@ auto ExecutionDependencies::Impl::backward(const Record& record,
     const auto shape = domain(record, support);
     std::uint64_t count = 1;
     for (auto n : shape) {
-      if (!n || count > UINT64_MAX / n)
+      if (!n || !core_internal::can_multiply(count, n))
         return Status{ErrorCode::ResourceExhausted,
                       "Result flattened support domain overflow"};
       count *= n;
     }
-    if (support.first > count || support.count > count - support.first)
+    if (!core_internal::can_add(support.first, support.count, count))
       return Status{ErrorCode::InvalidArgument,
                     "Result support exceeds input domain: producer=" +
                         std::to_string(record.result.node_id) +
@@ -807,8 +808,8 @@ Result<ResourceMap<Footprint>> ExecutionDependencies::potential_dirty(
   std::uint64_t answer_entries = 0;
   for (const auto& output : impl_->outputs) {
     const auto cost = 1 + output.second.samples.boxes().size();
-    if (cost > work || cost > limits.maximum_boxes ||
-        answer_entries > limits.maximum_boxes - cost)
+    if (cost > work ||
+        !core_internal::can_add(cost, answer_entries, limits.maximum_boxes))
       return Result<Answer>(Status{ErrorCode::ResourceExhausted, {}});
     work -= cost;
     auto dirty = Footprint::none(output.second.samples.shape(), limits);
@@ -836,8 +837,8 @@ Result<ResourceMap<Footprint>> ExecutionDependencies::potential_dirty(
       dirty = std::move(joined);
     }
     const auto actual = 1 + dirty.value().boxes().size();
-    if (actual > work || actual > limits.maximum_boxes ||
-        answer_entries > limits.maximum_boxes - actual)
+    if (actual > work ||
+        !core_internal::can_add(actual, answer_entries, limits.maximum_boxes))
       return Result<Answer>(Status{ErrorCode::ResourceExhausted, {}});
     work -= actual;
     answer_entries += actual;
@@ -1028,8 +1029,8 @@ Result<ExecutionDependencies> ExecutionDependencies::restrict(
       return Answer(candidate.status());
     auto record = candidate.take_value();
     const auto cost = Impl::weight(record);
-    if (cost > limits.maximum_boxes ||
-        result->entries > limits.maximum_boxes - cost || cost > work)
+    if (!core_internal::can_add(cost, result->entries, limits.maximum_boxes) ||
+        cost > work)
       return Answer(Status{ErrorCode::ResourceExhausted, {}});
     work -= cost;
     result->entries += cost;
@@ -1050,8 +1051,8 @@ Result<ExecutionDependencies> ExecutionDependencies::restrict(
   for (const auto& query : outputs) {
     const auto cost = 1 + query.second.boxes().size() +
                       impl_->outputs.find(query.first)->second.records.size();
-    if (cost > limits.maximum_boxes ||
-        result->entries > limits.maximum_boxes - cost || cost > work)
+    if (!core_internal::can_add(cost, result->entries, limits.maximum_boxes) ||
+        cost > work)
       return Answer(Status{ErrorCode::ResourceExhausted, {}});
     work -= cost;
     result->entries += cost;
@@ -1075,8 +1076,9 @@ Result<ExecutionDependencies> ExecutionDependencies::restrict(
           return Answer(candidate.status());
         auto record = candidate.take_value();
         const auto weight = Impl::weight(record);
-        if (weight > limits.maximum_boxes ||
-            result->entries > limits.maximum_boxes - weight || weight > work)
+        if (!core_internal::can_add(weight, result->entries,
+                                    limits.maximum_boxes) ||
+            weight > work)
           return Answer(Status{ErrorCode::ResourceExhausted, {}});
         work -= weight;
         result->entries += weight;
@@ -1127,9 +1129,8 @@ Result<ResourceMap<Footprint>> ExecutionDependencies::source_support(
       return Result<Answer>(Status{ErrorCode::Cancelled, {}});
     const auto cost =
         1 + root.second.records.size() + root.second.samples.boxes().size();
-    if (cost > limits.maximum_boxes ||
-        root_entries > limits.maximum_boxes - cost ||
-        cost > limits.maximum_work || root_entries > limits.maximum_work - cost)
+    if (!core_internal::can_add(cost, root_entries, limits.maximum_boxes) ||
+        !core_internal::can_add(cost, root_entries, limits.maximum_work))
       return Result<Answer>(Status{ErrorCode::ResourceExhausted, {}});
     root_entries += cost;
   }
@@ -1175,8 +1176,8 @@ Result<ResourceMap<Footprint>> ExecutionDependencies::source_support(
       const auto prior =
           old == result.end() ? 0 : 1 + old->second.boxes().size();
       const auto weight = 1 + united.value().boxes().size();
-      if (weight > limits.maximum_boxes ||
-          entries - prior > limits.maximum_boxes - weight)
+      if (!core_internal::can_add(weight, entries - prior,
+                                  limits.maximum_boxes))
         return Result<Answer>(Status{ErrorCode::ResourceExhausted, {}});
       entries = entries - prior + weight;
       result.insert_or_assign(name, united.take_value());

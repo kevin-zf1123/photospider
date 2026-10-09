@@ -6,6 +6,7 @@
 #include <thread>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "execution/cpu_range.hpp"
 #include "photospider/plugin/cpu_tiles_api.h"
 
@@ -75,7 +76,7 @@ class CpuTileScope final {
     }
     if (work.counts[0] && work.counts[1] && work.counts[2]) {
       for (auto dimension : work.counts) {
-        if (count > UINT64_MAX / dimension)
+        if (!core_internal::can_multiply(count, dimension))
           return Status{ErrorCode::ResourceExhausted,
                         "CPU tile count overflow"};
         count *= dimension;
@@ -83,8 +84,8 @@ class CpuTileScope final {
     } else {
       count = 0;
     }
-    if (count > (UINT64_MAX - 256) / 256 || tiles_ > UINT64_MAX - count ||
-        stages_ == UINT64_MAX)
+    if (!core_internal::can_multiply_add(count, 256, 256) ||
+        !core_internal::can_add(tiles_, count) || stages_ == UINT64_MAX)
       return Status{ErrorCode::ResourceExhausted,
                     "CPU tile accounting overflow"};
     ResourceLease metadata;

@@ -7,6 +7,8 @@
 #include <new>
 #include <utility>
 
+#include "core/checked_math.hpp"
+
 namespace ps {
 namespace {
 void notify_failure(const BufferAllocator::FailureObserver& observer,
@@ -87,7 +89,7 @@ BufferAllocator BufferAllocator::limited_impl(std::uint64_t maximum_bytes,
         lease->state = state;
         {
           std::lock_guard<std::mutex> lock(state->mutex);
-          if (bytes > maximum_bytes - state->live)
+          if (!core_internal::can_add(bytes, state->live, maximum_bytes))
             return Result<std::shared_ptr<void>>(
                 Status{ErrorCode::ResourceExhausted,
                        "allocator live sublimit exceeded",

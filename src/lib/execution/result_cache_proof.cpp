@@ -4,6 +4,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "execution/result_blocks.hpp"
 
 namespace ps::execution_internal {
@@ -125,7 +126,7 @@ Result<ResourceString> ResultCacheProof::source_digest(
     if (source.target == ResultSupportTarget::Field) {
       auto width = found->result.schema().row_bytes(source.slot);
       if (!width.ok() || width.value() > maximum_window_ ||
-          (width.value() && count.value() > UINT64_MAX / width.value()))
+          !core_internal::can_multiply(count.value(), width.value()))
         return Result<ResourceString>(Status{ErrorCode::ResourceExhausted, {}});
       status = work_(count.value() * width.value());
       if (!status.ok())

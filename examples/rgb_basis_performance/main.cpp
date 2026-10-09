@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {

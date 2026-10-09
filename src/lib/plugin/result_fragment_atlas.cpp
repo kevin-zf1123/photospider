@@ -3,6 +3,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
+#include "core/status_helpers.hpp"
 #include "data/fragment_atlas_work.hpp"
 #include "data/result_window_access.hpp"
 #include "photospider/data/fragment_atlas.hpp"
@@ -11,9 +13,6 @@
 namespace ps {
 namespace {
 using Work = data_internal::FragmentAtlasWork;
-Status exhausted() {
-  return Status{ErrorCode::ResourceExhausted, {}};
-}
 }  // namespace
 Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare(
     const ResultTensorInput& input, std::vector<std::uint64_t> geometry,
@@ -37,9 +36,9 @@ Result<FragmentAtlas> FragmentAtlasPlan::materialize(
   const auto boxes = input.coverage().boxes().size();
   const auto per_box = 1 + 2 * rank;
   if (boxes > limits.maximum_boxes || boxes == UINT64_MAX ||
-      boxes + 1 > UINT64_MAX / per_box ||
-      boxes > (UINT64_MAX - 1) / ((boxes + 1) * per_box))
-    return Answer(exhausted());
+      !core_internal::can_multiply(boxes + 1, per_box) ||
+      !core_internal::can_multiply_add(boxes, (boxes + 1) * per_box, 1))
+    return Answer(core_internal::resource_exhausted());
   auto status = work.consume(1 + boxes * (boxes + 1) * per_box);
   if (!status.ok())
     return Answer(status);
@@ -57,11 +56,12 @@ Result<FragmentAtlas> FragmentAtlasPlan::materialize(
     windows.push_back(window.take_value());
   }
   const auto count = input.coverage().element_count();
-  if (!count.ok() || boxes > (UINT64_MAX - max_read_work) / (rank + 1))
-    return Answer(exhausted());
+  if (!count.ok() ||
+      !core_internal::can_multiply_add(boxes, rank + 1, max_read_work))
+    return Answer(core_internal::resource_exhausted());
   const auto cost = max_read_work + boxes * (rank + 1);
-  if (cost && count.value() > UINT64_MAX / cost)
-    return Answer(exhausted());
+  if (!core_internal::can_multiply(count.value(), cost))
+    return Answer(core_internal::resource_exhausted());
   status = work.consume(count.value() * cost);
   if (!status.ok())
     return Answer(status);

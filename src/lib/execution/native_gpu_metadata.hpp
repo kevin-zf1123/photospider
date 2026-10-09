@@ -11,6 +11,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "core/checked_math.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
 namespace ps::gpu_internal {
@@ -112,7 +113,7 @@ struct PipelineKeyView final {
     NativeString key(NativeAllocator<char>(account, false));
     std::size_t size = 0;
     for (const auto part : parts) {
-      if (part.size() > key.max_size() - size)
+      if (!core_internal::can_add(size, part.size(), key.max_size()))
         throw std::bad_alloc();
       size += part.size();
     }

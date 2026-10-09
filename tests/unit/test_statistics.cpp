@@ -1,8 +1,8 @@
 #include <cfenv>  // NOLINT(build/c++11)
 #include <cstdint>
 
-#include "photospider/data/statistics.hpp"
-#include "photospider/plugin/statistics_operation.hpp"
+#include "photospider/ops/statistics.hpp"
+#include "photospider/ops/statistics_operation.hpp"
 #include "support/test_support.hpp"
 
 int main() {

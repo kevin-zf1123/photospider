@@ -1,4 +1,4 @@
-#include "photospider/numeric/color_ramps.hpp"
+#include "photospider/ops/numeric/color_ramps.hpp"
 
 #include <atomic>
 #include <cfenv>  // NOLINT(build/c++11)
@@ -15,7 +15,7 @@
 #include <vector>
 
 #include "icc_fixture.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/numeric/arrays.hpp"
+#include "photospider/ops/numeric/arrays.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {

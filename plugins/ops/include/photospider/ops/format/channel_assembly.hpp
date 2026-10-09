@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "photospider/format/channel.hpp"
+#include "photospider/ops/format/channel.hpp"
 
 namespace ps::format {
 /** @brief Static FMT-02 metadata, output-layout and CPU-profile policy.

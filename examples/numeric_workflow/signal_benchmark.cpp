@@ -14,9 +14,9 @@
 #include <vector>
 
 #include "accuracy.hpp"  // NOLINT(build/include_subdir)
-#include "photospider/numeric/arrays.hpp"
-#include "photospider/numeric/inverse_curves.hpp"
-#include "photospider/numeric/lowpass.hpp"
+#include "photospider/ops/numeric/arrays.hpp"
+#include "photospider/ops/numeric/inverse_curves.hpp"
+#include "photospider/ops/numeric/lowpass.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {

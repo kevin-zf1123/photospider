@@ -10,12 +10,14 @@ if(@PHOTOSPIDER_ENABLE_INPAINT_OPENCV@)
 endif()
 
 set(Photospider_kernel_FOUND TRUE)
+set(Photospider_ops_headers_FOUND TRUE)
 set(Photospider_operation_sdk_FOUND TRUE)
 set(Photospider_data_provider_sdk_FOUND TRUE)
 
 foreach(_Photospider_component IN LISTS Photospider_FIND_COMPONENTS)
   if(NOT _Photospider_component STREQUAL "kernel" AND
      NOT _Photospider_component STREQUAL "operation_sdk" AND
+     NOT _Photospider_component STREQUAL "ops_headers" AND
      NOT _Photospider_component STREQUAL "data_provider_sdk")
     set(Photospider_${_Photospider_component}_FOUND FALSE)
   endif()

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "photospider/data/statistics.hpp"
+#include "photospider/ops/statistics.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps {

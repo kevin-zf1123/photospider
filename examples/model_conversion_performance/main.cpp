@@ -17,6 +17,7 @@
 #include "../channel_extraction_workflow/source.hpp"
 #include "02-format-color/model_math.hpp"
 #include "02-format-color/model_simd.hpp"
+#include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {

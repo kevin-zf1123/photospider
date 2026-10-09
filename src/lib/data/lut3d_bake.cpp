@@ -6,22 +6,89 @@
 #include <utility>
 #include <vector>
 
-#include "01-numeric/uniform_axis.hpp"
+#include "core/exact_binary_sum.hpp"
+#include "core/numeric_bits.hpp"
 #include "core/status_helpers.hpp"
 #include "data/lut3d_bake_validation.hpp"
 
 namespace ps {
 namespace {
 
-std::uint64_t raw(double value) {
-  std::uint64_t bits;
-  std::memcpy(&bits, &value, 8);
-  return bits;
+// Validate the registered report's rounded axis without retaining a knot table
+// or depending on an operator's sampling profile. Schema validation bounds the
+// shape to 2..256; every weighted sum uses the same fixed work charge as
+// before.
+Status validate_report_axis(
+    const std::array<double, 3>& axis, unsigned count,
+    const std::function<Status(std::uint64_t)>& consume) {
+  const auto invalid = [](std::string message) {
+    return Status{ErrorCode::OperationFailed,
+                  std::move(message),
+                  FailureReason::InvalidDomain,
+                  {FailureOrigin::Domain, FailureScope::Group}};
+  };
+  std::array<std::uint64_t, 3> bits{};
+  for (unsigned j = 0; j < 3; ++j) {
+    bits[j] = core_internal::binary64_bits(axis[j]);
+    if (!core_internal::finite_binary64(axis[j]))
+      return invalid("nonfinite axis component=" + std::to_string(j));
+  }
+  if (count == 1) {
+    if (bits[0] != bits[1] || bits[2] != 0)
+      return invalid(
+          "singleton axis requires bit-identical endpoints and +0 step");
+    return consume(1);
+  }
+  const auto first_key = core_internal::binary64_order_key(bits[0]);
+  const auto last_key = core_internal::binary64_order_key(bits[1]);
+  if (first_key == last_key)
+    return invalid("axis endpoints must differ");
+  const bool descending = last_key < first_key;
+  core_internal::ExactBinarySum first, second;
+  const auto rounded = [&](double a, double b, std::uint32_t wa,
+                           std::uint32_t wb, bool subtract) {
+    first.set(a);
+    second.set(b);
+    first.multiply(wa);
+    second.multiply(wb);
+    if (subtract)
+      second.negative = !second.negative;
+    first.add(second);
+    const bool negative_zero = !subtract &&
+                               (core_internal::binary64_bits(a) >> 63) &&
+                               (!wb || (core_internal::binary64_bits(b) >> 63));
+    return first.rounded_bits(count - 1, false, negative_zero);
+  };
+  auto work = consume(8192);
+  if (!work.ok())
+    return work;
+  const auto step = rounded(axis[1], axis[0], 1, 1, true);
+  constexpr auto sign = UINT64_C(1) << 63;
+  constexpr auto infinity = UINT64_C(0x7ff0000000000000);
+  if (!(step & (sign - 1)) || (step & infinity) == infinity ||
+      ((step >> 63) != descending) || step != bits[2])
+    return invalid("axis component=2 inconsistent or unrepresentable step");
+  std::uint64_t previous = 0;
+  for (unsigned j = 0; j < count; ++j) {
+    work = consume(1);
+    if (!work.ok())
+      return work;
+    auto knot = j == 0 ? bits[0] : bits[1];
+    if (j && j + 1 != count) {
+      work = consume(8192);
+      if (!work.ok())
+        return work;
+      knot = rounded(axis[0], axis[1], count - 1 - j, j, false);
+    }
+    const auto ordered = core_internal::binary64_order_key(knot);
+    const auto key = descending ? UINT64_MAX - ordered : ordered;
+    if (j && previous >= key)
+      return invalid("non-strict reconstructed axis knot=" + std::to_string(j));
+    previous = key;
+  }
+  return Status::success();
 }
-bool finite(double value) {
-  return (raw(value) & UINT64_C(0x7ff0000000000000)) !=
-         UINT64_C(0x7ff0000000000000);
-}
+
 void append(ResultFacet* facet, std::uint64_t word) {
   for (unsigned i = 0; i < 8; ++i)
     facet->payload.push_back(word >> (8 * i));
@@ -62,9 +129,12 @@ Status validate(const Lut3dBakeDescription& spec) {
           "LUT3D bake shape must be 2..256");
   if ((spec.interpolation != Lut3dInterpolation::Trilinear &&
        spec.interpolation != Lut3dInterpolation::Tetrahedral) ||
-      !finite(spec.atol) || !finite(spec.rtol) ||
-      ((raw(spec.atol) >> 63) && (raw(spec.atol) << 1)) ||
-      ((raw(spec.rtol) >> 63) && (raw(spec.rtol) << 1)) ||
+      !core_internal::finite_binary64(spec.atol) ||
+      !core_internal::finite_binary64(spec.rtol) ||
+      ((core_internal::binary64_bits(spec.atol) >> 63) &&
+       (core_internal::binary64_bits(spec.atol) << 1)) ||
+      ((core_internal::binary64_bits(spec.rtol) >> 63) &&
+       (core_internal::binary64_bits(spec.rtol) << 1)) ||
       (spec.table_dtype != ElementType::Float32 &&
        spec.table_dtype != ElementType::Float64) ||
       (spec.source_dtype != ElementType::Float32 &&
@@ -124,8 +194,8 @@ Result<SchemaTemplate> lut3d_bake_schema(const Lut3dBakeDescription& spec) {
   for (auto n : spec.shape)
     append(&metadata, n);
   append(&metadata, static_cast<std::uint64_t>(spec.interpolation));
-  append(&metadata, raw(spec.atol));
-  append(&metadata, raw(spec.rtol));
+  append(&metadata, core_internal::binary64_bits(spec.atol));
+  append(&metadata, core_internal::binary64_bits(spec.rtol));
   append(&metadata, static_cast<std::uint64_t>(spec.table_dtype));
   append(&metadata, static_cast<std::uint64_t>(spec.source_dtype));
   append(&metadata, spec.extra_points);
@@ -284,12 +354,9 @@ Status validate_lut3d_bake_report_values(
     return malformed();
   report.passed = passed != 0;
   for (unsigned i = 0; i < 3; ++i) {
-    plugin_internal::numeric_ops::UniformAxis grid(
-        plugin_internal::numeric_ops::SequenceProfile::Strict);
-    auto valid =
-        grid.validate({raw(report.axis[3 * i]), raw(report.axis[3 * i + 1]),
-                       raw(report.axis[3 * i + 2])},
-                      description.shape[i], work);
+    auto valid = validate_report_axis(
+        {report.axis[3 * i], report.axis[3 * i + 1], report.axis[3 * i + 2]},
+        description.shape[i], work);
     if (!valid.ok()) {
       if (valid.detail.origin == FailureOrigin::Domain)
         valid.detail.scope = FailureScope::Group;
@@ -297,15 +364,15 @@ Status validate_lut3d_bake_report_values(
     }
   }
   const auto valid_point = [&](const double* point) {
-    using plugin_internal::numeric_ops::BinaryParts;
     for (unsigned c = 0; c < 3; ++c) {
-      if (!finite(point[c]))
+      if (!core_internal::finite_binary64(point[c]))
         return false;
-      const auto first =
-          BinaryParts::decode(raw(report.axis[3 * c]), false).order_key();
-      const auto last =
-          BinaryParts::decode(raw(report.axis[3 * c + 1]), false).order_key();
-      const auto key = BinaryParts::decode(raw(point[c]), false).order_key();
+      const auto first = core_internal::binary64_order_key(
+          core_internal::binary64_bits(report.axis[3 * c]));
+      const auto last = core_internal::binary64_order_key(
+          core_internal::binary64_bits(report.axis[3 * c + 1]));
+      const auto key = core_internal::binary64_order_key(
+          core_internal::binary64_bits(point[c]));
       if (key < std::min(first, last) || key > std::max(first, last))
         return false;
     }
@@ -315,7 +382,8 @@ Status validate_lut3d_bake_report_values(
                                double chroma) {
     return (color.model != ColorModel::Cielch &&
             color.model != ColorModel::Oklch) ||
-           !(raw(chroma) >> 63) || !(raw(chroma) << 1);
+           !(core_internal::binary64_bits(chroma) >> 63) ||
+           !(core_internal::binary64_bits(chroma) << 1);
   };
   if (!valid_chroma(description.input_description, report.axis[3]) ||
       !valid_chroma(description.input_description, report.axis[4]))
@@ -332,10 +400,10 @@ Status validate_lut3d_bake_report_values(
 
   for (const auto* values : {&report.axis, &report.max_error_point})
     for (auto value : *values)
-      if (!finite(value))
+      if (!core_internal::finite_binary64(value))
         return malformed();
   for (unsigned i = 0; i < 3; ++i) {
-    const auto error = raw(report.max_abs_error[i]);
+    const auto error = core_internal::binary64_bits(report.max_abs_error[i]);
     if ((error >> 63) || error > UINT64_C(0x7ff0000000000000) ||
         report.max_error_index[i] < 0 ||
         report.max_error_index[i] >= report.validation_count)
@@ -343,7 +411,8 @@ Status validate_lut3d_bake_report_values(
     for (auto value :
          {report.first_failure_input[i], report.first_failure_reference[i],
           report.first_failure_lut[i]})
-      if (!finite(value) || (report.passed && raw(value)))
+      if (!core_internal::finite_binary64(value) ||
+          (report.passed && core_internal::binary64_bits(value)))
         return malformed();
   }
   if (report.passed ? report.first_failure_index != -1

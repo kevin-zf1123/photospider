@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "execution/cpu_range_context.hpp"
 
 namespace ps::gpu_internal {
@@ -13,9 +14,14 @@ std::uint64_t allocation_capacity(std::uint64_t bytes) noexcept {
   // Apple Silicon buffers up to one 16 KiB page have exact payload capacity.
   // Larger buffers are explicitly requested in complete pages.
   constexpr std::uint64_t page = 16384;
-  if (bytes == 0 || bytes > static_cast<std::uint64_t>(INT64_MAX) - page)
+  if (bytes == 0 || !core_internal::can_add(bytes, page, INT64_MAX))
     return 0;
-  return bytes <= page ? bytes : (bytes + page - 1) / page * page;
+  if (bytes <= page)
+    return bytes;
+  std::uint64_t capacity = 0;
+  return core_internal::checked_align_up(bytes, page, &capacity, INT64_MAX)
+             ? capacity
+             : 0;
 }
 Invocation::Invocation(std::shared_ptr<Device> device,
                        CancellationToken cancellation,

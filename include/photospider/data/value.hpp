@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <string>
 #include <utility>
@@ -240,6 +241,24 @@ class PHOTOSPIDER_API Value final {
    */
   [[nodiscard]] Result<std::size_t> byte_address(
       const std::vector<std::uint64_t>& coordinate) const;
+  /**
+   * @brief Resolves a borrowed coordinate without allocating coordinate
+   * storage.
+   * @param coordinate Array of rank logical coordinates, borrowed for this
+   * call. A null pointer is rejected.
+   * @param rank Number of coordinates; must match this Value's rank.
+   * @return Checked offset into bytes(), or InvalidArgument for an invalid
+   * Value, null pointer, rank mismatch, or coordinate outside coverage.
+   * @note Read-only and safe for concurrent calls on the same immutable Value.
+   * The successful path performs no allocation and retains no caller memory.
+   */
+  [[nodiscard]] Result<std::size_t> byte_address(
+      const std::uint64_t* coordinate, std::size_t rank) const;
+  /** @brief Resolves brace coordinates without allocating a vector. */
+  [[nodiscard]] Result<std::size_t> byte_address(
+      std::initializer_list<std::uint64_t> coordinate) const {
+    return byte_address(coordinate.begin(), coordinate.size());
+  }
 
   /**
    * @brief Returns the physical scalar width.
@@ -287,6 +306,14 @@ class PHOTOSPIDER_API ValueView final {
   Value retain() const { return *value_; }
   Result<std::size_t> byte_address(
       const std::vector<std::uint64_t>& coordinate) const {
+    return value_->byte_address(coordinate);
+  }
+  Result<std::size_t> byte_address(const std::uint64_t* coordinate,
+                                   std::size_t rank) const {
+    return value_->byte_address(coordinate, rank);
+  }
+  Result<std::size_t> byte_address(
+      std::initializer_list<std::uint64_t> coordinate) const {
     return value_->byte_address(coordinate);
   }
 

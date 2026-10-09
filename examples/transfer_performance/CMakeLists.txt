@@ -1,10 +1,10 @@
 cmake_minimum_required(VERSION 3.21)
 project(PhotospiderTransferPerformance LANGUAGES CXX)
 if(NOT TARGET Photospider::kernel)
-  find_package(Photospider 0.33 CONFIG REQUIRED COMPONENTS kernel)
+  find_package(Photospider 0.33 CONFIG REQUIRED COMPONENTS kernel ops_headers)
 endif()
 add_executable(photospider_transfer_performance main.cpp)
-target_link_libraries(photospider_transfer_performance PRIVATE Photospider::kernel)
+target_link_libraries(photospider_transfer_performance PRIVATE Photospider::kernel Photospider::ops_headers)
 target_compile_features(photospider_transfer_performance PRIVATE cxx_std_17)
 # Development benchmark: independent checked-in golden values gate timing.
 target_include_directories(photospider_transfer_performance PRIVATE ../../tests)

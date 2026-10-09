@@ -273,13 +273,13 @@ set(
   src/lib/data/representation.cpp
   src/lib/data/layer.cpp
   src/lib/data/quality.cpp
-  src/lib/data/statistics.cpp
+  plugins/ops/10-analysis/statistics.cpp
   src/lib/data/lut3d_bake.cpp
   src/lib/data/lut3d_bake_validation.cpp
-  src/lib/numeric/lut3d_baking.cpp
-  src/lib/plugin/statistics_operation.cpp
-  src/lib/plugin/fft_operation.cpp
-  src/lib/plugin/component_operation.cpp
+  plugins/ops/01-numeric/lut3d_baking.cpp
+  plugins/ops/10-analysis/statistics_operation.cpp
+  plugins/ops/10-analysis/fft_operation.cpp
+  plugins/ops/10-analysis/component_operation.cpp
   src/lib/data/result.cpp
   src/lib/data/result_builder.cpp
   src/lib/data/result_tensor_store.cpp
@@ -361,9 +361,9 @@ set_source_files_properties(${PHOTOSPIDER_OPERATION_SOURCES}
   src/lib/plugin/port_validation.cpp src/lib/compiler/compiler.cpp
   src/lib/data/layer.cpp src/lib/data/representation.cpp
   src/lib/data/quality.cpp
-  src/lib/data/statistics.cpp
-  src/lib/plugin/statistics_operation.cpp
-  src/lib/plugin/fft_operation.cpp
+  plugins/ops/10-analysis/statistics.cpp
+  plugins/ops/10-analysis/statistics_operation.cpp
+  plugins/ops/10-analysis/fft_operation.cpp
   src/lib/plugin/operation_registry.cpp PROPERTIES
   COMPILE_OPTIONS "-fno-fast-math;-frounding-math;-ffp-contract=off")
 # Keep optional ISA flags/definitions local; all other kernel code retains the
@@ -469,6 +469,15 @@ add_library(photospider
   $<TARGET_OBJECTS:photospider_runtime_objects>)
 add_library(Photospider::kernel ALIAS photospider)
 
+add_library(photospider_ops_headers INTERFACE)
+add_library(Photospider::ops_headers ALIAS photospider_ops_headers)
+set_target_properties(photospider_ops_headers PROPERTIES EXPORT_NAME ops_headers)
+target_compile_features(photospider_ops_headers INTERFACE cxx_std_17)
+target_include_directories(
+  photospider_ops_headers
+  INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/include>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+
 add_library(photospider_operation_sdk INTERFACE)
 add_library(Photospider::operation_sdk ALIAS photospider_operation_sdk)
 set_target_properties(photospider_operation_sdk PROPERTIES EXPORT_NAME operation_sdk)
@@ -503,7 +512,7 @@ function(photospider_configure_kernel_target target)
     ${target}
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib ${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG> ${CMAKE_CURRENT_BINARY_DIR}/generated
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/lib ${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops ${CMAKE_CURRENT_SOURCE_DIR}/plugins/ops/include ${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG> ${CMAKE_CURRENT_BINARY_DIR}/generated
       ${CMAKE_CURRENT_BINARY_DIR}/plugins/ops/rgba32f)
   target_link_libraries(
     ${target} PUBLIC Threads::Threads PRIVATE ${CMAKE_DL_LIBS})
@@ -583,15 +592,17 @@ if(PHOTOSPIDER_BUILD_MANUAL_FUZZ_TARGETS)
 endif()
 
 install(
-  TARGETS photospider photospider_operation_sdk photospider_data_provider_sdk
+  TARGETS photospider photospider_operation_sdk photospider_data_provider_sdk photospider_ops_headers
   EXPORT PhotospiderTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY include/photospider DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-  FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h" PATTERN "format" EXCLUDE)
-install(FILES include/photospider/format/alpha.hpp include/photospider/format/channel.hpp include/photospider/format/channel_assembly.hpp include/photospider/format/channel_editing.hpp include/photospider/format/metadata.hpp include/photospider/format/transfer.hpp include/photospider/format/rgb_basis.hpp include/photospider/format/model_conversion.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/photospider/format)
+  FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h")
+install(DIRECTORY plugins/ops/include/photospider/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/photospider
+  FILES_MATCHING PATTERN "*.hpp" PATTERN "*.h")
 install(
   EXPORT PhotospiderTargets
   FILE PhotospiderTargets.cmake
@@ -625,6 +636,7 @@ add_subdirectory(examples/model_conversion_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_editing_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_extraction_workflow EXCLUDE_FROM_ALL)
 add_subdirectory(examples/channel_extraction_performance EXCLUDE_FROM_ALL)
+add_subdirectory(examples/value_address_performance EXCLUDE_FROM_ALL)
 add_subdirectory(examples/image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/regional_image_vertical EXCLUDE_FROM_ALL)
 add_subdirectory(examples/foundations_workflow EXCLUDE_FROM_ALL)
@@ -669,7 +681,7 @@ if(BUILD_TESTING)
 
   function(photospider_add_test target kernel_target)
     add_executable(${target} ${ARGN})
-    target_link_libraries(${target} PRIVATE ${kernel_target})
+    target_link_libraries(${target} PRIVATE ${kernel_target} Photospider::ops_headers)
     target_include_directories(${target} PRIVATE tests)
     target_compile_features(${target} PRIVATE cxx_std_17)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -1200,6 +1212,10 @@ if(BUILD_TESTING)
   photospider_add_test(test_managed_dispatch Photospider::kernel tests/integration/test_managed_dispatch.cpp)
   photospider_add_test(test_storage Photospider::kernel tests/unit/test_storage.cpp)
   photospider_add_test(test_value Photospider::kernel tests/unit/test_value.cpp)
+  photospider_add_test(test_checked_math Photospider::kernel tests/unit/test_checked_math.cpp)
+  target_include_directories(test_checked_math PRIVATE src/lib)
+  photospider_add_test(test_lut3d_axis Photospider::kernel tests/unit/test_lut3d_axis.cpp)
+  target_include_directories(test_lut3d_axis PRIVATE src/lib)
   photospider_add_test(
     test_compiler Photospider::kernel tests/unit/test_compiler.cpp)
   photospider_add_test(

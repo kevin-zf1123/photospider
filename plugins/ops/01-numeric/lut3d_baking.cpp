@@ -1,4 +1,4 @@
-#include "photospider/numeric/lut3d_baking.hpp"
+#include "photospider/ops/numeric/lut3d_baking.hpp"
 
 #include <cstring>
 #include <map>

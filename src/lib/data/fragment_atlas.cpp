@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
+#include "core/status_helpers.hpp"
 #include "data/fragment_atlas_work.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
@@ -44,9 +46,6 @@ unsigned population(std::uint64_t mask) {
   for (; mask; mask &= mask - 1)
     ++count;
   return count;
-}
-Status exhausted() {
-  return Status{ErrorCode::ResourceExhausted, {}};
 }
 using Work = data_internal::FragmentAtlasWork;
 Result<MutableValue> allocate(std::uint64_t bytes,
@@ -85,8 +84,8 @@ Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare_regions(
   const auto rank = descriptor.shape.size();
   const auto raw = coverage.boxes().size();
   const auto scale = 1 + 2 * rank;
-  if (raw > (UINT64_MAX - rank - 1) / scale)
-    return Result<FragmentAtlasPlan>(exhausted());
+  if (!core_internal::can_multiply_add(raw, scale, rank + 1))
+    return Result<FragmentAtlasPlan>(core_internal::resource_exhausted());
   status = work.consume(1 + rank + raw * scale);
   if (!status.ok())
     return Result<FragmentAtlasPlan>(status);
@@ -113,14 +112,14 @@ Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare_regions(
     return Result<FragmentAtlasPlan>(data_internal::invalid_fragment_atlas());
   std::uint64_t volume = 1;
   for (auto size : geometry) {
-    if (!size || size > 64 / volume)
+    if (!size || !core_internal::can_multiply(size, volume, 64))
       return Result<FragmentAtlasPlan>(data_internal::invalid_fragment_atlas());
     volume *= size;
   }
   auto count = coverage.element_count();
   const auto width = Value::element_size(descriptor.element_type);
-  if (!count.ok() || count.value() > UINT64_MAX / width)
-    return Result<FragmentAtlasPlan>(exhausted());
+  if (!count.ok() || !core_internal::can_multiply(count.value(), width))
+    return Result<FragmentAtlasPlan>(core_internal::resource_exhausted());
   status = work.consume(count.value());
   if (!status.ok())
     return Result<FragmentAtlasPlan>(status);
@@ -141,7 +140,7 @@ Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare_regions(
         auto found = masks.find(key);
         if (found == masks.end()) {
           if (masks.size() >= limits.maximum_boxes)
-            return exhausted();
+            return core_internal::resource_exhausted();
           found = masks.emplace(key, 0).first;
         }
         found->second |= UINT64_C(1) << bit;
@@ -156,19 +155,19 @@ Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare_regions(
   plan->coverage = coverage;
   plan->tile_shape = std::move(geometry);
   plan->bytes = count.value() * width;
-  if (masks.size() > UINT64_MAX / 2)
-    return Result<FragmentAtlasPlan>(exhausted());
+  if (!core_internal::can_multiply(masks.size(), 2))
+    return Result<FragmentAtlasPlan>(core_internal::resource_exhausted());
   while (plan->slots < masks.size() * 2) {
-    if (plan->slots > UINT64_MAX / 2)
-      return Result<FragmentAtlasPlan>(exhausted());
+    if (!core_internal::can_multiply(plan->slots, 2))
+      return Result<FragmentAtlasPlan>(core_internal::resource_exhausted());
     plan->slots *= 2;
   }
   if (plan->slots > SIZE_MAX ||
-      plan->slots > UINT64_MAX / kFragmentAtlasSlotBytes)
-    return Result<FragmentAtlasPlan>(exhausted());
+      !core_internal::can_multiply(plan->slots, kFragmentAtlasSlotBytes))
+    return Result<FragmentAtlasPlan>(core_internal::resource_exhausted());
   const auto tile_work = 1 + shape.size() * 8;
-  if (masks.size() > (UINT64_MAX - plan->slots) / tile_work)
-    return Result<FragmentAtlasPlan>(exhausted());
+  if (!core_internal::can_multiply_add(masks.size(), tile_work, plan->slots))
+    return Result<FragmentAtlasPlan>(core_internal::resource_exhausted());
   status = work.consume(plan->slots + masks.size() * tile_work);
   if (!status.ok())
     return Result<FragmentAtlasPlan>(status);
@@ -195,15 +194,13 @@ Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare_regions(
     return Result<FragmentAtlasPlan>(status);
   plan->prepared_work = limits.maximum_work - work.left;
   const auto add_cost = [&](std::uint64_t n, std::uint64_t factor) {
-    if (n > (UINT64_MAX - plan->packing_work) / factor)
-      return false;
-    plan->packing_work += n * factor;
-    return true;
+    return core_internal::checked_multiply_add(n, factor, plan->packing_work,
+                                               &plan->packing_work);
   };
   if (!add_cost(1, 1 + rank) || !add_cost(raw, 2 * scale) ||
       !add_cost(plan->slots, 10) || !add_cost(plan->tiles.size(), 74) ||
       !add_cost(count.value(), shape.size() + width))
-    return Result<FragmentAtlasPlan>(exhausted());
+    return Result<FragmentAtlasPlan>(core_internal::resource_exhausted());
   FragmentAtlasPlan result;
   result.impl_ = std::move(plan);
   return Result<FragmentAtlasPlan>(std::move(result));
@@ -261,9 +258,9 @@ Result<FragmentAtlas> FragmentAtlasPlan::materialize_regions(
   const auto rank = impl_->descriptor.shape.size();
   const auto left = impl_->coverage.boxes().size();
   const auto right = coverage.boxes().size();
-  if (left > UINT64_MAX - right ||
-      left + right > (UINT64_MAX - rank - 1) / (1 + 2 * rank))
-    return Result<FragmentAtlas>(exhausted());
+  if (!core_internal::can_add(left, right) ||
+      !core_internal::can_multiply_add(left + right, 1 + 2 * rank, rank + 1))
+    return Result<FragmentAtlas>(core_internal::resource_exhausted());
   status = work.consume(1 + rank + (left + right) * (1 + 2 * rank));
   if (!status.ok())
     return Result<FragmentAtlas>(status);
@@ -275,7 +272,8 @@ Result<FragmentAtlas> FragmentAtlasPlan::materialize_regions(
   const auto metadata_work = 1 + rank + (left + right) * (1 + 2 * rank);
   status = work.consume(impl_->packing_work - metadata_work);
   if (!status.ok() || impl_->tiles.size() > limits.maximum_boxes)
-    return Result<FragmentAtlas>(status.ok() ? exhausted() : status);
+    return Result<FragmentAtlas>(
+        status.ok() ? core_internal::resource_exhausted() : status);
   auto payload = allocate(payload_allocation_bytes(), allocator);
   if (!payload.ok())
     return Result<FragmentAtlas>(payload.status());
@@ -340,13 +338,15 @@ Result<std::uint64_t> FragmentAtlas::address(
       at.size() != descriptor.shape.size() || tile_shape.size() != at.size() ||
       !payload.valid() || !directory.valid() || !slot_count ||
       (slot_count & (slot_count - 1)) ||
-      slot_count > directory.bytes().size() / kFragmentAtlasSlotBytes ||
+      !core_internal::can_multiply(slot_count, kFragmentAtlasSlotBytes,
+                                   directory.bytes().size()) ||
       payload_bytes > payload.bytes().size())
     return Result<std::uint64_t>(data_internal::invalid_fragment_atlas());
   Key key{};
   std::uint64_t bit = 0, volume = 1;
   for (std::size_t axis = 0; axis < at.size(); ++axis) {
-    if (!tile_shape[axis] || tile_shape[axis] > 64 / volume ||
+    if (!tile_shape[axis] ||
+        !core_internal::can_multiply(tile_shape[axis], volume, 64) ||
         at[axis] >= descriptor.shape[axis])
       return Result<std::uint64_t>(data_internal::invalid_fragment_atlas());
     volume *= tile_shape[axis];
@@ -369,8 +369,8 @@ Result<std::uint64_t> FragmentAtlas::address(
       const auto offset = load(entry + 72);
       const auto width = Value::element_size(descriptor.element_type);
       const auto prior = population(mask & ((UINT64_C(1) << bit) - 1));
-      if (offset > payload_bytes || prior * width > payload_bytes - offset ||
-          width > payload_bytes - offset - prior * width)
+      if (!core_internal::can_multiply_add(prior + 1, width, offset,
+                                           payload_bytes))
         return Result<std::uint64_t>(data_internal::invalid_fragment_atlas());
       return Result<std::uint64_t>(offset + prior * width);
     }

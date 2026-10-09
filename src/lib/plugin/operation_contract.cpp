@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/checked_math.hpp"
 #include "core/status_helpers.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "plugin/operation_semantics.hpp"
@@ -185,7 +186,7 @@ Result<OperationMetadata> infer_operation_output(
       }
       const auto n =
           extent.value / extent.divisor + (extent.value % extent.divisor != 0);
-      if (n > UINT64_MAX - extent.offset)
+      if (!core_internal::can_add(n, extent.offset))
         return mismatch("result domain overflows");
       domain.push_back(n + extent.offset);
     }
@@ -330,7 +331,7 @@ Status validate_operation_contract(const OperationTraits& t) {
       (t.repeated_maximum &&
        (!t.repeated_minimum ||
         (!t.repeated_match && !t.requires_metadata_specialization) ||
-        t.input_count > 1024 - t.repeated_maximum)) ||
+        !core_internal::can_add(t.input_count, t.repeated_maximum, 1024))) ||
       (!t.repeated_maximum && t.repeated_minimum))
     return core_internal::invalid_schema_domain(
         "invalid repeated input template");

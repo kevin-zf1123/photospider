@@ -7,7 +7,7 @@
 
 #include "02-format-color/alpha_lowering.hpp"
 #include "02-format-color/alpha_numeric_metadata.hpp"
-#include "photospider/format/metadata.hpp"
+#include "photospider/ops/format/metadata.hpp"
 
 namespace ps::plugin_internal::alpha_ops {
 namespace {

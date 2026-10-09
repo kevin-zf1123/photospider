@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "cache_build_identity.hpp"  // NOLINT(build/include_subdir)
+#include "core/checked_math.hpp"
 #include "execution/native_gpu.hpp"
 #ifdef PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS
 #include "execution/execution_test_hooks.hpp"
@@ -572,7 +573,8 @@ Status Device::execute(
         const auto size = group.value()[axis];
         if (!c.grid[axis] || c.grid[axis] > UINT32_MAX ||
             size > limits.maxComputeWorkGroupSize[axis] ||
-            size > limits.maxComputeWorkGroupInvocations / product ||
+            !core_internal::can_multiply(
+                product, size, limits.maxComputeWorkGroupInvocations) ||
             c.grid[axis] / size + (c.grid[axis] % size != 0) >
                 limits.maxComputeWorkGroupCount[axis] ||
             (explicit_group && c.group[axis] != size))
@@ -583,8 +585,8 @@ Status Device::execute(
       std::uint32_t mask = c.constant_size ? 1U << c.constant_index : 0;
       if (c.buffer_count > limits.maxPerStageDescriptorStorageBuffers ||
           c.buffer_count > limits.maxDescriptorSetStorageBuffers ||
-          c.buffer_count + (c.constant_size != 0) >
-              limits.maxPerStageResources ||
+          !core_internal::can_add(c.buffer_count, c.constant_size != 0,
+                                  limits.maxPerStageResources) ||
           (c.constant_size && (c.constant_size > limits.maxUniformBufferRange ||
                                !limits.maxPerStageDescriptorUniformBuffers ||
                                !limits.maxDescriptorSetUniformBuffers)))

@@ -1,4 +1,4 @@
-#include "photospider/numeric/unary.hpp"
+#include "photospider/ops/numeric/unary.hpp"
 
 #include <fenv.h>  // NOLINT(build/c++11)
 
