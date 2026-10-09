@@ -22,6 +22,8 @@ struct ResultTensorBacking {
   ResourceVector<ResultTensorView> views;
   ResourceVector<ResultSpatialBacking> backing;
   ResourceVector<Value> affine;
+  // True only when affine[i].region() equals coverage.boxes()[i].
+  bool affine_canonical = false;
   ResourceVector<ResultRef> affine_owners;
   ResourceVector<ResourceLease> affine_metadata;
   ResourceVector<std::shared_ptr<void>> affine_growth;

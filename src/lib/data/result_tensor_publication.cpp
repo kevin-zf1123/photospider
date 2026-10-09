@@ -195,6 +195,7 @@ Status ResultBuilder::publish_tensor_storage(
   target.affine.push_back(value.take_value());
   target.affine_metadata.push_back(admission.take_value());
   target.affine_growth.push_back(std::move(growth_owner));
+  target.affine_canonical = false;
   target.coverage = coverage.take_value();
   target.relation = combined.take_value();
   ++impl_->revision;
@@ -559,6 +560,237 @@ Status ResultBuilder::publish_tensor_kernel(
       for (auto& candidate : candidates)
         target.backing.push_back(std::move(candidate));
     }
+    target.affine_canonical = false;
+    target.coverage = coverage.take_value();
+    target.relation = combined.take_value();
+    ++owner->revision;
+    return Status::success();
+  } catch (const std::bad_alloc&) {
+    auto status = Status{ErrorCode::ResourceExhausted, {}};
+    std::lock_guard<std::timed_mutex> lock(owner->mutex);
+    if (!owner->complete && owner->status().ok())
+      owner->failure.record(status);
+    return owner->status().ok() ? status : owner->status();
+  } catch (...) {
+    auto status = Status{ErrorCode::OperationFailed, {}};
+    std::lock_guard<std::timed_mutex> lock(owner->mutex);
+    if (!owner->complete && owner->status().ok())
+      owner->failure.record(status);
+    return owner->status().ok() ? status : owner->status();
+  }
+}
+Status ResultBuilder::publish_tensor_kernel(
+    std::uint32_t slot, const Footprint& requested,
+    const std::function<Status(const ResourceVector<ResultTensorWriteWindow>&)>&
+        write,
+    ResultRelation relation, ResultFinality finality,
+    const CancellationToken& cancellation) {
+  const Footprint samples = requested;
+  const auto owner = impl_;
+  if (!owner)
+    return {ErrorCode::Stale, {}};
+  try {
+    ResourceAllocationScope scope(owner->budget);
+    std::unique_lock<std::timed_mutex> lock(owner->mutex, std::defer_lock);
+    while (!lock.try_lock_for(std::chrono::milliseconds(2)))
+      if (cancellation.cancelled()) {
+        owner->cancelled_publication = true;
+        return {ErrorCode::Cancelled, {}};
+      }
+    const auto reject = [&](Status status) {
+      owner->failure.record(status);
+      return status;
+    };
+    if (cancellation.cancelled())
+      return reject({ErrorCode::Cancelled, {}});
+    if (owner->complete || !owner->status().ok())
+      return owner->status().ok() ? Status{ErrorCode::Stale, {}}
+                                  : owner->status();
+    if (auto busy = owner->reject_active_mutation(); !busy.ok())
+      return busy;
+    const auto revision = owner->revision;
+    if (!samples.valid() || slot >= owner->schema.tensors.size() || !write ||
+        !finality.satisfied() || !owner->descriptor_relation.valid() ||
+        !relation.owned_by(owner->budget) || revision == UINT64_MAX)
+      return reject(data_internal::invalid_schema());
+    const auto& spec = owner->schema.tensors[slot];
+    auto& target = owner->tensors[slot];
+    if (samples.shape() != spec.sample_shape())
+      return reject(data_internal::invalid_schema());
+    if (samples.boxes().size() == 1) {
+      lock.unlock();
+      return publish_tensor_kernel(slot, samples.boxes()[0], write,
+                                   std::move(relation), finality, cancellation);
+    }
+    owner->kernel_active.store(true);
+    ProducerWriteGuard producer_guard{&owner->kernel_active};
+    FootprintLimits limits;
+    limits.cancellation = cancellation;
+    limits.consume_work = [root = owner->budget](auto n) {
+      return root.consume({n});
+    };
+    auto closed = spec.close_samples(samples, limits);
+    if (!closed.ok())
+      return reject(closed.status());
+    const auto domain = spec.sample_count();
+    if (closed.value() != samples ||
+        relation.coverage() != (domain.ok() ? domain.value() : UINT64_MAX))
+      return reject(data_internal::invalid_schema());
+    auto overlap = samples.intersect(target.coverage, limits);
+    if (!overlap.ok())
+      return reject(overlap.status());
+    if (!overlap.value().empty())
+      return reject(data_internal::invalid_schema());
+    auto coverage = target.coverage.unite(samples, limits);
+    if (!coverage.ok())
+      return reject(coverage.status());
+    if (relation.guarantee() != DependencyGuarantee::Unknown) {
+      auto certified = relation.certify(samples, limits);
+      if (!certified.ok())
+        return reject(certified);
+    }
+    auto restricted = relation.restrict_to(samples, limits);
+    if (!restricted.ok())
+      return reject(restricted.status());
+    relation = restricted.take_value();
+    auto combined =
+        !target.coverage.empty() && target.relation.valid() &&
+                !target.relation.same_owner(relation)
+            ? ResultRelation::unite(owner->budget, {target.relation, relation})
+            : Result<ResultRelation>(relation);
+    if (!combined.ok())
+      return reject(combined.status());
+    if (samples.empty()) {
+      target.relation = combined.take_value();
+      ++owner->revision;
+      return Status::success();
+    }
+    auto count = samples.element_count();
+    const auto width = Value::element_size(spec.descriptor.element_type);
+    if (!count.ok() || !width || count.value() > INT64_MAX / width)
+      return reject({ErrorCode::ResourceExhausted, "batch tensor byte count"});
+    const auto bytes = count.value() * width;
+    if (bytes > owner->limits.maximum_bytes)
+      return reject(
+          {ErrorCode::ResourceExhausted, "tensor storage growth limit"});
+    auto copied = owner->budget.consume({count.value()});
+    if (!copied.ok())
+      return reject(copied);
+    const auto rank = samples.shape().size(), boxes = samples.boxes().size();
+    const auto metadata_unit =
+        sizeof(Value) +
+        rank * (sizeof(RegionDimension) + 3 * sizeof(std::uint64_t));
+    if (boxes > UINT64_MAX / metadata_unit ||
+        boxes > target.affine.max_size() - target.affine.size())
+      return reject(
+          {ErrorCode::ResourceExhausted, "batch tensor metadata count"});
+    const auto metadata_bytes = boxes * metadata_unit;
+    if (metadata_bytes > UINT64_MAX - bytes)
+      return reject(
+          {ErrorCode::ResourceExhausted, "batch tensor growth count"});
+    auto metadata = owner->budget.reserve(
+        ResourceCapacity::host(metadata_bytes, metadata_bytes));
+    if (!metadata.ok())
+      return reject(metadata.status());
+    auto scratch = owner->budget.reserve(
+        ResourceCapacity::host(metadata_bytes, metadata_bytes));
+    if (!scratch.ok())
+      return reject(scratch.status());
+    auto allocated = owner->budget.allocator().allocate(bytes);
+    if (!allocated.ok())
+      return reject(allocated.status());
+    auto buffer = allocated.take_value();
+    const auto growth_bytes = buffer.size() + metadata_bytes;
+    if (growth_bytes < metadata_bytes)
+      return reject(
+          {ErrorCode::ResourceExhausted, "batch tensor growth count"});
+    auto growth = owner->image_budget->charge(growth_bytes, false, true);
+    if (!growth.ok())
+      return reject(growth.status());
+    std::shared_ptr<void> growth_owner;
+    try {
+      growth_owner = std::shared_ptr<void>(
+          nullptr, [budget = owner->image_budget, growth_bytes](void*) {
+            budget->release(growth_bytes);
+          });
+    } catch (...) {
+      owner->image_budget->release(growth_bytes);
+      throw;
+    }
+    ResourceVector<StridedLayout> layouts{
+        ResourceAllocator<StridedLayout>(owner->budget)};
+    ResourceVector<ResultTensorWriteWindow> windows{
+        ResourceAllocator<ResultTensorWriteWindow>(owner->budget)};
+    ResourceVector<Value> values{ResourceAllocator<Value>(owner->budget)};
+    layouts.reserve(boxes);
+    windows.reserve(boxes);
+    values.reserve(boxes);
+    target.affine.reserve(target.affine.size() + boxes);
+    target.affine_metadata.reserve(target.affine_metadata.size() + 1);
+    target.affine_growth.reserve(target.affine_growth.size() + 1);
+    std::uint64_t offset = 0;
+    for (const auto& region : samples.boxes()) {
+      if (cancellation.cancelled())
+        return reject({ErrorCode::Cancelled, {}});
+      ResultTensorWriteWindow window;
+      window.spec_ = &spec;
+      window.region_ = region;
+      window.affine_data_ = buffer.data() + offset;
+      window.affine_strides_.resize(rank);
+      StridedLayout layout;
+      layout.byte_offset = offset;
+      layout.byte_strides.resize(rank);
+      layout.origin.resize(rank);
+      std::uint64_t stride = width;
+      for (std::size_t axis = rank; axis-- > 0;) {
+        window.affine_strides_[axis] = stride;
+        layout.byte_strides[axis] = stride;
+        layout.origin[axis] = region.dimensions()[axis].offset;
+        stride *= region.dimensions()[axis].extent;
+      }
+      offset += stride;
+      layouts.push_back(std::move(layout));
+      windows.push_back(std::move(window));
+    }
+    lock.unlock();
+    Status written;
+    try {
+      written = write(windows);
+    } catch (const std::bad_alloc&) {
+      written = {ErrorCode::ResourceExhausted, {}};
+    } catch (...) {
+      written = {ErrorCode::OperationFailed, {}};
+    }
+    lock.lock();
+    if (!owner->status().ok())
+      return owner->status();
+    if (impl_ != owner || owner->complete || owner->revision != revision)
+      return reject(
+          {ErrorCode::Stale, "tensor producer changed during callback"});
+    if (!written.ok())
+      return reject(written);
+    if (cancellation.cancelled())
+      return reject({ErrorCode::Cancelled, {}});
+    windows.clear();
+    auto storage = std::move(buffer).freeze();
+    for (std::size_t i = 0; i < boxes; ++i) {
+      auto value = Value::from_storage(
+          {spec.descriptor.element_type, samples.shape()}, samples.boxes()[i],
+          std::move(layouts[i]), storage);
+      if (!value.ok())
+        return reject(value.status());
+      values.push_back(value.take_value());
+    }
+    if (cancellation.cancelled())
+      return reject({ErrorCode::Cancelled, {}});
+    const bool canonical = target.coverage.empty() && target.affine.empty() &&
+                           target.backing.empty() && target.views.empty();
+    // All allocations and fallible checks precede this single commit barrier.
+    for (auto& value : values)
+      target.affine.push_back(std::move(value));
+    target.affine_metadata.push_back(metadata.take_value());
+    target.affine_growth.push_back(std::move(growth_owner));
+    target.affine_canonical = canonical;
     target.coverage = coverage.take_value();
     target.relation = combined.take_value();
     ++owner->revision;
@@ -1108,6 +1340,7 @@ Status ResultBuilder::publish_tensor_view(
   if (impl_->revision == UINT64_MAX)
     return reject(data_internal::invalid_schema());
   target.views.push_back({region, alias.take_value(), std::move(owners)});
+  target.affine_canonical = false;
   target.coverage = next.take_value();
   target.relation = combined.take_value();
   ++impl_->revision;

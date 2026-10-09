@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "data/affine_view.hpp"
+#include "data/footprint_index.hpp"
 #include "data/result_host_access.hpp"
 #include "data/result_state.hpp"
 #include "data/result_support.hpp"
@@ -157,8 +158,14 @@ Result<std::uint64_t> execution_internal::ResultWindowAccess::read_work(
   if (!window.valid())
     return Result<std::uint64_t>(Status{ErrorCode::Stale, {}});
   const auto rank = window.region_.rank();
-  const auto pieces =
-      static_cast<std::uint64_t>(window.affine_.size()) + window.pieces_.size();
+  auto affine = static_cast<std::uint64_t>(window.affine_.size());
+  if (window.affine_canonical_ && affine > 1) {
+    std::uint64_t levels = 1;
+    for (auto n = affine; n; n >>= 1)
+      levels += 2;
+    affine = levels * rank;
+  }
+  const auto pieces = affine + window.pieces_.size();
   const auto fixed = 4 * rank + 2;
   if (pieces == UINT64_MAX || pieces + 1 > (UINT64_MAX - fixed) / (rank + 1))
     return Result<std::uint64_t>(Status{ErrorCode::ResourceExhausted, {}});
@@ -329,12 +336,22 @@ Result<ResultTensorRun> ResultTensorReadWindow::row_run(
     return Result<ResultTensorRun>(Status{
         ErrorCode::InvalidArgument, "coordinate outside Result tensor window"});
   if (owners_.size() > 1) {
-    auto charged = owner_.impl_->budget.consume(
-        {(affine_.size() + 1) * (region_.rank() + 1)});
+    auto lookup = execution_internal::ResultWindowAccess::read_work(*this);
+    if (!lookup.ok())
+      return Result<ResultTensorRun>(lookup.status());
+    auto charged = owner_.impl_->budget.consume({lookup.value()});
     if (!charged.ok())
       return Result<ResultTensorRun>(charged);
   }
-  for (const auto& value : affine_) {
+  auto first = std::size_t{0}, last = affine_.size();
+  if (affine_canonical_) {
+    first = footprint_internal::containing(
+        affine_.size(), at.size(), at.data(),
+        [&](auto i) -> const Region& { return affine_[i].region(); }, [] {});
+    last = first == affine_.size() ? first : first + 1;
+  }
+  for (auto i = first; i < last; ++i) {
+    const auto& value = affine_[i];
     if (!inside(value.region(), at))
       continue;
     auto address = value.byte_address(at);
@@ -380,12 +397,22 @@ Result<ResultTensorRectangle> ResultTensorReadWindow::rectangle_run(
   if (!row.ok())
     return Result<ResultTensorRectangle>(row.status());
   if (owners_.size() > 1) {
-    auto charged = owner_.impl_->budget.consume(
-        {(affine_.size() + 1) * (region_.rank() + 1)});
+    auto lookup = execution_internal::ResultWindowAccess::read_work(*this);
+    if (!lookup.ok())
+      return Result<ResultTensorRectangle>(lookup.status());
+    auto charged = owner_.impl_->budget.consume({lookup.value()});
     if (!charged.ok())
       return Result<ResultTensorRectangle>(charged);
   }
-  for (const auto& value : affine_) {
+  auto first = std::size_t{0}, last = affine_.size();
+  if (affine_canonical_) {
+    first = footprint_internal::containing(
+        affine_.size(), at.size(), at.data(),
+        [&](auto i) -> const Region& { return affine_[i].region(); }, [] {});
+    last = first == affine_.size() ? first : first + 1;
+  }
+  for (auto i = first; i < last; ++i) {
+    const auto& value = affine_[i];
     if (!inside(value.region(), at))
       continue;
     if (!row_axis())
@@ -560,6 +587,71 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
   result.piece_order_ = ResourceVector<std::size_t>(
       ResourceAllocator<std::size_t>(impl_->budget));
   result.cancellation_ = cancellation;
+  const auto& backing = impl_->tensors[slot];
+  if (backing.affine_canonical) {
+    std::array<std::uint64_t, 8> at{};
+    for (std::size_t axis = 0; axis < region.rank(); ++axis)
+      at[axis] = region.dimensions()[axis].offset;
+    std::uint64_t levels = 1;
+    for (auto n = backing.affine.size(); n; n >>= 1)
+      levels += 2;
+    auto charged = impl_->budget.consume({levels * region.rank()});
+    if (!charged.ok())
+      return Answer(charged);
+    const auto index = footprint_internal::containing(
+        backing.affine.size(), region.rank(), at.data(),
+        [&](auto i) -> const Region& { return backing.affine[i].region(); },
+        [] {});
+    if (index != backing.affine.size()) {
+      const auto& value = backing.affine[index];
+      bool contained = true;
+      for (std::size_t axis = 0; axis < region.rank(); ++axis) {
+        const auto a = region.dimensions()[axis],
+                   b = value.region().dimensions()[axis];
+        contained &= a.extent <= b.extent - (a.offset - b.offset);
+      }
+      if (contained) {
+        auto part = value.view(region);
+        if (!part.ok())
+          return Answer(part.status());
+        result.affine_.push_back(part.take_value());
+        result.affine_canonical_ = true;
+        return Answer(std::move(result));
+      }
+    }
+    // Distinct canonical values are disjoint. The authorization check already
+    // proved this entire request covered, so clip each backing once instead of
+    // repeatedly subtracting its prefix from a growing set of remaining boxes.
+    charged =
+        impl_->budget.consume({backing.affine.size() * (region.rank() + 1)});
+    if (!charged.ok())
+      return Answer(charged);
+    for (const auto& value : backing.affine) {
+      if (cancellation.cancelled())
+        return Answer(Status{ErrorCode::Cancelled, {}});
+      auto dims = region.dimensions();
+      bool overlaps = true;
+      for (std::size_t axis = 0; axis < dims.size(); ++axis) {
+        const auto other = value.region().dimensions()[axis];
+        const auto first = std::max(dims[axis].offset, other.offset);
+        const auto last = std::min(dims[axis].offset + dims[axis].extent,
+                                   other.offset + other.extent);
+        if (first >= last) {
+          overlaps = false;
+          break;
+        }
+        dims[axis] = {first, last - first};
+      }
+      if (!overlaps)
+        continue;
+      auto part = value.view(Region(std::move(dims)));
+      if (!part.ok())
+        return Answer(part.status());
+      result.affine_.push_back(part.take_value());
+    }
+    result.affine_canonical_ = true;
+    return Answer(std::move(result));
+  }
   auto remaining = requested.take_value();
   if (!impl_->tensors[slot].affine.empty()) {
     for (const auto& value : impl_->tensors[slot].affine) {
@@ -601,8 +693,10 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
         return Answer(next.status());
       remaining = next.take_value();
     }
-    if (remaining.empty())
+    if (remaining.empty()) {
+      result.affine_canonical_ = backing.affine_canonical;
       return Answer(std::move(result));
+    }
   }
   if (!spec.layout.spatial)
     return Answer(data_internal::unavailable());

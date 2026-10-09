@@ -302,12 +302,29 @@ Status validate_tensor_samples(
       };
       std::array<Cached, 4> cache{};
       const auto sample_axis = window.sample_axis();
+      auto count = region.element_count();
+      if (!count.ok())
+        return count.status();
+      uint64_t remaining = count.value(), credit = 0;
       const auto reader = [&](const auto& at) -> Result<double> {
-        if (consume) {
-          auto charged = consume(1);
-          if (!charged.ok())
-            return Result<double>(charged);
+        if (cancellation.cancelled())
+          return Result<double>(Status{ErrorCode::Cancelled, {}});
+        if (!credit) {
+          const auto next = std::min<uint64_t>(256, remaining);
+          if (consume) {
+            // Precharge a bounded batch without changing the per-sample
+            // validation. Successful regions still consume exactly N units;
+            // a rejected charge never falls back to a smaller retry.
+            auto charged = consume(next);
+            if (!charged.ok())
+              return Result<double>(charged);
+          }
+          credit = next;
+          remaining -= credit;
+          if (cancellation.cancelled())
+            return Result<double>(Status{ErrorCode::Cancelled, {}});
         }
+        --credit;
         auto& row = cache[at.back() % cache.size()];
         bool hit = row.valid && at[sample_axis] >= row.at[sample_axis] &&
                    at[sample_axis] - row.at[sample_axis] < row.run.samples;
@@ -348,6 +365,13 @@ Status validate_tensor_samples(
                                             numeric_failure, stop);
       if (!checked.ok())
         return checked;
+      if (cancellation.cancelled())
+        return {ErrorCode::Cancelled, {}};
+      if (stop) {
+        const auto code = stop();
+        if (code != ErrorCode::Ok)
+          return {code, {}};
+      }
       bool advanced = false;
       for (size_t axis = batches; axis-- > 0;) {
         if (++dimensions[axis].offset <

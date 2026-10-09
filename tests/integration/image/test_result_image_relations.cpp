@@ -742,9 +742,323 @@ void mapped_relations() {
               count == 4,
           "mapped visit exact clipped support");
 }
+void gather_cached_mask() {
+  ResourceBudget root;
+  constexpr std::uint64_t count = 512;
+  const std::vector<std::uint64_t> output{2 * count, 4}, input{1, 4};
+  std::vector<Region> even, odd;
+  for (std::uint64_t i = 0; i < count; ++i) {
+    even.emplace_back(std::vector<RegionDimension>{{2 * i, 1}, {0, 4}});
+    odd.emplace_back(std::vector<RegionDimension>{{2 * i + 1, 1}, {0, 4}});
+  }
+  auto mask = take(Footprint::from_regions(output, even));
+  // Different owners with identical canonical geometry must hit the full-mask
+  // path, while equal box counts with different coordinates must not.
+  auto same = take(Footprint::from_regions(output, even));
+  auto different = take(Footprint::from_regions(output, odd));
+  std::vector<ResultMappedAxis> axes(2);
+  axes[1].extent = 4;
+  auto relation = take(
+      ResultRelation::gather(root, output, mask, 1, input, axes, 0, 1,
+                             [](std::uint64_t, std::uint32_t) {
+                               ResultGatherSample sample;
+                               sample.present = true;
+                               return Result<ResultGatherSample>(sample);
+                             },
+                             {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
+  FootprintLimits limits;
+  limits.maximum_work = 8 * count + 128;
+  std::uint64_t issued = 0;
+  limits.consume_work = [&](auto n) {
+    issued += n;
+    return Status::success();
+  };
+  unsigned calls = 0;
+  Footprint projected;
+  require(relation
+              .project(
+                  same,
+                  [&](auto, const auto* samples) {
+                    ++calls;
+                    projected = *samples;
+                    return Status::success();
+                  },
+                  limits)
+              .ok(),
+          "full sparse Gather projection avoids geometry rebuild");
+  require(calls == 1 && projected == take(Footprint::all(input)) &&
+              issued <= limits.maximum_work,
+          "cached mask retains exact support and linear query work");
+  for (const auto maximum : {0U, 32U, 128U, 1024U, 4096U, 65536U}) {
+    limits.maximum_work = maximum;
+    issued = 0;
+    calls = 0;
+    auto status = relation.project(
+        different,
+        [&](auto, const auto*) {
+          ++calls;
+          return Status::success();
+        },
+        limits);
+    require(issued <= maximum && calls == 0 &&
+                (status.ok() || status.code == ErrorCode::ResourceExhausted),
+            "unequal-mask fallback shares comparison work and preserves holes");
+  }
+  CancellationSource cancel;
+  limits = {};
+  limits.cancellation = cancel.token();
+  limits.consume_work = [&](auto n) {
+    if (n >= count)
+      cancel.cancel();
+    return Status::success();
+  };
+  calls = 0;
+  require(relation.project(
+                      same,
+                      [&](auto, const auto*) {
+                        ++calls;
+                        return Status::success();
+                      },
+                      limits)
+                      .code == ErrorCode::Cancelled &&
+              calls == 0,
+          "full-mask comparison observes cancellation after its charge");
+  limits = {};
+  limits.maximum_boxes = count - 1;
+  require(relation.project(
+                      same,
+                      [&](auto, const auto*) {
+                        ++calls;
+                        return Status::success();
+                      },
+                      limits)
+                      .code == ErrorCode::ResourceExhausted &&
+              calls == 0,
+          "full-mask alias still obeys the box limit");
+}
+void gather_relations() {
+  ResourceBudget root;
+  const std::vector<std::uint64_t> output{3, 4}, input{8, 8, 4};
+  std::vector<ResultMappedAxis> axes(3);
+  axes[0].output_axis = 0;
+  axes[0].step = 2;
+  axes[1].output_axis = 0;
+  axes[2].extent = 4;
+  const auto reader = [](std::uint64_t, std::uint32_t) {
+    ResultGatherSample sample;
+    sample.present = true;
+    return Result<ResultGatherSample>(sample);
+  };
+  auto relation = take(ResultRelation::gather(
+      root, output, Region::whole(output), 1, input, axes, 0, 1, reader,
+      {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}, 2));
+  const auto request =
+      take(Footprint::from_regions(output, {Region({{1, 1}, {2, 1}})}));
+  const auto expected =
+      take(Footprint::from_regions(input, {Region({{2, 1}, {1, 1}, {0, 4}})}));
+  Footprint data, validation;
+  require(relation
+              .project(request,
+                       [&](auto support, const auto* samples) {
+                         require(samples != nullptr, "gather tensor footprint");
+                         if (support.roles & 1U)
+                           data = *samples;
+                         if (support.roles & 4U)
+                           validation = *samples;
+                         return Status::success();
+                       })
+              .ok(),
+          "gather enumerates mappings with gaps and repeated output axes");
+  require(data == expected,
+          "gather partial channel retains exact full input tuple");
+  require(validation == take(Footprint::from_regions(
+                            input, {Region({{2, 1}, {0, 8}, {0, 4}})})),
+          "gather Validation expands without broadening Data");
+  const auto edit =
+      take(Footprint::from_regions(input, {Region({{2, 1}, {1, 1}, {3, 1}})}));
+  require(take(relation.preimage(
+              request, {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}, edit)) ==
+              request,
+          "gather inverse detects any channel and respects requested output "
+          "channels");
+  const auto full = take(Footprint::all(output));
+  FootprintLimits limits;
+  limits.maximum_boxes = 1;
+  unsigned calls = 0;
+  require(relation.project(
+                      full,
+                      [&](auto, const auto*) {
+                        ++calls;
+                        return Status::success();
+                      },
+                      limits)
+                      .code == ErrorCode::ResourceExhausted &&
+              calls == 0,
+          "cached gather support obeys box limit");
+  CancellationSource cancel;
+  limits = {};
+  limits.cancellation = cancel.token();
+  calls = 0;
+  require(relation.project(
+                      request,
+                      [&](auto, const auto*) {
+                        ++calls;
+                        cancel.cancel();
+                        return Status::success();
+                      },
+                      limits)
+                      .code == ErrorCode::Cancelled &&
+              calls == 1,
+          "Data visitor cancellation prevents Validation callback");
+  auto two = take(Footprint::from_regions(
+      output, {Region({{0, 1}, {0, 4}}), Region({{2, 1}, {0, 4}})}));
+  auto sparse = take(
+      ResultRelation::gather(root, output, two, 1, input, axes, 0, 1, reader,
+                             {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}, 2));
+  require(sparse.certify(two).ok() &&
+              sparse.certify(full).code == ErrorCode::NotFound,
+          "one gather witness retains output holes");
+  for (const auto maximum : {0U, 5U, 20U, 100U}) {
+    limits = {};
+    limits.maximum_work = maximum;
+    std::uint64_t issued = 0;
+    limits.consume_work = [&](auto n) {
+      issued += n;
+      return Status::success();
+    };
+    auto status = sparse.project(
+        two, [](auto, const auto*) { return Status::success(); }, limits);
+    require(issued <= maximum,
+            "gather query cannot reset local work between boxes");
+    require(status.ok() || status.code == ErrorCode::ResourceExhausted,
+            "gather bounded query status");
+  }
+  const std::vector<std::uint64_t> huge{UINT64_MAX, 4};
+  auto huge_q = take(
+      Footprint::from_regions(huge, {Region({{UINT64_MAX - 4, 1}, {0, 4}}),
+                                     Region({{UINT64_MAX - 2, 1}, {0, 4}})}));
+  std::vector<ResultMappedAxis> sampled(2);
+  sampled[1].extent = 4;
+  auto enormous = take(
+      ResultRelation::gather(root, huge, huge_q, 1, huge, sampled, 1, 1,
+                             [](auto row, auto) {
+                               ResultGatherSample sample;
+                               sample.present = true;
+                               sample.coordinates[0] = UINT64_MAX - 4 + 2 * row;
+                               return Result<ResultGatherSample>(sample);
+                             },
+                             {0, 5, 0, 0, ResultSupportTarget::Tensor, 0}));
+  Footprint enormous_support;
+  require(enormous.project(huge_q,
+                           [&](auto, const auto* samples) {
+                             enormous_support = *samples;
+                             return Status::success();
+                           })
+                  .ok() &&
+              enormous_support == huge_q,
+          "gather uses local rows in unflattenable sparse domain");
+  const std::vector<std::uint64_t> wide_input{UINT64_MAX, UINT64_MAX};
+  const auto wide_query = take(Footprint::all({2, 1}));
+  auto wide_gather = take(
+      ResultRelation::gather(root, {2, 1}, wide_query, 1, wide_input,
+                             std::vector<ResultMappedAxis>(2), 3, 1,
+                             [](auto row, auto) {
+                               ResultGatherSample sample;
+                               sample.present = true;
+                               sample.coordinates[0] = row ? 0 : UINT64_MAX - 1;
+                               sample.coordinates[1] = row ? UINT64_MAX - 1 : 0;
+                               return Result<ResultGatherSample>(sample);
+                             },
+                             {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
+  const auto wide_expected = take(Footprint::from_regions(
+      wide_input, {Region({{UINT64_MAX - 1, 1}, {0, 1}}),
+                   Region({{0, 1}, {UINT64_MAX - 1, 1}})}));
+  Footprint wide_support;
+  require(wide_gather
+                  .project(wide_query,
+                           [&](auto, const auto* samples) {
+                             wide_support = *samples;
+                             return Status::success();
+                           })
+                  .ok() &&
+              wide_support == wide_expected,
+          "gather retains full coordinates when support keys need more than 64 "
+          "bits");
+  const std::vector<std::vector<std::uint64_t>> key_shapes{
+      {1, UINT64_MAX},
+      {UINT64_C(1) << 32, UINT64_C(1) << 32},
+      {2, UINT64_MAX},
+      {1, 1}};
+  for (const auto& shape : key_shapes) {
+    const auto point = Region({{shape[0] - 1, 1}, {shape[1] - 1, 1}});
+    auto keys = take(
+        ResultRelation::gather(root, {2, 1}, wide_query, 1, shape,
+                               std::vector<ResultMappedAxis>(2), 3, 2,
+                               [&](auto row, auto) {
+                                 ResultGatherSample sample;
+                                 sample.present = true;
+                                 sample.coordinates[0] = row ? 0 : shape[0] - 1;
+                                 sample.coordinates[1] = row ? 0 : shape[1] - 1;
+                                 return Result<ResultGatherSample>(sample);
+                               },
+                               {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
+    const auto expected =
+        take(Footprint::from_regions(shape, {point, Region({{0, 1}, {0, 1}})}));
+    Footprint projected;
+    require(keys.project(wide_query,
+                         [&](auto, const auto* samples) {
+                           projected = *samples;
+                           return Status::success();
+                         })
+                    .ok() &&
+                projected == expected,
+            "zero, 64 and 65-bit gather support keys are exact");
+    const auto first_output =
+        take(Footprint::from_regions({2, 1}, {Region({{0, 1}, {0, 1}})}));
+    const auto change = take(Footprint::from_regions(shape, {point}));
+    require(keys.project(first_output,
+                         [&](auto, const auto* samples) {
+                           projected = *samples;
+                           return Status::success();
+                         })
+                    .ok() &&
+                projected == change,
+            "packed key partial projection preserves UINT64_MAX keys");
+    require(
+        take(keys.preimage(first_output,
+                           {0, 1, 0, 0, ResultSupportTarget::Tensor, 0},
+                           change)) == first_output,
+        "packed normalization leaves exact inverse dependency queries intact");
+  }
+  CancellationSource after_reader;
+  limits = {};
+  limits.cancellation = after_reader.token();
+  bool done = false;
+  unsigned later = 0;
+  limits.consume_work = [&](auto) {
+    if (done && ++later == 4)
+      after_reader.cancel();
+    return Status::success();
+  };
+  auto cancelled = ResultRelation::gather(
+      root, {16, 4}, Region::whole({16, 4}), 1, {32, 4}, sampled, 1, 1,
+      [&](auto row, auto) {
+        ResultGatherSample sample;
+        sample.present = true;
+        sample.coordinates[0] = 31 - row;
+        done = row == 15;
+        return Result<ResultGatherSample>(sample);
+      },
+      {0, 5, 0, 0, ResultSupportTarget::Tensor, 0}, 0, limits);
+  require(
+      done && later == 4 && cancelled.status().code == ErrorCode::Cancelled,
+      "gather cancellation reaches radix normalization after reader completes");
+}
 }  // namespace
 int main() {
   try {
+    gather_relations();
+    gather_cached_mask();
     reshape_relations();
     prefix_relations();
     mapped_relation_capacity_failure();

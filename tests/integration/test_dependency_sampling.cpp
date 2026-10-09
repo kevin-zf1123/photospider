@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cfenv>  // NOLINT(build/c++11)
 #include <chrono>
@@ -5,6 +6,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <future>
 #include <iostream>
 #include <limits>
@@ -18,6 +20,7 @@
 #include <vector>
 
 #include "../../examples/numeric_workflow/result_fixture.hpp"
+#include "data/value_validation.hpp"
 #include "execution/execution_test_hooks.hpp"
 #include "photospider/photospider.hpp"
 #include "support/execution_sync_fixture.hpp"
@@ -74,13 +77,17 @@ struct HookScope final {
   ~HookScope() { execution_testing::install_execution_test_hooks(nullptr); }
 };
 template <class Run>
-int cancel_at_retirement(const ResourceBudget& root, Run run) {
+int cancel_at_retirement(const ResourceBudget& root, Run run,
+                         bool staged = false) {
   const auto baseline = root.statistics().live[ResourceKind::Payload];
   const auto work = root.statistics().issued.work;
   CallbackGate gate;
   cancellation_gate = &gate;
   execution_testing::ExecutionTestHooks hooks;
-  hooks.callback_body_finished = hold_callback_retirement;
+  if (staged)
+    hooks.final_result_ready = hold_callback_retirement;
+  else
+    hooks.callback_body_finished = hold_callback_retirement;
   HookScope installed(hooks);
   CancellationSource stop;
   std::future<decltype(run(stop.token()))> active;
@@ -504,8 +511,11 @@ struct StmapDriver {
   std::shared_ptr<OperationRegistry> registry;
   ExecutionContext context;
   ResourceBudget root;
-  explicit StmapDriver(std::shared_ptr<OperationRegistry> r)
-      : registry(r), context(r), root(context.resource_budget().take_value()) {}
+  explicit StmapDriver(std::shared_ptr<OperationRegistry> r,
+                       ExecutionContextConfig config = {})
+      : registry(r),
+        context(r, config),
+        root(context.resource_budget().take_value()) {}
   ResultRef source(const SchemaTemplate& schema,
                    const std::vector<float>& pixels) {
     auto builder = numeric_result_fixture::take(
@@ -532,7 +542,8 @@ struct StmapDriver {
   Result<DemandResult> run(ResultRef source, ResultRef map,
                            const std::string& boundary, const Footprint& q,
                            ExecutionOptions options = {},
-                           const CancellationToken& cancellation = {}) {
+                           const CancellationToken& cancellation = {},
+                           const PlanningOptions& planning = {}) {
     WorkflowDocument doc;
     doc.inputs.resize(2);
     const std::array<ResultRef, 2> inputs{source, map};
@@ -550,7 +561,7 @@ struct StmapDriver {
                   {{"boundary", boundary}}}};
     doc.outputs = {{"result", 1, "value"}};
     GraphContext graph(doc);
-    auto compiled = Compiler(registry).compile(graph);
+    auto compiled = Compiler(registry).compile(graph, planning);
     if (!compiled.ok())
       return Result<DemandResult>(compiled.status());
     auto frozen = context.freeze(compiled.value().plan, bindings);
@@ -820,12 +831,14 @@ int stmap_results(const std::shared_ptr<OperationRegistry>& registry) {
   auto cancelled = driver.run(image, point_map, "clamp", q, {}, stop.token());
   PS_CHECK(!cancelled.ok() && cancelled.status().code == ErrorCode::Cancelled);
   auto large_map = driver.map(std::vector<double>(5000, .5), {50, 50, 2});
-  PS_CHECK(
-      cancel_at_retirement(driver.root, [&](const CancellationToken& token) {
-        return driver.run(image, large_map, "clamp",
-                          Footprint::all({1, 1, 50, 50, 4}).take_value(), {},
-                          token);
-      }) == 0);
+  PS_CHECK(cancel_at_retirement(
+               driver.root,
+               [&](const CancellationToken& token) {
+                 return driver.run(
+                     image, large_map, "clamp",
+                     Footprint::all({1, 1, 50, 50, 4}).take_value(), {}, token);
+               },
+               true) == 0);
   PS_CHECK(cancel_in_loop(
                driver.root, "image.stmap", [&](const CancellationToken& token) {
                  return driver.run(
@@ -851,8 +864,538 @@ int stmap_results(const std::shared_ptr<OperationRegistry>& registry) {
   return 0;
 }
 
+std::uint32_t float_bits(float value) {
+  std::uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+std::int64_t stmap_reference_index(std::int64_t i, std::int64_t n,
+                                   const std::string& mode) {
+  if (i >= 0 && i < n)
+    return i;
+  if (mode == "constant")
+    return -1;
+  if (mode == "clamp")
+    return std::max<std::int64_t>(0, std::min(n - 1, i));
+  if (n == 1)
+    return 0;
+  const auto period = mode == "wrap"      ? n
+                      : mode == "reflect" ? 2 * n
+                                          : 2 * (n - 1);
+  const auto r = (i % period + period) % period;
+  return mode == "wrap" ? r
+                        : std::min(r, period - (mode == "reflect" ? 1 : 0) - r);
+}
+std::array<float, 4> stmap_reference(const std::vector<float>& source,
+                                     std::uint64_t height, std::uint64_t width,
+                                     double u, double v,
+                                     const std::string& mode) {
+  // An independent scalar oracle with explicit rounding after every operation;
+  // it cannot inherit the production loop's vectorization or FMA decisions.
+  volatile double sx = u - .5, sy = v - .5;
+  const auto left = static_cast<std::int64_t>(std::floor(sx));
+  const auto top = static_cast<std::int64_t>(std::floor(sy));
+  volatile double fx = sx - static_cast<double>(left),
+                  fy = sy - static_cast<double>(top);
+  std::array<double, 4> weights{};
+  std::array<std::array<float, 4>, 4> values{};
+  for (unsigned dy = 0; dy < 2; ++dy)
+    for (unsigned dx = 0; dx < 2; ++dx) {
+      const auto k = dy * 2 + dx;
+      volatile double weight = (dy ? fy : 1 - fy) * (dx ? fx : 1 - fx);
+      weights[k] = weight;
+      const auto y = stmap_reference_index(top + dy, height, mode);
+      const auto x = stmap_reference_index(left + dx, width, mode);
+      if (x >= 0 && y >= 0) {
+        for (std::size_t c = 0; c < 4; ++c)
+          values[k][c] = source[(y * width + x) * 4 + c];
+      }
+    }
+  std::array<float, 4> result{};
+  for (std::size_t c = 0; c < 4; ++c) {
+    double sum = 0;
+    for (std::size_t k = 0; k < 4; ++k) {
+      volatile double product = static_cast<double>(values[k][c]) * weights[k];
+      volatile double next = sum + product;
+      sum = next;
+    }
+    volatile float narrowed = static_cast<float>(sum);
+    result[c] = narrowed;
+  }
+  return result;
+}
+int stmap_bitwise_oracle(const std::shared_ptr<OperationRegistry>& registry) {
+  struct Environment {
+    std::fenv_t saved{};
+    Environment() {
+      std::fegetenv(&saved);
+      std::fesetenv(FE_DFL_ENV);
+    }
+    ~Environment() { std::fesetenv(&saved); }
+  } environment;
+  const auto tiny = std::numeric_limits<float>::denorm_min();
+  const auto normal = std::numeric_limits<float>::min();
+  const std::vector<float> original{
+      -1,     -0.F,  tiny,      1,        std::nextafter(1.F, 2.F),
+      normal, -tiny, 1,         0x1p80F,  -0x1p80F,
+      .25F,   1,     -0x1p80F,  0x1p80F,  -.25F,
+      1,      1,     -1,        3 * tiny, 1,
+      -1,     1,     -3 * tiny, 1};
+  const std::vector<double> uv{.5,   .5,      1,      .5,  1.75,    1.25, -3.25,
+                               4.75, 0x1p-56, .5,     3.5, 2.5,     -.5,  -.5,
+                               1.5,  1.5,     0x1p40, .5,  -0x1p40, .5};
+  PlanningOptions tiles;
+  tiles.tile_height = 1;
+  tiles.tile_width = 2;
+  for (const auto size : {std::array<std::uint64_t, 2>{2, 3}, {1, 1}, {1, 2}}) {
+    const std::vector<float> pixels(original.begin(),
+                                    original.begin() + size[0] * size[1] * 4);
+    for (const std::string mode :
+         {"constant", "clamp", "wrap", "reflect", "mirror"}) {
+      StmapDriver driver(registry);
+      const auto q = Footprint::all({1, 1, 2, 5, 4}).take_value();
+      auto answer =
+          driver.run(driver.source(image_schema(size[0], size[1]), pixels),
+                     driver.map(uv, {2, 5, 2}), mode, q, {}, {}, tiles);
+      PS_REQUIRE_OK(answer);
+      for (std::uint64_t i = 0; i < 10; ++i) {
+        const auto expected = stmap_reference(pixels, size[0], size[1],
+                                              uv[i * 2], uv[i * 2 + 1], mode);
+        for (std::uint64_t c = 0; c < 4; ++c) {
+          std::uint32_t actual = 0;
+          PS_REQUIRE_OK(numeric_result_fixture::read(
+              answer.value().results.at("result"), {0, 0, i / 5, i % 5, c},
+              &actual, 4));
+          PS_CHECK(actual == float_bits(expected[c]));
+        }
+      }
+    }
+  }
+  for (const int rounding :
+       {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+    PS_CHECK(std::fesetround(rounding) == 0);
+    StmapDriver driver(registry);
+    auto q = Footprint::all({1, 1, 1, 1, 4}).take_value();
+    auto folded = driver.run(
+        driver.source(image_schema(2, 2), {0x1p100F, 0, 0, 1, 1, 0, 0, 1,
+                                           -0x1p100F, 0, 0, 1, 1, 0, 0, 1}),
+        driver.map({1, 1}), "clamp", q);
+    PS_REQUIRE_OK(folded);
+    std::uint32_t bits = 0;
+    PS_REQUIRE_OK(numeric_result_fixture::read(
+        folded.value().results.at("result"), {0, 0, 0, 0, 0}, &bits, 4));
+    PS_CHECK(bits == float_bits(.25F) && std::fegetround() == rounding);
+    auto shifted =
+        driver.run(driver.source(image_schema(1, 2), {1, 0, 0, 1, -1, 0, 0, 1}),
+                   driver.map({0x1p-56, .5}), "wrap", q);
+    PS_REQUIRE_OK(shifted);
+    PS_REQUIRE_OK(numeric_result_fixture::read(
+        shifted.value().results.at("result"), {0, 0, 0, 0, 0}, &bits, 4));
+    PS_CHECK(bits == 0 && std::fegetround() == rounding);
+  }
+  return 0;
+}
+ResultRef stmap_map(StmapDriver& driver, const std::vector<double>& uv,
+                    std::uint64_t h, std::uint64_t w,
+                    const std::vector<std::uint64_t>& batches = {},
+                    std::uint32_t atomic = 0) {
+  auto shape = batches;
+  shape.insert(shape.end(), {h, w, 2});
+  auto value = data(ElementType::Float64, shape, uv);
+  auto schema = numeric_result_fixture::source_schema(value);
+  schema.tensors[0].batch_axes.assign(batches.begin(), batches.end());
+  schema.tensors[0].descriptor.shape = {h, w, 2};
+  schema.tensors[0].atomic_trailing_axes = atomic;
+  return numeric_result_fixture::source(driver.root, value, &schema);
+}
+Footprint stmap_dirty(const DemandResult& answer, const std::string& input,
+                      const Footprint& edit, std::uint32_t roles) {
+  return numeric_result_fixture::take(
+             answer.dependencies.potential_dirty(
+                 input, edit, roles, {}, ResultSupportTarget::Tensor, 0))
+      .at("result");
+}
+int stmap_sparse_dependencies(
+    const std::shared_ptr<OperationRegistry>& registry) {
+  using numeric_result_fixture::take;
+  StmapDriver driver(registry);
+  const std::vector<std::uint64_t> output_shape{1, 1, 1, 3, 4},
+      source_shape{1, 1, 1, 8, 4};
+  const auto pixel = [](std::uint64_t x, std::uint64_t c = 4) {
+    return Region({{0, 1}, {0, 1}, {0, 1}, {x, 1}, {0, c}});
+  };
+  const auto full = take(Footprint::all(output_shape));
+  const auto sparse =
+      take(Footprint::from_regions(output_shape, {pixel(0, 1), pixel(2, 1)}));
+  const auto closed =
+      take(Footprint::from_regions(output_shape, {pixel(0), pixel(2)}));
+  std::vector<float> pixels(8 * 4);
+  for (unsigned x = 0; x < 8; ++x) {
+    pixels[x * 4] = x;
+    pixels[x * 4 + 3] = 1;
+  }
+  const auto map = stmap_map(driver, {.5, .5, 3.5, .5, 6.5, .5}, 1, 3);
+  auto answer = take(driver.run(driver.source(image_schema(1, 8), pixels), map,
+                                "clamp", full));
+  PS_CHECK(stmap_dirty(answer, "input0", footprint(source_shape, pixel(1)),
+                       1) == footprint(output_shape, pixel(0)));
+  PS_CHECK(stmap_dirty(answer, "input0", footprint(source_shape, pixel(4)),
+                       1) == footprint(output_shape, pixel(1)));
+  PS_CHECK(stmap_dirty(answer, "input0", footprint(source_shape, pixel(2)), 1)
+               .empty());
+  const auto map_middle =
+      footprint({1, 3, 2}, Region({{0, 1}, {1, 1}, {0, 1}}));
+  PS_CHECK(stmap_dirty(answer, "input1", map_middle, 2) ==
+           footprint(output_shape, pixel(1)));
+  auto relation = take(answer.results.at("result").tensor_relation(0));
+  auto projected = take(Footprint::none(source_shape));
+  PS_REQUIRE_OK(relation.project(
+      footprint(output_shape, pixel(0, 1)),
+      [&](ResultSupport support, const Footprint* samples) {
+        if (support.input == 0 && (support.roles & 1U) && samples)
+          projected = take(projected.unite(*samples));
+        return Status::success();
+      }));
+  PS_CHECK(projected ==
+           footprint(source_shape,
+                     Region({{0, 1}, {0, 1}, {0, 1}, {0, 2}, {0, 4}})));
+  auto finite = pixels;
+  pixels[2 * 4] = std::numeric_limits<float>::quiet_NaN();
+  auto sparse_answer = take(driver.run(
+      driver.source(image_schema(1, 8), pixels),
+      stmap_map(driver,
+                {.5, .5, std::numeric_limits<double>::quiet_NaN(), .5, 6.5, .5},
+                1, 3),
+      "clamp", sparse));
+  PS_CHECK(take(sparse_answer.results.at("result").descriptor())
+               .tensor_coverage(0) == closed);
+  PS_CHECK(
+      stmap_dirty(sparse_answer, "input0", footprint(source_shape, pixel(4)), 1)
+          .empty());
+  PS_CHECK(stmap_dirty(sparse_answer, "input1", map_middle, 2).empty());
+  auto supports = take(sparse_answer.dependencies.source_support());
+  PS_CHECK(
+      supports.at("input0") ==
+      take(Footprint::from_regions(
+          source_shape, {Region({{0, 1}, {0, 1}, {0, 1}, {0, 2}, {0, 4}}),
+                         Region({{0, 1}, {0, 1}, {0, 1}, {6, 2}, {0, 4}})})));
+  auto grouped_source = image_schema(1, 8);
+  grouped_source.tensors[0].atomic_trailing_axes = 2;
+  auto validation = take(
+      driver.run(driver.source(grouped_source, finite), map, "clamp", sparse));
+  auto unrelated = footprint(source_shape, pixel(2));
+  PS_CHECK(stmap_dirty(validation, "input0", unrelated, 1).empty());
+  PS_CHECK(stmap_dirty(validation, "input0", unrelated, 4) == closed);
+  auto map_validation = take(
+      driver.run(driver.source(image_schema(1, 8), finite),
+                 stmap_map(driver, {.5, .5, 3.5, .5, 6.5, .5}, 1, 3, {}, 2),
+                 "clamp", sparse));
+  PS_CHECK(stmap_dirty(map_validation, "input1", map_middle, 2).empty());
+  PS_CHECK(stmap_dirty(map_validation, "input1", map_middle, 4) == closed);
+  return 0;
+}
+int stmap_batches_and_strides(
+    const std::shared_ptr<OperationRegistry>& registry) {
+  using numeric_result_fixture::take;
+  StmapDriver driver(registry);
+  auto schema = image_schema(1, 8, 2);
+  schema.tensors[0].batch_axes = {2, 2};
+  std::vector<float> pixels(4 * 8 * 4);
+  std::vector<double> batched_uv;
+  for (unsigned f = 0; f < 2; ++f)
+    for (unsigned l = 0; l < 2; ++l) {
+      for (unsigned x = 0; x < 8; ++x) {
+        const auto i = ((f * 2 + l) * 8 + x) * 4;
+        pixels[i] = 10 * f + 3 * l + x;
+        pixels[i + 3] = 1;
+      }
+      batched_uv.insert(batched_uv.end(), {.5, .5, 3.5, .5, 6.5, .5});
+    }
+  auto source = driver.source(schema, pixels);
+  const auto full = take(Footprint::all({2, 2, 1, 3, 4}));
+  for (const bool batched : {false, true}) {
+    auto map = batched ? stmap_map(driver, batched_uv, 1, 3, {2, 2})
+                       : stmap_map(driver, {.5, .5, 3.5, .5, 6.5, .5}, 1, 3);
+    auto answer = take(driver.run(source, map, "clamp", full));
+    for (std::uint64_t f = 0; f < 2; ++f)
+      for (std::uint64_t l = 0; l < 2; ++l)
+        for (std::uint64_t x = 0; x < 3; ++x) {
+          float value = 0;
+          PS_REQUIRE_OK(numeric_result_fixture::read(
+              answer.results.at("result"), {f, l, 0, x, 0}, &value, 4));
+          PS_CHECK(value == 10 * f + 3 * l + 3 * x);
+        }
+    const auto map_edit =
+        batched ? footprint({2, 2, 1, 3, 2},
+                            Region({{1, 1}, {0, 1}, {0, 1}, {1, 1}, {0, 1}}))
+                : footprint({1, 3, 2}, Region({{0, 1}, {1, 1}, {0, 1}}));
+    const auto expected =
+        batched ? Region({{1, 1}, {0, 1}, {0, 1}, {1, 1}, {0, 4}})
+                : Region({{0, 2}, {0, 2}, {0, 1}, {1, 1}, {0, 4}});
+    PS_CHECK(stmap_dirty(answer, "input1", map_edit, 2) ==
+             footprint(full.shape(), expected));
+    auto source_edit =
+        footprint(schema.tensors[0].sample_shape(),
+                  Region({{1, 1}, {0, 1}, {0, 1}, {1, 1}, {0, 1}}));
+    PS_CHECK(stmap_dirty(answer, "input0", source_edit, 1) ==
+             footprint(full.shape(),
+                       Region({{1, 1}, {0, 1}, {0, 1}, {0, 1}, {0, 4}})));
+  }
+  const std::vector<double> physical{.5, .5, 3.5, .5, 6.5, .5};
+  auto map_schema = numeric_result_fixture::source_schema(
+      data(ElementType::Float64, {1, 3, 2}, physical));
+  for (const bool spatial : {false, true}) {
+    map_schema.tensors[0].layout.spatial = spatial;
+    auto builder =
+        take(ResultBuilder::start(driver.root, map_schema, "signed.map"));
+    PS_REQUIRE_OK(builder.bind_descriptor_relation(
+        take(ResultRelation::cartesian(driver.root, 1, {}))));
+    auto buffer = take(driver.root.allocator().allocate(48));
+    std::memcpy(buffer.data(), physical.data(), 48);
+    PS_REQUIRE_OK(builder.publish_tensor(
+        0, Region::whole({1, 3, 2}), StridedLayout{32, {48, -16, 8}},
+        std::move(buffer).freeze(),
+        take(ResultRelation::cartesian(driver.root, 6, {})),
+        {true, true, true, true}));
+    auto signed_answer =
+        take(driver.run(source, take(builder.seal()), "clamp", full));
+    for (std::uint64_t x = 0; x < 3; ++x) {
+      float value = 0;
+      PS_REQUIRE_OK(numeric_result_fixture::read(
+          signed_answer.results.at("result"), {1, 1, 0, x, 0}, &value, 4));
+      PS_CHECK(value == 13 + (2 - x) * 3);
+    }
+  }
+  return 0;
+}
+
+int typed_validation_work_batches(
+    const std::shared_ptr<OperationRegistry>& registry) {
+  using numeric_result_fixture::take;
+  StmapDriver driver(registry);
+  const auto facet = take(encode_semantic(coverage_semantics()));
+  auto schema = image_schema(1, 513);
+  schema.tensors[0].descriptor.shape = {1, 513};
+  schema.tensors[0].layout.channel_axis.reset();
+  schema.tensors[0].facets = {facet};
+  const auto shape = schema.tensors[0].sample_shape();
+  const auto samples = take(Footprint::all(shape));
+  const auto make = [&](bool invalid) {
+    std::vector<float> values(513, .5F);
+    if (invalid)
+      values[256] = 2.F;
+    auto builder = take(ResultBuilder::start(
+        driver.root, schema, "validation.input", {}, {}, 1, 1024));
+    numeric_result_fixture::require(
+        builder
+            .bind_descriptor_relation(
+                take(ResultRelation::cartesian(driver.root, 1, {})))
+            .ok(),
+        "validation descriptor");
+    numeric_result_fixture::require(
+        builder
+            .publish_tensor(
+                0, Region::whole(shape),
+                ByteView(reinterpret_cast<const std::uint8_t*>(values.data()),
+                         values.size() * sizeof(float)),
+                take(ResultRelation::cartesian(driver.root, values.size(), {})),
+                {true, true, true, true})
+            .ok(),
+        "validation payload");
+    return take(builder.seal());
+  };
+  const auto valid = make(false), invalid = make(true);
+  std::vector<std::uint64_t> charges;
+  const auto validate = [&](const ResultRef& input,
+                            const CancellationToken& token,
+                            const std::function<Status(std::uint64_t)>& consume,
+                            const std::function<ErrorCode()>& stop = {}) {
+    return input_internal::validate_tensor_samples(
+        input, take(input.descriptor()), 0, samples, driver.root,
+        ErrorCode::TypeMismatch, token, stop, consume);
+  };
+  auto status = validate(valid, {}, [&](auto n) {
+    charges.push_back(n);
+    return Status::success();
+  });
+  PS_REQUIRE_OK(status);
+  PS_CHECK(charges == std::vector<std::uint64_t>({256, 256, 1}));
+  charges.clear();
+  status = validate(invalid, {}, [&](auto n) {
+    charges.push_back(n);
+    return charges.size() == 2 ? Status{ErrorCode::ResourceExhausted, {}}
+                               : Status::success();
+  });
+  PS_CHECK(status.code == ErrorCode::ResourceExhausted);
+  PS_CHECK(charges == std::vector<std::uint64_t>({256, 256}));
+  charges.clear();
+  status = validate(invalid, {}, [&](auto n) {
+    charges.push_back(n);
+    return Status::success();
+  });
+  PS_CHECK(status.code == ErrorCode::TypeMismatch);
+  PS_CHECK(charges == std::vector<std::uint64_t>({256, 256}));
+  charges.clear();
+  CancellationSource cancellation;
+  status = validate(invalid, cancellation.token(), [&](auto n) {
+    charges.push_back(n);
+    if (charges.size() == 2)
+      cancellation.cancel();
+    return Status::success();
+  });
+  PS_CHECK(status.code == ErrorCode::Cancelled);
+  PS_CHECK(charges == std::vector<std::uint64_t>({256, 256}));
+  charges.clear();
+  status = validate(
+      valid, {},
+      [&](auto n) {
+        charges.push_back(n);
+        return Status::success();
+      },
+      [&] { return charges.size() == 3 ? ErrorCode::Stale : ErrorCode::Ok; });
+  PS_CHECK(status.code == ErrorCode::Stale);
+  PS_CHECK(charges == std::vector<std::uint64_t>({256, 256, 1}));
+  return 0;
+}
+int stmap_cpu_tiles(const std::shared_ptr<OperationRegistry>& registry) {
+  using numeric_result_fixture::take;
+  constexpr std::uint64_t side = 256;
+  const std::vector<float> pixels{1,  -2,  3,  1, -4,  5,  6,  1,
+                                  7,  8,   -9, 1, -10, 11, 12, 1,
+                                  13, -14, 15, 1, 16,  17, 18, 1};
+  const std::array<std::array<double, 2>, 8> points{
+      {{{.875, .75}},
+       {{-.25, -.75}},
+       {{2.5, 1.5}},
+       {{3.875, 2.25}},
+       {{.5, .5}},
+       {{std::ldexp(1., -56), .5}},
+       {{-1099511627776., .5}},
+       {{2.125, 1.125}}}};
+  std::vector<double> uv(2 * side * side);
+  for (std::size_t i = 0; i < side * side; ++i) {
+    uv[2 * i] = points[i % points.size()][0];
+    uv[2 * i + 1] = points[i % points.size()][1];
+  }
+  const auto query = take(Footprint::all({1, 1, side, side, 4}));
+  for (const std::string mode :
+       {"constant", "clamp", "wrap", "reflect", "mirror"}) {
+    std::vector<float> reference;
+    std::uint64_t reference_work = 0, reference_tiles = 0;
+    for (const unsigned workers : {1U, 4U}) {
+      ExecutionContextConfig config;
+      config.cpu_workers = workers;
+      StmapDriver driver(registry, config);
+      const auto source = driver.source(image_schema(2, 3), pixels);
+      const auto map = driver.map(uv, {side, side, 2});
+      ExecutionOptions options;
+      options.maximum_parallelism = workers;
+      options.maximum_dependency_work = UINT64_C(1) << 32;
+      options.dependencies.maximum_work = UINT64_C(1) << 32;
+      options.dependencies.sets.maximum_work = UINT64_C(1) << 32;
+      const auto before = driver.root.statistics().issued.work;
+      const auto rounding = std::fegetround();
+      PS_CHECK(std::fesetround(FE_UPWARD) == 0);
+      const auto answer = driver.run(source, map, mode, query, options);
+      const auto restored = std::fegetround();
+      PS_CHECK(std::fesetround(rounding) == 0);
+      PS_REQUIRE_OK(answer);
+      PS_CHECK(restored == FE_UPWARD);
+      const auto work = driver.root.statistics().issued.work - before;
+      const auto& diagnostics = answer.value().diagnostics;
+      PS_CHECK(diagnostics.cpu_stage_count == 1);
+      PS_CHECK(diagnostics.cpu_tile_callback_count > 0 &&
+               diagnostics.cpu_tile_callback_count <= 64);
+      const auto& result = answer.value().results.at("result");
+      const auto descriptor = take(result.descriptor());
+      auto window = take(
+          result.acquire_tensor(descriptor, 0, Region::whole(query.shape())));
+      PS_CHECK(window.sample_axis() == 3);
+      std::vector<float> actual(side * side * 4);
+      for (std::uint64_t y = 0; y < side; ++y)
+        for (std::uint64_t c = 0; c < 4; ++c)
+          for (std::uint64_t x = 0; x < side;) {
+            const auto run = take(window.row_run({0, 0, y, x, c}));
+            const auto n = std::min(side - x, run.samples);
+            for (std::uint64_t i = 0; i < n; ++i)
+              std::memcpy(&actual[((y * side + x + i) * 4) + c],
+                          run.data + static_cast<std::int64_t>(i) *
+                                         run.sample_stride_bytes,
+                          4);
+            x += n;
+          }
+      for (std::size_t i = 0; i < points.size(); ++i) {
+        const auto expected =
+            stmap_reference(pixels, 2, 3, points[i][0], points[i][1], mode);
+        PS_CHECK(std::memcmp(actual.data() + i * 4, expected.data(), 16) == 0);
+      }
+      auto support = take(answer.value().dependencies.source_support());
+      PS_CHECK(support.at("input1") == take(Footprint::all({side, side, 2})));
+      PS_CHECK(support.at("input0") == take(Footprint::all({1, 1, 2, 3, 4})));
+      if (workers == 1) {
+        reference = std::move(actual);
+        reference_work = work;
+        reference_tiles = diagnostics.cpu_tile_callback_count;
+      } else {
+        PS_CHECK(std::memcmp(actual.data(), reference.data(),
+                             actual.size() * sizeof(float)) == 0);
+        PS_CHECK(work == reference_work);
+        PS_CHECK(diagnostics.cpu_tile_callback_count == reference_tiles);
+      }
+    }
+  }
+  return 0;
+}
+int stmap_sparse_scaling() {
+  std::uint64_t previous = 0;
+  for (const std::uint64_t side : {16, 32, 64}) {
+    StmapDriver driver(ps::make_default_operation_registry());
+    auto image = driver.source(image_schema(1, 2), {1, 0, 0, 1, 2, 0, 0, 1});
+    auto map =
+        driver.map(std::vector<double>(2 * side * side, .5), {side, side, 2});
+    std::vector<Region> boxes;
+    for (std::uint64_t y = 0; y < side; ++y)
+      for (std::uint64_t x = y % 2; x < side; x += 2)
+        boxes.emplace_back(std::vector<RegionDimension>{{0, 1},
+                                                        {0, 1},
+                                                        {y, 1},
+                                                        {x, 1},
+                                                        {0, 4}});
+    auto query =
+        Footprint::from_regions({1, 1, side, side, 4}, boxes).take_value();
+    const auto before = driver.root.statistics().issued.work;
+    ExecutionOptions options;
+    options.maximum_dependency_work = UINT64_C(1) << 32;
+    options.dependencies.maximum_work = UINT64_C(1) << 32;
+    options.dependencies.sets.maximum_work = UINT64_C(1) << 32;
+    auto answer = driver.run(image, map, "clamp", query, options);
+    PS_REQUIRE_OK(answer);
+    const auto work = driver.root.statistics().issued.work - before;
+    std::uint64_t callbacks = 0;
+    for (const auto& op : answer.value().diagnostics.operation_timings)
+      callbacks += op.invocation_count;
+    std::cout << "STMap sparse side=" << side << " boxes=" << boxes.size()
+              << " work=" << work << '\n';
+    PS_CHECK(callbacks == 3);
+    PS_CHECK(work < 15000 * boxes.size());
+    if (previous)
+      PS_CHECK(work < 6 * previous);
+    previous = work;
+    const auto& result = answer.value().results.at("result");
+    PS_CHECK(result.descriptor().take_value().tensor_coverage(0) == query);
+    for (const auto& region : {boxes.front(), boxes.back()}) {
+      float value = 0;
+      const auto& d = region.dimensions();
+      PS_REQUIRE_OK(numeric_result_fixture::read(
+          result, {0, 0, d[2].offset, d[3].offset, 0}, &value, 4));
+      PS_CHECK(value == 1.F);
+    }
+  }
+  return 0;
+}
 int stmap_scaling() {
-  for (const std::uint64_t side : {10, 15, 20}) {
+  std::uint64_t previous_work = 0;
+  for (const std::uint64_t side : {8, 16, 32, 64}) {
     StmapDriver driver(ps::make_default_operation_registry());
     auto image =
         driver.source(image_schema(1, 3), {1, 0, 0, 1, 2, 0, 0, 1, 4, 0, 0, 1});
@@ -861,15 +1404,22 @@ int stmap_scaling() {
     auto query = Footprint::all({1, 1, side, side, 4}).take_value();
     const auto before = driver.root.statistics();
     {
-      auto answer = driver.run(image, map, "clamp", query);
+      ExecutionOptions options;
+      options.maximum_dependency_work = UINT64_C(1) << 32;
+      options.dependencies.maximum_work = UINT64_C(1) << 32;
+      options.dependencies.sets.maximum_work = UINT64_C(1) << 32;
+      auto answer = driver.run(image, map, "clamp", query, options);
       PS_REQUIRE_OK(answer);
       const auto work =
           driver.root.statistics().issued.work - before.issued.work;
-      // Repeated immutable union construction is quadratic with logarithmic
-      // indexing; this bound excludes the old cubic cross-witness scan.
+      // The exact witness table and batched execution grow with requested
+      // pixels. This gate fails on the former P^2 publication path.
       const auto pixels = side * side;
       std::cout << "STMap side=" << side << " work=" << work << '\n';
-      PS_CHECK(work < 256 * pixels * pixels);
+      PS_CHECK(work < 1600 * pixels);
+      if (previous_work)
+        PS_CHECK(work < 5 * previous_work);
+      previous_work = work;
       PS_CHECK(driver.root.statistics().live[ResourceKind::Payload] -
                    before.live[ResourceKind::Payload] <
                UINT64_C(1048576));
@@ -919,6 +1469,12 @@ int main() {
   PS_CHECK(radius_oracles(registry) == 0);
   PS_CHECK(radius_contracts(registry) == 0);
   PS_CHECK(stmap_results(registry) == 0);
+  PS_CHECK(stmap_bitwise_oracle(registry) == 0);
+  PS_CHECK(stmap_sparse_dependencies(registry) == 0);
+  PS_CHECK(stmap_batches_and_strides(registry) == 0);
+  PS_CHECK(typed_validation_work_batches(registry) == 0);
+  PS_CHECK(stmap_cpu_tiles(registry) == 0);
   PS_CHECK(stmap_scaling() == 0);
+  PS_CHECK(stmap_sparse_scaling() == 0);
   return 0;
 }

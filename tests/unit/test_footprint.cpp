@@ -159,9 +159,129 @@ int bounds() {
   PS_CHECK(a == b && a.element_count().value() == 5);
   return 0;
 }
+int indexed_limits_and_sweep() {
+  const auto single =
+      Footprint::from_regions({8}, {Region({{1, 1}})}).take_value();
+  const auto sparse =
+      Footprint::from_regions({8}, {Region({{1, 2}}), Region({{6, 1}})})
+          .take_value();
+  ps::FootprintLimits limits;
+  limits.maximum_boxes = 0;
+  PS_CHECK(single.unite(single, limits).status().code ==
+           ps::ErrorCode::ResourceExhausted);
+  PS_CHECK(single.intersect(single, limits).status().code ==
+           ps::ErrorCode::ResourceExhausted);
+  for (std::uint64_t bound = 0; bound < 100; ++bound) {
+    limits.maximum_boxes = 100;
+    limits.maximum_work = bound;
+    std::uint64_t consumed = 0;
+    limits.consume_work = [&](auto n) {
+      consumed += n;
+      return Status::success();
+    };
+    auto joined = single.unite(sparse, limits);
+    PS_CHECK(consumed <= bound);
+    if (joined.ok())
+      PS_CHECK(joined.value() == sparse);
+    consumed = 0;
+    auto common = single.intersect(sparse, limits);
+    PS_CHECK(consumed <= bound);
+    if (common.ok())
+      PS_CHECK(common.value() == single);
+    consumed = 0;
+    auto removed = single.subtract(sparse, limits);
+    PS_CHECK(consumed <= bound);
+    if (removed.ok())
+      PS_CHECK(removed.value().empty());
+  }
+  std::vector<Region> nested;
+  for (std::uint64_t i = 0; i < 256; ++i)
+    nested.emplace_back(std::vector<ps::RegionDimension>{{i, 512 - 2 * i}});
+  std::uint64_t work = 0;
+  auto normalized = Footprint::from_regions({512}, nested, {}, &work);
+  PS_REQUIRE_OK(normalized);
+  PS_CHECK(normalized.value() == Footprint::all({512}).take_value());
+  PS_CHECK(work < 64 * nested.size());
+  return 0;
+}
+int event_sort_limits() {
+  // Exercise large event sets, equal end/begin coordinates, and high unsigned
+  // digits against literal interval membership instead of a sorting oracle.
+  const auto base = UINT64_MAX - 256;
+  std::vector<Region> gaps, fills;
+  for (std::uint64_t i = 0; i < 64; ++i) {
+    gaps.emplace_back(std::vector<ps::RegionDimension>{{base + 2 * i, 1}});
+    fills.emplace_back(std::vector<ps::RegionDimension>{{base + 2 * i + 1, 1}});
+  }
+  gaps.emplace_back(std::vector<ps::RegionDimension>{{0, 1}});
+  auto sparse = Footprint::from_regions({UINT64_MAX}, gaps);
+  PS_REQUIRE_OK(sparse);
+  PS_CHECK(sparse.value().boxes().size() == 65);
+  for (std::uint64_t i = 0; i < 128; ++i)
+    PS_CHECK(sparse.value().contains({base + i}) == !(i & 1U));
+  std::reverse(gaps.begin(), gaps.end());
+  PS_CHECK(Footprint::from_regions({UINT64_MAX}, gaps).value() ==
+           sparse.value());
+  gaps.insert(gaps.end(), fills.begin(), fills.end());
+  auto joined = Footprint::from_regions({UINT64_MAX}, gaps);
+  PS_REQUIRE_OK(joined);
+  auto expected = Footprint::from_regions(
+      {UINT64_MAX}, {Region({{0, 1}}), Region({{base, 128}})});
+  PS_REQUIRE_OK(expected);
+  PS_CHECK(joined.value() == expected.value());
+  auto filled_gaps = Footprint::from_regions({UINT64_MAX}, fills);
+  PS_REQUIRE_OK(filled_gaps);
+  PS_CHECK(joined.value().subtract(filled_gaps.value()).value() ==
+           sparse.value());
+  PS_CHECK(sparse.value().intersect(filled_gaps.value()).value().empty());
+  bool completed = false;
+  for (const std::uint64_t bound : {0, 128, 256, 512, 4096, 16384}) {
+    ps::FootprintLimits limits;
+    limits.maximum_work = bound;
+    std::uint64_t charged = 0, measured = 0;
+    limits.consume_work = [&](auto n) {
+      charged += n;
+      return Status::success();
+    };
+    auto limited =
+        Footprint::from_regions({UINT64_MAX}, gaps, limits, &measured);
+    PS_CHECK(charged == measured && measured <= bound);
+    if (limited.ok()) {
+      PS_CHECK(limited.value() == expected.value());
+      completed = true;
+    } else {
+      PS_CHECK(limited.status().code == ps::ErrorCode::ResourceExhausted);
+    }
+  }
+  PS_CHECK(completed);
+  ps::FootprintLimits limits;
+  bool rejected = false;
+  limits.consume_work = [&](auto n) {
+    if (n > 1) {
+      rejected = true;
+      return Status{ps::ErrorCode::ResourceExhausted, "event pass denied"};
+    }
+    return Status::success();
+  };
+  PS_CHECK(Footprint::from_regions({UINT64_MAX}, gaps, limits).status().code ==
+           ps::ErrorCode::ResourceExhausted);
+  PS_CHECK(rejected);
+  ps::CancellationSource stop;
+  limits.cancellation = stop.token();
+  limits.consume_work = [&](auto n) {
+    if (n > 1)
+      stop.cancel();
+    return Status::success();
+  };
+  PS_CHECK(Footprint::from_regions({UINT64_MAX}, gaps, limits).status().code ==
+           ps::ErrorCode::Cancelled);
+  return 0;
+}
 }  // namespace
 int main() {
   PS_CHECK(exhaustive() == 0);
+  PS_CHECK(indexed_limits_and_sweep() == 0);
+  PS_CHECK(event_sort_limits() == 0);
   PS_CHECK(bounds() == 0);
   PS_CHECK(single_rectangle_limits() == 0);
   return 0;

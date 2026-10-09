@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -641,8 +642,138 @@ int tensor_relation_frontiers() {
   PS_CHECK(wrapped.visit_declared(1, 256, ignore).code == ErrorCode::NotFound);
   return 0;
 }
+int batched_tensor_transaction() {
+  for (unsigned action = 0; action < 6; ++action) {
+    auto root = budget(UINT64_C(1) << 22);
+    SchemaTemplate schema;
+    schema.id = "test.batch_tensor";
+    schema.publication = PublishPolicy::IndependentChunks;
+    ResultTensorSpec tensor;
+    tensor.key = "values";
+    tensor.descriptor = {ElementType::Float32, {4, 4}};
+    schema.tensors.push_back(tensor);
+    auto producer =
+        ResultBuilder::start(root, schema, "batch.test").take_value();
+    auto relation = ResultRelation::cartesian(root, 16, {}).take_value();
+    PS_REQUIRE_OK(producer.bind_descriptor_relation(
+        ResultRelation::cartesian(root, 1, {}).take_value()));
+    const bool failure = action >= 1 && action <= 4;
+    const float prior_value = 19;
+    if (failure)
+      PS_REQUIRE_OK(producer.publish_tensor(
+          0, Region({{3, 1}, {0, 1}}),
+          ByteView(reinterpret_cast<const std::uint8_t*>(&prior_value), 4),
+          relation, {true, true, true, true}));
+    const auto reference = producer.reference();
+    const auto old = reference.descriptor(false).take_value();
+    auto samples = Footprint::from_regions({4, 4}, {Region({{0, 1}, {0, 2}}),
+                                                    Region({{2, 1}, {1, 3}})})
+                       .take_value();
+    const auto expected = samples;
+    const auto before = root.statistics().live[ResourceKind::Payload];
+    CancellationSource cancellation;
+    unsigned callbacks = 0;
+    auto status = producer.publish_tensor_kernel(
+        0, samples,
+        [&](const auto& windows) -> Status {
+          ++callbacks;
+          for (const auto& window : windows) {
+            const auto& d = window.region().dimensions();
+            for (std::uint64_t y = d[0].offset; y < d[0].offset + d[0].extent;
+                 ++y)
+              for (std::uint64_t x = d[1].offset; x < d[1].offset + d[1].extent;
+                   ++x) {
+                auto run = window.row_run({y, x});
+                if (!run.ok())
+                  return run.status();
+                const float value = static_cast<float>(y * 4 + x);
+                std::memcpy(run.value().data, &value, 4);
+              }
+          }
+          if (action == 1)
+            return {ErrorCode::OperationFailed, "producer test failure"};
+          if (action == 2)
+            throw std::runtime_error("producer test exception");
+          if (action == 3)
+            cancellation.cancel();
+          if (action == 4) {
+            auto nested = producer.publish_tensor(
+                0, Region({{3, 1}, {3, 1}}),
+                ByteView(reinterpret_cast<const std::uint8_t*>(&prior_value),
+                         4),
+                relation, {true, true, true, true});
+            if (nested.ok())
+              return {ErrorCode::OperationFailed,
+                      "nested mutation was accepted"};
+          }
+          if (action == 5)
+            samples = Footprint::none({4, 4}).take_value();
+          return Status::success();
+        },
+        relation, {true, true, true, true}, cancellation.token());
+    PS_CHECK(callbacks == 1);
+    if (failure) {
+      PS_CHECK(!status.ok() && !producer.seal().ok());
+      PS_CHECK(root.statistics().live[ResourceKind::Payload] == before);
+      float value = 0;
+      PS_REQUIRE_OK(reference.read_tensor(old, 0, {3, 0}, &value, 4));
+      PS_CHECK(value == prior_value);
+    } else {
+      PS_REQUIRE_OK(status);
+      auto result = producer.seal().take_value();
+      auto facts = result.descriptor().take_value();
+      PS_CHECK(facts.tensor_coverage(0) == expected);
+      auto retained_relation = result.tensor_relation(0).take_value();
+      PS_CHECK(retained_relation.certify(expected).ok());
+      PS_CHECK(
+          retained_relation.certify(Footprint::all({4, 4}).take_value()).code ==
+          ErrorCode::NotFound);
+      PS_CHECK(retained_relation
+                   .visit(4, 1000, [](auto) { return Status::success(); })
+                   .code == ErrorCode::NotFound);
+      for (const auto& box : expected.boxes()) {
+        auto window = result.acquire_tensor(facts, 0, box);
+        PS_REQUIRE_OK(window);
+        const auto& d = box.dimensions();
+        for (std::uint64_t x = d[1].offset; x < d[1].offset + d[1].extent;
+             ++x) {
+          float value = -1;
+          auto run = window.value().row_run({d[0].offset, x});
+          PS_REQUIRE_OK(run);
+          std::memcpy(&value, run.value().data, 4);
+          PS_CHECK(value == d[0].offset * 4 + x);
+        }
+      }
+      PS_CHECK(!result.acquire_tensor(facts, 0, Region({{0, 3}, {0, 4}})).ok());
+    }
+  }
+  auto root = budget();
+  SchemaTemplate schema;
+  schema.id = "test.batch_domain";
+  ResultTensorSpec tensor;
+  tensor.key = "values";
+  tensor.descriptor = {ElementType::Float32, {4}};
+  schema.tensors.push_back(tensor);
+  auto producer =
+      ResultBuilder::start(root, schema, "batch.domain").take_value();
+  PS_REQUIRE_OK(producer.bind_descriptor_relation(
+      ResultRelation::cartesian(root, 1, {}).take_value()));
+  auto wrong = Footprint::from_regions({8}, {Region({{0, 1}})}).take_value();
+  bool called = false;
+  auto status = producer.publish_tensor_kernel(
+      0, wrong,
+      [&](const auto&) {
+        called = true;
+        return Status::success();
+      },
+      ResultRelation::cartesian(root, 4, {}).take_value(),
+      {true, true, true, true});
+  PS_CHECK(!status.ok() && !called);
+  return 0;
+}
 }  // namespace
 int main() {
+  PS_CHECK(batched_tensor_transaction() == 0);
   PS_CHECK(descriptors_and_lifetime() == 0);
   PS_CHECK(empty_and_failure() == 0);
   PS_CHECK(paging() == 0);

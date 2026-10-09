@@ -1,12 +1,15 @@
 #include "photospider/data/footprint.hpp"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <optional>
 #include <queue>
 #include <utility>
 #include <vector>
 
+#include "core/radix_sort.hpp"
+#include "data/footprint_index.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
 namespace ps {
@@ -52,21 +55,24 @@ struct Work final {
     if (limits.cancellation.cancelled())
       throw Stop{Status::failure(ErrorCode::Cancelled, "footprint cancelled")};
   }
-  void tick() {
+  void tick(std::uint64_t count = 1) {
     check();
-    if (!remaining)
+    if (count > remaining)
       throw Stop{Status::failure(ErrorCode::ResourceExhausted,
                                  "footprint work limit")};
+    if (!count)
+      return;
     if (limits.consume_work) {
-      auto charged = limits.consume_work(1);
+      auto charged = limits.consume_work(count);
       if (!charged.ok())
         throw Stop{std::move(charged)};
     } else if (auto* root = resource_internal::metadata_budget()) {
-      auto charged = root->consume({1});
+      auto charged = root->consume({count});
       if (!charged.ok())
         throw Stop{std::move(charged)};
     }
-    --remaining;
+    remaining -= count;
+    check();
   }
   void capacity(std::size_t count) const {
     check();
@@ -75,6 +81,52 @@ struct Work final {
           Status::failure(ErrorCode::ResourceExhausted, "footprint box limit")};
   }
 };
+
+// Canonical suffixes for one axis interval occupy a contiguous range. A point
+// lookup narrows that range on each axis instead of scanning every rectangle.
+const Region* containing_box(const std::vector<Region>& boxes,
+                             const std::uint64_t* at, std::size_t rank,
+                             Work* work = nullptr) {
+  const auto index = footprint_internal::containing(
+      boxes.size(), rank, at, [&](auto i) -> const Region& { return boxes[i]; },
+      [&] {
+        if (work)
+          work->tick();
+      });
+  return index == boxes.size() ? nullptr : &boxes[index];
+}
+
+Result<bool> contains_rectangle(const Footprint& set, const Region& region,
+                                FootprintLimits* remaining) {
+  std::uint64_t consumed = 0;
+  auto check = [&]() -> Result<bool> {
+    try {
+      Work work(*remaining, &consumed);
+      work.tick();
+      std::array<std::uint64_t, 8> at{};
+      for (std::size_t axis = 0; axis < region.rank(); ++axis)
+        at[axis] = region.dimensions()[axis].offset;
+      const auto* box =
+          containing_box(set.boxes(), at.data(), region.rank(), &work);
+      if (!box)
+        return Result<bool>(false);
+      for (std::size_t axis = 0; axis < region.rank(); ++axis) {
+        work.tick();
+        const auto a = region.dimensions()[axis], b = box->dimensions()[axis];
+        if (a.extent > b.extent - (a.offset - b.offset))
+          return Result<bool>(false);
+      }
+      return Result<bool>(true);
+    } catch (const Stop& stop) {
+      return Result<bool>(stop.status);
+    } catch (const std::bad_alloc&) {
+      return Result<bool>(Status{ErrorCode::ResourceExhausted, {}});
+    }
+  };
+  auto result = check();
+  remaining->maximum_work -= consumed;
+  return result;
+}
 
 bool selected(bool left, bool right, Combine operation) {
   switch (operation) {
@@ -99,19 +151,43 @@ Boxes sweep(const Boxes& a, const Boxes& b, std::size_t axis, std::size_t rank,
     return {};
   if (b.empty() && operation == Combine::Intersection)
     return {};
-  ResourceVector<std::uint64_t> boundaries;
-  for (const auto* boxes : {&a, &b})
-    for (const auto& box : *boxes) {
+  struct Event {
+    std::uint64_t coordinate;
+    std::size_t index;
+    unsigned side;
+    bool begin;
+  };
+  ResourceVector<Event> events;
+  const Boxes* operands[] = {&a, &b};
+  ResourceVector<std::size_t> active[2], positions[2];
+  for (unsigned side = 0; side < 2; ++side) {
+    positions[side].resize(operands[side]->size());
+    for (std::size_t i = 0; i < operands[side]->size(); ++i) {
       work->tick();
-      boundaries.push_back(box[axis].offset);
-      boundaries.push_back(box[axis].offset + box[axis].extent);
+      const auto d = (*operands[side])[i][axis];
+      events.push_back({d.offset, i, side, true});
+      events.push_back({d.offset + d.extent, i, side, false});
     }
-  std::sort(boundaries.begin(), boundaries.end(), [&](auto x, auto y) {
-    work->tick();
-    return x < y;
-  });
-  boundaries.erase(std::unique(boundaries.begin(), boundaries.end()),
-                   boundaries.end());
+  }
+  // Small suffixes avoid histogram setup. Larger event sets use fixed-width
+  // radix passes, charging each pass once instead of refreshing execution
+  // state from every comparison in an O(n log n) sort.
+  if (events.size() <= 32) {
+    std::sort(events.begin(), events.end(), [&](const auto& x, const auto& y) {
+      work->tick();
+      return x.coordinate < y.coordinate;
+    });
+  } else {
+    auto sorted = radix_internal::sort(
+        &events, 1, [](const Event& event, auto) { return event.coordinate; },
+        [&](auto count) {
+          work->tick(count);
+          return Status::success();
+        },
+        work->limits.cancellation);
+    if (!sorted.ok())
+      throw Stop{std::move(sorted)};
+  }
   Boxes result, previous;
   std::uint64_t start = 0, end = 0;
   auto flush = [&] {
@@ -122,22 +198,44 @@ Boxes sweep(const Boxes& a, const Boxes& b, std::size_t axis, std::size_t rank,
       result.push_back(std::move(suffix));
     }
   };
-  for (std::size_t i = 1; i < boundaries.size(); ++i) {
-    work->tick();
-    const auto lo = boundaries[i - 1], hi = boundaries[i];
-    Boxes left, right;
-    for (const auto& box : a) {
+  bool first = true;
+  for (std::size_t i = 0; i < events.size();) {
+    const auto lo = events[i].coordinate;
+    do {
       work->tick();
-      if (box[axis].offset <= lo && hi <= box[axis].offset + box[axis].extent)
-        left.push_back(box);
+      const auto event = events[i++];
+      auto& set = active[event.side];
+      auto& position = positions[event.side];
+      if (event.begin) {
+        position[event.index] = set.size();
+        set.push_back(event.index);
+      } else {
+        const auto at = position[event.index];
+        set[at] = set.back();
+        position[set[at]] = at;
+        set.pop_back();
+      }
+    } while (i < events.size() && events[i].coordinate == lo);
+    if (i == events.size())
+      break;
+    const auto hi = events[i].coordinate;
+    Boxes suffix;
+    if (axis + 1 == rank) {
+      if (selected(!active[0].empty(), !active[1].empty(), operation))
+        suffix.push_back(Box{});
+    } else {
+      Boxes left, right;
+      for (const auto index : active[0]) {
+        work->tick();
+        left.push_back(a[index]);
+      }
+      for (const auto index : active[1]) {
+        work->tick();
+        right.push_back(b[index]);
+      }
+      suffix = sweep(left, right, axis + 1, rank, operation, work);
     }
-    for (const auto& box : b) {
-      work->tick();
-      if (box[axis].offset <= lo && hi <= box[axis].offset + box[axis].extent)
-        right.push_back(box);
-    }
-    auto suffix = sweep(left, right, axis + 1, rank, operation, work);
-    if (i > 1 && equal_boxes(previous, suffix)) {
+    if (!first && equal_boxes(previous, suffix)) {
       end = hi;
     } else {
       flush();
@@ -145,6 +243,7 @@ Boxes sweep(const Boxes& a, const Boxes& b, std::size_t axis, std::size_t rank,
       start = lo;
       end = hi;
     }
+    first = false;
   }
   flush();
   return result;
@@ -288,32 +387,35 @@ bool Footprint::contains(
     const std::vector<std::uint64_t>& coordinate) const noexcept {
   if (!valid() || coordinate.size() != this->shape().size())
     return false;
-  for (const auto& box : this->boxes()) {
-    bool inside = true;
-    for (std::size_t axis = 0; axis < this->shape().size(); ++axis) {
-      const auto d = box.dimensions()[axis];
-      if (coordinate[axis] < d.offset ||
-          coordinate[axis] - d.offset >= d.extent) {
-        inside = false;
-        break;
-      }
-    }
-    if (inside)
-      return true;
-  }
-  return false;
+  return containing_box(boxes(), coordinate.data(), coordinate.size()) !=
+         nullptr;
 }
 Result<Footprint> Footprint::unite(const Footprint& other,
                                    const FootprintLimits& limits) const {
+  auto remaining = limits;
   std::optional<ResourceAllocationScope> scope;
   if (impl_ && impl_->budget && !resource_internal::metadata_budget())
     scope.emplace(*impl_->budget);
   if (this->shape() != other.shape())
     return Result<Footprint>(Status::failure(ErrorCode::InvalidArgument,
                                              "footprint domain mismatch"));
+  if (valid() && other.valid()) {
+    for (const auto& pair :
+         {std::make_pair(this, &other), std::make_pair(&other, this)}) {
+      if (pair.first->boxes().size() != 1)
+        continue;
+      auto contained =
+          contains_rectangle(*pair.second, pair.first->boxes()[0], &remaining);
+      if (!contained.ok())
+        return Result<Footprint>(contained.status());
+      if (contained.value() &&
+          pair.second->boxes().size() <= limits.maximum_boxes)
+        return Result<Footprint>(*pair.second);
+    }
+  }
   auto boxes =
       combine(this->shape(), this->boxes(), other.boxes(), Combine::Union,
-              limits, nullptr, sizeof(Impl) + shape().size() * 8);
+              remaining, nullptr, sizeof(Impl) + shape().size() * 8);
   if (!boxes.ok())
     return Result<Footprint>(boxes.status());
   auto normalized = boxes.take_value();
@@ -322,14 +424,29 @@ Result<Footprint> Footprint::unite(const Footprint& other,
 }
 Result<Footprint> Footprint::intersect(const Footprint& other,
                                        const FootprintLimits& limits) const {
+  auto remaining = limits;
   std::optional<ResourceAllocationScope> scope;
   if (impl_ && impl_->budget && !resource_internal::metadata_budget())
     scope.emplace(*impl_->budget);
   if (this->shape() != other.shape())
     return Result<Footprint>(Status::failure(ErrorCode::InvalidArgument,
                                              "footprint domain mismatch"));
+  if (valid() && other.valid()) {
+    for (const auto& pair :
+         {std::make_pair(this, &other), std::make_pair(&other, this)}) {
+      if (pair.first->boxes().size() != 1)
+        continue;
+      auto contained =
+          contains_rectangle(*pair.second, pair.first->boxes()[0], &remaining);
+      if (!contained.ok())
+        return Result<Footprint>(contained.status());
+      if (contained.value() &&
+          pair.first->boxes().size() <= limits.maximum_boxes)
+        return Result<Footprint>(*pair.first);
+    }
+  }
   auto boxes = combine(this->shape(), this->boxes(), other.boxes(),
-                       Combine::Intersection, limits, nullptr,
+                       Combine::Intersection, remaining, nullptr,
                        sizeof(Impl) + shape().size() * 8);
   if (!boxes.ok())
     return Result<Footprint>(boxes.status());
@@ -339,15 +456,23 @@ Result<Footprint> Footprint::intersect(const Footprint& other,
 }
 Result<Footprint> Footprint::subtract(const Footprint& other,
                                       const FootprintLimits& limits) const {
+  auto remaining = limits;
   std::optional<ResourceAllocationScope> scope;
   if (impl_ && impl_->budget && !resource_internal::metadata_budget())
     scope.emplace(*impl_->budget);
   if (this->shape() != other.shape())
     return Result<Footprint>(Status::failure(ErrorCode::InvalidArgument,
                                              "footprint domain mismatch"));
+  if (valid() && other.valid() && boxes().size() == 1) {
+    auto contained = contains_rectangle(other, boxes()[0], &remaining);
+    if (!contained.ok())
+      return Result<Footprint>(contained.status());
+    if (contained.value())
+      return Footprint::none(shape(), remaining);
+  }
   auto boxes =
       combine(this->shape(), this->boxes(), other.boxes(), Combine::Difference,
-              limits, nullptr, sizeof(Impl) + shape().size() * 8);
+              remaining, nullptr, sizeof(Impl) + shape().size() * 8);
   if (!boxes.ok())
     return Result<Footprint>(boxes.status());
   auto normalized = boxes.take_value();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -49,6 +50,13 @@ struct ResultSupport final {
 struct ResultRelationRow final {
   std::uint64_t output = 0;
   ResultSupport support;
+};
+/** @brief One optional tensor rectangle origin returned to a gather builder.
+ * Only indexed axes are read. Coordinates are logical, independent of strides.
+ */
+struct ResultGatherSample final {
+  std::array<std::uint64_t, 8> coordinates{};
+  bool present = false;
 };
 /** @brief Anchored affine input support interval.
  * start=source_origin+step*(output[output_axis]-output_origin). A negative
@@ -122,6 +130,53 @@ class PHOTOSPIDER_API ResultRelation final {
       ResourceBudget budget, const std::vector<std::uint64_t>& output_shape,
       const Region& outputs, const std::vector<std::uint64_t>& input_shape,
       const std::vector<ResultMappedAxis>& axes, ResultSupport support);
+  /** @brief Immutable indexed tensor support shared by output sample tuples.
+   * outputs is one rectangle; its last output_tuple_axes (1..rank) axes must
+   * cover their complete domains. Each remaining row-major output tuple has
+   * samples_per_tuple (1..64) optional input rectangles. Indexed input axes
+   * (bit mask) obtain their origins from reader(tuple, sample); other axes use
+   * axes, independently of the grouped output axes. All extents come from axes
+   * and clip at input boundaries. Indexed axes must be fixed in axes.
+   *
+   * reader runs synchronously in increasing tuple/sample order, is not
+   * retained, and returns owned coordinates; no input payload or mutable
+   * callback survives construction. The budget accounts the table before
+   * copying it. Construction is linear in table entries plus exact support
+   * normalization. Full-rectangle projection reuses that immutable normalized
+   * support; subrectangle and inverse queries retain per-tuple precision.
+   * Unflattenable tensor domains work through rectangle queries; scalar visit
+   * returns ResourceExhausted on span overflow. validation_trailing_axes
+   * optionally adds same-observation Validation support closed over that many
+   * trailing input axes, without broadening Data/Control. Input support must
+   * name a Tensor, first=count=0, roles in 1..7. Invalid metadata returns
+   * InvalidArgument; budget/cancellation/reader failures retain their typed
+   * status. The result is immutable and safe for concurrent queries.
+   */
+  static Result<ResultRelation> gather(
+      ResourceBudget budget, const std::vector<std::uint64_t>& output_shape,
+      const Region& outputs, std::uint32_t output_tuple_axes,
+      const std::vector<std::uint64_t>& input_shape,
+      const std::vector<ResultMappedAxis>& axes, std::uint32_t indexed_axes,
+      std::uint32_t samples_per_tuple,
+      const std::function<Result<ResultGatherSample>(std::uint64_t,
+                                                     std::uint32_t)>& reader,
+      ResultSupport support, std::uint32_t validation_trailing_axes = 0,
+      const FootprintLimits& limits = {});
+  /** @brief Gather over canonical disjoint output rectangles.
+   * Rows concatenate each rectangle's local row-major tuples in boxes() order.
+   * The immutable table, normalization and cancellation share limits. Full
+   * projection is cached once for the complete footprint, including its holes.
+   */
+  static Result<ResultRelation> gather(
+      ResourceBudget budget, const std::vector<std::uint64_t>& output_shape,
+      const Footprint& outputs, std::uint32_t output_tuple_axes,
+      const std::vector<std::uint64_t>& input_shape,
+      const std::vector<ResultMappedAxis>& axes, std::uint32_t indexed_axes,
+      std::uint32_t samples_per_tuple,
+      const std::function<Result<ResultGatherSample>(std::uint64_t,
+                                                     std::uint32_t)>& reader,
+      ResultSupport support, std::uint32_t validation_trailing_axes = 0,
+      const FootprintLimits& limits = {});
   /** @brief Exact symmetric neighborhood support over a complete tensor domain.
    * shape contains 1..8 positive uint64 extents; its full element product may
    * exceed uint64. radii has one uint64 radius per axis. For each output
@@ -248,6 +303,10 @@ class PHOTOSPIDER_API ResultRelation final {
   friend class execution_internal::StructuredExecution;
   friend class execution_internal::ResultPublicationValidator;
   friend class execution_internal::StructuredResultCache;
+  Status project_impl(
+      const Footprint& outputs,
+      const std::function<Status(ResultSupport, const Footprint*)>& visitor,
+      const FootprintLimits& limits, bool preflight) const;
   Status validate_tuple_closure(const Footprint& outputs, std::uint32_t input,
                                 std::uint32_t slot,
                                 const std::vector<std::uint64_t>& shape,
@@ -255,6 +314,11 @@ class PHOTOSPIDER_API ResultRelation final {
                                 const FootprintLimits& limits) const;
   Result<ResultRelation> restrict_to(const std::vector<std::uint64_t>& shape,
                                      const Region& region) const;
+  /** @brief Restrict a witness to an exact footprint, retaining its holes.
+   * Uses one immutable mask rather than one expression node per rectangle.
+   */
+  Result<ResultRelation> restrict_to(const Footprint& outputs,
+                                     const FootprintLimits& limits = {}) const;
   Result<std::uint64_t> cache_metadata(
       ResourceVector<const void*>& owners, std::uint64_t maximum,
       const std::function<Status(std::uint64_t)>& work) const;

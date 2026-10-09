@@ -430,6 +430,7 @@ class PHOTOSPIDER_API ResultTensorReadWindow final {
   CancellationToken cancellation_;
   Result<std::size_t> find_piece(const std::vector<std::uint64_t>& at) const;
   ResourceVector<Value> affine_;
+  bool affine_canonical_ = false;
 };
 /** @brief A zero-copy logical tensor transform over an authorized source
  * window. source_axes has one anchored point map per complete source axis,
@@ -599,6 +600,19 @@ class PHOTOSPIDER_API ResultBuilder final {
    */
   Status publish_tensor_kernel(
       std::uint32_t slot, const Region& region,
+      const std::function<
+          Status(const ResourceVector<ResultTensorWriteWindow>&)>& write,
+      ResultRelation relation, ResultFinality finality,
+      const CancellationToken& cancellation = {});
+  /** @brief Atomically write an exact set of disjoint tensor rectangles.
+   * A singleton uses the spatial/affine path above. Multiple rectangles share
+   * one private packed allocation and one publication transaction. The callback
+   * receives one affine window per canonical box, in boxes() order; holes are
+   * never allocated or certified. Failure, cancellation, and reentrant mutation
+   * retain the same rollback and sticky-error rules as the Region overload.
+   */
+  Status publish_tensor_kernel(
+      std::uint32_t slot, const Footprint& samples,
       const std::function<
           Status(const ResourceVector<ResultTensorWriteWindow>&)>& write,
       ResultRelation relation, ResultFinality finality,
