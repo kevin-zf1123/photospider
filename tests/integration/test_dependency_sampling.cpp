@@ -1346,6 +1346,236 @@ int stmap_cpu_tiles(const std::shared_ptr<OperationRegistry>& registry) {
   }
   return 0;
 }
+int stmap_map_rows(const std::shared_ptr<OperationRegistry>& registry) {
+  using numeric_result_fixture::take;
+  constexpr std::uint64_t side = 256, count = side * side;
+  const std::vector<float> pixels{1,  -2,  3,  1, 4,   5,  -6, 1,
+                                  7,  8,   9,  1, -10, 11, 12, 1,
+                                  13, -14, 15, 1, 16,  17, 18, 1};
+  std::vector<double> uv(2 * count);
+  for (std::uint64_t y = 0; y < side; ++y)
+    for (std::uint64_t x = 0; x < side; ++x) {
+      uv[2 * (y * side + x)] = (x % 9) * .5 - .875;
+      uv[2 * (y * side + x) + 1] = (y % 7) * .5 - .75;
+    }
+  const auto query = take(Footprint::all({1, 1, side, side, 4}));
+  std::vector<float> reference;
+  for (unsigned layout = 0; layout < 4; ++layout) {
+    ResourceBudget observed;
+    ResultRelation retained;
+    {
+      ExecutionContextConfig config;
+      config.cpu_workers = 4;
+      StmapDriver driver(registry, config);
+      observed = driver.root;
+      const auto source = driver.source(image_schema(2, 3), pixels);
+      auto schema = numeric_result_fixture::source_schema(
+          data(ElementType::Float64, {side, side, 2}, uv));
+      schema.tensors[0].layout.spatial = layout == 1 || layout == 2;
+      auto builder = take(ResultBuilder::start(driver.root, schema, "map.rows",
+                                               {}, {}, 32, 64));
+      PS_REQUIRE_OK(builder.bind_descriptor_relation(
+          take(ResultRelation::cartesian(driver.root, 1, {}))));
+      const auto relation =
+          take(ResultRelation::cartesian(driver.root, 2 * count, {}));
+      if (layout < 2) {
+        std::vector<double> physical(2 * count);
+        for (std::uint64_t y = 0; y < side; ++y)
+          for (std::uint64_t x = 0; x < side; ++x)
+            for (std::uint64_t c = 0; c < 2; ++c) {
+              const auto index =
+                  layout == 0
+                      ? 2 * (y * side + side - 1 - x) + c
+                      : c * count + (side - 1 - y) * side + side - 1 - x;
+              physical[index] = uv[2 * (y * side + x) + c];
+            }
+        auto buffer =
+            take(driver.root.allocator().allocate(physical.size() * 8));
+        std::memcpy(buffer.data(), physical.data(), physical.size() * 8);
+        const auto strides =
+            layout == 0 ? StridedLayout{(side - 1) * 16, {side * 16, -16, 8}}
+                        : StridedLayout{(count - 1) * 8,
+                                        {-static_cast<std::int64_t>(side * 8),
+                                         -8, count * 8}};
+        PS_REQUIRE_OK(builder.publish_tensor(
+            0, Region::whole({side, side, 2}), strides,
+            std::move(buffer).freeze(), relation, {true, true, true, true}));
+      } else if (layout == 2) {
+        // Spatial tiles shorter than a logical row require the row-copy path.
+        PS_REQUIRE_OK(builder.publish_tensor(
+            0, Region::whole({side, side, 2}),
+            ByteView(reinterpret_cast<const std::uint8_t*>(uv.data()),
+                     uv.size() * 8),
+            relation, {true, true, true, true}));
+      } else {
+        // One affine top half and two lower pieces mix raw and copied rows.
+        for (const auto& region : {Region({{0, 128}, {0, side}, {0, 2}}),
+                                   Region({{128, 128}, {0, 127}, {0, 2}}),
+                                   Region({{128, 128}, {127, 129}, {0, 2}})}) {
+          std::vector<double> piece;
+          const auto y = region.dimensions()[0], x = region.dimensions()[1];
+          for (auto row = y.offset; row < y.offset + y.extent; ++row)
+            for (auto column = x.offset; column < x.offset + x.extent; ++column)
+              for (std::size_t c = 0; c < 2; ++c)
+                piece.push_back(uv[2 * (row * side + column) + c]);
+          PS_REQUIRE_OK(builder.publish_tensor(
+              0, region,
+              ByteView(reinterpret_cast<const std::uint8_t*>(piece.data()),
+                       piece.size() * 8),
+              relation, {true, true, true, true}));
+        }
+      }
+      const auto map = take(builder.seal());
+      ExecutionOptions options;
+      options.maximum_parallelism = 4;
+      options.maximum_dependency_work = UINT64_C(1) << 32;
+      options.dependencies.maximum_work = UINT64_C(1) << 32;
+      options.dependencies.sets.maximum_work = UINT64_C(1) << 32;
+      const auto rounding = std::fegetround();
+      PS_CHECK(std::fesetround(FE_DOWNWARD) == 0);
+      const auto answer = driver.run(source, map, "mirror", query, options);
+      const auto restored = std::fegetround();
+      PS_CHECK(std::fesetround(rounding) == 0);
+      PS_REQUIRE_OK(answer);
+      PS_CHECK(restored == FE_DOWNWARD);
+      PS_CHECK(answer.value().diagnostics.cpu_stage_count == 1 &&
+               answer.value().diagnostics.cpu_tile_callback_count == 64);
+      const auto& result = answer.value().results.at("result");
+      retained = take(result.tensor_relation(0));
+      const auto descriptor = take(result.descriptor());
+      const auto window = take(
+          result.acquire_tensor(descriptor, 0, Region::whole(query.shape())));
+      std::vector<float> actual(4 * count);
+      for (std::uint64_t y = 0; y < side; ++y)
+        for (std::uint64_t c = 0; c < 4; ++c)
+          for (std::uint64_t x = 0; x < side;) {
+            const auto run = take(window.row_run({0, 0, y, x, c}));
+            const auto n = std::min(side - x, run.samples);
+            for (std::uint64_t i = 0; i < n; ++i)
+              std::memcpy(&actual[4 * (y * side + x + i) + c],
+                          run.data + static_cast<std::int64_t>(i) *
+                                         run.sample_stride_bytes,
+                          4);
+            x += n;
+          }
+      for (const auto y : {0U, 1U, 127U, 128U, 255U})
+        for (const auto x : {0U, 1U, 63U, 126U, 127U, 128U, 255U}) {
+          const auto expected =
+              stmap_reference(pixels, 2, 3, uv[2 * (y * side + x)],
+                              uv[2 * (y * side + x) + 1], "mirror");
+          PS_CHECK(std::memcmp(actual.data() + 4 * (y * side + x),
+                               expected.data(), 16) == 0);
+        }
+      if (!layout)
+        reference = std::move(actual);
+      else
+        PS_CHECK(std::memcmp(actual.data(), reference.data(), 16 * count) == 0);
+      auto support = take(answer.value().dependencies.source_support());
+      PS_CHECK(support.at("input1") == take(Footprint::all({side, side, 2})));
+      const auto selected = [&](unsigned index) {
+        return footprint(
+            query.shape(),
+            Region(
+                {{0, 1}, {0, 1}, {127 + index, 1}, {126 + index, 1}, {0, 4}}));
+      };
+      const auto observations = take(selected(0).unite(selected(1)));
+      for (unsigned index = 0; index < 2; ++index) {
+        const auto source_shape = source.schema().tensors[0].sample_shape();
+        auto projected = take(Footprint::none(source_shape));
+        PS_REQUIRE_OK(retained.project(
+            selected(index), [&](ResultSupport support, const Footprint* set) {
+              if (support.input == 0 && (support.roles & 1U) && set)
+                projected = take(projected.unite(*set));
+              return Status::success();
+            }));
+        PS_CHECK(projected ==
+                 footprint(
+                     source_shape,
+                     Region({{0, 1}, {0, 1}, {0, 2}, {1 - index, 2}, {0, 4}})));
+        const auto edit = footprint(
+            source_shape,
+            Region({{0, 1}, {0, 1}, {0, 1}, {index ? 0U : 2U, 1}, {0, 1}}));
+        PS_CHECK(take(retained.preimage(
+                     observations, {0, 1, 0, 0, ResultSupportTarget::Tensor, 0},
+                     edit)) == selected(index));
+      }
+    }
+    // Raw windows own Payload; copied UV uses Metadata. The packed table is
+    // 128 KiB plus small relation headers, below even the half-map UV copy.
+    const auto live = observed.statistics().live;
+    PS_CHECK(live[ResourceKind::Payload] == 0);
+    PS_CHECK(live[ResourceKind::Metadata] < (UINT64_C(256) << 10));
+    retained = {};
+    for (auto live : observed.statistics().live.values)
+      PS_CHECK(live == 0);
+  }
+  // Cross frame/layer boundaries with the same 65,536-pixel row fast path.
+  // An unbatched map repeats its rows; a batched map has distinct row values.
+  for (const bool batched : {false, true}) {
+    ExecutionContextConfig config;
+    config.cpu_workers = 4;
+    StmapDriver driver(registry, config);
+    auto schema = image_schema(1, 3, 2);
+    schema.tensors[0].batch_axes = {2, 2};
+    std::vector<float> pixels(4 * 3 * 4);
+    for (unsigned f = 0; f < 2; ++f)
+      for (unsigned l = 0; l < 2; ++l)
+        for (unsigned x = 0; x < 3; ++x) {
+          pixels[4 * ((f * 2 + l) * 3 + x)] = 100 * f + 10 * l + x;
+          pixels[4 * ((f * 2 + l) * 3 + x) + 3] = 1;
+        }
+    std::vector<double> maps;
+    for (unsigned batch = 0; batch < (batched ? 4U : 1U); ++batch)
+      for (unsigned y = 0; y < 64; ++y)
+        for (unsigned x = 0; x < 256; ++x) {
+          maps.push_back(.75 + (batch + y / 32 + x / 128) % 2);
+          maps.push_back(.5);
+        }
+    const auto source = driver.source(schema, pixels);
+    const auto map = stmap_map(driver, maps, 64, 256,
+                               batched ? std::vector<std::uint64_t>{2, 2}
+                                       : std::vector<std::uint64_t>{});
+    const auto outputs = take(Footprint::all({2, 2, 64, 256, 4}));
+    ExecutionOptions options;
+    options.maximum_parallelism = 4;
+    options.maximum_dependency_work = UINT64_C(1) << 32;
+    options.dependencies.maximum_work = UINT64_C(1) << 32;
+    options.dependencies.sets.maximum_work = UINT64_C(1) << 32;
+    const auto answer =
+        take(driver.run(source, map, "clamp", outputs, options));
+    PS_CHECK(answer.diagnostics.cpu_tile_callback_count == 64);
+    const auto& result = answer.results.at("result");
+    const auto relation = take(result.tensor_relation(0));
+    for (unsigned f = 0; f < 2; ++f)
+      for (unsigned l = 0; l < 2; ++l)
+        for (unsigned y : {31U, 32U})
+          for (unsigned x : {127U, 128U}) {
+            const auto column =
+                ((batched ? 2 * f + l : 0U) + y / 32 + x / 128) % 2;
+            float value = 0;
+            PS_REQUIRE_OK(numeric_result_fixture::read(result, {f, l, y, x, 0},
+                                                       &value, 4));
+            PS_CHECK(value == 100 * f + 10 * l + column + .25F);
+            auto projected =
+                take(Footprint::none(schema.tensors[0].sample_shape()));
+            PS_REQUIRE_OK(relation.project(
+                footprint(outputs.shape(),
+                          Region({{f, 1}, {l, 1}, {y, 1}, {x, 1}, {0, 4}})),
+                [&](ResultSupport support, const Footprint* set) {
+                  if (support.input == 0 && (support.roles & 1U) && set)
+                    projected = take(projected.unite(*set));
+                  return Status::success();
+                }));
+            PS_CHECK(
+                projected ==
+                footprint(
+                    schema.tensors[0].sample_shape(),
+                    Region({{f, 1}, {l, 1}, {0, 1}, {column, 2}, {0, 4}})));
+          }
+  }
+  return 0;
+}
+
 int stmap_sparse_scaling() {
   std::uint64_t previous = 0;
   for (const std::uint64_t side : {16, 32, 64}) {
@@ -1474,6 +1704,7 @@ int main() {
   PS_CHECK(stmap_batches_and_strides(registry) == 0);
   PS_CHECK(typed_validation_work_batches(registry) == 0);
   PS_CHECK(stmap_cpu_tiles(registry) == 0);
+  PS_CHECK(stmap_map_rows(registry) == 0);
   PS_CHECK(stmap_scaling() == 0);
   PS_CHECK(stmap_sparse_scaling() == 0);
   return 0;

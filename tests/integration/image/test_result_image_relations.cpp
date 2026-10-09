@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <iostream>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -836,6 +837,510 @@ void gather_cached_mask() {
               calls == 0,
           "full-mask alias still obeys the box limit");
 }
+void gather_packed_storage() {
+  using Point = std::array<std::uint64_t, 2>;
+  const auto points = [](const auto& shape, const std::set<Point>& values) {
+    std::vector<Region> boxes;
+    for (const auto& at : values)
+      boxes.emplace_back(std::vector<RegionDimension>{{at[0], 1}, {at[1], 1}});
+    return take(Footprint::from_regions(shape, boxes));
+  };
+  const std::vector<std::vector<std::uint64_t>> shapes{
+      {1, 1},
+      {8, 16},
+      {UINT64_C(1) << 31, UINT64_C(1) << 32},
+      {UINT64_C(1) << 32, UINT64_C(1) << 32},
+      {1, UINT64_MAX},
+      {2, UINT64_MAX},
+      {UINT64_MAX, UINT64_MAX}};
+  const std::vector<std::uint64_t> output{65, 1};
+  const auto all = take(Footprint::all(output));
+  for (const auto& shape : shapes) {
+    for (const auto taps : {1U, 3U, 4U, 63U, 64U}) {
+      ResourceBudget root;
+      {
+        std::vector<std::set<Point>> expected_rows(65);
+        std::vector<ResultGatherSample> table(65 * taps);
+        std::set<Point> expected_all;
+        for (std::uint64_t row = 0; row < 65; ++row) {
+          for (std::uint32_t tap = 0; tap < taps; ++tap) {
+            auto& sample = table[row * taps + tap];
+            sample.coordinates.fill(UINT64_MAX);
+            sample.present =
+                row && (row == 1 || (row * 17 + tap * 5) % 11 < 3 ||
+                        (row >= 63 && (tap == 0 || tap + 1 == taps)));
+            if (!sample.present)
+              continue;
+            Point at{};
+            for (std::size_t axis = 0; axis < 2; ++axis) {
+              const auto maximum = shape[axis] - 1;
+              switch ((row + tap + axis) % 4) {
+                case 0:
+                  at[axis] = 0;
+                  break;
+                case 1:
+                  at[axis] = maximum;
+                  break;
+                case 2:
+                  at[axis] = maximum / 2;
+                  break;
+                default:
+                  at[axis] = std::min<std::uint64_t>(1, maximum);
+              }
+              sample.coordinates[axis] = at[axis];
+            }
+            expected_rows[row].insert(at);
+            expected_all.insert(at);
+          }
+        }
+        std::uint64_t reader_calls = 0;
+        auto relation = take(ResultRelation::gather(
+            root, output, all, 1, shape, std::vector<ResultMappedAxis>(2), 3,
+            taps,
+            [&](auto row, auto tap) {
+              require(row * taps + tap == reader_calls++,
+                      "compressed Gather retains synchronous reader order");
+              return Result<ResultGatherSample>(table[row * taps + tap]);
+            },
+            {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
+        auto owner = relation;
+        relation = {};
+        table.clear();
+        Footprint projected = take(Footprint::none(shape));
+        const auto capture = [&](auto support, const auto* samples) {
+          require(samples && support.roles == 1,
+                  "compressed Gather projects exact typed Data");
+          projected = *samples;
+          return Status::success();
+        };
+        require(owner.project(all, capture).ok() &&
+                    projected == points(shape, expected_all),
+                "compressed full support matches literal coordinates");
+        for (const auto row : {0U, 1U, 20U, 21U, 22U, 63U, 64U}) {
+          const auto q = take(
+              Footprint::from_regions(output, {Region({{row, 1}, {0, 1}})}));
+          projected = take(Footprint::none(shape));
+          require(owner.project(q, capture).ok() &&
+                      projected == points(shape, expected_rows[row]),
+                  "partial Gather decodes cross-word coordinates and presence");
+          if (shape[0] <= UINT64_MAX / shape[1]) {
+            std::set<Point> visited;
+            require(
+                owner.visit(row, 100000,
+                            [&](auto support) {
+                              require(
+                                  support.count == 1 && support.roles == 1,
+                                  "compressed Gather visits one source point");
+                              visited.insert({support.first / shape[1],
+                                              support.first % shape[1]});
+                              return Status::success();
+                            })
+                        .ok() &&
+                    visited == expected_rows[row],
+                "visit and footprint queries read the same packed records");
+          }
+        }
+        const auto edited = *expected_all.begin();
+        std::vector<Region> dirty_rows;
+        for (std::uint64_t row = 0; row < 65; ++row)
+          if (expected_rows[row].count(edited))
+            dirty_rows.emplace_back(
+                std::vector<RegionDimension>{{row, 1}, {0, 1}});
+        require(take(owner.preimage(
+                    all, {0, 1, 0, 0, ResultSupportTarget::Tensor, 0},
+                    points(shape, {edited}))) ==
+                    take(Footprint::from_regions(output, dirty_rows)),
+                "packed inverse keeps per-row evidence after reader storage "
+                "retires");
+        require(reader_calls == 65 * taps,
+                "Gather never retains or replays the reader");
+      }
+      for (auto live : root.statistics().live.values)
+        require(!live,
+                "last compressed Gather owner releases all Root resources");
+    }
+  }
+
+  for (bool zero_bits : {false, true}) {
+    ResourceBudget root;
+    const std::vector<std::uint64_t> output{2, 2, 3, 4};
+    const std::vector<std::uint64_t> input{2, 2, zero_bits ? 1U : 3U,
+                                           zero_bits ? 1U : 131U, 4};
+    std::vector<ResultMappedAxis> axes(5);
+    axes[0].output_axis = 0;
+    axes[1].output_axis = 1;
+    axes[4].extent = 4;
+    auto relation = take(ResultRelation::gather(
+        root, output, Region::whole(output), 2, input, axes, 12, 3,
+        [&](auto row, auto tap) {
+          ResultGatherSample sample;
+          sample.present = true;
+          sample.coordinates[2] = zero_bits ? 0 : row % 3;
+          sample.coordinates[3] = zero_bits ? 0 : row * 31 + tap;
+          return Result<ResultGatherSample>(sample);
+        },
+        {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}, 1));
+    const auto q = take(Footprint::from_regions(
+        output, {Region({{1, 1}, {0, 1}, {2, 1}, {1, 1}})}));
+    const auto expected = take(Footprint::from_regions(
+        input, {Region({{1, 1},
+                        {0, 1},
+                        {zero_bits ? 0U : 2U, 1},
+                        {zero_bits ? 0U : 62U, zero_bits ? 1U : 3U},
+                        {0, 4}})}));
+    Footprint projected;
+    require(
+        relation.project(q,
+                         [&](auto support, const auto* samples) {
+                           require(support.roles == 5,
+                                   "complete input tuple includes Validation");
+                           projected = *samples;
+                           return Status::success();
+                         })
+                .ok() &&
+            projected == expected,
+        "indexed tape preserves mapped F/L and multiple grouped output axes");
+    require(
+        take(relation.preimage(q, {0, 4, 0, 0, ResultSupportTarget::Tensor, 0},
+                               expected)) == q,
+        "batch inverse is limited to requested partial output tuple");
+  }
+}
+
+void gather_bitmap_equivalence() {
+  ResourceBudget root;
+  constexpr std::uint64_t distant = UINT64_C(1) << 20;
+  const std::vector<std::uint64_t> output{distant, 131, 1},
+      input{distant, 131, 4};
+  const Region dense({{0, 3}, {0, 131}, {0, 1}});
+  const auto bitmap_q = take(Footprint::from_regions(output, {dense}));
+  // An absent distant output extends only the mapped-origin bound, selecting
+  // radix without changing any present source rectangle or its per-row support.
+  const auto radix_q = take(Footprint::from_regions(
+      output, {dense, Region({{distant - 1, 1}, {0, 1}, {0, 1}})}));
+  const auto hole = [](std::uint64_t y, std::uint64_t x) {
+    return (y == 0 && (x == 0 || x == 63 || x == 64 || x == 65)) ||
+           (y == 1 && (x == 1 || x == 129)) || (y == 2 && x == 130);
+  };
+  for (bool rectangles : {false, true}) {
+    std::vector<ResultMappedAxis> axes(3);
+    axes[0].output_axis = 0;
+    axes[0].extent = rectangles ? 2 : 1;
+    axes[1].extent = rectangles ? 3 : 1;
+    axes[2].extent = 4;
+    const auto reader = [&](auto row, auto tap) {
+      ResultGatherSample sample;
+      sample.coordinates.fill(UINT64_MAX);
+      sample.present = row < 393 && !hole(row / 131, row % 131) &&
+                       (tap == 0 || row % 3 == tap);
+      if (sample.present)
+        sample.coordinates[1] = row % 131;
+      return Result<ResultGatherSample>(sample);
+    };
+    auto bitmap = take(ResultRelation::gather(
+        root, output, bitmap_q, 1, input, axes, 2, 3, reader,
+        {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}, 2));
+    auto radix = take(ResultRelation::gather(
+        root, output, radix_q, 1, input, axes, 2, 3, reader,
+        {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}, 2));
+    const auto partial = take(
+        Footprint::from_regions(output, {Region({{0, 2}, {20, 92}, {0, 1}})}));
+    for (bool full : {false, true}) {
+      const auto& q = full ? bitmap_q : partial;
+      std::vector<Region> data_boxes, validation_boxes;
+      require(q.visit(
+                   [&](const auto& at) {
+                     if (hole(at[0], at[1]))
+                       return Status::success();
+                     const auto height = rectangles ? 2U : 1U;
+                     const auto width = std::min<std::uint64_t>(
+                         rectangles ? 3 : 1, 131 - at[1]);
+                     data_boxes.emplace_back(
+                         std::vector<RegionDimension>{{at[0], height},
+                                                      {at[1], width},
+                                                      {0, 4}});
+                     validation_boxes.emplace_back(
+                         std::vector<RegionDimension>{{at[0], height},
+                                                      {0, 131},
+                                                      {0, 4}});
+                     return Status::success();
+                   },
+                   10000)
+                  .ok(),
+              "literal bitmap rectangle oracle");
+      const auto expected_data =
+          take(Footprint::from_regions(input, data_boxes));
+      const auto expected_validation =
+          take(Footprint::from_regions(input, validation_boxes));
+      for (bool use_radix : {false, true}) {
+        const auto& relation = use_radix ? radix : bitmap;
+        const auto& request = full && use_radix ? radix_q : q;
+        Footprint data, validation;
+        require(relation.project(request,
+                                 [&](auto support, const auto* samples) {
+                                   if (support.roles & 1U)
+                                     data = *samples;
+                                   if (support.roles & 4U)
+                                     validation = *samples;
+                                   return Status::success();
+                                 })
+                        .ok() &&
+                    data == expected_data && validation == expected_validation,
+                "bitmap and radix preserve canonical holes, rectangle extents "
+                "and closure");
+        const auto edit = take(Footprint::from_regions(
+            input, {Region({{0, 1}, {63, 1}, {3, 1}})}));
+        for (const auto role : {1U, 4U}) {
+          std::vector<Region> hits;
+          require(
+              q.visit(
+                   [&](const auto& at) {
+                     const bool hit =
+                         at[0] == 0 && !hole(at[0], at[1]) &&
+                         (role == 4 ||
+                          (at[1] <= 63 && 63 - at[1] < (rectangles ? 3U : 1U)));
+                     if (hit)
+                       hits.emplace_back(
+                           std::vector<RegionDimension>{{at[0], 1},
+                                                        {at[1], 1},
+                                                        {0, 1}});
+                     return Status::success();
+                   },
+                   10000)
+                  .ok(),
+              "literal bitmap inverse oracle");
+          require(take(relation.preimage(
+                      request, {0, role, 0, 0, ResultSupportTarget::Tensor, 0},
+                      edit)) == take(Footprint::from_regions(output, hits)),
+                  "bitmap and radix retain exact per-output Data and "
+                  "Validation inverse");
+        }
+      }
+    }
+  }
+}
+
+void gather_bitmap_resources() {
+  const std::vector<std::uint64_t> output{32, 1}, input{2, 17, 4};
+  const auto all = take(Footprint::all(output));
+  const auto partial =
+      take(Footprint::from_regions(output, {Region({{8, 20}, {0, 1}})}));
+  std::vector<ResultMappedAxis> axes(3);
+  axes[2].extent = 4;
+  const auto build = [&](ResourceBudget root, const FootprintLimits& limits) {
+    return ResultRelation::gather(
+        root, output, all, 1, input, axes, 3, 3,
+        [](auto row, auto tap) {
+          ResultGatherSample sample;
+          sample.present = row % 7 && (tap == 0 || row % 3 == tap);
+          sample.coordinates[0] = row / 16;
+          sample.coordinates[1] = row % 16;
+          return Result<ResultGatherSample>(sample);
+        },
+        {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}, 2, limits);
+  };
+  {
+    ResourceBudget root;
+    const std::vector<std::uint64_t> huge{UINT64_MAX, UINT64_MAX};
+    const auto all = take(Footprint::all({4, 1}));
+    auto relation = take(ResultRelation::gather(
+        root, {4, 1}, all, 1, huge, std::vector<ResultMappedAxis>(2), 3, 1,
+        [](auto row, auto) {
+          ResultGatherSample sample;
+          sample.present = true;
+          sample.coordinates[0] = UINT64_MAX - 2 + row % 2;
+          sample.coordinates[1] = UINT64_MAX - 2 + row / 2;
+          return Result<ResultGatherSample>(sample);
+        },
+        {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
+    const auto q =
+        take(Footprint::from_regions({4, 1}, {Region({{0, 2}, {0, 1}})}));
+    const auto expected = take(Footprint::from_regions(
+        huge, {Region({{UINT64_MAX - 2, 2}, {UINT64_MAX - 2, 1}})}));
+    Footprint projected;
+    require(relation.project(q,
+                             [&](auto, const auto* samples) {
+                               projected = *samples;
+                               return Status::success();
+                             })
+                    .ok() &&
+                projected == expected,
+            "local bitmap works when the global source key requires 128 bits");
+    require(
+        take(relation.preimage(q, {0, 1, 0, 0, ResultSupportTarget::Tensor, 0},
+                               expected)) == q,
+        "wide packed coordinates retain local bitmap inverse precision");
+  }
+  std::uint64_t construction_charges = 0, projection_charges = 0,
+                projection_work = 0;
+  {
+    ResourceBudget root;
+    FootprintLimits limits;
+    limits.consume_work = [&](auto) {
+      ++construction_charges;
+      return Status::success();
+    };
+    const auto relation = take(build(root, limits));
+    limits.consume_work = [&](auto n) {
+      ++projection_charges;
+      projection_work += n;
+      return Status::success();
+    };
+    unsigned visits = 0;
+    require(relation.project(
+                        partial,
+                        [&](auto, const auto*) {
+                          ++visits;
+                          return Status::success();
+                        },
+                        limits)
+                    .ok() &&
+                visits == 2,
+            "bitmap partial projection exercises Data and Validation phases");
+  }
+  for (bool cancel : {false, true}) {
+    for (std::uint64_t fail = 1; fail <= construction_charges; ++fail) {
+      ResourceBudget root;
+      CancellationSource stop;
+      FootprintLimits limits;
+      limits.cancellation = stop.token();
+      std::uint64_t charges = 0;
+      limits.consume_work = [&](auto) {
+        if (++charges != fail)
+          return Status::success();
+        if (cancel) {
+          stop.cancel();
+          return Status::success();
+        }
+        return Status{ErrorCode::ResourceExhausted, "bitmap work rejection"};
+      };
+      const auto failed = build(root, limits);
+      require(
+          !failed.ok() && charges == fail &&
+              failed.status().code == (cancel ? ErrorCode::Cancelled
+                                              : ErrorCode::ResourceExhausted),
+          "every Gather allocation/normalization work phase fails without "
+          "retry");
+      if (!cancel)
+        require(failed.status().message == "bitmap work rejection",
+                "Gather preserves the rejecting work status");
+      for (auto live : root.statistics().live.values)
+        require(!live,
+                "failed compressed Gather construction releases Root leases");
+    }
+    for (std::uint64_t fail = 1; fail <= projection_charges; ++fail) {
+      ResourceBudget root;
+      const auto relation = take(build(root, {}));
+      const auto baseline = root.statistics().live;
+      CancellationSource stop;
+      FootprintLimits limits;
+      limits.cancellation = stop.token();
+      std::uint64_t charges = 0;
+      limits.consume_work = [&](auto) {
+        if (++charges != fail)
+          return Status::success();
+        if (cancel) {
+          stop.cancel();
+          return Status::success();
+        }
+        return Status{ErrorCode::ResourceExhausted, "bitmap work rejection"};
+      };
+      unsigned visits = 0;
+      const auto failed = relation.project(
+          partial,
+          [&](auto, const auto*) {
+            ++visits;
+            return Status::success();
+          },
+          limits);
+      require(
+          charges == fail && visits == 0 &&
+              failed.code == (cancel ? ErrorCode::Cancelled
+                                     : ErrorCode::ResourceExhausted),
+          "bitmap query failure never publishes partial normalized support");
+      require(root.statistics().live.values == baseline.values,
+              "failed bitmap query retires its scratch without changing the "
+              "witness");
+    }
+  }
+  {
+    ResourceBudget root;
+    const auto relation = take(build(root, {}));
+    for (const auto maximum : {UINT64_C(0), UINT64_C(1), UINT64_C(100),
+                               projection_work / 2, projection_work}) {
+      FootprintLimits limits;
+      limits.maximum_work = maximum;
+      std::uint64_t issued = 0;
+      limits.consume_work = [&](auto n) {
+        issued += n;
+        return Status::success();
+      };
+      const auto status = relation.project(
+          partial, [](auto, const auto*) { return Status::success(); }, limits);
+      require(issued <= maximum &&
+                  (status.ok() || status.code == ErrorCode::ResourceExhausted),
+              "bitmap comparison, marking, scanning and closure share one "
+              "allowance");
+    }
+  }
+
+  ResourceLimits capacity;
+  capacity.capacity[ResourceKind::Host] = 512 * 1024;
+  capacity.capacity[ResourceKind::Metadata] = 256 * 1024;
+  ResourceBudget root(capacity);
+  {
+    const std::vector<std::uint64_t> shape{65, 65, 4};
+    auto relation = take(ResultRelation::gather(
+        root, shape, Region::whole(shape), 1, shape, axes, 3, 4,
+        [](auto row, auto tap) {
+          const auto pixel = (row * 40503 + 17) % 4225;
+          ResultGatherSample sample;
+          sample.present = true;
+          sample.coordinates[0] = (pixel / 65 + tap / 2) % 65;
+          sample.coordinates[1] = (pixel % 65 + tap % 2) % 65;
+          return Result<ResultGatherSample>(sample);
+        },
+        {0, 5, 0, 0, ResultSupportTarget::Tensor, 0}));
+    Footprint projected;
+    require(relation.project(take(Footprint::all(shape)),
+                             [&](auto, const auto* samples) {
+                               projected = *samples;
+                               return Status::success();
+                             })
+                    .ok() &&
+                projected == take(Footprint::all(shape)),
+            "multi-batch bitmap fits below two full radix arrays and preserves "
+            "tail bits");
+    require(root.statistics().live[ResourceKind::Metadata] < 64 * 1024,
+            "compressed dense witness retains a bounded coordinate tape");
+  }
+  for (auto live : root.statistics().live.values)
+    require(!live, "compressed capacity case releases its last owner");
+
+  FootprintLimits unlimited;
+  unlimited.maximum_work = UINT64_MAX;
+  unlimited.consume_work = [](auto) { return Status::success(); };
+  const std::vector<std::uint64_t> enormous{UINT64_MAX / 256, 1};
+  unsigned reader_calls = 0;
+  const auto overflow = ResultRelation::gather(
+      root, enormous, Region::whole(enormous), 1,
+      std::vector<std::uint64_t>(8, UINT64_MAX),
+      std::vector<ResultMappedAxis>(8), 255, 1,
+      [&](auto, auto) {
+        ++reader_calls;
+        return Result<ResultGatherSample>(ResultGatherSample{});
+      },
+      {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}, 0, unlimited);
+  require(!overflow.ok() &&
+              overflow.status().code == ErrorCode::ResourceExhausted &&
+              overflow.status().message == "gather coordinate bits" &&
+              !reader_calls,
+          "packed bit-count overflow is rejected before allocating or calling "
+          "reader");
+  for (auto live : root.statistics().live.values)
+    require(!live, "packed size overflow retires partial metadata");
+}
+
 void gather_relations() {
   ResourceBudget root;
   const std::vector<std::uint64_t> output{3, 4}, input{8, 8, 4};
@@ -1050,13 +1555,15 @@ void gather_relations() {
         return Result<ResultGatherSample>(sample);
       },
       {0, 5, 0, 0, ResultSupportTarget::Tensor, 0}, 0, limits);
-  require(
-      done && later == 4 && cancelled.status().code == ErrorCode::Cancelled,
-      "gather cancellation reaches radix normalization after reader completes");
+  require(done && later == 4 && cancelled.status().code == ErrorCode::Cancelled,
+          "gather cancellation reaches normalization after reader completes");
 }
 }  // namespace
 int main() {
   try {
+    gather_packed_storage();
+    gather_bitmap_equivalence();
+    gather_bitmap_resources();
     gather_relations();
     gather_cached_mask();
     reshape_relations();

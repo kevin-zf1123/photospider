@@ -526,19 +526,24 @@ Result<std::uint64_t> ResultRelation::cache_metadata(
         !add(2 * node->reshape_source.rank()) ||
         !add(node->samples.capacity() * 7) || !add(node->row_count * 7) ||
         !add(node->children_count) ||
-        (node->gather && (!add(node->gather->output_shape.capacity()) ||
-                          !add(node->gather->input_shape.capacity()) ||
-                          !add(node->gather->axes.capacity() * 5) ||
-                          !add(node->gather->outputs.boxes().size() *
-                               (1 + 2 * node->output_shape.size())) ||
-                          !add(node->gather->first.capacity()) ||
-                          !add(node->gather->coordinates.capacity()) ||
-                          !add(node->gather->present.capacity()) ||
-                          !add(node->gather->fixed_coordinates.size() + 10) ||
-                          !add(node->gather->full_support.boxes().size() *
-                               (1 + 2 * node->input_shape.size())) ||
-                          !add(node->gather->full_validation.boxes().size() *
-                               (1 + 2 * node->input_shape.size())))) ||
+        (node->gather &&
+         (!add(node->gather->output_shape.capacity()) ||
+          !add(node->gather->input_shape.capacity()) ||
+          !add(node->gather->axes.capacity() * 5) ||
+          !add(node->gather->outputs.boxes().size() *
+               (1 + 2 * node->output_shape.size())) ||
+          !add(node->gather->first.capacity()) ||
+          !add(node->gather->coordinates.capacity()) ||
+          !add(node->gather->present.capacity()) ||
+          !add(node->gather->fixed_coordinates.size() +
+               node->gather->key_width.size() + node->gather->key_shift.size() +
+               node->gather->coordinate_width.size() +
+               node->gather->coordinate_shift.size() +
+               node->gather->lower.size() + node->gather->upper.size() + 12) ||
+          !add(node->gather->full_support.boxes().size() *
+               (1 + 2 * node->input_shape.size())) ||
+          !add(node->gather->full_validation.boxes().size() *
+               (1 + 2 * node->input_shape.size())))) ||
         total > maximum - count)
       return Result<std::uint64_t>(Status{ErrorCode::ResourceExhausted, {}});
     charged = work(count);
@@ -867,13 +872,22 @@ Result<ResultRelation> ResultRelation::gather(
                    : bounding_region.dimensions()[m.output_axis].offset)
               .value();
     }
+    if (!(indexed_axes & (1U << axis))) {
+      const auto d = m.output_axis < 0
+                         ? RegionDimension{0, 1}
+                         : bounding_region.dimensions()[m.output_axis];
+      const auto first = m.source_coordinate(d.offset).value();
+      const auto last = m.source_coordinate(d.offset + d.extent - 1).value();
+      table->lower[axis] = std::min(first, last);
+      table->upper[axis] = std::max(first, last);
+    }
   }
-  const auto stride = samples_per_tuple * columns;
-  if ((stride && rows > UINT64_MAX / stride / sizeof(std::uint64_t)) ||
-      rows > UINT64_MAX / sizeof(std::uint64_t) ||
-      rows > UINT64_MAX / samples_per_tuple)
+  if (rows > UINT64_MAX / samples_per_tuple)
     return Answer(Status{ErrorCode::ResourceExhausted, "gather table size"});
-  const auto unit = 1 + samples_per_tuple * (columns + 1);
+  // Validate, bound and pack each indexed field. Tape clearing is charged by
+  // allocate() before allocation and runs in cancellation-bounded chunks.
+  const auto unit =
+      1 + samples_per_tuple * (input_shape.size() + 5 * columns + 4);
   if (rows > work.remaining / unit)
     return Answer(
         Status{ErrorCode::ResourceExhausted, "gather table work limit"});
@@ -896,12 +910,9 @@ Result<ResultRelation> ResultRelation::gather(
   table->taps = samples_per_tuple;
   table->validation_axes = validation_trailing_axes;
   table->prepare_keys();
-  table->present =
-      ResourceVector<std::uint64_t>(ResourceAllocator<std::uint64_t>(budget));
-  table->coordinates =
-      ResourceVector<std::uint64_t>(ResourceAllocator<std::uint64_t>(budget));
-  table->present.resize(rows);
-  table->coordinates.resize(rows * stride);
+  charged = table->allocate(rows, limits);
+  if (!charged.ok())
+    return Answer(charged);
   for (std::uint64_t row = 0; row < rows; ++row) {
     if (!(row & 255U)) {
       charged = table->charge(std::min<std::uint64_t>(256, rows - row) * unit,
@@ -915,16 +926,14 @@ Result<ResultRelation> ResultRelation::gather(
         return Answer(sample.status());
       if (!sample.value().present)
         continue;
-      table->present[row] |= UINT64_C(1) << tap;
-      auto index = (row * samples_per_tuple + tap) * columns;
       for (std::size_t axis = 0; axis < input_shape.size(); ++axis) {
         if (!(indexed_axes & (1U << axis)))
           continue;
         const auto coordinate = sample.value().coordinates[axis];
         if (coordinate >= input_shape[axis])
           return Answer(invalid_relation());
-        table->coordinates[index++] = coordinate;
       }
+      table->store(row, tap, sample.value().coordinates);
     }
   }
   auto projected = table->project(table->outputs, limits);

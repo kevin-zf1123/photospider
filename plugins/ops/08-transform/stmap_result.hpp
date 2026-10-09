@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -70,11 +71,21 @@ struct Program final {
   struct Block {
     Region region;
     ResourceLease lease;
+    std::uint64_t first = 0, count = 0, first_row = 0;
+  };
+  using MapValue = std::array<double, 2>;
+  struct MapRow {
     std::uint64_t first = 0, count = 0;
+    std::array<const std::uint8_t*, 2> data{};
+    std::array<std::int64_t, 2> stride{};
+    ResultTensorReadWindow window;
+    ResourceVector<MapValue> copied;
   };
   struct Span {
     Coordinate at;
-    std::uint64_t first = 0, count = 0;
+    std::uint64_t count = 0;
+    std::array<const std::uint8_t*, 2> map_data{};
+    std::array<std::int64_t, 2> map_stride{};
     std::array<std::uint8_t*, 4> data{};
     std::array<std::int64_t, 4> stride{};
   };
@@ -90,7 +101,10 @@ struct Program final {
   Footprint outputs, source_samples;
   ResultRelation witness;
   ResourceVector<Block> blocks;
-  ResourceVector<std::array<double, 2>> uv;
+  ResourceVector<MapValue> uv;
+  ResourceVector<MapRow> map_rows;
+  std::uint64_t pixel_count = 0, row_count = 0;
+  bool use_map_rows = false;
   ResourceVector<std::array<float, 4>> source_pixels;
   ResourceVector<std::uint64_t> source_first;
   std::optional<ResultBuilder> builder;
@@ -154,6 +168,43 @@ struct Program final {
         for (std::uint64_t y = d[2].offset; y < d[2].offset + d[2].extent; ++y)
           callback(Coordinate{f, l, y, d[3].offset}, d[3].extent);
   }
+  static std::ptrdiff_t byte_offset(std::uint64_t index, std::int64_t stride) {
+    return static_cast<std::ptrdiff_t>(static_cast<__int128>(index) * stride);
+  }
+  static MapValue map_value(const std::array<const std::uint8_t*, 2>& data,
+                            const std::array<std::int64_t, 2>& stride,
+                            std::uint64_t index) {
+    MapValue value;
+    for (std::size_t c = 0; c < 2; ++c)
+      std::memcpy(&value[c], data[c] + byte_offset(index, stride[c]), 8);
+    return value;
+  }
+  static bool raw_map_row(const ResultTensorReadWindow& window,
+                          std::vector<std::uint64_t> coordinate, MapRow* row) {
+    const auto width_axis = coordinate.size() - 2;
+    coordinate.back() = 0;
+    if (window.sample_axis() == coordinate.size() - 1 &&
+        window.row_axis() == width_axis) {
+      const auto rectangle = math_take(window.rectangle_run(coordinate));
+      if (rectangle.row.samples >= 2 && rectangle.rows >= row->count) {
+        row->data = {rectangle.row.data,
+                     rectangle.row.data + rectangle.row.sample_stride_bytes};
+        row->stride.fill(rectangle.row_stride_bytes);
+        return true;
+      }
+    } else if (window.sample_axis() == width_axis) {
+      for (std::uint64_t c = 0; c < 2; ++c) {
+        coordinate.back() = c;
+        const auto run = math_take(window.row_run(coordinate));
+        if (run.samples < row->count)
+          return false;
+        row->data[c] = run.data;
+        row->stride[c] = run.sample_stride_bytes;
+      }
+      return true;
+    }
+    return false;
+  }
   void read_map(const ResultProgramPhase& phase, const Block& block) {
     each_row(block.region, [&](Coordinate at, std::uint64_t count) {
       math_require(phase.consume_work(count * 2 + 1));
@@ -165,9 +216,29 @@ struct Program final {
       for (const auto d : region.dimensions())
         coordinate.push_back(d.offset);
       const auto width_axis = coordinate.size() - 2;
-      auto index = block.first + local_index(block.region, at);
+      const auto index = block.first + local_index(block.region, at);
+      MapRow cached;
+      cached.first = index;
+      cached.count = count;
+      const bool raw = use_map_rows && raw_map_row(window, coordinate, &cached);
+      MapValue* target = nullptr;
+      if (!raw) {
+        if (use_map_rows) {
+          cached.copied = ResourceVector<MapValue>(
+              ResourceAllocator<MapValue>(phase.resources));
+          if (count > cached.copied.max_size())
+            throw Status{ErrorCode::ResourceExhausted, "STMap map row size"};
+          cached.copied.resize(count);
+          target = cached.copied.data();
+        } else {
+          target = uv.data() + index;
+        }
+        for (std::size_t c = 0; c < 2; ++c)
+          cached.data[c] = reinterpret_cast<const std::uint8_t*>(&target[0][c]);
+        cached.stride.fill(sizeof(MapValue));
+      }
       std::uint64_t done = 0;
-      while (done < count) {
+      while (!raw && done < count) {
         math_require(phase.consume_work(0));
         coordinate[width_axis] = at[3] + done;
         coordinate.back() = 0;
@@ -181,8 +252,8 @@ struct Program final {
               const auto* first =
                   rectangle.row.data +
                   static_cast<std::int64_t>(i) * rectangle.row_stride_bytes;
-              std::memcpy(&uv[index + done + i][0], first, 8);
-              std::memcpy(&uv[index + done + i][1],
+              std::memcpy(&target[done + i][0], first, 8);
+              std::memcpy(&target[done + i][1],
                           first + rectangle.row.sample_stride_bytes, 8);
             }
             done += n;
@@ -200,7 +271,7 @@ struct Program final {
         }
         for (std::uint64_t i = 0; i < n; ++i)
           for (std::uint64_t c = 0; c < 2; ++c)
-            std::memcpy(&uv[index + done + i][c],
+            std::memcpy(&target[done + i][c],
                         runs[c].data + static_cast<std::int64_t>(i) *
                                            runs[c].sample_stride_bytes,
                         8);
@@ -209,10 +280,15 @@ struct Program final {
       for (std::uint64_t i = 0; i < count; ++i) {
         if (!(i & 255U))
           math_require(phase.consume_work(0));
-        for (const auto value : uv[index + i])
+        for (const auto value : map_value(cached.data, cached.stride, i))
           if (!std::isfinite(value) || std::abs(value) > coordinate_limit)
             throw Status{ErrorCode::OperationFailed,
                          "STMap coordinate must be finite and within +/-2^40"};
+      }
+      if (use_map_rows) {
+        if (raw)
+          cached.window = std::move(window);
+        map_rows.push_back(std::move(cached));
       }
     });
   }
@@ -245,6 +321,30 @@ struct Program final {
   void prepare_relations(const ResultProgramPhase& phase) {
     const auto& source = phase.query.inputs[0].result_schema->tensors[0];
     const auto limits = phase_sets(phase);
+    // Retain at most one owner/directory entry per long logical row. Sparse,
+    // partial and multi-Result maps keep the compact per-pixel copy. A raw
+    // window owns its immutable bytes independently of the current poll.
+    use_map_rows = pixel_count >= 65536 && blocks.size() == 1 &&
+                   blocks[0].region.dimensions()[3].extent >= 256 &&
+                   phase.tensors->at({1, 0}).object_id();
+    if (use_map_rows) {
+      const auto map = map_region(phase.query, blocks[0].region);
+      const auto shape =
+          phase.query.inputs[1].result_schema->tensors[0].sample_shape();
+      for (std::size_t axis = 0; axis < shape.size(); ++axis)
+        use_map_rows &= !map.dimensions()[axis].offset &&
+                        map.dimensions()[axis].extent == shape[axis];
+    }
+    if (use_map_rows) {
+      math_require(phase.consume_work(row_count * 6));
+      if (row_count > map_rows.max_size())
+        throw Status{ErrorCode::ResourceExhausted, "STMap map row count"};
+      map_rows.reserve(row_count);
+    } else {
+      if (pixel_count > uv.max_size())
+        throw Status{ErrorCode::ResourceExhausted, "STMap map size"};
+      uv.resize(pixel_count);
+    }
     auto bounding = blocks[0].region.dimensions();
     for (const auto& block : blocks) {
       read_map(phase, block);
@@ -261,6 +361,7 @@ struct Program final {
     axes[1].output_axis = 1;
     axes[4].extent = 4;
     std::uint64_t previous = UINT64_MAX;
+    std::size_t map_row = 0;
     std::array<Tap, 4> taps{};
     auto gather = math_take(ResultRelation::gather(
         phase.resources, outputs.shape(), outputs, 1, source.sample_shape(),
@@ -270,9 +371,19 @@ struct Program final {
           if (row != previous) {
             if (!(row & 255U))
               math_require(phase.consume_work(
-                  std::min<std::uint64_t>(256, uv.size() - row) * 4));
+                  std::min<std::uint64_t>(256, pixel_count - row) * 4));
             previous = row;
-            taps = taps_for(uv[row], source);
+            MapValue value;
+            if (use_map_rows) {
+              while (row >= map_rows[map_row].first + map_rows[map_row].count)
+                ++map_row;
+              const auto& selected = map_rows[map_row];
+              value = map_value(selected.data, selected.stride,
+                                row - selected.first);
+            } else {
+              value = uv[row];
+            }
+            taps = taps_for(value, source);
           }
           ResultGatherSample value;
           value.present = taps[tap].present;
@@ -384,7 +495,8 @@ struct Program final {
       throw Status{ErrorCode::Cancelled, {}};
     auto at = span.at;
     for (std::uint64_t i = 0; i < span.count; ++i) {
-      const auto value = sample(at, uv[span.first + i], source);
+      const auto value =
+          sample(at, map_value(span.map_data, span.map_stride, i), source);
       for (std::uint64_t c = 0; c < 4; ++c)
         std::memcpy(
             span.data[c] + static_cast<std::int64_t>(i) * span.stride[c],
@@ -418,9 +530,9 @@ struct Program final {
     std::uint64_t levels = 1;
     for (auto n = source_samples.boxes().size(); n; n >>= 1)
       ++levels;
-    const bool tiled = phase.cpu_tiles && uv.size() >= 65536;
+    const bool tiled = phase.cpu_tiles && pixel_count >= 65536;
     const auto per_pixel = 24 + 32 * levels + (tiled ? 16 : 0);
-    if (uv.size() > UINT64_MAX / per_pixel)
+    if (pixel_count > UINT64_MAX / per_pixel)
       throw Status{ErrorCode::ResourceExhausted, "STMap interpolation work"};
     math_require(builder->publish_tensor_kernel(
         0, outputs,
@@ -429,11 +541,11 @@ struct Program final {
             // Window services and accounting belong to this coordinator. The
             // synchronous stage receives only immutable inputs and disjoint
             // raw spans, each no longer than 256 pixels.
-            math_require(phase.consume_work(uv.size() * per_pixel));
+            math_require(phase.consume_work(pixel_count * per_pixel));
             ResourceVector<Span> spans{
                 ResourceAllocator<Span>(phase.resources)};
             if (tiled)
-              spans.reserve(uv.size() / 256 + (uv.size() % 256 != 0));
+              spans.reserve(pixel_count / 256 + (pixel_count % 256 != 0));
             for (const auto& writer : writers)
               each_row(writer.region(), [&](Coordinate at,
                                             std::uint64_t count) {
@@ -459,7 +571,28 @@ struct Program final {
                     runs[c] = math_take(writer.row_run(coordinate));
                     n = std::min(n, runs[c].samples);
                   }
-                  Span span{at, block.first + local_index(block.region, at), n};
+                  Span span;
+                  span.at = at;
+                  span.count = n;
+                  const auto local = local_index(block.region, at);
+                  if (use_map_rows) {
+                    const auto width = block.region.dimensions()[3].extent;
+                    const auto& selected =
+                        map_rows[block.first_row + local / width];
+                    n = std::min(n, selected.count - local % width);
+                    span.count = n;
+                    for (std::size_t c = 0; c < 2; ++c) {
+                      span.map_data[c] =
+                          selected.data[c] +
+                          byte_offset(local % width, selected.stride[c]);
+                      span.map_stride[c] = selected.stride[c];
+                    }
+                  } else {
+                    for (std::size_t c = 0; c < 2; ++c)
+                      span.map_data[c] = reinterpret_cast<const std::uint8_t*>(
+                          &uv[block.first + local][c]);
+                    span.map_stride.fill(sizeof(MapValue));
+                  }
                   for (std::uint64_t c = 0; c < 4; ++c) {
                     span.data[c] = runs[c].data;
                     span.stride[c] = runs[c].sample_stride_bytes;
@@ -523,8 +656,10 @@ struct Program final {
             ResultPublication{math_take(empty.seal()), true});
       }
       blocks = ResourceVector<Block>(ResourceAllocator<Block>(phase.resources));
-      uv = ResourceVector<std::array<double, 2>>(
-          ResourceAllocator<std::array<double, 2>>(phase.resources));
+      uv = ResourceVector<MapValue>(
+          ResourceAllocator<MapValue>(phase.resources));
+      map_rows =
+          ResourceVector<MapRow>(ResourceAllocator<MapRow>(phase.resources));
       source_pixels = ResourceVector<std::array<float, 4>>(
           ResourceAllocator<std::array<float, 4>>(phase.resources));
       source_first = ResourceVector<std::uint64_t>(
@@ -539,11 +674,12 @@ struct Program final {
         const auto bytes = box.rank() * sizeof(RegionDimension);
         auto lease = math_take(
             phase.resources.reserve(ResourceCapacity::host(bytes, bytes)));
-        blocks.push_back({box, std::move(lease), count, pixels});
+        blocks.push_back({box, std::move(lease), count, pixels, row_count});
+        row_count += pixels / box.dimensions()[3].extent;
         count += pixels;
         map_boxes.push_back(map_region(phase.query, box));
       }
-      uv.resize(count);
+      pixel_count = count;
       const auto& source = phase.query.inputs[0].result_schema->tensors[0];
       const auto& map = phase.query.inputs[1].result_schema->tensors[0];
       ResultProgramNeed need;

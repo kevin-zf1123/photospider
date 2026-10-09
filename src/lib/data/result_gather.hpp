@@ -28,26 +28,124 @@ struct Table final {
   Coordinate fixed_coordinates{};
   std::uint32_t fixed_axes = 0;
   std::array<unsigned, 8> key_width{}, key_shift{};
+  std::array<unsigned, 8> coordinate_width{}, coordinate_shift{};
+  unsigned coordinate_bits = 0;
   bool packed_keys = false;
   Footprint full_support, full_validation;
+  Coordinate lower{}, upper{};
+  std::uint64_t sample_count = 0;
 
   explicit Table(ResourceBudget root) : budget(std::move(root)) {}
 
   void prepare_keys() {
     unsigned bits = 0;
     for (std::size_t axis = input_shape.size(); axis-- > 0;) {
-      if (fixed_axes & (1U << axis))
-        continue;
       const auto maximum = input_shape[axis] - 1;
       const auto width =
           maximum ? 64U - static_cast<unsigned>(__builtin_clzll(maximum)) : 0U;
-      if (width > 64 - bits)
-        return;
+      if (indexed_axes & (1U << axis)) {
+        coordinate_width[axis] = width;
+        coordinate_shift[axis] = coordinate_bits;
+        coordinate_bits += width;
+      }
+      if (fixed_axes & (1U << axis))
+        continue;
       key_width[axis] = width;
       key_shift[axis] = bits;
       bits += width;
     }
-    packed_keys = true;
+    packed_keys = bits <= 64;
+  }
+
+  static std::uint64_t mask(unsigned width) {
+    return width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+  }
+
+  std::uint64_t read_bits(std::uint64_t bit, unsigned width) const {
+    if (!width)
+      return 0;
+    const auto word = bit / 64;
+    const auto shift = static_cast<unsigned>(bit % 64);
+    auto value = coordinates[word] >> shift;
+    if (shift && width > 64 - shift)
+      value |= coordinates[word + 1] << (64 - shift);
+    return value & mask(width);
+  }
+
+  void write_bits(std::uint64_t bit, unsigned width, std::uint64_t value) {
+    if (!width)
+      return;
+    const auto word = bit / 64;
+    const auto shift = static_cast<unsigned>(bit % 64);
+    coordinates[word] |= value << shift;
+    if (shift && width > 64 - shift)
+      coordinates[word + 1] |= value >> (64 - shift);
+  }
+
+  bool has(std::uint64_t row, std::uint32_t tap) const {
+    const auto reference = row * taps + tap;
+    return (present[reference / 64] >> (reference % 64)) & 1U;
+  }
+
+  void store(std::uint64_t row, std::uint32_t tap, const Coordinate& at) {
+    const auto reference = row * taps + tap;
+    present[reference / 64] |= UINT64_C(1) << (reference % 64);
+    const auto first_bit = reference * coordinate_bits;
+    std::uint64_t packed = 0;
+    for (std::size_t axis = 0; axis < input_shape.size(); ++axis) {
+      if (!(indexed_axes & (1U << axis)))
+        continue;
+      lower[axis] = sample_count ? std::min(lower[axis], at[axis]) : at[axis];
+      upper[axis] = sample_count ? std::max(upper[axis], at[axis]) : at[axis];
+      if (!coordinate_width[axis])
+        continue;
+      if (coordinate_bits <= 64)
+        packed |= at[axis] << coordinate_shift[axis];
+      else
+        write_bits(first_bit + coordinate_shift[axis], coordinate_width[axis],
+                   at[axis]);
+    }
+    if (coordinate_bits <= 64)
+      write_bits(first_bit, coordinate_bits, packed);
+    ++sample_count;
+  }
+
+  // Indexed fields have their own layout: mapped coordinates do not occupy
+  // the retained tape. Wide tuples still use bounded, at-most-two-word reads
+  // per axis; only normalization needs its reference-key fallback.
+  Status allocate(std::uint64_t rows, const FootprintLimits& limits) {
+    if (rows > UINT64_MAX / taps)
+      return {ErrorCode::ResourceExhausted, "gather table size"};
+    const auto entries = rows * taps;
+    if (coordinate_bits && entries > UINT64_MAX / coordinate_bits)
+      return {ErrorCode::ResourceExhausted, "gather coordinate bits"};
+    const auto bits = entries * coordinate_bits;
+    const auto presence_words = entries / 64 + (entries % 64 != 0);
+    const auto coordinate_words = bits / 64 + (bits % 64 != 0);
+    auto charged = charge(presence_words + coordinate_words, limits);
+    if (!charged.ok())
+      return charged;
+    present =
+        ResourceVector<std::uint64_t>(ResourceAllocator<std::uint64_t>(budget));
+    coordinates =
+        ResourceVector<std::uint64_t>(ResourceAllocator<std::uint64_t>(budget));
+    const auto clear = [&](auto& tape, std::uint64_t count) {
+      tape.reserve(count);
+      while (tape.size() < count) {
+        if (limits.cancellation.cancelled())
+          return Status{ErrorCode::Cancelled, {}};
+        tape.resize(std::min(count, tape.size() + UINT64_C(32768)));
+      }
+      return limits.cancellation.cancelled() ? Status{ErrorCode::Cancelled, {}}
+                                             : Status::success();
+    };
+    auto status = clear(present, presence_words);
+    return status.ok() ? clear(coordinates, coordinate_words) : status;
+  }
+
+  std::uint64_t source_work() const {
+    return input_shape.size() + columns +
+           (coordinate_bits <= 64 ? 2 : 2 * columns);
   }
 
   std::uint64_t pack(const Coordinate& at) const {
@@ -128,15 +226,22 @@ struct Table final {
 
   Coordinate source(const Coordinate& output, std::uint64_t row,
                     std::uint32_t tap) const {
-    Coordinate at{};
-    auto index = (row * taps + tap) * columns;
+    Coordinate at = fixed_coordinates;
+    const auto first_bit = (row * taps + tap) * coordinate_bits;
+    const auto packed =
+        coordinate_bits <= 64 ? read_bits(first_bit, coordinate_bits) : 0;
     for (std::size_t axis = 0; axis < input_shape.size(); ++axis) {
-      const auto m = axes[axis];
-      at[axis] = indexed_axes & (1U << axis)
-                     ? coordinates[index++]
-                     : m.source_coordinate(
-                            m.output_axis < 0 ? 0 : output[m.output_axis])
-                           .value();
+      if (coordinate_width[axis]) {
+        at[axis] = coordinate_bits <= 64
+                       ? (packed >> coordinate_shift[axis]) &
+                             mask(coordinate_width[axis])
+                       : read_bits(first_bit + coordinate_shift[axis],
+                                   coordinate_width[axis]);
+      } else if (!(indexed_axes & (1U << axis)) &&
+                 !(fixed_axes & (1U << axis))) {
+        const auto m = axes[axis];
+        at[axis] = m.source_coordinate(output[m.output_axis]).value();
+      }
     }
     return at;
   }
@@ -145,10 +250,9 @@ struct Table final {
                                  std::size_t axis) const {
     if (fixed_axes & (1U << axis))
       return fixed_coordinates[axis];
-    if (indexed_axes & (1U << axis)) {
-      const auto preceding = indexed_axes & ((1U << axis) - 1U);
-      return coordinates[reference * columns + __builtin_popcount(preceding)];
-    }
+    if (indexed_axes & (1U << axis))
+      return read_bits(reference * coordinate_bits + coordinate_shift[axis],
+                       coordinate_width[axis]);
     const auto m = axes[axis];
     if (m.output_axis < 0 || !m.step)
       return m.source_origin;
@@ -182,7 +286,7 @@ struct Table final {
 
   template <class Visitor>
   Status each_tuple(const Footprint& requested, const FootprintLimits& limits,
-                    Visitor visitor) const {
+                    Visitor visitor, std::uint64_t per_tap = 0) const {
     const auto prefix = output_shape.size() - tuple_axes;
     std::uint64_t lookup = 1;
     for (auto n = outputs.boxes().size(); n; n >>= 1)
@@ -210,7 +314,7 @@ struct Table final {
         contained &= a.extent <= b.extent - (a.offset - b.offset);
       }
       const auto unit =
-          1 + taps * input_shape.size() + (contained ? 0 : lookup);
+          1 + taps * (source_work() + 1 + per_tap) + (contained ? 0 : lookup);
       if (count > (UINT64_MAX - lookup) / unit)
         return {ErrorCode::ResourceExhausted, "gather work overflow"};
       auto charged = charge(count * unit + lookup, limits);
@@ -239,46 +343,13 @@ struct Table final {
     return Status::success();
   }
 
-  // Inputs to normalization are origins, not heap-allocated per-tap Regions.
-  // Sort once, remove duplicates, then coalesce contiguous sample runs before
-  // admitting the exact canonical rectangle set.
-  Result<Footprint> normalize(ResourceVector<std::uint64_t> points,
-                              const FootprintLimits& limits) const {
+  // Both enumerators produce lexicographically ordered rectangle origins.
+  // Extents and boundary clipping stay here, including non-point Gather taps.
+  template <class Enumerate>
+  Result<Footprint> normalize_ordered(Enumerate enumerate,
+                                      const FootprintLimits& limits) const {
     using Answer = Result<Footprint>;
     const auto rank = input_shape.size();
-    std::array<std::size_t, 8> sort_axes{};
-    std::size_t sort_rank = 0;
-    for (std::size_t axis = 0; axis < rank; ++axis)
-      if (!(fixed_axes & (1U << axis)))
-        sort_axes[sort_rank++] = axis;
-    std::uint64_t coordinate_cost = 1;
-    if (!packed_keys && outputs.boxes().size() > 1) {
-      for (std::size_t axis = 0; axis < rank; ++axis) {
-        if (!(fixed_axes & (1U << axis)) && axes[axis].output_axis >= 0 &&
-            axes[axis].step) {
-          for (auto n = outputs.boxes().size(); n; n >>= 1)
-            ++coordinate_cost;
-        }
-      }
-    }
-    auto charged = radix_internal::sort(
-        &points, packed_keys ? 1 : sort_rank,
-        [&](auto reference, auto axis) {
-          return packed_keys ? reference
-                             : input_coordinate(reference, sort_axes[axis]);
-        },
-        [&](auto n) {
-          if (n > UINT64_MAX / coordinate_cost)
-            return Status{ErrorCode::ResourceExhausted,
-                          "gather radix work overflow"};
-          return charge(n * coordinate_cost, limits);
-        },
-        limits.cancellation);
-    if (!charged.ok())
-      return Answer(charged);
-    charged = charge(points.size() * (3 * rank + 1), limits);
-    if (!charged.ok())
-      return Answer(charged);
     auto merge_axis = rank - 1;
     while (merge_axis && !(indexed_axes & (1U << merge_axis)) &&
            (axes[merge_axis].output_axis < 0 || !axes[merge_axis].step) &&
@@ -309,12 +380,9 @@ struct Table final {
       boxes.emplace_back(std::move(dimensions));
       return Status::success();
     };
-    for (std::size_t i = 0; i < points.size(); ++i) {
-      if (!(i & 255U) && limits.cancellation.cancelled())
-        return Answer(Status{ErrorCode::Cancelled, {}});
-      const auto point = input(points[i]);
+    const auto accept = [&](const Coordinate& point) -> Status {
       if (have_previous && point == previous)
-        continue;
+        return Status::success();
       previous = point;
       have_previous = true;
       Coordinate lengths{};
@@ -339,12 +407,16 @@ struct Table final {
       } else {
         auto status = flush();
         if (!status.ok())
-          return Answer(status);
+          return status;
         run_origin = point;
         run_lengths = lengths;
         have_run = true;
       }
-    }
+      return Status::success();
+    };
+    auto enumerated = enumerate(accept);
+    if (!enumerated.ok())
+      return Answer(enumerated);
     auto flushed = flush();
     if (!flushed.ok())
       return Answer(flushed);
@@ -358,6 +430,164 @@ struct Table final {
       normalized.push_back(std::move(box));
     return Footprint::from_regions({input_shape.begin(), input_shape.end()},
                                    normalized, limits);
+  }
+
+  Result<Footprint> normalize(ResourceVector<std::uint64_t> points,
+                              const FootprintLimits& limits) const {
+    using Answer = Result<Footprint>;
+    const auto rank = input_shape.size();
+    std::array<std::size_t, 8> sort_axes{};
+    std::size_t sort_rank = 0;
+    for (std::size_t axis = 0; axis < rank; ++axis)
+      if (!(fixed_axes & (1U << axis)))
+        sort_axes[sort_rank++] = axis;
+    std::uint64_t coordinate_cost = packed_keys ? 1 : 3;
+    if (!packed_keys && outputs.boxes().size() > 1) {
+      for (std::size_t axis = 0; axis < rank; ++axis) {
+        if (!(fixed_axes & (1U << axis)) && axes[axis].output_axis >= 0 &&
+            axes[axis].step) {
+          for (auto n = outputs.boxes().size(); n; n >>= 1)
+            ++coordinate_cost;
+        }
+      }
+    }
+    auto charged = radix_internal::sort(
+        &points, packed_keys ? 1 : sort_rank,
+        [&](auto reference, auto axis) {
+          return packed_keys ? reference
+                             : input_coordinate(reference, sort_axes[axis]);
+        },
+        [&](auto n) {
+          if (n > UINT64_MAX / coordinate_cost)
+            return Status{ErrorCode::ResourceExhausted,
+                          "gather radix work overflow"};
+          return charge(n * coordinate_cost, limits);
+        },
+        limits.cancellation);
+    if (!charged.ok())
+      return Answer(charged);
+    const auto unit = 3 * rank + source_work() + 1;
+    if (points.size() > UINT64_MAX / unit)
+      return Answer(
+          Status{ErrorCode::ResourceExhausted, "gather normalization work"});
+    charged = charge(points.size() * unit, limits);
+    if (!charged.ok())
+      return Answer(charged);
+    return normalize_ordered(
+        [&](const auto& accept) {
+          for (std::size_t i = 0; i < points.size(); ++i) {
+            if (!(i & 255U) && limits.cancellation.cancelled())
+              return Status{ErrorCode::Cancelled, {}};
+            auto status = accept(input(points[i]));
+            if (!status.ok())
+              return status;
+          }
+          return Status::success();
+        },
+        limits);
+  }
+
+  std::uint64_t bitmap_area(std::uint64_t capacity) const {
+    // The stored bound may be conservative for mapped axes or a partial Q.
+    // Its admission uses this query's sample bound, never the full table alone.
+    const auto count = std::min(capacity, sample_count);
+    if (!count)
+      return 0;
+    const auto maximum = count > UINT64_MAX / 8 ? UINT64_MAX : 8 * count;
+    std::uint64_t area = 1;
+    for (std::size_t axis = 0; axis < input_shape.size(); ++axis) {
+      const auto extent = upper[axis] - lower[axis] + 1;
+      if (extent > maximum / area)
+        return 0;
+      area *= extent;
+    }
+    return area;
+  }
+
+  Result<Footprint> normalize_bitmap(const Footprint& requested,
+                                     std::uint64_t area,
+                                     const FootprintLimits& limits) const {
+    using Answer = Result<Footprint>;
+    const auto rank = input_shape.size();
+    Coordinate extents{}, strides{};
+    std::array<std::size_t, 8> varying{};
+    std::size_t varying_count = 0;
+    std::uint64_t stride = 1;
+    for (std::size_t axis = rank; axis-- > 0;) {
+      extents[axis] = upper[axis] - lower[axis] + 1;
+      strides[axis] = stride;
+      stride *= extents[axis];
+      if (extents[axis] > 1)
+        varying[varying_count++] = axis;
+    }
+    const auto words = area / 64 + (area % 64 != 0);
+    auto status = charge(words, limits);
+    if (!status.ok())
+      return Answer(status);
+    // The allocator admits Host/Metadata before the bitmap is zero-filled.
+    ResourceVector<std::uint64_t> bitmap{
+        ResourceAllocator<std::uint64_t>(budget)};
+    bitmap.reserve(words);
+    while (bitmap.size() < words) {
+      if (limits.cancellation.cancelled())
+        return Answer(Status{ErrorCode::Cancelled, {}});
+      bitmap.resize(std::min(words, bitmap.size() + UINT64_C(32768)));
+    }
+    status = each_tuple(
+        requested, limits,
+        [&](const auto& at, auto row, const auto&) {
+          for (std::uint32_t tap = 0; tap < taps; ++tap) {
+            if (!has(row, tap))
+              continue;
+            const auto point = source(at, row, tap);
+            std::uint64_t index = 0;
+            for (std::size_t i = 0; i < varying_count; ++i) {
+              const auto axis = varying[i];
+              index += (point[axis] - lower[axis]) * strides[axis];
+            }
+            bitmap[index / 64] |= UINT64_C(1) << (index % 64);
+          }
+          return Status::success();
+        },
+        2 * varying_count + 1);
+    if (!status.ok())
+      return Answer(status);
+    return normalize_ordered(
+        [&](const auto& accept) {
+          for (std::uint64_t first_word = 0; first_word < words;) {
+            const auto last_word = std::min(words, first_word + 64);
+            auto charged = charge(2 * (last_word - first_word), limits);
+            if (!charged.ok())
+              return charged;
+            std::uint64_t count = 0;
+            for (auto word = first_word; word < last_word; ++word)
+              count += __builtin_popcountll(bitmap[word]);
+            charged = charge(count * (3 * rank + varying_count + 1), limits);
+            if (!charged.ok())
+              return charged;
+            for (; first_word < last_word; ++first_word) {
+              if (limits.cancellation.cancelled())
+                return Status{ErrorCode::Cancelled, {}};
+              auto bits = bitmap[first_word];
+              while (bits) {
+                auto index = first_word * 64 +
+                             static_cast<unsigned>(__builtin_ctzll(bits));
+                bits &= bits - 1;
+                auto point = lower;
+                for (std::size_t i = 0; i < varying_count; ++i) {
+                  const auto axis = varying[i];
+                  point[axis] += index % extents[axis];
+                  index /= extents[axis];
+                }
+                auto accepted = accept(point);
+                if (!accepted.ok())
+                  return accepted;
+              }
+            }
+          }
+          return Status::success();
+        },
+        limits);
   }
 
   Result<Footprint> project(const Footprint& requested,
@@ -376,8 +606,6 @@ struct Table final {
       return charged.ok() ? Result<Footprint>(full_support)
                           : Result<Footprint>(charged);
     }
-    ResourceVector<std::uint64_t> points{
-        ResourceAllocator<std::uint64_t>(budget)};
     std::uint64_t capacity = 0;
     for (const auto& box : requested.boxes()) {
       std::uint64_t count = taps;
@@ -399,15 +627,22 @@ struct Table final {
           Status{ErrorCode::ResourceExhausted, "gather query work limit"});
     if (limits.cancellation.cancelled())
       return Result<Footprint>(Status{ErrorCode::Cancelled, {}});
-    points.reserve(capacity);
+    const auto area = bitmap_area(capacity);
+    if (area)
+      return normalize_bitmap(requested, area, limits);
+    ResourceVector<std::uint64_t> points{
+        ResourceAllocator<std::uint64_t>(budget)};
+    points.reserve(std::min(capacity, sample_count));
     auto status = each_tuple(
-        requested, limits, [&](const auto& at, auto row, const auto&) {
+        requested, limits,
+        [&](const auto& at, auto row, const auto&) {
           for (std::uint32_t tap = 0; tap < taps; ++tap)
-            if (present[row] & (UINT64_C(1) << tap))
+            if (has(row, tap))
               points.push_back(packed_keys ? pack(source(at, row, tap))
                                            : row * taps + tap);
           return Status::success();
-        });
+        },
+        packed_keys ? input_shape.size() : 0);
     return status.ok() ? normalize(std::move(points), limits)
                        : Result<Footprint>(status);
   }
@@ -546,7 +781,7 @@ struct Table final {
       return Status::success();
     };
     for (std::uint32_t tap = 0; tap < taps; ++tap) {
-      if (!(present[row] & (UINT64_C(1) << tap)))
+      if (!has(row, tap))
         continue;
       const auto origin = source(at, row, tap);
       auto status = emit(origin, false);
@@ -613,7 +848,7 @@ struct Table final {
         requested, limits, [&](const auto& at, auto row, const auto& box) {
           bool hit = false;
           for (std::uint32_t tap = 0; tap < taps && !hit; ++tap) {
-            if (!(present[row] & (UINT64_C(1) << tap)))
+            if (!has(row, tap))
               continue;
             const auto origin = source(at, row, tap);
             if (points) {
