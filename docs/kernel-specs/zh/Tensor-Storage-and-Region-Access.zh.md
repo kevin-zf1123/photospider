@@ -157,6 +157,12 @@ Status ResultBuilder::publish_tensor_kernel(
     const std::function<Status(
         const ResourceVector<ResultTensorWriteWindow>&)>& write,
     ResultRelation, ResultFinality, const CancellationToken&);
+
+Status ResultBuilder::publish_tensor_kernel(
+    std::uint32_t slot, const Footprint&,
+    const std::function<Status(
+        const ResourceVector<ResultTensorWriteWindow>&)>& write,
+    ResultRelation, ResultFinality, const CancellationToken&);
 ```
 
 完整声明见 [`result.hpp`](../../../include/photospider/data/result.hpp)。Read window 拥有源 `ResultRef`、captured descriptor facts、schema、association、resources，以及精确授权区域所需的 backing。它是 move-only。Window 销毁前，run 指针保持有效。Captured descriptor 限定可见前缀：之后的发布不能扩展早先 descriptor 的 coverage。请求超出已认证 coverage 时返回 `NotFound`；过时 descriptor facts 返回 `Stale`。
@@ -166,6 +172,8 @@ Read window 授权一个逻辑矩形；只要整个矩形均已认证，它就�
 Coordinator 在建立 window 前会授权精确逻辑样本集合。对 affine 存储，它保留获准 `CpuStorage` 的 subviews；对私有 planar backing，它保留页 window，包括由认证 view 映射到源页面的情形。它不会将预留地址或 padding 暴露为可读数据。Batch-piece 索引比较会向 source root 计入 work。Window 保留 acquisition 时的 cancellation token；该 token 取消后，之后的 run lookup 返回 `Cancelled`。已经返回的指针仍有效，直到 window 销毁。页面供给量可能超过请求字节数，并与逻辑样本 coverage 分开计费。Callback 执行前，coordinator 显式准备页面和上游样本；page-fault 处理不会调度 DAG 工作。系统不会自动驱逐仍存活的页面，也不会回放 producer 来恢复页面。稀疏 bookkeeping 只记录选中的页面，不会为虚拟范围内所有可能的页面预先分配 metadata record。
 
 `publish_tensor_kernel()` 只允许 callback 写入请求中的未发布区域。Callback 获取的 borrowed windows 和指针在其返回后失效；并发工作必须写互不重叠的 run，并在返回前结束。一般 tensor 使用一次自有 payload 分配，callback 成功后直接发布该存储。空间 tensor 在 callback 执行前准备私有目标页。对每个请求的 batch coordinate，builder 会复用已安装的 `PlanarImage`，或准备一个私有 candidate，并只将该坐标记录在稀疏 backing directory 中。只有所有 writer 成功后才安装新 candidate；准备或 callback 失败会释放 candidate 的页、虚拟预留和 metadata，同时保留旧的已认证前缀。若请求的 planar span 无法预留，publication 会在 callback 执行前失败。空区域会跳过 callback、样本 payload 和页面工作，不增加样本 coverage；Result 仍保留 descriptor relation obligations。
+
+Footprint 重载在一个事务中写入一组精确的、互不相交的 canonical box。单 box footprint 走 Region 重载。有多个 box 时，builder 为所有 tensor（包括 spatial tensor）分配一块私有 affine 缓冲，并按 `boxes()` 顺序为每个 box 传入一个 write window；空洞不获得存储。Callback 成功后，该缓冲按每个 box 一个 affine 片段发布，因此 slot 保留其逻辑 shape、spatial layout metadata 和全局坐标，而这些 box 的 backing 是 affine 存储而非 planar 页面。读取方与读取任何 affine backing 时一样使用实际的 run stride。失败、取消和重入修改遵循下文的事务规则，不增加 coverage。
 
 空间写路径采用事务语义。它在 callback 执行前准备所需页面与容量，仅在 callback 成功且取消检查通过后提交，然后认证精确区域和 relation。Callback 失败、取消、覆盖重叠或资源失败都不会认证新样本 coverage；先前已认证的前缀保持可读且不可变。分配或供页失败会回滚未发布页面。准入失败返回 `ResourceExhausted` 等类型化状态；不会驱逐或静默重算仍存活的已发布页面。
 

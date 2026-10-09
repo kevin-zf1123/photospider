@@ -60,6 +60,10 @@ Structured Result execution 使用同一 root 管理图像页、不可变 sample
 
 Result relation rows 与已发布图像 payload 使用所选 resource root 计量。每次 publication 都必须符合配置的 payload、work、I/O 和 stage 限额。`Exact`、`Conservative` 与 `Unknown` 具有不同的 dirty-propagation 行为；未解析的 relation 不能证明输出为 clean。PlanarImage materialization 会将字节复制到 managed backing，并在公开 sample coverage 前计入 payload；affine 与 storage-view publication 则保留 source owners 及其 accounting，不复制 tensor bytes。Schema selection 只保留声明过的 typed image 与 Result metadata resources，包括 ICC 和 OCIO bindings。Compiler 将嵌套 Result schemas 及其 resource identities 带入 plan；runtime Result bindings 会在 execution root 下重新准入所需 owners。
 
+Typed tensor 样本校验按最多 256 个标量样本的额度批次计费。读取一个没有剩余额度的样本前，validator 为该区域计入 `min(256, remaining)` 个 work 单位，然后用相同的数值与语义检查逐个校验每个样本。通过校验的 `N` 样本区域恰好消耗 `N` 个单位。失败的样本可能留下最多 255 个已预付但未读取的样本，这部分 work 不退还。被拒绝的计费直接返回其状态，不以更小批次重试。Validator 在每次读取样本前和每次计费后检查取消，并在每个已校验区域之后检查取消和宿主 stop 状态，因此被取消、stale 或停止的 Run 最迟在下一个区域边界结束。失败校验记录的 work 因而可能超过实际读取的样本数。
+
+依赖数据值的 relation 表、Footprint box 索引、radix sort scratch 和操作自有缓存都在执行 root 上使用 `ResourceAllocator`。`ResultRelation::gather` 表、其规范化 support 以及 STMap 的 map 和 source 缓存在其 owner 存活期间计入 Host 与 Metadata 容量；已发布的 relation 保留其表，直到引用它的最后一个 Result 或依赖快照被释放。Host 容量包含 Shared 和 Metadata，因此一次 Run 的 Host 峰值与 Metadata 峰值相互重叠，不能相加来估计进程内存。
+
 `ExecutionDependencies` 返回的 coverage 和 guarantee maps 使用同一 resource root 的 `ResourceMap` allocator。`source_support()` 与 `potential_dirty()` 返回 root-owned `ResourceMap<Footprint>`；`source_observations()` 返回 root-owned `ResourceVector<SourceObservation>`。每条 observation 自有其 `ResourceString` input name 和 `Footprint`，并记录 typed target、slot 与 roles。这些值可比 `ExecutionDependencies` 对象和 `ExecutionContext` 活得更久；其 allocator owners 会让 accounting root 保持存活，直到最后一个 map、vector、name 或 footprint 释放。
 
 ```cpp

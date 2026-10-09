@@ -146,6 +146,21 @@ Publication validator 在一次同步 validation 期间接收 `PublicationValida
 
 `publish_tensor_kernel` 为请求区域借出可写 windows。对于 spatial tensor，完整逻辑 sample 的字节几何可表示时，builder 使用 planar rectangles。如果 layout 非 spatial、sample count 不可表示，或完整 sample count 乘 element width 会溢出，builder 会在 Root limits 内为请求区域分配 affine backing。此回退保留 tensor spec、spatial layout、全局 sample 坐标、relation 和 certified coverage，只改变物理 writer backing。Callback 必须使用每个 window 的 `spec()`、`region()`、`sample_axis()`，以及 `row_run()` 或 `rectangle_run()` 返回的 strides；不能假设 backing 是 planar 或行连续。巨大逻辑 spatial domain 上的 sparse request 按实际可写区域计费；更大的请求区域仍须满足 Root payload 与 work limits。
 
+```cpp
+Status ResultBuilder::publish_tensor_kernel(
+    std::uint32_t slot, const Footprint& samples,
+    const std::function<
+        Status(const ResourceVector<ResultTensorWriteWindow>&)>& write,
+    ResultRelation relation, ResultFinality finality,
+    const CancellationToken& cancellation = {});
+```
+
+Footprint 重载在一个事务中发布一组精确的、互不相交的 canonical box。Builder 在运行任何 producer 代码之前复制 `samples`，因此 callback 修改调用方的 footprint 对象不会改变发布集合。只有一个 box 的 footprint 走上述 Region 路径。有多个 box 时，footprint 必须已按 tensor 的 observation 分组闭合（`close_samples` 返回同一集合），不能与已有 coverage 重叠，relation 必须覆盖完整 slot 域；违反时返回 `TypeMismatch`。除 guarantee 为 `Unknown` 的情况外，builder 在 footprint 上认证 relation，用一个保留空洞的不可变 footprint mask 限制它，并为所有 box 分配一块私有缓冲。Callback 按 `boxes()` 顺序为每个 box 收到一个 write window。空洞不获得存储，也不获得 coverage。Empty footprint 跳过 callback 和 payload work，只记录限制后的 relation。
+
+Callback 在 publication mutex 之外运行；运行期间同一 producer 的 mutation 和 seal 会被拒绝。Callback 返回后，builder 重新检查 owner、revision 和 sticky failure，再检查取消。返回的错误、抛出的异常（分配失败为 `ResourceExhausted`，其他为 `OperationFailed`）、取消或 revision 变化（`Stale`）都会记录 producer failure、释放缓冲且不认证新的 coverage；先前认证的前缀仍可读取。通过这些 windows 写入的 worker 必须在 callback 返回前完成，因为 windows 和原始指针在那时失效。成功时，builder 在一个新 revision 上一起提交这些 box、coverage 和 relation。该重载每发布一个样本计入一个 Root work 单位，每个 box 计入 Host metadata；字节大小必须满足 builder 的 tensor 存储增长上限。
+
+当一个 slot 的首次发布就是这种多 box 发布时，它的 affine 片段与 canonical coverage box 一一对应。`acquire_tensor` 随后用二分查找定位包含请求起点的片段。落在单个片段内的请求得到一个 view；跨片段的请求先整体对 coverage 授权，再与每个片段各裁剪一次。所得 window 上的 `row_run()` 和 `rectangle_run()` 同样用二分查找定位片段。该 slot 之后的任何发布都会使其 window 回到逐片段查找。两种情况下，callback 和读取方都使用 `row_run()` 与 `rectangle_run()` 报告的 stride。
+
 发布遵循 schema policy。`CompleteBundle` 在 seal 前隐藏输出。`StablePrefix` 和 `IndependentChunks` 只暴露有序且不可撤销的 certified field prefixes/ranges；当前 publisher 不提供任意乱序 chunk publication。Callback 给出的 `ResultFinality` 是算法作者承担的义务，覆盖 data、control、validation 和 descriptor facts；宿主检查声明义务是否完整，但不会证明任意 callback 实际读取了什么。后续 operational failure 不会撤销已认证 prefix，较早取得的 descriptor snapshot 也不会自动获得新发布的 coverage。
 
 发布的 Result 记录有序 source ObjectIds，用于 lineage 与 dependency 报告。Association 是 metadata，不是 input payload 的 strong owner，也不授予读取权限。`ResultObjectInputs`、`ResultTensorInput` capabilities 和 retained windows 提供上文说明的活动 owner 与授权路径。Physical tensor view 也会保留它发布的所有 source Results。Result resources 保留 schema 声明的 owners，包括 typed image facets 引用的 ICC/OCIO owners。Compiler 从 supplied bindings 选择 nested resources，runtime bindings 还会在 execution resource root 下重新准入。Public `ResourceMap` 和 `ResourceVector` containers 也携带 allocator 与 managed ownership；复制的 results、relations、names 和 observations 会在容器及其所含 `ResultRef` owners 释放前持续占用 root 计量的 metadata。Consumer 应将这些复制与 payload、relation 工作一起纳入预算。该策略偏保守，因此仍存活的 owners 可能保留比最终输出本身所需更多的 backing。
@@ -175,6 +190,28 @@ Dependency recorder 为该请求捕获一个由 Root 计量、不可拆分的 ma
 `ResultRelation::prefix(budget, count, input, roles, target, slot)` 表示 rank-one domain `[0,count)` 上精确的 inclusive-prefix dependency，其中 `1 <= count <= UINT64_MAX`。输出 `j` 依赖输入 `[0,j+1)`。Relation 只保存固定节点与两个长度为一的 shape vectors，metadata 大小不随 domain 长度增加。Role mask 可组合 Data、Control 和 Validation；Descriptor role 或 target 无效。访问单个输出只报告一个 support span。将请求输出 `Q` 投影时，至多产生一个展平 support span `[0,max_end(Q))`；Empty 不产生访问。逆向投影将最早变更输入 `k` 映射到 `Q ∩ [k,count)`。Projection 与 inverse 的 work、取消及 metadata capacity 均受限，并返回类型化失败状态。
 
 `ResultRelation::neighborhood(budget, shape, radii, periodic, support)` 是另一种 compact exact node。它接受相同的 tensor 坐标域，rank 为 1..8，每个 uint64 extent 为正，并且每个轴有一个 uint64 radius；sample 总数的完整乘积可以超过 uint64。Relation 保存各轴 radius，不建立逐样本表。每个输出样本的 support 是各轴对称的矩形邻域，并按 periodic 选择裁剪到 tensor domain 或逐轴环绕；所有 radius 为零时即 identity support。Forward projection 扩展请求矩形，inverse projection 返回邻域与变更输入相交的请求输出。较大的矩形投影可表示 sample 总数乘积溢出的 domain；枚举单个 sample 的 support 仍可能耗尽 work limit。Shape、radius 和矩形 metadata、work、box 数量、取消与容量均受 execution root 和 query limits 约束。失败返回类型化 status，不会把 support 扩宽为 bounding box。
+
+```cpp
+struct ResultGatherSample final {
+  std::array<std::uint64_t, 8> coordinates{};
+  bool present = false;
+};
+
+static Result<ResultRelation> ResultRelation::gather(
+    ResourceBudget budget, const std::vector<std::uint64_t>& output_shape,
+    const Footprint& outputs, std::uint32_t output_tuple_axes,
+    const std::vector<std::uint64_t>& input_shape,
+    const std::vector<ResultMappedAxis>& axes, std::uint32_t indexed_axes,
+    std::uint32_t samples_per_tuple,
+    const std::function<Result<ResultGatherSample>(std::uint64_t,
+                                                   std::uint32_t)>& reader,
+    ResultSupport support, std::uint32_t validation_trailing_axes = 0,
+    const FootprintLimits& limits = {});
+```
+
+`ResultRelation::gather` 为一组输出 tuple 记录依赖数据值的 tensor support 表。另一个重载接收一个 `Region` 而不是 `Footprint`。最后 `output_tuple_axes` 个输出轴（1..rank）构成一个 tuple，并必须覆盖其完整域；RGBA 图像使用 1，因此一个像素就是一个 tuple。各行按局部行主序枚举每个 canonical 输出 box 的 tuple，并按 `boxes()` 顺序拼接，因此完整输出域不需要可展平为 uint64 的基数。每行有 `samples_per_tuple`（1..64）个可选输入矩形。对 `indexed_axes` 位掩码选中的输入轴，`reader(row, sample)` 返回矩形起点；这些轴在 `axes` 中必须固定。其余输入轴与 `ResultRelation::mapped` 一样跟随 `axes`，每个矩形的 extent 都取自 `axes` 并在输入边界处裁剪。`support` 指定 Tensor target，roles 在 1..7 内。非零 `validation_trailing_axes` 增加闭合到相应数量尾部输入轴的同 observation Validation support，不改变 Data/Control support。
+
+Builder 按行和 sample 递增顺序同步调用 `reader`，且不保留它，因此构建完成后 relation 不持有 callback、payload 或输入引用。该表为每行存一个存在位字，并为每个存在的 sample 存被索引的坐标；填充前先向 `budget` 计费。构建代价对表项线性，另加一次对完整 support 的精确规范化，relation 连同其 Validation 闭包一起保留该结果。请求 footprint 与 `outputs` 具有相同 canonical boxes 的投影复用该规范化 support；不同的 footprint 从表中按 tuple 精确回答，反向投影则恰好返回其已记录的 Data/Control 或 Validation support 与变化输入样本相交的输出 tuple。非法 metadata 或越界坐标返回 `InvalidArgument`；budget、取消和 reader 失败保留各自状态。该 relation 不可变，可安全并发查询。由 callback 决定记录哪些样本：relation 不检查权重或数值，因此读取了零权重样本的操作会像记录其他样本一样记录它。[依赖采样](Dependency-Sampling.zh.md)给出 STMap 的表，[依赖数据](Dependency-Data.zh.md)说明查询上限。
 
 C Result service `make_prefix` 只在相同 rank-one 输入/输出 tensor slots 之间创建此 relation。成功时返回供 `publish_tensor_with_relation` 使用的 relation handle，并由 `release_relation` 退役。创建 relation 不授予 payload 读取权限；callback 仍须单独通过 `need_tensor` 请求输入数据。此 C relation helper 与数值算子实现相互独立：`numeric.ordered_scan` 使用 C++ Result phase 的 prefix relation 和 checkpoint services；分阶段 `numeric.mean` 与 `numeric.variance` 使用其 block-state service。
 

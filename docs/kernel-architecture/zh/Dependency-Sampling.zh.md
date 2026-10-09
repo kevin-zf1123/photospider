@@ -35,19 +35,69 @@ $$
 y_c = \mathrm{Float32}\!\left(\sum_{dy=0}^{1}\sum_{dx=0}^{1} w_{dy,dx} \, s_{dy,dx,c}\right).
 $$
 
-对于每个被请求的输出像素，同一个 continuation 首先以 Control、Validation 和 Descriptor roles（14）请求 map pixel，同时请求 source descriptor。它将两个 map 坐标校验为有限且位于 `[-2^40,2^40]`，计算四个经 boundary 映射的 tap，再以 Data、Validation 和 Descriptor roles（13）请求存在的完整 RGBA source tap。如果 `constant` 使所有 tap 都在 source 外，relation 仍包含 source descriptor，但不会请求 source payload。Map Control 与 source Data relation 仅覆盖选中的 map pixel 和 taps；typed Validation 则单独记录在 `close_samples` 闭包上。
+上述公式中的每一步都是一次就近舍入的 Float64 运算：`f_x` 按 `(u-0.5)-l` 计算，每个权重是两个 Float64 因子的 Float64 乘积，每个乘积 `w*s` 先舍入再累加。因此权重是 Float64 值，而非精确有理数权重。取 `u=2^-56`、`v=0.5`、红色值为 `[1,-1]` 的 1x2 source 和 `wrap` 时，`u-0.5` 舍入为 `-0.5`，两个水平权重都变为 `0.5`，红色输出为 `+0`（Float32 位模式 `0x00000000`）。按精确有理数表达式计算会得到 `2^-55`。`image.stmap` 保留 Float64 结果，`test_dependency_sampling.cpp` 中的逐位 oracle 在四种调用方舍入模式下检查该结果。
 
-Tap 顺序固定为左上、右上、左下、右下。每个位于 source 内的 tap 都会读取完整 RGBA pixel，包括权重为零的 tap；编辑该 source tap 时，即使权重为零且当前输出位不变，输出仍会被标记为 potential dirty。所选 map pixel 的 Control witness 独立追踪 map 编辑。地址关系将输出 pixel 紧凑映射到 source pixel，因此稀疏请求不会展平或枚举巨大 source image。四个乘积按 tap 顺序依次做 Float64 加法，最后一次转换为 Float32。Result writer 将请求的通道样本闭包到完整 RGBA pixel，保留全局 frame/layer 和空间坐标，并通过 all-or-nothing Result transaction 发布。
+### 执行阶段
 
-Program 的状态、tensor windows、workspace、输出和 work 都计入 Root limits。非法 map 坐标返回 `OperationFailed`；不符合要求的 image/map metadata 返回 `TypeMismatch`；未知 boundary 返回 `InvalidArgument`。Typed image source validation 可返回带 `FailureReason::InvalidDomain` 和 source `input_id` 的 `InvalidArgument`。取消和资源耗尽保留各自状态码。执行失败时不会发布部分输出。
+非空请求在三次 continuation poll 内完成。Program 在第一个 Need 之前把请求的输出 footprint `Q` 闭合为完整 RGBA 像素；闭合后的 footprint `P` 就是 program 计算并发布的输出像素集合。
 
-当完整 spatial sample 的字节几何不可表示时，Result writer 会为请求区域使用 affine backing。因此，对 `Ho=Wo=2^40` 的 map 请求一个 sparse pixel 时，只需在 Root limits 内写四个 output samples，无需分配完整逻辑输出域；全域写入仍须满足 Root budget。下文的巨大 source case 也通过相同的稀疏映射避免枚举完整 source。
+1. 第一次 poll 请求 source descriptor（role 8，Descriptor），以及 `P` 中每个 canonical box 对应的 map samples，roles 为 Control、Validation 和 Descriptor（14）。Broadcast map 的这些 map box 去掉 frame/layer 轴。`P` 之外的 map samples 不会被请求，因此未请求像素上的非有限 map 值不会被读取。
+2. 第二次 poll 把授权的 map 坐标复制到计入 Root 的 `[P][2]` Float64 数组。当 window 在 sample 轴上同时暴露两个分量时，它通过 `rectangle_run()` 按行读取 map；否则按分量调用 `row_run()`，因此接受 planar、tiled 和带符号 stride 的 map。它拒绝非有限或超出 `[-2^40,2^40]` 的坐标，为每个像素计算四个经过 boundary 映射的 tap，并构建下文所述的 Gather relation。随后它在 `P` 上投影该 relation，得到精确的 source Data footprint，并以 Data、Validation 和 Descriptor roles（13）请求该 footprint。当 `constant` 使所有请求像素的所有 tap 都落在 source 之外时，请求只含 Descriptor（8），不读取 source payload。
+3. 第三次 poll 把每个授权的 source 像素复制一次到计入 Root 的缓存中，缓存含 `S` 个 RGBA Float32 值，`S` 为不同 source Data 像素的数量。随后它通过 `ResultBuilder::publish_tensor_kernel` 的 Footprint 重载一次发布整个 `P`，并 seal Result。
 
-`test_dependency_sampling` 覆盖五种 boundary、map frame/layer broadcast、三像素 identity map，以及从由 16 payload bytes 支持的 2^40 x 2^40 broadcast source 稀疏读取。它还检查零权重 tap 仍保留 dirty evidence、constant boundary tap 不请求 source payload，以及 Empty 跳过非有限 map。Source 设置 `atomic_trailing_axes=2` 时，Validation 会闭包到完整 source row（fixture 中 `H=1,W=3`），Data 仍只覆盖选中 taps。零权重 typed tap 的 RGB 非有限分量会由 source validation 返回 `InvalidArgument`；非有限 map 坐标则先由算子返回 `OperationFailed`。四种 caller rounding mode 得到相同 tie 结果，并恢复调用方模式。context 退休后仍可从保留的 Result 读取值 7，且其 association 含两个 source。
+Empty demand 在第一次 poll 内完成：program seal 一个带 descriptor relation 的空 Result，不请求 map 或 source samples。因此 `OperationTiming::invocation_count` 对非空请求报告三次 poll，对 Empty demand 报告一次。下文发布阶段的 CPU tile callbacks 通过 `cpu_tile_callback_count` 单独报告。
 
-规模测试使用默认 `ExecutionOptions` 运行 10x10、15x15 和 20x20 map。每种尺寸使用独立 context，并在输入构建完成后取 baseline。所有 map 坐标均为 0.5，因此在 `clamp` 下每个输出像素读取三像素 source row 中的像素 0 和 1。测试检查每个输出通道，并要求 support 精确：map support 覆盖整个 map，source support 恰好覆盖像素 0 和 1。修改 source 像素 1 会使整个输出成为 potentially dirty，修改未使用的像素 2 则保持 clean。持有 Result 期间，live Payload 增量小于 1 MiB；释放后回到 baseline。Run 发出的 Root work 对 `P` 个输出像素保持低于 `256 * P * P`。该上限只是此 workload 的回归检查，不是通用的 STMap 复杂度保证；1 MiB 增量也不是 context payload 限额、峰值内存上限或 RSS 声明。
+### 依赖证据
 
-取消在 50x50 map 上的两个位置测试。第一个位置在 callback body 结束后挂起 callback，取消 Run，要求返回 `Cancelled` 且 Payload 回到 baseline。第二个位置让 callback 线程停在一次 poll 的逐像素 tap 与通道循环内的一次正值 phase work 计费处，并在此处取消。该次 work 计费必须返回 `Cancelled`，Run 必须报告 `Cancelled`，Payload 必须回到 baseline。
+发布的 tensor relation 是常数个 relation 节点的并集，节点数与 `P` 无关：
+
+| 节点 | Support |
+| --- | --- |
+| 覆盖 `P` 的 `ResultRelation::gather` | 对每个输出像素，每个存在的 tap 记录一个完整 RGBA 像素的 source Data（role 1）。被索引的轴是 source 的 height 和 width；frame 和 layer 跟随输出的 frame 和 layer。Validation（role 4）闭合到 `max(1, atomic_trailing_axes)` 个尾部 source 轴，不扩大 Data。 |
+| 覆盖 map 的 `ResultRelation::mapped` | 对每个输出像素，记录相同 height 和 width 处的 map 像素；map 带 batch 时还对应输出的 frame/layer。Map `atomic_trailing_axes <= 1` 时记录 Control 和 Validation（role 6）；分组更大时记录 Control（role 2），并用单独的 Validation 节点（role 4）闭合到这些尾部 map 轴。 |
+| Descriptor relation | 两个输入端口的 Descriptor（role 8），通过 `bind_descriptor_relation` 绑定。 |
+
+Map 节点建立在 `P` 的外接矩形上；发布时并集被限制到精确的 footprint `P`，因此该矩形内未请求的 map 像素不带 Control 边。Gather 表为每个输出像素存一行，每行含四个可选 tap：一个存在位，以及每个存在 tap 的 source y/x 坐标。它是一张不可变表，而非每像素一个 relation 节点。`constant` 下位于 source 外的 tap 不存在，不贡献 support。
+
+Tap 顺序固定为左上、右上、左下、右下。每个位于 source 内的 tap 都作为完整 RGBA 像素读取，包括权重为零的 tap；因此即使该 tap 权重为零且输出位不变，修改该 source tap 仍可能把输出标记为 potentially dirty。此类 tap 中的非有限分量仍会使 typed source validation 失败。Map Control witness 独立跟踪所选 map 像素的修改。地址从输出像素紧凑映射到 source 像素，因此稀疏请求不会展平或枚举巨大的 source 图像。
+
+### 发布与并行算术
+
+发布 callback 运行在 coordinator 线程上。它按行遍历每个 write window，计入 work，并创建最多 256 像素的 span；每个 span 记录全局输出坐标、其第一个像素在 map 数组中的偏移，以及每个通道一个原始输出指针和字节 stride。每个输出像素根据 map 数组和 source 缓存计算上述公式。Source box 多于一个时，tap 通过对 canonical source boxes 的二分查找定位到缓存位置。
+
+当 `P >= 65,536` 且宿主提供 CPU staged tile 服务（`OperationTraits::cpu_staged_tiles`）时，coordinator 先收集全部 span，再对 span 索引提交一个 tile stage。Tile 大小为 `ceil(spans/64)`，因此无论 worker 数是多少，该 stage 最多有 64 个 tile callback；stage 请求 `min(4, maximum_workers)` 个 worker。Tile callback 只读取不可变的 map 数组和 source 缓存，只写自己互不相交的输出 span，并在每个 span 前检查取消。Map 和 source Needs、window 服务、分配、work 计费和发布都留在 coordinator 上。所有 tile callback 在发布 callback 返回前完成。较小的请求或没有该服务的宿主在 coordinator 上直接计算每个 span。一个和四个 worker 得到相同的输出字节、Root work 和 tile 数。
+
+在 AArch64 上，program 用 NEON 计算四个通道：把每个 tap 的 RGBA 值扩展为两对 Float64 lane，每对乘以 tap 权重后按 tap 顺序加到累加器，最后一次窄化为 Float32。其他目标使用等价的标量循环。两条路径的每个通道都从 `+0` 开始，乘法与加法分开执行，最后舍入一次到 Float32。`dependency_sampling.cpp` 使用 `-fno-fast-math -frounding-math -ffp-contract=off` 编译，因此编译器不会把乘法和加法收缩为融合运算，也不会重排求和。每次 poll 设置就近舍入和渐进下溢，并恢复调用方的浮点环境。Tile worker 运行在 CPU tile 服务的就近舍入环境下，见[并行执行模型](Parallel-Execution-Model.zh.md)。
+
+### 代价
+
+设 `P` 为闭合后的输出像素数，`S <= 4P` 为不同 source Data 像素数，`B_s` 和 `B_o` 分别为 source Data footprint 和 `P` 的 canonical box 数，`R_o` 为非空输出行数，`V` 为 typed Validation 读取的标量样本数。`G` 是规范化这些集合的精确 Footprint 运算代价。STMap program 的代价为
+
+$$
+T = O\!\left(P\,[1 + \log(B_s+1) + \chi \log(B_o+1)] + R_o \log(B_o+1) + S + V + G\right),
+$$
+
+其中变化的 tap 坐标不能装入一个 64 位排序键时 $\chi$ 为 1，否则为 0。Map 读取、tap 生成、Gather 表构建和插值对 `P` 线性。Source 缓存对 `S` 线性。每次 tap 查找要搜索 source boxes，每个输出行要在 `P` 中定位所属 box。对稠密矩形请求，`B_s` 和 `B_o` 很小，`V` 和 `G` 对 `P` 线性，因此整个 program 对 `P` 线性。高度碎片化的请求或碎片化的 source footprint 保留对数项，较大的 Validation 闭包至少花费 `V`。Gather 规范化用稳定的字节 radix sort 对 tap 坐标排序，并跳过不变化的字节位置。变化的 source 坐标能装入一个 64 位键时，排序最多八趟。否则每个变化的 source 轴各作为一个 64 位键，且每次读取由输出映射的 frame 或 layer 坐标都要搜索输出 boxes，这就是 $\chi$ 项。Gather 查询见[依赖数据](Dependency-Data.zh.md)。
+
+Program 为每个输出像素保留 16 字节 map 坐标，并在 Gather 表中保留 64 字节 tap 坐标和 8 字节存在位；每个缓存的 source 像素占 16 字节。Footprint 规范化 scratch、排序缓冲、span、window 和输出 payload 另行计入 Root。
+
+### 错误与资源
+
+Program 的状态、tensor windows、workspace、输出和 work 都计入 Root limits。非法 map 坐标返回 `OperationFailed`；image/map metadata 格式错误返回 `TypeMismatch`；未知 boundary 返回 `InvalidArgument`。Typed image source validation 可能返回带 `FailureReason::InvalidDomain` 及其 source `input_id` 的 `InvalidArgument`。取消和资源耗尽保留各自的状态码；tile callback 把取消、资源耗尽和其他失败报告给 coordinator，coordinator 返回第一个记录的状态。失败的执行不返回部分发布的输出。
+
+只有一个 canonical box 的闭合 footprint 使用 Region 发布路径：完整 spatial sample 字节几何可表示时，Result writer 使用 planar backing，否则为请求区域使用 affine backing。因此，从 `Ho=Wo=2^40` 的 map 发出的单像素稀疏请求在 Root limits 内写入四个输出样本，而不分配完整逻辑输出域。含多个 box 的 footprint 使用一块恰好覆盖这些 box 的 packed affine 分配。全域写入仍必须满足可用 Root 预算，同样的稀疏映射也使下文的巨大 source 用例不被枚举。
+
+Root 容量限制请求规模。Gather 表、Footprint metadata 和 source 缓存计入 Host 与 Metadata 容量。使用默认容量时，较大的完整请求一旦使这些结构超过 Metadata 容量，就返回 `ResourceExhausted`；这类请求需要在执行资源配置中显式提高 Metadata、Host 和 Shared 容量。发布对所发布集合还保留局部 Footprint 上限：65,536 个 box 和 1,048,576 个 work 单位。
+
+### 测试
+
+`tests/integration/test_dependency_sampling.cpp` 覆盖五种 boundary、map frame/layer broadcast、三像素 identity map，以及从由 16 字节 payload 支撑的 2^40x2^40 broadcast source 稀疏读取。它还检查零权重 tap 仍是 dirty 证据、constant boundary tap 不请求 source payload，以及 Empty 跳过非有限 map。Source `atomic_trailing_axes=2` 时，Validation 闭合到完整 source 行，而 Data 仍只限于所选 tap。零权重 typed tap 中的非有限 RGB 分量以 `InvalidArgument` 使 source validation 失败；非有限 map 坐标先在操作中以 `OperationFailed` 失败。保留的 Result 在 context 退役后仍读到值 7，并保留两个 source 的关联。
+
+`stmap_bitwise_oracle` 把每个输出通道的位模式与独立标量参考比较，覆盖 2x3、1x1 和 1x2 source、全部五种 boundary、`+/-2^40` 坐标、subnormal、有符号零和 `2^80` source 值，以及 1x2 的 planning tile。它在四种调用方舍入模式下检查 `2^100` 与 `-2^100` 的 tap 顺序折叠和上文的 `2^-56` 反例，并检查调用方模式被恢复。`stmap_sparse_dependencies` 检查精确的逐像素 Data dirty 映射、单个输出通道到其两个 source 像素的投影、稀疏请求中的空洞、请求之外的 NaN map 值，以及分组 source 和 map tensor 的 Data 与 Validation 分别闭合。`stmap_batches_and_strides` 覆盖 2x2 frame/layer source 上的 broadcast map 与 batched map，以及带符号 stride 的 nonspatial 和 spatial map backing。`typed_validation_work_batches` 检查[托管资源](Managed-Resources.zh.md)中所述的 256 样本 validation 计费批次。`stmap_cpu_tiles` 在全部五种 boundary 和向上的调用方舍入模式下，以一个和四个 worker 运行 256x256 请求，要求输出逐字节相同、work 相同、tile 数相同且不超过 64，并检查 oracle 值和精确 source support。
+
+规模测试在显式提高的依赖 work 上限下运行 8x8 到 64x64 的 map。每个 map 坐标都是 0.5，因此在 `clamp` 下每个输出像素读取三像素行中的 source 像素 0 和 1。测试检查每个输出通道和精确 source support。修改 source 像素 1 使整个输出成为 potentially dirty，修改未使用的像素 2 则保持 clean。持有 Result 时 live Payload 增长小于 1 MiB；释放后回到基线。Root work 低于 `1600 * P`，`P` 每增加到四倍，work 增长小于五倍。稀疏规模测试在 16x16 到 64x64 的 map 上请求棋盘格单像素；它要求三次 poll、每个请求像素的 Root work 低于 `15000`，且尺寸每增加到四倍 work 增长小于六倍。这些上限只是这些工作负载的回归检查，1 MiB 增量也不是 context payload 上限、峰值内存上限或 RSS 声明。
+
+取消在 50x50 map 上的两个位置测试。第一个位置在 callback body 结束后挂起 callback，取消 Run，要求返回 `Cancelled` 且 Payload 回到基线。第二个位置在一次 poll 内的正 phase work 计费处暂停 callback 线程并在此取消。该 work 计费必须返回 `Cancelled`，Run 必须报告 `Cancelled`，Payload 必须回到基线。Tile worker 内部的取消由通用 CPU tile 服务测试覆盖，没有 STMap 专用的故障注入。
 
 端到端动态 demand 与 radius 测试位于 [`dependency_workflows/demand.cpp`](../../../tests/integration/dependency_workflows/demand.cpp)、[`dynamic.cpp`](../../../tests/integration/dependency_workflows/dynamic.cpp) 和 [`dependency_workflow_fixture.hpp`](../../../tests/support/dependency_workflow_fixture.hpp)。这些源码是当前行为覆盖入口。
 
@@ -81,6 +131,17 @@ Empty demand 执行静态 metadata specialization，并返回不请求 sample pa
 ## 执行状态与错误
 
 ```text
+STMap Empty -> 静态 metadata/参数检查 -> 空 Result，无 payload Need
+STMap 输出 Q -> 闭合为完整 RGBA 像素 P
+  poll 1：Need(覆盖 P 的 map Control|Validation|Descriptor，source Descriptor)
+  poll 2：读取并校验 map -> 每像素四个 tap -> Gather relation
+          -> Need(投影 tap 上的 source Data|Validation|Descriptor，
+                  或在 constant 下所有 tap 都在外部时仅 Descriptor)
+  poll 3：缓存 source 像素 -> 一次发布 P
+          -> P < 65,536 或无 tile 服务：coordinator 计算 span
+          -> 否则：<= 64 个 tile callback，<= 4 个 worker，然后 join
+          -> 提交 P 或回滚 -> seal Result
+
 Empty 查询 -> 静态校验 -> 不调用 state 或读取 sample
 非空 radius 查询 -> start -> Control Need -> 精确供给
   gather -> 每块至多 64 个 Data -> 有序折叠 -> 发布 sample
