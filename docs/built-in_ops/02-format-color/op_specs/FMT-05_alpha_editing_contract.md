@@ -11,7 +11,7 @@ clarification_status: complete
 
 # FMT-05: internal alpha editing, extraction and removal
 
-FMT-05 remains Proposed. The installed `photospider/format/alpha.hpp` exposes
+FMT-05 remains Proposed. The installed `photospider/ops/format/alpha.hpp` exposes
 `format::set_alpha`, `format::extract_alpha`, and `format::remove_alpha`.
 `set_alpha` appends the registered `alpha.set_<profile>` Result operation;
 B/C compile into compositions of registered channel extraction, literal-like

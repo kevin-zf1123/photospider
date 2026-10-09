@@ -101,6 +101,6 @@ including coordinates outside the requested projection.
 ## Implementation and executable acceptance
 
 The six registered profile keys use Whole execution. Public authoring helpers are
-declared in `photospider/numeric/scans.hpp`; current execution and focused
+declared in `photospider/ops/numeric/scans.hpp`; current execution and focused
 validation details are in [NUM-13 Whole execution](../scans-whole.md). Proposed
 specification status is unchanged.

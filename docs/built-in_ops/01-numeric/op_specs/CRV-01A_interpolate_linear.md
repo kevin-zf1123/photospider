@@ -229,7 +229,7 @@ separate-x/y, explicit-query interface. The maintained target workflow and curre
 ## Maintained implementation and validation
 
 `plugins/ops/01-numeric/curve_interpolation.cpp` implements these three profile
-keys. The public `photospider/numeric/curves.hpp` constructor is
+keys. The public `photospider/ops/numeric/curves.hpp` constructor is
 `interpolate_linear_node`. Strict and Float64 outputs use exact rational evaluation and one final
 destination rounding. Accelerated Float32 evaluation accepts only enclosures
 whose endpoints round to the same Float32 result, preserving monotonicity;

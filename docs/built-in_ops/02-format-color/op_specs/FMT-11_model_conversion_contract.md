@@ -370,7 +370,7 @@ owners at final retirement. Preserve upstream/cancellation errors.
 The implementation uses explicit model and unit metadata, normalized CIE
 lightness, group remapping, exact component requests and the registered S
 constituent. Legacy ColorArray v1 is not silently relabeled. Public helpers are
-available from the installed `photospider/format/model_conversion.hpp` header.
+available from the installed `photospider/ops/format/model_conversion.hpp` header.
 
 ## Acceptance and remaining boundaries
 

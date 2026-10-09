@@ -20,8 +20,8 @@ Original channels 1 and 2 pass through. `raw` requires explicit base axis 2;
 source structure explicitly distinguishes component and scalar. Samples are
 copied without color conversion or alpha arithmetic.
 
-The exported header is `photospider/format/channel_editing.hpp` (also included
-by `photospider.hpp`). `swizzle_channels(document, inputs, slots, options)`
+The exported header is `photospider/ops/format/channel_editing.hpp` (also included
+by `photospider/ops.hpp`). `swizzle_channels(document, inputs, slots, options)`
 selects/repeats base channels or explicit scalar/literal sources.
 `replace_channels(document, inputs, replacements, options)` performs simultaneous
 assignments to original destination selectors. Input ordinal zero is always

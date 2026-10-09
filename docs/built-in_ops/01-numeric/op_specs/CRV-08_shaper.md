@@ -191,7 +191,7 @@ are linked below.
 ## Maintained implementation and validation
 
 The two linear authoring helpers are `linear_shaper` and `linear_shaper_inverse`
-in `photospider/numeric/shapers.hpp`; they expand to existing remap/constant
+in `photospider/ops/numeric/shapers.hpp`; they expand to existing remap/constant
 workflow nodes and are not separate linear primitive registrations. The six log
 primitive keys are exposed by `log2_shaper_node` and `log2_shaper_inverse_node`
 across strict, Apple and x86 profiles. Log evaluation uses a certified whole

@@ -114,7 +114,7 @@ it is not silently discarded into an untyped numeric array.
 ## Maintained implementation and validation
 
 The current runtime registers 45 CRV-06 keys and exposes 15 primitive helpers
-through `photospider/numeric/color_ramps.hpp`; this shared contract is not itself
+through `photospider/ops/numeric/color_ramps.hpp`; this shared contract is not itself
 a registered operation. ColorArray codec/metadata and full-color closure are
 implemented, with ICC import/bind and immutable ownership. Result output schemas select the
 resource identities required by their ColorArray facets.

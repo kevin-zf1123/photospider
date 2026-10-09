@@ -64,7 +64,7 @@ see the execution entry below.
 ## Maintained implementation
 
 The three keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
-with independently named constructors in `photospider/numeric/binary.hpp`.
+with independently named constructors in `photospider/ops/numeric/binary.hpp`.
 The shared Whole adapter retains and validates both complete inputs, including
 when a numeric identity determines a result.
 Floating elementary operations use controlled correctly rounded hardware

@@ -21,7 +21,7 @@ Runtime contract: A/B/C are registered as twelve Result operation ABI 2 CPU
 keys: `assemble`, `concatenate`, `assemble_mapped`, and `scalar_literal`, each
 with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
 The public authoring helpers are installed in
-`photospider/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
+`photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT
 specification decision remains Proposed; implementation status is recorded
 separately.
 

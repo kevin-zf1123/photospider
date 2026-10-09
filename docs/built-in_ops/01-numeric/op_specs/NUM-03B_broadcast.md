@@ -160,7 +160,7 @@ in the workflow README and implementation table.
 The three keys are registered with per-node metadata specialization. The
 specializer validates `shape`, the explicit injective `axis_map`, extent
 compatibility, layout and source dtype, then produces a compact static
-dependency mapping. `broadcast_node` in `photospider/numeric/arrays.hpp` is the
+dependency mapping. `broadcast_node` in `photospider/ops/numeric/arrays.hpp` is the
 public authoring helper and emits these parameters without implicit alignment.
 
 The implementation preserves source owners for view output, uses zero strides

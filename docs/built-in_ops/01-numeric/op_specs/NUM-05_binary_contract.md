@@ -116,7 +116,7 @@ provides actual runnable public fixtures and results as documented below.
 ## Maintained implementation
 
 All 27 keys are registered by `plugins/ops/01-numeric/numeric_binary.cpp`,
-with independently named constructors in `photospider/numeric/binary.hpp`.
+with independently named constructors in `photospider/ops/numeric/binary.hpp`.
 The shared Whole Result implementation validates both complete inputs, even
 when a numeric identity determines a result. Floating elementary operations
 use controlled correctly rounded hardware arithmetic after exact special-value

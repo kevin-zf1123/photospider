@@ -56,13 +56,15 @@ void allocate_with_quotas(BufferAllocator allocator,
 
 Coordinator 在提供 capability 前，会按 input schema 和已发布 coverage 校验每个 `ResultObjectNeed` 与 `ResultTensorNeed`。`ResultTensorInput` 只授权读取请求的 samples。Tensor window acquisition 保留获准的 backing owners 与 leases；只要 owning handle 仍存活，window 可在 callback 返回后继续使用。`TemporaryStorage` 接收单独传入的 `ResourceBudget`，用它计量有界私有临时文件容量和返回的 buffers。
 
+结构化 Result 缓存和 checkpoint 缓存状态各自保存一份从执行 root 复制而来的 `ResourceBudget` handle。副本共享同一个 root，因此即使 coordinator 的包装对象被重新赋值或销毁，这两个组件仍向该 root 计费，其正确性也不依赖 coordinator 中成员的声明顺序。
+
 Structured Result execution 使用同一 root 管理图像页、不可变 sample coverage、relation witnesses、field storage 和 retained source owners。图像 publication 选择 PlanarImage materialization 时，每个 frame 和 layer 使用有界 backing；metadata 与 coverage maps 计入 Metadata，planar pixel capacity 计入 Payload。其他 tensor publication 路径可保留 affine 或 `CpuStorage` backing 及 source Result owners，而不复制 payload；这些 owner 继续持有原有 accounting leases。Image read capability 保留 Result 和授权其 sample Region 的 captured descriptor。复制 capability 也会保留 backing 和 accounting lease。`ResultRef::capture()` 固定一份不可变的 descriptor revision、coverage、relations 和 dependency evidence；共享 waiter 消费该 publication snapshot，不观察生产者之后的 revision。
 
 Result relation rows 与已发布图像 payload 使用所选 resource root 计量。每次 publication 都必须符合配置的 payload、work、I/O 和 stage 限额。`Exact`、`Conservative` 与 `Unknown` 具有不同的 dirty-propagation 行为；未解析的 relation 不能证明输出为 clean。PlanarImage materialization 会将字节复制到 managed backing，并在公开 sample coverage 前计入 payload；affine 与 storage-view publication 则保留 source owners 及其 accounting，不复制 tensor bytes。Schema selection 只保留声明过的 typed image 与 Result metadata resources，包括 ICC 和 OCIO bindings。Compiler 将嵌套 Result schemas 及其 resource identities 带入 plan；runtime Result bindings 会在 execution root 下重新准入所需 owners。
 
 Typed tensor 样本校验按最多 256 个标量样本的额度批次计费。读取一个没有剩余额度的样本前，validator 为该区域计入 `min(256, remaining)` 个 work 单位，然后用相同的数值与语义检查逐个校验每个样本。通过校验的 `N` 样本区域恰好消耗 `N` 个单位。失败的样本可能留下最多 255 个已预付但未读取的样本，这部分 work 不退还。被拒绝的计费直接返回其状态，不以更小批次重试。Validator 在每次读取样本前和每次计费后检查取消，并在每个已校验区域之后检查取消和宿主 stop 状态，因此被取消、stale 或停止的 Run 最迟在下一个区域边界结束。失败校验记录的 work 因而可能超过实际读取的样本数。
 
-依赖数据值的 relation 表、Footprint box 索引、radix sort scratch 和操作自有缓存都在执行 root 上使用 `ResourceAllocator`。`ResultRelation::gather` 表、其规范化 support、规范化位图或 radix 键，以及 STMap 的复制 map 行和 source 缓存在其 owner 存活期间计入 Host 与 Metadata 容量。保留 read window 的 STMap map 行沿用 map backing 已有的计费，不复制数据；已发布的 relation 保留其表，直到引用它的最后一个 Result 或依赖快照被释放。Host 容量包含 Shared 和 Metadata，因此一次 Run 的 Host 峰值与 Metadata 峰值相互重叠，不能相加来估计进程内存。
+依赖数据值的 relation 表、Footprint box 索引、radix sort scratch 和操作自有缓存都在执行 root 上使用 `ResourceAllocator`。`ResultRelation::gather` 表、其规范化 support、规范化位图或 radix 键，以及 STMap 的复制 map 行和 source 缓存在其 owner 存活期间计入 Host 与 Metadata 容量。保留 read window 的 STMap map 行沿用 map backing 已有的计费，不复制数据；已发布的 relation 保留其表，直到引用它的最后一个 Result 或依赖快照被释放。Host 容量包含 Shared 和 Metadata，因此一次 Run 的 Host 峰值与 Metadata 峰值相互重叠，不能相加来估计进程内存。在默认的 `ExecutionOptions` 依赖与工作量限制下，对 16×16 map 执行 STMap 时，稠密和稀疏的 source support 都能完成；释放 Result 后，root 的 live 计数回到 Run 之前的值。
 
 `ExecutionDependencies` 返回的 coverage 和 guarantee maps 使用同一 resource root 的 `ResourceMap` allocator。`source_support()` 与 `potential_dirty()` 返回 root-owned `ResourceMap<Footprint>`；`source_observations()` 返回 root-owned `ResourceVector<SourceObservation>`。每条 observation 自有其 `ResourceString` input name 和 `Footprint`，并记录 typed target、slot 与 roles。这些值可比 `ExecutionDependencies` 对象和 `ExecutionContext` 活得更久；其 allocator owners 会让 accounting root 保持存活，直到最后一个 map、vector、name 或 footprint 释放。
 
@@ -81,7 +83,7 @@ GPU context 在创建 device 时使用 execution context 的资源 root 进行 n
 
 托管 native metadata 准入失败后，device 清空 native pipeline cache 并重试一次。GPU payload 准入可先回收可丢弃的待写磁盘缓存和 result-cache owner，再原子预留实际 native capacity。这些恢复路径不会重试 operation callback。
 
-`TemporaryStorage` 拥有私有、无缓冲的临时文件，并以字节偏移寻址。编码 extent 分别按 4096 字节取整；磁盘限额统计编码文件 capacity，不统计文件系统块。读取有范围和窗口上限、同步执行，返回不可变 owner buffer，并让文件和 root lease 保持存活。追加前先预留容量；回滚无法确认时将 reservation 隔离到文件成功关闭。冻结前缀不可覆盖，seal 后不能继续生产。取消阻止新 I/O，已提交的同步调用结束后才释放 owner。
+`TemporaryStorage` 拥有私有、无缓冲的临时文件，并以字节偏移寻址。编码 extent 分别按 4096 字节取整；磁盘限额统计编码文件 capacity，不统计文件系统块。读取有范围和窗口上限、同步执行，返回不可变 owner buffer，并让文件和 root lease 保持存活。追加前先预留容量。追加依次检查文件是否失效或已 seal、是否已取消；字节数为零时直接返回当前末尾。如果新的末尾偏移或其按 4096 字节取整后的 extent 超过 `INT64_MAX`，追加在分配前以 `ResourceExhausted` 失败，文件大小、live 资源以及已发出的 I/O 和工作量都不变。回滚无法确认时将 reservation 隔离到文件成功关闭。冻结前缀不可覆盖，seal 后不能继续生产。取消阻止新 I/O，已提交的同步调用结束后才释放 owner。
 
 `TemporaryStorage` 在创建文件前以及每次 append、write 或 read 前向当前线程的 I/O protocol fence 请求许可。该 fence 是 core 层的同步 thread-local capability：owner 提供策略，状态在 scope 退出前处于借用状态，嵌套 scope 退出时恢复上一层。未安装 scope 时 I/O 照常进行。Execution 在受 fence 保护的 Result callback 周围安装绑定 callback failure code 与 failure latch 的 scope。在该 callback 内调用 `TemporaryStorage` 属于强制 I/O protocol violation，会在文件改变前以 `InvalidArgument`、`UnauthorizedRead` 和 Protocol/Group detail 失败。此前已记录的失败仍是报告的首个原因，例如先前的 `ResourceExhausted` 与 `CapacityLimit`；latch 记录的 violation 会否决 CPU retry。
 
@@ -89,7 +91,15 @@ GPU context 在创建 device 时使用 execution context 的资源 root 进行 n
 
 ## 算法与数学实现 (Algorithms & Math)
 
-预算乘积、对齐和页取整在分配或发布前进行溢出检查。准入依据申报或查询到的 allocation capacity；`live` 表示当前准入容量（包括未使用 reservation），`peak` 表示观测到的该计数最大值。
+预算乘积、对齐和页取整在分配或发布前进行溢出检查。内核统一使用 `src/lib/core/checked_math.hpp` 中的一组无符号辅助函数：带可选上限的加法、乘法、乘加和对齐检查，以及饱和乘法。检查失败时不写输出，各调用点保留自己的处理方式：
+
+| 数量 | 溢出时 |
+| --- | --- |
+| 分配、存储、传输和工作量计费 | 拒绝，通常返回 `ResourceExhausted` |
+| 逻辑 domain 大小和 reshape 成本估计 | 饱和到上限 |
+| 可选 checkpoint 缓存的成本估计 | 跳过缓存路径，算子照常执行 |
+
+容量检查接受恰好填满剩余容量的请求；例如配置为 24 字节的 result cache 可以同时容纳一个 16 字节和一个 8 字节的条目而不发生淘汰。准入依据申报或查询到的 allocation capacity；`live` 表示当前准入容量（包括未使用 reservation），`peak` 表示观测到的该计数最大值。
 
 ## 限制与非目标 (Limitations & Non-Goals)
 

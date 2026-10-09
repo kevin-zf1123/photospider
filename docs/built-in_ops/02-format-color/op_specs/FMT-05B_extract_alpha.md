@@ -14,7 +14,7 @@ clarification_status: complete
 # FMT-05B: extract internal alpha or explicitly generate opaque alpha
 
 FMT-05B remains Proposed. The public `format::extract_alpha` helper is compiled
-and installed through `photospider/format/alpha.hpp`. It appends an executable
+and installed through `photospider/ops/format/alpha.hpp`. It appends an executable
 Result composition over the registered `channel.extract_index_<profile>` key
 when the selected group has alpha. For `missing_alpha=opaque`, it computes the
 exact same-dtype code that decodes to coverage one and uses the registered

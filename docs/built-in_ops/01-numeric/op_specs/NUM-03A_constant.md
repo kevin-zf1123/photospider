@@ -148,7 +148,7 @@ Implementation delivery provides real build/run commands and measured results.
 The three keys are registered with per-node metadata specialization. The
 specializer parses and validates `shape` and `layout`, infers the input dtype
 and concrete output shape, and exposes the view payload bound to the planner.
-`constant_node` in `photospider/numeric/arrays.hpp` is the public authoring
+`constant_node` in `photospider/ops/numeric/arrays.hpp` is the public authoring
 helper and emits the same explicit operation key and parameters.
 
 The strict implementation performs an exact byte copy of the scalar. The two

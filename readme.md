@@ -41,13 +41,23 @@ find_package(Photospider 0.33 CONFIG REQUIRED COMPONENTS kernel)
 target_link_libraries(app PRIVATE Photospider::kernel)
 ```
 
-Extension authors request only the narrow component they use:
+Consumers request only the components they use:
 
 | Use | Component | Target |
 | --- | --- | --- |
 | Compiler/executor | `kernel` | `Photospider::kernel` |
+| Built-in operation helper headers | `ops_headers` | `Photospider::ops_headers` |
 | Operation ABI headers | `operation_sdk` | `Photospider::operation_sdk` |
 | Data-provider ABI header | `data_provider_sdk` | `Photospider::data_provider_sdk` |
+
+`Photospider::ops_headers` is a header-only target. It adds the `photospider/ops/` include tree: workflow-authoring helpers for numeric and format/color operations, plus the FFT, component and statistics operation factories. The helper implementations are still compiled into the kernel library, so code that uses these headers links both targets:
+
+```cmake
+find_package(Photospider 0.33 CONFIG REQUIRED COMPONENTS kernel ops_headers)
+target_link_libraries(app PRIVATE Photospider::kernel Photospider::ops_headers)
+```
+
+`#include <photospider/ops.hpp>` includes the kernel umbrella header, the format/color helpers, and the FFT, component and statistics headers. Numeric helpers are included one at a time, for example `#include <photospider/ops/numeric/lut3d_baking.hpp>`. Applications that only compile and run workflows through `photospider/photospider.hpp` need only `Photospider::kernel`.
 
 ## Local daemon
 

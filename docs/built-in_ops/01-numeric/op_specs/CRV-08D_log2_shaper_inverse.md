@@ -70,7 +70,7 @@ specification remains Proposed.
 ## Maintained implementation and validation
 
 The public entry point is `log2_shaper_inverse_node` in
-`photospider/numeric/shapers.hpp`. The log primitive uses certified
+`photospider/ops/numeric/shapers.hpp`. The log primitive uses certified
 whole-expression evaluation with a strict certified scalar fallback, preserves
 monotonicity and partition independence, and may return `ResourceExhausted` when
 128..4096 refinement capacity is unresolved. See [the CRV-08 family contract](CRV-08_shaper.md)

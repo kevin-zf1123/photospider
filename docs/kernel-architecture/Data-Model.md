@@ -22,6 +22,13 @@ class Value {
                               std::vector<std::uint8_t>,
                               std::vector<ValueFacet> = {},
                               ResourceBindings = {});
+  // Checked byte offset of one logical coordinate inside bytes().
+  Result<std::size_t> byte_address(const std::uint64_t* coordinate,
+                                   std::size_t rank) const;
+  Result<std::size_t> byte_address(
+      std::initializer_list<std::uint64_t> coordinate) const;
+  Result<std::size_t> byte_address(
+      const std::vector<std::uint64_t>& coordinate) const;
 };
 
 struct ExecutionBinding {
@@ -42,6 +49,8 @@ class PlanarImage {
 `WorkflowDocument` is copied compiler input. Its nodes carry operation keys, ordered input references, typed parameters, and named output selections. Input declarations require a fixed `result_schema`; compiler validation rejects a missing schema with `InvalidArgument`. Execution bindings provide the corresponding owning `ResultRef`, whose schema and static metadata are checked against that declaration. Plans keep declarations and selected resource identities, not caller sample addresses.
 
 A generic `Value` has a nonzero rank-1-to-8 descriptor, a logical `Region`, a `StridedLayout`, up to 64 unique facets, and shared immutable CPU-accessible storage. Its element types are `UInt8`, `Int8`, `UInt16`, `Int16`, `Int64`, `Float32`, and `Float64`. `Value::create` validates shape and coverage, stride count and addressed byte span, element type, and facet/resource consistency before publishing. Negative and zero strides are valid when every addressed byte remains in the backing allocation. Copies share storage and expose no writable pointer.
+
+`Value::byte_address` maps one logical coordinate to a checked byte offset into `bytes()`. It applies the Region origin and the layout strides, including negative strides, broadcast (zero) strides and high origins. A coordinate outside coverage, a rank mismatch, a null coordinate pointer or a default-constructed Value returns `InvalidArgument`. The pointer-plus-rank and brace-list overloads borrow the coordinate only for the duration of the call and perform no allocation on the success path, so they suit per-sample loops; for example, `value.byte_address({y, x, c})` addresses channel `c` of pixel `(x, y)` in an HWC image without building a vector. The vector overload has the same result. `ValueView` forwards all three overloads. Concurrent calls on the same immutable Value are safe.
 
 `Region` stores unsigned offset/extent pairs in descriptor-axis order. It describes logical samples, not bytes. Region interval and element-count arithmetic is checked. `Value::as_float64()` accepts only a contiguous Float64 scalar whose Region is exactly rank one with `{offset=0, extent=1}`; other valid Value coverage remains usable through the general accessors.
 
@@ -84,6 +93,10 @@ When a Result binding references storage outside the execution root, the runtime
 Result schemas describe logical sample domains; the compiler does not require their dense element product or packed byte count to fit a machine allocation size. For an output whose port kind is `RgbaFloat32`, the planner checks that the packed dense size is representable; Result planning does not estimate dense payload bytes. Actual `Value` backing creation validates allocation size and addressed byte span, and its strides must fit the signed representation. A Result may describe a much larger logical domain than its physical backing, for example a broadcast view over a small allocation.
 
 Result tensor schemas describe logical axes and optional spatial layout. Physical tiled addresses are not represented by ordinary affine strides. Each operation declares supported Result metadata and execution behavior; `PlanningOptions` supplies physical tile geometry where spatial planning uses it.
+
+The kernel owns the 3D LUT bake report and table schemas declared in `photospider/data/lut3d_bake.hpp`: schema construction, decoding (`lut3d_bake_description`) and report reading (`read_lut3d_bake_report`), including validation of each axis. The baking operation that produces these Results is a built-in operation in `plugins/ops/01-numeric/`.
+
+Each report axis stores three binary64 values `{first, last, step}`. Validation requires finite components. A one-knot axis requires bit-identical endpoints and a `+0` step. Otherwise the endpoints must differ, and the stored step must equal the round-to-nearest-even value of `(last - first) / (count - 1)`. The validator then reconstructs every interior knot as the rounded value of `((count - 1 - j) * first + j * last) / (count - 1)` and requires the knots to be strictly monotonic in the axis direction; positive and negative zero order as the same key. These sums use exact multi-limb binary arithmetic, so the result does not depend on the floating-point environment or rounding mode. No knot table is allocated. Work is charged through the caller's `consume_work` callback: 8192 units for the step, 1 per knot and another 8192 per interior knot. The first failing component returns `OperationFailed` with `InvalidDomain`.
 
 Float32 Values preserve binary32 payload bits. A scalar or operation contract validates any numeric domain it consumes; storage accepts the element representation independently from that domain.
 

@@ -123,7 +123,7 @@ mutable upstream links describe candidate evidence, not a frozen dependency.
 ## Maintained implementation and validation
 
 The maintained keys are registered in `plugins/ops/01-numeric/numeric_unary.cpp`
-and exposed through `photospider/numeric/unary.hpp`. Bit-level special cases
+and exposed through `photospider/ops/numeric/unary.hpp`. Bit-level special cases
 precede controlled hardware elementary arithmetic. Strict transcendental results
 use directed Q128..Q4096 enclosures. Accelerated ordinary results use private
 SLEEF binary64 kernels and conservative final-error checks within the

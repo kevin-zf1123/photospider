@@ -10,15 +10,15 @@
 
 | Family | 当前源码与可用性 | 当前 Result 图像状态 |
 | --- | --- | --- |
-| FMT alpha | 构建 `alpha_operations.cpp`、`alpha_common.hpp` 与 `alpha_authoring.cpp`；安装 `photospider/format/alpha.hpp`。 | 三个 CPU profiles 共注册 associate、unassociate、set 九个 native Result ABI 2 keys。`extract_alpha` 与 `remove_alpha` 仍是基于已注册 operations 的 helper 组合。 |
-| FMT channel extraction | `channel_extraction.cpp` 注册六个 `channel.extract_index_<profile>` 与 `channel.extract_named_<profile>` CPU Result operation；`format::split_channels` 展开 index nodes。Public header `photospider/format/channel.hpp` 单独安装。 | 对 generic 和 spatial Result tensor 提供精确分量访问及 Dependency-v2 support。这是 tensor operation，不是像素转换。 |
+| FMT alpha | 构建 `alpha_operations.cpp`、`alpha_common.hpp` 与 `alpha_authoring.cpp`；安装 `photospider/ops/format/alpha.hpp`。 | 三个 CPU profiles 共注册 associate、unassociate、set 九个 native Result ABI 2 keys。`extract_alpha` 与 `remove_alpha` 仍是基于已注册 operations 的 helper 组合。 |
+| FMT channel extraction | `channel_extraction.cpp` 注册六个 `channel.extract_index_<profile>` 与 `channel.extract_named_<profile>` CPU Result operation；`format::split_channels` 展开 index nodes。Public header `photospider/ops/format/channel.hpp` 单独安装。 | 对 generic 和 spatial Result tensor 提供精确分量访问及 Dependency-v2 support。这是 tensor operation，不是像素转换。 |
 | FMT literal-like fill | `channel_literal_like.cpp` 注册三个 `channel.literal_like_<profile>` Result CPU key。 | 单输入 Result；仅请求 Descriptor role 8，不读来源 samples；按请求输出重复同 dtype raw bits。可用于 FMT-05B opaque lowering，但不实现 `extract_alpha`。 |
 | FMT scalar literal | `channel_assembly.cpp` 注册三个 `channel.scalar_literal_<profile>` Result CPU key。 | 无输入 Whole primitive；以 prepared native bits 发布一个 generic shape `[1]` tensor，供 FMT-03 scalar sources 使用。 |
 | FMT channel assembly/editing | `channel_assembly.cpp` 注册 A/B/C CPU Result keys；已安装 assembly/editing headers 提供 A/B/C 与 swizzle/replace helpers。 | Result operation ABI 2；单 tensor 输入输出、七种逐位 dtype、样本数量有界、所有输入均做 Descriptor 检查、Data 按映射请求。行为测试见 [`test_channel_assembly.cpp`](../../../tests/integration/test_channel_assembly.cpp) 与 [`test_channel_editing.cpp`](../../../tests/integration/test_channel_editing.cpp)。 |
-| FMT metadata assignment | `metadata_assignment.cpp` 注册 `metadata.assign_<profile>` keys；`format::remove_metadata` 是 lowering helper。Public header `photospider/format/metadata.hpp` 单独安装。 | Result operation ABI 2；输入恰有一个 tensor member 且没有 fields。保留 schema、tensor key、batch axes、layout 和样本位。这是通用 Result tensor operation，不是专用图像 operation family。 |
-| FMT RGB basis conversion | `rgb_basis.cpp`、`rgb_basis_math.cpp` 注册 A/B/C CPU Result keys；`photospider/format/rgb_basis.hpp` 已安装。 | 三个 CPU profiles 共注册九个 Result ABI 2 keys。`format::convert_linear_rgb` 事务式组合已注册 stages，不增加 D key。这是通用 tensor operation，不是 image-slot operation。 |
-| FMT model conversion | `model_conversion.cpp`、`model_math.cpp` 和 `model_simd.cpp` 注册 FMT-11 Result operations；`photospider/format/model_conversion.hpp` 提供 graph helpers。 | A-R/T 在三个 CPU profiles 下共注册 57 个 keys；FMT-11S 降低为已注册的 MASK threshold operation。 |
-| FMT 数值格式转换与 transfer | `numeric_conversion.cpp` 注册 `numeric.convert_format_strict`；`transfer.cpp` 注册 `color.transfer_encode_<profile>` 与 `color.transfer_decode_<profile>`。`photospider/format/transfer.hpp` 单独安装。 | 两者都是通用 Result tensor operation，不是图像专用 family。数值转换执行同坐标 dtype/range conversion；transfer 对选中的 semantic RGB/Gray group 或显式 raw components 执行标量曲线转换。 |
+| FMT metadata assignment | `metadata_assignment.cpp` 注册 `metadata.assign_<profile>` keys；`format::remove_metadata` 是 lowering helper。Public header `photospider/ops/format/metadata.hpp` 单独安装。 | Result operation ABI 2；输入恰有一个 tensor member 且没有 fields。保留 schema、tensor key、batch axes、layout 和样本位。这是通用 Result tensor operation，不是专用图像 operation family。 |
+| FMT RGB basis conversion | `rgb_basis.cpp`、`rgb_basis_math.cpp` 注册 A/B/C CPU Result keys；`photospider/ops/format/rgb_basis.hpp` 已安装。 | 三个 CPU profiles 共注册九个 Result ABI 2 keys。`format::convert_linear_rgb` 事务式组合已注册 stages，不增加 D key。这是通用 tensor operation，不是 image-slot operation。 |
+| FMT model conversion | `model_conversion.cpp`、`model_math.cpp` 和 `model_simd.cpp` 注册 FMT-11 Result operations；`photospider/ops/format/model_conversion.hpp` 提供 graph helpers。 | A-R/T 在三个 CPU profiles 下共注册 57 个 keys；FMT-11S 降低为已注册的 MASK threshold operation。 |
+| FMT 数值格式转换与 transfer | `numeric_conversion.cpp` 注册 `numeric.convert_format_strict`；`transfer.cpp` 注册 `color.transfer_encode_<profile>` 与 `color.transfer_decode_<profile>`。`photospider/ops/format/transfer.hpp` 单独安装。 | 两者都是通用 Result tensor operation，不是图像专用 family。数值转换执行同坐标 dtype/range conversion；transfer 对选中的 semantic RGB/Gray group 或显式 raw components 执行标量曲线转换。 |
 | Exposure and grade | `image.exposure_gain` 使用内置 Result 图像路径。`grade.levels` 仍是 numeric field operation。 | Exposure 接收 Result 图像和 `[0, 16]` 内的单例 Float32 Result 控制值；它缩放 RGB 并保留 alpha。`grade.levels` 仍为 numeric operation。 |
 | Gaussian | `image_program.cpp` 实现 typed `image.gaussian_blur`；`gaussian.cpp` 和 `gaussian_gpu.cpp` 实现独立的 generic numeric Gaussian operations。 | 图像 Gaussian 接收 `photospider.image` Results。在空间边界 clamp，并请求 radius halo；保留图像语义。CPU 与 Metal 使用不同的舍入契约。 |
 | STMap and dependency sampling | `dependency_sampling.cpp` 通过 Result API 注册 `image.stmap` 以及 generic `numeric.radius_gather` / `numeric.radius_scatter`。 | STMap 接收 RGBA `photospider.image` Result 和 cell shape 为 `{height, width, 2}` 的 generic Float64 map tensor；map 可以无 batch，也可以使用与 source 相同的 batch axes。Radius gather/scatter 接收无 batch 的 rank-one Float64 values 和 shape 相同的 Int64 radii，并发布 generic Float64 Result。这些都是 CPU Dependency-v2 operations；radius operations 不使用 image slot。 |
@@ -43,7 +43,7 @@ GPU 实现遇到保守 native arithmetic domain 之外的有限输入时，可�
 
 ## 原生 alpha Result operations
 
-已安装的 `photospider/format/alpha.hpp` 可向普通 workflow 追加 FMT-04A/B 与
+已安装的 `photospider/ops/format/alpha.hpp` 可向普通 workflow 追加 FMT-04A/B 与
 FMT-05A nodes。九个 native keys 使用 Result ABI 2；FMT-05B/C 仍是基于已注册
 extraction、literal-like fill、mapped assembly 和 metadata assignment keys 的
 authoring compositions。这些是通用 single-tensor operations，不是专用的
@@ -66,7 +66,7 @@ Set 的 `auto` 只在物理 `ViewUnavailable` 时 materialize。Materialization 
 budgets 与 cancellation 约束下事务发布；空输出请求不保留本次执行的载荷状态。这些
 FMT operations 没有新增 GPU backend。
 
-当前 `02-format-color` 中已有的 built-in FMT families 均提供 Result CPU operations，或提供可降低为已注册 operations 的 helper。FMT-01、FMT-02/03、FMT-04/05A alpha、FMT-06 numeric conversion、FMT-08、FMT-09 transfer、FMT-10 RGB basis、literal-like fill 与 scalar literal 使用 Result operation ABI 2。Public headers `photospider/format/channel.hpp`、`channel_assembly.hpp`、`channel_editing.hpp`、`alpha.hpp`、`metadata.hpp`、`transfer.hpp` 和 `rgb_basis.hpp` 和 `model_conversion.hpp` 分别单独安装。FMT-05B/C 是现有 Result operations 的可执行组合；FMT-04/05A、FMT-09 和 FMT-10 已有 native keys。其他 production operations 可能仍注册，但其 structural-image Value 契约仍在 Result 图像路径之外。注册本身不能证明具备 Result 图像支持。
+当前 `02-format-color` 中已有的 built-in FMT families 均提供 Result CPU operations，或提供可降低为已注册 operations 的 helper。FMT-01、FMT-02/03、FMT-04/05A alpha、FMT-06 numeric conversion、FMT-08、FMT-09 transfer、FMT-10 RGB basis、literal-like fill 与 scalar literal 使用 Result operation ABI 2。Public headers `photospider/ops/format/channel.hpp`、`channel_assembly.hpp`、`channel_editing.hpp`、`alpha.hpp`、`metadata.hpp`、`transfer.hpp` 和 `rgb_basis.hpp` 和 `model_conversion.hpp` 作为只含头文件的 `Photospider::ops_headers` target 的一部分分别安装；使用方将它与 `Photospider::kernel` 一起链接。FMT-05B/C 是现有 Result operations 的可执行组合；FMT-04/05A、FMT-09 和 FMT-10 已有 native keys。其他 production operations 可能仍注册，但其 structural-image Value 契约仍在 Result 图像路径之外。注册本身不能证明具备 Result 图像支持。
 
 ## 内置 Result 图像 operations
 

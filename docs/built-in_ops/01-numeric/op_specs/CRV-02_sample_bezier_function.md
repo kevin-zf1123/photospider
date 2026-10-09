@@ -433,7 +433,7 @@ be labeled a CertifiedBound QualityReport without the required kernel evidence.
 ### Public workflow fixture
 
 The public fixture is implemented through `sample_bezier_function_node` in
-`photospider/numeric/bezier.hpp`:
+`photospider/ops/numeric/bezier.hpp`:
 
 ```text
 anchors: Float64[2,2] = [[0,0], [1,1]]

@@ -67,7 +67,7 @@ through Compiler/ExecutionContext; commands and current evidence are linked belo
 ## Maintained implementation and validation
 
 This template is maintained through the public helper in
-`photospider/numeric/resampling.hpp` and ordinary workflow composition. The
+`photospider/ops/numeric/resampling.hpp` and ordinary workflow composition. The
 resampling executable passes eight groups under each of Strict and Apple; it
 retains CRV-01's exact-copy and numerical-accuracy checks and defines no separate
 resampling oracle. The focused root `test_numeric_resampling_result` passes 1/1. Whole numerical/fallback counters are N/A.

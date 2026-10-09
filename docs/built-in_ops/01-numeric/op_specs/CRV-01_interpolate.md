@@ -74,7 +74,7 @@ accept x, y and query tensors and do not alias those controls-based operations.
 
 The four Proposed interfaces are implemented by twelve registered keys in
 `plugins/ops/01-numeric/curve_interpolation.cpp` and public constructors in
-`photospider/numeric/curves.hpp`. Each workflow input and output is a Result. An
+`photospider/ops/numeric/curves.hpp`. Each workflow input and output is a Result. An
 input schema contains one tensor member under any schema id and member key;
 `sample_shape()` supplies x[K], y[K] or y[K,C], and query[N]. Each input can use
 Float32 or Float64 independently. The `values` output uses schema

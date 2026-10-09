@@ -48,7 +48,7 @@ baseline when the execution context is destroyed.
 ## Public use and focused validation
 
 The public C++ helpers `prefix_sum_node` and `integral_image_node` are declared
-in `include/photospider/numeric/scans.hpp`. This snippet assumes the caller has
+in `plugins/ops/include/photospider/ops/numeric/scans.hpp`. This snippet assumes the caller has
 already created a `WorkflowInput` and a workflow builder:
 
 ```cpp

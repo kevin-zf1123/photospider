@@ -75,7 +75,7 @@ Structured coordinator 登记请求的 named Result roots，并推进其 depende
 
 Frontier 有 queued callback work 时，coordinator 从 Root-owned pending list 提交最多 `maximum_parallelism` 个 task。它等待已提交 callback 退出，再读取 phase result 并串行应用，然后推进下一个 dependency frontier。该上限作用于已提交的 callback task，不是另建 Result graph scheduler。CPU staged-tile controller 与 GPU callback 仍使用各自的 inline/controller 和 single-lane 路径。
 
-Run coordinator 拥有调度策略和发布顺序。独立组件分别拥有每 Run cache quota 与 checkpoint scopes、actor phase/continuation state、Need producer cursor、joint 推进状态和每次 submission 的 stage 数据。Need cursor 拥有 producer 和每个输入的请求状态；coordinator 校验并登记每个已提供 envelope 后才推进 cursor。每个 submission 的 transfer、tile 和 native observations 保留至 task 退出，再由 coordinator 合并。Joint worker 标记 callback 已进入并运行共享 callback；coordinator 在退休时只计一次该 group。Result poll timing 从 phase 创建计至 coordinator 退休，包括 queue 与 wave 等待，因此不是纯计算时长。同步 Run 完成和 shutdown 会先排空已提交工作，再释放借给 callback 的状态。
+Run coordinator 拥有调度策略和发布顺序。独立组件分别拥有每 Run cache quota 与 checkpoint scopes、actor phase/continuation state、Need producer cursor、joint 推进状态和每次 submission 的 stage 数据。Need cursor 拥有 producer 和每个输入的请求状态；coordinator 校验并登记每个已提供 envelope 后才推进 cursor。每个 submission 的 transfer、tile 和 native observations 保留至 task 退出，再由 coordinator 合并。Joint worker 标记 callback 已进入并运行共享 callback；coordinator 在退休时只计一次该 group。Joint participant 标记的构造函数是私有的，只有 coordinator 能调用；它不能复制或移动，并且只作为 coordinator 中 `final` Actor 类型的一部分创建。因此 coordinator 转换回 Actor 的每个 participant 都确实是 Actor，coordinator 之外的代码无法创建其他 participant 类型。Result poll timing 从 phase 创建计至 coordinator 退休，包括 queue 与 wave 等待，因此不是纯计算时长。同步 Run 完成和 shutdown 会先排空已提交工作，再释放借给 callback 的状态。
 
 ### Planar staged tile service
 
@@ -115,6 +115,8 @@ Coordinator 提交一个三维 work-item grid，并等待全部 tile callback �
 Context 在创建时确定 CPU worker 数；`cpu_workers` 为零时解析为有界硬件线程数。CPU 始终可用，native GPU 可选。`maximum_queued_tasks` 限制 CPU/GPU lane 共享的等待 callback 数。普通 callback 在 worker 开始执行时释放等待 slot；planar `CPU_STAGES` job 会保留 admission 和 managed Queue lease，直到所有已提交 tile 退出且 job 从队列摘除，具体规则见上文。活动 job 在退役前保留输入 owner、callback state、scratch 和输出 storage。
 
 取消会关闭后续 range/tile 领取，并阻止后续 device submission。同步 range call 等待活动 block；GPU service 在返回前排空已提交工作。最终取消和 currentness 检查通过后才发布输出。Sticky host-service failure 优先于 callback success。宿主不能抢占任意 plugin code 或已提交 native dispatch。
+
+长时间运行的 CPU block 只在自身循环中轮询 token 的位置观察取消。例如，一个在 262,144 次迭代的循环中每次检查 `phase.query.cancellation` 的 block，在第 64 次迭代后被取消就会提前返回。Run 随后报告 `Cancelled`，此时只完成了计划迭代中的一部分；没有 block 仍处于活动状态，Root 的 Queue 用量回到零。`test_cpu_parallel` 覆盖这一情形。从不轮询的 block 会执行完整个区间，Run 之后才观察到取消。
 
 CPU helper 保存并恢复浮点环境，以 nearest-even 舍入和 gradual underflow 执行。Operation 自行定义 reduction 顺序，以及保持该顺序的 block 几何。
 

@@ -443,7 +443,7 @@ may truncate detail; structured origin/scope remains authoritative.
 ## 7. Maintained implementation and numerical boundary
 
 `plugins/ops/01-numeric/numeric_expression.cpp` registers all three selected
-keys. `photospider/numeric/expression.hpp` provides `sample_expression_node`;
+keys. `photospider/ops/numeric/expression.hpp` provides `sample_expression_node`;
 it validates the free-name/connection map and writes all four static parameters.
 Zero coefficients use a fixed start prefix plus a repeated `[end,coefficients...]`
 group. Pure metadata preparation accepts mixed floating scalar dtypes.

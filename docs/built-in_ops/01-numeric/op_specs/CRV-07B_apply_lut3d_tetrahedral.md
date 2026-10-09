@@ -106,7 +106,7 @@ outside this Proposed specification.
 
 ## Maintained implementation
 
-[`apply_lut3d_tetrahedral_node`](../../../../include/photospider/numeric/lut3d.hpp)
+[`apply_lut3d_tetrahedral_node`](../../../../plugins/ops/include/photospider/ops/numeric/lut3d.hpp)
 constructs this Whole Result primitive in
 [`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp).
 All profiles use exact stable rational ordering, exact weight differences and

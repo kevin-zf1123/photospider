@@ -71,7 +71,7 @@ specification remains Proposed.
 ## Maintained implementation and validation
 
 The public entry point is `linear_shaper_inverse` in
-`photospider/numeric/shapers.hpp`. This linear helper expands to existing Result
+`photospider/ops/numeric/shapers.hpp`. This linear helper expands to existing Result
 remap/constant nodes and is not a linear primitive.
 See [the CRV-08 family contract](CRV-08_shaper.md) and [the shaper workflow README](../../../../examples/numeric_workflow/README.md)
 for the shared command, fixture and validation evidence. The installed consumer passes 1/1, including public

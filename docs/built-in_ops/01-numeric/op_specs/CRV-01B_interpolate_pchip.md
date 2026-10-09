@@ -245,7 +245,7 @@ This explicit-query target remains Proposed; its maintained implementation is re
 ## Maintained implementation and validation
 
 `plugins/ops/01-numeric/curve_interpolation.cpp` implements these three profile
-keys. The public `photospider/numeric/curves.hpp` constructor is
+keys. The public `photospider/ops/numeric/curves.hpp` constructor is
 `interpolate_pchip_node`. Strict and Float64 outputs use exact rational evaluation and one final
 destination rounding. Accelerated Float32 evaluation accepts only enclosures
 whose endpoints round to the same Float32 result, preserving monotonicity;

@@ -14,7 +14,7 @@ clarification_status: complete
 # FMT-05C: remove one group's alpha relationship
 
 FMT-05C remains Proposed. The public `format::remove_alpha` helper is compiled
-and installed in `photospider/format/alpha.hpp`. It appends an executable Result
+and installed in `photospider/ops/format/alpha.hpp`. It appends an executable Result
 composition using registered mapped assembly for channel-bearing inputs, or
 registered metadata assignment for component Gray identity. These paths add no
 alpha operation key. The helper takes one single-tensor Result without fields

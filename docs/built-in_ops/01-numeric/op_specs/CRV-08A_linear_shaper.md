@@ -69,7 +69,7 @@ specification remains Proposed.
 
 ## Maintained implementation and validation
 
-The public entry point is `linear_shaper` in `photospider/numeric/shapers.hpp`.
+The public entry point is `linear_shaper` in `photospider/ops/numeric/shapers.hpp`.
 This linear helper expands to existing Result remap/constant nodes and is not a
 linear primitive.
 See [the CRV-08 family contract](CRV-08_shaper.md) and [the shaper workflow README](../../../../examples/numeric_workflow/README.md)

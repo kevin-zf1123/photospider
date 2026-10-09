@@ -79,7 +79,7 @@ NaN fixtures checked separately using exact input payload bits.
 ## Maintained implementation and validation
 
 This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
-exposed through `photospider/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
+exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 

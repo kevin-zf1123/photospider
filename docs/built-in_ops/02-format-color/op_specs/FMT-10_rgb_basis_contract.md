@@ -38,7 +38,7 @@ Neither implies complete CIECAM appearance rendering or a scene/display change.
 All selected XYZ/RGB descriptions must share the same observer convention;
 this family does not convert observers or spectral data.
 
-The installed `photospider/format/rgb_basis.hpp` header exposes static parameter
+The installed `photospider/ops/format/rgb_basis.hpp` header exposes static parameter
 codecs and transactional authoring helpers. D resolves real upstream metadata,
 then stages A, optional C and B in a temporary workflow before publishing the
 expansion. Writes to a shared WorkflowDocument must be serialized; compiled plans

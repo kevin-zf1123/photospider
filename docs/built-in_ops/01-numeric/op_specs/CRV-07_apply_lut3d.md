@@ -269,7 +269,7 @@ hue components and every supported color model.
 
 The six operation keys are registered in
 [`lut3d_application.cpp`](../../../../plugins/ops/01-numeric/lut3d_application.cpp),
-and [`lut3d.hpp`](../../../../include/photospider/numeric/lut3d.hpp) provides the
+and [`lut3d.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/lut3d.hpp) provides the
 public trilinear and tetrahedral constructors. Both are Whole Result operations.
 Static preparation validates Result tensor schemas and ColorArray facets, then
 stores reusable immutable program state. Each continuation records current

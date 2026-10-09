@@ -60,7 +60,7 @@ values-only/axis-only/joint requests, changed source bindings, singleton count,
 partial output, low shared budgets, cancellation, cache-off and exported-owner
 lifetime. Templates do not compute on construction, freeze results or create files.
 Use source mathematical fixtures independently of graph equivalence, which alone
-could reproduce a shared numerical bug. The maintained public constructor in `photospider/numeric/lut1d.hpp` and
+could reproduce a shared numerical bug. The maintained public constructor in `photospider/ops/numeric/lut1d.hpp` and
 `examples/numeric_workflow/baking.cpp` execute this fixture. The example is
 excluded from default builds and CTest/integration registration. See the
 [numeric workflow README](../../../../examples/numeric_workflow/README.md#lut1d-baking-templates-crv-04)

@@ -155,7 +155,7 @@ Strict/accelerated identity or finite tolerance must be tested separately from
 classification/payload rules and exact dependency mapping.
 
 The maintained implementation is provided by `numeric_unary.cpp` and the public
-`photospider/numeric/unary.hpp` entry points. The runnable workflow and current
+`photospider/ops/numeric/unary.hpp` entry points. The runnable workflow and current
 validation boundary are documented below; this does not change the Proposed status.
 
 ## Exact rational pi input counterparts
@@ -174,7 +174,7 @@ floating pi-multiple functions remain separate. Reduced common-angle denominator
 ## Maintained implementation and validation
 
 The 66 maintained unary keys are registered in `plugins/ops/01-numeric/numeric_unary.cpp`
-and exposed through `photospider/numeric/unary.hpp`. The helpers author Result
+and exposed through `photospider/ops/numeric/unary.hpp`. The helpers author Result
 workflows. Each input port accepts a Result with a supported numeric tensor in
 slot 0; metadata specialization requires matching input dtype and complete
 sample shape. It does not require a particular input schema ID or image facet.

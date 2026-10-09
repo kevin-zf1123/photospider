@@ -4,7 +4,7 @@
 
 The current unary family registers 66 Result operations in
 `plugins/ops/01-numeric/numeric_unary.cpp` and exposes node constructors through
-`photospider/numeric/unary.hpp`. Each input Result contains exactly one numeric
+`photospider/ops/numeric/unary.hpp`. Each input Result contains exactly one numeric
 tensor member in slot 0 and may also carry fields. Metadata specialization
 requires matching dtype and complete sample shape, rank 1..8, positive extents,
 and at most 2^40 samples; input schema IDs and facet identities are not fixed.
@@ -27,7 +27,7 @@ and returned Results keep immutable backing after the execution context retires.
 
 `numeric_binary.cpp` registers 27 CPU Whole Result keys through the shared
 `point_math_operation` implementation. The public helpers in
-`photospider/numeric/binary.hpp` build editable workflows, and
+`photospider/ops/numeric/binary.hpp` build editable workflows, and
 `examples/numeric_workflow/binary.cpp` binds source Results through the public
 C++ API. Its `Value` objects are local typed backing used to create those
 Results.

@@ -267,7 +267,7 @@ invocation commands and independent result checks are linked below; this specifi
 ## Maintained implementation and validation
 
 The public `bake_lut3d` authoring entry point is declared in
-[`photospider/numeric/lut3d_baking.hpp`](../../../../include/photospider/numeric/lut3d_baking.hpp).
+[`photospider/ops/numeric/lut3d_baking.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/lut3d_baking.hpp).
 Its authoring-only `Lut3dSourceBuilder` runs for generated grid and validation
 shapes, appends ordinary nodes and returns Result outputs. The helper protects
 existing input declarations, Result schemas, nodes and exports; it retains no

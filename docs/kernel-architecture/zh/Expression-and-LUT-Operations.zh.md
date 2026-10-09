@@ -18,7 +18,7 @@
 
 该算子族有独立的 parser 与函数集合。它允许十进制/科学计数法字面量、`x`、`pi`、`e`、具名系数标识符、括号、一元 `+ -`、二元 `+ - * / ^`，一元 `abs`、`sqrt`、`exp`、`ln`、`sin`、`cos`、`tan`，以及二元 `min`、`max`。未带后缀 Result key 使用函数名 `log`；profile key 使用 `ln`，并额外支持 `tan`、`pi` 和 `e`。后缀选择 CPU numeric profile。主机不支持指定 profile 时，准备阶段失败。Strict 按从左到右的 Float64 表达式顺序求值，再一次性舍入到输出 dtype。Accelerated profile 将候选结果按固定 strict 结果进行认证，对不确定样本回退到 strict evaluator。Whole 和 Region 请求使用相同 profile 结果。这些 key 有两个命名输出和动态端点绑定；输入形式不同于未带后缀 Result 采样器的系数向量，也不同于其静态 start/step 参数。
 
-公开 workflow helper 定义于 [`numeric/expression.hpp`](../../../include/photospider/numeric/expression.hpp)。它生成带 `values` 和 `axis` 输出的普通 `WorkflowNode`。Helper 按字节序排序 free coefficient 名称，并在追加节点前拒绝缺失、未使用或重复名称。
+公开 workflow helper 定义于 [`numeric/expression.hpp`](../../../plugins/ops/include/photospider/ops/numeric/expression.hpp)。使用方通过只含头文件的 `Photospider::ops_headers` target 以 `photospider/ops/numeric/expression.hpp` 引入它，并与 `Photospider::kernel` 一起链接。它生成带 `values` 和 `axis` 输出的普通 `WorkflowNode`。Helper 按字节序排序 free coefficient 名称，并在追加节点前拒绝缺失、未使用或重复名称。
 
 ## 线性 LUT application
 

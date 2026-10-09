@@ -6,6 +6,8 @@
 
 ## 当前 Result 算子族与保留的 FMT 契约
 
+下文提到的 `photospider/ops/format/*.hpp` 编写辅助属于只含头文件的 `Photospider::ops_headers` target。它们的实现编译在内核库中，因此使用方需要同时链接 `Photospider::kernel` 和 `Photospider::ops_headers`。
+
 | 算子族 | Keys 与公开 authoring API | 当前状态 |
 | --- | --- | --- |
 | 通道选择 | Result keys `channel.extract_index_<profile>`、`channel.extract_named_<profile>`；`format::split_channels` | 已注册 Result operation；一个 tensor member 且没有 fields；精确选中通道的 Data + Descriptor support。 |
@@ -13,10 +15,10 @@
 | Scalar literal | `channel.scalar_literal_<profile>` | 已注册的无输入 Whole Result primitive；以 prepared native bits 输出 shape `[1]`，供 FMT-03 literal source 使用。 |
 | Metadata 编辑 | Result key `metadata.assign_<profile>`；`format::assign_metadata`、`format::remove_metadata` | 已注册 Result operation；一个 tensor member 且没有 fields；same-coordinate Data + Descriptor，无 Validation/Control 或 planar callback。 |
 | 通道组装与编辑 | `channel.assemble_<profile>`、`channel.concatenate_<profile>`、`channel.assemble_mapped_<profile>`；已安装的 `channel_assembly.hpp`、`channel_editing.hpp` helpers | Result keys 已注册；FMT-03 helpers 展开为 mapped assembly，没有独立 swizzle/replace key。 |
-| Alpha 关联与编辑 | `alpha.associate_<profile>`、`alpha.unassociate_<profile>`、`alpha.set_<profile>`；已安装 `photospider/format/alpha.hpp` helpers | 三个成员各有 strict、Apple Silicon 和 x86-64 CPU profile，共九个 Result ABI 2 keys。FMT-05B/C helpers 编译期组合为已注册的 extraction、literal-like fill、mapped assembly 与 metadata assignment operations。 |
+| Alpha 关联与编辑 | `alpha.associate_<profile>`、`alpha.unassociate_<profile>`、`alpha.set_<profile>`；已安装 `photospider/ops/format/alpha.hpp` helpers | 三个成员各有 strict、Apple Silicon 和 x86-64 CPU profile，共九个 Result ABI 2 keys。FMT-05B/C helpers 编译期组合为已注册的 extraction、literal-like fill、mapped assembly 与 metadata assignment operations。 |
 | 数值格式转换 | `numeric.convert_format_strict` | 单一已注册 strict Result ABI 2 key，覆盖七种 dtype 之间的 49 个转换对。 |
-| Transfer 转换 | `color.transfer_encode_<profile>`、`color.transfer_decode_<profile>`；`photospider/format/transfer.hpp` 提供 `TransferDefinition` codec | encode/decode 各有 strict、Apple Silicon 与 x86-64 CPU Result ABI 2 key，共六个已注册 keys。 |
-| RGB basis 转换 | `color.rgb_to_xyz_<profile>`、`color.xyz_to_rgb_<profile>`、`color.adapt_xyz_white_<profile>`；已安装 `photospider/format/rgb_basis.hpp` helpers | A/B/C 跨三个 profile 共注册九个 Result ABI 2 CPU keys。`format::convert_linear_rgb` 事务式组合已注册 stages，不增加 D key。 |
+| Transfer 转换 | `color.transfer_encode_<profile>`、`color.transfer_decode_<profile>`；`photospider/ops/format/transfer.hpp` 提供 `TransferDefinition` codec | encode/decode 各有 strict、Apple Silicon 与 x86-64 CPU Result ABI 2 key，共六个已注册 keys。 |
+| RGB basis 转换 | `color.rgb_to_xyz_<profile>`、`color.xyz_to_rgb_<profile>`、`color.adapt_xyz_white_<profile>`；已安装 `photospider/ops/format/rgb_basis.hpp` helpers | A/B/C 跨三个 profile 共注册九个 Result ABI 2 CPU keys。`format::convert_linear_rgb` 事务式组合已注册 stages，不增加 D key。 |
 | Model 转换 | A-R、T 的 `color.*_<profile>`；FMT-11S helper 降低为 `mask.threshold_channel_<profile>` | 三个 CPU profiles 共 57 个 native model keys；S 不新增 color key。单 tensor Float32/Float64 Result，full sample rank 至多 8；sample count 受 Result schema 可表示范围和执行资源限制约束。 |
 
 带 profile 后缀的 channel extraction、assembly、alpha、metadata、transfer、RGB basis、literal-like fill 和 scalar-literal operations 使用 `strict`、`accelerated_apple_silicon` 或 `accelerated_x86_64`；加速变体要求宿主支持对应能力。Numeric conversion 使用唯一的不带后缀 strict key。Model conversion keys 使用 strict、accelerated_apple_silicon 和 accelerated_x86_64 profiles。当前 Result operations 使用 `start_result` 与 Result tensor protocol。
@@ -29,7 +31,7 @@
 
 每个 node 接收只有一个 tensor member 且没有 fields 的 Result，发布 `values` Result。静态参数 `metadata_mode=respect|raw|override`、`axis`、`keepdims` 和 `layout=auto|view|materialize`。`axis` 索引 tensor descriptor，不包括 Result batch prefix；执行时将它平移到完整 sample shape。Respect 将显式 axis 与 TensorDescription 比较。Override 使用 `tensor_description_parameter` 编码的本地描述。Named lookup 要求完整 channel table，不能使用 raw。输入输出保留 batch axes；`keepdims=false` 删除选中的 cell axis，要求 descriptor rank 至少为 2。操作不做颜色转换、alpha 归一化、样本验证或浮点运算。
 
-Public authoring interface 从 `photospider/format/channel.hpp` 安装。Runtime 投影选中 component 的 TensorDescription，并按 shape 变化重映射适用 cell-axis metadata。普通提取输出只保留投影后的 TensorDescription facet，不保证保留所有 opaque annotations。单通道不会因此获得 complete-color 或样本有效性保证。`format::split_channels` 为每个通道展开一个 index node，返回 `c0`、`c1` 等句柄；helper 校验声明的完整 schema 和 physical layout。每个生成 node 使用完整 canonical schema 的 domain-separated SHA-256 摘要（64 个小写十六进制字符）和独立的 physical-layout assertion，以便编译时检查 producer。摘要包含 opaque metadata 与 batch axes，不读取样本，也不是样本哈希或有效性证明。
+Public authoring interface 从 `photospider/ops/format/channel.hpp` 安装。Runtime 投影选中 component 的 TensorDescription，并按 shape 变化重映射适用 cell-axis metadata。普通提取输出只保留投影后的 TensorDescription facet，不保证保留所有 opaque annotations。单通道不会因此获得 complete-color 或样本有效性保证。`format::split_channels` 为每个通道展开一个 index node，返回 `c0`、`c1` 等句柄；helper 校验声明的完整 schema 和 physical layout。每个生成 node 使用完整 canonical schema 的 domain-separated SHA-256 摘要（64 个小写十六进制字符）和独立的 physical-layout assertion，以便编译时检查 producer。摘要包含 opaque metadata 与 batch axes，不读取样本，也不是样本哈希或有效性证明。
 
 Dependency-v2 以 Data (1) 和 Descriptor (8) 请求精确的选中通道 support，不请求 Validation 或 Control。Dirty mapping 将选中通道变化映射到对应输出坐标；未选通道不使输出变脏。Generic tensor view 支持有效的正、负和零 stride，Result mapper 可以分区并保留多个 backing owner。选取 spatial tensor 的 channel axis 可以保留源 physical owner；切取 spatial height/width 时，auto 会按投影后的 layout materialize，强制 view 返回 `InvalidArgument/InvalidDomain` 和 `ViewUnavailable`。Squeeze 删除 spatial axis 时输出成为 generic layout；keepdims 保留 extent-one spatial layout。物化只复制请求的输出区域，每 256 样本以内检查取消。Empty demand 发布空 Result，不读取 source payload。Result cache 被禁用。
 
@@ -66,7 +68,7 @@ tensor facets。
 
 A 在相同 component shape 中插入通道轴。B 按输入顺序拼接通道块，每个输入可使用不同通道轴。C 把显式 component/channel selector 映射到完整输出槽位，每个槽位恰有一个来源。所有已连接输入，即使未被映射使用，也执行 Descriptor 检查；Data 仅覆盖请求输出区域内实际映射的来源。操作不广播、不重采样、不转换数值或执行样本域验证。
 
-已安装的 `photospider/format/channel_assembly.hpp` helpers 追加静态 graph node，不读取样本。generic retained view 要求整个请求区域由同一 `CpuStorage` owner 和单一 affine 地址式表示。planar view 还须由 ResultBuilder 证明同一根、按输出顺序连续的 planes 和匹配 row pitch。强制 view 缺少证明时返回 `ViewUnavailable`；`auto` 仅在该错误下回退复制。物化只读取请求区域。每次运行拥有独立的 prepared state，Empty observation 不保留 payload state。Need 按每组 64 个处理，最多执行 16 组并进行 publication。1024 输入用例需要显式 64 MiB metadata capacity；默认 16 MiB 会受控地返回资源错误。[性能指南](../../../examples/channel_assembly_performance/README.md) 将历史 Value/planar 表格与当前 Result smoke 区分；未运行完整 Result 矩阵或 profiling。
+已安装的 `photospider/ops/format/channel_assembly.hpp` helpers 追加静态 graph node，不读取样本。generic retained view 要求整个请求区域由同一 `CpuStorage` owner 和单一 affine 地址式表示。planar view 还须由 ResultBuilder 证明同一根、按输出顺序连续的 planes 和匹配 row pitch。强制 view 缺少证明时返回 `ViewUnavailable`；`auto` 仅在该错误下回退复制。物化只读取请求区域。每次运行拥有独立的 prepared state，Empty observation 不保留 payload state。Need 按每组 64 个处理，最多执行 16 组并进行 publication。1024 输入用例需要显式 64 MiB metadata capacity；默认 16 MiB 会受控地返回资源错误。[性能指南](../../../examples/channel_assembly_performance/README.md) 将历史 Value/planar 表格与当前 Result smoke 区分；未运行完整 Result 矩阵或 profiling。
 
 ## FMT-03 通道编辑
 
@@ -86,7 +88,7 @@ Control。公式、raw 模式、layout 与错误规则见 [FMT-04 contract](../.
 
 ## FMT-05 alpha 提取与移除
 
-已安装的 `photospider/format/alpha.hpp` 提供 `format::extract_alpha` 和
+已安装的 `photospider/ops/format/alpha.hpp` 提供 `format::extract_alpha` 和
 `format::remove_alpha` 编译期图组合。它们接收无 fields 的 single-tensor
 Result，逐位保留七种支持的 dtype，保留 batch axes，并将 axis 解释为相对
 cell axes 的位置。包含 batch 与 cell axes 的完整 sample rank 不超过 8，
@@ -164,7 +166,7 @@ accelerated x86-64 profiles 下各注册一个 key，共九个 Result ABI 2 CPU 
 identity、tensor key、logical shape 和 batch axes，更新适用的 semantic facets，
 并将 `atomic_trailing_axes` 设为零。包含 batch 和 cell axes 的完整 sample rank
 最多为 8；sample count 最多为 2^40。已安装的
-`photospider/format/rgb_basis.hpp` 提供静态 codec，以及
+`photospider/ops/format/rgb_basis.hpp` 提供静态 codec，以及
 `format::rgb_to_xyz`、`format::xyz_to_rgb`、`format::adapt_xyz_white` 和
 `format::convert_linear_rgb` authoring helpers。
 
@@ -200,10 +202,10 @@ oracle；完整矩阵和性能结论尚不可得。
 
 ## FMT-08 元数据赋值与删除
 
-注册表提供三个 Result CPU key：`metadata.assign_strict`、`metadata.assign_accelerated_apple_silicon` 和 `metadata.assign_accelerated_x86_64`。`format::assign_metadata` 构造 A；`format::remove_metadata` 将 B 事务式降低为 A。输入和输出均是无 fields 的 single-tensor Result；保留 schema id、tensor key、batch axes、descriptor、layout、source publication policy 和样本位。执行以 role 1 和 8 请求同坐标 Data 与 Descriptor support，不请求 Validation 或 Control。操作不扫描样本，并禁用 Result cache。Public header `photospider/format/metadata.hpp` 单独安装。[公开示例](../../../examples/metadata_workflow/README.md) 检查特殊值位模式与源不可变性。metadata 到 extraction 的 configuration/resource chain 已覆盖；`channel.assemble` 组合尚未覆盖。
+注册表提供三个 Result CPU key：`metadata.assign_strict`、`metadata.assign_accelerated_apple_silicon` 和 `metadata.assign_accelerated_x86_64`。`format::assign_metadata` 构造 A；`format::remove_metadata` 将 B 事务式降低为 A。输入和输出均是无 fields 的 single-tensor Result；保留 schema id、tensor key、batch axes、descriptor、layout、source publication policy 和样本位。执行以 role 1 和 8 请求同坐标 Data 与 Descriptor support，不请求 Validation 或 Control。操作不扫描样本，并禁用 Result cache。Public header `photospider/ops/format/metadata.hpp` 单独安装。[公开示例](../../../examples/metadata_workflow/README.md) 检查特殊值位模式与源不可变性。metadata 到 extraction 的 configuration/resource chain 已覆盖；`channel.assemble` 组合尚未覆盖。
 
 ## FMT-11 颜色模型转换
 
-FMT-11 的 19 个 native members 在三个 CPU profiles 下注册，共 57 个 model-conversion keys。已安装的 `photospider/format/model_conversion.hpp` helpers 追加一个 key 并返回 `values` port；FMT-11S 追加已注册的 `mask.threshold_channel_<profile>` operation，没有 native color key。所有输入和输出都是无 fields 的单 tensor Result，dtype 为 Float32 或 Float64。完整 sample rank（batch 与 cell axes 合计）最多为 8；sample count 受 Result schema 可表示范围和执行资源限制约束。
+FMT-11 的 19 个 native members 在三个 CPU profiles 下注册，共 57 个 model-conversion keys。已安装的 `photospider/ops/format/model_conversion.hpp` helpers 追加一个 key 并返回 `values` port；FMT-11S 追加已注册的 `mask.threshold_channel_<profile>` operation，没有 native color key。所有输入和输出都是无 fields 的单 tensor Result，dtype 为 Float32 或 Float64。完整 sample rank（batch 与 cell axes 合计）最多为 8；sample count 受 Result schema 可表示范围和执行资源限制约束。
 
 `axis` 和 `output_axis` 索引 cell axes，不包含 batch prefix。Q 将选中的三分量缩为一个分量；R 将一个 Gray 分量扩展为三个分量，有现有轴时将该轴的 extent 增加 2；axis-free 输入则插入一个长度为 3 的 cell axis。输出保留 schema id、tensor key 和 batches，更新模型 metadata，并将 `atomic_trailing_axes` 设为零。语义模式下被选中的 samples 请求 Data 与 Validation；raw T 验证 binary selector，raw S 和 bypass samples 只请求 Data，R 的常量输出只需 Descriptor。Empty demand 不保留运行状态。Q 只有在完整映射通过 generic affine 或 canonical spatial Result view 证明时才返回 view；证明失败时 forced view 返回 `ViewUnavailable`，`auto` 则物化。其他转换物化输出，即使请求只包含 bypass 也拒绝 forced view。发布采用事务方式，且未注册 GPU profile。sparse Q view 的测试使用符合 canonical spatial view proof 的预期。

@@ -41,7 +41,7 @@ integration copies initial directly without constructing `ExactCalculus` state.
 ## Public use and focused validation
 
 The public C++ helpers `derivative_1d_node` and `integrate_1d_node` are declared
-in `include/photospider/numeric/calculus.hpp`. This snippet assumes the caller
+in `plugins/ops/include/photospider/ops/numeric/calculus.hpp`. This snippet assumes the caller
 has already created the input references and workflow builder:
 
 ```cpp

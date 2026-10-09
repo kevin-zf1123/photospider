@@ -234,7 +234,7 @@ registration.
 ## Color ramps
 
 The 45 CRV-06 profile keys expose 15 public helpers in
-`photospider/numeric/color_ramps.hpp`: 42 keys cover eight non-RGB models and
+`photospider/ops/numeric/color_ramps.hpp`: 42 keys cover eight non-RGB models and
 three keys cover RGB/RGBA. The nine models are separate operations: RGB, CMYK,
 XYZ, CIELAB, CIELCh(ab), OKLab, OKLCh, HSL and YCbCr. The required `colors_type`
 argument is an authoring hint used to choose the default output dtype; an
@@ -454,7 +454,7 @@ retain the formulas, color support, limits, errors and acceptance requirements.
 
 `sequences.cpp` declares dynamic scalar bindings, creates a `WorkflowDocument`,
 compiles it with `Compiler`, and executes it with `ExecutionContext`. The public
-`photospider/numeric/sequences.hpp` helpers `linspace_node` and `arange_node`
+`photospider/ops/numeric/sequences.hpp` helpers `linspace_node` and `arange_node`
 create nodes with explicit parameters. `SequenceInput` carries a workflow input
 reference and an immutable, single-tensor Result schema hint; it does not retain
 payload. The compiler validates the actual graph edge independently.
@@ -549,7 +549,7 @@ arithmetic work and published output samples are separate counts.
 
 ## Expression sampling and static preparation: NUM-01
 
-`sample_expression_node` in `photospider/numeric/expression.hpp` authors the
+`sample_expression_node` in `photospider/ops/numeric/expression.hpp` authors the
 three suffixed profile keys. Its Result inputs are one tensor member under any
 key, each with `sample_shape()` [1] and Float32 or Float64 dtype; ports may mix
 dtypes. The `values` output uses `photospider.tensor` / `samples`, selected dtype
@@ -750,7 +750,7 @@ The NUM-03 examples use Result inputs and outputs throughout the public
 workflow. `ArrayWorkflow::source` converts the example's generic numeric
 backing into a typed Result binding; compilation, freezing, ordinary execution,
 fragment execution, and `DemandHandle` requests operate on Results. The
-`photospider/numeric/arrays.hpp` helpers expose `constant_node` and
+`photospider/ops/numeric/arrays.hpp` helpers expose `constant_node` and
 `broadcast_node`, each with an explicit shape, `View` or `Dense` layout, and
 numeric profile. The example's `Value` objects are local storage backings for
 generic numeric data, not workflow ports.
@@ -1000,7 +1000,7 @@ rerun for this Result update. See [NUM-08 Whole behavior and checks](../../docs/
 
 `photospider_numeric_layouts` exercises the nine `array.*` profile keys through
 the public `reshape_node`, `transpose_node` and `slice_node` helpers in
-`photospider/numeric/layouts.hpp`. Each source is a single-tensor Result under
+`photospider/ops/numeric/layouts.hpp`. Each source is a single-tensor Result under
 any schema/member key; raw `Value` objects in the fixture provide backing only.
 Results are published under the same execution Root. The helpers default to
 `TransformLayout::Auto`; `View` and `Dense` can be selected explicitly.
@@ -1061,7 +1061,7 @@ or performance claim.
 
 `photospider_numeric_indexing` exercises the eighteen concatenate, gather and
 scatter profile keys through the public helpers in
-`photospider/numeric/indexing.hpp`. The fixture builds its `WorkflowDocument`
+`photospider/ops/numeric/indexing.hpp`. The fixture builds its `WorkflowDocument`
 and Result bindings through the public C++ API. Its local `Value` arrays supply
 typed backing only; source tensors are published as Results under the execution
 Root. Each input Result contributes one tensor member under any schema/member
@@ -1399,7 +1399,7 @@ This is a focused consumer selection, not a full package matrix.
 
 ## Exact affine matrix transforms: NUM-14
 
-The `matrix_transform_node` helper in `photospider/numeric/matrix.hpp` authors
+The `matrix_transform_node` helper in `photospider/ops/numeric/matrix.hpp` authors
 three Result inputs in port order: `vectors`, `matrix`, `bias`. Each input Result
 has one tensor member under any member key. Their `sample_shape()` values are
 `[...,Cin]`, `[Cout,Cin]`, and `[Cout]`; dtypes match and are Float32 or Float64.
@@ -1458,7 +1458,7 @@ python3 oracle/ops/numeric/matrix_oracle.py \
 ## Discrete derivatives and cumulative integration: NUM-15
 
 The six registered calculus profile keys run Whole Result programs through the
-public helpers in `photospider/numeric/calculus.hpp`. The manual fixture keeps
+public helpers in `photospider/ops/numeric/calculus.hpp`. The manual fixture keeps
 `Value` only as source backing and binds each declared input as a Result whose
 tensor publication references that storage. A sparse query still computes
 and publishes the complete output with full tensor coverage. The query limits the
@@ -1499,7 +1499,7 @@ for the focused coverage and package-consumer commands.
 
 ## Unary mathematics and exact rational pi: NUM-04
 
-`photospider/numeric/unary.hpp` provides independently named constructors for
+`photospider/ops/numeric/unary.hpp` provides independently named constructors for
 `abs`, `neg`, `sqrt`, `exp`, `ln`, `sin`, `cos`, `tan`, `floor`, `ceil`, `round`,
 `sign`, `reciprocal`, `sinpi`, `cospi`, `tanpi`, `sinc`, and `sincpi`. Append
 `_node(id, input, profile)` to these names. Four additional
@@ -1587,7 +1587,7 @@ changes to NaN sign/payload. Use `apple` or `x86` only on a host with that CPU
 
 ## Binary mathematics: NUM-05
 
-`photospider/numeric/binary.hpp` provides `add_node`, `subtract_node`,
+`photospider/ops/numeric/binary.hpp` provides `add_node`, `subtract_node`,
 `multiply_node`, `divide_node`, `minimum_node`, `maximum_node`, `pow_node`,
 `atan2_node` and `atan2pi_node`. Each takes `(id, first, second, profile)`;
 profile defaults to Strict. Angle arguments are ordered `(y,x)`, other arguments
@@ -1790,7 +1790,7 @@ The installed 0.32.0 consumer compiled and linked against
 
 ## LUT1D baking templates: CRV-04
 
-`photospider/numeric/lut1d.hpp` provides six authoring functions: `bake_lut1d_expression`, `bake_lut1d_bezier`, `bake_lut1d_linear`, `bake_lut1d_pchip`, `bake_lut1d_linear_multi` and `bake_lut1d_pchip_multi`. Each appends one or two ordinary operation nodes to the caller-owned `WorkflowDocument` and returns `BakedLut1d` references to `values` and `axis`. The constructor authors graph metadata; the caller explicitly exports the references or connects them to later nodes, then compiles and executes the workflow through the public Result API.
+`photospider/ops/numeric/lut1d.hpp` provides six authoring functions: `bake_lut1d_expression`, `bake_lut1d_bezier`, `bake_lut1d_linear`, `bake_lut1d_pchip`, `bake_lut1d_linear_multi` and `bake_lut1d_pchip_multi`. Each appends one or two ordinary operation nodes to the caller-owned `WorkflowDocument` and returns `BakedLut1d` references to `values` and `axis`. The constructor authors graph metadata; the caller explicitly exports the references or connects them to later nodes, then compiles and executes the workflow through the public Result API.
 
 For a document declaring Result inputs `start:[1]` and `end:[1]`, the minimal expression template is:
 
@@ -1950,7 +1950,7 @@ published accelerated contract.
 
 ## Scalar coordinate shapers
 
-`photospider/numeric/shapers.hpp` exposes two linear authoring helpers and two
+`photospider/ops/numeric/shapers.hpp` exposes two linear authoring helpers and two
 log2 node helpers. Each input edge is a Result with one tensor member under any
 schema id/version/key; use its full `sample_shape()`, including batch axes.
 `input` is Float32/Float64 of rank 1..8, positive extents and at most `2^40`
@@ -1961,7 +1961,7 @@ input shape and input dtype, with empty facets. A shaper does not change a color
 transfer description.
 
 ```cpp
-#include <photospider/numeric/shapers.hpp>
+#include <photospider/ops/numeric/shapers.hpp>
 // graph is a WorkflowDocument; these edges bind Result tensors.
 auto linear = ps::numeric::linear_shaper(graph, x, lower, upper, input_descriptor);
 auto inverse = ps::numeric::linear_shaper_inverse(
@@ -2041,7 +2041,7 @@ a sparse request does not reduce the Result descriptor's coverage. MPFR 4.2.2 is
 
 ## Measured three-dimensional LUT baking
 
-`photospider/numeric/lut3d_baking.hpp` expands a pointwise source transform into
+`photospider/ops/numeric/lut3d_baking.hpp` expands a pointwise source transform into
 ordinary workflow nodes. A source builder receives a generated Float64 Result
 tensor and its descriptor, appends source nodes and returns an output reference.
 It is called twice during authoring: for `[N0,N1,N2,3]` grid colors and `[P,3]`
@@ -2053,8 +2053,8 @@ builder or capture for execution. The caller asserts that source output depends
 on each sampled color only, not on position, batch shape or other samples.
 
 ```cpp
-#include <photospider/numeric/lut3d_baking.hpp>
-#include <photospider/numeric/color_ramps.hpp>
+#include <photospider/ops/numeric/lut3d_baking.hpp>
+#include <photospider/ops/numeric/color_ramps.hpp>
 
 auto color = ps::numeric::color_ramp_rgb_description();
 ps::numeric::Lut3dBakeOptions options{
@@ -2210,12 +2210,12 @@ fixture and context teardown.
 
 ## Inverse curves
 
-`photospider/numeric/inverse_curves.hpp` provides `invert_linear_node` and `invert_pchip_node`. Each input is a Result containing one tensor member under any schema id and member key; `sample_shape()` supplies x[K], y[K] and query[N]. The three inputs independently accept Float32/64. x must be finite and strictly increasing; y must be finite and strictly increasing or decreasing. The `values` output is a Result with schema `photospider.tensor`, member `samples`, shape [N] and empty facets. K is 2..65536 and N is 1..2^40. Constructors default to Float64 and `reject`; direct workflow nodes must provide String parameters `dtype` and `out_of_domain` explicitly (`float32`/`float64`, `reject`/`clamp`).
+`photospider/ops/numeric/inverse_curves.hpp` provides `invert_linear_node` and `invert_pchip_node`. Each input is a Result containing one tensor member under any schema id and member key; `sample_shape()` supplies x[K], y[K] and query[N]. The three inputs independently accept Float32/64. x must be finite and strictly increasing; y must be finite and strictly increasing or decreasing. The `values` output is a Result with schema `photospider.tensor`, member `samples`, shape [N] and empty facets. K is 2..65536 and N is 1..2^40. Constructors default to Float64 and `reject`; direct workflow nodes must provide String parameters `dtype` and `out_of_domain` explicitly (`float32`/`float64`, `reject`/`clamp`).
 
 The inverse solves the original forward function, without swapping x/y and fitting a new interpolator. Linear computes the selected segment as one exact rational expression. PCHIP inverts the original exact Hermite polynomial and compares it at destination lattice values and their exact midpoint, including subnormal and overflow boundaries. Strict rounds final x once. Accelerated profiles follow the shared final FP32 four-ULP contract; PCHIP uses a certified bracket and the strict solver when needed. Knot/clamp and signed-zero rules remain exact.
 
 ```cpp
-#include <photospider/numeric/inverse_curves.hpp>
+#include <photospider/ops/numeric/inverse_curves.hpp>
 
 // document.inputs binds ids 1, 2, 3 to x, y, query respectively.
 auto inverse = ps::numeric::invert_pchip_node(
@@ -2253,15 +2253,15 @@ cmake --install build/kernel-dev --prefix build/kernel-dev/result-only-install
 
 ## Signal resampling
 
-`photospider/numeric/resampling.hpp` exposes four ordinary workflow templates: `resample_linear`, `resample_pchip`, `resample_linear_multi`, and `resample_pchip_multi`. Each appends the corresponding CRV-01 interpolator node and an independent `core.identity` node for `new_positions`. The inputs are `positions[K]`, `values[K]` or `[K,C]`, and `new_positions[N]`, independently Float32/64. The returned `ResampledSignal` holds connectable `samples` and `positions` node references; `outputs()` creates explicit caller-named exports. Sample dtype defaults to Float64 and domain policy to Reject, with the selected interpolator's Clamp and LinearExtrapolate policies also available.
+`photospider/ops/numeric/resampling.hpp` exposes four ordinary workflow templates: `resample_linear`, `resample_pchip`, `resample_linear_multi`, and `resample_pchip_multi`. Each appends the corresponding CRV-01 interpolator node and an independent `core.identity` node for `new_positions`. The inputs are `positions[K]`, `values[K]` or `[K,C]`, and `new_positions[N]`, independently Float32/64. The returned `ResampledSignal` holds connectable `samples` and `positions` node references; `outputs()` creates explicit caller-named exports. Sample dtype defaults to Float64 and domain policy to Reject, with the selected interpolator's Clamp and LinearExtrapolate policies also available.
 
 Bindings and execution outputs use Results throughout; the `Value` objects in the manual fixture provide immutable source backing. `positions` maps the bound query Result's descriptor, facets and raw bits, including sNaN/Inf/-0, without copying its payload. Its requested source support is exactly the requested query region and it has no curve-source dependency. Normal typed and upstream validation still applies to requested positions. A `samples` request inherits CRV-01 Whole behavior: complete positions, values and query validation, full output coverage, complete dirty support, and Run failures for invalid undelivered queries or columns. The four helpers preserve existing exports, reserve collision-free IDs for declarations, references and outputs, and leave the document unchanged on authoring failure.
 
 The editable `resampling.cpp::filtered_workflow` connects an explicit Hann low-pass to linear resampling through the installed API:
 
 ```cpp
-#include <photospider/numeric/lowpass.hpp>
-#include <photospider/numeric/resampling.hpp>
+#include <photospider/ops/numeric/lowpass.hpp>
+#include <photospider/ops/numeric/resampling.hpp>
 
 // Inputs 1/2/3 bind old positions, signal values and requested new positions.
 auto filter = ps::numeric::lowpass_uniform_hann_sinc_node(
@@ -2301,7 +2301,7 @@ cmake --install build/kernel-dev --prefix build/kernel-dev/result-only-install
 
 ## Uniform lowpass
 
-`photospider/numeric/lowpass.hpp` provides five independent
+`photospider/ops/numeric/lowpass.hpp` provides five independent
 `lowpass_uniform_{hann_sinc,hamming_sinc,blackman_sinc,kaiser_sinc,gaussian}_node`
 helpers. The `input` port is a Result with one tensor member and no fields under any
 structurally valid schema id/version/member key. Use complete `sample_shape()`

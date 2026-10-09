@@ -232,6 +232,8 @@ attribute accelerated strict fallbacks; rejected pre-dispatch domains add no
 call. Legacy reporters without per-function attribution merge into `Other`.
 All numeric diagnostic merging is checked for overflow before publication.
 
+`NumericDiagnostics::evaluated_values` counts admitted numeric evaluations, including attempts that later fail. Most operations count one attempt per output value. Exact reductions and cumulative scans count accumulator input attempts instead, and metadata-only `reduce_count` reports zero. `OperationTiming::computed_elements` counts output elements separately. For `strict_math_calls`, expression generators report every dispatched mathematical primitive, and Bezier function samplers report each exact sign evaluation of `Bx` during root refinement; topology checks and interval or gcd work are not counted. Operations without call-level instrumentation leave `strict_math_calls` at zero.
+
 ## CRV-01 exact interpolation
 
 Four primitives (linear/PCHIP, single/multiple functions) provide twelve profile

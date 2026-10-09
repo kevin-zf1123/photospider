@@ -11,7 +11,7 @@
 | C | `color.adapt_xyz_white_{strict,accelerated_apple_silicon,accelerated_x86_64}` |
 | D | C++ `ps::format::convert_linear_rgb`，事务式展开 A → 可选 C → B；没有 native D 注册项 |
 
-头文件为 `photospider/format/rgb_basis.hpp`，也由 umbrella header 导出。四个同名 authoring helper 接受实际输入边、`RgbBasisOptions` 和可选注册表。它们沿真实输入边推导元数据，不相信另行传入的猜测；新增节点先在工作副本中静态校验，失败时不修改原图。已有/前向引用的节点 ID、导出 ID 均参与占用检查。D 的 override 仅作用于 A 的源解释，后续节点消费前一节点的实际输出描述。
+头文件为 `photospider/ops/format/rgb_basis.hpp`，也由 umbrella header 导出。四个同名 authoring helper 接受实际输入边、`RgbBasisOptions` 和可选注册表。它们沿真实输入边推导元数据，不相信另行传入的猜测；新增节点先在工作副本中静态校验，失败时不修改原图。已有/前向引用的节点 ID、导出 ID 均参与占用检查。D 的 override 仅作用于 A 的源解释，后续节点消费前一节点的实际输出描述。
 
 七个 preset 名为 `srgb_rec709`、`display_p3`、`rec2020`、`adobe_rgb_1998`、`prophoto_rgb`、`aces_ap0`、`aces_ap1`。方法为 `xyz_scaling`、`bradford`、`cat02`、`cat16`。B 的 white policy 仅有 require_match/preserve_xyz；D 额外支持 adapt，必须显式选择方法。没有自动 transfer、曝光、色域裁剪或峰值亮度缩放。
 

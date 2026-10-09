@@ -6,6 +6,8 @@ The table distinguishes registered Result operations from remaining Proposed spe
 
 ## Current Result families and retained FMT contracts
 
+The `photospider/ops/format/*.hpp` authoring helpers named below belong to the header-only `Photospider::ops_headers` target. Their implementations are compiled into the kernel library, so consumers link `Photospider::kernel` and `Photospider::ops_headers` together.
+
 | Family | Keys and public authoring API | Current status |
 | --- | --- | --- |
 | Channel selection | `channel.extract_index_<profile>`, `channel.extract_named_<profile>`; `format::split_channels` | Registered Result operations; one tensor member and no fields; exact selected-channel Data plus Descriptor support. |
@@ -13,10 +15,10 @@ The table distinguishes registered Result operations from remaining Proposed spe
 | Scalar literal | `channel.scalar_literal_<profile>` | Registered no-input Whole Result primitive for prepared native bits in shape `[1]`; used by FMT-03 scalar sources. |
 | Metadata editing | `metadata.assign_<profile>`; `format::assign_metadata`, `format::remove_metadata` | Registered Result operations; one tensor member and no fields; same-coordinate Data plus Descriptor roles, without Validation/Control or planar callbacks. |
 | Channel assembly and editing | `channel.assemble_<profile>`, `channel.concatenate_<profile>`, `channel.assemble_mapped_<profile>`; installed helpers in `channel_assembly.hpp` and `channel_editing.hpp` | Registered Result keys; FMT-03 helpers lower transactionally to mapped assembly. There is no native swizzle/replace key. |
-| Alpha association and editing | `alpha.associate_<profile>`, `alpha.unassociate_<profile>`, `alpha.set_<profile>`; installed helpers in `photospider/format/alpha.hpp` | Nine Result ABI 2 keys cover three members across the strict, Apple Silicon and x86-64 CPU profiles. FMT-05B/C helpers compile transactionally into registered extraction, literal-like fill, mapped assembly and metadata assignment operations. |
+| Alpha association and editing | `alpha.associate_<profile>`, `alpha.unassociate_<profile>`, `alpha.set_<profile>`; installed helpers in `photospider/ops/format/alpha.hpp` | Nine Result ABI 2 keys cover three members across the strict, Apple Silicon and x86-64 CPU profiles. FMT-05B/C helpers compile transactionally into registered extraction, literal-like fill, mapped assembly and metadata assignment operations. |
 | Numeric format conversion | `numeric.convert_format_strict` | One registered strict Result ABI 2 key for all 49 pairs among seven supported dtypes. |
-| Transfer conversion | `color.transfer_encode_<profile>`, `color.transfer_decode_<profile>`; `TransferDefinition` codec in `photospider/format/transfer.hpp` | Six registered Result ABI 2 keys across encode/decode and three CPU profiles; generic and spatial single-tensor inputs. |
-| RGB basis conversion | `color.rgb_to_xyz_<profile>`, `color.xyz_to_rgb_<profile>`, `color.adapt_xyz_white_<profile>`; installed helpers in `photospider/format/rgb_basis.hpp` | Nine registered Result ABI 2 CPU keys cover A/B/C across three profiles. `format::convert_linear_rgb` transactionally composes registered stages; it adds no D key. |
+| Transfer conversion | `color.transfer_encode_<profile>`, `color.transfer_decode_<profile>`; `TransferDefinition` codec in `photospider/ops/format/transfer.hpp` | Six registered Result ABI 2 keys across encode/decode and three CPU profiles; generic and spatial single-tensor inputs. |
+| RGB basis conversion | `color.rgb_to_xyz_<profile>`, `color.xyz_to_rgb_<profile>`, `color.adapt_xyz_white_<profile>`; installed helpers in `photospider/ops/format/rgb_basis.hpp` | Nine registered Result ABI 2 CPU keys cover A/B/C across three profiles. `format::convert_linear_rgb` transactionally composes registered stages; it adds no D key. |
 | Model conversion | `color.*_<profile>` for A-R and T; FMT-11S helper lowers to `mask.threshold_channel_<profile>` | 57 native model keys across three CPU profiles; S adds no color key. One-tensor Float32/Float64 Results, rank at most 8; sample counts follow Result schema representability and execution resource limits. |
 
 Profile-suffixed channel extraction, assembly, alpha, metadata, transfer, RGB basis, literal-like fill and scalar-literal operations use `strict`, `accelerated_apple_silicon` or `accelerated_x86_64`; accelerated variants require the matching host capability. Numeric conversion uses its single unsuffixed strict key. Model-conversion keys use the strict, accelerated Apple Silicon and accelerated x86-64 profiles. Current Result operations use `start_result` and the Result tensor protocol.
@@ -29,7 +31,7 @@ The public tensor-description encoder emits v4 when no `coordinates` record is p
 
 Each node accepts one Result with a single tensor member and no fields, and publishes one `values` Result. Parameters `metadata_mode=respect|raw|override`, `axis`, `keepdims`, and `layout=auto|view|materialize` are static. `axis` indexes the tensor descriptor, excluding the Result batch prefix; execution maps it after that prefix. Respect checks the axis against the TensorDescription. Override uses a node-local TensorDescription encoded by `tensor_description_parameter`. Named selection requires a complete channel table and cannot use raw mode. The input/output preserve batch axes; `keepdims=false` removes the selected cell axis and requires descriptor rank at least two. No color conversion, alpha normalization, sample validation or floating arithmetic occurs.
 
-The public authoring interface is installed from `photospider/format/channel.hpp`. The runtime projects the selected TensorDescription component and remaps applicable cell-axis metadata. The normal extraction output retains the projected TensorDescription facet, not every opaque input annotation. A projected component does not acquire complete-color or sample-validity guarantees. `format::split_channels` expands one index node per channel and returns `c0`, `c1`, ... handles after checking the declared schema and physical layout. Each generated node carries a bounded, domain-separated SHA-256 digest of the complete canonical schema plus a separate physical-layout assertion for compile-time producer checks. The 64-character digest includes opaque metadata and batch axes; it hashes no samples and is not a validity proof.
+The public authoring interface is installed from `photospider/ops/format/channel.hpp`. The runtime projects the selected TensorDescription component and remaps applicable cell-axis metadata. The normal extraction output retains the projected TensorDescription facet, not every opaque input annotation. A projected component does not acquire complete-color or sample-validity guarantees. `format::split_channels` expands one index node per channel and returns `c0`, `c1`, ... handles after checking the declared schema and physical layout. Each generated node carries a bounded, domain-separated SHA-256 digest of the complete canonical schema plus a separate physical-layout assertion for compile-time producer checks. The 64-character digest includes opaque metadata and batch axes; it hashes no samples and is not a validity proof.
 
 Dependency-v2 requests exact selected-channel source coverage and its Descriptor with Data (1) and Descriptor (8) roles. It requests no Validation or Control support. Generic tensor views support valid positive, negative and zero strides, and Result backing partitions can retain multiple owners. Selecting a spatial tensor's channel axis can retain the source plane owner. Slicing spatial height or width materializes in auto mode; forced view returns `InvalidArgument/InvalidDomain` with `ViewUnavailable`. Materialization copies only requested output coverage, checking cancellation within runs of at most 256 samples. Empty output demand publishes an empty Result without reading source payload. Result caching is disabled.
 
@@ -80,7 +82,7 @@ inputs still receive Descriptor checks. All source payload requests are limited
 to mapped coordinates in the requested output regions. There is no broadcasting,
 resampling, conversion or sample-domain validation.
 
-The installed helpers in `photospider/format/channel_assembly.hpp` append static
+The installed helpers in `photospider/ops/format/channel_assembly.hpp` append static
 graph nodes and perform no sample reads. `metadata_mode`, `layout`, profile,
 axis and map records are serialized through the current parameter interface.
 The compiler/runtime enforce input descriptors and resource capacity.
@@ -127,7 +129,7 @@ for formulas, raw-mode behavior, layout and error rules.
 
 ## FMT-05 alpha extraction and removal
 
-The installed `photospider/format/alpha.hpp` exposes `format::extract_alpha` and
+The installed `photospider/ops/format/alpha.hpp` exposes `format::extract_alpha` and
 `format::remove_alpha` as compile-time graph compositions. They accept a
 single-tensor Result with no fields, preserve one of the seven supported dtypes
 bit-for-bit, retain batch axes, and interpret axes relative to cell axes. The
@@ -220,7 +222,7 @@ Float64 tensor and no fields, and publishes one `values` Result with one tensor.
 The result preserves Result schema identity, tensor key, logical shape and batch
 axes, updates applicable semantic facets and sets `atomic_trailing_axes` to zero.
 Complete sample rank including batch and cell axes is at most 8; sample count is
-at most 2^40. The installed `photospider/format/rgb_basis.hpp` header exposes
+at most 2^40. The installed `photospider/ops/format/rgb_basis.hpp` header exposes
 static codecs and `format::rgb_to_xyz`, `format::xyz_to_rgb`,
 `format::adapt_xyz_white` and `format::convert_linear_rgb` authoring helpers.
 
@@ -264,10 +266,10 @@ conclusion is available.
 
 ## FMT-08 metadata assignment and removal
 
-The registry provides three Result CPU keys: `metadata.assign_strict`, `metadata.assign_accelerated_apple_silicon` and `metadata.assign_accelerated_x86_64`. `format::assign_metadata` appends A; `format::remove_metadata` transactionally lowers B to A. The input and output are single-tensor Results with no fields. They preserve schema id, tensor key, batches, descriptor, layout, source publication policy and sample bits. Execution requests same-coordinate Data and Descriptor support with roles 1 and 8, without Validation or Control. The operation never scans sample values and disables Result caching. The public header `photospider/format/metadata.hpp` is installed separately. The [public example](../../examples/metadata_workflow/README.md) verifies special-value bits and source immutability. Five focused Result CTest cases, the example, and two installed consumer checks pass. The metadata-to-extraction configuration/resource chain is covered; composition through `channel.assemble` is not. The older [performance guide](../../examples/metadata_performance/README.md) measures Value/planar execution, not this Result path.
+The registry provides three Result CPU keys: `metadata.assign_strict`, `metadata.assign_accelerated_apple_silicon` and `metadata.assign_accelerated_x86_64`. `format::assign_metadata` appends A; `format::remove_metadata` transactionally lowers B to A. The input and output are single-tensor Results with no fields. They preserve schema id, tensor key, batches, descriptor, layout, source publication policy and sample bits. Execution requests same-coordinate Data and Descriptor support with roles 1 and 8, without Validation or Control. The operation never scans sample values and disables Result caching. The public header `photospider/ops/format/metadata.hpp` is installed separately. The [public example](../../examples/metadata_workflow/README.md) verifies special-value bits and source immutability. Five focused Result CTest cases, the example, and two installed consumer checks pass. The metadata-to-extraction configuration/resource chain is covered; composition through `channel.assemble` is not. The older [performance guide](../../examples/metadata_performance/README.md) measures Value/planar execution, not this Result path.
 
 ## FMT-11 model conversions
 
-FMT-11 registers 19 native members across three CPU profiles, for 57 model-conversion keys. The installed `photospider/format/model_conversion.hpp` helpers append one key and return the `values` port; FMT-11S appends the registered `mask.threshold_channel_<profile>` operation and has no native color key. All inputs and outputs are single-tensor Results without fields, using Float32 or Float64. The complete sample rank, including batch and cell axes, is at most 8; sample counts follow Result schema representability and execution resource limits.
+FMT-11 registers 19 native members across three CPU profiles, for 57 model-conversion keys. The installed `photospider/ops/format/model_conversion.hpp` helpers append one key and return the `values` port; FMT-11S appends the registered `mask.threshold_channel_<profile>` operation and has no native color key. All inputs and outputs are single-tensor Results without fields, using Float32 or Float64. The complete sample rank, including batch and cell axes, is at most 8; sample counts follow Result schema representability and execution resource limits.
 
 The `axis` and `output_axis` parameters index cell axes, excluding the batch prefix. Q reduces a selected triple to one component; R expands one Gray component to three, increasing the existing channel-axis extent by two or inserting one length-three cell axis for axis-free input. Outputs preserve schema id, tensor key and batches, while updating model metadata and setting `atomic_trailing_axes` to zero. Semantic selected samples request Data and Validation; raw T validates its binary selector, raw S and bypass samples request Data only, and constant R outputs require Descriptor support only. Empty demand is stateless. Q returns a view only when the complete mapping passes the generic affine or canonical spatial Result view proof; forced view reports `ViewUnavailable` if proof fails, while `auto` materializes. Other model conversions materialize and reject forced view, including bypass-only requests. Publication is transactional, and no GPU profile is registered. Sparse Q-view tests require a mapping that satisfies the canonical spatial view proof.

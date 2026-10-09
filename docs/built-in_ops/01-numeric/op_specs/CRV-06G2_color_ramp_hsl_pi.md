@@ -76,7 +76,7 @@ The maintained public workflow and current validation boundary are documented be
 ## Maintained implementation and validation
 
 The public helper `color_ramp_hsl_pi_node` is declared in
-[`color_ramps.hpp`](../../../../include/photospider/numeric/color_ramps.hpp).
+[`color_ramps.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/color_ramps.hpp).
 `color_ramps.cpp` prepares immutable model/unit/profile state and executes the
 Whole Result operation. Original hue values use exact rational interpolation;
 Cross-unit conversion in either direction multiplies or divides by certified pi,
