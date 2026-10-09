@@ -1,9 +1,10 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
-#include <thread>
+#include <mutex>
 
 #include "photospider/plugin/result_operation_plugin_api.h"
 
@@ -14,6 +15,11 @@ struct Observations {
 };
 std::array<Observations, 15> observations;
 std::atomic<std::uint32_t> destroy_count{0};
+struct CancellationGate {
+  std::mutex mutex;
+  std::condition_variable changed;
+  bool entered = false, released = false;
+} cancellation_gate;
 struct State {
   bool requested = false;
 };
@@ -165,14 +171,17 @@ int poll(void* user, void* raw, const ps_result_query_v2* query,
       return 2;
     if (observed.mode == 12) {
       observed.waiting.store(1, std::memory_order_release);
-      const auto deadline =
-          std::chrono::steady_clock::now() + std::chrono::seconds(5);
-      while (!services->cancelled(services->context)) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-          observed.waiting.store(0, std::memory_order_release);
-          return 1;
-        }
-        std::this_thread::yield();
+      std::unique_lock<std::mutex> lock(cancellation_gate.mutex);
+      cancellation_gate.entered = true;
+      cancellation_gate.changed.notify_all();
+      const bool released = cancellation_gate.changed.wait_for(
+          lock, std::chrono::seconds(15),
+          [&] { return cancellation_gate.released; });
+      lock.unlock();
+      const bool cancelled = services->cancelled(services->context) != 0;
+      if (!released || !cancelled) {
+        observed.waiting.store(0, std::memory_order_release);
+        return 1;
       }
       observed.waiting.store(0, std::memory_order_release);
     }
@@ -268,4 +277,26 @@ ps_operation_fixture_awaiting_cancellation(std::uint32_t mode) {
   return mode < observations.size()
              ? observations[mode].waiting.load(std::memory_order_acquire)
              : 0;
+}
+
+// Private fixture synchronization; these symbols are outside the operation ABI.
+extern "C" PS_RESULT_EXPORT void ps_operation_fixture_arm_cancellation_gate() {
+  std::lock_guard<std::mutex> lock(cancellation_gate.mutex);
+  cancellation_gate.entered = false;
+  cancellation_gate.released = false;
+}
+extern "C" PS_RESULT_EXPORT std::uint32_t
+ps_operation_fixture_wait_cancellation_entered(std::uint32_t timeout_ms) {
+  std::unique_lock<std::mutex> lock(cancellation_gate.mutex);
+  return cancellation_gate.changed.wait_for(
+             lock, std::chrono::milliseconds(timeout_ms),
+             [&] { return cancellation_gate.entered; })
+             ? 1U
+             : 0U;
+}
+extern "C" PS_RESULT_EXPORT void
+ps_operation_fixture_release_cancellation_gate() {
+  std::lock_guard<std::mutex> lock(cancellation_gate.mutex);
+  cancellation_gate.released = true;
+  cancellation_gate.changed.notify_all();
 }

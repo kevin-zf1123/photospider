@@ -8,13 +8,15 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
 #include "photospider/photospider.hpp"
 #include "support/image_scene_fixture.hpp"
 #include "support/test_support.hpp"
+#if defined(PHOTOSPIDER_LOCAL_EXECUTION_SYNC_TESTS)
+#include "support/execution_sync_fixture.hpp"
+#endif
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -375,6 +377,7 @@ int semantic_binding_identity(const std::shared_ptr<OperationRegistry>& base) {
   }
   return 0;
 }
+#if defined(PHOTOSPIDER_LOCAL_EXECUTION_SYNC_TESTS)
 int shared_invalid_and_cancel(const std::shared_ptr<OperationRegistry>& base) {
   Fixture f(base);
   std::mutex mutex;
@@ -397,23 +400,34 @@ int shared_invalid_and_cancel(const std::shared_ptr<OperationRegistry>& base) {
   auto plan = Compiler(f.registry).compile(graph).take_value().plan;
   auto frozen = take(execution.freeze(plan, s.bindings));
   CancellationSource cancel;
-  auto first = std::async(std::launch::async, [&] {
-    return execution.execute(frozen, cancel.token());
+  ps::test::SharedJoinEvent joined("coefficient.scale", 5);
+  std::future<Result<ExecutionResult>> first, second;
+  ps::test::OnExit cleanup([&] {
+    cancel.cancel();
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      release = true;
+      changed.notify_all();
+    }
+    if (first.valid())
+      first.wait();
+    if (second.valid())
+      second.wait();
   });
+  first = std::async(std::launch::async,
+                     [&] { return execution.execute(frozen, cancel.token()); });
+  bool callback_entered;
   {
     std::unique_lock<std::mutex> lock(mutex);
-    PS_CHECK(changed.wait_for(lock, std::chrono::seconds(5),
-                              [&] { return entered; }));
+    callback_entered = changed.wait_for(lock, std::chrono::seconds(5),
+                                        [&] { return entered; });
   }
-  auto second =
+  second =
       std::async(std::launch::async, [&] { return execution.execute(frozen); });
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (!execution.cache_statistics().shared_computations &&
-         std::chrono::steady_clock::now() < deadline)
-    std::this_thread::yield();
+  const bool waiter_joined = joined.wait();
   const auto active = execution.cache_statistics();
-  const bool shared = active.shared_computations > 0 && active.in_flight == 1;
+  const bool shared = callback_entered && waiter_joined &&
+                      active.shared_computations > 0 && active.in_flight == 1;
   // Release on failure as well, so cancellation regressions cannot strand work.
   if (shared)
     cancel.cancel();
@@ -448,6 +462,7 @@ int shared_invalid_and_cancel(const std::shared_ptr<OperationRegistry>& base) {
   PS_CHECK(execution.cache_statistics().in_flight == 0);
   return 0;
 }
+#endif
 int metadata_rejection() {
   for (unsigned kind = 0; kind < 6; ++kind) {
     auto registry = make_default_operation_registry(false);
@@ -499,9 +514,22 @@ int metadata_rejection() {
 }  // namespace
 int main(int argc, char** argv) {
   try {
+#if defined(PHOTOSPIDER_LOCAL_EXECUTION_SYNC_TESTS)
+    execution_testing::ExecutionTestHooks hooks;
+    hooks.native_device = true;
+    ps::test::ExecutionHookScope native(hooks);
+#endif
     auto base = make_default_operation_registry();
+#if defined(PHOTOSPIDER_LOCAL_EXECUTION_SYNC_TESTS)
     if (argc == 2 && std::string(argv[1]) == "--sharing-only")
       return shared_invalid_and_cancel(base);
+#else
+    static_cast<void>(argv);
+    if (argc != 1) {
+      std::cerr << "unexpected installed test argument\n";
+      return 1;
+    }
+#endif
     PS_CHECK(valid_views(base) == 0);
     PS_CHECK(reuse_and_errors(base) == 0);
     PS_CHECK(metadata_rejection() == 0);

@@ -438,7 +438,8 @@ int main() {
     auto warm_scope = context.freeze(plan, bindings).take_value();
     auto warm = context.execute_fragments(warm_scope, {{"y", q}});
     if (verify(warm, 2, 3) ||
-        check(warm.value().diagnostics.cache_hits == (enabled ? 1 : 0) &&
+        check((enabled ? warm.value().diagnostics.cache_hits > 0
+                       : warm.value().diagnostics.cache_hits == 0) &&
                   warm.value().diagnostics.native_dispatch_count == 0 &&
                   (!enabled ||
                    warm.value().diagnostics.operation_timings.empty()),

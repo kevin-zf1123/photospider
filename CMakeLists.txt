@@ -302,6 +302,7 @@ set(
   src/lib/data/icc_validation.cpp
   src/lib/data/ocio_config_resource.cpp
   src/lib/data/resource_bindings.cpp
+  src/lib/plugin/result_fragment_atlas.cpp
   src/lib/plugin/result_program.cpp
   src/lib/plugin/result_joint.cpp
   src/lib/plugin/result_plugin_import.cpp
@@ -678,7 +679,7 @@ if(BUILD_TESTING)
   endfunction()
 
   add_library(operation_fixture MODULE tests/fixtures/operation_fixture.cpp)
-  target_link_libraries(operation_fixture PRIVATE Photospider::operation_sdk)
+  target_link_libraries(operation_fixture PRIVATE Photospider::operation_sdk Threads::Threads)
   target_compile_definitions(operation_fixture PRIVATE PHOTOSPIDER_OPERATION_PLUGIN_BUILD)
   set_target_properties(operation_fixture PROPERTIES PREFIX "")
 
@@ -876,8 +877,8 @@ if(BUILD_TESTING)
   set_property(TARGET photospider_foundations_workflow PROPERTY EXCLUDE_FROM_ALL FALSE)
   photospider_register_test(NAME test_workflow_numeric_reductions COMMAND photospider_foundations_workflow --scenario numeric)
   photospider_register_test(NAME test_workflow_expression_lut COMMAND photospider_foundations_workflow --scenario expression-lut)
-  photospider_add_test(test_basic_operations Photospider::kernel tests/integration/test_basic_operations.cpp)
-  target_include_directories(test_basic_operations PRIVATE examples)
+  photospider_add_test(test_basic_operations photospider_test_kernel tests/integration/test_basic_operations.cpp)
+  target_include_directories(test_basic_operations PRIVATE examples src/lib)
   photospider_add_test(test_expression_operations Photospider::kernel tests/integration/test_expression_operations.cpp)
   add_library(expression_contract_fixture MODULE
     tests/fixtures/expression_contract_fixture.c
@@ -964,10 +965,16 @@ if(BUILD_TESTING)
   endif()
   photospider_add_test(test_numeric_operations Photospider::kernel tests/integration/test_numeric_operations.cpp)
   foreach(_numeric_family IN ITEMS arithmetic arrays sequences statistics matrix calculus curves bezier lut1d lut3d baking expression filters color_ramps)
-    photospider_add_test(test_numeric_result_math_${_numeric_family} Photospider::kernel
+    if(_numeric_family STREQUAL "arithmetic")
+      set(_numeric_kernel photospider_test_kernel)
+    else()
+      set(_numeric_kernel Photospider::kernel)
+    endif()
+    photospider_add_test(test_numeric_result_math_${_numeric_family} ${_numeric_kernel}
       tests/integration/numeric/test_numeric_result_math_${_numeric_family}.cpp)
   endforeach()
   target_include_directories(test_numeric_result_math_arrays PRIVATE src/lib)
+  target_include_directories(test_numeric_result_math_arithmetic PRIVATE src/lib)
   photospider_register_test(NAME test_numeric_unary_result COMMAND photospider_numeric_unary strict)
   photospider_register_test(NAME test_numeric_binary_result COMMAND photospider_numeric_binary strict)
   photospider_register_test(NAME test_numeric_comparisons_result COMMAND photospider_numeric_comparisons _strict)
@@ -1027,8 +1034,8 @@ if(BUILD_TESTING)
     tests/integration/dependency_workflows/reductions.cpp
     tests/integration/dependency_workflows/scan.cpp
     tests/integration/dependency_workflows/blocks.cpp)
-  target_link_libraries(test_dependency_workflows PRIVATE Photospider::kernel)
-  target_include_directories(test_dependency_workflows PRIVATE tests ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(test_dependency_workflows PRIVATE photospider_test_kernel)
+  target_include_directories(test_dependency_workflows PRIVATE tests src/lib ${CMAKE_CURRENT_SOURCE_DIR})
   foreach(_behavior IN ITEMS data progressive shared reductions scan blocks dynamic demand radius)
     photospider_register_test(NAME test_dependency_workflows_${_behavior}
       COMMAND test_dependency_workflows --scenario ${_behavior})
@@ -1133,8 +1140,9 @@ if(BUILD_TESTING)
   target_include_directories(test_metal_images PRIVATE examples)
   photospider_register_test(NAME test_metal_images_native COMMAND test_metal_images --native-only)
   set_tests_properties(test_metal_images_native PROPERTIES SKIP_RETURN_CODE 77)
-  photospider_add_test(test_computed_scalar Photospider::kernel tests/integration/test_computed_scalar.cpp)
-  target_include_directories(test_computed_scalar PRIVATE examples)
+  photospider_add_test(test_computed_scalar photospider_test_kernel tests/integration/test_computed_scalar.cpp)
+  target_include_directories(test_computed_scalar PRIVATE examples src/lib)
+  target_compile_definitions(test_computed_scalar PRIVATE PHOTOSPIDER_LOCAL_EXECUTION_SYNC_TESTS)
   photospider_register_test(NAME test_computed_scalar_sharing COMMAND test_computed_scalar --sharing-only)
   foreach(_image_family IN ITEMS backing views relations execution format filter transform composite native)
     photospider_add_test(test_result_image_${_image_family} Photospider::kernel

@@ -634,6 +634,70 @@ void anchored_tensor_relations() {
   require(table.certify(samples).code == ErrorCode::ResourceExhausted,
           "sample table certificate cannot authorize a wrapped coordinate");
 }
+void projection_preflight() {
+  ResourceBudget root;
+  auto selected = take(Footprint::from_regions({4}, {Region({{0, 1}})}));
+  auto supported = take(
+      ResultRelation::mapped(root, {4}, Region({{0, 1}}), {8}, {{0, 0, 1, 1}},
+                             {0, 5, 0, 0, ResultSupportTarget::Tensor, 0}));
+  auto sparse = take(
+      ResultRelation::mapped(root, {4}, Region({{3, 1}}), {8}, {{0, 0, 2, 1}},
+                             {0, 5, 0, 0, ResultSupportTarget::Tensor, 0}));
+  for (bool reverse : {false, true}) {
+    auto relation = take(ResultRelation::unite(
+        root, reverse ? std::vector<ResultRelation>{supported, sparse}
+                      : std::vector<ResultRelation>{sparse, supported}));
+    unsigned visits = 0;
+    auto status = relation.project(selected, [&](auto, auto) {
+      ++visits;
+      return Status::success();
+    });
+    require(status.code == ErrorCode::NotFound && visits == 0,
+            "projection checks unsupported disjoint leaves before any visitor");
+  }
+  auto partial = take(
+      ResultRelation::mapped(root, {4, 5}, Region({{1, 2}, {1, 3}}), {4, 5},
+                             {{0, 0, 1, 1}, {1, 0, 1, 1}},
+                             {0, 5, 0, 0, ResultSupportTarget::Tensor, 0}));
+  auto stripes = take(Footprint::from_regions(
+      {4, 5}, {Region({{0, 4}, {0, 2}}), Region({{0, 4}, {3, 2}})}));
+  Footprint intersection;
+  require(partial
+              .project(stripes,
+                       [&](auto, const auto* samples) {
+                         require(samples != nullptr,
+                                 "mapped rectangle projection");
+                         intersection = *samples;
+                         return Status::success();
+                       })
+              .ok(),
+          "partial witness projection");
+  for (std::uint64_t y = 0; y < 4; ++y)
+    for (std::uint64_t x = 0; x < 5; ++x)
+      require(intersection.contains({y, x}) ==
+                  (y >= 1 && y < 3 && (x == 1 || x == 3)),
+              "rectangular clipping preserves separated stripes and holes");
+  require(intersection.element_count().value() == 4,
+          "clipping intersection cardinality");
+  CancellationSource stop;
+  FootprintLimits limits;
+  limits.cancellation = stop.token();
+  limits.consume_work = [&](std::uint64_t) {
+    stop.cancel();
+    return Status::success();
+  };
+  unsigned visits = 0;
+  auto cancelled = partial.project(
+      stripes,
+      [&](auto, auto) {
+        ++visits;
+        return Status::success();
+      },
+      limits);
+  require(
+      cancelled.code == ErrorCode::Cancelled && visits == 0,
+      "projection observes cancellation from work admission before visitor");
+}
 void mapped_relations() {
   ResourceBudget root;
   const std::vector<std::uint64_t> output{2, 3, 257, 513};
@@ -686,6 +750,7 @@ int main() {
     mapped_relation_capacity_failure();
     anchored_tensor_relations();
     mapped_relations();
+    projection_preflight();
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

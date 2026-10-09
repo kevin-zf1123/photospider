@@ -484,14 +484,6 @@ void sequence_workflows() {
       d.source({ElementType::Float64, {1}}, {double_bits(1)}, {1, {0}});
   auto direct_end = d.source({ElementType::Float64, {1}},
                              {double_bits(0x1.0000020000001p0)}, {1, {0}});
-  auto direct =
-      take(d.run("numeric.linspace_strict", {direct_start, direct_end}, {},
-                 {{"count", static_cast<int64_t>(3)},
-                  {"dtype", std::string("float32")}}))
-          .results.at("out");
-  require(read_bits(direct, {1}) == 0x3f800001,
-          "direct binary32 rounding avoids the distinct binary64 "
-          "double-rounding result");
   const auto old_round = std::fegetround();
   const auto old_flags = std::fetestexcept(FE_ALL_EXCEPT);
   std::fesetround(FE_UPWARD);

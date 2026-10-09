@@ -5,7 +5,9 @@
 #include <utility>
 #include <vector>
 
-#include "execution/memory_budget.hpp"
+#include "data/memory_budget.hpp"
+#include "execution/memory_admission.hpp"
+#include "execution/result_callback_scope.hpp"
 #include "photospider/photospider.hpp"
 #include "plugin/failure_latch.hpp"
 #include "support/test_support.hpp"
@@ -52,10 +54,49 @@ int failure_latch_publication() {
   PS_CHECK(success_exchange.snapshot().code == ErrorCode::Internal);
   return 0;
 }
+int temporary_io_fence() {
+  ResourceBudget root;
+  auto store = TemporaryStorage::create(root).take_value();
+  auto failure = ErrorCode::Ok;
+  plugin_internal::FailureLatch latch;
+  {
+    execution_internal::ResultCallbackScope scope(&failure, &latch);
+    auto denied = store.append_zeroed(4);
+    PS_CHECK(denied.status().reason == FailureReason::UnauthorizedRead);
+    PS_CHECK(denied.status().detail.origin == FailureOrigin::Protocol);
+    PS_CHECK(denied.status().detail.scope == FailureScope::Group);
+    PS_CHECK(failure == ErrorCode::InvalidArgument && store.size() == 0);
+    {
+      execution_internal::ResultCallbackScope nested(nullptr);
+      PS_CHECK(store.append_zeroed(4).ok());
+    }
+    PS_CHECK(store.append_zeroed(1).status().reason ==
+             FailureReason::UnauthorizedRead);
+    PS_CHECK(store.size() == 4);
+  }
+  PS_CHECK(store.append_zeroed(4).ok());
+  plugin_internal::FailureLatch prior;
+  const Status first{ErrorCode::ResourceExhausted,
+                     "prior capacity failure",
+                     FailureReason::CapacityLimit,
+                     {FailureOrigin::Resource, FailureScope::Group}};
+  prior.record(first);
+  failure = first.code;
+  {
+    execution_internal::ResultCallbackScope scope(&failure, &prior);
+    auto denied = TemporaryStorage::create(root);
+    PS_CHECK(denied.status().code == first.code);
+    PS_CHECK(denied.status().reason == first.reason);
+    PS_CHECK(denied.status().detail.origin == first.detail.origin);
+    PS_CHECK(denied.status().message == first.message);
+  }
+  PS_CHECK(TemporaryStorage::create(root).ok());
+  return 0;
+}
 int on_demand_payload() {
   auto root = std::make_shared<ResourceBudget>(ResourceLimits{});
-  auto budget = std::make_shared<execution_internal::MemoryBudget>(8192, root);
-  auto observation = std::make_shared<execution_internal::MemoryObservation>();
+  auto budget = std::make_shared<data_internal::MemoryBudget>(8192, root);
+  auto observation = std::make_shared<data_internal::MemoryObservation>();
   auto cached_reservation = budget->reserve(7000, {}, observation).take_value();
   auto cached = cached_reservation->allocator().allocate(7000).take_value();
   cached_reservation->seal();
@@ -108,5 +149,6 @@ int on_demand_payload() {
 int main() {
   PS_CHECK(failure_latch_publication() == 0);
   PS_CHECK(on_demand_payload() == 0);
+  PS_CHECK(temporary_io_fence() == 0);
   return 0;
 }

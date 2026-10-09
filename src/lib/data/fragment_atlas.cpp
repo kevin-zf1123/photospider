@@ -10,8 +10,8 @@
 #include <utility>
 #include <vector>
 
-#include "data/result_window_access.hpp"
-#include "photospider/plugin/result_program.hpp"
+#include "data/fragment_atlas_work.hpp"
+#include "photospider/core/resource_allocator.hpp"
 
 namespace ps {
 namespace {
@@ -48,24 +48,7 @@ unsigned population(std::uint64_t mask) {
 Status exhausted() {
   return Status{ErrorCode::ResourceExhausted, {}};
 }
-Status invalid() {
-  return Status{ErrorCode::InvalidArgument, "invalid fragment atlas"};
-}
-struct Work {
-  std::uint64_t left;
-  CancellationToken cancel;
-  std::function<Status(std::uint64_t)> charge = {};
-  Status consume(std::uint64_t cost) {
-    if (cancel.cancelled())
-      return Status{ErrorCode::Cancelled, {}};
-    if (cost > left)
-      return exhausted();
-    auto status = charge ? charge(cost) : Status::success();
-    if (status.ok())
-      left -= cost;
-    return status;
-  }
-};
+using Work = data_internal::FragmentAtlasWork;
 Result<MutableValue> allocate(std::uint64_t bytes,
                               const BufferAllocator& allocator) {
   return MutableValue::allocate({ElementType::UInt8, {bytes}},
@@ -84,20 +67,11 @@ Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare(
     const ValueFragments& input, std::vector<std::uint64_t> geometry,
     const FootprintLimits& limits) {
   if (!input.valid())
-    return Result<FragmentAtlasPlan>(invalid());
+    return Result<FragmentAtlasPlan>(data_internal::invalid_fragment_atlas());
   auto local = limits;
   local.consume_work = {};
   return prepare_regions(input.descriptor(), input.coverage(),
                          std::move(geometry), local);
-}
-Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare(
-    const ResultTensorInput& input, std::vector<std::uint64_t> geometry,
-    const FootprintLimits& limits) {
-  if (!input.result_.valid())
-    return Result<FragmentAtlasPlan>(invalid());
-  return prepare_regions(
-      {input.spec().descriptor.element_type, input.spec().sample_shape()},
-      input.coverage(), std::move(geometry), limits);
 }
 Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare_regions(
     const ValueDescriptor& descriptor, const Footprint& coverage,
@@ -107,7 +81,7 @@ Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare_regions(
   if (!status.ok())
     return Result<FragmentAtlasPlan>(status);
   if (!coverage.valid() || descriptor.shape != coverage.shape())
-    return Result<FragmentAtlasPlan>(invalid());
+    return Result<FragmentAtlasPlan>(data_internal::invalid_fragment_atlas());
   const auto rank = descriptor.shape.size();
   const auto raw = coverage.boxes().size();
   const auto scale = 1 + 2 * rank;
@@ -136,11 +110,11 @@ Result<FragmentAtlasPlan> FragmentAtlasPlan::prepare_regions(
     }
   }
   if (geometry.size() != shape.size())
-    return Result<FragmentAtlasPlan>(invalid());
+    return Result<FragmentAtlasPlan>(data_internal::invalid_fragment_atlas());
   std::uint64_t volume = 1;
   for (auto size : geometry) {
     if (!size || size > 64 / volume)
-      return Result<FragmentAtlasPlan>(invalid());
+      return Result<FragmentAtlasPlan>(data_internal::invalid_fragment_atlas());
     volume *= size;
   }
   auto count = coverage.element_count();
@@ -263,7 +237,7 @@ Result<FragmentAtlas> FragmentAtlasPlan::materialize(
     const ValueFragments& input, const BufferAllocator& allocator,
     const FootprintLimits& limits) const {
   if (!input.valid())
-    return Result<FragmentAtlas>(invalid());
+    return Result<FragmentAtlas>(data_internal::invalid_fragment_atlas());
   auto local = limits;
   local.consume_work = {};
   return materialize_regions(
@@ -272,72 +246,6 @@ Result<FragmentAtlas> FragmentAtlasPlan::materialize(
         return input.read(at, destination, bytes);
       },
       allocator, local);
-}
-Result<FragmentAtlas> FragmentAtlasPlan::materialize(
-    const ResultTensorInput& input, const BufferAllocator& allocator,
-    const FootprintLimits& limits) const {
-  using Answer = Result<FragmentAtlas>;
-  if (!impl_ || !input.result_.valid())
-    return Answer(invalid());
-  if (!input.payload_authorized_)
-    return Answer(input.read({}, nullptr, 0, limits.cancellation));
-  Work work{limits.maximum_work, limits.cancellation, limits.consume_work};
-  const auto rank = input.coverage().shape().size();
-  const auto boxes = input.coverage().boxes().size();
-  const auto per_box = 1 + 2 * rank;
-  if (boxes > limits.maximum_boxes || boxes == UINT64_MAX ||
-      boxes + 1 > UINT64_MAX / per_box ||
-      boxes > (UINT64_MAX - 1) / ((boxes + 1) * per_box))
-    return Answer(exhausted());
-  auto status = work.consume(1 + boxes * (boxes + 1) * per_box);
-  if (!status.ok())
-    return Answer(status);
-  ResourceVector<ResultTensorReadWindow> windows;
-  std::uint64_t max_read_work = 0;
-  for (const auto& box : input.coverage().boxes()) {
-    auto window = input.acquire(box, limits.cancellation);
-    if (!window.ok())
-      return Answer(window.status());
-    auto read_work =
-        execution_internal::ResultWindowAccess::read_work(window.value());
-    if (!read_work.ok())
-      return Answer(read_work.status());
-    max_read_work = std::max(max_read_work, read_work.value());
-    windows.push_back(window.take_value());
-  }
-  const auto count = input.coverage().element_count();
-  if (!count.ok() || boxes > (UINT64_MAX - max_read_work) / (rank + 1))
-    return Answer(exhausted());
-  const auto cost = max_read_work + boxes * (rank + 1);
-  if (cost && count.value() > UINT64_MAX / cost)
-    return Answer(exhausted());
-  status = work.consume(count.value() * cost);
-  if (!status.ok())
-    return Answer(status);
-  auto remaining = limits;
-  remaining.maximum_work = work.left;
-  return materialize_regions(
-      {input.spec().descriptor.element_type, input.spec().sample_shape()},
-      input.coverage(),
-      [&](const auto& at, void* destination, std::size_t bytes) {
-        for (const auto& window : windows) {
-          bool contains = true;
-          for (std::size_t axis = 0; axis < at.size(); ++axis) {
-            const auto& span = window.region().dimensions()[axis];
-            contains = contains && at[axis] >= span.offset &&
-                       at[axis] - span.offset < span.extent;
-          }
-          if (!contains)
-            continue;
-          auto row = window.row_run(at);
-          if (!row.ok())
-            return row.status();
-          std::memcpy(destination, row.value().data, bytes);
-          return Status::success();
-        }
-        return invalid();
-      },
-      allocator, remaining);
 }
 Result<FragmentAtlas> FragmentAtlasPlan::materialize_regions(
     const ValueDescriptor& descriptor, const Footprint& coverage,
@@ -349,7 +257,7 @@ Result<FragmentAtlas> FragmentAtlasPlan::materialize_regions(
   if (!status.ok())
     return Result<FragmentAtlas>(status);
   if (!impl_ || !coverage.valid())
-    return Result<FragmentAtlas>(invalid());
+    return Result<FragmentAtlas>(data_internal::invalid_fragment_atlas());
   const auto rank = impl_->descriptor.shape.size();
   const auto left = impl_->coverage.boxes().size();
   const auto right = coverage.boxes().size();
@@ -362,7 +270,7 @@ Result<FragmentAtlas> FragmentAtlasPlan::materialize_regions(
   if (descriptor.shape != impl_->descriptor.shape ||
       descriptor.element_type != impl_->descriptor.element_type ||
       coverage != impl_->coverage)
-    return Result<FragmentAtlas>(invalid());
+    return Result<FragmentAtlas>(data_internal::invalid_fragment_atlas());
   const auto width = Value::element_size(impl_->descriptor.element_type);
   const auto metadata_work = 1 + rank + (left + right) * (1 + 2 * rank);
   status = work.consume(impl_->packing_work - metadata_work);
@@ -434,13 +342,13 @@ Result<std::uint64_t> FragmentAtlas::address(
       (slot_count & (slot_count - 1)) ||
       slot_count > directory.bytes().size() / kFragmentAtlasSlotBytes ||
       payload_bytes > payload.bytes().size())
-    return Result<std::uint64_t>(invalid());
+    return Result<std::uint64_t>(data_internal::invalid_fragment_atlas());
   Key key{};
   std::uint64_t bit = 0, volume = 1;
   for (std::size_t axis = 0; axis < at.size(); ++axis) {
     if (!tile_shape[axis] || tile_shape[axis] > 64 / volume ||
         at[axis] >= descriptor.shape[axis])
-      return Result<std::uint64_t>(invalid());
+      return Result<std::uint64_t>(data_internal::invalid_fragment_atlas());
     volume *= tile_shape[axis];
     key[axis] = at[axis] / tile_shape[axis];
     bit = bit * tile_shape[axis] + at[axis] % tile_shape[axis];
@@ -463,7 +371,7 @@ Result<std::uint64_t> FragmentAtlas::address(
       const auto prior = population(mask & ((UINT64_C(1) << bit) - 1));
       if (offset > payload_bytes || prior * width > payload_bytes - offset ||
           width > payload_bytes - offset - prior * width)
-        return Result<std::uint64_t>(invalid());
+        return Result<std::uint64_t>(data_internal::invalid_fragment_atlas());
       return Result<std::uint64_t>(offset + prior * width);
     }
     slot = (slot + 1) & (slot_count - 1);

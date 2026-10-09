@@ -23,6 +23,7 @@
 #include "benchmark/raw_benchmark_test_hooks.hpp"
 #include "execution/execution_test_hooks.hpp"
 #include "photospider/execution/execution.hpp"
+#include "support/execution_sync_fixture.hpp"
 #include "support/operation_result_fixture.hpp"
 #include "support/test_support.hpp"
 
@@ -180,30 +181,37 @@ class FixtureInvocationObserver final {
     return function(mode);
   }
 
-  /**
-   * @brief Waits until one exported fixture counter reaches a minimum value.
-   * @param name Exact mode-indexed counter symbol name.
-   * @param mode Closed fixture mode.
-   * @param minimum Required inclusive counter value.
-   * @param timeout Maximum bounded observation interval.
-   * @return True when the counter reaches `minimum` before the deadline.
-   * @throws std::runtime_error If the counter symbol is missing.
-   * @note Yield-based polling is used only for the real-DSO cancellation seam.
-   */
-  [[nodiscard]] bool wait_until_counter_at_least(
-      const char* name, std::uint32_t mode, std::uint32_t minimum,
-      std::chrono::milliseconds timeout) const {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (counter(name, mode) < minimum) {
-      if (std::chrono::steady_clock::now() >= deadline) {
-        return false;
-      }
-      std::this_thread::yield();
-    }
-    return true;
+  struct CancellationControls {
+    void (*arm)();
+    std::uint32_t (*wait)(std::uint32_t);
+    void (*release)();
+  };
+  // Resolve every control before launching callbacks, so missing symbols cannot
+  // strand a future behind the fixture gate.
+  CancellationControls cancellation_controls() const {
+    return {
+        symbol<void (*)()>("ps_operation_fixture_arm_cancellation_gate"),
+        symbol<std::uint32_t (*)(std::uint32_t)>(
+            "ps_operation_fixture_wait_cancellation_entered"),
+        symbol<void (*)()>("ps_operation_fixture_release_cancellation_gate")};
   }
 
  private:
+  template <class Function>
+  Function symbol(const char* name) const {
+#if defined(_WIN32)
+    void* address = reinterpret_cast<void*>(
+        GetProcAddress(static_cast<HMODULE>(handle_), name));
+#else
+    void* address = dlsym(handle_, name);
+#endif
+    Function function = nullptr;
+    static_assert(sizeof(function) == sizeof(address));
+    std::memcpy(&function, &address, sizeof(function));
+    if (!function)
+      throw std::runtime_error("fixture control symbol is missing");
+    return function;
+  }
   /** @brief Native fixture mapping handle owned by this observer. */
   void* handle_ = nullptr;
 };
@@ -1652,14 +1660,22 @@ int result_dso_contracts(bool require_gpu) {
     auto compiled = compile("fixture.duplicate_cancelled", gpu);
     PS_CHECK(compiled.ok());
     CancellationSource cancellation;
-    auto future = std::async(std::launch::async, [&] {
+    const auto controls = observer.cancellation_controls();
+    controls.arm();
+    std::future<Result<ExecutionResult>> future;
+    ps::test::OnExit cleanup([&] {
+      cancellation.cancel();
+      controls.release();
+      if (future.valid())
+        future.wait();
+    });
+    future = std::async(std::launch::async, [&] {
       return context.execute(compiled.value().plan, {{binding}},
                              cancellation.token());
     });
-    const bool waiting = observer.wait_until_counter_at_least(
-        "ps_operation_fixture_awaiting_cancellation",
-        kFixtureDuplicateThenCancellation, 1, std::chrono::seconds(2));
+    const bool waiting = controls.wait(5000) != 0;
     const bool cancelled = cancellation.cancel();
+    controls.release();
     auto result = future.get();
     PS_CHECK(waiting && cancelled);
     PS_CHECK(!result.ok() && result.status().code == ErrorCode::Cancelled);

@@ -1731,7 +1731,8 @@ void window_work_failure() {
               result.status().reason == FailureReason::WorkLimit,
           "ignored owning-window work failure preserves first reason");
 }
-void many_view_windows(std::uint64_t layers = 1) {
+void many_view_windows() {
+  constexpr std::uint64_t layers = 2;
   auto registry = std::make_shared<OperationRegistry>();
   require(
       registry->load_plugin(PS_RESULT_FIXTURE).ok() && registry->freeze().ok(),
@@ -2383,7 +2384,6 @@ int main(int argc, char** argv) {
     c_joint_payload_bounds();
     c_prefix_relations();
     many_view_windows();
-    many_view_windows(2);
     std::cout << "C11 unified Result fixture passed\n";
     return 0;
   } catch (const std::exception& e) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 #include "photospider/plugin/operation_registry.hpp"
 
@@ -126,6 +127,18 @@ using FinalResultReadyHook = void (*)() noexcept;
  */
 using PostSubmitObservationHook = void (*)() noexcept;
 
+/** @brief One positive explicit phase work call inside an executor poll.
+ * @note Actor and operation are borrowed for notification only. Ordinals start
+ * at one for each executor poll; they are private synchronization points.
+ */
+struct PhaseWorkPoint final {
+  std::string_view operation;
+  Backend backend;
+  const void* actor;
+  std::uint32_t poll;
+  std::uint64_t ordinal, work;
+};
+
 /**
  * @brief Private callback set for deterministic execution regressions.
  *
@@ -183,6 +196,18 @@ struct ExecutionTestHooks final {
   ExecutionTimingHook execution_timing = nullptr;
   /** @brief Injects a typed capacity-query error before native preparation. */
   ErrorCode (*native_capacity_error)() noexcept = nullptr;
+  /** @brief Borrowed state for the structured notifications below. */
+  void* structured_context = nullptr;
+  /** @brief Signals a nonproducer lease after acquire and diagnostics update.
+   * @note Signal only; never block or re-enter the acquiring Run.
+   */
+  void (*shared_joined)(void*, std::string_view, std::uint64_t,
+                        const void*) noexcept = nullptr;
+  /** @brief Outside core locks, immediately before the work stop check. */
+  void (*phase_work_started)(void*, const PhaseWorkPoint&) noexcept = nullptr;
+  /** @brief Observes the same work service's returned status. */
+  void (*phase_work_finished)(void*, const PhaseWorkPoint&,
+                              ErrorCode) noexcept = nullptr;
 };
 
 /**
@@ -282,6 +307,16 @@ void notify_checkpoint_published() noexcept;
 /** @brief Observes a successful checkpoint lookup outside its directory lock.
  */
 void notify_checkpoint_borrowed() noexcept;
+
+/** @brief Signal-only notification after a shared waiter lease is installed. */
+void notify_shared_joined(std::string_view operation, std::uint64_t node,
+                          const void* actor) noexcept;
+/** @brief Observes positive phase work only during the actual poll call.
+ * @note Hooks must not re-enter the Run. Borrowed state must outlive callbacks.
+ */
+void notify_phase_work_started(const PhaseWorkPoint& point) noexcept;
+void notify_phase_work_finished(const PhaseWorkPoint& point,
+                                ErrorCode status) noexcept;
 
 /** @brief Observes native submission while storage remains owned in flight. */
 void notify_native_submitted() noexcept;

@@ -8,16 +8,12 @@
 #include <utility>
 #include <vector>
 
+#include "core/status_helpers.hpp"
 #include "data/content_digest.hpp"
 
 namespace ps::numeric {
 namespace {
-Status invalid(const char* message) {
-  return {ErrorCode::InvalidArgument,
-          message,
-          FailureReason::InvalidDomain,
-          {FailureOrigin::Schema, FailureScope::Unspecified}};
-}
+
 Status type_error(const char* message) {
   return {ErrorCode::TypeMismatch,
           message,
@@ -93,8 +89,8 @@ Result<WorkflowNodeOutput> expand(WorkflowDocument* document,
     return result;
   if (document->nodes.size() < count || document->nodes.size() > 65536 ||
       prefix(*document, count) != before)
-    return Result<WorkflowNodeOutput>(
-        invalid("LUT3D source builder must only append nodes"));
+    return Result<WorkflowNodeOutput>(core_internal::invalid_schema_domain(
+        "LUT3D source builder must only append nodes"));
   return result;
 }
 Result<ElementType> source_type(const SemanticGraphIR& graph,
@@ -141,9 +137,9 @@ Result<BakedLut3d> bake_lut3d(WorkflowDocument& document,
   if (!registry || !registry->frozen() || !source ||
       !options.source_pointwise ||
       (extra && (!extra->count || extra->count > 1048576)))
-    return Answer(
-        invalid("LUT3D baking requires frozen registry, pointwise source and "
-                "valid extras"));
+    return Answer(core_internal::invalid_schema_domain(
+        "LUT3D baking requires frozen registry, pointwise source and "
+        "valid extras"));
   const char* suffix = options.profile == CpuNumericProfile::Strict ? "_strict"
                        : options.profile == CpuNumericProfile::AppleSiliconNeon
                            ? "_accelerated_apple_silicon"
@@ -151,7 +147,8 @@ Result<BakedLut3d> bake_lut3d(WorkflowDocument& document,
                            ? "_accelerated_x86_64"
                            : nullptr;
   if (!suffix)
-    return Answer(invalid("invalid bake CPU profile"));
+    return Answer(
+        core_internal::invalid_schema_domain("invalid bake CPU profile"));
   Lut3dBakeDescription spec;
   spec.shape = options.shape;
   spec.interpolation = options.interpolation;

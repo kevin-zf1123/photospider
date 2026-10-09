@@ -8,7 +8,7 @@
 #include <new>
 #include <utility>
 
-#include "execution/result_callback_scope.hpp"
+#include "core/io_protocol_scope.hpp"
 
 #if defined(_WIN32)
 #include <io.h>
@@ -82,7 +82,7 @@ struct TemporaryStorage::Impl {
   }
 };
 Result<TemporaryStorage> TemporaryStorage::create(ResourceBudget budget) {
-  auto allowed = execution_internal::result_io_allowed();
+  auto allowed = core_internal::IoProtocolScope::allowed();
   if (!allowed.ok())
     return Result<TemporaryStorage>(allowed);
   try {
@@ -119,7 +119,7 @@ std::uint64_t TemporaryStorage::size() const {
 }
 Result<std::uint64_t> TemporaryStorage::append_zeroed(
     std::uint64_t bytes, const CancellationToken& cancel) {
-  auto allowed = execution_internal::result_io_allowed();
+  auto allowed = core_internal::IoProtocolScope::allowed();
   if (!allowed.ok())
     return Result<std::uint64_t>(allowed);
   if (!impl_)
@@ -176,7 +176,7 @@ Result<std::uint64_t> TemporaryStorage::append_zeroed(
 }
 Status TemporaryStorage::write(std::uint64_t offset, ByteView bytes,
                                const CancellationToken& cancel) {
-  auto allowed = execution_internal::result_io_allowed();
+  auto allowed = core_internal::IoProtocolScope::allowed();
   if (!allowed.ok())
     return allowed;
   if (!impl_)
@@ -208,7 +208,7 @@ Result<std::shared_ptr<const CpuStorage>> TemporaryStorage::read(
     std::uint64_t offset, std::uint64_t bytes, std::uint64_t maximum_window,
     const CancellationToken& cancel) const {
   using ReadResult = Result<std::shared_ptr<const CpuStorage>>;
-  auto allowed = execution_internal::result_io_allowed();
+  auto allowed = core_internal::IoProtocolScope::allowed();
   if (!allowed.ok())
     return ReadResult(allowed);
   if (!impl_)

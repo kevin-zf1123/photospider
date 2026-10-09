@@ -148,6 +148,24 @@ void notify_checkpoint_borrowed() noexcept {
     hooks->checkpoint_borrowed();
 }
 
+void notify_shared_joined(std::string_view operation, std::uint64_t node,
+                          const void* actor) noexcept {
+  const auto* hooks = g_hooks.load(std::memory_order_acquire);
+  if (hooks && hooks->shared_joined)
+    hooks->shared_joined(hooks->structured_context, operation, node, actor);
+}
+void notify_phase_work_started(const PhaseWorkPoint& point) noexcept {
+  const auto* hooks = g_hooks.load(std::memory_order_acquire);
+  if (hooks && hooks->phase_work_started)
+    hooks->phase_work_started(hooks->structured_context, point);
+}
+void notify_phase_work_finished(const PhaseWorkPoint& point,
+                                ErrorCode status) noexcept {
+  const auto* hooks = g_hooks.load(std::memory_order_acquire);
+  if (hooks && hooks->phase_work_finished)
+    hooks->phase_work_finished(hooks->structured_context, point, status);
+}
+
 void notify_native_submitted() noexcept {
   const ExecutionTestHooks* hooks = g_hooks.load(std::memory_order_acquire);
   if (hooks && hooks->native_submitted)

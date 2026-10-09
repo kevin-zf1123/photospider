@@ -7,13 +7,12 @@
 #include <utility>
 #include <vector>
 
+#include "core/status_helpers.hpp"
 #include "data/dependency_metadata.hpp"
 
 namespace ps {
 namespace {
-Status invalid(const char* text) {
-  return Status::failure(ErrorCode::InvalidArgument, text);
-}
+
 Status stopped(const FootprintLimits& limits) {
   return limits.cancellation.cancelled()
              ? Status::failure(ErrorCode::Cancelled,
@@ -79,11 +78,11 @@ Result<std::vector<DependencyNeed>> normalize(
     if (need.port >= shapes.size() || !need.roles || (need.roles & ~15U) ||
         !need.samples.valid() || need.samples.shape() != shapes[need.port])
       return Result<std::vector<DependencyNeed>>(
-          invalid("invalid dependency need"));
+          core_internal::invalid_argument("invalid dependency need"));
     for (const auto& tag : need.tags)
       if (!tag.kind)
         return Result<std::vector<DependencyNeed>>(
-            invalid("zero dependency tag kind"));
+            core_internal::invalid_argument("zero dependency tag kind"));
     for (std::uint32_t role = 1; role <= 8; role <<= 1) {
       if (!(need.roles & role))
         continue;
@@ -132,8 +131,8 @@ Result<DependencyCertificate> DependencyCertificate::create_owned(
     return Result<DependencyCertificate>(status);
   if (identity.empty() || identity.size() > 4096 || !coverage.valid() ||
       input_shapes.size() > 1024)
-    return Result<DependencyCertificate>(
-        invalid("invalid dependency certificate identity/domain"));
+    return Result<DependencyCertificate>(core_internal::invalid_argument(
+        "invalid dependency certificate identity/domain"));
   for (const auto& shape : input_shapes) {
     auto empty = Footprint::none(shape, limits);
     if (!empty.ok())
@@ -143,13 +142,13 @@ Result<DependencyCertificate> DependencyCertificate::create_owned(
   if (!count.ok())
     return Result<DependencyCertificate>(count.status());
   if (count.value() != rows.size())
-    return Result<DependencyCertificate>(
-        invalid("certificate has unknown or extra rows"));
+    return Result<DependencyCertificate>(core_internal::invalid_argument(
+        "certificate has unknown or extra rows"));
   std::uint64_t entries = rows.size();
   for (const auto& row : rows) {
     if (!coverage.contains(row.output))
       return Result<DependencyCertificate>(
-          invalid("certificate row outside coverage"));
+          core_internal::invalid_argument("certificate row outside coverage"));
     for (const auto& need : row.inputs) {
       const auto extra = need.tags.size() + need.samples.boxes().size() + 1;
       for (std::uint32_t role = 1; role <= 8; role <<= 1) {
@@ -172,7 +171,7 @@ Result<DependencyCertificate> DependencyCertificate::create_owned(
   for (std::size_t i = 0; i < rows.size(); ++i) {
     if (i && rows[i - 1].output == rows[i].output)
       return Result<DependencyCertificate>(
-          invalid("duplicate certificate row"));
+          core_internal::invalid_argument("duplicate certificate row"));
     auto canonical = normalize(rows[i].inputs, input_shapes, limits);
     if (!canonical.ok())
       return Result<DependencyCertificate>(canonical.status());
@@ -213,7 +212,8 @@ Result<DependencyCertificate> DependencyCertificate::restrict(
   if (!outside.ok())
     return Result<DependencyCertificate>(outside.status());
   if (!outside.value().empty())
-    return Result<DependencyCertificate>(invalid("unknown certificate row"));
+    return Result<DependencyCertificate>(
+        core_internal::invalid_argument("unknown certificate row"));
   dependency_internal::MetadataBytes construction_bytes;
   construction_bytes.add(dependency_internal::certificate_bytes(
       identity_, subset, input_shapes_, {}, {}, true));
@@ -295,10 +295,12 @@ Result<Footprint> DependencyCertificate::transpose(
   if (!valid() || dirty.port >= input_shapes_.size() || !dirty.roles ||
       (dirty.roles & ~15U) || !dirty.samples.valid() ||
       dirty.samples.shape() != input_shapes_[dirty.port])
-    return Result<Footprint>(invalid("invalid certificate transpose input"));
+    return Result<Footprint>(
+        core_internal::invalid_argument("invalid certificate transpose input"));
   for (const auto& tag : dirty.tags)
     if (!tag.kind)
-      return Result<Footprint>(invalid("zero dirty tag kind"));
+      return Result<Footprint>(
+          core_internal::invalid_argument("zero dirty tag kind"));
   std::vector<Region> affected;
   std::uint64_t work = limits.maximum_work;
   for (const auto& row : rows_) {
@@ -335,7 +337,7 @@ Result<DependencyCertificate> DependencyCertificate::merge(
   if (!valid() || identity_ != other.identity_ ||
       input_shapes_ != other.input_shapes_)
     return Result<DependencyCertificate>(
-        invalid("incompatible certificate identities"));
+        core_internal::invalid_argument("incompatible certificate identities"));
   if (mapped_ || other.mapped_)
     return merge_mapped(other, limits);
   auto coverage = coverage_.unite(other.coverage_, limits);
@@ -412,8 +414,8 @@ Result<DependencyCertificate> DependencyCertificate::merge(
       if (!status.ok())
         return Result<DependencyCertificate>(status);
       if (!same_row(*row, *overlap))
-        return Result<DependencyCertificate>(
-            invalid("inconsistent overlapping certificate rows"));
+        return Result<DependencyCertificate>(core_internal::invalid_argument(
+            "inconsistent overlapping certificate rows"));
     }
     entries += weight.value();
     rows.push_back(*row);

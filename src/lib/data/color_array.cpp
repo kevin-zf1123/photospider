@@ -6,15 +6,14 @@
 #include <utility>
 #include <vector>
 
+#include "core/status_helpers.hpp"
 #include "data/color_array_exact.hpp"
 #include "data/typed_sample_validation.hpp"
 #include "data/value_validation.hpp"
 
 namespace ps {
 namespace {
-Status invalid(const char* message) {
-  return {ErrorCode::InvalidArgument, message, FailureReason::InvalidDomain};
-}
+
 std::uint64_t bits(double value) {
   std::uint64_t result;
   std::memcpy(&result, &value, 8);
@@ -39,54 +38,55 @@ Status validate(const ColorArrayDescriptor& s, bool static_source) {
   const auto model = static_cast<unsigned>(s.model);
   if (model < 1 || model > 9 || static_cast<unsigned>(s.association) > 2 ||
       (s.model != ColorModel::Rgb && s.association != ColorAssociation::None))
-    return invalid("invalid color model/association");
+    return core_internal::invalid_domain("invalid color model/association");
   const bool cmyk = s.model == ColorModel::Cmyk;
   if (cmyk ? s.reference != ColorReference::ProfileRelative
            : s.reference != ColorReference::SceneRelative &&
                  s.reference != ColorReference::DisplayRelative)
-    return invalid("invalid color reference");
+    return core_internal::invalid_domain("invalid color reference");
   const bool split = s.source_layout == ColorSourceLayout::RationalHueSplit;
   if ((s.source_layout != ColorSourceLayout::Interleaved && !split) ||
       (split && (!static_source || !polar(s.model))))
-    return invalid("invalid runtime/static color layout");
+    return core_internal::invalid_domain("invalid runtime/static color layout");
   if (s.hue.has_value() != polar(s.model) ||
       (s.hue && (split ? *s.hue != ColorHueUnit::RationalPi
                        : *s.hue != ColorHueUnit::Radian &&
                              *s.hue != ColorHueUnit::PiMultiple)))
-    return invalid("invalid color hue unit");
+    return core_internal::invalid_domain("invalid color hue unit");
   if (s.white.has_value() == cmyk || s.profile.has_value() != cmyk ||
       s.primaries.has_value() != has_rgb(s.model) ||
       s.transfer.has_value() != has_rgb(s.model) ||
       s.ncl_coefficients.has_value() != (s.model == ColorModel::Ycbcr))
-    return invalid("missing or irrelevant color fields");
+    return core_internal::invalid_domain("missing or irrelevant color fields");
   if (cmyk)
     return s.profile->byte_length >= 132
                ? Status::success()
-               : invalid(
+               : core_internal::invalid_domain(
                      "ICC profile length is smaller than its header/directory");
   const auto& white = *s.white;
   if (!finite(white[0]) || !finite(white[1]) ||
       !color_internal::positive_sum_below_one(white[0], white[1]))
-    return invalid("invalid color white xy");
+    return core_internal::invalid_domain("invalid color white xy");
   if ((s.model == ColorModel::Oklab || s.model == ColorModel::Oklch) &&
       (bits(white[0]) != bits(.3127) || bits(white[1]) != bits(.3290)))
-    return invalid("OK coordinates require D65");
+    return core_internal::invalid_domain("OK coordinates require D65");
   if (s.primaries) {
     if (!std::all_of(s.primaries->begin(), s.primaries->end(), finite) ||
         !color_internal::valid_basis(*s.primaries, white))
-      return invalid("singular color primary basis or white normalization");
+      return core_internal::invalid_domain(
+          "singular color primary basis or white normalization");
     const auto& transfer = *s.transfer;
     const bool gamma = transfer.kind == ColorTransferKind::Gamma;
     if (static_cast<unsigned>(transfer.kind) > 2 ||
         transfer.gamma.has_value() != gamma ||
         (gamma && !positive(*transfer.gamma)))
-      return invalid("invalid color transfer/exponent");
+      return core_internal::invalid_domain("invalid color transfer/exponent");
   }
   if (s.ncl_coefficients) {
     const auto& ncl = *s.ncl_coefficients;
     if (!finite(ncl[0]) || !finite(ncl[1]) ||
         !color_internal::positive_sum_below_one(ncl[0], ncl[1]))
-      return invalid("invalid NCL Kr/Kb");
+      return core_internal::invalid_domain("invalid NCL Kr/Kb");
   }
   return Status::success();
 }
@@ -164,7 +164,7 @@ Result<ColorArrayDescriptor> decode(const ValueFacet& facet,
   if (facet.key != "photospider.color-array" || facet.version != 1 ||
       facet.payload.size() > 4096)
     return Result<ColorArrayDescriptor>(
-        invalid("unsupported color-array facet"));
+        core_internal::invalid_domain("unsupported color-array facet"));
   Reader reader(facet.payload);
   ColorArrayDescriptor s;
   s.model = static_cast<ColorModel>(reader.integer(1));
@@ -196,12 +196,13 @@ Result<ColorArrayDescriptor> decode(const ValueFacet& facet,
   }
   if (!reader.complete())
     return Result<ColorArrayDescriptor>(
-        invalid("truncated or trailing color bytes"));
+        core_internal::invalid_domain("truncated or trailing color bytes"));
   auto canonical = encode(s, static_source);
   if (!canonical.ok())
     return Result<ColorArrayDescriptor>(canonical.status());
   if (canonical.value().payload != facet.payload)
-    return Result<ColorArrayDescriptor>(invalid("noncanonical color bytes"));
+    return Result<ColorArrayDescriptor>(
+        core_internal::invalid_domain("noncanonical color bytes"));
   return Result<ColorArrayDescriptor>(std::move(s));
 }
 unsigned channels(const ColorArrayDescriptor& s) {
@@ -251,7 +252,8 @@ Result<ColorPrimaryCoordinates> color_primary_coordinates(
           ColorPrimaryCoordinates{{.713, .293, .165, .830, .128, .044},
                                   {.32168, .33767}});
   }
-  return Result<ColorPrimaryCoordinates>(invalid("unknown primary preset"));
+  return Result<ColorPrimaryCoordinates>(
+      core_internal::invalid_domain("unknown primary preset"));
 }
 Result<std::array<double, 2>> color_ncl_coefficients(ColorNclPreset preset) {
   switch (preset) {
@@ -262,7 +264,8 @@ Result<std::array<double, 2>> color_ncl_coefficients(ColorNclPreset preset) {
     case ColorNclPreset::Bt2020:
       return Result<std::array<double, 2>>(std::array<double, 2>{.2627, .0593});
   }
-  return Result<std::array<double, 2>>(invalid("unknown NCL preset"));
+  return Result<std::array<double, 2>>(
+      core_internal::invalid_domain("unknown NCL preset"));
 }
 Result<ValueFacet> encode_color_array(const ColorArrayDescriptor& s) {
   return encode(s, false);
@@ -287,7 +290,7 @@ Result<ColorArrayDescriptor> color_array_from_parameter(
     const std::string& parameter) {
   if (parameter.empty() || parameter.size() > 8192 || parameter.size() % 2)
     return Result<ColorArrayDescriptor>(
-        invalid("invalid color parameter size"));
+        core_internal::invalid_domain("invalid color parameter size"));
   const auto digit = [](char c) {
     return c >= '0' && c <= '9'   ? c - '0'
            : c >= 'a' && c <= 'f' ? c - 'a' + 10
@@ -298,7 +301,8 @@ Result<ColorArrayDescriptor> color_array_from_parameter(
   for (std::size_t i = 0; i < parameter.size(); i += 2) {
     const auto a = digit(parameter[i]), b = digit(parameter[i + 1]);
     if (a < 0 || b < 0)
-      return Result<ColorArrayDescriptor>(invalid("noncanonical color hex"));
+      return Result<ColorArrayDescriptor>(
+          core_internal::invalid_domain("noncanonical color hex"));
     facet.payload.push_back(static_cast<std::uint8_t>(a * 16 + b));
   }
   return decode(facet, true);
@@ -328,7 +332,7 @@ Status validate_color_array_value(const ColorArrayDescriptor& s,
                                   const Value& value, ErrorCode failure,
                                   const std::function<ErrorCode()>& stop) {
   if (!value.valid())
-    return invalid("invalid color-array Value");
+    return core_internal::invalid_domain("invalid color-array Value");
   const auto reader = [&](const auto& at) -> Result<double> {
     auto address = value.byte_address(at);
     if (!address.ok())

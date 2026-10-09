@@ -311,7 +311,19 @@ auto ExecutionDependencies::Impl::backward(const Record& record,
   }
   using Key =
       std::tuple<std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t>;
-  using Buffer = execution_internal::AccountedRegions;
+  struct BoxKey {
+    std::array<std::uint64_t, 16> dimensions{};
+    std::size_t rank = 0;
+    bool operator<(const BoxKey& other) const {
+      return std::lexicographical_compare(
+          dimensions.begin(), dimensions.begin() + 2 * rank,
+          other.dimensions.begin(), other.dimensions.begin() + 2 * other.rank);
+    }
+  };
+  struct Buffer {
+    execution_internal::AccountedRegions regions;
+    std::set<BoxKey, std::less<BoxKey>, ResourceAllocator<BoxKey>> mapped;
+  };
   std::map<Key, Buffer, std::less<Key>,
            ResourceAllocator<std::pair<const Key, Buffer>>>
       boxes;
@@ -364,7 +376,7 @@ auto ExecutionDependencies::Impl::backward(const Record& record,
     auto& buffer =
         boxes[{support.input, support.roles,
                static_cast<std::uint32_t>(support.target), support.slot}];
-    auto& selected = buffer.boxes;
+    auto& selected = buffer.regions.boxes;
     auto first = support.first, remaining_span = support.count;
     while (remaining_span) {
       if (!remaining--)
@@ -402,11 +414,11 @@ auto ExecutionDependencies::Impl::backward(const Record& record,
                 dimensions[0].offset) {
           auto merged = selected.back().dimensions()[0];
           merged.extent += dimensions[0].extent;
-          auto status = buffer.replace_last(&merged, 1);
+          auto status = buffer.regions.replace_last(&merged, 1);
           if (!status.ok())
             return status;
         } else {
-          auto status = buffer.append(dimensions.data(), shape.size());
+          auto status = buffer.regions.append(dimensions.data(), shape.size());
           if (!status.ok())
             return status;
         }
@@ -434,7 +446,38 @@ auto ExecutionDependencies::Impl::backward(const Record& record,
             boxes[{support.input, support.roles,
                    static_cast<std::uint32_t>(support.target), support.slot}];
         for (const auto& box : mapped->boxes()) {
-          auto appended = buffer.append(box.dimensions().data(), box.rank());
+          // Deduplicate within one (port, roles, target, slot) after validating
+          // the address and shape. Repeated taps still pay bounded index work.
+          std::uint64_t levels = 1;
+          for (auto size = buffer.mapped.size(); size; size >>= 1)
+            levels += 2;
+          const auto cost = 2 * box.rank() * (levels + 1);
+          if (cost > remaining)
+            return Status{ErrorCode::ResourceExhausted,
+                          "mapped support indexing limit"};
+          remaining -= cost;
+          if (limits.cancellation.cancelled())
+            return Status{ErrorCode::Cancelled, {}};
+          auto charged =
+              limits.consume_work
+                  ? limits.consume_work(cost)
+                  : (resource_internal::metadata_budget()
+                         ? resource_internal::metadata_budget()->consume({cost})
+                         : Status::success());
+          if (!charged.ok())
+            return charged;
+          BoxKey key;
+          key.rank = box.rank();
+          for (std::size_t axis = 0; axis < box.rank(); ++axis) {
+            key.dimensions[2 * axis] = box.dimensions()[axis].offset;
+            key.dimensions[2 * axis + 1] = box.dimensions()[axis].extent;
+          }
+          if (!buffer.mapped.insert(key).second)
+            continue;
+          if (buffer.regions.boxes.size() >= limits.maximum_boxes)
+            return Status{ErrorCode::ResourceExhausted, {}};
+          auto appended =
+              buffer.regions.append(box.dimensions().data(), box.rank());
           if (!appended.ok())
             return appended;
         }
@@ -468,7 +511,8 @@ auto ExecutionDependencies::Impl::backward(const Record& record,
     const auto [port, roles, kind, slot] = item.first;
     auto shape = domain(record, {port, roles, 0, 0,
                                  static_cast<ResultSupportTarget>(kind), slot});
-    auto set = Footprint::from_regions(shape, item.second.boxes, limits);
+    auto set =
+        Footprint::from_regions(shape, item.second.regions.boxes, limits);
     if (!set.ok())
       return Result<ResourceVector<DependencyNeed>>(set.status());
     answer.push_back({port, roles, set.take_value(), {}, kind, slot});

@@ -21,6 +21,8 @@ Result<ResourceLease> reserve_capacity(const ResourceBudget& budget,
 
 预算跟踪 Host、Device、Shared、Metadata、Referenced、Disk、Entries、Files、I/O slots、Queue 和 Payload。部分维度描述同一物理字节：Host 包含 Metadata 与 Shared，Device 包含 Shared，不能把重叠计数相加。context 的 Payload 另受 `maximum_live_bytes` 限制；调用方原有存储通过 Referenced 单独准入，不计入 Payload 子限额。
 
+在内核内部，data 层拥有 Payload reservation：`src/lib/data/memory_budget.hpp` 中的内部类型 `MemoryBudget` 与 `MemoryReservation` 实现 Payload capacity 以及 storage 和 Result 保留的 reservation lease。借用 Run 或 context state 的准入保留在 execution 层。内部 helper `ScopedMemoryAdmission` 向 allocator 提供可复制的准入 callback，其 owner 在借用的 state 退休前关闭该 callback；payload lease 不保留它。`test_resource_internals` 直接测试该 helper。公共 resource 与 storage 头文件只前向声明这些类型，布局和签名保持不变。
+
 ## 核心数据结构与内存布局 (Data Layout & Memory)
 
 `ResourceLease` 的副本共享同一 reservation，容量直到最后一个 lease owner 销毁后才释放。`grow` 原子地准入增量；只有关联存储释放后调用方才可 `shrink`。容量不足立即返回带 capacity-limit 状态的 `ResourceExhausted`，不会等待其他 owner 释放。
@@ -76,6 +78,8 @@ GPU context 在创建 device 时使用 execution context 的资源 root 进行 n
 托管 native metadata 准入失败后，device 清空 native pipeline cache 并重试一次。GPU payload 准入可先回收可丢弃的待写磁盘缓存和 result-cache owner，再原子预留实际 native capacity。这些恢复路径不会重试 operation callback。
 
 `TemporaryStorage` 拥有私有、无缓冲的临时文件，并以字节偏移寻址。编码 extent 分别按 4096 字节取整；磁盘限额统计编码文件 capacity，不统计文件系统块。读取有范围和窗口上限、同步执行，返回不可变 owner buffer，并让文件和 root lease 保持存活。追加前先预留容量；回滚无法确认时将 reservation 隔离到文件成功关闭。冻结前缀不可覆盖，seal 后不能继续生产。取消阻止新 I/O，已提交的同步调用结束后才释放 owner。
+
+`TemporaryStorage` 在创建文件前以及每次 append、write 或 read 前向当前线程的 I/O protocol fence 请求许可。该 fence 是 core 层的同步 thread-local capability：owner 提供策略，状态在 scope 退出前处于借用状态，嵌套 scope 退出时恢复上一层。未安装 scope 时 I/O 照常进行。Execution 在受 fence 保护的 Result callback 周围安装绑定 callback failure code 与 failure latch 的 scope。在该 callback 内调用 `TemporaryStorage` 属于强制 I/O protocol violation，会在文件改变前以 `InvalidArgument`、`UnauthorizedRead` 和 Protocol/Group detail 失败。此前已记录的失败仍是报告的首个原因，例如先前的 `ResourceExhausted` 与 `CapacityLimit`；latch 记录的 violation 会否决 CPU retry。
 
 `preserve_output_views` operation 在仿射 view 覆盖输入需求时可以发布该 view。同一 owner 的兼容 fragment 只有经地址映射验证覆盖关系后才可合并。root 外部的源 storage 通过 Referenced lease 计费；root allocator 已拥有的源 storage 保持原有 Payload 和 Host 计账，不重复计入 Referenced。新分配的输出 backing 由活动输出 allocator 计费。该选项适用于 CPU Atomic staged 或 Whole 执行，排除 GPU 和 joint 执行。`requires_input_views` 会进一步要求 Whole 执行。
 

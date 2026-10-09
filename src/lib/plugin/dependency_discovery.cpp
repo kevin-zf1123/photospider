@@ -8,13 +8,12 @@
 #include <utility>
 #include <vector>
 
+#include "core/status_helpers.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal {
 namespace {
-Status invalid(const char* message) {
-  return Status::failure(ErrorCode::InvalidArgument, message);
-}
+
 std::uint64_t word(const std::uint8_t* bytes, unsigned width) {
   std::uint64_t value = 0;
   for (unsigned i = 0; i < width; ++i)
@@ -30,16 +29,17 @@ Status visit_discovery_records(
     return {ErrorCode::Cancelled, {}};
   const auto size = 16 + static_cast<std::uint64_t>(capacity) * 144;
   if (!visit || !capacity || capacity > 65536 || table.bytes().size() != size)
-    return invalid("invalid GPU discovery allocation");
+    return core_internal::invalid_argument("invalid GPU discovery allocation");
   const auto* bytes = table.bytes().data();
   const auto count = word(bytes, 4), overflow = word(bytes + 4, 4);
   if (word(bytes + 8, 8) || overflow > 1 || count > candidates)
-    return invalid("invalid GPU discovery header");
+    return core_internal::invalid_argument("invalid GPU discovery header");
   if (overflow)
     return Status::failure(ErrorCode::ResourceExhausted,
                            "GPU discovery request table overflow");
   if (count > capacity || count > limits.maximum_boxes)
-    return invalid("invalid GPU discovery request count");
+    return core_internal::invalid_argument(
+        "invalid GPU discovery request count");
   for (std::uint64_t i = 0; i < count; ++i) {
     if (limits.cancellation.cancelled())
       return {ErrorCode::Cancelled, {}};
@@ -51,13 +51,13 @@ Status visit_discovery_records(
     record.slot = word(row + 12, 4);
     if (!record.roles || (record.roles & ~7U) || !record.rank ||
         record.rank > 8)
-      return invalid("invalid GPU discovery record");
+      return core_internal::invalid_argument("invalid GPU discovery record");
     for (unsigned axis = 0; axis < 8; ++axis) {
       record.offsets[axis] = word(row + 16 + axis * 8, 8);
       record.extents[axis] = word(row + 80 + axis * 8, 8);
       if (axis < record.rank ? !record.extents[axis]
                              : record.offsets[axis] || record.extents[axis])
-        return invalid("invalid GPU discovery axis");
+        return core_internal::invalid_argument("invalid GPU discovery axis");
     }
     auto status = visit(record);
     if (!status.ok())
@@ -84,12 +84,14 @@ Result<ResourceVector<ResultTensorNeed>> decode_result_discovery(
         if (row.input >= query.inputs.size() ||
             !query.inputs[row.input].result_schema ||
             row.slot >= query.inputs[row.input].result_schema->tensors.size())
-          return invalid("invalid Result GPU discovery input slot");
+          return core_internal::invalid_argument(
+              "invalid Result GPU discovery input slot");
         const auto& spec =
             query.inputs[row.input].result_schema->tensors[row.slot];
         const auto rank = spec.batch_axes.size() + spec.descriptor.shape.size();
         if (row.rank != rank)
-          return invalid("invalid Result GPU discovery rank");
+          return core_internal::invalid_argument(
+              "invalid Result GPU discovery rank");
         auto lease = resources.reserve(ResourceCapacity::host(
             sizeof(Region) +
                 rank * (sizeof(RegionDimension) + sizeof(std::uint64_t)),
@@ -103,7 +105,8 @@ Result<ResourceVector<ResultTensorNeed>> decode_result_discovery(
         for (unsigned axis = 0; axis < rank; ++axis) {
           if (row.offsets[axis] >= shape[axis] ||
               row.extents[axis] > shape[axis] - row.offsets[axis])
-            return invalid("GPU discovery rectangle outside Result domain");
+            return core_internal::invalid_argument(
+                "GPU discovery rectangle outside Result domain");
           dimensions.push_back({row.offsets[axis], row.extents[axis]});
         }
         auto raw = Footprint::from_regions(
@@ -114,7 +117,8 @@ Result<ResourceVector<ResultTensorNeed>> decode_result_discovery(
         if (!closed.ok())
           return closed.status();
         if (closed.value() != raw.value())
-          return invalid("GPU discovery omits Result tuple closure");
+          return core_internal::invalid_argument(
+              "GPU discovery omits Result tuple closure");
         const Key key{row.input, row.slot, row.roles};
         auto found = groups.find(key);
         if (found == groups.end()) {

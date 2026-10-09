@@ -16,7 +16,7 @@ ctest --test-dir build/check --output-on-failure
 
 ## 安装包 consumer
 
-`test_installed_consumer` 将当前构建的 package 安装到隔离 prefix，使用 `find_package(Photospider CONFIG REQUIRED)` 配置 `tests/consumer`，再构建并运行默认 package gate。Gate 只使用安装后的 public headers 和导出 targets。Consumer 注册声明同时派生测试命令和构建依赖，包括 fixture DSO。需要 private symbols 的测试链接非安装的 static test library，该库使用正常 kernel objects 构建；fault-injection 变体只替换包含对应 test seam 的编译单元。
+`test_installed_consumer` 将当前构建的 package 安装到隔离 prefix，使用 `find_package(Photospider CONFIG REQUIRED)` 配置 `tests/consumer`，再构建并运行默认 package gate。Gate 只使用安装后的 public headers 和导出 targets。Consumer 注册声明同时派生测试命令和构建依赖，包括 fixture DSO。需要 private symbols 的测试链接非安装的 static test library，该库使用正常 kernel objects 构建；fault-injection 变体只替换包含对应 test seam 的编译单元。该库同时编译私有 execution test hooks，并发测试借此等待真实事件，不依赖计时。Phase work gate 让 callback 线程停在 executor poll 内选定的一次正值 work 计费处。Shared-join event 在 waiter 取得 shared producer 的 lease 后触发。Operation fixture DSO 导出 operation ABI 之外的私有 arm、wait 和 release 符号，用于挂起 native callback 直到测试放行；放行后 callback 调用真实的 cancellation service。本地注册的 `test_computed_scalar_sharing`（`test_computed_scalar --sharing-only`）使用 `PHOTOSPIDER_LOCAL_EXECUTION_SYNC_TESTS` 构建，覆盖共享 computed scalar 的某一调用方取消。安装测试 `installed_computed_scalar` 只针对安装后的 public package 构建同一源码，不含这些 hooks，并拒绝任何命令行参数。
 
 Consumer 项目提供两个明确 target：
 
@@ -27,7 +27,7 @@ cmake --build build/consumer-build --target run_photospider_consumer
 cmake --build build/consumer-build --target run_photospider_consumer_all
 ```
 
-`run_photospider_consumer` 运行 12 项核心 package gate。`run_photospider_consumer_all` 构建已注册的 installed targets 并运行全部 40 项 installed tests，其中包含可选硬件检查。设备不可用时，测试使用已注册的 skip code 77。Skip 表示没有执行对应硬件路径。
+`run_photospider_consumer` 运行 12 项核心 package gate。`run_photospider_consumer_all` 构建已注册的 installed targets 并运行全部 39 项 installed tests，其中包含可选硬件检查。设备不可用时，测试使用已注册的 skip code 77。Skip 表示没有执行对应硬件路径。
 
 顶层 installed gate 在配置 kernel build 后通过 CTest 运行。其 nested configure 会收到当前 generator、platform、toolset、configuration 和 sanitizer mode。匹配的 sanitizer instrumentation 会进入 consumer 的 C/C++ 编译和链接步骤，不会进入安装 package 导出文件。仓内及 installed consumer 的 `MODULE` fixture 使用相同的 sanitizer instrumentation；C11 operation fixture 仍以 C 编译。macOS ASAN 构建会在每个 module 中加入测试专用 C++ atexit owner，在 `dlclose` 执行模块退休期间、image 仍映射时注销 compiler-rt image globals。实现见[module instrumentation helper](../../../cmake/BehaviorTests.cmake)和[retirement owner](../../../tests/support/asan_module_retirement.cpp)。
 

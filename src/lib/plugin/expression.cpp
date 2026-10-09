@@ -18,13 +18,12 @@
 #include <utility>
 #include <vector>
 
+#include "core/status_helpers.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps::expression_internal {
 namespace {
-Status invalid(const char* message) {
-  return Status::failure(ErrorCode::InvalidArgument, message);
-}
+
 unsigned arity(Kind kind) {
   return kind == Kind::Add || kind == Kind::Subtract ||
                  kind == Kind::Multiply || kind == Kind::Divide ||
@@ -55,7 +54,8 @@ class Parser {
   Result<Expression> run() {
     if (source_.empty() || source_.size() > 4096 || coefficients_ < 1 ||
         coefficients_ > 256)
-      return Result<Expression>(invalid("expression source/table limit"));
+      return Result<Expression>(
+          core_internal::invalid_argument("expression source/table limit"));
     bool operand = true;
     while (position_ < source_.size()) {
       spaces();
@@ -68,7 +68,8 @@ class Parser {
         operand = false;
       } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
         if (!operand)
-          return Result<Expression>(invalid("missing expression operator"));
+          return Result<Expression>(
+              core_internal::invalid_argument("missing expression operator"));
         const auto begin = position_++;
         while (position_ < source_.size() &&
                ((source_[position_] >= 'a' && source_[position_] <= 'z') ||
@@ -103,36 +104,41 @@ class Parser {
           else if (name == "max")
             kind = Kind::Max;
           else
-            return Result<Expression>(invalid("unknown expression identifier"));
+            return Result<Expression>(core_internal::invalid_argument(
+                "unknown expression identifier"));
           spaces();
           if (!take('('))
-            return Result<Expression>(invalid("function requires parentheses"));
+            return Result<Expression>(core_internal::invalid_argument(
+                "function requires parentheses"));
           operators_.push_back({kind, true, true,
                                 static_cast<std::uint16_t>(values_.size()), 0});
         }
       } else if (c == '(') {
         if (!operand)
-          return Result<Expression>(
-              invalid("missing operator before parentheses"));
+          return Result<Expression>(core_internal::invalid_argument(
+              "missing operator before parentheses"));
         ++position_;
         operators_.push_back({Kind::Add, true, false,
                               static_cast<std::uint16_t>(values_.size()), 0});
       } else if (c == ')' || c == ',') {
         if (operand)
-          return Result<Expression>(invalid("empty expression argument"));
+          return Result<Expression>(
+              core_internal::invalid_argument("empty expression argument"));
         while (!operators_.empty() && !operators_.back().parenthesis)
           if (!reduce())
             return failure();
         if (operators_.empty())
-          return Result<Expression>(invalid("unmatched expression delimiter"));
+          return Result<Expression>(core_internal::invalid_argument(
+              "unmatched expression delimiter"));
         auto& frame = operators_.back();
         if (values_.size() != frame.base + frame.commas + 1U)
-          return Result<Expression>(invalid("malformed expression argument"));
+          return Result<Expression>(
+              core_internal::invalid_argument("malformed expression argument"));
         ++position_;
         if (c == ',') {
           if (!frame.function || ++frame.commas >= arity(frame.kind))
-            return Result<Expression>(
-                invalid("function argument count mismatch"));
+            return Result<Expression>(core_internal::invalid_argument(
+                "function argument count mismatch"));
           operand = true;
         } else {
           const auto closed = frame;
@@ -155,9 +161,11 @@ class Parser {
         else if (c == '^')
           kind = Kind::Power;
         else
-          return Result<Expression>(invalid("unsupported expression token"));
+          return Result<Expression>(
+              core_internal::invalid_argument("unsupported expression token"));
         if (operand && kind != Kind::Positive && kind != Kind::Negative)
-          return Result<Expression>(invalid("missing expression operand"));
+          return Result<Expression>(
+              core_internal::invalid_argument("missing expression operand"));
         ++position_;
         if (!operand) {
           while (!operators_.empty() && !operators_.back().parenthesis &&
@@ -172,22 +180,25 @@ class Parser {
       }
     }
     if (operand)
-      return Result<Expression>(invalid("incomplete expression"));
+      return Result<Expression>(
+          core_internal::invalid_argument("incomplete expression"));
     while (!operators_.empty()) {
       if (operators_.back().parenthesis)
-        return Result<Expression>(invalid("unclosed expression parentheses"));
+        return Result<Expression>(
+            core_internal::invalid_argument("unclosed expression parentheses"));
       if (!reduce())
         return failure();
     }
     if (values_.size() != 1)
-      return Result<Expression>(invalid("expression must have one result"));
+      return Result<Expression>(
+          core_internal::invalid_argument("expression must have one result"));
     return Result<Expression>(std::move(expression_));
   }
 
  private:
   Result<Expression> failure() {
-    return Result<Expression>(
-        invalid("invalid expression literal, arity, index or AST limit"));
+    return Result<Expression>(core_internal::invalid_argument(
+        "invalid expression literal, arity, index or AST limit"));
   }
   void spaces() {
     while (position_ < source_.size() &&

@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/status_helpers.hpp"
 #include "core/utf8_validation.hpp"
 #include "data/exact_numeric.hpp"
 #include "data/model_coordinates.hpp"
@@ -17,12 +18,7 @@
 namespace ps {
 namespace {
 constexpr char kKey[] = "photospider.tensor-description";
-Status invalid(const char* message) {
-  return {ErrorCode::InvalidArgument,
-          message,
-          FailureReason::InvalidDomain,
-          {FailureOrigin::Schema, FailureScope::Unspecified}};
-}
+
 bool valid_text(const std::string& text) {
   return text.size() <= 128 &&
          (text.empty() || core_internal::valid_utf8_key(text));
@@ -192,30 +188,36 @@ bool valid_channel(const TensorChannelDescription& channel) {
 }
 Status validate_structure(const TensorDescription& value) {
   if (!valid_coordinates(value.coordinates))
-    return invalid("invalid native model coordinates");
+    return core_internal::invalid_schema_domain(
+        "invalid native model coordinates");
   if (!valid_encoding(value.encoding) || !valid_sampling(value.sampling) ||
       !valid_extended(value.convention, value.configured,
                       value.analytic_binding, value.profile.has_value()))
-    return invalid("invalid encoding, sampling or configured interpretation");
+    return core_internal::invalid_schema_domain(
+        "invalid encoding, sampling or configured interpretation");
   if ((value.channel_axis && *value.channel_axis >= 8) ||
       value.channels.size() > 65535 || value.axes.size() > 8 ||
       (!value.channel_axis && !value.channels.empty()) ||
       (value.component && !valid_channel(*value.component)))
-    return invalid("invalid tensor description structure");
+    return core_internal::invalid_schema_domain(
+        "invalid tensor description structure");
   for (const auto& channel : value.channels)
     if (!valid_channel(channel))
-      return invalid("invalid tensor channel text");
+      return core_internal::invalid_schema_domain(
+          "invalid tensor channel text");
   for (const auto& axis : value.axes)
     if (!valid_text(axis.name) || !valid_text(axis.unit) ||
         !std::isfinite(axis.origin) || !std::isfinite(axis.step) ||
         axis.step <= 0)
-      return invalid("invalid tensor axis description");
+      return core_internal::invalid_schema_domain(
+          "invalid tensor axis description");
   for (const auto* field : {&value.model, &value.primaries, &value.transfer,
                             &value.reference, &value.association})
     if (!valid_text(*field))
-      return invalid("invalid tensor interpretation text");
+      return core_internal::invalid_schema_domain(
+          "invalid tensor interpretation text");
   if (value.groups.size() > 128)
-    return invalid("too many color groups");
+    return core_internal::invalid_schema_domain("too many color groups");
   for (const auto& group : value.groups) {
     if (!valid_text(group.name) || group.name.empty() ||
         group.indices.empty() ||
@@ -229,7 +231,8 @@ Status validate_structure(const TensorDescription& value) {
            value.association == "premultiplied" && group.alpha &&
            (group.interpretation.model == "rgb" ||
             group.interpretation.model == "gray"))))
-      return invalid("invalid explicit color group");
+      return core_internal::invalid_schema_domain(
+          "invalid explicit color group");
     const std::map<std::string, std::vector<std::string>> roles{
         {"rgb", {"red", "green", "blue"}},
         {"xyz", {"x", "y", "z"}},
@@ -247,13 +250,15 @@ Status validate_structure(const TensorDescription& value) {
     const auto expected = roles.find(group.interpretation.model);
     if (expected == roles.end() ||
         expected->second.size() != group.components.size())
-      return invalid("unknown or incomplete color-group model");
+      return core_internal::invalid_schema_domain(
+          "unknown or incomplete color-group model");
     std::set<std::string> actual_roles;
     for (const auto& c : group.components)
       actual_roles.insert(c.role);
     if (actual_roles !=
         std::set<std::string>(expected->second.begin(), expected->second.end()))
-      return invalid("incomplete color-group roles");
+      return core_internal::invalid_schema_domain(
+          "incomplete color-group roles");
     const auto& interpretation = group.interpretation;
     if ((interpretation.model == "rgb" && !interpretation.profile &&
          !interpretation.configured &&
@@ -265,17 +270,20 @@ Status validate_structure(const TensorDescription& value) {
          !interpretation.profile && !interpretation.configured &&
          !interpretation.white) ||
         (interpretation.model == "cmyk" && !interpretation.profile))
-      return invalid("incomplete color-group interpretation");
+      return core_internal::invalid_schema_domain(
+          "incomplete color-group interpretation");
     if (interpretation.analytic_binding) {
       const auto& b = *interpretation.analytic_binding;
       if (b.model != interpretation.model ||
           b.roles.size() != group.components.size())
-        return invalid("analytic binding model/order mismatch");
+        return core_internal::invalid_schema_domain(
+            "analytic binding model/order mismatch");
       for (std::size_t i = 0; i < b.roles.size(); ++i)
         if (b.roles[i] != group.components[i].role ||
             (!group.components[i].unit.empty() &&
              b.units[i] != group.components[i].unit))
-          return invalid("analytic binding component units mismatch");
+          return core_internal::invalid_schema_domain(
+              "analytic binding component units mismatch");
     }
     std::optional<TensorSampling> sampling = value.sampling;
     for (std::size_t i = 0; i < group.components.size(); ++i) {
@@ -283,14 +291,16 @@ Status validate_structure(const TensorDescription& value) {
       if (!current && group.indices[i] < value.channels.size())
         current = value.channels[group.indices[i]].sampling;
       if (sampling && current && sampling->grid != current->grid)
-        return invalid("group sampling grids disagree");
+        return core_internal::invalid_schema_domain(
+            "group sampling grids disagree");
       if (current)
         sampling = current;
     }
     if (group.alpha && *group.alpha < value.channels.size()) {
       const auto& alpha_sampling = value.channels[*group.alpha].sampling;
       if (sampling && alpha_sampling && sampling->grid != alpha_sampling->grid)
-        return invalid("group alpha sampling grid disagrees");
+        return core_internal::invalid_schema_domain(
+            "group alpha sampling grid disagrees");
     }
     std::set<std::uint64_t> seen;
     for (std::size_t i = 0; i < group.indices.size(); ++i)
@@ -298,7 +308,8 @@ Status validate_structure(const TensorDescription& value) {
           !valid_channel(group.components[i]) ||
           group.components[i].interpretation ||
           (group.alpha && *group.alpha == group.indices[i]))
-        return invalid("invalid group component indices");
+        return core_internal::invalid_schema_domain(
+            "invalid group component indices");
   }
   const auto compatible_text = [](const std::string& a, const std::string& b) {
     return a.empty() || b.empty() || a == b;
@@ -336,7 +347,8 @@ Status validate_structure(const TensorDescription& value) {
           !compatible_text(old.unit, c.unit) ||
           (old.interpretation &&
            !compatible_interpretation(*old.interpretation, *c.interpretation)))
-        return invalid("group conflicts with channel or overlapping group");
+        return core_internal::invalid_schema_domain(
+            "group conflicts with channel or overlapping group");
       if (!c.name.empty())
         old.name = c.name;
       if (!c.role.empty())
@@ -355,7 +367,8 @@ Status validate_structure(const TensorDescription& value) {
       const auto& incoming = *c.interpretation;
       if (!data_internal::overlay_model_coordinates(&merged.coordinates,
                                                     incoming.coordinates, true))
-        return invalid("group conflicts with channel or overlapping group");
+        return core_internal::invalid_schema_domain(
+            "group conflicts with channel or overlapping group");
       for (auto pair :
            {std::make_pair(&merged.model, &incoming.model),
             std::make_pair(&merged.primaries, &incoming.primaries),
@@ -878,8 +891,8 @@ Result<ValueFacet> encode_tensor_description(
   if (extended)
     put_coordinates(&bytes, description.coordinates);
   if (bytes.size() > 4096)
-    return Result<ValueFacet>(
-        invalid("tensor description exceeds facet bound"));
+    return Result<ValueFacet>(core_internal::invalid_schema_domain(
+        "tensor description exceeds facet bound"));
   return Result<ValueFacet>(std::move(facet));
 }
 
@@ -890,17 +903,20 @@ Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
       facet.payload[0] != 'T' || facet.payload[1] != 'D' ||
       facet.payload[2] != 'M' ||
       facet.payload[3] != static_cast<std::uint8_t>('0' + facet.version))
-    return Answer(invalid("invalid tensor description facet"));
+    return Answer(core_internal::invalid_schema_domain(
+        "invalid tensor description facet"));
   Reader reader{facet.payload, 4, facet.version == 5};
   TensorDescription value;
   std::uint8_t axis = 0, has_component = 0, axes = 0;
   std::uint16_t count = 0;
   if (!reader.byte(&axis) || (axis != 255 && axis >= 8) || !reader.u16(&count))
-    return Answer(invalid("invalid tensor description header"));
+    return Answer(core_internal::invalid_schema_domain(
+        "invalid tensor description header"));
   if (axis != 255)
     value.channel_axis = axis;
   if (count > (facet.payload.size() - reader.offset) / 3)
-    return Answer(invalid("truncated tensor channel table"));
+    return Answer(
+        core_internal::invalid_schema_domain("truncated tensor channel table"));
   if (const auto* root = resource_internal::metadata_budget()) {
     // Each channel has a six-byte minimum encoding. The retained channels,
     // validation assertion copies and map nodes are charged separately from
@@ -920,90 +936,112 @@ Result<TensorDescription> decode_tensor_description(const ValueFacet& facet) {
   value.channels.resize(count);
   for (auto& channel : value.channels)
     if (!reader.channel(&channel))
-      return Answer(invalid("invalid tensor channel table"));
+      return Answer(
+          core_internal::invalid_schema_domain("invalid tensor channel table"));
   if (!reader.byte(&has_component) || has_component > 1)
-    return Answer(invalid("invalid tensor component marker"));
+    return Answer(core_internal::invalid_schema_domain(
+        "invalid tensor component marker"));
   if (has_component) {
     value.component.emplace();
     if (!reader.channel(&*value.component))
-      return Answer(invalid("invalid tensor component"));
+      return Answer(
+          core_internal::invalid_schema_domain("invalid tensor component"));
   }
   if (!reader.byte(&axes) || axes > 8)
-    return Answer(invalid("invalid tensor axis count"));
+    return Answer(
+        core_internal::invalid_schema_domain("invalid tensor axis count"));
   value.axes.resize(axes);
   for (auto& described : value.axes)
     if (!reader.text(&described.name) || !reader.text(&described.unit) ||
         !reader.f64(&described.origin) || !reader.f64(&described.step))
-      return Answer(invalid("invalid tensor axis data"));
+      return Answer(
+          core_internal::invalid_schema_domain("invalid tensor axis data"));
   for (auto* field : {&value.model, &value.primaries, &value.transfer,
                       &value.reference, &value.association})
     if (!reader.text(field))
-      return Answer(invalid("invalid tensor interpretation"));
+      return Answer(core_internal::invalid_schema_domain(
+          "invalid tensor interpretation"));
   std::uint8_t present = 0;
   if (!reader.byte(&present) || present > 1)
-    return Answer(invalid("invalid tensor white marker"));
+    return Answer(
+        core_internal::invalid_schema_domain("invalid tensor white marker"));
   if (present) {
     value.white.emplace();
     for (auto& number : *value.white)
       if (!reader.f64(&number))
-        return Answer(invalid("truncated tensor white"));
+        return Answer(
+            core_internal::invalid_schema_domain("truncated tensor white"));
   }
   if (!reader.byte(&present) || present > 1)
-    return Answer(invalid("invalid tensor primaries marker"));
+    return Answer(core_internal::invalid_schema_domain(
+        "invalid tensor primaries marker"));
   if (present) {
     value.primaries_xy.emplace();
     for (auto& number : *value.primaries_xy)
       if (!reader.f64(&number))
-        return Answer(invalid("truncated tensor primaries"));
+        return Answer(
+            core_internal::invalid_schema_domain("truncated tensor primaries"));
   }
   if (!reader.byte(&present) || present > 1)
-    return Answer(invalid("invalid tensor profile marker"));
+    return Answer(
+        core_internal::invalid_schema_domain("invalid tensor profile marker"));
   if (present) {
     value.profile.emplace();
     if (!reader.u64(&value.profile->byte_length) ||
         facet.payload.size() - reader.offset < value.profile->sha256.size())
-      return Answer(invalid("truncated tensor profile identity"));
+      return Answer(core_internal::invalid_schema_domain(
+          "truncated tensor profile identity"));
     for (auto& byte : value.profile->sha256)
       if (!reader.byte(&byte))
-        return Answer(invalid("truncated tensor profile identity"));
+        return Answer(core_internal::invalid_schema_domain(
+            "truncated tensor profile identity"));
   }
   std::uint16_t group_count = 0;
   if (!reader.u16(&group_count) || group_count > 128)
-    return Answer(invalid("invalid group count"));
+    return Answer(core_internal::invalid_schema_domain("invalid group count"));
   if (group_count > (facet.payload.size() - reader.offset) / 15)
-    return Answer(invalid("truncated tensor group table"));
+    return Answer(
+        core_internal::invalid_schema_domain("truncated tensor group table"));
   value.groups.resize(group_count);
   for (auto& group : value.groups) {
     std::uint16_t count = 0;
     if (!reader.text(&group.name) || !reader.u16(&count) || count > 64)
-      return Answer(invalid("invalid group header"));
+      return Answer(
+          core_internal::invalid_schema_domain("invalid group header"));
     if (count > (facet.payload.size() - reader.offset) / 14)
-      return Answer(invalid("truncated group components"));
+      return Answer(
+          core_internal::invalid_schema_domain("truncated group components"));
     group.indices.resize(count);
     group.components.resize(count);
     for (std::size_t i = 0; i < count; ++i)
       if (!reader.u64(&group.indices[i]) ||
           !reader.channel(&group.components[i]))
-        return Answer(invalid("invalid group components"));
+        return Answer(
+            core_internal::invalid_schema_domain("invalid group components"));
     if (!reader.interpretation(&group.interpretation) ||
         !reader.byte(&present) || present > 1)
-      return Answer(invalid("invalid group interpretation"));
+      return Answer(
+          core_internal::invalid_schema_domain("invalid group interpretation"));
     if (present) {
       group.alpha.emplace();
       if (!reader.u64(&*group.alpha))
-        return Answer(invalid("invalid group alpha"));
+        return Answer(
+            core_internal::invalid_schema_domain("invalid group alpha"));
     }
   }
   if (!reader.encoding(&value.encoding) || !reader.sampling(&value.sampling) ||
       !reader.extended_space(&value.convention, &value.configured,
                              &value.analytic_binding) ||
       (reader.extended && !reader.coordinates(&value.coordinates)))
-    return Answer(invalid("invalid extended tensor descriptions"));
+    return Answer(core_internal::invalid_schema_domain(
+        "invalid extended tensor descriptions"));
   if (reader.offset != facet.payload.size() || !validate_structure(value).ok())
-    return Answer(invalid("noncanonical tensor description"));
+    return Answer(core_internal::invalid_schema_domain(
+        "noncanonical tensor description"));
   auto canonical = encode_tensor_description(value);
   if (!canonical.ok() || canonical.value().payload != facet.payload)
-    return Answer(invalid("noncanonical tensor description bytes"));
+    return Answer(core_internal::invalid_schema_domain(
+        "noncanonical tensor description bytes"));
   return Answer(std::move(value));
 }
 
@@ -1025,7 +1063,8 @@ Result<std::string> tensor_description_parameter(
 Result<TensorDescription> tensor_description_from_parameter(
     const std::string& parameter) {
   if (parameter.size() < 18 || parameter.size() > 8192 || parameter.size() % 2)
-    return Result<TensorDescription>(invalid("invalid tensor override length"));
+    return Result<TensorDescription>(
+        core_internal::invalid_schema_domain("invalid tensor override length"));
   ValueFacet facet;
   facet.key = kKey;
   facet.version = 4;
@@ -1040,7 +1079,8 @@ Result<TensorDescription> tensor_description_from_parameter(
   for (std::size_t i = 0; i < parameter.size(); i += 2) {
     const auto high = nibble(parameter[i]), low = nibble(parameter[i + 1]);
     if (high < 0 || low < 0)
-      return Result<TensorDescription>(invalid("invalid tensor override hex"));
+      return Result<TensorDescription>(
+          core_internal::invalid_schema_domain("invalid tensor override hex"));
     facet.payload.push_back(static_cast<std::uint8_t>((high << 4) | low));
   }
   if (facet.payload.size() >= 4 && facet.payload[3] == '5')
@@ -1057,7 +1097,8 @@ Status validate_tensor_description(const TensorDescription& description,
   if (rank == 0 || rank > 8 ||
       (description.channel_axis && *description.channel_axis >= rank) ||
       (!description.axes.empty() && description.axes.size() != rank))
-    return invalid("tensor description disagrees with shape");
+    return core_internal::invalid_schema_domain(
+        "tensor description disagrees with shape");
   if (!description.channels.empty() &&
       description.channels.size() !=
           descriptor.shape[*description.channel_axis])
@@ -1117,28 +1158,31 @@ Status validate_tensor_description(const TensorDescription& description,
       if (!compatible_encoding(e))
         return {ErrorCode::TypeMismatch, "group encoding exceeds dtype"};
       if (integer_dtype && !e)
-        return invalid(
+        return core_internal::invalid_schema_domain(
             "complete integer color group requires explicit decoder");
     }
   std::set<std::string> names;
   for (const auto& group : description.groups) {
     if (!names.insert(group.name).second)
-      return invalid("group requires unique name");
+      return core_internal::invalid_schema_domain("group requires unique name");
     // A rank-preserving, single Gray plane has no invented channel axis.
     // Only the unique implicit component zero is addressable in that form.
     if (!description.channel_axis &&
         (description.groups.size() != 1 ||
          group.interpretation.model != "gray" ||
          group.indices != std::vector<std::uint64_t>{0} || group.alpha))
-      return invalid("axis-free group must be one Gray component");
+      return core_internal::invalid_schema_domain(
+          "axis-free group must be one Gray component");
     const auto count = description.channel_axis
                            ? descriptor.shape[*description.channel_axis]
                            : 1;
     for (auto index : group.indices)
       if (index >= count)
-        return invalid("group index exceeds channel count");
+        return core_internal::invalid_schema_domain(
+            "group index exceeds channel count");
     if (group.alpha && *group.alpha >= count)
-      return invalid("group alpha exceeds channel count");
+      return core_internal::invalid_schema_domain(
+          "group alpha exceeds channel count");
   }
   return Status::success();
 }

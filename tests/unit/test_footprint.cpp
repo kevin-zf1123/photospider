@@ -62,6 +62,45 @@ int exhaustive() {
   }
   return 0;
 }
+int single_rectangle_limits() {
+  for (std::size_t rank = 1; rank <= 8; ++rank) {
+    const Point shape(rank, 4);
+    std::vector<ps::RegionDimension> whole(rank, {0, 4});
+    auto left = whole, right = whole;
+    left[0] = {0, 2};
+    right[0] = {2, 2};
+    auto canonical = Footprint::from_regions(shape, {Region(whole)});
+    auto split = Footprint::from_regions(shape, {Region(left), Region(right)});
+    PS_CHECK(canonical.ok() && split.ok() &&
+             canonical.value() == split.value());
+  }
+  ps::FootprintLimits limits;
+  std::uint64_t measured = 999;
+  limits.maximum_work = 0;
+  PS_CHECK(Footprint::from_regions({4}, {Region({{0, 2}})}, limits, &measured)
+                   .status()
+                   .code == ps::ErrorCode::ResourceExhausted &&
+           measured == 0);
+  limits.maximum_work = 100;
+  limits.maximum_boxes = 0;
+  PS_CHECK(
+      Footprint::from_regions({4}, {Region({{0, 2}})}, limits).status().code ==
+      ps::ErrorCode::ResourceExhausted);
+  limits.maximum_boxes = 1;
+  ps::CancellationSource stop;
+  unsigned calls = 0;
+  limits.cancellation = stop.token();
+  limits.consume_work = [&](std::uint64_t) {
+    if (++calls == 2)
+      stop.cancel();
+    return Status::success();
+  };
+  auto cancelled = Footprint::from_regions(
+      {4}, {Region({{0, 2}}), Region({{2, 0}})}, limits, &measured);
+  PS_CHECK(cancelled.status().code == ps::ErrorCode::Cancelled &&
+           measured == 2);
+  return 0;
+}
 int bounds() {
   using ps::ErrorCode;
   const Point huge{UINT64_MAX, UINT64_MAX, 7, 2, 3, 4, 5, 6};
@@ -124,5 +163,6 @@ int bounds() {
 int main() {
   PS_CHECK(exhaustive() == 0);
   PS_CHECK(bounds() == 0);
+  PS_CHECK(single_rectangle_limits() == 0);
   return 0;
 }

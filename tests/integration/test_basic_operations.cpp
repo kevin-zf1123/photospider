@@ -9,12 +9,12 @@
 #include <limits>
 #include <memory>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
 #include "foundations_workflow/workflow.hpp"
 #include "numeric_workflow/result_fixture.hpp"
+#include "support/execution_sync_fixture.hpp"
 
 namespace {
 using namespace foundations;  // NOLINT(build/namespaces)
@@ -589,24 +589,23 @@ void result_contracts() {
       prepare("analysis.histogram", {huge},
               {{"range_min", 0.}, {"range_max", 1.}, {"bins", INT64_C(4)}});
   const auto baseline_payload = root.statistics().live[ResourceKind::Payload];
-  const auto baseline_work = root.statistics().issued.work;
+  ps::test::PhaseWorkGate gate("analysis.histogram", 1024);
   CancellationSource stop;
-  auto active = std::async(std::launch::async, [&] {
+  std::future<ps::Result<ps::ExecutionResult>> active;
+  ps::test::OnExit cleanup([&] {
+    stop.cancel();
+    gate.release();
+    if (active.valid())
+      active.wait();
+  });
+  active = std::async(std::launch::async, [&] {
     return context.execute(counting.second, stop.token());
   });
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(3);
-  while (root.statistics().issued.work < baseline_work + 50000 &&
-         active.wait_for(std::chrono::milliseconds(0)) !=
-             std::future_status::ready &&
-         std::chrono::steady_clock::now() < deadline) {
-    std::this_thread::yield();
-  }
-  const bool progressed =
-      root.statistics().issued.work >= baseline_work + 50000;
+  const bool progressed = gate.wait();
   stop.cancel();
+  gate.release();
   auto cancelled = active.get();
-  require(progressed && !cancelled.ok() &&
+  require(progressed && gate.cancelled_in_service() && !cancelled.ok() &&
               cancelled.status().code == ErrorCode::Cancelled &&
               root.statistics().live[ResourceKind::Payload] == baseline_payload,
           "active histogram cancellation releases unpublished counters");

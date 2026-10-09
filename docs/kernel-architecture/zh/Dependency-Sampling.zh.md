@@ -43,7 +43,11 @@ Program 的状态、tensor windows、workspace、输出和 work 都计入 Root l
 
 当完整 spatial sample 的字节几何不可表示时，Result writer 会为请求区域使用 affine backing。因此，对 `Ho=Wo=2^40` 的 map 请求一个 sparse pixel 时，只需在 Root limits 内写四个 output samples，无需分配完整逻辑输出域；全域写入仍须满足 Root budget。下文的巨大 source case 也通过相同的稀疏映射避免枚举完整 source。
 
-`test_dependency_sampling` 覆盖五种 boundary、map frame/layer broadcast、三像素 identity map，以及从由 16 payload bytes 支持的 2^40 x 2^40 broadcast source 稀疏读取。它还检查零权重 tap 仍保留 dirty evidence、constant boundary tap 不请求 source payload、Empty 跳过非有限 map，以及 10x10 fixture 在执行前后测量到的 live payload 增量小于 1 MiB。该 fixture 增量不是 context payload 限额、峰值内存或 RSS 声明。Source 设置 `atomic_trailing_axes=2` 时，Validation 会闭包到完整 source row（fixture 中 `H=1,W=3`），Data 仍只覆盖选中 taps。零权重 typed tap 的 RGB 非有限分量会由 source validation 返回 `InvalidArgument`；非有限 map 坐标则先由算子返回 `OperationFailed`。四种 caller rounding mode 得到相同 tie 结果，并恢复调用方模式。测试还检查 work 准入后的 active cancellation 将 payload 释放回 baseline；context 退休后仍可从保留 Result 读取值 7，并确认 association 含两个 source。
+`test_dependency_sampling` 覆盖五种 boundary、map frame/layer broadcast、三像素 identity map，以及从由 16 payload bytes 支持的 2^40 x 2^40 broadcast source 稀疏读取。它还检查零权重 tap 仍保留 dirty evidence、constant boundary tap 不请求 source payload，以及 Empty 跳过非有限 map。Source 设置 `atomic_trailing_axes=2` 时，Validation 会闭包到完整 source row（fixture 中 `H=1,W=3`），Data 仍只覆盖选中 taps。零权重 typed tap 的 RGB 非有限分量会由 source validation 返回 `InvalidArgument`；非有限 map 坐标则先由算子返回 `OperationFailed`。四种 caller rounding mode 得到相同 tie 结果，并恢复调用方模式。context 退休后仍可从保留的 Result 读取值 7，且其 association 含两个 source。
+
+规模测试使用默认 `ExecutionOptions` 运行 10x10、15x15 和 20x20 map。每种尺寸使用独立 context，并在输入构建完成后取 baseline。所有 map 坐标均为 0.5，因此在 `clamp` 下每个输出像素读取三像素 source row 中的像素 0 和 1。测试检查每个输出通道，并要求 support 精确：map support 覆盖整个 map，source support 恰好覆盖像素 0 和 1。修改 source 像素 1 会使整个输出成为 potentially dirty，修改未使用的像素 2 则保持 clean。持有 Result 期间，live Payload 增量小于 1 MiB；释放后回到 baseline。Run 发出的 Root work 对 `P` 个输出像素保持低于 `256 * P * P`。该上限只是此 workload 的回归检查，不是通用的 STMap 复杂度保证；1 MiB 增量也不是 context payload 限额、峰值内存上限或 RSS 声明。
+
+取消在 50x50 map 上的两个位置测试。第一个位置在 callback body 结束后挂起 callback，取消 Run，要求返回 `Cancelled` 且 Payload 回到 baseline。第二个位置让 callback 线程停在一次 poll 的逐像素 tap 与通道循环内的一次正值 phase work 计费处，并在此处取消。该次 work 计费必须返回 `Cancelled`，Run 必须报告 `Cancelled`，Payload 必须回到 baseline。
 
 端到端动态 demand 与 radius 测试位于 [`dependency_workflows/demand.cpp`](../../../tests/integration/dependency_workflows/demand.cpp)、[`dynamic.cpp`](../../../tests/integration/dependency_workflows/dynamic.cpp) 和 [`dependency_workflow_fixture.hpp`](../../../tests/support/dependency_workflow_fixture.hpp)。这些源码是当前行为覆盖入口。
 
@@ -70,7 +74,7 @@ Scatter 每块最多 64 个 radius 样本，扫描完整 radius tensor。它保�
 
 Dependency relation 将每个输出样本映射到精确的 source Data 或 radius Control support。`close_samples` Validation 单独以 role 4 记录。即使 Data 请求为空，两个输入的 Descriptor relation 仍存在，因此 typed validation 与数值支持相互独立。
 
-每次 poll 向 Root 预留 32,768 字节 scratch 并计入 Run work。Continuation 使用 inline 数组保存至多 64 个候选索引，逐个处理请求 footprint 中的输出样本。每个和从正零开始，按 source 索引递增执行 Float64 左折叠；每次 poll 建立最近舍入和渐进下溢环境，然后恢复调用方浮点环境。非有限的命中 source、中间和溢出及非法的已观察 radius 返回 `OperationFailed`；typed Result validation 可使用 source `input_id` 和 `FailureReason::InvalidDomain` 返回 `InvalidArgument`。取消和资源耗尽保留各自状态码。
+每次 poll 向 Root 预留 32,768 字节 scratch。Continuation 通过 phase 计费的 work 扣减 Root。Coordinator 中的 Need 准入和 dependency projection 同时扣减 Root 与独立的 Run 级额度 `ExecutionOptions::maximum_dependency_work`（默认 1,048,576），因此一次 Run 累计的 Root work 不能与该额度直接比较。Continuation 使用 inline 数组保存至多 64 个候选索引，逐个处理请求 footprint 中的输出样本。每个和从正零开始，按 source 索引递增执行 Float64 左折叠；每次 poll 建立最近舍入和渐进下溢环境，然后恢复调用方浮点环境。非有限的命中 source、中间和溢出及非法的已观察 radius 返回 `OperationFailed`；typed Result validation 可使用 source `input_id` 和 `FailureReason::InvalidDomain` 返回 `InvalidArgument`。取消和资源耗尽保留各自状态码。
 
 Empty demand 执行静态 metadata specialization，并返回不请求 sample payload 的空 Result。非空 demand 中，builder 逐点私有发布，全部请求样本完成后只 seal 一次。seal 前失败或取消不会返回部分 Result。输出 coverage 对应请求 footprint `Q`；只有调用者请求完整域时才生成完整输出。
 
@@ -89,7 +93,7 @@ Coordinator 在每轮 poll 提供由当前 Result Needs 授权的 object/tensor 
 
 STMap 与 radius definitions 使用 `OperationDefinition::specialize_metadata` 执行静态 Result 校验。Registry 提供完整的 input Result metadata 和 parameters；specializer 校验声明的约束，并在执行前返回推导的 output schema。它不读取 tensor payload。`OperationRegistry::start_result` 随后校验已解析的 `ResultProgramQuery`，并调用 definition factory 创建 continuation。执行期间，`ResultContinuation::poll` 接收当前的 `ResultProgramPhase`，其中包含 callback 当前获准的 Result inputs 和 services；Coordinator 在各次 poll 之间履行 Needs。
 
-`tests/integration/test_dependency_sampling.cpp` 检查有 seed 的 gather/scatter 结果、精确 Data/Control/Validation support、输出位不变但依赖关系变化的 radius edit、typed 与 opaque facets、命中非有限值、有序求和、Empty demand、取消和 Root 回滚。`N=2^40` 的 broadcast view 可用每个输入 8 字节的 backing gather 最后一个样本，无需扫描远端 Control 值。[dependency workflow demand scenario](../../../tests/integration/dependency_workflows/demand.cpp) 检查 Result-based 动态编辑、demand 替换和保留输出行为。STMap 覆盖见上文。
+`tests/integration/test_dependency_sampling.cpp` 检查有 seed 的 gather/scatter 结果、精确 Data/Control/Validation support、输出位不变但依赖关系变化的 radius edit、typed 与 opaque facets、命中非有限值、有序求和、Empty demand、取消和 Root 回滚。对 100,000 样本的 scatter，取消分别在 callback body 结束后和 radius Control 元素循环内的 phase work 计费处测试；两种情况都返回 `Cancelled`，Payload 回到 baseline。`N=2^40` 的 broadcast view 可用每个输入 8 字节的 backing gather 最后一个样本，无需扫描远端 Control 值。[dependency workflow demand scenario](../../../tests/integration/dependency_workflows/demand.cpp) 检查 Result-based 动态编辑、demand 替换和保留输出行为。STMap 覆盖见上文。
 
 ## 算法观察组与数值诊断
 

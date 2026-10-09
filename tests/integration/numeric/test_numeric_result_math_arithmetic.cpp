@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "support/execution_sync_fixture.hpp"
 #include "support/result_numeric_observation_fixture.hpp"
 
 namespace {
@@ -123,34 +124,40 @@ void core_result_programs() {
       std::unique_lock<std::mutex> lock(mutex);
       entered = true;
       changed.notify_all();
-      changed.wait(lock, [&] { return resume; });
+      if (!changed.wait_for(lock, std::chrono::seconds(15),
+                            [&] { return resume; }))
+        return Status{ErrorCode::OperationFailed, "publication gate timeout"};
     }
     return Status::success();
   };
   CancellationSource producer_stop;
-  auto producer = std::async(std::launch::async, [&] {
+  ps::test::SharedJoinEvent joined_event("core.gpu_fallback_probe", 7);
+  std::future<Result<ExecutionResult>> producer, waiter;
+  ps::test::OnExit cleanup([&] {
+    producer_stop.cancel();
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      resume = true;
+      changed.notify_all();
+    }
+    if (producer.valid())
+      producer.wait();
+    if (waiter.valid())
+      waiter.wait();
+  });
+  producer = std::async(std::launch::async, [&] {
     return driver.context->execute(shared_frozen, producer_stop.token(),
                                    options);
   });
+  bool callback_entered;
   {
     std::unique_lock<std::mutex> lock(mutex);
-    require(changed.wait_for(lock, std::chrono::seconds(3),
-                             [&] { return entered; }),
-            "shared fallback producer reached dependency");
+    callback_entered = changed.wait_for(lock, std::chrono::seconds(5),
+                                        [&] { return entered; });
   }
-  const auto entries = driver.root.statistics().live[ResourceKind::Entries];
-  auto waiter = std::async(std::launch::async, [&] {
-    return driver.context->execute(shared_frozen);
-  });
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(3);
-  while (driver.root.statistics().live[ResourceKind::Entries] < entries + 2 &&
-         std::chrono::steady_clock::now() < deadline)
-    std::this_thread::yield();
-  const bool joined =
-      driver.root.statistics().live[ResourceKind::Entries] >= entries + 2;
-  const bool waiting = waiter.wait_for(std::chrono::milliseconds(20)) ==
-                       std::future_status::timeout;
+  waiter = std::async(std::launch::async,
+                      [&] { return driver.context->execute(shared_frozen); });
+  const bool joined = joined_event.wait();
   producer_stop.cancel();
   {
     std::lock_guard<std::mutex> lock(mutex);
@@ -160,7 +167,8 @@ void core_result_programs() {
   auto retired = producer.get();
   auto survived = take(waiter.get());
   require(
-      joined && waiting && retired.status().code == ErrorCode::Cancelled &&
+      callback_entered && joined &&
+          retired.status().code == ErrorCode::Cancelled &&
           read_bits(survived.results.at("out"), {2}) == 9 &&
           survived.diagnostics.shared_computations >= 1 &&
           survived.diagnostics.selected_backends.at({7, 0}) == Backend::Cpu,

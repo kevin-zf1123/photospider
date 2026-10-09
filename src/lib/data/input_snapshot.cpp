@@ -9,8 +9,8 @@
 #include <vector>
 
 #include "data/content_digest.hpp"
+#include "data/memory_budget.hpp"
 #include "data/value_validation.hpp"
-#include "execution/memory_budget.hpp"
 
 namespace ps {
 namespace {
@@ -121,7 +121,7 @@ Status validate_value(const Value& value,
 }  // namespace
 struct InputSnapshotStore::Impl {
   InputSnapshotStoreConfig config;
-  std::shared_ptr<execution_internal::MemoryBudget> budget;
+  std::shared_ptr<data_internal::MemoryBudget> budget;
 };
 struct InputSnapshot::Impl {
   ResourceBindings resources;
@@ -231,7 +231,7 @@ InputSnapshotStore::InputSnapshotStore(InputSnapshotStoreConfig config) {
   impl_ = std::make_shared<Impl>();
   impl_->config = config;
   impl_->budget =
-      std::make_shared<execution_internal::MemoryBudget>(config.maximum_bytes);
+      std::make_shared<data_internal::MemoryBudget>(config.maximum_bytes);
 }
 InputSnapshotStore::~InputSnapshotStore() = default;
 std::uint64_t InputSnapshotStore::live_bytes() const {

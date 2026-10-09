@@ -6,15 +6,14 @@
 #include <utility>
 #include <vector>
 
+#include "core/status_helpers.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/color_array.hpp"
 #include "photospider/data/tensor_description.hpp"
 
 namespace ps {
 namespace {
-Status invalid(const char* message) {
-  return {ErrorCode::InvalidArgument, message, FailureReason::InvalidDomain};
-}
+
 struct Stop {
   Status status;
 };
@@ -26,12 +25,12 @@ template <class T, class Work>
 void admit(const T* values, std::size_t count, ResourceVector<T>* out,
            const ResourceBudget& resources, Work work) {
   if (count && !values)
-    throw Stop{invalid("null resource handles")};
+    throw Stop{core_internal::invalid_domain("null resource handles")};
   out->reserve(count);
   for (std::size_t i = 0; i < count; ++i) {
     work(1);
     if (!values[i].valid())
-      throw Stop{invalid("invalid resource handle")};
+      throw Stop{core_internal::invalid_domain("invalid resource handle")};
     out->push_back(values[i]);
   }
   std::sort(out->begin(), out->end(), [&](const auto& a, const auto& b) {
@@ -47,12 +46,14 @@ void admit(const T* values, std::size_t count, ResourceVector<T>* out,
       if (prior.storage().get() != incoming.storage().get()) {
         auto a = prior.storage()->bytes(), b = incoming.storage()->bytes();
         if (a.size() != b.size())
-          throw Stop{invalid("resource identity collision")};
+          throw Stop{
+              core_internal::invalid_domain("resource identity collision")};
         for (std::size_t offset = 0; offset < a.size();) {
           const auto n = std::min<std::size_t>(1024, a.size() - offset);
           work(n);
           if (std::memcmp(a.data() + offset, b.data() + offset, n))
-            throw Stop{invalid("resource identity collision")};
+            throw Stop{
+                core_internal::invalid_domain("resource identity collision")};
           offset += n;
         }
       }
@@ -79,7 +80,8 @@ Result<T> lookup(const ResourceVector<T>& values,
                                     return value.identity() < key;
                                   });
   if (i == values.end() || !(i->identity() == id))
-    return Result<T>(invalid("unresolved immutable resource identity"));
+    return Result<T>(core_internal::invalid_domain(
+        "unresolved immutable resource identity"));
   return Result<T>(*i);
 }
 }  // namespace
@@ -148,23 +150,26 @@ std::size_t ResourceBindings::config_count() const noexcept {
 Result<IccProfile> ResourceBindings::icc_profile(
     const ColorProfileIdentity& id) const {
   return impl_ ? lookup(impl_->profiles, id)
-               : Result<IccProfile>(invalid("unresolved ICC profile identity"));
+               : Result<IccProfile>(core_internal::invalid_domain(
+                     "unresolved ICC profile identity"));
 }
 Result<OcioConfigResource> ResourceBindings::ocio_config(
     const ColorProfileIdentity& id) const {
   return impl_ ? lookup(impl_->configs, id)
-               : Result<OcioConfigResource>(
-                     invalid("unresolved OCIO config identity"));
+               : Result<OcioConfigResource>(core_internal::invalid_domain(
+                     "unresolved OCIO config identity"));
 }
 Result<IccProfile> ResourceBindings::profile_at(std::size_t index) const {
   if (index >= profile_count())
-    return Result<IccProfile>(invalid("profile index outside set"));
+    return Result<IccProfile>(
+        core_internal::invalid_domain("profile index outside set"));
   return Result<IccProfile>(impl_->profiles[index]);
 }
 Result<OcioConfigResource> ResourceBindings::config_at(
     std::size_t index) const {
   if (index >= config_count())
-    return Result<OcioConfigResource>(invalid("config index outside set"));
+    return Result<OcioConfigResource>(
+        core_internal::invalid_domain("config index outside set"));
   return Result<OcioConfigResource>(impl_->configs[index]);
 }
 Result<ResourceBindings> ResourceBindings::select(
@@ -199,7 +204,8 @@ Result<ResourceBindings> ResourceBindings::select(
     profile(d.profile);
     configured(d.configured);
     if (d.profile && !d.model.empty() && selected.back().model() != d.model)
-      throw Stop{invalid("ICC header model disagrees with interpretation")};
+      throw Stop{core_internal::invalid_domain(
+          "ICC header model disagrees with interpretation")};
   };
   for (const auto& facet : facets) {
     if (impl_)
@@ -210,7 +216,8 @@ Result<ResourceBindings> ResourceBindings::select(
         throw Stop{d.status()};
       profile(d.value().profile);
       if (d.value().profile && selected.back().model() != "cmyk")
-        throw Stop{invalid("legacy CMYK facet requires a CMYK profile")};
+        throw Stop{core_internal::invalid_domain(
+            "legacy CMYK facet requires a CMYK profile")};
     } else if (facet.key == "photospider.tensor-description") {
       auto result = decode_tensor_description(facet);
       if (!result.ok())

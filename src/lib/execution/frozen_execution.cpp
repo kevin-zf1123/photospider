@@ -4,11 +4,11 @@
 #include <string>
 #include <utility>
 
+#include "data/memory_budget.hpp"
 #include "execution/demand_query.hpp"
 #include "execution/execution_bindings.hpp"
 #include "execution/execution_context_state.hpp"
 #include "execution/frozen_execution_state.hpp"
-#include "execution/memory_budget.hpp"
 #include "execution/result_run.hpp"
 #include "photospider/execution/execution.hpp"
 namespace ps {

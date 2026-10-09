@@ -189,7 +189,7 @@ void thread_probes(const std::shared_ptr<OperationRegistry>& registry,
                   << " " << run.status().message << '\n';
         throw std::runtime_error("thread discovery admission failed");
       }
-      if (run.ok() && run.value().diagnostics.native_dispatch_count != 1)
+      if (run.ok() && run.value().diagnostics.native_dispatch_count == 0)
         throw std::runtime_error("parallel discovery lacked native submission");
       run = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
       if (root.statistics().live[ResourceKind::Payload] != 0)

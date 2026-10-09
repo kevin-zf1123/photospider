@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "../../examples/numeric_workflow/result_fixture.hpp"
-#include "execution/memory_budget.hpp"
+#include "data/memory_budget.hpp"
 #include "execution/result_cache.hpp"
 #include "photospider/photospider.hpp"
 #include "support/multi_output_result_fixture.hpp"
@@ -262,7 +262,7 @@ int result_content_bits() {
 int fragment_lru_storage() {
   using namespace ps;                      // NOLINT(build/namespaces)
   using namespace ps::execution_internal;  // NOLINT(build/namespaces)
-  auto budget = std::make_shared<MemoryBudget>(256);
+  auto budget = std::make_shared<data_internal::MemoryBudget>(256);
   ResultCache cache(24, budget);
   const ValueDescriptor descriptor{ElementType::Float32, {4}};
   const auto make = [&](Region region) {
@@ -429,7 +429,7 @@ int concurrent_reclamation() {
   std::condition_variable cv;
   const auto deadline =
       std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  auto budget = std::make_shared<execution_internal::MemoryBudget>(16);
+  auto budget = std::make_shared<data_internal::MemoryBudget>(16);
   auto a_work = budget->reserve(8).take_value();
   auto make_value = [](const BufferAllocator& allocator) {
     return MutableValue::allocate({ElementType::Float32, {1, 1}},

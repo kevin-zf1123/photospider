@@ -187,7 +187,13 @@ Result<Normalized> combine(const std::vector<std::uint64_t>& shape,
         }
       }
     }
-    auto normalized = sweep(left, right, 0, shape.size(), operation, &work);
+    work.check();
+    // A validated single rectangle is already canonical. Projection creates
+    // these frequently; a multidimensional sweep adds no geometry information.
+    auto normalized =
+        operation == Combine::Union && right.empty() && left.size() == 1
+            ? std::move(left)
+            : sweep(left, right, 0, shape.size(), operation, &work);
     Normalized result;
     if (auto* root = resource_internal::metadata_budget()) {
       auto bytes = retained_bytes + normalized.size() * sizeof(Region);

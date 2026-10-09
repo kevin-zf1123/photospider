@@ -8,11 +8,11 @@
 #include <vector>
 
 #include "core/resource_observation.hpp"
+#include "data/memory_budget.hpp"
 #include "execution/callback_pool.hpp"
 #include "execution/cpu_tiles.hpp"
 #include "execution/execution_bindings.hpp"
 #include "execution/execution_device.hpp"
-#include "execution/memory_budget.hpp"
 #include "execution/native_upload_codec.hpp"
 #include "execution/result_cache.hpp"
 #include "execution/result_native_upload.hpp"
@@ -27,7 +27,8 @@ Result<ExecutionResult> run_result_plan(
     const std::shared_ptr<gpu_internal::Device>& native_device,
     const std::shared_ptr<execution_internal::NativeUploadRegistry>&
         native_uploads,
-    WaitingAdmission* admission, const std::shared_ptr<MemoryBudget>& budget,
+    WaitingAdmission* admission,
+    const std::shared_ptr<data_internal::MemoryBudget>& budget,
     const std::shared_ptr<OperationRegistry>& operations,
     const ExecutionPlan& plan, std::function<bool()> current,
     std::vector<ExecutionBinding> bindings,

@@ -5,11 +5,13 @@
 #include <vector>
 
 #include "photospider/execution/execution.hpp"
+namespace ps::data_internal {
+class MemoryBudget;
+}
 namespace ps::gpu_internal {
 class Device;
 }
 namespace ps::execution_internal {
-class MemoryBudget;
 class ThreadPool;
 class WaitingAdmission;
 class NativeUploadRegistry;
@@ -24,7 +26,8 @@ Result<ExecutionResult> run_result_plan(
     const std::shared_ptr<gpu_internal::Device>& native_device,
     const std::shared_ptr<execution_internal::NativeUploadRegistry>&
         native_uploads,
-    WaitingAdmission* admission, const std::shared_ptr<MemoryBudget>& budget,
+    WaitingAdmission* admission,
+    const std::shared_ptr<data_internal::MemoryBudget>& budget,
     const std::shared_ptr<OperationRegistry>& operations,
     const ExecutionPlan& plan, std::function<bool()> current,
     std::vector<ExecutionBinding> bindings,

@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/status_helpers.hpp"
 #include "data/value_validation.hpp"
 
 namespace ps {
@@ -86,9 +87,7 @@ const std::uint8_t* packed_region_data(const Value& value, const Region& region,
     return nullptr;
   return value.bytes().data() + address.value();
 }
-Status invalid(const char* message) {
-  return Status::failure(ErrorCode::InvalidArgument, message);
-}
+
 }  // namespace
 void ValueFragments::swap(ValueFragments& other) noexcept {
   using std::swap;
@@ -127,13 +126,16 @@ Result<ValueFragments> ValueFragments::create_view(
     const FootprintLimits& limits,
     std::shared_ptr<const void> metadata_lifetime, ResourceBindings resources) {
   if (count && !fragments)
-    return Result<ValueFragments>(invalid("null fragment array"));
+    return Result<ValueFragments>(
+        core_internal::invalid_argument("null fragment array"));
   if (!authorized.valid() || authorized.shape() != descriptor.shape)
-    return Result<ValueFragments>(invalid("fragment domain mismatch"));
+    return Result<ValueFragments>(
+        core_internal::invalid_argument("fragment domain mismatch"));
   try {
     static_cast<void>(Value::element_size(descriptor.element_type));
   } catch (const std::invalid_argument&) {
-    return Result<ValueFragments>(invalid("invalid fragment dtype"));
+    return Result<ValueFragments>(
+        core_internal::invalid_argument("invalid fragment dtype"));
   }
   auto status = input_internal::canonicalize_facets(&facets);
   if (!status.ok())
@@ -163,8 +165,8 @@ Result<ValueFragments> ValueFragments::create_view(
     return Result<ValueFragments>(selected.status());
   for (const auto& region : authorized.boxes())
     if (!input_internal::complete_tuple_channels(descriptor, facets, region))
-      return Result<ValueFragments>(
-          invalid("color fragments require full channels"));
+      return Result<ValueFragments>(core_internal::invalid_argument(
+          "color fragments require full channels"));
   auto empty = Footprint::none(descriptor.shape, limits);
   if (!empty.ok())
     return Result<ValueFragments>(empty.status());
@@ -182,7 +184,8 @@ Result<ValueFragments> ValueFragments::create_view(
       return Result<ValueFragments>(Status::failure(
           ErrorCode::ResourceExhausted, "fragment construction limit"));
     if (!value.valid())
-      return Result<ValueFragments>(invalid("invalid fragment"));
+      return Result<ValueFragments>(
+          core_internal::invalid_argument("invalid fragment"));
     if (value.descriptor().shape != descriptor.shape ||
         value.descriptor().element_type != descriptor.element_type ||
         !input_internal::same_facets(value.facets(), facets))
@@ -190,8 +193,8 @@ Result<ValueFragments> ValueFragments::create_view(
           ErrorCode::TypeMismatch, "fragment metadata mismatch"));
     if (!input_internal::complete_tuple_channels(descriptor, facets,
                                                  value.region()))
-      return Result<ValueFragments>(
-          invalid("every color fragment requires full channels"));
+      return Result<ValueFragments>(core_internal::invalid_argument(
+          "every color fragment requires full channels"));
     // Resolve duplicate identities against the canonical set before replacing
     // per-fragment ancestry. The result then retains each profile allocation
     // exactly once, matching resources() and retained_bytes().
@@ -218,8 +221,8 @@ Result<ValueFragments> ValueFragments::create_view(
         return Result<ValueFragments>(overlap.status());
       for (const auto& intersection : overlap.value().boxes())
         if (!same_mapping(prior, value, intersection))
-          return Result<ValueFragments>(
-              invalid("ambiguous overlapping fragments"));
+          return Result<ValueFragments>(core_internal::invalid_argument(
+              "ambiguous overlapping fragments"));
     }
     auto missing = clipped.value().subtract(available, limits);
     if (!missing.ok())
@@ -255,7 +258,7 @@ Result<ValueFragments> ValueFragments::create_view(
 Status ValueFragments::read(const std::vector<std::uint64_t>& coordinate,
                             void* destination, std::size_t size) const {
   if (!valid() || !destination || !authorized_.contains(coordinate))
-    return invalid("read outside authorized fragments");
+    return core_internal::invalid_argument("read outside authorized fragments");
   if (size != Value::element_size(descriptor_.element_type))
     return Status::failure(ErrorCode::TypeMismatch,
                            "fragment sample width mismatch");
@@ -272,7 +275,7 @@ Status ValueFragments::read(const std::vector<std::uint64_t>& coordinate,
                             void* destination, std::size_t size,
                             const FootprintLimits& limits) const {
   if (!valid() || !destination || coordinate.size() != descriptor_.shape.size())
-    return invalid("read outside authorized fragments");
+    return core_internal::invalid_argument("read outside authorized fragments");
   auto remaining = limits.maximum_work;
   const auto admit = [&](std::uint64_t amount) {
     if (limits.cancellation.cancelled())
@@ -312,7 +315,7 @@ Status ValueFragments::read(const std::vector<std::uint64_t>& coordinate,
     }
   }
   if (!authorized)
-    return invalid("read outside authorized fragments");
+    return core_internal::invalid_argument("read outside authorized fragments");
   if (size != Value::element_size(descriptor_.element_type))
     return Status::failure(ErrorCode::TypeMismatch,
                            "fragment sample width mismatch");
@@ -339,8 +342,8 @@ Result<ValueFragments> ValueFragments::restrict(
   if (!outside.ok())
     return Result<ValueFragments>(outside.status());
   if (!outside.value().empty())
-    return Result<ValueFragments>(
-        invalid("fragment restriction exceeds coverage"));
+    return Result<ValueFragments>(core_internal::invalid_argument(
+        "fragment restriction exceeds coverage"));
   return create_view(descriptor_, facets_, subset, fragments_.data(),
                      fragments_.size(), limits, metadata_lifetime_, resources_);
 }
@@ -348,7 +351,8 @@ Result<Value> ValueFragments::collect(const Region& region,
                                       const BufferAllocator& allocator,
                                       const FootprintLimits& limits) const {
   if (!valid() || region.empty())
-    return Result<Value>(invalid("invalid fragment collection"));
+    return Result<Value>(
+        core_internal::invalid_argument("invalid fragment collection"));
   auto query = Footprint::from_regions(descriptor_.shape, {region}, limits);
   if (!query.ok())
     return Result<Value>(query.status());
@@ -359,7 +363,8 @@ Result<Value> ValueFragments::collect(const Region& region,
     return Result<Value>(
         Status::failure(ErrorCode::NotFound, "collection has a hole"));
   if (!input_internal::complete_tuple_channels(descriptor_, facets_, region))
-    return Result<Value>(invalid("color collection requires full channels"));
+    return Result<Value>(core_internal::invalid_argument(
+        "color collection requires full channels"));
   auto allocation = MutableValue::allocate(descriptor_, region, allocator);
   if (!allocation.ok())
     return Result<Value>(allocation.status());
@@ -410,7 +415,8 @@ Result<Value> ValueFragments::collect(const Region& region,
 }
 Result<std::uint64_t> ValueFragments::retained_bytes() const {
   if (!valid())
-    return Result<std::uint64_t>(invalid("invalid fragments"));
+    return Result<std::uint64_t>(
+        core_internal::invalid_argument("invalid fragments"));
   std::set<const CpuStorage*> owners;
   std::uint64_t count = 0;
   for (const auto& value : fragments_)

@@ -7,11 +7,11 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
 #include "support/dependency_workflow_fixture.hpp"
+#include "support/execution_sync_fixture.hpp"
 
 namespace {
 void require(bool condition, const char* message) {
@@ -41,7 +41,7 @@ struct SharedIdentity {
     std::unique_lock<std::mutex> lock(gate->mutex);
     ++gate->calls;
     gate->changed.notify_all();
-    if (!gate->changed.wait_for(lock, std::chrono::seconds(3),
+    if (!gate->changed.wait_for(lock, std::chrono::seconds(15),
                                 [&] { return gate->release; }))
       return Result<ResultProgramPoll>(
           Status{ErrorCode::OperationFailed, "example gate deadline"});
@@ -119,32 +119,40 @@ void sharing_workflow() {
   auto demand = opened.take_value();
   const DemandQuery q{{"y", Footprint::all({1}).take_value()}};
   CancellationSource cancelled;
-  auto first = std::async(std::launch::async,
-                          [&] { return demand.request(q, cancelled.token()); });
+  ps::test::SharedJoinEvent joined("example.shared_identity", 1);
+  std::future<Result<DemandResult>> first, second;
+  ps::test::OnExit cleanup([&] {
+    cancelled.cancel();
+    {
+      std::lock_guard<std::mutex> lock(gate->mutex);
+      gate->release = true;
+      gate->changed.notify_all();
+    }
+    if (first.valid())
+      first.wait();
+    if (second.valid())
+      second.wait();
+  });
+  first = std::async(std::launch::async,
+                     [&] { return demand.request(q, cancelled.token()); });
+  bool entered;
   {
     std::unique_lock<std::mutex> lock(gate->mutex);
-    require(gate->changed.wait_for(lock, std::chrono::seconds(3),
-                                   [&] { return gate->calls == 1; }),
-            "first callback did not start");
+    entered = gate->changed.wait_for(lock, std::chrono::seconds(5),
+                                     [&] { return gate->calls == 1; });
   }
-  auto second =
-      std::async(std::launch::async, [&] { return demand.request(q); });
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(3);
-  while (!context.cache_statistics().shared_computations) {
-    require(std::chrono::steady_clock::now() < deadline,
-            "second waiter did not join");
-    std::this_thread::yield();
-  }
+  second = std::async(std::launch::async, [&] { return demand.request(q); });
+  const bool shared = joined.wait();
   cancelled.cancel();
   {
     std::lock_guard<std::mutex> lock(gate->mutex);
     gate->release = true;
     gate->changed.notify_all();
   }
-  require(first.get().status().code == ErrorCode::Cancelled,
-          "first waiter cancellation");
+  const auto first_status = first.get().status().code;
   auto survivor = second.get();
+  require(entered && shared && first_status == ErrorCode::Cancelled,
+          "first waiter cancellation after second waiter joined");
   require(survivor.ok(), "surviving waiter failed");
   require(
       dependency_fixture::number(survivor.value().results.at("y")) == expected,

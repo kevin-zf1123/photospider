@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "execution/memory_budget.hpp"
+#include "data/memory_budget.hpp"
 #include "execution/structured_cache.hpp"
 #include "photospider/execution/execution.hpp"
 
@@ -43,7 +43,8 @@ class ResultCache final {
     std::shared_ptr<const StructuredIdentity> identity_;
     std::uint64_t epoch_;
   };
-  ResultCache(std::uint64_t limit, std::shared_ptr<MemoryBudget> budget,
+  ResultCache(std::uint64_t limit,
+              std::shared_ptr<data_internal::MemoryBudget> budget,
               std::uint64_t dependency_metadata_limit = 65536)
       : limit_(limit),
         budget_(std::move(budget)),
@@ -400,7 +401,7 @@ class ResultCache final {
     return retired;
   }
   const std::uint64_t limit_;
-  std::shared_ptr<MemoryBudget> budget_;
+  std::shared_ptr<data_internal::MemoryBudget> budget_;
   const std::uint64_t dependency_metadata_limit_;
   std::shared_ptr<const StructuredIdentity> structured_identity_;
   std::uint64_t structured_metadata_ = 0;

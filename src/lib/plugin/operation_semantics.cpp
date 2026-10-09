@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/status_helpers.hpp"
 #include "plugin/expression.hpp"
 #include "plugin/port_validation.hpp"
 
@@ -16,9 +17,7 @@ using Facets = Result<std::vector<ValueFacet>>;
 Status mismatch(const char* message) {
   return Status::failure(ErrorCode::TypeMismatch, message);
 }
-Status invalid(const char* message) {
-  return Status::failure(ErrorCode::InvalidArgument, message);
-}
+
 const ValueFacet* typed_facet(const OperationMetadata& metadata) {
   for (const auto& facet : metadata.facets)
     if (facet.key == "photospider.image" || facet.key == "photospider.semantic")
@@ -50,7 +49,8 @@ Facets infer_transformed_facets(
     const auto found = parameters.find(t.outputs[0].output_semantic_parameter);
     if (found == parameters.end() ||
         !std::holds_alternative<std::string>(found->second))
-      return Facets(invalid("missing channel target semantic parameter"));
+      return Facets(core_internal::invalid_argument(
+          "missing channel target semantic parameter"));
     auto target = semantic_from_parameter(std::get<std::string>(found->second));
     if (!target.ok())
       return Facets(target.status());
@@ -128,15 +128,16 @@ Facets infer_transformed_facets(
         !std::holds_alternative<double>(start->second) ||
         step == parameters.end() ||
         !std::holds_alternative<double>(step->second))
-      return Facets(invalid("missing expression/domain parameters"));
+      return Facets(core_internal::invalid_argument(
+          "missing expression/domain parameters"));
     const double origin = std::get<double>(start->second),
                  delta = std::get<double>(step->second);
     const double end =
         std::fma(static_cast<double>(output.shape[0] - 1), delta, origin);
     if (!std::isfinite(origin) || !std::isfinite(delta) || delta <= 0 ||
         !std::isfinite(end) || (output.shape[0] > 1 && end <= origin))
-      return Facets(
-          invalid("expression sampling endpoint is not representable"));
+      return Facets(core_internal::invalid_argument(
+          "expression sampling endpoint is not representable"));
     auto parsed = expression_internal::parse(
         std::get<std::string>(expression->second), input.descriptor.shape[0]);
     if (!parsed.ok())
@@ -179,7 +180,8 @@ Facets infer_transformed_facets(
         !std::holds_alternative<std::string>(policy->second) ||
         (std::get<std::string>(policy->second) != "reject" &&
          std::get<std::string>(policy->second) != "clip"))
-      return Facets(invalid("LUT out-of-domain policy must be reject or clip"));
+      return Facets(core_internal::invalid_argument(
+          "LUT out-of-domain policy must be reject or clip"));
     const double end =
         std::fma(static_cast<double>(inputs[1].descriptor.shape[0] - 1),
                  s.sample_step, s.sample_origin);
@@ -193,14 +195,16 @@ Facets infer_transformed_facets(
     const auto found = parameters.find(t.outputs[0].output_semantic_parameter);
     if (found == parameters.end() ||
         !std::holds_alternative<std::string>(found->second))
-      return Facets(invalid("missing channel selection parameter"));
+      return Facets(core_internal::invalid_argument(
+          "missing channel selection parameter"));
     auto indices =
         channel_indices_from_parameter(std::get<std::string>(found->second));
     if (!indices.ok())
       return Facets(indices.status());
     for (auto index : indices.value())
       if (index >= input.descriptor.shape[2])
-        return Facets(invalid("swizzle channel index outside input"));
+        return Facets(core_internal::invalid_argument(
+            "swizzle channel index outside input"));
     if (!typed_facet(input))
       return Facets(std::vector<ValueFacet>{});
     auto source = typed(input);
@@ -236,10 +240,12 @@ Facets infer_transformed_facets(
     const auto found = parameters.find(t.outputs[0].output_semantic_parameter);
     if (found == parameters.end() ||
         !std::holds_alternative<std::int64_t>(found->second))
-      return Facets(invalid("missing channel extraction index"));
+      return Facets(
+          core_internal::invalid_argument("missing channel extraction index"));
     const auto index = std::get<std::int64_t>(found->second);
     if (index < 0 || static_cast<std::uint64_t>(index) >= s.channels.size())
-      return Facets(invalid("extraction index outside input"));
+      return Facets(
+          core_internal::invalid_argument("extraction index outside input"));
     SemanticDescriptor result;
     result.channels = {s.channels[index]};
     result.unit = result.channels[0].unit;
@@ -276,7 +282,8 @@ Facets infer_transformed_facets(
   const bool lab = rule == OperationSemanticRule::XyzToLab;
   if (!rgb && !lab && rule != OperationSemanticRule::RgbToXyz &&
       rule != OperationSemanticRule::LabToXyz)
-    return Facets(invalid("unknown color semantic transformation"));
+    return Facets(core_internal::invalid_argument(
+        "unknown color semantic transformation"));
   const SemanticChannel alpha{"A", "coverage", "dimensionless"};
   s.model = rgb ? "rgb" : lab ? "lab" : "xyz";
   s.primaries = rgb ? "srgb" : "";
@@ -303,9 +310,7 @@ Facets infer_transformed_facets(
 
 namespace ps {
 namespace {
-Status invalid(const char* text) {
-  return Status::failure(ErrorCode::InvalidArgument, text);
-}
+
 bool image_metadata(const OperationMetadata& metadata) {
   return std::any_of(
       metadata.facets.begin(), metadata.facets.end(),
@@ -314,14 +319,15 @@ bool image_metadata(const OperationMetadata& metadata) {
 Status validate_metadata(OperationMetadata* metadata) {
   if (metadata->atomic_trailing_axes > metadata->descriptor.shape.size() ||
       (metadata->atomic_trailing_axes && image_metadata(*metadata)))
-    return invalid("invalid input tuple observation metadata");
+    return core_internal::invalid_argument(
+        "invalid input tuple observation metadata");
   auto shape = Footprint::none(metadata->descriptor.shape);
   if (!shape.ok())
     return shape.status();
   try {
     static_cast<void>(Value::element_size(metadata->descriptor.element_type));
   } catch (const std::invalid_argument&) {
-    return invalid("unknown dependency dtype");
+    return core_internal::invalid_argument("unknown dependency dtype");
   }
   auto status = input_internal::canonicalize_facets(&metadata->facets);
   if (!status.ok())
@@ -329,7 +335,8 @@ Status validate_metadata(OperationMetadata* metadata) {
   if (input_internal::tuple_channel_axis(metadata->descriptor,
                                          metadata->facets) &&
       metadata->atomic_trailing_axes > 1)
-    return invalid("color observations group exactly one trailing axis");
+    return core_internal::invalid_argument(
+        "color observations group exactly one trailing axis");
   return input_internal::validate_port_metadata({}, metadata->descriptor,
                                                 metadata->facets);
 }
@@ -342,11 +349,13 @@ Result<Footprint> operation_observations(const OperationMetadata& output,
   if (!status.ok())
     return Result<Footprint>(status);
   if (!samples.valid() || samples.shape() != output.descriptor.shape)
-    return Result<Footprint>(invalid("output footprint domain mismatch"));
+    return Result<Footprint>(
+        core_internal::invalid_argument("output footprint domain mismatch"));
   const auto grouped = output.atomic_trailing_axes;
   if (grouped > output.descriptor.shape.size() ||
       (grouped && image_metadata(output)))
-    return Result<Footprint>(invalid("invalid tuple observation metadata"));
+    return Result<Footprint>(
+        core_internal::invalid_argument("invalid tuple observation metadata"));
   const bool color =
       input_internal::tuple_channel_axis(output.descriptor, output.facets)
           .has_value();
@@ -356,8 +365,8 @@ Result<Footprint> operation_observations(const OperationMetadata& output,
   for (const auto& box : samples.boxes()) {
     if (image_metadata(output) && !input_internal::complete_tuple_channels(
                                       output.descriptor, output.facets, box))
-      return Result<Footprint>(
-          invalid("a color observation requires complete channels"));
+      return Result<Footprint>(core_internal::invalid_argument(
+          "a color observation requires complete channels"));
     auto dimensions = box.dimensions();
     dimensions.resize(dimensions.size() - (grouped ? grouped : 1));
     if (dimensions.empty())
@@ -380,7 +389,8 @@ Result<Footprint> observation_samples(const OperationMetadata& output,
   auto shape = output.descriptor.shape;
   const auto grouped = output.atomic_trailing_axes;
   if (grouped > shape.size() || (grouped && image_metadata(output)))
-    return Result<Footprint>(invalid("invalid tuple observation metadata"));
+    return Result<Footprint>(
+        core_internal::invalid_argument("invalid tuple observation metadata"));
   const auto trailing = grouped ? grouped
                                 : (input_internal::tuple_channel_axis(
                                        output.descriptor, output.facets)
@@ -390,7 +400,8 @@ Result<Footprint> observation_samples(const OperationMetadata& output,
   if (shape.empty())
     shape.push_back(1);
   if (!observations.valid() || observations.shape() != shape)
-    return Result<Footprint>(invalid("observation domain mismatch"));
+    return Result<Footprint>(
+        core_internal::invalid_argument("observation domain mismatch"));
   if (!trailing)
     return Result<Footprint>(observations);
   std::vector<Region> rectangles;

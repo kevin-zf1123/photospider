@@ -1188,6 +1188,9 @@ class StructuredExecution final
     std::uint64_t published_revision = 0, native_dispatches = 0;
     bool complete = false;
   };
+  // Joint participants must be Actor base subobjects belonging to the paired
+  // StructuredExecution host. submit_joint creates every participant from
+  // shared_ptr<Actor>; its control block retains the Actor deleter.
   static std::shared_ptr<Actor> joint_actor(
       const std::shared_ptr<JointParticipant>& participant) {
     return std::static_pointer_cast<Actor>(participant);
@@ -1218,6 +1221,10 @@ class StructuredExecution final
         carrier->pending.reset();
         carrier->queued = false;
       }
+    }
+    Status finish_submission(
+        const std::shared_ptr<JointParticipant>& participant) override {
+      return owner.finish_actor(joint_actor(participant));
     }
     void clear_submission(JointParticipant& participant) override {
       auto& value = actor(participant);
@@ -2362,11 +2369,13 @@ class StructuredExecution final
     }
   }
   Status finish_joint_impl(const std::shared_ptr<JointActor>& group) {
-    if (group->pending_members.empty())
-      return protocol_failure("missing structured joint retirement owner");
-    auto carrier = joint_actor(group->pending_members.front().lock());
-    if (!carrier || !carrier->pending)
-      return protocol_failure("missing structured joint submission");
+    JointHost host(*this);
+    auto finished = group->finish_submission(host);
+    if (!finished.ok())
+      return finished.status();
+    auto submission = finished.take_value();
+    if (!submission.poll_ready)
+      return Status::success();
     std::array<std::shared_ptr<Actor>, 64> storage;
     struct Ready {
       std::shared_ptr<Actor>* items;
@@ -2376,49 +2385,8 @@ class StructuredExecution final
       auto size() const { return count; }
       auto& operator[](std::size_t i) { return items[i]; }
     } ready{storage.data()};
-    for (const auto& weak : group->pending_members)
-      if (auto actor = joint_actor(weak.lock()))
-        storage[ready.count++] = std::move(actor);
-    auto status = finish_actor(carrier);
-    for (const auto& actor : ready) {
-      actor->pending.reset();
-      actor->busy = false;
-    }
-    group->pending_members.clear();
-    group->pending = false;
-    if (!status.ok()) {
-      if (!group->contract2 &&
-          ResultFallbackState::optional_joint_failure(status))
-        release_joint(group, true);
-      else
-        fail_joint(group, status);
-      return Status::success();
-    }
-    if (group->starting) {
-      auto first = group->failure->snapshot();
-      if (first.ok() && !group->started.ok())
-        first = group->started.status();
-      if (!first.ok()) {
-        if (!group->contract2 &&
-            ResultFallbackState::optional_joint_failure(first))
-          release_joint(group, true);
-        else
-          fail_joint(group, first);
-      } else {
-        group->continuation = group->started.take_value();
-      }
-      group->starting = false;
-      return Status::success();
-    }
-    if (!group->polled.ok()) {
-      const auto first = group->polled.status();
-      if (!group->contract2 &&
-          ResultFallbackState::optional_joint_failure(first))
-        release_joint(group, true);
-      else
-        fail_joint(group, first);
-      return Status::success();
-    }
+    for (std::size_t i = 0; i < submission.count; ++i)
+      storage[ready.count++] = joint_actor(submission.members[i]);
     // A contract-2 domain reply may include a member whose Need is still
     // Waiting. Such a reply must retire that exact Actor, not the latest alias
     // for its output and not only the Ready subset of this poll.
@@ -3145,6 +3113,10 @@ class StructuredExecution final
         created->initialized = true;
         actor_aliases_[index] = created;
         ++diagnostics_.shared_computations;
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+        execution_testing::notify_shared_joined(step.operation, step.node_id,
+                                                created.get());
+#endif
         return Answer(std::move(created));
       }
     }
@@ -5263,8 +5235,26 @@ class StructuredExecution final
       }
       return result;
     };
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+    bool in_poll = false;
+    std::uint64_t phase_work_ordinal = 0;
+    const auto poll_thread = std::this_thread::get_id();
+    auto phase_work = [&](std::uint64_t count) {
+      if (std::this_thread::get_id() != poll_thread || !in_poll || !count)
+        return work(count);
+      execution_testing::PhaseWorkPoint point{
+          step.operation, actor.query.backend,  &actor,
+          actor.polls,    ++phase_work_ordinal, count};
+      execution_testing::notify_phase_work_started(point);
+      auto status = work(count);
+      execution_testing::notify_phase_work_finished(point, status.code);
+      return status;
+    };
+#else
+    auto& phase_work = work;
+#endif
     ResultProgramPhase phase{actor.query,   actor.results,  actor.io,
-                             allocator,     resources_,     work,
+                             allocator,     resources_,     phase_work,
                              actor.failure, observe_failure};
     ResourceVector<std::uint64_t> association{
         ResourceAllocator<std::uint64_t>(resources_)};
@@ -5453,7 +5443,19 @@ class StructuredExecution final
     ResultGpuService gpu(phase.gpu, phase.gpu_status, observe_failure);
     phase.gpu = gpu.get();
     stage.invoked = true;
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+    struct PollObservationScope {
+      bool& active;
+      ~PollObservationScope() { active = false; }
+    };
+    {
+      PollObservationScope observation{in_poll};
+      in_poll = true;
+      polled = poll(phase);
+    }
+#else
     polled = poll(phase);
+#endif
     if (polled.ok() && discovered_count) {
       auto response = polled.take_value();
       auto* need = std::get_if<ResultProgramNeed>(&response);
@@ -5823,6 +5825,8 @@ class StructuredExecution final
   const ExecutionPlan& plan_;
   std::vector<ExecutionBinding> bindings_;
   std::shared_ptr<OperationRegistry> operations_;
+  // cache_state_ borrows this wrapper, so resources_ must be declared and
+  // constructed first and destroyed last. Initializer order cannot enforce it.
   ResourceBudget resources_;
   core_internal::PayloadCapture payload_capture_;
   ResourceBindings bindings_resources_;

@@ -12,9 +12,9 @@ namespace ps {
 class ExecutionContext;
 class CpuStorage;
 class BufferAllocator;
-namespace execution_internal {
+namespace data_internal {
 class MemoryReservation;
-}  // namespace execution_internal
+}  // namespace data_internal
 namespace core_internal {
 struct ResourcePayloadAccess;
 class ResourcePayloadScope;
@@ -115,7 +115,7 @@ class PHOTOSPIDER_API ResourceLease final {
 
  private:
   friend class ResourceBudget;
-  friend class execution_internal::MemoryReservation;
+  friend class data_internal::MemoryReservation;
   friend struct core_internal::ResourcePayloadAccess;
   // Classifies already-reserved payload as shared native bytes. Host/Payload
   // stay charged by this lease; Device/Shared are added atomically.

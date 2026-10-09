@@ -4,6 +4,9 @@
 #include <memory>
 #include <utility>
 
+#include "execution/result_fallback.hpp"
+#include "execution/result_protocol.hpp"
+
 namespace ps::execution_internal {
 StructuredJointState::StructuredJointState(const ResourceBudget& root)
     : payload(std::make_shared<core_internal::PayloadObservation>()),
@@ -32,6 +35,52 @@ bool StructuredJointState::peers() const {
 bool StructuredJointState::complete() const {
   return std::all_of(members.begin(), members.end(),
                      [](const auto& member) { return member.done->load(); });
+}
+Result<StructuredJointState::Submission>
+StructuredJointState::finish_submission(StructuredJointHost& host) {
+  if (pending_members.empty())
+    return Result<Submission>(
+        protocol_failure("missing structured joint retirement owner"));
+  auto carrier = pending_members.front().lock();
+  if (!carrier || !host.pending(*carrier))
+    return Result<Submission>(
+        protocol_failure("missing structured joint submission"));
+  Submission submission;
+  for (const auto& weak : pending_members)
+    if (auto actor = weak.lock()) {
+      if (submission.count == submission.members.size())
+        return Result<Submission>(
+            protocol_failure("structured joint cohort exceeds capacity"));
+      submission.members[submission.count++] = std::move(actor);
+    }
+  auto status = host.finish_submission(carrier);
+  for (std::size_t i = 0; i < submission.count; ++i)
+    host.clear_submission(*submission.members[i]);
+  pending_members.clear();
+  pending = false;
+  const auto reject = [&](const Status& failure) {
+    if (!contract2 && ResultFallbackState::optional_joint_failure(failure))
+      release(true, host);
+    else
+      fail(failure, host);
+  };
+  if (!status.ok()) {
+    reject(status);
+  } else if (starting) {
+    auto first = failure->snapshot();
+    if (first.ok() && !started.ok())
+      first = started.status();
+    if (!first.ok())
+      reject(first);
+    else
+      continuation = started.take_value();
+    starting = false;
+  } else if (!polled.ok()) {
+    reject(polled.status());
+  } else {
+    submission.poll_ready = true;
+  }
+  return Result<Submission>(std::move(submission));
 }
 void StructuredJointState::retire_submission(StructuredJointHost& host) {
   if (auto carrier = pending_members.front().lock();

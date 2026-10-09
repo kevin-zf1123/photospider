@@ -14,7 +14,7 @@ Context shutdown 会取消 shared work、释放 registry table lock，再 drain 
 
 Structured execution 的 coordinator Host 在 Run 内持有 actor 与 Run 操作。`StructuredResultCache` 拥有 completed-result proof、replay、snapshot 和 quota 状态；它通过单次调用的借用 context/actor views 工作，并通过同步 Host 请求 Need supply 和 candidate adoption。`PublicationValidationServices` 也只借用于一次 validation：它提供 work 准入、cancellation、stop 状态和 limits，供 validator 检查 publication facts。Validator 返回 status 与 retirement intent，只有 coordinator 会退休 actor。这些组件明确了所有权边界，但 Need dependency graph 仍由 coordinator 管理。
 
-Joint continuation state 是非模板的编译组件。它保存弱 `JointParticipant` 引用，这些引用与各 Actor 共用同一 control block；Run 内的 `JointHost` 则拥有 Actor 和 Run 的状态修改。Detach 或 retirement 期间，coordinator 持有强 cohort guard。Fallback release 按以下顺序执行：恢复 baseline、导入已完成 member 的 ancestry、清理 continuation state、detach members、丢弃活动 attempt，最后将活动 member 标记为 restart。该顺序保留已完成 evidence，并确保清理结束前 participant state 仍然存活。
+Joint continuation state 是非模板的编译组件。它保存弱 `JointParticipant` 引用，这些引用与各 Actor 共用同一 control block；Run 内的 `JointHost` 则拥有 Actor 和 Run 的状态修改。Detach 或 retirement 期间，coordinator 持有强 cohort guard。Fallback release 按以下顺序执行：恢复 baseline、导入已完成 member 的 ancestry、清理 continuation state、detach members、丢弃活动 attempt，最后将活动 member 标记为 restart。该顺序保留已完成 evidence，并确保清理结束前 participant state 仍然存活。Joint 组件还负责常规 submission retirement、启动失败与 fallback 处理，以及接受 cohort continuation。Submission 在 carrier 退休前取得各 participant 的强 owner，因为 carrier 退休可能释放持有它们的 task capture。组件通过借用的 `StructuredJointHost` 退休 carrier：Host 执行 coordinator 的 actor finish 并原样返回其状态，随后组件清除每个 participant 的 pending submission。C2 Waiting 与 domain finality、Need 预检、publication transaction 和调度仍由 coordinator 负责。
 
 ## Planning 与 execution
 

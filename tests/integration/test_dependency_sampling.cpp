@@ -20,6 +20,7 @@
 #include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "execution/execution_test_hooks.hpp"
 #include "photospider/photospider.hpp"
+#include "support/execution_sync_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
@@ -73,7 +74,7 @@ struct HookScope final {
   ~HookScope() { execution_testing::install_execution_test_hooks(nullptr); }
 };
 template <class Run>
-int cancel_active(const ResourceBudget& root, Run run) {
+int cancel_at_retirement(const ResourceBudget& root, Run run) {
   const auto baseline = root.statistics().live[ResourceKind::Payload];
   const auto work = root.statistics().issued.work;
   CallbackGate gate;
@@ -82,8 +83,15 @@ int cancel_active(const ResourceBudget& root, Run run) {
   hooks.callback_body_finished = hold_callback_retirement;
   HookScope installed(hooks);
   CancellationSource stop;
-  auto active =
-      std::async(std::launch::async, [&] { return run(stop.token()); });
+  std::future<decltype(run(stop.token()))> active;
+  ps::test::OnExit cleanup([&] {
+    stop.cancel();
+    gate.release();
+    if (active.valid())
+      active.wait();
+    cancellation_gate = nullptr;
+  });
+  active = std::async(std::launch::async, [&] { return run(stop.token()); });
   const bool entered = gate.wait();
   stop.cancel();
   gate.release();
@@ -96,6 +104,30 @@ int cancel_active(const ResourceBudget& root, Run run) {
                          __LINE__);
     return 1;
   }
+  PS_CHECK(root.statistics().live[ResourceKind::Payload] == baseline);
+  return 0;
+}
+template <class Run>
+int cancel_in_loop(const ResourceBudget& root, std::string_view operation,
+                   Run run) {
+  const auto baseline = root.statistics().live[ResourceKind::Payload];
+  ps::test::PhaseWorkGate gate(operation, 8);
+  CancellationSource stop;
+  std::future<decltype(run(stop.token()))> active;
+  ps::test::OnExit cleanup([&] {
+    stop.cancel();
+    gate.release();
+    if (active.valid())
+      active.wait();
+  });
+  active = std::async(std::launch::async, [&] { return run(stop.token()); });
+  const bool entered = gate.wait();
+  stop.cancel();
+  gate.release();
+  auto interrupted = active.get();
+  PS_CHECK(entered && gate.cancelled_in_service());
+  PS_CHECK(!interrupted.ok() &&
+           interrupted.status().code == ErrorCode::Cancelled);
   PS_CHECK(root.statistics().live[ResourceKind::Payload] == baseline);
   return 0;
 }
@@ -440,10 +472,18 @@ int radius_contracts(const std::shared_ptr<OperationRegistry>& registry) {
       data(ElementType::Float64, {100000}, std::vector<double>(100000, 1)));
   auto radii = driver.input(
       data(ElementType::Int64, {100000}, std::vector<std::int64_t>(100000, 0)));
-  PS_CHECK(cancel_active(driver.root, [&](const CancellationToken& stop) {
-             return driver.run("numeric.radius_scatter", {many, radii},
-                               footprint({100000}, Region({{0, 1}})), {}, stop);
-           }) == 0);
+  PS_CHECK(
+      cancel_at_retirement(driver.root, [&](const CancellationToken& stop) {
+        return driver.run("numeric.radius_scatter", {many, radii},
+                          footprint({100000}, Region({{0, 1}})), {}, stop);
+      }) == 0);
+  PS_CHECK(cancel_in_loop(driver.root, "numeric.radius_scatter",
+                          [&](const CancellationToken& stop) {
+                            return driver.run(
+                                "numeric.radius_scatter", {many, radii},
+                                footprint({100000}, Region({{0, 1}})), {},
+                                stop);
+                          }) == 0);
   return 0;
 }
 
@@ -720,22 +760,6 @@ int stmap_results(const std::shared_ptr<OperationRegistry>& registry) {
     }
     PS_CHECK(driver.root.statistics().live[ResourceKind::Payload] == before);
   }
-  auto full_map = driver.map(std::vector<double>(200, .5), {10, 10, 2});
-  const auto payload_before =
-      driver.root.statistics().live[ResourceKind::Payload];
-  auto full = driver.run(image, full_map, "clamp",
-                         Footprint::all({1, 1, 10, 10, 4}).take_value());
-  PS_REQUIRE_OK(full);
-  PS_CHECK(driver.root.statistics().live[ResourceKind::Payload] -
-               payload_before <
-           UINT64_C(1048576));
-  float last = 0;
-  const auto& complete = full.value().results.at("result");
-  PS_CHECK(complete
-               .read_tensor(complete.descriptor().take_value(), 0,
-                            {0, 0, 9, 9, 0}, &last, 4)
-               .ok() &&
-           last == 1);
   auto invalid =
       driver.source(image_schema(1, 3), {1, 0, 0, 1, 2, 0, 0, 1, NAN, 0, 0, 1});
   PS_CHECK(
@@ -796,11 +820,18 @@ int stmap_results(const std::shared_ptr<OperationRegistry>& registry) {
   auto cancelled = driver.run(image, point_map, "clamp", q, {}, stop.token());
   PS_CHECK(!cancelled.ok() && cancelled.status().code == ErrorCode::Cancelled);
   auto large_map = driver.map(std::vector<double>(5000, .5), {50, 50, 2});
-  PS_CHECK(cancel_active(driver.root, [&](const CancellationToken& token) {
-             return driver.run(image, large_map, "clamp",
-                               Footprint::all({1, 1, 50, 50, 4}).take_value(),
-                               {}, token);
-           }) == 0);
+  PS_CHECK(
+      cancel_at_retirement(driver.root, [&](const CancellationToken& token) {
+        return driver.run(image, large_map, "clamp",
+                          Footprint::all({1, 1, 50, 50, 4}).take_value(), {},
+                          token);
+      }) == 0);
+  PS_CHECK(cancel_in_loop(
+               driver.root, "image.stmap", [&](const CancellationToken& token) {
+                 return driver.run(
+                     image, large_map, "clamp",
+                     Footprint::all({1, 1, 50, 50, 4}).take_value(), {}, token);
+               }) == 0);
   ResultRef surviving;
   {
     StmapDriver temporary(registry);
@@ -820,6 +851,67 @@ int stmap_results(const std::shared_ptr<OperationRegistry>& registry) {
   return 0;
 }
 
+int stmap_scaling() {
+  for (const std::uint64_t side : {10, 15, 20}) {
+    StmapDriver driver(ps::make_default_operation_registry());
+    auto image =
+        driver.source(image_schema(1, 3), {1, 0, 0, 1, 2, 0, 0, 1, 4, 0, 0, 1});
+    auto map =
+        driver.map(std::vector<double>(2 * side * side, .5), {side, side, 2});
+    auto query = Footprint::all({1, 1, side, side, 4}).take_value();
+    const auto before = driver.root.statistics();
+    {
+      auto answer = driver.run(image, map, "clamp", query);
+      PS_REQUIRE_OK(answer);
+      const auto work =
+          driver.root.statistics().issued.work - before.issued.work;
+      // Repeated immutable union construction is quadratic with logarithmic
+      // indexing; this bound excludes the old cubic cross-witness scan.
+      const auto pixels = side * side;
+      std::cout << "STMap side=" << side << " work=" << work << '\n';
+      PS_CHECK(work < 256 * pixels * pixels);
+      PS_CHECK(driver.root.statistics().live[ResourceKind::Payload] -
+                   before.live[ResourceKind::Payload] <
+               UINT64_C(1048576));
+      const auto& result = answer.value().results.at("result");
+      for (std::uint64_t y = 0; y < side; ++y) {
+        for (std::uint64_t x = 0; x < side; ++x) {
+          for (std::uint64_t c = 0; c < 4; ++c) {
+            float value = -1;
+            PS_CHECK(result
+                         .read_tensor(result.descriptor().take_value(), 0,
+                                      {0, 0, y, x, c}, &value, 4)
+                         .ok());
+            PS_CHECK(value == (c == 0 || c == 3 ? 1.F : 0.F));
+          }
+        }
+      }
+      auto support = answer.value().dependencies.source_support();
+      PS_REQUIRE_OK(support);
+      PS_CHECK(support.value().at("input1") ==
+               Footprint::all({side, side, 2}).take_value());
+      PS_CHECK(support.value().at("input0") ==
+               footprint({1, 1, 1, 3, 4},
+                         Region({{0, 1}, {0, 1}, {0, 1}, {0, 2}, {0, 4}})));
+      auto tap = footprint({1, 1, 1, 3, 4},
+                           Region({{0, 1}, {0, 1}, {0, 1}, {1, 1}, {0, 4}}));
+      auto dirty = answer.value().dependencies.potential_dirty(
+          "input0", tap, 1, {}, ResultSupportTarget::Tensor, 0);
+      PS_REQUIRE_OK(dirty);
+      PS_CHECK(dirty.value().at("result") == query);
+      auto absent = footprint({1, 1, 1, 3, 4},
+                              Region({{0, 1}, {0, 1}, {0, 1}, {2, 1}, {0, 4}}));
+      auto clean = answer.value().dependencies.potential_dirty(
+          "input0", absent, 1, {}, ResultSupportTarget::Tensor, 0);
+      PS_REQUIRE_OK(clean);
+      PS_CHECK(clean.value().at("result").empty());
+    }
+    PS_CHECK(driver.root.statistics().live[ResourceKind::Payload] ==
+             before.live[ResourceKind::Payload]);
+  }
+  return 0;
+}
+
 }  // namespace
 int main() {
   auto registry = ps::make_default_operation_registry();
@@ -827,5 +919,6 @@ int main() {
   PS_CHECK(radius_oracles(registry) == 0);
   PS_CHECK(radius_contracts(registry) == 0);
   PS_CHECK(stmap_results(registry) == 0);
+  PS_CHECK(stmap_scaling() == 0);
   return 0;
 }

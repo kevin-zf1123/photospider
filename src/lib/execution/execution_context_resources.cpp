@@ -4,10 +4,10 @@
 #include <thread>
 #include <utility>
 
+#include "data/memory_budget.hpp"
 #include "execution/demand_context.hpp"
 #include "execution/execution_context_state.hpp"
 #include "execution/execution_device.hpp"
-#include "execution/memory_budget.hpp"
 #include "execution/native_gpu.hpp"
 #include "execution/result_cache.hpp"
 #include "execution/result_checkpoints.hpp"
@@ -17,7 +17,6 @@
 #endif
 namespace ps {
 using execution_internal::execution_device;
-using execution_internal::MemoryBudget;
 using execution_internal::ThreadPool;
 namespace {
 std::uint32_t resolve_cpu_workers(std::uint32_t configured) noexcept {
@@ -34,7 +33,7 @@ ExecutionContext::Impl::Impl(std::shared_ptr<OperationRegistry> operations,
     // NOLINTNEXTLINE(whitespace/indent_namespace)
     : cpu_worker_count(resolve_cpu_workers(requested.cpu_workers)),
       // NOLINTNEXTLINE(whitespace/indent_namespace)
-      budget(std::make_shared<MemoryBudget>(
+      budget(std::make_shared<data_internal::MemoryBudget>(
           requested.maximum_live_bytes,
           [&] {
             auto limits =

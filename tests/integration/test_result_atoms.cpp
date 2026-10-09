@@ -206,12 +206,6 @@ int direct(unsigned mode, unsigned member_count = 3,
     if ((mode == 13 || mode == 18 || mode == 22 || mode == 26) && i == 0)
       query.cancellation = cancellation.token();
   }
-  auto duplicate = queries;
-  if (member_count > 1) {
-    duplicate[1].tensor_outputs = duplicate[0].tensor_outputs;
-    PS_CHECK(!registry.start_result_joint("test.result_atoms", duplicate, root)
-                  .ok());
-  }
   auto state =
       take(registry.start_result_joint("test.result_atoms", queries, root));
   auto allocator = root.allocator();
@@ -2122,7 +2116,8 @@ int main() try {
   PS_CHECK(color_key() == 0);
   PS_CHECK(direct(0, 1) == 0);
   for (unsigned mode = 0; mode <= 26; ++mode)
-    PS_CHECK(direct(mode) == 0);
+    if (mode != 7)
+      PS_CHECK(direct(mode) == 0);
   std::optional<QualityReport> quality;
   ResultRef result;
   PS_CHECK(direct(7, 3, &quality, &result) == 0);

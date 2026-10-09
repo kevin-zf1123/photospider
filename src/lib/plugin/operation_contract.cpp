@@ -7,18 +7,14 @@
 #include <utility>
 #include <vector>
 
+#include "core/status_helpers.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "plugin/operation_semantics.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps {
 namespace {
-Status invalid(const char* message) {
-  return Status{ErrorCode::InvalidArgument,
-                message,
-                FailureReason::InvalidDomain,
-                {FailureOrigin::Schema, FailureScope::Unspecified}};
-}
+
 template <class T>
 const T* parameter(const std::map<std::string, ParameterValue>& values,
                    const std::string& name) {
@@ -30,7 +26,8 @@ const T* parameter(const std::map<std::string, ParameterValue>& values,
 Result<OperationTraits> select_operation_output(const OperationTraits& traits,
                                                 std::uint32_t output_index) {
   if (output_index >= traits.outputs.size())
-    return Result<OperationTraits>(invalid("unknown output index"));
+    return Result<OperationTraits>(
+        core_internal::invalid_schema_domain("unknown output index"));
   auto selected = traits;
   selected.outputs = {traits.outputs[output_index]};
   return Result<OperationTraits>(std::move(selected));
@@ -40,7 +37,8 @@ Result<OperationTraits> resolve_operation_traits(
     const OperationTraits& traits, std::size_t count,
     const std::map<std::string, ParameterValue>& parameters) {
   if (traits.outputs.empty() || traits.outputs.size() > 64)
-    return Result<OperationTraits>(invalid("invalid output count"));
+    return Result<OperationTraits>(
+        core_internal::invalid_schema_domain("invalid output count"));
   auto status = validate_operation_parameters(traits, parameters);
   if (!status.ok())
     return Result<OperationTraits>(status);
@@ -52,35 +50,39 @@ Result<OperationTraits> resolve_operation_traits(
                     return input.kind != OperationPortKind::Result;
                   }) ||
       count > 1024 || traits.version != 25)
-    return Result<OperationTraits>(invalid("invalid operation version/count"));
+    return Result<OperationTraits>(core_internal::invalid_schema_domain(
+        "invalid operation version/count"));
   if (traits.repeated_maximum && !traits.repeated_resolved) {
     if (traits.input_schema.size() != traits.input_count + 1 ||
         count < traits.input_count ||
         count - traits.input_count < traits.repeated_minimum ||
         count - traits.input_count > traits.repeated_maximum)
-      return Result<OperationTraits>(
-          invalid("repeated input count outside bounds"));
+      return Result<OperationTraits>(core_internal::invalid_schema_domain(
+          "repeated input count outside bounds"));
     result.repeated_resolved =
         static_cast<std::uint32_t>(count - traits.input_count);
     result.input_schema.resize(count, traits.input_schema.back());
     result.input_count = static_cast<std::uint32_t>(count);
   } else if (count != traits.input_count ||
              traits.input_schema.size() != count) {
-    return Result<OperationTraits>(invalid("operation input count mismatch"));
+    return Result<OperationTraits>(
+        core_internal::invalid_schema_domain("operation input count mismatch"));
   }
   for (auto& output : result.outputs) {
     if (!output.halo_radius_parameter.empty()) {
       const auto* value =
           parameter<std::int64_t>(parameters, output.halo_radius_parameter);
       if (!value || *value <= 0 || *value > UINT32_MAX)
-        return Result<OperationTraits>(invalid("invalid static halo"));
+        return Result<OperationTraits>(
+            core_internal::invalid_schema_domain("invalid static halo"));
       output.halo_radius = static_cast<std::uint32_t>(*value);
     }
     if (!output.spatial_factor_parameter.empty()) {
       const auto* value =
           parameter<std::int64_t>(parameters, output.spatial_factor_parameter);
       if (!value || *value < 1 || *value > 16)
-        return Result<OperationTraits>(invalid("invalid static shrink factor"));
+        return Result<OperationTraits>(core_internal::invalid_schema_domain(
+            "invalid static shrink factor"));
       output.spatial_factor = static_cast<std::uint32_t>(*value);
     }
   }
@@ -91,11 +93,11 @@ Result<OperationMetadata> infer_operation_output(
     const OperationTraits& t, const std::vector<OperationMetadata>& inputs,
     const std::map<std::string, ParameterValue>&) {
   if (t.requires_metadata_specialization)
-    return Result<OperationMetadata>(invalid(
+    return Result<OperationMetadata>(core_internal::invalid_schema_domain(
         "operation template requires registry metadata specialization"));
   if (t.version != 25 || t.outputs.size() != 1 || !t.outputs[0].result_schema)
-    return Result<OperationMetadata>(
-        invalid("select one output for singleton inference"));
+    return Result<OperationMetadata>(core_internal::invalid_schema_domain(
+        "select one output for singleton inference"));
   const auto mismatch = [](const char* message) {
     return Result<OperationMetadata>(
         Status{ErrorCode::TypeMismatch,
@@ -201,14 +203,15 @@ Result<OperationMetadata> infer_operation_output(
     return valid.ok() ? Result<OperationMetadata>(std::move(metadata))
                       : Result<OperationMetadata>(valid);
   }
-  return Result<OperationMetadata>(invalid("missing Result output schema"));
+  return Result<OperationMetadata>(
+      core_internal::invalid_schema_domain("missing Result output schema"));
 }
 Result<std::vector<OperationMetadata>> infer_operation_outputs(
     const OperationTraits& traits, const std::vector<OperationMetadata>& inputs,
     const std::map<std::string, ParameterValue>& parameters) {
   if (traits.outputs.empty() || traits.outputs.size() > 64)
     return Result<std::vector<OperationMetadata>>(
-        invalid("invalid output count"));
+        core_internal::invalid_schema_domain("invalid output count"));
   std::vector<OperationMetadata> results;
   for (std::uint32_t i = 0; i < traits.outputs.size(); ++i) {
     auto selected = select_operation_output(traits, i);
@@ -222,27 +225,30 @@ Result<std::vector<OperationMetadata>> infer_operation_outputs(
 namespace input_internal {
 Status validate_operation_contract(const OperationTraits& t) {
   if (t.outputs.size() != 1)
-    return invalid("select one output contract");
+    return core_internal::invalid_schema_domain("select one output contract");
   const auto& selected = t.outputs[0];
   if (!selected.result_schema ||
       std::any_of(t.input_schema.begin(), t.input_schema.end(),
                   [](const auto& input) {
                     return input.kind != OperationPortKind::Result;
                   }))
-    return invalid("Result programs require Result input and output schemas");
+    return core_internal::invalid_schema_domain(
+        "Result programs require Result input and output schemas");
   if (selected.data_movement != DataMovementKind::None &&
       selected.data_movement != DataMovementKind::BitwiseMapped)
-    return invalid("unknown data movement kind");
+    return core_internal::invalid_schema_domain("unknown data movement kind");
   if (selected.data_movement_view_policy != DataMovementViewPolicy::Auto &&
       selected.data_movement_view_policy !=
           DataMovementViewPolicy::RequireView &&
       selected.data_movement_view_policy != DataMovementViewPolicy::Materialize)
-    return invalid("unknown data movement view policy");
+    return core_internal::invalid_schema_domain(
+        "unknown data movement view policy");
   if ((selected.data_movement != DataMovementKind::None ||
        selected.data_movement_view_policy != DataMovementViewPolicy::Auto) &&
       (!selected.result_schema ||
        selected.data_movement != DataMovementKind::BitwiseMapped))
-    return invalid("bitwise movement requires a mapped Result continuation");
+    return core_internal::invalid_schema_domain(
+        "bitwise movement requires a mapped Result continuation");
   const bool staged_atomic =
       selected.region_rule == OperationRegionRule::Dependency;
   const bool whole = selected.region_rule == OperationRegionRule::Whole;
@@ -250,21 +256,23 @@ Status validate_operation_contract(const OperationTraits& t) {
       (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
        (selected.region_rule != OperationRegionRule::Whole &&
         selected.region_rule != OperationRegionRule::Dependency)))
-    return invalid("CPU stages require a CPU-only Result continuation");
+    return core_internal::invalid_schema_domain(
+        "CPU stages require a CPU-only Result continuation");
   if ((selected.regional_atomic || selected.preserve_output_views) &&
       (!t.supports_cpu || t.supports_gpu || t.joint_contract ||
        selected.observation_kind != ObservationKind::Atomic ||
        selected.requires_dense_output ||
        (selected.regional_atomic ? !staged_atomic : !(staged_atomic || whole))))
-    return invalid(
+    return core_internal::invalid_schema_domain(
         "regional/view output requires CPU non-joint Atomic execution");
   if (selected.requires_input_views &&
       (!whole || !selected.preserve_output_views))
-    return invalid("original input views require CPU Whole view output");
+    return core_internal::invalid_schema_domain(
+        "original input views require CPU Whole view output");
   if (t.outputs[0].maximum_output_payload_bytes &&
       (!t.supports_cpu || t.supports_gpu || !(staged_atomic || whole) ||
        t.outputs[0].requires_dense_output))
-    return invalid(
+    return core_internal::invalid_schema_domain(
         "explicit output payload bound requires a CPU Whole or staged view");
 
   const bool whole_result =
@@ -272,7 +280,7 @@ Status validate_operation_contract(const OperationTraits& t) {
       selected.observation_kind == ObservationKind::Atomic &&
       selected.failure_delivery == FailureDelivery::RequestFailureOnly;
   if (!whole_result && (!t.deterministic || !t.side_effect_free))
-    return invalid(
+    return core_internal::invalid_schema_domain(
         "regional programs require deterministic side-effect-free behavior");
   if ((t.outputs[0].observation_kind != ObservationKind::Atomic &&
        t.outputs[0].observation_kind != ObservationKind::RequestRecord) ||
@@ -283,16 +291,19 @@ Status validate_operation_contract(const OperationTraits& t) {
       (!whole && !staged_atomic) || !selected.continuation_bytes ||
       !selected.maximum_dependency_stages ||
       selected.maximum_dependency_stages > 1048576)
-    return invalid("invalid dependency observation/phase contract");
+    return core_internal::invalid_schema_domain(
+        "invalid dependency observation/phase contract");
   const auto& output = t.outputs[0];
   if (output.atomic_trailing_axes &&
       (output.atomic_trailing_axes > 8 ||
        output.region_rule != OperationRegionRule::Whole ||
        output.observation_kind != ObservationKind::Atomic || t.supports_gpu))
-    return invalid("tuple grouping requires CPU Whole or staged Atomic output");
+    return core_internal::invalid_schema_domain(
+        "tuple grouping requires CPU Whole or staged Atomic output");
   if (output.result_schema.has_value() !=
       (output.output_schema.kind == OperationPortKind::Result))
-    return invalid("structured output requires a complete schema template");
+    return core_internal::invalid_schema_domain(
+        "structured output requires a complete schema template");
   if (output.result_schema &&
       (!output.result_schema->validate().ok() ||
        (output.output_schema.result_schema_id.empty()
@@ -306,7 +317,8 @@ Status validate_operation_contract(const OperationTraits& t) {
        output.output_dtype_rule != OperationDtypeRule::Declared ||
        output.output_semantic_rule != OperationSemanticRule::Drop ||
        !output.output_facets.empty()))
-    return invalid("invalid structured output template");
+    return core_internal::invalid_schema_domain(
+        "invalid structured output template");
   const auto spec = [&](const std::string& name, OperationParameterType type) {
     return std::any_of(t.parameter_schema.begin(), t.parameter_schema.end(),
                        [&](const auto& p) {
@@ -320,31 +332,35 @@ Status validate_operation_contract(const OperationTraits& t) {
         (!t.repeated_match && !t.requires_metadata_specialization) ||
         t.input_count > 1024 - t.repeated_maximum)) ||
       (!t.repeated_maximum && t.repeated_minimum))
-    return invalid("invalid repeated input template");
+    return core_internal::invalid_schema_domain(
+        "invalid repeated input template");
   const auto maximum = t.input_count + t.repeated_maximum;
   if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Input ||
       t.outputs[0].output_dtype_rule == OperationDtypeRule::WidenNumericInput) {
     if (t.outputs[0].output_dtype_input >= maximum ||
         !t.outputs[0].output_dtype_parameter.empty())
-      return invalid("invalid output dtype input");
+      return core_internal::invalid_schema_domain("invalid output dtype input");
   } else if (t.outputs[0].output_dtype_rule == OperationDtypeRule::Parameter) {
     if (t.outputs[0].output_dtype_input ||
         !spec(t.outputs[0].output_dtype_parameter,
               OperationParameterType::String))
-      return invalid("invalid output dtype parameter");
+      return core_internal::invalid_schema_domain(
+          "invalid output dtype parameter");
   } else if (t.outputs[0].output_dtype_rule != OperationDtypeRule::Declared ||
              t.outputs[0].output_dtype_input ||
              !t.outputs[0].output_dtype_parameter.empty()) {
-    return invalid("invalid declared output dtype");
+    return core_internal::invalid_schema_domain(
+        "invalid declared output dtype");
   }
   if (t.outputs[0].shape_rule == OperationShapeRule::Axes) {
     if (t.outputs[0].output_axes.empty() ||
         t.outputs[0].output_axes.size() > 8 ||
         (t.outputs[0].region_rule != OperationRegionRule::Whole &&
          t.outputs[0].region_rule != OperationRegionRule::Dependency))
-      return invalid("axes require bounded rank and Whole region");
+      return core_internal::invalid_schema_domain(
+          "axes require bounded rank and Whole region");
   } else if (!t.outputs[0].output_axes.empty()) {
-    return invalid("unexpected output axes");
+    return core_internal::invalid_schema_domain("unexpected output axes");
   }
   for (const auto& axis : t.outputs[0].output_axes) {
     if (static_cast<std::uint32_t>(axis.source) > 5 || !axis.divisor ||
@@ -364,38 +380,42 @@ Status validate_operation_contract(const OperationTraits& t) {
         (axis.source == OperationExtentSource::InputAxis
              ? axis.input >= maximum || axis.axis >= 8
              : axis.input || axis.axis))
-      return invalid("invalid static output axis");
+      return core_internal::invalid_schema_domain("invalid static output axis");
   }
   if ((t.repeated_maximum ||
        t.outputs[0].output_schema.kind == OperationPortKind::Typed) &&
       (t.outputs[0].region_rule != OperationRegionRule::Whole &&
        t.outputs[0].region_rule != OperationRegionRule::Dependency))
-    return invalid("new typed/repeated contract requires Whole");
+    return core_internal::invalid_schema_domain(
+        "new typed/repeated contract requires Whole");
   for (const auto& port : t.input_schema)
     if (port.kind == OperationPortKind::Typed &&
         (t.outputs[0].region_rule != OperationRegionRule::Whole &&
          t.outputs[0].region_rule != OperationRegionRule::Dependency))
-      return invalid("typed inputs require Whole");
+      return core_internal::invalid_schema_domain("typed inputs require Whole");
   auto facets = t.outputs[0].output_facets;
   if (!canonicalize_facets(&facets).ok() ||
       !same_facets(facets, t.outputs[0].output_facets))
-    return invalid("invalid canonical output facets");
+    return core_internal::invalid_schema_domain(
+        "invalid canonical output facets");
   switch (t.outputs[0].output_semantic_rule) {
     case OperationSemanticRule::Drop:
       if (t.outputs[0].output_schema.kind == OperationPortKind::RgbaFloat32 ||
           t.outputs[0].output_schema.kind == OperationPortKind::Float32Mask ||
           t.outputs[0].output_schema.kind == OperationPortKind::Typed)
-        return invalid("typed output requires an explicit semantic rule");
+        return core_internal::invalid_schema_domain(
+            "typed output requires an explicit semantic rule");
       if (t.outputs[0].output_semantic_input ||
           !t.outputs[0].output_facets.empty() ||
           !t.outputs[0].output_semantic_parameter.empty())
-        return invalid("unexpected dropped semantic fields");
+        return core_internal::invalid_schema_domain(
+            "unexpected dropped semantic fields");
       break;
     case OperationSemanticRule::PreserveInput:
       if (t.outputs[0].output_semantic_input >= maximum ||
           !t.outputs[0].output_facets.empty() ||
           !t.outputs[0].output_semantic_parameter.empty())
-        return invalid("invalid semantic input");
+        return core_internal::invalid_schema_domain("invalid semantic input");
       break;
     case OperationSemanticRule::YCbCrPlane: {
       if (t.outputs[0].output_semantic_input >= maximum ||
@@ -403,23 +423,27 @@ Status validate_operation_contract(const OperationTraits& t) {
           t.outputs[0].output_facets.size() != 1 ||
           (t.outputs[0].region_rule != OperationRegionRule::Whole &&
            t.outputs[0].region_rule != OperationRegionRule::Dependency))
-        return invalid("invalid YCbCr plane template");
+        return core_internal::invalid_schema_domain(
+            "invalid YCbCr plane template");
       auto plane = decode_semantic(t.outputs[0].output_facets[0]);
       if (!plane.ok() || plane.value().kind != SemanticKind::ImagePlane)
-        return invalid("YCbCr template requires plane semantics");
+        return core_internal::invalid_schema_domain(
+            "YCbCr template requires plane semantics");
       break;
     }
     case OperationSemanticRule::Establish:
       if (t.outputs[0].output_semantic_input ||
           !t.outputs[0].output_semantic_parameter.empty())
-        return invalid("invalid established semantic fields");
+        return core_internal::invalid_schema_domain(
+            "invalid established semantic fields");
       break;
     case OperationSemanticRule::Parameter:
       if (t.outputs[0].output_semantic_input ||
           !t.outputs[0].output_facets.empty() ||
           !spec(t.outputs[0].output_semantic_parameter,
                 OperationParameterType::String))
-        return invalid("invalid semantic parameter");
+        return core_internal::invalid_schema_domain(
+            "invalid semantic parameter");
       break;
     case OperationSemanticRule::ExtractChannel:
     case OperationSemanticRule::SwizzleChannels:
@@ -439,34 +463,40 @@ Status validate_operation_contract(const OperationTraits& t) {
           t.outputs[0].output_semantic_input >= maximum ||
           (rule == OperationSemanticRule::MergeChannelsParameter &&
            t.outputs[0].output_semantic_input))
-        return invalid("invalid semantic transform source/region");
+        return core_internal::invalid_schema_domain(
+            "invalid semantic transform source/region");
       if (rule == OperationSemanticRule::ExtractChannel) {
         if (!spec(t.outputs[0].output_semantic_parameter,
                   OperationParameterType::Int64))
-          return invalid("extract requires an Int64 index parameter");
+          return core_internal::invalid_schema_domain(
+              "extract requires an Int64 index parameter");
       } else if (rule == OperationSemanticRule::SwizzleChannels ||
                  rule == OperationSemanticRule::MergeChannelsParameter ||
                  rule == OperationSemanticRule::SampleExpression ||
                  rule == OperationSemanticRule::ApplyLut1d) {
         if (!spec(t.outputs[0].output_semantic_parameter,
                   OperationParameterType::String))
-          return invalid("channel transform requires a String parameter");
+          return core_internal::invalid_schema_domain(
+              "channel transform requires a String parameter");
       } else if (!t.outputs[0].output_semantic_parameter.empty()) {
-        return invalid("unexpected color transform parameter");
+        return core_internal::invalid_schema_domain(
+            "unexpected color transform parameter");
       }
       if (rule == OperationSemanticRule::SampleExpression &&
           (!spec("start", OperationParameterType::Float64) ||
            !spec("step", OperationParameterType::Float64)))
-        return invalid(
+        return core_internal::invalid_schema_domain(
             "expression domain requires Float64 start/step parameters");
       if (rule == OperationSemanticRule::ApplyLut1d &&
           (maximum != 2 || t.outputs[0].output_semantic_input ||
            t.repeated_maximum))
-        return invalid("LUT contract requires ordered query/table inputs");
+        return core_internal::invalid_schema_domain(
+            "LUT contract requires ordered query/table inputs");
       break;
     }
     default:
-      return invalid("unknown semantic inference rule");
+      return core_internal::invalid_schema_domain(
+          "unknown semantic inference rule");
   }
   return Status::success();
 }

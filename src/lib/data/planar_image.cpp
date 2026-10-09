@@ -25,6 +25,8 @@
 #include <unistd.h>
 #endif
 
+#include "core/status_helpers.hpp"
+
 namespace ps {
 PlanarPageBudget::PlanarPageBudget(std::uint64_t maximum_bytes, Reserve reserve,
                                    std::shared_ptr<void> accounting_domain)
@@ -88,9 +90,7 @@ bool metadata_capacity(std::uint64_t base, std::uint64_t rows,
          multiply(pages, 192, &page_bytes) && add(base, row_bytes, out) &&
          add(*out, interval_bytes, out) && add(*out, page_bytes, out);
 }
-Status invalid(const char* message) {
-  return Status::failure(ErrorCode::InvalidArgument, message);
-}
+
 Status exhausted(const char* message) {
   return Status::failure(ErrorCode::ResourceExhausted, message);
 }
@@ -218,12 +218,12 @@ Status PlanarImage::validate_layout(const ValueDescriptor& descriptor,
       (layout.order == ImagePlaneOrder::Tiled && layout.row_pitch_bytes) ||
       std::any_of(descriptor.shape.begin(), descriptor.shape.end(),
                   [](auto extent) { return extent == 0; }))
-    return invalid("invalid structural planar layout");
+    return core_internal::invalid_argument("invalid structural planar layout");
   std::uint64_t scalar_width = 0;
   try {
     scalar_width = Value::element_size(descriptor.element_type);
   } catch (const std::invalid_argument&) {
-    return invalid("invalid planar dtype");
+    return core_internal::invalid_argument("invalid planar dtype");
   }
   std::uint64_t row_bytes = 0;
   if (physical &&
@@ -232,25 +232,26 @@ Status PlanarImage::validate_layout(const ValueDescriptor& descriptor,
   if (layout.row_pitch_bytes &&
       ((physical && layout.row_pitch_bytes < row_bytes) ||
        layout.row_pitch_bytes % scalar_width != 0))
-    return invalid("invalid planar row pitch");
+    return core_internal::invalid_argument("invalid planar row pitch");
   const auto channels =
       layout.channel_axis ? descriptor.shape[*layout.channel_axis] : 1;
   if (layout.groups.size() > channels || layout.groups.size() > 64)
-    return invalid("too many planar component groups");
+    return core_internal::invalid_argument("too many planar component groups");
   std::vector<Interval> groups;
   groups.reserve(layout.groups.size());
   for (const auto& group : layout.groups) {
     if (group.role.empty() || group.role.size() > 128 || !group.channel_count ||
         group.first_channel >= channels ||
         group.channel_count > channels - group.first_channel)
-      return invalid("invalid planar component group");
+      return core_internal::invalid_argument("invalid planar component group");
     groups.emplace_back(group.first_channel,
                         group.first_channel + group.channel_count);
   }
   std::sort(groups.begin(), groups.end());
   for (std::size_t i = 1; i < groups.size(); ++i)
     if (groups[i].first < groups[i - 1].second)
-      return invalid("overlapping planar component groups");
+      return core_internal::invalid_argument(
+          "overlapping planar component groups");
   return Status::success();
 }
 
@@ -317,7 +318,8 @@ Result<PlanarImage> PlanarImage::create(
       (config.tile_width & (config.tile_width - 1)) != 0 ||
       (config.order != ImagePlaneOrder::Continuous &&
        config.order != ImagePlaneOrder::Tiled))
-    return Result<PlanarImage>(invalid("invalid planar image descriptor"));
+    return Result<PlanarImage>(
+        core_internal::invalid_argument("invalid planar image descriptor"));
   if (!config.aggregate_budget)
     config.aggregate_budget =
         std::make_shared<PlanarPageBudget>(config.maximum_backed_bytes);
@@ -337,7 +339,8 @@ Result<PlanarImage> PlanarImage::create(
   try {
     out->scalar_width = Value::element_size(out->descriptor.element_type);
   } catch (const std::invalid_argument&) {
-    return Result<PlanarImage>(invalid("invalid planar image dtype"));
+    return Result<PlanarImage>(
+        core_internal::invalid_argument("invalid planar image dtype"));
   }
   out->page = host_page_size();
   if (!out->page || out->page > SIZE_MAX)
@@ -356,7 +359,8 @@ Result<PlanarImage> PlanarImage::create(
       return Result<PlanarImage>(exhausted("continuous plane overflow"));
   } else {
     if (out->config.row_pitch_bytes)
-      return Result<PlanarImage>(invalid("tiled row pitch is fixed"));
+      return Result<PlanarImage>(
+          core_internal::invalid_argument("tiled row pitch is fixed"));
     std::uint64_t tile_row = 0, full_span = 0, edge_span = 0;
     if (!multiply(out->config.tile_width, out->scalar_width, &tile_row) ||
         !multiply(out->config.tile_height, tile_row, &full_span) ||
@@ -400,7 +404,7 @@ Result<PlanarImage> PlanarImage::assemble_view(
     const CancellationToken& cancellation, const ResourceBindings& resources) {
   using Answer = Result<PlanarImage>;
   const auto unavailable = [] {
-    return invalid(
+    return core_internal::invalid_argument(
         "ViewUnavailable: assembly has no canonical common-owner mapping");
   };
   if (!validate_layout(descriptor, layout).ok() || requested.empty() ||
@@ -598,10 +602,12 @@ const void* PlanarImage::owner_token() const noexcept {
 Result<std::uint64_t> PlanarImage::byte_offset(
     const std::vector<std::uint64_t>& coordinate) const {
   if (!impl_ || coordinate.size() != impl_->descriptor.shape.size())
-    return Result<std::uint64_t>(invalid("invalid image coordinate"));
+    return Result<std::uint64_t>(
+        core_internal::invalid_argument("invalid image coordinate"));
   for (std::size_t axis = 0; axis < coordinate.size(); ++axis)
     if (coordinate[axis] >= impl_->descriptor.shape[axis])
-      return Result<std::uint64_t>(invalid("image coordinate out of bounds"));
+      return Result<std::uint64_t>(
+          core_internal::invalid_argument("image coordinate out of bounds"));
   return Result<std::uint64_t>(impl_->offset(
       coordinate[impl_->config.height_axis],
       coordinate[impl_->config.width_axis], impl_->channel_of(coordinate)));
@@ -629,12 +635,14 @@ const std::vector<ValueFacet>& PlanarImageReadWindow::facets() const {
 Result<PlanarRowRun> PlanarImageReadWindow::row_run(
     const std::vector<std::uint64_t>& coordinate) const {
   if (!image_ || coordinate.size() != region_.rank())
-    return Result<PlanarRowRun>(invalid("invalid image window coordinate"));
+    return Result<PlanarRowRun>(
+        core_internal::invalid_argument("invalid image window coordinate"));
   for (std::size_t axis = 0; axis < coordinate.size(); ++axis) {
     const auto dim = region_.dimensions()[axis];
     if (coordinate[axis] < dim.offset ||
         coordinate[axis] - dim.offset >= dim.extent)
-      return Result<PlanarRowRun>(invalid("coordinate outside image window"));
+      return Result<PlanarRowRun>(
+          core_internal::invalid_argument("coordinate outside image window"));
   }
   const auto& owner = *image_->impl_;
   const auto x = coordinate[owner.config.width_axis];
@@ -673,7 +681,7 @@ Result<PlanarImageReadWindow> PlanarImage::certified_window(
   if (!impl_ || region.empty() ||
       !region.validate(impl_->descriptor.shape).ok())
     return Result<PlanarImageReadWindow>(
-        invalid("invalid certified image rectangle"));
+        core_internal::invalid_argument("invalid certified image rectangle"));
   if (cancellation.cancelled())
     return Result<PlanarImageReadWindow>(Status{ErrorCode::Cancelled, {}});
   if (impl_->view_source) {
@@ -683,8 +691,8 @@ Result<PlanarImageReadWindow> PlanarImage::certified_window(
       if (requested.offset < allowed.offset ||
           requested.extent > allowed.extent ||
           requested.offset - allowed.offset > allowed.extent - requested.extent)
-        return Result<PlanarImageReadWindow>(
-            invalid("certified rectangle exceeds immutable view"));
+        return Result<PlanarImageReadWindow>(core_internal::invalid_argument(
+            "certified rectangle exceeds immutable view"));
     }
   }
   return Result<PlanarImageReadWindow>(
@@ -695,7 +703,7 @@ Result<PlanarImageReadWindow> PlanarImage::acquire(
   if (!impl_ || region.empty() ||
       !region.validate(impl_->descriptor.shape).ok())
     return Result<PlanarImageReadWindow>(
-        invalid("invalid image window region"));
+        core_internal::invalid_argument("invalid image window region"));
   if (impl_->view_source) {
     for (std::size_t axis = 0; axis < region.rank(); ++axis) {
       const auto requested = region.dimensions()[axis];
@@ -812,13 +820,13 @@ Result<PlanarMutableRowRun> PlanarImageWriteWindow::row_run(
     const std::vector<std::uint64_t>& coordinate) const {
   if (!impl_ || coordinate.size() != impl_->region.rank())
     return Result<PlanarMutableRowRun>(
-        invalid("invalid image write coordinate"));
+        core_internal::invalid_argument("invalid image write coordinate"));
   for (std::size_t axis = 0; axis < coordinate.size(); ++axis) {
     const auto dim = impl_->region.dimensions()[axis];
     if (coordinate[axis] < dim.offset ||
         coordinate[axis] - dim.offset >= dim.extent)
-      return Result<PlanarMutableRowRun>(
-          invalid("coordinate outside image write window"));
+      return Result<PlanarMutableRowRun>(core_internal::invalid_argument(
+          "coordinate outside image write window"));
   }
   const auto& image = *impl_->image;
   const auto x = coordinate[image.config.width_axis];
@@ -853,7 +861,7 @@ Result<PlanarMutableRectangleRun> PlanarImageWriteWindow::rectangle_run(
 
 Status PlanarImageWriteWindow::commit(const CancellationToken& cancellation) {
   if (!impl_ || impl_->committed)
-    return invalid("invalid image write publication");
+    return core_internal::invalid_argument("invalid image write publication");
   if (cancellation.cancelled())
     return Status::failure(ErrorCode::Cancelled,
                            "image write publication cancelled");
@@ -876,7 +884,7 @@ Result<PlanarImageWriteWindow> PlanarImage::begin_write(
   if (!impl_ || impl_->view_source || region.empty() ||
       !region.validate(impl_->descriptor.shape).ok())
     return Result<PlanarImageWriteWindow>(
-        invalid("invalid planar image write region"));
+        core_internal::invalid_argument("invalid planar image write region"));
   if (cancellation.cancelled())
     return Result<PlanarImageWriteWindow>(Status::failure(
         ErrorCode::Cancelled, "image write preparation cancelled"));
@@ -946,8 +954,8 @@ Result<PlanarImageWriteWindow> PlanarImage::begin_write(
       for (const auto& existing : intervals)
         if (existing.first < incoming.second &&
             incoming.first < existing.second)
-          return Result<PlanarImageWriteWindow>(
-              invalid("image samples already published"));
+          return Result<PlanarImageWriteWindow>(core_internal::invalid_argument(
+              "image samples already published"));
       intervals.push_back(incoming);
       std::sort(intervals.begin(), intervals.end());
       std::vector<Interval> merged;

@@ -7,15 +7,14 @@
 #include <string>
 #include <utility>
 
+#include "core/status_helpers.hpp"
 #include "core/utf8_validation.hpp"
 #include "data/content_digest.hpp"
 #include "photospider/core/resource_allocator.hpp"
 
 namespace ps {
 namespace {
-Status invalid(const char* message) {
-  return {ErrorCode::InvalidArgument, message, FailureReason::InvalidDomain};
-}
+
 bool name(const std::string& s) {
   return !s.empty() && s.size() <= 128 && core_internal::valid_utf8_key(s);
 }
@@ -50,24 +49,27 @@ Result<OcioConfigResource> OcioConfigResource::import(
       snapshot.spaces.empty() ||
       snapshot.files.size() + snapshot.context.size() + snapshot.spaces.size() >
           1024) {
-    return Answer(invalid("invalid explicit OCIO resource snapshot"));
+    return Answer(core_internal::invalid_domain(
+        "invalid explicit OCIO resource snapshot"));
   }
   for (const auto& e : snapshot.spaces) {
     if (!name(e.first) || (e.second != "scene" && e.second != "display")) {
-      return Answer(invalid("invalid OCIO space declaration"));
+      return Answer(
+          core_internal::invalid_domain("invalid OCIO space declaration"));
     }
   }
   for (const auto& e : snapshot.context) {
     if (!name(e.first) || e.second.size() > 4096 ||
         e.second.find('\0') != std::string::npos ||
         e.second.find('$') != std::string::npos) {
-      return Answer(
-          invalid("OCIO context must contain explicit resolved values"));
+      return Answer(core_internal::invalid_domain(
+          "OCIO context must contain explicit resolved values"));
     }
   }
   for (const auto& e : snapshot.files) {
     if (!name(e.first)) {
-      return Answer(invalid("invalid OCIO logical file name"));
+      return Answer(
+          core_internal::invalid_domain("invalid OCIO logical file name"));
     }
   }
   auto work = [&](std::uint64_t n) {
@@ -117,7 +119,7 @@ Result<OcioConfigResource> OcioConfigResource::import(
     }
   });
   if (overflow || size > SIZE_MAX) {
-    return Answer(invalid("OCIO snapshot size overflow"));
+    return Answer(core_internal::invalid_domain("OCIO snapshot size overflow"));
   }
   auto allocated = resources.allocator().allocate(size);
   if (!allocated.ok()) {
@@ -189,7 +191,8 @@ const std::shared_ptr<const CpuStorage>& OcioConfigResource::storage() const {
 Result<ByteView> OcioConfigResource::lookup(const std::string& category,
                                             const std::string& key) const {
   if (!impl_) {
-    return Result<ByteView>(invalid("invalid OCIO snapshot"));
+    return Result<ByteView>(
+        core_internal::invalid_domain("invalid OCIO snapshot"));
   }
   auto bytes = impl_->storage->bytes();
   std::size_t at = 0;
@@ -207,14 +210,16 @@ Status OcioConfigResource::validate_space(const std::string& name,
                                           const std::string& reference) const {
   auto space = lookup("spaces", name);
   if (!space.ok() || !equal(space.value(), reference)) {
-    return invalid("unresolved OCIO space/reference declaration");
+    return core_internal::invalid_domain(
+        "unresolved OCIO space/reference declaration");
   }
   return Status::success();
 }
 Result<OcioConfigResource> OcioConfigResource::reference(
     const ResourceBudget& resources) const try {
   if (!impl_) {
-    return Result<OcioConfigResource>(invalid("invalid OCIO snapshot"));
+    return Result<OcioConfigResource>(
+        core_internal::invalid_domain("invalid OCIO snapshot"));
   }
   auto storage = resources.reference(impl_->storage);
   if (!storage.ok()) {

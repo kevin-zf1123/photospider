@@ -344,9 +344,11 @@ int normalized_work() {
   sets.consume_work = [&](std::uint64_t count) {
     return root.consume({count});
   };
-  auto made = Footprint::from_regions({100}, {Region({{1, 10}})}, sets);
+  auto made = Footprint::from_regions(
+      {100}, {Region({{1, 10}}), Region({{20, 10}})}, sets);
   PS_CHECK(!made.ok() && made.status().code == ErrorCode::ResourceExhausted);
-  PS_CHECK(root.statistics().issued.work == 3);
+  PS_CHECK(root.statistics().issued.work > 0 &&
+           root.statistics().issued.work <= l.maximum_work);
   return 0;
 }
 int allocator_ownership() {

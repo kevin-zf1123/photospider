@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <memory>
 #include <set>
 #include <tuple>
@@ -749,6 +750,75 @@ Result<ResultRelation> ResultRelation::reshape(
 } catch (const std::bad_alloc&) {
   return Result<ResultRelation>(Status{ErrorCode::ResourceExhausted, {}});
 }
+namespace {
+Result<Footprint> clip_projection(const ResourceBudget& budget,
+                                  const Footprint& outputs, const Region& mask,
+                                  const FootprintLimits& limits) {
+  const auto cost = outputs.boxes().size() * outputs.shape().size() + 1;
+  if (limits.cancellation.cancelled())
+    return Result<Footprint>(Status{ErrorCode::Cancelled, {}});
+  if (cost > limits.maximum_work)
+    return Result<Footprint>(Status{ErrorCode::ResourceExhausted, {}});
+  auto charged =
+      limits.consume_work ? limits.consume_work(cost) : budget.consume({cost});
+  if (!charged.ok())
+    return Result<Footprint>(charged);
+  if (limits.cancellation.cancelled())
+    return Result<Footprint>(Status{ErrorCode::Cancelled, {}});
+  auto valid = mask.validate(outputs.shape());
+  if (!valid.ok())
+    return Result<Footprint>(valid);
+  bool contained = true;
+  for (const auto& box : outputs.boxes()) {
+    for (std::size_t axis = 0; axis < outputs.shape().size(); ++axis) {
+      const auto a = box.dimensions()[axis], b = mask.dimensions()[axis];
+      if (a.offset < b.offset || a.extent > b.extent ||
+          a.offset - b.offset > b.extent - a.extent) {
+        contained = false;
+        break;
+      }
+    }
+    if (!contained)
+      break;
+  }
+  if (contained)
+    return Result<Footprint>(outputs);
+  if (cost > limits.maximum_work - cost)
+    return Result<Footprint>(Status{ErrorCode::ResourceExhausted, {}});
+  // Intersect canonical rectangles directly with one rectangular mask instead
+  // of sweeping both sets on every axis. Normalize the clipped pieces once.
+  charged =
+      limits.consume_work ? limits.consume_work(cost) : budget.consume({cost});
+  if (!charged.ok())
+    return Result<Footprint>(charged);
+  const auto bytes =
+      outputs.boxes().size() *
+      (sizeof(Region) + outputs.shape().size() * sizeof(RegionDimension));
+  auto admitted = budget.reserve(ResourceCapacity::host(bytes, bytes));
+  if (!admitted.ok())
+    return Result<Footprint>(admitted.status());
+  auto lease = admitted.take_value();
+  std::vector<Region> clipped;
+  clipped.reserve(outputs.boxes().size());
+  for (const auto& box : outputs.boxes()) {
+    auto dimensions = box.dimensions();
+    bool empty = false;
+    for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
+      const auto a = dimensions[axis], b = mask.dimensions()[axis];
+      const auto first = std::max(a.offset, b.offset);
+      const auto end = std::min(a.offset + a.extent, b.offset + b.extent);
+      if (first >= end) {
+        empty = true;
+        break;
+      }
+      dimensions[axis] = {first, end - first};
+    }
+    if (!empty)
+      clipped.emplace_back(std::move(dimensions));
+  }
+  return Footprint::from_regions(outputs.shape(), clipped, limits);
+}
+}  // namespace
 Status ResultRelation::project(
     const Footprint& outputs,
     const std::function<Status(ResultSupport, const Footprint*)>& visitor,
@@ -815,13 +885,12 @@ Status ResultRelation::project(
     if (limits.cancellation.cancelled())
       return Status{ErrorCode::Cancelled, {}};
     if (node->kind == Impl::Kind::Restricted) {
-      auto region = Footprint::from_regions(outputs.shape(),
-                                            {node->mapped_outputs}, limits);
-      if (!region.ok())
-        return region.status();
-      auto clipped = outputs.intersect(region.value(), limits);
+      auto clipped =
+          clip_projection(node->budget, outputs, node->mapped_outputs, limits);
       if (!clipped.ok())
         return clipped.status();
+      if (clipped.value().empty())
+        continue;
       ResultRelation child;
       child.impl_ = node->children[0];
       auto status = child.project(clipped.value(), visitor, limits);
@@ -882,13 +951,12 @@ Status ResultRelation::project(
       }
       continue;
     }
-    auto domain = Footprint::from_regions(outputs.shape(),
-                                          {node->mapped_outputs}, limits);
-    if (!domain.ok())
-      return domain.status();
-    auto requested = outputs.intersect(domain.value(), limits);
+    auto requested =
+        clip_projection(node->budget, outputs, node->mapped_outputs, limits);
     if (!requested.ok())
       return requested.status();
+    if (requested.value().empty())
+      continue;
     if (node->kind == Impl::Kind::Neighborhood) {
       auto samples = neighborhood_internal::expand(
           node->budget, requested.value(), node->radii, node->periodic, limits);
@@ -1009,11 +1077,8 @@ Status ResultRelation::validate_tuple_closure(
     auto* node = current.value;
     if (node->kind == Impl::Kind::Restricted ||
         node->kind == Impl::Kind::Mapped) {
-      auto mask = Footprint::from_regions(outputs.shape(),
-                                          {node->mapped_outputs}, limits);
-      if (!mask.ok())
-        return mask.status();
-      auto clipped = current.mask.intersect(mask.value(), limits);
+      auto clipped = clip_projection(node->budget, current.mask,
+                                     node->mapped_outputs, limits);
       if (!clipped.ok())
         return clipped.status();
       current.mask = clipped.take_value();
@@ -2014,15 +2079,44 @@ Result<ResultRelation> ResultRelation::unite(
     // compact geometry without widening a partially published row.
     ResourceVector<std::shared_ptr<const Impl>> compact{
         ResourceAllocator<std::shared_ptr<const Impl>>(budget)};
+    using Node = std::shared_ptr<const Impl>;
+    using Candidates = ResourceVector<std::size_t>;
+    // Pointer identity selects candidates only; it is never semantic identity.
+    const auto same_witness_order = [](const Node& a, const Node& b) {
+      const auto* x = a->children[0].get();
+      const auto* y = b->children[0].get();
+      return x == y ? a->output_shape < b->output_shape
+                    : std::less<const Impl*>{}(x, y);
+    };
+    using Entry = std::pair<const Node, Candidates>;
+    std::map<Node, Candidates, decltype(same_witness_order),
+             ResourceAllocator<Entry>>
+        candidates{same_witness_order, ResourceAllocator<Entry>(budget)};
     for (auto node : leaves) {
+      Candidates* group = nullptr;
       if (node->kind == Impl::Kind::Restricted) {
-        for (std::size_t i = 0; i < compact.size();) {
+        std::uint64_t comparisons = 1;
+        for (auto size = candidates.size(); size; size >>= 1)
+          comparisons += 2;
+        auto indexed =
+            budget.consume({comparisons * (node->output_shape.size() + 1)});
+        if (!indexed.ok())
+          return Result<ResultRelation>(indexed);
+        group = &candidates
+                     .try_emplace(node, ResourceAllocator<std::size_t>(budget))
+                     .first->second;
+        for (std::size_t at = 0; at < group->size();) {
+          const auto i = (*group)[at];
+          if (!compact[i]) {
+            ++at;
+            continue;
+          }
           auto work = budget.consume({node->output_shape.size() + 1});
           if (!work.ok())
             return Result<ResultRelation>(work);
           auto region = adjacent_region(*node, *compact[i]);
           if (!region) {
-            ++i;
+            ++at;
             continue;
           }
           ResultRelation original;
@@ -2032,14 +2126,20 @@ Result<ResultRelation> ResultRelation::unite(
           if (!merged.ok())
             return merged;
           node = merged.take_value().impl_;
-          compact.erase(compact.begin() + i);
+          // Stable slots preserve traversal order and avoid shifting unrelated
+          // witnesses or invalidating their candidate indices.
+          compact[i].reset();
           if (node->kind != Impl::Kind::Restricted)
             break;
-          i = 0;
+          at = 0;
         }
       }
+      if (group && node->kind == Impl::Kind::Restricted)
+        group->push_back(compact.size());
       compact.push_back(std::move(node));
     }
+    compact.erase(std::remove(compact.begin(), compact.end(), nullptr),
+                  compact.end());
     leaves = std::move(compact);
     while (leaves.size() > 1) {
       ResourceVector<std::shared_ptr<const Impl>> next{

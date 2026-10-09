@@ -7,16 +7,12 @@
 #include <vector>
 
 #include "01-numeric/uniform_axis.hpp"
+#include "core/status_helpers.hpp"
 #include "data/lut3d_bake_validation.hpp"
 
 namespace ps {
 namespace {
-Status invalid(const char* message = "invalid LUT3D bake report schema") {
-  return {ErrorCode::InvalidArgument,
-          message,
-          FailureReason::InvalidDomain,
-          {FailureOrigin::Schema, FailureScope::Unspecified}};
-}
+
 std::uint64_t raw(double value) {
   std::uint64_t bits;
   std::memcpy(&bits, &value, 8);
@@ -62,7 +58,8 @@ struct Reader {
 Status validate(const Lut3dBakeDescription& spec) {
   for (auto n : spec.shape)
     if (n < 2 || n > 256)
-      return invalid("LUT3D bake shape must be 2..256");
+      return core_internal::invalid_schema_domain(
+          "LUT3D bake shape must be 2..256");
   if ((spec.interpolation != Lut3dInterpolation::Trilinear &&
        spec.interpolation != Lut3dInterpolation::Tetrahedral) ||
       !finite(spec.atol) || !finite(spec.rtol) ||
@@ -73,17 +70,20 @@ Status validate(const Lut3dBakeDescription& spec) {
       (spec.source_dtype != ElementType::Float32 &&
        spec.source_dtype != ElementType::Float64) ||
       spec.extra_points > 1048576 || spec.recipe_identity.size() != 64)
-    return invalid();
+    return core_internal::invalid_schema_domain(
+        "invalid LUT3D bake report schema");
   for (char c : spec.recipe_identity)
     if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
-      return invalid();
+      return core_internal::invalid_schema_domain(
+          "invalid LUT3D bake report schema");
   for (const auto* description :
        {&spec.input_description, &spec.output_description}) {
     if (description->model != spec.input_description.model ||
         description->model == ColorModel::Cmyk ||
         description->association != ColorAssociation::None ||
         description->source_layout != ColorSourceLayout::Interleaved)
-      return invalid("LUT3D bake requires same-model three-component colors");
+      return core_internal::invalid_schema_domain(
+          "LUT3D bake requires same-model three-component colors");
     auto checked = validate_color_array_descriptor(
         *description, {ElementType::Float64, {1, 3}});
     if (!checked.ok())
@@ -168,21 +168,24 @@ Result<Lut3dBakeDescription> lut3d_bake_description(
       schema.metadata.size() != 1 ||
       schema.metadata[0].key != "curve.bake_lut3d.measured" ||
       schema.metadata[0].version != 1)
-    return Answer(invalid());
+    return Answer(core_internal::invalid_schema_domain(
+        "invalid LUT3D bake report schema"));
   Reader reader{schema.metadata[0].payload};
   Lut3dBakeDescription spec;
   for (auto& n : spec.shape)
     n = reader.word();
   const auto method = reader.word();
   if (method < 1 || method > 2)
-    return Answer(invalid());
+    return Answer(core_internal::invalid_schema_domain(
+        "invalid LUT3D bake report schema"));
   spec.interpolation = static_cast<Lut3dInterpolation>(method);
   const auto a = reader.word(), r = reader.word();
   std::memcpy(&spec.atol, &a, 8);
   std::memcpy(&spec.rtol, &r, 8);
   const auto table = reader.word(), source = reader.word();
   if ((table != 3 && table != 4) || (source != 3 && source != 4))
-    return Answer(invalid());
+    return Answer(core_internal::invalid_schema_domain(
+        "invalid LUT3D bake report schema"));
   spec.table_dtype = static_cast<ElementType>(table);
   spec.source_dtype = static_cast<ElementType>(source);
   spec.extra_points = reader.word();
@@ -191,14 +194,16 @@ Result<Lut3dBakeDescription> lut3d_bake_description(
   spec.recipe_identity = reader.text();
   if (!reader.valid || reader.offset != reader.bytes.size() || !input.ok() ||
       !output.ok())
-    return Answer(invalid());
+    return Answer(core_internal::invalid_schema_domain(
+        "invalid LUT3D bake report schema"));
   spec.input_description = input.take_value();
   spec.output_description = output.take_value();
   auto expected = schema.id == "curve.bake_lut3d.report"
                       ? lut3d_bake_schema(spec)
                       : lut3d_bake_table_schema(spec);
   if (!expected.ok() || !schema.same_schema(expected.value()))
-    return Answer(invalid());
+    return Answer(core_internal::invalid_schema_domain(
+        "invalid LUT3D bake report schema"));
   return Answer(std::move(spec));
 }
 Result<Lut3dBakeReport> read_lut3d_bake_report(
@@ -207,7 +212,8 @@ Result<Lut3dBakeReport> read_lut3d_bake_report(
     const std::function<Status(std::uint64_t)>& consume_work) {
   using Answer = Result<Lut3dBakeReport>;
   if (!result.valid() || result.schema().id != "curve.bake_lut3d.report")
-    return Answer(invalid());
+    return Answer(core_internal::invalid_schema_domain(
+        "invalid LUT3D bake report schema"));
   auto description = lut3d_bake_description(result.schema());
   if (!description.ok())
     return Answer(description.status());
@@ -246,7 +252,8 @@ Result<Lut3dBakeReport> read_lut3d_bake_report(
     if (!window.ok())
       return Answer(window.status());
     if (window.value()->bytes().size() != sizes[field])
-      return Answer(invalid());
+      return Answer(core_internal::invalid_schema_domain(
+          "invalid LUT3D bake report schema"));
     std::memcpy(fields[field], window.value()->bytes().data(), sizes[field]);
   }
   auto validated = input_internal::validate_lut3d_bake_report_values(

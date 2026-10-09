@@ -4,7 +4,7 @@
 
 ## 范围与所有权
 
-Plan 只保留 descriptor domain、精确 sample coverage 和占用 tile 坐标。物化得到的 payload 与目录 Value 通过调用方 allocator 拥有 packed bytes；Result atlas 不保留 source Result 或 read window。Native host 在同步 invocation drain 前保留 device view。Atlas 的 scalar-width transport 不证明相应 GPU 算术已支持。
+Plan 只保留 descriptor domain、精确 sample coverage 和占用 tile 坐标。物化得到的 payload 与目录 Value 通过调用方 allocator 拥有 packed bytes；Result atlas 不保留 source Result 或 read window。Native host 在同步 invocation drain 前保留 device view。Atlas 的 scalar-width transport 不证明相应 GPU 算术已支持。通用目录规划和打包实现在 data 层。`ResultTensorInput` overload 实现在 plugin 层、Result input capability 旁，将其 coverage 和拥有型 windows 适配给通用打包器，并使用同一 packing work 策略。
 
 ## 核心数据结构与内存布局
 
@@ -38,7 +38,7 @@ class FragmentAtlasPlan final {
 };
 ```
 
-`FragmentAtlasPlan` 从精确 coverage 准备传输元数据，再通过调用方 allocator 物化。支持 rank 1..8 以及所有内建 `ElementType`：UInt8、Int64、Float64、Float32、Int8、UInt16、Int16；原始样本 bits 不转换。Plan 只持有 domain、coverage 和 tile masks，不保留 source data owner。`ResultTensorInput` overload 取得拥有型 windows，仅复制该 Need 授权的 samples；通过 `row_run()` 读取，支持负 stride、broadcast stride、碎片化 windows 和带 batch prefix 的 spatial tensor，不填补空洞或 bounding box。Atlas 物化后可独立于 input Result、poll 和 execution context 存活。
+`FragmentAtlasPlan` 从精确 coverage 准备传输元数据，再通过调用方 allocator 物化。支持 rank 1..8 以及所有内建 `ElementType`：UInt8、Int64、Float64、Float32、Int8、UInt16、Int16；原始样本 bits 不转换。Plan 只持有 domain、coverage 和 tile masks，不保留 source data owner。`ResultTensorInput` overload 取得拥有型 windows，仅复制该 Need 授权的 samples；通过 `row_run()` 读取，支持负 stride、broadcast stride、碎片化 windows 和带 batch prefix 的 spatial tensor，不填补空洞或 bounding box。Atlas 物化后可独立于 input Result、poll 和 execution context 存活。Capability 未授予 payload 读取时，物化仍经过 `input.read`，因此该尝试与直接读取一样 latch `UnauthorizedRead`。
 
 `preparation_work()` 报告通用目录规划工作，`materialization_work()` 报告通用 packing 工作。`ResultTensorInput` overload 还会通过 `FootprintLimits::consume_work` 计入 window acquisition 和 read-bound 工作，因此 `materialization_work()` 不代表其完整计费。`ValueFragments` overload 保留调用方原有的外部计费方式。
 

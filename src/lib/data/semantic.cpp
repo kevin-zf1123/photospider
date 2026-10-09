@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/status_helpers.hpp"
 #include "core/utf8_validation.hpp"
 #include "data/typed_sample_validation.hpp"
 #include "data/value_validation.hpp"
@@ -27,9 +28,7 @@ constexpr std::array<const char*, 11> kinds = {
     "byte_resource",
     "image_plane",
 };
-Status invalid(const char* message) {
-  return Status::failure(ErrorCode::InvalidArgument, message);
-}
+
 bool one_of(const std::string& text,
             std::initializer_list<const char*> options) {
   return std::any_of(options.begin(), options.end(),
@@ -42,20 +41,22 @@ bool text_valid(const std::string& text) {
 Status validate(const SemanticDescriptor& s) {
   const auto kind = static_cast<std::uint32_t>(s.kind);
   if (kind == 0 || kind > 10 || s.channels.size() > 64)
-    return invalid("invalid semantic kind/channel count");
+    return core_internal::invalid_argument(
+        "invalid semantic kind/channel count");
   for (const auto* text : {&s.model, &s.primaries, &s.transfer, &s.reference,
                            &s.unit, &s.association, &s.coordinate_space,
                            &s.direction, &s.sample_axis_unit, &s.media_type})
     if (!text_valid(*text))
-      return invalid("invalid semantic text");
+      return core_internal::invalid_argument("invalid semantic text");
   std::set<std::string> names;
   for (const auto& c : s.channels)
     if (!text_valid(c.name) || c.name.empty() || !text_valid(c.role) ||
         c.role.empty() || !text_valid(c.unit) || c.unit.empty() ||
         !names.insert(c.name).second)
-      return invalid("invalid or duplicate semantic channel");
+      return core_internal::invalid_argument(
+          "invalid or duplicate semantic channel");
   if (s.unit.empty())
-    return invalid("semantic value unit is required");
+    return core_internal::invalid_argument("semantic value unit is required");
   const bool image = s.kind == SemanticKind::Image;
   const bool plane = s.kind == SemanticKind::ImagePlane;
   const bool sampled =
@@ -64,13 +65,13 @@ Status validate(const SemanticDescriptor& s) {
       (sampled ? s.sample_step <= 0 || s.sample_axis_unit.empty()
                : s.sample_origin != 0 || s.sample_step != 0 ||
                      !s.sample_axis_unit.empty()))
-    return invalid("invalid sampling domain");
+    return core_internal::invalid_argument("invalid sampling domain");
   for (std::size_t axis = 0; axis < 2; ++axis)
     if (!std::isfinite(s.plane_origin[axis]) ||
         !std::isfinite(s.plane_step[axis]) ||
         (plane ? s.plane_step[axis] <= 0
                : s.plane_origin[axis] != 0 || s.plane_step[axis] != 0))
-      return invalid("invalid plane sampling domain");
+      return core_internal::invalid_argument("invalid plane sampling domain");
   if (plane) {
     if (s.model != "ycbcr" || s.primaries != "srgb" || s.transfer != "bt709" ||
         !one_of(s.reference, {"scene", "display"}) || s.association != "none" ||
@@ -80,7 +81,8 @@ Status validate(const SemanticDescriptor& s) {
         s.channels[0].unit != "relative" || s.white[1] != 1 ||
         std::any_of(s.white.begin(), s.white.end(),
                     [](double x) { return !std::isfinite(x) || x <= 0; }))
-      return invalid("invalid YCbCr plane color semantics");
+      return core_internal::invalid_argument(
+          "invalid YCbCr plane color semantics");
   } else if (image) {
     if (!one_of(s.model, {"rgb", "xyz", "lab"}) ||
         !one_of(s.association,
@@ -92,10 +94,12 @@ Status validate(const SemanticDescriptor& s) {
         (s.model == "lab" ? s.transfer != "identity"
                           : s.transfer != "linear") ||
         (s.association == "coverage_premultiplied" && s.model != "rgb"))
-      return invalid("invalid image color/alpha semantics");
+      return core_internal::invalid_argument(
+          "invalid image color/alpha semantics");
     const bool alpha = s.association != "none";
     if (s.channels.size() != (alpha ? 4U : 3U))
-      return invalid("image channel count contradicts association");
+      return core_internal::invalid_argument(
+          "image channel count contradicts association");
     const std::vector<std::string> roles =
         s.model == "rgb"   ? std::vector<std::string>{"red", "green", "blue"}
         : s.model == "xyz" ? std::vector<std::string>{"x", "y", "z"}
@@ -109,33 +113,38 @@ Status validate(const SemanticDescriptor& s) {
               : "relative";
       if (std::find(roles.begin(), roles.end(), role) == roles.end() ||
           !seen_roles.insert(role).second || s.channels[i].unit != unit)
-        return invalid("image channel role/unit mismatch");
+        return core_internal::invalid_argument(
+            "image channel role/unit mismatch");
     }
     if (s.unit != (s.model == "lab" ? "lab" : "relative") ||
         (alpha && (s.channels[3].role != "coverage" ||
                    s.channels[3].unit != "dimensionless")))
-      return invalid("image unit/coverage mismatch");
+      return core_internal::invalid_argument("image unit/coverage mismatch");
   } else if (!s.model.empty() || !s.primaries.empty() || !s.transfer.empty() ||
              !s.reference.empty() || !s.association.empty() ||
              std::any_of(s.white.begin(), s.white.end(), [](double x) {
                return !std::isfinite(x) || x != 0;
              })) {
-    return invalid("color fields require image semantics");
+    return core_internal::invalid_argument(
+        "color fields require image semantics");
   }
   if (s.kind == SemanticKind::ByteResource) {
     if (s.media_type.empty() || !s.channels.empty())
-      return invalid("byte resource requires media type and no channels");
+      return core_internal::invalid_argument(
+          "byte resource requires media type and no channels");
   } else if (!s.media_type.empty() || s.channels.empty()) {
-    return invalid("typed samples require channels and no media type");
+    return core_internal::invalid_argument(
+        "typed samples require channels and no media type");
   }
   if ((s.kind == SemanticKind::Scalar || s.kind == SemanticKind::ScalarField ||
        s.kind == SemanticKind::Mask) &&
       s.channels.size() != 1)
-    return invalid("scalar/field/mask requires one channel");
+    return core_internal::invalid_argument(
+        "scalar/field/mask requires one channel");
   if (s.kind == SemanticKind::Mask &&
       (!one_of(s.channels[0].role, {"coverage", "probability", "membership"}) ||
        s.channels[0].unit != "dimensionless" || s.unit != "dimensionless"))
-    return invalid("mask role/unit mismatch");
+    return core_internal::invalid_argument("mask role/unit mismatch");
   const bool vector = s.kind == SemanticKind::VectorField;
   const bool complex = s.kind == SemanticKind::ComplexField;
   if (vector && (s.channels.size() < 2 || s.channels.size() > 3 ||
@@ -143,19 +152,23 @@ Status validate(const SemanticDescriptor& s) {
                          {"pixel_displacement", "normalized_displacement",
                           "pixel_position", "normalized_position"}) ||
                  !one_of(s.direction, {"forward", "inverse"})))
-    return invalid("vector requires coordinates and direction");
+    return core_internal::invalid_argument(
+        "vector requires coordinates and direction");
   if (complex && (s.channels.size() != 2 || s.channels[0].role != "real" ||
                   s.channels[1].role != "imaginary" ||
                   s.coordinate_space != "frequency_unshifted" ||
                   s.direction != "forward_negative_inverse_1n"))
-    return invalid("complex field requires real/imaginary channels");
+    return core_internal::invalid_argument(
+        "complex field requires real/imaginary channels");
   if (!vector && !complex &&
       (!s.direction.empty() || !s.coordinate_space.empty()))
-    return invalid("coordinate fields require vector semantics");
+    return core_internal::invalid_argument(
+        "coordinate fields require vector semantics");
   if (!image && s.kind != SemanticKind::ByteResource)
     for (const auto& channel : s.channels)
       if (channel.unit != s.unit)
-        return invalid("sample unit differs from channel unit");
+        return core_internal::invalid_argument(
+            "sample unit differs from channel unit");
   return Status::success();
 }
 void integer(std::vector<std::uint8_t>* out, std::uint64_t value, unsigned n) {
@@ -267,14 +280,16 @@ Result<ValueFacet> encode_semantic(const SemanticDescriptor& s) {
       number(out, step);
   }
   if (out->size() > 4096)
-    return Result<ValueFacet>(invalid("semantic payload exceeds 4096 bytes"));
+    return Result<ValueFacet>(
+        core_internal::invalid_argument("semantic payload exceeds 4096 bytes"));
   return Result<ValueFacet>(std::move(facet));
 }
 Result<SemanticDescriptor> decode_semantic(const ValueFacet& facet) {
   if (facet.payload.size() > 4096 ||
       !((facet.key == "photospider.image" && facet.version == 2) ||
         (facet.key == "photospider.semantic" && facet.version == 1)))
-    return Result<SemanticDescriptor>(invalid("unsupported semantic facet"));
+    return Result<SemanticDescriptor>(
+        core_internal::invalid_argument("unsupported semantic facet"));
   Reader r(facet.payload);
   const auto kind = r.string();
   SemanticDescriptor s;
@@ -285,7 +300,7 @@ Result<SemanticDescriptor> decode_semantic(const ValueFacet& facet) {
   const auto count = r.integer(4);
   if (!r.ok || count > 64)
     return Result<SemanticDescriptor>(
-        invalid("invalid semantic channel count"));
+        core_internal::invalid_argument("invalid semantic channel count"));
   for (std::uint64_t i = 0; i < count; ++i)
     s.channels.push_back({r.string(), r.string(), r.string()});
   s.model = r.string();
@@ -309,14 +324,15 @@ Result<SemanticDescriptor> decode_semantic(const ValueFacet& facet) {
       step = r.number();
   }
   if (!r.complete())
-    return Result<SemanticDescriptor>(
-        invalid("truncated or trailing semantic bytes"));
+    return Result<SemanticDescriptor>(core_internal::invalid_argument(
+        "truncated or trailing semantic bytes"));
   auto encoded = encode_semantic(s);
   if (!encoded.ok())
     return Result<SemanticDescriptor>(encoded.status());
   if (encoded.value().key != facet.key ||
       encoded.value().payload != facet.payload)
-    return Result<SemanticDescriptor>(invalid("noncanonical semantic payload"));
+    return Result<SemanticDescriptor>(
+        core_internal::invalid_argument("noncanonical semantic payload"));
   return Result<SemanticDescriptor>(std::move(s));
 }
 Result<std::string> semantic_parameter(const SemanticDescriptor& s) {
@@ -335,7 +351,7 @@ Result<SemanticDescriptor> semantic_from_parameter(
     const std::string& parameter) {
   if (parameter.empty() || parameter.size() > 8192 || parameter.size() % 2)
     return Result<SemanticDescriptor>(
-        invalid("invalid semantic parameter size"));
+        core_internal::invalid_argument("invalid semantic parameter size"));
   ValueFacet facet{"photospider.semantic", 1, {}};
   const auto digit = [](char c) {
     return c >= '0' && c <= '9'   ? c - '0'
@@ -345,7 +361,8 @@ Result<SemanticDescriptor> semantic_from_parameter(
   for (std::size_t i = 0; i < parameter.size(); i += 2) {
     const int a = digit(parameter[i]), b = digit(parameter[i + 1]);
     if (a < 0 || b < 0)
-      return Result<SemanticDescriptor>(invalid("noncanonical semantic hex"));
+      return Result<SemanticDescriptor>(
+          core_internal::invalid_argument("noncanonical semantic hex"));
     facet.payload.push_back(static_cast<std::uint8_t>(a * 16 + b));
   }
   Reader r(facet.payload);
@@ -358,11 +375,13 @@ Result<SemanticDescriptor> semantic_from_parameter(
 Result<std::string> channel_indices_parameter(
     const std::vector<std::uint32_t>& indices) {
   if (indices.empty() || indices.size() > 64)
-    return Result<std::string>(invalid("channel index count outside [1,64]"));
+    return Result<std::string>(
+        core_internal::invalid_argument("channel index count outside [1,64]"));
   std::string result;
   for (auto index : indices) {
     if (index > 63)
-      return Result<std::string>(invalid("channel index outside [0,63]"));
+      return Result<std::string>(
+          core_internal::invalid_argument("channel index outside [0,63]"));
     if (!result.empty())
       result += ',';
     result += std::to_string(index);
@@ -373,7 +392,7 @@ Result<std::vector<std::uint32_t>> channel_indices_from_parameter(
     const std::string& parameter) {
   if (parameter.empty() || parameter.size() > 191)
     return Result<std::vector<std::uint32_t>>(
-        invalid("invalid channel index String size"));
+        core_internal::invalid_argument("invalid channel index String size"));
   std::vector<std::uint32_t> result;
   std::size_t position = 0;
   while (position < parameter.size()) {
@@ -384,13 +403,13 @@ Result<std::vector<std::uint32_t>> channel_indices_from_parameter(
       value = value * 10 + static_cast<unsigned>(parameter[position++] - '0');
       if (value > 63 || (position - start > 1 && parameter[start] == '0'))
         return Result<std::vector<std::uint32_t>>(
-            invalid("noncanonical channel index"));
+            core_internal::invalid_argument("noncanonical channel index"));
     }
     if (position == start || result.size() == 64 ||
         (position < parameter.size() &&
          (parameter[position] != ',' || position + 1 == parameter.size())))
       return Result<std::vector<std::uint32_t>>(
-          invalid("invalid channel index list"));
+          core_internal::invalid_argument("invalid channel index list"));
     result.push_back(value);
     if (position < parameter.size())
       ++position;
@@ -458,7 +477,7 @@ Status validate_semantic_value(const SemanticDescriptor& s, const Value& value,
                                ErrorCode failure,
                                const std::function<ErrorCode()>& stop) {
   if (!value.valid())
-    return invalid("invalid semantic Value");
+    return core_internal::invalid_argument("invalid semantic Value");
   const auto reader = [&](const auto& at) -> Result<double> {
     auto address = value.byte_address(at);
     if (!address.ok())

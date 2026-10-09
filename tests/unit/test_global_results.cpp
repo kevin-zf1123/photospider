@@ -553,6 +553,7 @@ int tensor_relation_frontiers() {
                    ResultRelation::cartesian(root, 1, {}).take_value())
                .ok());
   auto witness = ResultRelation::cartesian(root, 4, {0, 1, 0, 1}).take_value();
+  std::vector<ResultRef> prefixes;
   const double seven = 7;
   for (std::uint64_t point = 0; point < 4; ++point) {
     PS_CHECK(builder
@@ -562,6 +563,7 @@ int tensor_relation_frontiers() {
                               sizeof(seven)),
                      witness, {true, true, true, true})
                  .ok());
+    prefixes.push_back(builder.reference().capture().take_value());
     auto relation = builder.reference().tensor_relation(0).take_value();
     for (std::uint64_t at = 0; at < 4; ++at) {
       auto status = relation.visit(at, 32, [](ResultSupport support) {
@@ -573,6 +575,21 @@ int tensor_relation_frontiers() {
     }
   }
   PS_CHECK(builder.seal().ok());
+
+  // Later compaction must not widen an already captured publication prefix.
+  for (std::size_t prefix = 0; prefix < prefixes.size(); ++prefix) {
+    auto relation = prefixes[prefix].tensor_relation(0).take_value();
+    for (std::uint64_t point = 0; point < 4; ++point) {
+      unsigned visits = 0;
+      auto status = relation.visit(point, 32, [&](ResultSupport) {
+        ++visits;
+        return Status::success();
+      });
+      PS_CHECK(point <= prefix ? status.ok()
+                               : status.code == ErrorCode::NotFound);
+      PS_CHECK(visits == (point <= prefix ? 1U : 0U));
+    }
+  }
 
   schema.tensors[0].descriptor.shape = {80};
   auto sparse = ResultBuilder::start(root, schema, "nested.union").take_value();

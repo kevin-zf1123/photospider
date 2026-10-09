@@ -16,8 +16,8 @@
 #include <vector>
 
 #include "../../examples/numeric_workflow/result_fixture.hpp"
+#include "data/memory_budget.hpp"
 #include "execution/dependency_records.hpp"
-#include "execution/memory_budget.hpp"
 #include "photospider/photospider.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
@@ -909,7 +909,7 @@ int concurrent_and_reentrant() {
   return 0;
 }
 int allocator_lifetime() {
-  auto budget = std::make_shared<execution_internal::MemoryBudget>(64);
+  auto budget = std::make_shared<data_internal::MemoryBudget>(64);
   auto reservation = multi_result::take(budget->reserve(64));
   auto allocator = reservation->allocator().limited(16);
   auto a = multi_result::take(allocator.allocate(8));

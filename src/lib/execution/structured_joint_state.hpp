@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -29,6 +30,8 @@ class StructuredJointHost {
   virtual JointMemberState state(const JointParticipant&) const = 0;
   virtual bool pending(const JointParticipant&) const = 0;
   virtual void retire_submission(const std::shared_ptr<JointParticipant>&) = 0;
+  virtual Status finish_submission(
+      const std::shared_ptr<JointParticipant>&) = 0;
   virtual void clear_submission(JointParticipant&) = 0;
   virtual void install_records(std::unique_ptr<DependencyRecords>) = 0;
   virtual Status import_completed(const JointParticipant&) = 0;
@@ -69,6 +72,14 @@ struct StructuredJointState {
   void refresh() const;
   bool peers() const;
   bool complete() const;
+  // Strong owners survive carrier retirement, which may release task captures.
+  // Capacity matches the maximum cohort size admitted by the coordinator.
+  struct Submission {
+    std::array<std::shared_ptr<JointParticipant>, 64> members;
+    std::size_t count = 0;
+    bool poll_ready = false;
+  };
+  Result<Submission> finish_submission(StructuredJointHost&);
   void retire_submission(StructuredJointHost&);
   void release(bool fallback, StructuredJointHost&);
   Status fail(const Status&, StructuredJointHost&);

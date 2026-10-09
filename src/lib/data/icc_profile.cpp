@@ -8,6 +8,7 @@
 #include <string>
 #include <utility>
 
+#include "core/status_helpers.hpp"
 #include "data/content_digest.hpp"
 #include "data/icc_validation.hpp"
 #include "photospider/core/resource_allocator.hpp"
@@ -99,9 +100,7 @@ class Md5 {
   std::size_t used_ = 0;
   std::uint64_t length_ = 0;
 };
-Status invalid(const char* message) {
-  return {ErrorCode::InvalidArgument, message, FailureReason::InvalidDomain};
-}
+
 Status profile_id(ByteView bytes,
                   const std::function<Status(std::uint64_t)>& consume) {
   if (bytes[8] != 4 || std::all_of(bytes.begin() + 84, bytes.begin() + 100,
@@ -137,7 +136,7 @@ Status profile_id(ByteView bytes,
     if (std::equal(result.begin(), result.end(), bytes.begin() + 84))
       return Status::success();
   }
-  return invalid("ICC Profile ID checksum mismatch");
+  return core_internal::invalid_domain("ICC Profile ID checksum mismatch");
 }
 }  // namespace
 struct IccProfile::Impl {
@@ -161,7 +160,8 @@ Result<IccProfile> IccProfile::import(ByteView bytes,
   if (!status.ok())
     return Result<IccProfile>(status);
   if (!bytes.data() || bytes.size() < 132 || bytes.size() > UINT32_MAX)
-    return Result<IccProfile>(invalid("invalid ICC byte range"));
+    return Result<IccProfile>(
+        core_internal::invalid_domain("invalid ICC byte range"));
   std::shared_ptr<Impl> impl;
   try {
     impl = std::allocate_shared<Impl>(ResourceAllocator<Impl>(resources));
@@ -248,7 +248,8 @@ const std::shared_ptr<const CpuStorage>& IccProfile::storage() const {
 Result<IccProfile> IccProfile::reference(
     const ResourceBudget& resources) const {
   if (!impl_)
-    return Result<IccProfile>(invalid("invalid ICC resource"));
+    return Result<IccProfile>(
+        core_internal::invalid_domain("invalid ICC resource"));
   std::shared_ptr<Impl> impl;
   try {
     impl = std::allocate_shared<Impl>(ResourceAllocator<Impl>(resources));

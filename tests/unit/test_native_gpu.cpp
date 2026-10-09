@@ -5,8 +5,8 @@
 #include <thread>
 #include <utility>
 
+#include "data/memory_budget.hpp"
 #include "execution/execution_test_hooks.hpp"
-#include "execution/memory_budget.hpp"
 #include "execution/native_gpu.hpp"
 #include "photospider/core/resources.hpp"
 #include "support/native_allocation_quota.hpp"
@@ -89,10 +89,9 @@ int shared_capacity(const std::shared_ptr<ps::gpu_internal::Device>& device) {
     ResourceLimits limits;
     limits.capacity[ResourceKind::Shared] = capacity;
     auto managed = std::make_shared<ResourceBudget>(limits);
-    auto memory = std::make_shared<ps::execution_internal::MemoryBudget>(
-        1 << 20, managed);
-    auto observation =
-        std::make_shared<ps::execution_internal::MemoryObservation>();
+    auto memory =
+        std::make_shared<ps::data_internal::MemoryBudget>(1 << 20, managed);
+    auto observation = std::make_shared<ps::data_internal::MemoryObservation>();
     auto reservation =
         memory->reserve(capacity * 4, {}, observation).take_value();
     auto allocator =

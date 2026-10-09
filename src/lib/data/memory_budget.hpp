@@ -14,7 +14,7 @@
 #include "photospider/core/resources.hpp"
 #include "photospider/data/storage.hpp"
 
-namespace ps::execution_internal {
+namespace ps::data_internal {
 class MemoryReservation;
 /** @brief Per-Run observations shared by collector, Whole boundaries and tiles.
  */
@@ -246,43 +246,6 @@ class MemoryReservation final
   bool admitted_ = false;
 };
 
-// A driver-owned admission capability. Allocator copies may retain State, but
-// closing the driver fences callbacks before borrowed Run/context state
-// retires. The lock serializes close with admission; payload leases do not
-// retain State.
-class ScopedMemoryAdmission final {
- public:
-  using Admit =
-      std::function<Result<std::shared_ptr<MemoryReservation>>(std::uint64_t)>;
-  explicit ScopedMemoryAdmission(Admit admit)
-      : state_(std::make_shared<State>(std::move(admit))) {}
-  ~ScopedMemoryAdmission() {
-    std::lock_guard<std::mutex> lock(state_->mutex);
-    state_->admit = {};
-  }
-  ScopedMemoryAdmission(const ScopedMemoryAdmission&) = delete;
-  ScopedMemoryAdmission& operator=(const ScopedMemoryAdmission&) = delete;
-  Admit callback() const {
-    return
-        [state = state_](
-            std::uint64_t bytes) -> Result<std::shared_ptr<MemoryReservation>> {
-          std::lock_guard<std::mutex> lock(state->mutex);
-          if (!state->admit)
-            return Result<std::shared_ptr<MemoryReservation>>(Status{
-                ErrorCode::OperationFailed, "retired allocation admission"});
-          return state->admit(bytes);
-        };
-  }
-
- private:
-  struct State {
-    std::mutex mutex;
-    Admit admit;
-    explicit State(Admit callback) : admit(std::move(callback)) {}
-  };
-  std::shared_ptr<State> state_;
-};
-
 inline bool MemoryBudget::can_allocate(std::uint64_t bytes, bool shared) const {
   if (bytes > available())
     return false;
@@ -414,4 +377,4 @@ inline Result<std::shared_ptr<MemoryReservation>> MemoryBudget::reserve(
   ++admission_epoch_;
   return Result<std::shared_ptr<MemoryReservation>>(std::move(reservation));
 }
-}  // namespace ps::execution_internal
+}  // namespace ps::data_internal

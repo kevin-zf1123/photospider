@@ -447,7 +447,6 @@ photospider_add_installed_test(NAME installed_unified_result_workflow COMMAND ph
 photospider_add_installed_test(NAME installed_image_domain_native SKIP_RETURN_CODE 77 COMMAND photospider_image_domain_consumer --native-only)
 
 
-photospider_add_installed_test(NAME installed_computed_scalar_sharing COMMAND photospider_computed_scalar_consumer --sharing-only)
 
 
 
