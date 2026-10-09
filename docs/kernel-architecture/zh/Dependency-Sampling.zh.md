@@ -42,7 +42,7 @@ $$
 非空请求在三次 continuation poll 内完成。Program 在第一个 Need 之前把请求的输出 footprint `Q` 闭合为完整 RGBA 像素；闭合后的 footprint `P` 就是 program 计算并发布的输出像素集合。
 
 1. 第一次 poll 请求 source descriptor（role 8，Descriptor），以及 `P` 中每个 canonical box 对应的 map samples，roles 为 Control、Validation 和 Descriptor（14）。Broadcast map 的这些 map box 去掉 frame/layer 轴。`P` 之外的 map samples 不会被请求，因此未请求像素上的非有限 map 值不会被读取。
-2. 第二次 poll 把授权的 map 坐标复制到计入 Root 的 `[P][2]` Float64 数组。当 window 在 sample 轴上同时暴露两个分量时，它通过 `rectangle_run()` 按行读取 map；否则按分量调用 `row_run()`，因此接受 planar、tiled 和带符号 stride 的 map。它拒绝非有限或超出 `[-2^40,2^40]` 的坐标，为每个像素计算四个经过 boundary 映射的 tap，并构建下文所述的 Gather relation。随后它在 `P` 上投影该 relation，得到精确的 source Data footprint，并以 Data、Validation 和 Descriptor roles（13）请求该 footprint。当 `constant` 使所有请求像素的所有 tap 都落在 source 之外时，请求只含 Descriptor（8），不读取 source payload。
+2. 第二次 poll 按行读取授权的 map 坐标：当 window 在 sample 轴上同时暴露两个分量时通过 `rectangle_run()` 读取，否则按分量调用 `row_run()`，因此接受 planar、tiled 和带符号 stride 的 map。存储方式取决于请求，见[map 坐标存储](#map-坐标存储)。它拒绝非有限或超出 `[-2^40,2^40]` 的坐标，为每个像素计算四个经过 boundary 映射的 tap，并构建下文所述的 Gather relation。随后它在 `P` 上投影该 relation，得到精确的 source Data footprint，并以 Data、Validation 和 Descriptor roles（13）请求该 footprint。当 `constant` 使所有请求像素的所有 tap 都落在 source 之外时，请求只含 Descriptor（8），不读取 source payload。
 3. 第三次 poll 把每个授权的 source 像素复制一次到计入 Root 的缓存中，缓存含 `S` 个 RGBA Float32 值，`S` 为不同 source Data 像素的数量。随后它通过 `ResultBuilder::publish_tensor_kernel` 的 Footprint 重载一次发布整个 `P`，并 seal Result。
 
 Empty demand 在第一次 poll 内完成：program seal 一个带 descriptor relation 的空 Result，不请求 map 或 source samples。因此 `OperationTiming::invocation_count` 对非空请求报告三次 poll，对 Empty demand 报告一次。下文发布阶段的 CPU tile callbacks 通过 `cpu_tile_callback_count` 单独报告。
@@ -57,15 +57,15 @@ Empty demand 在第一次 poll 内完成：program seal 一个带 descriptor rel
 | 覆盖 map 的 `ResultRelation::mapped` | 对每个输出像素，记录相同 height 和 width 处的 map 像素；map 带 batch 时还对应输出的 frame/layer。Map `atomic_trailing_axes <= 1` 时记录 Control 和 Validation（role 6）；分组更大时记录 Control（role 2），并用单独的 Validation 节点（role 4）闭合到这些尾部 map 轴。 |
 | Descriptor relation | 两个输入端口的 Descriptor（role 8），通过 `bind_descriptor_relation` 绑定。 |
 
-Map 节点建立在 `P` 的外接矩形上；发布时并集被限制到精确的 footprint `P`，因此该矩形内未请求的 map 像素不带 Control 边。Gather 表为每个输出像素存一行，每行含四个可选 tap：一个存在位，以及每个存在 tap 的 source y/x 坐标。它是一张不可变表，而非每像素一个 relation 节点。`constant` 下位于 source 外的 tap 不存在，不贡献 support。
+Map 节点建立在 `P` 的外接矩形上；发布时并集被限制到精确的 footprint `P`，因此该矩形内未请求的 map 像素不带 Control 边。Gather 表为每个输出像素存一行，每行含四个可选 tap：一个存在位，以及每个 tap 的 source y/x 坐标，坐标按 source height 和 width 轴所需的位宽打包。它是一张不可变表，而非每像素一个 relation 节点。`constant` 下位于 source 外的 tap 不存在，不贡献 support。
 
 Tap 顺序固定为左上、右上、左下、右下。每个位于 source 内的 tap 都作为完整 RGBA 像素读取，包括权重为零的 tap；因此即使该 tap 权重为零且输出位不变，修改该 source tap 仍可能把输出标记为 potentially dirty。此类 tap 中的非有限分量仍会使 typed source validation 失败。Map Control witness 独立跟踪所选 map 像素的修改。地址从输出像素紧凑映射到 source 像素，因此稀疏请求不会展平或枚举巨大的 source 图像。
 
 ### 发布与并行算术
 
-发布 callback 运行在 coordinator 线程上。它按行遍历每个 write window，计入 work，并创建最多 256 像素的 span；每个 span 记录全局输出坐标、其第一个像素在 map 数组中的偏移，以及每个通道一个原始输出指针和字节 stride。每个输出像素根据 map 数组和 source 缓存计算上述公式。Source box 多于一个时，tap 通过对 canonical source boxes 的二分查找定位到缓存位置。
+发布 callback 运行在 coordinator 线程上。它按行遍历每个 write window，计入 work，并创建最多 256 像素的 span；每个 span 记录全局输出坐标、两个 map 分量各自的指针和字节 stride，以及每个通道一个原始输出指针和字节 stride。Span 不跨越 map 行。每个输出像素根据 map 值和 source 缓存计算上述公式。Source box 多于一个时，tap 通过对 canonical source boxes 的二分查找定位到缓存位置。
 
-当 `P >= 65,536` 且宿主提供 CPU staged tile 服务（`OperationTraits::cpu_staged_tiles`）时，coordinator 先收集全部 span，再对 span 索引提交一个 tile stage。Tile 大小为 `ceil(spans/64)`，因此无论 worker 数是多少，该 stage 最多有 64 个 tile callback；stage 请求 `min(4, maximum_workers)` 个 worker。Tile callback 只读取不可变的 map 数组和 source 缓存，只写自己互不相交的输出 span，并在每个 span 前检查取消。Map 和 source Needs、window 服务、分配、work 计费和发布都留在 coordinator 上。所有 tile callback 在发布 callback 返回前完成。较小的请求或没有该服务的宿主在 coordinator 上直接计算每个 span。一个和四个 worker 得到相同的输出字节、Root work 和 tile 数。
+当 `P >= 65,536` 且宿主提供 CPU staged tile 服务（`OperationTraits::cpu_staged_tiles`）时，coordinator 先收集全部 span，再对 span 索引提交一个 tile stage。Tile 大小为 `ceil(spans/64)`，因此无论 worker 数是多少，该 stage 最多有 64 个 tile callback；stage 请求 `min(4, maximum_workers)` 个 worker。Tile callback 只读取不可变的 map 值和 source 缓存，只写自己互不相交的输出 span，并在每个 span 前检查取消。Map 和 source Needs、window 服务、分配、work 计费和发布都留在 coordinator 上。所有 tile callback 在发布 callback 返回前完成。较小的请求或没有该服务的宿主在 coordinator 上直接计算每个 span。一个和四个 worker 得到相同的输出字节、Root work 和 tile 数。
 
 在 AArch64 上，program 用 NEON 计算四个通道：把每个 tap 的 RGBA 值扩展为两对 Float64 lane，每对乘以 tap 权重后按 tap 顺序加到累加器，最后一次窄化为 Float32。其他目标使用等价的标量循环。两条路径的每个通道都从 `+0` 开始，乘法与加法分开执行，最后舍入一次到 Float32。`dependency_sampling.cpp` 使用 `-fno-fast-math -frounding-math -ffp-contract=off` 编译，因此编译器不会把乘法和加法收缩为融合运算，也不会重排求和。每次 poll 设置就近舍入和渐进下溢，并恢复调用方的浮点环境。Tile worker 运行在 CPU tile 服务的就近舍入环境下，见[并行执行模型](Parallel-Execution-Model.zh.md)。
 
@@ -77,9 +77,15 @@ $$
 T = O\!\left(P\,[1 + \log(B_s+1) + \chi \log(B_o+1)] + R_o \log(B_o+1) + S + V + G\right),
 $$
 
-其中变化的 tap 坐标不能装入一个 64 位排序键时 $\chi$ 为 1，否则为 0。Map 读取、tap 生成、Gather 表构建和插值对 `P` 线性。Source 缓存对 `S` 线性。每次 tap 查找要搜索 source boxes，每个输出行要在 `P` 中定位所属 box。对稠密矩形请求，`B_s` 和 `B_o` 很小，`V` 和 `G` 对 `P` 线性，因此整个 program 对 `P` 线性。高度碎片化的请求或碎片化的 source footprint 保留对数项，较大的 Validation 闭包至少花费 `V`。Gather 规范化用稳定的字节 radix sort 对 tap 坐标排序，并跳过不变化的字节位置。变化的 source 坐标能装入一个 64 位键时，排序最多八趟。否则每个变化的 source 轴各作为一个 64 位键，且每次读取由输出映射的 frame 或 layer 坐标都要搜索输出 boxes，这就是 $\chi$ 项。Gather 查询见[依赖数据](Dependency-Data.zh.md)。
+其中变化的 tap 坐标不能装入一个 64 位排序键时 $\chi$ 为 1，否则为 0。Map 读取、tap 生成、Gather 表构建和插值对 `P` 线性。Source 缓存对 `S` 线性。每次 tap 查找要搜索 source boxes，每个输出行要在 `P` 中定位所属 box。对稠密矩形请求，`B_s` 和 `B_o` 很小，`V` 和 `G` 对 `P` 线性，因此整个 program 对 `P` 线性。高度碎片化的请求或碎片化的 source footprint 保留对数项，较大的 Validation 闭包至少花费 `V`。Gather 规范化在 tap 起点的外接框足够小时用位图标记这些起点，否则用稳定的字节 radix sort 排序，并跳过不变化的字节位置。稠密请求走位图路径，代价为 `O(P + A/64)`，其中外接框面积 `A <= 32P`。在 radix 路径上，变化的 source 坐标能装入一个 64 位键时排序最多八趟；否则每个变化的 source 轴各作为一个 64 位键，且每次读取由输出映射的 frame 或 layer 坐标都要搜索输出 boxes，这就是 $\chi$ 项。Gather 查询见[依赖数据](Dependency-Data.zh.md)。
 
-Program 为每个输出像素保留 16 字节 map 坐标，并在 Gather 表中保留 64 字节 tap 坐标和 8 字节存在位；每个缓存的 source 像素占 16 字节。Footprint 规范化 scratch、排序缓冲、span、window 和输出 payload 另行计入 Root。
+Gather 表为每个输出像素存储 `4 * (ceil(log2 Hs) + ceil(log2 Ws))` 个坐标位和 4 个存在位，整张表按 64 位字向上取整；4096x4096 的 source 每像素需要 12.5 字节。已发布的 relation 在其生命周期内保留这张表。请求期间，program 还持有 map 坐标（见下文）和每个缓存 source 像素 16 字节。稠密位图在规范化期间占用 `ceil(A/64)` 个字。Radix 键和 scratch（每个存在 tap 各 8 字节）、span、window、Footprint 规范化 scratch 和输出 payload 另行计入 Root。
+
+### map 坐标存储
+
+请求满足以下全部条件时使用 map 行：至少 65,536 像素，闭合 footprint 是一个 box 且行宽至少 256 像素，map capability 来自单个 Result，请求的 map 区域覆盖完整 map 域。输出不必覆盖其完整域：在部分 frame 和 layer 上广播的 unbatched map 仍满足条件。Program 为每个输出行保留一个目录项。如果 map window 把整行暴露为一个 affine 或 planar run，该目录项保留这个 owning read window 及其原始指针和带符号 stride，不复制数据。否则它把该行复制到每像素 16 字节的 Root 分配缓冲区。同一请求中可以同时存在原始行和复制行。
+
+其他请求把全部 map 坐标复制到计入 Root 的 `[P][2]` Float64 数组。两种情况下，program 在发布后销毁时释放这些 window 和缓冲区；已发布的 Gather relation 只保留 tap 坐标和存在位。保留的 read window 在请求运行期间使其读取的 map backing 保持存活，因此相对于数组的节省量取决于 map 的物理布局。
 
 ### 错误与资源
 
@@ -93,7 +99,7 @@ Root 容量限制请求规模。Gather 表、Footprint metadata 和 source 缓�
 
 `tests/integration/test_dependency_sampling.cpp` 覆盖五种 boundary、map frame/layer broadcast、三像素 identity map，以及从由 16 字节 payload 支撑的 2^40x2^40 broadcast source 稀疏读取。它还检查零权重 tap 仍是 dirty 证据、constant boundary tap 不请求 source payload，以及 Empty 跳过非有限 map。Source `atomic_trailing_axes=2` 时，Validation 闭合到完整 source 行，而 Data 仍只限于所选 tap。零权重 typed tap 中的非有限 RGB 分量以 `InvalidArgument` 使 source validation 失败；非有限 map 坐标先在操作中以 `OperationFailed` 失败。保留的 Result 在 context 退役后仍读到值 7，并保留两个 source 的关联。
 
-`stmap_bitwise_oracle` 把每个输出通道的位模式与独立标量参考比较，覆盖 2x3、1x1 和 1x2 source、全部五种 boundary、`+/-2^40` 坐标、subnormal、有符号零和 `2^80` source 值，以及 1x2 的 planning tile。它在四种调用方舍入模式下检查 `2^100` 与 `-2^100` 的 tap 顺序折叠和上文的 `2^-56` 反例，并检查调用方模式被恢复。`stmap_sparse_dependencies` 检查精确的逐像素 Data dirty 映射、单个输出通道到其两个 source 像素的投影、稀疏请求中的空洞、请求之外的 NaN map 值，以及分组 source 和 map tensor 的 Data 与 Validation 分别闭合。`stmap_batches_and_strides` 覆盖 2x2 frame/layer source 上的 broadcast map 与 batched map，以及带符号 stride 的 nonspatial 和 spatial map backing。`typed_validation_work_batches` 检查[托管资源](Managed-Resources.zh.md)中所述的 256 样本 validation 计费批次。`stmap_cpu_tiles` 在全部五种 boundary 和向上的调用方舍入模式下，以一个和四个 worker 运行 256x256 请求，要求输出逐字节相同、work 相同、tile 数相同且不超过 64，并检查 oracle 值和精确 source support。
+`stmap_bitwise_oracle` 把每个输出通道的位模式与独立标量参考比较，覆盖 2x3、1x1 和 1x2 source、全部五种 boundary、`+/-2^40` 坐标、subnormal、有符号零和 `2^80` source 值，以及 1x2 的 planning tile。它在四种调用方舍入模式下检查 `2^100` 与 `-2^100` 的 tap 顺序折叠和上文的 `2^-56` 反例，并检查调用方模式被恢复。`stmap_sparse_dependencies` 检查精确的逐像素 Data dirty 映射、单个输出通道到其两个 source 像素的投影、稀疏请求中的空洞、请求之外的 NaN map 值，以及分组 source 和 map tensor 的 Data 与 Validation 分别闭合。`stmap_batches_and_strides` 覆盖 2x2 frame/layer source 上的 broadcast map 与 batched map，以及带符号 stride 的 nonspatial 和 spatial map backing。`typed_validation_work_batches` 检查[托管资源](Managed-Resources.zh.md)中所述的 256 样本 validation 计费批次。`stmap_map_rows` 在负 stride affine、负 stride planar、32x64 tiled 和部分拆分的 affine map 上运行 65,536 像素请求，使同一请求中同时出现原始行和复制行；它在各布局间逐位比较全部像素，并用标量 oracle 检查抽样像素。它还检查原始行与复制行分界两侧的精确 Data 投影和反向投影、两个 frame 与两个 layer 上的 broadcast map 和 batched map、调用方舍入模式的恢复，以及 Result 释放后保留的 relation 不持有 Payload 且 Metadata 少于 256 KiB。`stmap_cpu_tiles` 在全部五种 boundary 和向上的调用方舍入模式下，以一个和四个 worker 运行 256x256 请求，要求输出逐字节相同、work 相同、tile 数相同且不超过 64，并检查 oracle 值和精确 source support。
 
 规模测试在显式提高的依赖 work 上限下运行 8x8 到 64x64 的 map。每个 map 坐标都是 0.5，因此在 `clamp` 下每个输出像素读取三像素行中的 source 像素 0 和 1。测试检查每个输出通道和精确 source support。修改 source 像素 1 使整个输出成为 potentially dirty，修改未使用的像素 2 则保持 clean。持有 Result 时 live Payload 增长小于 1 MiB；释放后回到基线。Root work 低于 `1600 * P`，`P` 每增加到四倍，work 增长小于五倍。稀疏规模测试在 16x16 到 64x64 的 map 上请求棋盘格单像素；它要求三次 poll、每个请求像素的 Root work 低于 `15000`，且尺寸每增加到四倍 work 增长小于六倍。这些上限只是这些工作负载的回归检查，1 MiB 增量也不是 context payload 上限、峰值内存上限或 RSS 声明。
 
