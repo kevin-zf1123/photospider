@@ -30,10 +30,13 @@
                  |
    compiler: pure prepare callbacks (metadata + static parameters only)
                  |
-   executor: start/poll callbacks with borrowed v3 service tables
+   executor (callback path): start/poll callbacks with borrowed v3 service tables
+   (capability execution paths extend here later; v3 only reserves their slot)
                  |
    host validates publication, relations, budgets, cancellation
 ```
+
+图中展示的是回调执行路径。能力格式确定之后，能力执行路径接入 D11 预留的槽位；v3 不能仅凭槽位执行 capability-only 算子。
 
 宿主负责编译、调度、依赖跟踪、预算、取消、缓存、发布和模块生命周期。算子模块负责公式、参数定义、元数据推导、输入请求和依赖声明。宿主可以保留私有 C++ 注册记录，这些记录不属于冻结契约。
 
@@ -70,7 +73,7 @@ typedef struct ps_op_service_query_v3 {
 
 ### D2. v3 提供的能力
 
-1. **推导。** 纯准备回调返回已解析的输出契约。SDK 提供 shape、dtype、halo 和 spatial factor 的常用规则。现有的 `OperationShapeRule`、`OperationDtypeRule`、`OperationSemanticRule` 等枚举不照搬进 C ABI。准备只依赖输入元数据和静态参数，不读取运行时样本，不执行上游节点，也不做文件 I/O。
+1. **推导。** 纯准备回调返回已解析的输出契约，其中包括由静态参数推导的输入投影（本次计算实际需要哪些输入），以及准备阶段推导的额外执行 workspace 上界。SDK 提供 shape、dtype、halo 和 spatial factor 的常用规则。现有的 `OperationShapeRule`、`OperationDtypeRule`、`OperationSemanticRule` 等枚举不照搬进 C ABI。准备只依赖输入元数据和静态参数，不读取运行时样本，不执行上游节点，也不做文件 I/O。
 2. **schema 时机。** 准备阶段可以根据输入元数据确定具体 schema，包括受约束的 schema 继承。结构在执行前固定。运行时可以确定已声明的动态行数、覆盖和完成状态。读取样本后新增字段或更换 dtype 不在 v3 范围内。
 3. **内存与状态。** 宿主提供跨 poll 保留的存储。静态准备状态、一次执行的可变状态和已发布的不可变数据是三种不同的生命周期。执行工作区经宿主资源准入计费。准备存储与执行预算之间的现有边界保持不变。
 4. **临时 I/O。** 服务提供临时存储的创建、扩展、读取和写入。回调返回 Need，宿主执行 I/O，下一次 poll 取得回复。存储后端和路径属于宿主实现细节。

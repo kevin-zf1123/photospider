@@ -30,10 +30,13 @@ Built-in operations register through an unfrozen C++ registration interface, whi
                  |
    compiler: pure prepare callbacks (metadata + static parameters only)
                  |
-   executor: start/poll callbacks with borrowed v3 service tables
+   executor (callback path): start/poll callbacks with borrowed v3 service tables
+   (capability execution paths extend here later; v3 only reserves their slot)
                  |
    host validates publication, relations, budgets, cancellation
 ```
+
+The diagram shows the callback execution path. A capability execution path attaches to the reserved slot in D11 once a capability format exists; v3 cannot execute a capability-only operation from the slot alone.
 
 The host owns compilation, scheduling, dependency tracking, budgets, cancellation, caching, publication and module lifetime. An operation module owns its formulas, parameter definitions, metadata inference, input requests and dependency declarations. The host may keep private C++ registry records; those records are not part of the frozen contract.
 
@@ -70,7 +73,7 @@ The versioned C ABI is the only frozen binary contract for operation modules. Th
 
 ### D2. Capabilities the v3 surface provides
 
-1. **Inference.** A pure prepare callback returns a resolved output contract. The SDK supplies common rules for shape, dtype, halo and spatial factor. The current `OperationShapeRule`, `OperationDtypeRule`, `OperationSemanticRule` and similar enums are not copied into the C ABI. Preparation depends only on input metadata and static parameters; it does not read runtime samples, execute upstream nodes or perform file I/O.
+1. **Inference.** A pure prepare callback returns a resolved output contract, including the input projection derived from static parameters (which inputs the computation actually needs) and an upper bound on additional execution workspace derived during preparation. The SDK supplies common rules for shape, dtype, halo and spatial factor. The current `OperationShapeRule`, `OperationDtypeRule`, `OperationSemanticRule` and similar enums are not copied into the C ABI. Preparation depends only on input metadata and static parameters; it does not read runtime samples, execute upstream nodes or perform file I/O.
 2. **Schema timing.** Preparation may derive a concrete schema from input metadata, including constrained schema inheritance. The structure is fixed before execution. At run time an operation may determine declared dynamic row counts, coverage and completion. Adding fields or changing dtype after reading samples is outside v3.
 3. **Memory and state.** The host provides storage that persists across polls. Three lifetimes are distinct: static preparation state, mutable state for one execution, and published immutable data. Execution workspace is charged through host resource admission. The existing boundary between preparation storage and execution budgets stays as it is.
 4. **Temporary I/O.** Services create, extend, read and write temporary storage. The callback returns a Need, the host performs the I/O, and the next poll receives the reply. Storage backends and paths are host implementation details.
