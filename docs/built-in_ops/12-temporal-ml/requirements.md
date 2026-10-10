@@ -6,6 +6,8 @@
 
 输入应有精确timestamp/timebase、有理帧率、source time、曝光区间、颜色状态、有效mask、切镜边界和缺帧政策。邻帧flow位移与px/s速度不同；向前flow与向后flow不能简单逐像素取负。序列可以按需提供，不能强制所有帧组成单个巨型Tensor常驻。
 
+[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md)（Proposed）D7 规定内核与时间无关：时间表示、精确时间比较、选帧、窗口、权重、执行顺序、历史状态及其失效由宿主应用或宿主侧 workflow builder 负责。内核只接收显式的有限帧输入、普通 batch 轴和显式 `state_in`/`state_out` Result，不提供原生 Sequence/RationalTime 类型或按时间取帧服务。下文的时间需求据此归入宿主侧库；外部模型与权重按 ADR 0022 D8 作为不可变、按内容寻址的资源处理。
+
 | ID / 功能 | 输入 → 输出 | 实现依赖与建议验收 |
 | --- | --- | --- |
 | TMP-01 sparse track | frames+points/regions→tracks/status/error | pyramid Lucas–Kanade等具名；已知translation、遮挡失效 |
@@ -25,7 +27,7 @@
 
 Nuke Time Nodes与AE Time Effects公开了不同重定时、运动及时间位移功能；它们映射到不同源时间需求，不宜统一成“读前后两帧”。[^time][^ae] OpenCV光流可作为CPU确定性基线候选，纹理/遮挡条件仍需明确。[^flow]
 
-CPU/GPU先按每个算法的数值与内存协议实现；窗口长度、状态寿命、取消与缓存身份必须包括时间和输入快照。状态模型需reset、随机访问和重放定义；帧缓存由宿主/内核已接受职责管理，算子不能自行新建持久任务系统。
+CPU/GPU先按每个算法的数值与内存协议实现。窗口长度和状态寿命由宿主决定；内核的取消与缓存身份覆盖实际绑定的输入快照和显式参数，宿主选帧所依据的时间进入宿主侧身份。状态模型的reset、随机访问和重放由宿主定义；帧缓存由宿主/内核已接受职责管理，算子不能自行新建持久任务系统。
 
 ## Deep 与辅助数据
 

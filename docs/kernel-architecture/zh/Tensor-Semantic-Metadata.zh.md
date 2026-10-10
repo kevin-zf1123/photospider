@@ -115,5 +115,7 @@ OCIO snapshot 包含显式 config 字节、完整排序的逻辑文件映射、�
 - ICC 准入是结构校验；OCIO 准入校验冻结快照，不执行 transform。Metadata assignment 不运行颜色管理转换，也不创建私有 worker pool。Profile class、tags 和 LUT 边界见[ICC profile 校验实现](../../../src/lib/data/icc_validation.cpp)。
 - 静态 authoring 受 facet 和 transaction 限制；其 preparation path 没有运行时 cancellation token。运行时资源准入使用对应的根预算与取消检查。
 - Metadata 编辑会禁用 sample-only cache reuse，因为输出 identity 包含 metadata。
+- 颜色组与 alpha 索引指定 channel 轴上的位置，axis 角色指定逻辑维度；两者都不决定字节顺序。`ColorArray` 描述符的 channel-last 形式是该描述符自身的属性，不是通用约束。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) D9（Proposed）记录规范图像目标。
+- `ResourceBindings` 目前承载 ICC profile 和 OCIO 快照。ADR 0022 D8 所述的通用、按内容寻址的模型与引擎资源尚未实现。
 
 资源准入、复制或 hash 失败会阻止发布并释放未发布 owner。Result header 可以移除资源引用，而旧 view 仍持有样本 backing；删除 facet 不保证所有祖先分配立即释放。当前行为由已注册的 metadata assignment 测试和 installed consumer fixture 覆盖。Result allocation 与 work admission 不限制 RSS，block-cache 观察也不构成性能结论。

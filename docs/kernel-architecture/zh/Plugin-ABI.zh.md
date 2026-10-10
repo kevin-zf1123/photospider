@@ -92,6 +92,7 @@ Owning tensor-window reads 也会从捕获的 execution Root 扣除 work。C row
 - Operation module 是同进程受信任代码。ABI 校验不提供 sandbox 或 authentication。
 旧 planar header 和独立 image executor 没有兼容 adapter。
 - C++ consumers 针对已安装的 package 0.33.0 headers 构建。Resource facilities 声明在 `photospider/core/`：`core/cancellation.hpp`、`core/resources.hpp`、`core/resource_allocator.hpp` 和存放 data-movement enums 的 `core/data_movement.hpp`。WorkflowDocument schema 5 和 OperationTraits 25 定义当前 compiler contract。Result operation C table 为 ABI 2；provider ABI 1 独立版本化。C import boundary 拒绝非法外部记录，内部 execution states 只在校验后表示。
+- 内置 operations 通过已安装头文件中未冻结的 C++ `OperationDefinition` 注册路径注册，C importer 只接受与 ABI 2 精确相等的结构体大小。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md)（Proposed）记录目标契约：内置与外部模块共用一套按前缀协商的 C ABI v3，服务表各自带版本，回调路径与声明式能力并列且可选。在 v3 实现之前，本页描述 ABI 2。
 - Production image operation 的可用性按[图像 operations](Image-Operations.zh.md)中的源码与 registry 分类确定。
 - GPU 执行需要 native-backend build 和可用设备。Table 或 capability 声明本身不能证明硬件执行。
 - Result C table 仅提供 Result ports 与 tensor members。IPC plugin loading 和 daemon protocol 不属于该 ABI。

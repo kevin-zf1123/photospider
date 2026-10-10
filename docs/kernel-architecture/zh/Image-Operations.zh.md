@@ -72,6 +72,8 @@ FMT operations 没有新增 GPU backend。
 
 `image.exposure_gain`、`image.opacity`、`image.brush_circle`、`image.mask`、`image.source_over`、`image.mix`、`image.gaussian_blur`、`image.downsample_box`、`mask.downsample_box` 和 `image.split_horizontal` 接收结构化 `Result` 并发布结构化 `Result`。图像 slot 使用 schema `photospider.image` version 1，包含一个名为 `pixels` 的 tensor 且不包含 fields。每个 slot 恰有两个 batch axes，分别表示 frame 和 layer，并声明 spatial layout。RGBA operation 要求 Float32 HWC 四通道 tensor 和 canonical linear premultiplied RGBA 语义；coverage 输入为带 coverage 语义的 Float32 HW tensor。多图像输入的 frame/layer 数量和空间尺寸必须一致。
 
+Float32 HWC、两个 batch axes、premultiplied RGBA 的 profile 是上述 RGBA 算术 operation 的当前契约；coverage 输入使用 Float32 HW profile，`image.split_horizontal` 接受任意受支持的 dtype，不要求 RGBA 语义。这套 premultiplied profile 不是规范图像目标。[FMT 公共契约](../../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)和 [ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) D9（Proposed）将规范图像定义为：颜色为 straight，alpha 如存在则是同一 tensor 中位于声明 channel index 的 plane，样本为 Float32 或 Float64，逻辑 axis 角色显式声明，物理存储为 planar。把这些 RGBA 算术 operation 迁到该契约属于有意的接口变化，与 ABI 迁移分开报告；目前尚未实现。
+
 Local Navier-Stokes inpainting 使用同一 Result API 和 typed image schema。图像和 coverage 输入要求 frame/layer batch 与空间尺寸匹配。它验证完整的 `[N,L,H,W,4]` 图像域和 `[N,L,H,W]` mask 域，再发布完整图像 Result，并保留接受的图像 schema 和语义 facets。该 profile 要求 canonical linear-sRGB premultiplied RGBA、不透明 alpha 和 canonical coverage，并允许声明的 scene 或 display reference。不接受 CMYK 或 ICC ColorArray 输入，也不会为无类型 numeric tensor 推断图像语义。输出可以继续输入其他 typed image operation。
 
 图像 tensor 的 descriptor axes 表示 cell 轴。坐标 `{frame, layer, y, x, channel}` 定位一个 RGBA 样本，`{frame, layer, y, x}` 定位一个 coverage 样本。HWC 的 channel 在逻辑上是一个轴；`PlanarImage` 可以把各 channel 存为不同物理平面。所有这些 operation 都保留 frame 和 layer batch axes。

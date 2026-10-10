@@ -6,7 +6,7 @@
 
 `ResultRef` 是结构化 tensor data 与图像数据的语义、发布、ownership 和 input/output 路径。Result 包含 typed tensor slots、packed primitive fields，或二者兼有。Tensor slot 可携带图像语义，并使用内部 planar typed backing；这不创建独立的图像 Result 路径。`Value` 是 backing storage，不是 workflow 或 operation 的 input/output 形式。
 
-当前 package 为 0.33.0，WorkflowDocument schema 为 5，OperationTraits version 为 25，Result C operation ABI 为 2，native provider ABI 为 1。这些版本号描述彼此独立的契约。C++ operation interface 使用 `start_result` 与 `ResultContinuation`。Result C operation table 是唯一的 C operation-plugin 接口；consumer 必须针对已安装 package 重建，因为当前 C++ API 与精确声明的 C 结构是契约。
+当前 package 为 0.33.0，WorkflowDocument schema 为 5，OperationTraits version 为 25，Result C operation ABI 为 2，native provider ABI 为 1。这些版本号描述彼此独立的契约。C++ operation interface 使用 `start_result` 与 `ResultContinuation`。Result C operation table 是唯一的 C operation-plugin 接口；consumer 必须针对已安装 package 重建，因为当前 C++ API 与精确声明的 C 结构是契约。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md)（Proposed）记录所有 operation 共用的按前缀协商 C ABI v3；package 0.33.0 尚未实现。
 
 编译器将不可变 schema 复制到 plan。执行协调器拥有 producer 状态并调度 callbacks 和 I/O。`ResultRef` 拥有 schema、单调 descriptor facts、已认证 backing、dependency evidence 和 source-association metadata。复制引用会共享这些所有权。外部引用或 read window 可在 execution context 结束后继续保持所需 backing 存活。Association metadata 只标识已消费输入，不拥有其 payload。
 
@@ -62,7 +62,7 @@ struct ExecutionBinding final {
 
 `ResultTensorSpec` 描述一个 typed tensor member。Cell descriptor 的 rank 为 1..8，extents 均为正数；`batch_axes` 添加一个正 extent 前缀，合计 sample rank 不超过八。`atomic_trailing_axes` 将 cell 末尾指定数量的轴闭合为一个不可分割的 observation。Schema validation 不要求 dense allocation，也不要求完整 domain 的元素积可表示。`ResultTensorLayout` 记录可选 spatial layout、physical plane order、row pitch 和 channel groups；storage order 与 pitch 不改变 semantic schema identity。Spatial layout 在 cell descriptor 内映射 height、width 和可选 channel axes，与 batch prefix 分开。
 
-Tensor facets 可附加 sample 规则。Semantic Image facet 要求 height 与 width 分别在 cell axes 0 和 1；ColorArray facet 闭合声明的 channel tuple。Tensor-description facet 可描述 CHW 等其他 layout。Layout groups 本身不会要求 peer channels 或 alpha samples。
+Tensor facets 可附加 sample 规则。Semantic Image facet 要求 height 与 width 分别在 cell axes 0 和 1；ColorArray facet 闭合声明的 channel tuple。Tensor-description facet 可描述 CHW 等其他 layout。Layout groups 本身不会要求 peer channels 或 alpha samples。固定 height/width axis 的规则属于 legacy semantic Image facet。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) D9 的规范图像目标使用显式逻辑 axis 角色，不强制 HWC。
 
 Tensor slot 上的 sample 授权保留 legacy semantic image facet 和经验证的 `ColorArray` facet 各自的 tuple 契约。对 rank-3 semantic image cell，空间请求会闭合到完整 channel tuple；若 alpha 是一个 channel，也包含 alpha。对 `ColorArray`，闭包包括所声明 tuple 的全部 channels。Tensor-description facets 和 structural layout groups 不会增加 peer-channel 或 alpha demand。没有这两类 tuple facets 的 typed tensor 按 sample 坐标访问，不会推导 peer closure。逻辑 tuple 完整性与 channel 字节是否交错无关；planar storage 可将 channels 放在不同 planes。
 

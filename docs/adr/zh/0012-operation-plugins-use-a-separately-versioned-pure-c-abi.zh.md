@@ -1,6 +1,7 @@
 # ADR 0012：Operation Plugin 使用版本化 C 契约
 
 - 状态：已接受
+- 提议中的后继：[ADR 0022](0022-freeze-operation-c-abi-v3.zh.md) 以前缀协商取代精确大小的表规则，并让内置算子使用同一条 C 导入路径。在 ADR 0022 被接受并实现之前，本 ADR 描述 ABI 2。
 
 ## 1. 核心摘要 (TL;DR)
 Operation plugin 和 data provider 通过独立版本化的 C 接口跨越 kernel 边界。Host 在发布 registry 记录前校验并复制 descriptor。这样 compiler 元数据不依赖 plugin 的 C++ 对象布局；native plugin 仍在 host 进程和信任域中运行。

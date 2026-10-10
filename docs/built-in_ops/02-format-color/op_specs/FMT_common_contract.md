@@ -152,6 +152,11 @@ ColorArray-plus-Image/Layer-adapters direction. The later planar/virtual-storage
 decisions are specified in the shared kernel contract linked below; operator-local
 and migration details remain explicit.
 Confirmation does not imply implementation completion.
+[ADR 0022](../../../adr/0022-freeze-operation-c-abi-v3.md) (Proposed), decision D9,
+applies C02, C05 and C11 to the operation ABI for every category: Float32 and
+Float64 images, explicit logical axis roles, in-tensor alpha at any channel
+index, physical planar storage and explicit migration of legacy image and
+ColorArray consumers.
 
 | ID | Shared decision | Selected contract | Status |
 | --- | --- | --- | --- |

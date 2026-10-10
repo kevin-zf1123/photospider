@@ -106,3 +106,5 @@ Float32 Value 保留 binary32 payload bits。Scalar 或 operation contract 校�
 - Data-definition registry 保存来自受信任启动注册或 DSO 的复制 schema metadata；它不分配 Value，也不提供存储。
 - Structural image 能力由 Result tensor schema 和 operation contract 声明；不支持的组合会在校验或规划阶段返回带类型的失败。
 - `CpuStorage` 暴露 CPU 可访问的不可变字节，也可保留已完成的原生存储。Device handle 保持私有。
+- 管线元素类型为 UInt8、Int8、UInt16、Int16、Int64、Float32 和 Float64。[ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) D6（Proposed）保持该集合封闭，并拒绝未知 dtype。
+- Kernel 没有时间或序列类型。Batch axes，包括图像的 frame/layer axes，不带时间含义；ADR 0022 D7 将时间表示、选帧和跨帧状态交给宿主应用。

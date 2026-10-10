@@ -107,3 +107,4 @@ GPU context 在创建 device 时使用 execution context 的资源 root 进行 n
 - 空容器及部分内部几何/重建 metadata 未被完整计量。重建的外层 `ValueFragments` metadata 可能独立于原 publication token 存活，但每个 `Value` 仍持有自身 storage owner。
 - 调用方从管理范围取出原始 `Value` 或 vector 并在 managed allocator 之外复制时，自行承担该副本的内存成本。
 - 前缀最终性和跨字段关联校验由 Result publisher 负责，不属于 `TemporaryStorage`。
+- Result C ABI 2 在每次 bridge `poll` 结束时释放普通的 C callback scratch。已保留的 tensor handle 以及由 `create_block_state` 创建的不可变 block-state Result 可以跨 poll 存在。通用的、宿主托管且跨 poll 保留的可变 workspace，以及通过 C ABI 创建临时存储，是 [ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) D2（Proposed）的目标，尚未实现。

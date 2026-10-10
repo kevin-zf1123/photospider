@@ -106,3 +106,5 @@ Float32 Values preserve binary32 payload bits. A scalar or operation contract va
 - The data-definition registry stores copied schema metadata from trusted startup registrations or DSOs; it does not allocate Values or provide storage.
 - Structural image support is declared by the Result tensor schema and operation contract; an unsupported combination returns a typed failure during validation or planning.
 - `CpuStorage` exposes CPU-accessible immutable bytes and may retain completed native storage. Device handles remain private.
+- The pipeline element types are UInt8, Int8, UInt16, Int16, Int64, Float32 and Float64. [ADR 0022](../adr/0022-freeze-operation-c-abi-v3.md) D6 (Proposed) keeps this set closed and rejects unknown dtypes.
+- The kernel has no time or sequence type. Batch axes, including the image frame/layer axes, carry no temporal meaning; ADR 0022 D7 assigns time representation, frame selection and cross-frame state to the host application.

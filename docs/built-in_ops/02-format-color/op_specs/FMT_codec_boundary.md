@@ -28,6 +28,8 @@ no replacement kernel operators are assigned to them.
   alignment and explicit backing preparation. Raw/override cannot waive the
   physical storage contract. Generic non-image arrays retain their own tensor
   contracts; this does not make scalar/vector/table operands into images.
+- [ADR 0022](../../../adr/0022-freeze-operation-c-abi-v3.md) D9 (Proposed)
+  records this image contract for the operation ABI shared by all categories.
 - Same spatial extent is an invariant within an image. It does not require every
   independent image in a workflow to have the same resolution. Geometric
   operators can produce a different output image resolution under their specs.

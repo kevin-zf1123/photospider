@@ -19,5 +19,6 @@ ADR 记录长期有效的架构约束及其理由。了解边界为何存在时�
 | [0019](0019-metal-resident-image-workflows.zh.md) | 让受支持的图像工作流驻留于 Metal 存储。 |
 | [0020](0020-composable-operation-foundations.zh.md) | 在算子间组合数值、语义和输出契约。 |
 | [0021](0021-independent-node-results.zh.md) | 显式表示独立节点结果与联合执行。 |
+| [0022](0022-freeze-operation-c-abi-v3.zh.md) | Proposed：内置与外部算子冻结同一套按前缀协商的 C ABI。 |
 
 [Kernel 概览](../../kernel-architecture/zh/Overview.zh.md)说明当前所有权和执行行为。各 ADR 在其约束适用时仍可供查阅；决策记录本身不能证明某项提议或已接受能力已经实现。

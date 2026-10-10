@@ -230,6 +230,7 @@ Track virtual reservation, provided page capacity, valid sample coverage and cha
 - A provided page does not imply valid sample coverage for the rest of that page. Missing samples are not zeros.
 - Affine source-window publication supports anchored point maps and compatible signed/zero-stride reshape chunks. C ABI `make_reshape()` supplies compact dependency support, while payload access still requires an explicit tensor window authorization.
 - This document defines CPU tensor storage and access. It does not promise GPU address mapping or physical residency.
+- A `layout.spatial` flag, tensor metadata or an HWC shape does not make storage planar. A canonical image actually uses planar backing; other layouts reach it through a legal view or materialization, as recorded in [ADR 0022](../adr/0022-freeze-operation-c-abi-v3.md) D9 (Proposed).
 - Package, workflow, traits and plugin ABI version values are maintained in the [Compiler Version Contract](../development/Compiler-Version-Contract.md).
 
 ## Behavioral evidence

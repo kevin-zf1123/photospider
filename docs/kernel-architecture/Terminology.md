@@ -19,5 +19,7 @@
 | digest / cache key | Non-security identity used for reproducibility checks or disposable cache lookup. |
 | cancellation | Cooperative request that prevents successful late result publication. |
 | CPU fallback | A new CPU attempt after an optional native callback reports backend unavailability before publishing output, when the operation traits permit it. |
+| canonical image | Target image representation in a Result tensor: straight color, optional alpha as a plane of the same tensor, planar storage. Defined by the FMT common contract and [ADR 0022](../adr/0022-freeze-operation-c-abi-v3.md) D9; some built-in RGBA image operations still use premultiplied Float32 HWC. |
+| boundary payload | Explicitly described premultiplied numeric tensor produced or consumed by FMT-04 adapters for export or external interfaces; ordinary image consumers reject it. |
 
 `SessionId`, `JobId`, daemon IPC, and process lifecycle belong to `photospider-daemon`; its Jobs are ephemeral. Persistent results and recovery are outside the current product boundary. Kernel results remain in-memory values whose backing lifetime follows their owners.

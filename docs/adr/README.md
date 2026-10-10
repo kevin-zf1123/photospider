@@ -19,5 +19,6 @@ ADRs record durable architecture constraints and their rationale. Use them to un
 | [0019](0019-metal-resident-image-workflows.md) | Keep supported image workflows resident in Metal storage. |
 | [0020](0020-composable-operation-foundations.md) | Compose numeric, semantic, and output contracts across operations. |
 | [0021](0021-independent-node-results.md) | Represent independent node results and joint execution explicitly. |
+| [0022](0022-freeze-operation-c-abi-v3.md) | Proposed: freeze one prefix-negotiated C ABI for built-in and external operations. |
 
 The [kernel overview](../kernel-architecture/Overview.md) states current ownership and execution behavior. Individual ADRs remain useful when their constraints apply; a decision record does not establish that a proposed or accepted capability is implemented.

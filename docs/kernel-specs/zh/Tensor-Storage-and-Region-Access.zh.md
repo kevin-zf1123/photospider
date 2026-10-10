@@ -230,6 +230,7 @@ C ABI 2 service [`ps_result_services_v2::publish_tensor_view`](../../../include/
 - 提供某页不会使整页的样本 coverage 有效。缺失样本不视为零。
 - Affine source-window publication 支持 anchored point maps 和兼容的有符号／零 stride reshape chunks。C ABI `make_reshape()` 提供 compact dependency support；payload access 仍须通过显式 tensor window authorization 获取。
 - 本文定义 CPU tensor storage 和 access，不保证 GPU 地址映射或物理页常驻。
+- `layout.spatial` 标志、tensor metadata 或 HWC shape 都不能使存储成为 planar。规范图像在物理上确实使用 planar backing；其他布局通过合法视图或物化达到该要求，见 [ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) D9（Proposed）。
 - Package、workflow、traits 和 plugin ABI 的版本值维护在 [Compiler Version Contract](../../development/Compiler-Version-Contract.md) 中。
 
 ## 行为证据

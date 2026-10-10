@@ -24,6 +24,8 @@ Members [A associate](FMT-04A_associate_alpha.md) and
 operations with three profile keys each. The contract replaces persistent
 external alpha bindings with explicit graph inputs and keeps canonical images
 straight.
+[ADR 0022](../../../adr/0022-freeze-operation-c-abi-v3.md) D9 (Proposed) keeps
+this boundary payload as an ordinary Result payload at the operation ABI level.
 
 ## Purpose and confirmed boundary
 

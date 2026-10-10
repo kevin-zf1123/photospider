@@ -19,5 +19,7 @@
 | digest / cache key | 用于复现检查或可丢弃缓存查找的非安全 identity。 |
 | cancellation | 协作式停止请求，阻止较晚的结果成功发布。 |
 | CPU fallback | 原生 callback 在发布输出前报告 backend unavailable，且 operation traits 允许时，新发起的 CPU attempt。 |
+| canonical image（规范图像） | Result tensor 中的目标图像表示：颜色为 straight，alpha 可选且是同一 tensor 的一个 plane，存储为 planar。由 FMT 公共契约和 [ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) D9 定义；部分内置 RGBA 图像 operation 仍使用 premultiplied Float32 HWC。 |
+| boundary payload（边界 payload） | FMT-04 适配器为导出或外部接口生成或消费的、带显式描述的 premultiplied 数值 tensor；普通图像消费者拒绝它。 |
 
 `SessionId`、`JobId`、daemon IPC 和进程生命周期属于 `photospider-daemon`；Daemon Job 是临时状态。持久 result 与恢复能力在当前产品边界之外。Kernel result 是内存中的值，其 backing 生命周期由 owner 决定。

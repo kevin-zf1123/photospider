@@ -1,6 +1,7 @@
 # ADR 0012: Operation Plugins Use Versioned C Contracts
 
 - Status: Accepted
+- Proposed successor: [ADR 0022](0022-freeze-operation-c-abi-v3.md) replaces the exact-size table rule with prefix negotiation and moves built-in operations onto the same C import path. This ADR describes ABI 2 until ADR 0022 is accepted and implemented.
 
 ## 1. Core Summary (TL;DR)
 Operation plugins and data providers cross the kernel boundary through versioned C interfaces. The host validates and copies descriptors before making registry entries available. This keeps compiler metadata independent from plugin C++ object layouts while leaving native plugins in the host process and trust domain.
