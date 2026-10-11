@@ -6,7 +6,7 @@
 
 ## 1. Core summary (TL;DR)
 
-Built-in operations register through an unfrozen C++ registration interface, while external modules use Result operation C ABI 2, which accepts only exact structure sizes. ABI 2 already resolves metadata statically and propagates host-managed resources, but it lacks persistent preparation state, preparation-derived extra workspace, a generic immutable resource handle, temporary storage creation and the C++ declarative inference rules. Photospider will freeze one versioned C ABI, v3, as the only binary contract between the host and every operation module; a header-only C++ SDK compiles into each module, and built-in operations use the same import path as external modules. Structures negotiate by stable prefix, services are separately versioned tables, and the frozen surface covers only what the current built-in operations need plus a reserved slot for declared kernel capabilities.
+Built-in operations register through an unfrozen C++ registration interface, while external modules use Result operation C ABI 2, which accepts only exact structure sizes. ABI 2 already resolves metadata statically and propagates host-managed resources, but it lacks persistent preparation state, preparation-derived extra workspace, a generic immutable resource handle and the C++ declarative inference rules. Photospider will freeze one versioned C ABI, v3, as the only binary contract between the host and every operation module; a header-only C++ SDK compiles into each module, and built-in operations use the same import path as external modules. Structures negotiate by stable prefix, services are separately versioned tables, and the frozen surface covers only what the retained built-in operations need.
 
 ## 2. Mental model and intuition
 
@@ -30,13 +30,10 @@ Built-in operations register through an unfrozen C++ registration interface, whi
                  |
    compiler: pure prepare callbacks (metadata + static parameters only)
                  |
-   executor (callback path): start/poll callbacks with borrowed v3 service tables
-   (capability execution paths extend here later; v3 only reserves their slot)
+   executor: start/poll callbacks with borrowed v3 service tables
                  |
-   host validates publication, relations, budgets, cancellation
+   host validates publication, tile records, budgets, cancellation
 ```
-
-The diagram shows the callback execution path. A capability execution path attaches to the reserved slot in D11 once a capability format exists; v3 cannot execute a capability-only operation from the slot alone.
 
 The host owns compilation, scheduling, dependency tracking, budgets, cancellation, caching, publication and module lifetime. An operation module owns its formulas, parameter definitions, metadata inference, input requests and dependency declarations. The host may keep private C++ registry records; those records are not part of the frozen contract.
 
@@ -76,11 +73,10 @@ The versioned C ABI is the only frozen binary contract for operation modules. Th
 1. **Inference.** A pure prepare callback returns a resolved output contract, including the input projection derived from static parameters (which inputs the computation actually needs) and an upper bound on additional execution workspace derived during preparation. The SDK supplies common rules for shape, dtype, halo and spatial factor. The current `OperationShapeRule`, `OperationDtypeRule`, `OperationSemanticRule` and similar enums are not copied into the C ABI. Preparation depends only on input metadata and static parameters; it does not read runtime samples, execute upstream nodes or perform file I/O.
 2. **Schema timing.** Preparation may derive a concrete schema from input metadata, including constrained schema inheritance. The structure is fixed before execution. At run time an operation may determine declared dynamic row counts, coverage and completion. Adding fields or changing dtype after reading samples is outside v3.
 3. **Memory and state.** The host provides storage that persists across polls. Three lifetimes are distinct: static preparation state, mutable state for one execution, and published immutable data. Execution workspace is charged through host resource admission. The existing boundary between preparation storage and execution budgets stays as it is.
-4. **Temporary I/O.** Services create, extend, read and write temporary storage. The callback returns a Need, the host performs the I/O, and the next poll receives the reply. Storage backends and paths are host implementation details.
-5. **Dependencies and regions.** The host exposes compact managed relations and Footprint construction, covering current Gather, merge and projection uses. Dependency precision, holes and cost characteristics are preserved. An arbitrary plugin relation callback is not the default representation.
-6. **Resources.** A generic immutable resource handle covers current resource uses first; model and engine policy follows D8. The host may manage facts such as `semantic_key` and association internally rather than exposing every field of the C++ query.
+4. **Dependencies.** A Need names an input port and either a set of tile indices in the producer's grid, the complete producer, or only its semantic descriptor, as defined by [ADR 0023](0023-track-dependencies-between-fixed-tiles.md). The coordinator records the requested units; publication carries no dependency relation. Converting sample coordinates to tile indices is SDK work on the module side.
+5. **Resources.** A generic immutable resource handle covers current resource uses first; model and engine policy follows D8. The host may manage facts such as `semantic_key` and association internally rather than exposing every field of the C++ query.
 
-Callback errors remain structured with sticky failure, and cancellation, stale-work and publication rules continue to apply. CPU/GPU lanes, windows, views, joint execution, blocks and checkpoints keep their current behavior. Pure utility and algorithm code belongs in the SDK or operation helper libraries; migration does not move it into the kernel.
+Callback errors remain structured with sticky failure, and cancellation, stale-work and publication rules continue to apply. CPU/GPU lanes, windows, views, blocks and checkpoints keep their current behavior. Pure utility and algorithm code belongs in the SDK or operation helper libraries; migration does not move it into the kernel.
 
 ### D3. Compatibility policy
 
@@ -106,7 +102,7 @@ The pipeline element types are exactly UInt8, Int8, UInt16, Int16, Int64, Float3
 
 ### D7. Time-independent kernel
 
-The host application owns time representation, exact time comparison, frame selection, windows, weights, execution order, history state and history invalidation. The kernel keeps explicit multi-input operations, ordinary batch axes and explicit `state_in`/`state_out` Results; "single image" does not mean "only one image input". Continuations, temporary I/O, blocks, checkpoints and caches stay generic. A plan whose schemas are compatible can run with different immutable input bindings, as defined in ADR 0016. When a host computes weights from rational time and converts them to Float64, that rounding boundary is explicit; it is not equivalent to a single rounding of the original rational expression. Sequence and time policy operations move to host-side libraries or workflow builders.
+The host application owns time representation, exact time comparison, frame selection, windows, weights, execution order, history state and history invalidation. The kernel keeps explicit multi-input operations, ordinary batch axes and explicit `state_in`/`state_out` Results; "single image" does not mean "only one image input". Continuations, blocks, checkpoints and caches stay generic. A plan whose schemas are compatible can run with different immutable input bindings, as defined in ADR 0016. When a host computes weights from rational time and converts them to Float64, that rounding boundary is explicit; it is not equivalent to a single rounding of the original rational expression. Sequence and time policy operations move to host-side libraries or workflow builders.
 
 ### D8. External resources and engines
 
@@ -134,17 +130,13 @@ Canonical images follow the accepted [FMT common contract](../built-in_ops/02-fo
 
 The C ABI and the kernel's `Region` and `Footprint` containers have separate layouts. v3 does not freeze the C++ container layout, and container optimizations follow later measurement.
 
-### D11. Declared kernel capabilities
+### D11. Operation-specific metadata rules
 
-Capabilities have two layers: a fine-grained computation IR and coarse named primitives built on it. The long-term target is compiling capability compositions to executable binaries. v3 reserves a versioned extension position in the operation declaration and defines no capability format.
-
-An operation may provide a capability implementation path, a callback path or both. A callback is optional: when one exists the host may use it as declared, and an operation that declares a capability need not also provide a complete reference callback. If no capability implementation is available to the host and no executable callback exists, the host reports the operation as unsupported; it never succeeds silently or assumes a CPU reference implementation. The negotiation or compilation stage that rejects it, and the error representation, are left to the interface design. Independent numerical validation and native execution acceptance remain required regardless of callbacks.
-
-The current `data_movement` field and `OperationSemanticRule` enum are not frozen in their present form. The canonical encoding of a capability declaration enters semantic identity; pointers, function addresses and opaque state do not. Optimizations that replace one implementation path with another preserve source metadata assertions, intermediate validation, forced materialization or views, and the first error coordinate and failure order. Numeric rewrites such as merging rounded conversions, replacing division by reciprocal multiplication or introducing FMA require separate proof of equivalence.
+The current `data_movement` field and `OperationSemanticRule` enum are not frozen in their present form. Operation-specific inference moves into each module's prepare callback and SDK helpers, and the kernel validates the resolved contract. v3 defines no declared kernel capability format and reserves no extension slot for one.
 
 ### Acceptance
 
-- **Behavior parity.** Representative migrations cover identity and channel extraction/assembly (schema, layout, views, ownership); Gaussian (preparation, workspace, cross-poll coefficients, regions, native GPU); expression, Bezier and sequence operations (static input-set reduction); STMap (Gather, projection, merge, memory); FFT, component and statistics factories (temporary I/O, dynamic fields); joint, block and checkpoint; and an independently installed PixelOE. After the representative set, every in-scope operation migrates.
+- **Behavior parity.** Representative migrations cover identity and channel extraction/assembly (schema, layout, views, ownership); expression, Bezier and sequence operations (static input-set reduction); LUT3D bake (field results, gated Needs); STMap (two-stage tile Needs, tile records, memory); block and checkpoint (dependency restoration); and an independently installed PixelOE (Whole execution, native GPU). After the representative set, every retained operation in 01-numeric, 02-format-color, STMap and PixelOE migrates.
 - **Compatibility.** Fixtures compiled against separate older headers exercise old-module/new-host, new-module/old-host, required and optional capabilities, multi-element array stride, short output buffers, unknown extensions, failure cleanup and module lifetime. A small `struct_size` forged with the current header is insufficient.
 - **Images.** Float32/Float64, HWC/CHW logical orders, non-final alpha, no alpha, multiple groups, hidden RGB, boundary-payload rejection and conversion, planar physical access, ROI and channel dependencies, legal views and materialization, deliberate contract changes and native backend support limits.
 - **External engines.** Wrapper semantics, comparison of the frozen artifact with an independent direct engine run, and task-level effect; plus ownership, concurrency, cancellation, errors, resources and cache identity. Mocks or offline oracles do not replace real inference, decoding or quality validation.
@@ -158,7 +150,7 @@ The current `data_movement` field and `OperationSemanticRule` enum are not froze
 - No native Sequence or RationalTime type, time-indexed frame service, frame-rate or missing-frame policy, playback, seek, replay or implicit cross-call time state in the kernel.
 - No built-in inference framework, automatic license judgment or artifact approval product. License records stay separate from resource and execution identity.
 - No sandbox, signature check, isolated worker or forced termination; modules remain trusted in-process code.
-- No capability format, first capability family, flat-box or bitmap Region container, or performance promise is defined here.
+- No declared kernel capability format or extension slot, flat-box or bitmap Region container, or performance promise is defined here.
 - Canonical straight and planar images are not reopened as an open product choice, and the current Float32 HWC premultiplied image path is not the target contract.
 
 ## 5. Consequences
@@ -167,6 +159,6 @@ Every module, built-in or external, must be rebuilt against the v3 header; a v2 
 
 Prefix negotiation lets a structure grow without rejecting older modules, but only additions with defined defaults are minor changes. Any change to an existing field's meaning, ownership or threading rule is a major version, and the host rejects a module that requires content it does not understand. A module that requires a missing service or device capability is rejected or reported as unsupported rather than run with guessed behavior.
 
-Moving built-in operations onto C callbacks adds a function-pointer call per block or tile. Per-row window, per-coordinate read and per-element cancellation or work callbacks are the expensive paths; they need batched forms before migration, and the C-bridge overhead is measured against direct C++ on Gaussian and PixelOE. The existing premultiplied image operations change their public contract when they adopt straight images; those changes are reported and validated separately from behavior-preserving ABI migration.
+Moving built-in operations onto C callbacks adds a function-pointer call per block or tile. Per-row window, per-coordinate read and per-element cancellation or work callbacks are the expensive paths; they need batched forms before migration, and the C-bridge overhead is measured against direct C++ on representative 01-numeric operations and PixelOE. The existing premultiplied image operations change their public contract when they adopt straight images; those changes are reported and validated separately from behavior-preserving ABI migration.
 
 Host applications that need temporal behavior implement frame selection, weighting and state threading themselves, using explicit inputs and `state_in`/`state_out` Results. Operations that wrap models or engines carry their own validation, metering declarations and determinism evidence before result caching is enabled for them.

@@ -5,7 +5,7 @@
 
 ## 1. Core summary (TL;DR)
 
-Mutable workflow graphs and edited inputs need stable execution inputs, while regional work benefits from reusing results whose exact dependencies have not changed. The kernel owns immutable input snapshots, frozen execution bundles and bounded disposable result caches. Exact content and dependency identity permit reuse without making cache state authoritative.
+Mutable workflow graphs and edited inputs need stable execution inputs, while tiled work benefits from reusing tiles whose recorded dependencies have not changed. The kernel owns immutable input snapshots, frozen execution bundles and bounded disposable result caches. Content identity and tile dependency records permit reuse without making cache state authoritative.
 
 ## 2. Mental model and intuition
 
@@ -14,20 +14,18 @@ Mutable workflow graphs and edited inputs need stable execution inputs, while re
 ```text
 Graph + bindings --freeze--> Frozen plan and input owners
                                   |
-                         requested local result
+                     requested tile or Whole unit
                            /             \
-                  exact cache hit      cache miss
+                     cache hit         cache miss
                        |                  |
-                       |             producer flight
-                       |             /            \
-                       |       subscriber A    subscriber B
-                       |             \            /
+                       |         compute in this Run
+                       |                  |
                        +---------- validated immutable result
                                       |
                            memory result cache
 ```
 
-An `ExecutionContext` owns worker resources, in-flight coordination and its cache entries. A result may outlive the context when a returned `Value` still owns the result storage and its budget lease. Application code owns preview policy, event queues, publication arbitration and presentation.
+An `ExecutionContext` owns worker resources and its cache entries. A result may outlive the context when a returned `Value` still owns the result storage and its budget lease. Application code owns preview policy, event queues, publication arbitration and presentation.
 
 ## 3. Formal contracts and APIs
 
@@ -72,11 +70,9 @@ Snapshots contain supported rank-1..8 `Value` inputs and preserve their sample b
 
 `freeze` captures a current matching plan, immutable bindings and the operation registry owner. A custom `RegionalSource` must first be imported into a kernel snapshot. Workflow input bindings supplied to freeze are immutable Values, kernel snapshots, or immutable `ResultRef` owners for declarations with a Result schema. Preflight checks that a Result binding matches the declared schema and has a valid final descriptor. Execution admission checks root ownership when the context uses managed resources, and demand reads remain bounded by the declared domain and published support. Capture invokes no operation callback and rechecks graph currentness before returning. Frozen execution uses the captured input versions after graph replacement or destruction; ordinary execution retains its normal currentness checks. Each execute call supplies independent cancellation, and owners remain alive until admitted callbacks retire. A Result input binding retains its immutable `ResultRef` owner. Callers capture a Result with `ResultRef::capture()` and read image samples through `ResultRef::read_image()` using the captured descriptor.
 
-Completed-result retention is optional. Its capacity is a sublimit of `maximum_live_bytes`; zero disables retention while exact in-flight demand sharing remains available. Keys cover the local operation contract and implementation, exact demanded input content and metadata, output Region and relevant backend identity. Compiler graph revision and unrelated branches do not enter a local result key. A dirty hint can narrow work but cannot establish reuse without content identity. Reuse requires every participating operation to be deterministic, side-effect-free and cacheable, with proven input dependencies.
+Completed-result retention is optional. Its capacity is a sublimit of `maximum_live_bytes`; zero disables retention. The reuse unit is a tile of a Tiled output or a complete Whole output. Its key combines the step's physical identity (operation contract and implementation, tile extent, resolved output schema, and relevant backend and resource identities), the unit index and the identities of the producer units recorded for it, as defined by [ADR 0023](0023-track-dependencies-between-fixed-tiles.md); workflow-input identities are computed over logical content. Compiler graph revision and unrelated branches do not enter a local result key. A dirty hint can narrow work but cannot establish reuse without content identity. Reuse requires every participating operation to be deterministic, side-effect-free and cacheable.
 
-The coordinator lets identical in-flight requests in one context share a producer. Each waiter has independent cancellation. Cancelling one waiter leaves other live waiters attached; when the last waiter leaves, the coordinator requests producer cancellation. The producer owns its frozen inputs and registry until admitted callbacks retire. It does not block a worker by waiting for another callback in the same pool. Only validated successful immutable results enter completed caches.
-
-
+Each Run computes its own cache misses; identical requests in concurrent Runs are not merged. A Run's producers own their frozen inputs and registry until admitted callbacks retire. It does not block a worker by waiting for another callback in the same pool. Only validated successful immutable results enter completed caches.
 
 ## 4. Non-goals and explicit boundaries
 
@@ -92,4 +88,4 @@ Retaining old snapshots and returned Values retains their backing blocks and lea
 
 The cache reclaims idle entries before resource admission. Eviction and cache clearing remove reuse eligibility but do not invalidate Values already held by callers. Cache admission failure skips retention; if the working set itself exceeds the context's controlled-buffer capacity, execution fails with `ResourceExhausted`. The caller must release unneeded results to make their owned capacity available.
 
-Cancellation is cooperative. Submitted work retires before its owners are released, and a producer continues while any subscriber still needs it.
+Cancellation is cooperative. Submitted work retires before its owners are released, and cancelling one Run does not affect another Run.

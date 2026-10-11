@@ -69,6 +69,6 @@ struct ExecutionResult final {
 
 ## 5. 后果与代价 (Consequences)
 
-Malformed declarations，以及缺失、多余、重复或非法 binding names 以 `InvalidArgument` 失败；不兼容的 Result schema 以 `TypeMismatch` 失败。这些检查在 operation callbacks 之前执行。调用方可以用不同 Result bindings 重用已编译 plan，但在 `execute` 复制期间不得修改 binding container。
+Malformed declarations，以及缺失、多余、重复或非法 binding names 以 `InvalidArgument` 失败；不兼容的 Result schema 以 `TypeMismatch` 失败。这些检查在 operation callbacks 之前执行。调用方可以用不同 Result bindings 重用已编译 plan，但在 `execute` 复制期间不得修改 binding container。声明 schema 恰好包含一个空间 tensor 且没有 field 的绑定输入按 tile 请求和比较；其他输入都是一个 Whole 单元，见 [ADR 0023](0023-track-dependencies-between-fixed-tiles.zh.md)。
 
-Cancellation 采用协作方式。Executor 会等待已进入的 callbacks 退出后再释放借用 phases 和 owners。只要 live peer 仍需要 frozen Result producer，context 就可能继续持有该 producer；一个 waiter 的取消不会取消其他 waiter 仍需要的共享工作。输入 Results 保留各自的 backing owners；Root 计费的工作状态、outputs 和 transfers 会持续计费到最后一个 owner 退出。
+Cancellation 采用协作方式。Executor 会等待已进入的 callbacks 退出后再释放借用 phases 和 owners。每个 Run 拥有自己的 producer；取消一个 Run 会停止并退休该 Run 的工作，不影响其他 Run。输入 Results 保留各自的 backing owners；Root 计费的工作状态、outputs 和 transfers 会持续计费到最后一个 owner 退出。
