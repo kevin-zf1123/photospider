@@ -100,6 +100,5 @@ Use an independent retained-slot oracle and exact bytes for arbitrary alpha
 positions, shared references, cell axes, batch prefixes, disjoint regions and
 tile boundaries. Check surviving source/view owners after context retirement,
 final release, low budgets, cancellation and rollback of failed helper expansion.
-`test_alpha_authoring` exercises the public compile/execute path and passes.
-Fourteen small alpha performance smoke cases pass their output oracle; no full
-matrix is claimed.
+Create a temporary public compile/execute check for the helper expansion and
+remove it after the operation change is validated.

@@ -92,10 +92,6 @@ exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole e
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
-The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
-cover this operation. Manual targets have no CTest/integration
-registration; MPFR is used only by the independent Python oracle.
-
 Other inputs retain strict evaluation; the Float32 certificate does not admit
 narrowed Float64 arguments. See the [adapter update](../adapter-performance.md) and
 [exp implementation, validation and performance report](../exp-performance.md).

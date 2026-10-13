@@ -70,7 +70,7 @@ The phase services expose checked sample reads with actual dtype, origin, signed
 | Scratch pointer | Valid through the current poll callback; expires when poll returns. |
 | Output pointer | Valid until successful publication, or until poll returns if unpublished; publication revokes direct pointer access immediately. |
 
-`tests/integration/test_result_c_block.cpp` covers the C block-state handle lifecycle and ordered Float64 fixture scan. Its finite-input and finite-sum checks belong to that fixture; the generic Float64 block service transports canonical bytes. The test also checks failure cleanup and Root ownership. Block-cache reuse and hit counts are implementation details, not a performance contract.
+`tests/integration/kernel/test_result_c_block.cpp` covers the C block-state handle lifecycle and ordered Float64 fixture scan. Its finite-input and finite-sum checks belong to that fixture; the generic Float64 block service transports canonical bytes. The test also checks failure cleanup and Root ownership. Block-cache reuse and hit counts are implementation details, not a performance contract.
 
 ### C checkpoint services
 
@@ -102,7 +102,7 @@ Context shutdown drains demand calls and submitted callbacks before retiring wor
 
 `ResultProgramPhase::block` and the C block service operate on an explicit sealed `CompleteBundle` tensor state. A block callback reads that state and returns it or a newly created state; it does not issue Needs or publish the operation output. The producer requests any later tensor samples from its poll callback. Checkpoint and block services remain separate: checkpoint restoration can import successful dependency evidence, while block state carries only transition data. Optional block-state retention may skip a transition or recompute it under resource limits. Its hit counts and transition reuse are implementation details, not performance promises.
 
-[`tests/integration/test_result_c_block.cpp`](../../tests/integration/test_result_c_block.cpp) covers the C block-state handle and Float64 fixture scan, including state lifetime and failure cleanup. Finite-input and finite-sum rules belong to that fixture; the generic state service transports tensor bytes.
+[`tests/integration/kernel/test_result_c_block.cpp`](../../tests/integration/kernel/test_result_c_block.cpp) covers the C block-state handle and Float64 fixture scan, including state lifetime and failure cleanup. Finite-input and finite-sum rules belong to that fixture; the generic state service transports tensor bytes.
 
 ## GPU fragment transport and execution
 

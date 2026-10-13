@@ -77,11 +77,8 @@ most 256 samples. The primitive disables Result caching.
 
 ## Example and validation
 
-For the B/A/R/G sample tensor in the [public Result workflow](../../../../examples/channel_extraction_workflow/README.md),
-axis 2 and index 2 select the red values. A request for the second row returns
-`[12,13]`; the source stores the same samples at coordinates `[1,0,2]` and
-`[1,1,2]`.
-
- This does not claim a cross-family workflow
-through channel assembly. The older [performance workload](../../../../examples/channel_extraction_performance/README.md)
-measures the Value/planar path; it is not current Result performance evidence.
+Use a UInt8 `[2,2,4]` tensor with channel order B/A/R/G and row-major samples
+`[30,25,10,20, 31,50,11,21, 32,75,12,22, 33,99,13,23]`. With axis 2 and index 2,
+the red output is `[[10,11],[12,13]]`. Reading its second row returns `[12,13]`,
+corresponding to source coordinates `[1,0,2]` and `[1,1,2]`. This is an analytic
+acceptance case for a temporary public Result check.

@@ -14,10 +14,9 @@
 | 有哪些功能、如何选择、哪些仍是提议 | 类别根目录的中文主题页 | 总导航、对应规格链接和状态摘要 |
 | 跨整个类别的目标语义 | `op_specs/<PREFIX>_common_contract.md`，仅在确有共享规则时创建 | 受影响的族契约及成员继承关系 |
 | 一个编号族的共同端口、参数或数学规则 | `op_specs/<PREFIX>-NN_<topic>_contract.md` | 该族成员的例外与继承链接 |
-| 独立算子或 workflow 的可验收契约 | `op_specs/<ID>_<function>.md`，例如 `NUM-04A_abs.md`；单成员也可直接用编号规格 | 所属主题页、当前实现入口及相关示例 |
-| 当前注册、后端、限制和实测性能 | 类别根目录的 `implementation.md` 或明确限定范围的 `<topic>-implementation.md`、`<topic>-performance.md` | 公开实现文档、对应规格的实现状态和可运行示例 |
+| 独立算子或 workflow 的可验收契约 | `op_specs/<ID>_<function>.md`，例如 `NUM-04A_abs.md`；单成员也可直接用编号规格 | 所属主题页、当前实现入口及验收场景 |
+| 当前注册、后端、限制和实测性能 | 类别根目录的 `implementation.md` 或明确限定范围的 `<topic>-implementation.md`、`<topic>-performance.md` | 公开实现文档、对应规格的实现状态和验收要求 |
 | 独立 oracle 与复现命令 | `oracle/ops/<category>/README.md` 及其代码；类别根目录可放 `oracle-coverage.md` 等覆盖索引 | 规格的验收链接与主题页入口 |
-| 可执行 workflow 与复现命令 | `examples/<workflow>/README.md` 及其代码 | 规格的示例链接与主题页入口 |
 | 跨类别的覆盖、路线或资料 | `13-coverage/`、`14-roadmap/`、`15-references/` | 受影响类别的入口链接 |
 
 `op_specs/` 中的英文共享、族和成员规格是目标行为的权威定义；中文主题页须准确
@@ -28,10 +27,20 @@
 
 修订时按变化的范围选择落点：共享语义改共享契约，族规则改族契约，单个行为改成员
 规格；随后更新实际受影响的中文目录摘要和导航。运行行为或注册状态变化时，再核对
-代码、`docs/kernel-architecture/` 的当前实现事实、类别实现说明以及可运行示例。
-规格状态、实现状态、oracle 覆盖和后端支持分别表述；`Accepted` 不表示已注册，
+代码、`docs/kernel-architecture/` 的当前实现事实、类别实现说明以及验收要求。
+规格状态、实现状态、数值证据等级和后端支持分别表述；`Accepted` 不表示已注册，
 oracle 通过也不表示 runtime 已实现。文档只描述当前功能或当前目标契约，修订历史
 留在 commit message，不在正文维护按日期累积的进度流水账。
+
+## 验收程序的保留周期
+
+内置算子的 oracle 需要保留，后续需要根据这部分重新编写内置算子。
+
+本规格保留数学定义、独立期望值、容差和程序行为要求。修改或实现算子时，现场编写
+公开执行检查，完成验证及算子修改后立即删除临时测试程序、测试数据和注册入口。
+不要求为每份规格保留示例目录或 CTest 目标。内核行为与包契约测试按
+[测试与验证](../../development/Testing-and-Validation.md)长期保留。规格中的验收场景
+表示需要验证的行为，不代表当前已有可执行程序或本次已通过验证。
 
 ## 规格对象
 

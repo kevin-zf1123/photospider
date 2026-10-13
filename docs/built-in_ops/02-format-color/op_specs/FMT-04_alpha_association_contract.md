@@ -273,14 +273,9 @@ Benchmark Float32 [4096,4096,4] internal-alpha inputs, transparent/opaque/tiny
 alpha, full/R-only/alpha-only output and y/x=[127,130) at tile size 128. Record
 axes, profile/ISA/build, workers, source/page state, time statistics, bytes,
 virtual span, backing, ordinary retained owners and scratch/metadata peaks.
-Correctness gates timing. Eight focused CTest targets pass, including
-`test_alpha_operations` and `test_alpha_authoring`; the native operation suite
-covers 16 groups. Fourteen small benchmark smoke cases pass their output oracle,
-including named Apple Silicon SIMD, Float64 reference, and zero-copy Set/extract/
-remove observations.
+Correctness gates timing.
 
 The native CPU implementation provides the registered Result members described
 above. Acceptance still requires independent checks of bit patterns, semantic
 domain failures, partial-region dependencies, transactional publication, Root
-resource limits, cancellation and retained-owner lifetime. The current native run covers `test_alpha_operations`, `test_alpha_authoring`,
-`test_alpha_math`, and five reused primitive test targets.
+resource limits, cancellation and retained-owner lifetime.

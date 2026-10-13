@@ -90,19 +90,14 @@ The `ops-impl` branch now provides the independent public
 exact white/basis checks, regional sample validation and generic NUM full-color
 Validation closure. These facilities use the canonical bytes defined below and
 keep Image/SemanticKind separate. Static rational split descriptions remain
-parameter-only. The manual [ColorArray example](../../../../examples/numeric_workflow/README.md#colorarray-facilities)
-checks public workflow composition, source support/dirty behavior, snapshot and
-fragment boundaries, and per-observation dependency proofs. It is excluded from
-CTest and integration registration.
+parameter-only.
 
 The explicit `IccProfile`/`ResourceBindings` path now resolves profile identities
 at compilation and publication, retains accepted bytes in Values/fragments and
 snapshots, and carries owners through ordinary, dependency and structured
 execution queries. Empty output retains the required profile. The codec's
 `ColorProfileIdentity` remains metadata only; a CMYK Value requires the matching
-owning binding. See the [public ICC manual](../../../../examples/numeric_workflow/README.md#immutable-icc-resources)
-for editable workflows, independent structure/identity fixtures and resource
-failure checks. Resource-bearing results bypass optional sample-only caches.
+owning binding. Resource-bearing results bypass optional sample-only caches.
 Color ramp arithmetic is implemented; the broader family acceptance matrix is
 tracked separately. This document does not claim the entire category is complete.
 

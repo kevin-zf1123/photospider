@@ -58,25 +58,13 @@ Published Result storage remains valid after execution context retirement.
 
 ## Focused validation
 
-Build and run the public Result workflow test from the configured build
-directory:
-
-```sh
-cmake --build build/kernel-dev --target photospider_numeric_expression -j8
-ctest --test-dir build/kernel-dev -R '^test_numeric_expression_result$' --output-on-failure
-```
-
-The root CTest `test_numeric_expression_result` runs the strict example through
-the public C++ API. Focused coverage
-asserts that both output programs share one prepared AST. It also checks mixed
-Float32/Float64 bindings, a balanced 128-coefficient expression (255 AST nodes,
-height 8) over 130 declared ports, three Need polls for the 129 active inputs,
-atomic axis tuple publication and exact source associations. Other cases check
-whole-domain failure outside the requested values region, duplicate-coordinate
-rejection with axis-only behavior, a failing end producer excluded for N=1,
-invalid scalar input schemas, Float32 final overflow, a valid Empty values+axis
-request with empty coverage and no failing-coefficient producer start,
-floating-point environment restoration, WorkLimit, pre-cancellation, and Results
-that remain readable after context retirement. Fraction/MPFR oracle and
-benchmark commands remain in the workflow README and are separate from these
-CTests.
+Temporary validation should exercise shared AST preparation across outputs and
+dynamic runs, mixed Float32/Float64 bindings, and a balanced 128-coefficient
+expression with 255 AST nodes, height 8 and 130 declared ports. Check atomic axis
+tuple publication and source associations; whole-domain failure outside the
+requested projection; duplicate-coordinate rejection and axis-only behavior;
+N=1 exclusion of a failing end producer; invalid scalar schemas; Float32 final
+overflow; Empty output without starting failing producers; caller/worker floating
+environments; work limits; cancellation; and output lifetime after context
+retirement. Compare numeric results with independent Fraction or directed-MPFR
+references. Follow the temporary-test lifecycle in the testing guide.

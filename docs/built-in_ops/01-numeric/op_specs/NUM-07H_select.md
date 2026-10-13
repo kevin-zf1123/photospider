@@ -81,6 +81,6 @@ fails the invocation, and edits to either branch invalidate cache reuse.
 Cover all-true/all-false/alternating conditions, all four branch dtypes, distinct
 sNaN payloads, strides, output budgets, cancellation and escaped output owners.
 
-The public manual workflow verifies these Whole rules locally for strict/Apple. Current commands and
-public/core measurements are in [NUM-07 measurements](../comparison-whole.md).
-No integration registration is added; specification status remains Proposed.
+Validate these Whole rules through a temporary public workflow on each admitted
+profile. See [NUM-07 execution](../comparison-whole.md) for the behavior and
+validation boundary. Specification status remains Proposed.

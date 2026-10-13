@@ -106,11 +106,8 @@ negative strides, unaligned and zero-stride input, caller and worker floating
 environments during actual continuation polls, schema rejection, work limits,
 cancellation, and output lifetime after context retirement.
 
-The independent oracle retains 1,810 Fraction reference cases. Strict acceptance
-is bit-exact. Apple acceptance uses the shared FP32-scaled accelerated bound and
-includes a verified one-ULP difference. The root behavior test and installed
-consumer compile the manual workflow with `-fno-fast-math -frounding-math
--ffp-contract=off`. Commands and current execution details are in
-[NUM-15 Whole execution](../calculus-whole.md), and the runnable workflow is
-listed in [the numeric workflow guide](../../../../examples/numeric_workflow/README.md#discrete-derivatives-and-cumulative-integration-num-15).
-Proposed status is unchanged.
+Use independent exact Fraction references for temporary numerical acceptance.
+Strict results must match the final rounded reference bits. Accelerated results
+use the shared final FP32-scaled bound and need not be bit-exact. Compile the
+checker with `-fno-fast-math -frounding-math -ffp-contract=off`; execution details
+and validation cases are in [NUM-15 Whole execution](../calculus-whole.md).

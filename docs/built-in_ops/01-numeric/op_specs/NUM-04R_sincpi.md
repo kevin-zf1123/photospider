@@ -83,10 +83,6 @@ exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole e
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
-The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
-cover this operation. Manual targets have no CTest/integration
-registration; MPFR is used only by the independent Python oracle.
-
 Float32 accelerated sincpi covers all finite binary32 inputs using exact integer-unit reduction. For `n = round_even(abs(x))` and `r = abs(x)-n`, it evaluates a central sincpi polynomial and reconstructs `(-1)^n*(r/abs(x))*sincpi(r)`. The central polynomial, hardware division and multiply use SIMD binary64 intermediates before final Float32 rounding. The `n=0` branch uses the central polynomial directly; zero returns one, nonzero integers return positive zero, and finite magnitudes at least `2^23` are all integers.
 
 The maintained analytic certificate includes coefficient, arithmetic and final

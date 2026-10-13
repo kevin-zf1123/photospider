@@ -78,10 +78,6 @@ exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole e
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
-The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
-cover this operation. Manual targets have no CTest/integration
-registration; MPFR is used only by the independent Python oracle.
-
 Float32 accelerated cos uses an explicit-FMA NEON/AVX2 even polynomial for `|x| <= 1`.
 
 The maintained analytic certificate includes coefficient, arithmetic and final

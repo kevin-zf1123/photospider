@@ -102,5 +102,5 @@ axes, metadata limits, source strides/owners, auto/view/dense and disjoint reads
 
 All formal profiles use Whole and disable cross-run content caching because
 content does not prove physical owner/stride identity; same-Run sharing remains
-available. The current Result workflow and oracle are recorded in
+available. Execution behavior and temporary acceptance cases are described in
 [NUM-09 Whole execution](../layouts-whole.md).

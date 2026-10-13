@@ -29,12 +29,3 @@
 ## 错误与校验
 
 表达式语法错误和静态参数非法返回 `InvalidArgument`。类型、shape 或语义不匹配返回 `TypeMismatch`。Generic expression 系数在求值时检查，因此非有限系数返回 `OperationFailed`；数学未定义、坐标塌缩、插值精度不足和输出溢出也返回 `OperationFailed`，适用时附样本下标。Typed LUT 输入在 Need 阶段完整验证；非有限 typed source sample 可返回带 `FailureReason::InvalidDomain` 和 source `input_id` 的 `InvalidArgument`，即使该 sample 位于选中插值 stencil 之外。Empty demand 跳过 payload validation。取消和资源耗尽保留各自状态码。宿主在 payload execution 前校验 Result metadata，包括语义契约与兼容的 operation 声明。
-
-## 公开 workflow 与验证
-
-[`test_expression_operations.cpp`](../../../tests/integration/test_expression_operations.cpp) 覆盖未带后缀表达式和 LUT 操作，包括语法与数值边界、端点行为、单位匹配、接近精度边界的插值、分配和取消。
-
-```sh
-cmake --build build/kernel-dev --target test_expression_operations photospider_foundations_workflow -j8
-ctest --test-dir build/kernel-dev -R '^(test_expression_operations|test_workflow_expression_lut)$' --output-on-failure
-```

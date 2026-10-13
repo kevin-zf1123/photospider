@@ -101,5 +101,4 @@ auto fallback and dense results without comparing incidental physical addresses.
 
 All nine formal profile keys use Whole and disable cross-run content caching
 because content alone does not establish physical owner/stride identity;
-same-Run sharing remains available. The current Result workflow, oracle and
-resource checks are in [NUM-09 Whole execution](../layouts-whole.md).
+same-Run sharing remains available. Execution behavior and temporary numerical/resource acceptance cases are in [NUM-09 Whole execution](../layouts-whole.md).

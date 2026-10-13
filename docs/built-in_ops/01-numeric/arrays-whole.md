@@ -19,24 +19,13 @@ No NUM-14 certificate or floating approximation is involved.
 
 ## Public workflow and validation
 
-The current Result behavior is covered by `test_numeric_result_arrays`:
-
-```sh
-cmake --build build/kernel-dev --target test_numeric_result_arrays -j8
-ctest --test-dir build/kernel-dev -R '^test_numeric_result_arrays$' --output-on-failure
-```
-
-The focused test covers dense output and schema rejection, structured consumption
+Temporary acceptance should cover dense output and schema rejection, structured consumption
 of giant views, Result cache rebinding, owner lifetime, raw bit patterns and
-constant/broadcast boundary cases. It checks all 256 UInt8 values, Int64
+constant/broadcast boundary cases. Check all 256 UInt8 values, Int64
 extrema, Float32/64 special values, all four floating-point rounding modes, and
 negative unaligned axis permutations. A structured input with one batch axis
 of extent 2 and cell shape `{3}` verifies that the consumer reads the last
 sample using batch coordinate 1 and cell coordinate 2.
-Strict and available accelerated profiles run; on the tested Apple Silicon host,
-the x86 profile reports `BackendUnavailable`. These checks establish correctness
-and ownership behavior, not a current Result performance baseline.
-
-The `photospider_numeric_arrays` executable composes the same Result operations
-with the remaining NUM-03 workflow cases. Its full manual run is separate from
-the focused CTest above; the test command is the targeted validation entry point.
+Run Strict and each admitted accelerated profile. An unavailable profile must
+report `BackendUnavailable`. Record the configurations actually exercised;
+measure performance separately.

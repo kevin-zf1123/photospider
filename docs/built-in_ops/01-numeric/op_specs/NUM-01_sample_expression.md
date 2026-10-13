@@ -540,12 +540,6 @@ numeric.sample_expression_strict
 
 Changing only a to 3 and b to -1 yields `[-1,-0.25,0.5,1.25,2]` with the same
 axis and plan. Use the appropriate accelerated key on its supported CPU target.
-The [workflow documentation](../../../../examples/numeric_workflow/README.md)
-contains the helper call, Result bindings, expected outputs and focused test
-commands. `examples/numeric_workflow/expression.cpp` runs through
-WorkflowDocument, Compiler and ExecutionContext, and publishes values and axis
-as Result outputs. Its `Value` instances are local typed backing used to create
-source Results.
 
 Performance acceptance records hardware, OS/compiler, math library/profile, N,
 AST, dtype, requested M, cache state, admitted resources and timing distribution.
@@ -560,17 +554,14 @@ acceleration.
 
 ### Current focused validation
 
-The registered `test_numeric_expression_result` covers static preparation
-reused across outputs and dynamic runs, mixed-dtype bindings, a balanced
-128-coefficient expression (255 AST nodes, height 8) over 130 declared ports,
-three input Need polls for 129 active inputs, atomic axis tuple publication and
-source associations. It checks expression failure
-outside the requested values region, duplicate-coordinate rejection with
-axis-only behavior, the N=1 end producer exclusion, invalid input scalar
-schemas, Float32 final overflow, floating-environment restoration, WorkLimit,
-pre-cancellation and output lifetime. The broader
-`test_numeric_result_math_expression` kernel suite separately covers Empty expression
-queries. Commands are in the [NUM-01 Whole execution](../expression-whole.md).
+Temporary acceptance should check preparation shared across outputs and dynamic
+runs, mixed dtypes, a balanced 128-coefficient expression with 255 AST nodes and
+height 8 across 130 declared ports, atomic axis publication and source associations.
+Cover failures outside requested values, duplicate coordinates with axis-only
+behavior, N=1 end-producer exclusion, invalid scalar schemas, Float32 overflow,
+Empty queries, caller/worker floating environments, work limits, cancellation
+and output lifetime. See [NUM-01 Whole execution](../expression-whole.md) for the
+execution behavior and validation scope.
 
 ## 9. Related requirements
 

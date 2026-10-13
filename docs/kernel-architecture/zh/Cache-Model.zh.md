@@ -44,4 +44,4 @@ Borrowed-graph execution 继续严格检查 graph currentness。Coordinator 必�
 - Native input-copy reuse 与 completed Result computation reuse 分离。它可复用所需 Result tensor backing 的 transport，但不会使上游 producer computation 获得缓存资格。
 - LRU eviction 会撤销新 lookup 对该 entry 的资格。已经取得强 candidate 的 lookup 可在 eviction 后完成 replay 和 adoption，只要 cache 仍开启且 epoch 仍有效。Adoption 不要求再次证明 LRU residency；可选 promotion lookup 仅在同一 manifest 仍驻留时影响 LRU 顺序。Cache closing 或 epoch 变化会拒绝 adoption，而 candidate 的独立 owner 会继续有效，直到该次尝试释放它。Frozen executions 是内存 owners，不是序列化 plans。
 
-当前 production image operation 可用性见[图像 operations](Image-Operations.zh.md)。Snapshot 和 generic cache 行为由 `test_input_snapshot`、`test_frozen_execution`、`test_generic_result_cache` 与 `test_computed_scalar` 覆盖。Result capture 和 owner release 由 `test_result_image_contracts`、`test_global_results` 覆盖。
+当前 production image operation 可用性见[图像 operations](Image-Operations.zh.md)。Snapshot 和 generic cache 行为由 `test_input_snapshot`、`test_frozen_execution`、`test_generic_result_cache` 与 `test_computed_scalar` 覆盖。Result capture 和 owner release 由 `test_result_image_contracts`、`test_result_objects` 覆盖。

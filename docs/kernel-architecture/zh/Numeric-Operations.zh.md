@@ -69,6 +69,10 @@ Profile-specific 逐元素和归约实现通过执行资源预算计量 work 和
 
 ## 公开 workflow 与检查
 
-[`tests/integration/test_numeric_operations.cpp`](../../../tests/integration/test_numeric_operations.cpp) 覆盖注册的 arithmetic 行为。分族 Result numeric oracle 位于 [`tests/integration/numeric`](../../../tests/integration/numeric)，分别覆盖 arithmetic、arrays、sequences、statistics、matrix、calculus、curves、Bezier、LUT、baking、expression、filters 和 color ramps。Ordered reduction 与 scan 行为由 [`test_ordered_reduction.cpp`](../../../tests/integration/test_ordered_reduction.cpp)、[`test_ordered_scan.cpp`](../../../tests/integration/test_ordered_scan.cpp) 和 [`test_scan_waiters.cpp`](../../../tests/integration/test_scan_waiters.cpp) 覆盖。这些测试使用独立数值期望；block-cache 观察不构成性能证据。
+算子修改期间，使用现场编写的独立数值参考和公开 Result workflow 验证算术，
+完成后删除检查程序，具体规则见[测试与验证](../../development/zh/Testing-and-Validation.zh.md)。
+保留的内核 [test_scan_waiters](../../../tests/integration/kernel/test_scan_waiters.cpp)
+使用合成 scan 检查并发执行间的 checkpoint 共享、取消隔离、错误传播、缓存清除与 Queue 资源释放。
+它不构成内置 scan 算子的数值正确性验证。
 
 Generic 算术 key 未声明 planar image capability。注册这些 key 不代表 structural planar image 可以作为 generic numeric array 输入。

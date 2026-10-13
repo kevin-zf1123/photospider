@@ -61,13 +61,12 @@ Use the corresponding CRV-01 analytic fixtures for samples and exact byte
 comparison against new_positions for positions. Test nonfinite positions-only
 forwarding followed by failed samples demand, partial indices/columns,
 independent dirty effects, both outputs jointly/separately, profile/dtype mixing,
-strides, context-lifetime ownership, low budgets and cancellation. The maintained public workflow expands this template and requests samples/positions
-through Compiler/ExecutionContext; commands and current evidence are linked below.
+strides, context-lifetime ownership, low budgets and cancellation. Use a temporary public workflow that expands this template and requests
+samples/positions through Compiler/ExecutionContext.
 
 ## Maintained implementation and validation
 
-This template is maintained through the public helper in
-`photospider/ops/numeric/resampling.hpp` and ordinary workflow composition. The
-resampling executable passes eight groups under each of Strict and Apple; it
-retains CRV-01's exact-copy and numerical-accuracy checks and defines no separate
-resampling oracle. The focused root `test_numeric_resampling_result` passes 1/1. Whole numerical/fallback counters are N/A.
+This template uses the public helper in `photospider/ops/numeric/resampling.hpp`
+and ordinary workflow composition. Temporary acceptance inherits CRV-01 exact-copy
+and numerical-accuracy checks and adds composition checks; it does not require
+a separate resampling formula oracle. Whole numerical/fallback counters are unavailable.

@@ -78,8 +78,8 @@ with saturation_lightness=[[0.25,0.125],[0.75,0.875]] give the same result.
 Use independent exact-rational and certified-pi oracles, both output units/dtypes,
 mixed source precision, large multi-turn angles, q=0 demand failures, complete-input
 reads, partial-channel/full-color expansion, strides, budgets and owner lifetime.
-Public Compiler/ExecutionContext workflow bindings and values/description checks
-are maintained; current commands and runtime evidence are linked below. Source HSL-to-RGB extension semantics will be fixed by
+Check public Compiler/ExecutionContext bindings, values and descriptions in a
+temporary workflow. Source HSL-to-RGB extension semantics will be fixed by
 separate conversion specifications, not guessed by this interpolation operation.
 
 - [Ramp family](CRV-06_color_ramp.md).

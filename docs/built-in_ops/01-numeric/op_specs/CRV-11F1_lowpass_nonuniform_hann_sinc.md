@@ -79,12 +79,10 @@ bounds, invalid remote data failures, complete dirty support, budgets/cancellati
 strides and source/result lifetime.
 
 The maintained public workflow binds positions/values and statics, then requests
-samples through Compiler/ExecutionContext. See the shared workflow link below for
-commands and current evidence; the spec does not claim universal antialias rejection.
+samples through Compiler/ExecutionContext; the spec does not claim universal antialias rejection.
 
 ## Maintained implementation and validation
 
 This primitive is registered in the five-kernel nonuniform low-pass family. Exact partition and paired-affine integration use global Taylor moments with a rigorous tail bound; this is not local adaptive quadrature, and accelerated keys currently use the strict fallback.
 Certified precision is bounded to 128..4096 bits and order <=512; unresolved
-capacity or rounding may return `ResourceExhausted`. See the [shared workflow](../../../../examples/numeric_workflow/README.md#nonuniform-lowpass)
-and [CRV-11 umbrella](CRV-11_resample_signal.md). See the shared workflow for exact coverage and commands.
+capacity or rounding may return `ResourceExhausted`. See [CRV-11 umbrella](CRV-11_resample_signal.md).

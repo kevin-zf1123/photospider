@@ -17,8 +17,6 @@ These guides describe the kernel's current contracts and runtime behavior. Engli
 
 ## Workflows and focused topics
 
-- [Result quickstart](../../examples/result_quickstart/README.md): a minimal installed-package operation and workflow.
-- [Foundations workflows](../../examples/foundations_workflow/README.md): runnable installed-package examples and their current scenarios.
-- [GPU integration tests](../../tests/integration/gpu/): registered GPU behavior coverage; hardware-dependent cases report skip when unavailable.
+- [GPU integration tests](../../tests/integration/kernel/gpu/): registered GPU behavior coverage; hardware-dependent cases report skip when unavailable.
 
 Operation-specific guides describe their own inputs, outputs, and execution rules. The [built-in operations index](../built-in_ops/README.md) routes to those contracts.

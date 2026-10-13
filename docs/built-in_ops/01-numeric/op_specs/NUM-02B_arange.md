@@ -54,10 +54,6 @@ Active input edits invalidate the complete selected output. Values own `count * 
 
 The focused Result sequence fixture runs through:
 
-```sh
-ctest --test-dir build/kernel-dev -R '^test_numeric_sequences_result$' --output-on-failure
-```
-
 The workflow loop checks strict and available Apple Silicon execution for Float64 sequences. Separate strict cases check Int64 values beyond 2^53, exact intermediate-product cancellation with a representable final sum, and axis and values selection. For example, `INT64_MIN + 2*INT64_MAX` must produce `INT64_MAX-1`; the intermediate product is outside Int64, but the exact final value fits. Shared sequence fixtures check negative zero, Empty, pre-cancellation, work-limit rollback, public Result-only authoring through a runnable workflow, direct Float32 rounding and whole-output overflow, count-one producer exclusion with static descriptor rejection, and count-two upstream failure. These shared cases do not establish every arange dtype/profile combination. The x86 unavailable path is checked, not x86 execution. The independent Fraction/IEEE oracle and installed SDK consumer are described in [sequences Whole](../sequences-whole.md); neither supplies an x86 execution or performance claim.
 
 The current implementation uses fixed-width exact dyadic state for integer and floating modes and direct rounding in its accelerated paths as well as strict. This exact implementation is an implementation fact; the public accelerated floating accuracy promise remains the shared FP32 four-ULP contract. An unsupported accelerated target returns `BackendUnavailable`; the runtime does not substitute a different key. No NUM-14 certificate is applied. See [sequences Whole](../sequences-whole.md) for the shared execution and test boundaries.

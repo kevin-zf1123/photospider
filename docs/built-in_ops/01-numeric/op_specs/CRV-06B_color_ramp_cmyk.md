@@ -171,8 +171,8 @@ resource and inspect output profile identity as well as amounts. Check different
 file paths with identical frozen content, changed content requiring recompilation,
 missing/RGB/DeviceLink/ICCmax/malformed profiles, exact read/dirty sets, partial
 channel requests expanding to full CMYK, strides, low resource budgets, cancellation,
-cache-off and profile/value lifetime after context destruction. The maintained public commands and current runtime evidence are linked in the
-umbrella contract; CMYK/RGB conversion requires its own profile transform.
+cache-off and profile/value lifetime after context destruction. Create the public checks for the current operation change. CMYK/RGB conversion
+requires its own profile transform.
 
 Profile-format references are the
 [ICC v2/v4 specification catalogue](https://www.color.org/icc_specs2/).

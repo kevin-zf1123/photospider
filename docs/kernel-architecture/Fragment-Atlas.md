@@ -66,10 +66,10 @@ Synchronous GPU attempts may retry on CPU only when the operation permits CPU fa
 
 Current integration sources exercise the transport and failure boundaries:
 
-- [`test_gpu_fragment_execution.cpp`](../../tests/integration/gpu/test_gpu_fragment_execution.cpp) compares real native lookup and output against an independent coordinate oracle. It covers rank, width, sparse holes, fragment packing, grant enforcement and Root admission.
-- [`test_gpu_c_abi_execution.cpp`](../../tests/integration/gpu/test_gpu_c_abi_execution.cpp) loads [`gpu_result_c_plugin.c`](../../tests/fixtures/gpu_result_c_plugin.c) and checks C atlas handles, stale tokens, publication revocation, malformed requests, errors and native dispatch.
-- [`test_fragment_atlas_gpu.cpp`](../../tests/unit/test_fragment_atlas_gpu.cpp) exercises the lower-level atlas SDK with native buffer capacity and readback checks.
-- [`test_gpu_sync_fallback.cpp`](../../tests/integration/gpu/test_gpu_sync_fallback.cpp) checks CPU retry, cancellation and retained producer behavior.
+- [`test_gpu_fragment_execution.cpp`](../../tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp) compares real native lookup and output against an independent coordinate oracle. It covers rank, width, sparse holes, fragment packing, grant enforcement and Root admission.
+- [`test_gpu_c_abi_execution.cpp`](../../tests/integration/kernel/gpu/test_gpu_c_abi_execution.cpp) loads [`gpu_result_c_plugin.c`](../../tests/fixtures/gpu_result_c_plugin.c) and checks C atlas handles, stale tokens, publication revocation, malformed requests, errors and native dispatch.
+- [`test_fragment_atlas_gpu.cpp`](../../tests/unit/kernel/test_fragment_atlas_gpu.cpp) exercises the lower-level atlas SDK with native buffer capacity and readback checks.
+- [`test_gpu_sync_fallback.cpp`](../../tests/integration/kernel/gpu/test_gpu_sync_fallback.cpp) checks CPU retry, cancellation and retained producer behavior.
 
 These native tests return the configured skip code when the required device is unavailable. Protocol mocks and CPU fallback do not establish native execution.
 ## Algorithms and wire format
@@ -82,6 +82,6 @@ The hash is FNV-1a over the rank coordinate words, low byte first, with offset b
 
 ## Limits and failure handling
 
-The generic atlas unit suite is registered as `test_fragment_atlas` from [`tests/unit/test_fragment_atlas.cpp`](../../tests/unit/test_fragment_atlas.cpp). The native SDK suite uses [`tests/unit/test_fragment_atlas_gpu.cpp`](../../tests/unit/test_fragment_atlas_gpu.cpp); the Result callback integration path uses [`tests/integration/gpu/test_gpu_fragment_execution.cpp`](../../tests/integration/gpu/test_gpu_fragment_execution.cpp). These sources cover wire layout, coordinate lookup, sparse holes, signed and zero strides, rank and dtype transport, buffer admission, cancellation and native readback. Native tests may skip when the required Metal device is unavailable.
+The generic atlas unit suite is registered as `test_fragment_atlas` from [`tests/unit/kernel/test_fragment_atlas.cpp`](../../tests/unit/kernel/test_fragment_atlas.cpp). The native SDK suite uses [`tests/unit/kernel/test_fragment_atlas_gpu.cpp`](../../tests/unit/kernel/test_fragment_atlas_gpu.cpp); the Result callback integration path uses [`tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp`](../../tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp). These sources cover wire layout, coordinate lookup, sparse holes, signed and zero strides, rank and dtype transport, buffer admission, cancellation and native readback. Native tests may skip when the required Metal device is unavailable.
 
 The `ValueFragments` overload preserves its accepted Value coverage; structural image facets that require `PlanarImage` are rejected. The `ResultTensorInput` overload reads only samples authorized by its tensor Need. Both packers preserve holes, return `NotFound` for missing directory samples, and fail plans that exceed tile or work limits. Cancellation retires newly allocated owners. Device hosts must admit rounded payload and directory capacities separately; atlas lookup does not trigger additional reads or provide a CPU fallback.

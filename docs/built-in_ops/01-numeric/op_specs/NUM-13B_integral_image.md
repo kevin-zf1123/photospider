@@ -103,8 +103,7 @@ when an unrequested integer rectangle overflows despite representable later resu
 Four-corner rectangle queries on rounded floating outputs may introduce their
 own rounding/cancellation error; this operator guarantees each integral-image
 result, not exact recovery from arbitrary downstream subtraction. Test exact
-integer fixtures separately from floating retrieval accuracy. The current
-`test_numeric_scans_result` covers independent small-integer enumeration,
+integer fixtures separately from floating retrieval accuracy. Temporary public-path acceptance should cover independent small-integer enumeration,
 cross-plane NaN/layout cases, resource limits, cancellation, Empty demand and
 zero-boundary input validation.
 

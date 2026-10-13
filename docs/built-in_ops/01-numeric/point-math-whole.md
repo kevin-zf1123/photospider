@@ -27,10 +27,7 @@ and returned Results keep immutable backing after the execution context retires.
 
 `numeric_binary.cpp` registers 27 CPU Whole Result keys through the shared
 `point_math_operation` implementation. The public helpers in
-`photospider/ops/numeric/binary.hpp` build editable workflows, and
-`examples/numeric_workflow/binary.cpp` binds source Results through the public
-C++ API. Its `Value` objects are local typed backing used to create those
-Results.
+`photospider/ops/numeric/binary.hpp` build editable workflows.
 
 Each input Result has one tensor member in slot 0 and may also contain fields.
 Input schema IDs may differ, but dtype and the complete `sample_shape()` must
@@ -46,10 +43,10 @@ empty coverage without sample reads or arithmetic. Integer overflow anywhere
 in the full operation returns OperationFailed/ArithmeticOverflow/Run and no
 Atom key.
 
-The focused strict workflow is registered as `test_numeric_binary_result`.
-Strict and Apple runs have independent integer/Fraction/MPFR oracle coverage;
-the installed consumer runs the same example source through
-`Photospider::kernel`. These are CPU checks, with no native GPU claim.
+For a change to these operations, create a temporary public Result workflow and
+compare its output against independent integer, Fraction or directed-MPFR
+references. Validate Strict and each locally admitted accelerated profile
+separately. CPU validation does not establish native GPU behavior.
 
 Accelerated ln, sin, cos, tan, pow and atan2 use 64-lane gather blocks for
 Float32 and Float64. Their 2,624-byte fixed scratch is included in the declared

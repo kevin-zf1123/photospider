@@ -200,9 +200,8 @@ requirement; this primitive does not infer that target or guarantee zero aliasin
 
 Verify whole/ROI/disjoint numerical equivalence, exact boundary mathematics,
 zero-tap operand omission, complete dirty support and typed validation, N=1, short signals, strides, source/result lifetime, low budgets,
-cancellation and cache-off. The maintained public workflow binds input and
-required statics and requests values through Compiler/ExecutionContext, with
-actual commands and independently checked outputs linked below.
+cancellation and cache-off. Use a temporary public workflow with the input and required statics, request
+values through Compiler/ExecutionContext, and check independent expected outputs.
 
 Primary method references: [SciPy firwin](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.firwin.html),
 [Blackman](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.windows.blackman.html),
@@ -223,11 +222,6 @@ implementation use exact tap support and certified whole sums. Accelerated keys
 prepare 128-bit coefficient enclosures in managed per-Whole callback state, then
 bound the complete hardware convolution and normalization before final-error
 acceptance. Unresolved coefficients or outputs dispatch strict convolution.
-Certified strict precision is 128..4096 bits and may fail `ResourceExhausted`. Its independent MPFR oracle has 474 accepted-value cases per profile:
-Strict matches exact reference bits, while Apple applies the shared final FP32
-bound. The focused root CTests `test_numeric_lowpass_result` and
-`test_numeric_lowpass_execution_result` pass, as does the separate shared math
-integration fixture. Whole
-numerical/fallback counters are unavailable. See the
-[uniform-lowpass workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
-and [CRV-11 umbrella](CRV-11_resample_signal.md).
+Certified strict precision is 128..4096 bits and may fail `ResourceExhausted`. Use an independent directed-MPFR reference for temporary numerical checks.
+Strict matches exact reference bits; accelerated profiles use the shared final
+FP32 bound. Whole numerical/fallback counters are unavailable. See [CRV-11 umbrella](CRV-11_resample_signal.md).

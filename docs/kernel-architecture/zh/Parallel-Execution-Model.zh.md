@@ -65,7 +65,7 @@ N_{blocks}=N/B + (N\bmod B\ne0),\qquad
 end=begin+\min(B,N-begin).
 $$
 
-Structured CPU Result Whole poll 会通过 `ResultProgramPhase::cpu_parallel` 收到此借用 service。它只在当前 Whole callback 内调度 block，不会独立并行化 Result dependency graph。`tests/integration/test_cpu_parallel.cpp` 在 Root 已发行 work 后请求 `UINT64_MAX` range，并检查资源拒绝发生在任何 block callback 之前。`tests/unit/test_cpu_range.cpp` 在没有 Root 预算时检查端点算术，因此不能证明 Root admission 行为。
+Structured CPU Result Whole poll 会通过 `ResultProgramPhase::cpu_parallel` 收到此借用 service。它只在当前 Whole callback 内调度 block，不会独立并行化 Result dependency graph。`tests/integration/kernel/test_cpu_parallel.cpp` 在 Root 已发行 work 后请求 `UINT64_MAX` range，并检查资源拒绝发生在任何 block callback 之前。`tests/unit/kernel/test_cpu_range.cpp` 在没有 Root 预算时检查端点算术，因此不能证明 Root admission 行为。
 
 ### Structured Result callback wave
 

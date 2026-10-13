@@ -63,10 +63,6 @@ target_link_libraries(app PRIVATE Photospider::kernel Photospider::ops_headers)
 
 The separate [`photospider-daemon`](https://github.com/kevin-zf1123/photospider-daemon) repository owns local IPC and ephemeral Session/Job orchestration, while the kernel owns compilation, execution, values, and execution resources. The daemon consumes the installed public kernel package; compatibility with a particular daemon revision is not established by this repository.
 
-## Composable workflows
-
-The [Result quickstart](examples/result_quickstart/README.md) builds against the installed 0.33 package and runs a public Result operation through a compiled workflow. Its checked output is `answer=42`. The [foundations workflows](examples/foundations_workflow/README.md) provide broader current examples.
-
 ## Documentation
 
 | Need | Start here |
@@ -74,8 +70,6 @@ The [Result quickstart](examples/result_quickstart/README.md) builds against the
 | Current ownership and behavior | [Architecture overview](docs/kernel-architecture/Overview.md) |
 | Canonical terms | [Kernel terminology](docs/kernel-architecture/Terminology.md) |
 | Compiler and local execution | [Compiler and execution](docs/kernel-architecture/Compiler-and-Execution.md) |
-| Minimal public Result workflow | [Result quickstart](examples/result_quickstart/README.md) |
-| Composable workflows | [Foundations examples](examples/foundations_workflow/README.md) |
 | Image contracts and execution boundaries | [Image operations](docs/kernel-architecture/Image-Operations.md) |
 | Values and memory | [Data model](docs/kernel-architecture/Data-Model.md) |
 | Operation/provider ABI | [Plugin ABI](docs/kernel-architecture/Plugin-ABI.md) |

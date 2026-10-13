@@ -7,8 +7,7 @@ the selected discrete mathematical result, including raw special-value rules;
 it is not a claim that every input succeeds under every resource budget.
 
 Current measurements and coverage limits are in the
-[accelerated specification](op_specs/NUM_accelerated_contract.md#current-implementation);
-reproduction commands are in the [workflow README](../../../examples/numeric_workflow/README.md).
+[accelerated specification](op_specs/NUM_accelerated_contract.md#current-implementation).
 
 ## Exact elementary paths
 
@@ -62,7 +61,7 @@ ln(2). It emits a constant only after both rational bounds have the same scaled
 integer floor. Recheck it with:
 
 ```sh
-python3 examples/numeric_workflow/generate_math_constants.py --check
+python3 oracle/ops/numeric/generate_math_constants.py --check
 ```
 
 `directed_functions.hpp` propagates both arithmetic and analytic errors:
@@ -146,7 +145,10 @@ revisions; see [current Whole measurements](point-math-whole.md).
 
 NUM-11 reductions and NUM-13 scans keep one `NumericDiagnostics` object local to each Whole `write`. After `MathTensorReader` returns an input word, the callback increments `evaluated_values` immediately before passing that word to the exact accumulator. On successful execution, the count therefore matches sample words supplied to the accumulator, not output groups or positions. Prefix zero boundaries, integral-image carries and final output conversions do not add input attempts. The reducer's `implementation` identity names `photospider.reduction-exact/1;accumulator-u64x68`; scans use `photospider.scan-exact/1;accumulator-u64x68`. Both append the selected profile's `selection_implementation` and host/build identity. That ISA label describes the four-word output-selection scratch helper; it does not claim that the complete reduction or scan algorithm uses SIMD arithmetic.
 
-For these exact accumulator paths, Strict and Apple checks report zero `strict_math_calls`, zero `strict_fallbacks` and zero fallback reasons. This records that these operations did not dispatch a strict fallback; it is not a measure of scalar work. `reduce_count` uses a separate metadata-only identity and reports zero evaluated values. Empty requests do no sample arithmetic, and a completed-result cache hit contributes no new input attempts.
+For completed exact-accumulator runs with reported diagnostics, temporary
+acceptance should verify zero `strict_math_calls`, zero `strict_fallbacks` and
+no fallback reasons.
+Zero values indicate no reported strict fallback; they do not measure scalar work. `reduce_count` uses a separate metadata-only identity and reports zero evaluated values. Empty requests do no sample arithmetic, and a completed-result cache hit contributes no new input attempts.
 
 The callback attempts one final report after a normal return or a status it handles through `finish`. It records a handled operation failure before reporting and preserves that primary status if diagnostic admission is rejected. WorkLimit or cancellation can prevent the report from being merged. A `Status` thrown while acquiring or reading a tensor window, or `std::bad_alloc` caught by the outer `math_callback`, is recorded by that outer layer and can bypass the local final-report attempt. These counters do not promise a partial progress record for every terminal path.
 
@@ -171,14 +173,11 @@ memory/work/cancellation contract. Sources:
 [GMP custom allocation](https://gmplib.org/manual/Custom-Allocation),
 [libbf limitations](https://bellard.org/libbf/readme.txt).
 
-The public workflow, oracle, low-resource/error tests and local timing command
-are in [the numeric workflow example](../../../examples/numeric_workflow/README.md).
-The manual executable is excluded from the default build and is not registered
-with CTest or integration testing. WSL is used only for correctness; performance
+Performance
 observations must identify the native hardware, shape, dtype, worker/cache
 settings and actual measured execution scope.
 
-The public workflow executable checks all functions, negative input strides,
+Temporary public-path acceptance should check the changed functions, negative input strides,
 four caller rounding modes and preserved flags, exact sparse support and dirty
 mapping, typed validation, Atom overflow/denominator diagnostics, required
 upstream errors, cache changes to NaN bits, escaped result lifetime, and
@@ -300,12 +299,12 @@ arithmetic. Backend, typed, upstream, stale and cancellation failures retain the
 categories. Numeric failures are OperationFailed/InvalidDomain or final-output
 ArithmeticOverflow, with Run scope and offending port/index where available.
 
-They do not validate the current Result workflow or establish its performance. They
-cover Result declarations and bindings, Whole sparse support and error paths,
-layouts and floating-environment preservation, Empty and metadata validation,
-work/cancellation/resource limits, cache and binding replacement, typed Mask
-validation, upstream failures, and Result/read-window lifetime and release. See the
-workflow README for commands and exact evidence boundaries.
+Public-path acceptance should cover Result declarations and bindings, complete
+Whole output under sparse demand, error scope, layouts and floating environments,
+Empty and metadata validation, work/cancellation/resource limits, binding
+replacement, typed Mask validation, upstream failures and Result/read-window
+lifetime. Build the checks for the current change and record the actual profiles
+and inputs used; the specification is not a run result.
 
 ## CRV-02 exact Bezier function sampling
 
@@ -319,20 +318,21 @@ Mathematical selection remains local: exact anchor/clamp uses that anchor y; int
 
 The Result association records actual source ObjectIds. Input changes update recorded dependency dirtiness for the requested region; anchor and handle changes affect `values`, while start/end affect outputs that depend on them. The count=1 dependency omits `end`. Complete immutable input versions, profile, metadata and parameters remain in cache identity, while binding topology can reuse the static PreparedOperation. Both outputs retain independent identities, names, dtypes and empty facets. Result owners and authorized read windows remain valid past context and source-handle retirement; releasing the final window releases the Root allocation.
 
-It covers Result declarations/bindings/reads, count-one and axis dependency projection, sparse full-output coverage and source association, same-demand and fresh-source cache behavior, preparation reuse, error ordering, all-port layouts, caller/worker fenv, work/cancellation/output/scratch limits, typed validation, and Result/read-window lifetime. It also verifies that retained values and axis windows keep 48 Payload bytes alive after all four source owners retire, that releasing the values window leaves the 24-byte axis readable, and that releasing the final window returns all Root usage to zero. Generic y data outside the mathematical stencil is not scanned; recognized typed validation still applies to the complete active Result input. The maximum-count oracle cases verify that a sparse request cannot admit the complete dense output under a 1 MiB Payload budget. They check capacity rejection at the operation node, not successful million-element numerical execution.
-
-Four additional cases per profile check maximum-count full-output capacity rejection. Reproduction commands, installed consumer configuration and the manual benchmark protocol are in the [numeric workflow README](../../../examples/numeric_workflow/README.md#bezier-function-sampling-crv-02).
+Temporary acceptance should cover Result declarations/bindings/reads, count-one and axis dependency projection, sparse full-output coverage and source association, same-demand and fresh-source cache behavior, preparation reuse, error ordering, all-port layouts, caller/worker fenv, work/cancellation/output/scratch limits, typed validation, and Result/read-window lifetime. For a three-value Float64 case in an isolated Root, retire the context, source
+owners and output Result handles while retaining the values and axis windows.
+Those windows retain 48 Payload bytes; closing the values window leaves the
+24-byte axis readable, and closing the final window releases the remaining payload. Generic y data outside the mathematical stencil is not scanned; recognized typed validation still applies to the complete active Result input. For maximum-count acceptance, use a sparse request with a 1 MiB Payload cap and
+check that complete dense-output admission fails at the operation node. This
+checks capacity rejection, not successful million-element numerical execution.
 
 ## CRV-03 parametric Bezier evaluation
 
 `parametric_bezier.cpp` evaluates explicit t and does not solve an inverse. The
 public `evaluate_bezier_node` accepts four Result inputs and specializes the
-output schema from their descriptors and static degree/dtype parameters. The
-manual `parametric.cpp` workflow declares schema-backed inputs, binds source
-Results, executes through the public compiler/context API and reads output
-Results through authorized tensor access. Its `Value` objects provide immutable
-source storage only; source Results refer to that storage and account it as
-Referenced. Result tensor schemas carry descriptor and semantic facets.
+output schema from their descriptors and static degree/dtype parameters. For public-path acceptance, declare schema-backed inputs, bind source Results,
+execute through Compiler/ExecutionContext and read output Results through
+authorized tensor windows. Source Values can provide immutable storage, charged
+as Referenced when retained by source Results. Result tensor schemas carry descriptor and semantic facets.
 
 The Whole Result continuation requests active inputs with Data, Validation and
 Descriptor (role 13), validates every segment/t row before component arithmetic,
@@ -391,36 +391,41 @@ object, while a fresh equivalent four-source bundle demonstrates a content-cache
 hit and refreshes all four source associations. Whole execution exposes no
 per-value counters, so zero counters do not imply zero arithmetic or fallbacks.
 
-The fixture runs all 16 combinations of reversed, unaligned layouts across all
+Temporary acceptance should run all 16 combinations of reversed, unaligned layouts across all
 four inputs and a separate zero-stride source composition. Under each caller
-rounding mode it verifies the actual computation worker's floating environment.
-Nine malformed static Result schema/parameter cases are
-rejected before execution. Lifetime checks cover Float32 and Float64 3x2 outputs:
+rounding mode, verify the actual computation worker's floating environment.
+Verify that malformed static Result schemas and parameters reject before execution. Lifetime checks cover Float32 and Float64 3x2 outputs:
 all four source backings expire, the escaped Result and authorized read window
 share one 24-byte or 48-byte output owner, and releasing both returns all Root
-live capacity to zero. The manual Strict/Apple checks also cover typed
+live capacity to zero. Also cover typed
 validation, source association, static preparation, full sparse coverage,
-upstream error ordering, work/cancellation and output/scratch cleanup. The installed 0.32.0
-package consumer compiled and linked the same manual source. The exact consumer
-configuration is recorded in the [workflow README](../../../examples/numeric_workflow/README.md#parametric-bezier-evaluation-crv-03).
+upstream error ordering, work/cancellation and output/scratch cleanup. Report each admitted profile actually exercised.
 
 ## CRV-04 public LUT1D authoring
 
 `numeric/lut1d.hpp` exposes six authoring functions that append ordinary runtime nodes to a caller-owned `WorkflowDocument`: expression and Bezier samplers each produce `values` and `axis`, while linear and PCHIP interpolation templates first produce Float64 linspace queries and then interpolation values. `BakedLut1d` returns node-output references; `outputs()` creates caller-named workflow exports. Construction creates graph metadata only. It reserves existing and referenced node IDs, allocates the lowest available positive IDs, enforces the 65,536-node limit and appends nodes only after the complete expansion succeeds. A failed construction leaves the graph unchanged. The caller owns output declarations and compilation.
 
-The source operations use Result inputs and outputs. `SequenceInput` pairs a workflow edge with an immutable Result schema hint for a Float32/Float64 `[1]` endpoint; the compiler checks the actual binding independently. The manual fixture keeps arrays as local `Value` backing, publishes their storage as immutable source Results, and binds those Results through `ExecutionBindings`. It does not import values through a snapshot store. `Fixture::run` returns `DemandResult.results`, and the fixture reads values through authorized Result tensor access.
+The source operations use Result inputs and outputs. `SequenceInput` pairs a workflow edge with an immutable Result schema hint for a Float32/Float64 `[1]` endpoint; the compiler checks the actual binding independently. A temporary public checker can keep arrays as local `Value` backing, publish their
+storage as immutable source Results, and bind them through `ExecutionBindings`.
+Inspect the returned Results through authorized tensor windows.
 
 All expanded formal outputs use CPU Whole continuations. A nonempty `values` demand computes the full table and reports its full coverage, including for a sparse request. Interpolation templates allocate the full Float64 query array (`8*count` bytes), followed by the full table (`count*C*dtype_size` bytes), in addition to source owners and source-specific workspace. The host accounts these allocations through one Root resource budget. A sparse million-row multi-PCHIP request under a 1 MiB Payload budget checks full-output rejection; it does not demonstrate sparse success or successful maximum-size execution.
 
 `axis` is a separate Float64 `[3]` Result. Axis-only demand skips expression coefficients, Bezier controls and interpolation x/y. For `count=1`, the expanded source omits the end payload. For `count>1`, a first-value request still collects the end input and computes the complete grid. Each source keeps its own mathematical formula, selection, typed validation and numerical allowance. Active Result collection can propagate typed or upstream errors outside the requested numerical region, and numerical failures retain the source operation's Run scope. Empty `values` demand returns empty coverage without polling its failing numerical producer or reading payload; metadata processing and Result sealing remain ordinary execution work.
 
-Source associations contain the active Result ObjectIds, while dependency support and dirty mapping follow the output request. Repeated identical demand retains the completed Result identity. A fresh same-content source bundle reuses cached outputs with current associations. Each output association follows its direct producer inputs: an interpolated table points to x, y and the current query Result; the query Result and independent axis point to current endpoint Results. A one-node sampler asserts exactly two cache hits for `values` and `axis`; an interpolation graph also exports `query_values` and asserts exactly three hits. Replacing bindings reuses static `PreparedOperation` objects and recomputes outputs for the new endpoints. Function controls affect values demand; they do not dirty the independent axis.
+Source associations contain the active Result ObjectIds, while dependency support and dirty mapping follow the output request. Repeated identical demand retains the completed Result identity. A fresh same-content source bundle reuses cached outputs with current associations. Each output association follows its direct producer inputs: an interpolated table points to x, y and the current query Result; the query Result and independent axis point to current endpoint Results. Temporary cache checks should inspect values and associations for every exported
+output, including `query_values` in an interpolation graph. Hit counts depend on
+the cache configuration and graph; they are not part of the numerical contract. Replacing bindings reuses static `PreparedOperation` objects and recomputes outputs for the new endpoints. Function controls affect values demand; they do not dirty the independent axis.
 
-The manual harness in `examples/numeric_workflow/baking.cpp` contains seven groups. Its generated-versus-explicit graph check spans six templates, two output dtypes and four demand modes: 48 graph pairs per profile. It compares Result descriptors, coverage, requested bits, source support and dirty mapping, and checks separately encoded analytic sample values. These fixture values test composition equivalence; they are not a replacement for the independent numeric oracles for the source operations. Other groups exercise count-one and failing-end behavior, empty-demand and axis/source isolation, source failures, cache/association behavior, static preparation reuse, authoring boundaries, mixed endpoint/table dtype, reversed/unaligned/scalar-zero source layouts, caller and actual-worker floating-environment restoration, work/payload limits, active cancellation, and recovery.
+Ownership acceptance should cover all six templates for Float32 and Float64
+outputs. Retire each source backing while retaining separate values and axis
+Results and authorized read windows. The two output buffers remain independently charged to Root Payload; each window remains readable after its Result handle is released. Releasing the final window returns live Root resources to zero.
 
-The ownership group covers all six templates for Float32 and Float64 outputs. It retires each source backing while retaining separate values and axis Results and authorized read windows. The two output buffers remain independently charged to Root Payload; each window remains readable after its Result handle is released. Releasing the final window returns live Root resources to zero.
-
-The million-row sparse admission case returns `ResourceExhausted / CapacityLimit` at node 1 before the complete linspace query Result can be admitted. It verifies that the full query payload is budgeted before interpolation, not that a million-row table was numerically computed. The fixture also injects work exhaustion and cancellation during actual computation; both paths release live Payload to zero. The direct numerical oracles for expression, sequences, curves and Bezier remain in their source families. The baking graph comparison verifies that the six public constructors expand to the corresponding source nodes without changing any source formula.
+The million-row sparse admission case returns `ResourceExhausted / CapacityLimit` at node 1 before the complete linspace query Result can be admitted. It verifies that the full query payload is budgeted before interpolation, not that a million-row table was numerically computed. Inject work exhaustion and cancellation during computation and check payload
+release. Use the retained independent numerical references in `oracle/ops/numeric/`
+for expression, sequence, curve and Bezier specifications. Separately compare the six constructors with
+explicit graph expansions; graph equivalence alone cannot detect a shared
+numerical implementation bug.
 
 ## CRV-05 dynamic-axis LUT1D
 
@@ -472,26 +477,22 @@ Numeric InvalidDomain/ArithmeticOverflow failures have Run scope. Typed, upstrea
 resource, stale, backend and cancellation failures retain their categories.
 Whole does not expose per-value fallback counters; report those as unavailable.
 
-The Result manual workflow now checks seven groups under Strict and the locally
-available Apple profile. Its independent Fraction driver passes 1,416 bit-equal
-cases for each profile. The six CRV-04 baking chains connect to the Result LUT
+Use independent Fraction goldens when checking each admitted numerical profile. The six CRV-04 baking chains connect to the Result LUT
 consumer; source replacement retains the same static preparation, fresh source
 Results produce cache hits with current associations, and sparse requests retain
-full Whole output coverage. The fixture also covers typed RGBA validation,
+full Whole output coverage. Also cover typed RGBA validation,
 upstream failures, all-port layouts, caller/worker fenv, resource and cancellation
-rollback, output lifetime and Root release. Its maximum L=1,048,576 case uses a
-16 MiB Payload capacity; Root diagnostics show the 8 MiB axis grid charged to
+rollback, output lifetime and Root release. For the maximum L=1,048,576 case, use a
+16 MiB Payload capacity; check that Root diagnostics charge the 8 MiB axis grid to
 Metadata while peak Payload remains below 8 MiB, confirming no dense table copy.
 A 2^39-channel sparse request fails with CapacityLimit at the LUT node.
 
-The existing `test_numeric_result_math_lut1d` integration fixture retains additional
-LUT1D checks, including custom Result schemas, channel batch shape [2,2,2],
-eight scalar Fraction golden bits, axis/query/table error precedence, and
-cancellation inside a 352-limb `ExactCurve` slot. Its 1 MiB Payload cases reject
-a sparse input[262144] request whose full Float64 output needs 2 MiB, and accept
-a zero-stride Float32 table [262145] while adding only the 8-byte output to live
-Payload. These are integration-fixture results, separate from the manual
-`lut1d.cpp` groups.
+LUT1D acceptance cases include custom Result schemas, channel batch shape [2,2,2],
+independent Fraction goldens, axis/query/table error precedence and cancellation
+during exact arithmetic. Under a 1 MiB Payload cap, a sparse request from
+input[262144] still requires the complete 2 MiB Float64 output and must reject.
+A zero-stride Float32 table [262145] can use retained source storage while its
+scalar Float64 output adds 8 bytes. Check these resource cases through Results.
 
 ## CRV-06 ColorArray and color ramps
 
@@ -573,12 +574,11 @@ Empty color results retain required resources. Sample-only optional caches skip
 resource-bearing results. Package 0.16 requires C++ consumers to rebuild; C ABI 9
 and the existing semantic/digest version numbers remain unchanged.
 
- These cover strict numerical references, mixed dtype, model domains,
+Acceptance should cover strict numerical references, mixed dtype, model domains,
 RGB association, hue units, resources, arbitrary layouts, active cancellation,
-full-input typed failure and full-output budgets. Focused numeric, compiler,
-color and resource CTests pass.
+full-input typed failure and full-output budgets.
 The retained accelerated allowance is contractual; bit matching in these cases
-does not replace that contract. Public commands are in the workflow README.
+does not replace that contract.
 
 ## CRV-07 joint three-dimensional LUT application
 
@@ -636,27 +636,22 @@ integer helpers. The implementation adds no approximate backend or NUM-14
 certificate; numerical counters from the former dependency session do not
 apply to this Result continuation.
 
-The independent Fraction oracle reconstructs RN64 grids, cells, and simplexes,
-then rounds rational sums using separate Python integer IEEE logic.
-The fixture exercises Result declarations and bindings, sparse full-color
+The independent `oracle/ops/numeric/lut3d_oracle.py` reference reconstructs
+RN64 grids, cells and simplexes, then rounds rational sums with separate integer IEEE logic. Temporary acceptance
+should exercise Result declarations and bindings, sparse full-color
 coverage, source associations and cache reuse, preparation reuse, Empty and
 failed table producers, typed ColorArray validation, reversed/unaligned layouts,
 caller and worker floating environments, owner retirement, and window lifetime.
-Two interpolation outputs retain 12 and 24 Payload bytes while their escaped
-read windows remain alive after source retirement; releasing the final windows
-returns Root usage to zero.
+For one RGB sample with shape [1,3], Float32 and Float64 output windows retain
+12 and 24 Payload bytes respectively after context, source and output Result
+handles retire. Releasing the final windows releases those output allocations.
 
-A Float64 table with maximum 256^3 grid shape succeeds using an 8-byte backing
-window under an 8 MiB Root Payload cap, showing that the execution does not copy
-the 384 MiB dense table. A separate sparse query requiring 2^38 output positions
-is rejected as `CapacityLimit` at node 1 because the complete output exceeds the
-budget. This is a capacity rejection, not successful numerical execution at
-that output size. The `test_numeric_lut3d_result` behavior test runs the manual
-fixture under Strict. The shared `test_numeric_result_math_lut3d` includes distinct
-LUT workflow, boundary, preparation, and resource fixtures; those are separate
-evidence from the six manual groups. Reproduction and installed-consumer
-commands are in the [numeric workflow README](../../../examples/numeric_workflow/README.md#joint-three-axis-color-luts).
-No x86 execution or native GPU execution is established by this evidence.
+For LUT3D resource validation, use a Float64 table with 256^3 grid shape and an
+8-byte zero-stride backing under an 8 MiB Root Payload cap. Verify that execution
+retains source storage rather than copying the 384 MiB logical table. A sparse
+query requiring 2^38 output positions must fail with `CapacityLimit` when the
+complete output exceeds the budget. This checks admission, not successful
+numerical execution at that output size.
 
 ## CRV-08 whole-formula shapers
 
@@ -704,13 +699,12 @@ and publication owners. Account full collected input, full output and workspace.
 Linear templates already expand NUM Whole remap/constant nodes; no redundant
 linear primitive is added and inverse bound-order validation remains connected.
 
-Native strict/Apple each pass 4196 Fraction/directed MPFR-4.2.0-p12 cases across
-all four forms and both dtypes, near-equal/extreme bounds, exact roots/midpoints,
-IEEE payload/zero/Inf, underflow/overflow and monotonic groups. Six public manual
-groups inspect whole support/dirty/cache behavior, arbitrary layouts and fenv,
-ColorArray validation, Empty, inverse -0, log direct workspace/refinement
-interruption and all four public paths' work/output/cancellation/upstream errors.
-Focused numeric/compiler CTests pass. Public commands are in the shaper workflow README.
+Validate all four shaper forms and both dtypes against independent Fraction or
+directed-MPFR references. Include near-equal/extreme bounds, exact roots and
+midpoints, IEEE payloads/zero/Inf, underflow/overflow and monotonic groups. Check
+Whole support, dirty mapping, source replacement, layouts, caller/worker fenv,
+ColorArray validation, Empty, inverse -0, refinement interruption and
+work/output/cancellation/upstream failures through the public API.
 
 ## CRV-09 measured LUT3D baking
 
@@ -724,9 +718,9 @@ semantic identity. Both expansions execute under one frozen binding snapshot,
 including shared dynamic inputs and optional `ResourceBindings`. Pointwise
 independence is the caller's assertion.
 
-`baking3d.cpp` binds source fixtures from `Value` backing into immutable
-Root-owned Referenced Results. The public bake graph publishes only Result
-outputs: table, axis and report. Geometry programs use Whole Result with
+For temporary bake validation, bind immutable source Results backed by local
+Values and charge retained source storage as Referenced. The public bake graph
+publishes Result outputs: table, axis and report. Geometry programs use Whole Result with
 role-13 validation and complete outputs. Static preparation validates metadata
 and stores reusable geometry or report POD state. Empty tensor demand skips
 payload evaluation; source, table, axis and report failures preserve their
@@ -750,8 +744,8 @@ integers in `2^-2148` units. Error needs fewer than 3173 bits; the threshold
 product needs fewer than 4197, within the 4352-bit workspace. Exact integer
 comparison selects maxima and preserves the earliest ordinal on ties. The
 reported maximum is rounded to Float64, then advanced by one positive IEEE step
-if that rounded down; an unrepresentable error is diagnostic +Inf. The independent
-Fraction oracle checks 384 cases per profile against the current Result harness.
+if that rounded down; an unrepresentable error is diagnostic +Inf. Validate the error/threshold comparison and outward rounding with independent
+Fraction references for each admitted profile.
 
 Measurement visits row-major cell centers and then extra points. The continuation
 stores only counts, maxima and first-failure data, and seals all eleven fields
@@ -763,7 +757,7 @@ Its canonical resolved schema participates in graph, plan and cache identity.
 Pack, Unpack and Gate first request authorized Result tensor views. Legal mappings
 retain the existing common storage owner; a physical `ViewUnavailable` triggers
 transactional materialization of the requested region, preserving sample bits
-and dependency support while charging Root Payload. The baking harness checks
+and dependency support while charging Root Payload. Temporary baking acceptance should check
 Float32/Float64 across all five geometries, reversed and unaligned layouts, and
 verifies the mapped row address equals the source backing address with zero Root
 Payload. Pack uses two polls for this path. Report reads use bounded windows;
@@ -775,7 +769,7 @@ retirement.
 All source operations, full grid colors, validation points, converted colors,
 table backing, report fields, windows and scratch consume their respective host
 budgets. A small requested table region does not reduce the full bake or global
-measurement work. The harness verifies a huge grid is rejected with
+measurement work. Verify that a huge grid is rejected with
 CapacityLimit at its geometry node; it does not demonstrate successful
 maximum-shape execution. Measured acceptance applies only at the listed centers
 and extra points under the selected interpolation method and table dtype; it is
@@ -784,14 +778,11 @@ report with `passed=false`, while a dependent table request fails with
 `LutApproximationToleranceExceeded`. Axis remains independent. Source, invalid
 data, cancellation, stale binding and resource failures remain execution errors.
 
- Its bake assertions
-are independent fixture coverage, not all cases from `baking3d.cpp`. Its cache
-fixture uses a 64 MiB Result cache,
-1,048,576 `maximum_dependency_cache_metadata` proof units and 128 Mi
-dependency-cache work units; 14 hits were observed, while the assertion requires
-only a positive count. The metadata limit is measured in proof units, not bytes. Exact commands and
-coverage are in the [numeric workflow README](../../../examples/numeric_workflow/README.md#measured-three-dimensional-lut-baking).
-No current x86, native-GPU or successful maximum-shape execution is claimed.
+For cache acceptance, configure explicit payload, dependency-cache metadata and
+work budgets and verify current values and associations after rebinding.
+`maximum_dependency_cache_metadata` counts proof units, not bytes. Observed hit
+counts depend on the chosen graph and budget and are not a numerical guarantee.
+Report actual backend and shape coverage separately.
 
 ## CRV-10 inverse curves
 
@@ -838,22 +829,15 @@ Collinear stencils still bypass lattice search; noncollinear wide-integer
 comparison is scalar and restores the surrounding profile. Scalar/NEON/AVX2
 implementations remain; no Accelerate/SME inverse backend is introduced.
 
-The [public inverse workflow](../../../examples/numeric_workflow/README.md#inverse-curves)
-uses a Result-backed manual fixture with local Value source backing, immutable
-source Results, workflow bindings, Result outputs and authorized read windows.
-Its five groups run under Strict and Apple. The manual fixture checks
-both caller and actual computation-worker floating environments, negative and
-zero strides, true fresh-source cache reuse with refreshed direct associations,
-same-demand ObjectId retention, static preparation reuse, Empty propagation
-without polling a failed producer, typed SampledSignal error attribution,
-K=65536 execution, and retained Float32/Float64 outputs after source-owner
-retirement. An escaped Result and read window retain 12 or 24 Payload bytes;
-closing the last window returns Root live capacity to zero. A public N=2^40
-constant View is rejected with CapacityLimit at the inverse node because Whole
-execution requires complete output storage; it does not demonstrate numerical
-execution at that output size. `test_numeric_result_math_baking` separately covers
-`inverse_workflows` and `inverse_boundaries`; those integration fixtures are not
-the manual fixture.
+Inverse-curve acceptance should bind immutable source Results and read outputs
+through authorized windows. Check caller/worker floating environments, mixed
+dtypes, negative/zero strides, dirty scope, knot/clamp signed zero, preparation
+reuse, current source associations, Empty without polling a failing producer,
+SampledSignal errors at input 2, cancellation and source-owner retirement. Include
+K=65536 and a three-element Float32/Float64 output retaining respectively 12/24
+Payload bytes after source retirement; releasing the final window must release
+that payload. A constant View with N=2^40 must be rejected when the complete
+Whole output exceeds the configured Payload cap.
 
 ## CRV-11 resampling and certified lowpass
 
@@ -944,14 +928,8 @@ Every scale scan, partition piece, coefficient/refinement and limb operation has
 work/cancellation checks. The production path has no MPFR/Fraction dependency;
 those remain independent manual references.
 
-Public examples, exact fixtures, response checks and runtime commands are in
-[resampling](../../../examples/numeric_workflow/README.md#signal-resampling),
-[uniform lowpass](../../../examples/numeric_workflow/README.md#uniform-lowpass)
-and [nonuniform lowpass](../../../examples/numeric_workflow/README.md#nonuniform-lowpass).
-
-The four maintained manual executables exercise distinct parts of this family. The
-resampling examples preserve CRV-01's existing exact-copy and numeric-accuracy
-checks; this family has no separate numerical oracle.  Manual checks cover all-port negative, unaligned and zero strides, worker and caller floating-environment preservation, an independent two-constant oracle on a non-last axis, complete Whole input/dirty support, remote-column Run errors, uniform NaN/Inf tap order, typed validation, cache replacement and source association, static preparation reuse, real-work cancellation, 2^40-output capacity rejection, and escaped owners. Resampling additionally checks raw and typed position forwarding, output-specific support, remote-query failure, K=65536 execution, and a zero-copy mapped position view at N=2^40 while the full samples output is rejected for capacity. Float64 layout checks cover all four templates and eight source layouts under each caller/worker rounding mode; Float32 checks separately cover bit-preserving positions, typed validation, and owner lifetime. These are execution checks, not an independent resampling oracle.
+Resampling acceptance inherits CRV-01's exact-copy and numeric-accuracy
+requirements and adds public composition checks. Temporary checks should cover all-port negative, unaligned and zero strides, worker and caller floating-environment preservation, an independent two-constant oracle on a non-last axis, complete Whole input/dirty support, remote-column Run errors, uniform NaN/Inf tap order, typed validation, cache replacement and source association, static preparation reuse, real-work cancellation, 2^40-output capacity rejection, and escaped owners. Resampling additionally checks raw and typed position forwarding, output-specific support, remote-query failure, K=65536 execution, and a zero-copy mapped position view at N=2^40 while the full samples output is rejected for capacity. Float64 layout checks cover all four templates and eight source layouts under each caller/worker rounding mode; Float32 checks separately cover bit-preserving positions, typed validation, and owner lifetime. These are execution checks, not an independent resampling oracle.
 
 ## Shared rounding and regional execution
 

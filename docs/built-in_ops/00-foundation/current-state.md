@@ -16,7 +16,7 @@
 
 | 能力 | 实现子集与调用入口 | 数据和执行边界 |
 | --- | --- | --- |
-| Numeric、expression 与 LUT | 默认 registry 的数值、curve、field、统计和 expression/LUT operation；从[基础算子](../../kernel-architecture/Basic-Operations.md)、[数值操作](../../kernel-architecture/Numeric-Operations.md)、[表达式与 LUT](../../kernel-architecture/Expression-and-LUT-Operations.md)查看 key 契约；[Foundations workflow](../../../examples/foundations_workflow/README.md)提供可运行的 numeric 与 expression/LUT 场景。 | 仅按具体 key 公开的 dtype、shape、参数和 Whole/Region 规则执行；输入为 generic `Value` 不等于图像 planar 能力。 |
+| Numeric、expression 与 LUT | 默认 registry 的数值、curve、field、统计和 expression/LUT operation；从[基础算子](../../kernel-architecture/Basic-Operations.md)、[数值操作](../../kernel-architecture/Numeric-Operations.md)、[表达式与 LUT](../../kernel-architecture/Expression-and-LUT-Operations.md)查看 key 契约。 | 仅按具体 key 公开的 dtype、shape、参数和 Whole/Region 规则执行；输入为 generic `Value` 不等于图像 planar 能力。 |
 | Channel 与 color | 默认 registry 中明确注册的通道构造、提取、颜色模型转换和 RGB 基底节点，见[通道与颜色操作](../../kernel-architecture/Channel-and-Color-Operations.md)。 | 各节点只接受其声明的 facet、dtype 与布局；不提供任意图像格式转换或 ICC/OCIO 管理。 |
 | Image 与 mask | 内置图像 operation 通过 Result tensor storage 执行；当前清单与各 key 的输入约束见[图像操作](../../kernel-architecture/Image-Operations.md)。 | 图像样本使用 typed `photospider.image` Result；`PlanarImage` 是可选 typed backing，不是独立的公开图像 operation 路径。 |
 | Layer 纯值计算 | `LayerPixel` 及纯计算 helper 保留在[`data/layer.hpp`](../../../include/photospider/data/layer.hpp)；`layer_schema` 与 `layer_spec` 仍描述其值格式。 | 当前没有 Layer operation factory 或 Layer image workflow。六种 Layer Result schema ID 与 `photospider.layer` facet 被 `SchemaTemplate::validate` 拒绝；schema 描述能力不代表可发布 Result。图像语义存储使用 Result Tensor，`PlanarImage` 仅是 typed backing。边界见[Layer runtime](../../kernel-architecture/Layer-Runtime.md)。 |

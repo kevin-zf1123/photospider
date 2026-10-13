@@ -148,18 +148,16 @@ admitted ranges are listed above. Wider legal inputs remain supported by strict.
 
 ### Current validation
 
- WSL results establish correctness only. Strict uses bitwise comparisons; accelerated
-acceptance checks final FP32-scaled error directly, including Float64 error.
+Strict acceptance uses bitwise comparisons; accelerated acceptance checks final
+FP32-scaled error directly, including Float64 error. Numerical checks do not
+establish a performance result.
 
-Public checks cover Whole/ROI, partitions and tails; negative/unaligned/zero
+Temporary public checks should cover Whole/ROI, partitions and tails; negative/unaligned/zero
 strides; caller fenv; cache changes; typed/upstream failures; resource limits,
-cancellation and returned/unpublished owner lifetime. Regressions include
+cancellation and returned/unpublished owner lifetime. Include
 neighboring PCHIP queries, exact collinearity versus underflowed slopes,
-non-last-axis/disjoint sort lines and upper-edge smoothstep. Native and WSL static/shared installed consumers link
-only `Photospider::kernel` and run the expression workflow; the SLEEF license is
-installed. Independent
-code and contract review findings were corrected and checked. These checks do
-not constitute exhaustive parameter/platform or all-input refinement coverage.
+non-last-axis/disjoint sort lines and upper-edge smoothstep. These cases do not constitute exhaustive parameter/platform or all-input
+refinement coverage.
 
 Float32 exp in [-80,80] now uses the IQK-derived NEON/AVX2 polynomial with an
 exact-rational whole-domain certificate for this admitted interval. It satisfies

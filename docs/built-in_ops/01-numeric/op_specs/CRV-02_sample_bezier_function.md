@@ -449,19 +449,13 @@ request values indices {0,1,8} -> {0:0, 1:0.5, 8:1}
 request axis -> [0,1,0.125]
 ```
 
-The public workflow fixture uses WorkflowDocument input declarations and Result
-bindings, compiles the graph with `Compiler`, executes it through
-`ExecutionContext`, and reads the published Result outputs. The maintained
-manual example is `examples/numeric_workflow/bezier.cpp`; it uses Result
-declarations, bindings and outputs, with Value objects only as immutable source
-backing. The independent `bezier_oracle.py` validates the public operation
-against Fraction/de Casteljau/Euclid-Sturm cases. Strict and Apple each pass 382
-numerical/error cases plus four full-output capacity-rejection cases. The
-maximum-count cases verify `CapacityLimit` rejection at the operation node under
-a 1 MiB Payload budget; they do not execute a successful million-sample result.
-Current commands and detailed evidence are in the numeric workflow README. The
-public workflow remains the validation entry point; this specification does not
-replace it with an internal solver call.
+Validate the public path with WorkflowDocument input declarations and Result
+bindings, Compiler, ExecutionContext and authorized Result reads. Use independent
+Fraction/de Casteljau/Euclid-Sturm references for numerical results. A maximum-count
+request under a 1 MiB Payload cap must reject at the operation node when the
+complete dense output cannot fit; this is a capacity case, not a successful
+million-sample numerical run. A solver-only check does not establish public
+workflow behavior.
 
  Maximum-count requests verify complete-output capacity
 rejection, not successful million-sample execution. Larger numeric and performance
@@ -471,11 +465,28 @@ runs are additional coverage.
 
 The maintained implementation registers the three profile keys in `plugins/ops/01-numeric/bezier_function.cpp` as Whole Result operations. Each input is a sole tensor member under any schema id/version/key; shapes derive from `sample_shape()`. Output ports use `photospider.tensor` v1 / `samples`, with `values[count]` and atomic Float64 `axis[3]`, empty facets and source associations. Input needs use role 13. For count=1, the values dependency omits end and the axis dependency contains only start. Nonempty requests return full certified coverage in global sample coordinates; Empty reads no payload. It performs exact x topology and monotonicity validation, RN64 control reconstruction, an inverse solver with up to 8192 fractional bits of dyadic refinement, exact polynomial/Horner evaluation and direct output rounding. The polynomial workspace is 40,960 bits with a 96-slot arena; the static live-slot bound is at most 44. All profiles use the same exact mathematical path with scalar/NEON/AVX2 integer helpers; the numerical contract retains the shared accelerated allowance. Whole eliminates per-sample dependency certificates and staged read windows. Fixed state is allocator-owned; topology has 8*(K+(degree-1)*(K-1)) element bytes plus metadata overhead. Complete values cost b*count; axis costs 24 bytes. The common operation workspace declaration conservatively bounds the larger values state even for axis, whose actual callback allocates only its smaller state.
 
-The manual Result fixture is `examples/numeric_workflow/bezier.cpp`. The fixture exercises Result declarations, bindings and reads; count-one and axis dependency projection; sparse full-output coverage; same-demand identity; content-cache reuse with current source associations; static preparation reuse after binding changes; layouts across all ports; caller and worker floating environments; typed input validation; work, cancellation, output and scratch limits; upstream errors; and owner retirement. The fixture verifies complete Whole coverage in global sample coordinates and that the source ObjectIds in each Result association match the active bindings. All four source owners can retire while `values` and `axis` windows retain 48 Payload bytes; releasing the values window leaves the 24-byte axis readable, and releasing the final window returns all Root usage to zero. Empty demand reads no input payload and executes no numeric kernel; the runtime can still poll metadata and seal the Result. `axis` reads start/end only, with count=1 excluding end; it does not read controls. For `values`, generic y data outside the mathematical stencil is not scanned, while recognized typed validation covers each active input. The maximum-count oracle cases verify rejection of the complete dense output under a 1 MiB Payload budget at the operation node; they are capacity checks, not successful million-element numeric runs.
+Acceptance should cover count-one and axis projection, complete Whole coverage
+under sparse requests, current source associations, preparation reuse, layouts,
+caller/worker floating environments, typed validation, work/output/scratch limits,
+cancellation, upstream failures and owner retirement. In a three-value Float64
+case with an isolated Root, values and axis windows retain 48 Payload bytes
+after the context, source owners and output Result handles retire; closing values leaves the 24-byte axis readable, and closing the final
+window releases all payload. Empty reads no payload and performs no numeric
+kernel work, although metadata polling and sealing can occur. Axis reads only
+start/end, with count=1 excluding end, and never reads controls. Generic y values
+outside the mathematical stencil are not scanned; recognized typed validation
+covers each active input.
 
- Focused manual and installed commands, as well as fixture coverage, are maintained in the [numeric workflow README](../../../../examples/numeric_workflow/README.md#bezier-function-sampling-crv-02). The separate `test_numeric_result_math_bezier` integration target covers `bezier_workflows`, `bezier_boundaries`, `bezier_projection` and `bezier_resources`; its 22 golden words include six function outputs and sixteen CRV-03 parametric outputs.
+Use independently rounded function-sampling and parametric-Bezier expected values;
+shared implementation output is not an independent golden.
 
- It includes coordinator discovery, polling, computation, publication and digest, while excluding source construction, compilation, freeze, readback and output checks. It reports continuation polls, computed elements, Root Payload peak and `timing_scope=result_execute_fragments`. Whole diagnostics do not expose per-value root-solver or fallback counters, so those fields remain N/A. Regular and stress cases are bounded behavior and timing-scope smoke checks; they do not establish a performance improvement.
+When measuring `result_execute_fragments`, state whether the measured interval
+includes coordinator discovery, polling, computation, publication and digest,
+and keep source construction, compilation, freeze, readback and output checking
+separate. Report continuation polls, computed elements and Root Payload peak.
+Whole diagnostics do not expose per-value root-solver or fallback counters;
+leave those unavailable. Bounded smoke cases alone do not establish a
+performance improvement.
 
 ## Related operation distinction
 

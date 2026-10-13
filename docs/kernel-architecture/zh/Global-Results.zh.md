@@ -82,7 +82,7 @@ Coordinator 分别准备各个 box。如果后续 `ResultTensorInput::acquire()`
 
 Result C ABI operation definition 可以声明固定 input prefix 和一个重复的尾部 group。`input_count` 和 `inputs` 只描述固定 prefix；`repeated_input` 提供一个 prototype constraint，在 metadata resolution 及 `start`/`poll` query validation 时应用于每个实际尾部 input。非零 `repeated_maximum` 启用该 group，并要求 `1 <= repeated_minimum <= repeated_maximum`，且 prefix 加 maximum 不超过 1,024 个 inputs。禁用时，所有 repeated 字段均为零或 null。`repeated_match` 只能为 0 或 1：值为 1 时，每个重复 tensor 必须与第一个重复 tensor 的 dtype 和完整逻辑 `sample_shape()` 相同；值为 0 时，扩展后的 input list 必须由 pure metadata resolver 解析。C++ registry 保留未展开的 template，并在 preparation 时根据实际 input count 展开。该声明只约束 metadata；operation 对每个实际读取的 input 仍需请求 Tensor Need。
 
-重复输入契约由 `tests/integration/test_result_repeated.cpp` 及其 C fixture 覆盖，包括扩展后的 input constraint、metadata resolution、malformed DSO 拒绝和 typed reads。Package consumer 通过已注册的 installed suite 验证。这些位置描述行为覆盖，不表示当前完整测试矩阵已全部通过。
+重复输入契约由 `tests/integration/kernel/test_result_repeated.cpp` 及其 C fixture 覆盖，包括扩展后的 input constraint、metadata resolution、malformed DSO 拒绝和 typed reads。这些位置描述行为覆盖，不表示当前完整测试矩阵已全部通过。
 
 Native GPU callback 可对已有 payload-authorized tensor Need 调用 `ResultProgramPhase::acquire_native_atlas(input, slot)`。它返回只包含该 Need coverage 的不可变 `FragmentAtlas`；dispatch 和 publication 仍由 operation 决定。同一 poll 对同一 port 与 slot 的重复调用复用一个 atlas。CPU 调用、缺少 Need 或 Descriptor-only Need 会产生 sticky `InvalidArgument`，不会扩大授权范围。空的 payload Need 仍返回有效 atlas，含一个惰性 payload 字节和两个空目录 slot，不读取 source samples，也不执行 native dispatch。Root-backed payload 与 directory storage 独立于 operation workspace；atlas 自己拥有这些 buffer，不保留 source Result 或 read window。Caller 持有的 shared atlas 可在 poll、source 和 execution context 结束后继续存活。
 

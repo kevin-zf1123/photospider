@@ -14,17 +14,7 @@ Count's output size is independent of its logical shape. Its 8-byte zero-stride 
 
 ## Current behavior checks
 
-Build and run the public Result workflow and the independent Fraction/midpoint-square oracle with:
-
-```sh
-cmake --build build/kernel-dev --target photospider_numeric_reductions -j8
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_reductions strict
-python3 oracle/ops/numeric/reduction_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_reductions strict
-python3 oracle/ops/numeric/reduction_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_reductions apple
-ctest --test-dir build/kernel-dev -R '^test_numeric_reductions_result$' --output-on-failure
-```
-
-The strict and available Apple Silicon workflow runs exit successfully. The oracle covers 4,740 independent cases per profile. The workflow exercises all seven reducers under four rounding modes on the actual worker and caller, typed validation, strided inputs, unrequested-group overflow, Empty demand, work and cancellation failures, and invalid `ddof`.
+Use independent Fraction and midpoint-square references for each admitted profile. Temporary acceptance should exercise all seven reducers under four rounding modes on the actual worker and caller, typed validation, strided inputs, unrequested-group overflow, Empty demand, work and cancellation failures, and invalid `ddof`.
 
 A generated Result producer publishes 4,096 values cycling through 0..3. Sum, mean, variance and standard deviation return 6,144, 1.5, 1.25 and the correctly rounded square root of 1.25. The test reads the Root Payload peak directly and requires it to include at least the 32 KiB source while staying within the configured 128 KiB cap. After context retirement, the source has retired and the retained dense reduction Result accounts for 8 bytes; releasing it returns Root resources to zero.
 
@@ -34,20 +24,13 @@ The count case derives a `[2^20,1]` output from a `2^40`-element schema while le
 
 The cache case distinguishes identity sharing on one Frozen workflow from completed-result reuse with a fresh equal-content source and Frozen workflow. The cache replay carries the current source ObjectId. Replacing an unrequested input group invalidates and recomputes the complete Whole result; the requested first group remains 3 while the second becomes 11. The original dense output stays readable after context retirement at 16 payload bytes and releases all Root resources with its last owner.
 
-Each Whole write keeps one `NumericDiagnostics` record local to the callback. `evaluated_values` increments after an authorized source word is read and immediately before it is supplied to the exact accumulator; on success it counts accumulator input attempts, not output groups. `reduce_count` uses a metadata-only path and reports zero evaluated values. The selected profile and exact accumulator implementation identity are reported once at completion. The identity's ISA suffix describes the four-word output-selection helper, not SIMD execution of the reduction algorithm. Strict and Apple workflow checks report zero strict-math calls, strict fallbacks and fallback reasons.
+Each Whole write keeps one `NumericDiagnostics` record local to the callback. `evaluated_values` increments after an authorized source word is read and immediately before it is supplied to the exact accumulator; on success it counts accumulator input attempts, not output groups. `reduce_count` uses a metadata-only path and reports zero evaluated values. The selected profile and exact accumulator implementation identity are reported once at completion. The identity's ISA suffix describes the four-word output-selection helper, not SIMD execution of the reduction algorithm. Do not infer strict-math or fallback counts from the selected ISA suffix.
 
 The callback reports diagnostics after normal completion or a status it handles locally, preserving the first operation failure if reporting is rejected. WorkLimit or cancellation can prevent the report from merging. A `Status` thrown during tensor-window acquisition/read or `std::bad_alloc` caught by the outer math callback can bypass this local report. Cache hits add no new accumulator attempts; Empty demand does no sample arithmetic.
 
 Typed-boundary checks use a straight-alpha RGB Result. A green-only request still validates the complete typed input, so an invalid alpha outside that selected channel fails each of the six numerical reducers with `InvalidArgument` / `InvalidDomain`; metadata-only count succeeds without reading it. Empty demand has empty coverage, support and computed-element count. Pre-cancellation, same-schema valid typed input, logical-order NaN priority across strided windows, unaligned/negative/zero strides, final overflow, and invalid `ddof` are also checked.
 
-The installed consumer uses the same workflow source and links `Photospider::kernel`. To check it against a local install, run:
-
-```sh
-cmake --install build/kernel-dev --prefix build/kernel-dev/result-repeat-install
-```
-
-Its compile uses only the installed prefix's `include` directory plus
-`-fno-fast-math -frounding-math -ffp-contract=off`, and links the prefix's
-`lib/libphotospider.a`.
+Compile temporary numerical checkers with
+`-fno-fast-math -frounding-math -ffp-contract=off`.
 
 These checks do not establish x86 execution, GPU support, maximum-shape throughput or an RSS bound. The seven specifications remain Proposed; their formulas and acceptance rules are linked from [the shared contract](op_specs/NUM-11_reduction_contract.md).

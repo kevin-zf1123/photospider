@@ -98,24 +98,21 @@ copy the entire table into dense storage. The Whole continuation publishes the
 complete packed Result, records current source ObjectIds, and releases temporary
 state on failure or cancellation.
 
- Its independent Fraction driver passes 1,416 bit-equal cases per
-profile. Manual coverage includes scalar and channel Float32/Float64, all-port
+Use independent Fraction goldens for temporary checks. Acceptance should include scalar and channel Float32/Float64, all-port
 reversed unaligned inputs, zero-stride aliases, caller and worker floating-point
 modes, recognized typed RGBA validation of an unrequested alpha, upstream Result
 failure propagation, static metadata bounds, Empty, dirty mapping and full Whole
-coverage after sparse queries. It checks same-demand Result identity, cache hits
+coverage after sparse queries. Check same-demand Result identity, cache hits
 for fresh equivalent source Results with associations updated to those sources,
 and reuse of static preparation after input/table/axis replacement. All six CRV-04
 baking templates feed the Result application nodes.
 
-The same focused selection also runs the existing `test_numeric_result_math_lut1d`
-integration fixture; its LUT1D groups cover custom Result schemas, channel batch
-shape [2,2,2], eight scalar Fraction golden bits, axis/query/table failure
-precedence, cancellation inside a 352-limb `ExactCurve` slot, and the existing
-1 MiB resource cases. Those cases reject a sparse request from input[262144]
-because its complete Float64 output needs 2 MiB, and accept a zero-stride
-Float32 table [262145] with only an 8-byte output increase. These assertions
-belong to the integration fixture, not the new manual workflow.
+Temporary acceptance should cover custom Result schemas, channel batch shape
+[2,2,2], Fraction goldens, axis/query/table error precedence and cancellation
+during exact arithmetic. Under a 1 MiB Payload cap, reject a sparse request from
+input[262144] because the complete Float64 output requires 2 MiB. A zero-stride
+Float32 table [262145] should retain source storage while a scalar Float64 result
+adds only its 8-byte output payload.
 
 Resource checks exercise cancellation and work limits during the continuation,
 capacity rejection for an output and scratch, and release of all Root resources.
@@ -125,7 +122,3 @@ operator does not materialize a dense table copy. A sparse request with 2^39
 channels fails with `ResourceExhausted/CapacityLimit` at the LUT node. Escaped
 scalar and channel Results each retain 16 Payload bytes while a read window is
 alive; releasing both handles returns every Root resource to zero.
-
-`test_numeric_result_math_lut1d` and the manual/installed tests are
-distinct fixtures. Reproduction commands are in the [numeric workflow
-README](../../../../examples/numeric_workflow/README.md#lut1d-application-crv-05).

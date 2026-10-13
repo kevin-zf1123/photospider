@@ -72,7 +72,6 @@ specification remains Proposed.
 The public entry point is `linear_shaper` in `photospider/ops/numeric/shapers.hpp`.
 This linear helper expands to existing Result remap/constant nodes and is not a
 linear primitive.
-See [the CRV-08 family contract](CRV-08_shaper.md) and [the shaper workflow README](../../../../examples/numeric_workflow/README.md)
-for the shared command, fixture and validation evidence. The installed consumer passes 1/1, including public
-composition and output lifetime checks. x86 numerical, GPU, maximum-size and
-performance validation are not covered.
+See [the CRV-08 family contract](CRV-08_shaper.md)
+for arithmetic and validation requirements. Temporary acceptance must cover public
+composition and output lifetime; report only the profiles and sizes actually exercised.

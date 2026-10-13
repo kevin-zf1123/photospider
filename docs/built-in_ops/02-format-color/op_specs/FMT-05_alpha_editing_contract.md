@@ -338,8 +338,3 @@ has a dedicated Result integration test; the B/C authoring compositions have
 separate integration coverage. Numeric alpha math tests do not establish Result
 operation behavior. Installed-consumer
 validation remains separate.
-
-The alpha performance driver uses the Result API and reports dependency
-support and Root resource counters. Its CSV fields and accounting boundaries are
-documented in the [performance guide](../../../../examples/alpha_performance/README.md). No
-throughput claim is made here without measured Result runs.

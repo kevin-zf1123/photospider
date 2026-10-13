@@ -97,9 +97,3 @@ cascade, remove only that group's dependent description and retain unrelated
 groups and component labels. Verify input metadata and another consumer remain
 unchanged. Valid pixel bytes are still available as generic/component data; no
 RGB/Gray model is inferred merely because three channels remain.
-
-The public [metadata workflow](../../../../examples/metadata_workflow/README.md)
-executes assign and remove Result nodes and checks exact sample bits. The older
-[metadata performance workload](../../../../examples/metadata_performance/README.md)
-covers the previous Value/planar path and is not current Result performance
-evidence.

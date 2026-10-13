@@ -125,9 +125,9 @@ L outside [0,1], large opposite signed a/b, white mismatch, all source/destinati
 dtype combinations, direct signed zeros and final narrowing overflow. Independent
 exact rational interpolation and bit conversion are the numeric oracle.
 
-The public workflow binds input/stops/colors, supplies the complete
-description/dtype/policy, and inspects named values and metadata through Compiler/
-ExecutionContext; run commands and checked results are linked below. Verify
+A temporary public workflow should bind input/stops/colors, supply the complete
+description/dtype/policy, and inspect named values and metadata through Compiler/
+ExecutionContext. Verify
 full-color request expansion, mathematically unused generic colors and complete typed validation,
 global-stop failures, whole-input dirty witnesses, strides, low budgets, cancellation,
 cache-off and descriptor/data lifetime after context teardown. This coordinate

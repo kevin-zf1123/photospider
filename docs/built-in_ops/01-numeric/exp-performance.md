@@ -1,13 +1,15 @@
 # NUM-04 Float32 exp SIMD optimization
 
-The maintained driver now runs IQK only. The subsequent
-[adapter/FP64 update](adapter-performance.md) restores certified SLEEF binary64
-exp and NUM-01 AST exp, while Float32 NUM-04 retains IQK. No Float64 input is
+Float32 NUM-04 uses the IQK-derived path. The
+[adapter/FP64 implementation](adapter-performance.md) uses certified SLEEF
+binary64 exp for Float64 and NUM-01 AST exp. No Float64 input is
 narrowed to fit the Float32 polynomial. The current Result computation reserves
 an arithmetic object, a math batch workspace, and a Float32 SIMD workspace. Specification status remains Proposed. The maintained
 `numeric.exp_accelerated_apple_silicon` and `numeric.exp_accelerated_x86_64`
 callbacks now use a 64-sample batch and an IQK-derived normal-range SIMD expf.
-Strict and other NUM-04/05 functions retain their arithmetic paths. ## Algorithm and correctness boundary
+Strict and other NUM-04/05 functions retain their arithmetic paths.
+
+## Algorithm and correctness boundary
 
 The polynomial is adapted from `ik_llama.cpp`'s `iqk_utils.h`, which attributes
 the routine to Justine Tunney and Arm Limited. The original
@@ -36,8 +38,9 @@ propagates every binary32 rounding error. Separate negative/positive reduced
 intervals and a neighborhood of zero handle the binade crossing. Conservative
 reference-distance bounds are <3.123, <2.685 and <3.040 minimum representable
 steps respectively. Scaling remains normal for the admitted integer exponents.
-This establishes the existing four-step Float32 contract without a per-sample
-SLEEF certificate or an unproved reliance on upstream's error comment.
+The certificate must establish the four-step Float32 contract for the actual
+coefficients and FMA graph. Recreate this check when modifying either; a sampled
+accuracy test or an upstream error comment cannot replace it.
 
 The Result computation phase establishes nearest/gradual floating mode on its
 CPU worker and restores that worker's prior environment on exit. The caller
@@ -48,11 +51,3 @@ in groups of at most 64. Fallback owns its own admission/refinement charge,
 without double charging. Cancellation and failed work/capacity admission never
 publish a partial result. The operation executes as a Whole Result computation
 and retains source/build cache identity.
-
-## Result-path acceptance
-
-Run them with:
-
-```sh
-ctest --test-dir build/kernel-dev -R '^(test_numeric_unary_result|test_numeric_binary_result|test_numeric_comparisons_result|test_numeric_color_array_result)$' --output-on-failure
-```

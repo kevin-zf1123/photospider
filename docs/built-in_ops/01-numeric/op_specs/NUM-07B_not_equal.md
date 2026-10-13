@@ -47,9 +47,8 @@ comparison helper. Include Int64 extrema and values above 2^53, signed zeros,
 subnormal neighbors, infinities, signaling/quiet NaNs in either input position
 and the shared disjoint/strided/resource/typed-validation acceptance cases.
 
-The default registry implements all three Whole profile keys. The manual workflow checks source
+The default registry implements all three Whole profile keys. Temporary acceptance should check source
 support, special bits, typed validation, strided inputs, cancellation/resources
-and composition with select. No integration-test registration or performance
-claim is included; the specification remains Proposed.
+and composition with select. The specification remains Proposed; these requirements do not report a test or performance result.
 
 Current Whole execution, capacity and validation: [NUM-07 measurements](../comparison-whole.md).

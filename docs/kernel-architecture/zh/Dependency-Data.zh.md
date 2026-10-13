@@ -72,7 +72,7 @@ Result ABI 3 C operation table 是唯一的 C staged-operation 接口，提供 t
 | scratch 指针 | 在当前 poll callback 内有效，poll 返回即失效。 |
 | output 指针 | 成功发布时立即失效；未发布时最晚在 poll 返回时失效。 |
 
-[`tests/integration/test_result_c_block.cpp`](../../../tests/integration/test_result_c_block.cpp) 覆盖 C block-state handle 生命周期和有序 Float64 fixture scan。Finite input/sum 检查属于该 fixture；通用 Float64 block service 传输 canonical bytes。测试还检查失败清理与 Root ownership。Block-cache reuse 和 hit 数属于实现细节，不是性能契约。
+[`tests/integration/kernel/test_result_c_block.cpp`](../../../tests/integration/kernel/test_result_c_block.cpp) 覆盖 C block-state handle 生命周期和有序 Float64 fixture scan。Finite input/sum 检查属于该 fixture；通用 Float64 block service 传输 canonical bytes。测试还检查失败清理与 Root ownership。Block-cache reuse 和 hit 数属于实现细节，不是性能契约。
 
 ### C checkpoint 服务
 
@@ -105,7 +105,7 @@ Context 关闭时先排空 demand calls 和已提交 callback，再销毁 worker
 
 `ResultProgramPhase::block` 和 C block service 作用于一个显式、已 sealed 的 `CompleteBundle` tensor state。Block callback 读取该 state，并返回它或一个新建的 state；它不发出 Need，也不发布 operation output。Producer 通过 poll callback 请求之后的 tensor 样本。Checkpoint 与 block 服务相互独立：checkpoint 恢复可导入成功的 dependency evidence，block state 只携带转移数据。可选的 block-state 保留可能跳过一次转移，或在资源限制下重新计算。其命中次数和转移复用属于实现细节，不构成性能承诺。
 
-[`tests/integration/test_result_c_block.cpp`](../../../tests/integration/test_result_c_block.cpp) 覆盖 C block-state handle 和 Float64 fixture scan，包括 state 生命周期与失败清理。Finite input 和 finite sum 规则属于该 fixture；通用 state service 传输 tensor 字节。
+[`tests/integration/kernel/test_result_c_block.cpp`](../../../tests/integration/kernel/test_result_c_block.cpp) 覆盖 C block-state handle 和 Float64 fixture scan，包括 state 生命周期与失败清理。Finite input 和 finite sum 规则属于该 fixture；通用 state service 传输 tensor 字节。
 
 ## GPU fragment 传输与执行
 

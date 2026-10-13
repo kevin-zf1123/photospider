@@ -49,14 +49,23 @@ are N/A; the actual strict fallback remains available.
 Conceptual fixture: x=[0,1,3],y=[0,2,4],query=[3,1,3] -> values=[2,0.5,2].
 Negating y and query retains the result. Apply CRV-10's independent exact oracle,
 boundary/rounding/monotonicity, dirty/partial-read, stride, budget, cancellation
-and owner-lifetime acceptance. The maintained public Compiler/ExecutionContext
-workflow supplies x/y/query and static dtype/policy. See the inverse-curves example linked below for commands and
-current validation evidence.
+and owner-lifetime acceptance. A temporary public Compiler/ExecutionContext
+workflow should supply x/y/query and static dtype/policy. Create this check for the current change and remove it after validation.
 
 ## Maintained implementation and validation
 
- The source/contract reviewer and worker verification found no blocker or required change.
+
 
 `plugins/ops/01-numeric/curve_inverse.cpp` registers the six Whole Result keys; the public constructors are `invert_linear_node` and `invert_pchip_node` in [`inverse_curves.hpp`](../../../../plugins/ops/include/photospider/ops/numeric/inverse_curves.hpp). The current Result implementation retains the exact inverse algorithm and resource accounting described above.
 
-The maintained manual fixture is `examples/numeric_workflow/inverse.cpp`; it keeps source arrays as Value backing, binds their immutable Results through the public workflow, returns Results and reads them through authorized windows. These are separate from `test_numeric_result_math_curves`'s `inverse_workflows` and `inverse_boundaries` integration cases. The fixture covers both caller and actual computation-worker floating environments, mixed dtypes, negative/zero strides, dirty scope, knot/clamp signed zero, static preparation reuse, repeated-demand ObjectId retention, a true fresh-source cache hit with current direct associations, Empty propagation without polling a failed producer, `SampledSignal` type failure attributed to input 2, cancellation, and source-owner retirement. Retained Float32 and Float64 outputs/read windows account for 12 and 24 Payload bytes; releasing the final window returns Root live capacity to zero.  A public N=2^40 constant View is rejected as `ResourceExhausted/CapacityLimit` at node 1 because Whole execution must allocate the complete output; this is not a numerical run at that physical output size. The installed-consumer target is configured to compile and link the public workflow source against package 0.32.0.
+For temporary validation, bind immutable source Results and read outputs through
+authorized windows. Cover caller/worker floating environments, mixed dtypes,
+negative/zero strides, dirty scope, knot/clamp signed zero, preparation reuse,
+repeated-demand identity and current source associations. Include Empty without
+polling a failing producer, SampledSignal errors attributed to input 2,
+cancellation and source-owner retirement. A three-element Float32/Float64 output
+and its windows retain 12/24 Payload bytes after source retirement; releasing
+the last window releases that payload. A constant View with N=2^40 must fail
+`ResourceExhausted/CapacityLimit` when complete Whole output storage exceeds the
+configured Payload cap. This case checks admission, not numerical execution at
+that logical size.

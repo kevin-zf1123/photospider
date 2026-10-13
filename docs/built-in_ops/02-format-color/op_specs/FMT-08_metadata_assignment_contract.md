@@ -15,11 +15,7 @@ WorkflowDocument 4 and OperationTraits 21. The specification status remains
 Proposed; it is separate from the CPU implementation status. Current execution
 uses one Result tensor and preserves its logical structure and sample bits. The metadata-to-`channel.extract` configuration/resource chain
 is covered; a chain through `channel.assemble` is not. This does not claim that
-every FMT consumer has been validated. The older
-[metadata performance workload](../../../../examples/metadata_performance/README.md)
-measures the previous Value/planar path and is not current Result performance
-evidence. See the [Result implementation guide](../../../kernel-architecture/Tensor-Semantic-Metadata.md)
-and [public workflow](../../../../examples/metadata_workflow/README.md).
+every FMT consumer has been validated. See the [Result implementation guide](../../../kernel-architecture/Tensor-Semantic-Metadata.md).
 
 Inherit [FMT-common](FMT_common_contract.md), its NUM execution/resource baseline,
 canonical straight/internal-alpha rules and the
@@ -283,7 +279,8 @@ conflicts, exact partial requests and upstream failures. Verify profile/resource
 retention, context-independent produced views, final release, budget/cancel
 rollback and optimizer/cache preservation of semantic effects.
 
-The current focused CTest set passes 5/5: `test_metadata_assignment`,
-`test_global_results`, `test_result_execution`, `test_result_metadata_budget`,
-and `test_result_image_contracts`. These checks do not cover composition with
-`channel.extract` or `channel.assemble` operations.
+Validate metadata assignment with temporary operation-specific checks. The retained
+kernel tests `test_result_objects`, `test_result_execution`,
+`test_result_metadata_budget` and `test_result_image_contracts` cover generic
+Result behavior; they do not establish metadata-assignment semantics or
+composition with `channel.extract` or `channel.assemble`.

@@ -18,10 +18,4 @@ The kernels use a bounded `SequenceMath` workspace admitted through the phase al
 
 ## Current behavior checks
 
-Run the focused public Result sequence fixture with:
-
-```sh
-ctest --test-dir build/kernel-dev -R '^test_numeric_sequences_result$' --output-on-failure
-```
-
-Coverage includes strict and available Apple Silicon workflows, values and axis selection, atomic tuple closure, Int64 precision above 2^53, extreme cancellation, Float32 direct-rounding cases, signed zero, caller floating-environment restoration, axis-only overflow, failure from an unrequested values overflow, Empty and pre-cancellation. Projection tests cover count-one exclusion of a failing second producer, static validation of the excluded input, and count-two required-producer failure. Resource tests cover work-limit rollback. A step change from 0.5 to 1 recomputes all 256 values; the last value is 255 and `computed_elements` is 256. After context retirement, a retained Result keeps at least 2048 Payload bytes live until its final owner is released, after which all Root resource dimensions return to zero. The x86 backend unavailable path is checked, not x86 execution. No performance result is claimed.
+Temporary acceptance should cover Strict and each admitted accelerated profile, values and axis selection, atomic tuple closure, Int64 precision above 2^53, extreme cancellation, Float32 direct-rounding cases, signed zero, caller floating-environment restoration, axis-only overflow, failure from an unrequested values overflow, Empty and pre-cancellation. Projection tests cover count-one exclusion of a failing second producer, static validation of the excluded input, and count-two required-producer failure. Resource tests cover work-limit rollback. A step change from 0.5 to 1 recomputes all 256 values; the last value is 255 and `computed_elements` is 256. After context retirement, a retained Result keeps at least 2048 Payload bytes live until its final owner is released, after which all Root resource dimensions return to zero. Check unavailable-profile rejection separately from native arithmetic execution. Measure performance separately.

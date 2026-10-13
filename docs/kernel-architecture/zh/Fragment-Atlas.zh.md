@@ -64,10 +64,10 @@ C Result bridge 使用相同的 Need-scoped atlas。Atlas buffer tokens 和 disp
 
 当前 integration 源码检查 transport 与失败边界：
 
-- [`test_gpu_fragment_execution.cpp`](../../../tests/integration/gpu/test_gpu_fragment_execution.cpp) 用独立坐标 oracle 比较真实 native lookup 与输出，覆盖 rank、width、sparse holes、fragment packing、grant enforcement 和 Root admission。
-- [`test_gpu_c_abi_execution.cpp`](../../../tests/integration/gpu/test_gpu_c_abi_execution.cpp) 加载 [`gpu_result_c_plugin.c`](../../../tests/fixtures/gpu_result_c_plugin.c)，检查 C atlas handles、stale tokens、publication revocation、malformed requests、错误与 native dispatch。
-- [`test_fragment_atlas_gpu.cpp`](../../../tests/unit/test_fragment_atlas_gpu.cpp) 通过 native buffer capacity 与 readback 检查较底层的 atlas SDK。
-- [`test_gpu_sync_fallback.cpp`](../../../tests/integration/gpu/test_gpu_sync_fallback.cpp) 检查 CPU retry、取消和保留 producer 行为。
+- [`test_gpu_fragment_execution.cpp`](../../../tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp) 用独立坐标 oracle 比较真实 native lookup 与输出，覆盖 rank、width、sparse holes、fragment packing、grant enforcement 和 Root admission。
+- [`test_gpu_c_abi_execution.cpp`](../../../tests/integration/kernel/gpu/test_gpu_c_abi_execution.cpp) 加载 [`gpu_result_c_plugin.c`](../../../tests/fixtures/gpu_result_c_plugin.c)，检查 C atlas handles、stale tokens、publication revocation、malformed requests、错误与 native dispatch。
+- [`test_fragment_atlas_gpu.cpp`](../../../tests/unit/kernel/test_fragment_atlas_gpu.cpp) 通过 native buffer capacity 与 readback 检查较底层的 atlas SDK。
+- [`test_gpu_sync_fallback.cpp`](../../../tests/integration/kernel/gpu/test_gpu_sync_fallback.cpp) 检查 CPU retry、取消和保留 producer 行为。
 
 所需设备不可用时，这些 native tests 返回已配置的 skip code。Protocol mock 与 CPU fallback 不能证明 native execution。
 ## 算法与 wire format
@@ -80,6 +80,6 @@ Payload 按 tile key 和有效 bit 顺序紧凑存放，孔洞不占样本。空
 
 ## 限制与错误处理
 
-通用 atlas unit suite 注册为 `test_fragment_atlas`，源码为 [`tests/unit/test_fragment_atlas.cpp`](../../../tests/unit/test_fragment_atlas.cpp)。Native SDK suite 源码为 [`tests/unit/test_fragment_atlas_gpu.cpp`](../../../tests/unit/test_fragment_atlas_gpu.cpp)；Result callback 集成路径见 [`tests/integration/gpu/test_gpu_fragment_execution.cpp`](../../../tests/integration/gpu/test_gpu_fragment_execution.cpp)。这些源码共同覆盖 wire layout、坐标查找、sparse holes、有符号与零 stride、rank 和 dtype transport、buffer 准入、取消与 native readback。所需 Metal device 不可用时，native tests 可 skip。
+通用 atlas unit suite 注册为 `test_fragment_atlas`，源码为 [`tests/unit/kernel/test_fragment_atlas.cpp`](../../../tests/unit/kernel/test_fragment_atlas.cpp)。Native SDK suite 源码为 [`tests/unit/kernel/test_fragment_atlas_gpu.cpp`](../../../tests/unit/kernel/test_fragment_atlas_gpu.cpp)；Result callback 集成路径见 [`tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp`](../../../tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp)。这些源码共同覆盖 wire layout、坐标查找、sparse holes、有符号与零 stride、rank 和 dtype transport、buffer 准入、取消与 native readback。所需 Metal device 不可用时，native tests 可 skip。
 
 `ValueFragments` overload 保留其允许的 Value coverage；需要 `PlanarImage` 的 structural image facets 会被拒绝。`ResultTensorInput` overload 只读取 tensor Need 授权的 samples。两种 packer 均保留 holes，缺失 directory sample 返回 `NotFound`，超出 tile 或 work limits 的 plan 会失败，取消会退休新分配的 owner。Device host 必须分别准入取整后的 payload 与 directory capacity；Atlas 查找不会触发额外 read 或提供 CPU fallback。

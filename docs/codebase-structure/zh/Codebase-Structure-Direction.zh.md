@@ -43,8 +43,9 @@ src/lib/
 plugins/ops/<NN-family>/   内置算子实现
 
 tests/fixtures/
-tests/unit/
-tests/integration/
+tests/unit/kernel/
+tests/integration/kernel/
+tests/package/
 ```
 
 私有源码按职责划分位置。`src/lib/core/` 存放不依赖其他内核模块的原语；`checked_math.hpp`、`status_helpers.hpp`、`exact_binary_sum.hpp` 和 `numeric_bits.hpp` 是共享实现，其他模块不再定义本地副本。当前源码树中没有 `src/lib/server`、`src/lib/policy`、进程隔离子树、`plugins/policies`、worker 应用或 execution-profile benchmark 族。

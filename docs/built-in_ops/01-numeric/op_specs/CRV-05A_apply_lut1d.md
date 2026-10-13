@@ -249,9 +249,7 @@ sparse 2^39-channel output fails at the LUT node with
 `ResourceExhausted/CapacityLimit`. Output and an authorized read window retain a
 single 16-byte Payload owner after source/context teardown; releasing both
 returns all Root resources to zero. The independent oracle, test identities and reproduction commands are
-summarized in the [family verification section](CRV-05_apply_lut1d.md#maintained-implementation-and-validation)
-and [numeric workflow
-README](../../../../examples/numeric_workflow/README.md#lut1d-application-crv-05).
+summarized in the [family verification section](CRV-05_apply_lut1d.md#maintained-implementation-and-validation).
 
 - [Family decisions](CRV-05_apply_lut1d.md).
 - [Baking templates](CRV-04_bake_lut1d.md).

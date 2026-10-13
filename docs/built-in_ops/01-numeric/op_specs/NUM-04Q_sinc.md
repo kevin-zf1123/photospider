@@ -83,10 +83,6 @@ exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole e
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
-The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
-cover this operation. Manual targets have no CTest/integration
-registration; MPFR is used only by the independent Python oracle.
-
 Float32 accelerated sinc uses a direct even polynomial for `|x| <= 1`, including both zeros. It does not compute a sine followed by division.
 
 The maintained analytic certificate includes coefficient, arithmetic and final

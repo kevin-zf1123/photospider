@@ -29,7 +29,8 @@ $$
 y_c = \mathrm{Float32}\!\left(\sum_{dy=0}^{1}\sum_{dx=0}^{1} w_{dy,dx} \, s_{dy,dx,c}\right).
 $$
 
-上述公式中的每一步都是一次就近舍入的 Float64 运算：`f_x` 按 `(u-0.5)-l` 计算，每个权重是两个 Float64 因子的 Float64 乘积，每个乘积 `w*s` 先舍入再累加。因此权重是 Float64 值，而非精确有理数权重。取 `u=2^-56`、`v=0.5`、红色值为 `[1,-1]` 的 1x2 source 和 `wrap` 时，`u-0.5` 舍入为 `-0.5`，两个水平权重都变为 `0.5`，红色输出为 `+0`（Float32 位模式 `0x00000000`）。按精确有理数表达式计算会得到 `2^-55`。`image.stmap` 保留 Float64 结果，`test_stmap_tiles.cpp` 中的逐位 oracle 在四种调用方舍入模式下检查该结果。
+上述公式中的每一步都是一次就近舍入的 Float64 运算：`f_x` 按 `(u-0.5)-l` 计算，每个权重是两个 Float64 因子的 Float64 乘积，每个乘积 `w*s` 先舍入再累加。因此权重是 Float64 值，而非精确有理数权重。取 `u=2^-56`、`v=0.5`、红色值为 `[1,-1]` 的 1x2 source 和 `wrap` 时，`u-0.5` 舍入为 `-0.5`，两个水平权重都变为 `0.5`，红色输出为 `+0`（Float32 位模式 `0x00000000`）。按精确有理数表达式计算会得到 `2^-55`。`image.stmap` 保留 Float64 结果。修改算子时，应在四种调用方舍入模式下验证这个逐位验收场景，
+并按测试规范现场编写、用后删除检查程序。
 
 ### 发布与并行算术
 
@@ -51,4 +52,4 @@ Program 的状态、tensor windows、workspace、输出和 work 都计入 Root l
 
 Structured Result callback 通过 `ResultProgramPhase::report_numeric` 提交有界 `NumericDiagnostics`。报告包含实际 CPU profile、实现身份、evaluated values、strict fallback 和有界原因分类。Result callback dispatch 前，host 会从 Root 资源中准入对应 output/backend 的 `OperationTiming` 记录。每个 poll 的报告只合并一次，包括返回 Need 或失败的 poll。Callback 失败时，host 会先锁存首个错误，再合并该次报告；报告合并失败不会替换原始错误。若 `BackendUnavailable` 符合 CPU fallback 条件，host 会在 CPU 重启前记录失败的 GPU attempt。
 
-`NumericDiagnostics::evaluated_values` 统计已报告的算术尝试，包括之后失败的工作。`OperationTiming::computed_elements` 是另一个计数：对 Result publication，它统计新增的 field rows 和 tensor samples。后续 Result revision 只统计相较前一 revision 新增的 rows 与 coverage；cache-hit publication 不增加 computed elements。逻辑计数超出 `UINT64_MAX` 或 sample cardinality 不可表示时，计数会饱和到 `UINT64_MAX` 并设置 `computed_elements_saturated`；恰好等于 `UINT64_MAX` 的精确计数不会设置该 flag。诊断计数饱和不会使原本合法的 Result 失效。这些诊断不改变语义身份，也不能证明精度界。见手动[数值 workflow](../../../examples/numeric_workflow/README.md)。
+`NumericDiagnostics::evaluated_values` 统计已报告的算术尝试，包括之后失败的工作。`OperationTiming::computed_elements` 是另一个计数：对 Result publication，它统计新增的 field rows 和 tensor samples。后续 Result revision 只统计相较前一 revision 新增的 rows 与 coverage；cache-hit publication 不增加 computed elements。逻辑计数超出 `UINT64_MAX` 或 sample cardinality 不可表示时，计数会饱和到 `UINT64_MAX` 并设置 `computed_elements_saturated`；恰好等于 `UINT64_MAX` 的精确计数不会设置该 flag。诊断计数饱和不会使原本合法的 Result 失效。这些诊断不改变语义身份，也不能证明精度界。

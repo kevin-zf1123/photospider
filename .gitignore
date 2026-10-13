@@ -56,72 +56,19 @@
 !plugins/ops/rgba32f/*.metal
 !plugins/ops/rgba32f/*.h.in
 !plugins/ops/rgba32f/CMakeLists.txt
-!plugins/ops/PixelOE/CMakeLists.txt
-!plugins/ops/PixelOE/*.md
-!plugins/ops/PixelOE/tools/*.py
-!plugins/ops/PixelOE/third_party/*.md
-!plugins/ops/PixelOE/third_party/LICENSE.PixelOE
-!plugins/ops/PixelOE/third_party/shaders/**/*.slang
 
-# Maintained public-API image example and shared acceptance fixture.
-!examples/inpaint_ns_workflow/
-!examples/inpaint_ns_workflow/*.cpp
-!examples/inpaint_ns_workflow/*.hpp
-!examples/inpaint_ns_workflow/CMakeLists.txt
-!examples/result_quickstart/
-!examples/result_quickstart/*.cpp
-!examples/result_quickstart/*.md
-!examples/result_quickstart/CMakeLists.txt
-!examples/foundations_workflow/
-!examples/foundations_workflow/*.cpp
-!examples/foundations_workflow/*.hpp
-!examples/foundations_workflow/*.md
-!examples/foundations_workflow/CMakeLists.txt
-!examples/numeric_workflow/
-!examples/numeric_workflow/*.cpp
-!examples/numeric_workflow/*.hpp
-!examples/numeric_workflow/*.md
-!examples/numeric_workflow/*.py
-!examples/numeric_workflow/CMakeLists.txt
 !docs/built-in_ops/04-mask-morphology/op_specs/catalog.json
 !oracle/
 !oracle/ops/
 !oracle/ops/**/
 !oracle/ops/**/*.py
+!oracle/ops/**/*.hpp
 !oracle/ops/**/*.md
 !oracle/ops/**/*.json
 !oracle/ops/**/*.jsonl
 !oracle/ops/**/*.txt
-!examples/
-!examples/components_workflow/
-!examples/components_workflow/*.cpp
-!examples/components_workflow/*.md
-!examples/components_workflow/CMakeLists.txt
-!examples/fft_workflow/
-!examples/fft_workflow/*.cpp
-!examples/fft_workflow/*.md
-!examples/fft_workflow/CMakeLists.txt
-!examples/statistics_workflow/
-!examples/statistics_workflow/*.cpp
-!examples/statistics_workflow/*.md
-!examples/statistics_workflow/CMakeLists.txt
-!examples/representations_workflow/
-!examples/representations_workflow/*.cpp
-!examples/representations_workflow/*.md
-!examples/representations_workflow/CMakeLists.txt
-!examples/multi_output_workflow/
-!examples/multi_output_workflow/*.cpp
-!examples/multi_output_workflow/*.md
-!examples/multi_output_workflow/CMakeLists.txt
-!examples/image_vertical/
-!examples/image_vertical/*.cpp
-!examples/image_vertical/*.hpp
-!examples/image_vertical/CMakeLists.txt
-!examples/regional_image_vertical/
-!examples/regional_image_vertical/*.cpp
-!examples/regional_image_vertical/CMakeLists.txt
 
-# Maintained unit, integration, fixture, support, and consumer sources.
+# Maintained kernel unit/integration, package, fixture, and support sources.
 !tests/
 !tests/**/
 !tests/**/*.c
@@ -130,8 +77,6 @@
 !tests/**/*.hpp
 !tests/fixtures/native_vulkan.slang
 !tests/fixtures/native_scale.slang
-!tests/fixtures/perlin_coordinates.slang
-!tests/oracles/fmt09_division.py
 !tests/**/CMakeLists.txt
 # Exact long-lived manual-fuzz seeds; generated corpus mutations stay ignored.
 !tests/fuzz/corpus/operation_contract_ir/malformed-schema
@@ -175,12 +120,6 @@ tests/results/
 *.pyc
 __pycache__/
 
-!/examples/atom_outcomes_workflow/
-!/examples/atom_outcomes_workflow/CMakeLists.txt
-!/examples/atom_outcomes_workflow/main.cpp
-!/examples/atom_outcomes_workflow/operations.hpp
-!/examples/atom_outcomes_workflow/README.md
-
 # Private numeric math adapter; builders supply the ignored upstream source.
 !third_party/
 !third_party/SLEEF.md
@@ -188,128 +127,23 @@ __pycache__/
 !third_party/IK_LLAMA_LICENSE.txt
 /third_party/sleef/
 
-!examples/channel_extraction_workflow/
-!examples/channel_extraction_workflow/*.cpp
-!examples/channel_extraction_workflow/*.hpp
-!examples/channel_extraction_workflow/*.md
-!examples/channel_extraction_workflow/CMakeLists.txt
-
-!examples/channel_extraction_performance/
-!examples/channel_extraction_performance/*.cpp
-!examples/channel_extraction_performance/*.py
-!examples/channel_extraction_performance/*.md
-!examples/channel_extraction_performance/CMakeLists.txt
-!examples/numeric_conversion_performance/
-!examples/numeric_conversion_performance/*.cpp
-!examples/numeric_conversion_performance/*.md
-!examples/numeric_conversion_performance/CMakeLists.txt
-
-!examples/codec_performance/
-!examples/codec_performance/*.cpp
-!examples/codec_performance/*.md
-!examples/codec_performance/CMakeLists.txt
-
-!examples/channel_assembly_performance/
-!examples/channel_assembly_performance/*.cpp
-!examples/channel_assembly_performance/*.py
-!examples/channel_assembly_performance/*.md
-!examples/channel_assembly_performance/CMakeLists.txt
-
-!examples/channel_editing/
-!examples/channel_editing/*.cpp
-!examples/channel_editing/*.hpp
-!examples/channel_editing/*.md
-!examples/channel_editing/CMakeLists.txt
-!examples/channel_editing_performance/
-!examples/channel_editing_performance/*.cpp
-!examples/channel_editing_performance/*.py
-!examples/channel_editing_performance/*.md
-!examples/channel_editing_performance/CMakeLists.txt
-
-!examples/metadata_performance/
-!examples/metadata_performance/*.cpp
-!examples/metadata_performance/*.py
-!examples/metadata_performance/*.md
-!examples/metadata_performance/CMakeLists.txt
-!examples/metadata_workflow/
-!examples/metadata_workflow/*.cpp
-!examples/metadata_workflow/*.md
-!examples/metadata_workflow/CMakeLists.txt
-
-# FMT-11 independent oracles and performance workflow.
 !tools/
 !tools/compile_native_vulkan_fixtures.py
 !tools/compile_builtin_vulkan.py
-!tools/fmt11/
-!tools/fmt11/*.py
-!tools/fmt11/*.sh
-!examples/model_conversion_performance/
-!examples/model_conversion_performance/*.cpp
-!examples/model_conversion_performance/*.md
-!examples/model_conversion_performance/CMakeLists.txt
 
-# Package version regression and FMT-11 exact-rational fixtures.
-!tests/cmake/
-!tests/cmake/test_package_version.cmake
-!tests/fixtures/fmt11/rational_oracles.txt
-
-# FMT-09 reproducible constants/oracles and performance harness.
-!tests/oracles/fmt09_constants.py
-!tests/oracles/fmt09_reference.py
-!examples/transfer_performance/
-!examples/transfer_performance/*.cpp
-!examples/transfer_performance/*.md
-!examples/transfer_performance/CMakeLists.txt
-
-# FMT-09 revision-2 independently reproducible corpus and ABBA driver.
-!tests/oracles/fmt09_sweep.py
-!examples/transfer_performance/compare.py
-# FMT-10 configure-required benchmark and reproducible exact oracle fixtures.
-!examples/rgb_basis_performance/
-!examples/rgb_basis_performance/*.cpp
-!examples/rgb_basis_performance/*.py
-!examples/rgb_basis_performance/*.md
-!examples/rgb_basis_performance/CMakeLists.txt
+!tests/oracles/*.py
 !tests/fixtures/generate_fmt10_oracles.py
-# FMT-04/05 independent oracle and performance tooling.
+!tests/fixtures/fmt11/rational_oracles.txt
 !tests/support/generate_alpha_golden.py
-!examples/alpha_performance/
-!examples/alpha_performance/*.cpp
-!examples/alpha_performance/*.py
-!examples/alpha_performance/*.md
-!examples/alpha_performance/CMakeLists.txt
+!tools/fmt11/
+!tools/fmt11/generate_oracles.py
+!tools/fmt11/generate_rational_oracles.py
 
-!examples/dynamic_scheduler/
-!examples/dynamic_scheduler/*.cpp
-!examples/dynamic_scheduler/*.hpp
-!examples/dynamic_scheduler/*.md
-!examples/dynamic_scheduler/CMakeLists.txt
-!examples/perlin_workflow/
-!examples/perlin_workflow/*.cpp
-!examples/perlin_workflow/*.hpp
-!examples/perlin_workflow/*.md
-!examples/perlin_workflow/CMakeLists.txt
-
-!examples/gaussian_workflow/
-!examples/gaussian_workflow/*.cpp
-!examples/gaussian_workflow/*.md
-!examples/gaussian_workflow/CMakeLists.txt
+!tests/package/
+!tests/package/test_package_version.cmake
 
 !plugins/ops/05-filter/gaussian.slang
 !tests/fixtures/gaussian_input.slang
 
-!plugins/ops/PixelOE/src/copy.slang
-!plugins/ops/PixelOE/tools/compile_vulkan_kernels.py
 
-# Public unified Result workflow and its dedicated minimal operations.
-!examples/unified_result_workflow/
-!examples/unified_result_workflow/*.hpp
-!examples/unified_result_workflow/*.cpp
-!examples/unified_result_workflow/CMakeLists.txt
-!examples/unified_result_workflow/*.md
-!examples/shared/
-!examples/shared/*.hpp
-
-!examples/value_address_performance/
-!examples/value_address_performance/*.cpp
-!examples/value_address_performance/CMakeLists.txt
+/plugins/ops/PixelOE/

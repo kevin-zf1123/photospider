@@ -48,46 +48,19 @@ Authorized active input windows and the selected full output payload coexist wit
 
 ## Current behavior checks and limits
 
-The current public workflow is `examples/numeric_workflow/ordering.cpp`; it is
-registered as `test_numeric_ordering_result`. The independent numerical oracle
-is `oracle/ops/numeric/ordering_oracle.py`. Build and run the strict example,
-the oracle for strict and locally available accelerated profiles, and the
-focused CTest with:
+The independent numerical oracle is `oracle/ops/numeric/ordering_oracle.py`.
 
-```sh
-cmake --build build/kernel-dev --target photospider_numeric_ordering -j8
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_ordering strict
-python3 oracle/ops/numeric/ordering_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_ordering strict
-python3 oracle/ops/numeric/ordering_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_ordering apple
-ctest --test-dir build/kernel-dev -R '^test_numeric_ordering_result$' --output-on-failure
-```
-
-The executable accepts `strict`, `apple` and `x86`; accelerated profiles need a
-compatible host and otherwise return `BackendUnavailable`.
-
-The workflow checks stable values and original indices for `[3,1,1,2]`, separate
+Temporary public-path checks should cover stable values and original indices for `[3,1,1,2]`, separate
 output selection, sparse requests with complete output publication, non-last
 axes and disjoint lines, reversed input strides, and worker/caller floating-
-environment preservation. It also covers source/q replacement, q projection
+environment preservation. Also cover source/q replacement, q projection
 and failure precedence, typed input validation, Empty demand, Root work and
-metadata limits, cancellation and Result lifetime. Its `block_contracts()` case
-is separate from the formal Whole operations: a pure dependency-v2 two-output
-probe tests the `share_blocks_across_outputs` trait, cache-disabled
-recomputation, optional cache-work fallback, changed input bits and current
-per-output Need evidence. Sort and quantile themselves do not use staged block
-sharing.
+metadata limits, cancellation and Result lifetime. Sort and quantile do not
+use staged block sharing.
 
-The installed consumer compiles the same workflow source against
-`Photospider::kernel`:
-
-```sh
-cmake --install build/kernel-dev --prefix build/kernel-dev/result-repeat-install
-```
-
- The separate
-`test_result_c_block` and installed `installed_result_c_block` also pass 1/1;
-they exercise the generic Result-v2 block-sharing contract, not the Whole sort
-or quantile callbacks.
+The retained kernel `test_result_c_block` exercises the generic Result C ABI
+block-sharing contract with synthetic operations. Sort and quantile require
+their own temporary numerical and public-path acceptance.
 
 No x86 arithmetic execution or performance result is claimed. The current
 checks do not cover every q semantic-facet, error and resource combination.

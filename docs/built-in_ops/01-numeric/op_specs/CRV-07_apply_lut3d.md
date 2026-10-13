@@ -279,15 +279,6 @@ and read windows retain storage after context retirement. `UniformAxis` owns the
 Root grids, while output and exact-arithmetic workspace use managed Root
 resources.
 
- The registered
-`test_numeric_lut3d_result` runs this manual fixture under Strict;
-`test_numeric_result_math_lut3d` exercises separate LUT workflow, boundary,
-preparation, and resource fixtures. The installed consumer compiles the same
-public workflow source against the installed 0.32.0 `Photospider::kernel`
-package; commands and direct coverage are in the
-[public workflow section](../../../../examples/numeric_workflow/README.md#joint-three-axis-color-luts). These timings distinguish the LUT3D-specific test from
-shared integration coverage.
-
 The maximum 256^3 Float64 table shape succeeds with an 8-byte backing read
 window under an 8 MiB Root Payload cap, proving that the implementation does
 not make a dense table copy. A separate sparse request requiring 2^38 output

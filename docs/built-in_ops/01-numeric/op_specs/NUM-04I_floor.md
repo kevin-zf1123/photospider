@@ -72,7 +72,3 @@ This operation is registered in `plugins/ops/01-numeric/numeric_unary.cpp` and
 exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole execution, full-input typed validation and
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
-
-The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
-cover this operation. Manual targets have no CTest/integration
-registration; MPFR is used only by the independent Python oracle.

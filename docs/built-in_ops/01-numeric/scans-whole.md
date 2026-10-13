@@ -58,8 +58,7 @@ auto integral = ps::numeric::integral_image_node(
     2, input, {0, 1}, ps::ElementType::Int64);
 ```
 
-The current public workflow entry is `examples/numeric_workflow/scans.cpp`,
-registered as `test_numeric_scans_result`. It exercises independent
+Temporary validation should use independent
 small-integer prefix and rectangle enumeration, nonadjacent selected axes,
 batch axes, negative and unaligned strides, NaN and infinity ordering, exact
 cancellation, negative zero, typed validation at zero boundaries, Empty demand,
@@ -68,38 +67,20 @@ An integral-image request for the representable value at `[2,2]` still fails
 `Domain/Run` because the complete output overflows at unrequested `[1,2]`; the
 failure has no Atom key, while its diagnostic identifies global output
 coordinate `[1,2]`; Root resources return to zero.
-The current tests also cover a generated 4,096-sample Result source, a
+Also cover a generated Float64 Result source with shape [4096], a
 stable-prefix source that fails after publishing its first 128 samples, source
-replacement and completed-result cache reuse. They check that edits dirty the
+replacement and completed-result cache reuse. Check that edits dirty the
 observed output request, including zero boundaries, and that an escaped output
 window remains readable after the context and Result handle retire. Input is
 read through authorized windows; the fixture does not pack the complete source
-into a second payload. The generated-source case verifies one scan over all
+into a second payload. For the generated-source case, verify one scan over all
 4,096 values, complete 4,097-element output coverage and the output's 32,776-byte
-payload after context retirement. The stable-prefix case confirms that a
+payload after context retirement. For the stable-prefix case, verify that a
 zero-boundary query still waits for the complete source Need and propagates its
 tail failure before performing scan arithmetic.
-Each Whole write keeps one `NumericDiagnostics` record local to the callback. `evaluated_values` increments after an authorized source word is read and immediately before it is supplied to the exact accumulator; on success it counts accumulator input attempts, not output positions. Prefix zero boundaries, carry snapshots and final output conversions do not increment it. The selected profile and exact scan accumulator identity are reported once at completion. Its ISA suffix describes the four-word output-selection helper, not SIMD execution of the scan algorithm. Strict and Apple workflow checks report zero strict-math calls, strict fallbacks and fallback reasons.
+Each Whole write keeps one `NumericDiagnostics` record local to the callback. `evaluated_values` increments after an authorized source word is read and immediately before it is supplied to the exact accumulator; on success it counts accumulator input attempts, not output positions. Prefix zero boundaries, carry snapshots and final output conversions do not increment it. The selected profile and exact scan accumulator identity are reported once at completion. Its ISA suffix describes the four-word output-selection helper, not SIMD execution of the scan algorithm. Do not infer strict-math or fallback counts from the selected ISA suffix.
 
 The callback reports diagnostics after normal completion or a status it handles locally, preserving the first operation failure if reporting is rejected. WorkLimit or cancellation can prevent the report from merging. A `Status` thrown during tensor-window acquisition/read or `std::bad_alloc` caught by the outer math callback can bypass this local report. Cache hits add no new accumulator attempts; Empty demand does no sample arithmetic.
 
-Run the focused test with the configured build directory:
-
-```sh
-cmake --build build/kernel-dev --target photospider_numeric_scans -j8
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_scans strict
-python3 oracle/ops/numeric/scan_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_scans strict
-python3 oracle/ops/numeric/scan_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_scans apple
-ctest --test-dir build/kernel-dev -R '^test_numeric_scans_result$' --output-on-failure
-```
-
-The installed consumer uses the same source against `Photospider::kernel`:
-
-```sh
-cmake --install build/kernel-dev --prefix build/kernel-dev/result-repeat-install
-```
-
-   The installed
-consumer compiles against the installed prefix include directory
-with `-fno-fast-math`, `-frounding-math` and `-ffp-contract=off`, and links the
-installed `libphotospider.a`. This focused check is not a full package matrix.
+Compile temporary numerical checks with `-fno-fast-math`, `-frounding-math`
+and `-ffp-contract=off`; remove the checker after validating the operation change.

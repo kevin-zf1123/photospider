@@ -86,24 +86,17 @@ cancellation or numeric failure publishes no partial output and releases
 unpublished scratch and payload. Empty requests avoid input payload allocation
 and sample work.
 
-The current public Result workflow and focused test are described in
-[NUM-06 Result Whole execution](../range-whole.md). The workflow directly checks
-Float32/Float64 paths, negative and zero-stride Int64 layouts, invalid bounds
-outside sparse demand, typed validation, Whole support, Empty, resource
-exhaustion, cache behavior and global-coordinate projection. The independent
-oracle covers UInt8 and Int64 boundary values. The separate
-[`test_numeric_result_math_sequences.cpp`](../../../../tests/integration/numeric/test_numeric_result_math_sequences.cpp)
-fixture retains additional checks for all four dtypes, integer extrema,
-batch-axis flattening, negative zero and pre-cancellation; it was not rerun for
-this update.
+Temporary public Result acceptance should cover Float32/Float64 paths, all four
+clamp dtypes, integer extrema, negative/zero strides, batch-axis flattening, negative
+zero, invalid bounds outside sparse demand, typed validation, Whole support,
+Empty, resource exhaustion, cancellation, binding changes and global-coordinate
+projection. Use independent UInt8/Int64 boundary values. Execution behavior is
+described in [NUM-06 Result Whole execution](../range-whole.md).
 
 Input values `[-1, 0.5, 2]`, lower `[0,0,0]` and upper `[1,1,1]` produce
-`[0,0.5,1]`. The current [`ranges.cpp` workflow](../../../../examples/numeric_workflow/ranges.cpp)
-binds tensor Results and reads the published `values` Result.
+`[0,0.5,1]`.
 
-The code declares strict, Apple Silicon and x86-64 profile keys. The current
-root Result test, Apple Silicon workflow, independent strict/Apple Fraction
-oracle and installed consumer are summarized in [NUM-06 Result Whole
-execution](../range-whole.md). No x86 execution, native GPU support or
-performance result is claimed. These evidence boundaries do not change the
-Proposed status.
+The code declares strict, Apple Silicon and x86-64 profile keys. Execution behavior and temporary acceptance cases are described in
+[NUM-06 Result Whole execution](../range-whole.md). Validate each admitted profile
+against independent Fraction references. The specification remains Proposed;
+its cases do not report current hardware or performance results.

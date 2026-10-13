@@ -203,8 +203,3 @@ Pi and rational-pi arguments undergo exact quadrant reduction before
 approximation. Rejected candidates use strict evaluation; unresolved rounding
 may return `ResourceExhausted`. Per-value fallback counters are not emitted by
 this Whole callback; execution-level computed-element diagnostics are separate.
-
-The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
-document the constructors, Result bindings, manual checks and oracle entry
-points. The root registers `test_numeric_unary_result`, which builds and runs the strict
-Result workflow. MPFR is used only by the independent Python oracle.

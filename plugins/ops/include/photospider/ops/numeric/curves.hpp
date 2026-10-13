@@ -73,8 +73,6 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* operation,
  * Ordinary exact zero is -0 only for two -0 segment endpoints; node/clamp
  * retains y zero. CPU-specific profiles require their target. PCHIP
  * extrapolates its endpoint tangent; linear extrapolates its endpoint secant.
- * See the numeric_workflow README for current Result test coverage and
- * compositions.
  */
 /** @brief Piecewise-linear single-function interpolation; shared contract
  * above. */

@@ -35,14 +35,6 @@ Public authoring interface 从 `photospider/ops/format/channel.hpp` 安装。Run
 
 Dependency-v2 以 Data (1) 和 Descriptor (8) 请求精确的选中通道 support，不请求 Validation 或 Control。Dirty mapping 将选中通道变化映射到对应输出坐标；未选通道不使输出变脏。Generic tensor view 支持有效的正、负和零 stride，Result mapper 可以分区并保留多个 backing owner。选取 spatial tensor 的 channel axis 可以保留源 physical owner；切取 spatial height/width 时，auto 会按投影后的 layout materialize，强制 view 返回 `InvalidArgument/InvalidDomain` 和 `ViewUnavailable`。Squeeze 删除 spatial axis 时输出成为 generic layout；keepdims 保留 extent-one spatial layout。物化只复制请求的输出区域，每 256 样本以内检查取消。Empty demand 发布空 Result，不读取 source payload。Result cache 被禁用。
 
-[公开 Result workflow](../../../examples/channel_extraction_workflow/README.md) 使用 B/A/R/G UInt8 `[2,2,4]` tensor，只请求 `c2` 第二行 ROI，检查结果 `[12,13]`。`test_channel_extraction` 覆盖 direct index/named、任意轴、七种 dtype、batch/spatial layouts、owner partitions、metadata、resources、取消和限制。
-
-```sh
-cmake --build build --target photospider_channel_extraction_workflow test_channel_extraction -j 8
-./build/examples/channel_extraction_workflow/photospider_channel_extraction_workflow
-ctest --test-dir build -R '^test_channel_extraction$' --output-on-failure
-```
-
 ## Scalar literal primitive
 
 Default registry 注册三个 `channel.scalar_literal_<profile>` CPU keys。这个无输入
@@ -68,13 +60,13 @@ tensor facets。
 
 A 在相同 component shape 中插入通道轴。B 按输入顺序拼接通道块，每个输入可使用不同通道轴。C 把显式 component/channel selector 映射到完整输出槽位，每个槽位恰有一个来源。所有已连接输入，即使未被映射使用，也执行 Descriptor 检查；Data 仅覆盖请求输出区域内实际映射的来源。操作不广播、不重采样、不转换数值或执行样本域验证。
 
-已安装的 `photospider/ops/format/channel_assembly.hpp` helpers 追加静态 graph node，不读取样本。generic retained view 要求整个请求区域由同一 `CpuStorage` owner 和单一 affine 地址式表示。planar view 还须由 ResultBuilder 证明同一根、按输出顺序连续的 planes 和匹配 row pitch。强制 view 缺少证明时返回 `ViewUnavailable`；`auto` 仅在该错误下回退复制。物化只读取请求区域。每次运行拥有独立的 prepared state，Empty observation 不保留 payload state。Need 按每组 64 个处理，最多执行 16 组并进行 publication。1024 输入用例需要显式 64 MiB metadata capacity；默认 16 MiB 会受控地返回资源错误。[性能指南](../../../examples/channel_assembly_performance/README.md) 将历史 Value/planar 表格与当前 Result smoke 区分；未运行完整 Result 矩阵或 profiling。
+已安装的 `photospider/ops/format/channel_assembly.hpp` helpers 追加静态 graph node，不读取样本。generic retained view 要求整个请求区域由同一 `CpuStorage` owner 和单一 affine 地址式表示。planar view 还须由 ResultBuilder 证明同一根、按输出顺序连续的 planes 和匹配 row pitch。强制 view 缺少证明时返回 `ViewUnavailable`；`auto` 仅在该错误下回退复制。物化只读取请求区域。每次运行拥有独立的 prepared state，Empty observation 不保留 payload state。Need 按每组 64 个处理，最多执行 16 组并进行 publication。1024 输入用例需要显式 64 MiB metadata capacity；默认 16 MiB 会受控地返回资源错误。
 
 ## FMT-03 通道编辑
 
 已安装的 `format::swizzle_channels` 与 `format::replace_channels` 是 graph authoring helpers，展开为 `channel.assemble_mapped_<profile>`；使用 literal 时还会用 `channel.scalar_literal_<profile>`。没有独立的 native swizzle/replace key。Swizzle 映射非空有序槽位；replace 对原始输入的不同目标同时赋值，空替换列表表示 identity。Literal 使用预先准备的 native bits。所有连接输入，包括未使用输入，都参与 Descriptor 检查；Data 需求遵循有效来源映射。
 
-FMT-03 的所有 nonscalar inputs 必须与 base 具有完全相同的 batch prefix；scalar inputs 是无 batch 的 shape `[1]`。Axis 参数索引 cell axes，不包含 batch prefix。包含 batch 与 cell axes 的 full sample rank 不超过 8。FMT-03 输入断言以 `result-inputs-v1:` 开头，后接 64 个小写 SHA-256 十六进制字符，固定 81 字符。带 domain separation 的摘要覆盖所有连接输入的完整有序 canonical schema 和 physical layout，包括重复及未使用输入。不包含 samples，也不是 samples 有效性的证明。Literal operation 使用 shape `[1]` 和 prepared native bits，并采用 Whole 语义。Scalar row repetition 每次最多复制 256 个 samples，同时计费 work 并检查 cancellation。[公开 workflow](../../../examples/channel_editing/README.md) 展示可运行示例。
+FMT-03 的所有 nonscalar inputs 必须与 base 具有完全相同的 batch prefix；scalar inputs 是无 batch 的 shape `[1]`。Axis 参数索引 cell axes，不包含 batch prefix。包含 batch 与 cell axes 的 full sample rank 不超过 8。FMT-03 输入断言以 `result-inputs-v1:` 开头，后接 64 个小写 SHA-256 十六进制字符，固定 81 字符。带 domain separation 的摘要覆盖所有连接输入的完整有序 canonical schema 和 physical layout，包括重复及未使用输入。不包含 samples，也不是 samples 有效性的证明。Literal operation 使用 shape `[1]` 和 prepared native bits，并采用 Whole 语义。Scalar row repetition 每次最多复制 256 个 samples，同时计费 work 并检查 cancellation。
 
 ## FMT-04 alpha 关联
 
@@ -116,7 +108,9 @@ Validation 或 Control，不扫描未请求 samples，错误保持在请求的 o
 Axis 参数索引 cell axes，不包含 batch axes。数值规则、typed endpoint 格式与 metadata
 传播见 [FMT-06 contract](../../built-in_ops/02-format-color/op_specs/FMT-06_numeric_conversion_contract.md)。对完整 sample coordinate `q`，channel-table 项由
 `q[batch_prefix_length + axis]` 定位；`axis` 本身是 cell-axis index，不含 Result
-batch prefix。额外的 batch/view/Empty/bit-stride、ICC resource、并发 plan 复用和最终 payload 释放检查均通过；SME 测试也通过。`test_alpha_numeric_interop` 的四种 inherited/moved 组合通过；这不代表 model-conversion interop 已验证。六项 numeric/alpha/resource focused CTests 均通过。installed numeric-conversion 和 alpha-numeric-interoperability consumers 均通过；standalone performance consumer 已完成 configure/build。13 个串行 Result smoke case 均通过逐位 oracle，但不据此得出 Result 性能结论。
+batch prefix。临时算子检查应覆盖 batch/view/Empty/bit-stride、ICC resource 所有权、
+并发 plan 复用和 payload 释放。Alpha 互操作与原生 dispatch 应分别验证；这些场景
+不构成 model-conversion 互操作或性能证据。
 
 仅当完整 declared mapping 是静态 identity，且源 storage 可表示该映射时，same-dtype
 转换才可发布 generic 或 spatial view。只请求一个恒等通道不能使整个变换结果可 view。
@@ -150,11 +144,8 @@ physical mapping 无法证明时，在 observation evaluation 返回失败。Aut
 变换或物理 view 无法表示时 materialize。物化在 Root budgets 和 cancellation 限制下
 事务发布请求区域，并遵守 Result owner 与 resource 生命周期。数值 workspace 延迟分配；
 简单路径每批最多 1024 samples，通用曲线路径每批最多 64。Strict fallback 与
-floating-environment 行为遵循 NUM。Transfer operations 没有 GPU backend。集成测试在 strict
-和 Apple Silicon profiles 上完成 16,760 次 golden 尝试；本机不具备 x86-64
-backend，因此跳过该 profile。25 个指定的串行 Result performance smoke case 均通过
-golden gate，每项包含两次 warmup 和一次测量执行。这些结果不代表完整矩阵，也不足以
-得出性能结论。
+floating-environment 行为遵循 NUM。Transfer operations 没有 GPU backend。临时验收应使用独立的 transfer 参考比较每个实际可用的 profile，并检查运行时错误、
+资源限制与浮点环境。原生 dispatch 和性能只按实际测量结果报告。
 
 ## FMT-10 RGB 基底与 XYZ
 
@@ -194,15 +185,14 @@ Validation。精确 identity matrix 只读取对应的已选 sample，但 semant
 WorkflowDocument。调用方必须串行化同一个 document 的写入；编译完成的 plan 及其不可变
 prepared state 可以并发执行。D policy 选择 A→B、使用 `preserve_xyz` 的 A→B，或带
 显式 method 的 A→C→B。helper 返回 B 的 `values` edge，不注册 D key。
-`test_rgb_basis_math` 与 `test_rgb_basis` 已通过；integration suite 保留 4,032 项
-independent oracle 检查，并覆盖 batched inputs、三种 Result storage layouts、identity
-views、并发 plan 复用和 owner 释放。65,536-channel identity view 在 512 KiB Metadata
-预算下也通过。25 个性能 smoke case 通过的是同一实现 strict reference gate，不是 independent
-oracle；完整矩阵和性能结论尚不可得。
+临时验收应覆盖独立的矩阵／适应变换期望值、batched inputs、三种 Result storage
+layouts、identity view、并发复用与 owner 释放。包括 512 KiB Metadata 预算下的
+65,536-channel identity view。同一实现的 reference gate 不构成独立数值 oracle，
+也不构成性能证据。
 
 ## FMT-08 元数据赋值与删除
 
-注册表提供三个 Result CPU key：`metadata.assign_strict`、`metadata.assign_accelerated_apple_silicon` 和 `metadata.assign_accelerated_x86_64`。`format::assign_metadata` 构造 A；`format::remove_metadata` 将 B 事务式降低为 A。输入和输出均是无 fields 的 single-tensor Result；保留 schema id、tensor key、batch axes、descriptor、layout、source publication policy 和样本位。执行以 role 1 和 8 请求同坐标 Data 与 Descriptor support，不请求 Validation 或 Control。操作不扫描样本，并禁用 Result cache。Public header `photospider/ops/format/metadata.hpp` 单独安装。[公开示例](../../../examples/metadata_workflow/README.md) 检查特殊值位模式与源不可变性。metadata 到 extraction 的 configuration/resource chain 已覆盖；`channel.assemble` 组合尚未覆盖。
+注册表提供三个 Result CPU key：`metadata.assign_strict`、`metadata.assign_accelerated_apple_silicon` 和 `metadata.assign_accelerated_x86_64`。`format::assign_metadata` 构造 A；`format::remove_metadata` 将 B 事务式降低为 A。输入和输出均是无 fields 的 single-tensor Result；保留 schema id、tensor key、batch axes、descriptor、layout、source publication policy 和样本位。执行以 role 1 和 8 请求同坐标 Data 与 Descriptor support，不请求 Validation 或 Control。操作不扫描样本，并禁用 Result cache。Public header `photospider/ops/format/metadata.hpp` 单独安装。
 
 ## FMT-11 颜色模型转换
 

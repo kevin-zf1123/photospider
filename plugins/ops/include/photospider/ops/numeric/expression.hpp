@@ -70,8 +70,8 @@ namespace ps::numeric {
  *
  * Values owns count*sizeof(dtype) output bytes plus bounded math workspace;
  * axis owns 24 output bytes and smaller coordinate workspace. Both Results own
- * immutable storage beyond context lifetime. See the NUM-01 specification and
- * examples/numeric_workflow for the grammar, error and resource rules.
+ * immutable storage beyond context lifetime. See the NUM-01 specification
+ * for the grammar, error and resource rules.
  */
 PHOTOSPIDER_OPS_API Result<WorkflowNode> sample_expression_node(
     std::uint64_t id, std::string expression, WorkflowInput start,

@@ -75,10 +75,6 @@ exposed through `photospider/ops/numeric/unary.hpp`. It uses synchronous Whole e
 atomic failure for the complete invocation. Its numerical path follows
 [the shared implementation notes](../math-implementation.md).
 
-The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
-cover this operation. Manual targets have no CTest/integration
-registration; MPFR is used only by the independent Python oracle.
-
 Float32 accelerated sinpi uses a polynomial in the original binary argument for `2^-120 <= |x| < 1/4`, with exact signed zero handling. Coefficients include pi powers; no rounded `pi*x` input is substituted. Exact quarter-turn roots retain the algebraic path.
 
 The maintained analytic certificate includes coefficient, arithmetic and final

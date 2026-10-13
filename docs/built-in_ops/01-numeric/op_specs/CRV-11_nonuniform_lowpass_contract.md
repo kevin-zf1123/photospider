@@ -228,12 +228,8 @@ Root-owned storage and retains one reusable piece vector. The implementation
 uses exact partition and paired-affine integration plus global Taylor moments
 with a rigorous tail bound, not local adaptive quadrature. All accelerated keys
 currently use the strict fallback; 128..4096-bit precision and order <=512 may
-return `ResourceExhausted`. Tests cover complete input
+return `ResourceExhausted`. Temporary acceptance should cover complete input
 and dirty support, global position validation, remote-column Run errors, cache
 replacement with current source associations, static preparation reuse, active
-arithmetic cancellation and escaped Result/read-window owners. The focused root
-`test_numeric_lowpass_nonuniform_result` CTest passes, as does the separate
-shared math integration fixture.
-Whole numerical/fallback counters are unavailable. See the
-[nonuniform-lowpass workflow](../../../../examples/numeric_workflow/README.md#nonuniform-lowpass)
-and [CRV-11 umbrella](CRV-11_resample_signal.md).
+arithmetic cancellation and escaped Result/read-window owners.
+Whole numerical/fallback counters are unavailable. See [CRV-11 umbrella](CRV-11_resample_signal.md).

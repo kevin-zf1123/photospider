@@ -134,7 +134,3 @@ strict rounding may return `ResourceExhausted`. Nonempty requests use Whole exec
 complete packed output allocation and Run-scoped arithmetic errors. Empty requests
 read no payload. Per-value fallback/evaluation diagnostics are unavailable (N/A)
 on this callback path; numerical fallback behavior is unchanged.
-
-The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
-cover this operation. Manual targets have no CTest/integration
-registration; MPFR is used only by the independent Python oracle.

@@ -65,26 +65,13 @@ call.
 
 ## Workflow and validation
 
-Build and run the public workflow and its focused behavior test with:
+Temporary validation should cover nonleading-axis concatenation, gather and all
+four scatter operations; same-owner views and independent owners; invalid and
+repeated indices; failures outside selected output; exact integer cancellation
+and overflow; typed validation; Empty and cancellation; negative/zero strides;
+floating environments; source replacement; associations; and escaped Result/window
+lifetime. Check work, payload and metadata cleanup. Execute each admitted CPU
+profile explicitly before reporting results.
 
-```sh
-cmake --build build/kernel-dev --target photospider_numeric_indexing -j8
-ctest --test-dir build/kernel-dev -R '^test_numeric_indexing_result$' --output-on-failure
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_indexing strict
-python3 oracle/ops/numeric/index_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_indexing strict
-python3 oracle/ops/numeric/index_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_indexing apple
-```
-
-The workflow checks nonleading-axis concatenation, gather and all four scatter
-operations, same-owner view address/association, independent owners, invalid and
-repeated indices, input failures outside the selected output, exact integer
-cancellation/overflow, typed RGB validation, Empty and pre-cancelled requests,
-negative/zero-stride reads, floating-environment preservation, cache
-reassociation after source edits, escaped Result/window lifetime, and work,
-payload and metadata cleanup. The focused `test_numeric_indexing_result` CTest
-passes 1/1; the strict and Apple public workflows exit successfully. No current x86, native GPU
-or performance result is claimed.
-
-The existing `test_numeric_result_math_arrays` integration fixture contains additional
-indexing cases, including multi-envelope concatenate requests with 65 and 256
-repeated references under Dense and View.
+Include multi-envelope concatenate requests with 65 and 256 repeated references
+under Dense and View. These are bounded acceptance cases, not a permanent test target.

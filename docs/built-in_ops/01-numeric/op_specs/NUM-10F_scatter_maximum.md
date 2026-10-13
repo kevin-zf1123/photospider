@@ -67,9 +67,8 @@ Include duplicated targets, unhit sNaN base, selected and unselected failures,
 NaN payload precedence, infinities, signed zeros, integer extrema, source strides,
 index changes, global invalid-index rejection and shared resource/lifetime tests.
 
-The public workflow checks all four scatter variants and the aggregate's
-first-NaN quieting behavior on its focused Float64 fixture. The independent
-`index_oracle.py` checks maximum's NaN and signed-zero ordering across generated
-cases for strict and Apple profiles. See
-[NUM-10 Whole execution](../indexing-whole.md) for runnable commands and
-evidence boundaries.
+Temporary validation should cover all four scatter variants and first-NaN
+quieting. Use independent index grouping and bit comparisons for maximum
+NaN and signed-zero ordering on each admitted profile. See
+[NUM-10 Whole execution](../indexing-whole.md) for execution behavior and
+validation cases.

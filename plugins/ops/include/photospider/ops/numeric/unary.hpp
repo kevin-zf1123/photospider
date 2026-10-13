@@ -93,8 +93,7 @@ inline Result<WorkflowNode> rational(std::uint64_t id, const char* name,
  * for unresolved cases. Special and algebraic paths keep their exact rules.
  * The execution layer reports computed output elements separately from
  * per-value fallback counters, which this Whole callback does not emit. Named
- * profiles require their corresponding CPU target. The accompanying
- * numeric_workflow example contains public Result execution and oracle checks.
+ * profiles require their corresponding CPU target.
  */
 /** @brief Absolute value; UInt8/Int64/Float32/64, Int64 minimum overflows.
  * @note Uses the shared unary helper execution/ownership/error contract above.

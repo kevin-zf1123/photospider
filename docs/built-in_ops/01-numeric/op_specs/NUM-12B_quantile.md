@@ -128,13 +128,6 @@ not an Atom-scoped sample result.
 
 ## Current behavior checks
 
-The current public behavior entry is `examples/numeric_workflow/ordering.cpp`,
-registered as `test_numeric_ordering_result`. It checks the 7.5
-landmark, q-schema validation, axis-length-one q exclusion despite a failing q
-producer, source-failure precedence, source/q replacement, and output lifetime. See
-[NUM-12 Result Whole execution](../ordering-whole.md) for the current commands
-and evidence boundaries.
-
  The checks do not claim x86 arithmetic execution, performance
 or a complete q semantic-facet/error/resource matrix. The specification
 remains Proposed.

@@ -135,31 +135,17 @@ resource selection, ICC ownership, and cancellation during actual exact work
 cancellation paths return Root resources to baseline after context teardown.
 Successful ICC and Result-lifetime cases retain their valid owners.
 
- Against the Result `--probe`, `color_ramp_oracle.py` passes 1,784
-Fraction/Machin-pi cases per profile and `rgb_ramp_oracle.py` passes 352
-rational/root/Decimal cases per profile.
-Repeated requests return consistent values and rebinding changes associations;
-these checks do not establish a warm-cache hit.
+Use independent Fraction/Machin-pi references for hue interpolation and exact
+rational/root references for RGB cases. Check repeated-request values and
+associations after rebinding. Equal values alone do not establish a warm-cache hit.
 
 Reproduce the focused suite, Strict/Apple manual groups and independent oracles
 with:
 
-```sh
-cmake --build build/kernel-dev --target test_numeric_result_math_color_ramps photospider_numeric_color_ramps -j8
-ctest --test-dir build/kernel-dev -R '^test_numeric_result_math_color_ramps$' --output-on-failure
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps strict
-python3 oracle/ops/numeric/color_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps strict
-python3 oracle/ops/numeric/rgb_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps strict
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps apple
-python3 oracle/ops/numeric/color_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps apple
-python3 oracle/ops/numeric/rgb_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps apple
-```
-
 These checks cover Strict and the local Apple profile only. No x86 numerical,
 maximum-shape, or performance rerun is included. CRV-06 has no GPU variant.
 The ColorArray v1 CIELAB/CIELCh implicit L* scale difference from the native
-`l=L*/100` contract remains open. See the [workflow README](../../../../examples/numeric_workflow/README.md#color-ramps)
-and [math implementation](../math-implementation.md#crv-06-colorarray-and-color-ramps)
+`l=L*/100` contract remains open. See [math implementation](../math-implementation.md#crv-06-colorarray-and-color-ramps)
 for the implementation and evidence boundaries.
 ## Whole execution and resources
 

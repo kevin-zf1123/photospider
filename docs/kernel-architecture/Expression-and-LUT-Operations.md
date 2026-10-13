@@ -29,12 +29,3 @@ The operation uses Whole execution. A nonempty request asks for Data, Validation
 ## Errors and validation
 
 Malformed expression syntax and invalid static parameters return `InvalidArgument`. Type, shape, or semantic mismatches return `TypeMismatch`. Generic expression coefficients are checked during evaluation, so a nonfinite coefficient returns `OperationFailed`; undefined math, coordinate collapse, interpolation precision loss, and output overflow also return `OperationFailed`, with a sample index where available. Typed LUT inputs are validated completely during their Need; a nonfinite typed source sample can return `InvalidArgument` with `FailureReason::InvalidDomain` and its source `input_id`, including when the sample is outside the selected interpolation stencil. Empty demand skips payload validation. Cancellation and resource exhaustion keep their own status codes. The host validates Result metadata before payload execution, including the semantic contract and compatible operation declarations.
-
-## Public workflows and verification
-
-[`test_expression_operations.cpp`](../../tests/integration/test_expression_operations.cpp) covers the unsuffixed expression and LUT operations, including grammar and numeric boundaries, endpoint behavior, unit matching, interpolation near precision limits, allocation, and cancellation.
-
-```sh
-cmake --build build/kernel-dev --target test_expression_operations photospider_foundations_workflow -j8
-ctest --test-dir build/kernel-dev -R '^(test_expression_operations|test_workflow_expression_lut)$' --output-on-failure
-```

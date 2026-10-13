@@ -305,12 +305,10 @@ invalid unrequested table entries and whole/disjoint/tile request equivalence.
 Verify view/materialize, context-independent owners, low budgets, cancellation,
 currentness, floating environment and declared fallback diagnostics.
 
-Six focused CTest targets pass: `test_numeric_conversion`,
-`test_numeric_conversion_sme`, `test_alpha_numeric_interop`,
-`test_alpha_operations`, `test_alpha_authoring` and `test_resources`. The numeric
-suite covers 49 dtype pairs, randomized oracles, ROI, cold-lookup budget,
-failure-order, floating-environment and identity views. Additional batch/view/
-Empty/bit-stride, ICC-resource, concurrent-plan-reuse and payload-release checks
-pass. `test_alpha_numeric_interop` covers four inherited/moved cases. These checks establish behavior, not
-performance. Thirteen Result performance smoke cases pass their byte oracle, but
-their timings have not been interpreted as performance evidence.
+Temporary numeric-conversion acceptance should cover all 49 dtype pairs using
+independent exact references, ROI, cold-lookup budgets, failure ordering,
+floating environments, identity views, batch/view/Empty/bit-stride cases, ICC
+resource ownership, concurrent plan reuse and payload release. Add explicit
+alpha interoperability cases when changing inherited encoding behavior. An SME
+path requires an actual dispatch check on admitted hardware; CPU output agreement
+alone does not establish SME dispatch or performance.

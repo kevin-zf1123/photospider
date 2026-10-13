@@ -117,9 +117,3 @@ support relation and failure behavior.
 - Assigning Float64 dtype, a different shape, a runtime proof, an external alpha
   binding or an incompatible physical image channel axis through metadata fails.
   Materialize does not turn this into an implicit import or numeric conversion.
-
-The public [metadata workflow](../../../../examples/metadata_workflow/README.md)
-shows Result binding, compilation, execution and exact-byte checks. The old
-[metadata performance workload](../../../../examples/metadata_performance/README.md)
-measures the previous Value/planar implementation and is not current Result
-performance evidence.

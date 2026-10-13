@@ -128,11 +128,9 @@ baking chains. Sparse demand returns full Whole output coverage, while dirty
 mapping follows the recorded query region. Replacing source Results retains the
 static preparation and refreshes cache associations.
 
-The focused root selection also runs the existing `test_numeric_result_math_lut1d`
-integration fixture, which checks channel batch shape [2,2,2], custom Result
-schemas, scalar Fraction golden bits, axis/query/table failure precedence, and
-the original 1 MiB sparse-output and zero-stride table resource cases. These
-belong to the existing integration fixture, not the new manual workflow.
+Channel acceptance cases include batch shape [2,2,2], custom Result schemas,
+independent Fraction goldens and axis/query/table failure precedence. Include
+the 1 MiB sparse-output and zero-stride resource cases in the family contract.
 
 An L=1,048,576 dynamic axis grid succeeds with the 8*L-byte grid charged to
 Metadata and no dense table copy charged to Payload. A sparse output request with
@@ -141,7 +139,6 @@ channel Result and authorized read window share one 16-byte Payload owner after
 all sources and the execution context retire; releasing them returns Root
 resources to zero. See the
 [family verification section](CRV-05_apply_lut1d.md#maintained-implementation-and-validation)
-and [numeric workflow README](../../../../examples/numeric_workflow/README.md#lut1d-application-crv-05)
 for test identities and run evidence.
 
 - [Family decisions](CRV-05_apply_lut1d.md).

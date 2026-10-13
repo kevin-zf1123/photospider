@@ -65,7 +65,7 @@ N_{blocks}=N/B + (N\bmod B\ne0),\qquad
 end=begin+\min(B,N-begin).
 $$
 
-Structured CPU Result Whole polls receive this borrowed service as `ResultProgramPhase::cpu_parallel`. It schedules blocks within the active Whole callback; it does not parallelize a Result dependency graph independently. `tests/integration/test_cpu_parallel.cpp` exercises a `UINT64_MAX` range after earlier Root work and verifies resource rejection before any block callback. `tests/unit/test_cpu_range.cpp` checks endpoint arithmetic without a Root budget and therefore does not establish Root admission behavior.
+Structured CPU Result Whole polls receive this borrowed service as `ResultProgramPhase::cpu_parallel`. It schedules blocks within the active Whole callback; it does not parallelize a Result dependency graph independently. `tests/integration/kernel/test_cpu_parallel.cpp` exercises a `UINT64_MAX` range after earlier Root work and verifies resource rejection before any block callback. `tests/unit/kernel/test_cpu_range.cpp` checks endpoint arithmetic without a Root budget and therefore does not establish Root admission behavior.
 
 ### Structured Result callback waves
 

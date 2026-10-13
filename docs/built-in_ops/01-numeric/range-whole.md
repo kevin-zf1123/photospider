@@ -40,16 +40,11 @@ The strict profile rounds the exact formula directly. Accelerated profiles retai
 
 ## Current behavior checks
 
-The maintained Result workflow is [`ranges.cpp`](../../../examples/numeric_workflow/ranges.cpp), built as `photospider_numeric_ranges` and registered as `test_numeric_ranges_result`. It checks a Float64 broadcast-to-remap-to-clamp composition, invalid bounds outside sparse demand, all-port input support including endpoint queries, typed RGB Straight-alpha validation on an unselected channel, Empty, negative/zero/unaligned Int64 layouts, signed and shifted Float32 layouts, and cache identity/invalidation. For sparse `Q`, dirty queries on each input map to the observed output footprint, while the published Result remains complete. The fixture also checks caller and worker floating-environment restoration, resource failures and cancellation cleanup.
-
 The example wraps its original typed backing in source Results charged to the same execution Root; it does not pack a second copy of the inputs. Cache checks distinguish same-Frozen identity reuse from completed-result reuse with fresh source Results, verify that replay records the current source ObjectIds, and confirm that replacing a bound invalidates the cached result. A Result retained after context retirement remains readable, and releasing its final owner returns all Root resource dimensions to zero.
 
-The separate [`test_numeric_result_math_sequences.cpp`](../../../tests/integration/numeric/test_numeric_result_math_sequences.cpp) integration fixture retains additional checks for all four clamp dtypes, integer extrema, batch-axis flattening, negative zero, remap intermediate overflow, pre-cancellation and x86 profile rejection. The independent exact Fraction oracle covers UInt8 and Int64 boundaries in addition to the floating cases.
-
-Run the focused public Result workflow test with:
-
-```sh
-ctest --test-dir build/kernel-dev -R '^test_numeric_ranges_result$' --output-on-failure
-```
+Temporary acceptance should cover all four clamp dtypes, integer extrema,
+batch-axis flattening, negative zero, remap intermediate overflow, pre-cancellation
+and unavailable-profile rejection. Use exact Fraction references for the remap
+formula and independent UInt8/Int64 boundary values.
 
 These checks do not establish x86 execution, native GPU support or a performance result. The separate integration fixture's x86 availability rejection does not validate x86 arithmetic.

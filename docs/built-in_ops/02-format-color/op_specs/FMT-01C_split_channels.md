@@ -58,12 +58,10 @@ and Descriptor, not Validation or Control. Its result retains batch axes and
 uses A's `keepdims` policy. Each handle has independent dependency and dirty
 mapping behavior.
 
-The public [workflow example](../../../../examples/channel_extraction_workflow/README.md)
-builds a described UInt8 `[2,2,4]` B/A/R/G Result, calls `split_channels`, and
-publishes only `c2`. Its nonzero ROI returns `[12,13]`; diagnostics confirm that
-no sibling extraction node ran. It also verifies that a schema with three
-4,096-byte opaque facets, whose canonical form exceeds 8,192 bytes, can be split
-and executed, while changing an opaque byte makes the producer assertion fail
-at compile time. This does not verify a subsequent cross-family channel-assembly
-workflow. Performance data for the old
-Value/planar path is not a Result performance claim.
+For temporary public acceptance, use the UInt8 B/A/R/G tensor and expected red
+values from [channel extraction](FMT-01A_extract_channel_index.md#example-and-validation).
+Call `split_channels`, request only `c2`, and check its second row `[12,13]` and
+that no sibling extraction node runs. Also cover three 4,096-byte opaque facets
+whose canonical form exceeds 8,192 bytes: splitting and execution must succeed,
+while changing an opaque byte must fail the producer assertion at compilation.
+Validate a later cross-family assembly composition separately.

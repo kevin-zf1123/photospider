@@ -128,7 +128,5 @@ The conceptual target workflow is a described image -> B -> alpha component
 processing. `format::extract_alpha` now appends the FMT-05B helper composition. Existing alpha
 uses `channel.extract_index_<profile>`; opaque fallback uses
 `channel.literal_like_<profile>` with exact prepared bits and descriptor-only
-source demand. `test_alpha_authoring` exercises the public compile/execute path and passes.
-The separate `test_channel_literal_like` validates only its primitive. Fourteen
-small alpha performance smoke cases pass their output oracle; no full matrix is
-claimed.
+source demand. Validate the helper expansion through the public compile/execute path; checking
+the reused primitive alone does not establish composition behavior.

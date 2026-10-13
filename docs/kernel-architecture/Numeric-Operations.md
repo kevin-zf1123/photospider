@@ -69,6 +69,12 @@ Invalid static parameters return `InvalidArgument`. Unsupported or incompatible 
 
 ## Public workflows and checks
 
-[`tests/integration/test_numeric_operations.cpp`](../../tests/integration/test_numeric_operations.cpp) covers registered arithmetic behavior. Split Result numeric oracles live under [`tests/integration/numeric`](../../tests/integration/numeric), with separate files for arithmetic, arrays, sequences, statistics, matrix, calculus, curves, Bezier, LUTs, baking, expressions, filters and color ramps. Ordered reduction and scan behavior is exercised by [`test_ordered_reduction.cpp`](../../tests/integration/test_ordered_reduction.cpp), [`test_ordered_scan.cpp`](../../tests/integration/test_ordered_scan.cpp) and [`test_scan_waiters.cpp`](../../tests/integration/test_scan_waiters.cpp). These tests use independent numerical expectations; block-cache observations do not establish performance.
+Operator arithmetic is checked with temporary independent numerical references
+and public Result workflows during the operation change. Remove these checkers
+after validation, as described in [Testing and Validation](../development/Testing-and-Validation.md).
+The retained kernel [test_scan_waiters](../../tests/integration/kernel/test_scan_waiters.cpp)
+uses a synthetic scan to check checkpoint sharing between concurrent runs,
+cancellation isolation, error propagation, cache clearing and Queue resource release.
+It does not establish the numerical correctness of bundled scan operations.
 
 Generic arithmetic keys do not declare planar image capability. Their registration does not imply that a structural planar image can be passed as a generic numeric array.

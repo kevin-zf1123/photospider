@@ -167,9 +167,7 @@ Keep a separate independent integer/rational, bit-pattern or directed-precision
 oracle, and compare exact bits or the explicitly allowed ULP rule. Verify required
 reads and dirty support separately from numeric equality. Exercise only the
 relevant shape, special-value, layout, lifetime, low-budget and cancellation cases
-listed in the primitive/family contracts. Maintained commands, independent
-oracles and actual results are linked from the individual implementation sections
-and the [public numeric workflows](../../../../examples/numeric_workflow/README.md).
+listed in the primitive/family contracts.
 
 No unresolved user-facing semantic choice is recorded by this baseline. Concrete
 backend selection, metadata specialization, diagnostics and runnable fixtures are

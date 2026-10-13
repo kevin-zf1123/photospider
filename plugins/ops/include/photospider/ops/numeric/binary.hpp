@@ -71,8 +71,7 @@ inline Result<WorkflowNode> node(std::uint64_t id, const char* name,
  * results retain their defined rules. Named profiles require their CPU target.
  * Invalid node IDs or profiles return InvalidArgument/InvalidDomain/Schema.
  * The helpers own their node metadata and are pure and safe for concurrent use;
- * allocation may throw std::bad_alloc. The numeric_workflow example contains
- * public Result workflows and oracles.
+ * allocation may throw std::bad_alloc.
  */
 /** @brief Exact a+b; UInt8/Int64/Float32/64, checked integer range.
  * @note Uses the shared binary execution/ownership/error contract above.

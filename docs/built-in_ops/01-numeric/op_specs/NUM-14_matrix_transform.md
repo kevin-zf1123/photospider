@@ -122,9 +122,7 @@ low budgets, cancellation and owner lifetime through public execution.
 accelerated keys. `matrix_transform_node` authors three Result input edges in
 the order `vectors`, `matrix`, `bias`; each edge has one tensor member under any
 member key. The output is the `values` Result with `photospider.tensor` schema
-and tensor member `samples`. `examples/numeric_workflow/matrix.cpp` keeps Values
-only as private typed backing for source Results. Its workflow bindings,
-execution, and output reads use Result.
+and tensor member `samples`.
 
 Static preparation validates dtype, rank, component counts, shape agreement, and
 the 2^40 logical-count limit, then specializes the output schema. Rebinding
@@ -144,15 +142,14 @@ Empty demand performs no matrix arithmetic. Source NaN classification follows
 the required input arrivals and cannot suppress an upstream source failure.
 Typed RGBA validation includes alpha and dirties every observed output.
 
-The manual executable checks negative, zero, and unaligned strides, shifted
+Temporary acceptance should check negative, zero, and unaligned strides, shifted
 origins, all four caller and worker rounding modes, exception-flag restoration,
 exact callback work thresholds, low Payload capacity, actual computation
 cancellation, and final release of all Root resources. Retaining an output
 Result and read window charges the 16-byte Float64 output once; after Result
 release, the window remains readable, and releasing it returns Root usage to
-zero. These checks establish the executable behaviors above for the exercised
-profiles; they do not establish individual Accelerate or SME hardware
-instruction dispatch.
+zero. Report the profiles actually exercised; output agreement does not establish
+individual Accelerate or SME hardware instruction dispatch.
 
 ## Apple matrix candidate backends
 
@@ -215,20 +212,16 @@ See [Apple's SME platform notes](https://github.com/apple-oss-distributions/xnu/
 and [Arm ACLE streaming/ZA rules](https://arm-software.github.io/acle/main/acle.html).
 The implementation preserves `-fno-fast-math -frounding-math -ffp-contract=off`.
 
-The current executable is `photospider_numeric_matrix`; its default path runs the
-Result workflow checks, while `oracle`, `benchmark`, and `grid` modes remain
-available. CTest registers its default path as `test_numeric_matrix_result`.
-The separate `test_numeric_result_math_matrix` integration executable contains the
-`matrix_*` cases for shape, exact values, typed validation, Empty demand,
-resources, and cancellation. The manual-only preparation, fresh-source
-association, and escaped-owner assertions belong to `test_numeric_matrix_result`.
+Create temporary public Result checks for shape, exact values, typed validation,
+Empty, resource limits, cancellation, preparation reuse, fresh-source associations
+and escaped-owner lifetime. Compare matrix formulas against independent exact
+dot products. Benchmarking, when needed for a change, must report its measured
+scope separately from numerical acceptance.
 
 The Fraction oracle independently checks exact dot products and source-NaN
 priority. These checks are correctness samples, not
 a performance campaign. Benchmark elapsed time includes Result coordination,
-digest. Reproduction commands and
-current verification boundaries are documented in the NUM-14 section of
-`examples/numeric_workflow/README.md`.
+digest.
 
 Specification status remains Proposed independently of implementation status.
 Focused tests of the strict and locally available profiles do not prove that

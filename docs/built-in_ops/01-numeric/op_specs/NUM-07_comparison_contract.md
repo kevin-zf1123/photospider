@@ -86,9 +86,8 @@ collection/typed failure may precede InvalidCondition. Any input edit invalidate
 all observations. Invalid condition anywhere fails with Run scope and no Atom key.
 All NUM-07 Whole callbacks have per-value numeric diagnostics N/A.
 
-Source support, typed closure, sNaN environment preservation,
-condition/error isolation, cache changes and resource cleanup are separately
-checked. These manual executables have no integration-test registration and
-establish no performance claim. Specification status remains Proposed.
+Validate source support, typed closure, sNaN floating-environment preservation,
+condition/error isolation, source replacement and resource cleanup separately
+from numerical comparisons. Specification status remains Proposed.
 
 Current Whole validation and timing are recorded in [NUM-07 measurements](../comparison-whole.md).

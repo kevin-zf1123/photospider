@@ -43,16 +43,6 @@ tolerance validation still applies.
 
 ## Current validation entry points
 
-Build and run the strict public example, focused CTest and independent oracle:
-
-```sh
-cmake --build build/kernel-dev --target photospider_numeric_comparisons -j 8
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_comparisons _strict
-ctest --test-dir build/kernel-dev -R '^test_numeric_comparisons_result$' --output-on-failure
-python3 oracle/ops/numeric/comparison_oracle.py \
-  build/kernel-dev/examples/numeric_workflow/photospider_numeric_comparisons _strict
-```
-
 Use `_accelerated_apple_silicon` on Apple Silicon or
 `_accelerated_x86_64` on x86-64; an unsupported host reports
 `BackendUnavailable`.

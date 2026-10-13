@@ -112,25 +112,19 @@ cancellation or numeric failure publishes no partial output and releases
 unpublished scratch and payload. Empty requests avoid input payload allocation
 and sample work.
 
-The current public Result workflow and focused test are described in
-[NUM-06 Result Whole execution](../range-whole.md). The workflow checks
-remap-to-clamp composition, invalid bounds outside sparse demand, all five input
-obligations, Empty, Whole support, typed validation through clamp, cache
-invalidation, and rational work exhaustion. The strict and Apple Silicon
-oracles cover the remap formulas and boundary values. The separate
-[`test_numeric_result_math_sequences.cpp`](../../../../tests/integration/numeric/test_numeric_result_math_sequences.cpp)
-fixture retains checks for an overflowing intermediate subtraction, invalid
-bounds despite input NaN, batch-axis flattening and pre-cancellation; it was not
-rerun for this update.
+Temporary public Result acceptance should cover remap-to-clamp composition,
+invalid bounds outside sparse demand, all five input obligations, Empty, Whole
+support, typed validation through clamp, binding changes and rational-work
+exhaustion. Use exact rational references for formulas and boundaries. Include
+overflowing intermediate subtraction, invalid bounds despite input NaN,
+batch-axis flattening and cancellation. Execution behavior is described in
+[NUM-06 Result Whole execution](../range-whole.md).
 
 For example, Float64 input `[0,0.5,1,2]` with source bounds `[0,1]` and target
 bounds `[0,255]` explicitly broadcast to the input shape produces
-`[0,127.5,255,510]`. The current [`ranges.cpp` workflow](../../../../examples/numeric_workflow/ranges.cpp)
-binds tensor Results and reads the published `values` Result.
+`[0,127.5,255,510]`.
 
-The code declares strict, Apple Silicon and x86-64 profile keys. The current
-root Result test, Apple Silicon workflow, independent strict/Apple Fraction
-oracle and installed consumer are summarized in [NUM-06 Result Whole
-execution](../range-whole.md). No x86 execution, native GPU support or
-performance result is claimed. These evidence boundaries do not change the
-Proposed status.
+The code declares strict, Apple Silicon and x86-64 profile keys. Execution behavior and temporary acceptance cases are described in
+[NUM-06 Result Whole execution](../range-whole.md). Validate each admitted profile
+against independent Fraction references. The specification remains Proposed;
+its cases do not report current hardware or performance results.

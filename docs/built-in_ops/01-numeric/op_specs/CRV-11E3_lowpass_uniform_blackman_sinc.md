@@ -69,9 +69,8 @@ The frequency response and target-downsampling attenuation require independent
 measurement; this primitive never claims ideal cutoff or zero aliasing.
 
 The maintained public workflow binds input, axis/radius/boundary and cutoff,
-then requests values using the selected operation key. See the shared workflow link below for the maintained invocation, commands and
-current evidence; this Proposed specification does not claim ideal cutoff or
-zero-aliasing behavior.
+then requests values using the selected operation key; this Proposed specification
+does not claim ideal cutoff or zero-aliasing behavior.
 
 ## Maintained implementation and validation
 
@@ -82,5 +81,4 @@ error to the final output gate. Unresolved coefficients or outputs use strict
 whole-sum evaluation, with Whole fallback counters unavailable. Support and special-value
 shortcuts remain exact.
 Certified precision is bounded to 128..4096 bits; unresolved
-capacity or rounding may return `ResourceExhausted`. See the [shared workflow](../../../../examples/numeric_workflow/README.md#uniform-lowpass)
-and [CRV-11 umbrella](CRV-11_resample_signal.md). See the shared workflow for exact coverage and commands.
+capacity or rounding may return `ResourceExhausted`. See [CRV-11 umbrella](CRV-11_resample_signal.md).

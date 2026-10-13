@@ -261,8 +261,8 @@ changes, rounded centers, extra-point bounds/count, and caller-asserted source
 limitations. Test report-only/table-only/axis-only and joint requests, all-grid
 source failures outside requested table fragments, cache-off, cancellation,
 budget failure, strides and result/data lifetime. Verify finite sampled tests
-never become a CertifiedBound claim. The maintained public template construction,
-invocation commands and independent result checks are linked below; this specification remains Proposed.
+never become a CertifiedBound claim. Build a temporary public workflow from the template and inspect independently
+expected outputs. This specification remains Proposed.
 
 ## Maintained implementation and validation
 
@@ -343,13 +343,6 @@ for `maximum_dependency_cache_metadata`, and 128 Mi dependency-cache work units.
 It observes 14 cache hits in this run, while its assertion requires only a
 positive count; the observed count is not a contract. The metadata limit counts
 proof units rather than bytes.
-
-Its bake
-assertions are independent fixture coverage, not all cases from the baking3d
-harness. Exact focused CTest
-and installed-consumer commands are maintained in the
-[workflow section](../../../../examples/numeric_workflow/README.md#measured-three-dimensional-lut-baking).
-No current x86, native-GPU or maximum-shape-success validation is claimed.
 
 - [3D LUT application](CRV-07_apply_lut3d.md).
 - [1D baking templates](CRV-04_bake_lut1d.md).

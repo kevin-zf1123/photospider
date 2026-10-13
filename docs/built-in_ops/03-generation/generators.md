@@ -4,7 +4,7 @@
 原生 GPU 形式已注册。三者使用 Result 输入与输出，GPU 按内核构建使用 Metal
 或 Vulkan，且不提供 CPU fallback。当前 Result GPU 路径已在 Metal 上通过独立
 oracle 与安装消费检查；Vulkan 的旧 Value 路径验证不代表当前 Result 实现。
-Gaussian 与 PixelOE Vulkan 尚未交付。具体英文规格记录端口、
+Gaussian Vulkan 尚未交付。具体英文规格记录端口、
 参数、数学定义与依赖规则，继承 01-numeric 与 02-format-color。
 [共享契约](op_specs/GEN_common_contract.md)、[oracle 覆盖说明](oracle-coverage.md)、
 [oracle 使用说明](../../../oracle/ops/generation/README.md)与

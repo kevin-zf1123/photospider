@@ -126,9 +126,3 @@ SLEEF binary64 enclosures within the shared admitted ranges. `atan2pi` divides
 an angle enclosure by an enclosed pi. Rejected candidates use the certified
 strict backend. See [math implementation](../math-implementation.md) for
 rounding, scratch, work accounting and unresolved-refinement limits.
-
-The [public example and commands](../../../../examples/numeric_workflow/README.md)
-include an editable add/multiply composition, independent integer/Fraction/MPFR
-oracles and direct error/resource checks. `test_numeric_binary_result` covers
-the strict Result workflow; the installed consumer exercises the same example
-source through `Photospider::kernel`. These checks establish CPU behavior, not GPU support.

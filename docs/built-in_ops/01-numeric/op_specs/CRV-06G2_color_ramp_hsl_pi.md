@@ -65,7 +65,6 @@ including ResourceExhausted on unfinished certified arithmetic.
 Bind the ordered ports above, stops=[0,1], matching color_description, and
 explicit static parameters. colors=[[0,0.25,0.125],[4,0.75,0.875]], input=[0.5] gives [[2,0.5,0.5]].
 The example uses the default output unit and a described values result.
-The maintained public Compiler/ExecutionContext workflow and invocation commands are linked below.
 
 Use the shared independent arithmetic oracle, per-profile/dtype/unit fixtures,
 multi-turn and large-angle cases, whole versus partial color requests, whole-input dirty
@@ -81,7 +80,5 @@ The public helper `color_ramp_hsl_pi_node` is declared in
 Whole Result operation. Original hue values use exact rational interpolation;
 Cross-unit conversion in either direction multiplies or divides by certified pi,
 with a 4096-bit precision ceiling. Same-unit RationalPi expressions cancel pi
-symbolically. Focused Result CTest, Strict/Apple manual groups, independent numerical oracles
-and installed-consumer checks pass. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation)
-and [workflow README](../../../../examples/numeric_workflow/README.md#color-ramps)
-for evidence scope and untested platforms/shapes.
+symbolically. Validate the Result path and numerical profile independently for each change. See the [family contract](CRV-06_color_ramp.md#maintained-implementation-and-validation)
+for the shared behavior and acceptance requirements.

@@ -132,10 +132,3 @@ storage; resource limits do not weaken the arithmetic contract. Numeric failures
 are OperationFailed/InvalidDomain or final-output ArithmeticOverflow, with Run
 scope and the offending port/index where available. Other typed, upstream, stale
 and cancellation failures preserve their failure categories.
-
-The manual Result fixture, exact Fraction oracle and installed consumer are
-defined in the [numeric workflow README](../../../../examples/numeric_workflow/README.md).
-Their command lines and coverage are documented there. The bounded benchmark passed eight rows per profile with two
-polls, N*C computed elements and `timing_scope=result_execute_fragments`; its
-Root Payload peaks are listed in the workflow README. These bounded timing
-checks do not establish a performance improvement.

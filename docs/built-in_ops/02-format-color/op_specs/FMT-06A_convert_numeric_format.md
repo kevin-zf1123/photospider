@@ -127,14 +127,13 @@ The public graph is `declared input Result -> numeric.convert_format_strict ->
 typed, encoded output Result`; consumers needing native color coordinates or normalized
 alpha must decode explicitly.
 
-Six focused CTest targets pass: `test_numeric_conversion`,
-`test_numeric_conversion_sme`, `test_alpha_numeric_interop`,
-`test_alpha_operations`, `test_alpha_authoring` and `test_resources`. The numeric
-suite covers 49 dtype pairs, randomized oracles, ROI, cold-lookup budget,
-failure-order, floating-environment and identity views. Additional batch/view/
-Empty/bit-stride, ICC-resource, concurrent-plan-reuse and payload-release checks
-pass. The SME test passes, and `test_alpha_numeric_interop` covers four
-inherited/moved cases.
+Temporary numeric-conversion acceptance should cover all 49 dtype pairs using
+independent exact references, ROI, cold-lookup budgets, failure ordering,
+floating environments, identity views, batch/view/Empty/bit-stride cases, ICC
+resource ownership, concurrent plan reuse and payload release. Add explicit
+alpha interoperability cases when changing inherited encoding behavior. An SME
+path requires an actual dispatch check on admitted hardware; CPU output agreement
+alone does not establish SME dispatch or performance.
 
 Thirteen serial Result performance smoke cases pass their bitwise output oracle.
 A debugger-confirmed SME dispatch verifies the Float32→UInt8 tiled path is reached;

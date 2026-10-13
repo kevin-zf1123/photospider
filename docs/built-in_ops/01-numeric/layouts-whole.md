@@ -39,15 +39,6 @@ available.
 
 ## Public workflow and validation
 
-```sh
-cmake --build build/kernel-dev --target photospider_numeric_layouts -j8
-ctest --test-dir build/kernel-dev -R '^test_numeric_layouts_result$' --output-on-failure
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_layouts strict
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_layouts apple
-python3 oracle/ops/numeric/layout_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_layouts strict
-python3 oracle/ops/numeric/layout_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_layouts apple
-```
-
  The separate finite-address oracle
 checks 6,374 successful View/Auto/Dense mappings per profile plus expected View
 rejections. It independently covers negative, zero and singleton strides,
@@ -62,11 +53,6 @@ Raw specials in all four fenv modes and escaped storage/resource lifetime pass.
 Prepared Whole view fixtures include giant zero-stride producer output,
 structured consumption, original external dense owner retention, multi-owner
 rejection, same-owner singleton joining and sticky allocator failures.
-The separate [`prepared.cpp::whole_views` Result fixture](../../../examples/numeric_workflow/README.md#whole-result-view-preparation)
-uses a compiled CPU Whole Tensor Need: it checks affine view proof, strict
-multi-owner rejection, Auto collection into Root-owned private backing, an
-8-byte source under an 8-byte output cap, and owner lifetime after context
-retirement. It documents a Result input path.
 The Result operation declares zero fixed workspace
 bytes and reserves up to 4096 bytes of Host scratch for rank<=8 coordinate
 vectors. Earlier regional checks do not establish Whole behavior.

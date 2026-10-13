@@ -32,23 +32,3 @@ all four rounding modes and preexisting exception flags. It checks exact work
 admission, a one-unit deficit, actual managed output/workspace allocation, a
 one-byte capacity deficit, and release after success/failure. This directly
 covers batch mechanics; independent public oracles establish numerical bounds.
-
-```sh
-cmake -S . -B build
-cmake --build build --target photospider_numeric_math_batch \
-  photospider_numeric_unary photospider_numeric_binary \
-  photospider_numeric_inverse photospider_numeric_lowpass \
-  photospider_numeric_lowpass_execution -j 8
-build/examples/numeric_workflow/photospider_numeric_math_batch
-python3 oracle/ops/numeric/unary_oracle.py \
-  build/examples/numeric_workflow/photospider_numeric_unary apple
-python3 oracle/ops/numeric/binary_oracle.py \
-  build/examples/numeric_workflow/photospider_numeric_binary apple
-python3 oracle/ops/numeric/inverse_oracle.py \
-  build/examples/numeric_workflow/photospider_numeric_inverse apple
-python3 oracle/ops/numeric/lowpass_oracle.py \
-  build/examples/numeric_workflow/photospider_numeric_lowpass apple
-build/examples/numeric_workflow/photospider_numeric_lowpass_execution apple
-```
-
-Use `x86` on WSL.

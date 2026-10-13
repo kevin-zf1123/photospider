@@ -199,9 +199,7 @@ expression with a strict certified scalar fallback and preserves monotonicity an
 independence. Refinement precision is bounded to 128..4096; unresolved capacity or
 rounding returns `ResourceExhausted`.
 
-The focused `test_numeric_result_math_filters` CTest passes 1/1 and covers the Result
-workflows, boundaries, prepared-state rebinding and cancellation, plus the
-existing authoring checks. See [the workflow
-README](../../../../examples/numeric_workflow/README.md) for reproducible
-commands. These results do not cover x86 numerical execution, GPU execution,
-maximum-size shapes or performance.
+Create temporary public Result checks for formulas, boundaries, prepared-state
+rebinding, cancellation and authoring validation. Report numeric execution for
+each tested profile separately; these cases do not establish untested backends,
+maximum-size behavior or performance.

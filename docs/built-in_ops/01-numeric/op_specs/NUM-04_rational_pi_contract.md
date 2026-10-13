@@ -182,8 +182,3 @@ Float32/Float64 dtype, and publishes one packed Result. Strict and accelerated
 evaluation retain the rational contracts above; per-value fallback counters
 are not emitted by this Whole callback, while execution-level computed-element
 diagnostics remain separate.
-
-The [public workflow and commands](../../../../examples/numeric_workflow/README.md)
-document Result bindings and the independent oracle. The root registers
-`test_numeric_unary_result` for the strict Result workflow. MPFR is used only by
-the independent Python oracle.

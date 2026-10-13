@@ -92,10 +92,10 @@ and final conversion/publication. Integer `ArithmeticOverflow` is a Domain/Run
 failure with the output coordinate; failures release unpublished output and
 state. Schema caps, dtype rules and owner lifetime remain.
 
-The current `test_numeric_scans_result` workflow checks `[1,2,3] -> [0,1,3,6]`,
+Temporary acceptance should check `[1,2,3] -> [0,1,3,6]`,
 independent small-integer enumeration, batch and nonadjacent axes, negative and
 unaligned strides, special values, zero-boundary validation, Empty demand,
-resource budgets and cancellation. It checks complete-output integer overflow,
+resource budgets and cancellation. Check complete-output integer overflow,
 including coordinates outside the requested projection.
 
 ## Implementation and executable acceptance

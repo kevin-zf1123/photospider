@@ -152,8 +152,7 @@ The public target workflow binds a small indexed integer matrix, creates the
 selected broadcast key with shape/map/layout, compiles and requests full plus
 nonzero/disjoint outputs. Check logical indices, strides/owners, actual source
 reads and dirty support. Use the explicit coordinate formula as an independent
-oracle. The current implementation's runnable target and command are recorded
-in the workflow README and implementation table.
+oracle. Create this public-path check for the current change and remove it after validation.
 
 ## Current implementation status
 
@@ -169,9 +168,6 @@ requested region for dense output. Local Clang execution checked `[3]` to
 `[2,3,4]` with `axis_map=[1]`, exact sparse source support and dirty
 replication, a `[274877906944,3]` view backed by three Int64 samples, and a
 structured consumer reading the giant view through an 8-byte result view.
-`examples/numeric_workflow/mappings.cpp` compares compact mapped certificates
-with explicit rows over 64 queries, 8 dirty subsets and 3 roles, including
-large replication and bounded materialization.
 
 The following dated implementation/acceptance record predates Whole.
 It includes negative-stride unaligned permutation, independent owners, image Data

@@ -74,7 +74,5 @@ The public entry point is `log2_shaper_inverse_node` in
 whole-expression evaluation with a strict certified scalar fallback, preserves
 monotonicity and partition independence, and may return `ResourceExhausted` when
 128..4096 refinement capacity is unresolved. See [the CRV-08 family contract](CRV-08_shaper.md)
-and [the shaper workflow README](../../../../examples/numeric_workflow/README.md)
-for the shared command, fixture and validation evidence. The installed consumer passes 1/1, including public log
-composition and output lifetime checks. x86 numerical, GPU, maximum-size and
-performance validation are not covered.
+for arithmetic and validation requirements. Temporary acceptance must cover public
+composition and output lifetime; report only the profiles and sizes actually exercised.

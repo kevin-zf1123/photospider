@@ -42,9 +42,9 @@ Table bytes、取整后的 native capacity、candidate work、decode work 与 re
 
 ## 已注册 workflow 与 decoder 覆盖
 
-当前 C discovery fixture 是 [`tests/fixtures/gpu_result_discovery_plugin.c`](../../../tests/fixtures/gpu_result_discovery_plugin.c)，由 [`tests/integration/gpu/test_gpu_discovery_workflow.cpp`](../../../tests/integration/gpu/test_gpu_discovery_workflow.cpp) 加载。独立期望输出为 `8` 和 `24`；Metal 路径断言四次 native dispatch。Control 编辑会改变选中的 Data support，frozen execution 则保留捕获时的 Result。同一 integration 源码还覆盖 malformed records、overflow、device 缺失、publication failure、取消、Root 清理和 retry。
+当前 C discovery fixture 是 [`tests/fixtures/gpu_result_discovery_plugin.c`](../../../tests/fixtures/gpu_result_discovery_plugin.c)，由 [`tests/integration/kernel/gpu/test_gpu_discovery_workflow.cpp`](../../../tests/integration/kernel/gpu/test_gpu_discovery_workflow.cpp) 加载。独立期望输出为 `8` 和 `24`；Metal 路径断言四次 native dispatch。Control 编辑会改变选中的 Data support，frozen execution 则保留捕获时的 Result。同一 integration 源码还覆盖 malformed records、overflow、device 缺失、publication failure、取消、Root 清理和 retry。
 
-Decoder 与 normalization 源测试为 [`tests/unit/test_gpu_discovery.cpp`](../../../tests/unit/test_gpu_discovery.cpp) 和 [`tests/unit/test_result_gpu_discovery.cpp`](../../../tests/unit/test_result_gpu_discovery.cpp)。这些注册项指出可执行覆盖，不表示以前某次运行已通过。
+Decoder 与 normalization 源测试为 [`tests/unit/kernel/test_result_discovery_services.cpp`](../../../tests/unit/kernel/test_result_discovery_services.cpp) 和 [`tests/unit/kernel/test_result_discovery_decoder.cpp`](../../../tests/unit/kernel/test_result_discovery_decoder.cpp)。这些注册项指出可执行覆盖，不表示以前某次运行已通过。
 
 Discovery 必须在当前 callback entry thread 执行。C++ `ResultProgramPhase::consume_work` 可从 worker thread 计费；C discovery service 仍限于 entry thread。Work 与 metadata 限额跨 active poll 中的调用累计，每次调用也消耗 Run 和 Root work。重复记录仍消耗 emission 与 normalization work。
 

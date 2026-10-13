@@ -121,15 +121,13 @@ demand starts no producer and publishes empty tensor coverage. For N>1, each
 nonempty query prepares all active inputs even when it requests output 0, then
 publishes the complete output with full tensor coverage. The query scopes the
 recorded dependency observation and dirty mapping; it does not trim Result
-coverage. The manual workflow verifies failure ordering, raw output-zero
+coverage. Temporary acceptance should verify failure ordering, raw output-zero
 copying, sparse requests, negative and zero strides, unaligned
 storage, caller and worker floating environments on actual continuation polls,
 resource limits, cancellation, and Result/window lifetime through Root release.
 
-The independent oracle retains 1,810 Fraction reference cases. Strict acceptance
-is bit-exact. Apple acceptance follows the shared FP32-scaled bound and includes
-a verified one-ULP difference; it is not a bit-exact claim. The root behavior
-test and installed consumer compile the same manual workflow with
-`-fno-fast-math -frounding-math -ffp-contract=off`. Commands and current
-execution details are in [NUM-15 Whole execution](../calculus-whole.md), and the
-runnable workflow is listed in [the numeric workflow guide](../../../../examples/numeric_workflow/README.md#discrete-derivatives-and-cumulative-integration-num-15).
+Use independent exact Fraction references for temporary numerical acceptance.
+Strict results must match the final rounded reference bits. Accelerated results
+use the shared final FP32-scaled bound and need not be bit-exact. Compile the
+checker with `-fno-fast-math -frounding-math -ffp-contract=off`; execution details
+and validation cases are in [NUM-15 Whole execution](../calculus-whole.md).

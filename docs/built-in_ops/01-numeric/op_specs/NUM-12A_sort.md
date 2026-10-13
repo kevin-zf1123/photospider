@@ -97,13 +97,6 @@ Arbitrary valid affine source strides are read through owning tensor windows.
 
 ## Current behavior checks
 
-The current public behavior entry is `examples/numeric_workflow/ordering.cpp`,
-registered as `test_numeric_ordering_result`. It checks
-`[3,1,1,2]` values and indices, separate output selection, full publication for
-sparse demand, stable non-last-axis sorting, dirty support, and ordering of
-signed zeros, infinities and signaling-NaN payloads. See [NUM-12 Result Whole
-execution](../ordering-whole.md) for commands and current evidence limits.
-
  The checks do not claim x86 arithmetic execution, performance
 or complete typed-facet/error/resource coverage. The specification remains
 Proposed.

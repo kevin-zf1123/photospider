@@ -43,8 +43,9 @@ src/lib/
 plugins/ops/<NN-family>/   built-in operation implementations
 
 tests/fixtures/
-tests/unit/
-tests/integration/
+tests/unit/kernel/
+tests/integration/kernel/
+tests/package/
 ```
 
 Private source homes follow responsibility. `src/lib/core/` holds primitives with no dependency on other kernel modules; `checked_math.hpp`, `status_helpers.hpp`, `exact_binary_sum.hpp` and `numeric_bits.hpp` are the shared implementations, so other modules do not define local copies of them. The active tree has no `src/lib/server`, `src/lib/policy`, process-isolation subtree, `plugins/policies`, worker application, or execution-profile benchmark family.

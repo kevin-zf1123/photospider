@@ -56,10 +56,6 @@ Output values own `count * sizeof(dtype)` payload bytes. Axis owns 24 bytes. The
 
 The focused Result sequence fixture runs through:
 
-```sh
-ctest --test-dir build/kernel-dev -R '^test_numeric_sequences_result$' --output-on-failure
-```
-
 The workflow loop checks strict and available Apple Silicon execution with Float64 endpoints. Separate strict cases check direct Float32 rounding with `start=1`, `end=0x1.0000020000001p0`, and `count=3`: the middle result is `0x3f800001`, while Float64-then-Float32 double rounding gives `0x3f800000`. Other checks cover endpoint and axis output selection, atomic tuple closure, extreme finite cancellation, signed zero, axis-only overflow, failure from an overflowing value outside requested coverage, nonfinite-input failure, Empty, work-limit rollback and pre-cancellation. It also checks count-one exclusion of a failing end producer while retaining static dtype validation, plus count-two upstream failure. The x86 profile's unavailable path is checked; this is not an x86 execution result. The focused workflow is supplemented by the independent Fraction/IEEE oracle and installed SDK consumer described in [sequences Whole](../sequences-whole.md); neither supplies an x86 execution or performance claim.
 
 The current implementation uses 68 base-2^32 limbs for finite binary64 rational arithmetic and direct IEEE rounding for its accelerated paths as well as strict. This exact implementation is an implementation fact; the public accelerated accuracy promise remains the shared FP32 four-ULP contract. An unsupported accelerated target returns `BackendUnavailable`; the runtime does not substitute a different key. No NUM-14 finite-Float32 certificate is used. Current shared storage and Whole behavior is summarized in [sequences Whole](../sequences-whole.md).

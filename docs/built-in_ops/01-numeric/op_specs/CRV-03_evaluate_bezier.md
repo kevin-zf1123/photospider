@@ -189,10 +189,9 @@ control reconstruction observe their separate rounding boundaries.
 For a nonempty request Q, the operation returns complete certified [N,D]
 coverage in global sample coordinates while dependency and dirty mappings retain
 Q. Input version, profile, metadata and parameter identity participate in cache
-validation; a source edit invalidates the corresponding recorded demand. The
-manual fixture confirms replacement segment and t Results reuse the static
-PreparedOperation and refreshes all four source ObjectIds when a fresh equivalent
-bundle reuses the content cache.
+validation; a source edit invalidates the corresponding recorded demand. Check that replacement segment and t Results can reuse static preparation,
+and that any content-cache reuse refreshes all four source ObjectIds for the
+active bindings.
 
 The immutable dense output Result owns its packed payload independently of the
 four source backings and execution context. A previously acquired authorized
@@ -246,23 +245,17 @@ or evaluated component fails the complete Run. Verify complete source support,
 whole invalidation, all-port layouts/fenv, Empty/schema, active cancellation and
 work/output/workspace rejection. Acceptance also requires public constant-node
 composition cases showing that 2^39-column and 2^40-row sparse requests still
-require the complete payload budget and fail when it is insufficient. The
-Result manual workflow exercises both rejection cases under Strict and Apple
-profiles; they do not establish successful numerical execution at either
-maximum shape.
+require the complete payload budget and fail when it is insufficient. These cases check capacity rejection for each admitted profile; they do not
+establish successful numerical execution at either maximum shape.
 
-Its source `Value` objects supply immutable
-storage referenced by source Results and charged as Referenced; output values,
-bindings, and reads use Results. Coverage includes both profiles, Float32/Float64,
-quadratic/cubic fixtures, all 16 combinations of reversed/unaligned inputs,
-zero-stride sources, caller and worker fenv, nine invalid static metadata cases, typed Whole
-validation, unused generic values, query/producer error ordering, endpoint
-selection, overflow, Empty, current association, demand dirty mapping, static
-preparation, exact-work cancellation, WorkLimit and complete Root release. The separate
-`test_numeric_result_math_bezier` integration target
-continues to cover 22 Fraction golden words across CRV-02 function sampling and
-CRV-03 parametric evaluation; these integration cases do not replace the manual
-fixture or its installed consumer.
+For temporary validation, source Values may supply immutable Referenced storage
+for source Results; bindings, output values and reads use Results. Cover admitted
+profiles, Float32/Float64, quadratic/cubic curves, all 16 reversed/unaligned input
+combinations, zero strides, caller/worker fenv, invalid static metadata, typed
+Whole validation, unused generic values, error ordering, endpoint selection,
+overflow, Empty, associations, dirty mapping, preparation reuse, work limits,
+cancellation and Root release. Use independent Fraction goldens for CRV-02 and
+CRV-03 rather than comparing two paths through the same implementation.
 
 Production retains RN64 reconstruction and exact integer power-Horner with one
 final rounding. All current profiles use the same exact numerical calculation;
@@ -272,9 +265,6 @@ mathematical topology pass is performed. Whole retains one row and fixed scratch
 instead of per-output associations. See implementation notes for public/core
 performance and its limits.
 
-Build/run commands and editable use are maintained in
-[the numeric workflow README](../../../../examples/numeric_workflow/README.md#parametric-bezier-evaluation-crv-03).
-The focused Result test command and coverage are in the numeric workflow README.
 See [implementation notes](../math-implementation.md#crv-03-parametric-bezier-evaluation)
 for the arithmetic bounds.
 

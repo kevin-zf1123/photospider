@@ -209,9 +209,15 @@ acceptance obligations. These cases remain acceptance requirements.
 
 ## Actual focused validation
 
-`test_numeric_result_math_curves` exercises the Result workflows and independent small-input checks. Coverage includes exact linear and nonlinear PCHIP results, all four operation forms, locally available profiles, Float32/Float64 inputs, knot and clamp signed-zero behavior, typed Whole validation, query/domain error precedence, resource limits, pre-cancellation, source associations and output lifetime. `curve_composition` checks `linspace -> bake_lut1d_pchip` and `resample_linear`.
+For temporary public-path acceptance, compare all four interpolation forms with
+independent small-input references. Cover exact linear and nonlinear PCHIP
+results, admitted profiles, Float32/Float64, knot/clamp signed zero, typed Whole
+validation, query/domain error precedence, limits, cancellation, associations
+and output lifetime. Include `linspace -> bake_lut1d_pchip` and `resample_linear`
+compositions when changing the corresponding helpers.
 
-The current focused command is `cmake --build build/kernel-dev --target test_numeric_result_math_curves -j8` followed by `ctest --test-dir build/kernel-dev -R '^test_numeric_result_math_curves$' --output-on-failure`.
+Create and run these checks for the current operation change, then remove the
+temporary checker and its build registration.
 
 ## Existing implementation distinction
 
@@ -239,6 +245,5 @@ the Whole contract above; mathematical y stencils remain unchanged.
 
 The [family implementation record](CRV-01_interpolate.md#maintained-implementation-and-validation)
 contains the shared arithmetic/resource details and current validation boundary.
-See [the editable workflow](../../../../examples/numeric_workflow/README.md#explicit-query-curves-crv-01)
-for construction, commands and checked expected results. This
+This
 operation's specification status remains Proposed.

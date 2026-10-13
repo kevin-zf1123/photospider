@@ -35,15 +35,6 @@ The public authoring interface is installed from `photospider/ops/format/channel
 
 Dependency-v2 requests exact selected-channel source coverage and its Descriptor with Data (1) and Descriptor (8) roles. It requests no Validation or Control support. Generic tensor views support valid positive, negative and zero strides, and Result backing partitions can retain multiple owners. Selecting a spatial tensor's channel axis can retain the source plane owner. Slicing spatial height or width materializes in auto mode; forced view returns `InvalidArgument/InvalidDomain` with `ViewUnavailable`. Materialization copies only requested output coverage, checking cancellation within runs of at most 256 samples. Empty output demand publishes an empty Result without reading source payload. Result caching is disabled.
 
-The [public Result workflow](../../examples/channel_extraction_workflow/README.md) describes a B/A/R/G UInt8 tensor of shape `[2,2,4]`, requests the second row of `c2`, and checks `[12,13]`. `test_channel_extraction` covers direct index and named operations, arbitrary axes, all seven dtypes, batch/spatial layouts, owner partitions, metadata, resources, cancellation and limits.
-
-```sh
-cmake --build build --target test_channel_extraction -j 8
-ctest --test-dir build -R '^test_channel_extraction$' --output-on-failure
-```
-
- This does not establish support for another ISA or a GPU. The older [channel extraction performance workflow](../../examples/channel_extraction_performance/README.md) contains Value/planar measurements. It is not timing evidence for the Result implementation.
-
 ## Scalar literal primitive
 
 The default registry registers `channel.scalar_literal_<profile>` for the
@@ -115,7 +106,7 @@ and layout of every connected input, including repeated and unused inputs. It
 contains no sample data and proves no sample validity. The literal operation
 uses Whole semantics over shape `[1]` with prepared native bits. Scalar row
 repetition copies at most 256 samples per batch while charging work and polling
-cancellation. Public Result workflow output is documented in [the example](../../examples/channel_editing/README.md).
+cancellation.
 
 ## FMT-04 alpha association
 
@@ -160,7 +151,7 @@ The operation requests source Data (role 1) and Descriptor (role 8). It requests
 no Validation or Control support, scans no unrequested samples, and keeps errors
 within the requested observation scope. Axis parameters index cell axes and
 exclude batch axes. Numerical behavior, typed endpoint formats and metadata
-propagation are defined in the [FMT-06 contract](../built-in_ops/02-format-color/op_specs/FMT-06_numeric_conversion_contract.md). Additional batch/view/Empty/bit-stride, ICC-resource, concurrent-plan-reuse and payload-release checks pass; `test_numeric_conversion_sme` passes. `test_alpha_numeric_interop` passes four inherited/moved cases; this does not establish model-conversion interoperability. The six focused numeric/alpha/resource CTests pass. Thirteen serial Result smoke cases pass byte oracles, but no Result performance conclusion is drawn.
+propagation are defined in the [FMT-06 contract](../built-in_ops/02-format-color/op_specs/FMT-06_numeric_conversion_contract.md). Temporary operation checks should cover batch/view/Empty/bit-stride cases, ICC-resource ownership, concurrent plan reuse and payload release. Validate alpha interoperability and native dispatch separately; these cases do not establish model-conversion interoperability or performance.
 
 A same-dtype mapping may publish a generic or spatial view only when the complete
 declared mapping is a static identity and the source storage can represent it.
@@ -204,12 +195,9 @@ coverage transactionally under Root budgets and cancellation, with normal owner
 and resource lifetimes. The numeric workspace is allocated lazily; simple runs
 process up to 1024 samples, while the general curve path batches at most 64. Strict
 fallback and floating-environment behavior follow NUM. Transfer operations have
-no GPU backend. The focused `test_transfer_operations` and
-`test_transfer_runtime`, `test_transfer_math` and `test_transfer_simd` pass, as do
-six shared FMT regression tests, `test_result_execution`. The integration test completed
-16,760 golden attempts on strict and Apple Silicon profiles; x86-64 was skipped
-because the backend is unavailable on this host. They do not establish a full matrix or performance
-conclusion.
+no GPU backend. Temporary acceptance should compare each admitted profile with independent
+transfer references and exercise runtime errors, resource limits and floating
+environments. Report native dispatch and performance only when measured.
 
 ## FMT-10 RGB basis and XYZ
 
@@ -256,16 +244,15 @@ WorkflowDocument only after static validation succeeds. Callers must serialize
 writes to the same document. Compiled plans and their immutable prepared state
 can be executed concurrently. D's policy selects A→B, A→B with `preserve_xyz`,
 or A→C→B with an explicit method. The helper returns B's `values` edge and adds
-no native D key. `test_rgb_basis_math` and `test_rgb_basis` pass; the integration
-suite retains 4,032 independent oracle checks and covers batched inputs, three
-Result storage layouts, identity views, concurrent reuse and owner release. The
-wide 65,536-channel identity view also passes under a 512 KiB Metadata budget. The 25 benchmark smoke cases pass a same-implementation
-strict reference gate, not an independent oracle; no full matrix or speed
-conclusion is available.
+no native D key. Temporary acceptance should cover independent matrix/adaptation values, batched
+inputs, three Result storage layouts, identity views, concurrent reuse and owner
+release. Include the 65,536-channel identity-view case under a 512 KiB Metadata
+budget. A same-implementation reference gate is not an independent numerical
+oracle and does not establish performance.
 
 ## FMT-08 metadata assignment and removal
 
-The registry provides three Result CPU keys: `metadata.assign_strict`, `metadata.assign_accelerated_apple_silicon` and `metadata.assign_accelerated_x86_64`. `format::assign_metadata` appends A; `format::remove_metadata` transactionally lowers B to A. The input and output are single-tensor Results with no fields. They preserve schema id, tensor key, batches, descriptor, layout, source publication policy and sample bits. Execution requests same-coordinate Data and Descriptor support with roles 1 and 8, without Validation or Control. The operation never scans sample values and disables Result caching. The public header `photospider/ops/format/metadata.hpp` is installed separately. The [public example](../../examples/metadata_workflow/README.md) verifies special-value bits and source immutability. Five focused Result CTest cases, the example, and two installed consumer checks pass. The metadata-to-extraction configuration/resource chain is covered; composition through `channel.assemble` is not. The older [performance guide](../../examples/metadata_performance/README.md) measures Value/planar execution, not this Result path.
+The registry provides three Result CPU keys: `metadata.assign_strict`, `metadata.assign_accelerated_apple_silicon` and `metadata.assign_accelerated_x86_64`. `format::assign_metadata` appends A; `format::remove_metadata` transactionally lowers B to A. The input and output are single-tensor Results with no fields. They preserve schema id, tensor key, batches, descriptor, layout, source publication policy and sample bits. Execution requests same-coordinate Data and Descriptor support with roles 1 and 8, without Validation or Control. The operation never scans sample values and disables Result caching. The public header `photospider/ops/format/metadata.hpp` is installed separately.
 
 ## FMT-11 model conversions
 
