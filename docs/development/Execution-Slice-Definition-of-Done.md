@@ -41,7 +41,6 @@ this list does not require a full test suite for each operation or local fix.
 - Affected English public documents and Chinese mirrors match the behavior.
   Issue/Project updates follow the authorized delivery scope; delivery snapshots
   follow the update rule in the Current Development Program.
-- Private OpenSpec working notes are outside the public completion gate.
 - Actual commands and limitations are recorded; unrun gates are not claimed.
 
 ## Decision tasks and authorized delivery

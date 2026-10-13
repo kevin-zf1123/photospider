@@ -81,6 +81,6 @@ photospider-daemon
 
 ## 命名与文档
 
-类型使用 `PascalCase`；文件、函数、字段、目录与内部 target 使用 `snake_case`。完整的重命名会同步更新声明、定义、include、测试、CMake、公开文档、镜像与被跟踪的 Issue，且不保留别名。私有 OpenSpec 工作笔记对重命名没有约束力。
+类型使用 `PascalCase`；文件、函数、字段、目录与内部 target 使用 `snake_case`。完整的重命名会同步更新声明、定义、include、测试、CMake、公开文档、镜像与被跟踪的 Issue，且不保留别名。
 
 公共 API 文档说明适用的参数约束、返回值与错误行为、所有权、生命周期、线程安全，以及影响契约的缓存或调度约束。内部注释解释不明显的状态转移、预算归属和回收顺序；普通 helper 无需逐一编写完整 Doxygen。

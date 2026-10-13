@@ -81,6 +81,6 @@ The kernel never depends on daemon source/package targets. Daemon tests install 
 
 ## Naming and documentation
 
-Types use `PascalCase`; files, functions, fields, directories, and internal targets use `snake_case`. A complete rename updates declarations, definitions, includes, tests, CMake, public documents, mirrors, and tracked Issues without aliases. Private OpenSpec working notes have no authority over the rename.
+Types use `PascalCase`; files, functions, fields, directories, and internal targets use `snake_case`. A complete rename updates declarations, definitions, includes, tests, CMake, public documents, mirrors, and tracked Issues without aliases.
 
 Public API documentation describes applicable parameter constraints, return and error behavior, ownership, lifetime, thread-safety, and cache or scheduling constraints when they affect the contract. Internal comments explain non-obvious state transitions, budget ownership, and reclamation order; routine helpers do not each need exhaustive Doxygen documentation.

@@ -73,11 +73,5 @@ scope. They are not future or default-disabled kernel features.
 - Maintainer operational views: GitHub Projects, which mirror Issues and do
   not override them
 
-OpenSpec files in the private personal-overlay repository are maintainer
-working notes. They have no public architecture or delivery authority and do
-not gate implementation, review, or completion. A proposal becomes effective
-only after its accepted decisions and work are recorded in the applicable
-public ADR, current-fact or development document, and GitHub Issue.
-
 English documents are authoritative. Official Chinese mirrors are maintained
 in the matching `zh/` paths.

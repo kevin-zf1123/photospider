@@ -69,7 +69,6 @@ Keep the result, location, actual validation, remaining work, and next action
 concise. Update the Current Development Program when its audited baseline,
 current milestone, critical path, or blocked reason changes, as defined in its
 update rule. Do not duplicate progress in feedback, tracking, and reports.
-Private OpenSpec is explicit-only and supplies no public delivery gate.
 
 Public ADRs record decisions; architecture docs record implemented behavior.
 Update affected English documents and their Chinese mirrors. Research does not
