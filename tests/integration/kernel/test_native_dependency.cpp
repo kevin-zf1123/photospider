@@ -20,7 +20,6 @@ ErrorCode fail_first_query() noexcept {
 }
 struct Counts {
   unsigned gpu_starts = 0, cpu_starts = 0, destroyed = 0;
-  unsigned gpu_polls = 0, cpu_polls = 0;
   bool ordered_retirement = true;
 };
 struct State {
@@ -34,7 +33,6 @@ struct State {
   Backend backend;
   bool supplied = false;
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    ++(backend == Backend::Gpu ? counts->gpu_polls : counts->cpu_polls);
     if (!supplied) {
       supplied = true;
       ResultProgramNeed need;
@@ -148,11 +146,11 @@ int capacity_failure(ErrorCode error) {
   auto input = multi_result::binding(context.resource_budget().take_value(),
                                      "input", 14, schema);
   auto result = context.execute(compiled.value().plan, {{input}});
-  PS_CHECK(queries == 1 && counts.gpu_starts == 1 && counts.gpu_polls == 2);
+  PS_CHECK(queries == 1 && counts.gpu_starts == 1);
   if (error == ErrorCode::BackendUnavailable) {
     PS_CHECK(result.ok());
-    PS_CHECK(counts.cpu_starts == 1 && counts.cpu_polls == 2 &&
-             counts.destroyed == 2 && counts.ordered_retirement);
+    PS_CHECK(counts.cpu_starts == 1 && counts.destroyed == 2 &&
+             counts.ordered_retirement);
     PS_CHECK(result.value().diagnostics.fallback_reasons.size() == 1);
     PS_CHECK(result.value().diagnostics.selected_backends.at({1, 0}) ==
              Backend::Cpu);

@@ -246,8 +246,9 @@ int main(int argc, char** argv) try {
   const auto data = source(root, ElementType::Float32);
   const auto bindings = bind(data, source(root, ElementType::Int64));
   for (bool gpu : {false, true}) {
-    if (gpu && !context.gpu_enabled()) {
-      std::cout << "CPU discovery oracle passed; native skipped\n";
+    if (gpu && (!PS_TEST_HAS_METAL || !context.gpu_enabled())) {
+      std::cout
+          << "CPU discovery oracle passed; Metal unavailable, native skipped\n";
       return 77;
     }
     PlanningOptions options;

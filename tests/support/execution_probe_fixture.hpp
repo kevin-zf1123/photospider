@@ -59,11 +59,4 @@ inline Status register_fallback_probe(OperationRegistry* registry) {
   };
   return registry->register_operation(std::move(operation));
 }
-inline std::shared_ptr<OperationRegistry> make_probe_registry() {
-  auto registry = kernel_registry(false);
-  multi_result::check(register_delay_probe(registry.get()));
-  multi_result::check(register_fallback_probe(registry.get()));
-  multi_result::check(registry->freeze());
-  return registry;
-}
 }  // namespace ps::test

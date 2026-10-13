@@ -23,8 +23,7 @@ allocation hooks into any kernel. Windows/LLP64 is not supported by that binding
 
 NumPy, SciPy and scikit-image are optional for external differential checks.
 Without them those five unittest methods are skipped, and the report says so.
-The retained `common/test_report.json` is a historical environment/run snapshot; it does
-not report validation of the current checkout. New reports go to the requested
+New reports go to the requested
 output path.
 
 ## Files and reproducibility
@@ -41,7 +40,6 @@ output path.
 | `common/golden.json` | Corresponding exact floating hex bits, integer results and expected error categories. |
 | `run_cases.py` | Check hand expectations and immutable golden; evaluate one case or compare normalized candidate output. |
 | `test_oracles.py` | Tests containing analytic vectors, IEEE edge cases, 900 MPFR rational/quadratic certificates, exhaustive and external checks. |
-| `common/test_report.json` | Historical run snapshot, separate from immutable reference values in `common/golden.json`. |
 
 Default verification never rewrites golden. Regeneration is an explicit action,
 and still checks all hand-derived expectations before writing:

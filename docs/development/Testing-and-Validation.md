@@ -73,4 +73,30 @@ Mock/service checks and native GPU checks have separate registrations. Only
 hardware-dependent entries use skip return code 77; a native skip does not
 replace a passing mock/service result. Their software contract may still be covered by deterministic CPU or fault-injection tests, but those do not establish native device execution. Report CPU/mock coverage and actual hardware execution separately.
 
+`test_gpu_c_abi_bridge` runs `test_gpu_c_abi_execution --bridge-only` with
+`kernel`, `integration`, `mock`, `abi` and `gpu` labels. It needs no GPU and has
+no skip code. It checks that invalid writable flags and forged or expired tokens
+are rejected before host callbacks, with valid token translation as a positive
+control. The separate `test_gpu_c_abi_execution` registration covers native
+execution. Run the software bridge check with:
+
+```sh
+cmake --build build/check --target test_gpu_c_abi_execution -j8
+ctest --test-dir build/check -R '^test_gpu_c_abi_bridge$' -LE native --output-on-failure
+```
+
+The MSL integration tests in `tests/integration/kernel/gpu/` run their preceding
+CPU checks on other builds, then skip the native phase unless Metal is compiled
+(`PHOTOSPIDER_ENABLE_METAL` and `APPLE`) and the context has an available GPU.
+Metal unit tests check the actual device backend. Once a native phase is admitted,
+unexpected backend failures remain test failures; they are not converted to skips.
+
 Tests assert observable values, error categories, resource limits, cancellation, publication, and ownership behavior. Cache internals such as block-cache hit counts are implementation details; performance benchmarking is tracked separately from this behavior suite.
+
+Negative cases isolate one invalid condition while keeping other inputs valid,
+so another rejection cannot satisfy the same structured error assertion. Error
+propagation tests compare the captured original `Status`, including its message,
+instead of hard-coding generated English text. Exact counts remain appropriate for
+specified charges and direct lifecycle events. Where the contract specifies only
+an upper bound, assert that bound and exercise an explicit rejection; use actual
+computation and ownership observations to establish reuse and retirement.

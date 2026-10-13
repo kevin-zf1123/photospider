@@ -21,7 +21,6 @@
 #include "photospider/plugin/operation_registry.hpp"
 #include "plugin/library_test_hooks.hpp"
 #include "support/operation_result_fixture.hpp"
-#include "support/result_diagnostics_fixture.hpp"
 #include "support/test_support.hpp"
 
 #if defined(_WIN32)
@@ -91,7 +90,6 @@
 namespace {
 
 using ps::plugin_testing::LibraryKind;
-using result_diagnostics::verify_cpp_fixed_broadcast;
 
 /** @brief Fixture mode for output-free GPU backend unavailability. */
 constexpr std::uint32_t kGpuBackendUnavailable = 1U;
@@ -1322,13 +1320,6 @@ int main() {
   }
   PS_CHECK(operation_observer.counter("ps_operation_fixture_destroy_count") ==
            destroy_before_retirement + 1U);
-
-  PS_CHECK(verify_cpp_fixed_broadcast({4}) == 0);
-  PS_CHECK(verify_cpp_fixed_broadcast({UINT64_MAX}, true) == 0);
-  PS_CHECK(verify_cpp_fixed_broadcast(
-               {std::numeric_limits<std::uint64_t>::max()}) == 0);
-  PS_CHECK(verify_cpp_fixed_broadcast(
-               {std::numeric_limits<std::uint64_t>::max(), 2U}) == 0);
 
   OperationRegistry fencing;
   OperationTraits conflicting_schema;

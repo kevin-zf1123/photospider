@@ -9,9 +9,9 @@ photospider_add_kernel_test(test_whole_needs Photospider::kernel tests/integrati
 photospider_add_kernel_test(test_tile_demand Photospider::kernel tests/integration/kernel/test_tile_demand.cpp)
 photospider_add_kernel_test(test_result_schema_validation Photospider::kernel tests/integration/kernel/test_result_schema_validation.cpp)
 
-photospider_add_result_table_fixture(result_field_need_fixture tests/fixtures/result_field_need_fixture.c)
 photospider_add_kernel_test(test_result_c_fields Photospider::kernel tests/integration/kernel/test_result_c_fields.cpp)
-target_compile_definitions(test_result_c_fields PRIVATE PS_RESULT_FIXTURE="$<TARGET_FILE:result_field_need_fixture>")
+target_compile_definitions(test_result_c_fields PRIVATE PS_RESULT_FIXTURE="$<TARGET_FILE:result_operation_fixture>")
+add_dependencies(test_result_c_fields result_operation_fixture)
 photospider_add_result_table_fixture(result_tile_need_fixture tests/fixtures/result_tile_need_fixture.c)
 photospider_add_kernel_test(test_result_c_tiles Photospider::kernel tests/integration/kernel/test_result_c_tiles.cpp)
 target_compile_definitions(test_result_c_tiles PRIVATE PS_RESULT_TILE_NEED_FIXTURE="$<TARGET_FILE:result_tile_need_fixture>")
@@ -303,6 +303,8 @@ photospider_add_kernel_test(test_gpu_c_abi_execution Photospider::kernel tests/i
 target_compile_definitions(test_gpu_c_abi_execution PRIVATE PS_GPU_DEPENDENCY_PLUGIN="$<TARGET_FILE:gpu_dependency_c_fixture>")
 add_dependencies(test_gpu_c_abi_execution gpu_dependency_c_fixture)
 set_tests_properties(test_gpu_c_abi_execution PROPERTIES SKIP_RETURN_CODE 77)
+photospider_register_test(NAME test_gpu_c_abi_bridge SUITE kernel LEVEL integration
+  COMMAND test_gpu_c_abi_execution --bridge-only LABELS mock abi gpu)
 photospider_add_kernel_test(test_gpu_fragment_execution Photospider::kernel tests/integration/kernel/gpu/test_gpu_fragment_execution.cpp)
 set_tests_properties(test_gpu_fragment_execution PROPERTIES SKIP_RETURN_CODE 77)
 
@@ -406,6 +408,12 @@ photospider_add_kernel_test(test_result_metadata_cache Photospider::kernel tests
 
 set_property(TEST test_result_gpu_service test_result_discovery_decoder
   APPEND PROPERTY LABELS mock gpu)
+# These native phases use MSL. Other builds still run their preceding CPU checks.
+foreach(_test IN ITEMS test_gpu_c_abi_execution test_gpu_discovery_workflow
+    test_gpu_fragment_execution test_gpu_sync_fallback)
+  target_compile_definitions(${_test} PRIVATE
+    PS_TEST_HAS_METAL=$<AND:$<BOOL:${PHOTOSPIDER_ENABLE_METAL}>,$<BOOL:${APPLE}>>)
+endforeach()
 set_property(TEST
   test_native_dependency test_vulkan_gpu test_native_execution
   test_gpu_discovery_workflow test_gpu_sync_fallback test_gpu_c_abi_execution
@@ -415,6 +423,7 @@ set_property(TEST
 set_property(TEST test_vulkan_gpu APPEND PROPERTY LABELS vulkan)
 set_property(TEST test_native_gpu test_fragment_atlas_gpu
   test_gpu_discovery_workflow test_gpu_c_abi_execution test_gpu_fragment_execution
+  test_gpu_sync_fallback
   APPEND PROPERTY LABELS metal)
 set_property(TEST
   test_result_c_fields test_result_c_tiles test_result_c_abi

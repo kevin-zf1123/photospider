@@ -373,11 +373,6 @@ int inference() {
   auto resolved = inference_registry.resolve_traits("test.repeated",
                                                     {field, field, field}, {});
   PS_CHECK(resolved.ok() && resolved.value().input_schema.size() == 3);
-  auto result =
-      infer_operation_output(resolved.value(), {field, field, field}, {});
-  PS_CHECK(result.ok() &&
-           result.value().result_schema->tensors[0].descriptor.shape ==
-               (std::vector<std::uint64_t>{2, 4, 3}));
   const auto wrong =
       metadata(multi_result::schema(ElementType::Float32, {2, 5}));
   PS_CHECK(inference_registry

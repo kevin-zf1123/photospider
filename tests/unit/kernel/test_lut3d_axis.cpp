@@ -45,36 +45,32 @@ int main() {
   struct AxisCase {
     std::uint64_t first, last, step;
     unsigned count;
-    const char* failure;
+    bool rejected;
   };
   const AxisCase cases[] = {
-      {0, one, half, 3, nullptr},
-      {one, 0, sign | half, 3, nullptr},
-      {sign, one, one, 2, nullptr},
-      {one, sign, sign | one, 2, nullptr},
-      {sign | maximum, maximum, maximum, 3, nullptr},
-      {maximum, sign | maximum, sign | maximum, 3, nullptr},
-      {sign | 2, 1, 2, 3, nullptr},
-      {UINT64_C(0x000fffffffffffff), UINT64_C(0x0010000000000001), 1, 3,
-       nullptr},
-      {0, sign, 0, 2, "axis endpoints must differ"},
-      {sign | maximum, maximum, maximum, 2,
-       "axis component=2 inconsistent or unrepresentable step"},
-      {0, 1, 0, 3, "axis component=2 inconsistent or unrepresentable step"},
-      {sign | 1, 1, 1, 4, "non-strict reconstructed axis knot=2"},
-      {one, one + 1, half_ulp, 3, "non-strict reconstructed axis knot=1"},
-      {one + 1, one, sign | half_ulp, 3,
-       "non-strict reconstructed axis knot=2"}};
+      {0, one, half, 3, false},
+      {one, 0, sign | half, 3, false},
+      {sign, one, one, 2, false},
+      {one, sign, sign | one, 2, false},
+      {sign | maximum, maximum, maximum, 3, false},
+      {maximum, sign | maximum, sign | maximum, 3, false},
+      {sign | 2, 1, 2, 3, false},
+      {UINT64_C(0x000fffffffffffff), UINT64_C(0x0010000000000001), 1, 3, false},
+      {0, sign, 0, 2, true},
+      {sign | maximum, maximum, maximum, 2, true},
+      {0, 1, 0, 3, true},
+      {sign | 1, 1, 1, 4, true},
+      {one, one + 1, half_ulp, 3, true},
+      {one + 1, one, sign | half_ulp, 3, true}};
   for (const auto& axis : cases) {
     Fixture fixture(axis.first, axis.last, axis.step, axis.count);
     auto status =
         fixture.validate([](std::uint64_t) { return ps::Status::success(); });
-    if (axis.failure) {
+    if (axis.rejected) {
       PS_CHECK(status.code == ps::ErrorCode::OperationFailed &&
                status.reason == ps::FailureReason::InvalidDomain &&
                status.detail.origin == ps::FailureOrigin::Domain &&
-               status.detail.scope == ps::FailureScope::Group &&
-               status.message == axis.failure);
+               status.detail.scope == ps::FailureScope::Group);
     } else {
       PS_REQUIRE_OK(status);
       PS_CHECK(ps::core_internal::binary64_bits(fixture.report.axis[0]) ==
@@ -115,10 +111,19 @@ int main() {
            sentinel.message);
   Fixture nonfinite(0, 0, infinity, 2);
   charges.clear();
-  PS_CHECK(nonfinite.validate(work).message == "nonfinite axis component=2");
+  const auto nonfinite_status = nonfinite.validate(work);
+  PS_CHECK(nonfinite_status.code == ps::ErrorCode::OperationFailed &&
+           nonfinite_status.reason == ps::FailureReason::InvalidDomain &&
+           nonfinite_status.detail.origin == ps::FailureOrigin::Domain &&
+           nonfinite_status.detail.scope == ps::FailureScope::Group);
   PS_CHECK(charges.empty());
-  PS_CHECK(nonfinite.validate(work, 2).message ==
-           "invalid measured LUT3D report values");
+  Fixture invalid_flag(0, one, half, 3);
+  charges.clear();
+  const auto malformed = invalid_flag.validate(work, 2);
+  PS_CHECK(malformed.code == ps::ErrorCode::OperationFailed &&
+           malformed.reason == ps::FailureReason::InvalidDomain &&
+           malformed.detail.origin == ps::FailureOrigin::Domain &&
+           malformed.detail.scope == ps::FailureScope::Group);
   PS_CHECK(charges.empty());
   Fixture domain_work(0, one, half, 3);
   auto domain = domain_work.validate([](std::uint64_t) {

@@ -143,7 +143,8 @@ int run(const std::shared_ptr<gpu_internal::Device>& device,
 }  // namespace
 int main() {
   auto device = ps::gpu_internal::Device::create();
-  if (!device || !device->available()) {
+  if (!device || !device->available() ||
+      device->backend() != PS_GPU_BACKEND_METAL_V1) {
     std::cout << "SKIP: native Metal unavailable\n";
     return 77;
   }

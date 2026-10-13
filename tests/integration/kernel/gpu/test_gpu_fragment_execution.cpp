@@ -555,8 +555,9 @@ int main() try {
   ExecutionContext context(registry, config);
   const auto bindings = inputs(take(context.resource_budget()));
   for (bool gpu : {false, true}) {
-    if (gpu && !context.gpu_enabled()) {
-      std::cout << "CPU oracle passed; native workflow skipped\n";
+    if (gpu && (!PS_TEST_HAS_METAL || !context.gpu_enabled())) {
+      std::cout
+          << "CPU oracle passed; Metal unavailable, native workflow skipped\n";
       return 77;
     }
     PlanningOptions planning;

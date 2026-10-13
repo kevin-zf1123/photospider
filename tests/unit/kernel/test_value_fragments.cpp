@@ -24,7 +24,7 @@ int bounded_read() {
   PS_CHECK(created.ok());
   const auto& fragments = created.value();
   PS_CHECK(fragments.fragments().size() == count);
-  // Every independent allocation remains a separate lookup candidate.
+  // The public lookup contract bounds work without fixing search order.
   constexpr std::uint64_t bound = 2 + 4 + (1 + count) * 2;
   std::uint64_t charged = 0, calls = 0;
   FootprintLimits limits;
@@ -36,12 +36,23 @@ int bounded_read() {
   };
   std::uint8_t destination = 17;
   PS_CHECK(fragments.read({count - 1}, &destination, 1, limits).ok());
-  PS_CHECK(destination == 255 && charged == bound && calls == count + 3);
+  PS_CHECK(destination == 255 && charged > 0 && charged <= bound);
   destination = 17;
-  limits.maximum_work = bound - 1;
+  limits.maximum_work = 0;
   PS_CHECK(fragments.read({count - 1}, &destination, 1, limits).code ==
            ErrorCode::ResourceExhausted);
   PS_CHECK(destination == 17);
+  limits.maximum_work = bound;
+  calls = 0;
+  limits.consume_work = [&](std::uint64_t) {
+    ++calls;
+    return Status{ErrorCode::ResourceExhausted, "lookup work refused",
+                  FailureReason::WorkLimit};
+  };
+  const auto refused = fragments.read({count - 1}, &destination, 1, limits);
+  PS_CHECK(refused.code == ErrorCode::ResourceExhausted &&
+           refused.reason == FailureReason::WorkLimit && calls == 1 &&
+           destination == 17);
   CancellationSource cancellation;
   limits.maximum_work = bound;
   limits.cancellation = cancellation.token();

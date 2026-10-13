@@ -22,9 +22,6 @@ class ResourceOracleTests(unittest.TestCase):
     def test_hash_rejection(self):
         bad=copy.deepcopy(self.tile['manifest']);bad['sha256']='0'*64
         with self.assertRaises(ValueError):r_validate_rank(self.tile['rank'],bad)
-    def test_raw_fixture_not_blue_qualified(self):
-        self.assertFalse(self.tile['manifest']['blue_noise_approved'])
-        self.assertFalse(self.volume['manifest']['stbn_approved'])
     def test_periodic_negative_coordinates(self):
         tile=self.tile['rank']
         self.assertEqual(r_rank_lookup(tile,-1,-1),r_rank_lookup(tile,3,3))

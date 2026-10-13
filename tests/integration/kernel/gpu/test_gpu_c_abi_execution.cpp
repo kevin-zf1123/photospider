@@ -99,15 +99,107 @@ bool unit_query(const OperationRegistry& registry, const ResourceBudget& root) {
          !need->tiles[0].whole && !need->tiles[0].descriptor_only &&
          need->tiles[0].tiles == point(0).tiles;
 }
+struct HostCalls {
+  unsigned buffers = 0, executions = 0, releases = 0;
+  bool translated = true;
+  static constexpr std::uint64_t token = UINT64_C(0x123456789abcdef0);
+};
+bool bridge_rejections(const OperationRegistry& registry) {
+  for (std::int64_t mode : {18, 19, 20, 21, 22, 23}) {
+    ResourceBudget root;
+    HostCalls calls;
+    ps_gpu_service_v1 gpu{};
+    gpu.struct_size = sizeof(gpu);
+    gpu.abi_version = PS_GPU_ABI_VERSION_1;
+    gpu.backend = PS_GPU_BACKEND_METAL_V1;
+    gpu.context = &calls;
+    gpu.buffer = [](void* context, const std::uint8_t*, std::uint64_t,
+                    std::uint32_t, std::uint64_t* token) {
+      ++static_cast<HostCalls*>(context)->buffers;
+      *token = HostCalls::token;
+      return 0;
+    };
+    gpu.execute = [](void* context, const ps_gpu_dispatch_v1* commands,
+                     std::uint32_t count) {
+      auto& host = *static_cast<HostCalls*>(context);
+      ++host.executions;
+      host.translated = host.translated && count == 1 && commands &&
+                        commands[0].buffer_count == 1 && commands[0].buffers &&
+                        commands[0].buffers[0].token == HostCalls::token;
+      return 0;
+    };
+    gpu.release = [](void* context, std::uint64_t token) {
+      auto& host = *static_cast<HostCalls*>(context);
+      ++host.releases;
+      host.translated = host.translated && token == HostCalls::token;
+      return 0;
+    };
+    {
+      ResultProgramMetadata metadata;
+      metadata.output.result_schema =
+          std::make_shared<const SchemaTemplate>(schema());
+      metadata.inputs.push_back(metadata.output);
+      const std::map<std::string, ParameterValue> parameters{{"mode", mode}};
+      ResultProgramQuery query(metadata, parameters);
+      query.backend = Backend::Gpu;
+      query.tile_extent = 1;
+      query.tile_unit = 0;
+      query.output_request = point(0);
+      query.semantic_key = "example.c_native_sum";
+      auto continuation = take(registry.start_result(
+          std::string(query.semantic_key), query, root.allocator()));
+      ResultObjectInputs objects;
+      const auto allocator = root.allocator();
+      ResultProgramPhase phase{
+          query,
+          objects,
+          allocator,
+          root,
+          [&](std::uint64_t work) { return root.consume({work}); },
+          std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok)};
+      phase.gpu = &gpu;
+      auto result = continuation.poll(phase);
+      if (mode == 21 || mode == 22) {
+        if (!result.ok() ||
+            !std::holds_alternative<ResultProgramNeed>(result.value()) ||
+            calls.buffers != 1 || calls.executions || calls.releases)
+          return false;
+        result = continuation.poll(phase);
+      }
+      if (mode == 23) {
+        if (!result.ok() ||
+            !std::holds_alternative<ResultProgramNeed>(result.value()) ||
+            calls.buffers != 1 || calls.executions != 1 ||
+            calls.releases != 1 || !calls.translated)
+          return false;
+      } else {
+        if (result.ok() || result.status().code != ErrorCode::InvalidArgument ||
+            calls.buffers != (mode >= 21 ? 1U : 0U) || calls.executions ||
+            calls.releases)
+          return false;
+      }
+    }
+    if (root.statistics().live[ResourceKind::Payload] != 0)
+      return false;
+  }
+  return true;
+}
 }  // namespace
 int main(int argc, char** argv) try {
+  const bool bridge_only = argc > 1 && std::string(argv[1]) == "--bridge-only";
+  const int plugin_argument = bridge_only ? 2 : 1;
   auto registry = std::make_shared<OperationRegistry>();
   const auto status =
-      registry->load_plugin(argc > 1 ? argv[1] : PS_GPU_DEPENDENCY_PLUGIN);
+      registry->load_plugin(argc > plugin_argument ? argv[plugin_argument]
+                                                   : PS_GPU_DEPENDENCY_PLUGIN);
   if (!status.ok())
     std::cerr << status.message << '\n';
   if (check(status.ok() && registry->freeze().ok(), "C plugin load failed"))
     return 1;
+  if (bridge_only)
+    return check(bridge_rejections(*registry),
+                 "C GPU bridge forwarded an invalid request or lost token "
+                 "translation");
   ExecutionContextConfig config;
   config.gpu_enabled = true;
   config.result_cache_bytes = 1048576;
@@ -117,8 +209,8 @@ int main(int argc, char** argv) try {
     return 1;
   const auto bindings = inputs(take(context.resource_budget()));
   for (bool gpu : {false, true}) {
-    if (gpu && !context.gpu_enabled()) {
-      std::cout << "C CPU oracle passed; native skipped\n";
+    if (gpu && (!PS_TEST_HAS_METAL || !context.gpu_enabled())) {
+      std::cout << "C CPU oracle passed; Metal unavailable, native skipped\n";
       return 77;
     }
     GraphContext graph(document(0));
@@ -230,15 +322,6 @@ int main(int argc, char** argv) try {
                             .live[ResourceKind::Payload] == length * 4 &&
                     fresh.cache_statistics().entries == 0,
                 "C failed Result retained payload or cached output"))
-        return 1;
-      if (mode == 3 &&
-          check(failed.status().message == "invalid C native view destination",
-                "C writable flag was not rejected by the bridge"))
-        return 1;
-      if ((mode == 1 || mode == 5) &&
-          check(failed.status().message ==
-                    "native token is not from current C poll",
-                "C stale/forged token did not fail in bridge"))
         return 1;
       auto retry_frozen =
           fresh.freeze(compiled.value().plan, fresh_bindings).take_value();

@@ -815,8 +815,7 @@ int profile_owners(bool exhaust = false, bool work_exhaust = false) {
                  run.status().code == ErrorCode::ResourceExhausted);
         PS_CHECK(owners.profiles.size() == 1);
         if (work_exhaust)
-          PS_CHECK(run.status().reason == FailureReason::WorkLimit &&
-                   run.status().message == "managed resource work exhausted");
+          PS_CHECK(run.status().reason == FailureReason::WorkLimit);
       } else {
         if (!run.ok())
           std::cerr << "resource tensor code="

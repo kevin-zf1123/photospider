@@ -30,16 +30,14 @@ struct NullDiagnostic final : std::exception {
 bool expected(const Status& status, unsigned mode, bool sticky) {
   if (sticky || mode == 2)
     return status.code == ErrorCode::ResourceExhausted;
-  const char* message = mode == 0 ? "Result fixture exception"
-                        : mode == 1
-                            ? ""
-                            : "operation raised a nonstandard exception";
+  const char* message = mode == 0 ? "Result fixture exception" : "";
   return status.code == ErrorCode::OperationFailed &&
          status.reason == FailureReason::HostException &&
-         status.message == message;
+         (mode == 3 || status.message == message);
 }
 struct Counts {
   unsigned polls = 0, destroyed = 0, scalar_starts = 0;
+  Status service_failure;
 };
 struct ThrowingState {
   unsigned mode;
@@ -144,6 +142,7 @@ struct ServiceFailure {
     ++counts->polls;
     double value = 0;
     auto failed = phase.read_tensor(0, 0, {0}, &value, sizeof(value));
+    counts->service_failure = failed;
     if (mode == 0)
       return Result<ResultProgramPoll>(failed);
     if (mode == 1)
@@ -190,7 +189,12 @@ int direct_service_failure(unsigned mode) {
     PS_CHECK(result.status().reason == FailureReason::UnauthorizedRead);
     PS_CHECK(result.status().detail.origin == FailureOrigin::Protocol);
     PS_CHECK(result.status().detail.scope == FailureScope::Group);
-    PS_CHECK(result.status().message == "missing authorized image input");
+    const auto& original = counts.service_failure;
+    PS_CHECK(!original.ok() && result.status().code == original.code &&
+             result.status().reason == original.reason &&
+             result.status().detail.origin == original.detail.origin &&
+             result.status().detail.scope == original.detail.scope &&
+             result.status().message == original.message);
   }
   PS_CHECK(continuation.poll(phase).status().code ==
            ErrorCode::InvalidArgument);

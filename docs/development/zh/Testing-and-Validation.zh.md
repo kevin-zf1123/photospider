@@ -62,4 +62,25 @@ Mock/service 检查与原生 GPU 检查分别注册；只有依赖硬件的注�
 原生检查跳过时，mock/service 的通过结果仍独立记录。确定性的 CPU 或故障注入检查
 不构成原生设备执行证据，应分别报告两类覆盖。
 
+`test_gpu_c_abi_bridge` 以 `test_gpu_c_abi_execution --bridge-only` 运行，标签为
+`kernel`、`integration`、`mock`、`abi`、`gpu`。它不需要 GPU，也没有 skip code。
+它检查非法 writable 标志、伪造或过期 token 在调用 host callback 前被拒绝，并用
+合法 token 翻译作为正向对照。独立的 `test_gpu_c_abi_execution` 注册项覆盖原生执行。
+软件 bridge 检查可单独运行：
+
+```sh
+cmake --build build/check --target test_gpu_c_abi_execution -j8
+ctest --test-dir build/check -R '^test_gpu_c_abi_bridge$' -LE native --output-on-failure
+```
+
+`tests/integration/kernel/gpu/` 中的 MSL 集成测试在其他构建中仍运行前面的 CPU 检查，
+随后仅在编译了 Metal（`PHOTOSPIDER_ENABLE_METAL` 与 `APPLE` 均成立）且 context 有
+可用 GPU 时进入原生阶段。Metal 单元测试检查实际设备后端。原生阶段接纳后出现的
+非预期 backend 错误仍算测试失败，不转换成跳过。
+
 测试检查可观察的数值、错误类别、资源限制、取消、发布和所有权行为。Block-cache 命中数等缓存内部计数属于实现细节；性能基准与行为测试分开处理。
+
+负向案例只设置一个非法条件，其余输入保持合法，防止另一项拒绝满足相同的结构化
+错误断言。错误传播测试比较捕获的原始 `Status`，包括 message，避免固定生成的
+英文文案。契约规定的收费和直接生命周期事件仍适合检查精确计数；契约仅规定上界时，
+检查该上界并显式触发拒绝。通过实际计算和所有权观察验证复用及退休行为。

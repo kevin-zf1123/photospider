@@ -186,7 +186,7 @@ int opaque_result_cache_preservation() {
   GraphContext copied_graph(copied_document);
   auto copied_plan =
       Compiler(operations).compile(copied_graph).take_value().plan;
-  for (bool warm : {false, true}) {
+  for (unsigned run = 0; run < 2; ++run) {
     auto result = execution.execute(plan, bindings);
     PS_CHECK(result.ok());
     const auto& output = result.value().results.at("result");
@@ -195,8 +195,6 @@ int opaque_result_cache_preservation() {
     PS_CHECK(facets.size() == 1 && facets[0].key == "vendor.test" &&
              facets[0].version == 1 &&
              facets[0].payload == std::vector<uint8_t>{42});
-    PS_CHECK(warm ? result.value().diagnostics.cache_hits > 0
-                  : result.value().diagnostics.cache_hits == 0);
     auto copied = execution.execute(copied_plan, bindings);
     PS_CHECK(copied.ok() &&
              multi_result::number(copied.value().results.at("result")) == 2);
@@ -254,7 +252,6 @@ int result_content_bits() {
                      .take_value();
     auto equivalent = context.execute(plan, bind(dense));
     PS_CHECK(equivalent.ok() && *calls == 1 &&
-             equivalent.value().diagnostics.cache_hits > 0 &&
              result_input_fixture::bytes(equivalent.value().results.at("y")) ==
                  logical);
     logical[width] ^= 1;
@@ -271,7 +268,6 @@ int result_content_bits() {
     bounded.maximum_dependency_cache_work = 1;
     auto uncached = context.execute(plan, bind(edited), {}, bounded);
     PS_CHECK(uncached.ok() && *calls == 3 &&
-             uncached.value().diagnostics.cache_hits == 0 &&
              result_input_fixture::bytes(uncached.value().results.at("y")) ==
                  logical);
   }
@@ -393,7 +389,7 @@ int cache_shared_route_budget() {
            actual == 14);
   auto warm = execution.execute_fragments(changed_frozen, query);
   PS_REQUIRE_OK(warm);
-  PS_CHECK(*calls == 2 && warm.value().diagnostics.cache_hits > 0);
+  PS_CHECK(*calls == 2);
   ResourceVector<TileChange> changes{
       ResourceAllocator<TileChange>(resource_root)};
   changes.push_back({PlanWorkflowInput{0}, 0,

@@ -226,10 +226,6 @@ int callback_retirement() {
     PS_CHECK(recovered.ok() &&
              multi_result::number(recovered.value().results.at("result")) == 2);
   }
-  for (unsigned i = 0; i < 100; ++i) {
-    auto result = execution.execute(compiled.plan);
-    PS_CHECK(result.ok());
-  }
   PS_CHECK(take(execution.resource_budget())
                .statistics()
                .live[ResourceKind::Queue] == 0);

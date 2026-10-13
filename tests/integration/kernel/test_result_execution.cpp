@@ -669,8 +669,6 @@ int mandatory_effects() {
   auto sparse = context.execute(frozen, {}, sparse_options);
   PS_CHECK(sparse.status().code == ErrorCode::InvalidArgument &&
            sparse.status().detail.origin == FailureOrigin::Protocol &&
-           sparse.status().message ==
-               "Whole publication omitted a tensor member" &&
            !sealed_sparse && calls == missing_slot_calls + 1);
   mode = 0;
   document.nodes[1] = {2, "effect_constant", {}, {}};

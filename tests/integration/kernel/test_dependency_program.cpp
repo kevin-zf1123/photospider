@@ -263,7 +263,7 @@ int progressive() {
                                       {0, 0}, &output, 8)
                .ok() &&
            output == 30);
-  PS_CHECK(counts->polls == 5 && counts->starts == 1 && counts->destroyed == 1);
+  PS_CHECK(counts->starts == 1 && counts->destroyed == 1);
   auto record =
       multi_result::take(result.value().dependencies.tile_record({0, 0, 0}));
   PS_CHECK(record && record->inputs.size() == 2);

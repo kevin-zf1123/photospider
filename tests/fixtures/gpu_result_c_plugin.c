@@ -152,6 +152,52 @@ static int invalid_token(const ps_result_services_v3* host, uint64_t token) {
   host->gpu->execute(host->gpu->context, &command, 1);
   return 1;
 }
+/* Direct mock-host probes isolate bridge rejection from backend validation.
+ * 18: invalid writable; 19/20: forged execute/release token;
+ * 21/22: expired execute/release token; 23: valid same-poll translation. */
+static int bridge_probe(struct State* state, const ps_result_query_v3* q,
+                        const ps_result_services_v3* host) {
+  if (state->mode == 18) {
+    uint8_t* scratch = NULL;
+    uint64_t token = 0;
+    if (host->allocate_scratch(host->context, 4, &scratch))
+      return 1;
+    host->gpu->buffer(host->gpu->context, scratch, 4, 2, &token);
+    return 1;
+  }
+  if (state->mode >= 21 && !state->stage) {
+    uint8_t* scratch = NULL;
+    if (host->allocate_scratch(host->context, 4, &scratch) ||
+        host->gpu->buffer(host->gpu->context, scratch, 4, 1, &state->old_token))
+      return 1;
+    state->stage = 1;
+    if (state->mode != 23)
+      return need(host, q, state, 0);
+  }
+  const uint64_t token = state->mode < 21 ? UINT64_MAX : state->old_token;
+  if (state->mode == 20 || state->mode == 22) {
+    host->gpu->release(host->gpu->context, token);
+    return 1;
+  }
+  const ps_gpu_buffer_binding_v1 binding = {sizeof(binding), 0, token, 0, 4, 0};
+  const char source[] =
+      "#include <metal_stdlib>\nusing namespace metal;\n"
+      "kernel void noop(device const uint* in [[buffer(0)]]) {}";
+  ps_gpu_dispatch_v1 command = {0};
+  command.struct_size = sizeof(command);
+  command.source = source;
+  command.source_size = sizeof(source) - 1;
+  command.entry = "noop";
+  command.entry_size = 4;
+  command.buffers = &binding;
+  command.buffer_count = 1;
+  command.grid[0] = command.grid[1] = command.grid[2] = 1;
+  if (host->gpu->execute(host->gpu->context, &command, 1))
+    return 1;
+  if (state->mode != 23 || host->gpu->release(host->gpu->context, token))
+    return 1;
+  return need(host, q, state, 0);
+}
 static int poll(void* user, void* bytes, const ps_result_query_v3* q,
                 const ps_result_services_v3* host) {
   (void)user;
@@ -161,6 +207,8 @@ static int poll(void* user, void* bytes, const ps_result_query_v3* q,
   const uint32_t requested_count =
       q->requested.whole || q->requested.tile_count ? 1 : 0;
   struct State* state = bytes;
+  if (state->mode >= 18)
+    return bridge_probe(state, q, host);
   if (!state->stage) {
     if (host->begin_result(host->context))
       return 1;
@@ -357,7 +405,7 @@ static const ps_result_output_v3 output = {
     .execution = PS_RESULT_REGIONAL_V3};
 static const ps_result_parameter_descriptor_v3 parameters[] = {
     {sizeof(ps_result_parameter_descriptor_v3), "mode", 4,
-     PS_RESULT_PARAMETER_INT64_V3, 1, 1, 0, 17}};
+     PS_RESULT_PARAMETER_INT64_V3, 1, 1, 0, 23}};
 static int resolve(void* user, const ps_result_port_v3* inputs, uint32_t count,
                    const ps_result_parameter_value_v3* values,
                    uint32_t value_count, const ps_result_port_v3* outputs,

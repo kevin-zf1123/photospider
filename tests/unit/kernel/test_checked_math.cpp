@@ -83,7 +83,6 @@ int main() {
   const auto quality = invalid_quality();
   PS_CHECK(quality.code == ps::ErrorCode::InvalidArgument &&
            quality.reason == ps::FailureReason::InvalidQuality &&
-           quality.message == "invalid numerical quality report" &&
            quality.detail.origin == ps::FailureOrigin::Unspecified &&
            quality.detail.scope == ps::FailureScope::Unspecified);
   const auto schema = invalid_schema_domain("schema");

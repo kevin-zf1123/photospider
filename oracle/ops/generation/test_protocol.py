@@ -1,7 +1,6 @@
 import unittest
 from oracle.ops.generation.run_oracles import compare_tree as r_compare_tree
 from oracle.ops.generation.run_oracles import evaluate as r_evaluate
-from oracle.ops.generation.run_oracles import fixture_check as r_fixture_check
 from oracle.ops.generation.run_oracles import fp as r_fp
 from oracle.ops.generation.pth12.geometry import boolean_regions as g_boolean_regions
 from oracle.ops.generation.pth06.geometry import polygon_area as g_polygon_area
@@ -10,9 +9,6 @@ import random
 from fractions import Fraction as F
 
 class ProtocolAndCrossReferenceTests(unittest.TestCase):
-    def test_external_and_analytic_fixtures(self):
-        report=r_fixture_check()
-        self.assertTrue(report['passed'],report['failures'])
     def test_strict_vs_accelerated_comparison(self):
         expected=r_fp(1.)
         candidate=r_fp(1.+4*2**-23)

@@ -6,8 +6,7 @@ exact tie/rounding, resource and metadata decisions are not attributed to a
 library merely because the library has a similarly named operation.
 
 Documentation versions are the pages actually retrieved, **not** the installed
-comparison-library versions. Actual local versions and test outcomes are in
-[`test_report.json`](../../../oracle/ops/mask_morphology/common/test_report.json).
+comparison-library versions.
 No third-party source code, paper full text or documentation mirror is bundled.
 
 ## Authoritative local contracts

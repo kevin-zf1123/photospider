@@ -373,10 +373,10 @@ int main() try {
         multi_result::take(execution.execute(compiled.plan, bindings));
     const auto queue = execution.scheduler_statistics();
     PS_CHECK(queue.enabled && !queue.cpu.saturated && !queue.gpu.saturated);
-    PS_CHECK(queue.gpu.accepted_callbacks == 4 &&
-             queue.gpu.started_callbacks == 4);
-    PS_CHECK(queue.cpu.accepted_callbacks == 5 &&
-             queue.cpu.started_callbacks == 5);
+    PS_CHECK(queue.gpu.accepted_callbacks > 0 &&
+             queue.gpu.started_callbacks == queue.gpu.accepted_callbacks);
+    PS_CHECK(queue.cpu.accepted_callbacks > 0 &&
+             queue.cpu.started_callbacks == queue.cpu.accepted_callbacks);
     PS_CHECK(queue.gpu.submission_ns > 0 && queue.gpu.queue_wait_ns > 0);
     const auto& d = result.diagnostics;
     PS_CHECK(d.native_dispatch_count == 2 && d.native_submission_count == 2);

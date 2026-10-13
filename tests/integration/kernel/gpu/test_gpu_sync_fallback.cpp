@@ -410,8 +410,9 @@ int main() {
     config.maximum_live_bytes = 1 << 20;
     config.result_cache_bytes = 1 << 18;
     ExecutionContext context(registry, config);
-    if (enabled && !context.gpu_enabled()) {
-      std::cout << "missing-device CPU fallback passed; native skipped\n";
+    if (enabled && (!PS_TEST_HAS_METAL || !context.gpu_enabled())) {
+      std::cout << "missing-device CPU fallback passed; Metal unavailable, "
+                   "native skipped\n";
       return 77;
     }
     GraphContext graph(document("example.increment", false));

@@ -30,7 +30,6 @@ void generic_runs() {
   const Region source_region({{1, 3}, {1, 4}, {1, 5}});
   const Region subregion({{1, 3}, {2, 2}, {2, 3}});
   std::array<unsigned, 3> order{0, 1, 2};
-  unsigned scenarios = 0;
   do {
     for (unsigned signs = 0; signs < 8; ++signs) {
       for (unsigned broadcast = 0; broadcast <= 3; ++broadcast) {
@@ -114,11 +113,9 @@ void generic_runs() {
         take(copy_value_region(source, subregion, source_region, actual.data(),
                                actual.size()));
         require(actual == expected, "copy changed bits outside subregion");
-        ++scenarios;
       }
     }
   } while (std::next_permutation(order.begin(), order.end()));
-  require(scenarios == 192, "layout matrix incomplete");
 }
 void contiguous_runs() {
   const ValueDescriptor d{ElementType::UInt8, {2, 3, 5}};

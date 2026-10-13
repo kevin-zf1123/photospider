@@ -220,7 +220,8 @@ int main() {
   PS_CHECK(allocation_capacity(INT64_MAX - UINT64_C(16383)) == 0);
   PS_CHECK(allocation_capacity(UINT64_MAX) == 0);
   auto device = Device::create();
-  if (!device) {
+  if (!device || !device->available() ||
+      device->backend() != PS_GPU_BACKEND_METAL_V1) {
     std::cout << "Metal unavailable: native hardware tests skipped\n";
     return 77;
   }

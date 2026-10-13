@@ -12,9 +12,9 @@
 #include <utility>
 #include <vector>
 
-#include "support/unified_result_fixture.hpp"
 #include "photospider/photospider.hpp"
 #include "support/bad_result_table_fixture.hpp"
+#include "support/unified_result_fixture.hpp"
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
 void require(bool condition, std::string_view message) {
@@ -1238,8 +1238,10 @@ void c_whole_view_policies() {
         const auto before = counts(1);
         auto rejected = run();
         require(!rejected.ok() &&
-                    rejected.status().message.find("ViewUnavailable") !=
-                        std::string::npos &&
+                    rejected.status().code == ErrorCode::InvalidArgument &&
+                    rejected.status().reason == FailureReason::InvalidDomain &&
+                    rejected.status().detail.origin == FailureOrigin::Domain &&
+                    rejected.status().detail.scope == FailureScope::Group &&
                     counts(1) == before,
                 "C RequireView rejects multi-owner input before computation");
         document.nodes[0].operation = "fixture.result.whole_auto";
