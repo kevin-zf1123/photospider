@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 original=2,processed=10,m=.25 ->4; original=2,processed=NaN,m=0 fails InvalidDomain.
 
 Independent reference entry: `affect_result` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask17/reference.py`](../../../../oracle/ops/mask_morphology/mask17/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

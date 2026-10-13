@@ -60,7 +60,7 @@ With a=1, b=0, s=0, and y≥0 this reduces to member A. A sufficiently low y map
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational uses rational expressions with direct IEEE rounding. For transcendental functions, only a DirectedMPFR result whose interval is closed to a unique rounded value is a strict golden. If the interval cannot determine rounding, report Inconclusive; do not substitute an approximation.
 
-`restoration.generalized_anscombe_forward(image, *, gain, offset=0, read_sigma=0, dtype='float64')` → [Source file](../../../../oracle/ops/filter/oracles/restoration.py).
+`res07.restoration.generalized_anscombe_forward(image, *, gain, offset=0, read_sigma=0, dtype='float64')` → [Source file](../../../../oracle/ops/filter/res07/restoration.py).
 
 
 These are standalone oracle helper signatures, not operator constructors; their Python convenience defaults do not define operation parameter defaults.

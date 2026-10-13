@@ -62,7 +62,7 @@ Fixtures: for N=2, type I maps [a,b] to [a+b,a-b]; type II has nonzero DC and ze
 
 The reference function evaluates the numerical formula on small inputs; it is not a production kernel or a complete Ports-schema/preflight simulator. ExactRational evaluates rational expressions and rounds directly to IEEE format. For transcendental functions, use a DirectedMPFR result as a strict golden only when the interval is closed. If the interval does not determine rounding, report Inconclusive rather than substituting an approximation.
 
-`spectral.dct2(image, *, kind='II', norm='backward', inverse, dtype)` → [source](../../../../oracle/ops/filter/oracles/spectral.py).
+`frq09.spectral.dct2(image, *, kind='II', norm='backward', inverse, dtype)` → [source](../../../../oracle/ops/filter/frq09/spectral.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

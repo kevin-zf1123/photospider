@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 x=[.25,.5,.75], threshold=.5, ge -> [0,1,1]; gt -> [0,0,1].
 
 Independent reference entry: `threshold` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask03/reference.py`](../../../../oracle/ops/mask_morphology/mask03/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

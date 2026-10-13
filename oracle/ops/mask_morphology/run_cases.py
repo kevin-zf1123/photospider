@@ -5,8 +5,10 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from exact import OracleError, atom, bits
-from reference import evaluate
+from oracle.ops.mask_morphology.common.exact import OracleError
+from oracle.ops.mask_morphology.common.exact import atom
+from oracle.ops.mask_morphology.common.exact import bits
+from oracle.ops.mask_morphology.registry import evaluate
 
 HERE=Path(__file__).resolve().parent
 INTEGER_OUTPUT={'label_compact','label_min_pixel','component_count','component_areas','component_bboxes','component_bundle'}
@@ -40,8 +42,8 @@ def verify_hand(case, result):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--cases',type=Path,default=HERE/'cases.json')
-    parser.add_argument('--golden',type=Path,default=HERE/'golden.json')
+    parser.add_argument('--cases',type=Path,default=HERE/'common/cases.json')
+    parser.add_argument('--golden',type=Path,default=HERE/'common/golden.json')
     parser.add_argument('--emit',action='store_true',help='Write new golden; never default.')
     parser.add_argument('--output',type=Path,help='Required destination for --emit.')
     parser.add_argument('--candidate',type=Path,help='JSON map case-ID -> normalized result/error envelope.')

@@ -57,7 +57,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 input=[1,0,1], feature=foreground,exterior=none,l2 -> distances=[0,1,0]; middle nearest=(0,0). All-zero foreground search gives +Inf and nearest=(-1,-1).
 
 Independent reference entry: `nearest_feature` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask10/reference.py`](../../../../oracle/ops/mask_morphology/mask10/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

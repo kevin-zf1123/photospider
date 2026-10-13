@@ -62,7 +62,7 @@ base=2, detail=3, gain=2 yields 8; zero gain bypasses poisoned detail; large opp
 
 Reference functions evaluate small numerical examples; they are neither production kernels nor complete port-schema/preflight simulators. ExactRational rounds rational expressions directly to IEEE formats. For transcendental functions, only DirectedMPFR results whose interval endpoints round to the same value are strict goldens. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
-`restoration.detail_gain(base, detail, *, gain=1, dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/restoration.py).
+`fil16.restoration.detail_gain(base, detail, *, gain=1, dtype='float64')` → [source](../../../../oracle/ops/filter/fil16/restoration.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

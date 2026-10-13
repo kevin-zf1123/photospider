@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 threshold=.5,width=1: x=[0,.5,1] -> [0,.5,1] for both curves.
 
 Independent reference entry: `soft_threshold` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask03/reference.py`](../../../../oracle/ops/mask_morphology/mask03/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

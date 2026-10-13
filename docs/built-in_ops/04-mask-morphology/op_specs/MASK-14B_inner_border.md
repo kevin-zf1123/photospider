@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 3x3 full ones, square r1 -> border ones with center0.
 
 Independent reference entry: `inner_border` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask14/reference.py`](../../../../oracle/ops/mask_morphology/mask14/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

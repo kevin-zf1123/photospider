@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 single point, unit spacing: r=.5 unchanged; r=1 cross of five; r=1.5 includes four diagonals. Erosion at -.5 is identity.
 
 Independent reference entry: `offset_discrete` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask07/reference.py`](../../../../oracle/ops/mask_morphology/mask07/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

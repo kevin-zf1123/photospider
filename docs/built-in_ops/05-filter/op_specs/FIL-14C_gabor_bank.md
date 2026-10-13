@@ -60,8 +60,8 @@ A single bank matches FIL-14B. Duplicate parameters are allowed under different 
 
 The functions below cover subformulas/stages of this construction; named workflow tests in tests.py cover only their recorded configurations. They are not Photospider DAG builders and do not claim complete metadata, Region, or resource integration. Stage RN boundaries must not disappear when nodes are fused.
 
-`transcend.gabor_kernel(*, frequency, theta=0, phase=0, sigma=1, aspect=1, radius_y=1, radius_x=1, dc='keep', normalization='none')` → [source](../../../../oracle/ops/filter/oracles/transcend.py).
-`spatial.convolve2d(image, kernel, anchor=(0, 0), *, direction='correlate', normalization='none', bias=0, boundary='reflect_half', cval=0, output_shape='same', dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/spatial.py).
+`fil14.transcend.gabor_kernel(*, frequency, theta=0, phase=0, sigma=1, aspect=1, radius_y=1, radius_x=1, dc='keep', normalization='none')` → [source](../../../../oracle/ops/filter/fil14/transcend.py).
+`fil01.spatial.convolve2d(image, kernel, anchor=(0, 0), *, direction='correlate', normalization='none', bias=0, boundary='reflect_half', cval=0, output_shape='same', dtype='float64')` → [source](../../../../oracle/ops/filter/fil01/spatial.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

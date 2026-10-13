@@ -14,8 +14,8 @@ NumPy is optional for non-gating spectrum diagnostics only.
 ```sh
 python3 -m venv build/generation-oracle-venv
 build/generation-oracle-venv/bin/python -m pip install -r oracle/ops/generation/requirements-oracle.txt
-build/generation-oracle-venv/bin/python oracle/ops/generation/run_oracles.py --self-test --report build/generation-oracle/self-test.json
-build/generation-oracle-venv/bin/python oracle/ops/generation/run_oracles.py --input oracle/ops/generation/sample_requests.jsonl --candidate oracle/ops/generation/sample_expected.jsonl --profile strict --report build/generation-oracle/candidate-check.json
+build/generation-oracle-venv/bin/python -m oracle.ops.generation.run_oracles --self-test --report build/generation-oracle/self-test.json
+build/generation-oracle-venv/bin/python -m oracle.ops.generation.run_oracles --input oracle/ops/generation/common/requests.jsonl --candidate oracle/ops/generation/common/expected.jsonl --profile strict --report build/generation-oracle/candidate-check.json
 ```
 
 Reports/logs go under ignored `build/`, not into source fixtures.
@@ -25,11 +25,11 @@ Test results are written by the current invocation.
 
 | Module | Implemented reference | Boundary |
 | --- | --- | --- |
-| exact.py | Fraction mathematics, IEEE RNE/sqrt, basic fields, generic numeric mesh, source-width coordinates, rational-root two-circle subset | Not full shape/metadata validation; irrational two-circle roots explicitly unsupported |
-| rng.py | Philox4x64-10 core with three upstream KATs, candidate addressed sequences, fixed Perlin polynomial, point algorithms | Packing/seed/word extraction are **experimental**, not production goldens; Bridson candidates use ordinary math and are Measured |
-| geometry.py | Finite rational curves, flatten bounds, polygon area/Boolean boundaries, polyline fixtures | No Result ABI; many arc operations require rational segment lengths; publication helper performs necessary checks only, not general topology certification |
-| measured.py | High-precision integral/transcendental/Poisson diagnostics | All outputs are Measured; precision agreement does not certify rounding or global roots |
-| resources.py | Raw rank structure/hash/lookup/threshold checks | Synthetic fixtures are not approved blue/STBN assets |
+| `common/exact.py`, `gen*/exact.py`, `noi*/exact.py`, `pth*/exact.py` | Fraction mathematics, IEEE RNE/sqrt, basic fields, generic numeric mesh, source-width coordinates, rational-root two-circle subset | Not full shape/metadata validation; irrational two-circle roots explicitly unsupported |
+| `common/rng.py`, `noi*/rng.py`, `gen08/rng.py` | Philox4x64-10 core with three upstream KATs, candidate addressed sequences, fixed Perlin polynomial, point algorithms | Packing/seed/word extraction are **experimental**, not production goldens; Bridson candidates use ordinary math and are Measured |
+| `common/geometry.py`, `gen03/geometry.py`, `noi05/geometry.py`, `pth*/geometry.py` | Finite rational curves, flatten bounds, polygon area/Boolean boundaries, polyline fixtures | No Result ABI; many arc operations require rational segment lengths; publication helper performs necessary checks only, not general topology certification |
+| `common/measured.py`, `gen*/measured.py`, `noi*/measured.py`, `pth*/measured.py` | High-precision integral/transcendental/Poisson diagnostics | All outputs are Measured; precision agreement does not certify rounding or global roots |
+| `common/resources.py`, `noi07/resources.py`, `noi10/resources.py` | Raw rank structure/hash/lookup/threshold checks | Synthetic fixtures are not approved blue/STBN assets |
 | run_oracles.py | Finite JSONL reference/candidate comparison | Oracle protocol, not kernel workflow JSON; accelerated sample comparison is not admission |
 
 [Per-member coverage](../../../docs/built-in_ops/03-generation/oracle-coverage.md)
@@ -55,7 +55,7 @@ gradient2d and fractal operations reject by default; `--allow-candidate-rng` opt
 in and labels results as candidate. Statistics also requires this flag:
 
 ```sh
-python3 oracle/ops/generation/run_oracles.py --statistics --allow-candidate-rng --report build/generation-oracle/statistics.json
+python3 -m oracle.ops.generation.run_oracles --statistics --allow-candidate-rng --report build/generation-oracle/statistics.json
 ```
 
 Do not use these addressed results as production goldens until packing and mappings
@@ -83,54 +83,17 @@ Candidate-result quality labels are never treated as proofs.
 
 The 14 sample expected results come from hand calculations and the external core
 KAT, not by running this oracle and calling the result independent. The same cases
-also appear in fixtures.json; these are two validation paths, not 28 independent
+also appear in common/fixtures.json; these are two validation paths, not 28 independent
 fixtures. Fixed-seed crosschecks provide additional finite coverage. Provenance:
 [SOURCES](SOURCES.md).
 
-## Actual Perlin runtime comparison
+## Perlin reference inputs
 
-`check_perlin_runtime.py` sends raw IEEE coordinates to a native runner and
-compares its returned bits with `rng.perlin2002_fraction` plus independent exact
-IEEE rounding. It covers 1566 input/output combinations including Float32/64,
-negative coordinates, subnormals, huge finite values and deterministic random
-coordinates. Its default seed and case construction are fixed in the script.
-
-```sh
-cmake --build build/kernel-dev --target test_perlin_exact test_perlin_workflow -j 8
-python3 oracle/ops/generation/check_perlin_runtime.py \
-  --runner build/kernel-dev/test_perlin_exact
-python3 oracle/ops/generation/check_perlin_runtime.py \
-  --runner build/kernel-dev/test_perlin_workflow
-python3 oracle/ops/generation/check_perlin_runtime.py \
-  --runner build/kernel-dev/test_perlin_workflow --tiled
-```
-
-The first runner exercises the C++ integer calculator. The second compiles and
-executes actual public CPU Whole workflows, or CPU tiled with `--tiled`.
-Each mode checks the same 1566 cases independently.
-Worker, layout, ROI and resource behavior is checked separately by
-`test_perlin_workflow`, `test_perlin_tiled` and `test_cpu_tiles`; finite oracle
-coverage is not exhaustive correctness proof.
-
-## Native strict Perlin GPU comparison
-
-`test_perlin_gpu --stdin` shares one native execution context across requests,
-executes the registered GPU-only Whole form, and verifies nonzero native dispatch
-counts and absence of fallback before emitting each output's raw bits. It accepts
-the same input protocol as the Whole/tiled runners.
-
-```sh
-python3 oracle/ops/generation/check_perlin_runtime.py --runner build/kernel-dev/test_perlin_gpu
-```
-
-Build the kernel with `-DPHOTOSPIDER_ENABLE_VULKAN=ON` to select its Vulkan backend;
-the same GPU runner then reports whether the native Vulkan dispatch succeeded. The
-FreeBSD Intel UHD 770 run matched all 1,566 recorded cases. NVIDIA and Linux remain
-untested, and the checker does not measure speed.
-
-The checker independently computes the full polynomial with Fraction and rounds
-to the requested IEEE dtype. Unsupported devices make the runner fail/skip, never
-substitute a CPU result. Both native Metal and Vulkan paths are exercised by this
-runner. The Vulkan runner passes all 1566 comparisons on FreeBSD Intel UHD 770;
-the Perlin Vulkan path remains untested on NVIDIA and Linux hardware. These
-finite oracle checks do not measure performance or prove the full input domain.
+`noi04/samples.py` provides fixed coordinate samples and reference bits from
+`noi04.rng.perlin2002_fraction` plus independent exact IEEE rounding. `cases()` yields
+(input_is_float32, output_is_float32, coordinate_bits); `expected(case)` returns
+the output bits, and `reference_cases()` yields inputs with reference values.
+The 1,566 combinations include Float32/64, negative coordinates, subnormals,
+huge finite values and deterministic random coordinates. The reference module
+can be imported without argument parsing or native execution. Implementation
+adapters are created temporarily for each operation change.

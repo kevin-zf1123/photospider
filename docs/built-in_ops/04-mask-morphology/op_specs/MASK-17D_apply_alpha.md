@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 straight RGBA=(.8,.2,.1,.5), mask=.25 -> (.8,.2,.1,.125), not (.2,.05,.025,.125).
 
 Independent reference entry: `apply_alpha` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask17/reference.py`](../../../../oracle/ops/mask_morphology/mask17/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

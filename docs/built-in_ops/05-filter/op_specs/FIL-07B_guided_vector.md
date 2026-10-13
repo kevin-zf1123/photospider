@@ -60,7 +60,7 @@ With a constant guide, a=0 and the output is box(box(input)), not a single box. 
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational uses rational expressions with direct IEEE rounding. For transcendental functions, only DirectedMPFR results whose intervals close to one rounded value are strict goldens. Report Inconclusive when the interval does not determine rounding; do not substitute an approximation.
 
-`spatial.guided(image, guide, radius_y, radius_x, *, epsilon, metric_scale, dtype)` → [source](../../../../oracle/ops/filter/oracles/spatial.py) .
+`fil07.spatial.guided(image, guide, radius_y, radius_x, *, epsilon, metric_scale, dtype)` → [source](../../../../oracle/ops/filter/fil07/spatial.py) .
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

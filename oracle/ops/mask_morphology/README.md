@@ -9,51 +9,53 @@ See the [spec index](../../../docs/built-in_ops/04-mask-morphology/masks.md) and
 ## Run from the repository root
 
 ```sh
-python oracle/ops/mask_morphology/run_cases.py --verify
-python oracle/ops/mask_morphology/test_oracles.py --report /tmp/mask-test-report.json
+python -m oracle.ops.mask_morphology.run_cases --verify
+python -m oracle.ops.mask_morphology.test_oracles --report /tmp/mask-test-report.json
 ```
 
 Python 3.10+ is required. Rational, discrete and quadratic references use the
 standard library only. Gaussian references and MPFR comparison tests additionally
 require **MPFR 4.2+ on an LP64 Linux/macOS host**. They reuse only the repository's
-manual binding in `oracle/ops/numeric/math_oracle_support.py`. Set
+manual binding in `oracle/ops/numeric/common/mpfr.py`. Set
 `PHOTOSPIDER_ORACLE_MPFR` to the absolute shared-library path when automatic lookup
 fails. The module frees MPFR temporaries at context exit and does not install
 allocation hooks into any kernel. Windows/LLP64 is not supported by that binding.
 
 NumPy, SciPy and scikit-image are optional for external differential checks.
 Without them those five unittest methods are skipped, and the report says so.
-Actual dependency versions and skips are recorded in `test_report.json`.
+The retained `common/test_report.json` is a historical environment/run snapshot; it does
+not report validation of the current checkout. New reports go to the requested
+output path.
 
 ## Files and reproducibility
 
 | File | Purpose |
 | --- | --- |
-| `exact.py` | Integer/Fraction RN32/RN64, nearest-even midpoint/subnormal handling, exact a+b*sqrt(q), and inherited accelerated-bound checker. |
-| `reference.py` | 63 independent mathematical entries, brute-force distances, connectivity and iterative reference algorithms. |
-| `color_statistics.py` | Exact grouped moments, LDL-derived rounded Cholesky models and model application. |
-| `ciede2000.py` | Directed MPFR CIEDE2000 and complete selection-response certificates. |
-| `gaussian.py` | Certified MPFR enclosures of the full finite normalized Gaussian. |
-| `fixtures.py` | Human-authored analytic expectations, including invalid-domain cases. |
-| `cases.json` | Portable input/expected cases, all 63 members represented. |
-| `golden.json` | Corresponding exact floating hex bits, integer results and expected error categories. |
+| `common/exact.py` | Integer/Fraction RN32/RN64, nearest-even midpoint/subnormal handling, exact a+b*sqrt(q), and inherited accelerated-bound checker. |
+| `mask*/reference.py` | 63 independent mathematical entries, brute-force distances, connectivity and iterative reference algorithms. |
+| `mask04/color_statistics.py` | Exact grouped moments, LDL-derived rounded Cholesky models and model application. |
+| `mask04/ciede2000.py` | Directed MPFR CIEDE2000 and complete selection-response certificates. |
+| `mask08/gaussian.py` | Certified MPFR enclosures of the full finite normalized Gaussian. |
+| `common/fixtures.py` | Human-authored analytic expectations, including invalid-domain cases. |
+| `common/cases.json` | Portable input/expected cases, all 63 members represented. |
+| `common/golden.json` | Corresponding exact floating hex bits, integer results and expected error categories. |
 | `run_cases.py` | Check hand expectations and immutable golden; evaluate one case or compare normalized candidate output. |
 | `test_oracles.py` | Tests containing analytic vectors, IEEE edge cases, 900 MPFR rational/quadratic certificates, exhaustive and external checks. |
-| `test_report.json` | Actual oracle run; counts and untested production areas. |
+| `common/test_report.json` | Historical run snapshot, separate from immutable reference values in `common/golden.json`. |
 
 Default verification never rewrites golden. Regeneration is an explicit action,
 and still checks all hand-derived expectations before writing:
 
 ```sh
-python oracle/ops/mask_morphology/run_cases.py --emit --output /tmp/mask-golden.json
-python oracle/ops/mask_morphology/run_cases.py --candidate /tmp/candidate.json
+python -m oracle.ops.mask_morphology.run_cases --emit --output /tmp/mask-golden.json
+python -m oracle.ops.mask_morphology.run_cases --candidate /tmp/candidate.json
 ```
 
 The candidate file has exactly the same `{"schema_version":1,"results":{...}}`
-shape as `golden.json`; strict comparisons require all case IDs, field structure,
+shape as `common/golden.json`; strict comparisons require all case IDs, field structure,
 integer values and exact floating hex representations to match. Candidate output
 must be produced by an independent adapter; copying golden is not an acceptance
-experiment. `exact.accelerated_ok` is a numerical bound utility only: passing it
+experiment. `common.exact.accelerated_ok` is a numerical bound utility only: passing it
 cannot certify mask bounds, site choices, exact branches, backend admission or
 new accelerated registry profiles.
 
@@ -68,7 +70,7 @@ new accelerated registry profiles.
   "params": {"threshold": 0.5, "comparison": "ge"}
 }
 sh
-python oracle/ops/mask_morphology/run_cases.py --case /tmp/case.json
+python -m oracle.ops.mask_morphology.run_cases --case /tmp/case.json
 ```
 
 Use `bits:XXXXXXXX` or `bits:XXXXXXXXXXXXXXXX` for exact IEEE inputs, especially

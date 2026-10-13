@@ -8,7 +8,11 @@ import platform
 import sys
 from pathlib import Path
 from collections import Counter
-from tests import run_all,freeze,thaw,equal,MODULES
+from oracle.ops.filter.tests import run_all
+from oracle.ops.filter.tests import freeze
+from oracle.ops.filter.tests import thaw
+from oracle.ops.filter.tests import equal
+from oracle.ops.filter.tests import MODULES
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -23,7 +27,7 @@ def main():
         for vector in vectors:
             try:
                 request=thaw(vector['request']);mod,name=request['function'].split('.',1)
-                result=getattr(MODULES[mod],name)(*request['args'],**request['kwargs'])
+                result=MODULES[mod][name](*request['args'],**request['kwargs'])
                 # Compare encoded floats directly; exact Fraction outputs stay exact.
                 if freeze(result,vector['dtype'])!=vector['expected']:raise AssertionError('replay differs')
             except Exception as exc:failed.append({'case_id':vector['case_id'],'error':str(exc)})
@@ -34,7 +38,7 @@ def main():
     for package in ('mpmath','numpy','scipy'):
         try:versions[package]=importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:versions[package]='not_installed'
-    from oracles.bounds import Context
+    from oracle.ops.filter.common.bounds import Context
     with Context() as ctx:versions['MPFR']=ctx.version
     report={'schema':'FilterOracleSelfTestReport/v1','scope':'independent Python oracles only; no Photospider runtime executed',
             'python':sys.version,'platform':platform.platform(),'dependencies':versions,

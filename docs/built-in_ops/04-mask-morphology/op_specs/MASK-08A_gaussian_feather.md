@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 constant 1 with replicate or reflect_half ->1; full 1x1 with zero and positive radius -> less than1; both radii0 -> bit identity.
 
 Independent reference entry: `gaussian_feather` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask08/reference.py`](../../../../oracle/ops/mask_morphology/mask08/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

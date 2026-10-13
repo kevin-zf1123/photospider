@@ -60,7 +60,7 @@ When I=B, output is restore_offset. Preserve negative outputs. Retain accuracy f
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational rounds rational expressions directly to IEEE format. For transcendental functions, only a DirectedMPFR result whose interval endpoints round to the same value is a strict golden. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
-`restoration.subtract_background(image, background, *, restore_offset=0, dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/restoration.py).
+`res13.restoration.subtract_background(image, background, *, restore_offset=0, dtype='float64')` → [source](../../../../oracle/ops/filter/res13/restoration.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

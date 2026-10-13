@@ -57,7 +57,7 @@ The third-party comparison golden set covers sigma=0, impulses, seeded Gaussian 
 
 This member requires a native implementation and a comparison against a pinned third-party implementation. The specific comparison version, native profile, and resource details remain unresolved. A manifest-shape check alone establishes only field completeness; resource hashes, licensing, NUM compliance, and actual golden results remain unresolved, and the proposed member remains unregistered.
 
-`comparison_protocol.bm3d(manifest)` → [Source file](../../../../oracle/ops/filter/oracles/comparison_protocol.py).
+`comparison_protocol.bm3d(manifest)` → [Source file](../../../../oracle/ops/filter/common/comparison_protocol.py).
 
 
 These are standalone oracle helper signatures, not operator constructors; their Python convenience defaults do not define operation parameter defaults.

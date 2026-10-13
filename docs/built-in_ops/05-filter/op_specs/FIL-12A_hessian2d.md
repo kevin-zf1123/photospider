@@ -60,7 +60,7 @@ I=a*x²+b*x*y+c*y² ->(2a,b,2c) interior spacing1.
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational uses rational expressions with direct IEEE rounding. For transcendental functions, only DirectedMPFR results whose intervals close to one rounded value are strict goldens. Report Inconclusive when the interval does not determine rounding; do not substitute an approximation.
 
-`spatial.hessian(image, *, dx, dy, boundary, cval, dtype)` → [source](../../../../oracle/ops/filter/oracles/spatial.py).
+`fil12.spatial.hessian(image, *, dx, dy, boundary, cval, dtype)` → [source](../../../../oracle/ops/filter/fil12/spatial.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

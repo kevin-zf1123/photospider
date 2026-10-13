@@ -57,7 +57,7 @@ A single shift (0,0) is equivalent to the chain without cycle spinning. T=0 does
 
 The function below covers subformulas/stages of this composition. Named workflow checks in tests.py cover only their recorded configurations; they are not a Photospider DAG builder and do not claim complete metadata, Region, or resource integration. Stage RN boundaries cannot disappear by merging nodes.
 
-`multiscale.cycle_spin(image, thresholds, *, levels=1, profile='haar_mean_lifting_v1', shifts=((0, 0),), mode='soft', dtype='float64')` → [Source file](../../../../oracle/ops/filter/oracles/multiscale.py).
+`frq10.multiscale.cycle_spin(image, thresholds, *, levels=1, profile='haar_mean_lifting_v1', shifts=((0, 0),), mode='soft', dtype='float64')` → [Source file](../../../../oracle/ops/filter/frq10/multiscale.py).
 
 
 These are standalone oracle helper signatures, not operator constructors; their Python convenience defaults do not define operation parameter defaults.

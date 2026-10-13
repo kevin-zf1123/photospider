@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 single1 and a two-pixel chain survive; 2x2 full block must not vanish; a 1-pixel closed ring retains its hole.
 
 Independent reference entry: `thin_topological` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask15/reference.py`](../../../../oracle/ops/mask_morphology/mask15/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

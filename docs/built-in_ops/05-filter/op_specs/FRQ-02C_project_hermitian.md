@@ -62,7 +62,7 @@ Acceptance must verify bitwise idempotence on the specified NUM domain, +0 imagi
 
 The reference function evaluates the mathematical formula on small inputs. It is neither a production kernel nor a complete port-schema or preflight simulator. ExactRational rounds exact rational expressions directly to IEEE format. For transcendental functions, only results from a DirectedMPFR interval that determines the final rounding are strict goldens. Return Inconclusive when the interval cannot determine rounding; do not substitute an approximation.
 
-`spectral.project_hermitian(real, imag, *, dtype)` → [source file](../../../../oracle/ops/filter/oracles/spectral.py).
+`frq02.spectral.project_hermitian(real, imag, *, dtype)` → [source file](../../../../oracle/ops/filter/frq02/spectral.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

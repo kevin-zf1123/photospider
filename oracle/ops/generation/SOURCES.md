@@ -6,7 +6,7 @@ coverage table; generated logs are not reference fixtures.
 
 Philox4x64-10 multipliers, Weyl increments and round ordering were checked against
 [Random123 philox.h](https://github.com/DEShawResearch/random123/blob/main/include/Random123/philox.h).
-The three ten-round known-answer cases in `philox4x64_kat.json` were transcribed
+The three ten-round known-answer cases in `noi01/kat.json` were transcribed
 from [the authors' kat_vectors](https://github.com/DEShawResearch/random123/blob/main/tests/kat_vectors)
 from the upstream known-answer inventory. Zero/all-one/pi-word cases test the core independently of our Python
 implementation and experimental address layout. No upstream implementation is vendored.

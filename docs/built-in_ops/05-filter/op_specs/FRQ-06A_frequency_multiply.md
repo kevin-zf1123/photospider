@@ -62,7 +62,7 @@ Fixture: (1+2i)*(3+4i)=-5+10i; also cover zero imaginary parts and signed zero. 
 
 The reference function evaluates the numerical formula on small inputs; it is not a production kernel or a complete Ports-schema/preflight simulator. ExactRational evaluates rational expressions and rounds directly to IEEE format. For transcendental functions, use a DirectedMPFR result as a strict golden only when the interval is closed. If the interval does not determine rounding, report Inconclusive rather than substituting an approximation.
 
-`spectral.multiply(fr, fi, hr, hi, *, dtype)` → [source](../../../../oracle/ops/filter/oracles/spectral.py).
+`frq06.spectral.multiply(fr, fi, hr, hi, *, dtype)` → [source](../../../../oracle/ops/filter/frq06/spectral.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

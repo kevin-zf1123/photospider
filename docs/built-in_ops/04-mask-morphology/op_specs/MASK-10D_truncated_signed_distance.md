@@ -57,7 +57,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 full 1x1, exterior none,limit=2 -> distance=-2,within=0; empty image membership -> +2,within=0.
 
 Independent reference entry: `truncated_signed_distance` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask10/reference.py`](../../../../oracle/ops/mask_morphology/mask10/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

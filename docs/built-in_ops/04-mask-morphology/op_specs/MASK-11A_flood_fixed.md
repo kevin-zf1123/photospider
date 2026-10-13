@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 image line [0,1,2], seed at first, tolerance=1 -> [1,1,0].
 
 Independent reference entry: `flood_fixed` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask11/reference.py`](../../../../oracle/ops/mask_morphology/mask11/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

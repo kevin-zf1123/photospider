@@ -60,7 +60,7 @@ For the two-pixel input [0,1], block_width=2, origin_x=1, strength=0.25, and τ=
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational rounds rational expressions directly to IEEE format. For transcendental functions, only a DirectedMPFR result whose interval endpoints round to the same value is a strict golden. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
-`restoration.pairwise_block_boundary_smoothing(image, mask, *, block_height=8, block_width=8, origin_y=0, origin_x=0, threshold=1, strength=Fraction(1, 4), dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/restoration.py).
+`res11.restoration.pairwise_block_boundary_smoothing(image, mask, *, block_height=8, block_width=8, origin_y=0, origin_x=0, threshold=1, strength=Fraction(1, 4), dtype='float64')` → [source](../../../../oracle/ops/filter/res11/restoration.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

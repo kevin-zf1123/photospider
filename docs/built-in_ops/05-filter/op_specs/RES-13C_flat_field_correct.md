@@ -60,7 +60,7 @@ For input=10, dark=2, flat=6, flat_dark=2, and g=4, the result is 8. Exercise ze
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational rounds rational expressions directly to IEEE format. For transcendental functions, only a DirectedMPFR result whose interval endpoints round to the same value is a strict golden. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
-`restoration.flat_field(image, dark, flat, flat_dark, mask, *, reference_gain, invalid='error', dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/restoration.py).
+`res13.restoration.flat_field(image, dark, flat, flat_dark, mask, *, reference_gain, invalid='error', dtype='float64')` → [source](../../../../oracle/ops/filter/res13/restoration.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

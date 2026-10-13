@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 full 1x1 input, square r=1 -> 1, not 0; padded [1,0,1] line closes the gap when embedded away from borders.
 
 Independent reference entry: `closing` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask06/reference.py`](../../../../oracle/ops/mask_morphology/mask06/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

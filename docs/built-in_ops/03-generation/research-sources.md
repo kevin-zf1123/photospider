@@ -54,7 +54,7 @@ the upstream C/C++ implementation is not bundled as a production backend.
 Source: <https://raw.githubusercontent.com/DEShawResearch/random123/main/tests/kat_vectors>
 
 Adoption boundary: three external Philox4x64-10 known-answer vectors are retained in
-[the oracle fixture](../../../oracle/ops/generation/philox4x64_kat.json).
+[the oracle fixture](../../../oracle/ops/generation/noi01/kat.json).
 These validate the core permutation; they do not approve candidate address packing
 or floating conversion. Self-generated goldens cannot replace independent answers.
 

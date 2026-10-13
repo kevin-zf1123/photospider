@@ -57,8 +57,8 @@ The periodic checker pattern is attenuated, while genuine high-frequency texture
 
 The functions below cover sub-formulas or stages of this composition; named workflow tests in tests.py cover only their recorded configurations. They are not Photospider DAG builders and do not claim to model complete metadata, Region, or resource integration. RN stages must not disappear when nodes are fused.
 
-`transcend.gaussian_kernel(sigma, radius)` → [source](../../../../oracle/ops/filter/oracles/transcend.py).
-`spatial.separable(image, kx, ky, anchor=(0, 0), **kwargs)` → [source](../../../../oracle/ops/filter/oracles/spatial.py).
+`fil04.transcend.gaussian_kernel(sigma, radius)` → [source](../../../../oracle/ops/filter/fil04/transcend.py).
+`fil02.spatial.separable(image, kx, ky, anchor=(0, 0), **kwargs)` → [source](../../../../oracle/ops/filter/fil02/spatial.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

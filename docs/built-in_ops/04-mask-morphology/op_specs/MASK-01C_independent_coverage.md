@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 a=b=.5: and=.25, or=.75, xor=.5, subtract=.25.
 
 Independent reference entry: `independent_coverage` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask01/reference.py`](../../../../oracle/ops/mask_morphology/mask01/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

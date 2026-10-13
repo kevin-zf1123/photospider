@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 [0,.5,1], range [0,1) -> [1,1,0]; empty (1,1] selects nothing.
 
 Independent reference entry: `range_mask` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask03/reference.py`](../../../../oracle/ops/mask_morphology/mask03/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

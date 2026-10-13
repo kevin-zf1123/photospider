@@ -60,8 +60,8 @@ For finite constant inputs, `clamp`, reflection, and `wrap` must produce strict 
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational uses rational expressions with direct IEEE rounding. For transcendental functions, only DirectedMPFR results whose intervals close to one rounded value are strict goldens. Report Inconclusive when the interval does not determine rounding; do not substitute an approximation.
 
-`transcend.log_kernel(sigma, radius, *, scale_normalized)` → [source](../../../../oracle/ops/filter/oracles/transcend.py).
-`spatial.zero_dc_filter(image, kernel, *, boundary, cval, dtype)` → [source](../../../../oracle/ops/filter/oracles/spatial.py).
+`fil11.transcend.log_kernel(sigma, radius, *, scale_normalized)` → [source](../../../../oracle/ops/filter/fil11/transcend.py).
+`fil11.spatial.zero_dc_filter(image, kernel, *, boundary, cval, dtype)` → [source](../../../../oracle/ops/filter/fil11/spatial.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

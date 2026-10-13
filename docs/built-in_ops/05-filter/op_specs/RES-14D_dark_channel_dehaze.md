@@ -57,10 +57,10 @@ A constant nonblack scene may be amplified or distorted and serves as a prior-mo
 
 The functions below cover sub-formulas or stages of this composition; named workflow tests in tests.py cover only their recorded configurations. They are not Photospider DAG builders and do not claim to model complete metadata, Region, or resource integration. RN stages must not disappear when nodes are fused.
 
-`restoration.airlight(image, *, radius=1, top_fraction=0.001, request_airlight=True)` → [source](../../../../oracle/ops/filter/oracles/restoration.py).
-`restoration.transmission(image, airlight, *, radius=1, omega=0.95, dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/restoration.py).
-`restoration.apply_dehaze(image, airlight, transmission, *, t_floor=0.1, dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/restoration.py).
-`spatial.guided(image, guide, radius_y=1, radius_x=1, *, epsilon=0.01, metric_scale=None, dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/spatial.py).
+`res14.restoration.airlight(image, *, radius=1, top_fraction=0.001, request_airlight=True)` → [source](../../../../oracle/ops/filter/res14/restoration.py).
+`res14.restoration.transmission(image, airlight, *, radius=1, omega=0.95, dtype='float64')` → [source](../../../../oracle/ops/filter/res14/restoration.py).
+`res14.restoration.apply_dehaze(image, airlight, transmission, *, t_floor=0.1, dtype='float64')` → [source](../../../../oracle/ops/filter/res14/restoration.py).
+`fil07.spatial.guided(image, guide, radius_y=1, radius_x=1, *, epsilon=0.01, metric_scale=None, dtype='float64')` → [source](../../../../oracle/ops/filter/fil07/spatial.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

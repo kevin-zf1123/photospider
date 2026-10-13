@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 [0,1,128,255] -> [0,1,1,1].
 
 Independent reference entry: `nonzero_to_binary` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask03/reference.py`](../../../../oracle/ops/mask_morphology/mask03/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

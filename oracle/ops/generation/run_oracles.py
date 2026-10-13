@@ -18,10 +18,36 @@ import platform
 import sys
 import time
 import unittest
-import exact as e
-import geometry as g
-import rng
-import resources
+from oracle.ops.generation.common.exact import accelerated_ok as e_accelerated_ok
+from oracle.ops.generation.gen07.exact import barycentric as e_barycentric
+from oracle.ops.generation.gen07.exact import bilinear as e_bilinear
+from oracle.ops.generation.gen02.exact import coordinate as e_coordinate
+from oracle.ops.generation.gen03.exact import disk_sdf as e_disk_sdf
+from oracle.ops.generation.common.exact import from_bits as e_from_bits
+from oracle.ops.generation.gen05.exact import linear_coordinate as e_linear_coordinate
+from oracle.ops.generation.gen06.exact import linear_rgba_mix as e_linear_rgba_mix
+from oracle.ops.generation.gen06.exact import numeric_lookup as e_numeric_lookup
+from oracle.ops.generation.gen05.exact import radial_coordinate as e_radial_coordinate
+from oracle.ops.generation.gen03.exact import rectangle_coverage as e_rectangle_coverage
+from oracle.ops.generation.gen03.exact import rectangle_sdf as e_rectangle_sdf
+from oracle.ops.generation.common.exact import round_bits as e_round_bits
+from oracle.ops.generation.gen06.exact import spread_rounded as e_spread_rounded
+from oracle.ops.generation.common.exact import sqrt_fraction as e_sqrt_fraction
+from oracle.ops.generation.pth02.geometry import bezier_derivative as g_bezier_derivative
+from oracle.ops.generation.pth12.geometry import boolean_regions as g_boolean_regions
+from oracle.ops.generation.pth09.geometry import polygon_pixel_area as g_polygon_pixel_area
+from oracle.ops.generation.pth11.geometry import region_sdf as g_region_sdf
+from oracle.ops.generation.pth02.geometry import rounded_bezier_position as g_rounded_bezier_position
+from oracle.ops.generation.pth02.geometry import unit_tangent_fixture as g_unit_tangent_fixture
+from oracle.ops.generation.common.rng import CANDIDATE_LAYOUT as rng_CANDIDATE_LAYOUT
+from oracle.ops.generation.noi06.rng import fractal_fraction as rng_fractal_fraction
+from oracle.ops.generation.noi02.rng import gaussian_inputs as rng_gaussian_inputs
+from oracle.ops.generation.noi04.rng import gradient2d_fraction as rng_gradient2d_fraction
+from oracle.ops.generation.noi04.rng import perlin2002_fraction as rng_perlin2002_fraction
+from oracle.ops.generation.noi01.rng import philox4x64 as rng_philox4x64
+from oracle.ops.generation.noi01.rng import uniform as rng_uniform
+from oracle.ops.generation.noi07.resources import rank_lookup as resources_rank_lookup
+from oracle.ops.generation.noi07.resources import spectral_diagnostics as resources_spectral_diagnostics
 
 HERE=Path(__file__).resolve().parent
 OPERATIONS=('coordinate','rectangle_coverage','rectangle_sdf','disk_sdf','sqrt','spread',
@@ -35,7 +61,7 @@ ACCELERATED=set(OPERATIONS)-{'philox','uniform','boolean_regions','numeric_looku
 def decode(value):
     if isinstance(value,dict):
         if set(value)=={'bits','dtype'}:
-            return e.from_bits(int(value['bits'],16),value['dtype'])
+            return e_from_bits(int(value['bits'],16),value['dtype'])
         if set(value)=={'rational'}:
             return F(value['rational'])
         return {k:decode(v) for k,v in value.items()}
@@ -47,7 +73,7 @@ def decode(value):
 def fp(value,dtype='float64'):
     # Exact copy sign for actual binary zeros; rational zero is +0 by default.
     neg=isinstance(value,float) and value==0 and math.copysign(1,value)<0
-    return {'dtype':dtype,'bits':f'{e.round_bits(F(value),dtype,neg):0{32//4 if dtype=="float32" else 64//4}x}'}
+    return {'dtype':dtype,'bits':f'{e_round_bits(F(value),dtype,neg):0{32//4 if dtype=="float32" else 64//4}x}'}
 
 
 def rational_tree(value):
@@ -67,45 +93,45 @@ def evaluate(request,allow_candidate_rng=False):
     quality='Exact_finite_reference'
     if op in CANDIDATE_RNG_OPS:
         if not allow_candidate_rng:raise ValueError('RNG packing is not frozen; explicitly enable candidate RNG')
-        quality='Candidate_rng_layout_not_production_golden:'+rng.CANDIDATE_LAYOUT
-    if op=='coordinate':result=[fp(v,dtype) for v in e.coordinate(**a)]
-    elif op=='rectangle_coverage':result=fp(e.rectangle_coverage(**a),dtype)
-    elif op=='rectangle_sdf':result=fp(e.rectangle_sdf(**a,dtype=dtype),dtype)
-    elif op=='disk_sdf':result=fp(e.disk_sdf(**a,dtype=dtype),dtype)
-    elif op=='sqrt':result=fp(e.sqrt_fraction(a['q'],dtype),dtype)
-    elif op=='spread':result=fp(e.spread_rounded(**a,dtype=dtype),dtype)
-    elif op=='linear_gradient':result=fp(e.linear_coordinate(**a),dtype)
-    elif op=='radial_gradient':result=fp(e.radial_coordinate(**a,dtype=dtype),dtype)
+        quality='Candidate_rng_layout_not_production_golden:'+rng_CANDIDATE_LAYOUT
+    if op=='coordinate':result=[fp(v,dtype) for v in e_coordinate(**a)]
+    elif op=='rectangle_coverage':result=fp(e_rectangle_coverage(**a),dtype)
+    elif op=='rectangle_sdf':result=fp(e_rectangle_sdf(**a,dtype=dtype),dtype)
+    elif op=='disk_sdf':result=fp(e_disk_sdf(**a,dtype=dtype),dtype)
+    elif op=='sqrt':result=fp(e_sqrt_fraction(a['q'],dtype),dtype)
+    elif op=='spread':result=fp(e_spread_rounded(**a,dtype=dtype),dtype)
+    elif op=='linear_gradient':result=fp(e_linear_coordinate(**a),dtype)
+    elif op=='radial_gradient':result=fp(e_radial_coordinate(**a,dtype=dtype),dtype)
     elif op=='numeric_lookup':
         t=F(a['t']);table=a['table'];x=t*(len(table)-1)
         # Selected stop is a true copy, including -0; Fraction interpolation
         # alone cannot carry that bit-level distinction.
         if x.denominator==1 and 0<=x<len(table):values=table[int(x)]
-        else:values=e.numeric_lookup(t,table)
+        else:values=e_numeric_lookup(t,table)
         result=[fp(v,dtype) for v in values]
     elif op=='linear_rgba_mix':
-        values=e.linear_rgba_mix(**a);result=[fp(v,dtype) for v in values]
+        values=e_linear_rgba_mix(**a);result=[fp(v,dtype) for v in values]
         if int(result[3]['bits'],16)==0:
             if values[3]>0 and any(int(v['bits'],16)&((1<<(31 if dtype=='float32' else 63))-1) for v in result[:3]):
                 raise ArithmeticError('AssociationUnderflow')
             result=[fp(0,dtype) for _ in range(4)]
-    elif op=='bilinear':result=[fp(v,dtype) for v in e.bilinear(**a)]
-    elif op=='barycentric':result=[fp(v,dtype) for v in e.barycentric(**a)]
+    elif op=='bilinear':result=[fp(v,dtype) for v in e_bilinear(**a)]
+    elif op=='barycentric':result=[fp(v,dtype) for v in e_barycentric(**a)]
     elif op=='bezier':
-        pos=g.rounded_bezier_position(a['controls'],a['t'],dtype)
-        der=g.bezier_derivative(a['controls'],a['t']);tan,valid=g.unit_tangent_fixture(der,dtype)
+        pos=g_rounded_bezier_position(a['controls'],a['t'],dtype)
+        der=g_bezier_derivative(a['controls'],a['t']);tan,valid=g_unit_tangent_fixture(der,dtype)
         result={'position':[fp(v,dtype) for v in pos],'derivative':[fp(v,dtype) for v in der],
                 'tangent':[fp(v,dtype) for v in tan],'tangent_valid':valid}
-    elif op=='polygon_coverage':result=fp(g.polygon_pixel_area(**a),dtype)
-    elif op=='region_sdf':result=fp(g.region_sdf(**a,dtype=dtype),dtype)
+    elif op=='polygon_coverage':result=fp(g_polygon_pixel_area(**a),dtype)
+    elif op=='region_sdf':result=fp(g_region_sdf(**a,dtype=dtype),dtype)
     elif op=='boolean_regions':
-        result=rational_tree(g.boolean_regions(**a));quality='Exact_rational_boundary_before_Float64_publication'
-    elif op=='philox':result={'words':[f'{v:016x}' for v in rng.philox4x64(**a)]}
-    elif op=='uniform':result=fp(rng.uniform(**a,dtype=dtype),dtype)
-    elif op=='perlin2002':result=fp(rng.perlin2002_fraction(**a),dtype)
-    elif op=='gradient2d':result=fp(rng.gradient2d_fraction(**a),dtype)
-    elif op=='fractal':result=fp(rng.fractal_fraction(**a),dtype)
-    elif op=='rank_lookup':result=fp(resources.rank_lookup(**a,dtype=dtype),dtype)
+        result=rational_tree(g_boolean_regions(**a));quality='Exact_rational_boundary_before_Float64_publication'
+    elif op=='philox':result={'words':[f'{v:016x}' for v in rng_philox4x64(**a)]}
+    elif op=='uniform':result=fp(rng_uniform(**a,dtype=dtype),dtype)
+    elif op=='perlin2002':result=fp(rng_perlin2002_fraction(**a),dtype)
+    elif op=='gradient2d':result=fp(rng_gradient2d_fraction(**a),dtype)
+    elif op=='fractal':result=fp(rng_fractal_fraction(**a),dtype)
+    elif op=='rank_lookup':result=fp(resources_rank_lookup(**a,dtype=dtype),dtype)
     return {'id':request['id'],'quality':quality,'result':result}
 
 
@@ -116,7 +142,7 @@ def compare_tree(reference,actual,accelerated=False,path='result'):
             return [path+': floating type/shape mismatch']
         try:
             rb,ab=int(reference['bits'],16),int(actual['bits'],16)
-            ok=(e.accelerated_ok(e.from_bits(rb,reference['dtype']),e.from_bits(ab,reference['dtype']),reference['dtype']) if accelerated else rb==ab)
+            ok=(e_accelerated_ok(e_from_bits(rb,reference['dtype']),e_from_bits(ab,reference['dtype']),reference['dtype']) if accelerated else rb==ab)
             return [] if ok else [path+': numeric mismatch']
         except (ValueError,OverflowError,TypeError):return [path+': malformed floating bits']
     if type(reference) is not type(actual):return [path+': type mismatch']
@@ -130,7 +156,7 @@ def compare_tree(reference,actual,accelerated=False,path='result'):
     return errors
 
 
-def fixture_check(path=HERE/'fixtures.json'):
+def fixture_check(path=HERE/'common/fixtures.json'):
     data=json.loads(Path(path).read_text(encoding='utf-8'));errors=[]
     for case in data['cases']:
         got=evaluate(case)
@@ -141,11 +167,11 @@ def fixture_check(path=HERE/'fixtures.json'):
 
 def statistical_report(sample_count=16384):
     """Non-gating deterministic diagnostics. No quality/admission threshold."""
-    u=[rng.uniform(i,0,seed=2026) for i in range(sample_count)]
+    u=[rng_uniform(i,0,seed=2026) for i in range(sample_count)]
     mean=math.fsum(u)/sample_count;variance=math.fsum((v-mean)**2 for v in u)/sample_count
     n=[]
     for i in range(sample_count):
-        a,b=rng.gaussian_inputs(i,0,seed=2026)
+        a,b=rng_gaussian_inputs(i,0,seed=2026)
         n.append(math.sqrt(-2*math.log(float(a)))*math.cos(2*math.pi*float(b)))
     nm=math.fsum(n)/sample_count;nv=math.fsum((v-nm)**2 for v in n)/sample_count
     report={'quality':'Candidate_rng_Measured_statistics_not_production_golden','seed':2026,'samples':sample_count,
@@ -153,10 +179,10 @@ def statistical_report(sample_count=16384):
             'gaussian_math_float64_diagnostic':{'mean':nm,'population_variance':nv,'ideal_continuous_mean':0,'ideal_continuous_variance':1,
                'note':'finite open52 tail and ordinary math candidate; not a strict golden sequence'}}
     try:
-        tile=json.loads((HERE/'rank_4x4_fixture.json').read_text())['rank']
-        volume=json.loads((HERE/'stbn_shape_fixture.json').read_text())['rank']
-        report['synthetic_rank_spectrum']=resources.spectral_diagnostics(tile)
-        report['synthetic_volume_spectrum']=resources.spectral_diagnostics(volume)
+        tile=json.loads((HERE/'noi07/fixture.json').read_text())['rank']
+        volume=json.loads((HERE/'noi10/fixture.json').read_text())['rank']
+        report['synthetic_rank_spectrum']=resources_spectral_diagnostics(tile)
+        report['synthetic_volume_spectrum']=resources_spectral_diagnostics(volume)
     except ImportError:report['spectrum']='not run: optional numpy absent'
     return report
 
@@ -176,7 +202,7 @@ def main(argv=None):
         print('\n'.join(OPERATIONS));return 0
     report={'schema_version':1,'execution_utc':datetime.now(timezone.utc).isoformat(),
             'python':sys.version,'platform':platform.platform(),'implementation_scope':'independent mathematical oracle only; no Photospider kernel execution',
-            'rng_layout_status':'candidate_not_frozen', 'candidate_layout':rng.CANDIDATE_LAYOUT,'production_blue_noise_assets':False}
+            'rng_layout_status':'candidate_not_frozen', 'candidate_layout':rng_CANDIDATE_LAYOUT,'production_blue_noise_assets':False}
     report['optional_dependencies']={}
     for package in ('mpmath','numpy'):
         try:report['optional_dependencies'][package]=importlib.metadata.version(package)

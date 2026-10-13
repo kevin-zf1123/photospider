@@ -59,8 +59,8 @@ A constant input produces all zeros; a long weak chain connected to a strong pix
 
 The functions below cover subformulas/stages of this construction; named workflow tests in tests.py cover only their recorded configurations. They are not Photospider DAG builders and do not claim complete metadata, Region, or resource integration. Stage RN boundaries must not disappear when nodes are fused.
 
-`spatial.canny(image, *, sigma=1, radius=1, low=0.1, high=0.2, norm='l2', connectivity=8, dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/spatial.py).
-`spatial.hysteresis(weak, strong, connectivity=8)` → [source](../../../../oracle/ops/filter/oracles/spatial.py).
+`fil13.spatial.canny(image, *, sigma=1, radius=1, low=0.1, high=0.2, norm='l2', connectivity=8, dtype='float64')` → [source](../../../../oracle/ops/filter/fil13/spatial.py).
+`fil13.spatial.hysteresis(weak, strong, connectivity=8)` → [source](../../../../oracle/ops/filter/fil13/spatial.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

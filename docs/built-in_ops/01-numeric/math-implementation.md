@@ -61,7 +61,7 @@ ln(2). It emits a constant only after both rational bounds have the same scaled
 integer floor. Recheck it with:
 
 ```sh
-python3 oracle/ops/numeric/generate_math_constants.py --check
+python3 -m oracle.ops.numeric.common.generate_constants --check
 ```
 
 `directed_functions.hpp` propagates both arithmetic and analytic errors:
@@ -636,7 +636,7 @@ integer helpers. The implementation adds no approximate backend or NUM-14
 certificate; numerical counters from the former dependency session do not
 apply to this Result continuation.
 
-The independent `oracle/ops/numeric/lut3d_oracle.py` reference reconstructs
+The independent `oracle/ops/numeric/crv07/reference.py` reference reconstructs
 RN64 grids, cells and simplexes, then rounds rational sums with separate integer IEEE logic. Temporary acceptance
 should exercise Result declarations and bindings, sparse full-color
 coverage, source associations and cache reuse, preparation reuse, Empty and

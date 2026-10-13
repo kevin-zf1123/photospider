@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 3x3 ring with center0 -> residual center1; full1x1 ->0, never -1.
 
 Independent reference entry: `black_top_hat` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask14/reference.py`](../../../../oracle/ops/mask_morphology/mask14/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

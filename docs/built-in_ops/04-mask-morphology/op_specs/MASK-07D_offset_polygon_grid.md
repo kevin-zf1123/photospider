@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 polygon cell corners (-.5,-.5),(-.5,.5),(.5,.5),(.5,-.5), H=W=1,n=2: r=0 ->1; r=-.3 ->0.
 
 Independent reference entry: `offset_polygon_grid` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask07/reference.py`](../../../../oracle/ops/mask_morphology/mask07/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

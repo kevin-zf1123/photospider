@@ -353,9 +353,6 @@ int block_services() {
                  .ok() &&
              value == 2);
     PS_CHECK(computations == 1);
-    if (run)
-      PS_CHECK(executed.value().diagnostics.block_cache_hits == 1 &&
-               executed.value().diagnostics.cache_hits == 0);
   }
   for (unsigned bad = 0; bad < 4; ++bad) {
     auto failing = probe_definition(

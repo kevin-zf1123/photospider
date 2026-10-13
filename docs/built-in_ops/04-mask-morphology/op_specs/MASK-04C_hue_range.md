@@ -58,7 +58,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 hue=[0,1,2,-1], chroma=1, center=0, inner=outer=0 -> [1,1,1,1]; neutral exclusion gives 0.
 
 Independent reference entry: `hue_range` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask04/reference.py`](../../../../oracle/ops/mask_morphology/mask04/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

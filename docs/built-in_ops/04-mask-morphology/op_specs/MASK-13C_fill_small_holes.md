@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 3x3 ring center0: maximum_area0 unchanged,1 filled; an edge notch is never filled.
 
 Independent reference entry: `fill_small_holes` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask13/reference.py`](../../../../oracle/ops/mask_morphology/mask13/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

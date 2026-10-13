@@ -60,7 +60,7 @@ A flat quantization staircase is smoothed when its range is within threshold. A 
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational rounds rational expressions directly to IEEE format. For transcendental functions, only a DirectedMPFR result whose interval endpoints round to the same value is a strict golden. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
-`restoration.low_contrast_smoothing(image, mask, *, radius=1, range_threshold=1, strength=Fraction(1, 2), dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/restoration.py).
+`res11.restoration.low_contrast_smoothing(image, mask, *, radius=1, range_threshold=1, strength=Fraction(1, 2), dtype='float64')` → [source](../../../../oracle/ops/filter/res11/restoration.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

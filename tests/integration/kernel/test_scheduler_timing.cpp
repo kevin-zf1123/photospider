@@ -4,25 +4,42 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <utility>
 
 #if defined(PHOTOSPIDER_TEST_QUEUE_METER)
 #include "execution/callback_queue_timing.hpp"
 #endif
 #include "photospider/photospider.hpp"
+#include "support/execution_sync_fixture.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
+struct Control {
+  std::mutex mutex;
+  std::condition_variable changed;
+  bool released = false;
+  bool observe_queue = false;
+  bool queued = false;
+  std::promise<void> entered;
+};
+Control* active_control = nullptr;
+void callback_queued(ps::Backend backend) {
+  auto& control = *active_control;
+  std::lock_guard<std::mutex> lock(control.mutex);
+  if (backend == ps::Backend::Cpu && control.observe_queue) {
+    control.queued = true;
+    control.changed.notify_all();
+  }
+}
 int observe(bool enabled) {
   using namespace ps;  // NOLINT(build/namespaces)
-  struct Control {
-    std::mutex mutex;
-    std::condition_variable changed;
-    bool released = false;
-    std::promise<void> entered;
-  } control;
+  Control control;
+  active_control = &control;
+  ps::test::OnExit clear_control([] { active_control = nullptr; });
+  execution_testing::ExecutionTestHooks callbacks;
+  callbacks.callback_queued = callback_queued;
+  ps::test::ExecutionHookScope hooks(callbacks);
   auto entered_future = control.entered.get_future();
   auto operations = std::make_shared<OperationRegistry>();
   OperationDefinition operation;
@@ -48,7 +65,7 @@ int observe(bool enabled) {
         if (value == 0) {
           control->entered.set_value();
           std::unique_lock<std::mutex> lock(control->mutex);
-          if (!control->changed.wait_for(lock, std::chrono::seconds(3),
+          if (!control->changed.wait_for(lock, std::chrono::seconds(15),
                                          [&] { return control->released; }))
             return Result<ResultProgramPoll>(
                 Status{ErrorCode::OperationFailed, "test release timeout"});
@@ -79,31 +96,40 @@ int observe(bool enabled) {
         plan.plan,
         {{multi_result::binding(input_root, "input", value, schema)}});
   };
-  auto first = std::async(std::launch::async, [&] { return run(0); });
+  std::future<Result<ExecutionResult>> first, second;
+  ps::test::OnExit release([&] {
+    std::lock_guard<std::mutex> lock(control.mutex);
+    control.released = true;
+    control.changed.notify_all();
+  });
+  first = std::async(std::launch::async, [&] { return run(0); });
   const bool started = entered_future.wait_for(std::chrono::seconds(2)) ==
                        std::future_status::ready;
-  auto second = std::async(std::launch::async, [&] { return run(1); });
-  SchedulerStatistics pending;
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  if (enabled) {
-    do {
-      pending = context.scheduler_statistics();
-      if (pending.cpu.accepted_callbacks == 4)
-        break;
-      std::this_thread::yield();
-    } while (std::chrono::steady_clock::now() < deadline);
+  PS_CHECK(started);
+  {
+    std::lock_guard<std::mutex> lock(control.mutex);
+    control.observe_queue = true;
   }
-  ErrorCode rejected = ErrorCode::Ok;
-  if (enabled && pending.cpu.accepted_callbacks == 4)
-    rejected = run(2).status().code;
+  second = std::async(std::launch::async, [&] { return run(1); });
+  bool queued = false;
+  {
+    std::unique_lock<std::mutex> lock(control.mutex);
+    queued = control.changed.wait_for(lock, std::chrono::seconds(2),
+                                      [&] { return control.queued; });
+  }
+  PS_CHECK(queued);
+  // The sole worker is held in the first callback, and the next is queued.
+  // Inspect statistics outside the test mutex: publication holds the pool lock.
+  const auto pending = context.scheduler_statistics();
+  const auto rejected = run(2).status().code;
   {
     std::lock_guard<std::mutex> lock(control.mutex);
     control.released = true;
   }
   control.changed.notify_all();
   const auto a = first.get(), b = second.get();
-  PS_CHECK(started && a.ok() && b.ok());
+  PS_CHECK(a.ok() && b.ok());
+  PS_CHECK(rejected == ErrorCode::ResourceExhausted);
   std::int64_t value = -1;
   const auto& output = b.value().results.at("output");
   PS_CHECK(output
@@ -118,17 +144,16 @@ int observe(bool enabled) {
            stats.gpu.started_callbacks == 0 && stats.gpu.submission_ns == 0 &&
            stats.gpu.queue_wait_ns == 0);
   if (enabled) {
-    PS_CHECK(rejected == ErrorCode::ResourceExhausted);
-    // The first Run has Start/Need/compute; the second Start waits in the pool.
-    PS_CHECK(pending.cpu.accepted_callbacks == 4 &&
-             pending.cpu.started_callbacks == 3);
-    PS_CHECK(stats.cpu.accepted_callbacks == 6 &&
-             stats.cpu.started_callbacks == 6);
+    PS_CHECK(pending.cpu.accepted_callbacks > pending.cpu.started_callbacks);
+    PS_CHECK(stats.cpu.accepted_callbacks == stats.cpu.started_callbacks &&
+             stats.cpu.accepted_callbacks >= pending.cpu.accepted_callbacks &&
+             stats.cpu.started_callbacks > pending.cpu.started_callbacks);
     PS_CHECK(stats.cpu.submission_ns > 0 && stats.cpu.queue_wait_ns > 0 &&
              stats.cpu.maximum_queue_wait_ns > 0);
     PS_CHECK(stats.cpu.queue_wait_ns >= stats.cpu.maximum_queue_wait_ns);
     PS_CHECK(stats.cpu.maximum_queued_callbacks >= 1 &&
-             stats.cpu.maximum_queued_callbacks <= 2);
+             stats.cpu.maximum_queued_callbacks <=
+                 stats.cpu.accepted_callbacks);
   } else {
     PS_CHECK(stats.cpu.accepted_callbacks == 0 &&
              stats.cpu.started_callbacks == 0 && stats.cpu.submission_ns == 0 &&

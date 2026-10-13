@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 labels [[0,7],[7,42]], areas [[7,2],[42,1]], minimum_area2 -> [[0,1],[1,0]]; foreign ObjectId must fail.
 
 Independent reference entry: `filter_area_index` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask12/reference.py`](../../../../oracle/ops/mask_morphology/mask12/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

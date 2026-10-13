@@ -60,7 +60,7 @@ In complexity expressions, P=HW, C is the number of independent planes, A is the
 
 The current reference returns HighPrecisionDiagnostic: it numerically evaluates the mean function and solves for its root, but has no joint proof for the infinite Poisson tail, Gaussian integral tail, and final rounding interval. Its values cannot serve as strict goldens. Before strict/native registration, add a DirectedMPFR or equivalent certificate; algebraic-inverse fallback is forbidden. The current diagnostic coverage is limited to the s=0 degenerate case and the lower branch with positive read noise; it does not cover full root solving for positive read noise and positive λ.
 
-`restoration.generalized_mean_inverse(z, *, gain, offset=0, read_sigma=0, dps=40, max_lambda=12)` → [Source file](../../../../oracle/ops/filter/oracles/restoration.py).
+`res07.restoration.generalized_mean_inverse(z, *, gain, offset=0, read_sigma=0, dps=40, max_lambda=12)` → [Source file](../../../../oracle/ops/filter/res07/restoration.py).
 
 
 These are standalone oracle helper signatures, not operator constructors; their Python convenience defaults do not define operation parameter defaults.

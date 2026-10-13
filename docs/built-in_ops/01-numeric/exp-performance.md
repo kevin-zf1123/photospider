@@ -30,7 +30,7 @@ retain existing exact handling. Tail lanes duplicate a valid sanitized operand;
 all widths/layouts use the same per-lane FMA graph. No global fast-math flag is
 introduced and no Float64 argument is narrowed.
 
-`oracle/ops/numeric/exp_bound.py` is a deterministic exact-rational
+`oracle/ops/numeric/num04/exp_bound.py` is a deterministic exact-rational
 certificate, not a random accuracy test. It encloses ln(2) with an atanh series,
 proves the first reduction FMA exact via Sterbenz, bounds the second FMA, bounds
 P-exp using translated Taylor polynomials over 256 complete intervals, and

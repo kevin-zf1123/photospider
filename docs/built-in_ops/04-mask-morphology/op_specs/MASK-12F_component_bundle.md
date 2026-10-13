@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 single foreground at row-major index3 in 2x2 -> id4,area1,min3,bbox[1,1,2,2].
 
 Independent reference entry: `component_bundle` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask12/reference.py`](../../../../oracle/ops/mask_morphology/mask12/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

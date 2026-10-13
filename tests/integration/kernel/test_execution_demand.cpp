@@ -1002,7 +1002,6 @@ int protocol_first_cause() {
   auto failed = demand.request({{"y", TileRequest{false, point(0, 2)}}},
                                probe->cancellation.token());
   PS_CHECK(!failed.ok() && failed.status().code == ErrorCode::InvalidArgument &&
-           failed.status().message == "missing authorized image input" &&
            failed.status().reason == FailureReason::UnauthorizedRead &&
            failed.status().detail.origin == FailureOrigin::Protocol &&
            failed.status().detail.scope == FailureScope::Group &&

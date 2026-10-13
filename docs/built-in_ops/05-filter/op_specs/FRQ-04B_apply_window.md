@@ -63,7 +63,7 @@ A zero Hann endpoint produces +0 for finite input. NaN inputs follow NUM even wh
 
 The reference function evaluates the mathematical formula on small inputs. It is neither a production kernel nor a complete port-schema or preflight simulator. ExactRational rounds exact rational expressions directly to IEEE format. For transcendental functions, only results from a DirectedMPFR interval that determines the final rounding are strict goldens. Return Inconclusive when the interval cannot determine rounding; do not substitute an approximation.
 
-`spectral.apply_window(image, win, *, dtype)` → [source file](../../../../oracle/ops/filter/oracles/spectral.py).
+`frq04.spectral.apply_window(image, win, *, dtype)` → [source file](../../../../oracle/ops/filter/frq04/spectral.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

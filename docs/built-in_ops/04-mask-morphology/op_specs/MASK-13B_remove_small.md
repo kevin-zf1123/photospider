@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 a two-pixel component survives maximum_removed_area=1 and disappears at2; equality is removed. A zero threshold is an identity after validation.
 
 Independent reference entry: `remove_small` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask13/reference.py`](../../../../oracle/ops/mask_morphology/mask13/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

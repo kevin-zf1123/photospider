@@ -78,7 +78,7 @@ its tile polls.
 
 Verify exact preservation of constants and impulse reflection. Compare Float32 and Float64 results with a baked64 rational oracle. Do not assert that two truncated blurs equal one blur with sigma `sqrt(s1²+s2²)`.
 
-The reference helpers are `gaussian_kernel(sigma,radius)` in [transcend.py](../../../../oracle/ops/filter/oracles/transcend.py) and `separable(image,kx,ky,anchor=(0,0),**kwargs)` in [spatial.py](../../../../oracle/ops/filter/oracles/spatial.py). See also the [oracle README](../../../../oracle/ops/filter/README.md).
+The reference helpers are `gaussian_kernel(sigma,radius)` in [transcend.py](../../../../oracle/ops/filter/fil04/transcend.py) and `separable(image,kx,ky,anchor=(0,0),**kwargs)` in [spatial.py](../../../../oracle/ops/filter/fil02/spatial.py). See also the [oracle README](../../../../oracle/ops/filter/README.md).
 
 Fixture coverage identifiers: `gaussian_constant`, `straight_alpha_zero_hidden_color`, `straight_all_zero_alpha`, `straight_alpha_underflow_hidden_color`.
 

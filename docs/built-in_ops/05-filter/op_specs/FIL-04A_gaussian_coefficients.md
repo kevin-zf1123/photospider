@@ -52,7 +52,7 @@ For sigma zero and radius zero, return `[1]`. For sigma 1 and radius 1, return `
 
 The linked reference function is a small mathematical oracle, not a production kernel or a complete port-schema/preflight simulator. ExactRational uses exact rational expressions followed by IEEE rounding. For transcendental functions, only a DirectedMPFR interval that uniquely determines the result is a strict golden; otherwise report Inconclusive. Fixture identifiers describe reference-case scope only and make no claim about runtime implementation, full rank/batch behavior, metadata, ROI/dirty behavior, budgets, cancellation, or ownership. See the [runtime acceptance protocol](FILTER_oracle_protocol.md).
 
-The reference helper is `gaussian_kernel(sigma,radius)` in [transcend.py](../../../../oracle/ops/filter/oracles/transcend.py). See also the [oracle README](../../../../oracle/ops/filter/README.md).
+The reference helper is `gaussian_kernel(sigma,radius)` in [transcend.py](../../../../oracle/ops/filter/fil04/transcend.py). See also the [oracle README](../../../../oracle/ops/filter/README.md).
 
 Fixture coverage identifiers: `gaussian_coefficients`, `gaussian_zero_sigma`, `gaussian_zero_sigma_nonzero_radius`.
 

@@ -63,7 +63,7 @@ With depth=0, the response is all 1. A center at zero contributes one notch rath
 
 The reference function evaluates the mathematical formula on small inputs. It is neither a production kernel nor a complete port-schema or preflight simulator. ExactRational rounds exact rational expressions directly to IEEE format. For transcendental functions, only results from a DirectedMPFR interval that determines the final rounding are strict goldens. Return Inconclusive when the interval cannot determine rounding; do not substitute an approximation.
 
-`spectral.notch_response(height, width, *, centers, sigma_y, sigma_x, depth, spacing_y, spacing_x)` → [source file](../../../../oracle/ops/filter/oracles/spectral.py).
+`frq05.spectral.notch_response(height, width, *, centers, sigma_y, sigma_x, depth, spacing_y, spacing_x)` → [source file](../../../../oracle/ops/filter/frq05/spectral.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

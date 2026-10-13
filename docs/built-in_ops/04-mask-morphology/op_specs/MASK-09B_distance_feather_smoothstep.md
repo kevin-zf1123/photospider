@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 inner=outer=1, d=[-1,0,1] -> [1,.5,0]; inner=outer=0, d=0 ->1.
 
 Independent reference entry: `distance_feather_smoothstep` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask09/reference.py`](../../../../oracle/ops/mask_morphology/mask09/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

@@ -62,7 +62,7 @@ In complexity notation, P=HW, C is the number of independent planes, A the numbe
 
 Reference functions evaluate small numerical examples; they are neither production kernels nor complete port-schema/preflight simulators. ExactRational rounds rational expressions directly to IEEE formats. For transcendental functions, only DirectedMPFR results whose interval endpoints round to the same value are strict goldens. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
-`multiscale.local_laplacian(image, *, levels=1, edge_threshold=1, detail_exponent=1, edge_slope=1, dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/multiscale.py).
+`fil17.multiscale.local_laplacian(image, *, levels=1, edge_threshold=1, detail_exponent=1, edge_slope=1, dtype='float64')` → [source](../../../../oracle/ops/filter/fil17/multiscale.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

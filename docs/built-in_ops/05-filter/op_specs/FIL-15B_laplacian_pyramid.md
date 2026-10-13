@@ -62,7 +62,7 @@ Constant inputs produce identical G levels and +0 details. For odd 3×5 dimensio
 
 Reference functions evaluate small numerical examples; they are neither production kernels nor complete port-schema/preflight simulators. ExactRational rounds rational expressions directly to IEEE formats. For transcendental functions, only DirectedMPFR results whose interval endpoints round to the same value are strict goldens. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
-`multiscale.pyramid(image=None, levels=0, *, mode='laplacian', bands=None, dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/multiscale.py).
+`fil15.multiscale.pyramid(image=None, levels=0, *, mode='laplacian', bands=None, dtype='float64')` → [source](../../../../oracle/ops/filter/fil15/multiscale.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

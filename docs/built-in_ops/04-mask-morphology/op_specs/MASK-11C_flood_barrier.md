@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 barrier=[0,1,0], seed=[1,0,0] -> [1,0,0]; empty seeds -> zeros.
 
 Independent reference entry: `flood_barrier` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask11/reference.py`](../../../../oracle/ops/mask_morphology/mask11/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

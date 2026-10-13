@@ -131,14 +131,6 @@ __pycache__/
 !tools/compile_native_vulkan_fixtures.py
 !tools/compile_builtin_vulkan.py
 
-!tests/oracles/*.py
-!tests/fixtures/generate_fmt10_oracles.py
-!tests/fixtures/fmt11/rational_oracles.txt
-!tests/support/generate_alpha_golden.py
-!tools/fmt11/
-!tools/fmt11/generate_oracles.py
-!tools/fmt11/generate_rational_oracles.py
-
 !tests/package/
 !tests/package/test_package_version.cmake
 

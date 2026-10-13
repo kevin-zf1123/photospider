@@ -60,7 +60,7 @@ weak=[1,1,1,0,1], strong=[1,0,0,0,0] → [1,1,1,0,0]; diagonal connectivity diff
 
 Reference functions evaluate small numerical examples; they are neither production kernels nor complete port-schema/preflight simulators. ExactRational rounds rational expressions directly to IEEE formats. For transcendental functions, only DirectedMPFR results whose interval endpoints round to the same value are strict goldens. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
-`spatial.hysteresis(weak, strong, connectivity=8)` → [source](../../../../oracle/ops/filter/oracles/spatial.py).
+`fil13.spatial.hysteresis(weak, strong, connectivity=8)` → [source](../../../../oracle/ops/filter/fil13/spatial.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

@@ -60,7 +60,7 @@ Constants are preserved; a small bright spot may be removed. Spatial radius r is
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational rounds rational expressions directly to IEEE format. For transcendental functions, only a DirectedMPFR result whose interval endpoints round to the same value is a strict golden. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
-`restoration.ball_background(image, *, radius=1, height=1, dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/restoration.py).
+`res13.restoration.ball_background(image, *, radius=1, height=1, dtype='float64')` → [source](../../../../oracle/ops/filter/res13/restoration.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

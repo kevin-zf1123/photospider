@@ -60,7 +60,7 @@ For an interior ramp I=x, `unit_ramp` gives gx=1/dx and gy=0; verify the positiv
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational uses rational expressions with direct IEEE rounding. For transcendental functions, only DirectedMPFR results whose intervals close to one rounded value are strict goldens. Report Inconclusive when the interval does not determine rounding; do not substitute an approximation.
 
-`spatial.gradient(image, method, *, dx, dy, normalization, boundary, cval, dtype)` → [source](../../../../oracle/ops/filter/oracles/spatial.py) .
+`fil08.spatial.gradient(image, method, *, dx, dy, normalization, boundary, cval, dtype)` → [source](../../../../oracle/ops/filter/fil08/spatial.py) .
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

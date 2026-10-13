@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 d=[-1,0,1], radius=.25 -> [-1.25,-.25,.75].
 
 Independent reference entry: `shift_distance_field` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask07/reference.py`](../../../../oracle/ops/mask_morphology/mask07/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

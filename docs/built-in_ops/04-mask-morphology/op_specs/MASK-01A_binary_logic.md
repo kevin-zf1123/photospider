@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 a=[0,1,1], b=[1,0,1]: and=[0,0,1], or=[1,1,1], xor=[1,1,0], subtract=[0,1,0].
 
 Independent reference entry: `binary_logic` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask01/reference.py`](../../../../oracle/ops/mask_morphology/mask01/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

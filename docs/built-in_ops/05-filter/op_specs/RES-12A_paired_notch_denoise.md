@@ -57,9 +57,9 @@ A depth-zero chain does not guarantee a general bitwise round trip. A sinusoid o
 
 The functions below cover sub-formulas or stages of this composition; named workflow tests in tests.py cover only their recorded configurations. They are not Photospider DAG builders and do not claim to model complete metadata, Region, or resource integration. RN stages must not disappear when nodes are fused.
 
-`spectral.notch_response(height, width, *, centers, sigma_y, sigma_x, depth=1, dy=1, dx=1)` → [source](../../../../oracle/ops/filter/oracles/spectral.py).
-`spectral.rfft2(image, *, norm='backward', dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/spectral.py).
-`spectral.irfft2(real, imag, original_width, *, norm='backward', dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/spectral.py).
+`frq05.spectral.notch_response(height, width, *, centers, sigma_y, sigma_x, depth=1, dy=1, dx=1)` → [source](../../../../oracle/ops/filter/frq05/spectral.py).
+`frq02.spectral.rfft2(image, *, norm='backward', dtype='float64')` → [source](../../../../oracle/ops/filter/frq02/spectral.py).
+`frq02.spectral.irfft2(real, imag, original_width, *, norm='backward', dtype='float64')` → [source](../../../../oracle/ops/filter/frq02/spectral.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

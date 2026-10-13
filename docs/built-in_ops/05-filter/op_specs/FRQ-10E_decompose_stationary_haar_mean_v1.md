@@ -63,7 +63,7 @@ Acceptance fixtures: constant input yields zero detail bands; analytical 2x2 bas
 
 The reference function evaluates the numerical formula on small inputs; it is not a production kernel or a complete Ports-schema/preflight simulator. ExactRational evaluates rational expressions and rounds directly to IEEE format. For transcendental functions, use a DirectedMPFR result as a strict golden only when the interval is closed. If the interval does not determine rounding, report Inconclusive rather than substituting an approximation.
 
-`multiscale.wavelet(image, levels, profile, inverse, bands, dtype)` → [source](../../../../oracle/ops/filter/oracles/multiscale.py).
+`frq10.multiscale.wavelet(image, levels, profile, inverse, bands, dtype)` → [source](../../../../oracle/ops/filter/frq10/multiscale.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

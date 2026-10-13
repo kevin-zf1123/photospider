@@ -62,7 +62,7 @@ r=0 bit-copies; at r=1 the disk has 5 taps and the square box 9. Near sqrt(2), t
 
 Reference functions evaluate small numerical examples; they are neither production kernels nor complete port-schema/preflight simulators. ExactRational rounds rational expressions directly to IEEE formats. For transcendental functions, only DirectedMPFR results whose interval endpoints round to the same value are strict goldens. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
-`spatial.variable_gather(image, radius, *, disk=False, max_radius=10, boundary='truncate', dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/spatial.py).
+`fil18.spatial.variable_gather(image, radius, *, disk=False, max_radius=10, boundary='truncate', dtype='float64')` → [source](../../../../oracle/ops/filter/fil18/spatial.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

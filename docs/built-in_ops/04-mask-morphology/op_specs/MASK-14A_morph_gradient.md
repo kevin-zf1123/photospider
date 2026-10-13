@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 single1 in a 3x3 zero image, square r1 -> gradient all ones.
 
 Independent reference entry: `morph_gradient` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask14/reference.py`](../../../../oracle/ops/mask_morphology/mask14/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

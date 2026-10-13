@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 l difference 1/128, a/b equal gives exact DeltaE76=25/32; inner=0,outer=25/16,linear -> .5.
 
 Independent reference entry: `lab76_range` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask04/reference.py`](../../../../oracle/ops/mask_morphology/mask04/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

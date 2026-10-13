@@ -60,7 +60,7 @@ A delta PSF yields y/(1+nsr). With nsr=0, a delta PSF preserves finite values af
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational uses rational expressions with direct IEEE rounding. For transcendental functions, only a DirectedMPFR result whose interval is closed to a unique rounded value is a strict golden. If the interval cannot determine rounding, report Inconclusive; do not substitute an approximation.
 
-`restoration.wiener(observation, psf, *, nsr, anchor=(0, 0), singular='error', dtype='float64')` → [Source file](../../../../oracle/ops/filter/oracles/restoration.py).
+`res08.restoration.wiener(observation, psf, *, nsr, anchor=(0, 0), singular='error', dtype='float64')` → [Source file](../../../../oracle/ops/filter/res08/restoration.py).
 
 
 These are standalone oracle helper signatures, not operator constructors; their Python convenience defaults do not define operation parameter defaults.

@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 single 1 pixel, square r=1 -> 0; r=0 is exact identity.
 
 Independent reference entry: `opening` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask06/reference.py`](../../../../oracle/ops/mask_morphology/mask06/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

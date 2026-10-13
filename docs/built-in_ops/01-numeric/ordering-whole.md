@@ -48,7 +48,7 @@ Authorized active input windows and the selected full output payload coexist wit
 
 ## Current behavior checks and limits
 
-The independent numerical oracle is `oracle/ops/numeric/ordering_oracle.py`.
+The independent numerical oracle is `oracle/ops/numeric/num12/reference.py`.
 
 Temporary public-path checks should cover stable values and original indices for `[3,1,1,2]`, separate
 output selection, sparse requests with complete output publication, non-last

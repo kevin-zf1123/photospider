@@ -60,7 +60,7 @@ A constant guide yields the candidate mean. search_radius=0 is identity. Check p
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational uses rational expressions with direct IEEE rounding. For transcendental functions, only a DirectedMPFR result whose interval is closed to a unique rounded value is a strict golden. If the interval cannot determine rounding, report Inconclusive; do not substitute an approximation.
 
-`restoration.nlm(image, guide, *, patch_radius=1, search_radius=1, h_parameter=1, metric_scale=None, noise_sigma=None, dtype='float64')` → [Source file](../../../../oracle/ops/filter/oracles/restoration.py).
+`res02.restoration.nlm(image, guide, *, patch_radius=1, search_radius=1, h_parameter=1, metric_scale=None, noise_sigma=None, dtype='float64')` → [Source file](../../../../oracle/ops/filter/res02/restoration.py).
 
 
 These are standalone oracle helper signatures, not operator constructors; their Python convenience defaults do not define operation parameter defaults.

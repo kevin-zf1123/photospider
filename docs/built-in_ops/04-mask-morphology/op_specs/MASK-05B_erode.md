@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 a full 3x3 input, square r=1 -> only the center is 1; exterior is zero.
 
 Independent reference entry: `erode` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask05/reference.py`](../../../../oracle/ops/mask_morphology/mask05/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

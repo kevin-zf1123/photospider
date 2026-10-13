@@ -55,7 +55,7 @@ See the member's linked reference source and oracle README.
 
 Fixture coverage identifiers: `separable_correlate`.
 
-Reference callable: `separable(image,kx,ky,anchor=(0,0),**kwargs)` in [spatial.py](../../../../oracle/ops/filter/oracles/spatial.py). Pass the explicit correlation direction through `kwargs`. These oracle helper defaults do not define graph-node constructors; every node parameter remains explicitly required.
+Reference callable: `separable(image,kx,ky,anchor=(0,0),**kwargs)` in [spatial.py](../../../../oracle/ops/filter/fil02/spatial.py). Pass the explicit correlation direction through `kwargs`. These oracle helper defaults do not define graph-node constructors; every node parameter remains explicitly required.
 
 ## Backend and registration
 

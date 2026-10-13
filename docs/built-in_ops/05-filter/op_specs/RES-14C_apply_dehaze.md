@@ -60,7 +60,7 @@ For I=0.6, A=1, and t=0.5, output is 0.2. t=0 uses the floor; t=1 copies. Do not
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational rounds rational expressions directly to IEEE format. For transcendental functions, only a DirectedMPFR result whose interval endpoints round to the same value is a strict golden. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
-`restoration.apply_dehaze(image, airlight, transmission, *, t_floor=0.1, dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/restoration.py).
+`res14.restoration.apply_dehaze(image, airlight, transmission, *, t_floor=0.1, dtype='float64')` → [source](../../../../oracle/ops/filter/res14/restoration.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

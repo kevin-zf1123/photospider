@@ -58,7 +58,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 a ring with one axial missing cell can become enclosed at gap1; a seed on the missing cell reopens that cell before flood.
 
 Independent reference entry: `fill_axis_gaps` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask16/reference.py`](../../../../oracle/ops/mask_morphology/mask16/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 single coordinate image=[0,.5,1], target=[0], scales=[1], inner=0,outer=1,linear -> [1,.5,0].
 
 Independent reference entry: `coordinate_range` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask04/reference.py`](../../../../oracle/ops/mask_morphology/mask04/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

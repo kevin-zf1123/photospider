@@ -62,7 +62,7 @@ Constants remain unchanged. amount=0 preserves NaN and -0 without triggering blu
 
 Reference functions evaluate small numerical examples; they are neither production kernels nor complete port-schema/preflight simulators. ExactRational rounds rational expressions directly to IEEE formats. For transcendental functions, only DirectedMPFR results whose interval endpoints round to the same value are strict goldens. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
-`restoration.unsharp(image, *, amount=0, threshold=0, sigma_y=1, sigma_x=1, radius_y=1, radius_x=1, boundary='reflect_half', cval=0, dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/restoration.py).
+`fil16.restoration.unsharp(image, *, amount=0, threshold=0, sigma_y=1, sigma_x=1, radius_y=1, radius_x=1, boundary='reflect_half', cval=0, dtype='float64')` → [source](../../../../oracle/ops/filter/fil16/restoration.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

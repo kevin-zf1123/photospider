@@ -57,7 +57,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 input=[1,0,0], limit=1,l2,foreground,none -> distance=[0,1,1], within=[1,1,0].
 
 Independent reference entry: `truncated_nearest_feature` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask10/reference.py`](../../../../oracle/ops/mask_morphology/mask10/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

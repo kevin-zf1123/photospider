@@ -63,7 +63,7 @@ At DC, the band-pass response is 0 and the band-stop response is 1. The ideal re
 
 The reference function evaluates the mathematical formula on small inputs. It is neither a production kernel nor a complete port-schema or preflight simulator. ExactRational rounds exact rational expressions directly to IEEE format. For transcendental functions, only results from a DirectedMPFR interval that determines the final rounding are strict goldens. Return Inconclusive when the interval cannot determine rounding; do not substitute an approximation.
 
-`spectral.band_response(height, width, *, cutoff_low, cutoff_high, kind, pass_or_reject, order, spacing_y, spacing_x)` → [source file](../../../../oracle/ops/filter/oracles/spectral.py).
+`frq05.spectral.band_response(height, width, *, cutoff_low, cutoff_high, kind, pass_or_reject, order, spacing_y, spacing_x)` → [source file](../../../../oracle/ops/filter/frq05/spectral.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

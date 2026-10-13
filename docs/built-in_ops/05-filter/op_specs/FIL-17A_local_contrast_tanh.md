@@ -62,7 +62,7 @@ When input=base, finite values remain unchanged; amount=0 bypasses base; test od
 
 Reference functions evaluate small numerical examples; they are neither production kernels nor complete port-schema/preflight simulators. ExactRational rounds rational expressions directly to IEEE formats. For transcendental functions, only DirectedMPFR results whose interval endpoints round to the same value are strict goldens. If rounding cannot be determined, report Inconclusive rather than substituting an approximation.
 
-`transcend.local_contrast(image, base, *, amount=0, detail_scale=1, dtype='float64')` → [source](../../../../oracle/ops/filter/oracles/transcend.py).
+`fil17.transcend.local_contrast(image, base, *, amount=0, detail_scale=1, dtype='float64')` → [source](../../../../oracle/ops/filter/fil17/transcend.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

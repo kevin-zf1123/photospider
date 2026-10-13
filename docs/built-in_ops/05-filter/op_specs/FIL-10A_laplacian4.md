@@ -60,7 +60,7 @@ For `I=x²+y²` and interior `dx=dy=1`, output is 4. A constant input yields zer
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational uses rational expressions with direct IEEE rounding. For transcendental functions, only DirectedMPFR results whose intervals close to one rounded value are strict goldens. Report Inconclusive when the interval does not determine rounding; do not substitute an approximation.
 
-`spatial.laplacian(image, *, eight, dx, dy, scale, boundary, cval, dtype)` → [source](../../../../oracle/ops/filter/oracles/spatial.py).
+`fil10.spatial.laplacian(image, *, eight, dx, dy, scale, boundary, cval, dtype)` → [source](../../../../oracle/ops/filter/fil10/spatial.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

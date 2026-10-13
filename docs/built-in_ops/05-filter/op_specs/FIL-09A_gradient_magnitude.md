@@ -60,7 +60,7 @@ In complexity notation, P=HW, C is the number of independent planes, A is the ta
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational uses rational expressions with direct IEEE rounding. For transcendental functions, only DirectedMPFR results whose intervals close to one rounded value are strict goldens. Report Inconclusive when the interval does not determine rounding; do not substitute an approximation.
 
-`transcend.magnitude(gx, gy, *, norm, dtype)` → [source](../../../../oracle/ops/filter/oracles/transcend.py).
+`fil09.transcend.magnitude(gx, gy, *, norm, dtype)` → [source](../../../../oracle/ops/filter/fil09/transcend.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

@@ -60,7 +60,7 @@ Values at or below m(0) map to zero. A diagnostic may generate high-precision m 
 
 The current reference returns HighPrecisionDiagnostic: it numerically evaluates the Poisson mean function and solves for its root, but has no joint proof for the infinite Poisson tail and final rounding interval. Its values cannot serve as strict goldens. Before strict/native registration, add a DirectedMPFR or equivalent certificate; algebraic-inverse fallback is forbidden.
 
-`restoration.anscombe_mean_inverse(z, *, dps=70, max_lambda=100)` → [Source file](../../../../oracle/ops/filter/oracles/restoration.py).
+`res07.restoration.anscombe_mean_inverse(z, *, dps=70, max_lambda=100)` → [Source file](../../../../oracle/ops/filter/res07/restoration.py).
 
 
 These are standalone oracle helper signatures, not operator constructors; their Python convenience defaults do not define operation parameter defaults.

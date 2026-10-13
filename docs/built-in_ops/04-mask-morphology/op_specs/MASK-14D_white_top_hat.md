@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 isolated center1 removed by opening -> residual center1.
 
 Independent reference entry: `white_top_hat` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask14/reference.py`](../../../../oracle/ops/mask_morphology/mask14/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

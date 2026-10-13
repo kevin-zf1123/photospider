@@ -60,8 +60,8 @@ A constant input yields zero. An invalid ratio fails preflight. Include a fixtur
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational uses rational expressions with direct IEEE rounding. For transcendental functions, only DirectedMPFR results whose intervals close to one rounded value are strict goldens. Report Inconclusive when the interval does not determine rounding; do not substitute an approximation.
 
-`transcend.gaussian_kernel(sigma, radius)` → [source](../../../../oracle/ops/filter/oracles/transcend.py).
-`spatial.separable(image, kx, ky, anchor, **kwargs)` → [source](../../../../oracle/ops/filter/oracles/spatial.py).
+`fil04.transcend.gaussian_kernel(sigma, radius)` → [source](../../../../oracle/ops/filter/fil04/transcend.py).
+`fil02.spatial.separable(image, kx, ky, anchor, **kwargs)` → [source](../../../../oracle/ops/filter/fil02/spatial.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

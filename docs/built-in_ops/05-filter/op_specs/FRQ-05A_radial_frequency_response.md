@@ -63,7 +63,7 @@ At DC, low-pass is 1 and high-pass is 0. At the cutoff, Butterworth is RN64(1/sq
 
 The reference function evaluates the mathematical formula on small inputs. It is neither a production kernel nor a complete port-schema or preflight simulator. ExactRational rounds exact rational expressions directly to IEEE format. For transcendental functions, only results from a DirectedMPFR interval that determines the final rounding are strict goldens. Return Inconclusive when the interval cannot determine rounding; do not substitute an approximation.
 
-`spectral.radial_response(height, width, *, cutoff, kind, low_or_high, order, spacing_y, spacing_x)` → [source file](../../../../oracle/ops/filter/oracles/spectral.py).
+`frq05.spectral.radial_response(height, width, *, cutoff, kind, low_or_high, order, spacing_y, spacing_x)` → [source file](../../../../oracle/ops/filter/frq05/spectral.py).
 
 Fixture mapping and evidence scope: see [oracle coverage](../oracle-coverage.md).
 

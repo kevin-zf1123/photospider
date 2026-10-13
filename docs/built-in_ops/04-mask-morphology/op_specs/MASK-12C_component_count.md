@@ -54,7 +54,7 @@ upstream/cancellation/resource scope and immutable owner lifetime.
 labels [[0,7],[7,42]] -> count=2, not 42.
 
 Independent reference entry: `component_count` in
-[`reference.py`](../../../../oracle/ops/mask_morphology/reference.py).
+[`mask12/reference.py`](../../../../oracle/ops/mask_morphology/mask12/reference.py).
 Its small-image oracle and fixtures are not a production implementation and
 do not exercise kernel registration, resource accounting or exact Region reads.
 Run the [suite commands](../../../../oracle/ops/mask_morphology/README.md),

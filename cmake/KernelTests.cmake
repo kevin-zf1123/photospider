@@ -337,7 +337,7 @@ photospider_add_kernel_test(test_value_runs Photospider::kernel tests/unit/kerne
 photospider_add_kernel_test(test_fragment_atlas Photospider::kernel tests/unit/kernel/test_fragment_atlas.cpp)
 photospider_add_kernel_test(test_input_snapshot Photospider::kernel tests/unit/kernel/test_input_snapshot.cpp)
 target_include_directories(test_input_snapshot PRIVATE src/lib)
-photospider_add_kernel_test(test_scheduler_timing Photospider::kernel tests/integration/kernel/test_scheduler_timing.cpp)
+photospider_add_kernel_test(test_scheduler_timing photospider_test_kernel tests/integration/kernel/test_scheduler_timing.cpp)
 target_include_directories(test_scheduler_timing PRIVATE src/lib)
 target_compile_definitions(test_scheduler_timing PRIVATE PHOTOSPIDER_TEST_QUEUE_METER)
 photospider_add_kernel_test(test_result_gpu_service Photospider::kernel tests/unit/kernel/test_result_gpu_service.cpp)

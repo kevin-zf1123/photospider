@@ -60,7 +60,7 @@ At d=T, hard mode retains the coefficient and soft mode clears it to zero. Prese
 
 The reference function evaluates the numerical formula on small inputs; it is neither a production kernel nor a complete port-schema/preflight simulator. ExactRational uses rational expressions with direct IEEE rounding. For transcendental functions, only a DirectedMPFR result whose interval is closed to a unique rounded value is a strict golden. If the interval cannot determine rounding, report Inconclusive; do not substitute an approximation.
 
-`multiscale.threshold_bands(bands, thresholds, *, mode='soft', dtype='float64')` → [Source file](../../../../oracle/ops/filter/oracles/multiscale.py).
+`frq10.multiscale.threshold_bands(bands, thresholds, *, mode='soft', dtype='float64')` → [Source file](../../../../oracle/ops/filter/frq10/multiscale.py).
 
 
 These are standalone oracle helper signatures, not operator constructors; their Python convenience defaults do not define operation parameter defaults.
