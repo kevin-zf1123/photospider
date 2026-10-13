@@ -160,17 +160,6 @@ struct ExecutionTestHooks final {
   PostSubmitObservationHook post_submit_observation = nullptr;
   /** @brief Called after the callback body, before queue ownership retires. */
   FinalResultReadyHook callback_body_finished = nullptr;
-  /** @brief Called after the cancelled coordinator retires its caller and
-   * before it attempts shared-registry adoption.
-   * @note Noninstalled test-kernel hook; exceptions preserve synchronous drain.
-   * The hook must not re-enter the executing Run.
-   */
-  void (*structured_handoff_ready)() = nullptr;
-  /** @brief Called after a structured I/O request succeeds, before retention.
-   * @note Noninstalled test-kernel hook; exceptions reach the Need error path.
-   * The hook must not re-enter the executing Run.
-   */
-  void (*structured_io_completed)() = nullptr;
   /** @brief Called after successful checkpoint retention, outside its lock. */
   FinalResultReadyHook checkpoint_published = nullptr;
   /** @brief Called after a completed checkpoint and its provenance are found.
@@ -198,11 +187,6 @@ struct ExecutionTestHooks final {
   ErrorCode (*native_capacity_error)() noexcept = nullptr;
   /** @brief Borrowed state for the structured notifications below. */
   void* structured_context = nullptr;
-  /** @brief Signals a nonproducer lease after acquire and diagnostics update.
-   * @note Signal only; never block or re-enter the acquiring Run.
-   */
-  void (*shared_joined)(void*, std::string_view, std::uint64_t,
-                        const void*) noexcept = nullptr;
   /** @brief Outside core locks, immediately before the work stop check. */
   void (*phase_work_started)(void*, const PhaseWorkPoint&) noexcept = nullptr;
   /** @brief Observes the same work service's returned status. */
@@ -286,20 +270,6 @@ void notify_post_submit_observation() noexcept;
  * @note Private test-only point, outside queue and Run locks; hook is noexcept.
  */
 void notify_callback_body_finished() noexcept;
-/** @brief Exposes the coordinator handoff admission boundary to tests.
- * @throws Exceptions from the configured test hook; the caller drains instead.
- * @note Only the noninstalled test-kernel variant calls this. It must not
- * re-enter the executing Run.
- */
-void notify_structured_handoff_ready();
-
-/** @brief Injects a failure after successful structured I/O, before retention.
- * @throws Exceptions from the configured test hook.
- * @note Only the noninstalled test-kernel variant calls this. The hook must not
- * re-enter the executing Run.
- */
-void notify_structured_io_completed();
-
 /** @brief Observes retained state before the publishing callback returns.
  * @note Private test-only point; must not re-enter the publishing Run.
  */
@@ -308,9 +278,6 @@ void notify_checkpoint_published() noexcept;
  */
 void notify_checkpoint_borrowed() noexcept;
 
-/** @brief Signal-only notification after a shared waiter lease is installed. */
-void notify_shared_joined(std::string_view operation, std::uint64_t node,
-                          const void* actor) noexcept;
 /** @brief Observes positive phase work only during the actual poll call.
  * @note Hooks must not re-enter the Run. Borrowed state must outlive callbacks.
  */

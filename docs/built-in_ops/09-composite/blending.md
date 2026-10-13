@@ -25,8 +25,6 @@
 
 `c_out=(1-a)c_b+(1-b)c_s+a*b*f(B,S)`，`alpha_out=a+b-a*b`。
 
-这一定义适用于普通coverage颜色，不自动涵盖alpha=0而RGB非零的emission数据。`image.source_over` 和 `image.mix` 是已注册 operation；`layer_over`、`raw_rgba_plus` 与 `layer_emit` 是独立的纯值 helper，不是图像 operation。其余艺术混合模式仍为提议。
-
 ## 逐通道混合
 
 以下B,S默认在[0,1]的声明混合域；amount=1、mask=1、opacity=1为建议构造默认。需要HDR的无界代数变体单独命名，禁止静默套用bounded分支。每行的f仅算颜色，alpha仍由选定合成方式处理。

@@ -29,7 +29,7 @@ duplicates and replacement; FMT-02 owns explicit channel assembly.
 
 Each A/B node accepts one Result input named `input` and publishes one Result
 output named `values`. Input and output schemas contain one tensor member and no
-fields. Package 0.30.0 uses Result operation ABI 2, WorkflowDocument 4 and
+fields. Package 0.30.0 uses Result operation ABI 3, WorkflowDocument 4 and
 OperationTraits 21. The six CPU registry keys are:
 
 | Member | Strict | Apple Silicon profile | x86-64 profile |

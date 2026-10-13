@@ -60,8 +60,7 @@ with their bound source snapshots.
 
 Sample requests inherit CRV-01's Whole complete-input validation, full output allocation/invalidation and Run numerical failures. The operation reads authorized Result windows without collecting or copying its complete tensor inputs. Mathematical stencils remain unchanged; undelivered invalid queries or columns can fail the run. A sparse sample request still publishes full certified coverage, while its recorded dependency support and dirty mapping cover the complete interpolation inputs.
 Position-only requests have only the exact requested new_positions source
-support and no source curve reads. Joint execution is an optimization, not a
-dependency change. Empty requests, arbitrary source strides, owners after context
+support and no source curve reads. Empty requests, arbitrary source strides, owners after context
 teardown, cache-off, budgets and cancellation follow the source/forwarding contract.
 Account bindings, source read windows, output/intermediate owners and compiled template state rather than treating export aliases as unowned pointers. Cached sample Results associate the current positions, values and query Result identities; the forwarded positions Result associates the current query source. Static interpolation preparation can survive binding replacement while dynamic sample Results are recomputed. Escaped Results and authorized read windows retain their owners after context retirement and handle release.
 

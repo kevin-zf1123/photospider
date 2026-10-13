@@ -5,7 +5,7 @@
 #include <utility>
 #include <vector>
 
-#include "../../examples/unified_result_workflow/minimal_ops.hpp"
+#include "support/unified_result_fixture.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 namespace {
@@ -16,12 +16,12 @@ void require(bool condition, std::string_view message) {
 }
 std::pair<ResultRef, ResultRef> run() {
   auto registry = std::make_shared<OperationRegistry>();
-  require(unified_example::register_gather(registry.get()).ok(),
+  require(unified_result_fixture::register_gather(registry.get()).ok(),
           "register Result outputs");
   require(registry->freeze().ok(), "freeze");
   WorkflowDocument doc;
   auto schema =
-      std::make_shared<SchemaTemplate>(unified_example::image_schema());
+      std::make_shared<SchemaTemplate>(unified_result_fixture::image_schema());
   WorkflowInputDeclaration image_a;
   image_a.id = 1;
   image_a.name = "a";
@@ -32,8 +32,8 @@ std::pair<ResultRef, ResultRef> run() {
   WorkflowInputDeclaration control;
   control.id = 3;
   control.name = "control";
-  control.result_schema =
-      std::make_shared<SchemaTemplate>(unified_example::numeric_schema());
+  control.result_schema = std::make_shared<SchemaTemplate>(
+      unified_result_fixture::numeric_schema());
   doc.inputs = {image_a, image_b, control};
   doc.nodes = {{1,
                 "example.gather",
@@ -43,7 +43,9 @@ std::pair<ResultRef, ResultRef> run() {
   doc.outputs = {{"out", 1, "image"}, {"count", 1, "count"}};
   GraphContext graph(doc);
   Compiler compiler(registry);
-  auto planned = compiler.compile(graph);
+  PlanningOptions options;
+  options.tile_extent = 1;
+  auto planned = compiler.compile(graph, options);
   require(planned.ok(), planned.status().message);
   ExecutionContextConfig config;
   config.managed_resources = ResourceLimits{};
@@ -51,14 +53,14 @@ std::pair<ResultRef, ResultRef> run() {
   auto budget = context.resource_budget().take_value();
   ExecutionBinding a;
   a.name = "a";
-  a.result = unified_example::input_image(budget);
+  a.result = unified_result_fixture::input_image(budget);
   ExecutionBinding b;
   b.name = "b";
-  b.result = unified_example::input_image(budget, 5000);
+  b.result = unified_result_fixture::input_image(budget, 5000);
   std::vector<std::int64_t> selectors(32, 0);
   ExecutionBinding c;
   c.name = "control";
-  c.result = unified_example::input_control(budget, selectors);
+  c.result = unified_result_fixture::input_control(budget, selectors);
   auto executed = context.execute(planned.value().plan, {{a, b, c}});
   require(executed.ok(), executed.status().message);
   auto& result = executed.value().results.at("out");
@@ -77,9 +79,8 @@ std::pair<ResultRef, ResultRef> run() {
           "numeric Result sibling");
   auto frozen = context.freeze(planned.value().plan, {{a, b, c}});
   require(frozen.ok(), "freeze typed Result bindings");
-  auto wanted = Footprint::from_regions(
-                    {2, 2, 2, 4}, {Region({{1, 1}, {0, 1}, {1, 1}, {2, 1}})})
-                    .take_value();
+  const auto wanted_tiles = TileSet::from_indices(budget, {22}).take_value();
+  const TileRequest wanted{false, wanted_tiles};
   auto sparse = context.execute_fragments(frozen.value(), {{"out", wanted}});
   require(sparse.ok(), sparse.status().message);
   auto sparse_result = sparse.value().results.at("out");
@@ -90,17 +91,22 @@ std::pair<ResultRef, ResultRef> run() {
       "sparse sample");
   require(!sparse_result.read_tensor(captured, 0, {1, 0, 1, 1}, &pixel, 4).ok(),
           "hole is unauthorized");
-  auto dirty = sparse.value().dependencies.potential_dirty("control", wanted);
-  require(dirty.ok() && dirty.value().at("out") == wanted, "control transpose");
+  ResourceVector<TileChange> control_change{
+      ResourceAllocator<TileChange>(budget)};
+  control_change.push_back({PlanWorkflowInput{2}, 0, {}, true});
+  auto dirty = sparse.value().dependencies.dirty_units(control_change);
+  require(dirty.ok() && dirty.value().size() == 1 &&
+              dirty.value()[0] == TileUnit{0, 0, 22},
+          "Whole control changes invalidate the subscribed output tile");
   auto handle =
       context.open_demand(planned.value().plan, {{a, b, c}}).take_value();
   auto initial = handle.request({{"out", wanted}});
   require(initial.ok(), initial.status().message);
   selectors[22] = 3;
-  c.result = unified_example::input_control(budget, selectors);
+  c.result = unified_result_fixture::input_control(budget, selectors);
   auto changed = handle.replace_bindings({{a, b, c}});
   require(changed.ok(), changed.status().message);
-  require(changed.value().potential_dirty.at("out") == wanted,
+  require(changed.value().potential_dirty.at("out") == wanted_tiles,
           "consumed Control changes are dirty");
   auto updated = handle.request({{"out", wanted}});
   require(updated.ok(), updated.status().message);
@@ -117,32 +123,36 @@ std::pair<ResultRef, ResultRef> run() {
           "image retains ordered branch and control source identities");
   require(count_result.association().empty(),
           "constant count has no source association");
-  auto new_data = Footprint::from_regions(
-                      {2, 2, 2, 4}, {Region({{1, 1}, {0, 1}, {1, 1}, {3, 1}})})
-                      .take_value();
-  auto new_dirty = updated.value().dependencies.potential_dirty("b", new_data);
-  require(new_dirty.ok() && new_dirty.value().at("out") == wanted,
-          "new branch witness replaces old support");
-  auto old_dirty = initial.value().dependencies.potential_dirty("b", new_data);
-  require(old_dirty.ok() && old_dirty.value().at("out").empty(),
-          "old evidence is immutable");
+  ResourceVector<TileChange> source_change{
+      ResourceAllocator<TileChange>(budget)};
+  source_change.push_back({PlanWorkflowInput{1}, 0,
+                           TileSet::from_indices(budget, {23}).take_value(),
+                           false});
+  auto new_dirty = updated.value().dependencies.dirty_units(source_change);
+  require(new_dirty.ok() && new_dirty.value().size() == 1 &&
+              new_dirty.value()[0] == TileUnit{0, 0, 22},
+          "new branch replaces old tile dependency");
+  auto old_dirty = initial.value().dependencies.dirty_units(source_change);
+  require(old_dirty.ok() && old_dirty.value().empty(),
+          "prior dependency snapshot remains immutable");
   selectors[0] = 7;
-  c.result = unified_example::input_control(budget, selectors);
+  c.result = unified_result_fixture::input_control(budget, selectors);
   auto unrelated =
       handle.replace_bindings({{a, b, c}}, SnapshotAccessOptions{2, {}});
   require(unrelated.ok(), unrelated.status().message);
-  require(unrelated.value().potential_dirty.at("out").empty(),
-          "unconsumed Control remains clean");
+  require(
+      unrelated.value().potential_dirty.at("out") == wanted_tiles,
+      "Whole control payload edits conservatively invalidate subscribed tiles");
   const auto evaluate = [&](const DemandQuery& query) {
     auto current = context.freeze(planned.value().plan, {{a, b, c}});
     require(current.ok(), current.status().message);
     return context.execute_fragments(current.value(), query);
   };
   selectors[0] = 99;
-  c.result = unified_example::input_control(budget, selectors);
+  c.result = unified_result_fixture::input_control(budget, selectors);
   auto bounded = evaluate({{"out", wanted}});
   require(bounded.ok(), bounded.status().message);
-  const auto scalar = Footprint::all({1}).take_value();
+  const TileRequest scalar{true, {}};
   auto count_only = evaluate({{"count", scalar}});
   require(count_only.ok(), count_only.status().message);
   const auto& independent = count_only.value().results.at("count");
@@ -152,19 +162,16 @@ std::pair<ResultRef, ResultRef> run() {
                   .ok() &&
               count == 32,
           "count does not read invalid unneeded selectors");
-  auto empty = evaluate({{"out", Footprint::none({2, 2, 2, 4}).take_value()},
-                         {"count", Footprint::none({1}).take_value()}});
+  auto empty = evaluate({{"out", TileRequest{}}, {"count", TileRequest{}}});
   require(empty.ok(), empty.status().message);
   for (const auto& entry : empty.value().results)
     require(entry.second.descriptor().value().tensor_coverage(0).empty(),
             "empty Result demand publishes no samples");
-  auto invalid_at =
-      Footprint::from_regions({2, 2, 2, 4},
-                              {Region({{0, 1}, {0, 1}, {0, 1}, {0, 1}})})
-          .take_value();
+  const TileRequest invalid_at{false,
+                               TileSet::from_indices(budget, {0}).take_value()};
   for (auto invalid : {-1, 8}) {
     selectors[0] = invalid;
-    c.result = unified_example::input_control(budget, selectors);
+    c.result = unified_result_fixture::input_control(budget, selectors);
     auto rejected = evaluate({{"out", invalid_at}});
     require(
         !rejected.ok() && rejected.status().code == ErrorCode::InvalidArgument,

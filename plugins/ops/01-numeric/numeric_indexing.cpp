@@ -16,9 +16,9 @@
 #include "01-numeric/array_profiles.hpp"
 #include "01-numeric/exact_aggregate.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
+#include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/semantic.hpp"
-#include "plugin/builtin_operations.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal {
@@ -59,8 +59,7 @@ std::uint32_t static_axis(
 struct ConcatenateKernel final {
   SequenceProfile profile;
   explicit ConcatenateKernel(SequenceProfile selected) : profile(selected) {}
-  Status publish(const ResultProgramPhase& phase, ResultBuilder& builder,
-                 ResultRelation relation) {
+  Status publish(const ResultProgramPhase& phase, ResultBuilder& builder) {
     using namespace numeric_ops;  // NOLINT(build/namespaces)
     const auto& target = phase.query.output.result_schema->tensors[0];
     const auto shape = target.sample_shape();
@@ -158,9 +157,8 @@ struct ConcatenateKernel final {
               dimension == axis ? prefixes[port] : 0};
         auto status = builder.publish_tensor_view(
             0, Region(std::move(dimensions)), windows[port], transform,
-            relation, {true, true, true, true}, phase.query.cancellation);
-        if (status.code == ErrorCode::InvalidArgument &&
-            status.message.find("ViewUnavailable") != std::string::npos)
+            phase.query.cancellation);
+        if (status.reason == FailureReason::ViewUnavailable)
           return unavailable();
         if (!status.ok())
           return status;
@@ -216,7 +214,7 @@ struct ConcatenateKernel final {
             return phase.consume_work(1);
           });
         },
-        relation, {true, true, true, true}, phase.query.cancellation);
+        phase.query.cancellation);
   }
 };
 using ConcatenateProgram = numeric_ops::WholeTensorProgram<ConcatenateKernel>;

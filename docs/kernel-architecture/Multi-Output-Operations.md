@@ -27,14 +27,12 @@ The excerpt omits unrelated fields. Public execution places named Value outputs 
 
 The coordinator resolves only inputs in the selected projection. A Result callback may request a numeric Control sample, inspect it in the next stage, and then request the Data image samples selected by that value. The Result relation records consumed Control and Data support, and dirty transpose uses the same relation. Inputs outside the projection are not evaluated for that output.
 
-`ExecutionOptions::enable_joint` enables a registered contract for sharing physical work across eligible requested outputs. Each output keeps its own schema, query, relation, cache identity, and error. Joint execution does not authorize an unrequested output or merge unlike output semantics.
-
 ## Identity and resource effects
 
 A structured producer's identity includes the selected output, output contract, captured query, parameters, and ordered input bundle. Physical tile dimensions do not change semantic output identity. Relation traversal, reads, publication payload, continuation state, and retained input owners consume the same execution-root budget.
 
-A selected output failure returns a typed error for the request. An eligible joint group may share a continuation only when its registered contract permits the requested members. Unrequested output work does not start. Result owners remain live until their last owning reference is released.
+A selected output failure returns a typed error for the request. Unrequested output work does not start. Result owners remain live until their last owning reference is released.
 
 ## Executable fixture
 
-[`examples/unified_result_workflow`](../../examples/unified_result_workflow/README.md) uses public workflow APIs and minimal example operations to select a Result image output and a numeric output from the same node. The focused `test_multi_output_execution` and `test_unified_result_images` tests cover output selection, mixed ports, and image execution. The production operation catalog and image limitations are described in [Image operations](Image-Operations.md).
+The focused `test_multi_output_execution` and `test_unified_result_images` tests cover output selection, mixed ports, and image execution. The production operation catalog and image limitations are described in [Image operations](Image-Operations.md).

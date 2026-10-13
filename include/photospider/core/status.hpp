@@ -56,7 +56,10 @@ enum class FailureReason {
   StageLimit,
   Cancelled,
   StaleVersion,
-  InvalidQuality
+  InvalidQuality,
+  /** @brief Valid view request requires materialization; no mutation occurred.
+   */
+  ViewUnavailable
 };
 
 enum class FailureOrigin {

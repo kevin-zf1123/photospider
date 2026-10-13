@@ -22,23 +22,10 @@
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
 #include "data/value_validation.hpp"
-#include "photospider/data/representation.hpp"
 #include "photospider/data/result.hpp"
 #include "photospider/data/tensor_description.hpp"
 
 namespace ps {
-Status ResultBuilder::bind_descriptor_relation(ResultRelation relation) {
-  if (!impl_)
-    return Status{ErrorCode::Stale, {}};
-  std::lock_guard<std::timed_mutex> lock(impl_->mutex);
-  if (auto busy = impl_->reject_active_mutation(); !busy.ok())
-    return busy;
-  if (impl_->revision != 1 || impl_->descriptor_relation.valid() ||
-      !relation.owned_by(impl_->budget) || relation.coverage() != 1)
-    return data_internal::invalid_schema();
-  impl_->descriptor_relation = std::move(relation);
-  return Status::success();
-}
 ResultBuilder::ResultBuilder(ResultBuilder&& other) noexcept
     : impl_(std::move(other.impl_)) {}
 ResultBuilder& ResultBuilder::operator=(ResultBuilder&& other) noexcept {
@@ -54,8 +41,8 @@ ResultBuilder::~ResultBuilder() noexcept {
 Result<ResultBuilder> ResultBuilder::start(
     ResourceBudget budget, const SchemaTemplate& schema,
     std::string_view semantic_key, ResultGrowthLimits limits,
-    std::vector<std::uint64_t> association, std::uint64_t tile_height,
-    std::uint64_t tile_width, ResourceBindings resources) {
+    std::vector<std::uint64_t> association, std::uint64_t tile_extent,
+    ResourceBindings resources) {
   std::optional<ResourceAllocationScope> metadata_scope;
   const auto* active_root = resource_internal::metadata_budget();
   if (!active_root || !active_root->same_owner(budget))
@@ -65,9 +52,10 @@ Result<ResultBuilder> ResultBuilder::start(
     return Result<ResultBuilder>(valid);
   if (std::any_of(schema.tensors.begin(), schema.tensors.end(),
                   [](const auto& spec) { return spec.layout.spatial; }) &&
-      (!tile_height || !tile_width || (tile_height & (tile_height - 1)) ||
-       (tile_width & (tile_width - 1))))
-    return Result<ResultBuilder>(data_internal::invalid_schema());
+      (!tile_extent || (tile_extent & (tile_extent - 1))))
+    return Result<ResultBuilder>(
+        Status{ErrorCode::InvalidArgument,
+               "tile extent must be a positive power of two"});
   auto association_work = budget.consume({association.size()});
   if (!association_work.ok())
     return Result<ResultBuilder>(association_work);
@@ -153,7 +141,7 @@ Result<ResultBuilder> ResultBuilder::start(
       const auto& spec = impl->schema.tensors[i];
       auto& image = impl->tensors[i];
       auto initialized = image.initialize(impl->budget, spec, page_budget,
-                                          limits, tile_height, tile_width);
+                                          limits, tile_extent);
       if (!initialized.ok())
         return Result<ResultBuilder>(initialized);
     }
@@ -184,6 +172,22 @@ void ResultBuilder::fail(Status status) noexcept {
   if (!impl_->complete && impl_->status().ok())
     impl_->failure.record(status);
 }
+Result<ResultRef> ResultBuilder::seal_empty() {
+  if (!impl_)
+    return Result<ResultRef>(Status{ErrorCode::Stale, {}});
+  std::lock_guard<std::timed_mutex> lock(impl_->mutex);
+  if (impl_->revision != 1 || impl_->complete || !impl_->status().ok())
+    return Result<ResultRef>(data_internal::invalid_schema());
+  for (std::size_t i = 0; i < impl_->schema.tensors.size(); ++i)
+    if (!impl_->tensors[i].coverage.empty())
+      return Result<ResultRef>(data_internal::invalid_schema());
+  for (std::size_t i = 0; i < impl_->schema.fields.size(); ++i)
+    if (impl_->fields[i].written || impl_->fields[i].certified)
+      return Result<ResultRef>(data_internal::invalid_schema());
+  impl_->complete = true;
+  ++impl_->revision;
+  return Result<ResultRef>(reference());
+}
 Result<ResultRef> ResultBuilder::seal() {
   if (!impl_)
     return Result<ResultRef>(Status{ErrorCode::Stale, {}});
@@ -197,15 +201,10 @@ Result<ResultRef> ResultBuilder::seal() {
     impl_->failure.record(status);
     return Result<ResultRef>(status);
   };
-  if (!impl_->descriptor_relation.valid())
-    return reject(data_internal::invalid_schema());
-  for (std::size_t i = 0; i < impl_->schema.tensors.size(); ++i)
-    if (!impl_->tensors[i].relation.valid())
-      return reject(data_internal::invalid_schema());
   for (std::uint32_t i = 0; i < impl_->schema.fields.size(); ++i) {
     const auto& field = impl_->schema.fields[i];
     const auto& state = impl_->fields[i];
-    if (!state.relation.valid() || state.certified != state.written)
+    if (state.certified != state.written)
       return reject(data_internal::invalid_schema());
     if (field.rows.kind != ResultExtentKind::RuntimeCount) {
       const auto count = field.rows.kind == ResultExtentKind::FieldRows
@@ -218,12 +217,6 @@ Result<ResultRef> ResultBuilder::seal() {
   }
   if (impl_->revision == UINT64_MAX)
     return reject(data_internal::invalid_schema());
-  for (auto& field : impl_->fields)
-    if (field.storage.valid()) {
-      auto sealed = field.storage.seal();
-      if (!sealed.ok())
-        return reject(sealed);
-    }
   impl_->complete = true;
   ++impl_->revision;
   return Result<ResultRef>(reference());

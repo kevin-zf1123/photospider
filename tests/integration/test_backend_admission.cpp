@@ -17,13 +17,10 @@ struct Constant {
     auto builder = take(ps::ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
         phase.query.semantic_key));
-    check(builder.bind_descriptor_relation(
-        take(ps::ResultRelation::cartesian(phase.resources, 1, {}))));
+
     const std::uint8_t number = 17;
-    check(builder.publish_tensor(
-        0, ps::Region::whole({1}), ps::ByteView(&number, 1),
-        take(ps::ResultRelation::cartesian(phase.resources, 1, {})),
-        {true, true, true, true}));
+    check(builder.publish_tensor(0, ps::Region::whole({1}),
+                                 ps::ByteView(&number, 1)));
     return ps::Result<ps::ResultProgramPoll>(
         ps::ResultPublication{take(builder.seal()), true});
   } catch (const multi_result::Failure& failure) {
@@ -160,7 +157,7 @@ int main() {
   PS_REQUIRE_OK(effect_cpu);
   PS_REQUIRE_OK(context.execute(effect_cpu.value().plan));
   PS_CHECK(calls == 0 && effect_calls == 1);
-  auto tile = effect_cpu.value().plan.tile_plan("value", Region::whole({1}));
+  auto tile = effect_cpu.value().plan.tile_plan("value", TileRequest{true, {}});
   PS_REQUIRE_OK(tile);
   PS_REQUIRE_OK(context.execute(tile.value()));
   PS_CHECK(calls == 0 && effect_calls == 2);

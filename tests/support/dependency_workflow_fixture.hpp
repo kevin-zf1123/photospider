@@ -49,13 +49,11 @@ inline ps::ResultRef numbers(const ps::ResourceBudget& root,
   auto shape = schema(ps::ElementType::Float64, values.size());
   auto builder =
       take(ps::ResultBuilder::start(root, shape, "dependency.input"));
-  check(builder.bind_descriptor_relation(
-      take(ps::ResultRelation::cartesian(root, 1, {}))));
+
   check(builder.publish_tensor(
       0, ps::Region::whole({values.size()}),
-      {reinterpret_cast<const std::uint8_t*>(values.data()), values.size() * 8},
-      take(ps::ResultRelation::cartesian(root, values.size(), {})),
-      {true, true, true, true}));
+      {reinterpret_cast<const std::uint8_t*>(values.data()),
+       values.size() * 8}));
   return take(builder.seal());
 }
 inline double number(const ps::ResultRef& value, std::uint64_t at = 0) {
@@ -72,7 +70,7 @@ inline ps::OperationOutputTraits output(const ps::SchemaTemplate& schema,
   result.output_schema.result_schema_id = std::string(schema.id);
   result.output_schema.result_schema_version = schema.version;
   result.result_schema = schema;
-  result.region_rule = ps::OperationRegionRule::Dependency;
+  result.region_rule = ps::OperationRegionRule::Tiled;
   result.continuation_bytes = state_bytes;
   result.maximum_dependency_stages = stages;
   return result;
@@ -87,9 +85,9 @@ struct Source {
       const ps::ResultProgramPhase& phase) try {
     const auto& schema = *phase.query.output.result_schema;
     auto builder = take(ps::ResultBuilder::start(phase.resources, schema,
-                                                 phase.query.semantic_key));
-    check(builder.bind_descriptor_relation(
-        take(ps::ResultRelation::cartesian(phase.resources, 1, {}))));
+                                                 phase.query.semantic_key, {},
+                                                 {}, phase.query.tile_extent));
+
     auto demand = phase.query.tensor_outputs.value_or(
         take(ps::Footprint::all(schema.tensors[0].sample_shape())));
     for (const auto& box : demand.boxes()) {
@@ -103,12 +101,17 @@ struct Source {
       auto bytes = take(phase.resources.allocator().allocate(count * 8));
       check(phase.consume_work(count));
       check((*fill)(phase.query, box, bytes.data(), bytes.size()));
-      check(builder.publish_tensor(
-          0, box, ps::StridedLayout{0, {8}, {box.dimensions()[0].offset}},
-          std::move(bytes).freeze(),
-          take(ps::ResultRelation::cartesian(
-              phase.resources, take(schema.tensors[0].sample_count()), {})),
-          {true, true, true, true}));
+      ps::StridedLayout layout;
+      std::int64_t stride = 8;
+      layout.byte_strides.resize(box.rank());
+      for (std::size_t axis = box.rank(); axis-- > 0;) {
+        layout.byte_strides[axis] = stride;
+        stride *= box.dimensions()[axis].extent;
+      }
+      for (const auto& dimension : box.dimensions())
+        layout.origin.push_back(dimension.offset);
+      check(builder.publish_tensor(0, box, std::move(layout),
+                                   std::move(bytes).freeze()));
     }
     return ps::Result<ps::ResultProgramPoll>(
         ps::ResultPublication{take(builder.seal()), true});
@@ -126,7 +129,8 @@ inline ps::OperationDefinition source(std::string key,
                                       const ps::SchemaTemplate& schema,
                                       Fill fill) {
   if (schema.tensors.size() != 1 || !schema.fields.empty() ||
-      schema.tensors[0].sample_shape().size() != 1 ||
+      (schema.tensors[0].sample_shape().size() != 1 &&
+       schema.tensors[0].sample_shape().size() != 2) ||
       (schema.tensors[0].descriptor.element_type != ps::ElementType::Float64 &&
        schema.tensors[0].descriptor.element_type != ps::ElementType::Int64))
     throw Failure(

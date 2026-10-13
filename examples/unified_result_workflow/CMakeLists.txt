@@ -1,3 +1,0 @@
-add_executable(photospider_unified_result_workflow main.cpp)
-target_link_libraries(photospider_unified_result_workflow PRIVATE Photospider::kernel)
-target_compile_features(photospider_unified_result_workflow PRIVATE cxx_std_17)

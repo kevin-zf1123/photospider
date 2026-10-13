@@ -8,6 +8,8 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/plugin/result_tile_helpers.h"
+
 #ifdef PIXELOE_PROFILE_IO
 #include <chrono>
 #include <cinttypes>
@@ -57,7 +59,7 @@ void choice(const std::string& v, std::initializer_list<const char*> choices) {
   }
   throw Failure(6, "unsupported PixelOE option: " + v);
 }
-px::Options options(const ps_result_parameter_value_v2* p, uint32_t n) {
+px::Options options(const ps_result_parameter_value_v3* p, uint32_t n) {
   px::Options o;
   for (uint32_t i = 0; i < n; ++i) {
     std::string key(p[i].key, p[i].key_size);
@@ -168,7 +170,7 @@ void validate_channel(const ps::TensorChannelDescription& ch, size_t index) {
     validate_color(*ch.interpretation);
   }
 }
-void validate_metadata(const ps_result_tensor_spec_v2& m) {
+void validate_metadata(const ps_result_tensor_spec_v3& m) {
   if (m.element_type != 4 || m.rank != 3 || m.shape[2] != 3 ||
       m.height_axis != 0 || m.width_axis != 1 || m.channel_axis != 2 ||
       !m.spatial || m.batch_rank != 2) {
@@ -231,17 +233,17 @@ void require(int code, const char* message) {
   if (code)
     throw Failure(code, message);
 }
-const ps_result_tensor_spec_v2& image(const ps_result_port_v2& port) {
-  if (port.kind != PS_RESULT_OBJECT_V2 || !port.schema ||
+const ps_result_tensor_spec_v3& image(const ps_result_port_v3& port) {
+  if (port.kind != PS_RESULT_OBJECT_V3 || !port.schema ||
       port.schema->tensor_count != 1 || port.schema->field_count ||
       !port.schema->tensors)
     throw Failure(5, "PixelOE requires one Result image slot");
   return port.schema->tensors[0];
 }
-int infer(void* user, const ps_result_port_v2* inputs, uint32_t count,
-          const ps_result_parameter_value_v2* params, uint32_t pc,
-          const ps_result_port_v2* prototypes, uint32_t outputs,
-          const ps_result_metadata_sink_v2* sink) {
+int infer(void* user, const ps_result_port_v3* inputs, uint32_t count,
+          const ps_result_parameter_value_v3* params, uint32_t pc,
+          const ps_result_port_v3* prototypes, uint32_t outputs,
+          const ps_result_metadata_sink_v3* sink) {
   return protect([&] {
     if (count != 1 || outputs != 1)
       throw Failure(5, "PixelOE requires one input and output");
@@ -270,7 +272,7 @@ int infer(void* user, const ps_result_port_v2* inputs, uint32_t count,
     output.group_count = 0;
     output.facets = nullptr;
     output.facet_count = 0;
-    ps_result_facet_view_v2 view{};
+    ps_result_facet_view_v3 view{};
     if (selected != 2) {
       const auto& facet = rgb_facet();
       view = {sizeof(view),
@@ -293,8 +295,8 @@ int infer(void* user, const ps_result_port_v2* inputs, uint32_t count,
 struct State {
   bool requested = false;
 };
-int start(void*, void* raw, const ps_result_query_v2*,
-          const ps_result_services_v2*) {
+int start(void*, void* raw, const ps_result_query_v3*,
+          const ps_result_services_v3*) {
   new (raw) State{};
   return 0;
 }
@@ -302,38 +304,24 @@ void destroy_state(void*, void* raw) {
   static_cast<State*>(raw)->~State();
 }
 void destroy_api(void*) {}
-int execute(void* user, void* raw, const ps_result_query_v2* query,
-            const ps_result_services_v2* services) {
+int execute(void* user, void* raw, const ps_result_query_v3* query,
+            const ps_result_services_v3* services) {
   auto& state = *static_cast<State*>(raw);
-  if (query->requested_kind == 2 && query->requested_count == 0) {
+  if (!query->requested.whole && !query->requested.tile_count) {
     const auto code = protect([&] {
       require(services->begin_result(services->context),
               "PixelOE empty Result");
-      const ps_result_relation_row_v2 row{
-          0, 0, 8, PS_RESULT_TARGET_DESCRIPTOR_V2, 0, 0, 0};
-      require(services->bind_descriptor(services->context, &row, 1,
-                                        PS_RESULT_EXACT_V2),
-              "PixelOE empty descriptor");
       require(services->publish_result(services->context, 1),
               "PixelOE empty seal");
     });
-    return code ? code : PS_RESULT_PUBLISH_V2;
+    return code ? code : PS_RESULT_PUBLISH_V3;
   }
   if (!state.requested) {
-    const auto& source = image(query->inputs[0]);
-    ps_result_region_v2 all{};
-    all.struct_size = sizeof(all);
-    all.rank = source.rank + source.batch_rank;
-    all.extent[0] = source.batch_shape[0];
-    all.extent[1] = source.batch_shape[1];
-    for (unsigned axis = 0; axis < source.rank; ++axis)
-      all.extent[axis + 2] = source.shape[axis];
-    const auto code =
-        services->need_tensor(services->context, 0, 0, 13, &all, 1);
+    const auto code = ps_result_need_whole_v3(services, 0);
     if (code)
       return code;
     state.requested = true;
-    return PS_RESULT_NEED_V2;
+    return PS_RESULT_NEED_V3;
   }
   const auto code = protect([&] {
     px::Context context(services);
@@ -352,27 +340,8 @@ int execute(void* user, void* raw, const ps_result_query_v2* query,
     const auto h = static_cast<uint32_t>(source.shape[0]);
     const auto w = static_cast<uint32_t>(source.shape[1]);
     require(services->begin_result(services->context), "PixelOE begin Result");
-    const ps_result_relation_row_v2 descriptor{
-        0, 0, 8, PS_RESULT_TARGET_DESCRIPTOR_V2, 0, 0, 1};
-    require(services->bind_descriptor(services->context, &descriptor, 1,
-                                      PS_RESULT_EXACT_V2),
-            "PixelOE descriptor witness");
     constexpr uint64_t block = 1024;
     auto packed = context.empty(block * output.shape[2]);
-    uint64_t relation = 0;
-    const auto source_count =
-        source.batch_shape[0] * source.batch_shape[1] * h * w * 3;
-    require(services->make_tensor_cartesian(
-                services->context, 0, 0, 0, 5, 0, source_count,
-                PS_RESULT_CONSERVATIVE_V2, &relation),
-            "PixelOE Whole support");
-    struct ReleaseRelation {
-      const ps_result_services_v2* services;
-      uint64_t handle;
-      ~ReleaseRelation() {
-        services->release_relation(services->context, handle);
-      }
-    } release_relation{services, relation};
     for (uint64_t frame = 0; frame < source.batch_shape[0]; ++frame)
       for (uint64_t layer = 0; layer < source.batch_shape[1]; ++layer) {
 #ifdef PIXELOE_PROFILE_IO
@@ -380,7 +349,7 @@ int execute(void* user, void* raw, const ps_result_query_v2* query,
 #endif
         auto input = context.image(h, w);
         auto* data = static_cast<float*>(input.data);
-        ps_result_region_v2 source_region{};
+        ps_result_region_v3 source_region{};
         source_region.struct_size = sizeof(source_region);
         source_region.rank = 5;
         source_region.offset[0] = frame;
@@ -389,14 +358,14 @@ int execute(void* user, void* raw, const ps_result_query_v2* query,
         source_region.extent[2] = h;
         source_region.extent[3] = w;
         source_region.extent[4] = 3;
-        ps_result_tensor_window_v2 window{};
+        ps_result_tensor_window_v3 window{};
         window.struct_size = sizeof(window);
         uint64_t handle = 0;
         require(services->acquire_tensor_window(
                     services->context, 0, 0, &source_region, &window, &handle),
                 "PixelOE input window");
         struct ReleaseWindow {
-          const ps_result_services_v2* services;
+          const ps_result_services_v3* services;
           uint64_t handle;
           ~ReleaseWindow() {
             services->release_window(services->context, handle);
@@ -436,7 +405,7 @@ int execute(void* user, void* raw, const ps_result_query_v2* query,
             context.charge(16ULL * w);
             for (uint32_t x = 0; x < w;) {
               uint64_t at[]{frame, layer, y, x, ch};
-              ps_result_tensor_row_v2 row{};
+              ps_result_tensor_row_v3 row{};
               row.struct_size = sizeof(row);
               require(window.row(window.context, at, 5, &row),
                       "PixelOE input row");
@@ -489,7 +458,7 @@ int execute(void* user, void* raw, const ps_result_query_v2* query,
                       destination[pixel * out.channels + ch] = value;
                     }
                 });
-            ps_result_region_v2 region{};
+            ps_result_region_v3 region{};
             region.struct_size = sizeof(region);
             region.rank = 5;
             region.offset[0] = frame;
@@ -500,11 +469,10 @@ int execute(void* user, void* raw, const ps_result_query_v2* query,
             region.extent[2] = height;
             region.extent[3] = width;
             region.extent[4] = out.channels;
-            require(services->publish_tensor_with_relation(
+            require(services->publish_tensor(
                         services->context, 0, &region,
                         static_cast<const uint8_t*>(packed.data),
-                        width * height * out.channels * 4, relation,
-                        PS_RESULT_FINAL_V2),
+                        width * height * out.channels * 4),
                     "PixelOE image publication");
           }
 #ifdef PIXELOE_PROFILE_IO
@@ -530,19 +498,19 @@ int execute(void* user, void* raw, const ps_result_query_v2* query,
     require(services->publish_result(services->context, 1),
             "PixelOE seal Result");
   });
-  return code ? code : PS_RESULT_PUBLISH_V2;
+  return code ? code : PS_RESULT_PUBLISH_V3;
 }
 struct Tables {
-  std::vector<ps_result_parameter_descriptor_v2> parameters;
-  ps_result_tensor_spec_v2 pixels{};
-  ps_result_schema_v2 image_schema{};
-  ps_result_port_v2 input{};
-  ps_result_output_v2 output{};
-  ps_result_operation_v2 operations[12]{};
-  ps_result_operation_plugin_api_v2 api{};
+  std::vector<ps_result_parameter_descriptor_v3> parameters;
+  ps_result_tensor_spec_v3 pixels{};
+  ps_result_schema_v3 image_schema{};
+  ps_result_port_v3 input{};
+  ps_result_output_v3 output{};
+  ps_result_operation_v3 operations[12]{};
+  ps_result_operation_plugin_api_v3 api{};
   Tables() {
     for (const auto& p : schema)
-      parameters.push_back({sizeof(ps_result_parameter_descriptor_v2), p.name,
+      parameters.push_back({sizeof(ps_result_parameter_descriptor_v3), p.name,
                             static_cast<uint32_t>(std::strlen(p.name)), p.type,
                             1, p.type <= 2 ? 1u : 0u, p.lo, p.hi});
     pixels.struct_size = sizeof(pixels);
@@ -562,18 +530,18 @@ struct Tables {
     image_schema.id = "photospider.image";
     image_schema.id_size = 17;
     image_schema.version = 1;
-    image_schema.publication = PS_RESULT_COMPLETE_BUNDLE_V2;
+    image_schema.publication = PS_RESULT_COMPLETE_BUNDLE_V3;
     image_schema.tensors = &pixels;
     image_schema.tensor_count = 1;
     input.struct_size = sizeof(input);
-    input.kind = PS_RESULT_OBJECT_V2;
+    input.kind = PS_RESULT_OBJECT_V3;
     input.schema = &image_schema;
     output.struct_size = sizeof(output);
     output.key = "values";
     output.key_size = 6;
     output.port = input;
     output.input_count = UINT32_MAX;
-    output.execution = PS_RESULT_WHOLE_V2;
+    output.execution = PS_RESULT_WHOLE_V3;
     const char* keys[]{"pixeloe.pixelize",
                        "pixeloe.expanded",
                        "pixeloe.weight",
@@ -591,10 +559,10 @@ struct Tables {
       op.struct_size = sizeof(op);
       op.key = keys[i];
       op.key_size = std::strlen(keys[i]);
-      op.flags = (i < 3 || (i >= 6 && i < 9) ? PS_RESULT_FLAG_CPU_V2
-                                             : PS_RESULT_FLAG_GPU_V2) |
-                 PS_RESULT_FLAG_DETERMINISTIC_V2 |
-                 PS_RESULT_FLAG_SIDE_EFFECT_FREE_V2;
+      op.flags = (i < 3 || (i >= 6 && i < 9) ? PS_RESULT_FLAG_CPU_V3
+                                             : PS_RESULT_FLAG_GPU_V3) |
+                 PS_RESULT_FLAG_DETERMINISTIC_V3 |
+                 PS_RESULT_FLAG_SIDE_EFFECT_FREE_V3;
       op.inputs = &input;
       op.input_count = 1;
       op.outputs = &output;
@@ -611,14 +579,14 @@ struct Tables {
       op.poll = execute;
       op.destroy = destroy_state;
     }
-    api = {sizeof(api), PS_RESULT_OPERATION_ABI_VERSION_2,
+    api = {sizeof(api), PS_RESULT_OPERATION_ABI_VERSION_3,
            operations,  12,
            nullptr,     destroy_api};
   }
 };
 }  // namespace
-extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v2*
-ps_result_operation_plugin_get_api_v2() {
+extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v3*
+ps_result_operation_plugin_get_api_v3() {
   try {
     static Tables tables;
     return &tables.api;

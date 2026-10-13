@@ -37,7 +37,6 @@ Result<ExecutionResult> run_result_plan(
     const ExecutionOptions& options, const DemandQuery* requested,
     const std::string& snapshot_identity,
     execution_internal::ResultCache* dependency_cache,
-    execution_internal::SharedResults* shared_results, bool atom_outcomes,
     execution_internal::ResultCheckpoints* result_checkpoints,
     std::shared_ptr<const ExecutionPlan> plan_owner) {
   auto payload_observation =
@@ -48,12 +47,11 @@ Result<ExecutionResult> run_result_plan(
           : std::make_shared<core_internal::PayloadObservation>();
   std::optional<core_internal::ResourcePayloadScope> payload_scope;
   if (budget->resources())
-    payload_scope.emplace(
-        *budget->resources(),
-        core_internal::PayloadCapture{payload_observation, {}});
+    payload_scope.emplace(*budget->resources(),
+                          core_internal::PayloadCapture{payload_observation});
   ErrorCode coordinator_metadata_failure = ErrorCode::Ok;
   std::optional<ResourceAllocationScope> coordinator_resources;
-  // Frozen cache/flight paths install their own optional-retention scopes;
+  // Frozen cache paths install their own optional-retention scopes;
   // keep their best-effort allocation failures outside this sticky fence.
   if (budget->resources() && !dependency_cache)
     coordinator_resources.emplace(*budget->resources(),
@@ -91,10 +89,6 @@ Result<ExecutionResult> run_result_plan(
   auto retained_inputs = retain_managed_inputs(&bindings, budget);
   if (!retained_inputs.ok())
     return fail(retained_inputs);
-  if (atom_outcomes && !budget->resources())
-    return fail(
-        Status{ErrorCode::InvalidArgument,
-               "atom execution requires a managed CPU Result dependency plan"});
   if (!budget->resources())
     return fail(Status{ErrorCode::InvalidArgument,
                        "structured execution requires managed_resources"});
@@ -120,18 +114,11 @@ Result<ExecutionResult> run_result_plan(
       [pool, gpu_pool, native_device, budget, stage_root, admission, current,
        uploads, dependency_cache, cache_epoch,
        maximum_parallelism = options.maximum_parallelism](
-          Backend backend, bool whole, bool tiles, bool frozen_producer,
-          CancellationToken token,
+          Backend backend, bool whole, bool tiles, CancellationToken token,
           std::function<Status(const execution_internal::StructuredServices&)>
               task) -> Result<execution_internal::StructuredSubmission> {
         using Submission = execution_internal::StructuredSubmission;
         using Answer = Result<Submission>;
-        // A frozen shared producer serves peers independently of its
-        // originating caller generation. Its shared token still controls
-        // cancellation, and the caller retains its original final check.
-        const auto callback_current =
-            frozen_producer ? std::function<bool()>([] { return true; })
-                            : current;
         if (backend == Backend::Gpu &&
             !gpu_lane_available(gpu_pool, native_device)) {
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
@@ -142,14 +129,14 @@ Result<ExecutionResult> run_result_plan(
                                "native GPU Result lane is unavailable"});
         }
         if (tiles) {
-          auto issued = stage_root->consume({0, 0, 0, 1});
+          auto issued = stage_root->consume({0, 1});
           if (!issued.ok())
             return Answer(issued);
           execution_internal::CpuTileScope scope(
               pool->ranges(), token, stage_root.get(),
               maximum_parallelism ? maximum_parallelism
                                   : pool->ranges().workers(),
-              callback_current);
+              current);
           execution_internal::StructuredServices services;
           services.native_gpu_available =
               gpu_lane_available(gpu_pool, native_device);
@@ -170,13 +157,13 @@ Result<ExecutionResult> run_result_plan(
         }
         auto submitted = execution_internal::submit_result_stage(
             backend == Backend::Gpu ? gpu_pool : pool, admission,
-            [pool, native_device, budget, stage_root, callback_current, backend,
-             whole, uploads, dependency_cache, cache_epoch,
+            [pool, native_device, budget, stage_root, current, backend, whole,
+             uploads, dependency_cache, cache_epoch,
              native_gpu_available = gpu_lane_available(gpu_pool, native_device),
              token = std::move(token), task = std::move(task)] {
               if (token.cancelled())
                 return Result<int>(Status{ErrorCode::Cancelled, {}});
-              if (callback_current && !callback_current())
+              if (current && !current())
                 return Result<int>(Status{ErrorCode::Stale, {}});
               execution_internal::StructuredServices services;
               services.native_storage = [native_device](const auto& storage) {
@@ -213,10 +200,9 @@ Result<ExecutionResult> run_result_plan(
                     -> Result<std::pair<Value, std::uint64_t>> {
                   using Answer = Result<std::pair<Value, std::uint64_t>>;
                   const auto stop = [&] {
-                    return token.cancelled() ? ErrorCode::Cancelled
-                           : callback_current && !callback_current()
-                               ? ErrorCode::Stale
-                               : ErrorCode::Ok;
+                    return token.cancelled()       ? ErrorCode::Cancelled
+                           : current && !current() ? ErrorCode::Stale
+                                                   : ErrorCode::Ok;
                   };
                   if (stop() != ErrorCode::Ok)
                     return Answer(Status{stop(), {}});
@@ -328,7 +314,7 @@ Result<ExecutionResult> run_result_plan(
                 };
               }
               execution_internal::CpuRangeScope ranges(
-                  pool->ranges(), token, stage_root.get(), callback_current);
+                  pool->ranges(), token, stage_root.get(), current);
               if (backend == Backend::Cpu && whole)
                 services.cpu_parallel = ranges.service();
               auto status = task(services);
@@ -345,8 +331,8 @@ Result<ExecutionResult> run_result_plan(
         auto future = completion->future.share();
         return Answer(Submission{std::move(completion), std::move(future), {}});
       },
-      requested, snapshot_identity, shared_results, result_checkpoints,
-      dependency_cache, plan_owner, atom_outcomes,
+      requested, snapshot_identity, result_checkpoints, dependency_cache,
+      plan_owner,
       options.maximum_parallelism ? options.maximum_parallelism
                                   : pool->ranges().workers());
   if (!result.ok())

@@ -108,7 +108,7 @@ struct FailingSource {
     if (!requested) {
       requested = true;
       ps::ResultProgramNeed need;
-      need.tensors.push_back(
+      need.tiles.push_back(
           {0, 0,
            take(ps::Footprint::all(
                phase.query.inputs[0].result_schema->tensors[0].sample_shape())),
@@ -431,9 +431,10 @@ void selected_cache(const std::string& profile) {
   auto demand = take(execution.open_demand(plan.plan, bindings));
   const auto observed = take(demand.request(query));
   const auto repeated = take(demand.request(query));
-  require(observed.results.at("values").object_id() ==
-              repeated.results.at("values").object_id(),
-          "same frozen demand shares completed Result observation");
+  require(repeated.diagnostics.cache_hits > 0 &&
+              numeric_result_fixture::bytes(observed.results.at("values")) ==
+                  numeric_result_fixture::bytes(repeated.results.at("values")),
+          "repeated demand reuses bounded completed cache with identical bits");
   bindings.inputs[1].result =
       point_math_checks::source(take(execution.resource_budget()),
                                 raw(ps::ElementType::Int64, {10, 99, 30}),

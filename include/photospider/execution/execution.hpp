@@ -43,14 +43,11 @@ struct PHOTOSPIDER_API ExecutionContextConfig final {
   /** @brief Maximum reserved/allocated controlled computation buffer bytes. */
   std::uint64_t maximum_live_bytes = 256U * 1024U * 1024U;
   /** @brief Optional completed-result retention sublimit; zero disables it.
-   * Same-snapshot exact demand Flights still share active computations.
    */
   std::uint64_t result_cache_bytes = 0;
   /** @brief Maximum live context-managed demand handles, 1..65536. */
   std::uint32_t maximum_demands = 1024;
   /** @brief Maximum live Result checkpoint scopes, 1..1048576.
-   * @note Structured Result shared-producer entries and waiters use separate
-   * Root Entries, Host and Metadata admission and do not consume this limit.
    */
   std::uint64_t maximum_result_checkpoint_scopes = 65536;
   /** @brief Retained dependency-cache proof units, 1..1048576.
@@ -143,17 +140,11 @@ struct PHOTOSPIDER_API ExecutionOptions final {
    * that Run.
    */
   std::uint64_t maximum_dependency_cache_work = 1048576;
-  /** @brief Group already-ready Atomic outputs with optional CPU joint code. */
-  bool enable_joint = true;
   /** @brief Maximum explicit Result/temporary read or write payload, positive.
    * Internal backing windows are operation-defined and admitted against root
    * capacity; this bound does not split those requests.
    */
   std::uint64_t maximum_result_window_bytes = 4096;
-  /** @brief Collected atom observations for execute_atoms, at most 65536.
-   * Zero permits only an empty query. This bound is not semantic identity.
-   */
-  std::uint64_t maximum_atom_observations = 65536;
   /** @brief Per-caller notification after a structured range is certified.
    * Each execute call has an independent subscription. Notifications are
    * serialized for that caller. Revision watermarks are keyed by logical step
@@ -216,28 +207,13 @@ struct PHOTOSPIDER_API OperationTiming final {
 };
 
 /** @brief Context-local aggregate of cache observations, synchronized on read.
- * @note The context combines retained-result cache counters with structured
- * Result sharing counters. Their source-specific scopes are preserved rather
- * than normalized to one per-backend convention. Active Result producer
- * observations remain visible when completed-result retention is disabled.
  */
 struct ResultCacheStatistics final {
   /** @brief Existing retained-result cache counters; each source keeps its
    * own hit, miss, and eviction scope. */
   std::uint64_t hits = 0, misses = 0, evictions = 0;
-  /** @brief Cumulative shared-computation observations from the retained-result
-   * cache and structured Result sharing. Structured Result sharing adds one
-   * for each successful non-producer acquire, including a join to an active
-   * producer or reuse of a completed weak Result. */
-  std::uint64_t shared_computations = 0;
-  /** @brief Retained cache bytes and entries; weak structured Result entries
-   * do not add to either value. */
+  /** @brief Retained cache bytes and entries. */
   std::uint64_t retained_bytes = 0, entries = 0;
-  /** @brief Aggregate in-flight observations. Structured Result sharing counts
-   * unfinished producer epochs while their producer lease exists, including
-   * an older epoch replaced under the same key. Completion, failure, or lease
-   * destruction retires that epoch once. */
-  std::uint64_t in_flight = 0;
   /** @brief Unique retained native allocation capacity, included in
    * retained_bytes. */
   std::uint64_t native_retained_bytes = 0;
@@ -249,8 +225,6 @@ struct ResultCacheStatistics final {
  * @note Diagnostics are observations, not verdicts, attestations, or receipts.
  */
 struct PHOTOSPIDER_API ExecutionDiagnostics final {
-  /** @brief Actual shared starts, polls and singleton group fallbacks. */
-  std::uint64_t joint_groups = 0, joint_polls = 0, joint_fallbacks = 0;
   /** @brief Context-root model snapshot for structured execution; not RSS. */
   std::optional<ResourceStatistics> managed_resources = {};
   /** @brief Total execute call duration in microseconds. */
@@ -284,19 +258,12 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   /** @brief Actual bytes copied when assembling collected output tiles. */
   std::uint64_t result_copy_bytes = 0;
   /** @brief Peak committed controlled Payload bytes attributed to this Run.
-   * Includes payload allocated by parallel callbacks and this Run's own
-   * shared producer epoch. Excludes caller-preexisting input backing and
+   * Includes payload allocated by parallel callbacks. Excludes existing input
+   * backing and
    * earlier completed-cache storage. This reports controlled backing capacity,
    * not process RSS.
    */
   std::uint64_t peak_live_bytes = 0;
-  /** @brief Maximum committed Payload peak among active shared producer epochs
-   * used by this call. A joint producer reports its aggregate epoch peak.
-   * @note Separate from caller-owned collection; shared work is never charged
-   * twice in the context budget. Reusing a completed cached Result does not
-   * carry forward the earlier producer epoch's peak.
-   */
-  std::uint64_t shared_peak_live_bytes = 0;
   /** @brief Peak reserved Payload capacity attributed to this Run, including
    * complete CPU reservations and incremental native reservations. This is an
    * admission capacity measure and may differ from committed live bytes.
@@ -320,10 +287,6 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
   /** @brief Completed internal state transitions reused/computed after keyed
    * lookup. */
   std::uint64_t block_cache_hits = 0, block_cache_misses = 0;
-  /** @brief Actual non-producer acquires, including active joins and completed
-   * weak reuse. Repeated lookup of the same Run actor is not an acquire;
-   * reused work never duplicates producer callback timings. */
-  std::uint64_t shared_computations = 0;
   /** @brief Successful source reads used to assemble Result inputs. */
   std::uint64_t source_read_count = 0;
   std::uint64_t source_read_bytes = 0;
@@ -352,22 +315,6 @@ struct PHOTOSPIDER_API ExecutionDiagnostics final {
  * @note Results have no durable identity, retention, receipt, or recovery
  * semantics.
  */
-/** @brief Outcome of one named Result atom observation.
- * `output` identifies the requested compiled output and `key` identifies its
- * logical observation. The key omits tuple-channel and atomic trailing axes;
- * the associated Result covers those grouped samples at the selected
- * coordinates. `outcome` owns the published Result or retains a local failure
- * with its original upstream detail. `quality` carries any matching report.
- * Protocol, Run, Waiter, and call-level cancellation failures end the enclosing
- * call instead of becoming an observation outcome.
- */
-struct AtomObservation final {
-  ResourceString name;
-  ValueRef output;
-  AtomKey key;
-  Result<ResultRef> outcome;
-  std::optional<QualityReport> quality = {};
-};
 struct PHOTOSPIDER_API ExecutionResult final {
   /** @brief Raw compiler-independent execution diagnostics. */
   ExecutionDiagnostics diagnostics;
@@ -378,8 +325,6 @@ struct PHOTOSPIDER_API ExecutionResult final {
   /** @brief Paged named results; each retains descriptor, witness and backing.
    */
   ResourceMap<ResultRef> results = {};
-  /** @brief Populated by execute_atoms; empty for ordinary execute calls. */
-  ResourceVector<AtomObservation> atoms = {};
 };
 
 /**
@@ -397,17 +342,13 @@ class PHOTOSPIDER_API FrozenExecution final {
   /** @brief Borrowed immutable pinned plan, valid for this object's lifetime.
    */
   const ExecutionPlan& plan() const noexcept;
-  /** @brief Derives a frozen named-output region without recompilation.
-   * @details Creates a new state with an independent tile plan and the captured
-   * bindings, registry, and execution identity. Existing copies keep their
-   * original plan and state.
-   * For a sole-tensor Result output, the region uses full sample_shape,
-   * including batch axes, and closes over the tensor's sample tuple contract.
-   * @return Pinned region or Stale/InvalidArgument for invalid/outside demand.
+  /** @brief Derives a frozen named-output tile request without recompilation.
+   * Creates an independent plan sharing captured bindings and registry owners.
+   * @return Pinned tiles or Stale/InvalidArgument for invalid/outside demand.
    * @throws std::bad_alloc For copied metadata.
    */
-  Result<FrozenExecution> for_region(const std::string& output,
-                                     const Region& region) const;
+  Result<FrozenExecution> for_tiles(const std::string& output,
+                                    const TileRequest& request) const;
 
  private:
   friend class ExecutionContext;
@@ -416,11 +357,11 @@ class PHOTOSPIDER_API FrozenExecution final {
   std::shared_ptr<const State> state_;
 };
 
-/** @brief Named sample subsets of the compiled output regions.
- * ColorArray output requests expand to complete colors. Returned fragments and
- * retained demand identities use the closure; Image requires complete channels.
+/** @brief Named tile subsets or complete outputs of the compiled plan.
+ * Empty tile sets request no computation. Bounds are checked before a
+ * spatial Whole producer is normalized to its complete logical unit.
  */
-using DemandQuery = std::map<std::string, Footprint>;
+using DemandQuery = std::map<std::string, TileRequest>;
 /** @brief Complete sparse result; holes remain unauthorized and unallocated. */
 struct PHOTOSPIDER_API DemandResult final {
   ResourceMap<ResultRef> results;
@@ -436,13 +377,14 @@ struct DemandConfig final {
 };
 /** @brief Atomic binding replacement and potential change in recorded outputs.
  * @note Coverage excludes never-requested outputs. Dirty sets accumulate until
- * a new successful request replaces that exact query's publication. Hints do
- * not authorize clean results; byte comparisons use immutable input owners.
+ * their units are successfully recomputed. All subscriptions share the latest
+ * record of each unit. Whole outputs use unit 0. Hints do not authorize reads;
+ * byte comparisons use immutable input owners.
  */
 struct PHOTOSPIDER_API DemandUpdate final {
   std::uint64_t generation = 0;
-  DemandQuery coverage;
-  DemandQuery potential_dirty;
+  std::map<std::string, TileSet> coverage;
+  std::map<std::string, TileSet> potential_dirty;
 };
 /** @brief Context-managed immutable binding bundle with explicit replacement.
  * @note Copies share one handle. Requests are independently cancellable and
@@ -455,12 +397,8 @@ class PHOTOSPIDER_API DemandHandle final {
   bool valid() const noexcept { return impl_ != nullptr; }
   /** @brief Executes exact original Q against the captured latest generation.
    * @return Complete fragments/evidence, or typed failure without partial
-   * publication. Atomic observations are isolated; terminal Q is never split.
-   * Concurrent replacement makes old latest requests Stale; cancellation wins.
-   * @note Equal Atomic observations or identical terminal Q in the same
-   * immutable bundle can share active work only with deterministic, side-effect
-   * free ancestors. Waiter cancellation sources are independent of the
-   * producer.
+   * publication. Each completed unit replaces its prior dependency record.
+   * Concurrent publication/replacement can return Stale; cancellation wins.
    * @throws std::bad_alloc For request/structural metadata.
    */
   Result<DemandResult> request(const DemandQuery& query,
@@ -468,8 +406,9 @@ class PHOTOSPIDER_API DemandHandle final {
                                const ExecutionOptions& options = {}) const;
   /** @brief Validates immutable replacements and commits bundle/dirty together.
    * @note Replacement Results must retain the same static schemas. Required
-   * old support samples are compared under the sample limit. Concurrent request
-   * publication/replacement may return Stale for retry; no partial edit occurs.
+   * observed producer units are compared in full under the sample limit.
+   * Concurrent request publication/replacement may return Stale for retry; no
+   * partial edit occurs.
    * @return New generation and accumulated dirty coverage, or typed failure.
    * @throws std::bad_alloc For immutable snapshots/metadata.
    */
@@ -483,7 +422,8 @@ class PHOTOSPIDER_API DemandHandle final {
   /** @brief Removes one exact query's retained structural subscription.
    * @note Does not cancel active requests. An already-running request for Q
    * can publish a new subscription after this removal.
-   * @return Success, NotFound for an unregistered query, or stopped status.
+   * @return Success, NotFound for an unregistered query, Stale on concurrent
+   * publication/replacement, or stopped status.
    */
   Status release(const DemandQuery& query) const;
   /** @brief Cancels all handle requests and releases retained publications.
@@ -605,8 +545,7 @@ class PHOTOSPIDER_API ExecutionContext final {
                                    DemandConfig config = {});
   /** @brief Executes arbitrary exact subsets against independently frozen work.
    * @note Empty revalidates static metadata and skips Result callbacks and
-   * reads. Complete terminal RequestRecord Q stays intact, including
-   * noncontiguous requests. With a positive result cache,
+   * reads. With a positive result cache,
    * deterministic/side-effect-free/ cacheable ancestry may reuse successful
    * exact observations after matching the complete old source witness against
    * current immutable bindings. Hits preserve per-output evidence under the
@@ -621,16 +560,11 @@ class PHOTOSPIDER_API ExecutionContext final {
    * Sticky callback/protocol, observer, service, resource, cancellation, or
    * active-stop failures also block retry. Failures after continuation
    * startup, including poll and publication failures, do not trigger CPU
-   * fallback. For Result producers, shared waiters observe the actual backend
-   * selected after a permitted startup retry; this does not establish a
-   * separate Result fallback cache-isolation rule. The existing fallback-
-   * ancestry exclusion from completed-result, checkpoint and block reuse
-   * applies to Result Flights and Whole records.
+   * fallback. Fallback ancestry is excluded from completed-result, checkpoint
+   * and block reuse.
    * Diagnostics record actual backends and rejected physical attempts.
    * Caller must not race direct execution with context destruction.
-   * A cancelled structured Result producer may use the frozen-plan peer
-   * handoff described by `execute`; without a pending producer and live peer,
-   * callbacks drain before return. A nonempty Q makes every
+   * Callbacks drain before return. A nonempty Q makes every
    * non-side-effect-free operation a mandatory root, even if its output is
    * outside Q. A completely Empty Q skips unrelated effect roots. For a tensor
    * output, the internal actor identity uses slot zero with full coverage;
@@ -654,12 +588,6 @@ class PHOTOSPIDER_API ExecutionContext final {
   /** @brief Executes pinned work, independently cancellable per call.
    * @return Named result or typed failure. Ordinary completion drains callbacks
    * before return.
-   * @note If cancellation arrives while a structured Result producer callback
-   * is pending and a peer still needs it, the context may retain the
-   * coordinator for that peer and return after retiring this caller's
-   * subscription. The peer later drives the coordinator on its own polling
-   * thread. This handoff requires the pinned plan and does not apply when no
-   * peer remains; those paths drain synchronously.
    * @throws std::bad_alloc For metadata allocation.
    */
   Result<ExecutionResult> execute(const FrozenExecution& frozen,
@@ -671,9 +599,6 @@ class PHOTOSPIDER_API ExecutionContext final {
    */
   void clear_result_cache();
   /** @brief Returns synchronized context-local cache observations.
-   * @note The aggregate preserves the source-specific accounting of the
-   * retained-result cache and adds structured Result sharing counters; it is
-   * not a normalized per-backend counter set.
    */
   ResultCacheStatistics cache_statistics() const;
   /** @brief Returns cumulative FIFO observations when collection is enabled.
@@ -704,38 +629,12 @@ class PHOTOSPIDER_API ExecutionContext final {
    * Its leases can outlive this context. Does not start or retain computation.
    */
   Result<ResourceBudget> resource_budget() const;
-  /** @brief Collects exact CPU Atomic Result observations for named outputs.
-   * Uses the context's managed Root and requires a structured Result dependency
-   * plan. Each requested name maps to a sample Footprint in the output's full
-   * sample shape, including batch axes. The output must declare Atomic,
-   * PerAtomOutcome, and joint contract 2. Tensor tuple-channel and atomic
-   * trailing axes are grouped into one observation; the remaining coordinates
-   * form its `AtomKey`.
-   * Admission validates every named output and the total observation count
-   * before preparing actors or invoking producer callbacks. The count is
-   * bounded by `maximum_atom_observations` and a hard limit of 65,536. Each
-   * member returns an owning Result or a local failure and optional quality;
-   * protocol, Run, Waiter, and call-level cancellation failures end the call.
-   * Joint contract 2 may batch up to 64 one-observation queries, including
-   * different queries of one output, and still uses its required one-member
-   * joint callback when grouping is disabled. It has no GPU path. Ordinary
-   * `execute` keeps its fail-fast contract. A nonempty query makes every
-   * non-side-effect-free operation a mandatory root; a completely Empty query
-   * skips unrelated effect roots. For a tensor output, the internal actor
-   * identity uses slot zero with full coverage; other slots retain their
-   * original Need and publication checks. Failure or cancellation of a
-   * mandatory root fails this Run.
-   */
-  Result<ExecutionResult> execute_atoms(
-      const ExecutionPlan& plan, ExecutionBindings bindings,
-      const DemandQuery& requested, const CancellationToken& cancellation = {},
-      const ExecutionOptions& options = {});
 
  private:
   Result<ExecutionResult> execute_regions(
       const ExecutionPlan& plan, ExecutionBindings bindings,
       const CancellationToken& cancellation, const ExecutionOptions& options,
-      const std::string& snapshot_identity = {}, bool atom_outcomes = false,
+      const std::string& snapshot_identity = {},
       const DemandQuery* requested = nullptr,
       std::shared_ptr<const ExecutionPlan> plan_owner = {});
   /** @brief Opaque pools, shared waiting admission, and resource ledger. */

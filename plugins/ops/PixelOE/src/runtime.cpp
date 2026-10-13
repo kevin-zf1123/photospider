@@ -14,7 +14,7 @@
 #endif
 namespace px {
 namespace {
-thread_local const ps_result_services_v2* argument_services = nullptr;
+thread_local const ps_result_services_v3* argument_services = nullptr;
 bool simd_available() {
   const char* mode = std::getenv("PIXELOE_CPU_SIMD");
   if (mode && std::strcmp(mode, "0") == 0) {
@@ -47,7 +47,7 @@ void admit_arguments(size_t count) {
                                                     4096 + 2048 * count) != 0)
     throw Failure(4, "PixelOE argument construction budget exhausted");
 }
-Context::Context(const ps_result_services_v2* services)
+Context::Context(const ps_result_services_v3* services)
     : services_(services),
       simd_(services && !services->gpu && simd_available()) {
   if (!services_ || services_->struct_size != sizeof(*services_) ||

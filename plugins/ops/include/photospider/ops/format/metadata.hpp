@@ -7,6 +7,7 @@
 #include <variant>
 #include <vector>
 
+#include "photospider/ops/export.hpp"
 #include "photospider/ops/format/channel.hpp"
 
 namespace ps::format {
@@ -86,7 +87,7 @@ struct MetadataOptions final {
  * @return The new node's `values` output edge, or an error such as
  *         `InvalidArgument` or `ResourceExhausted`.
  */
-PHOTOSPIDER_API Result<WorkflowNodeOutput> assign_metadata(
+PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> assign_metadata(
     WorkflowDocument& document, WorkflowInput input,
     const MetadataOptions& options = {});
 /** @brief Lower a deletion-only metadata edit to the Result-based FMT-08A node.
@@ -103,7 +104,7 @@ PHOTOSPIDER_API Result<WorkflowNodeOutput> assign_metadata(
  * @return The lowered node's `values` edge, or an error such as
  *         `InvalidArgument` or `ResourceExhausted`.
  */
-PHOTOSPIDER_API Result<WorkflowNodeOutput> remove_metadata(
+PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> remove_metadata(
     WorkflowDocument& document, WorkflowInput input,
     const std::vector<std::string>& targets,
     const MetadataOptions& options = {});

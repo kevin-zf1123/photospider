@@ -4,11 +4,13 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/core/status.hpp"
+#include "photospider/data/tiles.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps {
@@ -57,11 +59,7 @@ struct PHOTOSPIDER_API PlanCacheKey final {
 /** @brief One independently inferred result in declaration order. */
 struct PHOTOSPIDER_API SemanticOutput final {
   std::string key;
-  ValueDescriptor descriptor;
-  std::vector<ValueFacet> facets;
-  bool effective_atomic = true;
-  /** @brief Alternative fixed structured edge schema; Value metadata is empty.
-   */
+  /** @brief Complete resolved Result schema. */
   std::shared_ptr<const SchemaTemplate> result_schema = {};
 };
 
@@ -86,7 +84,7 @@ struct PHOTOSPIDER_API SemanticNode final {
    * Retains its definition; pointer/state bytes are excluded from digests.
    */
   std::shared_ptr<const PreparedOperation> prepared = {};
-  /** @brief Independent named result metadata and observation legality. */
+  /** @brief Independent named result metadata. */
   std::vector<SemanticOutput> outputs;
 };
 
@@ -306,22 +304,16 @@ struct PHOTOSPIDER_API PlanningOptions final {
    * changes physical identity, not source parameters or input bits.
    */
   ExecutionMode execution_mode = ExecutionMode::CpuExact;
-  /**
-   * @brief Optional bounded logical demand per named workflow output.
-   *
-   * Missing names default to whole-output demand. Unknown names, rank/shape
-   * mismatch, empty/out-of-bounds Regions and partial-channel image demand
-   * fail before plan publication. Image coverage uses inferred facets and the
-   * full logical channel extent, including generic ports and Whole outputs.
-   * ColorArray requests instead expand the last axis to complete colors;
-   * returned output Regions record that closure. Changed demand replans
-   * optimized IR.
+  /** @brief Explicit tile indices or complete output for each named output.
+   * Missing names default to Whole. Unknown names, Whole plus indices,
+   * indices without a grid and out-of-grid indices fail before publication.
+   * Nonempty requests for Whole producers normalize to complete output;
+   * empty tile sets remain empty. Coordinates are converted by the caller.
    */
-  std::map<std::string, Region> output_regions;
-  /** @brief Spatial tile extents must each be a positive power of two
-   * (including 1); changing them only replans optimized IR. */
-  std::uint64_t tile_height = 128;
-  std::uint64_t tile_width = 128;
+  std::map<std::string, TileRequest> output_requests;
+  /** @brief Plan-wide square tile extent, a positive power of two including 1.
+   */
+  std::uint64_t tile_extent = 128;
 };
 
 /** @brief Reference to an earlier physical step. */
@@ -336,49 +328,6 @@ struct PHOTOSPIDER_API PlanWorkflowInput final {
 };
 /** @brief Tagged physical producer reference in input-port order. */
 using PlanInput = std::variant<PlanStepInput, PlanWorkflowInput>;
-
-/** @brief Physical action on local shared storage; HostAccess need not copy. */
-enum class PhysicalStepKind : std::uint32_t {
-  Upload = 1,
-  Operation = 2,
-  HostAccess = 3
-};
-
-/** @brief Explicit access/operation step with checked packed Region bounds.
- * @note step_index identifies the operation consumer (producer for a named
- * output). input_index is meaningful for unnamed access steps. Native addresses
- * are excluded. Runtime fallback can require a reported additional upload.
- */
-struct PHOTOSPIDER_API PhysicalStep final {
-  /** @brief Upload, operation execution or completed shared host access. */
-  PhysicalStepKind kind = PhysicalStepKind::Operation;
-  /** @brief Index in steps(); consumer for input access, producer for output.
-   */
-  std::size_t step_index = 0;
-  /** @brief Ordered consumer input port; unused for operation/named output. */
-  std::size_t input_index = 0;
-  /** @brief Typed producer; operation records refer to their own step. */
-  PlanInput source = PlanStepInput{};
-  /** @brief Expected producer implementation before runtime fallback. */
-  Backend source_backend = Backend::Cpu;
-  /** @brief Planned consumer access domain; host access selects Cpu. */
-  Backend destination_backend = Backend::Cpu;
-  /** @brief Full logical type/shape independent of packed storage. */
-  ValueDescriptor descriptor;
-  /** @brief Exact bounded logical demand, retaining complete image channels. */
-  Region region;
-  /** @brief Packed payload byte count; zero only for non-dense CPU metadata. */
-  std::uint64_t packed_bytes = 0;
-  /** @brief Logical requested upload bytes or operation output/workspace
-   * bound; host access is zero. Native backing capacity is resolved per device
-   * during execution and charged independently of this immutable plan.
-   */
-  std::uint64_t allocation_bytes = 0;
-  /** @brief Named result for a terminal host access; empty otherwise. */
-  std::string output_name;
-  /** @brief Canonical packed target view, with logical Region origin. */
-  StridedLayout packed_layout = {};
-};
 
 /**
  * @brief One validated local physical plan step.
@@ -404,31 +353,22 @@ struct PHOTOSPIDER_API PlanStep final {
    * Retains its definition; pointer/state bytes are excluded from digests.
    */
   std::shared_ptr<const PreparedOperation> prepared = {};
-  /** @brief Statically validated output Value descriptor. */
-  ValueDescriptor output_descriptor;
-  /** @brief Canonical inferred output facets, independent of runtime storage.
-   */
-  std::vector<ValueFacet> output_facets = {};
   /** @brief Selected local physical backend. */
   Backend backend = Backend::Cpu;
-  /** @brief Estimated peak bytes reserved before invocation. */
-  std::uint64_t planned_bytes = 0;
-  /** @brief Logical result coverage demanded by downstream plan consumers. */
-  Region output_demand;
-  /** @brief Per-input logical demands derived from the operation Region rule.
-   */
-  std::vector<Region> input_demands;
-  /** @brief Requires one complete materialization, never per-tile
-   * recomputation. */
-  bool whole_boundary = false;
-  /** @brief Compiler-proven observation kind over all input edges. */
-  bool effective_atomic = true;
   /** @brief Resolved fixed schema for a paged output; no Value shape is
    * invented. */
   std::shared_ptr<const SchemaTemplate> output_result_schema = {};
   /** @brief Immutable staged metadata owned by compilation, borrowed by Runs.
    */
   std::shared_ptr<const ResultProgramMetadata> structured_metadata = {};
+  /** @brief Spatial storage grid when this Result has one spatial tensor only.
+   */
+  std::optional<TileGrid> tile_grid;
+  /** @brief True only for a declared Tiled output with a resolved tile grid.
+   * Whole outputs use dependency/computation unit zero even when grid is
+   * present.
+   */
+  bool tiled = false;
 };
 
 /**
@@ -437,14 +377,6 @@ struct PHOTOSPIDER_API PlanStep final {
  * @note Steps may retain opaque immutable preparation and definition leases.
  * Native execution handles and daemon objects are not part of a plan.
  */
-struct PHOTOSPIDER_API PlanExecutionGroup final {
-  /** @brief Semantic node owning these optional singleton step alternatives. */
-  std::uint64_t node_id = 0;
-  /** @brief Contract-compatible Atomic CPU steps; runtime selects ready
-   * members. */
-  std::vector<std::size_t> members;
-};
-
 class PHOTOSPIDER_API ExecutionPlan final {
  public:
   /**
@@ -473,10 +405,6 @@ class PHOTOSPIDER_API ExecutionPlan final {
   /** @brief Compiler-owned static result identities; no Run-time rehashing. */
   const std::vector<std::string>& structured_templates() const noexcept {
     return structured_templates_;
-  }
-  /** @brief Optional execution groups; no group changes singleton semantics. */
-  const std::vector<PlanExecutionGroup>& execution_groups() const noexcept {
-    return execution_groups_;
   }
   /**
    * @brief Returns named output to step-index mapping.
@@ -540,18 +468,16 @@ class PHOTOSPIDER_API ExecutionPlan final {
     return current_check_ && current_check_();
   }
 
-  /** @brief Returns each name's exact output Region, including default Whole.
-   */
-  const std::map<std::string, Region>& output_regions() const noexcept {
-    return output_regions_;
+  /** @brief Normalized requests, including default Whole for omitted names. */
+  const std::map<std::string, TileRequest>& output_requests() const noexcept {
+    return output_requests_;
   }
   /** @brief Returns positive spatial tile geometry fixed by planning. */
-  std::uint64_t tile_height() const noexcept { return tile_height_; }
-  std::uint64_t tile_width() const noexcept { return tile_width_; }
-  /** @brief Ordered uploads, operations and host access for this exact demand.
-   */
-  const std::vector<PhysicalStep>& physical_steps() const noexcept {
-    return physical_steps_;
+  std::uint64_t tile_extent() const noexcept { return tile_extent_; }
+  /** @brief Workflow input grids in declaration order; storage-independent. */
+  const std::vector<std::optional<TileGrid>>& input_tile_grids()
+      const noexcept {
+    return input_tile_grids_;
   }
   /** @brief Explicit placement permission retained when deriving tile plans. */
   ExecutionMode execution_mode() const noexcept { return execution_mode_; }
@@ -559,28 +485,24 @@ class PHOTOSPIDER_API ExecutionPlan final {
    * @brief Derives one demand-local plan without reanalyzing or enumerating
    * tiles.
    * @param output_name Existing named output.
-   * @param region Nonempty subset of that name's requested Region; inferred
-   * image outputs require every logical channel, with spatial ROI allowed.
-   * @return A dependency-pruned tile plan or Stale/InvalidArgument/overflow.
+   * @param request Tile subset of that name's normalized plan request.
+   * @return A named-output plan or Stale/InvalidArgument for an invalid subset.
    * @throws std::bad_alloc For graph metadata allocation.
-   * @note Whole boundaries retain complete demand. No runtime Value is
-   * retained; callers must preserve graph/registry currentness as for the
-   * parent plan.
+   * @note No coordinates are converted and no pixel storage is allocated.
+   * Whole producers normalize nonempty requests before subset validation.
    */
   Result<ExecutionPlan> tile_plan(const std::string& output_name,
-                                  const Region& region) const;
+                                  const TileRequest& request) const;
 
  private:
   friend class Compiler;
   friend class ExecutionContext;
   friend class DemandHandle;
 
-  std::map<std::string, Region> output_regions_;
+  std::map<std::string, TileRequest> output_requests_;
   ExecutionMode execution_mode_ = ExecutionMode::CpuExact;
-  std::vector<PhysicalStep> physical_steps_;
-  std::vector<PlanExecutionGroup> execution_groups_;
-  std::uint64_t tile_height_ = 128;
-  std::uint64_t tile_width_ = 128;
+  std::uint64_t tile_extent_ = 128;
+  std::vector<std::optional<TileGrid>> input_tile_grids_;
   /** @brief Immutable resources required to interpret static metadata. */
   ResourceBindings resources_;
   /** @brief Canonical copied input metadata, with no per-run sample owners. */

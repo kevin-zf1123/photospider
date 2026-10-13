@@ -90,14 +90,6 @@ operations with their own IEEE contracts.
 
 ## Basic curves, fields and analysis Results
 
-`basic.cpp` composes `field.smoothstep` → `field.apply_lut_1d` → `grade.levels`
-with `analysis.histogram` and `analysis.histogram_out_of_range`. It also samples
-the same `[K,2]` controls with linear and monotone curves and connects the
-smoothstep coverage Result to `image.mask`. Its inputs are Results: a Float32
-`[2,2]` field `[-1,0,.5,2]`, a Float32 table `[0,2]`, Float64 controls
-`[0,0,.5,.25,1,1]`, and a canonical RGBA Float32 image with cell shape `[2,2,4]`
-and batch axes `[1,1]`.
-
 The workflow checks coverage and levels `[0,0,.5,1]`, histogram bins
 `[2,0,1,1]`, out-of-range counts `[0,0]`, linear samples
 `[0,.125,.25,.625,1]`, monotone samples
@@ -133,9 +125,7 @@ is `abs(-12)=12` with no color facet. The Data Need selects that component, whil
 the Whole operation validates the complete typed source, including alpha and
 unrequested colors. Its relation records full source support; changing the
 selected color's alpha is Validation-dirty for the requested output region.
-Changing alpha in another color also fails Whole validation. The successful
-request and its source-support mapping are checked with joint grouping both
-enabled and disabled. A ResultRef window can read the authorized red component
+Changing alpha in another color also fails Whole validation. A ResultRef window can read the authorized red component
 alone; publishing that one channel as a ColorArray tensor is rejected because
 the publication must contain a complete tuple. A full-tuple window remains
 readable after releasing the source handle. The `tuple_output_view()` example
@@ -154,17 +144,14 @@ The standalone Fraction oracle checks 1,847 exact metadata decisions, including
 extreme binary64 coordinates, zero normalization scales and near-singular bases.
 These manual checks are excluded from CTest and integration registration.
 
-`--joint-validation` runs a direct CPU Result contract-2 probe for tuple Needs.
-It rejects a per-member Validation Need that omits channels and accepts complete
-tuples, including tuples supplied by multiple Needs from the same member. A
+A
 second-stage history case checks that Validation from another observation cannot
 close the current observation. `--dependency-proof` runs the compact mapping,
-history, joint-transport, and schema-grouping checks. These probes exercise the
+history and schema-grouping checks. These probes exercise the
 Result relation rules independently from the `public_workflow()` example.
 
 ```sh
 cmake --build build/numeric --target photospider_numeric_color_array -j8
-build/numeric/examples/numeric_workflow/photospider_numeric_color_array --joint-validation
 build/numeric/examples/numeric_workflow/photospider_numeric_color_array --dependency-proof
 ```
 
@@ -525,28 +512,6 @@ After the execution context retires, the retained Result still accounts for at
 least 2048 live Payload bytes; releasing its final owner returns all Root
 resource dimensions to zero. No x86 execution or performance result is claimed.
 
-`facilities.cpp` implements `manual.numeric_probe`, `manual.failed_source` and
-`manual.structured_sum` as structured Result operations. Their workflow edges
-and outputs are Result-backed; the structured example binds its source as a
-Result tensor. The probe reports numeric work before returning either an atom
-failure or a Need whose upstream source fails. The four baseline cases retain
-`evaluated_values=2` and the original error provenance. A Host-pressure source
-also reports one value, consumes its remaining Host headroom, and returns
-`OperationFailed/ShortIo/Io/Group` at node 2. Its C2 caller has reported two
-values, so the aggregate is three with either joint-grouping mode; the source
-failure provenance remains intact. The Result timing entry is admitted from
-Root before callback dispatch, so this path does not need to grow the timing
-container after the callback consumes Host capacity. Disabling joint grouping
-still drives the probe's required single-member C2 joint callback.
-
-The structured consumer binds a five-sample input Result and reads it through a
-Tensor Need over two polls per observation. It checks five observations, ten
-polls and `sum=35`. Its producer's `atomic_trailing_axes` value is preserved in
-the consumer's compiled input metadata; a direct joint start with mismatched
-static grouping returns `Stale`. The example also reports both
-`OperationTiming.numeric.evaluated_values` and `computed_elements` to show that
-arithmetic work and published output samples are separate counts.
-
 ## Expression sampling and static preparation: NUM-01
 
 `sample_expression_node` in `photospider/ops/numeric/expression.hpp` authors the
@@ -640,104 +605,6 @@ executions. `invocations` is the operation poll count, while
 before projection. The evaluated-value, strict-math-call and fallback columns
 are `N/A` for this Whole Result path.
 
-### Whole static preparation in `prepared.cpp`
-
-The `manual.whole_prepared` case accepts one Float64 scalar Result and publishes
-two Results: `values` has shape `[5]`, and `axis` has shape `[3]` with one atomic
-trailing axis. Static preparation creates one immutable program shared by both
-outputs and by the semantic, optimized, and compiled representations. Repeated
-execution reuses that prepared program. A request for one axis component closes
-to the complete three-component tuple; direct and concurrent Result starts
-check the exact Float64 bits for 7.0.
-
-The `mask` parameter selects the static input projection. `mask=0` excludes the
-input, so an upstream Result source is not started. `mask=1` selects the scalar
-input and records its ObjectId in each output association. Duplicate and
-out-of-range projections (`mask=2` and `mask=3`) are rejected during
-specialization. When the input is selected, an upstream source failure reaches
-the Whole operation. Direct `start_result` checks the prepared schema and exact
-parameter seal before starting the callback. This paragraph describes the
-Whole Result case; C2 Result behavior is described below.
-
-An Empty tensor request also skips the selected source Need and all tensor
-reads and writes. The callback seals a metadata-only Result with empty tensor
-coverage; the source-start count remains at the single start from the earlier
-nonempty failing-source check.
-
-### C2 Result preparation and joint execution
-
-The `manual.prepared` operation declares two Result outputs and a C2
-`PerAtomOutcome` joint callback. One compile prepares an immutable `Program`
-shared by both outputs and by the semantic, optimized, and compiled plans.
-`execute_atoms` returns six independent Result observations: five `values`
-samples and one `axis` tuple. The axis query closes to its complete three-value
-atomic tuple. Every checked output sample has the exact Float64 bits for 7.0.
-
-With cache capacity set to zero, disabling grouping produces six one-member
-joint starts rather than switching to the singleton callback; enabling grouping
-reduces the start count below six. Sparse value queries and tile plans reuse the
-same preparation. Direct joint checks with two and five members prepare once,
-start once, poll once, and publish the requested Results. Static seals reject a
-foreign registry, changed schema, signed-zero parameter drift, and distinct
-NaN payload bits before another preparation. A started continuation can outlive
-the registry and external prepared handle, and its published Result remains
-readable after the continuation is released. The test checks the retained
-payload falls from eight bytes to zero when the last Result owner is released.
-These are independent per-atom Result publications; this example does not
-exercise aggregation of a wide Object or Field dependency into one Result.
-
-### Whole Result view preparation
-
-`manual.whole_view` requests its complete input tensor with Data, Validation,
-and Descriptor roles. In compiled structured CPU Whole execution, the
-coordinator validates and supplies that Need, then prepares each authorized box
-before the next computation poll. It first proves an affine view over the
-existing owner. If that mapping is unavailable, the strict view policy returns
-`ViewUnavailable` before the computation callback; Auto may instead collect
-the authorized samples into immutable Root-owned private backing retained by
-the `ResultTensorInput`. The callback acquires that prepared window and
-publishes a Result tensor view. Auto falls back only for an unavailable view. A
-work, cancellation, or resource failure remains an error.
-
-The fixture checks a zero-stride Result with an 8-byte backing and an 8-byte
-output payload cap, multi-owner rejection, Auto collection with a zero-byte
-output cap, and same-owner fragments that join into an affine view without
-collection. Collection and its metadata still consume Root capacity even when
-the output cap is zero. Under the fixture's 80-byte Root Payload cap, the source
-completes and seals before Auto preparation returns `ResourceExhausted`; the
-computation callback does not run, and live Payload returns to zero. A
-pre-cancelled execution also avoids source payload and computation. An
-out-of-domain tensor read returns `UnauthorizedRead`; copying the capability
-shares the immutable prepared backing without widening its grant. The output
-keeps its Result schema, association, and resource owners; its physical view
-retains the source Result. An external input owner remains readable after the
-execution context retires, and all Root resource dimensions reach zero after
-the final owner is dropped. A deliberately ignored workspace-allocation error
-remains sticky as `ResourceExhausted`; the output cap checks publication and
-does not prevent earlier Root allocations. Direct `ResultProgramPhase` calls
-do not automatically fulfill Needs or prepare these views. This path is limited
-to compiled structured CPU Whole execution; it does not extend to joint, GPU,
-or the C Result ABI.
-
-The completed-result cache also exercises this path. A warm request replays the
-original grant and dependency facts without running the computation callback;
-setting `maximum_dependency_cache_work=0` instead recomputes normally and
-reports zero cache work. Cache misses use the ordinary Need path and prepare
-views before computation.
-
-The focused local `test_numeric_prepared` CTest and the manual executable pass
-with these Whole view checks. The installed-kernel consumer uses the same
-`prepared.cpp` source. These checks do not imply support for wider Object/Field
-aggregation or joint/GPU view preparation.
-
-Rebuild and run the focused local target with:
-
-```sh
-cmake --build build/kernel-dev --target test_numeric_prepared photospider_numeric_prepared -j8
-ctest --test-dir build/kernel-dev -R '^test_numeric_prepared$' --output-on-failure
-build/kernel-dev/examples/numeric_workflow/photospider_numeric_prepared
-```
-
 The separate unsuffixed `numeric.sample_expression` and `lut.apply_1d` Result
 workflow is demonstrated by the `expression-lut` scenario in the
 [foundations workflow](../foundations_workflow/README.md). Those keys use a
@@ -790,17 +657,11 @@ separate typed Float32 spatial image Result with invalid RGBA semantics is
 rejected. This fixture uses a 1 MiB Root payload limit and a 64 KiB source page.
 
 `array_boundaries` checks all 256 UInt8 source values and an unaligned,
-negative-stride Int64 mapping. `structured_views` compiles a custom consumer
-that requests the last sample of a giant broadcast through Tensor Need. A
-separate input has one batch axis of extent 2 and a cell shape of `{3}`; the
-consumer reads the last sample at batch coordinate 1 and cell coordinate 2.
-The test also checks ordinary and frozen `[2^20,2^20]` constant Results and a
+negative-stride Int64 mapping. The test also checks ordinary and frozen `[2^20,2^20]` constant Results and a
 `[2^38,3]` broadcast, each backed by an 8-byte scalar where applicable.
 
 `broadcast_cache` distinguishes repeated queries against the same frozen
-Result object from reuse with a fresh, equivalent Result source. Rebinding both
-an unobserved and an observed source invalidates the Whole output; the new
-demand sees the replacement while the old frozen binding retains its value.
+Result object from reuse with a fresh, equivalent Result source.
 `array_owner_and_payload_cache` checks NaN sign and payload bits in cache keys,
 an oversized 4096-byte scalar backing that retires after an 8-byte constant
 Result is published, and a broadcast Result that retains its 24-byte source
@@ -838,8 +699,7 @@ owner tests, profile-specific boundaries, `structured_views`, and dense/schema
 checks. It verifies a dense `[2,3]` Result filled with six Int64 sevens,
 malformed shapes rejected during schema validation, and Int64/Float32/Float64
 bit preservation. Ordinary and frozen constant Results cover shape
-`[2^20,2^20]`; the structured consumer reads a `[2^38,3]` broadcast through
-Tensor Need and returns a one-sample Result. The batch-axis case has one batch
+`[2^20,2^20]`. The batch-axis case has one batch
 axis of extent 2 and cell shape `[3]`; the last coordinate is `[1,2]`.
 Published Results and acquired windows remain readable after context teardown
 until their final owners are released.
@@ -864,16 +724,14 @@ compiles `arrays.cpp` with `PS_RESULT_PAYLOAD_TEST` as
 `test_result_output_payload`. Its `manual.output_payload` operation declares an
 8-byte output cap and a separate 8-byte workspace, then attempts to publish a
 16-byte Float64 tensor. Direct polling rejects that publication with sticky
-`ResourceExhausted/CapacityLimit`; compiled execution also rejects it, and the
-joint path reports the cap failure per member. A second case sets the cap to
+`ResourceExhausted/CapacityLimit`; compiled execution also rejects it. A second case sets the cap to
 zero and publishes an authorized view of an input Result, confirming that
 shared physical backing is not charged as new output payload. This is a
 publication-time bound: the callback's attempted allocation is still charged
 to the Root before the host rejects the Result. The probe also checks
 cumulative prefix limits with and without backing reuse, metadata admission
 before callback entry, foreign-Root rejection, and preservation of a prior
-callback failure. Cancellation during one joint member's cap scan leaves a
-healthy peer able to succeed. The same probe is built as an installed consumer
+callback failure. The same probe is built as an installed consumer
 against the imported kernel and retains the existing Metadata/Entries
 bookkeeping checks.
 

@@ -1,6 +1,6 @@
 # PixelOE CPU, Metal and Vulkan Slang plugin
 
-PixelOE ports its Slang pixelization pipeline, including downscale modes, outline/statistics/weight options, color correction, sharpening, quantization and dithering. The plugin now registers twelve Result operation ABI 2 keys. See [SPEC.md](SPEC.md) for parameters and the current image contract.
+PixelOE ports its Slang pixelization pipeline, including downscale modes, outline/statistics/weight options, color correction, sharpening, quantization and dithering. The plugin now registers twelve Result operation ABI 3 keys. See [SPEC.md](SPEC.md) for parameters and the current image contract.
 
 The plugin requires Photospider 0.33.0 or a compatible release in the 0.33 minor line, with the `operation_sdk` and `kernel` components installed. Its package version file uses CMake `SameMinorVersion` compatibility. The input and each output use schema `photospider.image`, with one Float32 spatial tensor named `pixels`, HWC shape and exactly two batch axes: frames and layers. Each frame/layer image is processed independently. CPU Whole, CPU tiled, Metal and Vulkan keys remain distinct; GPU keys require their matching native backend. Python/Torch/Slang remain build and validation dependencies. Public kernel headers and libraries come from the installed package; PixelOE is not registered as a built-in operation.
 

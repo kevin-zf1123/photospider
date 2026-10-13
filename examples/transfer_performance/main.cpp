@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "../common/tile_request.hpp"
 #include "fixtures/fmt09_sweep.hpp"
 #include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
@@ -349,10 +350,11 @@ int main(int argc, char** argv) try {
   Compiler compiler(registry);
   GraphContext graph(document);
   PlanningOptions planning;
-  planning.output_regions = {{"result", roi}};
-  planning.tile_height = planning.tile_width = tile;
+  planning.tile_extent = tile;
   auto start = Clock::now();
   auto plan = take(compiler.compile(graph, planning));
+  plan.plan =
+      take(workflow_example::select_tiles(root, plan.plan, "result", roi));
   const auto compile_us = us(start);
   std::vector<double> prepare;
   OperationMetadata metadata;

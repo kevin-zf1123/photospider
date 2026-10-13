@@ -27,13 +27,9 @@ This specification defines the intended mathematics and interface contract only;
 
 Suffix letters denote distinct mathematical/interface objects, not quality tiers that a backend may choose arbitrarily. A primitive may propose strict and accelerated profiles; a helper only orchestrates explicit stages.
 
-## Shared Mathematics, Units, and Profiles
-
-
 ### Blocking Profile and Acceptance Gates
 Implement BM3D/CBM3D natively, and compare against a pinned third-party implementation. The exact third-party implementation and version, along with native profile and resource details, remain unresolved; do not claim a comparison has been executed. Algorithm papers do not establish software licensing terms.
 Pin version/source or binary SHA-256, CPU/ISA and thread count, randomness (expected none), noise units, profile, block dimensions/stride, search/group sizes and sorting ties, distance cutoff, 2D/3D transforms and norms, hard-stage thresholds, Wiener-stage pilot, Kaiser or other aggregation weights, boundary/padding, color-transform matrix, and input range. A third-party comparison establishes only the recorded comparison; it does not prove native NUM four-ULP compliance. Visual similarity is not conformance.
-
 
 ## Shared Execution and Numeric Obligations
 

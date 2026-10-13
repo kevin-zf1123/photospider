@@ -11,12 +11,13 @@
 #include <utility>
 #include <vector>
 
-#include "00-foundation/tensor_program.hpp"
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "common/registry.hpp"
+#include "common/tensor_program.hpp"
 #include "photospider/ops/format/metadata.hpp"
 #include "photospider/ops/numeric/workflow_authoring.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::metadata_internal {
 namespace {
@@ -1482,17 +1483,15 @@ Result<OperationPreparation> prepare(
 using plugin_internal::tensor_ops::require;
 using plugin_internal::tensor_ops::take;
 using Poll = Result<ResultProgramPoll>;
-ResultBuilder builder(const ResultProgramPhase& phase, bool empty) {
+ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto result = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
-  require(result.bind_descriptor_relation(take(ResultRelation::cartesian(
-      phase.resources, 1,
-      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+      phase.query.tile_extent, phase.query.resources));
+
   return result;
 }
 Poll empty_result(const ResultProgramPhase& phase) try {
@@ -1514,16 +1513,20 @@ struct State final {
     if (!requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tensors.push_back({0, 0, output, 9});
+      {
+        auto tile_need_0 = sdk::tile_need_for_samples(
+            phase.resources, phase.query, 0, 0, output);
+        if (!tile_need_0.ok())
+          return Result<ResultProgramPoll>(tile_need_0.status());
+        need.tiles.push_back(tile_need_0.take_value());
+      }
       return Poll(std::move(need));
     }
     auto result = builder(phase, false);
-    std::vector<ResultMappedAxis> axes(shape.size());
+    std::vector<ResultViewAxis> axes(shape.size());
     for (std::size_t axis = 0; axis < axes.size(); ++axis)
       axes[axis].output_axis = static_cast<std::int32_t>(axis);
-    const auto relation = take(ResultRelation::mapped(
-        phase.resources, shape, Region::whole(shape), shape, axes,
-        {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
+
     const auto policy = option(phase.query.parameters, "layout", "auto");
     require(plugin_internal::format_result::planes(
         tensor, output, [&](const Region& box) {
@@ -1532,7 +1535,7 @@ struct State final {
           if (!window.ok())
             return window.status();
           return plugin_internal::format_result::publish(
-              phase, &result, box, window.value(), axes, relation, policy);
+              phase, &result, box, window.value(), axes, policy);
         }));
     return Poll(ResultPublication{take(result.seal()), true});
   } catch (const Status& status) {
@@ -1560,7 +1563,7 @@ OperationDefinition definition(
   out.key = "values";
   out.output_schema = port;
   out.result_schema = plugin_internal::tensor_ops::scalar_schema();
-  out.region_rule = OperationRegionRule::Dependency;
+  out.region_rule = OperationRegionRule::Tiled;
   out.continuation_bytes = sizeof(State);
   out.maximum_dependency_stages = 2;
   op.prepare_static = [profile](const auto& inputs, const auto& params) {

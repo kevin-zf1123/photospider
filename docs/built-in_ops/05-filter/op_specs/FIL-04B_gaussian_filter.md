@@ -74,22 +74,9 @@ relation closes ColorArray tuple and atomic trailing axes. Dirty propagation
 follows these relations, and the continuation reuses one coefficient owner across
 its tile polls.
 
-`filter.gaussian_baked64_v1_strict_gpu` uses Whole demand and the same baked64
-mathematics. It selects MSL/Metal or SPIR-V/Vulkan from the active GPU service and
-has no CPU fallback. Host execution certifies coefficients; the device evaluates
-and rounds every output sample using exact integer arithmetic. A dispatch covers
-up to 256 output lanes on Metal and 64 on Vulkan, with at most 16 taps per lane.
-A submission may group two ordered dispatches, so each lane processes at most 32
-taps between submission drains. Cancellation stops later submissions and
-publication while retaining all owners until completion. The Result migration
-passes the native Metal test and independent oracle. See the [current implementation](../gaussian-implementation.md)
-and [public workflow](../../../../examples/gaussian_workflow/README.md).
-
 ## Oracle, fixtures, and acceptance
 
 Verify exact preservation of constants and impulse reflection. Compare Float32 and Float64 results with a baked64 rational oracle. Do not assert that two truncated blurs equal one blur with sigma `sqrt(s1²+s2²)`.
-
-The linked reference function is a mathematical oracle, not a production kernel or a complete Result-port/preflight simulator. ExactRational uses exact rational expressions followed by IEEE rounding. For transcendental functions, only a DirectedMPFR interval that uniquely determines the result is a strict golden; otherwise report Inconclusive. Fixture identifiers describe reference-case scope only. Current runtime behavior and finite execution evidence are described in the [implementation document](../gaussian-implementation.md). See the [runtime acceptance protocol](FILTER_oracle_protocol.md).
 
 The reference helpers are `gaussian_kernel(sigma,radius)` in [transcend.py](../../../../oracle/ops/filter/oracles/transcend.py) and `separable(image,kx,ky,anchor=(0,0),**kwargs)` in [spatial.py](../../../../oracle/ops/filter/oracles/spatial.py). See also the [oracle README](../../../../oracle/ops/filter/README.md).
 

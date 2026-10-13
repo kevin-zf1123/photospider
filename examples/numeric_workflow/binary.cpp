@@ -475,9 +475,10 @@ void cache_and_composition(ps::CpuNumericProfile profile) {
   ps::DemandQuery query{{"values", take(ps::Footprint::all({1}))}};
   auto first = take(demand.request(query));
   auto repeated = take(demand.request(query));
-  require(first.results.at("values").object_id() ==
-              repeated.results.at("values").object_id(),
-          "same frozen demand shares completed Result observation");
+  require(repeated.diagnostics.cache_hits > 0 &&
+              numeric_result_fixture::bytes(first.results.at("values")) ==
+                  numeric_result_fixture::bytes(repeated.results.at("values")),
+          "repeated demand reuses bounded completed cache with identical bits");
   std::uint64_t initial_bits = 0;
   require(rf::read(repeated.results.at("values"), {0}, &initial_bits, 8).ok() &&
               initial_bits == raw(1),

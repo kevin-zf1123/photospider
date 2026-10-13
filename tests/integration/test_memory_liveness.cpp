@@ -40,7 +40,7 @@ struct Program {
       requested = true;
       ResultProgramNeed need;
       for (unsigned port = 0; port < (mode == 3 ? 2U : 1U); ++port)
-        need.tensors.push_back({port, 0, take(Footprint::all({1})), 1});
+        need.tiles.push_back({port, true, false, {}});
       return Result<ResultProgramPoll>(std::move(need));
     }
     const auto active = ++control->active;
@@ -59,9 +59,12 @@ struct Program {
         double right = 0;
         check(phase.read_tensor(1, 0, {0}, &right, sizeof(right)));
         number += right;
-        if (control->check_release && !control->source.expired())
-          return Result<ResultProgramPoll>(Status{
-              ErrorCode::OperationFailed, "source retained after last use"});
+        // Completed tiles remain available while downstream adaptive Needs
+        // can still revisit their producers. Run retirement releases them.
+        if (control->check_release && control->source.expired())
+          return Result<ResultProgramPoll>(
+              Status{ErrorCode::OperationFailed,
+                     "source released before downstream completion"});
       } else {
         std::unique_lock<std::mutex> lock(control->mutex);
         if (mode == 1) {
@@ -99,20 +102,7 @@ struct Program {
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
             : std::vector<std::uint64_t>{}));
-    check(builder.bind_descriptor_relation(
-        take(ResultRelation::cartesian(phase.resources, 1, {}))));
-    auto relation_lease = take(phase.resources.reserve(ResourceCapacity::host(
-        2 * sizeof(ResultRelation), 2 * sizeof(ResultRelation))));
-    std::vector<ResultRelation> relations;
-    relations.reserve(2);
-    for (unsigned port = 0; port < (mode == 3 ? 2U : mode ? 1U : 0U); ++port)
-      relations.push_back(take(ResultRelation::cartesian(
-          phase.resources, 1,
-          {port, 1, 0, 1, ResultSupportTarget::Tensor, 0})));
-    auto relation =
-        relations.empty()
-            ? take(ResultRelation::cartesian(phase.resources, 1, {}))
-            : take(ResultRelation::unite(phase.resources, relations));
+
     auto made = phase.resources.allocator().allocate(sizeof(number));
     if (!made.ok()) {
       std::lock_guard<std::mutex> lock(control->mutex);
@@ -142,8 +132,7 @@ struct Program {
     if (!mode)
       control->source = storage;
     check(builder.publish_tensor(0, Region::whole({1}), {0, {8}},
-                                 std::move(storage), std::move(relation),
-                                 {true, true, true, true}));
+                                 std::move(storage)));
     return Result<ResultProgramPoll>(
         ResultPublication{take(builder.seal()), true});
   }
@@ -255,15 +244,12 @@ struct Scratch {
     auto builder = take(ResultBuilder::start(phase.resources,
                                              *phase.query.output.result_schema,
                                              phase.query.semantic_key));
-    check(builder.bind_descriptor_relation(
-        take(ResultRelation::cartesian(phase.resources, 1, {}))));
+
     auto output = take(phase.resources.allocator().allocate(8));
     const double number = 5;
     std::memcpy(output.data(), &number, 8);
-    check(builder.publish_tensor(
-        0, Region::whole({1}), {0, {8}}, std::move(output).freeze(),
-        take(ResultRelation::cartesian(phase.resources, 1, {})),
-        {true, true, true, true}));
+    check(builder.publish_tensor(0, Region::whole({1}), {0, {8}},
+                                 std::move(output).freeze()));
     return Result<ResultProgramPoll>(
         ResultPublication{take(builder.seal()), true});
   } catch (const multi_result::Failure& failure) {
@@ -343,7 +329,6 @@ int graph_liveness() {
     root = take(execution.resource_budget());
     ExecutionOptions options;
     options.maximum_parallelism = 2;
-    options.enable_joint = false;
     auto result = execution.execute(plan.plan, {}, {}, options);
     if (!result.ok())
       std::cerr << result.status().message << '\n';

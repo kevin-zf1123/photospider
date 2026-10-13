@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 
 namespace gpu_result {
 struct Failure : std::runtime_error {
@@ -49,45 +50,26 @@ inline ps::OperationOutputTraits output(const ps::SchemaTemplate& schema) {
   output.output_schema.result_schema_id = std::string(schema.id);
   output.output_schema.result_schema_version = schema.version;
   output.result_schema = schema;
-  output.region_rule = ps::OperationRegionRule::Dependency;
+  output.region_rule = ps::OperationRegionRule::Tiled;
   output.continuation_bytes = 1;
-  output.shape_rule = ps::OperationShapeRule::Scalar;
-  output.output_dtype_rule = ps::OperationDtypeRule::Declared;
-  output.output_semantic_rule = ps::OperationSemanticRule::Drop;
   output.maximum_dependency_stages = 4;
   return output;
 }
-inline ps::ResultBuilder builder(const ps::ResultProgramPhase& phase,
-                                 bool input_descriptor = true) {
+inline ps::ResultBuilder builder(const ps::ResultProgramPhase& phase) {
   auto result = take(ps::ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
-  check(result.bind_descriptor_relation(take(ps::ResultRelation::cartesian(
-      phase.resources, 1,
-      input_descriptor
-          ? ps::ResultSupport{0, 8, 0, 1, ps::ResultSupportTarget::Descriptor,
-                              0}
-          : ps::ResultSupport{}))));
+      phase.query.tile_extent, phase.query.resources));
   return result;
 }
-inline ps::ResultRelation identity(const ps::ResultProgramPhase& phase,
-                                   bool whole = false) {
-  const auto count =
-      take(phase.query.output.result_schema->tensors[0].sample_count());
-  return whole ? take(ps::ResultRelation::cartesian(
-                     phase.resources, count,
-                     {0, 1, 0, count, ps::ResultSupportTarget::Tensor, 0}))
-               : take(ps::ResultRelation::identity(
-                     phase.resources, count, 0, 1,
-                     ps::ResultSupportTarget::Tensor, 0));
-}
-inline ps::Result<ps::ResultProgramPoll> need(const ps::Footprint& samples) {
+inline ps::Result<ps::ResultProgramPoll> need(
+    const ps::ResultProgramPhase& phase, const ps::Footprint& samples) {
   ps::ResultProgramNeed need;
-  need.tensors.push_back({0, 0, samples, 9});
+  need.tiles.push_back(take(ps::sdk::tile_need_for_samples(
+      phase.resources, phase.query, 0, 0, samples)));
   return ps::Result<ps::ResultProgramPoll>(std::move(need));
 }
 inline ps::Footprint demand(const ps::ResultProgramPhase& phase) {
@@ -95,16 +77,18 @@ inline ps::Footprint demand(const ps::ResultProgramPhase& phase) {
       phase.query.output.result_schema->tensors[0].sample_shape())));
 }
 inline ps::Result<ps::ResultProgramPoll> view(
-    const ps::ResultProgramPhase& phase, bool whole = false) {
+    const ps::ResultProgramPhase& phase) {
   auto result = builder(phase);
-  auto support = identity(phase, whole);
   ps::ResultTensorViewTransform transform;
-  transform.source_axes = {{0, 0, 1, 1}};
+  for (std::uint32_t axis = 0;
+       axis <
+       phase.query.output.result_schema->tensors[0].sample_shape().size();
+       ++axis)
+    transform.source_axes.push_back({static_cast<std::int32_t>(axis), 0, 1, 1});
   for (const auto& box : demand(phase).boxes()) {
     auto window =
         take(phase.tensors->at({0, 0}).acquire(box, phase.query.cancellation));
-    check(result.publish_tensor_view(0, box, window, transform, support,
-                                     {true, true, true, true},
+    check(result.publish_tensor_view(0, box, window, transform,
                                      phase.query.cancellation));
   }
   return ps::Result<ps::ResultProgramPoll>(

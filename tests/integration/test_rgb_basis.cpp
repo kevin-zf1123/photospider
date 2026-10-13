@@ -139,12 +139,20 @@ Result<ExecutionResult> execute(Source& s, std::optional<Region> region = {},
   GraphContext graph(s.document);
   Compiler compiler(registry());
   PlanningOptions planning;
-  planning.tile_height = planning.tile_width = tile;
-  if (region)
-    planning.output_regions = {{"out", *region}};
+  planning.tile_extent = tile;
   auto compiled = compiler.compile(graph, planning);
   if (!compiled.ok())
     return Result<ExecutionResult>(compiled.status());
+  if (region) {
+    auto selected = workflow_example::select_tiles(
+        channel_fixture::take(s.context->resource_budget()),
+        compiled.value().plan, "out", *region);
+    if (!selected.ok())
+      return Result<ExecutionResult>(selected.status());
+    auto stages = compiled.take_value();
+    stages.plan = selected.take_value();
+    compiled = Result<CompiledWorkflow>(std::move(stages));
+  }
   return s.context->execute(compiled.value().plan, s.bindings, {},
                             execution_options);
 }
@@ -266,18 +274,18 @@ int metadata_and_roi() {
   auto bypass =
       run(true, {1, 1, 4}, bad, 0, p, Region({{0, 1}, {0, 1}, {1, 1}}), d);
   error(bypass);
-  PS_CHECK(bypass.ok());
+  PS_CHECK(!bypass.ok());
   // X row mathematically ignores B, but nonidentity still validates all three.
   auto need =
       run(true, {1, 1, 4}, bad, 0, p, Region({{0, 1}, {0, 1}, {2, 1}}), d);
   PS_CHECK(!need.ok());
-  // A's unrequested Z overflow is not a standalone A failure.
+  // Whole output validates every computed component, including Z.
   auto finite = words;
   finite[0] = 0x7f7fffff;
   auto requested =
       run(true, {1, 1, 4}, finite, 0, p, Region({{0, 1}, {0, 1}, {2, 1}}), d);
   error(requested);
-  PS_CHECK(requested.ok());
+  PS_CHECK(!requested.ok());
   PS_CHECK(!run(true, {1, 1, 4}, finite, 0, p, {}, d).ok());
   // Raw bypass metadata is descriptive only, never relabeled XYZ.
   auto rp = raw(0, 7);
@@ -454,8 +462,8 @@ int identities_and_specials() {
         auto roi = run(narrow, {1, 1, 3}, {bits(1, narrow), snan, inf}, 2, sem,
                        Region({{0, 1}, {0, 1}, {0, 1}}), desc, planar);
         error(roi);
-        PS_CHECK(roi.ok());
-        PS_CHECK(read(roi.value(), {0, 0, 0}) == bits(1, narrow));
+        PS_CHECK(!roi.ok() &&
+                 roi.status().reason == FailureReason::InvalidDomain);
         auto finite =
             run(narrow, {1, 1, 3}, {negzero, bits(1, narrow), bits(2, narrow)},
                 2, sem, {}, desc, planar);
@@ -641,7 +649,7 @@ int custom_registry_authoring() {
       output.output_schema.result_schema_version =
           output.result_schema->version;
       output.output_schema.tensor_key = "samples";
-      output.region_rule = OperationRegionRule::Dependency;
+      output.region_rule = OperationRegionRule::Tiled;
       output.continuation_bytes = 1;
       output.maximum_dependency_stages = 1;
       for (const auto* name :
@@ -819,9 +827,9 @@ int dependency_support_and_limits() {
     unsigned roles = 0;
     Footprint requested;
     hooks->need = [&](const ResultProgramNeed& need) {
-      transfer_fixture::require(need.tensors.size() == 1, "one RGB capability");
-      roles = need.tensors[0].roles;
-      requested = need.tensors[0].samples;
+      transfer_fixture::require(need.tiles.size() == 1, "one RGB capability");
+      roles = need.tiles[0].roles;
+      requested = need.tiles[0].samples;
     };
     auto result = instrumented(raw_source, parameters, pixel(channel), hooks);
     PS_CHECK(result.ok());
@@ -961,9 +969,10 @@ int batches_owners_resources() {
       auto document = transfer_fixture::document(source, key(2), params);
       GraphContext graph(document);
       PlanningOptions planning;
-      planning.output_regions = {{"result", roi}};
       auto compiled =
           take(Compiler(registry()).compile(graph, planning, input.resources));
+      compiled.plan = take(
+          workflow_example::select_tiles(root, compiled.plan, "result", roi));
       const auto bindings = transfer_fixture::bindings(source);
       auto a = std::async(std::launch::async, [&] {
         return context.execute(compiled.plan, bindings);

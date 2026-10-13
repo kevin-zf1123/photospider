@@ -31,12 +31,8 @@ Inherits the [FILTER common contract](FILTER_common_contract.md), [NUM numerical
 
 Member suffixes denote distinct mathematical/interface objects, not backend-selectable quality tiers. Primitives may propose separately named strict and accelerated variants; helpers only orchestrate explicit stages; external engines need fixed resources and approval before an executable configuration can be specified.
 
-## Shared mathematics, units, and profiles
-
-
 ### pyramid_binomial5_v1
 The one-dimensional kernel is h=[1,4,6,4,1]/16; the 2D kernel is its exact outer product; boundary=reflect_half. Reduce first applies the exact 2D convolution and RN_t, then samples even coordinates (2y,2x), with ceil-sized output. For expand, define the coarse image on an infinite integer grid and extend it with reflect_half. At each original target coordinate q, accumulate only offsets d∈[-2,2]² for which q-d is even, using coarse coordinate (q-d)/2 and weight 4*h[dy]*h[dx], then sum exactly and round once to RN_t. This differs from cropping the target first and then extending its boundary. Both axes are scaled by two. Read target_shape from the saved original-level descriptor; do not guess parity. One expand/reduce pair is not an inverse; the Laplacian residual compensates for this rather than assuming inverse filtering.
-
 
 ## Shared execution and numerical obligations
 

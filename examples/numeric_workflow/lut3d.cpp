@@ -260,9 +260,10 @@ void sparse_and_cache(ps::CpuNumericProfile profile) {
   options.maximum_dependency_cache_work = 128 * 1024 * 1024;
   const auto cold = take(demand.request({{"colors", wanted}}, {}, options));
   const auto repeated = take(demand.request({{"colors", wanted}}, {}, options));
-  require(cold.results.at("colors").object_id() ==
-              repeated.results.at("colors").object_id(),
-          "same LUT3D demand retains completed Result");
+  require(repeated.diagnostics.cache_hits > 0 &&
+              numeric_result_fixture::bytes(cold.results.at("colors")) ==
+                  numeric_result_fixture::bytes(repeated.results.at("colors")),
+          "repeated demand reuses bounded completed cache with identical bits");
   auto fresh = tetra.bindings(root);
   const auto warm =
       take(context.execute_fragments(take(context.freeze(compiled.plan, fresh)),
@@ -533,8 +534,7 @@ void failures_and_upstream(ps::CpuNumericProfile profile) {
       options.dependencies.maximum_work = UINT64_C(1) << 30;
       auto wanted = take(
           ps::Footprint::from_regions({2, 3}, {ps::Region({{0, 2}, {0, 1}})}));
-      for (bool joint : {false, true}) {
-        options.enable_joint = joint;
+      {
         auto result = context.execute_fragments(
             take(context.freeze(
                 compiled.plan,

@@ -19,64 +19,35 @@
 namespace ps::plugin_internal::result_c {
 Status outcome(int code) {
   switch (code) {
-    case PS_RESULT_STATUS_OK_V2:
+    case PS_RESULT_STATUS_OK_V3:
       return Status::success();
-    case PS_RESULT_STATUS_CANCELLED_V2:
+    case PS_RESULT_STATUS_CANCELLED_V3:
       return {ErrorCode::Cancelled, {}};
-    case PS_RESULT_STATUS_BACKEND_UNAVAILABLE_V2:
+    case PS_RESULT_STATUS_BACKEND_UNAVAILABLE_V3:
       return {ErrorCode::BackendUnavailable, {}};
-    case PS_RESULT_STATUS_RESOURCE_EXHAUSTED_V2:
+    case PS_RESULT_STATUS_RESOURCE_EXHAUSTED_V3:
       return {ErrorCode::ResourceExhausted, {}};
-    case PS_RESULT_STATUS_TYPE_MISMATCH_V2:
+    case PS_RESULT_STATUS_TYPE_MISMATCH_V3:
       return {ErrorCode::TypeMismatch, {}};
-    case PS_RESULT_STATUS_INVALID_ARGUMENT_V2:
+    case PS_RESULT_STATUS_INVALID_ARGUMENT_V3:
       return {ErrorCode::InvalidArgument, {}};
     default:
       return {ErrorCode::OperationFailed, {}};
   }
 }
 int code(const Status& status) {
-  return status.ok()                           ? PS_RESULT_STATUS_OK_V2
-         : status.code == ErrorCode::Cancelled ? PS_RESULT_STATUS_CANCELLED_V2
+  return status.ok()                           ? PS_RESULT_STATUS_OK_V3
+         : status.code == ErrorCode::Cancelled ? PS_RESULT_STATUS_CANCELLED_V3
          : status.code == ErrorCode::BackendUnavailable
-             ? PS_RESULT_STATUS_BACKEND_UNAVAILABLE_V2
+             ? PS_RESULT_STATUS_BACKEND_UNAVAILABLE_V3
          : status.code == ErrorCode::ResourceExhausted
-             ? PS_RESULT_STATUS_RESOURCE_EXHAUSTED_V2
+             ? PS_RESULT_STATUS_RESOURCE_EXHAUSTED_V3
          : status.code == ErrorCode::TypeMismatch
-             ? PS_RESULT_STATUS_TYPE_MISMATCH_V2
+             ? PS_RESULT_STATUS_TYPE_MISMATCH_V3
          : status.code == ErrorCode::InvalidArgument ||
                  status.code == ErrorCode::Stale
-             ? PS_RESULT_STATUS_INVALID_ARGUMENT_V2
-             : PS_RESULT_STATUS_FAILURE_V2;
-}
-ps_result_atom_key_v2 atom_view(const AtomKey& key) {
-  ps_result_atom_key_v2 result{};
-  result.output_index = key.output_index;
-  result.rank = key.rank;
-  std::copy(key.coordinate.begin(), key.coordinate.end(), result.coordinate);
-  return result;
-}
-AtomKey atom_key(const ps_result_atom_key_v2& key) {
-  AtomKey result{key.output_index, key.rank, {}};
-  std::copy(std::begin(key.coordinate), std::end(key.coordinate),
-            result.coordinate.begin());
-  return result;
-}
-bool empty_atom(const ps_result_atom_key_v2& key) {
-  return !key.output_index && !key.rank &&
-         std::all_of(std::begin(key.coordinate), std::end(key.coordinate),
-                     [](auto at) { return at == 0; });
-}
-bool empty_failure(const ps_result_atom_failure_v2& failure) {
-  return !failure.struct_size && !failure.code && !failure.reason &&
-         !failure.origin && !failure.scope && !failure.reserved &&
-         empty_atom(failure.atom) && empty_atom(failure.domain.first) &&
-         std::all_of(std::begin(failure.domain.extent),
-                     std::end(failure.domain.extent),
-                     [](auto extent) { return extent == 0; }) &&
-         !failure.message_size &&
-         std::all_of(std::begin(failure.message), std::end(failure.message),
-                     [](char byte) { return byte == 0; });
+             ? PS_RESULT_STATUS_INVALID_ARGUMENT_V3
+             : PS_RESULT_STATUS_FAILURE_V3;
 }
 Result<std::string> text(const char* pointer, std::uint32_t count,
                          std::uint32_t maximum) {
@@ -87,7 +58,7 @@ Result<std::string> text(const char* pointer, std::uint32_t count,
     return Result<std::string>(invalid("invalid Result plugin key"));
   return Result<std::string>(std::move(string));
 }
-Status facets(const ps_result_facet_view_v2* input, std::uint32_t count,
+Status facets(const ps_result_facet_view_v3* input, std::uint32_t count,
               std::vector<ValueFacet>* output) {
   if (!array(input, count, 64))
     return invalid("invalid Result facets");
@@ -108,7 +79,7 @@ Status facets(const ps_result_facet_view_v2* input, std::uint32_t count,
   }
   return input_internal::canonicalize_facets(output);
 }
-ResultExtent extent(const ps_result_extent_v2& source) {
+ResultExtent extent(const ps_result_extent_v3& source) {
   return {static_cast<ResultExtentKind>(source.kind),
           source.value,
           source.input,
@@ -117,9 +88,9 @@ ResultExtent extent(const ps_result_extent_v2& source) {
           source.divisor,
           source.offset};
 }
-Result<SchemaTemplate> schema(const ps_result_schema_v2* source) {
+Result<SchemaTemplate> schema(const ps_result_schema_v3* source) {
   if (!source ||
-      reinterpret_cast<std::uintptr_t>(source) % alignof(ps_result_schema_v2) ||
+      reinterpret_cast<std::uintptr_t>(source) % alignof(ps_result_schema_v3) ||
       source->struct_size != sizeof(*source) ||
       !array(source->fields, source->field_count, 16) ||
       !array(source->tensors, source->tensor_count, 16) ||
@@ -205,12 +176,12 @@ Result<SchemaTemplate> schema(const ps_result_schema_v2* source) {
   return checked.ok() ? Result<SchemaTemplate>(std::move(target))
                       : Result<SchemaTemplate>(checked);
 }
-Result<OperationPortConstraint> constraint(const ps_result_port_v2& p);
-Result<OperationMetadata> port(const ps_result_port_v2& input) {
+Result<OperationPortConstraint> constraint(const ps_result_port_v3& p);
+Result<OperationMetadata> port(const ps_result_port_v3& input) {
   if (input.struct_size != sizeof(input))
     return Result<OperationMetadata>(invalid("invalid Result port size"));
   OperationMetadata metadata;
-  if (input.kind != PS_RESULT_OBJECT_V2)
+  if (input.kind != PS_RESULT_OBJECT_V3)
     return Result<OperationMetadata>(invalid("invalid Result port kind"));
   auto copied = schema(input.schema);
   if (!copied.ok())
@@ -242,7 +213,7 @@ MetadataView::MetadataView(const OperationMetadata* source, size_t count) {
       status = invalid("C Result metadata requires a schema");
       return;
     }
-    p.kind = PS_RESULT_OBJECT_V2;
+    p.kind = PS_RESULT_OBJECT_V3;
     p.schema = &b.schema;
     const auto& schema = *m.result_schema;
     b.schema.struct_size = sizeof(b.schema);
@@ -252,7 +223,7 @@ MetadataView::MetadataView(const OperationMetadata* source, size_t count) {
     b.schema.publication = static_cast<uint32_t>(schema.publication);
     b.fields.reserve(schema.fields.size());
     for (const auto& f : schema.fields) {
-      ps_result_field_spec_v2 field{};
+      ps_result_field_spec_v3 field{};
       field.struct_size = sizeof(field);
       field.key = f.key.data();
       field.key_size = f.key.size();
@@ -288,7 +259,7 @@ MetadataView::MetadataView(const OperationMetadata* source, size_t count) {
       image.storage_order = static_cast<uint32_t>(f.layout.order);
       image.row_pitch_bytes = f.layout.row_pitch_bytes;
       for (const auto& g : f.layout.groups)
-        b.groups[j].push_back({sizeof(ps_result_group_v2), g.role.data(),
+        b.groups[j].push_back({sizeof(ps_result_group_v3), g.role.data(),
                                static_cast<uint32_t>(g.role.size()),
                                g.first_channel, g.channel_count});
       image.groups = b.groups[j].empty() ? nullptr : b.groups[j].data();
@@ -321,7 +292,7 @@ void apply_constraint(MetadataView& view, size_t i,
   p.tensor_key_size = prototype.tensor_key.size();
   p.requires_semantics = prototype.requires_semantics;
   p.scalar_bounds = prototype.scalar_bounds;
-  if (p.kind == PS_RESULT_OBJECT_V2 &&
+  if (p.kind == PS_RESULT_OBJECT_V3 &&
       input_internal::tensor_member_predicate(prototype)) {
     p.element_type = prototype.element_type;
     p.rank = prototype.rank;
@@ -348,27 +319,27 @@ uint32_t float_bits(float value) {
   std::memcpy(&bits, &value, sizeof(bits));
   return bits;
 }
-ResourceVector<ps_result_parameter_value_v2> parameters_view(
+ResourceVector<ps_result_parameter_value_v3> parameters_view(
     const std::map<std::string, ParameterValue>& source) {
-  ResourceVector<ps_result_parameter_value_v2> result;
+  ResourceVector<ps_result_parameter_value_v3> result;
   result.reserve(source.size());
   for (const auto& parameter : source) {
-    ps_result_parameter_value_v2 p{};
+    ps_result_parameter_value_v3 p{};
     p.struct_size = sizeof(p);
     p.key = parameter.first.data();
     p.key_size = parameter.first.size();
     if (const auto* integer = std::get_if<std::int64_t>(&parameter.second)) {
-      p.type = PS_RESULT_PARAMETER_INT64_V2;
+      p.type = PS_RESULT_PARAMETER_INT64_V3;
       p.int64_value = *integer;
     } else if (const auto* number = std::get_if<double>(&parameter.second)) {
-      p.type = PS_RESULT_PARAMETER_FLOAT64_V2;
+      p.type = PS_RESULT_PARAMETER_FLOAT64_V3;
       p.float64_value = *number;
     } else if (const auto* boolean = std::get_if<bool>(&parameter.second)) {
-      p.type = PS_RESULT_PARAMETER_BOOL_V2;
+      p.type = PS_RESULT_PARAMETER_BOOL_V3;
       p.bool_value = *boolean;
     } else {
       const auto& string = std::get<std::string>(parameter.second);
-      p.type = PS_RESULT_PARAMETER_STRING_V2;
+      p.type = PS_RESULT_PARAMETER_STRING_V3;
       p.string_value = string.data();
       p.string_size = string.size();
     }
@@ -376,8 +347,8 @@ ResourceVector<ps_result_parameter_value_v2> parameters_view(
   }
   return result;
 }
-Result<OperationPortConstraint> constraint(const ps_result_port_v2& p) {
-  if (p.struct_size != sizeof(p) || p.kind != PS_RESULT_OBJECT_V2)
+Result<OperationPortConstraint> constraint(const ps_result_port_v3& p) {
+  if (p.struct_size != sizeof(p) || p.kind != PS_RESULT_OBJECT_V3)
     return Result<OperationPortConstraint>(
         invalid("invalid Result port constraint size/kind"));
   OperationPortConstraint c;
@@ -419,14 +390,14 @@ struct MetadataSink {
   Status failure;
   const std::thread::id owner = std::this_thread::get_id();
   static int set(void* raw, uint32_t index,
-                 const ps_result_port_v2* source) noexcept {
+                 const ps_result_port_v3* source) noexcept {
     auto& sink = *static_cast<MetadataSink*>(raw);
     if (!sink.failure.ok())
       return code(sink.failure);
     try {
       if (sink.owner != std::this_thread::get_id() || !source ||
           reinterpret_cast<std::uintptr_t>(source) %
-              alignof(ps_result_port_v2) ||
+              alignof(ps_result_port_v3) ||
           source->struct_size != sizeof(*source) ||
           index >= sink.outputs.size() || sink.supplied[index] ||
           source->kind != static_cast<uint32_t>(
@@ -467,36 +438,57 @@ struct MetadataSink {
     return code(sink.failure);
   }
 };
+namespace {
+bool same_grid(const std::optional<TileGrid>& first,
+               const std::optional<TileGrid>& second) {
+  if (first.has_value() != second.has_value())
+    return false;
+  return !first || (first->tile_extent() == second->tile_extent() &&
+                    first->rank() == second->rank() &&
+                    first->batch_rank() == second->batch_rank() &&
+                    first->height_axis() == second->height_axis() &&
+                    first->width_axis() == second->width_axis() &&
+                    first->shape() == second->shape() &&
+                    first->batch_count() == second->batch_count() &&
+                    first->tile_rows() == second->tile_rows() &&
+                    first->tile_columns() == second->tile_columns() &&
+                    first->tile_count() == second->tile_count());
+}
+ps_result_tile_grid_v3 encode_grid(const std::optional<TileGrid>& grid) {
+  ps_result_tile_grid_v3 view{};
+  view.struct_size = sizeof(view);
+  if (grid) {
+    const auto& value = *grid;
+    view.present = 1;
+    view.rank = value.rank();
+    view.batch_rank = value.batch_rank();
+    view.height_axis = value.height_axis();
+    view.width_axis = value.width_axis();
+    view.tile_extent = value.tile_extent();
+    view.tile_rows = value.tile_rows();
+    view.tile_columns = value.tile_columns();
+    view.tile_count = value.tile_count();
+    std::copy(value.shape().begin(), value.shape().end(), view.shape);
+  }
+  return view;
+}
+}  // namespace
 QueryFrame::QueryFrame(const ResultProgramQuery& source,
                        const Definition& definition,
                        const ResourceBudget& resources)
     : input_views(source.inputs),
       output_view(&source.output, 1),
-      requested(ResourceAllocator<ps_result_region_v2>(resources)) {
-  const auto requested_count =
-      source.tensor_outputs ? source.tensor_outputs->boxes().size() : 0;
-  if (requested_count > 65536 || source.parameters.size() > 128) {
-    status = invalid("unbounded C Result query");
+      input_tile_grids(ResourceAllocator<ps_result_tile_grid_v3>(resources)) {
+  if (source.parameters.size() > 128 ||
+      source.output_index >= definition.traits.outputs.size() ||
+      !source.output.result_schema) {
+    status = invalid("invalid C Result query");
     return;
-  }
-  const auto* samples =
-      source.tensor_outputs ? &*source.tensor_outputs : nullptr;
-  if (samples) {
-    for (const auto& box : samples->boxes()) {
-      ps_result_region_v2 r{};
-      r.struct_size = sizeof(r);
-      r.rank = box.rank();
-      for (std::uint32_t i = 0; i < r.rank; ++i) {
-        r.offset[i] = box.dimensions()[i].offset;
-        r.extent[i] = box.dimensions()[i].extent;
-      }
-      requested.push_back(r);
-    }
   }
   query.struct_size = sizeof(query);
   query.output_index = source.output_index;
-  query.tensor_slot = source.tensor_slot;
-  query.requested_kind = source.tensor_outputs ? 2 : 0;
+  query.tile_unit = source.tile_unit;
+  query.tile_extent = source.tile_extent;
   if (!input_views.status.ok()) {
     status = input_views.status;
     return;
@@ -520,20 +512,18 @@ QueryFrame::QueryFrame(const ResultProgramQuery& source,
           : nullptr;
   resolved_output.execution =
       output_trait.region_rule == OperationRegionRule::Whole
-          ? PS_RESULT_WHOLE_V2
-          : PS_RESULT_REGIONAL_V2;
-  resolved_output.observation_kind =
-      static_cast<std::uint32_t>(output_trait.observation_kind);
+          ? PS_RESULT_WHOLE_V3
+          : PS_RESULT_REGIONAL_V3;
   resolved_output.failure_delivery =
       static_cast<std::uint32_t>(output_trait.failure_delivery);
   resolved_output.flags =
-      (output_trait.preserve_output_views ? PS_RESULT_OUTPUT_PRESERVE_VIEWS_V2
+      (output_trait.preserve_output_views ? PS_RESULT_OUTPUT_PRESERVE_VIEWS_V3
                                           : 0U) |
       (output_trait.requires_input_views
-           ? PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V2
+           ? PS_RESULT_OUTPUT_REQUIRE_INPUT_VIEWS_V3
            : 0U) |
       (output_trait.maximum_output_payload_bytes
-           ? PS_RESULT_OUTPUT_PAYLOAD_BOUND_V2
+           ? PS_RESULT_OUTPUT_PAYLOAD_BOUND_V3
            : 0U);
   resolved_output.maximum_output_payload_bytes =
       output_trait.maximum_output_payload_bytes.value_or(0);
@@ -541,11 +531,73 @@ QueryFrame::QueryFrame(const ResultProgramQuery& source,
   query.backend = static_cast<std::uint32_t>(source.backend);
   query.inputs = input_views.ports.empty() ? nullptr : input_views.ports.data();
   query.input_count = input_views.ports.size();
+  if (!source.input_tile_grids.empty() &&
+      source.input_tile_grids.size() != source.inputs.size()) {
+    status = invalid("incomplete compiled C input grids");
+    return;
+  }
+  input_tile_grids.reserve(source.inputs.size());
+  for (std::size_t i = 0; i < source.inputs.size(); ++i) {
+    if (!source.inputs[i].result_schema) {
+      status = invalid("C input grid has no schema");
+      return;
+    }
+    auto grid = TileGrid::from_schema(*source.inputs[i].result_schema,
+                                      source.tile_extent);
+    if (!grid.ok()) {
+      status = grid.status();
+      return;
+    }
+    if (!source.input_tile_grids.empty() &&
+        !same_grid(source.input_tile_grids[i], grid.value())) {
+      status = invalid("C input grid differs from resolved schema");
+      return;
+    }
+    const auto view = encode_grid(grid.value());
+    input_tile_grids.push_back(view);
+  }
+  query.input_tile_grids =
+      input_tile_grids.empty() ? nullptr : input_tile_grids.data();
   query.output = &resolved_output;
-  query.requested = requested.empty() ? nullptr : requested.data();
-  query.requested_count = requested.size();
-  query.tile_height = source.tile_height;
-  query.tile_width = source.tile_width;
+  auto grid =
+      TileGrid::from_schema(*source.output.result_schema, source.tile_extent);
+  if (!grid.ok()) {
+    status = grid.status();
+    return;
+  }
+  if (source.output_tile_grid &&
+      !same_grid(source.output_tile_grid, grid.value())) {
+    status = invalid("C output grid differs from resolved schema");
+    return;
+  }
+  output_tile_grid = encode_grid(grid.value());
+  query.output_tile_grid = &output_tile_grid;
+  query.tiled = output_trait.region_rule == OperationRegionRule::Tiled &&
+                grid.value().has_value();
+  auto selection =
+      source.output_request.resolve(grid.value(), query.tiled != 0);
+  if (!selection.ok()) {
+    status = selection.status();
+    return;
+  }
+  const auto& selected = selection.value();
+  if ((query.tiled && selected.whole) ||
+      (query.tiled && !selected.tiles.empty() &&
+       (selected.tiles.size() != 1 ||
+        !selected.tiles.contains(source.tile_unit))) ||
+      (!query.tiled && source.tile_unit != 0)) {
+    status = invalid("C query must name one computation unit");
+    return;
+  }
+  auto copied = selected.tiles.copy_to(resources);
+  if (!copied.ok()) {
+    status = copied.status();
+    return;
+  }
+  requested = copied.take_value();
+  query.requested = {
+      sizeof(ps_result_tile_request_v3), selected.whole ? 1U : 0U,
+      requested.empty() ? nullptr : requested.begin(), requested.size()};
   parameters = parameters_view(source.parameters);
   query.parameters = parameters.empty() ? nullptr : parameters.data();
   query.parameter_count = parameters.size();
@@ -569,7 +621,7 @@ Result<OperationPreparation> prepare_metadata(
       std::vector<OperationOutputSpecialization>(owner.api.output_count),
       {},
       Status::success()};
-  ps_result_metadata_sink_v2 service{sizeof(service), &sink, MetadataSink::set};
+  ps_result_metadata_sink_v3 service{sizeof(service), &sink, MetadataSink::set};
   auto status = outcome(owner.api.resolve_metadata(
       owner.api.user_data, view.ports.empty() ? nullptr : view.ports.data(),
       view.ports.size(), values.empty() ? nullptr : values.data(),

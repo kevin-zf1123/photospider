@@ -155,15 +155,6 @@ python3 oracle/ops/numeric/color_ramp_oracle.py build/kernel-dev/examples/numeri
 python3 oracle/ops/numeric/rgb_ramp_oracle.py build/kernel-dev/examples/numeric_workflow/photospider_numeric_color_ramps apple
 ```
 
-Reproduce the installed consumer check with:
-
-```sh
-cmake --install build/kernel-dev --prefix build/kernel-dev/consumer-install
-cmake -S tests/consumer -B build/kernel-dev/consumer-build -DCMAKE_PREFIX_PATH="$PWD/build/kernel-dev/consumer-install"
-cmake --build build/kernel-dev/consumer-build --target photospider_result_numeric_consumer -j8
-ctest --test-dir build/kernel-dev/consumer-build -R '^installed_result_numeric$' --output-on-failure
-```
-
 These checks cover Strict and the local Apple profile only. No x86 numerical,
 maximum-shape, or performance rerun is included. CRV-06 has no GPU variant.
 The ColorArray v1 CIELAB/CIELCh implicit L* scale difference from the native

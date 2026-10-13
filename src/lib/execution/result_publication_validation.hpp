@@ -21,7 +21,7 @@ class PublicationValidationServices {
 
 // All capabilities and callbacks are borrowed for one synchronous validation.
 // The coordinator has retired the producer callback before constructing this
-// view and owns the plan/query/history. Validation may bind producer and
+// view and owns the plan/query. Validation may bind producer and
 // association facts; it does not publish, freeze ancestry, retire or notify.
 struct PublicationValidationView final {
   const PlanStep& step;
@@ -29,15 +29,14 @@ struct PublicationValidationView final {
   const ResultRef& previous;
   std::uint64_t previous_revision, node_id;
   const ResultInputFacts& input_facts;
-  const ResultNeedHistory& history;
   const ResourceBudget& resources;
   std::uint64_t maximum_window;
   PublicationValidationServices& services;
 };
 class ResultPublicationValidator final {
  public:
-  // Returns an owning failure. Only the coordinator acts on retire_actor.
+  // Returns an owning failure; the coordinator handles actor retirement.
   static Status validate(const PublicationValidationView&,
-                         const ResultPublication&, bool& retire_actor);
+                         const ResultPublication&);
 };
 }  // namespace ps::execution_internal

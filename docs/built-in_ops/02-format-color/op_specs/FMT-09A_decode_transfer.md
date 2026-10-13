@@ -19,7 +19,7 @@ registered_operation_keys:
 
 Inherit the complete [FMT-09 contract](FMT-09_transfer_contract.md) and
 [scalar definitions](FMT-09_transfer_math.md). This direction has strict,
-accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 2 keys. The
+accelerated Apple Silicon and accelerated x86-64 CPU Result ABI 3 keys. The
 specification remains Proposed.
 
 ## Interface and observable behavior

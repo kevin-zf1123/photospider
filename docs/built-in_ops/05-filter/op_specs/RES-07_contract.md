@@ -35,13 +35,9 @@ This specification defines the intended mathematics and interface contract only;
 
 Suffix letters denote distinct mathematical/interface objects, not quality tiers that a backend may choose arbitrarily. A primitive may propose strict and accelerated profiles; a helper only orchestrates explicit stages.
 
-## Shared Mathematics, Units, and Profiles
-
-
 ### Observation Units
 Poisson count P has mean λ≥0. Anscombe input is a count, allowing finite noninteger nonnegative measurements. Generalized observations follow y=aP+b+N(0,s²), where a>0 is gain, b is offset, and s≥0 is read_sigma; the stabilized output is dimensionless. The generalized forward transform explicitly applies max(.,0) to a negative radicand and does not reject a Gaussian noisy observation merely because it may be negative.
 A mean-domain inverse assumes z estimates E[stabilizer(Y)|λ]; it is not an exact inverse of a single stabilized observation. For Poisson data, m(λ)=Σ_(k≥0) e^-λ λ^k/k! * 2sqrt(k+3/8). For the generalized transform, let ρ=s/a and define mρ(λ)=Σ Poisson(k;λ) ∫ φ(t)*2sqrt(max(k+3/8+ρ²+ρt,0))dt. Solve for λ≥0; return λ=0 when z≤mρ(0), and the unique monotone root when z>mρ(0) (s=0 reduces to the Poisson case). RES-07C and RES-07F may be registered only after strict validation of probability/integral tail bounds, root brackets, and final correct rounding. High-precision agreement alone is insufficient. Resource exhaustion must fail explicitly; do not fall back to an algebraic inverse.
-
 
 ## Shared Execution and Numeric Obligations
 

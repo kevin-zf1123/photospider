@@ -12,7 +12,7 @@
 #include "01-numeric/sequence_profiles.hpp"
 #include "core/exact_binary_sum.hpp"
 #include "photospider/core/resource_allocator.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "common/registry.hpp"
 #include "plugin/port_validation.hpp"
 namespace ps::plugin_internal {
 namespace {

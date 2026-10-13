@@ -18,8 +18,6 @@
 
 #include "core/checked_math.hpp"
 #include "core/utf8_validation.hpp"
-#include "execution/result_callback_scope.hpp"
-#include "plugin/builtin_operations.hpp"
 #include "plugin/operation_exception.hpp"
 #include "plugin/operation_resources.hpp"
 #include "plugin/port_validation.hpp"
@@ -38,59 +36,6 @@
 
 namespace ps {
 namespace {
-
-Result<ResultProgramPoll> empty_tensor_result(const ResultProgramPhase& phase) {
-  const auto stopped = [&]() {
-    if (phase.failure_latch) {
-      auto status = phase.failure_latch->snapshot();
-      if (!status.ok())
-        return status;
-    }
-    if (phase.failure && phase.failure->load() != ErrorCode::Ok)
-      return Status{phase.failure->load(), {}};
-    return phase.query.cancellation.cancelled()
-               ? Status{ErrorCode::Cancelled, {}}
-               : Status::success();
-  };
-  auto active = stopped();
-  if (!active.ok())
-    return Result<ResultProgramPoll>(active);
-  const auto& schema = *phase.query.output.result_schema;
-  if (phase.query.tensor_slot >= schema.tensors.size() ||
-      phase.query.tensor_outputs->shape() !=
-          schema.tensors[phase.query.tensor_slot].sample_shape())
-    return Result<ResultProgramPoll>(
-        Status{ErrorCode::InvalidArgument, "invalid Empty tensor query"});
-  auto started = ResultBuilder::start(
-      phase.resources, schema, phase.query.semantic_key, {}, {},
-      phase.query.tile_height, phase.query.tile_width, phase.query.resources);
-  if (!started.ok())
-    return Result<ResultProgramPoll>(started.status());
-  auto builder = started.take_value();
-  auto basis = ResultRelation::cartesian(phase.resources, 1, {});
-  if (!basis.ok())
-    return Result<ResultProgramPoll>(basis.status());
-  auto bound = builder.bind_descriptor_relation(basis.take_value());
-  if (!bound.ok())
-    return Result<ResultProgramPoll>(bound);
-  auto sealed = builder.seal();
-  active = stopped();
-  if (!active.ok())
-    return Result<ResultProgramPoll>(active);
-  return sealed.ok() ? Result<ResultProgramPoll>(
-                           ResultPublication{sealed.take_value(), true})
-                     : Result<ResultProgramPoll>(sealed.status());
-}
-bool empty_tensor_query(const ResultProgramQuery& query) {
-  return query.output.result_schema &&
-         query.output.result_schema->fields.empty() && query.tensor_outputs &&
-         query.tensor_outputs->empty() && query.prepared &&
-         query.output_index < query.prepared->traits().outputs.size() &&
-         (query.prepared->traits()
-                  .outputs[query.output_index]
-                  .observation_kind == ObservationKind::RequestRecord ||
-          query.prepared->traits().joint_contract == 2);
-}
 
 /**
  * @brief Returns whether a public key is bounded canonical strict UTF-8.
@@ -193,7 +138,7 @@ class OperationLibrary final {
   [[nodiscard]] void* handle() const noexcept { return handle_; }
 
   void attach_result_api(
-      const ps_result_operation_plugin_api_v2* api) noexcept {
+      const ps_result_operation_plugin_api_v3* api) noexcept {
     result_api_ = api;
   }
 
@@ -201,7 +146,7 @@ class OperationLibrary final {
   /** @brief Platform native library handle. */
   void* handle_ = nullptr;
   /** @brief Mapped immutable plugin API table. */
-  const ps_result_operation_plugin_api_v2* result_api_ = nullptr;
+  const ps_result_operation_plugin_api_v3* result_api_ = nullptr;
 };
 
 /**
@@ -335,115 +280,37 @@ bool parameter_type_matches(const ParameterValue& value,
 }
 
 /**
- * @brief Validates one complete version-nine semantic trait record.
+ * @brief Validates one complete Result operation trait record.
  * @param traits Candidate copied record.
  * @return Success or precise consistency failure.
  * @throws std::bad_alloc If a failure diagnostic allocation fails.
  * @note At least one backend is required; cacheability requires deterministic,
- * side-effect-free behavior. Fixed shapes validate only rank/extents here;
- * actual C++ callback Value layout and storage are validated at publication.
+ * side-effect-free behavior. Result schemas define output tensor metadata;
+ * actual callback backing is validated at publication.
  */
 Status validate_selected_traits(const OperationTraits& traits) {
-  bool known_shape = false;
-  switch (traits.outputs[0].shape_rule) {
-    case OperationShapeRule::Scalar:
-    case OperationShapeRule::PreserveFirstInput:
-    case OperationShapeRule::MatchAllInputs:
-    case OperationShapeRule::Fixed:
-    case OperationShapeRule::Axes:
-    case OperationShapeRule::Shrink:
-      known_shape = true;
-      break;
-  }
   bool known_region = false;
   switch (traits.outputs[0].region_rule) {
     case OperationRegionRule::Whole:
-    case OperationRegionRule::Elementwise:
-    case OperationRegionRule::Halo:
-    case OperationRegionRule::Shrink:
-    case OperationRegionRule::Dependency:
+    case OperationRegionRule::Tiled:
       known_region = true;
       break;
   }
-  try {
-    static_cast<void>(
-        Value::element_size(traits.outputs[0].output_element_type));
-  } catch (const std::invalid_argument&) {
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "operation output element type is unknown");
-  }
   const Status schema_status =
       validate_parameter_schema(traits.parameter_schema);
-  const bool fixed_shape_valid =
-      traits.outputs[0].shape_rule == OperationShapeRule::Fixed
-          ? (!traits.outputs[0].fixed_output_shape.empty() &&
-             traits.outputs[0].fixed_output_shape.size() <= 8U &&
-             std::none_of(traits.outputs[0].fixed_output_shape.begin(),
-                          traits.outputs[0].fixed_output_shape.end(),
-                          [](std::uint64_t extent) { return extent == 0U; }))
-          : traits.outputs[0].fixed_output_shape.empty();
   if (traits.workspace_input_multiplier > 16 || traits.version != 25U ||
-      (!traits.supports_cpu && !traits.supports_gpu) || !known_shape ||
-      !known_region ||
+      (!traits.supports_cpu && !traits.supports_gpu) || !known_region ||
       (traits.share_blocks_across_outputs &&
-       (!traits.deterministic || !traits.side_effect_free ||
-        traits.outputs[0].observation_kind != ObservationKind::Atomic ||
-        traits.outputs[0].regional_atomic)) ||
+       (!traits.deterministic || !traits.side_effect_free)) ||
       (traits.allows_cpu_fallback &&
        (!traits.supports_gpu || !traits.supports_cpu)) ||
       (traits.cacheable &&
        (!traits.deterministic || !traits.side_effect_free)) ||
-      ((traits.outputs[0].shape_rule ==
-            OperationShapeRule::PreserveFirstInput ||
-        traits.outputs[0].shape_rule == OperationShapeRule::MatchAllInputs) &&
-       traits.input_count == 0U && traits.repeated_minimum == 0U) ||
-      (traits.outputs[0].region_rule == OperationRegionRule::Halo &&
-       traits.outputs[0].halo_radius == 0U &&
-       traits.outputs[0].halo_radius_parameter.empty()) ||
-      (traits.outputs[0].region_rule != OperationRegionRule::Halo &&
-       traits.outputs[0].halo_radius != 0U) ||
-      !schema_status.ok() || !fixed_shape_valid ||
+      !schema_status.ok() ||
       !input_internal::validate_port_schema(traits).ok() ||
       !input_internal::validate_operation_contract(traits).ok()) {
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation semantic traits are inconsistent");
-  }
-  const bool shrink =
-      traits.outputs[0].shape_rule == OperationShapeRule::Shrink;
-  if (shrink !=
-          (traits.outputs[0].region_rule == OperationRegionRule::Shrink) ||
-      shrink != !traits.outputs[0].spatial_factor_parameter.empty() ||
-      traits.outputs[0].spatial_factor != 1)
-    return Status::failure(ErrorCode::InvalidArgument,
-                           "inconsistent shrink contract");
-  if (shrink) {
-    auto p = std::find_if(
-        traits.parameter_schema.begin(), traits.parameter_schema.end(),
-        [&](const OperationParameterSpec& spec) {
-          return spec.key == traits.outputs[0].spatial_factor_parameter;
-        });
-    if (traits.input_count != 1 ||
-        traits.outputs[0].output_schema.kind == OperationPortKind::Value ||
-        p == traits.parameter_schema.end() || !p->required || !p->bounded ||
-        p->type != OperationParameterType::Int64 || p->minimum < 1 ||
-        p->maximum > 16)
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "invalid shrink parameter");
-  }
-  if (!traits.outputs[0].halo_radius_parameter.empty()) {
-    auto parameter = std::find_if(
-        traits.parameter_schema.begin(), traits.parameter_schema.end(),
-        [&](const OperationParameterSpec& spec) {
-          return spec.key == traits.outputs[0].halo_radius_parameter;
-        });
-    if (traits.outputs[0].region_rule != OperationRegionRule::Halo ||
-        traits.outputs[0].halo_radius != 0 ||
-        parameter == traits.parameter_schema.end() || !parameter->required ||
-        !parameter->bounded ||
-        parameter->type != OperationParameterType::Int64 ||
-        parameter->minimum < 1 || parameter->maximum > UINT32_MAX)
-      return Status::failure(ErrorCode::InvalidArgument,
-                             "invalid halo parameter binding");
   }
   return Status::success();
 }
@@ -643,28 +510,6 @@ Status OperationRegistry::register_operation(OperationDefinition definition) {
       !definition.start_result)
     return Status::failure(ErrorCode::InvalidArgument,
                            "operation definition is malformed");
-  if (static_cast<bool>(definition.start_result_joint) !=
-          (definition.traits.joint_contract != 0) ||
-      definition.traits.joint_contract > 2 ||
-      (definition.start_result_joint &&
-       (!definition.traits.joint_contract ||
-        (definition.traits.joint_contract == 1 &&
-         definition.traits.outputs.size() < 2) ||
-        !definition.traits.joint_continuation_bytes ||
-        std::any_of(
-            definition.traits.outputs.begin(), definition.traits.outputs.end(),
-            [&](const auto& output) {
-              return output.output_schema.kind != OperationPortKind::Result ||
-                     output.observation_kind != ObservationKind::Atomic ||
-                     output.failure_delivery !=
-                         (definition.traits.joint_contract == 2
-                              ? FailureDelivery::PerAtomOutcome
-                              : FailureDelivery::RequestFailureOnly);
-            }))) ||
-      (!definition.start_result_joint &&
-       (definition.traits.joint_continuation_bytes ||
-        definition.traits.joint_workspace_bytes)))
-    return Status{ErrorCode::InvalidArgument, "invalid joint contract"};
   auto immutable_definition =
       std::make_shared<const OperationDefinition>(std::move(definition));
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -705,17 +550,18 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     if (find_symbol(pending_library.handle(), symbol))
       return Status{ErrorCode::TypeMismatch,
                     "image plugins require the Result ABI"};
-  if (find_symbol(pending_library.handle(),
-                  "ps_result_operation_plugin_get_api_v1"))
-    return Status{ErrorCode::TypeMismatch, "Result plugins require ABI 2"};
-  using ResultApiFunction = const ps_result_operation_plugin_api_v2* (*)();
+  for (const auto* symbol : {"ps_result_operation_plugin_get_api_v1",
+                             "ps_result_operation_plugin_get_api_v2"})
+    if (find_symbol(pending_library.handle(), symbol))
+      return Status{ErrorCode::TypeMismatch, "Result plugins require ABI 3"};
+  using ResultApiFunction = const ps_result_operation_plugin_api_v3* (*)();
   ResultApiFunction result_api_function = nullptr;
   void* result_symbol = find_symbol(pending_library.handle(),
-                                    "ps_result_operation_plugin_get_api_v2");
+                                    "ps_result_operation_plugin_get_api_v3");
   std::memcpy(&result_api_function, &result_symbol,
               sizeof(result_api_function));
   if (result_api_function) {
-    const ps_result_operation_plugin_api_v2* table = nullptr;
+    const ps_result_operation_plugin_api_v3* table = nullptr;
     try {
       table = result_api_function();
     } catch (...) {
@@ -723,9 +569,9 @@ Status OperationRegistry::load_plugin(const std::string& path) {
     }
     if (!table ||
         reinterpret_cast<std::uintptr_t>(table) %
-            alignof(ps_result_operation_plugin_api_v2) ||
+            alignof(ps_result_operation_plugin_api_v3) ||
         table->struct_size != sizeof(*table) ||
-        table->abi_version != PS_RESULT_OPERATION_ABI_VERSION_2)
+        table->abi_version != PS_RESULT_OPERATION_ABI_VERSION_3)
       return Status{ErrorCode::InvalidArgument,
                     "unsupported Result API version or size"};
     pending_library.attach_result_api(table);
@@ -760,7 +606,7 @@ Status OperationRegistry::load_plugin(const std::string& path) {
   }
 
   return Status{ErrorCode::InvalidArgument,
-                "operation plugin must expose Result ABI 2"};
+                "operation plugin must expose Result ABI 3"};
 }
 
 /**
@@ -840,18 +686,6 @@ OperationRegistry::prepare_operation(
                    FailureReason::None,
                    {FailureOrigin::Schema, FailureScope::Unspecified}});
       for (std::size_t i = 0; i < inputs.size(); ++i) {
-        if (inputs[i].atomic_trailing_axes >
-                inputs[i].descriptor.shape.size() ||
-            (inputs[i].atomic_trailing_axes &&
-             std::any_of(inputs[i].facets.begin(), inputs[i].facets.end(),
-                         [](const auto& facet) {
-                           return facet.key == "photospider.image";
-                         })))
-          return Answer(
-              Status{ErrorCode::TypeMismatch,
-                     "invalid input tuple observation metadata",
-                     FailureReason::None,
-                     {FailureOrigin::Schema, FailureScope::Unspecified}});
         auto status = input_internal::validate_port_metadata(
             traits.input_schema[i], inputs[i]);
         if (!status.ok()) {
@@ -909,71 +743,31 @@ OperationRegistry::prepare_operation(
           output.input_indices = std::move(specialization.input_indices);
         }
 
-        if (output.result_schema || metadata.result_schema) {
-          if (!output.result_schema || !metadata.result_schema ||
-              output.output_schema.kind != OperationPortKind::Result ||
-              (!output.output_schema.result_schema_id.empty() &&
-               (output.result_schema->id != metadata.result_schema->id ||
-                output.result_schema->version !=
-                    metadata.result_schema->version)) ||
-              metadata.descriptor.element_type != ElementType::UInt8 ||
-              !metadata.descriptor.shape.empty() || !metadata.facets.empty() ||
-              metadata.atomic_trailing_axes || specialization.regional_atomic ||
-              specialization.preserve_output_views ||
-              specialization.requires_input_views ||
-              specialization.maximum_output_payload_bytes ||
-              (specialization.data_movement != DataMovementKind::None &&
-               specialization.data_movement !=
-                   DataMovementKind::BitwiseMapped) ||
-              (specialization.data_movement_view_policy !=
-                   DataMovementViewPolicy::Auto &&
-               specialization.data_movement_view_policy !=
-                   DataMovementViewPolicy::RequireView &&
-               specialization.data_movement_view_policy !=
-                   DataMovementViewPolicy::Materialize))
-            return Answer(
-                Status{ErrorCode::TypeMismatch,
-                       "Result specialization must preserve its registered "
-                       "kind/id/version",
-                       FailureReason::None,
-                       {FailureOrigin::Schema, FailureScope::Unspecified}});
-          auto valid = input_internal::validate_port_metadata(
-              output.output_schema, metadata);
-          if (!valid.ok())
-            return Answer(valid);
-          output.result_schema = *metadata.result_schema;
-          output.output_schema.result_schema_id =
-              std::string(metadata.result_schema->id);
-          output.output_schema.result_schema_version =
-              metadata.result_schema->version;
-          if (specialization.data_movement != DataMovementKind::None)
-            output.data_movement = specialization.data_movement;
-          output.data_movement_view_policy =
-              specialization.data_movement_view_policy;
-          continue;
-        }
-        output.shape_rule = OperationShapeRule::Fixed;
-        output.fixed_output_shape = std::move(metadata.descriptor.shape);
-        output.output_axes.clear();
-        output.output_element_type = metadata.descriptor.element_type;
-        output.output_dtype_rule = OperationDtypeRule::Declared;
-        output.output_dtype_input = 0;
-        output.output_dtype_parameter.clear();
-        output.output_semantic_rule = metadata.facets.empty()
-                                          ? OperationSemanticRule::Drop
-                                          : OperationSemanticRule::Establish;
-        output.output_semantic_input = 0;
-        output.output_semantic_parameter.clear();
-        output.output_facets = std::move(metadata.facets);
-        output.atomic_trailing_axes = metadata.atomic_trailing_axes;
-        output.regional_atomic = specialization.regional_atomic;
-        output.preserve_output_views = specialization.preserve_output_views;
-        output.requires_input_views = specialization.requires_input_views;
-        output.maximum_output_payload_bytes =
-            specialization.maximum_output_payload_bytes;
-        output.data_movement = specialization.data_movement;
-        output.data_movement_view_policy =
-            specialization.data_movement_view_policy;
+        if (!metadata.result_schema ||
+            output.output_schema.kind != OperationPortKind::Result ||
+            (!output.output_schema.result_schema_id.empty() &&
+             (output.result_schema->id != metadata.result_schema->id ||
+              output.result_schema->version !=
+                  metadata.result_schema->version)) ||
+            (specialization.data_movement != DataMovementKind::None &&
+             specialization.data_movement != DataMovementKind::BitwiseMapped))
+          return Answer(
+              Status{ErrorCode::TypeMismatch,
+                     "Result specialization must preserve its registered "
+                     "kind/id/version",
+                     FailureReason::None,
+                     {FailureOrigin::Schema, FailureScope::Unspecified}});
+        auto valid = input_internal::validate_port_metadata(
+            output.output_schema, metadata);
+        if (!valid.ok())
+          return Answer(valid);
+        output.result_schema = *metadata.result_schema;
+        output.output_schema.result_schema_id =
+            std::string(metadata.result_schema->id);
+        output.output_schema.result_schema_version =
+            metadata.result_schema->version;
+        if (specialization.data_movement != DataMovementKind::None)
+          output.data_movement = specialization.data_movement;
       }
       traits.requires_metadata_specialization = false;
       auto expanded_validation = traits;
@@ -1057,11 +851,7 @@ Status PreparedOperation::validate_inputs(
   for (std::size_t i = 0; i < inputs.size(); ++i) {
     const auto& a = inputs[i];
     const auto& b = stored.inputs[i];
-    if (a.descriptor.element_type != b.descriptor.element_type ||
-        a.descriptor.shape != b.descriptor.shape ||
-        a.atomic_trailing_axes != b.atomic_trailing_axes ||
-        !input_internal::same_facets(a.facets, b.facets) ||
-        static_cast<bool>(a.result_schema) !=
+    if (static_cast<bool>(a.result_schema) !=
             static_cast<bool>(b.result_schema) ||
         (a.result_schema && !a.result_schema->same_schema(*b.result_schema)))
       return stale();
@@ -1094,30 +884,6 @@ Status PreparedOperation::validate_inputs(
   }
   return Status::success();
 }
-Status PreparedOperation::validate_result_query(
-    const ResultProgramQuery& query) const {
-  auto status = validate_inputs(query.inputs, query.parameters);
-  if (!status.ok())
-    return status;
-  auto selected = select_operation_output(traits(), query.output_index);
-  if (!selected.ok())
-    return selected.status();
-  auto inferred =
-      infer_operation_output(selected.value(), query.inputs, query.parameters);
-  if (!inferred.ok())
-    return inferred.status();
-  const auto& expected = inferred.value();
-  if (query.backend != Backend::Cpu || !expected.result_schema ||
-      !query.output.result_schema ||
-      !expected.result_schema->same_schema(*query.output.result_schema) ||
-      expected.descriptor.shape != query.output.descriptor.shape ||
-      expected.descriptor.element_type !=
-          query.output.descriptor.element_type ||
-      !input_internal::same_facets(expected.facets, query.output.facets))
-    return Status{ErrorCode::Stale, "Result joint poll metadata changed"};
-  return Status::success();
-}
-
 Result<ResultProgramQuery> OperationRegistry::prepare_result_query(
     const std::string& key, const ResultProgramQuery& query) const {
   using Answer = Result<ResultProgramQuery>;
@@ -1163,22 +929,7 @@ Result<ResultProgramQuery> OperationRegistry::prepare_result_query(
     if (!expected.ok())
       return Answer(expected.status());
     const auto& metadata = expected.value();
-    if (input_internal::structural_image_metadata(metadata.descriptor,
-                                                  metadata.facets) ||
-        input_internal::structural_image_metadata(query.output.descriptor,
-                                                  query.output.facets) ||
-        std::any_of(query.inputs.begin(), query.inputs.end(),
-                    [](const auto& input) {
-                      return input_internal::structural_image_metadata(
-                          input.descriptor, input.facets);
-                    }))
-      return Answer(Status{ErrorCode::TypeMismatch,
-                           "image structured output requires Result schema"});
     if (!metadata.result_schema || !query.output.result_schema ||
-        metadata.descriptor.shape != query.output.descriptor.shape ||
-        metadata.descriptor.element_type !=
-            query.output.descriptor.element_type ||
-        !input_internal::same_facets(metadata.facets, query.output.facets) ||
         !metadata.result_schema->same_schema(*query.output.result_schema))
       return Answer(Status{ErrorCode::TypeMismatch,
                            "structured start metadata mismatch"});
@@ -1227,9 +978,7 @@ Result<ResultContinuation> OperationRegistry::start_result(
       return Answer(Status{ErrorCode::Cancelled, {}});
     auto started = [&]() -> Answer {
       try {
-        return empty_tensor_query(normalized)
-                   ? ResultContinuation::stateless<empty_tensor_result>()
-                   : definition->start_result(normalized, scoped);
+        return definition->start_result(normalized, scoped);
       } catch (...) {
         return Answer(plugin_internal::current_operation_exception());
       }
@@ -1249,211 +998,6 @@ Result<ResultContinuation> OperationRegistry::start_result(
     state.prepared_ = normalized.prepared;
     state.resources_ = normalized.resources;
     state.payload_limit_ = selected.maximum_output_payload_bytes;
-    return Answer(std::move(state));
-  } catch (...) {
-    return Answer(plugin_internal::current_operation_exception());
-  }
-}
-
-Result<ResultJointContinuation> OperationRegistry::start_result_joint(
-    const std::string& key, const ResourceVector<ResultProgramQuery>& queries,
-    const ResourceBudget& resources) const {
-  return start_result_joint_impl(key, queries, resources,
-                                 resources.allocator());
-}
-Result<ResultJointContinuation> OperationRegistry::start_result_joint_compiled(
-    const std::string& key, const ResourceVector<ResultProgramQuery>& queries,
-    const ResourceBudget& resources, const BufferAllocator& allocator) const {
-  return start_result_joint_impl(key, queries, resources, allocator);
-}
-Result<ResultJointContinuation> OperationRegistry::start_result_joint_impl(
-    const std::string& key, const ResourceVector<ResultProgramQuery>& queries,
-    const ResourceBudget& resources,
-    const BufferAllocator& state_allocator) const {
-  using Answer = Result<ResultJointContinuation>;
-  Impl::DefinitionHandle definition;
-  {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    const auto found = impl_->definitions.find(key);
-    if (found == impl_->definitions.end())
-      return Answer(Status{ErrorCode::NotFound, {}});
-    definition = found->second;
-  }
-  if (!definition->start_result_joint ||
-      queries.size() < (definition->traits.joint_contract == 2 ? 1U : 2U) ||
-      queries.size() > 64 || queries.front().snapshot_identity.empty() ||
-      queries.front().snapshot_identity.size() > 4096)
-    return Answer(
-        Status{ErrorCode::InvalidArgument, "invalid Result joint start"});
-  try {
-    ErrorCode metadata_failure = ErrorCode::Ok;
-    ResourceAllocationScope scope(resources, &metadata_failure);
-    ResourceVector<ResultProgramQuery> normalized;
-    ResourceVector<ResultJointContinuation::Member> members;
-    std::uint64_t seen = 0;
-    std::shared_ptr<const PreparedOperation> prepared;
-    for (const auto& query : queries) {
-      if (query.backend != Backend::Cpu || query.output_index >= 64 ||
-          (definition->traits.joint_contract == 1 &&
-           (seen & (std::uint64_t{1} << query.output_index))) ||
-          !query.output.result_schema ||
-          query.snapshot_identity != queries.front().snapshot_identity)
-        return Answer(
-            Status{ErrorCode::InvalidArgument, "invalid Result joint member"});
-      seen |= std::uint64_t{1} << query.output_index;
-      auto candidate = query;
-      if (candidate.cancellation.cancelled())
-        candidate.cancellation = {};
-      if (candidate.prepared) {
-        auto valid = validate_prepared(*candidate.prepared, key, query.inputs,
-                                       query.parameters);
-        if (!valid.ok())
-          return Answer(valid);
-      }
-      if (prepared)
-        candidate.prepared = prepared;
-      auto checked = prepare_result_query(key, candidate);
-      if (!checked.ok())
-        return Answer(checked.status());
-      auto selected = checked.take_value();
-      selected.cancellation = query.cancellation;
-      if (!prepared)
-        prepared = selected.prepared;
-      // All members must name the same immutable static invocation.
-      auto shared =
-          validate_prepared(*prepared, key, query.inputs, query.parameters);
-      if (!shared.ok())
-        return Answer(shared);
-      if (query.tensor_slot >= query.output.result_schema->tensors.size() &&
-          !query.output.result_schema->tensors.empty())
-        return Answer(
-            Status{ErrorCode::InvalidArgument, "invalid joint tensor slot"});
-      if (query.tensor_outputs &&
-          (!query.tensor_outputs->valid() ||
-           query.output.result_schema->tensors.empty() ||
-           query.tensor_outputs->shape() !=
-               query.output.result_schema->tensors[query.tensor_slot]
-                   .sample_shape()))
-        return Answer(
-            Status{ErrorCode::InvalidArgument, "invalid joint output demand"});
-      if (!selected.output.result_schema->tensors.empty()) {
-        const auto& tensor =
-            selected.output.result_schema->tensors[selected.tensor_slot];
-        FootprintLimits limits;
-        limits.consume_work = [&](std::uint64_t amount) {
-          return resources.consume(ResourceWork{amount});
-        };
-        auto demand = selected.tensor_outputs
-                          ? Result<Footprint>(*selected.tensor_outputs)
-                          : Footprint::all(tensor.sample_shape(), limits);
-        if (!demand.ok())
-          return Answer(demand.status());
-        auto closed = tensor.close_samples(demand.value(), limits);
-        if (!closed.ok())
-          return Answer(closed.status());
-        const auto& samples = closed.value();
-        const auto tuple = input_internal::tuple_channel_axis(tensor.descriptor,
-                                                              tensor.facets);
-        if (samples.boxes().size() != 1 || samples.empty())
-          return Answer(Status{ErrorCode::InvalidArgument,
-                               "joint member requires one observation"});
-        const auto shape = tensor.sample_shape();
-        const auto& dimensions = samples.boxes()[0].dimensions();
-        for (std::size_t axis = 0; axis < shape.size(); ++axis) {
-          const bool grouped =
-              axis >= shape.size() - tensor.atomic_trailing_axes ||
-              (tuple && axis == *tuple + tensor.batch_axes.size());
-          if (!grouped && dimensions[axis].extent != 1)
-            return Answer(Status{ErrorCode::InvalidArgument,
-                                 "joint member requires one observation"});
-        }
-        selected.tensor_outputs = closed.take_value();
-      }
-      ResultJointContinuation::Member member;
-      auto atom = result_atom_key(selected);
-      if (!atom.ok())
-        return Answer(atom.status());
-      member.key = atom.take_value();
-      if (std::any_of(members.begin(), members.end(), [&](const auto& prior) {
-            return prior.key.output_index == member.key.output_index &&
-                   prior.tensor_slot != query.tensor_slot;
-          }))
-        return Answer(Status{ErrorCode::InvalidArgument,
-                             "Result joint output mixes tensor slots"});
-      if (std::any_of(members.begin(), members.end(), [&](const auto& prior) {
-            return prior.key == member.key;
-          }))
-        return Answer(Status{ErrorCode::InvalidArgument,
-                             "duplicate Result joint atom key"});
-      member.tensor_slot = query.tensor_slot;
-      member.semantic_key.assign(query.semantic_key.data(),
-                                 query.semantic_key.size());
-      member.snapshot_identity.assign(query.snapshot_identity.data(),
-                                      query.snapshot_identity.size());
-      if (query.tensor_outputs) {
-        auto captured = Footprint::from_regions(query.tensor_outputs->shape(),
-                                                query.tensor_outputs->boxes());
-        if (!captured.ok())
-          return Answer(captured.status());
-        member.requested_outputs = captured.take_value();
-      }
-      member.outputs = selected.tensor_outputs;
-      member.prepared = selected.prepared;
-      const auto& output =
-          selected.prepared->traits().outputs[query.output_index];
-      member.payload_limit = output.maximum_output_payload_bytes;
-      member.resources = selected.resources;
-      member.cancellation = query.cancellation;
-      members.push_back(std::move(member));
-      if (!query.cancellation.cancelled())
-        normalized.push_back(std::move(selected));
-    }
-    if (normalized.empty())
-      return Answer(Status{ErrorCode::Cancelled, {}});
-    auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
-    auto callback_latch = std::make_shared<plugin_internal::FailureLatch>();
-    auto allocator = state_allocator.limited(
-        prepared->traits().joint_continuation_bytes,
-        [failure, callback_latch](ErrorCode code) {
-          auto expected = ErrorCode::Ok;
-          failure->compare_exchange_strong(expected, code);
-          callback_latch->record(Status{code, {}});
-        });
-    ErrorCode callback_failure = ErrorCode::Ok;
-    input_internal::Float32Environment environment;
-    if (!environment.active())
-      return Answer(Status{ErrorCode::OperationFailed,
-                           "joint floating environment unavailable"});
-    auto started = [&] {
-      execution_internal::ResultCallbackScope callback(&callback_failure,
-                                                       callback_latch.get());
-      try {
-        return definition->start_result_joint(normalized, allocator);
-      } catch (...) {
-        return Answer(plugin_internal::current_operation_exception());
-      }
-    }();
-    auto sticky = callback_latch->snapshot();
-    if (!sticky.ok())
-      return Answer(sticky);
-    if (callback_failure != ErrorCode::Ok || metadata_failure != ErrorCode::Ok)
-      return Answer(Status{callback_failure != ErrorCode::Ok ? callback_failure
-                                                             : metadata_failure,
-                           {}});
-    if (failure->load() != ErrorCode::Ok)
-      return Answer(Status{failure->load(), {}});
-    if (!started.ok())
-      return started;
-    auto state = started.take_value();
-    if (!state.valid() || !state.destroy_ ||
-        !allocator.owns_allocation(state.storage_))
-      return Answer(Status{ErrorCode::InvalidArgument,
-                           "Result joint state must use host allocation"});
-    state.definition_ = definition;
-    state.root_ = resources;
-    state.members_ = std::move(members);
-    state.workspace_bytes_ = prepared->traits().joint_workspace_bytes;
-    state.contract_ = prepared->traits().joint_contract;
     return Answer(std::move(state));
   } catch (...) {
     return Answer(plugin_internal::current_operation_exception());
@@ -1480,15 +1024,6 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
         !query.page_bytes)
       return Answer(
           Status{ErrorCode::InvalidArgument, "invalid compiled result start"});
-    if (input_internal::structural_image_metadata(query.output.descriptor,
-                                                  query.output.facets) ||
-        std::any_of(query.inputs.begin(), query.inputs.end(),
-                    [](const auto& input) {
-                      return input_internal::structural_image_metadata(
-                          input.descriptor, input.facets);
-                    }))
-      return Answer(Status{ErrorCode::TypeMismatch,
-                           "image structured output requires Result schema"});
     auto prepared = query.prepared;
     if (!prepared)
       return Answer(
@@ -1521,9 +1056,7 @@ Result<ResultContinuation> OperationRegistry::start_result_compiled(
       return Answer(Status{ErrorCode::Cancelled, {}});
     auto started = [&]() -> Answer {
       try {
-        return empty_tensor_query(normalized)
-                   ? ResultContinuation::stateless<empty_tensor_result>()
-                   : definition->start_result(normalized, scoped);
+        return definition->start_result(normalized, scoped);
       } catch (...) {
         return Answer(plugin_internal::current_operation_exception());
       }
@@ -1562,22 +1095,6 @@ std::vector<std::string> OperationRegistry::keys() const {
     result.push_back(entry.first);
   }
   return result;
-}
-
-/**
- * @brief Implements the maintained frozen built-in operation set.
- * @copydetails make_default_operation_registry
- */
-std::shared_ptr<OperationRegistry> make_default_operation_registry(
-    bool freeze) {
-  auto registry = std::make_shared<OperationRegistry>();
-  const auto status =
-      plugin_internal::register_builtin_operations(registry.get());
-  if (!status.ok())
-    throw std::logic_error(status.message);
-  if (freeze)
-    registry->freeze();
-  return registry;
 }
 
 }  // namespace ps

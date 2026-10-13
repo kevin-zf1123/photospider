@@ -10,7 +10,7 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/array_profiles.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "common/registry.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -20,8 +20,7 @@ struct ArrayKernel final {
   SequenceProfile profile;
   ArrayKernel(bool constant, SequenceProfile profile)
       : constant(constant), profile(profile) {}
-  Status publish(const ResultProgramPhase& phase, ResultBuilder& builder,
-                 ResultRelation relation) {
+  Status publish(const ResultProgramPhase& phase, ResultBuilder& builder) {
     const auto& target = phase.query.output.result_schema->tensors[0];
     const auto shape = target.sample_shape();
     const auto& input = phase.tensors->at({0, 0});
@@ -42,8 +41,7 @@ struct ArrayKernel final {
       std::memcpy(buffer.data(), &bits, width);
       status = builder.publish_tensor(
           0, Region::whole(shape), {0, std::vector<int64_t>(shape.size(), 0)},
-          std::move(buffer).freeze(), std::move(relation),
-          {true, true, true, true}, phase.query.cancellation);
+          std::move(buffer).freeze(), phase.query.cancellation);
     } else if (view) {
       ResultTensorViewTransform transform;
       transform.source_axes.resize(source_shape.size());
@@ -52,11 +50,9 @@ struct ArrayKernel final {
                                        source_shape[axis] == 1 ? 0 : 1, 1};
       auto window = math_take(
           input.acquire(Region::whole(source_shape), phase.query.cancellation));
-      status = builder.publish_tensor_view(
-          0, Region::whole(shape), window, transform, std::move(relation),
-          {true, true, true, true}, phase.query.cancellation);
-      if (status.code == ErrorCode::InvalidArgument &&
-          status.message.find("ViewUnavailable") != std::string::npos)
+      status = builder.publish_tensor_view(0, Region::whole(shape), window,
+                                           transform, phase.query.cancellation);
+      if (status.reason == FailureReason::ViewUnavailable)
         return {ErrorCode::InvalidArgument,
                 "ViewUnavailable: complete broadcast source is not affine",
                 FailureReason::InvalidDomain,
@@ -145,7 +141,6 @@ struct ArrayKernel final {
               return phase.consume_work(1);
             });
           },
-          std::move(relation), {true, true, true, true},
           phase.query.cancellation);
     }
     if (!status.ok())

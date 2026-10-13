@@ -3,7 +3,6 @@
 #include <memory>
 
 #include "execution/callback_pool.hpp"
-#include "execution/shared_results.hpp"
 #include "photospider/execution/execution.hpp"
 namespace ps::data_internal {
 class MemoryBudget;
@@ -47,7 +46,6 @@ struct ExecutionContext::Impl final {
   std::shared_ptr<execution_internal::ResultCache> cache;
   std::shared_ptr<execution_internal::NativeUploadRegistry> native_uploads;
   std::shared_ptr<execution_internal::DemandCoordinator> demands;
-  execution_internal::SharedResults shared_results;
   std::unique_ptr<execution_internal::ResultCheckpoints> result_checkpoints;
 };
 }  // namespace ps

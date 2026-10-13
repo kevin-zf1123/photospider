@@ -13,6 +13,7 @@
 #include "icc_fixture.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/ops/format/channel.hpp"
 #include "photospider/ops/format/metadata.hpp"
+#include "support/tile_oracle.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -69,10 +70,21 @@ struct Fixture {
   }
   Result<ExecutionResult> execute(const PlanningOptions& options = {},
                                   CancellationToken cancellation = {},
-                                  ExecutionOptions execution = {}) {
+                                  ExecutionOptions execution = {},
+                                  const std::optional<Region>& region = {}) {
     auto plan = compile(options);
     if (!plan.ok())
       return Result<ExecutionResult>(plan.status());
+    if (region) {
+      auto selected =
+          workflow_example::select_tiles(take(context->resource_budget()),
+                                         plan.value().plan, "result", *region);
+      if (!selected.ok())
+        return Result<ExecutionResult>(selected.status());
+      auto stages = plan.take_value();
+      stages.plan = selected.take_value();
+      plan = Result<CompiledWorkflow>(std::move(stages));
+    }
     execution.dependencies.maximum_work = 1000000000;
     execution.maximum_dependency_work = 1000000000;
     return context->execute(plan.value().plan, bindings, cancellation,
@@ -101,15 +113,16 @@ Region mapped(const Source& source, const Region& region, unsigned cell_axis,
 }
 void oracle(const Source& source, const ExecutionResult& run, const Region& q,
             unsigned axis, std::uint64_t index, bool keep,
-            const char* name = "result") {
+            const char* name = "result", std::uint64_t extent = 128) {
   const auto& result = run.results.at(name);
   const auto shape = output_shape(source, axis, keep);
   check(result.schema().tensors[0].sample_shape() == shape,
         "inferred complete sample shape");
+  const auto expected = tile_oracle::coverage(result.schema(), q, extent);
   const auto covered = take(result.descriptor()).tensor_coverage(0);
-  check(covered == take(Footprint::from_regions(shape, {q})),
-        "exact output coverage");
-  const auto bytes = read(result, q);
+  check(covered == take(Footprint::from_regions(shape, {expected})),
+        "complete tile or Whole output coverage");
+  const auto bytes = read(result, expected);
   const auto width =
       Value::element_size(source.schema.tensors[0].descriptor.element_type);
   std::size_t next = 0;
@@ -153,8 +166,8 @@ void workflow() {
   f.node(params);
   PlanningOptions planning;
   const Region roi({{1, 1}, {0, 2}});
-  planning.output_regions = {{"result", roi}};
-  auto run = take(f.execute(planning));
+
+  auto run = take(f.execute(planning, {}, {}, roi));
   check(read(run.results.at("result"), roi) ==
             std::vector<std::uint8_t>({75, 99}),
         "alpha ROI");
@@ -166,7 +179,7 @@ void workflow() {
   params["selector"] = std::string("red");
   params["layout"] = std::string("view");
   f.node(params, true);
-  run = take(f.execute(planning));
+  run = take(f.execute(planning, {}, {}, roi));
   oracle(input, run, roi, 2, 2, false);
   f.document.nodes.clear();
   OperationMetadata metadata;
@@ -175,7 +188,7 @@ void workflow() {
       format::split_channels(f.document, WorkflowInputReference{1}, metadata));
   check(handles.size() == 4 && handles[2].name == "c2", "split handles");
   f.document.outputs = {{"result", handles[2].output.source_node, "values"}};
-  run = take(f.execute(planning));
+  run = take(f.execute(planning, {}, {}, roi));
   oracle(input, run, roi, 2, 2, false);
   for (const auto& timing : run.diagnostics.operation_timings)
     check(timing.output.node_id == handles[2].output.source_node,
@@ -226,11 +239,11 @@ void arbitrary_axis_oracle() {
             }
           const Region roi(dims);
           PlanningOptions planning;
-          planning.output_regions = {{"result", roi}};
+
           const auto selected = shape[axis] - 1;
           for (const auto* policy : {"auto", "view", "materialize"}) {
             f.node(parameters(axis, selected, keep, policy));
-            auto result = take(f.execute(planning));
+            auto result = take(f.execute(planning, {}, {}, roi));
             oracle(input, result, roi, axis, selected, keep);
             check((owner(result.results.at("result"), roi) ==
                    owner(f.bindings.inputs[0].result,
@@ -270,13 +283,16 @@ void planar_and_batches() {
         dims[h] = {127, 3};
         dims[w] = {126, 4};
         const Region roi(dims);
-        input.coverage = {mapped(input, roi, axis, 1, keep)};
+        auto source_area =
+            Region::whole(input.schema.tensors[0].sample_shape()).dimensions();
+        source_area[1] = {1, 1};
+        input.coverage = {Region(source_area)};
         Fixture f(input);
         PlanningOptions planning;
-        planning.output_regions = {{"result", roi}};
+
         for (const auto* policy : {"view", "materialize", "auto"}) {
           f.node(parameters(axis, 1, keep, policy));
-          auto run = take(f.execute(planning));
+          auto run = take(f.execute(planning, {}, {}, roi));
           oracle(input, run, roi, axis, 1, keep);
           const auto& groups =
               run.results.at("result").schema().tensors[0].layout.groups;
@@ -292,12 +308,15 @@ void planar_and_batches() {
                        mapped(input, Region(plane), axis, 1, keep))) ==
                     (std::string(policy) != "materialize"),
                 "planar batch owner");
+          const auto complete =
+              tile_oracle::coverage(run.results.at("result").schema(), roi);
           const auto support = take(Footprint::from_regions(
-              input.schema.tensors[0].sample_shape(), input.coverage));
+              input.schema.tensors[0].sample_shape(),
+              {mapped(input, complete, axis, 1, keep)}));
           check(take(run.dependencies.source_support()).at("source") == support,
                 "exact single-plane Need across tiles and batches");
-          const auto query = take(
-              Footprint::from_regions(output_shape(input, axis, keep), {roi}));
+          const auto query = take(Footprint::from_regions(
+              output_shape(input, axis, keep), {complete}));
           require(take(run.results.at("result").tensor_relation(0))
                       .project(query, [&](auto s, const Footprint* samples) {
                         check(s.roles == 1 &&
@@ -306,7 +325,8 @@ void planar_and_batches() {
                               "Data-only exact extraction relation");
                         return Status::success();
                       }));
-          auto wrong_channel = input.coverage[0].dimensions();
+          auto wrong_channel =
+              mapped(input, complete, axis, 1, keep).dimensions();
           wrong_channel[2 + axis].offset = 0;
           auto dirty = take(run.dependencies.potential_dirty(
               "source",
@@ -321,9 +341,8 @@ void planar_and_batches() {
                 "selected source maps to exact output");
         }
         auto unavailable = roi.dimensions();
-        unavailable[w] = {0, 1};
-        planning.output_regions = {{"result", Region(unavailable)}};
-        check(!f.execute(planning).ok(),
+        unavailable[1] = {0, 1};
+        check(!f.execute(planning, {}, {}, Region(unavailable)).ok(),
               "missing source coverage cannot become a view");
       }
 }
@@ -348,13 +367,13 @@ void spatial_axes() {
         Fixture f(input);
         auto q = Region::whole(output_shape(input, 0, keep));
         PlanningOptions planning;
-        planning.output_regions = {{"result", q}};
+
         for (const auto* policy : {"auto", "materialize"}) {
           f.node(parameters(0, 1, keep, policy));
-          oracle(input, take(f.execute(planning)), q, 0, 1, keep);
+          oracle(input, take(f.execute(planning, {}, {}, q)), q, 0, 1, keep);
         }
         f.node(parameters(0, 1, keep, "view"));
-        auto refused = f.execute(planning);
+        auto refused = f.execute(planning, {}, {}, q);
         check(!refused.ok() &&
                   refused.status().code == ErrorCode::InvalidArgument &&
                   refused.status().reason == FailureReason::InvalidDomain,
@@ -377,17 +396,20 @@ void strided_and_disjoint() {
   ResultTensorLayout spatial;
   spatial.spatial = true;
   auto input = source({ElementType::UInt8, {1, 3, 2}}, {}, spatial);
-  input.coverage = {Region({{0, 1}, {0, 1}, {1, 1}}),
-                    Region({{0, 1}, {2, 1}, {1, 1}})};
+  input.coverage = {Region({{0, 1}, {0, 1}, {0, 2}}),
+                    Region({{0, 1}, {2, 1}, {0, 2}})};
   Fixture f(input);
   f.node(parameters(2, 1, false, "view"));
   f.document.outputs = {{"left", 1, "values"}, {"right", 1, "values"}};
   PlanningOptions planning;
-  planning.output_regions = {{"left", Region({{0, 1}, {0, 1}})},
-                             {"right", Region({{0, 1}, {2, 1}})}};
+  planning.tile_extent = 1;
+  const auto root = take(f.context->resource_budget());
+  planning.output_requests = {
+      {"left", {false, take(TileSet::from_indices(root, {0}))}},
+      {"right", {false, take(TileSet::from_indices(root, {2}))}}};
   auto run = take(f.execute(planning));
-  oracle(input, run, planning.output_regions.at("left"), 2, 1, false, "left");
-  oracle(input, run, planning.output_regions.at("right"), 2, 1, false, "right");
+  oracle(input, run, Region({{0, 1}, {0, 1}}), 2, 1, false, "left", 1);
+  oracle(input, run, Region({{0, 1}, {2, 1}}), 2, 1, false, "right", 1);
   check(take(run.dependencies.source_support()).at("source") ==
             take(Footprint::from_regions(input.schema.tensors[0].sample_shape(),
                                          input.coverage)),
@@ -706,7 +728,8 @@ void sparse_huge_domain() {
   schema.id = "test.huge-channel";
   ResultTensorSpec tensor;
   tensor.key = "samples";
-  tensor.descriptor = {ElementType::UInt8, {UINT64_MAX, 2}};
+  tensor.descriptor = {ElementType::UInt8, {1, UINT64_MAX, 2}};
+  tensor.layout.spatial = true;
   schema.tensors.push_back(std::move(tensor));
   auto builder = take(ResultBuilder::start(root, schema, "sparse.source"));
   require(builder.bind_descriptor_relation(
@@ -714,8 +737,8 @@ void sparse_huge_domain() {
   auto data = take(root.allocator().allocate(1));
   *data.data() = 73;
   require(builder.publish_tensor(
-      0, Region({{UINT64_MAX - 1, 1}, {1, 1}}),
-      {0, {0, 0}, {UINT64_MAX - 1, 1}}, std::move(data).freeze(),
+      0, Region({{0, 1}, {UINT64_MAX - 1, 1}, {0, 2}}),
+      {0, {0, 0, 0}, {0, UINT64_MAX - 1, 0}}, std::move(data).freeze(),
       take(ResultRelation::cartesian(root, UINT64_MAX, {0, 1, 0, 0})),
       {true, true, true, true}));
   auto source_result = take(builder.seal());
@@ -728,11 +751,13 @@ void sparse_huge_domain() {
   document.nodes = {{1,
                      "channel.extract_index_strict",
                      {WorkflowInputReference{1}},
-                     parameters(1, 1, false, "view")}};
+                     parameters(2, 1, false, "view")}};
   document.outputs = {{"result", 1, "values"}};
   PlanningOptions planning;
-  const Region roi({{UINT64_MAX - 1, 1}});
-  planning.output_regions = {{"result", roi}};
+  const Region roi({{0, 1}, {UINT64_MAX - 1, 1}});
+  planning.tile_extent = 1;
+  planning.output_requests = {
+      {"result", {false, take(TileSet::from_indices(root, {UINT64_MAX - 1}))}}};
   GraphContext graph(document);
   auto compiled = take(Compiler(registry).compile(graph, planning));
   auto run =

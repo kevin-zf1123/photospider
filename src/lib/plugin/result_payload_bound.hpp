@@ -51,11 +51,6 @@ class ResultPayloadBound final {
         auto status = add(input.result_);
         if (!status.ok())
           return failure_.record(status);
-        for (const auto& piece : input.pieces_) {
-          status = add(piece.result);
-          if (!status.ok())
-            return failure_.record(status);
-        }
         for (const auto& backing : input.input_backing_) {
           status = work(phase, 1 + input_storage_.size());
           if (!status.ok())

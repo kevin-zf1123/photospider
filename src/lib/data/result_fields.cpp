@@ -23,7 +23,6 @@
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
 #include "data/value_validation.hpp"
-#include "photospider/data/representation.hpp"
 #include "photospider/data/result.hpp"
 #include "photospider/data/tensor_description.hpp"
 
@@ -32,78 +31,99 @@ namespace data_internal {
 Status ResultFieldBacking::append(const ResourceBudget& budget,
                                   std::uint64_t rows, ByteView bytes,
                                   const CancellationToken& cancellation) {
-  if (!storage.valid()) {
-    auto file = TemporaryStorage::create(budget);
-    if (!file.ok())
-      return file.status();
-    storage = file.take_value();
+  if (cancellation.cancelled())
+    return Status{ErrorCode::Cancelled, {}};
+  if (!bytes.data() || bytes.empty())
+    return Status{ErrorCode::InvalidArgument, "invalid field append bytes"};
+  auto charged = budget.consume({bytes.size()});
+  if (!charged.ok())
+    return charged;
+  try {
+    auto target = storage;
+    if (!target)
+      target = std::allocate_shared<Storage>(ResourceAllocator<Storage>(budget),
+                                             budget);
+    auto allocated = budget.allocator().allocate(bytes.size());
+    if (!allocated.ok())
+      return allocated.status();
+    auto buffer = allocated.take_value();
+    std::memcpy(buffer.data(), bytes.data(), bytes.size());
+    if (cancellation.cancelled())
+      return Status{ErrorCode::Cancelled, {}};
+    if (target->chunks.size() == target->chunks.capacity()) {
+      auto metadata_work = budget.consume({target->chunks.size()});
+      if (!metadata_work.ok())
+        return metadata_work;
+    }
+    // Publish only after payload admission and metadata growth succeed.
+    target->chunks.push_back({target->size, std::move(buffer).freeze()});
+    target->size += bytes.size();
+    storage = std::move(target);
+    written += rows;
+    return Status::success();
+  } catch (const std::bad_alloc&) {
+    return Status{ErrorCode::ResourceExhausted, {}};
   }
-  auto extended = storage.append_zeroed(bytes.size(), cancellation);
-  if (!extended.ok())
-    return extended.status();
-  auto status = storage.write(extended.value(), bytes, cancellation);
-  if (!status.ok())
-    return status;
-  written += rows;
-  return Status::success();
+}
+Result<std::shared_ptr<const CpuStorage>> ResultFieldBacking::read(
+    const ResourceBudget& budget, std::uint64_t offset, std::uint64_t bytes,
+    std::uint64_t maximum_window, const CancellationToken& cancellation) const {
+  using Answer = Result<std::shared_ptr<const CpuStorage>>;
+  if (cancellation.cancelled())
+    return Answer(Status{ErrorCode::Cancelled, {}});
+  if (!storage || !bytes || offset > storage->size ||
+      bytes > storage->size - offset)
+    return Answer(
+        Status{ErrorCode::InvalidArgument, "invalid field read range"});
+  if (bytes > maximum_window)
+    return Answer(Status{ErrorCode::ResourceExhausted,
+                         "field read exceeds window limit",
+                         FailureReason::CapacityLimit});
+  std::uint64_t lookup_work = 1;
+  for (auto size = storage->chunks.size(); size > 1; size /= 2)
+    ++lookup_work;
+  auto charged = budget.consume({lookup_work});
+  if (!charged.ok())
+    return Answer(charged);
+  charged = budget.consume({bytes});
+  if (!charged.ok())
+    return Answer(charged);
+  auto allocated = budget.allocator().allocate(bytes);
+  if (!allocated.ok())
+    return Answer(allocated.status());
+  auto buffer = allocated.take_value();
+  const auto& chunks = storage->chunks;
+  auto first = std::upper_bound(
+      chunks.begin(), chunks.end(), offset,
+      [](std::uint64_t at, const Chunk& chunk) { return at < chunk.offset; });
+  if (first != chunks.begin())
+    --first;
+  std::uint64_t copied = 0;
+  for (; first != chunks.end() && copied < bytes; ++first) {
+    if (cancellation.cancelled())
+      return Answer(Status{ErrorCode::Cancelled, {}});
+    const auto within = offset + copied - first->offset;
+    const auto data = first->bytes->bytes();
+    const auto count =
+        std::min<std::uint64_t>(bytes - copied, data.size() - within);
+    std::memcpy(buffer.data() + copied, data.data() + within, count);
+    copied += count;
+  }
+  if (copied != bytes)
+    return Answer(Status{ErrorCode::Internal, "field backing is incomplete"});
+  if (cancellation.cancelled())
+    return Answer(Status{ErrorCode::Cancelled, {}});
+  return Answer(std::move(buffer).freeze());
 }
 }  // namespace data_internal
 struct ResultReadPlan::Impl {
   ResourceLease lease;
   std::shared_ptr<ResultRef::Impl> result;
-  TemporaryStorage storage;
+  std::uint32_t field = 0;
   std::uint64_t offset = 0, bytes = 0;
 };
-struct ResultWritePlan::Impl {
-  ResourceLease lease;
-  std::shared_ptr<ResultRef::Impl> result;
-  std::shared_ptr<const CpuStorage> payload;
-  std::uint32_t field = 0;
-  std::uint64_t rows = 0;
-  std::atomic<bool> applied{false};
-};
-bool ResultWritePlan::owned_by(const ResourceBudget& budget) const noexcept {
-  return impl_ && impl_->result->budget.same_owner(budget);
-}
 bool ResultReadPlan::owned_by(const ResourceBudget& budget) const noexcept {
   return impl_ && impl_->result->budget.same_owner(budget);
-}
-std::uint64_t ResultWritePlan::byte_size() const noexcept {
-  return impl_ && impl_->payload ? impl_->payload->capacity() : 0;
-}
-Status ResultWritePlan::apply(const CancellationToken& cancellation) const {
-  if (!impl_ || impl_->applied.exchange(true))
-    return Status{ErrorCode::Stale, "result write command already applied"};
-  return ResultBuilder::append_to(impl_->result, impl_->field, impl_->rows,
-                                  impl_->payload->bytes(), cancellation);
-}
-Result<ResultWritePlan> ResultBuilder::prepare_append(
-    std::uint32_t field, std::uint64_t rows,
-    std::shared_ptr<const CpuStorage> payload) const {
-  if (!impl_ || !payload)
-    return Result<ResultWritePlan>(Status{ErrorCode::Stale, {}});
-  auto retained = impl_->budget.reference(std::move(payload));
-  if (!retained.ok())
-    return Result<ResultWritePlan>(retained.status());
-  auto capacity = ResourceCapacity::host(sizeof(ResultWritePlan::Impl),
-                                         sizeof(ResultWritePlan::Impl));
-  capacity[ResourceKind::Queue] = 1;
-  auto lease = impl_->budget.reserve(capacity);
-  if (!lease.ok())
-    return Result<ResultWritePlan>(lease.status());
-  try {
-    auto plan = std::make_shared<ResultWritePlan::Impl>();
-    plan->lease = lease.take_value();
-    plan->result = impl_;
-    plan->payload = retained.take_value();
-    plan->field = field;
-    plan->rows = rows;
-    ResultWritePlan result;
-    result.impl_ = std::move(plan);
-    return Result<ResultWritePlan>(std::move(result));
-  } catch (const std::bad_alloc&) {
-    return Result<ResultWritePlan>(Status{ErrorCode::ResourceExhausted, {}});
-  }
 }
 Result<ResultReadPlan> ResultRef::prepare_read(const ResultDescriptor& facts,
                                                std::uint32_t field,
@@ -131,7 +151,7 @@ Result<ResultReadPlan> ResultRef::prepare_read(const ResultDescriptor& facts,
     auto plan = std::make_shared<ResultReadPlan::Impl>();
     plan->lease = lease.take_value();
     plan->result = impl_;
-    plan->storage = impl_->fields[field].storage;
+    plan->field = field;
     plan->offset = first * impl_->fields[field].row_bytes;
     plan->bytes = rows * impl_->fields[field].row_bytes;
     ResultReadPlan result;
@@ -141,21 +161,6 @@ Result<ResultReadPlan> ResultRef::prepare_read(const ResultDescriptor& facts,
     return Result<ResultReadPlan>(Status{ErrorCode::ResourceExhausted, {}});
   }
 }
-Result<ResultRelation> ResultRef::relation(std::uint32_t field) const {
-  if (captured_)
-    return field < captured_->descriptor.field_count()
-               ? Result<ResultRelation>(captured_->fields[field])
-               : Result<ResultRelation>(data_internal::unavailable());
-  if (!impl_)
-    return Result<ResultRelation>(Status{ErrorCode::Stale, {}});
-  std::lock_guard<std::timed_mutex> lock(impl_->mutex);
-  if (field >= impl_->schema.fields.size() ||
-      !impl_->fields[field].relation.valid() ||
-      (!impl_->complete &&
-       impl_->schema.publication == PublishPolicy::CompleteBundle))
-    return Result<ResultRelation>(data_internal::unavailable());
-  return Result<ResultRelation>(impl_->fields[field].relation);
-}
 std::uint64_t ResultReadPlan::byte_size() const noexcept {
   return impl_ ? impl_->bytes : 0;
 }
@@ -164,8 +169,14 @@ Result<std::shared_ptr<const CpuStorage>> ResultReadPlan::load(
   if (!impl_ || !impl_->bytes)
     return Result<std::shared_ptr<const CpuStorage>>(
         Status{ErrorCode::InvalidArgument, "empty/invalid result read"});
-  auto loaded = impl_->storage.read(impl_->offset, impl_->bytes, maximum_window,
-                                    cancellation);
+  Result<std::shared_ptr<const CpuStorage>> loaded(
+      Status{ErrorCode::Internal, {}});
+  {
+    std::lock_guard<std::timed_mutex> lock(impl_->result->mutex);
+    loaded = impl_->result->fields[impl_->field].read(
+        impl_->result->budget, impl_->offset, impl_->bytes, maximum_window,
+        cancellation);
+  }
   if (!loaded.ok())
     return loaded;
   struct Owner {
@@ -229,9 +240,7 @@ Status ResultBuilder::append_to(const std::shared_ptr<ResultRef::Impl>& impl,
   impl->bytes += bytes.size();
   return Status::success();
 }
-Status ResultBuilder::publish(std::uint32_t field, std::uint64_t end,
-                              ResultRelation relation,
-                              ResultFinality finality) {
+Status ResultBuilder::publish(std::uint32_t field, std::uint64_t end) {
   if (!impl_)
     return Status{ErrorCode::Stale, {}};
   std::lock_guard<std::timed_mutex> lock(impl_->mutex);
@@ -244,60 +253,12 @@ Status ResultBuilder::publish(std::uint32_t field, std::uint64_t end,
     impl_->failure.record(status);
     return status;
   };
-  if (field >= impl_->schema.fields.size() || !finality.satisfied() ||
-      !relation.owned_by(impl_->budget) || !impl_->descriptor_relation.valid())
+  if (field >= impl_->schema.fields.size())
     return reject(data_internal::invalid_schema());
   auto& target = impl_->fields[field];
   if (end < target.certified || end > target.written ||
-      relation.coverage() < end || impl_->revision == UINT64_MAX)
+      impl_->revision == UINT64_MAX)
     return reject(data_internal::invalid_schema());
-  if (target.relation.valid() && !target.relation.same_owner(relation) &&
-      target.certified) {
-    if (target.relation.guarantee() != relation.guarantee())
-      return reject(data_internal::invalid_schema());
-    if (relation.guarantee() != DependencyGuarantee::Unknown) {
-      const auto ordered = [](const ResultSupport& a, const ResultSupport& b) {
-        return std::tie(a.input, a.roles, a.target, a.slot, a.first, a.count) <
-               std::tie(b.input, b.roles, b.target, b.slot, b.first, b.count);
-      };
-      for (uint64_t row = 0; row < target.certified; ++row) {
-        auto work = impl_->budget.consume({1});
-        if (!work.ok())
-          return reject(work);
-        ResourceVector<ResultSupport> prior{
-            ResourceAllocator<ResultSupport>(impl_->budget)},
-            next{ResourceAllocator<ResultSupport>(impl_->budget)};
-        auto status = target.relation.visit(row, impl_->limits.maximum_rows,
-                                            [&](auto support) {
-                                              prior.push_back(support);
-                                              return Status::success();
-                                            });
-        if (!status.ok())
-          return reject(status);
-        status =
-            relation.visit(row, impl_->limits.maximum_rows, [&](auto support) {
-              next.push_back(support);
-              return Status::success();
-            });
-        if (!status.ok())
-          return reject(status);
-        std::sort(prior.begin(), prior.end(), ordered);
-        std::sort(next.begin(), next.end(), ordered);
-        if (prior.size() != next.size() ||
-            !std::equal(prior.begin(), prior.end(), next.begin(),
-                        [&](const auto& a, const auto& b) {
-                          return !ordered(a, b) && !ordered(b, a);
-                        }))
-          return reject(data_internal::invalid_schema());
-      }
-    }
-  }
-  if (target.storage.valid()) {
-    auto frozen = target.storage.freeze_prefix(end * target.row_bytes);
-    if (!frozen.ok())
-      return reject(frozen);
-  }
-  target.relation = std::move(relation);
   target.certified = end;
   ++impl_->revision;
   return Status::success();

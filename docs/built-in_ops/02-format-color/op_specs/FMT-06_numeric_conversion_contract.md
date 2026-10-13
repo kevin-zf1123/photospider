@@ -11,7 +11,7 @@ clarification_status: current_member_complete_extensions_pending
 
 # FMT-06: numerical dtype and interval conversion
 
-The default registry provides one native Result ABI 2 key,
+The default registry provides one native Result ABI 3 key,
 `numeric.convert_format_strict`. It accepts one single-tensor Result with no
 fields and publishes one `values` output Result containing one tensor. It supports
 all 49 source/target pairs among UInt8, UInt16, Int8, Int16, Int64, Float32 and
@@ -290,7 +290,7 @@ adds the cell-relative `channel_axis` and selected `channel`. `range_index` refe
 to the static interval table. These fields are added for numerical failures in
 `convert_one`; upstream, resource and cancellation diagnostics keep their original
 content.
-The operation is registered as one CPU strict key using Result operation ABI 2.
+The operation is registered as one CPU strict key using Result operation ABI 3.
 Eligible contiguous spans use internal AArch64 NEON or runtime-checked amd64 AVX2;
 eligible Apple arm64 Float32→UInt8 spatial tiles may use the internal SME path.
 These paths preserve the exact same numerical behavior. No GPU backend is provided.

@@ -23,11 +23,27 @@
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
 #include "data/value_validation.hpp"
-#include "photospider/data/representation.hpp"
 #include "photospider/data/result.hpp"
 #include "photospider/data/tensor_description.hpp"
 
 namespace ps {
+Result<std::uint64_t> ResultViewAxis::source_coordinate(
+    std::uint64_t output) const {
+  if (output_axis < 0 || !step)
+    return Result<std::uint64_t>(source_origin);
+  const auto distance =
+      output >= output_origin ? output - output_origin : output_origin - output;
+  const auto magnitude = step < 0 ? static_cast<std::uint64_t>(-(step + 1)) + 1
+                                  : static_cast<std::uint64_t>(step);
+  const bool subtract = (output < output_origin) != (step < 0);
+  const auto available = subtract ? source_origin : UINT64_MAX - source_origin;
+  if (!core_internal::can_multiply(distance, magnitude, available))
+    return Result<std::uint64_t>(
+        Status{ErrorCode::InvalidArgument, "tensor view coordinate overflow"});
+  const auto delta = distance * magnitude;
+  return Result<std::uint64_t>(subtract ? source_origin - delta
+                                        : source_origin + delta);
+}
 namespace {
 std::timed_mutex result_ownership_mutex;
 struct ProducerWriteGuard final {
@@ -55,17 +71,14 @@ bool singleton_batches(const ResultTensorSpec& spec, const Region& region) {
 Status ResultBuilder::publish_tensor(std::uint32_t slot, const Region& region,
                                      StridedLayout layout,
                                      std::shared_ptr<const CpuStorage> storage,
-                                     ResultRelation relation,
-                                     ResultFinality finality,
                                      const CancellationToken& cancellation) {
   return publish_tensor_storage(slot, region, std::move(layout),
-                                std::move(storage), std::move(relation),
-                                finality, cancellation, {});
+                                std::move(storage), cancellation, {});
 }
 Status ResultBuilder::publish_tensor_storage(
     std::uint32_t slot, const Region& region, StridedLayout layout,
-    std::shared_ptr<const CpuStorage> storage, ResultRelation relation,
-    ResultFinality finality, const CancellationToken& cancellation,
+    std::shared_ptr<const CpuStorage> storage,
+    const CancellationToken& cancellation,
     ResourceVector<ResultRef> sources) try {
   if (!impl_)
     return Status{ErrorCode::Stale, {}};
@@ -88,9 +101,7 @@ Status ResultBuilder::publish_tensor_storage(
                                 : impl_->status();
   if (cancellation.cancelled())
     return reject({ErrorCode::Cancelled, {}});
-  if (slot >= impl_->schema.tensors.size() || !storage ||
-      !finality.satisfied() || !impl_->descriptor_relation.valid() ||
-      !relation.owned_by(impl_->budget))
+  if (slot >= impl_->schema.tensors.size() || !storage)
     return reject(data_internal::invalid_schema());
   const auto& spec = impl_->schema.tensors[slot];
   auto& target = impl_->tensors[slot];
@@ -122,9 +133,7 @@ Status ResultBuilder::publish_tensor_storage(
   auto closed = spec.close_samples(samples.value(), limits);
   if (!closed.ok())
     return reject(closed.status());
-  auto count = spec.sample_count();
-  if (closed.value() != samples.value() ||
-      relation.coverage() != (count.ok() ? count.value() : UINT64_MAX))
+  if (closed.value() != samples.value())
     return reject(data_internal::invalid_schema());
   auto overlap = samples.value().intersect(target.coverage, limits);
   if (!overlap.ok())
@@ -134,21 +143,6 @@ Status ResultBuilder::publish_tensor_storage(
   auto coverage = target.coverage.unite(samples.value(), limits);
   if (!coverage.ok())
     return reject(coverage.status());
-  if (relation.guarantee() != DependencyGuarantee::Unknown) {
-    auto certified = relation.certify(samples.value(), limits);
-    if (!certified.ok())
-      return reject(certified);
-  }
-  auto restricted = relation.restrict_to(spec.sample_shape(), region);
-  if (!restricted.ok())
-    return reject(restricted.status());
-  relation = restricted.take_value();
-  auto combined =
-      !target.coverage.empty() && !target.relation.same_owner(relation)
-          ? ResultRelation::unite(impl_->budget, {target.relation, relation})
-          : Result<ResultRelation>(relation);
-  if (!combined.ok())
-    return reject(combined.status());
   auto admission = impl_->budget.reserve(ResourceCapacity::host(
       sizeof(Value) +
           region.rank() * (sizeof(RegionDimension) + 3 * sizeof(std::uint64_t)),
@@ -198,7 +192,6 @@ Status ResultBuilder::publish_tensor_storage(
   target.affine_growth.push_back(std::move(growth_owner));
   target.affine_canonical = false;
   target.coverage = coverage.take_value();
-  target.relation = combined.take_value();
   ++impl_->revision;
   return Status::success();
 } catch (const std::bad_alloc&) {
@@ -212,7 +205,6 @@ Status ResultBuilder::publish_tensor_storage(
 }
 Status ResultBuilder::publish_tensor(
     std::uint32_t slot, const Region& region, ByteView packed,
-    ResultRelation relation, ResultFinality finality,
     const CancellationToken& cancellation) try {
   if (!impl_)
     return Status{ErrorCode::Stale, {}};
@@ -230,12 +222,6 @@ Status ResultBuilder::publish_tensor(
     auto status = data_internal::invalid_schema();
     fail(status);
     return status;
-  }
-  auto copy =
-      impl_->budget.consume({0, packed.size(), packed.size() ? 1U : 0U});
-  if (!copy.ok()) {
-    fail(copy);
-    return copy;
   }
   if (!impl_->schema.tensors[slot].layout.spatial && count.value()) {
     auto allocated = impl_->budget.allocator().allocate(packed.size());
@@ -262,8 +248,7 @@ Status ResultBuilder::publish_tensor(
     for (std::size_t axis = 0; axis < region.rank(); ++axis)
       layout.origin[axis] = region.dimensions()[axis].offset;
     return publish_tensor(slot, region, std::move(layout),
-                          std::move(buffer).freeze(), std::move(relation),
-                          finality, cancellation);
+                          std::move(buffer).freeze(), cancellation);
   }
   return publish_tensor_kernel(
       slot, region,
@@ -303,7 +288,7 @@ Status ResultBuilder::publish_tensor(
         }
         return Status::success();
       },
-      std::move(relation), finality, cancellation);
+      cancellation);
 } catch (const std::bad_alloc&) {
   auto status = Status{ErrorCode::ResourceExhausted, {}};
   fail(status);
@@ -317,7 +302,6 @@ Status ResultBuilder::publish_tensor_kernel(
     std::uint32_t slot, const Region& region,
     const std::function<Status(const ResourceVector<ResultTensorWriteWindow>&)>&
         write,
-    ResultRelation relation, ResultFinality finality,
     const CancellationToken& cancellation) {
   const auto owner = impl_;
   if (!owner)
@@ -349,9 +333,7 @@ Status ResultBuilder::publish_tensor_kernel(
     owner->kernel_active.store(true);
     ProducerWriteGuard producer_guard{&owner->kernel_active};
     const auto revision = owner->revision;
-    if (slot >= owner->schema.tensors.size() || !finality.satisfied() ||
-        !owner->descriptor_relation.valid() ||
-        !relation.owned_by(owner->budget))
+    if (slot >= owner->schema.tensors.size())
       return reject(data_internal::invalid_schema());
     const auto& spec = owner->schema.tensors[slot];
     auto& target = owner->tensors[slot];
@@ -368,9 +350,7 @@ Status ResultBuilder::publish_tensor_kernel(
     if (!closed.ok())
       return reject(closed.status());
     const auto domain_count = spec.sample_count();
-    if (closed.value() != samples.value() ||
-        relation.coverage() !=
-            (domain_count.ok() ? domain_count.value() : UINT64_MAX))
+    if (closed.value() != samples.value())
       return reject(data_internal::invalid_schema());
     auto overlap = samples.value().intersect(target.coverage, limits);
     if (!overlap.ok())
@@ -388,22 +368,6 @@ Status ResultBuilder::publish_tensor_kernel(
     auto copied_work = owner->budget.consume({count.value()});
     if (!copied_work.ok())
       return reject(copied_work);
-    if (relation.guarantee() != DependencyGuarantee::Unknown) {
-      auto certified = relation.certify(samples.value(), limits);
-      if (!certified.ok())
-        return reject(certified);
-    }
-    auto restricted = relation.restrict_to(spec.sample_shape(), region);
-    if (!restricted.ok())
-      return reject(restricted.status());
-    relation = restricted.take_value();
-    auto combined =
-        !target.coverage.empty() && target.relation.valid() &&
-                !target.relation.same_owner(relation)
-            ? ResultRelation::unite(owner->budget, {target.relation, relation})
-            : Result<ResultRelation>(relation);
-    if (!combined.ok())
-      return reject(combined.status());
     // A sparse logical domain need not have a representable full canvas.
     // Reuse the bounded affine transaction when planar byte geometry cannot
     // represent that domain; the typed schema and global coordinates persist.
@@ -449,8 +413,7 @@ Status ResultBuilder::publish_tensor_kernel(
       producer_guard.release();
       lock.unlock();
       return publish_tensor(slot, region, std::move(layout),
-                            std::move(buffer).freeze(), std::move(relation),
-                            finality, cancellation);
+                            std::move(buffer).freeze(), cancellation);
     }
     if (!samples.value().empty()) {
       const auto batches = spec.batch_axes.size();
@@ -564,7 +527,6 @@ Status ResultBuilder::publish_tensor_kernel(
     }
     target.affine_canonical = false;
     target.coverage = coverage.take_value();
-    target.relation = combined.take_value();
     ++owner->revision;
     return Status::success();
   } catch (const std::bad_alloc&) {
@@ -585,7 +547,6 @@ Status ResultBuilder::publish_tensor_kernel(
     std::uint32_t slot, const Footprint& requested,
     const std::function<Status(const ResourceVector<ResultTensorWriteWindow>&)>&
         write,
-    ResultRelation relation, ResultFinality finality,
     const CancellationToken& cancellation) {
   const Footprint samples = requested;
   const auto owner = impl_;
@@ -612,8 +573,7 @@ Status ResultBuilder::publish_tensor_kernel(
       return busy;
     const auto revision = owner->revision;
     if (!samples.valid() || slot >= owner->schema.tensors.size() || !write ||
-        !finality.satisfied() || !owner->descriptor_relation.valid() ||
-        !relation.owned_by(owner->budget) || revision == UINT64_MAX)
+        revision == UINT64_MAX)
       return reject(data_internal::invalid_schema());
     const auto& spec = owner->schema.tensors[slot];
     auto& target = owner->tensors[slot];
@@ -622,7 +582,7 @@ Status ResultBuilder::publish_tensor_kernel(
     if (samples.boxes().size() == 1) {
       lock.unlock();
       return publish_tensor_kernel(slot, samples.boxes()[0], write,
-                                   std::move(relation), finality, cancellation);
+                                   cancellation);
     }
     owner->kernel_active.store(true);
     ProducerWriteGuard producer_guard{&owner->kernel_active};
@@ -634,9 +594,7 @@ Status ResultBuilder::publish_tensor_kernel(
     auto closed = spec.close_samples(samples, limits);
     if (!closed.ok())
       return reject(closed.status());
-    const auto domain = spec.sample_count();
-    if (closed.value() != samples ||
-        relation.coverage() != (domain.ok() ? domain.value() : UINT64_MAX))
+    if (closed.value() != samples)
       return reject(data_internal::invalid_schema());
     auto overlap = samples.intersect(target.coverage, limits);
     if (!overlap.ok())
@@ -646,24 +604,7 @@ Status ResultBuilder::publish_tensor_kernel(
     auto coverage = target.coverage.unite(samples, limits);
     if (!coverage.ok())
       return reject(coverage.status());
-    if (relation.guarantee() != DependencyGuarantee::Unknown) {
-      auto certified = relation.certify(samples, limits);
-      if (!certified.ok())
-        return reject(certified);
-    }
-    auto restricted = relation.restrict_to(samples, limits);
-    if (!restricted.ok())
-      return reject(restricted.status());
-    relation = restricted.take_value();
-    auto combined =
-        !target.coverage.empty() && target.relation.valid() &&
-                !target.relation.same_owner(relation)
-            ? ResultRelation::unite(owner->budget, {target.relation, relation})
-            : Result<ResultRelation>(relation);
-    if (!combined.ok())
-      return reject(combined.status());
     if (samples.empty()) {
-      target.relation = combined.take_value();
       ++owner->revision;
       return Status::success();
     }
@@ -797,7 +738,6 @@ Status ResultBuilder::publish_tensor_kernel(
     target.affine_growth.push_back(std::move(growth_owner));
     target.affine_canonical = canonical;
     target.coverage = coverage.take_value();
-    target.relation = combined.take_value();
     ++owner->revision;
     return Status::success();
   } catch (const std::bad_alloc&) {
@@ -817,8 +757,8 @@ Status ResultBuilder::publish_tensor_kernel(
 Status ResultBuilder::publish_tensor_view(
     std::uint32_t slot, const Region& region,
     const ResultTensorReadWindow& source,
-    const ResultTensorViewTransform& transform, ResultRelation relation,
-    ResultFinality finality, const CancellationToken& cancellation) try {
+    const ResultTensorViewTransform& transform,
+    const CancellationToken& cancellation) try {
   if (!impl_)
     return {ErrorCode::Stale, {}};
   ResourceAllocationScope scope(impl_->budget);
@@ -836,9 +776,7 @@ Status ResultBuilder::publish_tensor_view(
       return {ErrorCode::Stale, {}};
     if (auto busy = impl_->reject_active_mutation(); !busy.ok())
       return busy;
-    if (slot >= impl_->schema.tensors.size() || !finality.satisfied() ||
-        !impl_->descriptor_relation.valid() ||
-        !relation.owned_by(impl_->budget)) {
+    if (slot >= impl_->schema.tensors.size()) {
       impl_->failure.record(data_internal::invalid_schema());
       return impl_->status();
     }
@@ -846,7 +784,8 @@ Status ResultBuilder::publish_tensor_view(
   }
   const auto unavailable = [] {
     return Status{ErrorCode::InvalidArgument,
-                  "ViewUnavailable: source has no affine physical mapping"};
+                  "ViewUnavailable: source has no affine physical mapping",
+                  FailureReason::ViewUnavailable};
   };
   const auto reject = [&](Status status) {
     fail(status);
@@ -858,11 +797,6 @@ Status ResultBuilder::publish_tensor_view(
     return reject(data_internal::invalid_schema());
   if (cancellation.cancelled())
     return reject({ErrorCode::Cancelled, {}});
-  if (source.owner_.request_record_)
-    return reject({ErrorCode::InvalidArgument,
-                   "terminal Result cannot supply a tensor view",
-                   FailureReason::None,
-                   {FailureOrigin::Protocol, FailureScope::Group}});
 
   const auto& spec = impl_->schema.tensors[slot];
   if (spec.descriptor.element_type != source.spec().descriptor.element_type)
@@ -939,9 +873,7 @@ Status ResultBuilder::publish_tensor_view(
   auto closed = spec.close_samples(samples.value(), limits);
   if (!closed.ok())
     return reject(closed.status());
-  const auto count = spec.sample_count();
   if (closed.value() != samples.value() ||
-      relation.coverage() != (count.ok() ? count.value() : UINT64_MAX) ||
       source.owner_.object_id() == impl_->object)
     return reject(data_internal::invalid_schema());
   auto overlap = samples.value().intersect(prior, limits);
@@ -949,11 +881,6 @@ Status ResultBuilder::publish_tensor_view(
     return reject(overlap.status());
   if (!overlap.value().empty())
     return reject(data_internal::invalid_schema());
-  if (relation.guarantee() != DependencyGuarantee::Unknown) {
-    auto certified = relation.certify(samples.value(), limits);
-    if (!certified.ok())
-      return reject(certified);
-  }
   // Metadata for temporary source layouts, rank-bounded coordinates and chunk
   // factors is admitted before constructing standard-library scratch vectors.
   auto scratch = impl_->budget.reserve(ResourceCapacity::host(4096, 4096));
@@ -1134,8 +1061,8 @@ Status ResultBuilder::publish_tensor_view(
   else
     owners.insert(owners.end(), source.owners_.begin(), source.owners_.end());
   return publish_tensor_storage(slot, region, std::move(layout),
-                                common.value().storage(), std::move(relation),
-                                finality, cancellation, std::move(owners));
+                                common.value().storage(), cancellation,
+                                std::move(owners));
 } catch (const std::bad_alloc&) {
   auto status = Status{ErrorCode::ResourceExhausted, {}};
   fail(status);
@@ -1148,7 +1075,6 @@ Status ResultBuilder::publish_tensor_view(
 Status ResultBuilder::publish_tensor_view(
     std::uint32_t slot, const Region& region,
     const std::vector<const ResultTensorReadWindow*>& sources,
-    ResultRelation relation, ResultFinality finality,
     const CancellationToken& cancellation) try {
   if (!impl_)
     return Status{ErrorCode::Stale, {}};
@@ -1186,13 +1112,13 @@ Status ResultBuilder::publish_tensor_view(
   auto unavailable = [] {
     return Status{
         ErrorCode::InvalidArgument,
-        "ViewUnavailable: sources have no canonical common-owner mapping"};
+        "ViewUnavailable: sources have no canonical common-owner mapping",
+        FailureReason::ViewUnavailable};
   };
   if (impl_->complete || !impl_->status().ok())
     return impl_->status().ok() ? Status{ErrorCode::Stale, {}}
                                 : impl_->status();
-  if (slot >= impl_->schema.tensors.size() || !finality.satisfied() ||
-      !impl_->descriptor_relation.valid() || !relation.owned_by(impl_->budget))
+  if (slot >= impl_->schema.tensors.size())
     return reject(data_internal::invalid_schema());
   const auto& spec = impl_->schema.tensors[slot];
   auto& target = impl_->tensors[slot];
@@ -1211,10 +1137,7 @@ Status ResultBuilder::publish_tensor_view(
   auto closed = spec.close_samples(samples.value(), limits);
   if (!closed.ok())
     return reject(closed.status());
-  const auto domain_count = spec.sample_count();
-  if (closed.value() != samples.value() ||
-      relation.coverage() !=
-          (domain_count.ok() ? domain_count.value() : UINT64_MAX))
+  if (closed.value() != samples.value())
     return reject(data_internal::invalid_schema());
   auto overlap = samples.value().intersect(target.coverage, limits);
   if (!overlap.ok())
@@ -1224,11 +1147,6 @@ Status ResultBuilder::publish_tensor_view(
   auto next = target.coverage.unite(samples.value(), limits);
   if (!next.ok())
     return reject(next.status());
-  if (relation.guarantee() != DependencyGuarantee::Unknown) {
-    auto certified = relation.certify(samples.value(), limits);
-    if (!certified.ok())
-      return reject(certified);
-  }
   std::vector<PlanarImage> tensors;
   std::vector<std::uint64_t> channels, counts;
   ResourceVector<ResultRef> owners(ResourceAllocator<ResultRef>(impl_->budget));
@@ -1236,11 +1154,6 @@ Status ResultBuilder::publish_tensor_view(
       region.dimensions().begin() + spec.batch_axes.size(),
       region.dimensions().end());
   for (const auto* source : sources) {
-    if (source && source->valid() && source->owner_.request_record_)
-      return reject({ErrorCode::InvalidArgument,
-                     "terminal Result cannot supply a tensor view",
-                     FailureReason::None,
-                     {FailureOrigin::Protocol, FailureScope::Group}});
     if (!source || !source->valid() || source->pieces_.empty() ||
         !source->affine_.empty())
       return unavailable();
@@ -1330,26 +1243,15 @@ Status ResultBuilder::publish_tensor_view(
       spec.facets, impl_->image_budget, cancellation, impl_->resources);
   if (!alias.ok()) {
     if (alias.status().code == ErrorCode::InvalidArgument &&
-        alias.status().message.find("ViewUnavailable") != std::string::npos)
+        alias.status().reason == FailureReason::ViewUnavailable)
       return alias.status();
     return reject(alias.status());
   }
-  auto restricted = relation.restrict_to(spec.sample_shape(), region);
-  if (!restricted.ok())
-    return reject(restricted.status());
-  relation = restricted.take_value();
-  auto combined =
-      !target.coverage.empty() && !target.relation.same_owner(relation)
-          ? ResultRelation::unite(impl_->budget, {target.relation, relation})
-          : Result<ResultRelation>(relation);
-  if (!combined.ok())
-    return reject(combined.status());
   if (impl_->revision == UINT64_MAX)
     return reject(data_internal::invalid_schema());
   target.views.push_back({region, alias.take_value(), std::move(owners)});
   target.affine_canonical = false;
   target.coverage = next.take_value();
-  target.relation = combined.take_value();
   ++impl_->revision;
   return Status::success();
 } catch (const std::bad_alloc&) {

@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "../common/tile_request.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {
@@ -128,7 +129,7 @@ int main(int argc, char** argv) try {
        {{"dtype", destination}, {"metadata_mode", std::string("raw")}}}};
   document.outputs = {{"converted", 1, "values"}};
   PlanningOptions options;
-  options.tile_height = options.tile_width = tile_extent;
+  options.tile_extent = tile_extent;
   Region region = Region::whole(descriptor.shape);
   if (coverage == "channel") {
     region = Region({{0, size}, {0, size}, {1, 1}});
@@ -140,10 +141,11 @@ int main(int argc, char** argv) try {
   } else if (coverage != "full") {
     throw std::runtime_error("unknown coverage");
   }
-  options.output_regions = {{"converted", region}};
   Compiler compiler(registry);
   GraphContext graph(document);
   auto plan = checked(compiler.compile(graph, options));
+  plan.plan = checked(
+      workflow_example::select_tiles(root, plan.plan, "converted", region));
   ExecutionBindings bindings;
   bindings.inputs.push_back({"image", source});
   const auto baseline = root.statistics();

@@ -12,14 +12,15 @@
 #include <utility>
 #include <vector>
 
+#include "common/floating_environment.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
+
 #if defined(__aarch64__)
 #include <arm_neon.h>
 #endif
 
-#include "00-foundation/image_program.hpp"
-#include "01-numeric/numeric_tensor_program.hpp"
-#include "data/footprint_index.hpp"
-#include "plugin/port_validation.hpp"
+#include "common/image_contract.hpp"
+#include "common/result_support.hpp"
 
 namespace ps::plugin_internal::stmap_result {
 using namespace numeric_ops;  // NOLINT(build/namespaces)
@@ -98,15 +99,14 @@ struct Program final {
   };
   Boundary mode;
   unsigned stage = 0;
-  Footprint outputs, source_samples;
-  ResultRelation witness;
+  Footprint outputs;
+  ResourceVector<Coordinate> source_coordinates;
   ResourceVector<Block> blocks;
   ResourceVector<MapValue> uv;
   ResourceVector<MapRow> map_rows;
   std::uint64_t pixel_count = 0, row_count = 0;
   bool use_map_rows = false;
   ResourceVector<std::array<float, 4>> source_pixels;
-  ResourceVector<std::uint64_t> source_first;
   std::optional<ResultBuilder> builder;
   explicit Program(Boundary selected) : mode(selected) {}
 
@@ -292,35 +292,8 @@ struct Program final {
       }
     });
   }
-  ResultRelation map_relation(const ResultProgramPhase& phase,
-                              const Region& region) const {
-    const auto& map = phase.query.inputs[1].result_schema->tensors[0];
-    const auto shape = map.sample_shape();
-    std::vector<ResultMappedAxis> axes(shape.size());
-    for (std::size_t axis = 0; axis + 1 < shape.size(); ++axis)
-      axes[axis].output_axis = axis + (map.batch_axes.empty() ? 2 : 0);
-    axes.back().extent = 2;
-    const auto grouped = std::max<std::uint32_t>(1, map.atomic_trailing_axes);
-    auto control = math_take(ResultRelation::mapped(
-        phase.resources, outputs.shape(), region, shape, axes,
-        {1, grouped == 1 ? 6U : 2U, 0, 0, ResultSupportTarget::Tensor, 0}));
-    if (grouped == 1)
-      return control;
-    for (std::size_t axis = shape.size() - grouped; axis < shape.size();
-         ++axis) {
-      axes[axis].output_axis = -1;
-      axes[axis].source_origin = 0;
-      axes[axis].extent = shape[axis];
-    }
-    auto validation = math_take(ResultRelation::mapped(
-        phase.resources, outputs.shape(), region, shape, axes,
-        {1, 4, 0, 0, ResultSupportTarget::Tensor, 0}));
-    return math_take(
-        ResultRelation::unite(phase.resources, {control, validation}));
-  }
-  void prepare_relations(const ResultProgramPhase& phase) {
+  TileNeed prepare_source(const ResultProgramPhase& phase) {
     const auto& source = phase.query.inputs[0].result_schema->tensors[0];
-    const auto limits = phase_sets(phase);
     // Retain at most one owner/directory entry per long logical row. Sparse,
     // partial and multi-Result maps keep the compact per-pixel copy. A raw
     // window owns its immutable bytes independently of the current poll.
@@ -345,105 +318,103 @@ struct Program final {
         throw Status{ErrorCode::ResourceExhausted, "STMap map size"};
       uv.resize(pixel_count);
     }
-    auto bounding = blocks[0].region.dimensions();
-    for (const auto& block : blocks) {
+    for (const auto& block : blocks)
       read_map(phase, block);
-      for (std::size_t axis = 0; axis < bounding.size(); ++axis) {
-        const auto d = block.region.dimensions()[axis];
-        const auto last = std::max(
-            bounding[axis].offset + bounding[axis].extent, d.offset + d.extent);
-        bounding[axis].offset = std::min(bounding[axis].offset, d.offset);
-        bounding[axis].extent = last - bounding[axis].offset;
-      }
-    }
-    std::vector<ResultMappedAxis> axes(5);
-    axes[0].output_axis = 0;
-    axes[1].output_axis = 1;
-    axes[4].extent = 4;
-    std::uint64_t previous = UINT64_MAX;
-    std::size_t map_row = 0;
-    std::array<Tap, 4> taps{};
-    auto gather = math_take(ResultRelation::gather(
-        phase.resources, outputs.shape(), outputs, 1, source.sample_shape(),
-        axes, 12, 4,
-        [&](std::uint64_t row,
-            std::uint32_t tap) -> Result<ResultGatherSample> {
-          if (row != previous) {
-            if (!(row & 255U))
-              math_require(phase.consume_work(
-                  std::min<std::uint64_t>(256, pixel_count - row) * 4));
-            previous = row;
-            MapValue value;
-            if (use_map_rows) {
-              while (row >= map_rows[map_row].first + map_rows[map_row].count)
-                ++map_row;
-              const auto& selected = map_rows[map_row];
-              value = map_value(selected.data, selected.stride,
-                                row - selected.first);
-            } else {
-              value = uv[row];
-            }
-            taps = taps_for(value, source);
-          }
-          ResultGatherSample value;
-          value.present = taps[tap].present;
-          value.coordinates[2] = taps[tap].y;
-          value.coordinates[3] = taps[tap].x;
-          return Result<ResultGatherSample>(value);
-        },
-        {0, 1, 0, 0, ResultSupportTarget::Tensor, 0},
-        std::max<std::uint32_t>(1, source.atomic_trailing_axes), limits));
-    source_samples = math_take(Footprint::none(source.sample_shape(), limits));
-    math_require(gather.project(
-        outputs,
-        [&](ResultSupport support, const Footprint* samples) {
-          if ((support.roles & 1U) && samples)
-            source_samples = *samples;
-          return Status::success();
-        },
-        limits));
-    witness = math_take(ResultRelation::unite(
-        phase.resources,
-        {gather, map_relation(phase, Region(std::move(bounding)))}));
-  }
-  void read_source(const ResultProgramPhase& phase) {
-    std::uint64_t count = 0;
-    source_first.reserve(source_samples.boxes().size());
-    for (const auto& box : source_samples.boxes()) {
-      source_first.push_back(count);
-      const auto n = math_take(box.element_count()) / 4;
-      if (n > UINT64_MAX - count)
-        throw Status{ErrorCode::ResourceExhausted, "STMap source count"};
-      count += n;
-    }
-    source_pixels.resize(count);
-    for (std::size_t b = 0; b < source_samples.boxes().size(); ++b) {
-      const auto& box = source_samples.boxes()[b];
-      each_row(box, [&](Coordinate at, std::uint64_t width) {
-        math_require(phase.consume_work(width * 4));
-        const auto first = source_first[b] + local_index(box, at);
-        Region region(
-            {{at[0], 1}, {at[1], 1}, {at[2], 1}, {at[3], width}, {0, 4}});
-        auto window = math_take(phase.tensors->at({0, 0}).acquire(
-            region, phase.query.cancellation));
-        std::vector<std::uint64_t> coordinate{at[0], at[1], at[2], at[3], 0};
-        for (std::uint64_t c = 0; c < 4; ++c) {
-          coordinate[4] = c;
-          for (std::uint64_t i = 0; i < width;) {
+    if (pixel_count > source_coordinates.max_size() / 4)
+      throw Status{ErrorCode::ResourceExhausted, "STMap tap coordinate count"};
+    source_coordinates.reserve(pixel_count * 4);
+    for (const auto& block : blocks) {
+      each_row(block.region, [&](Coordinate at, std::uint64_t count) {
+        math_require(phase.consume_work(count * 4));
+        for (std::uint64_t x = 0; x < count; ++x) {
+          if (!(x & 255U))
             math_require(phase.consume_work(0));
-            coordinate[3] = at[3] + i;
-            const auto run = math_take(window.row_run(coordinate));
-            const auto n =
-                std::min<std::uint64_t>({width - i, run.samples, 256});
-            for (std::uint64_t j = 0; j < n; ++j)
-              std::memcpy(&source_pixels[first + i + j][c],
-                          run.data + static_cast<std::int64_t>(j) *
-                                         run.sample_stride_bytes,
-                          4);
-            i += n;
+          const auto local = local_index(block.region, at);
+          MapValue value;
+          if (use_map_rows) {
+            const auto width = block.region.dimensions()[3].extent;
+            const auto& row = map_rows[block.first_row + local / width];
+            value = map_value(row.data, row.stride, local % width);
+          } else {
+            value = uv[block.first + local];
           }
+          for (const auto& tap : taps_for(value, source))
+            if (tap.present)
+              source_coordinates.push_back({at[0], at[1], tap.y, tap.x});
+          ++at[3];
         }
       });
+    }
+    std::uint64_t levels = 1;
+    for (auto n = source_coordinates.size(); n; n >>= 1)
+      ++levels;
+    if (source_coordinates.size() > UINT64_MAX / (8 * levels))
+      throw Status{ErrorCode::ResourceExhausted, "STMap tap sorting work"};
+    math_require(phase.consume_work(source_coordinates.size() * 8 * levels));
+    std::uint64_t comparisons = 0;
+    std::sort(
+        source_coordinates.begin(), source_coordinates.end(),
+        [&](const Coordinate& a, const Coordinate& b) {
+          if (!(++comparisons & 255U) && phase.query.cancellation.cancelled())
+            throw Status{ErrorCode::Cancelled, {}};
+          return a < b;
+        });
+    source_coordinates.erase(
+        std::unique(source_coordinates.begin(), source_coordinates.end()),
+        source_coordinates.end());
+    math_require(phase.consume_work(source_coordinates.size() * 6));
+    if (source_coordinates.empty())
+      return TileNeed{0, false, true, {}};
+    const auto grid = phase.query.input_tile_grids.empty()
+                          ? math_take(TileGrid::from_schema(
+                                *phase.query.inputs[0].result_schema,
+                                phase.query.tile_extent))
+                          : phase.query.input_tile_grids.at(0);
+    if (!grid)
+      return TileNeed{0, true, false, {}};
+    ResourceVector<TileIndex> tiles{
+        ResourceAllocator<TileIndex>(phase.resources)};
+    tiles.reserve(source_coordinates.size());
+    for (const auto& at : source_coordinates) {
+      const std::array<std::uint64_t, 5> point{at[0], at[1], at[2], at[3], 0};
+      tiles.push_back(
+          math_take(sdk::tile_for_coordinate(*grid, point.data(), 5)));
+    }
+    return TileNeed{0, false, false,
+                    math_take(TileSet::from_indices(
+                        phase.resources, tiles.data(), tiles.size()))};
+  }
+  void read_source(const ResultProgramPhase& phase) {
+    source_pixels.resize(source_coordinates.size());
+    for (std::size_t first = 0; first < source_coordinates.size();) {
+      const auto& at = source_coordinates[first];
+      std::size_t end = first + 1;
+      while (end < source_coordinates.size() &&
+             source_coordinates[end][0] == at[0] &&
+             source_coordinates[end][1] == at[1] &&
+             source_coordinates[end][2] == at[2] &&
+             source_coordinates[end][3] == at[3] + end - first)
+        ++end;
+      math_require(phase.consume_work((end - first) * 4));
+      Region row(
+          {{at[0], 1}, {at[1], 1}, {at[2], 1}, {at[3], end - first}, {0, 4}});
+      auto window = math_take(
+          phase.tensors->at({0, 0}).acquire(row, phase.query.cancellation));
+      for (std::uint64_t c = 0; c < 4; ++c) {
+        std::vector<std::uint64_t> position{at[0], at[1], at[2], at[3], c};
+        for (auto i = first; i < end;) {
+          math_require(phase.consume_work(0));
+          position[3] = at[3] + i - first;
+          const auto run = math_take(window.row_run(position));
+          const auto count = std::min<std::uint64_t>(
+              {end - i, window.sample_axis() == 3 ? run.samples : 1, 256});
+          for (std::uint64_t j = 0; j < count; ++j)
+            std::memcpy(&source_pixels[i + j][c],
+                        run.data + byte_offset(j, run.sample_stride_bytes), 4);
+          i += count;
+        }
+      }
+      first = end;
     }
   }
   std::array<float, 4> sample(const Coordinate& at,
@@ -455,15 +426,12 @@ struct Program final {
       if (!taps[i].present)
         continue;
       const Coordinate key{at[0], at[1], taps[i].y, taps[i].x};
-      const auto box = source_samples.boxes().size() == 1
-                           ? 0
-                           : footprint_internal::containing(
-                                 source_samples.boxes(), key.data(), 4);
-      if (box == source_samples.boxes().size())
+      const auto found = std::lower_bound(source_coordinates.begin(),
+                                          source_coordinates.end(), key);
+      if (found == source_coordinates.end() || *found != key)
         throw Status{ErrorCode::OperationFailed,
                      "STMap source index is incomplete"};
-      values[i] = source_pixels[source_first[box] +
-                                local_index(source_samples.boxes()[box], key)];
+      values[i] = source_pixels[found - source_coordinates.begin()];
     }
     std::array<float, 4> result{};
 #if defined(__aarch64__)
@@ -528,7 +496,7 @@ struct Program final {
   void publish(const ResultProgramPhase& phase) {
     const auto& source = phase.query.inputs[0].result_schema->tensors[0];
     std::uint64_t levels = 1;
-    for (auto n = source_samples.boxes().size(); n; n >>= 1)
+    for (auto n = source_coordinates.size(); n; n >>= 1)
       ++levels;
     const bool tiled = phase.cpu_tiles && pixel_count >= 65536;
     const auto per_pixel = 24 + 32 * levels + (tiled ? 16 : 0);
@@ -550,10 +518,17 @@ struct Program final {
               each_row(writer.region(), [&](Coordinate at,
                                             std::uint64_t count) {
                 math_require(phase.consume_work(0));
-                const auto b = blocks.size() == 1
-                                   ? 0
-                                   : footprint_internal::containing(
-                                         outputs.boxes(), at.data(), 4);
+                std::size_t b = 0;
+                for (; b < blocks.size(); ++b) {
+                  const auto& dimensions = blocks[b].region.dimensions();
+                  bool contains = true;
+                  for (std::size_t axis = 0; axis < 4; ++axis)
+                    contains &= at[axis] >= dimensions[axis].offset &&
+                                at[axis] - dimensions[axis].offset <
+                                    dimensions[axis].extent;
+                  if (contains)
+                    break;
+                }
                 if (b == blocks.size())
                   throw Status{ErrorCode::OperationFailed,
                                "STMap output index is incomplete"};
@@ -629,13 +604,13 @@ struct Program final {
             return phase.consume_work(0);
           });
         },
-        witness, {true, true, true, true}, phase.query.cancellation));
+        phase.query.cancellation));
   }
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
     auto scratch =
         math_take(phase.resources.reserve(ResourceCapacity::host(8192, 8192)));
     math_require(phase.consume_work(1));
-    input_internal::Float32Environment environment;
+    FloatingEnvironment environment;
     if (!environment.active())
       throw Status{ErrorCode::OperationFailed,
                    "STMap numeric environment unavailable"};
@@ -650,8 +625,6 @@ struct Program final {
       if (outputs.empty()) {
         auto empty = math_take(ResultBuilder::start(phase.resources, output,
                                                     phase.query.semantic_key));
-        math_require(empty.bind_descriptor_relation(
-            math_take(ResultRelation::cartesian(phase.resources, 1, {}))));
         return Result<ResultProgramPoll>(
             ResultPublication{math_take(empty.seal()), true});
       }
@@ -662,8 +635,8 @@ struct Program final {
           ResourceVector<MapRow>(ResourceAllocator<MapRow>(phase.resources));
       source_pixels = ResourceVector<std::array<float, 4>>(
           ResourceAllocator<std::array<float, 4>>(phase.resources));
-      source_first = ResourceVector<std::uint64_t>(
-          ResourceAllocator<std::uint64_t>(phase.resources));
+      source_coordinates = ResourceVector<Coordinate>(
+          ResourceAllocator<Coordinate>(phase.resources));
       std::vector<Region> map_boxes;
       std::uint64_t count = 0;
       for (const auto& box : outputs.boxes()) {
@@ -683,12 +656,23 @@ struct Program final {
       const auto& source = phase.query.inputs[0].result_schema->tensors[0];
       const auto& map = phase.query.inputs[1].result_schema->tensors[0];
       ResultProgramNeed need;
-      need.tensors.push_back(
-          {0, 0, math_take(Footprint::none(source.sample_shape(), limits)), 8});
-      need.tensors.push_back({1, 0,
-                              math_take(Footprint::from_regions(
-                                  map.sample_shape(), map_boxes, limits)),
-                              14});
+      {
+        auto tile_need_0 = sdk::tile_need_for_samples(
+            phase.resources, phase.query, 0, 0,
+            math_take(Footprint::none(source.sample_shape(), limits)), true);
+        if (!tile_need_0.ok())
+          return Result<ResultProgramPoll>(tile_need_0.status());
+        need.tiles.push_back(tile_need_0.take_value());
+      }
+      {
+        auto tile_need_1 = sdk::tile_need_for_samples(
+            phase.resources, phase.query, 1, 0,
+            math_take(Footprint::from_regions(map.sample_shape(), map_boxes,
+                                              limits)));
+        if (!tile_need_1.ok())
+          return Result<ResultProgramPoll>(tile_need_1.status());
+        need.tiles.push_back(tile_need_1.take_value());
+      }
       stage = 1;
       return Result<ResultProgramPoll>(std::move(need));
     }
@@ -699,19 +683,9 @@ struct Program final {
               ? std::vector<std::uint64_t>(phase.association->begin(),
                                            phase.association->end())
               : std::vector<std::uint64_t>{},
-          phase.query.tile_height, phase.query.tile_width,
-          phase.query.resources)));
-      std::vector<ResultRelation> descriptors;
-      for (std::uint32_t port = 0; port < 2; ++port)
-        descriptors.push_back(math_take(ResultRelation::cartesian(
-            phase.resources, 1,
-            {port, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
-      math_require(builder->bind_descriptor_relation(
-          math_take(ResultRelation::unite(phase.resources, descriptors))));
-      prepare_relations(phase);
+          phase.query.tile_extent, phase.query.resources)));
       ResultProgramNeed need;
-      need.tensors.push_back(
-          {0, 0, source_samples, source_samples.empty() ? 8U : 13U});
+      need.tiles.push_back(prepare_source(phase));
       stage = 2;
       return Result<ResultProgramPoll>(std::move(need));
     }
@@ -738,7 +712,7 @@ inline OperationDefinition operation() {
       static_cast<std::uint32_t>(ElementType::Float64);
   set_whole_tensor_output(traits, ElementType::Float32, sizeof(Program));
   traits.outputs[0].key = "value";
-  traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  traits.outputs[0].region_rule = OperationRegionRule::Tiled;
   traits.outputs[0].maximum_dependency_stages = 1048576;
   traits.outputs[0].output_schema.result_schema_id = "photospider.image";
   traits.outputs[0].output_schema.tensor_key = "pixels";
@@ -751,8 +725,7 @@ inline OperationDefinition operation() {
                                       const auto& parameters)
       -> Result<std::vector<OperationOutputSpecialization>> {
     try {
-      math_require(
-          image_ops::check_image(inputs[0], image_ops::ImageKind::Rgba));
+      math_require(image_ops::check_image(inputs[0]));
       if (!inputs[1].result_schema ||
           !inputs[1].result_schema->fields.empty() ||
           inputs[1].result_schema->tensors.size() != 1)

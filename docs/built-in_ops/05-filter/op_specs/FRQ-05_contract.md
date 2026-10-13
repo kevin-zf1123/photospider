@@ -32,11 +32,8 @@ Inherits [FILTER shared contract](FILTER_common_contract.md), [NUM](../../01-num
 
 Suffix letters identify distinct mathematical or interface objects, not quality tiers that a backend may select freely. A primitive may propose separately named strict and accelerated variants. A helper only orchestrates explicit stages. An external engine requires fixed resources and an approved executable configuration.
 
-## Shared Mathematics, Units, and Profiles
-
 ### Grid and Parameters
 This family produces only real-valued, even, full and unshifted responses, with Float64 real values, +0 imaginary values, and a FrequencyGrid/v1 response descriptor. Require positive H/W and explicit spacing_y/x. Define signed index n(k)=k for k≤floor(N/2), otherwise k−N; positive and negative Nyquist indices are equivalent. Compute fy=n(ky)/(H*dy), fx=n(kx)/(W*dx), and exact frequency radius r=sqrt(fx²+fy²). Do not silently reinterpret pixel units when applying cutoffs. Require cutoff>0; values above the maximum frequency are allowed and are not clipped.
-
 
 ## Shared Execution and Numeric Requirements
 

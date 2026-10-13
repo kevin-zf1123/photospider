@@ -24,7 +24,6 @@
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
 #include "data/value_validation.hpp"
-#include "photospider/data/representation.hpp"
 #include "photospider/data/result.hpp"
 #include "photospider/data/tensor_description.hpp"
 
@@ -571,12 +570,6 @@ Result<ResultTensorReadWindow> ResultRef::acquire_tensor(
     auto capture = std::make_shared<Capture>();
     capture->lease = admitted.take_value();
     capture->descriptor = facts;
-    for (std::size_t i = 0; i < facts.field_count(); ++i)
-      capture->fields[i] = impl_->fields[i].relation;
-    for (std::size_t i = 0; i < facts.tensor_count(); ++i)
-      capture->tensors[i] = impl_->tensors[i].relation;
-    capture->basis = impl_->descriptor_relation;
-    capture->dependencies = impl_->dependencies;
     result.owner_.captured_ = std::move(capture);
   }
   result.slot_ = slot;
@@ -863,7 +856,7 @@ Status ResultRef::read_tensor(const ResultDescriptor& facts, std::uint32_t slot,
       acquire_tensor(facts, slot, Region(std::move(dimensions)), cancellation);
   if (!window.ok())
     return window.status();
-  auto work = impl_->budget.consume({1, bytes, 1});
+  auto work = impl_->budget.consume({1});
   if (!work.ok())
     return work;
   auto run = window.value().row_run(at);
@@ -871,20 +864,5 @@ Status ResultRef::read_tensor(const ResultDescriptor& facts, std::uint32_t slot,
     return run.status();
   std::memcpy(destination, run.value().data, bytes);
   return Status::success();
-}
-Result<ResultRelation> ResultRef::tensor_relation(std::uint32_t slot) const {
-  if (captured_)
-    return slot < captured_->descriptor.tensor_count()
-               ? Result<ResultRelation>(captured_->tensors[slot])
-               : Result<ResultRelation>(data_internal::unavailable());
-  if (!impl_)
-    return Result<ResultRelation>(Status{ErrorCode::Stale, {}});
-  std::lock_guard<std::timed_mutex> lock(impl_->mutex);
-  if (slot >= impl_->schema.tensors.size() ||
-      !impl_->tensors[slot].relation.valid() ||
-      (!impl_->complete &&
-       impl_->schema.publication == PublishPolicy::CompleteBundle))
-    return Result<ResultRelation>(data_internal::unavailable());
-  return Result<ResultRelation>(impl_->tensors[slot].relation);
 }
 }  // namespace ps

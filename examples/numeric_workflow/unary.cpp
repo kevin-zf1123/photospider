@@ -441,9 +441,10 @@ void cancellation_and_cache(ps::CpuNumericProfile profile) {
   auto demand = take(context.open_demand(plan.plan, fresh_bindings));
   auto observed = take(demand.request(query));
   auto repeated = take(demand.request(query));
-  require(observed.results.at("values").object_id() ==
-              repeated.results.at("values").object_id(),
-          "same frozen demand shares completed Result observation");
+  require(repeated.diagnostics.cache_hits > 0 &&
+              numeric_result_fixture::bytes(observed.results.at("values")) ==
+                  numeric_result_fixture::bytes(repeated.results.at("values")),
+          "repeated demand reuses bounded completed cache with identical bits");
   std::uint64_t observed_bits = 0;
   require(
       rf::read(repeated.results.at("values"), {0}, &observed_bits, 8).ok() &&

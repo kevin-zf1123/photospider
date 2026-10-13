@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "photospider/ops/export.hpp"
 #include "photospider/ops/format/channel_editing.hpp"
 
 namespace ps::format {
@@ -100,7 +101,7 @@ struct RemoveAlphaOptions final : AlphaEditOptions {
  * in the default built-in runtime. Callers must serialize mutations to the same
  * `WorkflowDocument`.
  */
-PHOTOSPIDER_API Result<WorkflowNodeOutput> associate_alpha(
+PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> associate_alpha(
     WorkflowDocument& document, WorkflowInput input,
     const AlphaAssociationOptions& options,
     std::optional<WorkflowInput> alpha = {});
@@ -110,7 +111,7 @@ PHOTOSPIDER_API Result<WorkflowNodeOutput> associate_alpha(
  * `alpha.unassociate_<profile>` key is registered for all three CPU profiles.
  * Callers must serialize mutations to the same `WorkflowDocument`.
  */
-PHOTOSPIDER_API Result<WorkflowNodeOutput> unassociate_alpha(
+PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> unassociate_alpha(
     WorkflowDocument& document, WorkflowInput input,
     const AlphaAssociationOptions& options,
     std::optional<WorkflowInput> alpha = {});
@@ -123,7 +124,7 @@ PHOTOSPIDER_API Result<WorkflowNodeOutput> unassociate_alpha(
  * current built-in registry. Callers must serialize mutations to the same
  * `WorkflowDocument`.
  */
-PHOTOSPIDER_API Result<WorkflowNodeOutput> set_alpha(
+PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> set_alpha(
     WorkflowDocument& document, WorkflowInput input,
     const SetAlphaOptions& options, std::optional<WorkflowInput> alpha = {});
 /** @brief FMT-05B/C compile-time compositions, not new registry keys.
@@ -138,7 +139,7 @@ PHOTOSPIDER_API Result<WorkflowNodeOutput> set_alpha(
  * solved in exact descriptor arithmetic. Callers must serialize mutations to
  * the same `WorkflowDocument`.
  */
-PHOTOSPIDER_API Result<WorkflowNodeOutput> extract_alpha(
+PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> extract_alpha(
     WorkflowDocument& document, WorkflowInput input,
     const OperationMetadata& source_metadata,
     const ExtractAlphaOptions& options);
@@ -153,7 +154,7 @@ PHOTOSPIDER_API Result<WorkflowNodeOutput> extract_alpha(
  * time. Expansion is transactional and the returned `values` edge is graph-
  * owned. Callers must serialize mutations to the same `WorkflowDocument`.
  */
-PHOTOSPIDER_API Result<WorkflowNodeOutput> remove_alpha(
+PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> remove_alpha(
     WorkflowDocument& document, WorkflowInput input,
     const OperationMetadata& source_metadata,
     const RemoveAlphaOptions& options);

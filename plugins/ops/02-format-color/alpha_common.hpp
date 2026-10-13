@@ -12,7 +12,7 @@
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
 #include "photospider/ops/format/alpha.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "common/registry.hpp"
 
 namespace ps::plugin_internal::alpha_ops {
 using Params = std::map<std::string, ParameterValue>;

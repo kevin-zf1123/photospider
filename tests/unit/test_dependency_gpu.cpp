@@ -42,7 +42,6 @@ int mock_failures() {
     OperationDefinition op;
     op.key = "test.mock.failure";
     op.traits.outputs[0] = multi_result::output("value", schema);
-    op.traits.outputs[0].observation_kind = ObservationKind::RequestRecord;
     op.traits.outputs[0].continuation_bytes = sizeof(MockFailure);
     op.start_result = [mode](const auto&, const auto& allocator) {
       return ResultContinuation::make<MockFailure>(allocator, mode);
@@ -66,11 +65,12 @@ int mock_failures() {
     auto allocator =
         throwing.limited(4096, [&](ErrorCode code) { failure->store(code); });
     ResultObjectInputs inputs;
-    ResourceVector<ResultIoReply> io;
     ResultProgramPhase phase{
-        query,  inputs,
-        io,     allocator,
-        root,   [&](std::uint64_t units) { return root.consume({units}); },
+        query,
+        inputs,
+        allocator,
+        root,
+        [&](std::uint64_t units) { return root.consume({units}); },
         failure};
     const auto expected = mode < 2    ? ErrorCode::InvalidArgument
                           : mode == 2 ? ErrorCode::OperationFailed
@@ -96,8 +96,7 @@ struct State {
     if (!supplied) {
       supplied = true;
       ResultProgramNeed need;
-      need.tensors.push_back(
-          {0, 0, *phase.query.tensor_outputs, mode == 7 ? 8u : 1u});
+      need.tiles.push_back({0, mode != 7, mode == 7, {}});
       return Poll(std::move(need));
     }
     if (mode == 3) {
@@ -146,14 +145,9 @@ struct State {
             phase.query.semantic_key, {},
             std::vector<std::uint64_t>(phase.association->begin(),
                                        phase.association->end())));
-        multi_result::check(builder.bind_descriptor_relation(multi_result::take(
-            ResultRelation::cartesian(phase.resources, 1, {}))));
+
         multi_result::check(builder.publish_tensor(
-            0, Region::whole({1}), {0, {4}}, std::move(output).freeze(),
-            multi_result::take(ResultRelation::cartesian(
-                phase.resources, 1,
-                {0, 1, 0, 1, ResultSupportTarget::Tensor, 0})),
-            {true, true, true, true}));
+            0, Region::whole({1}), {0, {4}}, std::move(output).freeze()));
         return Poll(
             ResultPublication{multi_result::take(builder.seal()), true});
       }

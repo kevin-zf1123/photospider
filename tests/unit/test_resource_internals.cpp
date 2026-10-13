@@ -1,5 +1,6 @@
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -7,7 +8,6 @@
 
 #include "data/memory_budget.hpp"
 #include "execution/memory_admission.hpp"
-#include "execution/result_callback_scope.hpp"
 #include "photospider/photospider.hpp"
 #include "plugin/failure_latch.hpp"
 #include "support/test_support.hpp"
@@ -52,45 +52,6 @@ int failure_latch_publication() {
   PS_CHECK(success_exchange.compare_exchange_strong(expected, ErrorCode::Ok));
   PS_CHECK(success_exchange.load() == ErrorCode::Internal);
   PS_CHECK(success_exchange.snapshot().code == ErrorCode::Internal);
-  return 0;
-}
-int temporary_io_fence() {
-  ResourceBudget root;
-  auto store = TemporaryStorage::create(root).take_value();
-  auto failure = ErrorCode::Ok;
-  plugin_internal::FailureLatch latch;
-  {
-    execution_internal::ResultCallbackScope scope(&failure, &latch);
-    auto denied = store.append_zeroed(4);
-    PS_CHECK(denied.status().reason == FailureReason::UnauthorizedRead);
-    PS_CHECK(denied.status().detail.origin == FailureOrigin::Protocol);
-    PS_CHECK(denied.status().detail.scope == FailureScope::Group);
-    PS_CHECK(failure == ErrorCode::InvalidArgument && store.size() == 0);
-    {
-      execution_internal::ResultCallbackScope nested(nullptr);
-      PS_CHECK(store.append_zeroed(4).ok());
-    }
-    PS_CHECK(store.append_zeroed(1).status().reason ==
-             FailureReason::UnauthorizedRead);
-    PS_CHECK(store.size() == 4);
-  }
-  PS_CHECK(store.append_zeroed(4).ok());
-  plugin_internal::FailureLatch prior;
-  const Status first{ErrorCode::ResourceExhausted,
-                     "prior capacity failure",
-                     FailureReason::CapacityLimit,
-                     {FailureOrigin::Resource, FailureScope::Group}};
-  prior.record(first);
-  failure = first.code;
-  {
-    execution_internal::ResultCallbackScope scope(&failure, &prior);
-    auto denied = TemporaryStorage::create(root);
-    PS_CHECK(denied.status().code == first.code);
-    PS_CHECK(denied.status().reason == first.reason);
-    PS_CHECK(denied.status().detail.origin == first.detail.origin);
-    PS_CHECK(denied.status().message == first.message);
-  }
-  PS_CHECK(TemporaryStorage::create(root).ok());
   return 0;
 }
 int on_demand_payload() {
@@ -145,10 +106,38 @@ int on_demand_payload() {
   PS_CHECK(merged.view_elements == UINT64_MAX && merged.copied_elements == 0);
   return 0;
 }
+int numeric_function_counters() {
+  ps::NumericDiagnostics report;
+  report.profile = ps::CpuNumericProfile::Strict;
+  const char identity[] = "manual-function-counters/1";
+  std::memcpy(report.implementation.data(), identity, sizeof(identity));
+  report.strict_math_calls = 3;
+  report.strict_fallbacks = 2;
+  report.fallback_reasons[1] = 2;
+  report.function_fallbacks[static_cast<unsigned>(ps::NumericMathFunction::Sin)]
+                           [1] = 1;
+  ps::NumericDiagnostics total;
+  PS_CHECK(ps::merge_numeric_diagnostics(&total, report).ok() &&
+           total.strict_math_calls == 3 && total.function_fallbacks[0][1] == 1);
+  PS_CHECK(ps::merge_numeric_diagnostics(&total, report).ok() &&
+           total.strict_math_calls == 6 &&
+           total.function_fallbacks[static_cast<unsigned>(
+               ps::NumericMathFunction::Sin)][1] == 2);
+  const auto saved = total;
+  report.function_fallbacks[1][1] = 2;
+  PS_CHECK(!ps::merge_numeric_diagnostics(&total, report).ok() &&
+           total.function_fallbacks == saved.function_fallbacks &&
+           total.strict_math_calls == saved.strict_math_calls);
+  report.function_fallbacks[1][1] = 0;
+  total.strict_math_calls = UINT64_MAX;
+  PS_CHECK(!ps::merge_numeric_diagnostics(&total, report).ok() &&
+           total.strict_math_calls == UINT64_MAX);
+  return 0;
+}
 }  // namespace
 int main() {
   PS_CHECK(failure_latch_publication() == 0);
   PS_CHECK(on_demand_payload() == 0);
-  PS_CHECK(temporary_io_fence() == 0);
+  PS_CHECK(numeric_function_counters() == 0);
   return 0;
 }

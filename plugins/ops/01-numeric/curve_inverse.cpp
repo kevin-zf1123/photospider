@@ -15,7 +15,7 @@
 #include "01-numeric/exact_curve.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "photospider/core/resource_allocator.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "common/registry.hpp"
 
 namespace ps::plugin_internal {
 namespace {

@@ -1,5 +1,5 @@
 #include "01-numeric/ordered_reduction.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "common/registry.hpp"
 
 namespace ps::plugin_internal {
 Status register_numeric_variance(OperationRegistry* registry) {

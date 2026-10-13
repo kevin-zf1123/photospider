@@ -1,5 +1,6 @@
 #include <array>
 #include <cfenv>  // NOLINT(build/c++11)
+#include <cmath>
 #include <cstring>
 #include <future>
 #include <iostream>
@@ -54,10 +55,6 @@ void roles_and_constants() {
       "hsl_to_rgb",       "rgb_to_hsv",       "hsv_to_rgb",
       "rgb_to_ycbcr_ncl", "ycbcr_ncl_to_rgb", "xyz_to_xyy",
       "xyy_to_xyz"};
-  const unsigned masks[16][3] = {{2, 3, 6}, {3, 1, 5}, {1, 6, 6}, {1, 6, 6},
-                                 {7, 7, 7}, {7, 7, 7}, {1, 6, 6}, {1, 6, 6},
-                                 {7, 7, 7}, {7, 7, 7}, {7, 7, 7}, {7, 7, 7},
-                                 {7, 7, 7}, {5, 7, 3}, {7, 7, 2}, {7, 4, 7}};
   auto source = channel_fixture::source({ElementType::Float64, {1, 3}});
   fill(&source, {.5, .5, .5});
   for (unsigned member = 0; member < 16; ++member) {
@@ -72,28 +69,18 @@ void roles_and_constants() {
       params["input_hue_unit"] = std::string("pi_multiple");
     if (member == 12 || member == 13)
       params["ncl_matrix"] = std::string("bt709");
-    for (unsigned component = 0; component < 3; ++component) {
-      std::vector<Region> expected;
-      for (unsigned c = 0; c < 3; ++c)
-        if (masks[member][component] & (1U << c))
-          expected.emplace_back(Region({{0, 1}, {c, 1}}));
-      auto hook = std::make_shared<transfer_fixture::Hooks>();
-      bool needed = false;
-      hook->need = [&](const ResultProgramNeed& need) {
-        require(need.tensors.size() == 1 && need.tensors[0].roles == 9,
-                "raw exact roles");
-        require(need.tensors[0].samples ==
-                    take(Footprint::from_regions({1, 3}, expected)),
-                "exact component support");
-        needed = true;
-      };
-      const auto query = take(
-          Footprint::from_regions({1, 3}, {Region({{0, 1}, {component, 1}})}));
-      auto result =
-          observe(source, std::string("color.") + names[member] + "_strict",
-                  params, query, hook);
-      require(result.ok() && needed, "raw member request failed");
-    }
+    auto hook = std::make_shared<transfer_fixture::Hooks>();
+    bool needed = false;
+    hook->need = [&](const ResultProgramNeed& need) {
+      require(need.tiles.size() == 1 && need.tiles[0].roles == 9 &&
+                  need.tiles[0].samples == take(Footprint::all({1, 3})),
+              "Whole model output requires all three source components");
+      needed = true;
+    };
+    auto result =
+        observe(source, std::string("color.") + names[member] + "_strict",
+                params, take(Footprint::all({1, 3})), hook);
+    require(result.ok() && needed, "Whole model request failed");
   }
   auto scalar =
       channel_fixture::source({ElementType::Float64, {2, 3}}, {}, {}, {2});
@@ -105,17 +92,31 @@ void roles_and_constants() {
   auto hook = std::make_shared<transfer_fixture::Hooks>();
   bool descriptor_only = false;
   hook->need = [&](const ResultProgramNeed& need) {
-    descriptor_only = need.tensors.size() == 1 && need.tensors[0].roles == 8 &&
-                      need.tensors[0].samples.empty();
+    descriptor_only = need.tiles.size() == 1 && need.tiles[0].roles == 8 &&
+                      need.tiles[0].samples.empty();
   };
   const Region zeros({{1, 1}, {0, 2}, {1, 2}, {0, 3}});
   const auto query = take(Footprint::from_regions({2, 2, 3, 3}, {zeros}));
-  auto result = take(
-      observe(scalar, "color.gray_to_color_strict", expansion, query, hook));
-  require(descriptor_only, "constant R outputs fetched Gray data");
-  require(channel_fixture::read(result.results.at("result"), zeros) ==
-              std::vector<std::uint8_t>(96),
-          "R constants are not +0");
+  auto whole =
+      observe(scalar, "color.gray_to_color_strict", expansion, query, hook);
+  require(whole.ok() && !descriptor_only,
+          "Whole output reads the copied Gray component as well as constant "
+          "chroma");
+  const auto& copied = whole.value().results.at("result");
+  double gray_value = 0;
+  require(copied
+              .read_tensor(take(copied.descriptor()), 0, {1, 0, 0, 0},
+                           &gray_value, sizeof(gray_value))
+              .ok(),
+          "Whole Gray payload read");
+  require(std::isnan(gray_value), "raw Whole Gray copy preserves NaN");
+  fill(&scalar, {.5});
+  auto result = take(observe(scalar, "color.gray_to_color_strict", expansion,
+                             take(Footprint::all({2, 2, 3, 3})), hook));
+  require(!descriptor_only &&
+              channel_fixture::read(result.results.at("result"), zeros) ==
+                  std::vector<std::uint8_t>(96),
+          "Whole Gray expansion preserves exact zero chroma");
   auto binary = channel_fixture::source({ElementType::Float64, {1}});
   fill(&binary, {std::numeric_limits<double>::quiet_NaN()});
   for (bool threshold : {false, true}) {
@@ -128,7 +129,7 @@ void roles_and_constants() {
     }
     unsigned observed_roles = 0;
     hook->need = [&](const ResultProgramNeed& need) {
-      observed_roles = need.tensors[0].roles;
+      observed_roles = need.tiles[0].roles;
     };
     auto answer = observe(binary,
                           threshold ? "mask.threshold_channel_strict"
@@ -235,9 +236,10 @@ void q_groups_owners() {
           transfer_fixture::document(value, "color.color_to_gray_strict", p));
       const Region roi({{1, 1}, {0, 2}, {0, 3}, {0, 1}});
       PlanningOptions planning;
-      planning.output_regions = {{"result", roi}};
       auto compiled =
           take(Compiler(registry).compile(graph, planning, source.resources));
+      compiled.plan = take(
+          workflow_example::select_tiles(root, compiled.plan, "result", roi));
       const auto bindings = transfer_fixture::bindings(value);
       auto future = std::async(std::launch::async, [&] {
         return context.execute(compiled.plan, bindings);

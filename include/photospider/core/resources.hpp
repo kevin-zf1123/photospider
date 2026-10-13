@@ -22,9 +22,7 @@ class ResourcePayloadScope;
 
 /** @brief Independent capacity constraints; overlapping dimensions are not
  * summed. Host includes Shared and Metadata; Device includes Shared. Referenced
- * is a separate bound on caller-owned input capacity. Disk counts encoded
- * temporary extents, including padding, not filesystem allocation blocks or OS
- * cache.
+ * is a separate bound on caller-owned input capacity.
  */
 enum class ResourceKind : std::uint32_t {
   Host,
@@ -32,10 +30,7 @@ enum class ResourceKind : std::uint32_t {
   Shared,
   Metadata,
   Referenced,
-  Disk,
   Entries,
-  Files,
-  IoSlots,
   Queue,
   /** @brief Computation-buffer bytes; preserves maximum_live_bytes as a
      sublimit. */
@@ -69,15 +64,13 @@ struct PHOTOSPIDER_API ResourceLimits final {
   /** @brief Capacity unavailable to ordinary stages; reserved for cleanup. */
   ResourceCapacity cleanup;
   std::uint64_t maximum_work = UINT64_MAX;
-  std::uint64_t maximum_io_bytes = UINT64_MAX;
-  std::uint64_t maximum_io_requests = UINT64_MAX;
   std::uint64_t maximum_stages = UINT64_MAX;
   ResourceLimits();
 };
 
 /** @brief Cumulative quantities precharged atomically before submission. */
 struct ResourceWork final {
-  std::uint64_t work = 0, io_bytes = 0, io_requests = 0, stages = 0;
+  std::uint64_t work = 0, stages = 0;
 };
 
 /** @brief Synchronized capacity observations; peak is measured under this
@@ -93,7 +86,7 @@ class ResourceBudget;
  * associated storage has retired. Growth admits the entire increment
  * atomically. Shrinking is legal only after corresponding storage is released
  * or an unissued action is abandoned. No operation refunds already issued work
- * or I/O.
+ * or stages.
  */
 class PHOTOSPIDER_API ResourceLease final {
  public:

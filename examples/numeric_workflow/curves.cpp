@@ -487,9 +487,11 @@ void cache_composition_and_upstream(ps::CpuNumericProfile profile) {
     require(preparation != nullptr, "curve plan owns static preparation");
     const auto cold = take(demand.request(query, {}, options));
     const auto repeated = take(demand.request(query, {}, options));
-    require(cold.results.at("values").object_id() ==
-                repeated.results.at("values").object_id(),
-            "same curve demand retains completed Result");
+    require(
+        repeated.diagnostics.cache_hits > 0 &&
+            numeric_result_fixture::bytes(cold.results.at("values")) ==
+                numeric_result_fixture::bytes(repeated.results.at("values")),
+        "repeated demand reuses bounded completed cache with identical bits");
     const auto fresh_bindings = fixture.bindings(root);
     const auto warm = take(context.execute_fragments(
         take(context.freeze(plan.plan, fresh_bindings)), query, {}, options));

@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "../common/tile_request.hpp"
 #include "photospider/photospider.hpp"
 
 namespace {
@@ -140,7 +141,6 @@ int main(int argc, char** argv) try {
   if (roi && size < 130)
     throw std::runtime_error("ROI needs size >= 130");
   PlanningOptions options;
-  options.output_regions = {{"plane", region}};
   ExecutionBinding binding;
   binding.name = "image";
   binding.result = source;
@@ -165,6 +165,8 @@ int main(int argc, char** argv) try {
     GraphContext graph(document);
     auto start = Clock::now();
     auto compiled = checked(compiler.compile(graph, options));
+    compiled.plan = checked(
+        workflow_example::select_tiles(root, compiled.plan, "plane", region));
     const auto compile_us = elapsed(start);
     std::vector<double> times, callback;
     double first_us = 0;

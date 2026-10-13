@@ -106,12 +106,13 @@ inline ExecutionResult run(Fixture& fixture, WorkflowNodeOutput output,
     registry = make_default_operation_registry();
   GraphContext graph(fixture.document);
   PlanningOptions planning;
-  if (roi)
-    planning.output_regions = {{"result", *roi}};
   ResourceBindings resources;
   for (const auto& input : fixture.bindings.inputs)
     resources = take(resources.unite(input.result.resources()));
   auto compiled = take(Compiler(registry).compile(graph, planning, resources));
+  if (roi)
+    compiled.plan = take(workflow_example::select_tiles(
+        fixture.root, compiled.plan, "result", *roi));
   auto config = fixture.execution_config;
   config.cpu_workers = 1;
   ExecutionContext context(registry, config);

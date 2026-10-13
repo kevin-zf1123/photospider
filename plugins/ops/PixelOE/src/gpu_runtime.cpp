@@ -6,7 +6,7 @@
 #include <string>
 
 namespace px {
-void dispatch_gpu(const ps_result_services_v2* services, const char* entry,
+void dispatch_gpu(const ps_result_services_v3* services, const char* entry,
                   std::array<uint32_t, 3> grid, const Arguments& arguments) {
   if (services->consume_work(services->context, 16384) != 0)
     throw Failure(4, "PixelOE GPU metadata work budget exhausted");

@@ -266,7 +266,7 @@ int exact_reads(bool ancestor) {
   std::uint64_t samples = 0, next = 0;
   auto hooks = std::make_shared<ScanHooks>();
   hooks->need = [&](const ResultProgramNeed& need) {
-    for (const auto& tensor : need.tensors) {
+    for (const auto& tensor : need.tiles) {
       if (tensor.input != 0 || tensor.slot != 0 || tensor.roles != 5)
         return Status{ErrorCode::OperationFailed, "scan Need type"};
       for (const auto& box : tensor.samples.boxes()) {
@@ -388,8 +388,7 @@ int block_reconvergence() {
   PS_CHECK(dirty.ok() && dirty.value().at("y") == point(5, 6));
   context.clear_result_cache();
   auto retained = demand.request(query);
-  PS_CHECK(retained.ok() &&
-           retained.value().diagnostics.shared_computations == 1);
+  PS_CHECK(retained.ok() && retained.value().diagnostics.cache_hits == 0);
   PS_CHECK(read(retained.value().results.at("y"), 5, &actual).ok() &&
            actual == expected);
   initial = Result<DemandResult>(DemandResult{});

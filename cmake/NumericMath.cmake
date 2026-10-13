@@ -1,4 +1,4 @@
-# SLEEF is compiled into each kernel archive/shared library, with no installed
+# SLEEF is compiled into the bundled-operations library, with no installed
 # third-party target or header requirement and no network access at configure.
 set(_sleef_root "${PROJECT_SOURCE_DIR}/third_party/sleef")
 # Source acquisition is a builder prerequisite, never a configure-time action.

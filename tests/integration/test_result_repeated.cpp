@@ -10,7 +10,6 @@
 #include <utility>
 #include <vector>
 
-#include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "photospider/photospider.hpp"
 #include "support/bad_result_table_fixture.hpp"
 #include "support/multi_output_result_fixture.hpp"
@@ -47,7 +46,10 @@ ExecutionBinding binding(const ResourceBudget& root, std::string name,
                                     std::move(bytes)));
   ExecutionBinding result;
   result.name = std::move(name);
-  result.result = numeric_result_fixture::source(root, backing, &schema);
+  auto builder = take(ResultBuilder::start(root, schema, "repeated.source"));
+  check(builder.publish_tensor(0, backing.region(), backing.layout(),
+                               backing.storage()));
+  result.result = take(builder.seal());
   return result;
 }
 WorkflowDocument document(const std::string& key,
@@ -114,29 +116,22 @@ int execute_groups(const std::shared_ptr<OperationRegistry>& registry,
                                     (count - (layout == 2 ? 1U : 0U)) * j);
             PS_CHECK(multi_result::number(output, {j}) == expected);
           }
-          auto observations =
-              take(executed.value().dependencies.source_observations());
+          const auto& dependencies = executed.value().dependencies;
+          auto record = take(dependencies.tile_record({0, 0, 0}));
+          PS_CHECK(record && record->inputs.size() == schemas.size());
           for (unsigned i = 0; i < schemas.size(); ++i) {
-            bool tensor = false, descriptor = false;
-            for (const auto& observation : observations) {
-              if (std::string_view(observation.input) != doc.inputs[i].name)
-                continue;
-              tensor |= observation.target == ResultSupportTarget::Tensor &&
-                        observation.slot == 0 && (observation.roles & 1);
-              descriptor |=
-                  observation.target == ResultSupportTarget::Descriptor &&
-                  (observation.roles & 8);
-            }
-            PS_CHECK(tensor && descriptor);
-            auto changed = take(Footprint::from_regions(
-                schemas[i].tensors[0].sample_shape(), {Region({{0, 1}})}));
-            auto dirty = take(executed.value().dependencies.potential_dirty(
-                doc.inputs[i].name, changed, 1, {}, ResultSupportTarget::Tensor,
-                0));
-            PS_CHECK(dirty.at("sum") ==
-                     (prefix && i == 0 ? take(Footprint::all({shape}))
-                                       : take(Footprint::from_regions(
-                                             {shape}, {Region({{0, 1}})}))));
+            const auto& dependency = record->inputs[i];
+            PS_CHECK(dependency.whole && dependency.tiles.empty());
+            PS_CHECK(
+                std::holds_alternative<PlanWorkflowInput>(dependency.producer));
+            PS_CHECK(std::get<PlanWorkflowInput>(dependency.producer)
+                         .declaration_index == i);
+            ResourceVector<TileChange> changes{
+                ResourceAllocator<TileChange>(root)};
+            changes.push_back({PlanWorkflowInput{i}, 0,
+                               take(TileSet::from_indices(root, {0})), false});
+            auto dirty = take(dependencies.dirty_units(changes));
+            PS_CHECK(dirty.size() == 1 && (dirty[0] == TileUnit{0, 0, 0}));
           }
         }
       }

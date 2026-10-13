@@ -4,6 +4,7 @@
 #include <string>
 
 #include "photospider/core/status.hpp"
+#include "photospider/ops/export.hpp"
 
 namespace ps {
 /** FMT-09 scalar transfer identity and its static parameters.
@@ -26,7 +27,7 @@ enum class TransferCurve {
   Acescct
 };
 enum class Bt2020Coefficients { Smooth, Rounded10Bit, Rounded12Bit };
-struct PHOTOSPIDER_API TransferDefinition final {
+struct PHOTOSPIDER_OPS_API TransferDefinition final {
   TransferCurve curve = TransferCurve::Linear;
   std::optional<double> gamma;
   std::optional<Bt2020Coefficients> coefficient_variant;
@@ -41,7 +42,7 @@ struct PHOTOSPIDER_API TransferDefinition final {
  *
  * @param definition Curve and its applicable parameters.
  * @return Canonical transfer identity text on success. */
-PHOTOSPIDER_API Result<std::string> encode_transfer_definition(
+PHOTOSPIDER_OPS_API Result<std::string> encode_transfer_definition(
     const TransferDefinition& definition);
 /** Decode a canonical transfer identity produced by
  * encode_transfer_definition. The decoder does not infer gamma, reference,
@@ -50,6 +51,6 @@ PHOTOSPIDER_API Result<std::string> encode_transfer_definition(
  * @param text Bounded canonical transfer identity text.
  * @return The curve and applicable parameters on success. Malformed or
  * noncanonical text returns InvalidArgument with InvalidDomain reason. */
-PHOTOSPIDER_API Result<TransferDefinition> decode_transfer_definition(
+PHOTOSPIDER_OPS_API Result<TransferDefinition> decode_transfer_definition(
     const std::string& text);
 }  // namespace ps

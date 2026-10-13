@@ -391,7 +391,7 @@ void physical_layouts(ps::CpuNumericProfile profile) {
     split.traits.input_count = 0;
     split.traits.input_schema.clear();
     auto& output = split.traits.outputs[0];
-    output.region_rule = ps::OperationRegionRule::Dependency;
+    output.region_rule = ps::OperationRegionRule::Tiled;
     output.regional_atomic = true;
     output.output_schema.kind = ps::OperationPortKind::Result;
     output.result_schema = rf::source_schema(array({2, 2}, {0, 1, 2, 3}));

@@ -19,6 +19,8 @@
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
 struct Shared {
+  std::mutex mutex;
+  std::condition_variable changed;
   std::atomic<unsigned> active{0}, peak{0}, blocks{0};
   std::atomic<bool> paired{false};
   unsigned mode = 0;
@@ -39,19 +41,19 @@ int block(void* user, std::uint64_t begin, std::uint64_t end,
   auto peak = shared.peak.load();
   while (peak < active && !shared.peak.compare_exchange_weak(peak, active)) {
   }
-  if (active > 1)
+  if (active > 1) {
+    std::lock_guard<std::mutex> lock(shared.mutex);
     shared.paired = true;
+    shared.changed.notify_all();
+  }
   int code = 0;
   if (std::fegetround() != FE_TONEAREST ||
       slot >= (shared.grant ? shared.grant : work.service->maximum_workers))
     code = 1;
   if (shared.mode == 1) {
-    // Force overlap for the multi-worker fixture, with a finite timeout.
-    const auto until =
-        std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!shared.paired && std::chrono::steady_clock::now() < until)
-      std::this_thread::yield();
-    if (!shared.paired)
+    std::unique_lock<std::mutex> lock(shared.mutex);
+    if (!shared.changed.wait_for(lock, std::chrono::seconds(5),
+                                 [&] { return shared.paired.load(); }))
       code = 1;
   }
   if (shared.mode == 2)
@@ -136,14 +138,11 @@ std::shared_ptr<OperationRegistry> registry(Shared* shared) {
       auto builder = take(ResultBuilder::start(
           phase.resources, *phase.query.output.result_schema,
           phase.query.semantic_key));
-      check(builder.bind_descriptor_relation(
-          take(ResultRelation::cartesian(phase.resources, 1, {}))));
+
       const std::int64_t value = 257;
       check(builder.publish_tensor(
           0, Region::whole({1}),
-          {reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)},
-          take(ResultRelation::cartesian(phase.resources, 1, {})),
-          {true, true, true, true}));
+          {reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)}));
       return Result<ResultProgramPoll>(
           ResultPublication{take(builder.seal()), true});
     }

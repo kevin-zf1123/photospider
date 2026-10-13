@@ -66,8 +66,6 @@ void ResourcePayloadAccess::update(const PayloadCapture& capture,
             std::max(observation->peak_reserved_, observation->reserved_);
       };
   apply(capture.run);
-  if (capture.producer != capture.run)
-    apply(capture.producer);
 }
 }  // namespace core_internal
 namespace resource_internal {
@@ -111,10 +109,7 @@ ResourceLimits::ResourceLimits() {
   capacity[ResourceKind::Host] = 256ULL * 1024 * 1024;
   capacity[ResourceKind::Shared] = capacity[ResourceKind::Host];
   capacity[ResourceKind::Metadata] = 16ULL * 1024 * 1024;
-  capacity[ResourceKind::Disk] = 1024ULL * 1024 * 1024;
   capacity[ResourceKind::Entries] = 1048576;
-  capacity[ResourceKind::Files] = 256;
-  capacity[ResourceKind::IoSlots] = 16;
   capacity[ResourceKind::Queue] = 1024;
 }
 namespace core_internal {
@@ -241,8 +236,7 @@ Status ResourceLease::grow(ResourceCapacity additional) {
   }
   impl_->root->add(additional);
   if (!impl_->amount[ResourceKind::Payload] &&
-      additional[ResourceKind::Payload] && !impl_->observation.run &&
-      !impl_->observation.producer)
+      additional[ResourceKind::Payload] && !impl_->observation.run)
     impl_->observation =
         core_internal::ResourcePayloadScope::capture_owner(impl_->root.get());
   for (std::size_t i = 0; i < additional.values.size(); ++i)
@@ -343,19 +337,14 @@ bool ResourceBudget::try_consume(ResourceWork work, Status& failure) const {
         work_limit ? FailureReason::WorkLimit : FailureReason::StageLimit};
     return false;
   };
-  if (!work.io_bytes && !work.io_requests && !work.stages)
+  if (!work.stages)
     return impl_->admit_work(work.work) || failed(true);
   std::lock_guard<std::mutex> lock(impl_->mutex);
   auto& issued = impl_->stats.issued;
   const auto& limit = impl_->limits;
-  const bool work_limit =
-      !core_internal::can_add(
-          work.work, impl_->issued_work.load(std::memory_order_relaxed),
-          limit.maximum_work) ||
-      !core_internal::can_add(work.io_bytes, issued.io_bytes,
-                              limit.maximum_io_bytes) ||
-      !core_internal::can_add(work.io_requests, issued.io_requests,
-                              limit.maximum_io_requests);
+  const bool work_limit = !core_internal::can_add(
+      work.work, impl_->issued_work.load(std::memory_order_relaxed),
+      limit.maximum_work);
   if (work_limit ||
       !core_internal::can_add(work.stages, issued.stages, limit.maximum_stages))
     return failed(work_limit);
@@ -363,8 +352,6 @@ bool ResourceBudget::try_consume(ResourceWork work, Status& failure) const {
   // or throwing operation occurs before committing their counters.
   if (!impl_->admit_work(work.work))
     return failed(true);
-  issued.io_bytes += work.io_bytes;
-  issued.io_requests += work.io_requests;
   issued.stages += work.stages;
   return true;
 }

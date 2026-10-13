@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 
 namespace multi_result {
 struct Failure : std::runtime_error {
@@ -69,8 +70,6 @@ inline ps::ExecutionBinding binding(
     const ps::ResourceBudget& root, std::string name, double number,
     const ps::SchemaTemplate& schema = multi_result::schema()) {
   auto builder = take(ps::ResultBuilder::start(root, schema, "test.source"));
-  check(builder.bind_descriptor_relation(
-      take(ps::ResultRelation::cartesian(root, 1, {}))));
   const auto count = take(schema.tensors[0].sample_count());
   const auto type = schema.tensors[0].descriptor.element_type;
   const auto size = width(type);
@@ -79,9 +78,7 @@ inline ps::ExecutionBinding binding(
     write_number(bytes.data() + i * size, type, number);
   check(builder.publish_tensor(
       0, ps::Region::whole(schema.tensors[0].sample_shape()),
-      ps::ByteView(bytes.data(), bytes.size()),
-      take(ps::ResultRelation::cartesian(root, count, {})),
-      {true, true, true, true}));
+      ps::ByteView(bytes.data(), bytes.size())));
   ps::ExecutionBinding binding;
   binding.name = std::move(name);
   binding.result = take(builder.seal());
@@ -103,7 +100,7 @@ inline ps::OperationOutputTraits output(
   output.output_schema.result_schema_id = std::string(schema.id);
   output.output_schema.result_schema_version = schema.version;
   output.result_schema = schema;
-  output.region_rule = ps::OperationRegionRule::Dependency;
+  output.region_rule = ps::OperationRegionRule::Tiled;
   output.maximum_dependency_stages = 2;
   output.continuation_bytes = 256;
   return output;
@@ -136,7 +133,14 @@ struct Program {
     if (!requested && input >= 0 && !demand.empty()) {
       requested = true;
       ResultProgramNeed need;
-      need.tensors.push_back({static_cast<std::uint32_t>(input), 0, demand, 1});
+      {
+        auto selected = sdk::tile_need_for_samples(
+            phase.resources, phase.query, static_cast<std::uint32_t>(input), 0,
+            demand, ((1) & 7U) == 0);
+        if (!selected.ok())
+          return Result<ResultProgramPoll>(selected.status());
+        need.tiles.push_back(selected.take_value());
+      }
       return Answer(std::move(need));
     }
     if (phase.tensors &&
@@ -151,10 +155,7 @@ struct Program {
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
             : std::vector<std::uint64_t>{},
-        phase.query.tile_height, phase.query.tile_width,
-        phase.query.resources));
-    check(builder.bind_descriptor_relation(
-        take(ResultRelation::cartesian(phase.resources, 1, {}))));
+        phase.query.tile_extent, phase.query.resources));
     for (const auto& box : demand.boxes()) {
       if (input >= 0) {
         auto window =
@@ -164,13 +165,8 @@ struct Program {
         for (unsigned axis = 0; axis < shape.size(); ++axis)
           identity.source_axes.push_back(
               {static_cast<std::int32_t>(axis), 0, 1, 1});
-        auto relation = take(ResultRelation::mapped(
-            phase.resources, shape, box, shape, identity.source_axes,
-            {static_cast<std::uint32_t>(input), 1, 0, 1,
-             ResultSupportTarget::Tensor, 0}));
-        check(builder.publish_tensor_view(0, box, window, identity,
-                                          std::move(relation),
-                                          {true, true, true, true}));
+
+        check(builder.publish_tensor_view(0, box, window, identity));
       } else {
         auto count = take(box.element_count());
         check(phase.consume_work(count));
@@ -180,10 +176,7 @@ struct Program {
           write_number(allocation.data() + i * size,
                        spec.descriptor.element_type, constant);
         check(builder.publish_tensor(
-            0, box, ps::ByteView(allocation.data(), allocation.size()),
-            take(ResultRelation::cartesian(phase.resources,
-                                           take(spec.sample_count()), {})),
-            {true, true, true, true}));
+            0, box, ps::ByteView(allocation.data(), allocation.size())));
       }
     }
     return Answer(ResultPublication{take(builder.seal()), true});

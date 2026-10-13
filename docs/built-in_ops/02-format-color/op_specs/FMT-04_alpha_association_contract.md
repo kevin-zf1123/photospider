@@ -13,7 +13,7 @@ clarification_status: complete
 
 The default registry provides `alpha.associate_<profile>` and
 `alpha.unassociate_<profile>` for `strict`, `accelerated_apple_silicon`, and
-`accelerated_x86_64`. Each uses Result ABI 2. Semantic calls bind one Result; raw
+`accelerated_x86_64`. Each uses Result ABI 3. Semantic calls bind one Result; raw
 plane/scalar calls may bind a second Result. The family and its members remain
 Proposed; status records design acceptance separately from implementation.
 

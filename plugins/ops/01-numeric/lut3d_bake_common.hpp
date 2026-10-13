@@ -193,20 +193,4 @@ inline Result<Footprint> all(const ResultProgramPhase& phase, unsigned port) {
   return Footprint::all(tensor_descriptor(phase.query.inputs[port]).shape,
                         limits);
 }
-inline Result<ResultRelation> global_relation(
-    const ResultProgramPhase& phase, std::uint64_t rows,
-    const std::vector<ResultSupport>& supports) {
-  auto charge = phase.resources.reserve(ResourceCapacity::host(
-      16 * sizeof(ResultRelation), 16 * sizeof(ResultRelation)));
-  if (!charge.ok())
-    return Result<ResultRelation>(charge.status());
-  std::vector<ResultRelation> relations;
-  for (const auto& support : supports) {
-    auto part = ResultRelation::cartesian(phase.resources, rows, support);
-    if (!part.ok())
-      return Result<ResultRelation>(part.status());
-    relations.push_back(part.take_value());
-  }
-  return ResultRelation::unite(phase.resources, relations);
-}
 }  // namespace ps::plugin_internal::bake_ops

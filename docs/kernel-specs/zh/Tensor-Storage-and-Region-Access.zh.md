@@ -22,7 +22,6 @@ rank 限制针对完整 sample shape。Cell rank 为 1..8，batch-axis 数量为
 
 C++ operation 可以为 Result port 声明 tensor-member predicate，并将 constraint 的 schema id/version 留空。对 output constraint，这要求 metadata specialization 和非空 member predicate：`tensor_key` 可以指定 member；省略该 key 时要求恰好一个 tensor。注册的 `OperationOutputTraits::result_schema` prototype 仍须完整。Specializer 返回具体 schema；registry 验证后将其 id/version 收敛到 output constraint。固定 schema 注册仍须保留声明的 id/version。C ABI 仍要求固定输出 schema。
 
-`core.identity` 将输出专化为输入 schema，并接受恰好一个 tensor、无 scalar fields、任意 member key/schema id，以及七种受支持 dtype 中的一种。它保留 schema id/version、member key、batch axes 和 facets。它声明 bitwise-mapped movement；映射可用时执行可保留 view，不可用时可物化 copy。输出 association 记录实际输入 ObjectId；identity 发布新的 Result ObjectId。其输入读取使用 role 13（Data、Validation、Descriptor），映射 relation 使用 role 5。
 
 ## 核心数据模型与内存
 
@@ -156,13 +155,13 @@ Status ResultBuilder::publish_tensor_kernel(
     std::uint32_t slot, const Region&,
     const std::function<Status(
         const ResourceVector<ResultTensorWriteWindow>&)>& write,
-    ResultRelation, ResultFinality, const CancellationToken&);
+    const CancellationToken&);
 
 Status ResultBuilder::publish_tensor_kernel(
     std::uint32_t slot, const Footprint&,
     const std::function<Status(
         const ResourceVector<ResultTensorWriteWindow>&)>& write,
-    ResultRelation, ResultFinality, const CancellationToken&);
+    const CancellationToken&);
 ```
 
 完整声明见 [`result.hpp`](../../../include/photospider/data/result.hpp)。Read window 拥有源 `ResultRef`、captured descriptor facts、schema、association、resources，以及精确授权区域所需的 backing。它是 move-only。Window 销毁前，run 指针保持有效。Captured descriptor 限定可见前缀：之后的发布不能扩展早先 descriptor 的 coverage。请求超出已认证 coverage 时返回 `NotFound`；过时 descriptor facts 返回 `Stale`。
@@ -175,7 +174,7 @@ Coordinator 在建立 window 前会授权精确逻辑样本集合。对 affine �
 
 Footprint 重载在一个事务中写入一组精确的、互不相交的 canonical box。单 box footprint 走 Region 重载。有多个 box 时，builder 为所有 tensor（包括 spatial tensor）分配一块私有 affine 缓冲，并按 `boxes()` 顺序为每个 box 传入一个 write window；空洞不获得存储。Callback 成功后，该缓冲按每个 box 一个 affine 片段发布，因此 slot 保留其逻辑 shape、spatial layout metadata 和全局坐标，而这些 box 的 backing 是 affine 存储而非 planar 页面。读取方与读取任何 affine backing 时一样使用实际的 run stride。失败、取消和重入修改遵循下文的事务规则，不增加 coverage。
 
-空间写路径采用事务语义。它在 callback 执行前准备所需页面与容量，仅在 callback 成功且取消检查通过后提交，然后认证精确区域和 relation。Callback 失败、取消、覆盖重叠或资源失败都不会认证新样本 coverage；先前已认证的前缀保持可读且不可变。分配或供页失败会回滚未发布页面。准入失败返回 `ResourceExhausted` 等类型化状态；不会驱逐或静默重算仍存活的已发布页面。
+空间写路径采用事务语义。它在 callback 执行前准备所需页面与容量，仅在 callback 成功且取消检查通过后提交，然后认证精确区域。Callback 失败、取消、覆盖重叠或资源失败都不会认证新样本 coverage；先前已认证的前缀保持可读且不可变。分配或供页失败会回滚未发布页面。准入失败返回 `ResourceExhausted` 等类型化状态；不会驱逐或静默重算仍存活的已发布页面。
 
 Callback 执行期间，同一 producer 的 mutation 和 seal 会被拒绝。移动或替换 builder 会使当前事务在提交前失败。调用者须保持 producer 对象存活，直到 `publish_tensor_kernel()` 返回。读取已经认证的前缀，以及操作独立 builder，仍然可行。失败的 publication 会记录 producer failure；之后的 publication 会返回该失败。共享页面或 backing 分配不意味着可以读取未来样本。
 
@@ -183,7 +182,7 @@ Callback 执行期间，同一 producer 的 mutation 和 seal 会被拒绝。移
 
 ```cpp
 struct ResultTensorViewTransform final {
-  std::vector<ResultMappedAxis> source_axes;
+  std::vector<ResultViewAxis> source_axes;
   bool reshape = false;
 };
 
@@ -191,13 +190,12 @@ Status ResultBuilder::publish_tensor_view(
     std::uint32_t slot, const Region& target,
     const ResultTensorReadWindow& source,
     const ResultTensorViewTransform& transform,
-    ResultRelation relation, ResultFinality finality,
     const CancellationToken& cancellation = {});
 ```
 
 `ResultBuilder` 提供两种 view publication。Ordered-window 形式从同一 root 组装连续的物理 planar 平面，要求元素类型、空间坐标矩形、order 和 pitch 相匹配。Transform 形式将一个逻辑上已授权的 affine source window 映射到输出区域。若多个 affine fragments 共用同一个 `CpuStorage` owner，且合起来描述同一 affine 地址映射，该 window 可以由这些 fragments 组成。Kernel 从相邻逻辑坐标推导 singleton axes 的 stride，再验证每个 fragment 都符合该映射。两种形式都保留源 `ResultRef`、captured facts 和 resource owners，只发布获准的目标样本，不复制 payload。源 payload 仍由来源 root 计费；目标自身计费 metadata 与 relation。Affine transform 路径可以在 target payload capacity 为零时发布。系统拒绝源到目标的循环关系。
 
-Axis transform 的 `source_axes` 为每个 source-window axis 提供一个 [`ResultMappedAxis`](../../../include/photospider/data/result_relation.hpp)，其中包括 batch axes。每个 map 只选择一个 source coordinate（`extent == 1`）。输出轴使用 `output_axis == -1` 表示固定 source coordinate；`0..target_rank-1` 表示合法 target axis。映射轴的坐标满足：
+Axis transform 的 `source_axes` 为每个 source-window axis 提供一个 [`ResultViewAxis`](../../../include/photospider/data/result.hpp)，其中包括 batch axes。每个 map 只选择一个 source coordinate（`extent == 1`）。输出轴使用 `output_axis == -1` 表示固定 source coordinate；`0..target_rank-1` 表示合法 target axis。映射轴的坐标满足：
 
 ```text
 source_coordinate = source_origin
@@ -208,13 +206,10 @@ source_coordinate = source_origin
 
 设置 `reshape == true` 时，`source_axes` 必须为空。Transform 将完整 source window 按逻辑 row-major 顺序展平，再将该顺序分配给完整 output shape。Relation 使用完整 output shape 作为 ordinal 基准：先按 source-window extents 将 output ordinal 反解为坐标，再把各局部坐标加上 source-window offset，得到更大 input tensor 中的坐标。该逻辑映射独立于 source 的物理布局。有符号和零 stride 影响 payload 是否能表示为 view，但不改变 dependency support。
 
-`ResultRelation::reshape()` 会构造匹配的 compact witness。两个 shape 的 rank 均为 1 到 8，且 factorized cardinality 必须相等；实现不会形成 `uint64_t` 稠密元素乘积。Output `Region` 是 witness，区域外的样本没有 support。`project(Q)` 将 output footprint `Q` 裁剪到 witness，再把精确的 boxes 映射到 source coordinates，并发出带类型的 tensor support。`preimage(Q, changed)` 计算 `Q` 内精确的 dirty 子集；`certify()` 检查 witness coverage。空请求和空 witness 不产生 dirty samples。Holes 保持为精确 box 集合，不会扩展成 bounding box。若精确投影超出 rectangle 或 work 上限、发生取消，或 metadata/scratch 申请失败，操作返回错误，不会先以部分投影集合调用 visitor。Scratch boxes 由 relation 的 resource root 分配；work 通过提供的 `consume_work` callback 或直接向该 root 计费，每个 work unit 只计一次。
-
 C ABI 2 service [`ps_result_services_v2::publish_tensor_view`](../../../include/photospider/plugin/result_operation_plugin_api.h) 使用可空的 `ps_result_tensor_transform_v2`。`NULL` 选择 ordered planar assembly，可以提供多个 source window handles。非 `NULL` transform 选择 affine 形式，并且必须提供一个 source window。`reshape == 0` 时，`axes` 对每个 source axis 提供一个 anchored point map；`reshape == 1` 时，`source_rank` 为零且 `axes` 为 `NULL`。C transform 对象仅借用到本次 service call 结束；成功 publication 会独立保留 source，不依赖其 window handle。
 
-对于 affine transform 形式，`ViewUnavailable` 表示 source backing 无法表达所请求的映射，包括 page-backed 或非 affine source windows，以及 owner 不同的 affine fragments。Ordered-window 形式则单独支持符合条件的 planar pieces。Affine `ViewUnavailable` 会保留 builder 可用，使调用者可以显式执行 materializing copy；numeric `auto` layout 可选择该路径，`view` 则报告映射不可用。资源准入或 work-limit 错误、取消、Invalid transform、source authorization、channel closure、target overlap、finality、relation ownership 或 coverage，以及循环都会返回错误，不会选择 copy retry。因而 `2` reshape 为 `3` 会先返回 `InvalidArgument`，即使 source 的物理布局随后也可能被判为 fragmented。
+对于 affine transform 形式，`ViewUnavailable` 表示 source backing 无法表达所请求的映射，包括 page-backed 或非 affine source windows，以及 owner 不同的 affine fragments。Ordered-window 形式则单独支持符合条件的 planar pieces。Affine `ViewUnavailable` 会保留 builder 可用，使调用者可以显式执行 materializing copy；numeric `auto` layout 可选择该路径，`view` 则报告映射不可用。资源准入或 work-limit 错误、取消、Invalid transform、source authorization、channel closure、target overlap、循环都会返回错误，不会选择 copy retry。因而 `2` reshape 为 `3` 会先返回 `InvalidArgument`，即使 source 的物理布局随后也可能被判为 fragmented。
 
-行为测试覆盖六种 C++ affine 情形：转置、负 step 切片、reverse reshape、`{UINT64_MAX, UINT64_MAX}` 零 stride reshape、带 `INT64_MIN` stride 的 singleton axis，以及 broadcast。测试还验证 compact reshape projection、逆向 dirty region、witness coverage、巨大 factorized shape、精确 holes、取消及资源上限错误。C11 DSO fixture 使用 `make_reshape()` 和 reshape view publication，将 `2x3` source 映射为 `3x2`，并分别检查负 stride 和零 stride。测试检查 output samples、精确 dirty mapping、pointer 与 owner identity，以及 source capability 和 binding 退役后对 retained window 的读取。`make_reshape()` 构造 dependency support，不授予 payload read authorization。
 
 ## 资源计费与释放
 
@@ -228,13 +223,12 @@ C ABI 2 service [`ps_result_services_v2::publish_tensor_view`](../../../include/
 - 当前私有 planar 几何要求 tile 高和宽均为正的 2 次幂，不支持逐平面 tile 尺寸。
 - 物理布局 groups 描述存储组织，不授予样本读取权限，不验证颜色值，也不会自行创建 channel dependencies。
 - 提供某页不会使整页的样本 coverage 有效。缺失样本不视为零。
-- Affine source-window publication 支持 anchored point maps 和兼容的有符号／零 stride reshape chunks。C ABI `make_reshape()` 提供 compact dependency support；payload access 仍须通过显式 tensor window authorization 获取。
 - 本文定义 CPU tensor storage 和 access，不保证 GPU 地址映射或物理页常驻。
 - `layout.spatial` 标志、tensor metadata 或 HWC shape 都不能使存储成为 planar。规范图像在物理上确实使用 planar backing；其他布局通过合法视图或物化达到该要求，见 [ADR 0022](../../adr/zh/0022-freeze-operation-c-abi-v3.zh.md) D9（Proposed）。
 - Package、workflow、traits 和 plugin ABI 的版本值维护在 [Compiler Version Contract](../../development/Compiler-Version-Contract.md) 中。
 
 ## 行为证据
 
-当前注册的 image tests 按行为分组。[`test_result_image_backing.cpp`](../../../tests/integration/image/test_result_image_backing.cpp) 覆盖 tensor windows、稀疏 batch access、publication、backing boundary 和 retained owners。[`test_result_image_views.cpp`](../../../tests/integration/image/test_result_image_views.cpp) 覆盖 affine 与 fragmented views；[`test_result_image_transform.cpp`](../../../tests/integration/image/test_result_image_transform.cpp) 覆盖 split 和 downsample 行为。[`test_result_image_format.cpp`](../../../tests/integration/image/test_result_image_format.cpp) 覆盖 image schema 与 controls。共享 Result contract 检查位于 [`test_result_image_contracts.cpp`](../../../tests/integration/test_result_image_contracts.cpp)，C plugin service 和 publication cases 位于 [`test_result_plugin.cpp`](../../../tests/integration/test_result_plugin.cpp)。这些源码覆盖 schema rank 与 atomic grouping、由紧凑有符号／零 stride backing 支持的超大逻辑 extent、有界 work 与 cancellation 下的稀疏 windows、tile boundaries、精确 read 授权、事务写入、planar assembly、affine transforms，以及 source window 或 context 退役后的 access。它们不证明所有 plugin transformation 或 native GPU mapping 均已测试。
+当前注册的 image tests 按行为分组。[`test_result_image_backing.cpp`](../../../tests/integration/image/test_result_image_backing.cpp) 覆盖 tensor windows、稀疏 batch access、publication、backing boundary 和 retained owners。[`test_result_image_views.cpp`](../../../tests/integration/image/test_result_image_views.cpp) 覆盖 affine 与 fragmented views；共享 Result contract 检查位于 [`test_result_image_contracts.cpp`](../../../tests/integration/test_result_image_contracts.cpp)，C plugin service 和 publication cases 位于 [`test_result_plugin.cpp`](../../../tests/integration/test_result_plugin.cpp)。这些源码覆盖 schema rank 与 atomic grouping、由紧凑有符号／零 stride backing 支持的超大逻辑 extent、有界 work 与 cancellation 下的稀疏 windows、tile boundaries、精确 read 授权、事务写入、planar assembly、affine transforms，以及 source window 或 context 退役后的 access。它们不证明所有 plugin transformation 或 native GPU mapping 均已测试。
 
 页预留与提交是不同的操作系统概念；[Microsoft 的 `VirtualAlloc` 文档](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc)说明了 Windows 上的区别。本文中的计费术语描述内核管理的 backing，不表示可跨平台推导 RSS。

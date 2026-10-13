@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "../common/tile_request.hpp"
 #include "channel_editing/benchmark.hpp"
 #include "photospider/ops/format/channel_editing.hpp"
 
@@ -165,9 +166,10 @@ int main(int argc, char** argv) try {
           : Region::whole({size, size, output_channels});
   GraphContext graph(document);
   PlanningOptions planning;
-  planning.output_regions = {{"result", roi}};
   auto start = Clock::now();
   auto compiled = checked(compiler.compile(graph, planning));
+  compiled.plan = checked(
+      workflow_example::select_tiles(root, compiled.plan, "result", roi));
   const auto compile_us = elapsed(start);
   const auto baseline = root.statistics();
   ExecutionOptions execution;

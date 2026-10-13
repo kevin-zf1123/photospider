@@ -1,6 +1,6 @@
 # 通道与颜色算子
 
-当前 default registry 提供 FMT-01 extraction、FMT-02 assembly、FMT-03 editing helpers、FMT-04 alpha association、FMT-05A alpha setting、FMT-06 numeric conversion、FMT-08 metadata assignment、FMT-09 transfer conversion、FMT-10 RGB basis conversion 以及 `channel.literal_like_<profile>`、`channel.scalar_literal_<profile>` Result primitives 和 FMT-11 model conversion，使用 Result operation ABI 2。FMT-05B/C 是基于已注册 operations 的编译期 helper 组合；FMT-10D 是对已注册 A/B/C operations 的公开 graph helper；FMT-11 的 native model conversion 已注册；S helper 降低为 MASK threshold operation。[英文镜像](../Channel-and-Color-Operations.md) 描述相同的当前状态。
+当前 default registry 提供 FMT-01 extraction、FMT-02 assembly、FMT-03 editing helpers、FMT-04 alpha association、FMT-05A alpha setting、FMT-06 numeric conversion、FMT-08 metadata assignment、FMT-09 transfer conversion、FMT-10 RGB basis conversion 以及 `channel.literal_like_<profile>`、`channel.scalar_literal_<profile>` Result primitives 和 FMT-11 model conversion，使用 Result operation ABI 3。FMT-05B/C 是基于已注册 operations 的编译期 helper 组合；FMT-10D 是对已注册 A/B/C operations 的公开 graph helper；FMT-11 的 native model conversion 已注册；S helper 降低为 MASK threshold operation。[英文镜像](../Channel-and-Color-Operations.md) 描述相同的当前状态。
 
 下表区分当前 Result 注册项和仍保持 Proposed 的其他 FMT 契约。
 
@@ -15,10 +15,10 @@
 | Scalar literal | `channel.scalar_literal_<profile>` | 已注册的无输入 Whole Result primitive；以 prepared native bits 输出 shape `[1]`，供 FMT-03 literal source 使用。 |
 | Metadata 编辑 | Result key `metadata.assign_<profile>`；`format::assign_metadata`、`format::remove_metadata` | 已注册 Result operation；一个 tensor member 且没有 fields；same-coordinate Data + Descriptor，无 Validation/Control 或 planar callback。 |
 | 通道组装与编辑 | `channel.assemble_<profile>`、`channel.concatenate_<profile>`、`channel.assemble_mapped_<profile>`；已安装的 `channel_assembly.hpp`、`channel_editing.hpp` helpers | Result keys 已注册；FMT-03 helpers 展开为 mapped assembly，没有独立 swizzle/replace key。 |
-| Alpha 关联与编辑 | `alpha.associate_<profile>`、`alpha.unassociate_<profile>`、`alpha.set_<profile>`；已安装 `photospider/ops/format/alpha.hpp` helpers | 三个成员各有 strict、Apple Silicon 和 x86-64 CPU profile，共九个 Result ABI 2 keys。FMT-05B/C helpers 编译期组合为已注册的 extraction、literal-like fill、mapped assembly 与 metadata assignment operations。 |
-| 数值格式转换 | `numeric.convert_format_strict` | 单一已注册 strict Result ABI 2 key，覆盖七种 dtype 之间的 49 个转换对。 |
-| Transfer 转换 | `color.transfer_encode_<profile>`、`color.transfer_decode_<profile>`；`photospider/ops/format/transfer.hpp` 提供 `TransferDefinition` codec | encode/decode 各有 strict、Apple Silicon 与 x86-64 CPU Result ABI 2 key，共六个已注册 keys。 |
-| RGB basis 转换 | `color.rgb_to_xyz_<profile>`、`color.xyz_to_rgb_<profile>`、`color.adapt_xyz_white_<profile>`；已安装 `photospider/ops/format/rgb_basis.hpp` helpers | A/B/C 跨三个 profile 共注册九个 Result ABI 2 CPU keys。`format::convert_linear_rgb` 事务式组合已注册 stages，不增加 D key。 |
+| Alpha 关联与编辑 | `alpha.associate_<profile>`、`alpha.unassociate_<profile>`、`alpha.set_<profile>`；已安装 `photospider/ops/format/alpha.hpp` helpers | 三个成员各有 strict、Apple Silicon 和 x86-64 CPU profile，共九个 Result ABI 3 keys。FMT-05B/C helpers 编译期组合为已注册的 extraction、literal-like fill、mapped assembly 与 metadata assignment operations。 |
+| 数值格式转换 | `numeric.convert_format_strict` | 单一已注册 strict Result ABI 3 key，覆盖七种 dtype 之间的 49 个转换对。 |
+| Transfer 转换 | `color.transfer_encode_<profile>`、`color.transfer_decode_<profile>`；`photospider/ops/format/transfer.hpp` 提供 `TransferDefinition` codec | encode/decode 各有 strict、Apple Silicon 与 x86-64 CPU Result ABI 3 key，共六个已注册 keys。 |
+| RGB basis 转换 | `color.rgb_to_xyz_<profile>`、`color.xyz_to_rgb_<profile>`、`color.adapt_xyz_white_<profile>`；已安装 `photospider/ops/format/rgb_basis.hpp` helpers | A/B/C 跨三个 profile 共注册九个 Result ABI 3 CPU keys。`format::convert_linear_rgb` 事务式组合已注册 stages，不增加 D key。 |
 | Model 转换 | A-R、T 的 `color.*_<profile>`；FMT-11S helper 降低为 `mask.threshold_channel_<profile>` | 三个 CPU profiles 共 57 个 native model keys；S 不新增 color key。单 tensor Float32/Float64 Result，full sample rank 至多 8；sample count 受 Result schema 可表示范围和执行资源限制约束。 |
 
 带 profile 后缀的 channel extraction、assembly、alpha、metadata、transfer、RGB basis、literal-like fill 和 scalar-literal operations 使用 `strict`、`accelerated_apple_silicon` 或 `accelerated_x86_64`；加速变体要求宿主支持对应能力。Numeric conversion 使用唯一的不带后缀 strict key。Model conversion keys 使用 strict、accelerated_apple_silicon 和 accelerated_x86_64 profiles。当前 Result operations 使用 `start_result` 与 Result tensor protocol。
@@ -104,7 +104,7 @@ FMT-05A `set_alpha` 和 FMT-04 association helpers 使用已注册的
 
 ## FMT-06 数值格式转换
 
-`numeric.convert_format_strict` 是唯一已注册的 strict Result ABI 2 key。它接收
+`numeric.convert_format_strict` 是唯一已注册的 strict Result ABI 3 key。它接收
 一个只含单 tensor member、没有 fields 的 Result，并发布一个名为 `values`、只含单
 tensor 的 output Result。七种 source/target dtype 共支持 49 个转换对。包含 batch
 与 cell axes 的完整 sample rank 不超过 8；sample count 不超过 2^40。输出保留 Result
@@ -160,7 +160,7 @@ golden gate，每项包含两次 warmup 和一次测量执行。这些结果不�
 
 Registry 为 `color.rgb_to_xyz_<profile>`、`color.xyz_to_rgb_<profile>` 和
 `color.adapt_xyz_white_<profile>` 在 strict、accelerated Apple Silicon 与
-accelerated x86-64 profiles 下各注册一个 key，共九个 Result ABI 2 CPU keys。
+accelerated x86-64 profiles 下各注册一个 key，共九个 Result ABI 3 CPU keys。
 每个 operation 接收一个含单个 Float32 或 Float64 tensor、无 fields 的 Result，
 并发布一个名为 `values`、含单个 tensor 的 Result。输出保留 Result schema
 identity、tensor key、logical shape 和 batch axes，更新适用的 semantic facets，

@@ -99,7 +99,7 @@ inline WorkflowDocument delayed_document(std::int64_t milliseconds) {
   document.nodes = {
       WorkflowNode{1U, "core.constant", {}, {{"value", 7.0}}},
       WorkflowNode{2U,
-                   "core.delay",
+                   "test.delay",
                    {WorkflowNodeOutput{1U, "value"}},
                    {{"milliseconds", milliseconds}}},
   };

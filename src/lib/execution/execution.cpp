@@ -20,22 +20,10 @@ Result<ExecutionResult> ExecutionContext::execute(
   return execute_regions(plan, std::move(bindings), cancellation, options);
 }
 
-Result<ExecutionResult> ExecutionContext::execute_atoms(
-    const ExecutionPlan& plan, ExecutionBindings bindings,
-    const DemandQuery& requested, const CancellationToken& cancellation,
-    const ExecutionOptions& options) {
-  auto root = resource_budget();
-  if (!root.ok())
-    return Result<ExecutionResult>(root.status());
-  ResourceAllocationScope scope(root.value());
-  return execute_regions(plan, std::move(bindings), cancellation, options, {},
-                         true, &requested);
-}
 Result<ExecutionResult> ExecutionContext::execute_regions(
     const ExecutionPlan& plan, ExecutionBindings bindings,
     const CancellationToken& cancellation, const ExecutionOptions& options,
-    const std::string& snapshot_identity, bool atom_outcomes,
-    const DemandQuery* requested,
+    const std::string& snapshot_identity, const DemandQuery* requested,
     std::shared_ptr<const ExecutionPlan> plan_owner) {
   if (!impl_ || !plan.current() ||
       plan.operation_registry_.lock() != impl_->operation_registry)
@@ -66,8 +54,8 @@ Result<ExecutionResult> ExecutionContext::execute_regions(
         impl_->native_uploads, &impl_->waiting_admission, impl_->budget,
         impl_->operation_registry, plan, plan.current_check_,
         validated.take_value(), cancellation, options, requested,
-        snapshot_identity, impl_->cache.get(), &impl_->shared_results,
-        atom_outcomes, impl_->result_checkpoints.get(), std::move(plan_owner));
+        snapshot_identity, impl_->cache.get(), impl_->result_checkpoints.get(),
+        std::move(plan_owner));
   } catch (const std::bad_alloc&) {
     return failure(Status{ErrorCode::ResourceExhausted, {}});
   } catch (const std::exception& error) {

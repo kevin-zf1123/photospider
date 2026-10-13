@@ -115,13 +115,6 @@ Parameters samples(std::int64_t n = 5) {
   p["count"] = n;
   return p;
 }
-Parameters levels(double gamma = 1) {
-  return {{"black", 0.},
-          {"white", 1.},
-          {"gamma", gamma},
-          {"out_min", 0.},
-          {"out_max", 1.}};
-}
 void curves() {
   const auto controls = array<float>({0, 0, .5, .25, 1, 1}, {3, 2});
   exact<float>(output(operation("curve.sample_linear", {controls}, samples())),
@@ -236,24 +229,10 @@ void curves() {
                            samples(3))),
           {tiny, tiny / 2, 0});
     }
-    auto p = levels();
-    p["out_min"] = 0.;
-    p["out_max"] = tiny;
-    exact<double>(
-        output(operation("grade.levels", {array<double>({.5}, {1, 1})}, p)),
-        {tiny / 2});
   }
 }
 void fields() {
   const auto input = array<float>({0, .25, .5, 1}, {2, 2});
-  exact<float>(output(operation("grade.levels", {input}, levels(2))),
-               {0, .5, std::sqrt(.5F), 1});
-  auto bad = levels();
-  bad["gamma"] = 0.;
-  rejected(operation("grade.levels", {input}, bad), ErrorCode::InvalidArgument);
-  bad = levels();
-  bad["white"] = 0.;
-  rejected(operation("grade.levels", {input}, bad), ErrorCode::InvalidArgument);
   exact<float>(output(operation("field.smoothstep", {input},
                                 {{"edge0", 0.}, {"edge1", 1.}})),
                {0, .15625F, .5F, 1});
@@ -275,41 +254,6 @@ void fields() {
   require(finite("numeric.abs", {array<float>({NAN})}).status().code ==
               ErrorCode::OperationFailed,
           "finite nonfinite input");
-  auto cancellation_levels = levels();
-  cancellation_levels["white"] = 5.;
-  cancellation_levels["out_min"] = -3 * 0x1p100;
-  cancellation_levels["out_max"] = 0x1p101;
-  exact<float>(output(operation("grade.levels", {array<float>({3}, {1, 1})},
-                                cancellation_levels)),
-               {0});
-}
-void histograms() {
-  Parameters hist{{"bins", std::int64_t{4}},
-                  {"range_min", 0.},
-                  {"range_max", 1.}};
-  const auto values = array<double>({-1, 0, .25, .5, .75, 1, 2}, {1, 7});
-  exact<std::int64_t>(output(operation("analysis.histogram", {values}, hist)),
-                      {1, 1, 1, 2});
-  hist.erase("bins");
-  exact<std::int64_t>(
-      output(operation("analysis.histogram_out_of_range", {values}, hist)),
-      {1, 1});
-  rejected(operation("analysis.histogram_out_of_range",
-                     {array<float>({INFINITY}, {1, 1})}, hist),
-           ErrorCode::OperationFailed);
-  std::vector<std::int64_t> boundary_counts(100, 0);
-  boundary_counts[29] = 2;
-  boundary_counts[30] = 2;
-  boundary_counts[58] = 1;
-  exact<std::int64_t>(
-      output(operation("analysis.histogram",
-                       {array<double>({29, 58, std::nextafter(30., 0.), 30.,
-                                       std::nextafter(30., 100.)},
-                                      {1, 5})},
-                       {{"bins", std::int64_t{100}},
-                        {"range_min", 0.},
-                        {"range_max", 100.}})),
-      boundary_counts);
 }
 void regional() {
   std::vector<float> data(35);
@@ -317,18 +261,11 @@ void regional() {
     data[i] = static_cast<float>(i % 11) - 5;
   }
   auto input = array(data, {5, 7});
-  for (const auto* key : {"grade.levels", "numeric.abs"}) {
+  for (const auto* key : {"numeric.abs"}) {
     Parameters p;
-    if (std::string(key) == "grade.levels") {
-      p = levels();
-    }
     const auto whole = take(finite(key, {input}, {}, p));
-    ps::PlanningOptions options;
-    options.tile_height = 1;
-    options.tile_width = 2;
-    options.output_regions["result"] = ps::Region({{1, 3}, {2, 4}});
     const auto roi =
-        take(finite(key, {input}, options.output_regions["result"], p));
+        take(finite(key, {input}, ps::Region({{1, 3}, {2, 4}}), p));
     std::vector<float> expected;
     for (unsigned y = 1; y < 4; ++y) {
       for (unsigned x = 2; x < 6; ++x) {
@@ -356,8 +293,10 @@ void views_and_failures() {
   auto partial = take(ps::Value::create({ps::ElementType::Float32, {9, 9}},
                                         ps::Region({{4, 1}, {5, 3}}),
                                         {1, {0, 4}, {4, 5}}, bytes));
-  exact<float>(take(finite("numeric.abs", {partial}, partial.region())),
-               {.5, 2, 3});
+  // A non-spatial input/output is Whole, so incomplete binding coverage
+  // cannot satisfy the operator's complete input request.
+  rejected(finite("numeric.abs", {partial}, partial.region()),
+           ErrorCode::InvalidArgument);
   const auto controls = array<double>({0, 0, .5, .25, 1, 1}, {3, 2});
   ps::WorkflowDocument doc;
   numeric_result_fixture::declare_sources(&doc, {controls});
@@ -407,11 +346,11 @@ void views_and_failures() {
           "public Result execution cancellation");
   const int rounding = std::fegetround();
   require(std::fesetround(FE_DOWNWARD) == 0, "set rounding fixture");
-  auto rounded =
-      operation("grade.levels", {array<double>({.25}, {1, 1})}, levels(2));
+  auto rounded = operation("field.smoothstep", {array<double>({.25}, {1, 1})},
+                           {{"edge0", 0.}, {"edge1", 1.}});
   const bool restored = std::fegetround() == FE_DOWNWARD;
   std::fesetround(rounding);
-  exact<double>(output(std::move(rounded)), {.5});
+  exact<float>(output(std::move(rounded)), {.15625F});
   require(restored, "numeric environment must be restored");
 }
 void result_contracts() {
@@ -505,9 +444,7 @@ void result_contracts() {
       root, array<double>({0, 0, .5, NAN, 1, 1}, {3, 2}));
   auto table = numeric_result_fixture::source(root, array<float>({0, NAN, 1}));
   for (const auto* key :
-       {"curve.sample_linear", "curve.sample_monotone", "field.apply_lut_1d",
-        "grade.levels", "analysis.histogram",
-        "analysis.histogram_out_of_range"}) {
+       {"curve.sample_linear", "curve.sample_monotone", "field.apply_lut_1d"}) {
     std::vector<ResultRef> inputs{input};
     Parameters params;
     if (std::string(key).find("curve.") == 0) {
@@ -516,13 +453,6 @@ void result_contracts() {
     } else if (std::string(key) == "field.apply_lut_1d") {
       inputs.push_back(table);
       params = domain();
-    } else if (std::string(key) == "grade.levels") {
-      params = levels();
-    } else {
-      params = {{"range_min", 0.}, {"range_max", 1.}};
-      if (std::string(key) == "analysis.histogram") {
-        params["bins"] = INT64_C(4);
-      }
     }
     auto frozen = prepare(key, inputs, params);
     const auto shape = frozen.second.plan()
@@ -548,13 +478,15 @@ void result_contracts() {
   bad_schema.fields.push_back({"extra", ElementType::Float64, {}, {}});
   OperationMetadata metadata;
   metadata.result_schema = std::make_shared<SchemaTemplate>(bad_schema);
-  auto bad = registry->resolve_traits("grade.levels", {metadata}, levels());
+  auto bad = registry->resolve_traits("field.smoothstep", {metadata},
+                                      {{"edge0", 0.}, {"edge1", 1.}});
   require(!bad.ok() && bad.status().code == ErrorCode::TypeMismatch,
           "basic Result rejects scalar fields");
   bad_schema = schema;
   bad_schema.tensors[0].batch_axes = {2, 1};
   metadata.result_schema = std::make_shared<SchemaTemplate>(bad_schema);
-  bad = registry->resolve_traits("grade.levels", {metadata}, levels());
+  bad = registry->resolve_traits("field.smoothstep", {metadata},
+                                 {{"edge0", 0.}, {"edge1", 1.}});
   require(!bad.ok() && bad.status().code == ErrorCode::TypeMismatch,
           "basic field rejects multiple frames");
   auto broadcast =
@@ -584,31 +516,6 @@ void result_contracts() {
                   std::vector<std::uint64_t>({1000000, 1000000}) &&
               alias.diagnostics.result_digest.empty(),
           "optional digest skips huge logical views without failing execution");
-
-  auto counting =
-      prepare("analysis.histogram", {huge},
-              {{"range_min", 0.}, {"range_max", 1.}, {"bins", INT64_C(4)}});
-  const auto baseline_payload = root.statistics().live[ResourceKind::Payload];
-  ps::test::PhaseWorkGate gate("analysis.histogram", 1024);
-  CancellationSource stop;
-  std::future<ps::Result<ps::ExecutionResult>> active;
-  ps::test::OnExit cleanup([&] {
-    stop.cancel();
-    gate.release();
-    if (active.valid())
-      active.wait();
-  });
-  active = std::async(std::launch::async, [&] {
-    return context.execute(counting.second, stop.token());
-  });
-  const bool progressed = gate.wait();
-  stop.cancel();
-  gate.release();
-  auto cancelled = active.get();
-  require(progressed && gate.cancelled_in_service() && !cancelled.ok() &&
-              cancelled.status().code == ErrorCode::Cancelled &&
-              root.statistics().live[ResourceKind::Payload] == baseline_payload,
-          "active histogram cancellation releases unpublished counters");
 }
 
 }  // namespace
@@ -616,7 +523,6 @@ int main() {
   try {
     curves();
     fields();
-    histograms();
     regional();
     views_and_failures();
     result_contracts();

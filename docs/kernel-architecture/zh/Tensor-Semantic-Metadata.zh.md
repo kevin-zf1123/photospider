@@ -49,7 +49,7 @@ Color coordinates 可记录空值或 `relative`/`absolute` scale、可选描述�
 
 ## 3. 调度与状态机
 
-`ps::format::assign_metadata` 先检查编辑语法、类型、选项、路径重叠和有界事务编码，再追加一个节点。Compiler 随后解析源相关 selectors 并校验完整候选。当前注册使用 Result operation ABI 2、WorkflowDocument 5、OperationTraits 25 和 package 0.33.0。每个输入 Result 恰有一个 tensor member 且没有 fields。内部 node 可以提供可选 canonical schema assertion；public helper 不会设置它。
+`ps::format::assign_metadata` 先检查编辑语法、类型、选项、路径重叠和有界事务编码，再追加一个节点。Compiler 随后解析源相关 selectors 并校验完整候选。当前注册使用 Result operation ABI 3、WorkflowDocument 5、OperationTraits 25 和 package 0.33.0。每个输入 Result 恰有一个 tensor member 且没有 fields。内部 node 可以提供可选 canonical schema assertion；public helper 不会设置它。
 
 ```text
 authoring：校验编辑语法 -> 编码有界事务 -> 追加节点

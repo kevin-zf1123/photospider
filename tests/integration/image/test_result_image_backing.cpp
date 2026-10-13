@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <iostream>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -26,18 +27,10 @@ void numerical_tensor_windows() {
     require(schema.canonical().size() == schema.canonical_size(),
             "tensor canonical exact size");
     auto builder = take(ResultBuilder::start(root, schema, "tensor.source"));
-    require(builder
-                .bind_descriptor_relation(
-                    take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
-                .ok(),
-            "tensor basis");
-    const auto count = schema.tensors[0].sample_count();
-    auto witness = take(ResultRelation::cartesian(
-        root, count.ok() ? count.value() : UINT64_MAX, {0, 1, 0, 0}));
+
     require(builder
                 .publish_tensor(0, Region::whole(descriptor.shape),
-                                std::move(layout), storage, witness,
-                                {true, true, true, true})
+                                std::move(layout), storage)
                 .ok(),
             "affine tensor publication");
     auto result = take(builder.seal());
@@ -112,11 +105,7 @@ void spatial_tensor_batches() {
     slot.layout.channel_axis.reset();
     schema.tensors.push_back(slot);
     auto builder = take(ResultBuilder::start(root, schema, "spatial.batches"));
-    require(builder
-                .bind_descriptor_relation(
-                    take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
-                .ok(),
-            "spatial basis");
+
     const auto shape = slot.sample_shape();
     const auto count = take(slot.sample_count());
     std::vector<float> pixels(count);
@@ -128,9 +117,7 @@ void spatial_tensor_batches() {
             .publish_tensor(
                 0, Region::whole(shape),
                 ByteView(reinterpret_cast<const std::uint8_t*>(pixels.data()),
-                         pixels.size() * 4),
-                take(ResultRelation::cartesian(root, count, {0, 1, 0, 0})),
-                {true, true, true, true})
+                         pixels.size() * 4))
             .ok(),
         "spatial arbitrary batches publication");
     auto result = take(builder.seal());
@@ -199,19 +186,11 @@ void spatial_tensor_batches() {
   slot.descriptor = {ElementType::UInt8, {2}};
   schema.tensors.push_back(slot);
   auto builder = take(ResultBuilder::start(limited, schema, "limited.acquire"));
-  require(builder
-              .bind_descriptor_relation(
-                  take(ResultRelation::cartesian(limited, 1, {0, 8, 0, 0})))
-              .ok(),
-          "limited basis");
+
   const std::uint8_t bytes[] = {3, 4};
-  require(builder
-              .publish_tensor(
-                  0, Region::whole({2}), ByteView(bytes, 2),
-                  take(ResultRelation::cartesian(limited, 2, {0, 1, 0, 0})),
-                  {true, true, true, true})
-              .ok(),
-          "limited affine source");
+  require(
+      builder.publish_tensor(0, Region::whole({2}), ByteView(bytes, 2)).ok(),
+      "limited affine source");
   auto result = take(builder.seal());
   auto facts = take(result.descriptor());
   require(
@@ -235,21 +214,14 @@ ResultRef paged_batch_source(const ResourceBudget& root) {
   slot.layout.channel_axis.reset();
   schema.tensors.push_back(slot);
   auto builder = take(ResultBuilder::start(root, schema, "indexed.batches"));
-  require(builder
-              .bind_descriptor_relation(
-                  take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
-              .ok(),
-          "indexed batch basis");
+
   float values[64];
   for (unsigned i = 0; i < 64; ++i)
     values[i] = static_cast<float>(i);
   require(builder
-              .publish_tensor(
-                  0, Region::whole(slot.sample_shape()),
-                  ByteView(reinterpret_cast<const uint8_t*>(values),
-                           sizeof(values)),
-                  take(ResultRelation::cartesian(root, 64, {0, 1, 0, 0})),
-                  {true, true, true, true})
+              .publish_tensor(0, Region::whole(slot.sample_shape()),
+                              ByteView(reinterpret_cast<const uint8_t*>(values),
+                                       sizeof(values)))
               .ok(),
           "indexed batch publication");
   return take(builder.seal());
@@ -329,18 +301,14 @@ void tensor_writer_reentrancy() {
       slot.layout.channel_axis.reset();
       schema.tensors.push_back(slot);
       auto builder = take(ResultBuilder::start(root, schema, "writer.reentry"));
-      auto basis = take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0}));
-      require(builder.bind_descriptor_relation(basis).ok(),
-              "writer reentry basis");
-      auto relation = take(ResultRelation::cartesian(root, 3, {0, 1, 0, 0}));
+
       const Region left({{0, 1}, {0, 1}}), middle({{0, 1}, {1, 1}}),
           right({{0, 1}, {2, 1}});
       const float one = 1;
       require(builder
                   .publish_tensor(
                       0, left,
-                      ByteView(reinterpret_cast<const std::uint8_t*>(&one), 4),
-                      relation, {true, true, true, true})
+                      ByteView(reinterpret_cast<const std::uint8_t*>(&one), 4))
                   .ok(),
               "writer earlier prefix");
       auto reference = builder.reference();
@@ -352,9 +320,8 @@ void tensor_writer_reentrancy() {
       Status inner;
       std::optional<ResultBuilder> transferred;
       unsigned nested_calls = 0;
-      auto outer = builder.publish_tensor_kernel(
-          0, middle,
-          [&](const auto& writers) {
+      auto outer =
+          builder.publish_tensor_kernel(0, middle, [&](const auto& writers) {
             // This is a new acquisition of the immutable prefix while a
             // physical writer is live, rather than reuse of a pre-acquired
             // window.
@@ -372,21 +339,17 @@ void tensor_writer_reentrancy() {
                         !reference.acquire_tensor(facts, 0, middle).ok(),
                     "callback queries only old immutable certified prefix");
             if (mode == 1) {
-              inner =
-                  builder.publish_tensor(0, right, {0, {0, 4}, {0, 2}}, storage,
-                                         relation, {true, true, true, true});
+              inner = builder.publish_tensor(0, right, {0, {0, 4}, {0, 2}},
+                                             storage);
             }
             if (mode == 2) {
               inner = builder.seal().status();
             }
             if (mode == 3) {
-              inner = builder.publish_tensor_kernel(0, right,
-                                                    [&](const auto&) {
-                                                      ++nested_calls;
-                                                      return Status::success();
-                                                    },
-                                                    relation,
-                                                    {true, true, true, true});
+              inner = builder.publish_tensor_kernel(0, right, [&](const auto&) {
+                ++nested_calls;
+                return Status::success();
+              });
             }
             if (mode == 4 || mode == 5) {
               if (mode == 5) {
@@ -408,8 +371,7 @@ void tensor_writer_reentrancy() {
             const float two = 2;
             std::memcpy(write.value().data, &two, 4);
             return Status::success();
-          },
-          relation, {true, true, true, true});
+          });
       require(!nested_calls,
               "recursive writer is rejected before physical lock or callback");
       auto after = take(reference.descriptor(false));
@@ -445,13 +407,11 @@ void tensor_writer_reentrancy() {
         if (mode == 6) {
           require(
               outer.code == ErrorCode::Cancelled &&
-                  builder.bind_descriptor_relation(basis).ok() &&
                   builder
                       .publish_tensor(
                           0, right,
                           ByteView(reinterpret_cast<const std::uint8_t*>(&one),
-                                   4),
-                          relation, {true, true, true, true})
+                                   4))
                       .ok(),
               "entry owner failure never poisons an independent replacement "
               "builder");
@@ -472,13 +432,7 @@ void empty_tensor_writers() {
     slot.layout.channel_axis.reset();
     schema.tensors.push_back(slot);
     auto builder = take(ResultBuilder::start(root, schema, "empty.tensor"));
-    require(builder
-                .bind_descriptor_relation(
-                    take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
-                .ok(),
-            "empty tensor basis");
-    auto witness =
-        take(ResultRelation::cartesian(root, 1024 * 1024, {0, 1, 0, 0}));
+
     const auto before = root.statistics();
     std::uint32_t called = 0;
     require(builder
@@ -486,15 +440,13 @@ void empty_tensor_writers() {
                                        [&](const auto&) {
                                          ++called;
                                          return Status::success();
-                                       },
-                                       witness, {true, true, true, true})
+                                       })
                 .ok(),
             "empty tensor kernel publication");
     auto result = take(builder.seal());
     require(!called &&
                 root.statistics().live[ResourceKind::Payload] ==
                     before.live[ResourceKind::Payload] &&
-                root.statistics().issued.io_bytes == before.issued.io_bytes &&
                 root.statistics().issued.work - before.issued.work < 1024,
             "empty tensor demand skips callback/payload/sample work for every "
             "backing");
@@ -524,35 +476,27 @@ void lazy_spatial_backing() {
     require(schema.validate(true).ok(), "huge spatial topology is valid");
     const auto shape = slot.sample_shape();
     require(
-        ResultBuilder::start(root, schema, "spatial.bad.tile", {}, {}, 0, 32)
+        ResultBuilder::start(root, schema, "spatial.bad.tile", {}, {}, 0)
                     .status()
-                    .code == ErrorCode::TypeMismatch &&
-            ResultBuilder::start(root, schema, "spatial.bad.tile", {}, {}, 32,
-                                 3)
+                    .code == ErrorCode::InvalidArgument &&
+            ResultBuilder::start(root, schema, "spatial.bad.tile", {}, {}, 3)
                     .status()
-                    .code == ErrorCode::TypeMismatch,
+                    .code == ErrorCode::InvalidArgument,
         "spatial physical configuration validates before backing choice");
     auto builder = take(ResultBuilder::start(root, schema, "spatial.lazy"));
     require(root.statistics().live[ResourceKind::Payload] == 0,
             "spatial start does not choose a payload backing");
-    require(builder
-                .bind_descriptor_relation(
-                    take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
-                .ok(),
-            "huge spatial basis");
+
     const auto storage =
         take(Value::create({ElementType::Float32, {1}}, Region::whole({1}),
                            {0, {0}}, std::vector<std::uint8_t>{0, 0, 0, 0x3f}))
             .storage();
     StridedLayout layout;
     layout.byte_strides.resize(shape.size(), 0);
-    auto relation =
-        take(ResultRelation::cartesian(root, UINT64_MAX, {0, 1, 0, 0}));
-    require(builder
-                .publish_tensor(0, Region::whole(shape), layout, storage,
-                                relation, {true, true, true, true})
-                .ok(),
-            "huge spatial affine source publishes without dense reservation");
+
+    require(
+        builder.publish_tensor(0, Region::whole(shape), layout, storage).ok(),
+        "huge spatial affine source publishes without dense reservation");
     auto result = take(builder.seal());
     std::vector<RegionDimension> dimensions;
     std::vector<std::uint64_t> at;
@@ -570,16 +514,11 @@ void lazy_spatial_backing() {
     if (!batched) {
       auto materialized =
           take(ResultBuilder::start(root, schema, "spatial.write"));
-      require(materialized
-                  .bind_descriptor_relation(
-                      take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
-                  .ok(),
-              "materialized huge spatial basis");
+
       const auto before = root.statistics().live[ResourceKind::Payload];
       bool called = false;
       const auto written = materialized.publish_tensor_kernel(
-          0, Region({{0, 1}, {0, 1}}),
-          [&](const auto& writers) {
+          0, Region({{0, 1}, {0, 1}}), [&](const auto& writers) {
             called = true;
             auto run = writers[0].row_run({0, 0});
             if (!run.ok())
@@ -587,8 +526,7 @@ void lazy_spatial_backing() {
             const float value = .5F;
             std::memcpy(run.value().data, &value, 4);
             return Status::success();
-          },
-          relation, {true, true, true, true});
+          });
       require(written.ok() && called &&
                   root.statistics().live[ResourceKind::Payload] == before + 4,
               "huge spatial ROI write admits only its actual affine payload");
@@ -604,20 +542,13 @@ void lazy_spatial_backing() {
       ResourceBudget limited(constrained);
       auto denied =
           take(ResultBuilder::start(limited, schema, "spatial.denied"));
-      require(denied
-                  .bind_descriptor_relation(
-                      take(ResultRelation::cartesian(limited, 1, {})))
-                  .ok(),
-              "denied basis");
+
       called = false;
       const auto failed = denied.publish_tensor_kernel(
-          0, Region({{0, 1}, {0, 1}}),
-          [&](const auto&) {
+          0, Region({{0, 1}, {0, 1}}), [&](const auto&) {
             called = true;
             return Status::success();
-          },
-          take(ResultRelation::cartesian(limited, UINT64_MAX, {})),
-          {true, true, true, true});
+          });
       require(failed.code == ErrorCode::ResourceExhausted && !called &&
                   limited.statistics().live[ResourceKind::Payload] == 0 &&
                   denied.reference().descriptor(false).status().code ==
@@ -625,11 +556,7 @@ void lazy_spatial_backing() {
               "affine ROI backing checks actual reservation before callback");
     } else {
       auto sparse = take(ResultBuilder::start(root, schema, "spatial.sparse"));
-      require(sparse
-                  .bind_descriptor_relation(
-                      take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
-                  .ok(),
-              "sparse batch basis");
+
       require(sparse
                   .publish_tensor_kernel(0, Region(dimensions),
                                          [&](const auto& writers) {
@@ -641,8 +568,7 @@ void lazy_spatial_backing() {
                                            std::memcpy(run.value().data, &value,
                                                        sizeof(value));
                                            return Status::success();
-                                         },
-                                         relation, {true, true, true, true})
+                                         })
                   .ok(),
               "huge batch domain allocates only the requested physical batch");
       auto sparse_result = take(sparse.seal());
@@ -669,14 +595,7 @@ void direct_tensor_writers() {
     const Region region =
         huge ? Region({{UINT64_MAX - 1, 1}, {0, 2}}) : Region::whole(shape);
     auto builder = take(ResultBuilder::start(root, schema, "direct.tensor"));
-    require(builder
-                .bind_descriptor_relation(
-                    take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
-                .ok(),
-            "direct tensor basis");
-    const auto count = slot.sample_count();
-    auto witness = take(ResultRelation::cartesian(
-        root, count.ok() ? count.value() : UINT64_MAX, {0, 1, 0, 0}));
+
     require(builder
                 .publish_tensor_kernel(
                     0, region,
@@ -694,14 +613,12 @@ void direct_tensor_writers() {
                             0x7f;
                       }
                       return Status::success();
-                    },
-                    witness, {true, true, true, true})
+                    })
                 .ok(),
             "generic direct write publishes exact ROI");
     auto result = take(builder.seal());
     require(
-        root.statistics().peak[ResourceKind::Payload] == (huge ? 2 : 300000) &&
-            root.statistics().issued.io_bytes == 0,
+        root.statistics().peak[ResourceKind::Payload] == (huge ? 2 : 300000),
         "direct tensor writer retains one payload allocation without packed "
         "copy");
     auto window =
@@ -742,19 +659,12 @@ void backing_independent_spatial_runs() {
                      .storage();
   for (bool affine : {false, true}) {
     auto builder = take(ResultBuilder::start(root, schema, "spatial.runs"));
-    require(builder
-                .bind_descriptor_relation(
-                    take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
-                .ok(),
-            "spatial runs basis");
-    auto witness = take(ResultRelation::cartesian(root, 24, {0, 1, 0, 0}));
+
     auto status =
         affine ? builder.publish_tensor(0, Region::whole(slot.sample_shape()),
-                                        {0, {0, 0, 12, 3, 1}}, storage, witness,
-                                        {true, true, true, true})
+                                        {0, {0, 0, 12, 3, 1}}, storage)
                : builder.publish_tensor(0, Region::whole(slot.sample_shape()),
-                                        ByteView(bytes.data(), bytes.size()),
-                                        witness, {true, true, true, true});
+                                        ByteView(bytes.data(), bytes.size()));
     require(status.ok(), "both physical backings publish same tensor");
     auto result = take(builder.seal());
     auto window = take(result.acquire_tensor(
@@ -778,17 +688,10 @@ void backing_independent_spatial_runs() {
     buffer.data()[i] = static_cast<std::uint8_t>(i);
   auto multi =
       take(ResultBuilder::start(root, schema, "spatial.affine.batches"));
+
   require(multi
-              .bind_descriptor_relation(
-                  take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
-              .ok(),
-          "multiple affine batch basis");
-  require(multi
-              .publish_tensor(
-                  0, Region::whole(shape), {0, {24, 0, 12, 3, 1}},
-                  std::move(buffer).freeze(),
-                  take(ResultRelation::cartesian(root, 48, {0, 1, 0, 0})),
-                  {true, true, true, true})
+              .publish_tensor(0, Region::whole(shape), {0, {24, 0, 12, 3, 1}},
+                              std::move(buffer).freeze())
               .ok(),
           "affine multi-batch publication");
   auto result = take(multi.seal());
@@ -812,15 +715,12 @@ void window_failures() {
   const Region left({{0, 1}, {0, 1}, {0, 2}, {0, 1}});
   const Region right({{0, 1}, {0, 1}, {0, 2}, {1, 1}});
   auto builder = take(ResultBuilder::start(root, shape, "concurrent.windows"));
-  auto basis = take(ResultRelation::cartesian(root, 1, {0, 1, 0, 0}));
-  require(builder.bind_descriptor_relation(basis).ok(), "concurrent basis");
-  auto relation = take(ResultRelation::cartesian(root, 4, {0, 1, 0, 0}));
+
   const float samples[] = {.1F, .2F};
   require(builder
               .publish_tensor(
                   0, left,
-                  ByteView(reinterpret_cast<const std::uint8_t*>(samples), 8),
-                  relation, {true, true, true, true})
+                  ByteView(reinterpret_cast<const std::uint8_t*>(samples), 8))
               .ok(),
           "concurrent prefix");
   auto reference = builder.reference();
@@ -829,17 +729,13 @@ void window_failures() {
   std::condition_variable ready;
   bool writing = false, release = false;
   auto writer = std::async(std::launch::async, [&] {
-    return builder.publish_tensor_kernel(
-        0, right,
-        [&](const auto&) {
-          std::unique_lock<std::mutex> lock(mutex);
-          writing = true;
-          ready.notify_all();
-          ready.wait(lock, [&] { return release; });
-          return Status{ErrorCode::OperationFailed,
-                        "deliberate writer rollback"};
-        },
-        relation, {true, true, true, true});
+    return builder.publish_tensor_kernel(0, right, [&](const auto&) {
+      std::unique_lock<std::mutex> lock(mutex);
+      writing = true;
+      ready.notify_all();
+      ready.wait(lock, [&] { return release; });
+      return Status{ErrorCode::OperationFailed, "deliberate writer rollback"};
+    });
   });
   {
     std::unique_lock<std::mutex> lock(mutex);
@@ -881,61 +777,58 @@ void window_failures() {
   for (bool view : {false, true}) {
     builder = take(ResultBuilder::start(
         root, shape, view ? "sticky.view.cancel" : "sticky.kernel.cancel"));
-    require(builder.bind_descriptor_relation(basis).ok(), "cancel basis");
+
     auto window = take(reference.acquire_tensor(facts, 0, left));
     CancellationSource cancelled;
     cancelled.cancel();
     const auto failure =
-        view ? builder.publish_tensor_view(0, left, {&window}, relation,
-                                           {true, true, true, true},
-                                           cancelled.token())
-             : builder.publish_tensor_kernel(
-                   0, left, [](const auto&) { return Status::success(); },
-                   relation, {true, true, true, true}, cancelled.token());
+        view
+            ? builder.publish_tensor_view(0, left, {&window}, cancelled.token())
+            : builder.publish_tensor_kernel(
+                  0, left, [](const auto&) { return Status::success(); },
+                  cancelled.token());
     require(
         failure.code == ErrorCode::Cancelled &&
             builder.publish_tensor(
                        0, left,
                        ByteView(reinterpret_cast<const std::uint8_t*>(samples),
-                                8),
-                       relation, {true, true, true, true})
+                                8))
                     .code == ErrorCode::Cancelled &&
             !builder.seal().ok(),
         "pre-cancelled image publication stays sticky without blocking "
         "cancellation");
   }
   builder = take(ResultBuilder::start(root, shape, "sticky.slot"));
-  require(builder.bind_descriptor_relation(basis).ok(), "sticky basis");
+
   const auto bad_slot = builder.publish_tensor(
-      1, left, ByteView(reinterpret_cast<const std::uint8_t*>(samples), 8),
-      relation, {true, true, true, true});
+      1, left, ByteView(reinterpret_cast<const std::uint8_t*>(samples), 8));
   require(!bad_slot.ok() &&
               builder.publish_tensor(
                          0, left,
                          ByteView(
-                             reinterpret_cast<const std::uint8_t*>(samples), 8),
-                         relation, {true, true, true, true})
+                             reinterpret_cast<const std::uint8_t*>(samples), 8))
                       .code == bad_slot.code &&
               !builder.seal().ok(),
           "invalid slot is sticky");
   builder = take(ResultBuilder::start(root, shape, "sticky.allocation"));
-  require(builder.bind_descriptor_relation(basis).ok(), "allocation basis");
+
   const auto failed = builder.publish_tensor_kernel(
-      0, left, [](const auto&) -> Status { throw std::bad_alloc(); }, relation,
-      {true, true, true, true});
+      0, left, [](const auto&) -> Status { throw std::bad_alloc(); });
   require(failed.code == ErrorCode::ResourceExhausted &&
               builder.publish_tensor(
                          0, left,
                          ByteView(
-                             reinterpret_cast<const std::uint8_t*>(samples), 8),
-                         relation, {true, true, true, true})
+                             reinterpret_cast<const std::uint8_t*>(samples), 8))
                       .code == failed.code &&
               !builder.seal().ok(),
           "kernel allocation failure is sticky");
 }
 void windows_and_views() {
-  Driver source;
-  auto original = image(source.root);
+  auto source_registry = std::make_shared<OperationRegistry>();
+  require(source_registry->freeze().ok(), "freeze empty storage registry");
+  auto source_context = std::make_unique<ExecutionContext>(source_registry);
+  auto source_root = take(source_context->resource_budget());
+  auto original = image(source_root);
   auto facts = take(original.descriptor());
   const Region selected({{1, 1}, {0, 1}, {0, 3}, {0, 5}, {2, 1}});
   auto window = take(original.acquire_tensor(facts, 0, selected));
@@ -945,33 +838,23 @@ void windows_and_views() {
           "zero-copy bounded rectangle");
   require(!window.row_run({1, 0, 0, 0, 1}).ok(), "window channel authority");
   require(!window.row_run({0, 0, 0, 0, 2}).ok(), "window frame authority");
-  Driver destination;
+  ResourceBudget destination_root;
   auto output_schema = original.schema();
   auto& output = output_schema.tensors[0];
   output.descriptor.shape = {3, 5};
   output.layout.channel_axis.reset();
   output.facets.clear();
-  const auto count = take(output.sample_count());
   auto builder =
-      take(ResultBuilder::start(destination.root, output_schema, "view.test"));
-  require(builder
-              .bind_descriptor_relation(take(
-                  ResultRelation::cartesian(destination.root, 1, {0, 1, 0, 0})))
-              .ok(),
-          "view descriptor");
-  auto relation =
-      take(ResultRelation::cartesian(destination.root, count, {0, 1, 0, 0}));
+      take(ResultBuilder::start(destination_root, output_schema, "view.test"));
+
   const Region target({{1, 1}, {0, 1}, {0, 3}, {0, 5}});
-  const auto ambient_live = source.root.statistics().live.values;
+  const auto ambient_live = source_root.statistics().live.values;
   {
-    ResourceAllocationScope foreign(source.root);
-    require(builder
-                .publish_tensor_view(0, target, {&window}, relation,
-                                     {true, true, true, true})
-                .ok(),
+    ResourceAllocationScope foreign(source_root);
+    require(builder.publish_tensor_view(0, target, {&window}).ok(),
             "cross-budget channel view");
   }
-  require(source.root.statistics().live.values == ambient_live,
+  require(source_root.statistics().live.values == ambient_live,
           "destination view metadata does not charge ambient source root");
   auto result = take(builder.seal());
   auto alias =
@@ -982,34 +865,30 @@ void windows_and_views() {
           "view preserves actual payload pointer and root");
   original = {};
   window = {};
-  source.context.reset();
+  source_context.reset();
   require(read(result, {1, 0, 2, 4}) > 0,
           "view retains source after context retirement");
   alias = {};
   result = {};
 
   // Several publications may mix immutable view blocks and materialized pages.
-  original = image(destination.root);
+  original = image(destination_root);
   facts = take(original.descriptor());
   auto left = take(original.acquire_tensor(
       facts, 0, Region({{0, 1}, {0, 1}, {0, 3}, {0, 2}, {1, 1}})));
   auto right = take(original.acquire_tensor(
       facts, 0, Region({{0, 1}, {0, 1}, {0, 3}, {3, 2}, {1, 1}})));
   builder =
-      take(ResultBuilder::start(destination.root, output_schema, "mixed.test"));
-  require(builder
-              .bind_descriptor_relation(take(
-                  ResultRelation::cartesian(destination.root, 1, {0, 1, 0, 0})))
-              .ok(),
-          "mixed descriptor");
+      take(ResultBuilder::start(destination_root, output_schema, "mixed.test"));
+
   require(builder
               .publish_tensor_view(0, Region({{0, 1}, {0, 1}, {0, 3}, {0, 2}}),
-                                   {&left}, relation, {true, true, true, true})
+                                   {&left})
               .ok(),
           "left view");
   require(builder
               .publish_tensor_view(0, Region({{0, 1}, {0, 1}, {0, 3}, {3, 2}}),
-                                   {&right}, relation, {true, true, true, true})
+                                   {&right})
               .ok(),
           "right view");
   require(builder
@@ -1025,8 +904,7 @@ void windows_and_views() {
                       std::memcpy(run.value().data, &value, 4);
                     }
                     return Status::success();
-                  },
-                  relation, {true, true, true, true})
+                  })
               .ok(),
           "direct transactional image write");
   result = take(builder.seal());
@@ -1060,12 +938,8 @@ void spatial_backing_boundaries() {
         order == ImagePlaneOrder::Continuous ? 32 : 0;
     spec.tensors.push_back(tensor);
     auto builder =
-        take(ResultBuilder::start(root, spec, "physical.roi", {}, {}, 2, 8));
-    require(builder
-                .bind_descriptor_relation(
-                    take(ResultRelation::cartesian(root, 1, {})))
-                .ok(),
-            "physical descriptor");
+        take(ResultBuilder::start(root, spec, "physical.roi", {}, {}, 2));
+
     const Region roi({{1, 3}, {3, 14}, {0, 3}});
     require(
         builder
@@ -1080,7 +954,7 @@ void spatial_backing_boundaries() {
                         const auto columns =
                             order == ImagePlaneOrder::Continuous
                                 ? 17 - x
-                                : std::min<std::uint64_t>(17 - x, 8 - x % 8);
+                                : std::min<std::uint64_t>(17 - x, 2 - x % 2);
                         const auto rows =
                             order == ImagePlaneOrder::Continuous
                                 ? 4 - y
@@ -1090,7 +964,7 @@ void spatial_backing_boundaries() {
                                 rectangle.rows == rows &&
                                 rectangle.row_stride_bytes ==
                                     (order == ImagePlaneOrder::Continuous ? 32
-                                                                          : 8),
+                                                                          : 2),
                             "physical runs stop at ROI and tile edges without "
                             "padding");
                         for (std::uint64_t dx = 0; dx < columns; ++dx)
@@ -1099,9 +973,7 @@ void spatial_backing_boundaries() {
                         x += columns;
                       }
                   return Status::success();
-                },
-                take(ResultRelation::cartesian(root, 285, {})),
-                {true, true, true, true})
+                })
             .ok(),
         "physical ROI publication");
     auto result = take(builder.seal());
@@ -1134,12 +1006,7 @@ void spatial_backing_boundaries() {
   tensor.layout.order = ImagePlaneOrder::Continuous;
   spec.tensors.push_back(tensor);
   auto builder = take(ResultBuilder::start(root, spec, "rollback.pages"));
-  require(builder
-              .bind_descriptor_relation(
-                  take(ResultRelation::cartesian(root, 1, {})))
-              .ok(),
-          "rollback descriptor");
-  auto relation = take(ResultRelation::cartesian(root, 2 * width, {}));
+
   for (std::uint64_t y = 0; y < 2; ++y)
     require(builder
                 .publish_tensor_kernel(
@@ -1148,8 +1015,7 @@ void spatial_backing_boundaries() {
                       take(windows.at(0).row_run({y, 0})).data[0] =
                           static_cast<std::uint8_t>(123 + y);
                       return Status::success();
-                    },
-                    relation, {true, true, true, true})
+                    })
                 .ok(),
             "retained page prefix");
   auto captured = take(builder.reference().capture());
@@ -1157,14 +1023,12 @@ void spatial_backing_boundaries() {
   const auto retained = root.statistics().live[ResourceKind::Payload];
   bool wrote = false;
   auto failed = builder.publish_tensor_kernel(
-      0, Region({{0, 2}, {1, width - 1}}),
-      [&](const auto& windows) {
+      0, Region({{0, 2}, {1, width - 1}}), [&](const auto& windows) {
         take(windows.at(0).row_run({1, width - 1})).data[0] = 99;
         wrote = true;
         return Status{ErrorCode::Cancelled,
                       "rollback large unpublished page run"};
-      },
-      relation, {true, true, true, true});
+      });
   require(wrote && failed.code == ErrorCode::Cancelled &&
               root.statistics().live[ResourceKind::Payload] == retained,
           "failed large page transaction releases fresh backing only");

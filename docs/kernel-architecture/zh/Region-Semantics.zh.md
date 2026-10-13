@@ -33,13 +33,9 @@ struct ResultImageSpec final {
 
 编译器解析每个具名 output 的请求 `Q`。对 image output，Result continuation 收到 captured output footprint 和 image slot。Callback 可分阶段请求 input needs：先取 Control samples，再根据 control 值选择 Data image samples。每个 Need 都依据 Result schema、slot、逻辑 sample domain 和 input 已发布 coverage 校验。Callback 不能同步取回空洞或当前 capability 以外的 sample。
 
-`ResultRelation` 使用展平的逻辑 sample 坐标记录 output 到 input 的 support，并分别标识 input port、target、slot 和 role。Data、Control、Validation 和 Descriptor support 保持区分。Descriptor support 覆盖 count、basis 或语义 descriptor facts；静态 schema 变化要求重新编译。Frame 和 layer 坐标参与展平后的 image identity，因此 dirty edits 可定位具体 frame/layer samples。
+Whole operations 保持 Whole dependencies。Tensor semantic metadata（例如 channel roles 和 ColorArray tuples）按声明的契约参与校验及 sample closure；物理 `PlanarImageLayout::groups` 不会暗中新增 dependency edges。
 
-Demand handle 替换 immutable bindings 后，coordinator 会将新 bindings 与 captured evidence 实际消费过的 source samples 比较。它根据旧 relation 计算可能变脏的 output coverage，再原子提交新 binding generation；新请求随后依据新 control 值发现并记录 support。因此，已消费的 Control 值变化可以使旧分支失效，并引入新选中的 Data samples。未消费且无关的 control 或 tile 保持 clean。Evidence object 本身不可变：先前的 dependency query 仍描述原 generation。
-
-Tile 是调度单位，不是逻辑 dependency 证明。Tile projection 可将 samples 合并为 I/O 请求，但 relation support 仍基于 samples。Whole operations 保持 Whole dependencies。Regional 或 dependency operations 报告实际 support；tile grid 不会取代 relation。Tensor semantic metadata（例如 channel roles 和 ColorArray tuples）按声明的契约参与校验及 sample closure；物理 `PlanarImageLayout::groups` 不会暗中新增 dependency edges。
-
-只有 captured relation 完整时，`Exact` support 才能证明 clean。`Conservative` support 可能产生更宽的 dirty set。`Unknown` 保持 unresolved，不能转换为空的 clean answer。Dirty 表示可能受影响，不表示数值不同。Relation traversal 和 Footprint transformations 有界，并计入 execution root；超出 work 或 metadata 限额时返回错误。
+Dirty 表示可能受影响，不表示数值不同。Footprint transformations 有界，并计入 execution root；超出 work 或 metadata 限额时返回错误。
 
 ## Tile 投影的算术
 

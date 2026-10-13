@@ -22,7 +22,6 @@
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
 #include "data/value_validation.hpp"
-#include "photospider/data/representation.hpp"
 #include "photospider/data/result.hpp"
 #include "photospider/data/tensor_description.hpp"
 
@@ -51,14 +50,10 @@ Result<ResultRef> ResultRef::capture() const {
     facts.tensor_count_ = impl_->schema.tensors.size();
     for (uint32_t i = 0; i < facts.field_count_; ++i) {
       facts.rows_[i] = impl_->fields[i].certified;
-      capture->fields[i] = impl_->fields[i].relation;
     }
     for (uint32_t i = 0; i < facts.tensor_count_; ++i) {
       facts.tensors_[i] = impl_->tensors[i].coverage;
-      capture->tensors[i] = impl_->tensors[i].relation;
     }
-    capture->basis = impl_->descriptor_relation;
-    capture->dependencies = impl_->dependencies;
     ResultRef result = *this;
     result.captured_ = std::move(capture);
     return Result<ResultRef>(std::move(result));
@@ -71,31 +66,17 @@ WeakResultRef ResultRef::weak() const noexcept {
   weak.impl_ = impl_;
   weak.captured_ = captured_;
   weak.captured_view_ = captured_ != nullptr;
-  weak.request_record_ = request_record_;
   return weak;
 }
 ResultRef WeakResultRef::lock() const noexcept {
   ResultRef result;
   result.impl_ = impl_.lock();
-  result.request_record_ = request_record_;
   if (captured_view_) {
     result.captured_ = captured_.lock();
     if (!result.captured_)
       result.impl_.reset();
   }
   return result;
-}
-void ResultRef::bind_dependencies(
-    std::shared_ptr<const execution_internal::DependencyBundle> bundle) const {
-  std::lock_guard<std::timed_mutex> lock(impl_->mutex);
-  impl_->dependencies.bind(std::move(bundle));
-}
-std::shared_ptr<const execution_internal::DependencyBundle>
-ResultRef::dependencies() const {
-  if (captured_)
-    return captured_->dependencies.get();
-  std::lock_guard<std::timed_mutex> lock(impl_->mutex);
-  return impl_->dependencies.get();
 }
 Result<ResultDescriptor> ResultRef::descriptor(bool require_complete) const {
   if (captured_)

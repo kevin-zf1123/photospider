@@ -1,6 +1,5 @@
 #include "execution/execution_bindings.hpp"
 
-#include <algorithm>
 #include <map>
 #include <memory>
 #include <set>
@@ -81,44 +80,9 @@ Result<std::vector<ExecutionBinding>> preflight_regional_bindings(
                  "Result binding schema or finality differs"});
     result.push_back(std::move(binding));
   }
-  const auto stop = [&] { return binding_stop(plan, cancellation); };
-  for (const auto& step : plan.steps()) {
-    for (std::size_t port = 0; port < step.inputs.size(); ++port) {
-      const auto* input = std::get_if<PlanWorkflowInput>(&step.inputs[port]);
-      if (!input)
-        continue;
-      const auto& binding = result[input->declaration_index];
-      const auto& constraint = step.traits.input_schema[port];
-      if (constraint.scalar_bounds) {
-        const auto& selected = step.traits.outputs[0].input_indices;
-        if (selected && std::find(selected->begin(), selected->end(), port) ==
-                            selected->end())
-          continue;
-        auto facts = binding.result.descriptor();
-        if (!facts.ok())
-          return Result<std::vector<ExecutionBinding>>(facts.status());
-        OperationMetadata metadata;
-        metadata.result_schema =
-            plan.input_declarations()[input->declaration_index].result_schema;
-        auto status = input_internal::validate_port_tensor(
-            constraint, binding.result, facts.value(), metadata,
-            ErrorCode::InvalidArgument, cancellation, stop);
-        if (!status.ok()) {
-          status.detail.input_id =
-              plan.input_declarations()[input->declaration_index].id;
-          if (status.detail.origin == FailureOrigin::Unspecified &&
-              (status.code == ErrorCode::TypeMismatch ||
-               status.code == ErrorCode::InvalidArgument ||
-               status.code == ErrorCode::OperationFailed))
-            status.detail.origin = status.code == ErrorCode::TypeMismatch
-                                       ? FailureOrigin::Schema
-                                       : FailureOrigin::Domain;
-          return Result<std::vector<ExecutionBinding>>(status);
-        }
-        continue;
-      }
-    }
-  }
+  const auto stopped = binding_stop(plan, cancellation);
+  if (stopped != ErrorCode::Ok)
+    return Result<std::vector<ExecutionBinding>>(Status{stopped, {}});
   return Result<std::vector<ExecutionBinding>>(std::move(result));
 }
 

@@ -1,5 +1,5 @@
 #include "01-numeric/expression_result.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "common/registry.hpp"
 
 namespace ps::plugin_internal {
 Status register_lut_apply_1d(OperationRegistry* registry) {

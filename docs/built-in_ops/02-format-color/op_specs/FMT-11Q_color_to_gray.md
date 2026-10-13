@@ -51,7 +51,7 @@ publication; unrelated unobserved sample errors do not. Preserve upstream scope.
 This is a registered native Result primitive. Internal helper reuse preserves its declared support, rounding and validation.
 auto can share a legal same-owner view while retaining validation; forced view fails if that mapping cannot be represented.
 The implementation supports generic and spatial layouts. Empty demand is stateless, and publication is transactional.
-The implementation uses Result ABI 2 and the registered CPU profiles.
+The implementation uses Result ABI 3 and the registered CPU profiles.
 
 ## Independent acceptance and conceptual workflow
 

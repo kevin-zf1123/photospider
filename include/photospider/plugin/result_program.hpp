@@ -20,6 +20,7 @@
 #include "photospider/data/fragment_atlas.hpp"
 #include "photospider/data/quality.hpp"
 #include "photospider/data/result.hpp"
+#include "photospider/data/tiles.hpp"
 #include "photospider/plugin/cpu_parallel_api.h"
 #include "photospider/plugin/cpu_tiles_api.h"
 #include "photospider/plugin/native_gpu_api.h"
@@ -60,6 +61,11 @@ class ResultPayloadBound;
 struct ResultProgramMetadata final {
   std::vector<OperationMetadata> inputs;
   OperationMetadata output;
+  /** @brief Compiled input grids in port order; empty for direct preparation.
+   * A grid describes addressable spatial tiles even for a Whole producer.
+   */
+  std::vector<std::optional<TileGrid>> input_tile_grids = {};
+  std::optional<TileGrid> output_tile_grid = {};
 };
 /** @brief Borrowed static query for one structured Result continuation.
  * It identifies the selected Result output and optional tensor-slot demand.
@@ -71,26 +77,38 @@ struct ResultProgramQuery final {
       const std::map<std::string, ParameterValue>& static_parameters)
       : inputs(metadata.inputs),
         output(metadata.output),
-        parameters(static_parameters) {}
+        parameters(static_parameters),
+        input_tile_grids(metadata.input_tile_grids),
+        output_tile_grid(metadata.output_tile_grid) {}
   const std::vector<OperationMetadata>& inputs;
   const OperationMetadata& output;
   const std::map<std::string, ParameterValue>& parameters;
+  /** @brief Borrowed compiled grids for SDK coordinate conversion. */
+  const std::vector<std::optional<TileGrid>>& input_tile_grids;
+  const std::optional<TileGrid>& output_tile_grid;
   /** @brief Captured demand for the selected named output tensor slot.
    * `tensor_slot` selects the member; an absent footprint requests its full
    * sample domain. This footprint participates in producer identity. Result
    * checkpoint scope is separate and excludes the requested footprint. Tile
-   * dimensions are physical scheduling choices. For a C++ RequestRecord
-   * output, this footprint is the complete terminal query Q; the executor does
-   * not enlarge a supplied Q merely because the output region rule is Whole.
+   * dimensions are physical scheduling choices. A nonempty Whole query is
+   * expanded to the complete output, including non-spatial outputs whose
+   * operation declaration permits tiled execution.
    */
   std::optional<Footprint> tensor_outputs;
   std::uint32_t tensor_slot = 0;
-  std::uint64_t tile_height = 128, tile_width = 128;
+  std::uint64_t tile_extent = 128;
+  /** @brief Selected computation unit; Whole producers always use zero. */
+  TileIndex tile_unit = 0;
+  /** @brief Explicit computation-unit request, defaulting to Whole.
+   * Compiled Tiled invocations select exactly one index equal to tile_unit.
+   * Direct C invocations follow that same rule; a Tiled Whole request must be
+   * split by the executor before callback entry. Empty is explicit {false,{}}.
+   */
+  TileRequest output_request{true, {}};
   Backend backend = Backend::Cpu;
   std::string_view semantic_key;
   /** @brief Routing identity for the captured execution snapshot.
-   * Result joint admission requires a shared nonempty identity across members;
-   * it identifies provenance and does not supply numeric input semantics.
+   * It identifies provenance and does not supply numeric input semantics.
    */
   std::string_view snapshot_identity;
   std::uint32_t output_index = 0;
@@ -107,55 +125,9 @@ struct ResultProgramQuery final {
    */
   std::shared_ptr<const PreparedOperation> prepared;
 };
-/** @brief Derive the logical atom named by a Result query.
- * The key uses the declaration-order output index and the selected tensor
- * query. Tuple-channel and atomic trailing axes are closed into one
- * observation and omitted from the coordinate; every other sample axis,
- * including batch axes, remains in order and must have extent one. The query
- * must close to one nonempty box. A collection-only output maps to the
- * canonical singleton key `{output_index, rank 1, coordinate 0}`. This helper
- * validates query geometry, not the operation's joint-contract declaration.
- */
-PHOTOSPIDER_API Result<AtomKey> result_atom_key(
-    const ResultProgramQuery& query);
-/** @brief Return the fixed observation domain for the selected Result slot.
- * The domain omits tuple-channel and atomic trailing axes while retaining the
- * remaining batch and cell axes with their complete extents. If no coordinate
- * axes remain, it is the singleton rank-one domain. For a collection-only
- * output, the domain is also the singleton key domain. This describes semantic
- * observation scope; it does not expand tensor payload or authorize reads.
- */
-PHOTOSPIDER_API Result<AtomDomain> result_observation_domain(
-    const ResultProgramQuery& query);
-/** @brief Need for one tensor member of an input Result.
- * `samples` uses the member's full sample shape, including batch axes before
- * cell axes. When one poll requests several roles for the same input and slot,
- * the executor supplies the union of payload-readable samples once. It still
- * validates and records each role's own footprint separately. For a computed
- * contract-2 producer, the coordinator expands a wide tensor Need into
- * singleton-atom requests before supplying it; this does not limit wider
- * tensor Needs on other paths. When the union of a computed contract-2
- * tensor Need is Empty and the producer schema has no fields, the coordinator
- * can supply a sealed Empty Result through its metadata-only object path. This
- * creates no atom and grants no sample-read permission. A producer with fields
- * does not use this shortcut.
- */
-struct ResultTensorNeed final {
-  std::uint32_t input = 0, slot = 0;
-  Footprint samples;
-  std::uint32_t roles = 1;
-};
 /** @brief Owning capability restricted to the explicit tensor Need.
- * A capability can contain one Result or private pieces backed by several
- * original Results when a computed contract-2 Need is expanded into
- * singleton-atom requests. Each piece retains its original Result, captured
- * descriptor and granted samples; the coordinator does not create an
- * aggregate Result or validation domain. Reads and acquired windows remain
- * restricted to those grants. `object_id()` is the source ID for a singleton
- * capability and zero when there is no single Result identity; zero grants no
- * read authority. An Empty metadata-only grant may retain a sealed Result,
- * but its empty coverage does not authorize `read()` or `acquire()`. The phase
- * association still lists the actual input ports and their source object IDs.
+ * The capability retains its source Result, descriptor and granted samples.
+ * Reads and acquired windows remain restricted to those grants.
  * For compiled structured CPU Whole view execution, the coordinator may prepare
  * each authorized Need box as an affine view before the next computation poll.
  * Auto may instead retain an immutable, Root-accounted private backing when a
@@ -166,11 +138,10 @@ struct ResultTensorNeed final {
 class PHOTOSPIDER_API ResultTensorInput final {
  public:
   ResultTensorInput() = default;
-  std::uint64_t object_id() const noexcept {
-    return pieces_.size() > 1 ? 0 : result_.object_id();
-  }
+  std::uint64_t object_id() const noexcept { return result_.object_id(); }
   const ResultTensorSpec& spec() const {
-    return result_.schema().tensors.at(slot_);
+    return (static_schema_ ? *static_schema_ : result_.schema())
+        .tensors.at(slot_);
   }
   const Footprint& coverage() const noexcept { return samples_; }
   Status read(const std::vector<std::uint64_t>& coordinate, void* destination,
@@ -194,11 +165,6 @@ class PHOTOSPIDER_API ResultTensorInput final {
   friend class FragmentAtlasPlan;
   friend struct ResultProgramPhase;
   friend class plugin_internal::ResultPayloadBound;
-  struct Piece {
-    ResultRef result;
-    ResultDescriptor descriptor;
-    Footprint samples;
-  };
   struct InputBacking {
     ResourceLease metadata_owner;
     Value value;
@@ -212,8 +178,8 @@ class PHOTOSPIDER_API ResultTensorInput final {
       bool require_view, const CancellationToken& cancellation,
       const std::function<Status(std::uint64_t)>& consume_work);
   ResultRef result_;
+  std::shared_ptr<const SchemaTemplate> static_schema_;
   ResultDescriptor descriptor_;
-  ResourceVector<Piece> pieces_;
   ResourceVector<std::shared_ptr<const InputBacking>> input_backing_;
   std::optional<ResourceBudget> resources_;
   std::uint32_t slot_ = 0;
@@ -222,70 +188,33 @@ class PHOTOSPIDER_API ResultTensorInput final {
   std::shared_ptr<std::atomic<ErrorCode>> failure_;
   std::shared_ptr<plugin_internal::FailureLatch> observer_;
 };
-/** @brief Requests complete associated data or a monotone minimum field prefix.
- * Complete requests wait for seal. A prefix request returns a sealed shorter
- * collection when discovery finished; the consumer checks actual count.
- */
-struct ResultObjectNeed final {
-  std::uint32_t input = 0, field = 0;
-  bool complete = true;
-  std::uint64_t minimum_rows = 0;
-};
-struct ResultCreateTemporary final {};
-struct ResultReadTemporary final {
-  TemporaryStorage storage;
-  std::uint64_t offset = 0, bytes = 0;
-};
-struct ResultWriteTemporary final {
-  TemporaryStorage storage;
-  std::uint64_t offset = 0;
-  std::shared_ptr<const CpuStorage> bytes;
-};
-struct ResultExtendTemporary final {
-  TemporaryStorage storage;
-  std::uint64_t bytes = 0;
-};
-/** @brief Closed mandatory I/O actions, executed after a callback yields. */
-// NOLINTBEGIN(whitespace/indent_namespace)
-using ResultIoRequest =
-    std::variant<ResultReadPlan, ResultWritePlan, ResultCreateTemporary,
-                 ResultReadTemporary, ResultWriteTemporary,
-                 ResultExtendTemporary>;
-/** @brief Read owner, new temporary owner, append offset or write success. */
-using ResultIoReply =
-    std::variant<std::shared_ptr<const CpuStorage>, TemporaryStorage,
-                 std::uint64_t, std::monostate>;
-// NOLINTEND
-/** @brief Requests bounded Result input access or mandatory I/O for one stage.
- * The combined Result-object, tensor, and I/O entry count is limited by the
- * smaller of 65536 and the dependency set's `maximum_boxes`. An ordinary
- * empty Need is invalid. Tensor Needs for the same input and slot can carry
- * separate roles; the executor unions their payload reads while preserving
- * per-role evidence.
+/** @brief Requests explicit producer tiles, Whole or descriptor access.
+ * The input entry count is bounded by the execution limits.
+ * The complete envelope is validated before any upstream work begins. Each
+ * TileNeed has exactly one request kind and addresses the compiled input grid.
  */
 struct ResultProgramNeed final {
-  ResourceVector<ResultObjectNeed> results;
-  ResourceVector<ResultIoRequest> io;
-  ResourceVector<ResultTensorNeed> tensors = {};
+  ResourceVector<TileNeed> tiles = {};
 };
 /** @brief Mutable table borrowed only during a synchronous GPU discovery call.
  * `bytes` points to a zero-initialized Root allocation with 16 header bytes
- * and `capacity` 144-byte records. The host freezes and decodes it after the
- * callback and submitted GPU work have drained; it is separate from operation
- * workspace.
+ * and `capacity` 16-byte records (uint32 input, uint32 kind, uint64 tile).
+ * Kinds are Tile=0, Whole=1 and Descriptor=2; the latter two require tile 0.
+ * The host freezes and decodes it after the callback and submitted GPU work
+ * have drained; it is separate from operation workspace.
  */
 struct ResultGpuRequestTable final {
   std::uint8_t* bytes = nullptr;
   std::uint64_t byte_size = 0;
   std::uint32_t capacity = 0;
 };
-/** @brief Immutable grouped tensor-footprint metadata returned by discovery.
- * The receipt retains no source payload. Its tensor Needs describe typed input
- * regions and roles; the executor supplies those Needs before dependent
+/** @brief Immutable input tile requests returned by discovery.
+ * The receipt retains no source payload. Its tile Needs describe complete
+ * producer units; the executor supplies those Needs before dependent
  * computation continues.
  */
 struct ResultDiscoveryReceipt final {
-  ResourceVector<ResultTensorNeed> tensors;
+  ResourceVector<TileNeed> tiles;
 };
 /** @brief New certified prefix or complete object, published by one producer.
  */
@@ -298,6 +227,10 @@ using ResultProgramPoll = std::variant<ResultProgramNeed, ResultPublication>;
 using ResultObjectInputs =
     std::map<std::uint32_t, ResultRef, std::less<std::uint32_t>,
              ResourceAllocator<std::pair<const std::uint32_t, ResultRef>>>;
+/** @brief Metadata snapshots with no payload read capability. */
+using ResultDescriptorInputs = std::map<
+    std::uint32_t, ResultDescriptor, std::less<std::uint32_t>,
+    ResourceAllocator<std::pair<const std::uint32_t, ResultDescriptor>>>;
 using ResultTensorInputs = std::map<
     std::pair<std::uint32_t, std::uint32_t>, ResultTensorInput,
     std::less<std::pair<std::uint32_t, std::uint32_t>>,
@@ -326,15 +259,17 @@ class PHOTOSPIDER_API ResultCheckpoint final {
   std::shared_ptr<const void> witness_;
 };
 /** @brief Ready inputs/windows borrowed only until this poll returns.
- * Root resource operations are explicit admission; mandatory I/O is returned as
- * Need actions. Calling TemporaryStorage I/O inside poll is a sticky protocol
- * failure. `read_tensor()` and `consume_work()` failures cannot be ignored
- * into success.
+ * Root resource operations are explicit admission. Field append/read accesses
+ * immutable Root-memory backing directly. `read_tensor()` and `consume_work()`
+ * failures cannot be ignored into success.
  */
 struct PHOTOSPIDER_API ResultProgramPhase final {
   const ResultProgramQuery& query;
+  /** @brief Field-bearing or tensorless Results admitted by Whole input Needs.
+   * Pure tensor payloads use tensors. Descriptor-only requests expose metadata
+   * through descriptors and never add a payload capability to this map.
+   */
   const ResultObjectInputs& results;
-  const ResourceVector<ResultIoReply>& io;
   const BufferAllocator& allocator;
   const ResourceBudget& resources;
   std::function<Status(std::uint64_t)> consume_work;
@@ -347,7 +282,18 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
    * complete error provenance through the capability owning this latch.
    */
   std::shared_ptr<plugin_internal::FailureLatch> failure_latch = {};
+  /** @brief Records a non-Ok callback failure before further allocation.
+   * Preserves first-failure provenance through the host latch and observer.
+   * Observer exceptions cannot replace the recorded cause. Call on the entry
+   * thread while this borrowed phase is alive; Ok is a no-op.
+   */
+  void record_failure(const Status& status) const;
   const ResultTensorInputs* tensors = nullptr;
+  /** @brief Captured global facts for descriptor-only field inputs.
+   * Entries own metadata only. They cannot be used to read fields or tensors;
+   * payload access requires an independent Whole or tile Need.
+   */
+  const ResultDescriptorInputs* descriptors = nullptr;
   const ps_cpu_parallel_service_v1* cpu_parallel = nullptr;
   const ps_cpu_tiles_service_v1* cpu_tiles = nullptr;
   const ps_gpu_service_v1* gpu = nullptr;
@@ -378,9 +324,7 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
    * this callback returns; references and iterators to its previous elements
    * may be invalidated. Restoring a checkpoint restores dependency history,
    * not `results`, tensor capabilities, read windows, or Need authorization;
-   * the callback must request current input access separately. RequestRecord
-   * outputs cannot use checkpoint services; such use is a sticky
-   * InvalidArgument.
+   * the callback must request current input access separately.
    */
   std::function<Result<std::optional<ResultCheckpoint>>(std::uint32_t,
                                                         std::uint64_t)>
@@ -390,9 +334,7 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
    * Retention requires a pure deterministic operation and pure selected-input
    * producer closure. Optional cache or capacity refusal declines retention
    * without failing an otherwise successful operation. Protocol, cancellation,
-   * and admitted Run-work failures remain execution failures. RequestRecord
-   * outputs cannot use checkpoint services; such use is a sticky
-   * InvalidArgument.
+   * and admitted Run-work failures remain execution failures.
    */
   std::function<Status(std::uint32_t, std::uint64_t, const ResultRef&)>
       checkpoint_publish = {};
@@ -424,10 +366,7 @@ struct PHOTOSPIDER_API ResultProgramPhase final {
    * dependency evidence. Need evidence from the current actor remains in
    * effect. Public output publication, checkpoints and completed-result caches
    * remain independent of block-state reuse. Optional cache-work exhaustion
-   * skips caching and computes normally; Object-Need contents and I/O are not
-   * cached. Pure block work is
-   * available inside a RequestRecord query, but a terminal Result cannot be an
-   * incoming or computed block state.
+   * skips caching and computes normally.
    */
   std::function<Result<ResultRef>(std::uint32_t, std::uint64_t, std::uint64_t,
                                   std::uint64_t, const ResultRef&,
@@ -552,11 +491,6 @@ class PHOTOSPIDER_API ResultContinuation final {
    * diagnostic; allocation exceptions return ResourceExhausted. A previously
    * recorded phase failure takes precedence, and failed/cancelled phases do
    * not enter the callback. These rules also apply to direct registry hosts.
-   * For RequestRecord outputs, the host checks each publication for the
-   * captured schema, scope, Root, completeness, and exact selected tensor
-   * coverage Q. Partial or mismatched Result publications fail with a sticky
-   * protocol error; a successful Result is marked terminal for later
-   * input/view/state checks.
    * If the output declares `maximum_output_payload_bytes`, the host compares
    * the publication's unique physical backing against that cap. It excludes
    * owners still live through exposed Result inputs or authorized tensor
@@ -591,172 +525,6 @@ class PHOTOSPIDER_API ResultContinuation final {
                                      const ResultProgramPhase&) = nullptr;
   std::atomic_flag active_ = ATOMIC_FLAG_INIT;
 };
-/** @brief One local result from a Result joint callback.
- * The callback returns one Root-owned outcome for each member supplied to that
- * round, keyed by its distinct AtomKey. Contract 1 uses distinct output keys;
- * contract 2 can use different coordinates of the same output. The outcome is
- * that member's Result Need, complete publication, or typed local failure.
- * Contract 2 may attach QualityReport evidence, which the host validates
- * against the published estimate or typed failure before delivery. It must
- * be owned by `phase.resources.allocator()` and by either the member phase
- * allocator or the shared workspace allocator.
- */
-struct ResultJointOutcome final {
-  AtomKey key;
-  Result<ResultProgramPoll> outcome;
-  std::optional<QualityReport> quality = {};
-};
-/** @brief Borrowed resources for one bounded Result joint callback round.
- * `members` contains the currently ready, non-cancelled subset; after
- * cancellation this may contain one member even when start admitted more.
- * Their phase objects and services are borrowed for the callback. Each query
- * carries the prepared tensor Q closed over tuple and atomic trailing axes.
- * `allocator` provides the shared workspace limit; `consume_work` charges
- * round work against the active Run/root. Need admission validates each input
- * against the member's selected input projection. All member ResourceBudgets,
- * member allocators and the shared `allocator` must share the continuation
- * Root's nonempty accounting domain. `BufferAllocator::same_owner` checks only
- * that domain identity; it does not compare quotas or grant payload access.
- * The coordinator validates selected ports and owns Need storage; the callback
- * returns a Root-owned outcome vector, which the host validates before use.
- * The host counts Need entries across the whole round, caps their sum at
- * 65,536, and charges each Need envelope before walking it.
- */
-struct ResultJointPhase final {
-  const ResourceVector<const ResultProgramPhase*>& members;
-  const BufferAllocator& allocator;
-  std::function<Status(std::uint64_t)> consume_work;
-};
-/** @brief Move-only shared continuation state for CPU Result joints.
- * Contract 1 keys members by distinct output indices and requires
- * RequestFailureOnly delivery. Contract 2 keys members by distinct AtomKeys
- * and requires PerAtomOutcome delivery; coordinates of one output may repeat.
- * In both contracts, each tensor query closes over tuple-channel and atomic
- * trailing axes into one nonempty Atomic observation. The registry captures
- * raw queries and validates them on later polls before lending closed queries
- * to the callback. Each poll sees the non-cancelled ready subset, which may
- * contain one member, and returns a Root-owned outcome vector keyed by AtomKey.
- * The host validates member identity, Need ownership and projection,
- * publications and optional contract-2 quality before exposing outcomes.
- * Contract-2 ValidationDomain failures must match the output's full fixed
- * observation domain and propagate across covered Ready/Waiting members. A
- * later domain failure cannot revoke a previously semantic-terminal member.
- * Quality reports must be owned by `phase.resources.allocator()` and by
- * either the member phase allocator or the shared workspace allocator.
- * Estimate-read errors
- * retain their original status; cancellation clears the report, while a
- * nonfinite estimate or certificate mismatch yields InvalidQuality.
- * Per-round Need entries are limited to 65,536 across all members. Each Need
- * contains Result-object or tensor requests, or mandatory I/O actions. Callback
- * exceptions and shared allocation, work, or I/O errors
- * retain their first sticky cause. Foreign phase/member accounting domains or
- * foreign outcome storage are rejected. A group poll failure is latched;
- * concurrent
- * or reentrant polls leave the active poll unchanged. The host retains the
- * definition and Root until retirement. Direct registry use does not fulfill
- * Needs or record dependency evidence. Structured execution schedules eligible
- * CPU contract-2 Result queries as well as contract 1. Contract 2 remains a
- * joint path when joint grouping is disabled: the coordinator runs a one-member
- * group rather than a scalar callback, and it does not retry a failed group as
- * singletons. The public `ExecutionContext::execute_atoms` collector uses the
- * structured coordinator to collect managed CPU Result atoms. Each
- * contract-2 member represents one output observation; its input Tensor Needs
- * may span multiple observations. When a Need targets a computed contract-2
- * producer, the coordinator expands its requested samples into independent
- * atom queries and supplies a piecewise `ResultTensorInput` backed by the
- * original Results. Wider computed Tensor Needs remain supported on other
- * paths. There is no GPU joint path.
- */
-class PHOTOSPIDER_API ResultJointContinuation final {
- public:
-  ResultJointContinuation() = default;
-  ~ResultJointContinuation() noexcept;
-  ResultJointContinuation(ResultJointContinuation&&) noexcept;
-  ResultJointContinuation& operator=(ResultJointContinuation&&) noexcept;
-  ResultJointContinuation(const ResultJointContinuation&) = delete;
-  ResultJointContinuation& operator=(const ResultJointContinuation&) = delete;
-  template <class State, class... Args>
-  static Result<ResultJointContinuation> make(const BufferAllocator& allocator,
-                                              Args&&... args) {
-    static_assert(alignof(State) <= alignof(std::max_align_t),
-                  "overaligned Result joint state");
-    static_assert(std::is_nothrow_destructible<State>::value,
-                  "Result joint state destructor must not throw");
-    auto memory = allocator.allocate(sizeof(State));
-    if (!memory.ok())
-      return Result<ResultJointContinuation>(memory.status());
-    ResultJointContinuation continuation;
-    continuation.storage_ = memory.take_value();
-    new (continuation.storage_.data()) State(std::forward<Args>(args)...);
-    continuation.destroy_ = [](void* state) noexcept {
-      static_cast<State*>(state)->~State();
-    };
-    continuation.poll_ = [](void* state, const ResultJointPhase& phase) {
-      return static_cast<State*>(state)->poll(phase);
-    };
-    return Result<ResultJointContinuation>(std::move(continuation));
-  }
-  bool valid() const noexcept { return poll_ != nullptr; }
-  /** @brief Runs one synchronous callback round for a ready member subset.
-   * Concurrent or reentrant poll attempts are rejected without changing the
-   * active poll. The host validates the Root-owned outcome vector, member
-   * identities, Need containers, selected-port constraints and publications
-   * before returning any member outcome. Need entries are capped cumulatively
-   * at 65,536 for the round, and each envelope is precharged before its
-   * entries are traversed. A malformed round latches a sticky group error;
-   * a valid local error remains attached to its member. Cancelled
-   * members receive a local Cancelled outcome and are omitted from the
-   * callback. For payload-role tensor Needs, the host unions transport only
-   * within one member, input port and tensor slot. A ColorArray tuple must be
-   * complete in that union before any member outcome is exposed; split Needs
-   * from different members, ports or slots cannot complete one another.
-   * Descriptor-only Needs do not contribute payload transport.
-   */
-  Result<ResourceVector<ResultJointOutcome>> poll(
-      const ResultJointPhase& phase);
-
- private:
-  friend class OperationRegistry;
-  struct Member {
-    AtomKey key;
-    std::uint32_t tensor_slot = 0;
-    ResourceString semantic_key, snapshot_identity;
-    std::optional<Footprint> outputs, requested_outputs;
-    std::shared_ptr<const PreparedOperation> prepared;
-    ResourceBindings resources;
-    std::shared_ptr<plugin_internal::ResultPayloadBound> payload_bound;
-    std::optional<std::uint64_t> payload_limit;
-    CancellationToken cancellation;
-    bool terminal = false, semantic_terminal = false;
-  };
-  void reset() noexcept;
-  Result<ResourceVector<ResultJointOutcome>> poll_ready(
-      const ResultJointPhase& phase);
-  std::optional<Status> terminal_failure_;
-  std::shared_ptr<const void> definition_;
-  std::optional<ResourceBudget> root_;
-  ResourceVector<Member> members_;
-  std::uint64_t workspace_bytes_ = 0;
-  std::uint32_t contract_ = 1;
-  MutableBuffer storage_;
-  using Destroy = void (*)(void*) noexcept;  // NOLINT(readability/casting)
-  Destroy destroy_ = nullptr;
-  Result<ResourceVector<ResultJointOutcome>> (*poll_)(
-      void*, const ResultJointPhase&) = nullptr;
-  std::atomic<bool> active_{false};
-};
-/** @brief Starts shared state for a validated CPU Result joint invocation.
- * Contract 1 accepts 2..64 distinct Atomic output indices; contract 2 accepts
- * 1..64 distinct AtomKeys and may repeat an output index at different
- * coordinates. Every declared output is Atomic, with RequestFailureOnly for
- * contract 1 or PerAtomOutcome for contract 2. Members share one prepared
- * static invocation and nonempty routing `snapshot_identity`. Each tensor
- * query closes to one Atomic observation. The callback receives closed queries
- * for non-cancelled members, which may be a one-member subset. The registry
- * retains raw queries for later comparison and limits state allocation.
- */
-using ResultJointStart = std::function<Result<ResultJointContinuation>(
-    const ResourceVector<ResultProgramQuery>&, const BufferAllocator&)>;
 using ResultProgramStart = std::function<Result<ResultContinuation>(
     const ResultProgramQuery&, const BufferAllocator&)>;
 }  // namespace ps

@@ -364,9 +364,7 @@ void boundaries(ps::CpuNumericProfile profile) {
     schema.tensors.push_back(tensor);
     auto rejected = registry->resolve_traits(
         node.operation,
-        {ps::OperationMetadata{{},
-                               {},
-                               std::make_shared<ps::SchemaTemplate>(schema)}},
+        {ps::OperationMetadata{std::make_shared<ps::SchemaTemplate>(schema)}},
         node.parameters);
     require(!rejected.ok() &&
                 rejected.status().code == ps::ErrorCode::TypeMismatch &&
@@ -790,7 +788,7 @@ void source_node(Fixture* fixture,
     output.result_schema->publication = ps::PublishPolicy::StablePrefix;
   output.output_schema.result_schema_id = output.result_schema->id;
   output.output_schema.result_schema_version = output.result_schema->version;
-  output.region_rule = ps::OperationRegionRule::Dependency;
+  output.region_rule = ps::OperationRegionRule::Tiled;
   output.regional_atomic = true;
   output.continuation_bytes = sizeof(SourceProgram);
   output.maximum_dependency_stages = fail_tail ? 2 : 1;
@@ -907,10 +905,9 @@ void cache_and_lifetime(ps::CpuNumericProfile profile) {
       auto cold = take(demand.request({{"values", query}}));
       check_numeric(cold, profile, integral ? 4 : 3);
       retained = cold.results.at("values");
-      require(take(demand.request({{"values", query}}))
-                      .results.at("values")
-                      .object_id() == retained.object_id(),
-              "same frozen demand shares scan Result identity");
+      require(
+          take(demand.request({{"values", query}})).diagnostics.cache_hits > 0,
+          "repeated scan demand reuses bounded completed cache");
       auto fresh_bindings = fixture.bind(root);
       auto fresh = take(context.freeze(plan.plan, fresh_bindings));
       auto warm = take(context.execute_fragments(fresh, {{"values", query}}));

@@ -4,9 +4,9 @@
 #include <utility>
 #include <vector>
 
-#include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "data/content_digest.hpp"
 #include "photospider/photospider.hpp"
+#include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
@@ -106,11 +106,26 @@ int generic_snapshots() {
            ErrorCode::ResourceExhausted);
   PS_CHECK(bounded.live_bytes() == 0);
   // Public compile/execute and frozen capture consume generic snapshots.
-  auto registry = make_default_operation_registry();
+  auto registry = std::make_shared<OperationRegistry>();
+  OperationDefinition identity;
+  identity.key = "test.snapshot_identity";
+  auto schema = multi_result::schema(ElementType::Float64, {2});
+  identity.traits.outputs[0] = multi_result::output("value", schema);
+  identity.traits.input_count = 1;
+  identity.traits.input_schema.resize(1);
+  identity.traits.input_schema[0].kind = OperationPortKind::Result;
+  identity.traits.input_schema[0].tensor_key = "number";
+  identity.start_result = [](const ResultProgramQuery&,
+                             const BufferAllocator& allocator) {
+    return ResultContinuation::make<multi_result::Program>(allocator, 0);
+  };
+  PS_CHECK(registry->register_operation(std::move(identity)).ok());
+  PS_CHECK(registry->freeze().ok());
   WorkflowDocument document;
-  numeric_result_fixture::declare_sources(&document, {f64});
+  document.inputs = {multi_result::declaration(1, "input", schema)};
   document.inputs[0].name = "input";
-  document.nodes = {{1, "numeric.mean", {WorkflowInputReference{1}}, {}}};
+  document.nodes = {
+      {1, "test.snapshot_identity", {WorkflowInputReference{1}}, {}}};
   document.outputs = {{"result", 1, "value"}};
   GraphContext graph(document);
   Compiler compiler(registry);
@@ -129,23 +144,22 @@ int generic_snapshots() {
                            "snapshot.input")
           .take_value();
   PS_CHECK(input_builder
-               .bind_descriptor_relation(
-                   ResultRelation::cartesian(root, 1, {}).take_value())
+               .publish_tensor(0, backing.region(), backing.layout(),
+                               root.reference(backing.storage()).take_value())
                .ok());
-  PS_CHECK(
-      input_builder
-          .publish_tensor(0, backing.region(), backing.layout(),
-                          root.reference(backing.storage()).take_value(),
-                          ResultRelation::cartesian(root, 2, {}).take_value(),
-                          {true, true, true, true})
-          .ok());
   auto input = input_builder.seal().take_value();
   auto frozen = execution.freeze(plan, {{{"input", input}}}).take_value();
   input = {};
   input_builder = {};
   backing = {};
   auto result = execution.execute(frozen);
-  PS_CHECK(result.ok() && test::named_scalar(result.value(), "result") == 0);
+  PS_CHECK(result.ok());
+  auto output = result.value().results.at("result");
+  auto facts = output.descriptor().take_value();
+  double values[2] = {1, 1};
+  PS_CHECK(output.read_tensor(facts, 0, {0}, &values[0], sizeof(double)).ok());
+  PS_CHECK(output.read_tensor(facts, 0, {1}, &values[1], sizeof(double)).ok());
+  PS_CHECK(values[0] == 0 && values[1] == 0);
   return 0;
 }
 }  // namespace

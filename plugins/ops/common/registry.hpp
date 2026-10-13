@@ -1,0 +1,65 @@
+#pragma once
+
+#include "photospider/plugin/operation_registry.hpp"
+
+namespace ps::plugin_internal {
+Status register_rgb_basis(OperationRegistry* registry);
+Status register_metadata_assignment(OperationRegistry* registry);
+Status register_channel_assembly(OperationRegistry* registry);
+Status register_channel_literal_like(OperationRegistry* registry);
+Status register_alpha_operations(OperationRegistry* registry);
+Status register_channel_extraction(OperationRegistry* registry);
+Status register_model_conversions(OperationRegistry* registry);
+Status register_numeric_conversion(OperationRegistry* registry);
+Status register_transfer_operations(OperationRegistry* registry);
+/** @brief Registers the source-tree operations grouped by docs/built-in_ops. */
+Status register_builtin_operations(OperationRegistry* registry);
+Status register_numeric_layouts(OperationRegistry* registry);
+Status register_numeric_indexing(OperationRegistry* registry);
+Status register_lut1d_application(OperationRegistry* registry);
+Status register_lut3d_application(OperationRegistry* registry);
+Status register_lut3d_bake_results(OperationRegistry* registry);
+Status register_lut3d_bake_geometry(OperationRegistry* registry);
+Status register_log_shapers(OperationRegistry* registry);
+Status register_parametric_bezier(OperationRegistry* registry);
+Status register_bezier_function(OperationRegistry* registry);
+Status register_color_ramps(OperationRegistry* registry);
+Status register_nonuniform_lowpass(OperationRegistry* registry);
+Status register_uniform_lowpass(OperationRegistry* registry);
+Status register_curve_inverse(OperationRegistry* registry);
+Status register_curve_interpolation(OperationRegistry* registry);
+Status register_numeric_expression(OperationRegistry* registry);
+Status register_numeric_binary(OperationRegistry* registry);
+Status register_numeric_unary(OperationRegistry* registry);
+Status register_numeric_calculus(OperationRegistry* registry);
+Status register_numeric_matrix(OperationRegistry* registry);
+Status register_numeric_scans(OperationRegistry* registry);
+Status register_numeric_reductions(OperationRegistry* registry);
+Status register_numeric_ordering(OperationRegistry* registry);
+Status register_numeric_interpolation(OperationRegistry* registry);
+Status register_numeric_ranges(OperationRegistry* registry);
+Status register_numeric_comparisons(OperationRegistry* registry);
+Status register_numeric_arrays(OperationRegistry* registry);
+Status register_numeric_sequences(OperationRegistry* registry);
+Status register_numeric_add(OperationRegistry* registry);
+Status register_numeric_subtract(OperationRegistry* registry);
+Status register_numeric_multiply(OperationRegistry* registry);
+Status register_numeric_divide(OperationRegistry* registry);
+Status register_numeric_clamp(OperationRegistry* registry);
+Status register_numeric_mean(OperationRegistry* registry);
+Status register_numeric_ordered_scan(OperationRegistry* registry);
+Status register_numeric_variance(OperationRegistry* registry);
+Status register_numeric_sample_expression(OperationRegistry* registry);
+Status register_lut_apply_1d(OperationRegistry* registry);
+Status register_stmap(OperationRegistry* registry);
+Status register_curve_sample_linear(OperationRegistry* registry);
+Status register_curve_sample_monotone(OperationRegistry* registry);
+Status register_field_apply_lut_1d(OperationRegistry* registry);
+Status register_numeric_minimum(OperationRegistry* registry);
+Status register_numeric_maximum(OperationRegistry* registry);
+Status register_numeric_abs(OperationRegistry* registry);
+Status register_field_smoothstep(OperationRegistry* registry);
+Status register_core_constant(OperationRegistry* registry);
+Status register_core_identity(OperationRegistry* registry);
+Status register_math_add(OperationRegistry* registry);
+}  // namespace ps::plugin_internal

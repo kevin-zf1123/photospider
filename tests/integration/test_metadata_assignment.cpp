@@ -9,9 +9,11 @@
 #include <utility>
 #include <vector>
 
+#include "../../examples/common/tile_request.hpp"
 #include "icc_fixture.hpp"  // NOLINT(build/include_subdir)
 #include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
+#include "support/tile_oracle.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -185,10 +187,18 @@ struct Fixture final {
     graph = std::make_unique<GraphContext>(document);
     Compiler compiler(registry);
     PlanningOptions options;
-    if (region) {
-      options.output_regions = {{"result", *region}};
-    }
-    return compiler.compile(*graph, options, resources);
+    auto compiled = compiler.compile(*graph, options, resources);
+    if (!compiled.ok() || !region)
+      return compiled;
+    auto selected = workflow_example::select_tiles(
+        take(context->resource_budget()), compiled.value().plan, "result",
+        *region);
+    if (!selected.ok())
+      return Result<CompiledWorkflow>(selected.status());
+    auto stages = compiled.take_value();
+    stages.plan = selected.take_value();
+    compiled = Result<CompiledWorkflow>(std::move(stages));
+    return compiled;
   }
   ExecutionResult run(WorkflowNodeOutput edge,
                       const std::optional<Region>& region = {}) {
@@ -201,10 +211,12 @@ struct Fixture final {
   void oracle(const ExecutionResult& result, const Region& region) const {
     const auto& value = result.results.at("result");
     const auto facts = take(value.descriptor());
+    const auto complete = tile_oracle::coverage(value.schema(), region);
     auto fp = take(
-        Footprint::from_regions(schema.tensors[0].sample_shape(), {region}));
-    require(facts.tensor_coverage(0) == fp, "exact Result coverage");
-    auto window = take(value.acquire_tensor(facts, 0, region));
+        Footprint::from_regions(schema.tensors[0].sample_shape(), {complete}));
+    require(facts.tensor_coverage(0) == fp,
+            "complete tile or Whole Result coverage");
+    auto window = take(value.acquire_tensor(facts, 0, complete));
     const auto width = Value::element_size(descriptor.element_type);
     take(fp.visit(
         [&](const auto& at) {
@@ -376,7 +388,7 @@ void dtypes_and_layouts() {
         dims[2] = {2, 1};
       }
       Region roi(dims);
-      Fixture f(d, {}, true, tiled, roi);
+      Fixture f(d, {}, true, tiled);
       for (const auto* policy : {"auto", "view", "materialize"}) {
         format::MetadataOptions o;
         o.layout = policy;
@@ -389,11 +401,15 @@ void dtypes_and_layouts() {
                  owner(f.bindings.inputs[0].result, roi)) ==
                     (std::string(policy) != "materialize"),
                 "planar owner contract");
-        auto wrong = dims;
-        wrong[1] = {0, 1};
-        auto compiled = take(f.build(edge, Region(wrong)));
+        f.coverage = roi;
+        f.bind();
+        auto compiled = take(f.build(edge, roi));
         auto missing = f.context->execute(compiled.plan, f.bindings);
-        require(!missing.ok(), "view cannot invent missing coverage");
+        require(!missing.ok(),
+                "complete requested tiles require coverage outside the "
+                "original rectangle");
+        f.coverage.reset();
+        f.bind();
         auto live = take(f.build(edge, roi));
         CancellationSource stop;
         stop.cancel();
@@ -865,10 +881,11 @@ void result_contract() {
                   result.schema().tensors[0].batch_axes ==
                       f.schema.tensors[0].batch_axes,
               "metadata edit retains schema and publication contract");
-          const auto query = take(Footprint::from_regions(shape, {q}));
+          const auto query = take(Footprint::from_regions(
+              shape, {tile_oracle::coverage(result.schema(), q)}));
           require(
               take(output.dependencies.source_support()).at("source") == query,
-              "Data support is exactly Q including batch axes");
+              "Data support covers complete output tiles or Whole");
           unsigned visits = 0;
           take(take(result.tensor_relation(0))
                    .project(query, [&](auto support, const auto* samples) {

@@ -8,8 +8,8 @@
 #include <utility>
 #include <vector>
 
-#include "00-foundation/tensor_program.hpp"
 #include "02-format-color/transfer_program.hpp"
+#include "common/tensor_program.hpp"
 #include "photospider/data/tensor_description.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 
@@ -45,11 +45,7 @@ struct Preparation final {
   SequenceProfile profile = SequenceProfile::Strict;
   std::optional<std::uint32_t> axis, sample_axis;
   std::string layout;
-  struct Span {
-    Region region;
-    std::uint32_t roles;
-  };
-  std::vector<Span> spans;
+
   std::vector<std::uint64_t> components;
   bool all = false, semantic = true, materialize = false, narrow = true;
   bool selected(std::uint64_t index) const {
@@ -445,26 +441,6 @@ inline Result<OperationPreparation> prepare(
     output_tensor.layout.row_pitch_bytes = 0;
   output.metadata.result_schema =
       std::make_shared<SchemaTemplate>(std::move(schema));
-  if (!state->sample_axis || state->all || !state->semantic) {
-    state->spans.push_back(
-        {Region::whole(full_shape), state->semantic ? 5U : 1U});
-  } else {
-    std::vector<std::uint64_t> boundaries{0, shape[*state->axis]};
-    for (auto index : state->components) {
-      boundaries.push_back(index);
-      boundaries.push_back(index + 1);
-    }
-    std::sort(boundaries.begin(), boundaries.end());
-    boundaries.erase(std::unique(boundaries.begin(), boundaries.end()),
-                     boundaries.end());
-    for (std::size_t i = 1; i < boundaries.size(); ++i) {
-      auto dimensions = Region::whole(full_shape).dimensions();
-      dimensions[*state->sample_axis] = {boundaries[i - 1],
-                                         boundaries[i] - boundaries[i - 1]};
-      state->spans.push_back({Region(std::move(dimensions)),
-                              state->selected(boundaries[i - 1]) ? 5U : 1U});
-    }
-  }
   OperationPreparation result;
   result.outputs.push_back(std::move(output));
   result.state = std::move(state);

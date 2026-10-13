@@ -17,10 +17,14 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
+#include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
+using multi_result::check;
+using multi_result::take;
 using Poll = Result<ResultProgramPoll>;
 SchemaTemplate ids_schema() {
   SchemaTemplate schema;
@@ -59,19 +63,8 @@ Result<ResultRef> source_result(const ResourceBudget& root,
   if (!started.ok())
     return Result<ResultRef>(started.status());
   auto builder = started.take_value();
-  auto descriptor = ResultRelation::cartesian(root, 1, {});
-  if (!descriptor.ok())
-    return Result<ResultRef>(descriptor.status());
-  auto status = builder.bind_descriptor_relation(descriptor.take_value());
-  if (!status.ok())
-    return Result<ResultRef>(status);
-  auto relation = ResultRelation::cartesian(
-      root, schema.tensors[0].sample_count().value(), {});
-  if (!relation.ok())
-    return Result<ResultRef>(relation.status());
-  status =
-      builder.publish_tensor(0, backing.region(), backing.bytes(),
-                             relation.take_value(), {true, true, true, true});
+  Status status;
+  status = builder.publish_tensor(0, backing.region(), backing.bytes());
   return status.ok() ? builder.seal() : Result<ResultRef>(status);
 }
 double scalar_result(const ResultRef& result) {
@@ -90,7 +83,7 @@ OperationTraits traits(SchemaTemplate schema, std::uint32_t inputs,
   t.input_count = inputs;
   t.input_schema.resize(inputs);
   auto& output = t.outputs[0];
-  output.region_rule = OperationRegionRule::Dependency;
+  output.region_rule = OperationRegionRule::Tiled;
   output.continuation_bytes = state;
   output.maximum_dependency_stages = 100000;
   output.output_schema.kind = OperationPortKind::Result;
@@ -101,326 +94,144 @@ OperationTraits traits(SchemaTemplate schema, std::uint32_t inputs,
   return t;
 }
 struct SelectState {
-  std::uint64_t position = 0, count = 0, emitted = 0, batch = 0;
-  unsigned stage = 0;
+  std::uint64_t position = 0, count = 0, emitted = 0;
+  unsigned stage = 0, failure = 0;
+  bool supplied = false;
   ResultBuilder builder;
-  ResultRelation relation;
-  unsigned illegal_io = 0;
   std::atomic<unsigned>* reads;
-  SelectState(std::uint64_t n, unsigned forbidden,
-              std::atomic<unsigned>* counter)
-      : count(n), illegal_io(forbidden), reads(counter) {}
+  ResultRef* captured;
+  SelectState(std::uint64_t count, unsigned failure,
+              std::atomic<unsigned>* reads, ResultRef* captured)
+      : count(count), failure(failure), reads(reads), captured(captured) {}
   Poll poll(const ResultProgramPhase& phase) {
-    if (stage == 0) {
-      if (illegal_io == 1 || illegal_io == 2 || illegal_io == 4) {
-        auto ignored = TemporaryStorage::create(phase.resources);
-        static_cast<void>(ignored);
-        if (illegal_io == 2)
-          throw std::runtime_error("throw after protocol violation");
-        if (illegal_io == 4)
-          static_cast<void>(phase.consume_work(UINT64_MAX));
-      }
-      auto made = ResultBuilder::start(
+    if (!stage++) {
+      builder = take(ResultBuilder::start(
           phase.resources, *phase.query.output.result_schema,
-          phase.query.semantic_key, {count, count * 8});
-      if (!made.ok())
-        return Poll(made.status());
-      builder = made.take_value();
-      auto support = ResultRelation::cartesian(
-          phase.resources, count,
-          {0, 15, 0, count, ResultSupportTarget::Tensor, 0},
-          DependencyGuarantee::Conservative);
-      if (!support.ok())
-        return Poll(support.status());
-      relation = support.take_value();
-      auto descriptor = ResultRelation::cartesian(
-          phase.resources, 1, {0, 15, 0, count, ResultSupportTarget::Tensor, 0},
-          DependencyGuarantee::Conservative);
-      if (!descriptor.ok())
-        return Poll(descriptor.status());
-      auto bound = builder.bind_descriptor_relation(descriptor.take_value());
-      if (!bound.ok())
-        return Poll(bound);
-      auto published =
-          builder.publish(0, 0, relation, {true, true, true, true});
-      if (!published.ok())
-        return Poll(published);
-      stage = 1;
+          phase.query.semantic_key, {count, count * 8}));
+      check(builder.publish(0, 0));
+      if (failure == 3)
+        *captured = builder.reference();
       return Poll(ResultPublication{builder.reference(), false});
     }
-    if (stage == 1 && illegal_io == 3) {
-      Status failure{ErrorCode::OperationFailed,
-                     "producer stopped after prefix",
-                     FailureReason::NotConverged};
-      builder.fail(failure);
-      return Poll(failure);
+    if (failure == 3) {
+      Status status{ErrorCode::OperationFailed, "producer stopped after prefix",
+                    FailureReason::NotConverged};
+      builder.fail(status);
+      return Poll(status);
     }
-    if (stage == 3) {
-      auto status =
-          builder.publish(0, emitted, relation, {true, true, true, true});
-      if (!status.ok())
-        return Poll(status);
-      stage = 1;
-      return Poll(ResultPublication{builder.reference(), false});
+    if (position < count && !supplied) {
+      supplied = true;
+      return Poll(ResultProgramNeed{{{0, true, false, {}}}});
     }
-    if (stage == 2) {
-      auto workspace = phase.allocator.allocate(batch * 8);
-      if (!workspace.ok())
-        return Poll(workspace.status());
-      auto bytes = workspace.take_value();
+    if (position < count) {
+      const auto batch =
+          std::min(count - position,
+                   std::max<std::uint64_t>(1, phase.query.page_bytes / 16));
+      auto bytes = take(phase.allocator.allocate(batch * 8));
       std::uint64_t selected = 0;
       for (std::uint64_t i = 0; i < batch; ++i) {
-        auto charged = phase.consume_work(1);
-        if (!charged.ok())
-          return Poll(charged);
+        check(phase.consume_work(1));
         std::uint8_t value = 0;
-        auto read = phase.read_tensor(0, 0, {position + i}, &value, 1);
-        if (!read.ok())
-          return Poll(read);
+        check(phase.read_tensor(0, 0, {position + i}, &value, 1));
         ++*reads;
         if (value % 3 == 1) {
-          auto id = static_cast<std::int64_t>(position + i);
-          std::memcpy(bytes.data() + selected * 8, &id, 8);
-          ++selected;
+          const auto id = static_cast<std::int64_t>(position + i);
+          std::memcpy(bytes.data() + selected++ * 8, &id, 8);
         }
       }
       position += batch;
-      if (selected) {
-        auto exact = phase.allocator.allocate(selected * 8);
-        if (!exact.ok())
-          return Poll(exact.status());
-        auto payload = exact.take_value();
-        std::memcpy(payload.data(), bytes.data(), selected * 8);
-        auto append =
-            builder.prepare_append(0, selected, std::move(payload).freeze());
-        if (!append.ok())
-          return Poll(append.status());
-        emitted += selected;
-        stage = 3;
-        return Poll(ResultProgramNeed{{}, {append.take_value()}});
-      }
-      stage = 1;
+      supplied = false;
+      if (selected)
+        check(builder.append(0, selected, {bytes.data(), selected * 8}));
+      emitted += selected;
+      check(builder.publish(0, emitted));
+      return Poll(ResultPublication{builder.reference(), false});
     }
-    if (position == count) {
-      auto sealed = builder.seal();
-      return sealed.ok() ? Poll(ResultPublication{sealed.take_value(), true})
-                         : Poll(sealed.status());
-    }
-    batch = std::min<std::uint64_t>(
-        count - position,
-        std::max<std::uint64_t>(1, phase.query.page_bytes / 16));
-    stage = 2;
-    auto samples = Footprint::from_regions(
-        phase.query.inputs[0].result_schema->tensors[0].sample_shape(),
-        {Region({{position, batch}})});
-    if (!samples.ok())
-      return Poll(samples.status());
-    return Poll(ResultProgramNeed{{}, {}, {{0, 0, samples.take_value(), 15}}});
+    return Poll(ResultPublication{take(builder.seal()), true});
   }
 };
 struct SumState {
-  unsigned stage = 0;
-  ResultRef source;
-  ResultDescriptor descriptor;
-  ResultBuilder builder;
-  std::uint64_t position = 0;
-  std::int64_t sum = 0;
+  bool requested = false;
   Poll poll(const ResultProgramPhase& phase) {
-    if (stage == 0) {
-      stage = 1;
-      return Poll(ResultProgramNeed{{{0, 0, true, 0}}, {}});
+    if (!requested) {
+      requested = true;
+      return Poll(ResultProgramNeed{{{0, true, false, {}}}});
     }
-    if (stage == 1) {
-      source = phase.results.at(0);
-      auto facts = source.descriptor();
-      if (!facts.ok())
-        return Poll(facts.status());
-      descriptor = facts.take_value();
-      auto made = ResultBuilder::start(
-          phase.resources, *phase.query.output.result_schema,
-          phase.query.semantic_key, {}, {source.object_id()});
-      if (!made.ok())
-        return Poll(made.status());
-      builder = made.take_value();
-      auto witness = ResultRelation::cartesian(
-          phase.resources, 1, {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0},
-          DependencyGuarantee::Conservative);
-      if (!witness.ok())
-        return Poll(witness.status());
-      auto bound = builder.bind_descriptor_relation(witness.value());
-      if (!bound.ok())
-        return Poll(bound);
-      stage = 2;
-    }
-    if (stage == 3) {
-      const auto& page =
-          std::get<std::shared_ptr<const CpuStorage>>(phase.io.at(0));
+    const auto& source = phase.results.at(0);
+    auto descriptor = take(source.descriptor());
+    std::int64_t sum = 0;
+    for (std::uint64_t position = 0; position < descriptor.rows(0);) {
+      const auto count =
+          std::min(descriptor.rows(0) - position, phase.query.page_bytes / 8);
+      auto page = take(take(source.prepare_read(descriptor, 0, position, count))
+                           .load(phase.query.page_bytes));
       for (std::size_t offset = 0; offset < page->bytes().size(); offset += 8) {
         std::int64_t id = 0;
         std::memcpy(&id, page->bytes().data() + offset, 8);
         sum += id;
       }
-      stage = 2;
-    }
-    if (stage == 2 && position < descriptor.rows(0)) {
-      const auto count = std::min<std::uint64_t>(descriptor.rows(0) - position,
-                                                 phase.query.page_bytes / 8);
-      auto read = source.prepare_read(descriptor, 0, position, count);
-      if (!read.ok())
-        return Poll(read.status());
       position += count;
-      stage = 3;
-      return Poll(ResultProgramNeed{{}, {read.take_value()}});
     }
-    if (stage == 2) {
-      auto buffer = phase.allocator.allocate(8);
-      if (!buffer.ok())
-        return Poll(buffer.status());
-      auto bytes = buffer.take_value();
-      std::memcpy(bytes.data(), &sum, 8);
-      auto write = builder.prepare_append(0, 1, std::move(bytes).freeze());
-      if (!write.ok())
-        return Poll(write.status());
-      stage = 4;
-      return Poll(ResultProgramNeed{{}, {write.take_value()}});
-    }
-    auto support = ResultRelation::cartesian(
-        phase.resources, 1,
-        {0, 1, 0, descriptor.rows(0), ResultSupportTarget::Field, 0},
-        DependencyGuarantee::Conservative);
-    if (!support.ok())
-      return Poll(support.status());
-    auto published =
-        builder.publish(0, 1, support.take_value(), {true, true, true, true});
-    if (!published.ok())
-      return Poll(published);
-    auto sealed = builder.seal();
-    return sealed.ok() ? Poll(ResultPublication{sealed.take_value(), true})
-                       : Poll(sealed.status());
+    auto builder = take(ResultBuilder::start(
+        phase.resources, *phase.query.output.result_schema,
+        phase.query.semantic_key, {}, {source.object_id()}));
+    check(
+        builder.append(0, 1, {reinterpret_cast<const std::uint8_t*>(&sum), 8}));
+    check(builder.publish(0, 1));
+    return Poll(ResultPublication{take(builder.seal()), true});
   }
 };
-// Identity copy with real prefix-to-prefix dependencies and mandatory paging.
+// Whole input authorization, bounded field paging, and staged publication.
 struct ForwardState {
-  unsigned stage = 0;
-  std::uint64_t position = 0, batch = 0;
-  ResultRef source;
+  bool requested = false;
+  std::uint64_t position = 0;
   ResultBuilder builder;
-  ResultRelation support;
   Poll poll(const ResultProgramPhase& phase) {
-    if (stage == 0) {
-      stage = 1;
-      return Poll(ResultProgramNeed{{{0, 0, false, position + 1}}, {}});
+    if (!requested) {
+      requested = true;
+      return Poll(ResultProgramNeed{{{0, true, false, {}}}});
     }
-    if (stage == 1) {
-      source = phase.results.at(0);
-      auto facts = source.descriptor(false);
-      if (!facts.ok())
-        return Poll(facts.status());
-      if (!builder.reference().valid()) {
-        auto made = ResultBuilder::start(
-            phase.resources, *phase.query.output.result_schema,
-            phase.query.semantic_key, {37, 37 * 8}, {source.object_id()});
-        if (!made.ok())
-          return Poll(made.status());
-        builder = made.take_value();
-        auto relation = ResultRelation::identity(phase.resources, 37, 0, 1,
-                                                 ResultSupportTarget::Field, 0);
-        if (!relation.ok())
-          return Poll(relation.status());
-        support = relation.take_value();
-        auto descriptor = ResultRelation::cartesian(
-            phase.resources, 1,
-            {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0},
-            DependencyGuarantee::Conservative);
-        if (!descriptor.ok())
-          return Poll(descriptor.status());
-        auto bound = builder.bind_descriptor_relation(descriptor.take_value());
-        if (!bound.ok())
-          return Poll(bound);
-      }
-      if (position == facts.value().rows(0) && facts.value().sealed()) {
-        auto sealed = builder.seal();
-        return sealed.ok() ? Poll(ResultPublication{sealed.take_value(), true})
-                           : Poll(sealed.status());
-      }
-      batch = std::min(facts.value().rows(0) - position,
-                       phase.query.page_bytes / 8);
-      auto read = source.prepare_read(facts.value(), 0, position, batch);
-      if (!read.ok())
-        return Poll(read.status());
-      stage = 2;
-      return Poll(ResultProgramNeed{{}, {read.take_value()}});
-    }
-    if (stage == 2) {
-      auto append = builder.prepare_append(
-          0, batch,
-          std::get<std::shared_ptr<const CpuStorage>>(phase.io.at(0)));
-      if (!append.ok())
-        return Poll(append.status());
-      stage = 3;
-      return Poll(ResultProgramNeed{{}, {append.take_value()}});
-    }
+    const auto& source = phase.results.at(0);
+    auto facts = take(source.descriptor());
+    if (!builder.reference().valid())
+      builder = take(ResultBuilder::start(
+          phase.resources, *phase.query.output.result_schema,
+          phase.query.semantic_key, {37, 37 * 8}, {source.object_id()}));
+    if (position == facts.rows(0))
+      return Poll(ResultPublication{take(builder.seal()), true});
+    const auto batch =
+        std::min(facts.rows(0) - position, phase.query.page_bytes / 8);
+    auto page = take(take(source.prepare_read(facts, 0, position, batch))
+                         .load(phase.query.page_bytes));
+    check(builder.append(0, batch, page->bytes()));
     position += batch;
-    auto published =
-        builder.publish(0, position, support, {true, true, true, true});
-    if (!published.ok())
-      return Poll(published);
-    stage = 0;
+    requested = false;
+    check(builder.publish(0, position));
     return Poll(ResultPublication{builder.reference(), false});
   }
 };
 struct FirstState {
-  unsigned stage = 0;
+  bool requested = false;
   Poll poll(const ResultProgramPhase& phase) {
-    if (stage == 0) {
-      stage = 1;
-      return Poll(ResultProgramNeed{{{0, 0, false, 1}}, {}});
+    if (!requested) {
+      requested = true;
+      return Poll(ResultProgramNeed{{{0, true, false, {}}}});
     }
-    if (stage == 1) {
-      const auto& source = phase.results.at(0);
-      auto facts = source.descriptor(false);
-      if (!facts.ok())
-        return Poll(facts.status());
-      if (!facts.value().rows(0))
-        return Poll(Status{ErrorCode::TypeMismatch, "nonempty test fixture"});
-      auto read = source.prepare_read(facts.value(), 0, 0, 1);
-      if (!read.ok())
-        return Poll(read.status());
-      stage = 2;
-      return Poll(ResultProgramNeed{{}, {read.take_value()}});
-    }
+    const auto& source = phase.results.at(0);
+    auto facts = take(source.descriptor());
+    if (!facts.rows(0))
+      return Poll(Status{ErrorCode::TypeMismatch, "nonempty test fixture"});
+    auto page = take(take(source.prepare_read(facts, 0, 0, 1)).load(8));
     std::int64_t id = 0;
-    auto page = std::get<std::shared_ptr<const CpuStorage>>(phase.io.at(0));
     std::memcpy(&id, page->bytes().data(), 8);
     const double value = static_cast<double>(id);
-    auto started =
-        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key);
-    if (!started.ok())
-      return Poll(started.status());
-    auto builder = started.take_value();
-    auto basis = ResultRelation::cartesian(
-        phase.resources, 1, {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0},
-        DependencyGuarantee::Conservative);
-    if (!basis.ok())
-      return Poll(basis.status());
-    auto status = builder.bind_descriptor_relation(basis.take_value());
-    if (!status.ok())
-      return Poll(status);
-    auto relation = ResultRelation::cartesian(
-        phase.resources, 1, {0, 1, 0, 1, ResultSupportTarget::Field, 0},
-        DependencyGuarantee::Conservative);
-    if (!relation.ok())
-      return Poll(relation.status());
-    status = builder.publish_tensor(
+    auto builder = take(ResultBuilder::start(phase.resources,
+                                             *phase.query.output.result_schema,
+                                             phase.query.semantic_key));
+    check(builder.publish_tensor(
         0, Region::whole({1}),
-        ByteView(reinterpret_cast<const std::uint8_t*>(&value), 8),
-        relation.take_value(), {true, true, true, true});
-    if (!status.ok())
-      return Poll(status);
-    auto sealed = builder.seal();
-    return sealed.ok() ? Poll(ResultPublication{sealed.take_value(), true})
-                       : Poll(sealed.status());
+        {reinterpret_cast<const std::uint8_t*>(&value), 8}));
+    return Poll(ResultPublication{take(builder.seal()), true});
   }
 };
 int prefix_retirement(const std::shared_ptr<OperationRegistry>& registry,
@@ -436,8 +247,16 @@ int prefix_retirement(const std::shared_ptr<OperationRegistry>& registry,
     if (failure == 3)
       document.nodes.back().inputs = {WorkflowNodeOutput{1, "value"}};
     GraphContext graph(document);
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
-    ExecutionContext execution(registry, config);
+    auto plan =
+        Compiler(registry)
+            .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+            .take_value()
+            .plan;
+    auto concurrent_config = config;
+    // Two independent runs retain their own field and dependency metadata.
+    concurrent_config.managed_resources->capacity[ResourceKind::Host] *= 2;
+    concurrent_config.managed_resources->capacity[ResourceKind::Metadata] *= 2;
+    ExecutionContext execution(registry, concurrent_config);
     auto root = execution.resource_budget().take_value();
     auto source = source_result(root, *document.inputs[0].result_schema, input)
                       .take_value();
@@ -480,9 +299,7 @@ int prefix_retirement(const std::shared_ptr<OperationRegistry>& registry,
       PS_CHECK(changed.wait_for(lock, std::chrono::seconds(5),
                                 [&] { return entered; }));
     }
-    const auto entries = root.statistics().live[ResourceKind::Entries];
     const auto started_forward = forward_starts.load();
-    const auto shared_before = execution.cache_statistics().shared_computations;
     CancellationSource peer_cancel;
     auto b = std::async(std::launch::async, [&] {
       return execution.execute(frozen, peer_cancel.token(), options);
@@ -503,23 +320,8 @@ int prefix_retirement(const std::shared_ptr<OperationRegistry>& registry,
         changed.notify_all();
       }
     } release_on_exit{mutex, changed, release, cancelled, peer_cancel};
-    const auto limit =
-        std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (root.statistics().live[ResourceKind::Entries] <= entries &&
-           std::chrono::steady_clock::now() < limit)
-      std::this_thread::yield();
-    PS_CHECK(b.wait_for(std::chrono::milliseconds(20)) ==
-             std::future_status::timeout);
-    if (failure == 3) {
-      while (forward_starts == started_forward &&
-             execution.cache_statistics().shared_computations ==
-                 shared_before &&
-             std::chrono::steady_clock::now() < limit)
-        std::this_thread::yield();
-      PS_CHECK(forward_starts > started_forward ||
-               execution.cache_statistics().shared_computations >
-                   shared_before);
-    }
+    PS_CHECK(b.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    PS_CHECK(forward_starts > started_forward);
     if (failure == 0)
       cancelled.cancel();
     {
@@ -554,94 +356,31 @@ int prefix_retirement(const std::shared_ptr<OperationRegistry>& registry,
   return 0;
 }
 struct ForeignState {
-  const ResultIoRequest* request;
-  explicit ForeignState(const ResultIoRequest* value) : request(value) {}
   Poll poll(const ResultProgramPhase& phase) {
-    if (request)
-      return Poll(ResultProgramNeed{{}, {*request}});
     ResourceBudget other;
-    auto builder =
-        ResultBuilder::start(other, *phase.query.output.result_schema,
-                             phase.query.semantic_key)
-            .take_value();
-    auto descriptor =
-        ResultRelation::cartesian(other, 1, {0, 15, 0, 0},
-                                  DependencyGuarantee::Conservative)
-            .take_value();
-    auto rows = ResultRelation::cartesian(other, 0, {0, 15, 0, 0},
-                                          DependencyGuarantee::Conservative)
-                    .take_value();
-    auto bound = builder.bind_descriptor_relation(descriptor);
-    if (!bound.ok())
-      return Poll(bound);
-    auto published = builder.publish(0, 0, rows, {true, true, true, true});
-    if (!published.ok())
-      return Poll(published);
-    auto sealed = builder.seal();
-    return sealed.ok() ? Poll(ResultPublication{sealed.take_value(), true})
-                       : Poll(sealed.status());
+    auto builder = take(ResultBuilder::start(
+        other, *phase.query.output.result_schema, phase.query.semantic_key));
+    check(builder.publish(0, 0));
+    return Poll(ResultPublication{take(builder.seal()), true});
   }
 };
 int foreign_objects() {
   auto registry = std::make_shared<OperationRegistry>();
-  const ResultIoRequest* selected = nullptr;
   OperationDefinition operation;
   operation.key = "foreign";
   operation.traits = traits(ids_schema(), 0, sizeof(ForeignState));
-  operation.start_result = [&](const ResultProgramQuery&,
-                               const BufferAllocator& allocator) {
-    return ResultContinuation::make<ForeignState>(allocator, selected);
+  operation.start_result = [](const auto&, const auto& allocator) {
+    return ResultContinuation::make<ForeignState>(allocator);
   };
-  PS_CHECK(registry->register_operation(std::move(operation)).ok() &&
-           registry->freeze().ok());
+  check(registry->register_operation(std::move(operation)));
+  check(registry->freeze());
   WorkflowDocument document;
   document.nodes = {{1, "foreign", {}, {}}};
   document.outputs = {{"result", 1, "value"}};
   GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContextConfig config;
-  config.managed_resources = ResourceLimits{};
-  ExecutionContext execution(registry, config);
+  auto plan = take(Compiler(registry).compile(graph)).plan;
+  ExecutionContext execution(registry);
   PS_CHECK(execution.execute(plan).status().code == ErrorCode::InvalidArgument);
-  ResourceBudget other;
-  auto temporary = TemporaryStorage::create(other).take_value();
-  PS_CHECK(temporary.append_zeroed(8).ok());
-  auto builder =
-      ResultBuilder::start(other, sum_schema(), "foreign_ready").take_value();
-  auto support = ResultRelation::cartesian(other, 1, {0, 15, 0, 0},
-                                           DependencyGuarantee::Conservative)
-                     .take_value();
-  PS_CHECK(builder.bind_descriptor_relation(support).ok());
-  std::int64_t scalar = 7;
-  PS_CHECK(
-      builder
-          .append(0, 1,
-                  ByteView(reinterpret_cast<const std::uint8_t*>(&scalar), 8))
-          .ok());
-  PS_CHECK(builder.publish(0, 1, support, {true, true, true, true}).ok());
-  auto completed = builder.seal().take_value();
-  auto read = completed.prepare_read(completed.descriptor().value(), 0, 0, 1)
-                  .take_value();
-  auto pending =
-      ResultBuilder::start(other, sum_schema(), "foreign_pending").take_value();
-  auto bytes = other.allocator().allocate(8).take_value();
-  std::memcpy(bytes.data(), &scalar, 8);
-  auto write =
-      pending.prepare_append(0, 1, std::move(bytes).freeze()).take_value();
-  std::vector<ResultIoRequest> actions{ResultReadTemporary{temporary, 0, 8},
-                                       read, write};
-  const auto issued = other.statistics().issued.io_requests;
-  for (const auto& action : actions) {
-    selected = &action;
-    PS_CHECK(execution.execute(plan).status().code ==
-             ErrorCode::InvalidArgument);
-    PS_CHECK(other.statistics().issued.io_requests == issued);
-  }
-  ResourceBudget own;
-  auto local = ResultBuilder::start(own, ids_schema(), "local").take_value();
-  PS_CHECK(!local.bind_descriptor_relation(support).ok());
-  PS_CHECK(!ResultRelation::unite(own, {support}).ok());
-  PS_CHECK(!ResultRelation::compose(own, support, support, 100).ok());
   return 0;
 }
 struct ForeignBackingState {
@@ -654,18 +393,9 @@ struct ForeignBackingState {
     if (!started.ok())
       return Poll(started.status());
     auto builder = started.take_value();
-    auto basis = ResultRelation::cartesian(phase.resources, 1, {});
-    if (!basis.ok())
-      return Poll(basis.status());
-    auto status = builder.bind_descriptor_relation(basis.take_value());
-    if (!status.ok())
-      return Poll(status);
-    auto relation = ResultRelation::cartesian(phase.resources, 1, {});
-    if (!relation.ok())
-      return Poll(relation.status());
+    Status status;
     status = builder.publish_tensor(0, backing->region(), backing->layout(),
-                                    backing->storage(), relation.take_value(),
-                                    {true, true, true, true});
+                                    backing->storage());
     if (!status.ok())
       return Poll(status);
     auto sealed = builder.seal();
@@ -691,7 +421,11 @@ int foreign_backing() {
   document.nodes = {{1, "foreign_backing", {}, {}}};
   document.outputs = {{"value", 1, "value"}};
   GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   for (std::uint64_t limit : {0U, 8U}) {
     ExecutionContextConfig config;
     config.managed_resources = ResourceLimits{};
@@ -809,24 +543,14 @@ struct EffectState {
     if (!made.ok())
       return Poll(made.status());
     auto builder = made.take_value();
-    auto descriptor = ResultRelation::cartesian(phase.resources, 1, {});
-    if (!descriptor.ok())
-      return Poll(descriptor.status());
-    auto bound = builder.bind_descriptor_relation(descriptor.take_value());
-    if (!bound.ok())
-      return Poll(bound);
     for (std::uint32_t slot = 0; slot < 2; ++slot) {
       const double numbers[] = {42.0 + slot, 43.0 + slot};
       const auto count = slot + 1;
       const auto published_count = *mode == 3 && slot == 1 ? 1U : count;
-      auto support = ResultRelation::cartesian(phase.resources, count, {});
-      if (!support.ok())
-        return Poll(support.status());
       auto status = builder.publish_tensor(
           slot, Region({{0, published_count}}),
           ByteView(reinterpret_cast<const std::uint8_t*>(numbers),
-                   published_count * 8),
-          support.take_value(), {true, true, true, true});
+                   published_count * 8));
       if (!status.ok())
         return Poll(status);
     }
@@ -840,10 +564,7 @@ struct EffectReaderState {
   Poll poll(const ResultProgramPhase& phase) {
     if (!waiting) {
       waiting = true;
-      auto first = Footprint::all({1}).take_value();
-      auto second = Footprint::all({2}).take_value();
-      return Poll(
-          ResultProgramNeed{{}, {}, {{0, 0, first, 15}, {0, 1, second, 15}}});
+      return Poll(ResultProgramNeed{{{0, true, false, {}}}});
     }
     double first = 0, second = 0;
     auto status = phase.tensors->at({0, 0}).read({0}, &first, 8);
@@ -860,29 +581,10 @@ struct EffectReaderState {
     if (!made.ok())
       return Poll(made.status());
     auto builder = made.take_value();
-    auto descriptor = ResultRelation::cartesian(
-        phase.resources, 1, {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0});
-    if (!descriptor.ok())
-      return Poll(descriptor.status());
-    auto status_bound =
-        builder.bind_descriptor_relation(descriptor.take_value());
-    if (!status_bound.ok())
-      return Poll(status_bound);
-    auto left = ResultRelation::cartesian(
-        phase.resources, 1, {0, 5, 0, 1, ResultSupportTarget::Tensor, 0});
-    auto right = ResultRelation::cartesian(
-        phase.resources, 1, {0, 5, 0, 2, ResultSupportTarget::Tensor, 1});
-    if (!left.ok() || !right.ok())
-      return Poll(left.ok() ? right.status() : left.status());
-    auto support = ResultRelation::unite(
-        phase.resources, {left.take_value(), right.take_value()});
-    if (!support.ok())
-      return Poll(support.status());
     const double value = first + second;
     status = builder.publish_tensor(
         0, Region::whole({1}),
-        ByteView(reinterpret_cast<const std::uint8_t*>(&value), 8),
-        support.take_value(), {true, true, true, true});
+        ByteView(reinterpret_cast<const std::uint8_t*>(&value), 8));
     if (!status.ok())
       return Poll(status);
     auto sealed = builder.seal();
@@ -938,7 +640,11 @@ int mandatory_effects() {
                     {2, "effect_reader", {WorkflowNodeOutput{1, "value"}}, {}}};
   document.outputs = {{"value", 2, "value"}};
   GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   auto frozen = context.freeze(plan, {}).take_value();
   for (unsigned run = 1; run <= 2; ++run) {
     auto result = context.execute(frozen);
@@ -964,14 +670,14 @@ int mandatory_effects() {
   PS_CHECK(sparse.status().code == ErrorCode::InvalidArgument &&
            sparse.status().detail.origin == FailureOrigin::Protocol &&
            sparse.status().message ==
-               "tensor Need is outside published coverage" &&
-           sealed_sparse && calls == missing_slot_calls + 1);
+               "Whole publication omitted a tensor member" &&
+           !sealed_sparse && calls == missing_slot_calls + 1);
   mode = 0;
   document.nodes[1] = {2, "effect_constant", {}, {}};
   GraphContext unrelated(document);
   auto independent = Compiler(registry).compile(unrelated).take_value().plan;
   auto captured = context.freeze(independent, {}).take_value();
-  DemandQuery empty{{"value", Footprint::none({1}).take_value()}};
+  DemandQuery empty{{"value", TileRequest{}}};
   const auto before = calls;
   PS_CHECK(context.execute_fragments(captured, empty).ok() && calls == before);
   PS_CHECK(context.execute_fragments(captured, {}).ok() && calls == before);
@@ -1015,7 +721,11 @@ int foreign_scalar_validation() {
   document.nodes = {{1, "scalar_guard", {WorkflowInputReference{1}}, {}}};
   document.outputs = {{"value", 1, "value"}};
   GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   ExecutionContext context(registry);
   ResourceLimits limits;
   limits.maximum_work = 100000;
@@ -1060,15 +770,16 @@ struct ManyPartsState {
     if (!waiting) {
       waiting = true;
       ++*needs;
-      auto need = Poll(ResultProgramNeed{{}, {}, {{0, 0, *requested, 1}}});
+      auto need = Poll(ResultProgramNeed{{take(sdk::tile_need_for_samples(
+          phase.resources, phase.query, 0, 0, *requested))}});
       peaks->before = phase.resources.statistics().peak[ResourceKind::Metadata];
       return need;
     }
     peaks->supplied = phase.resources.statistics().peak[ResourceKind::Metadata];
     for (const auto& region : requested->boxes()) {
       std::uint8_t value = 1;
-      auto status =
-          phase.read_tensor(0, 0, {region.dimensions()[0].offset}, &value, 1);
+      auto status = phase.read_tensor(0, 0, {0, region.dimensions()[1].offset},
+                                      &value, 1);
       if (!status.ok())
         return Poll(status);
       ++*reads;
@@ -1079,11 +790,13 @@ struct ManyPartsState {
 int sparse_source_need_budget() {
   std::vector<Region> boxes;
   for (std::uint64_t i = 0; i < 128; ++i)
-    boxes.emplace_back(std::vector<RegionDimension>{{2 * i, 1}});
-  auto requested = Footprint::from_regions({256}, boxes).take_value();
+    boxes.emplace_back(std::vector<RegionDimension>{{0, 1}, {2 * i, 1}});
+  auto requested = Footprint::from_regions({1, 256}, boxes).take_value();
   auto scalar = Value::from_float64(42);
-  const auto input_schema =
+  auto input_schema =
       tensor_schema(ElementType::UInt8, 256, "test.source_bytes");
+  input_schema.tensors[0].descriptor.shape = {1, 256};
+  input_schema.tensors[0].layout.spatial = true;
   std::atomic<unsigned> needs{0}, reads{0};
   SparseNeedPeaks peaks;
   auto registry = std::make_shared<OperationRegistry>();
@@ -1110,10 +823,15 @@ int sparse_source_need_budget() {
   document.nodes = {{1, "many_parts", {WorkflowInputReference{1}}, {}}};
   document.outputs = {{"value", 1, "value"}};
   GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
-  auto input = Value::create({ElementType::UInt8, {256}}, Region::whole({256}),
-                             {0, {1}}, std::vector<std::uint8_t>(256))
-                   .take_value();
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
+  auto input =
+      Value::create({ElementType::UInt8, {1, 256}}, Region::whole({1, 256}),
+                    {0, {256, 1}}, std::vector<std::uint8_t>(256))
+          .take_value();
   // Measure setup and sparse-Need admission on this platform first. Standard
   // library object sizes affect managed metadata; no fixed KiB threshold can
   // reliably separate these phases across supported toolchains.
@@ -1165,7 +883,8 @@ int workflow() {
       std::atomic<unsigned> builds{0}, reads{0}, forward_starts{0};
       std::function<Status(const ResultProgramQuery&)> start_control,
           select_control;
-      unsigned illegal_io = 0;
+      unsigned failure_mode = 0;
+      ResultRef failed_prefix;
       OperationDefinition select;
       select.key = "select_ids";
       select.traits = traits(ids_schema(), 1, sizeof(SelectState));
@@ -1184,7 +903,7 @@ int workflow() {
             allocator,
             static_cast<std::uint64_t>(
                 std::get<std::int64_t>(query.parameters.at("count"))),
-            illegal_io, &reads);
+            failure_mode, &reads, &failed_prefix);
       };
       PS_CHECK(registry->register_operation(std::move(select)).ok());
       OperationDefinition sum;
@@ -1251,8 +970,11 @@ int workflow() {
       ExecutionContextConfig config;
       config.cpu_workers = 1;
       config.managed_resources = ResourceLimits{};
-      config.managed_resources->capacity[ResourceKind::Host] = 262144;
-      config.managed_resources->capacity[ResourceKind::Metadata] = 262144;
+      // The large field retains its bytes and chunk directory in memory.
+      const std::uint64_t field_capacity = count == 8192 ? 1048576 : 262144;
+      config.managed_resources->capacity[ResourceKind::Host] = field_capacity;
+      config.managed_resources->capacity[ResourceKind::Metadata] =
+          field_capacity;
       auto context = std::make_unique<ExecutionContext>(registry, config);
       auto root = context->resource_budget().take_value();
       std::vector<std::uint8_t> data(source_count);
@@ -1293,7 +1015,7 @@ int workflow() {
       PS_CHECK(notified_nodes == std::set<std::uint64_t>({1, 2, 3}));
       PS_CHECK(builds == 1 && reads == count);
       auto result = executed.take_value();
-      PS_CHECK(result.results.at("a").object_id() ==
+      PS_CHECK(result.results.at("a").object_id() !=
                result.results.at("b").object_id());
       std::int64_t expected = 0;
       std::uint64_t expected_count = 0;
@@ -1318,7 +1040,7 @@ int workflow() {
           total_elements += timing.computed_elements;
         }
       }
-      PS_CHECK(selection_timing && total_elements == 1);
+      PS_CHECK(selection_timing && total_elements == 2);
       const auto& total = result.results.at("a");
       PS_CHECK(total.association().size() == 1 &&
                total.association()[0] == ids.object_id());
@@ -1353,8 +1075,8 @@ int workflow() {
             {5, "first_id", {WorkflowNodeOutput{1, "value"}}, {}});
         subscriptions.nodes.push_back(
             {6, "first_id", {WorkflowNodeOutput{4, "value"}}, {}});
-        // Explicit output interest exercises producer alias notices even when
-        // the two identical scalar Result consumers share their continuation.
+        // Each selected step publishes its complete Whole result once,
+        // including equivalent producers with distinct computation units.
         subscriptions.outputs = {{"a_alias_ids", 4, "value"},
                                  {"b_first", 5, "value"},
                                  {"c_first", 6, "value"},
@@ -1381,20 +1103,20 @@ int workflow() {
         auto subscribed_result =
             context->execute(subscribed.value().plan, {{{"source", source}}},
                              {}, subscribed_options);
-        if (!subscribed_result.ok() || !alias_prefix || !alias_complete ||
-            builds != subscribed_builds + 1) {
+        if (!subscribed_result.ok() || alias_prefix || !alias_complete ||
+            builds != subscribed_builds + 2) {
           std::cerr << "subscription Result failure code="
                     << static_cast<unsigned>(subscribed_result.status().code)
                     << " message=" << subscribed_result.status().message
                     << " prefix=" << alias_prefix
                     << " complete=" << alias_complete << " builds=" << builds
-                    << " expected=" << subscribed_builds + 1 << " host_peak="
+                    << " expected=" << subscribed_builds + 2 << " host_peak="
                     << root.statistics().peak[ResourceKind::Host]
                     << " metadata_peak="
                     << root.statistics().peak[ResourceKind::Metadata] << '\n';
         }
-        PS_CHECK(subscribed_result.ok() && alias_prefix && alias_complete &&
-                 builds == subscribed_builds + 1);
+        PS_CHECK(subscribed_result.ok() && !alias_prefix && alias_complete &&
+                 builds == subscribed_builds + 2);
         subscribed_result = Result<ExecutionResult>(ExecutionResult{});
         auto captured =
             context->freeze(compiled.value().plan, {{{"source", source}}});
@@ -1406,16 +1128,18 @@ int workflow() {
         PS_CHECK(first.ok());
         options.maximum_result_window_bytes = 128;
         auto second = context->execute(frozen, {}, options);
-        PS_CHECK(second.ok() && builds == before + 1);
-        PS_CHECK(first.value().results.at("ids").object_id() ==
+        PS_CHECK(second.ok() && builds == before + 2);
+        PS_CHECK(first.value().results.at("ids").object_id() !=
                  second.value().results.at("ids").object_id());
+        first = Result<ExecutionResult>(ExecutionResult{});
+        second = Result<ExecutionResult>(ExecutionResult{});
         unsigned delivered = 0;
         notified_nodes.clear();
         auto stream_options = options;
         stream_options.result_publication = [&](ValueRef ref,
                                                 const ResultRef& object) {
           notified_nodes.insert(ref.node_id);
-          if (!object.descriptor().ok())
+          if (!object.descriptor(false).ok())
             return Status{ErrorCode::Internal, {}};
           ++delivered;
           return Status::success();
@@ -1430,14 +1154,14 @@ int workflow() {
                     << " host=" << root.statistics().live[ResourceKind::Host]
                     << " peak=" << root.statistics().peak[ResourceKind::Host]
                     << " message=" << streamed.status().message << '\n';
-        PS_CHECK(streamed.ok() && delivered >= 2 && builds == before + 1);
+        PS_CHECK(streamed.ok() && delivered >= 2 && builds == before + 3);
         PS_CHECK(notified_nodes == std::set<std::uint64_t>({1, 2, 3}));
         first = Result<ExecutionResult>(ExecutionResult{});
         second = Result<ExecutionResult>(ExecutionResult{});
         streamed = Result<ExecutionResult>(ExecutionResult{});
-        // No optional cache owns completed data; expiry permits a new object.
+        // With completed caching disabled each run computes a fresh object.
         auto rebuilt = context->execute(frozen, {}, options);
-        PS_CHECK(rebuilt.ok() && builds == before + 2);
+        PS_CHECK(rebuilt.ok() && builds == before + 4);
         rebuilt = Result<ExecutionResult>(ExecutionResult{});
         std::mutex mutex;
         std::condition_variable changed;
@@ -1464,21 +1188,11 @@ int workflow() {
           PS_CHECK(changed.wait_for(lock, std::chrono::seconds(5),
                                     [&] { return entered; }));
         }
-        const auto entries = root.statistics().live[ResourceKind::Entries];
         auto waiter = std::async(std::launch::async, [&] {
           return context->execute(frozen, {}, options);
         });
-        const auto deadline =
-            std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (root.statistics().live[ResourceKind::Entries] < entries + 2 &&
-               std::chrono::steady_clock::now() < deadline)
-          std::this_thread::yield();
-        PS_CHECK(root.statistics().live[ResourceKind::Entries] >= entries + 2);
-        // The second request is blocked on the existing producer, never a
-        // worker.
-        PS_CHECK(waiter.wait_for(std::chrono::milliseconds(20)) ==
-                 std::future_status::timeout);
-        PS_CHECK(builds == before + 3);
+        const bool independent = waiter.wait_for(std::chrono::seconds(5)) ==
+                                 std::future_status::ready;
         cancelled.cancel();
         {
           std::lock_guard<std::mutex> lock(mutex);
@@ -1488,15 +1202,11 @@ int workflow() {
         auto cancelled_result = producer.get();
         auto surviving = waiter.get();
         if (!surviving.ok())
-          std::cerr << "shared waiter failure "
+          std::cerr << "independent run failure "
                     << static_cast<int>(surviving.status().code) << " "
                     << surviving.status().message << '\n';
         PS_CHECK(cancelled_result.status().code == ErrorCode::Cancelled);
-        // The shared sum holds dependency facts, not the selected-id payload.
-        // After producer retirement the separately named ids output may
-        // rebuild an expired weak entry; active sharing was checked above.
-        PS_CHECK(surviving.ok() && builds >= before + 3 &&
-                 builds <= before + 4);
+        PS_CHECK(independent && surviving.ok() && builds == before + 6);
         PS_CHECK(surviving.value().results.at("ids").descriptor().value().rows(
                      0) == expected_count);
         for (const auto& name : {"a", "b"}) {
@@ -1509,17 +1219,19 @@ int workflow() {
           std::memcpy(&value, loaded->bytes().data(), 8);
           PS_CHECK(value == expected);
         }
-        auto changed_source = Footprint::all({source_count}).take_value();
-        auto dirty = surviving.value().dependencies.potential_dirty(
-            "source", changed_source, 1);
-        PS_CHECK(dirty.ok());
-        for (const auto& name : {"a", "b", "ids"})
-          PS_CHECK(!dirty.value().at(name).empty());
+        ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
+        changes.push_back({PlanWorkflowInput{0}, 0,
+                           take(TileSet::from_indices(root, {0})), false});
+        auto dirty = surviving.value().dependencies.dirty_units(changes);
+        PS_CHECK(dirty.ok() && dirty.value().size() == 3);
         surviving = Result<ExecutionResult>(ExecutionResult{});
-        // A failure before the producer installs its continuation wakes peers.
+        // Each run observes its own factory failure before continuation
+        // creation.
         entered = false;
         resume = false;
+        std::atomic<unsigned> start_attempts{0};
         start_control = [&](const ResultProgramQuery&) {
+          ++start_attempts;
           std::unique_lock<std::mutex> lock(mutex);
           entered = true;
           changed.notify_all();
@@ -1535,21 +1247,9 @@ int workflow() {
                                     [&] { return entered; }));
         }
         CancellationSource peer_cancel;
-        const auto failure_entries =
-            root.statistics().live[ResourceKind::Entries];
         auto peer = std::async(std::launch::async, [&] {
           return context->execute(frozen, peer_cancel.token(), options);
         });
-        const auto join_deadline =
-            std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (root.statistics().live[ResourceKind::Entries] <
-                   failure_entries + 2 &&
-               std::chrono::steady_clock::now() < join_deadline)
-          std::this_thread::yield();
-        PS_CHECK(root.statistics().live[ResourceKind::Entries] >=
-                 failure_entries + 2);
-        PS_CHECK(peer.wait_for(std::chrono::milliseconds(20)) ==
-                 std::future_status::timeout);
         {
           std::lock_guard<std::mutex> lock(mutex);
           resume = true;
@@ -1561,8 +1261,9 @@ int workflow() {
           peer_cancel.cancel();
         auto peer_result = peer.get();
         PS_CHECK(peer_ready == std::future_status::ready &&
-                 peer_result.status().code == ErrorCode::OperationFailed);
-        // Last-waiter cancellation reaches a cooperative callback even when
+                 peer_result.status().code == ErrorCode::OperationFailed &&
+                 start_attempts == 2);
+        // Run cancellation reaches a cooperative callback even when
         // that callback only polls its token and never calls consume_work.
         entered = false;
         std::atomic<bool> observed_cancel{false};
@@ -1601,17 +1302,13 @@ int workflow() {
       context.reset();
       if (count == 37 && page_bytes == 64) {
         options.result_publication = {};
-        for (unsigned failure_mode = 0; failure_mode < 5; ++failure_mode) {
+        for (unsigned failure_mode : {1U, 2U, 4U}) {
           auto bounded_config = config;
           auto& limits = *bounded_config.managed_resources;
-          if (failure_mode == 0)
-            limits.capacity[ResourceKind::Disk] = 1;
           if (failure_mode == 1)
             limits.maximum_work = 1;
           if (failure_mode == 2)
             limits.maximum_stages = 0;
-          if (failure_mode == 3)
-            limits.maximum_io_bytes = 1;
           if (failure_mode == 4)
             bounded_config.maximum_live_bytes = 4;
           auto bounded =
@@ -1629,39 +1326,17 @@ int workflow() {
           for (auto live : ledger.statistics().live.values)
             PS_CHECK(live == 0);
         }
-        for (unsigned violation : {1u, 2u, 4u}) {
-          illegal_io = violation;
-          ExecutionContext checked(registry, config);
-          auto owned = source_result(checked.resource_budget().take_value(),
-                                     input_schema, input)
-                           .take_value();
-          const auto before_reads = reads.load();
-          auto ignored = checked.execute(compiled.value().plan,
-                                         {{{"source", owned}}}, {}, options);
-          PS_CHECK(ignored.status().code == ErrorCode::InvalidArgument &&
-                   ignored.status().reason == FailureReason::UnauthorizedRead &&
-                   ignored.status().detail.origin == FailureOrigin::Protocol &&
-                   ignored.status().detail.scope == FailureScope::Group &&
-                   reads == before_reads);
-        }
-        illegal_io = 3;
+        failure_mode = 3;
         {
           ExecutionContext checked(registry, config);
           auto owned = source_result(checked.resource_budget().take_value(),
                                      input_schema, input)
                            .take_value();
-          ResultRef prefix;
-          options.result_publication = [&](ValueRef ref,
-                                           const ResultRef& result) {
-            if (ref.node_id == 1)
-              prefix = result;
-            return Status::success();
-          };
           auto failed = checked.execute(compiled.value().plan,
                                         {{{"source", owned}}}, {}, options);
-          PS_CHECK(prefix.valid() &&
+          PS_CHECK(failed_prefix.valid() &&
                    failed.status().reason == FailureReason::NotConverged);
-          const auto retained = prefix.production_status();
+          const auto retained = failed_prefix.production_status();
           PS_CHECK(retained.reason == failed.status().reason &&
                    retained.detail.node_id == failed.status().detail.node_id &&
                    retained.detail.scope == failed.status().detail.scope &&
@@ -1669,7 +1344,8 @@ int workflow() {
                    retained.detail.scope == FailureScope::Group);
         }
         options.result_publication = {};
-        illegal_io = 0;
+        failure_mode = 0;
+        failed_prefix = {};
       }
       source = {};
       for (auto live : root.statistics().live.values)

@@ -170,7 +170,6 @@ new integration-test registration is included. This does not change the Proposed
 status of this specification.
 
 - [NUM-03 category](../core.md).
-- [Existing scalar producer](../../../../plugins/ops/00-foundation/core_constant.cpp).
 - [Generation specification](../../03-generation/op_specs/GEN-01A_constant_tensor.md).
 - [Operator template](../../00-foundation/spec-template.md).
 

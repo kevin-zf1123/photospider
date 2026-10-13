@@ -17,7 +17,7 @@ operation_keys:
 # FMT-08A: atomically assign or reinterpret metadata
 
 Inherit the complete [FMT-08 contract](FMT-08_metadata_assignment_contract.md).
-The current CPU registrations use Result operation ABI 2, WorkflowDocument 4,
+The current CPU registrations use Result operation ABI 3, WorkflowDocument 4,
 OperationTraits 21 and package 0.30.0. The specification status remains
 Proposed. A publishes updated immutable metadata through a Result tensor while
 preserving the logical samples and Result schema. It is neither a validation

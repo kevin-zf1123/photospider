@@ -1,30 +1,26 @@
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <condition_variable>
-#include <cstring>
 #include <functional>
-#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
-#include <tuple>
 #include <utility>
 
 #include "core/checked_math.hpp"
-#include "execution/accounted_regions.hpp"
 #include "execution/demand_context.hpp"
 #include "execution/demand_query.hpp"
-#include "execution/dependency_records.hpp"
 #include "execution/execution_context_state.hpp"
 #include "execution/frozen_execution_state.hpp"
+#include "execution/tile_binding_changes.hpp"
+#include "execution/tile_records.hpp"
 #include "photospider/execution/execution.hpp"
-#include "plugin/port_validation.hpp"
 
 namespace ps {
 using execution_internal::demand_key;
+using execution_internal::TileRecords;
 namespace {
 // Checked publication metadata weight; failure leaves the old generation
 // intact.
@@ -45,12 +41,11 @@ Result<std::uint64_t> diagnostic_byte_sum(std::uint64_t left,
 struct DemandHandle::Impl {
   struct Publication {
     DemandQuery query;
-    ExecutionDependencies dependencies;
-    DemandQuery dirty;
-    std::uint64_t weight = 0;
+    std::map<std::string, TileSet> dirty;
   };
   std::weak_ptr<execution_internal::DemandCoordinator> owner;
   std::shared_ptr<const FrozenExecution> bundle;
+  std::shared_ptr<const TileRecords> records;
   std::atomic<std::uint64_t> generation{1};
   CancellationSource cancellation;
   DemandConfig config;
@@ -135,6 +130,7 @@ struct DemandCoordinator : std::enable_shared_from_this<DemandCoordinator> {
         handle->cancellation.cancel();
         handle->publications.clear();
         handle->metadata_entries = 0;
+        handle->records.reset();
         auto retired = std::move(handle->bundle);
         lock.unlock();
         retired.reset();
@@ -159,10 +155,11 @@ void close_demand_coordinator(
 }
 }  // namespace execution_internal
 namespace {
-Result<DemandQuery> close_color_demands(const DemandQuery& query,
-                                        const ExecutionPlan& plan,
-                                        const FootprintLimits& limits) {
-  auto checked = demand_key(query, plan, limits.maximum_boxes);
+Result<DemandQuery> normalize_tile_demands(const DemandQuery& query,
+                                           const ExecutionPlan& plan,
+                                           std::uint64_t maximum,
+                                           const ResourceBudget& root) {
+  auto checked = demand_key(query, plan, maximum, root);
   if (!checked.ok())
     return Result<DemandQuery>(checked.status());
   DemandQuery result;
@@ -170,201 +167,120 @@ Result<DemandQuery> close_color_demands(const DemandQuery& query,
     const auto found = plan.outputs().find(item.first);
     if (found == plan.outputs().end())
       return Result<DemandQuery>(
-          Status{ErrorCode::InvalidArgument, "unknown color demand output"});
+          Status{ErrorCode::InvalidArgument, "unknown demand output"});
     const auto& step = plan.steps()[found->second];
-    auto closed =
-        step.output_result_schema && !step.output_result_schema->tensors.empty()
-            ? step.output_result_schema->tensors[0].close_samples(item.second,
-                                                                  limits)
-            : input_internal::color_output_samples(step.output_descriptor,
-                                                   step.output_facets,
-                                                   item.second, limits);
+    auto closed = item.second.resolve(step.tile_grid, step.tiled);
     if (!closed.ok())
       return Result<DemandQuery>(closed.status());
     result.emplace(item.first, closed.take_value());
   }
   return Result<DemandQuery>(std::move(result));
 }
-template <class NamedValues>
-Status unite_named(DemandQuery* target, const NamedValues& values,
-                   const FootprintLimits& limits) {
+Status unite_named(std::map<std::string, TileSet>* target,
+                   const std::map<std::string, TileSet>& values,
+                   const ResourceBudget& root) {
   for (const auto& item : values) {
-    auto found = target->find(std::string(item.first));
-    auto next = found == target->end()
-                    ? Footprint::from_regions(item.second.shape(),
-                                              item.second.boxes(), limits)
-                    : found->second.unite(item.second, limits);
-    if (!next.ok())
-      return next.status();
-    target->insert_or_assign(std::string(item.first), next.take_value());
-  }
-  std::uint64_t entries = 0;
-  for (const auto& item : *target) {
-    const auto cost = 1 + item.second.boxes().size();
-    if (!core_internal::can_add(cost, entries, limits.maximum_boxes))
-      return Status{ErrorCode::ResourceExhausted, {}};
-    entries += cost;
+    auto work = root.consume({1 + item.first.size()});
+    if (!work.ok())
+      return work;
+    auto found = target->find(item.first);
+    auto merged = found == target->end()
+                      ? item.second.copy_to(root)
+                      : found->second.unite(item.second, root);
+    if (!merged.ok())
+      return merged.status();
+    target->insert_or_assign(item.first, merged.take_value());
   }
   return Status::success();
 }
-Result<ResourceVector<SourceObservation>> changed_observations(
-    const ExecutionBindings& before, const ExecutionBindings& after,
-    const ResourceVector<SourceObservation>& observations,
-    SnapshotAccessOptions access, const FootprintLimits& limits) {
-  using Answer = Result<ResourceVector<SourceObservation>>;
-  using Key = std::tuple<ResourceString, ResultSupportTarget, std::uint32_t>;
-  std::map<Key, Footprint, std::less<Key>,
-           ResourceAllocator<std::pair<const Key, Footprint>>>
-      physical, changes;
-  std::map<ResourceString, const ExecutionBinding*, ResourceStringLess,
-           ResourceAllocator<
-               std::pair<const ResourceString, const ExecutionBinding*>>>
-      old, next;
-  for (const auto& input : before.inputs)
-    old.emplace(ResourceString(input.name.data(), input.name.size()), &input);
-  for (const auto& input : after.inputs)
-    next.emplace(ResourceString(input.name.data(), input.name.size()), &input);
-  for (const auto& observation : observations) {
-    Key key{observation.input, observation.target, observation.slot};
-    auto found = physical.find(key);
-    auto united = found == physical.end()
-                      ? Result<Footprint>(observation.samples)
-                      : found->second.unite(observation.samples, limits);
-    if (!united.ok())
-      return Answer(united.status());
-    physical.insert_or_assign(key, united.take_value());
-    if (physical.size() > limits.maximum_boxes)
-      return Answer(Status{ErrorCode::ResourceExhausted, {}});
-  }
-  std::uint64_t remaining = access.maximum_samples;
-  for (const auto& item : physical) {
-    const auto& name = std::get<0>(item.first);
-    const auto kind = std::get<1>(item.first);
-    const auto slot = std::get<2>(item.first);
-    const auto& samples = item.second;
-    if (samples.empty())
-      continue;
-    const auto& a = *old.at(name);
-    const auto& b = *next.at(name);
-    auto count = samples.element_count();
-    if (!count.ok())
-      return Answer(count.status());
-    if (count.value() > remaining)
-      return Answer(
-          Status{ErrorCode::ResourceExhausted, "demand update sample limit"});
-    if (!a.result.valid() || !b.result.valid() ||
-        !a.result.schema().same_schema(b.result.schema()))
-      return Answer(
-          Status{ErrorCode::TypeMismatch, "Result source schema changed"});
-    auto left = a.result.descriptor();
-    auto right = b.result.descriptor();
-    if (!left.ok())
-      return Answer(left.status());
-    if (!right.ok())
-      return Answer(right.status());
-    if (kind == ResultSupportTarget::Descriptor) {
-      --remaining;
-      bool dirty = left.value().sealed() != right.value().sealed();
-      for (std::uint32_t i = 0; i < left.value().field_count(); ++i)
-        dirty |= left.value().rows(i) != right.value().rows(i);
-      for (std::uint32_t i = 0; i < left.value().tensor_count(); ++i)
-        dirty |=
-            left.value().tensor_coverage(i) != right.value().tensor_coverage(i);
-      if (dirty)
-        changes.emplace(item.first, samples);
-      continue;
+Result<TileSet> query_units(const TileRequest& query, const PlanStep& step,
+                            const ResourceBudget& root, std::uint64_t maximum) {
+  if (!query.whole)
+    return query.tiles.copy_to(root);
+  const auto count = step.tiled ? step.tile_grid->tile_count() : 1;
+  if (count > maximum)
+    return Result<TileSet>(
+        Status{ErrorCode::ResourceExhausted, "demand unit limit"});
+  auto work = root.consume({count});
+  if (!work.ok())
+    return Result<TileSet>(work);
+  ResourceVector<TileIndex> indices{ResourceAllocator<TileIndex>(root)};
+  indices.reserve(count);
+  for (TileIndex tile = 0; tile < count; ++tile)
+    indices.push_back(tile);
+  return TileSet::from_indices(root, indices.data(), indices.size());
+}
+template <class Publications>
+Result<std::shared_ptr<const TileRecords>> retained_records(
+    const TileRecords& previous, const TileRecords::Snapshot& updates,
+    const Publications& publications, const ExecutionPlan& plan,
+    const ResourceBudget& root, std::uint64_t generation,
+    const CancellationToken& cancellation) {
+  TileRecord roots(root);
+  for (const auto& item : publications) {
+    for (const auto& named : item.second->query) {
+      if (!named.second.whole && named.second.tiles.empty())
+        continue;
+      const auto index = plan.outputs().at(named.first);
+      auto status =
+          roots.include({PlanStepInput{index}, plan.steps()[index].output_index,
+                         named.second.whole, named.second.tiles},
+                        root);
+      if (!status.ok())
+        return Result<std::shared_ptr<const TileRecords>>(status);
     }
-    execution_internal::AccountedRegions boxes;
-    auto status = samples.visit(
-        [&](const auto& at) -> Status {
-          if (!remaining)
-            return Status{ErrorCode::ResourceExhausted, {}};
-          --remaining;
-          bool dirty = false;
-          if (kind == ResultSupportTarget::Tensor) {
-            if (slot >= a.result.schema().tensors.size())
-              return Status{ErrorCode::TypeMismatch, {}};
-            const auto width = Value::element_size(
-                a.result.schema().tensors[slot].descriptor.element_type);
-            std::uint8_t first[8]{}, second[8]{};
-            if (!right.value().tensor_coverage(slot).contains(at)) {
-              dirty = true;
-            } else {
-              auto read = a.result.read_tensor(left.value(), slot, at, first,
-                                               width, access.cancellation);
-              if (!read.ok())
-                return read;
-              read = b.result.read_tensor(right.value(), slot, at, second,
-                                          width, access.cancellation);
-              if (!read.ok())
-                return read;
-              dirty = std::memcmp(first, second, width) != 0;
-            }
-          } else {
-            if (kind != ResultSupportTarget::Field ||
-                slot >= a.result.schema().fields.size() || at.size() != 1)
-              return Status{ErrorCode::TypeMismatch, {}};
-            if (at[0] >= right.value().rows(slot)) {
-              dirty = true;
-            } else {
-              auto first = a.result.prepare_read(left.value(), slot, at[0], 1);
-              if (!first.ok())
-                return first.status();
-              auto second =
-                  b.result.prepare_read(right.value(), slot, at[0], 1);
-              if (!second.ok())
-                return second.status();
-              auto bytes = a.result.schema().row_bytes(slot);
-              if (!bytes.ok())
-                return bytes.status();
-              auto first_bytes =
-                  first.value().load(bytes.value(), access.cancellation);
-              if (!first_bytes.ok())
-                return first_bytes.status();
-              auto second_bytes =
-                  second.value().load(bytes.value(), access.cancellation);
-              if (!second_bytes.ok())
-                return second_bytes.status();
-              dirty = std::memcmp(first_bytes.value()->bytes().data(),
-                                  second_bytes.value()->bytes().data(),
-                                  bytes.value()) != 0;
-            }
-          }
-          if (dirty) {
-            if (boxes.boxes.size() >= limits.maximum_boxes)
-              return Status{ErrorCode::ResourceExhausted, {}};
-            std::array<RegionDimension, 8> dimensions{};
-            for (std::size_t i = 0; i < at.size(); ++i)
-              dimensions[i] = {at[i], 1};
-            auto admitted = boxes.append(dimensions.data(), at.size());
-            if (!admitted.ok())
-              return admitted;
-          }
-          return Status::success();
-        },
-        count.value(), access.cancellation);
-    if (!status.ok())
-      return Answer(status);
-    auto dirty = Footprint::from_regions(samples.shape(), boxes.boxes, limits);
-    if (!dirty.ok())
-      return Answer(dirty.status());
-    if (!dirty.value().empty())
-      changes.emplace(item.first, dirty.take_value());
   }
-  ResourceVector<SourceObservation> answer;
-  for (const auto& observation : observations) {
-    auto found =
-        changes.find({observation.input, observation.target, observation.slot});
-    if (found == changes.end())
-      continue;
-    auto dirty = found->second.intersect(observation.samples, limits);
-    if (!dirty.ok())
-      return Answer(dirty.status());
-    if (!dirty.value().empty())
-      answer.push_back({observation.input, observation.target, observation.slot,
-                        observation.roles, dirty.take_value()});
+  return previous.replaced(
+      generation, updates, roots,
+      [&](const PlanStepInput& input, std::uint32_t output) {
+        using Answer = Result<TileRecords::ProducerUnits>;
+        if (input.step_index >= plan.steps().size())
+          return Answer(Status{ErrorCode::InvalidArgument, {}});
+        const auto& step = plan.steps()[input.step_index];
+        if (output != step.output_index)
+          return Answer(Status{ErrorCode::InvalidArgument, {}});
+        const bool dynamic = std::any_of(
+            step.output_result_schema->fields.begin(),
+            step.output_result_schema->fields.end(), [](const auto& field) {
+              return field.rows.kind == ResultExtentKind::RuntimeCount;
+            });
+        return Answer(TileRecords::ProducerUnits{
+            step.tiled ? step.tile_grid->tile_count() : 1, dynamic});
+      },
+      [&](std::uint64_t n) {
+        return cancellation.cancelled() ? Status{ErrorCode::Cancelled, {}}
+                                        : root.consume({n});
+      });
+}
+template <class Publications>
+Result<std::uint64_t> retained_weight(const Publications& publications,
+                                      const TileRecords& records,
+                                      const ExecutionPlan& plan,
+                                      const ResourceBudget& root,
+                                      std::uint64_t maximum) {
+  auto size = records.metadata_size();
+  if (!size.ok())
+    return size;
+  std::uint64_t weight = size.value();
+  for (const auto& item : publications) {
+    auto key = demand_key(item.second->query, plan, maximum, root);
+    if (!key.ok())
+      return Result<std::uint64_t>(key.status());
+    auto next = diagnostic_byte_sum(weight, key.value().entries);
+    if (!next.ok())
+      return next;
+    weight = next.value();
+    for (const auto& named : item.second->dirty) {
+      next = diagnostic_byte_sum(weight, 1 + named.second.size());
+      if (!next.ok())
+        return next;
+      weight = next.value();
+    }
   }
-  return Answer(std::move(answer));
+  return weight <= maximum
+             ? Result<std::uint64_t>(weight)
+             : Result<std::uint64_t>(Status{ErrorCode::ResourceExhausted,
+                                            "retained demand metadata limit"});
 }
 }  // namespace
 Result<DemandHandle> ExecutionContext::open_demand(const ExecutionPlan& plan,
@@ -384,6 +300,9 @@ Result<DemandHandle> ExecutionContext::open_demand(const ExecutionPlan& plan,
   auto state = std::make_shared<DemandHandle::Impl>();
   state->owner = impl_->demands;
   state->config = config;
+  const auto root = frozen.value().state_->resources;
+  state->records = std::allocate_shared<TileRecords>(
+      ResourceAllocator<TileRecords>(root), root, 1);
   state->bundle = std::make_shared<const FrozenExecution>(frozen.take_value());
   auto& owner = *impl_->demands;
   std::lock_guard<std::mutex> lock(owner.mutex);
@@ -431,14 +350,16 @@ Result<DemandResult> DemandHandle::request(
   const auto failure = [&](Status status) {
     return Result<DemandResult>(lease->stop(std::move(status)));
   };
-  auto normalized = close_color_demands(query, lease->bundle->plan(),
-                                        options.dependencies.sets);
+  auto normalized = normalize_tile_demands(
+      query, lease->bundle->plan(), options.dependencies.sets.maximum_boxes,
+      lease->bundle->state_->resources);
   if (!normalized.ok())
     return failure(normalized.status());
   DemandQuery original = normalized.take_value();
   auto key = demand_key(original, lease->bundle->plan(),
                         std::min(impl_->config.maximum_metadata_entries,
-                                 options.dependencies.sets.maximum_boxes));
+                                 options.dependencies.sets.maximum_boxes),
+                        lease->bundle->state_->resources);
   if (!key.ok())
     return failure(key.status());
   auto state = std::allocate_shared<FrozenExecution::State>(
@@ -457,46 +378,83 @@ Result<DemandResult> DemandHandle::request(
     return failure(executed.status());
   auto result = executed.take_value();
   result.generation = lease->generation;
-  auto publication = std::make_shared<Impl::Publication>();
+  const auto& root = lease->bundle->state_->resources;
+  ResourceAllocationScope allocation(root);
+  auto publication = std::allocate_shared<Impl::Publication>(
+      ResourceAllocator<Impl::Publication>(root));
   publication->query = std::move(original);
-  publication->dependencies = result.dependencies;
-  auto limits = options.dependencies.sets;
-  limits.cancellation = lease->cancellation;
-  for (const auto& item : publication->query) {
-    auto empty = Footprint::none(item.second.shape(), limits);
-    if (!empty.ok())
-      return failure(empty.status());
-    publication->dirty.emplace(item.first, empty.take_value());
+  for (const auto& named : publication->query)
+    publication->dirty.emplace(named.first, TileSet{});
+  auto updates =
+      result.dependencies.tiles_
+          ? result.dependencies.tiles_->snapshot()
+          : Result<TileRecords::Snapshot>(TileRecords::Snapshot{
+                ResourceAllocator<std::shared_ptr<const TileRecord>>(root)});
+  if (!updates.ok())
+    return failure(updates.status());
+  std::map<std::string, std::shared_ptr<const Impl::Publication>> publications;
+  std::shared_ptr<const TileRecords> current_records;
+  {
+    std::lock_guard<std::mutex> lock(owner->mutex);
+    auto status = lease->stop();
+    if (!status.ok())
+      return Result<DemandResult>(status);
+    if (impl_->revision == UINT64_MAX)
+      return Result<DemandResult>(Status{ErrorCode::ResourceExhausted, {}});
+    auto previous = impl_->publications.find(key.value().value);
+    if (previous != impl_->publications.end() &&
+        previous->second->query != publication->query)
+      return Result<DemandResult>(
+          Status{ErrorCode::Internal, "query identity collision"});
+    publications = impl_->publications;
+    current_records = impl_->records;
+    lease->revision = impl_->revision;
   }
-  const auto base = diagnostic_byte_sum(
-      key.value().entries, execution_internal::DependencyRecords::metadata_size(
-                               result.dependencies));
-  if (!base.ok())
-    return failure(base.status());
-  auto weight = diagnostic_byte_sum(base.value(), publication->dirty.size());
+  publications.insert_or_assign(key.value().value, publication);
+  for (auto& item : publications) {
+    auto copied = std::allocate_shared<Impl::Publication>(
+        ResourceAllocator<Impl::Publication>(root), *item.second);
+    for (auto& named : copied->dirty) {
+      const auto index = lease->bundle->plan().outputs().at(named.first);
+      ResourceVector<TileIndex> remaining{ResourceAllocator<TileIndex>(root)};
+      for (auto tile : named.second) {
+        const TileUnit unit{
+            index, lease->bundle->plan().steps()[index].output_index, tile};
+        auto fresh = result.dependencies.tile_record(unit);
+        if (!fresh.ok())
+          return failure(fresh.status());
+        if (!fresh.value())
+          remaining.push_back(tile);
+      }
+      auto selected =
+          TileSet::from_indices(root, remaining.data(), remaining.size());
+      if (!selected.ok())
+        return failure(selected.status());
+      named.second = selected.take_value();
+    }
+    item.second = std::move(copied);
+  }
+  auto records = retained_records(*current_records, updates.value(),
+                                  publications, lease->bundle->plan(), root,
+                                  lease->generation, lease->cancellation);
+  if (!records.ok())
+    return failure(records.status());
+  auto weight =
+      retained_weight(publications, *records.value(), lease->bundle->plan(),
+                      root, impl_->config.maximum_metadata_entries);
   if (!weight.ok())
     return failure(weight.status());
-  publication->weight = weight.value();
   std::lock_guard<std::mutex> lock(owner->mutex);
   auto status = lease->stop();
   if (!status.ok())
     return Result<DemandResult>(status);
-  if (impl_->revision == UINT64_MAX)
-    return Result<DemandResult>(Status{ErrorCode::ResourceExhausted, {}});
-  auto old = impl_->publications.find(key.value().value);
-  if (old != impl_->publications.end() &&
-      old->second->query != publication->query)
+  if (impl_->revision != lease->revision)
     return Result<DemandResult>(
-        Status{ErrorCode::Internal, "query identity collision"});
-  const auto remainder =
-      impl_->metadata_entries -
-      (old == impl_->publications.end() ? 0 : old->second->weight);
-  if (!core_internal::can_add(publication->weight, remainder,
-                              impl_->config.maximum_metadata_entries))
-    return Result<DemandResult>(
-        Status{ErrorCode::ResourceExhausted, "retained demand metadata limit"});
-  impl_->publications.insert_or_assign(key.value().value, publication);
-  impl_->metadata_entries = remainder + publication->weight;
+        Status{ErrorCode::Stale,
+               "demand publications changed during request publication"});
+  impl_->records = records.take_value();
+  impl_->publications.swap(publications);
+  impl_->metadata_entries = weight.value();
   ++impl_->revision;
   return Result<DemandResult>(std::move(result));
 }
@@ -532,27 +490,56 @@ Status DemandHandle::release(const DemandQuery& query) const {
   if (!begun.ok())
     return begun.status();
   auto lease = begun.take_value();
-  FootprintLimits limits;
-  limits.maximum_boxes = impl_->config.maximum_metadata_entries;
-  auto normalized = close_color_demands(query, lease->bundle->plan(), limits);
+  auto normalized = normalize_tile_demands(
+      query, lease->bundle->plan(), impl_->config.maximum_metadata_entries,
+      lease->bundle->state_->resources);
   if (!normalized.ok())
     return lease->stop(normalized.status());
   auto key = demand_key(normalized.value(), lease->bundle->plan(),
-                        impl_->config.maximum_metadata_entries);
+                        impl_->config.maximum_metadata_entries,
+                        lease->bundle->state_->resources);
   if (!key.ok())
     return lease->stop(key.status());
+  std::map<std::string, std::shared_ptr<const Impl::Publication>> publications;
+  std::shared_ptr<const TileRecords> current_records;
+  {
+    std::lock_guard<std::mutex> lock(owner->mutex);
+    auto status = lease->stop();
+    if (!status.ok())
+      return status;
+    auto found = impl_->publications.find(key.value().value);
+    if (found == impl_->publications.end() ||
+        found->second->query != normalized.value())
+      return Status{ErrorCode::NotFound, {}};
+    if (impl_->revision == UINT64_MAX)
+      return Status{ErrorCode::ResourceExhausted, {}};
+    publications = impl_->publications;
+    current_records = impl_->records;
+    lease->revision = impl_->revision;
+  }
+  const auto& root = lease->bundle->state_->resources;
+  ResourceAllocationScope allocation(root);
+  publications.erase(key.value().value);
+  auto records = retained_records(*current_records, {}, publications,
+                                  lease->bundle->plan(), root,
+                                  lease->generation, lease->cancellation);
+  if (!records.ok())
+    return lease->stop(records.status());
+  auto weight =
+      retained_weight(publications, *records.value(), lease->bundle->plan(),
+                      root, impl_->config.maximum_metadata_entries);
+  if (!weight.ok())
+    return lease->stop(weight.status());
   std::lock_guard<std::mutex> lock(owner->mutex);
   auto status = lease->stop();
   if (!status.ok())
     return status;
-  auto found = impl_->publications.find(key.value().value);
-  if (found == impl_->publications.end() ||
-      found->second->query != normalized.value())
-    return Status{ErrorCode::NotFound, {}};
-  if (impl_->revision == UINT64_MAX)
-    return Status{ErrorCode::ResourceExhausted, {}};
-  impl_->metadata_entries -= found->second->weight;
-  impl_->publications.erase(found);
+  if (impl_->revision != lease->revision)
+    return Status{ErrorCode::Stale,
+                  "demand publications changed during release"};
+  impl_->records = records.take_value();
+  impl_->publications.swap(publications);
+  impl_->metadata_entries = weight.value();
   ++impl_->revision;
   return Status::success();
 }
@@ -565,6 +552,7 @@ bool DemandHandle::cancel() const noexcept {
     std::lock_guard<std::mutex> lock(owner->mutex);
     impl_->publications.clear();
     impl_->metadata_entries = 0;
+    impl_->records.reset();
     retired = std::move(impl_->bundle);
   }
   return first;
@@ -598,12 +586,14 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
     return Result<DemandUpdate>(lease->stop(std::move(status)));
   };
   std::map<std::string, std::shared_ptr<const Impl::Publication>> publications;
+  std::shared_ptr<const TileRecords> current_records;
   {
     std::lock_guard<std::mutex> lock(owner->mutex);
     auto status = lease->stop();
     if (!status.ok())
       return Result<DemandUpdate>(status);
     publications = impl_->publications;
+    current_records = impl_->records;
     lease->revision = impl_->revision;
   }
   auto frozen =
@@ -611,73 +601,70 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
   if (!frozen.ok())
     return failure(frozen.status());
   auto next = std::make_shared<const FrozenExecution>(frozen.take_value());
-  FootprintLimits limits{impl_->config.maximum_metadata_entries, 1048576,
-                         lease->cancellation};
-  ResourceVector<SourceObservation> support;
-  for (const auto& item : publications) {
-    auto source = item.second->dependencies.source_observations(limits);
-    if (!source.ok())
-      return failure(source.status());
-    if (!core_internal::can_add(source.value().size(), support.size(),
-                                limits.maximum_boxes))
-      return failure(Status{ErrorCode::ResourceExhausted, {}});
-    support.insert(support.end(), source.value().begin(), source.value().end());
-  }
+  auto support = current_records->workflow_dependencies();
+  if (!support.ok())
+    return failure(support.status());
   auto access = options;
   access.cancellation = lease->cancellation;
-  auto changes =
-      changed_observations(lease->bundle->state_->bindings,
-                           next->state_->bindings, support, access, limits);
+  auto changes = execution_internal::tile_binding_changes(
+      lease->bundle->plan(), lease->bundle->state_->bindings,
+      next->state_->bindings, support.value(), *root, access);
   if (!changes.ok())
     return failure(changes.status());
+  auto dirty = current_records->dirty(changes.value());
+  if (!dirty.ok())
+    return failure(dirty.status());
   DemandUpdate update;
   if (lease->generation == UINT64_MAX)
     return failure(Status{ErrorCode::ResourceExhausted, {}});
   update.generation = lease->generation + 1;
-  std::uint64_t entries = 0;
   for (auto& item : publications) {
-    auto publication = std::make_shared<Impl::Publication>(*item.second);
-    for (const auto& change : changes.value()) {
-      auto dirty = publication->dependencies.potential_dirty(
-          std::string(change.input), change.samples, change.roles, limits,
-          change.target, change.slot);
-      if (!dirty.ok())
-        return failure(dirty.status());
-      auto status = unite_named(&publication->dirty, dirty.value(), limits);
-      if (!status.ok())
-        return failure(status);
+    auto publication = std::allocate_shared<Impl::Publication>(
+        ResourceAllocator<Impl::Publication>(*root), *item.second);
+    std::map<std::string, TileSet> coverage;
+    for (const auto& named : publication->query) {
+      const auto index = next->plan().outputs().at(named.first);
+      const auto& step = next->plan().steps()[index];
+      auto units = query_units(named.second, step, *root,
+                               impl_->config.maximum_metadata_entries);
+      if (!units.ok())
+        return failure(units.status());
+      ResourceVector<TileIndex> selected{ResourceAllocator<TileIndex>(*root)};
+      for (const auto& unit : dirty.value()) {
+        auto work = root->consume({1});
+        if (!work.ok())
+          return failure(work);
+        if (unit.step == index && unit.output == step.output_index &&
+            units.value().contains(unit.tile))
+          selected.push_back(unit.tile);
+      }
+      auto changed =
+          TileSet::from_indices(*root, selected.data(), selected.size());
+      if (!changed.ok())
+        return failure(changed.status());
+      auto merged =
+          publication->dirty[named.first].unite(changed.value(), *root);
+      if (!merged.ok())
+        return failure(merged.status());
+      publication->dirty[named.first] = merged.take_value();
+      coverage.emplace(named.first, units.take_value());
     }
-    auto key = demand_key(publication->query, next->state_->plan,
-                          impl_->config.maximum_metadata_entries);
-    if (!key.ok())
-      return failure(key.status());
-    auto weight = diagnostic_byte_sum(
-        key.value().entries,
-        execution_internal::DependencyRecords::metadata_size(
-            publication->dependencies));
-    if (!weight.ok())
-      return failure(weight.status());
-    std::uint64_t cost = weight.value();
-    for (const auto& dirty : publication->dirty) {
-      weight = diagnostic_byte_sum(cost, 1 + dirty.second.boxes().size());
-      if (!weight.ok())
-        return failure(weight.status());
-      cost = weight.value();
-    }
-    publication->weight = cost;
-    if (!core_internal::can_add(cost, entries,
-                                impl_->config.maximum_metadata_entries))
-      return failure(Status{ErrorCode::ResourceExhausted,
-                            "updated demand metadata limit"});
-    entries += cost;
-    auto status = unite_named(&update.coverage, publication->query, limits);
-    if (!status.ok())
-      return failure(status);
-    status = unite_named(&update.potential_dirty, publication->dirty, limits);
+    auto status = unite_named(&update.coverage, coverage, *root);
+    if (status.ok())
+      status = unite_named(&update.potential_dirty, publication->dirty, *root);
     if (!status.ok())
       return failure(status);
     item.second = std::move(publication);
   }
+  auto records =
+      retained_records(*current_records, {}, publications, next->plan(), *root,
+                       update.generation, lease->cancellation);
+  if (!records.ok())
+    return failure(records.status());
+  auto weight = retained_weight(publications, *records.value(), next->plan(),
+                                *root, impl_->config.maximum_metadata_entries);
+  if (!weight.ok())
+    return failure(weight.status());
   std::shared_ptr<const FrozenExecution> retired;
   std::lock_guard<std::mutex> lock(owner->mutex);
   auto status = lease->stop();
@@ -691,7 +678,8 @@ Result<DemandUpdate> DemandHandle::replace_bindings(
   retired = std::move(impl_->bundle);
   impl_->bundle = std::move(next);
   impl_->publications.swap(publications);
-  impl_->metadata_entries = entries;
+  impl_->metadata_entries = weight.value();
+  impl_->records = records.take_value();
   ++impl_->revision;
   impl_->generation.store(update.generation, std::memory_order_release);
   return Result<DemandUpdate>(std::move(update));

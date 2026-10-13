@@ -22,21 +22,29 @@ double number(const DemandResult& result, const std::string& name) {
   return multi_result::number(result.results.at(name.c_str()));
 }
 
-int verify_sources(const ExecutionDependencies& dependencies,
-                   std::vector<std::string> expected,
-                   const Footprint& samples) {
-  auto observed = dependencies.source_observations();
-  PS_CHECK(observed.ok());
-  std::vector<std::string> names;
-  for (const auto& source : observed.value()) {
-    PS_CHECK(source.target == ResultSupportTarget::Tensor);
-    PS_CHECK(source.slot == 0 && source.roles == 1);
-    PS_CHECK(source.samples == samples);
-    names.emplace_back(source.input.begin(), source.input.end());
-  }
-  std::sort(names.begin(), names.end());
-  std::sort(expected.begin(), expected.end());
-  PS_CHECK(names == expected);
+int verify_source(const ExecutionDependencies& dependencies, TileUnit unit,
+                  std::size_t declaration) {
+  auto record = dependencies.tile_record(unit);
+  PS_REQUIRE_OK(record);
+  PS_CHECK(record.value() && record.value()->inputs.size() == 1);
+  const auto& input = record.value()->inputs[0];
+  PS_CHECK(std::holds_alternative<PlanWorkflowInput>(input.producer));
+  PS_CHECK(std::get<PlanWorkflowInput>(input.producer).declaration_index ==
+           declaration);
+  PS_CHECK(input.whole && input.tiles.empty());
+  return 0;
+}
+int verify_dirty(const ExecutionDependencies& dependencies,
+                 const ResourceBudget& root, std::size_t declaration,
+                 const std::vector<TileUnit>& expected) {
+  ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
+  changes.push_back({PlanWorkflowInput{declaration}, 0,
+                     multi_result::take(TileSet::from_indices(root, {0})),
+                     false});
+  auto dirty = dependencies.dirty_units(changes);
+  PS_REQUIRE_OK(dirty);
+  PS_CHECK(std::vector<TileUnit>(dirty.value().begin(), dirty.value().end()) ==
+           expected);
   return 0;
 }
 
@@ -81,19 +89,17 @@ int staged_outputs() {
                               multi_result::binding(root, "b", 11)}};
   auto frozen = execution.freeze(compiled.value().plan, bindings);
   PS_CHECK(frozen.ok());
-  const DemandQuery query{{"left", Footprint::all({1}).take_value()},
-                          {"right", Footprint::all({1}).take_value()}};
+  const DemandQuery query{{"left", TileRequest{true, {}}},
+                          {"right", TileRequest{true, {}}}};
   auto first = execution.execute_fragments(frozen.value(), query);
   PS_CHECK(first.ok());
   PS_CHECK(number(first.value(), "left") == 7);
   PS_CHECK(number(first.value(), "right") == 11);
   PS_CHECK((*counts)[0] == 1 && (*counts)[1] == 1);
-  PS_CHECK(first.value().dependencies.record_count() == 4);
-  auto point = Footprint::all({1}).take_value();
-  PS_CHECK(verify_sources(first.value().dependencies, {"a", "b"}, point) == 0);
-  auto dirty = first.value().dependencies.potential_dirty("a", point);
-  PS_CHECK(dirty.ok() && dirty.value().at("left") == point);
-  PS_CHECK(dirty.value().at("right").empty());
+  auto point = TileRequest{true, {}};
+  PS_CHECK(verify_source(first.value().dependencies, {0, 0, 0}, 0) == 0);
+  PS_CHECK(verify_source(first.value().dependencies, {1, 1, 0}, 1) == 0);
+  PS_CHECK(verify_dirty(first.value().dependencies, root, 0, {{0, 0, 0}}) == 0);
   bindings.inputs[0] = multi_result::binding(root, "a", 13);
   auto replacement = execution.freeze(compiled.value().plan, bindings);
   PS_CHECK(replacement.ok());
@@ -123,16 +129,14 @@ int staged_outputs() {
            renamed_result.value().diagnostics.cache_hits == 1);
   PS_CHECK((*counts)[1] == before_rename &&
            number(renamed_result.value(), "right") == 11);
-  PS_CHECK(renamed_result.value().dependencies.record_count() == 2);
-  PS_CHECK(verify_sources(renamed_result.value().dependencies, {"b"}, point) ==
+  PS_CHECK(verify_source(renamed_result.value().dependencies, {0, 1, 0}, 0) ==
            0);
   PS_CHECK(
       renamed_result.value().diagnostics.selected_backends.count({99, 1}) == 1);
   PS_CHECK(renamed_result.value().diagnostics.selected_backends.count({1, 1}) ==
            0);
-  auto renamed_dirty =
-      renamed_result.value().dependencies.potential_dirty("b", point);
-  PS_CHECK(renamed_dirty.ok() && renamed_dirty.value().at("right") == point);
+  PS_CHECK(verify_dirty(renamed_result.value().dependencies, root, 0,
+                        {{0, 1, 0}}) == 0);
   // A cached descendant must rebind its complete upstream record DAG too.
   auto chain = document;
   chain.nodes.push_back(
@@ -164,18 +168,15 @@ int staged_outputs() {
   PS_CHECK(number(moved_result.value(), "right") == 11);
   PS_CHECK(moved_result.value().diagnostics.selected_backends.count({77, 1}) ==
            1);
-  PS_CHECK(moved_result.value().dependencies.record_count() == 4);
-  PS_CHECK(verify_sources(moved_result.value().dependencies, {"b"}, point) ==
-           0);
+  PS_CHECK(verify_source(moved_result.value().dependencies, {1, 1, 0}, 1) == 0);
   PS_CHECK(moved_result.value().diagnostics.selected_backends.count({88, 1}) ==
            1);
   PS_CHECK(moved_result.value().diagnostics.selected_backends.count({2, 1}) ==
            0);
-  auto moved_dirty =
-      moved_result.value().dependencies.potential_dirty("b", point);
-  PS_CHECK(moved_dirty.ok() && moved_dirty.value().at("right") == point);
+  PS_CHECK(verify_dirty(moved_result.value().dependencies, root, 1,
+                        {{1, 1, 0}, {2, 1, 0}}) == 0);
   execution.clear_result_cache();
-  PS_CHECK(first.value().dependencies.potential_dirty("a", point).ok());
+  PS_CHECK(verify_dirty(first.value().dependencies, root, 0, {{0, 0, 0}}) == 0);
   document.outputs = {{"right", 1, "right"}};
   GraphContext single(document);
   auto selected = compiler.compile(single);
@@ -186,7 +187,7 @@ int staged_outputs() {
   return 0;
 }
 
-int projected_sync_inputs(bool terminal) {
+int projected_sync_inputs() {
   auto registry = std::make_shared<OperationRegistry>();
   auto unwanted_calls = std::make_shared<std::atomic<unsigned>>(0);
   OperationDefinition unwanted;
@@ -195,11 +196,6 @@ int projected_sync_inputs(bool terminal) {
   unwanted.traits.cacheable = false;
   unwanted.traits.outputs[0] = multi_result::output("value");
   unwanted.traits.outputs[0].region_rule = OperationRegionRule::Whole;
-  if (terminal) {
-    unwanted.traits.deterministic = true;
-    unwanted.traits.outputs[0].observation_kind =
-        ObservationKind::RequestRecord;
-  }
   unwanted.start_result = [unwanted_calls](const ResultProgramQuery&,
                                            const BufferAllocator&) {
     ++*unwanted_calls;
@@ -263,8 +259,7 @@ int projected_sync_inputs(bool terminal) {
                          .freeze(compiled.value().plan,
                                  {{multi_result::binding(root, "a", 23)}})
                          .take_value();
-  const DemandQuery only_constant{
-      {"constant", Footprint::all({1}).take_value()}};
+  const DemandQuery only_constant{{"constant", TileRequest{true, {}}}};
   const auto before = (*projected_calls)[1].load();
   auto first = execution.execute_fragments(frozen, only_constant);
   auto cached = execution.execute_fragments(independent, only_constant);
@@ -312,7 +307,6 @@ int projected_shapes_and_permutation() {
   auto allocator = direct_root.allocator();
 
   ResultObjectInputs objects;
-  ResourceVector<ResultIoReply> io;
   for (unsigned output = 0; output < 2; ++output) {
     metadata.output.result_schema = std::make_shared<const SchemaTemplate>(
         output ? right_schema : left_schema);
@@ -328,7 +322,6 @@ int projected_shapes_and_permutation() {
     ResultProgramPhase phase{
         query,
         objects,
-        io,
         allocator,
         direct_root,
         [&](std::uint64_t work) { return direct_root.consume({work}); },
@@ -337,9 +330,9 @@ int projected_shapes_and_permutation() {
     PS_CHECK(polled.ok() &&
              std::holds_alternative<ResultProgramNeed>(polled.value()));
     const auto& need = std::get<ResultProgramNeed>(polled.value());
-    PS_CHECK(need.tensors.size() == 1 && need.tensors[0].input == output);
-    PS_CHECK(need.tensors[0].slot == 0 && need.tensors[0].roles == 1);
-    PS_CHECK(need.tensors[0].samples == *query.tensor_outputs);
+    PS_CHECK(need.tiles.size() == 1 && need.tiles[0].input == output);
+    PS_CHECK(need.tiles[0].whole && !need.tiles[0].descriptor_only &&
+             need.tiles[0].tiles.empty());
   }
   ResultProgramQuery bad_query(metadata, parameters);
   bad_query.semantic_key = op.key;
@@ -361,8 +354,7 @@ int projected_shapes_and_permutation() {
   document.outputs = {{"left", 1, "left"}, {"right", 1, "right"}};
   GraphContext graph(document);
   PlanningOptions planning;
-  planning.output_regions = {{"left", Region({{1, 1}})},
-                             {"right", Region({{2, 1}})}};
+  planning.output_requests = {{"left", {true, {}}}, {"right", {true, {}}}};
   auto compiled = Compiler(registry).compile(graph, planning);
   if (!compiled.ok())
     std::cerr << compiled.status().message << '\n';
@@ -384,8 +376,14 @@ int projected_shapes_and_permutation() {
   PS_CHECK(
       right.read_tensor(right.descriptor().value(), 0, {2}, &integer, 8).ok() &&
       integer == 11);
+  // Non-spatial outputs compute their complete Whole unit for either request.
   PS_CHECK(
-      !right.read_tensor(right.descriptor().value(), 0, {1}, &integer, 8).ok());
+      right.read_tensor(right.descriptor().value(), 0, {1}, &integer, 8).ok() &&
+      integer == 11);
+  PS_CHECK(right.descriptor().value().tensor_coverage(0) ==
+           Footprint::all({3}).take_value());
+  PS_CHECK(left.descriptor().value().tensor_coverage(0) ==
+           Footprint::all({2}).take_value());
   document.outputs = {{"left", 1, "left"}};
   GraphContext single(document);
   const auto right_before = (*counts)[1].load();
@@ -510,7 +508,6 @@ int main() {
   PS_CHECK(staged_outputs() == 0);
   PS_CHECK(projected_shapes_and_permutation() == 0);
   PS_CHECK(synchronous_outputs() == 0);
-  PS_CHECK(projected_sync_inputs(false) == 0);
-  PS_CHECK(projected_sync_inputs(true) == 0);
+  PS_CHECK(projected_sync_inputs() == 0);
   return 0;
 }

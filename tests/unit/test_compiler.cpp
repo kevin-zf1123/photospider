@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "photospider/compiler/compiler.hpp"
-#include "support/multi_output_result_fixture.hpp"
+#include "support/kernel_registry_fixture.hpp"
 #include "support/test_support.hpp"
 
 /**
@@ -35,14 +35,14 @@ int main() {
   using ps::ErrorCode;
   using ps::GraphContext;
   using ps::GraphSnapshot;
-  using ps::make_default_operation_registry;
   using ps::PlanningOptions;
   using ps::WorkflowDocument;
   using ps::WorkflowNode;
   using ps::WorkflowNodeOutput;
   using ps::WorkflowOutput;
+  using ps::test::kernel_registry;
 
-  auto operations = make_default_operation_registry();
+  auto operations = kernel_registry();
   Compiler compiler(operations);
   // Unknown operations reject consistently without retaining historical keys.
   const std::string unknown_key = "test.unknown_operation";
@@ -217,7 +217,7 @@ int main() {
   PS_CHECK(gpu_compiled.value().plan.digest().value !=
            compiled.value().plan.digest().value);
 
-  auto other_operations = make_default_operation_registry();
+  auto other_operations = kernel_registry();
   Compiler other_compiler(other_operations);
   auto mismatched_optimization =
       other_compiler.optimize(compiled.value().semantic);

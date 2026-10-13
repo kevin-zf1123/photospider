@@ -8,6 +8,7 @@
 
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/data/tensor_description.hpp"
+#include "photospider/ops/export.hpp"
 
 namespace ps {
 class OperationRegistry;
@@ -54,14 +55,15 @@ struct RgbBasisOptions final {
  *
  * @param basis Preset or complete custom primary/white geometry.
  * @return Canonical static parameter text on success. */
-PHOTOSPIDER_API Result<std::string> rgb_basis_parameter(const RgbBasis& basis);
+PHOTOSPIDER_OPS_API Result<std::string> rgb_basis_parameter(
+    const RgbBasis& basis);
 /** @brief Encode a finite, valid white chromaticity as canonical bounded
  * `xy-v1:` Float64 words. Invalid xy or insufficient exact-work capacity
  * returns an error.
  *
  * @param white White chromaticity `{x, y}`.
  * @return Canonical static parameter text on success. */
-PHOTOSPIDER_API Result<std::string> xyz_white_parameter(
+PHOTOSPIDER_OPS_API Result<std::string> xyz_white_parameter(
     const std::array<double, 2>& white);
 /** @brief Append an FMT-10 operation to a workflow transactionally.
  *
@@ -80,7 +82,7 @@ PHOTOSPIDER_API Result<std::string> xyz_white_parameter(
  * @return The appended `values` edge on success; a status describing invalid
  * options, graph edges, geometry, capacity or backend availability on failure.
  */
-PHOTOSPIDER_API Result<WorkflowNodeOutput> rgb_to_xyz(
+PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> rgb_to_xyz(
     WorkflowDocument& document, WorkflowInput input,
     const RgbBasisOptions& options,
     std::shared_ptr<OperationRegistry> registry = {});
@@ -93,7 +95,7 @@ PHOTOSPIDER_API Result<WorkflowNodeOutput> rgb_to_xyz(
  * @param options FMT-10B source and target options.
  * @param registry Registry used for edge inference; defaults to built-ins.
  * @return The appended output edge or the preparation/validation status. */
-PHOTOSPIDER_API Result<WorkflowNodeOutput> xyz_to_rgb(
+PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> xyz_to_rgb(
     WorkflowDocument& document, WorkflowInput input,
     const RgbBasisOptions& options,
     std::shared_ptr<OperationRegistry> registry = {});
@@ -108,7 +110,7 @@ PHOTOSPIDER_API Result<WorkflowNodeOutput> xyz_to_rgb(
  * @param options FMT-10C white and method options.
  * @param registry Registry used for edge inference; defaults to built-ins.
  * @return The appended output edge or the preparation/validation status. */
-PHOTOSPIDER_API Result<WorkflowNodeOutput> adapt_xyz_white(
+PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> adapt_xyz_white(
     WorkflowDocument& document, WorkflowInput input,
     const RgbBasisOptions& options,
     std::shared_ptr<OperationRegistry> registry = {});
@@ -122,7 +124,7 @@ PHOTOSPIDER_API Result<WorkflowNodeOutput> adapt_xyz_white(
  * @param options Source/target basis and white-handling options for the stages.
  * @param registry Registry used for edge inference; defaults to built-ins.
  * @return The final B output edge or the first static preparation failure. */
-PHOTOSPIDER_API Result<WorkflowNodeOutput> convert_linear_rgb(
+PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> convert_linear_rgb(
     WorkflowDocument& document, WorkflowInput input,
     const RgbBasisOptions& options,
     std::shared_ptr<OperationRegistry> registry = {});

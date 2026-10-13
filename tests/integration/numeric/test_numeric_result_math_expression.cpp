@@ -193,10 +193,9 @@ void expression_boundaries() {
   failed = d.run(node.operation, {zero, one}, {}, node.parameters);
   require(!failed.ok() && failed.status().reason == FailureReason::DivideByZero,
           "expression division retains its distinct diagnostic reason");
-  OperationMetadata good, legacy;
+  OperationMetadata good, missing;
   good.result_schema = std::make_shared<SchemaTemplate>(zero.schema());
-  legacy.descriptor = {ElementType::Float64, {1}};
-  auto rejected = d.registry->resolve_traits(node.operation, {legacy, good},
+  auto rejected = d.registry->resolve_traits(node.operation, {missing, good},
                                              node.parameters);
   require(!rejected.ok() && rejected.status().code == ErrorCode::TypeMismatch,
           "expression rejects incompatible input metadata before static parser "

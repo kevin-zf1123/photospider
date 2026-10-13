@@ -1,38 +1,40 @@
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
-#include <cstdint>
 #include <cstring>
 #include <future>
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <vector>
+#include <utility>
 
-#include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "execution/execution_test_hooks.hpp"
-#include "photospider/photospider.hpp"
+#include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
-using namespace ps;                    // NOLINT(build/namespaces)
-using namespace std::chrono_literals;  // NOLINT(build/namespaces)
-struct Gate final {
+using namespace ps;  // NOLINT(build/namespaces)
+using multi_result::check;
+using multi_result::take;
+struct Gate {
   std::mutex mutex;
   std::condition_variable changed;
-  bool entered = false, released = false;
-  std::atomic<unsigned> borrowed{0};
+  bool entered = false, released = false, timed_out = false;
+  std::atomic<unsigned> borrowed{0}, starts{0}, destroyed{0}, prefixes{0};
   void hold() {
     std::unique_lock<std::mutex> lock(mutex);
     if (entered)
       return;
     entered = true;
     changed.notify_all();
-    changed.wait_for(lock, 5s, [&] { return released; });
+    timed_out = !changed.wait_for(lock, std::chrono::seconds(10),
+                                  [&] { return released; });
   }
   bool wait() {
     std::unique_lock<std::mutex> lock(mutex);
-    return changed.wait_for(lock, 3s, [&] { return entered; });
+    return changed.wait_for(lock, std::chrono::seconds(5),
+                            [&] { return entered; });
   }
   void release() {
     std::lock_guard<std::mutex> lock(mutex);
@@ -41,184 +43,152 @@ struct Gate final {
   }
 };
 Gate* active = nullptr;
-void hold_checkpoint() noexcept {
+void published() noexcept {
   active->hold();
 }
-void borrow_checkpoint() noexcept {
+void borrowed() noexcept {
   ++active->borrowed;
 }
-Value input(bool finite) {
-  const double data[]{1, finite ? 2 : std::numeric_limits<double>::infinity()};
-  std::vector<std::uint8_t> bytes(sizeof(data));
-  std::memcpy(bytes.data(), data, sizeof(data));
-  return Value::create({ElementType::Float64, {2}}, Region::whole({2}),
-                       {0, {8}}, bytes)
-      .take_value();
-}
-Footprint point(unsigned index) {
-  return Footprint::from_regions({2}, {Region({{index, 1}})}).take_value();
-}
-int shared(bool long_first, bool cancel_owner, bool finite, bool warm) {
-  auto registry = make_default_operation_registry();
-  WorkflowDocument doc;
-  WorkflowInputDeclaration declaration;
-  declaration.id = 1;
-  declaration.name = "x";
-  declaration.result_schema = std::make_shared<SchemaTemplate>(
-      numeric_result_fixture::source_schema(input(finite)));
-  doc.inputs = {declaration};
-  doc.nodes = {{1,
-                "numeric.ordered_scan",
-                {WorkflowInputReference{1}},
-                {{"block_size", INT64_C(1)}}}};
-  doc.outputs = {{"y", 1, "value"}};
-  GraphContext graph(doc);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+struct Scan {
+  Gate* counts;
+  unsigned stage = 0;
+  bool restored = false;
+  double carry = 0;
+  explicit Scan(Gate* gate) : counts(gate) { ++counts->starts; }
+  ~Scan() { ++counts->destroyed; }
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    if (!stage++) {
+      auto saved = take(phase.checkpoint_before(1, 0));
+      if (saved) {
+        carry = multi_result::number(saved->state());
+        restored = true;
+      }
+      ResultProgramNeed need;
+      need.tiles.push_back({0, true, false, {}});
+      return Result<ResultProgramPoll>(std::move(need));
+    }
+    if (!restored) {
+      check(phase.read_tensor(0, 0, {0}, &carry, sizeof(carry)));
+      ++counts->prefixes;
+      auto state =
+          multi_result::binding(phase.resources, "carry", carry).result;
+      check(phase.checkpoint_publish(1, 0, state));
+    }
+    double next = 0;
+    check(phase.read_tensor(0, 0, {1}, &next, sizeof(next)));
+    if (!std::isfinite(next))
+      return Result<ResultProgramPoll>(
+          Status{ErrorCode::OperationFailed, "nonfinite scan input 1"});
+    const double sum = carry + next;
+    auto builder = take(ResultBuilder::start(phase.resources,
+                                             *phase.query.output.result_schema,
+                                             phase.query.semantic_key));
+    check(builder.publish_tensor(
+        0, Region::whole({1}),
+        ByteView(reinterpret_cast<const std::uint8_t*>(&sum), sizeof(sum))));
+    return Result<ResultProgramPoll>(
+        ResultPublication{take(builder.seal()), true});
+  }
+};
+int concurrent_scans(bool cancel_owner, bool finite, bool cache) {
+  Gate gate;
+  auto registry = std::make_shared<OperationRegistry>();
+  auto input_schema = multi_result::schema(ElementType::Float64, {2});
+  OperationDefinition operation;
+  operation.key = "test.checkpoint_scan";
+  operation.traits.input_count = 1;
+  operation.traits.input_schema.resize(1);
+  operation.traits.input_schema[0].kind = OperationPortKind::Result;
+  operation.traits.input_schema[0].tensor_key = "number";
+  operation.traits.outputs = {multi_result::output("value")};
+  operation.traits.outputs[0].region_rule = OperationRegionRule::Whole;
+  operation.traits.outputs[0].continuation_bytes = sizeof(Scan);
+  operation.start_result = [&](const auto&, const auto& allocator) {
+    return ResultContinuation::make<Scan>(allocator, &gate);
+  };
+  check(registry->register_operation(std::move(operation)));
+  check(registry->freeze());
+  WorkflowDocument document;
+  document.inputs = {multi_result::declaration(1, "x", input_schema)};
+  document.nodes = {
+      {1, "test.checkpoint_scan", {WorkflowInputReference{1}}, {}}};
+  document.outputs = {{"y", 1, "value"}};
+  GraphContext graph(document);
+  auto plan = take(Compiler(registry).compile(graph)).plan;
   ExecutionContextConfig config;
   config.cpu_workers = 2;
-  config.result_cache_bytes = warm ? 64 : 0;
-  config.managed_resources = ResourceLimits{};
+  config.result_cache_bytes = cache ? 1048576 : 0;
   ExecutionContext context(registry, config);
-  auto root = context.resource_budget().take_value();
-  auto source = numeric_result_fixture::source(root, input(finite));
-  auto demand = context.open_demand(plan, {{{"x", source}}}).take_value();
-  if (warm)
-    PS_CHECK(demand.request({{"y", point(0)}}).ok());
-  Gate gate;
-  active = &gate;
+  auto root = take(context.resource_budget());
+  const double values[]{1,
+                        finite ? 2 : std::numeric_limits<double>::infinity()};
+  auto builder = take(ResultBuilder::start(root, input_schema, "input"));
+  check(builder.publish_tensor(
+      0, Region::whole({2}),
+      ByteView(reinterpret_cast<const std::uint8_t*>(values), sizeof(values))));
+  auto frozen = take(context.freeze(plan, {{{"x", take(builder.seal())}}}));
   execution_testing::ExecutionTestHooks hooks;
-  hooks.checkpoint_published = hold_checkpoint;
-  hooks.checkpoint_borrowed = borrow_checkpoint;
+  hooks.checkpoint_published = published;
+  hooks.checkpoint_borrowed = borrowed;
+  active = &gate;
   execution_testing::install_execution_test_hooks(&hooks);
-  CancellationSource stop;
-  const auto owner_index = long_first ? 1U : 0U;
-  const auto other_index = 1U - owner_index;
+  struct Cleanup {
+    ~Cleanup() {
+      execution_testing::install_execution_test_hooks(nullptr);
+      active = nullptr;
+    }
+  } cleanup;
+  CancellationSource cancellation;
+  // The same Whole unit misses twice while the first callback is held.
   auto owner = std::async(std::launch::async, [&] {
-    return demand.request({{"y", point(owner_index)}}, stop.token());
+    return context.execute(frozen, cancellation.token());
   });
   const bool entered = gate.wait();
-  // Both futures are always drained before the borrowed global hooks retire.
-  auto other = std::async(std::launch::async, [&] {
-    return demand.request({{"y", point(other_index)}});
-  });
-  const bool independent = other.wait_for(3s) == std::future_status::ready;
+  auto peer =
+      std::async(std::launch::async, [&] { return context.execute(frozen); });
+  const bool independent =
+      peer.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
   if (cancel_owner)
-    stop.cancel();
+    cancellation.cancel();
   gate.release();
   auto first = owner.get();
-  auto second = other.get();
-  execution_testing::install_execution_test_hooks(nullptr);
-  active = nullptr;
-  PS_CHECK(entered && independent);
-  PS_CHECK(warm || gate.borrowed.load() > 0);
-  for (unsigned i = 0; i < 2; ++i) {
-    const auto& result = i == owner_index ? first : second;
-    if (cancel_owner && i == owner_index) {
-      PS_CHECK(result.status().code == ErrorCode::Cancelled);
-    } else if (i == 1 && !finite) {
-      PS_CHECK(result.status().code == ErrorCode::OperationFailed &&
-               result.status().message == "nonfinite scan input 1");
+  auto second = peer.get();
+  PS_CHECK(entered && independent && !gate.timed_out);
+  PS_CHECK(gate.starts == 2 && gate.destroyed == 2);
+  PS_CHECK(gate.prefixes == 1);
+  PS_CHECK(gate.borrowed > 0);
+  for (const auto* result : {&first, &second}) {
+    if (result == &first && cancel_owner) {
+      PS_CHECK(result->status().code == ErrorCode::Cancelled);
+    } else if (!finite) {
+      PS_CHECK(result->status().code == ErrorCode::OperationFailed &&
+               result->status().message == "nonfinite scan input 1");
     } else {
-      double actual = 0;
-      PS_CHECK(result.ok() &&
-               result.value()
-                   .results.at("y")
-                   .read_tensor(
-                       result.value().results.at("y").descriptor().take_value(),
-                       0, {i}, &actual, 8)
-                   .ok() &&
-               actual == (i ? 3 : 1));
-      auto support = result.value().dependencies.source_support();
-      PS_CHECK(support.ok());
-      auto expected = Footprint::from_regions({2}, {Region({{0, i + 1}})});
-      PS_CHECK(support.value().at("x") == expected.value());
+      PS_REQUIRE_OK(*result);
+      PS_CHECK(multi_result::number(result->value().results.at("y")) == 3);
+      auto record = take(result->value().dependencies.tile_record({0, 0, 0}));
+      PS_CHECK(record && record->inputs.size() == 1 && record->inputs[0].whole);
     }
-  }
-  return 0;
-}
-int warm_short_first(bool cancel_short, bool finite, bool retain_result) {
-  auto registry = make_default_operation_registry();
-  WorkflowDocument doc;
-  WorkflowInputDeclaration declaration;
-  declaration.id = 1;
-  declaration.name = "x";
-  declaration.result_schema = std::make_shared<SchemaTemplate>(
-      numeric_result_fixture::source_schema(input(finite)));
-  doc.inputs = {declaration};
-  doc.nodes = {{1,
-                "numeric.ordered_scan",
-                {WorkflowInputReference{1}},
-                {{"block_size", INT64_C(1)}}}};
-  doc.outputs = {{"y", 1, "value"}};
-  GraphContext graph(doc);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContextConfig config;
-  config.cpu_workers = 2;
-  config.result_cache_bytes = 64;
-  config.maximum_dependency_cache_metadata = retain_result ? 65536 : 1;
-  config.managed_resources = ResourceLimits{};
-  ExecutionContext context(registry, config);
-  auto root = context.resource_budget().take_value();
-  auto source = numeric_result_fixture::source(root, input(finite));
-  auto demand = context.open_demand(plan, {{{"x", source}}}).take_value();
-  PS_CHECK(demand.request({{"y", point(0)}}).ok());
-  CancellationSource stop;
-  if (cancel_short)
-    stop.cancel();
-  // A completed content block may be reused after the previous Run retires.
-  // Submit the short observation first and preserve its own outcome.
-  auto short_result = demand.request({{"y", point(0)}}, stop.token());
-  auto long_result = demand.request({{"y", point(1)}});
-  if (cancel_short) {
-    PS_CHECK(short_result.status().code == ErrorCode::Cancelled);
-  } else {
-    double value = 0;
-    PS_CHECK(short_result.ok());
-    const auto& diagnostics = short_result.value().diagnostics;
-    if (retain_result) {
-      PS_CHECK(diagnostics.shared_computations == 1 &&
-               diagnostics.operation_timings.empty());
-    } else {
-    }
-    PS_CHECK(
-        short_result.value()
-            .results.at("y")
-            .read_tensor(
-                short_result.value().results.at("y").descriptor().take_value(),
-                0, {0}, &value, 8)
-            .ok() &&
-        value == 1);
   }
   if (finite) {
-    double value = 0;
-    PS_CHECK(
-        long_result.ok() &&
-        long_result.value()
-            .results.at("y")
-            .read_tensor(
-                long_result.value().results.at("y").descriptor().take_value(),
-                0, {1}, &value, 8)
-            .ok() &&
-        value == 3);
-  } else {
-    PS_CHECK(long_result.status().code == ErrorCode::OperationFailed &&
-             long_result.status().message == "nonfinite scan input 1");
+    auto warm = take(context.execute(frozen));
+    PS_CHECK(multi_result::number(warm.results.at("y")) == 3);
+    PS_CHECK(cache ? warm.diagnostics.cache_hits > 0
+                   : warm.diagnostics.cache_hits == 0);
+    context.clear_result_cache();
+    const auto before = gate.prefixes.load();
+    auto cold = take(context.execute(frozen));
+    PS_CHECK(multi_result::number(cold.results.at("y")) == 3);
+    PS_CHECK(gate.prefixes == before + 1 && cold.diagnostics.cache_hits == 0);
   }
-  PS_CHECK(demand.request({{"y", point(0)}}).ok());
+  PS_CHECK(root.statistics().live[ResourceKind::Queue] == 0);
   return 0;
 }
 }  // namespace
 int main() {
-  for (bool long_first : {false, true}) {
-    PS_CHECK(shared(long_first, false, false, false) == 0);
-    PS_CHECK(shared(long_first, true, false, false) == 0);
-    PS_CHECK(shared(long_first, true, true, false) == 0);
-  }
-  for (bool cancel : {false, true})
-    for (bool finite : {false, true})
-      for (bool retain_result : {false, true})
-        PS_CHECK(warm_short_first(cancel, finite, retain_result) == 0);
-  PS_CHECK(shared(true, false, false, true) == 0);
-  PS_CHECK(shared(true, true, false, true) == 0);
+  for (bool cache : {false, true})
+    for (bool cancel : {false, true})
+      for (bool finite : {false, true})
+        PS_CHECK(concurrent_scans(cancel, finite, cache) == 0);
   return 0;
 }

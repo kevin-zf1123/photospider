@@ -137,8 +137,7 @@ do not broaden a shared-input error into a whole-output ValidationDomain that
 revokes already completed or independent observations. In particular, invalid
 integrate_1d step affects positive indices only, and prefix_sum integer overflow
 belongs only to the requested overflowing prefix. Existing typed validation
-domains retain their own scope. Ordinary execute is fail-fast; execute_atoms
-isolation requires the host's actual eligible Atomic/PerAtomOutcome plan.
+domains retain their own scope. Ordinary execute is fail-fast.
 
 A failed observation publishes no partial Value or successful certificate.
 Independently completed observations retain their terminal outcomes. Dense

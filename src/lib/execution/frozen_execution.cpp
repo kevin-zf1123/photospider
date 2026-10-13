@@ -34,12 +34,12 @@ const ExecutionPlan& FrozenExecution::plan() const noexcept {
   static const ExecutionPlan empty;
   return state_ ? state_->plan : empty;
 }
-Result<FrozenExecution> FrozenExecution::for_region(
-    const std::string& output, const Region& region) const {
+Result<FrozenExecution> FrozenExecution::for_tiles(
+    const std::string& output, const TileRequest& request) const {
   if (!valid())
     return Result<FrozenExecution>(
         Status::failure(ErrorCode::Stale, "invalid frozen execution"));
-  auto tile = state_->plan.tile_plan(output, region);
+  auto tile = state_->plan.tile_plan(output, request);
   if (!tile.ok())
     return Result<FrozenExecution>(tile.status());
   auto state = std::allocate_shared<State>(
@@ -115,7 +115,8 @@ Result<DemandResult> ExecutionContext::execute_fragments(
     if (!combined.ok())
       return failure(combined.status());
     auto key = demand_key(query, captured.state_->plan,
-                          options.dependencies.sets.maximum_boxes);
+                          options.dependencies.sets.maximum_boxes,
+                          captured.state_->resources);
     if (!key.ok())
       return failure(key.status());
     auto validated = preflight_regional_bindings(
@@ -130,8 +131,7 @@ Result<DemandResult> ExecutionContext::execute_fragments(
         impl_->operation_registry, captured.state_->plan,
         captured.state_->plan.current_check_, validated.take_value(),
         combined.value(), options, &query, captured.state_->execution_identity,
-        impl_->cache.get(), &impl_->shared_results, false,
-        impl_->result_checkpoints.get(),
+        impl_->cache.get(), impl_->result_checkpoints.get(),
         std::shared_ptr<const ExecutionPlan>(captured.state_,
                                              &captured.state_->plan));
     if (!run.ok())
@@ -165,7 +165,7 @@ Result<ExecutionResult> ExecutionContext::execute(
     return Result<ExecutionResult>(Status{ErrorCode::Stale, {}});
   return execute_regions(captured.state_->plan, captured.state_->bindings,
                          cancellation, options,
-                         captured.state_->execution_identity, false, nullptr,
+                         captured.state_->execution_identity, nullptr,
                          std::shared_ptr<const ExecutionPlan>(
                              captured.state_, &captured.state_->plan));
 }

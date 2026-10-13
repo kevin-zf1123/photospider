@@ -14,6 +14,7 @@
 
 #include "photospider/data/tensor_description.hpp"
 #include "photospider/photospider.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 
 std::map<std::string, ps::ParameterValue> defaults() {
   using I = std::int64_t;
@@ -53,7 +54,7 @@ int main(int argc, char** argv) try {
   std::string input_file, output_file, operation = "pixeloe.pixelize";
   int repeat = 1, warmup = 0;
   uint32_t workers = 1;
-  uint64_t frames = 1, layers = 1;
+  uint64_t frames = 1, layers = 1, tile_extent = 128;
   bool empty = false;
   uint64_t budget = 8ULL << 30;
   uint64_t work_budget = UINT64_MAX;
@@ -68,6 +69,8 @@ int main(int argc, char** argv) try {
       frames = std::stoull(val);
     } else if (key == "layers") {
       layers = std::stoull(val);
+    } else if (key == "tile_extent") {
+      tile_extent = std::stoull(val);
     } else if (key == "empty") {
       empty = val == "true";
     } else if (key == "backend") {
@@ -218,12 +221,9 @@ int main(int argc, char** argv) try {
   document.outputs = {{"result", 1, "values"}};
   ps::GraphContext graph(document);
   ps::PlanningOptions planning;
+  planning.tile_extent = tile_extent;
   planning.execution_mode =
       gpu ? ps::ExecutionMode::NativeGpu : ps::ExecutionMode::CpuExact;
-  if (roi) {
-    planning.output_regions = {
-        {"result", ps::Region({{0, 1}, {0, 1}, {1, 3}, {2, 4}, {0, 3}})}};
-  }
   auto plan = ps::Compiler(registry).compile(graph, planning);
   if (!plan.ok()) {
     throw std::runtime_error("compile: " + plan.status().message);
@@ -240,15 +240,10 @@ int main(int argc, char** argv) try {
   const auto root = execution.resource_budget().take_value();
   auto builder =
       ps::ResultBuilder::start(root, schema, "pixeloe.source").take_value();
-  require(builder.bind_descriptor_relation(
-      ps::ResultRelation::cartesian(root, 1, {0, 8, 0, 0}).take_value()));
   require(builder.publish_tensor(
       0, ps::Region::whole(tensor.sample_shape()),
       ps::ByteView(reinterpret_cast<const uint8_t*>(samples.data()),
-                   samples.size() * 4),
-      ps::ResultRelation::cartesian(root, samples.size(), {0, 1, 0, 0})
-          .take_value(),
-      {true, true, true, true}));
+                   samples.size() * 4)));
   auto image = builder.seal().take_value();
   samples.clear();
   samples.shrink_to_fit();
@@ -259,20 +254,20 @@ int main(int argc, char** argv) try {
   auto captured = execution.freeze(plan.value().plan, bindings);
   if (!captured.ok())
     throw std::runtime_error(captured.status().message);
-  ps::OperationMetadata input_metadata;
-  input_metadata.result_schema =
-      std::make_shared<const ps::SchemaTemplate>(schema);
-  auto traits = registry->resolve_traits(operation, {input_metadata}, params)
-                    .take_value();
-  const auto output_shape =
-      traits.outputs[0].result_schema->tensors[0].sample_shape();
-  const auto demand =
-      empty ? ps::Footprint::none(output_shape).take_value()
-      : roi ? ps::Footprint::from_regions(
-                  output_shape,
-                  {ps::Region({{0, 1}, {0, 1}, {1, 3}, {2, 4}, {0, 3}})})
-                  .take_value()
-            : ps::Footprint::all(output_shape).take_value();
+  ps::TileRequest demand{!empty, {}};
+  if (roi && !empty) {
+    const auto& grid =
+        plan.value()
+            .plan.steps()[plan.value().plan.outputs().at("result")]
+            .tile_grid;
+    if (!grid)
+      throw std::runtime_error("PixelOE output has no spatial grid");
+    auto selected = ps::sdk::tiles_for_region(
+        root, *grid, ps::Region({{0, 1}, {0, 1}, {1, 3}, {2, 4}, {0, 3}}));
+    if (!selected.ok())
+      throw std::runtime_error(selected.status().message);
+    demand = {false, selected.take_value()};
+  }
   ps::ExecutionOptions execution_options;
   execution_options.maximum_dependency_work = work_budget;
   execution_options.dependencies.maximum_work = work_budget;
@@ -345,7 +340,8 @@ int main(int argc, char** argv) try {
       const auto& out = run.value().results.at("result");
       if (!out.descriptor().take_value().tensor_coverage(0).empty() ||
           diagnostics.native_dispatch_count || diagnostics.cpu_stage_count ||
-          !run.value().dependencies.source_support().take_value().empty() ||
+          run.value().dependencies.tile_record({0, 0, 0}).take_value() !=
+              nullptr ||
           root.statistics().live[ps::ResourceKind::Payload] != baseline_payload)
         throw std::runtime_error(
             "Empty PixelOE read samples or produced payload");

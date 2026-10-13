@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "support/execution_probe_fixture.hpp"
 #include "support/execution_sync_fixture.hpp"
 #include "support/result_numeric_observation_fixture.hpp"
 
@@ -13,7 +14,7 @@ namespace {
 using namespace ps::test_numeric;  // NOLINT(build/namespaces)
 void active_delay_cancel();
 void core_result_programs() {
-  Driver driver;
+  Driver driver(UINT64_MAX, 16 * 1048576, 0, ps::test::make_probe_registry());
   for (const auto& pair : std::vector<std::pair<double, double>>{
            {2, 3},
            {-0.0, -0.0},
@@ -43,7 +44,7 @@ void core_result_programs() {
   }
   auto source = driver.source({ElementType::UInt8, {3}}, {3, 7, 9}, {1, {1}});
   auto delay =
-      take(driver.run("core.delay", {source},
+      take(driver.run("test.delay", {source},
                       take(Footprint::from_regions({3}, {Region({{1, 1}})})),
                       {{"milliseconds", INT64_C(0)}}, {}, "value"));
   require(read_bits(delay.results.at("out"), {0}) == 3 &&
@@ -52,14 +53,14 @@ void core_result_programs() {
   for (const auto invalid : {INT64_C(-1), INT64_C(5001)}) {
     bool rejected = false;
     try {
-      driver.prepare("core.delay", {source}, {{"milliseconds", invalid}},
+      driver.prepare("test.delay", {source}, {{"milliseconds", invalid}},
                      "value");
     } catch (const std::runtime_error&) {
       rejected = true;
     }
     require(rejected, "delay static bounds");
   }
-  auto prepared = driver.prepare("core.gpu_fallback_probe", {source}, {},
+  auto prepared = driver.prepare("test.gpu_fallback_probe", {source}, {},
                                  "value", {}, true);
   auto frozen = take(driver.context->freeze(prepared.plan, prepared.bindings));
   auto fallback = take(driver.context->execute(frozen));
@@ -103,10 +104,10 @@ void core_result_programs() {
   shared_document.inputs = {input};
   shared_document.nodes = {
       {6,
-       "core.delay",
+       "test.delay",
        {WorkflowInputReference{11}},
        {{"milliseconds", INT64_C(0)}}},
-      {7, "core.gpu_fallback_probe", {WorkflowNodeOutput{6, "value"}}, {}}};
+      {7, "test.gpu_fallback_probe", {WorkflowNodeOutput{6, "value"}}, {}}};
   shared_document.outputs = {{"out", 7, "value"}};
   GraphContext shared_graph(shared_document);
   PlanningOptions gpu;
@@ -131,7 +132,6 @@ void core_result_programs() {
     return Status::success();
   };
   CancellationSource producer_stop;
-  ps::test::SharedJoinEvent joined_event("core.gpu_fallback_probe", 7);
   std::future<Result<ExecutionResult>> producer, waiter;
   ps::test::OnExit cleanup([&] {
     producer_stop.cancel();
@@ -157,7 +157,8 @@ void core_result_programs() {
   }
   waiter = std::async(std::launch::async,
                       [&] { return driver.context->execute(shared_frozen); });
-  const bool joined = joined_event.wait();
+  const bool independent =
+      waiter.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
   producer_stop.cancel();
   {
     std::lock_guard<std::mutex> lock(mutex);
@@ -166,27 +167,25 @@ void core_result_programs() {
   changed.notify_all();
   auto retired = producer.get();
   auto survived = take(waiter.get());
-  require(
-      callback_entered && joined &&
-          retired.status().code == ErrorCode::Cancelled &&
-          read_bits(survived.results.at("out"), {2}) == 9 &&
-          survived.diagnostics.shared_computations >= 1 &&
-          survived.diagnostics.selected_backends.at({7, 0}) == Backend::Cpu,
-      "shared fallback waiter survives producer cancellation and reports CPU");
-  auto delayed = driver.prepare("core.delay", {source},
+  require(callback_entered && independent &&
+              retired.status().code == ErrorCode::Cancelled &&
+              read_bits(survived.results.at("out"), {2}) == 9 &&
+              survived.diagnostics.selected_backends.at({7, 0}) == Backend::Cpu,
+          "independent fallback run survives another run cancellation and "
+          "reports CPU");
+  auto delayed = driver.prepare("test.delay", {source},
                                 {{"milliseconds", INT64_C(200)}}, "value");
   auto delay_frozen =
       take(driver.context->freeze(delayed.plan, delayed.bindings));
   active_delay_cancel();
   auto cold = take(driver.context->execute(delay_frozen));
   auto warm = take(driver.context->execute(delay_frozen));
-  require(cold.results.at("out").object_id() ==
+  require(cold.results.at("out").object_id() !=
                   warm.results.at("out").object_id() &&
               !cold.diagnostics.operation_timings.empty() &&
-              warm.diagnostics.operation_timings.empty() &&
-              warm.diagnostics.shared_computations >= 1,
-          "non-cacheable delay shares an already owned Result in the same "
-          "frozen scope");
+              !warm.diagnostics.operation_timings.empty() &&
+              warm.diagnostics.cache_hits == 0,
+          "non-cacheable delay executes for each run of the frozen plan");
 }
 void finite_elementwise_results() {
   Driver d;
@@ -775,7 +774,7 @@ void comparison_and_selection() {
           "select Empty does not read invalid conditions or branches");
 }
 void active_delay_cancel() {
-  auto original = make_default_operation_registry();
+  auto original = ps::test::make_probe_registry();
   auto registry = std::make_shared<OperationRegistry>();
   auto preparations = std::make_shared<unsigned>(0);
   auto stop = std::make_shared<CancellationSource>();
@@ -783,13 +782,13 @@ void active_delay_cancel() {
   require(
       registry
           ->register_operation(observed_numeric(
-              original, "core.delay", preparations, stop, observed, false, 1))
+              original, "test.delay", preparations, stop, observed, false, 1))
           .ok(),
       "observed delay registration");
   require(registry->freeze().ok(), "observed delay freeze");
   Driver driver(UINT64_MAX, 16 * 1048576, 0, registry);
   auto source = driver.source({ElementType::UInt8, {3}}, {3, 7, 9}, {1, {1}});
-  auto prepared = driver.prepare("core.delay", {source},
+  auto prepared = driver.prepare("test.delay", {source},
                                  {{"milliseconds", INT64_C(200)}}, "value");
   auto result =
       driver.context->execute(prepared.plan, prepared.bindings, stop->token());

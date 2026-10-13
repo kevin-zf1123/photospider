@@ -298,9 +298,8 @@ void lut1d_boundaries() {
                                              node.parameters);
   require(!rejected.ok() && rejected.status().code == ErrorCode::TypeMismatch,
           "LUT axis dtype is statically Float64");
-  OperationMetadata legacy;
-  legacy.descriptor = {ElementType::Float64, {1}};
-  rejected = d.registry->resolve_traits(node.operation, {legacy, tab, ax},
+  OperationMetadata missing;
+  rejected = d.registry->resolve_traits(node.operation, {missing, tab, ax},
                                         node.parameters);
   require(!rejected.ok() && rejected.status().code == ErrorCode::TypeMismatch,
           "LUT requires Result metadata at every input");

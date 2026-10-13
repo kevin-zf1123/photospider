@@ -18,97 +18,29 @@
 #include "plugin/result_payload_bound.hpp"
 
 namespace ps {
-Result<AtomDomain> result_observation_domain(const ResultProgramQuery& query) {
-  using Answer = Result<AtomDomain>;
-  if (!query.output.result_schema || query.output_index >= 64)
-    return Answer(Status{ErrorCode::InvalidArgument,
-                         "invalid Result observation domain"});
-  const auto& schema = *query.output.result_schema;
-  auto valid = schema.validate(true);
-  if (!valid.ok())
-    return Answer(valid);
-  AtomDomain domain;
-  domain.first.output_index = query.output_index;
-  if (schema.tensors.empty()) {
-    if (query.tensor_outputs || query.tensor_slot)
-      return Answer(Status{ErrorCode::InvalidArgument,
-                           "invalid Result observation domain"});
-    domain.first.rank = 1;
-    domain.extent[0] = 1;
-    return Answer(domain);
+void ResultProgramPhase::record_failure(const Status& status) const {
+  if (status.ok())
+    return;
+  if (failure_latch)
+    static_cast<void>(failure_latch->record(status));
+  if (failure) {
+    auto expected = ErrorCode::Ok;
+    failure->compare_exchange_strong(expected, status.code);
   }
-  if (query.tensor_slot >= schema.tensors.size())
-    return Answer(Status{ErrorCode::InvalidArgument,
-                         "invalid Result observation tensor slot"});
-  const auto& tensor = schema.tensors[query.tensor_slot];
-  const auto tuple =
-      input_internal::tuple_channel_axis(tensor.descriptor, tensor.facets);
-  const auto rank = tensor.batch_axes.size() + tensor.descriptor.shape.size();
-  for (std::size_t axis = 0; axis < rank; ++axis) {
-    const bool grouped = axis >= rank - tensor.atomic_trailing_axes ||
-                         (tuple && axis == *tuple + tensor.batch_axes.size());
-    if (grouped)
-      continue;
-    domain.extent[domain.first.rank++] =
-        axis < tensor.batch_axes.size()
-            ? tensor.batch_axes[axis]
-            : tensor.descriptor.shape[axis - tensor.batch_axes.size()];
+  if (failure_observer) {
+    try {
+      failure_observer(status);
+    } catch (...) {
+      // An observer failure makes this attempt unsafe to replay, even when
+      // the original cause was a retryable backend error.
+      if (failure_latch) {
+        try {
+          failure_latch->veto_backend_retry();
+        } catch (...) {
+        }
+      }
+    }
   }
-  if (!domain.first.rank) {
-    domain.first.rank = 1;
-    domain.extent[0] = 1;
-  }
-  return Answer(domain);
-}
-Result<AtomKey> result_atom_key(const ResultProgramQuery& query) {
-  using Answer = Result<AtomKey>;
-  const auto invalid = [] {
-    return Answer(Status{ErrorCode::InvalidArgument,
-                         "Result query requires one Atomic observation"});
-  };
-  if (!query.output.result_schema || query.output_index >= 64)
-    return invalid();
-  AtomKey key;
-  key.output_index = query.output_index;
-  const auto& schema = *query.output.result_schema;
-  auto valid = schema.validate(true);
-  if (!valid.ok())
-    return Answer(valid);
-  if (schema.tensors.empty()) {
-    if (query.tensor_outputs || query.tensor_slot)
-      return invalid();
-    key.rank = 1;
-    return Answer(key);
-  }
-  if (query.tensor_slot >= schema.tensors.size())
-    return invalid();
-  const auto& tensor = schema.tensors[query.tensor_slot];
-  auto requested = query.tensor_outputs
-                       ? Result<Footprint>(*query.tensor_outputs)
-                       : Footprint::all(tensor.sample_shape());
-  if (!requested.ok())
-    return Answer(requested.status());
-  auto closed = tensor.close_samples(requested.value());
-  if (!closed.ok())
-    return Answer(closed.status());
-  if (closed.value().boxes().size() != 1 || closed.value().empty())
-    return invalid();
-  const auto& dimensions = closed.value().boxes()[0].dimensions();
-  const auto tuple =
-      input_internal::tuple_channel_axis(tensor.descriptor, tensor.facets);
-  for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
-    const bool grouped =
-        axis >= dimensions.size() - tensor.atomic_trailing_axes ||
-        (tuple && axis == *tuple + tensor.batch_axes.size());
-    if (grouped)
-      continue;
-    if (dimensions[axis].extent != 1)
-      return invalid();
-    key.coordinate[key.rank++] = dimensions[axis].offset;
-  }
-  if (!key.rank)
-    key.rank = 1;
-  return Answer(key);
 }
 std::uint32_t ResultCheckpoint::phase() const {
   if (!valid())
@@ -165,23 +97,8 @@ Status ResultTensorInput::read_granted(
     }
     return Status{ErrorCode::Internal, "prepared input backing has a hole"};
   }
-  if (pieces_.empty())
-    return result_.read_tensor(descriptor_, slot_, coordinate, destination,
-                               bytes, cancellation);
-  if (cancellation.cancelled())
-    return Status{ErrorCode::Cancelled, {}};
-  auto charged =
-      resources_->consume({pieces_.size() * (1 + coordinate.size())});
-  if (!charged.ok())
-    return charged;
-  for (const auto& piece : pieces_)
-    if (piece.samples.contains(coordinate))
-      return piece.result.read_tensor(piece.descriptor, slot_, coordinate,
-                                      destination, bytes, cancellation);
-  return Status{ErrorCode::InvalidArgument,
-                "missing tensor Need piece",
-                FailureReason::UnauthorizedRead,
-                {FailureOrigin::Protocol, FailureScope::Group}};
+  return result_.read_tensor(descriptor_, slot_, coordinate, destination, bytes,
+                             cancellation);
 }
 Status ResultTensorInput::read(const std::vector<std::uint64_t>& coordinate,
                                void* destination, std::size_t bytes,
@@ -242,29 +159,7 @@ Result<ResultTensorReadWindow> ResultTensorInput::acquire(
   const auto acquire = [&]() -> Answer {
     if (!status.ok())
       return Answer(status);
-    if (pieces_.empty())
-      return result_.acquire_tensor(descriptor_, slot_, region, cancellation);
-    ResourceVector<ResultTensorReadWindow> windows{
-        ResourceAllocator<ResultTensorReadWindow>(*resources_)};
-    auto charged = resources_->consume({pieces_.size()});
-    if (!charged.ok())
-      return Answer(charged);
-    for (const auto& piece : pieces_) {
-      auto covered = requested.value().intersect(piece.samples, limits);
-      if (!covered.ok())
-        return Answer(covered.status());
-      for (const auto& box : covered.value().boxes()) {
-        auto window = piece.result.acquire_tensor(piece.descriptor, slot_, box,
-                                                  cancellation);
-        if (!window.ok())
-          return Answer(window.status());
-        windows.push_back(window.take_value());
-      }
-    }
-    if (windows.size() == 1)
-      return Answer(std::move(windows.front()));
-    return execution_internal::ResultWindowAccess::compose(
-        *resources_, region, std::move(windows), cancellation);
+    return result_.acquire_tensor(descriptor_, slot_, region, cancellation);
   };
   auto result = acquire();
   if (result.ok() && !input_backing_.empty()) {
@@ -664,12 +559,16 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
   auto query = phase.query;
   query.resources = resources_;
   query.prepared = prepared_;
-  ResultProgramPhase normalized{query,           phase.results,
-                                phase.io,        phase.allocator,
-                                phase.resources, phase.consume_work,
-                                phase.failure,   phase.failure_observer};
+  ResultProgramPhase normalized{query,
+                                phase.results,
+                                phase.allocator,
+                                phase.resources,
+                                phase.consume_work,
+                                phase.failure,
+                                phase.failure_observer};
   normalized.failure_latch = phase.failure_latch;
   normalized.tensors = phase.tensors;
+  normalized.descriptors = phase.descriptors;
   normalized.cpu_parallel = phase.cpu_parallel;
   normalized.cpu_tiles = phase.cpu_tiles;
   normalized.gpu = phase.gpu;
@@ -680,10 +579,6 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
   normalized.checkpoint_publish = phase.checkpoint_publish;
   normalized.block = phase.block;
   normalized.discover = phase.discover;
-  const bool terminal =
-      prepared_ && query.output_index < prepared_->traits().outputs.size() &&
-      prepared_->traits().outputs[query.output_index].observation_kind ==
-          ObservationKind::RequestRecord;
   const auto stopped = [&]() {
     if (normalized.failure_latch) {
       auto status = normalized.failure_latch->snapshot();
@@ -724,7 +619,7 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
     }
     return Result<ResultProgramPoll>(status);
   };
-  if (terminal || payload_limit_) {
+  if (payload_limit_) {
     auto status = stopped();
     if (!status.ok())
       return Result<ResultProgramPoll>(status);
@@ -754,10 +649,21 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
   }();
   if (!answer.ok())
     record_returned_failure(answer.status());
-  if (terminal || payload_limit_) {
-    auto status = stopped();
-    if (!status.ok())
-      return Result<ResultProgramPoll>(status);
+  // Mandatory service failures fence every prepared continuation, including
+  // ordinary outputs without a declared payload bound.
+  auto stopped_status = stopped();
+  if (!stopped_status.ok()) {
+    // An atomic flag carries only a code. Preserve a propagated service or
+    // exception Status when that code matches; an authoritative full latch
+    // or a different earlier failure always wins.
+    if (!normalized.failure_latch && !answer.ok() &&
+        answer.status().code == stopped_status.code &&
+        stopped_status.reason == FailureReason::None &&
+        stopped_status.detail.origin == FailureOrigin::Unspecified &&
+        stopped_status.detail.scope == FailureScope::Unspecified &&
+        stopped_status.message.empty())
+      return answer;
+    return Result<ResultProgramPoll>(stopped_status);
   }
   if (answer.ok() && payload_bound_) {
     if (const auto* publication =
@@ -766,51 +672,6 @@ Result<ResultProgramPoll> ResultContinuation::poll_guarded(
       if (!status.ok())
         return reject_bound(status);
     }
-  }
-  if (answer.ok() && terminal) {
-    auto outcome = answer.take_value();
-    const auto reject = [&](const char* message) {
-      return reject_bound(
-          Status{ErrorCode::InvalidArgument,
-                 message,
-                 FailureReason::None,
-                 {FailureOrigin::Protocol, FailureScope::Group}});
-    };
-    if (auto* publication = std::get_if<ResultPublication>(&outcome)) {
-      if (!publication->complete || !publication->result.valid() ||
-          !query.output.result_schema ||
-          !publication->result.schema().same_schema(
-              *query.output.result_schema) ||
-          !publication->result.matches_scope(query.semantic_key) ||
-          !publication->result.owned_by(normalized.resources))
-        return reject("invalid terminal Result publication");
-      auto descriptor = publication->result.descriptor(true);
-      if (!descriptor.ok() &&
-          descriptor.status().code == ErrorCode::ResourceExhausted)
-        return Result<ResultProgramPoll>(descriptor.status());
-      if (!descriptor.ok() || !descriptor.value().sealed())
-        return reject("terminal Result requires a sealed publication");
-      if (!query.output.result_schema->tensors.empty()) {
-        if (query.tensor_slot >= query.output.result_schema->tensors.size())
-          return reject("invalid terminal Result tensor slot");
-        FootprintLimits limits;
-        limits.consume_work = normalized.consume_work;
-        limits.cancellation = query.cancellation;
-        auto demand = query.tensor_outputs
-                          ? Result<Footprint>(*query.tensor_outputs)
-                          : Footprint::all(query.output.result_schema
-                                               ->tensors[query.tensor_slot]
-                                               .sample_shape(),
-                                           limits);
-        if (!demand.ok())
-          return Result<ResultProgramPoll>(demand.status());
-        if (descriptor.value().tensor_coverage(query.tensor_slot) !=
-            demand.value())
-          return reject("terminal Result coverage differs from captured query");
-      }
-      publication->result.request_record_ = true;
-    }
-    return Result<ResultProgramPoll>(std::move(outcome));
   }
   return answer;
 } catch (...) {

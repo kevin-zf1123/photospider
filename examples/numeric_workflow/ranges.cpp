@@ -345,8 +345,11 @@ void typed_cache_and_environment(const std::string& profile) {
     auto cold = take(demand.request(query));
     retained = cold.results.at("values");
     auto shared = take(demand.request(query));
-    require(shared.results.at("values").object_id() == retained.object_id(),
-            "same Frozen shares range Result identity");
+    require(
+        shared.diagnostics.cache_hits > 0 &&
+            numeric_result_fixture::bytes(shared.results.at("values")) ==
+                numeric_result_fixture::bytes(retained),
+        "repeated demand reuses bounded completed cache with identical bits");
     auto fresh_bindings = fixture.bind(root);
     auto fresh = take(execution.freeze(plan.plan, fresh_bindings));
     auto warm = take(execution.execute_fragments(fresh, query));

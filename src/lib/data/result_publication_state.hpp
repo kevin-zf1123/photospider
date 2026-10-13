@@ -10,23 +10,6 @@
 
 namespace ps::data_internal {
 
-// Owns immutable ancestry without including execution record definitions.
-// Captures copy this capability under the publication mutex; no payload owner
-// is retained by the evidence graph, so retirement cannot form a Result cycle.
-class ResultEvidenceOwner final {
- public:
-  void bind(
-      std::shared_ptr<const execution_internal::DependencyBundle> bundle) {
-    bundle_ = std::move(bundle);
-  }
-  std::shared_ptr<const execution_internal::DependencyBundle> get() const {
-    return std::static_pointer_cast<const execution_internal::DependencyBundle>(
-        bundle_);
-  }
-
- private:
-  std::shared_ptr<const void> bundle_;
-};
 // Owns admission, static schema/identity and synchronized publication state.
 // The Result bundle destroys tensor/field backings before this base, keeping
 // budget and resource capabilities alive until their physical storage retires.
@@ -43,8 +26,6 @@ struct ResultPublicationState {
   ResourceVector<std::uint64_t> association;
   ResourceBindings resources;
   std::shared_ptr<PlanarPageBudget> image_budget;
-  ResultRelation descriptor_relation;
-  data_internal::ResultEvidenceOwner dependencies;
   ResultGrowthLimits limits;
   std::uint64_t object = 0, revision = 1, bytes = 0;
   core_internal::StoredFailure failure;

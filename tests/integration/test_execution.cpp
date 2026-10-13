@@ -23,6 +23,7 @@
 #include "benchmark/raw_benchmark_test_hooks.hpp"
 #include "execution/execution_test_hooks.hpp"
 #include "photospider/execution/execution.hpp"
+#include "support/execution_probe_fixture.hpp"
 #include "support/execution_sync_fixture.hpp"
 #include "support/operation_result_fixture.hpp"
 #include "support/test_support.hpp"
@@ -228,8 +229,7 @@ ps::Footprint fixture_outputs(const ps::ResultProgramPhase& phase) {
           phase.query.output.result_schema->tensors[0].sample_shape())));
 }
 FixturePoll publish_backing(const ps::ResultProgramPhase& phase,
-                            const ps::Value& backing,
-                            ps::ResultRelation relation = {}) {
+                            const ps::Value& backing) {
   const auto shape =
       phase.query.output.result_schema->tensors[0].sample_shape();
   auto builder = multi_result::take(ps::ResultBuilder::start(
@@ -238,32 +238,22 @@ FixturePoll publish_backing(const ps::ResultProgramPhase& phase,
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
-  multi_result::check(builder.bind_descriptor_relation(multi_result::take(
-      ps::ResultRelation::cartesian(phase.resources, 1, {}))));
-  if (!relation.valid())
-    relation = multi_result::take(ps::ResultRelation::cartesian(
-        phase.resources,
-        multi_result::take(
-            builder.reference().schema().tensors[0].sample_count()),
-        {}));
+      phase.query.tile_extent, phase.query.resources));
   for (const auto& region : fixture_outputs(phase).boxes()) {
     multi_result::check(builder.publish_tensor(
         0, region, backing.layout(),
-        multi_result::take(phase.resources.reference(backing.storage())),
-        relation, {true, true, true, true}));
+        multi_result::take(phase.resources.reference(backing.storage()))));
   }
   return FixturePoll(
       ps::ResultPublication{multi_result::take(builder.seal()), true});
 }
-FixturePoll publish_number(const ps::ResultProgramPhase& phase, double number,
-                           ps::ResultRelation relation = {}) {
+FixturePoll publish_number(const ps::ResultProgramPhase& phase, double number) {
   auto bytes = multi_result::take(phase.allocator.allocate(sizeof(number)));
   std::memcpy(bytes.data(), &number, sizeof(number));
   auto value = multi_result::take(ps::Value::from_storage(
       {ps::ElementType::Float64, {1}}, ps::Region::whole({1}), {0, {8}},
       std::move(bytes).freeze()));
-  return publish_backing(phase, value, std::move(relation));
+  return publish_backing(phase, value);
 }
 FixturePoll small_result(const ps::ResultProgramPhase& phase) {
   return publish_number(phase, 2.0);
@@ -294,8 +284,6 @@ FixturePoll publish_input(const ps::ResultProgramPhase& phase,
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{}));
-  multi_result::check(builder.bind_descriptor_relation(multi_result::take(
-      ps::ResultRelation::cartesian(phase.resources, 1, {}))));
   const auto width =
       ps::Value::element_size(schema.tensors[0].descriptor.element_type);
   for (const auto& region : fixture_outputs(phase).boxes()) {
@@ -312,12 +300,8 @@ FixturePoll publish_input(const ps::ResultProgramPhase& phase,
           return status;
         },
         multi_result::take(samples.element_count())));
-    auto relation = multi_result::take(ps::ResultRelation::identity(
-        phase.resources, multi_result::take(schema.tensors[0].sample_count()),
-        port, 1, ps::ResultSupportTarget::Tensor, 0));
     multi_result::check(builder.publish_tensor(
-        0, region, ps::ByteView(bytes.data(), bytes.size()),
-        std::move(relation), {true, true, true, true}));
+        0, region, ps::ByteView(bytes.data(), bytes.size())));
   }
   return FixturePoll(
       ps::ResultPublication{multi_result::take(builder.seal()), true});
@@ -325,11 +309,9 @@ FixturePoll publish_input(const ps::ResultProgramPhase& phase,
 struct FixtureProgram {
   FixtureCallback compute;
   ps::OperationRegionRule rule;
-  std::uint32_t radius;
   bool requested = false;
-  FixtureProgram(FixtureCallback compute, ps::OperationRegionRule rule,
-                 std::uint32_t radius)
-      : compute(std::move(compute)), rule(rule), radius(radius) {}
+  FixtureProgram(FixtureCallback compute, ps::OperationRegionRule rule)
+      : compute(std::move(compute)), rule(rule) {}
   FixturePoll poll(const ps::ResultProgramPhase& phase) {
     if (!requested && !phase.query.inputs.empty() &&
         !fixture_outputs(phase).empty()) {
@@ -342,24 +324,8 @@ struct FixtureProgram {
         auto samples = output;
         if (rule == ps::OperationRegionRule::Whole)
           samples = multi_result::take(ps::Footprint::all(shape));
-        if (rule == ps::OperationRegionRule::Halo) {
-          std::vector<ps::Region> boxes;
-          for (const auto& box : output.boxes()) {
-            auto dimensions = box.dimensions();
-            for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
-              auto& dimension = dimensions[axis];
-              const auto end = std::min<std::uint64_t>(
-                  shape[axis], dimension.offset + dimension.extent + radius);
-              dimension.offset =
-                  dimension.offset > radius ? dimension.offset - radius : 0;
-              dimension.extent = end - dimension.offset;
-            }
-            boxes.emplace_back(std::move(dimensions));
-          }
-          samples =
-              multi_result::take(ps::Footprint::from_regions(shape, boxes));
-        }
-        need.tensors.push_back({port, 0, std::move(samples), 1});
+        need.tiles.push_back(multi_result::take(ps::sdk::tile_need_for_samples(
+            phase.resources, phase.query, port, 0, samples)));
       }
       return FixturePoll(std::move(need));
     }
@@ -371,13 +337,9 @@ ps::OperationDefinition fixture_operation(std::string key,
                                           FixtureCallback compute) {
   const auto prior = traits.outputs[0];
   const auto rule = prior.region_rule;
-  const auto radius = prior.halo_radius;
-  const auto fixed = prior.shape_rule == ps::OperationShapeRule::Fixed
-                         ? prior.fixed_output_shape
-                         : std::vector<std::uint64_t>{1};
-  auto schema = multi_result::schema(prior.output_element_type, fixed);
+  auto schema = prior.result_schema.value_or(
+      multi_result::schema(ps::ElementType::Float64, {1}));
   schema.id = "test.execution.fixture";
-  schema.tensors[0].facets = prior.output_facets;
   for (auto& input : traits.input_schema) {
     input.kind = ps::OperationPortKind::Result;
     input.rank = 1;
@@ -385,31 +347,22 @@ ps::OperationDefinition fixture_operation(std::string key,
   traits.outputs[0] = multi_result::output("value", schema);
   traits.outputs[0].region_rule = rule == ps::OperationRegionRule::Whole
                                       ? ps::OperationRegionRule::Whole
-                                      : ps::OperationRegionRule::Dependency;
+                                      : ps::OperationRegionRule::Tiled;
   traits.outputs[0].continuation_bytes = sizeof(FixtureProgram);
   traits.outputs[0].maximum_dependency_stages = 4;
   traits.workspace_bytes = std::max<std::uint64_t>(
       traits.workspace_bytes,
-      std::max<std::uint64_t>(
-          traits.estimated_bytes,
-          multi_result::take(schema.tensors[0].sample_count()) *
-              ps::Value::element_size(prior.output_element_type)));
+      multi_result::take(schema.tensors[0].sample_count()) *
+          ps::Value::element_size(schema.tensors[0].descriptor.element_type));
   ps::OperationDefinition definition;
   definition.key = std::move(key);
-  if (prior.shape_rule == ps::OperationShapeRule::PreserveFirstInput ||
-      prior.shape_rule == ps::OperationShapeRule::MatchAllInputs ||
-      prior.output_semantic_rule == ps::OperationSemanticRule::PreserveInput) {
+  if (traits.requires_metadata_specialization) {
     traits.requires_metadata_specialization = true;
     definition.specialize_metadata =
-        [schema, prior](const std::vector<ps::OperationMetadata>& inputs,
-                        const std::map<std::string, ps::ParameterValue>&) {
+        [schema](const std::vector<ps::OperationMetadata>& inputs,
+                 const std::map<std::string, ps::ParameterValue>&) {
           auto resolved = schema;
-          resolved.tensors[0].descriptor.shape =
-              inputs[0].result_schema->tensors[0].descriptor.shape;
-          if (prior.output_semantic_rule ==
-              ps::OperationSemanticRule::PreserveInput)
-            resolved.tensors[0].facets =
-                inputs[0].result_schema->tensors[0].facets;
+          resolved.tensors[0] = inputs[0].result_schema->tensors[0];
           ps::OperationOutputSpecialization output;
           output.metadata.result_schema =
               std::make_shared<const ps::SchemaTemplate>(std::move(resolved));
@@ -421,11 +374,11 @@ ps::OperationDefinition fixture_operation(std::string key,
         std::max<std::uint64_t>(traits.workspace_bytes, 4096);
   }
   definition.traits = std::move(traits);
-  definition.start_result = [compute = std::move(compute), rule, radius](
+  definition.start_result = [compute = std::move(compute), rule](
                                 const ps::ResultProgramQuery&,
                                 const ps::BufferAllocator& allocator) {
     return ps::ResultContinuation::make<FixtureProgram>(allocator, compute,
-                                                        rule, radius);
+                                                        rule);
   };
   return definition;
 }
@@ -1342,9 +1295,7 @@ void hold_post_submit_observation() noexcept {
 }
 
 /**
- * @brief Builds one frozen registry whose shared test operation uses a rule.
- * @param rule Whole, elementwise-exact, or halo input-demand behavior.
- * @param halo_radius Positive only for `Halo`.
+ * @brief Builds a frozen Whole-vector source and consumer registry.
  * @param observed Callback-owned location receiving the executed input demand.
  * @return Frozen registry with fixed-shape source and `test.region` consumer.
  * @throws std::bad_alloc If registry/callback storage allocation fails.
@@ -1353,13 +1304,11 @@ void hold_post_submit_observation() noexcept {
  * keys so plan differences originate in semantic traits and demands.
  */
 std::shared_ptr<ps::OperationRegistry> make_region_registry(
-    ps::OperationRegionRule rule, std::uint32_t halo_radius,
     std::shared_ptr<ps::Region> observed) {
   auto registry = std::make_shared<ps::OperationRegistry>();
   ps::OperationTraits source_traits;
-  source_traits.outputs[0].output_element_type = ps::ElementType::Float64;
-  source_traits.outputs[0].shape_rule = ps::OperationShapeRule::Fixed;
-  source_traits.outputs[0].fixed_output_shape = {10U};
+  source_traits.outputs[0].result_schema =
+      multi_result::schema(ps::ElementType::Float64, {10});
   source_traits.outputs[0].region_rule = ps::OperationRegionRule::Whole;
   ps::Status status = registry->register_operation(
       fixture_operation("test.region_source", source_traits,
@@ -1372,24 +1321,11 @@ std::shared_ptr<ps::OperationRegistry> make_region_registry(
   ps::OperationTraits consumer_traits;
   consumer_traits.input_count = 1U;
   consumer_traits.input_schema.resize(1);
-  consumer_traits.parameter_schema = {
-      {"read_radius", ps::OperationParameterType::Int64, true},
-      {"read_rule", ps::OperationParameterType::Int64, true}};
-  consumer_traits.outputs[0].output_element_type = ps::ElementType::Float64;
-  consumer_traits.outputs[0].shape_rule =
-      ps::OperationShapeRule::PreserveFirstInput;
-  consumer_traits.outputs[0].region_rule = rule;
-  consumer_traits.outputs[0].halo_radius = halo_radius;
+  consumer_traits.requires_metadata_specialization = true;
+  consumer_traits.outputs[0].region_rule = ps::OperationRegionRule::Whole;
   status = registry->register_operation(fixture_operation(
       "test.region", consumer_traits,
-      [observed, rule,
-       halo_radius](const ps::ResultProgramPhase& invocation) -> FixturePoll {
-        if (std::get<std::int64_t>(invocation.query.parameters.at(
-                "read_rule")) != static_cast<std::int64_t>(rule) ||
-            std::get<std::int64_t>(
-                invocation.query.parameters.at("read_radius")) != halo_radius)
-          return FixturePoll(ps::Status{ps::ErrorCode::InvalidArgument,
-                                        "regional fixture contract mismatch"});
+      [observed](const ps::ResultProgramPhase& invocation) -> FixturePoll {
         if (!observed || invocation.tensors->size() != 1U) {
           return FixturePoll(ps::Status::failure(
               ps::ErrorCode::InvalidArgument,
@@ -1410,17 +1346,14 @@ std::shared_ptr<ps::OperationRegistry> make_region_registry(
  * @return Two-node document with named output `value`.
  * @throws std::bad_alloc If source storage allocation fails.
  */
-ps::WorkflowDocument region_document(
-    ps::OperationRegionRule rule = ps::OperationRegionRule::Whole,
-    std::uint32_t radius = 0) {
+ps::WorkflowDocument region_document() {
   ps::WorkflowDocument document;
   document.nodes = {
       ps::WorkflowNode{1U, "test.region_source", {}, {}},
       ps::WorkflowNode{2U,
                        "test.region",
                        {ps::WorkflowNodeOutput{1U, "value"}},
-                       {{"read_radius", static_cast<std::int64_t>(radius)},
-                        {"read_rule", static_cast<std::int64_t>(rule)}}},
+                       {}},
   };
   document.outputs = {ps::WorkflowOutput{"value", 2U, "value"}};
   return document;
@@ -1592,7 +1525,7 @@ int result_dso_contracts(bool require_gpu) {
         observer.counter("ps_operation_fixture_cpu_invocation_count",
                          kFixtureGpuBackendUnavailable);
     auto result = context.execute(fallback.value().plan, {{binding}});
-    PS_CHECK(result.ok());
+    PS_REQUIRE_OK(result);
     PS_CHECK(multi_result::number(result.value().results.at("value")) == 12);
     const auto& diagnostics = result.value().diagnostics;
     PS_CHECK(diagnostics.fallback_reasons.size() == 1);
@@ -1718,11 +1651,9 @@ int main(int argc, char** argv) {
   using ps::ExecutionOptions;
   using ps::ExecutionResult;
   using ps::GraphContext;
-  using ps::make_default_operation_registry;
   using ps::OperationDefinition;
   using ps::OperationRegionRule;
   using ps::OperationRegistry;
-  using ps::OperationShapeRule;
   using ps::OperationTraits;
   using ps::PlanningOptions;
   using ps::RawBenchmarkOptions;
@@ -1740,16 +1671,18 @@ int main(int argc, char** argv) {
   using ps::WorkflowNode;
   using ps::WorkflowNodeOutput;
   using ps::WorkflowOutput;
+  using ps::test::kernel_registry;
 
-  auto operations = make_default_operation_registry(false);
+  auto operations = kernel_registry(false);
+  PS_CHECK(ps::test::register_delay_probe(operations.get()).ok());
+  PS_CHECK(ps::test::register_fallback_probe(operations.get()).ok());
   OperationTraits source_traits;
   source_traits.supports_gpu = true;
   source_traits.allows_cpu_fallback = true;
   source_traits.parameter_schema = {
       {"value", ps::OperationParameterType::Float64, true}};
-  auto scalar = [](const ps::ResultProgramPhase& phase, double number,
-                   ps::ResultRelation relation = {}) {
-    return publish_number(phase, number, std::move(relation));
+  auto scalar = [](const ps::ResultProgramPhase& phase, double number) {
+    return publish_number(phase, number);
   };
   PS_CHECK(
       operations
@@ -1769,46 +1702,36 @@ int main(int argc, char** argv) {
   add_traits.input_schema.resize(2);
   for (auto& input : add_traits.input_schema)
     input.element_type = static_cast<std::uint32_t>(ElementType::Float64);
-  PS_CHECK(
-      operations
-          ->register_operation(fixture_operation(
-              "test.lane.add", add_traits,
-              [scalar](const ps::ResultProgramPhase& invocation) {
-                if (invocation.query.backend == Backend::Gpu)
-                  return FixturePoll(ps::Status{ErrorCode::BackendUnavailable,
-                                                "lane sum requires CPU"});
-                auto relation = multi_result::take(ps::ResultRelation::unite(
-                    invocation.resources,
-                    {multi_result::take(ps::ResultRelation::cartesian(
-                         invocation.resources, 1,
-                         {0, 1, 0, 1, ps::ResultSupportTarget::Tensor, 0})),
-                     multi_result::take(ps::ResultRelation::cartesian(
-                         invocation.resources, 1,
-                         {1, 1, 0, 1, ps::ResultSupportTarget::Tensor, 0}))}));
-                return scalar(
-                    invocation,
-                    input_number(invocation, 0) + input_number(invocation, 1),
-                    std::move(relation));
-              }))
-          .ok());
+  PS_CHECK(operations
+               ->register_operation(fixture_operation(
+                   "test.lane.add", add_traits,
+                   [scalar](const ps::ResultProgramPhase& invocation) {
+                     if (invocation.query.backend == Backend::Gpu)
+                       return FixturePoll(
+                           ps::Status{ErrorCode::BackendUnavailable,
+                                      "lane sum requires CPU"});
+                     return scalar(invocation, input_number(invocation, 0) +
+                                                   input_number(invocation, 1));
+                   }))
+               .ok());
   PS_CHECK(operations->freeze().ok());
   Compiler compiler(operations);
   ExecutionContext execution(operations,
-                             ExecutionContextConfig{4U, false, 32U, 1024U});
+                             ExecutionContextConfig{4U, false, 32U, 65536U});
 
   GraphContext graph(ps::test::addition_document(2.5, 4.0));
   CompiledWorkflow workflow = compile_or_throw(&compiler, graph);
   auto result = execution.execute(workflow.plan);
-  PS_CHECK(result.ok());
+  PS_REQUIRE_OK(result);
   PS_CHECK(ps::test::named_scalar(result.value(), "sum") == 6.5);
   PS_CHECK(std::string_view(result.value().diagnostics.plan_digest) ==
            workflow.plan.digest().value);
   PS_CHECK(!result.value().diagnostics.result_digest.empty());
   PS_CHECK(result.value().diagnostics.selected_backends.size() == 3U);
 
-  auto other_operations = make_default_operation_registry();
+  auto other_operations = kernel_registry();
   ExecutionContext mismatched_execution(
-      other_operations, ExecutionContextConfig{1U, false, 8U, 1024U});
+      other_operations, ExecutionContextConfig{1U, false, 8U, 65536U});
   auto mismatched_result = mismatched_execution.execute(workflow.plan);
   PS_CHECK(!mismatched_result.ok());
   PS_CHECK(mismatched_result.status().code == ErrorCode::Stale);
@@ -1843,8 +1766,7 @@ int main(int argc, char** argv) {
   effect_sink_traits.deterministic = true;
   effect_sink_traits.side_effect_free = false;
   effect_sink_traits.cacheable = false;
-  effect_sink_traits.outputs[0].shape_rule =
-      OperationShapeRule::PreserveFirstInput;
+  effect_sink_traits.requires_metadata_specialization = true;
   PS_CHECK(effect_operations
                ->register_operation(fixture_operation(
                    "test.effect_sink", effect_sink_traits,
@@ -1866,7 +1788,7 @@ int main(int argc, char** argv) {
   effect_operations->freeze();
   Compiler effect_compiler(effect_operations);
   ExecutionContext effect_execution(
-      effect_operations, ExecutionContextConfig{1U, false, 4U, 1024U});
+      effect_operations, ExecutionContextConfig{1U, false, 4U, 65536U});
   WorkflowDocument effect_document;
   effect_document.nodes = {
       WorkflowNode{1U, "test.effect_source", {}, {}},
@@ -1990,7 +1912,7 @@ int main(int argc, char** argv) {
   PS_CHECK(ps::test::named_scalar(right_result.value(), "sum") == 30.0);
 
   ExecutionContext queue_bound_execution(
-      operations, ExecutionContextConfig{1U, true, 1U, 1024U});
+      operations, ExecutionContextConfig{1U, true, 1U, 65536U});
   GraphContext waiting_cpu_graph(lane_document(3.0, 4.0));
   GraphContext competing_gpu_graph(lane_document(5.0, 6.0));
   CompiledWorkflow waiting_cpu_workflow =
@@ -2043,7 +1965,6 @@ int main(int argc, char** argv) {
     QueuedAttemptAdmissionGate queued_attempt_gate;
     auto queued_attempt_operations = std::make_shared<OperationRegistry>();
     OperationTraits queued_occupant_traits;
-    queued_occupant_traits.estimated_bytes = sizeof(double);
     PS_CHECK(queued_attempt_operations
                  ->register_operation(fixture_operation(
                      "test.queued_attempt_occupant", queued_occupant_traits,
@@ -2055,7 +1976,6 @@ int main(int argc, char** argv) {
     OperationTraits queued_target_traits;
     queued_target_traits.side_effect_free = false;
     queued_target_traits.cacheable = false;
-    queued_target_traits.estimated_bytes = sizeof(double);
     PS_CHECK(queued_attempt_operations
                  ->register_operation(fixture_operation(
                      "test.queued_attempt_target", queued_target_traits,
@@ -2069,7 +1989,7 @@ int main(int argc, char** argv) {
     Compiler queued_attempt_compiler(queued_attempt_operations);
     ExecutionContext queued_attempt_execution(
         queued_attempt_operations,
-        ExecutionContextConfig{1U, false, 4U, 1024U});
+        ExecutionContextConfig{1U, false, 4U, 65536U});
     GraphContext queued_occupant_graph(
         single_operation_document("test.queued_attempt_occupant"));
     CompiledWorkflow queued_occupant_workflow =
@@ -2147,11 +2067,11 @@ int main(int argc, char** argv) {
     PS_CHECK(queued_attempt_gate.target_entries() == 1U);
   }
 
-  auto final_result_operations = make_region_registry(
-      OperationRegionRule::Whole, 0U, std::make_shared<Region>());
+  auto final_result_operations =
+      make_region_registry(std::make_shared<Region>());
   Compiler final_result_compiler(final_result_operations);
   ExecutionContext final_result_execution(
-      final_result_operations, ExecutionContextConfig{1U, false, 4U, 1024U});
+      final_result_operations, ExecutionContextConfig{1U, false, 4U, 65536U});
 
   GraphContext final_cancel_graph(region_document());
   CompiledWorkflow final_cancel_workflow =
@@ -2266,7 +2186,7 @@ int main(int argc, char** argv) {
            10U * sizeof(double));
 
   ExecutionContext concurrent_lane_execution(
-      operations, ExecutionContextConfig{2U, true, 8U, 1024U});
+      operations, ExecutionContextConfig{2U, true, 8U, 65536U});
   auto cpu_lane_future = std::async(std::launch::async, [&] {
     return concurrent_lane_execution.execute(waiting_cpu_workflow.plan);
   });
@@ -2286,7 +2206,6 @@ int main(int argc, char** argv) {
   OperationTraits gpu_only_traits;
   gpu_only_traits.supports_gpu = true;
   gpu_only_traits.allows_cpu_fallback = false;
-  gpu_only_traits.estimated_bytes = sizeof(double);
   PS_CHECK(gpu_only_operations
                ->register_operation(fixture_operation(
                    "test.gpu_only", gpu_only_traits,
@@ -2303,7 +2222,7 @@ int main(int argc, char** argv) {
   gpu_only_operations->freeze();
   Compiler gpu_only_compiler(gpu_only_operations);
   ExecutionContext no_gpu_execution(
-      gpu_only_operations, ExecutionContextConfig{1U, false, 4U, 1024U});
+      gpu_only_operations, ExecutionContextConfig{1U, false, 4U, 65536U});
 
   GraphContext unavailable_graph(single_operation_document("test.gpu_only"));
   CompiledWorkflow unavailable_workflow =
@@ -2353,7 +2272,7 @@ int main(int argc, char** argv) {
   GraphContext submission_graph(lane_document(2.5, 4.0));
   auto submission_workflow = compile_or_throw(&compiler, submission_graph);
   ExecutionContext cpu_submission_execution(
-      operations, ExecutionContextConfig{1U, false, 4U, 1024U});
+      operations, ExecutionContextConfig{1U, false, 4U, 65536U});
   SchedulerFailureController cpu_submission_rejection_control(
       ps::execution_testing::SchedulerFailurePoint::CallbackSubmitRejected,
       ps::execution_testing::CallbackSubmitAction::Reject, Backend::Cpu,
@@ -2376,7 +2295,7 @@ int main(int argc, char** argv) {
            6.5);
 
   ExecutionContext gpu_submission_execution(
-      gpu_only_operations, ExecutionContextConfig{1U, true, 4U, 1024U});
+      gpu_only_operations, ExecutionContextConfig{1U, true, 4U, 65536U});
   PS_CHECK(unavailable_workflow.plan.steps().size() == 1U);
   PS_CHECK(unavailable_workflow.plan.steps().front().backend == Backend::Gpu);
   SchedulerFailureController gpu_submission_rejection_control(
@@ -2525,7 +2444,6 @@ int main(int argc, char** argv) {
     ExternalStopRaceController external_stop_control;
     auto external_stop_operations = std::make_shared<OperationRegistry>();
     OperationTraits cpu_occupant_traits;
-    cpu_occupant_traits.estimated_bytes = sizeof(double);
     PS_CHECK(external_stop_operations
                  ->register_operation(fixture_operation(
                      "test.external_stop_cpu_occupant", cpu_occupant_traits,
@@ -2537,7 +2455,6 @@ int main(int argc, char** argv) {
                  .ok());
     OperationTraits external_gpu_traits;
     external_gpu_traits.supports_gpu = true;
-    external_gpu_traits.estimated_bytes = sizeof(double);
     PS_CHECK(external_stop_operations
                  ->register_operation(fixture_operation(
                      "test.external_stop_gpu", external_gpu_traits,
@@ -2547,7 +2464,6 @@ int main(int argc, char** argv) {
                      }))
                  .ok());
     OperationTraits external_cpu_traits;
-    external_cpu_traits.estimated_bytes = sizeof(double);
     PS_CHECK(
         external_stop_operations
             ->register_operation(fixture_operation(
@@ -2565,7 +2481,7 @@ int main(int argc, char** argv) {
 
     Compiler external_stop_compiler(external_stop_operations);
     ExecutionContext external_stop_execution(
-        external_stop_operations, ExecutionContextConfig{1U, true, 8U, 1024U});
+        external_stop_operations, ExecutionContextConfig{1U, true, 8U, 65536U});
     GraphContext cpu_occupant_graph(
         single_operation_document("test.external_stop_cpu_occupant"));
     CompiledWorkflow cpu_occupant_workflow =
@@ -2710,7 +2626,7 @@ int main(int argc, char** argv) {
   fallback_document.nodes = {
       WorkflowNode{1U, "core.constant", {}, {{"value", 9.0}}},
       WorkflowNode{2U,
-                   "core.gpu_fallback_probe",
+                   "test.gpu_fallback_probe",
                    {WorkflowNodeOutput{1U, "value"}},
                    {}},
   };
@@ -2719,7 +2635,7 @@ int main(int argc, char** argv) {
   CompiledWorkflow fallback_workflow =
       compile_or_throw(&compiler, fallback_graph, true);
   ExecutionContext gpu_execution(operations,
-                                 ExecutionContextConfig{2U, true, 16U, 1024U});
+                                 ExecutionContextConfig{2U, true, 16U, 65536U});
   auto fallback_result = gpu_execution.execute(fallback_workflow.plan);
   PS_CHECK(fallback_result.ok());
   PS_CHECK(ps::test::named_scalar(fallback_result.value(), "value") == 9.0);
@@ -2734,12 +2650,9 @@ int main(int argc, char** argv) {
 
   auto facet_operations = std::make_shared<OperationRegistry>();
   OperationTraits facet_source_traits;
-  facet_source_traits.outputs[0].output_element_type = ElementType::UInt8;
-  // Runtime facets must match the metadata projected by the compiler. This
-  // fixture tests transfer preservation, not undeclared dynamic semantics.
-  facet_source_traits.outputs[0].output_semantic_rule =
-      ps::OperationSemanticRule::Establish;
-  facet_source_traits.outputs[0].output_facets = {
+  facet_source_traits.outputs[0].result_schema =
+      multi_result::schema(ElementType::UInt8, {1});
+  facet_source_traits.outputs[0].result_schema->tensors[0].facets = {
       ValueFacet{"test.semantic", 3U, {4U, 5U}}};
   PS_CHECK(facet_operations
                ->register_operation(fixture_operation(
@@ -2755,15 +2668,12 @@ int main(int argc, char** argv) {
                .ok());
   OperationTraits facet_identity_traits;
   facet_identity_traits.input_count = 1U;
-  facet_identity_traits.outputs[0].output_semantic_rule =
-      ps::OperationSemanticRule::PreserveInput;
+  facet_identity_traits.requires_metadata_specialization = true;
   facet_identity_traits.input_schema.resize(1);
   facet_identity_traits.supports_gpu = true;
-  facet_identity_traits.outputs[0].output_element_type = ElementType::UInt8;
-  facet_identity_traits.outputs[0].shape_rule =
-      OperationShapeRule::PreserveFirstInput;
-  facet_identity_traits.outputs[0].region_rule =
-      OperationRegionRule::Elementwise;
+  facet_identity_traits.outputs[0].result_schema =
+      multi_result::schema(ElementType::UInt8, {1});
+  facet_identity_traits.outputs[0].region_rule = OperationRegionRule::Tiled;
   PS_CHECK(facet_operations
                ->register_operation(fixture_operation(
                    "test.facet_identity", facet_identity_traits,
@@ -2773,8 +2683,8 @@ int main(int argc, char** argv) {
                .ok());
   facet_operations->freeze();
   Compiler facet_compiler(facet_operations);
-  ExecutionContext facet_execution(facet_operations,
-                                   ExecutionContextConfig{1U, true, 8U, 1024U});
+  ExecutionContext facet_execution(
+      facet_operations, ExecutionContextConfig{1U, true, 8U, 65536U});
   WorkflowDocument facet_document;
   facet_document.nodes = {
       WorkflowNode{1U, "test.facet_source", {}, {}},
@@ -2809,61 +2719,21 @@ int main(int argc, char** argv) {
            std::vector<std::uint8_t>({4U, 5U}));
 
   auto whole_observed = std::make_shared<Region>();
-  auto exact_observed = std::make_shared<Region>();
-  auto halo_observed = std::make_shared<Region>();
-  auto whole_operations =
-      make_region_registry(OperationRegionRule::Whole, 0U, whole_observed);
-  auto exact_operations = make_region_registry(OperationRegionRule::Elementwise,
-                                               0U, exact_observed);
-  auto halo_operations =
-      make_region_registry(OperationRegionRule::Halo, 2U, halo_observed);
+  auto whole_operations = make_region_registry(whole_observed);
   Compiler whole_compiler(whole_operations);
-  Compiler exact_compiler(exact_operations);
-  Compiler halo_compiler(halo_operations);
   GraphContext whole_graph(region_document());
-  GraphContext exact_graph(region_document(OperationRegionRule::Elementwise));
-  GraphContext halo_graph(region_document(OperationRegionRule::Halo, 2U));
   PlanningOptions region_options;
-  region_options.output_regions.emplace("value",
-                                        Region({RegionDimension{4U, 2U}}));
+  region_options.output_requests.emplace("value", ps::TileRequest{true, {}});
   auto whole_workflow = whole_compiler.compile(whole_graph, region_options);
-  auto exact_workflow = exact_compiler.compile(exact_graph, region_options);
-  auto halo_workflow = halo_compiler.compile(halo_graph, region_options);
   PS_CHECK(whole_workflow.ok());
-  PS_CHECK(exact_workflow.ok());
-  PS_CHECK(halo_workflow.ok());
-  PS_CHECK(whole_workflow.value().plan.digest().value !=
-           exact_workflow.value().plan.digest().value);
-  PS_CHECK(exact_workflow.value().plan.digest().value !=
-           halo_workflow.value().plan.digest().value);
   ExecutionContext whole_execution(whole_operations);
-  ExecutionContext exact_execution(exact_operations);
-  ExecutionContext halo_execution(halo_operations);
   PS_CHECK(whole_execution.execute(whole_workflow.value().plan).ok());
-  PS_CHECK(exact_execution.execute(exact_workflow.value().plan).ok());
-  PS_CHECK(halo_execution.execute(halo_workflow.value().plan).ok());
   PS_CHECK(region_equals(*whole_observed, 0U, 10U));
-  PS_CHECK(region_equals(*exact_observed, 4U, 2U));
-  PS_CHECK(region_equals(*halo_observed, 2U, 6U));
-
-  auto clipped_observed = std::make_shared<Region>();
-  auto clipped_operations = make_region_registry(
-      OperationRegionRule::Halo, std::numeric_limits<std::uint32_t>::max(),
-      clipped_observed);
-  Compiler clipped_compiler(clipped_operations);
-  GraphContext clipped_graph(region_document(
-      OperationRegionRule::Halo, std::numeric_limits<std::uint32_t>::max()));
-  auto clipped_workflow =
-      clipped_compiler.compile(clipped_graph, region_options);
-  PS_CHECK(clipped_workflow.ok());
-  ExecutionContext clipped_execution(clipped_operations);
-  PS_CHECK(clipped_execution.execute(clipped_workflow.value().plan).ok());
-  PS_CHECK(region_equals(*clipped_observed, 0U, 10U));
 
   PlanningOptions unknown_region_options;
-  unknown_region_options.output_regions.emplace(
-      "missing", Region({RegionDimension{0U, 1U}}));
-  PS_CHECK(!exact_compiler.compile(exact_graph, unknown_region_options).ok());
+  unknown_region_options.output_requests.emplace("missing",
+                                                 ps::TileRequest{true, {}});
+  PS_CHECK(!whole_compiler.compile(whole_graph, unknown_region_options).ok());
 
   auto resource_operations = std::make_shared<OperationRegistry>();
   OperationTraits large_traits;
@@ -2874,7 +2744,6 @@ int main(int argc, char** argv) {
   large_traits.outputs[0].continuation_bytes = 1;
   large_traits.outputs[0].maximum_dependency_stages = 1;
   large_traits.workspace_bytes = 16;
-  large_traits.estimated_bytes = 16;
   OperationDefinition large_source;
   large_source.key = "test.large";
   large_source.traits = large_traits;
@@ -2885,7 +2754,6 @@ int main(int argc, char** argv) {
   PS_CHECK(
       resource_operations->register_operation(std::move(large_source)).ok());
   OperationTraits small_traits = large_traits;
-  small_traits.estimated_bytes = 8;
   small_traits.workspace_bytes = 8;
   OperationDefinition small_source;
   small_source.key = "test.small";
@@ -2963,7 +2831,7 @@ int main(int argc, char** argv) {
   Compiler benchmark_cancellation_compiler(benchmark_cancellation_operations);
   ExecutionContext benchmark_cancellation_execution(
       benchmark_cancellation_operations,
-      ExecutionContextConfig{1U, false, 4U, 1024U});
+      ExecutionContextConfig{1U, false, 4U, 65536U});
   GraphContext benchmark_cancellation_graph(
       single_operation_document("test.benchmark_cancel"));
   RawBenchmarkRunner cancellation_benchmark(&benchmark_cancellation_compiler,
@@ -3068,7 +2936,7 @@ int main(int argc, char** argv) {
   Compiler benchmark_failure_compiler(benchmark_failure_operations);
   ExecutionContext benchmark_failure_execution(
       benchmark_failure_operations,
-      ExecutionContextConfig{1U, false, 4U, 1024U});
+      ExecutionContextConfig{1U, false, 4U, 65536U});
   GraphContext benchmark_failure_graph(
       single_operation_document("test.benchmark_failure"));
   RawBenchmarkRunner failure_benchmark(&benchmark_failure_compiler,

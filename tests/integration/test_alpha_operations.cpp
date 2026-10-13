@@ -184,8 +184,6 @@ Result<ExecutionResult> execute(Fixture& f, WorkflowNodeOutput node,
   auto registry = make_default_operation_registry();
   GraphContext graph(f.document);
   PlanningOptions options;
-  if (roi)
-    options.output_regions = {{"result", *roi}};
   ResourceBindings resources;
   for (const auto& source : f.sources)
     resources = take(resources.unite(source.resources));
@@ -196,6 +194,15 @@ Result<ExecutionResult> execute(Fixture& f, WorkflowNodeOutput node,
   config.cpu_workers = 1;
   ExecutionContext context(registry, config);
   f.bind_to(context);
+  if (roi) {
+    auto selected = workflow_example::select_tiles(
+        take(context.resource_budget()), compiled.value().plan, "result", *roi);
+    if (!selected.ok())
+      return Result<ExecutionResult>(selected.status());
+    auto stages = compiled.take_value();
+    stages.plan = selected.take_value();
+    compiled = Result<CompiledWorkflow>(std::move(stages));
+  }
   ExecutionOptions execution;
   execution.dependencies.maximum_work = fuel;
   execution.maximum_dependency_work = fuel * 2;
@@ -296,25 +303,36 @@ void partial_domains() {
   format::AlphaAssociationOptions o;
   o.group = "rgb";
   auto a = take(format::associate_alpha(f.document, input, o));
-  auto r = take(execute(f, a, red));
-  require(observed(r, red) == std::vector<std::uint64_t>({bits(1), bits(1)}),
-          "R-only ignores missing G/B");
-  require(source_bytes(r, f) == 16, "R-only exact read union");
-  require(!readable(r.results.at("result"), alpha),
-          "R-only does not publish alpha");
-  auto b = take(format::unassociate_alpha(f.document, a, o));
-  require(observed(take(execute(f, b, red)), red) ==
-              std::vector<std::uint64_t>({bits(2), bits(4)}),
-          "B explicitly demands A's output alpha");
+  require(!execute(f, a, red).ok(),
+          "complete tile requires missing G/B coverage");
+  Fixture complete;
+  auto complete_input = complete.add({ElementType::Float32, {1, 2, 4}},
+                                     {bits(2), bits(3), bits(4), bits(.5),
+                                      bits(4), bits(8), bits(12), bits(.25)},
+                                     rgb(2), PlanarImageConfig{});
+  a = take(format::associate_alpha(complete.document, complete_input, o));
+  auto r = take(execute(complete, a, red));
+  require(observed(r) == std::vector<std::uint64_t>(
+                             {bits(1), bits(1.5), bits(2), bits(.5), bits(1),
+                              bits(2), bits(3), bits(.25)}),
+          "complete tile associates every color and retains alpha");
+  require(source_bytes(r, complete) == 32 &&
+              readable(r.results.at("result"), alpha),
+          "complete tile reads and publishes all channels");
+  auto b = take(format::unassociate_alpha(complete.document, a, o));
+  require(
+      observed(take(execute(complete, b, red))) ==
+          std::vector<std::uint64_t>({bits(2), bits(3), bits(4), bits(.5),
+                                      bits(4), bits(8), bits(12), bits(.25)}),
+      "unassociation restores the complete tile");
   Fixture bad;
   auto edge = bad.add({ElementType::Float32, {1, 1, 4}},
                       {bits(2), nan, nan, nan}, rgb(2));
   a = take(format::associate_alpha(bad.document, edge, o));
   const Region only_a({{0, 1}, {0, 1}, {3, 1}}),
       only_r({{0, 1}, {0, 1}, {0, 1}});
-  require(observed(take(execute(bad, a, only_a)), only_a) ==
-              std::vector<std::uint64_t>{nan},
-          "A-only sNaN copies without validation");
+  require(!execute(bad, a, only_a).ok(),
+          "Whole alpha request validates the computed colors and alpha");
   require(!execute(bad, a, only_r).ok(), "color request validates alpha");
   Fixture hidden;
   edge = hidden.add({ElementType::Float32, {1, 2}}, {nan, 0}, gray(1));
@@ -768,13 +786,13 @@ void ranks_tiles_and_views() {
     std::vector<std::uint64_t> data(height * width * 4);
     for (std::size_t i = 0; i < data.size(); i += 4) {
       data[i] = bits(2);
-      data[i + 1] = data[i + 2] = 0x7f801234;
+      data[i + 1] = data[i + 2] = bits(4);
       data[i + 3] = bits(.5);
     }
     const Region red({{127, 2}, {127, 4}, {0, 1}}),
         alpha({{127, 2}, {127, 4}, {3, 1}});
-    auto input = f.add({ElementType::Float32, {height, width, 4}}, data, rgb(2),
-                       config, std::vector<Region>{red, alpha});
+    auto input =
+        f.add({ElementType::Float32, {height, width, 4}}, data, rgb(2), config);
     format::AlphaAssociationOptions a;
     a.group = "rgb";
     a.algorithm = "simd";
@@ -789,8 +807,8 @@ void ranks_tiles_and_views() {
     auto result = take(std::move(run));
     require(observed(result, red) == std::vector<std::uint64_t>(8, bits(1)),
             "cross-tile/row pitch ROI");
-    require(source_bytes(result, f) == 64,
-            "tile edges preserve exact source support");
+    require(source_bytes(result, f) == height * width * 16,
+            "complete tiles include every color and alpha channel");
     format::SetAlphaOptions identity_set;
     identity_set.group = "rgb";
     identity_set.alpha_source.channel.value = "3";
@@ -800,22 +818,21 @@ void ranks_tiles_and_views() {
     require(owner(identity_result.results.at("result")) ==
                 owner(f.bindings.inputs[0].result),
             "R-only planar set returns validated identity view");
-    require(!readable(identity_result.results.at("result"), alpha),
-            "view does not publish validation-only alpha");
+    require(readable(identity_result.results.at("result"), alpha),
+            "complete tile view publishes alpha as well as colors");
     format::SetAlphaOptions set;
     set.group = "rgb";
     set.alpha_source.kind = "external_plane";
     auto alpha_config = config;
     alpha_config.channel_axis.reset();
-    const Region weight_roi({{127, 2}, {127, 4}});
     auto weight = f.add({ElementType::Float32, {height, width}},
                         std::vector<std::uint64_t>(height * width, bits(.25)),
-                        {}, alpha_config, std::vector<Region>{weight_roi});
+                        {}, alpha_config);
     op = take(format::set_alpha(f.document, input, set, weight));
     result = take(execute(f, op, red));
     require(observed(result, red) == std::vector<std::uint64_t>(8, bits(2)),
             "external planar alpha validates without multiplying");
-    require(source_bytes(result, f) == 64,
+    require(source_bytes(result, f) == height * width * 16,
             "set R-only does not fetch old alpha");
   }
   Fixture reversed;
@@ -1092,7 +1109,9 @@ void review_contract_regressions() {
       const auto& message = run.status().message;
       require(
           message.find("group=gray") != std::string::npos &&
-              message.find("at [0,1,0]") != std::string::npos &&
+              message.find(o.alpha_source.kind == "scalar"
+                               ? "at [0,0,0]"
+                               : "at [0,1,0]") != std::string::npos &&
               message.find("alpha_source=" + o.alpha_source.kind) !=
                   std::string::npos,
           "diagnostic must identify group, output coordinate and alpha source");

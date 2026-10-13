@@ -30,7 +30,7 @@ void repeated_tensor_shapes() {
   traits.outputs[0].continuation_bytes = 1;
   traits.outputs[0].maximum_dependency_stages = 1;
   traits.outputs[0].result_schema = schema;
-  traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  traits.outputs[0].region_rule = OperationRegionRule::Tiled;
   auto resolved = take(resolve_operation_traits(traits, 2, {}));
   OperationMetadata first, second;
   first.result_schema = std::make_shared<SchemaTemplate>(schema);
@@ -83,23 +83,22 @@ void scalar_prelude_workflows() {
     output.output_schema.result_schema_id = "test.scalar.members";
     output.output_schema.result_schema_version = 1;
     output.result_schema = consumer ? output_schema : source_schema;
-    output.region_rule = OperationRegionRule::Dependency;
+    output.region_rule = OperationRegionRule::Tiled;
     output.input_indices =
         consumer ? std::vector<uint32_t>{0} : std::vector<uint32_t>{};
     output.continuation_bytes = sizeof(ScalarPreludeState);
-    output.maximum_dependency_stages = 1;
+    output.maximum_dependency_stages = 2;
     operation.start_result = [consumer, starts, producer_starts, profile](
                                  const ResultProgramQuery&,
                                  const BufferAllocator& allocator) {
-      if (consumer)
-        ++*starts;
-      else
+      if (!consumer)
         ++*producer_starts;
       return ResultContinuation::make<ScalarPreludeState>(
           allocator, consumer,
           profile == 1   ? std::numeric_limits<float>::quiet_NaN()
           : profile == 2 ? 1.5F
-                         : .5F);
+                         : .5F,
+          starts.get());
     };
     require(registry->register_operation(std::move(operation)).ok(),
             "scalar fixture registration");
@@ -107,25 +106,19 @@ void scalar_prelude_workflows() {
   require(registry->freeze().ok(), "scalar fixture freeze");
   ExecutionContextConfig config;
   config.managed_resources = ResourceLimits{};
+  config.result_cache_bytes = 4096;
   ExecutionContext context(registry, config);
   auto root = take(context.resource_budget());
   const auto binding = [&](float value) {
     auto builder =
         take(ResultBuilder::start(root, source_schema, "scalar.source"));
-    require(builder
-                .bind_descriptor_relation(
-                    take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
-                .ok(),
-            "scalar source descriptor");
     auto buffer = take(root.allocator().allocate(sizeof(value)));
     std::memcpy(buffer.data(), &value, sizeof(value));
     auto storage = std::move(buffer).freeze();
     for (uint32_t slot = 0; slot < 3; ++slot)
       require(builder
-                  .publish_tensor(
-                      slot, Region::whole({1}), {0, {INT64_MIN}}, storage,
-                      take(ResultRelation::cartesian(root, 1, {0, 1, 0, 0})),
-                      {true, true, true, true})
+                  .publish_tensor(slot, Region::whole({1}), {0, {INT64_MIN}},
+                                  storage)
                   .ok(),
               "scalar signed singleton source");
     ExecutionBinding input;
@@ -152,24 +145,15 @@ void scalar_prelude_workflows() {
   GraphContext graph(direct);
   auto plan = take(Compiler(registry).compile(graph)).plan;
   auto success = context.execute(plan, {{external, ignored}});
-  require(success.ok() && *starts == 1,
-          "selected named scalar is ready before consumer start and excluded "
-          "NaN is not read");
-  auto observations = take(success.value().dependencies.source_observations());
-  bool validation = false, descriptor = false;
-  for (const auto& observation : observations) {
-    if (observation.input == "control") {
-      validation |= observation.target == ResultSupportTarget::Tensor &&
-                    observation.slot == 2 && (observation.roles & 4);
-      descriptor |= observation.target == ResultSupportTarget::Descriptor &&
-                    (observation.roles & 8);
-    }
-    require(observation.input != "ignored",
-            "excluded input does not acquire implicit scalar witness");
-  }
   require(
-      validation && descriptor,
-      "implicit scalar validation and descriptor retain full Result ancestry");
+      success.ok() && *starts == 1,
+      "selected named scalar is ready before consumer data poll and excluded "
+      "NaN is not read");
+  auto record = take(success.value().dependencies.tile_record({0, 0, 0}));
+  require(record && record->inputs.size() == 1 && record->inputs[0].whole &&
+              std::get<PlanWorkflowInput>(record->inputs[0].producer)
+                      .declaration_index == 0,
+          "selected scalar records Whole input and excludes the unused port");
   {
     auto cached_config = config;
     cached_config.result_cache_bytes = 4096;
@@ -179,19 +163,12 @@ void scalar_prelude_workflows() {
     for (const char* name : {"control", "ignored"}) {
       auto builder = take(ResultBuilder::start(cached_root, source_schema,
                                                "scalar.cache.source"));
-      require(builder
-                  .bind_descriptor_relation(
-                      take(ResultRelation::cartesian(cached_root, 1, {})))
-                  .ok(),
-              "cached scalar source descriptor");
       const float number = .5F;
       for (uint32_t slot = 0; slot < 3; ++slot)
         require(builder
                     .publish_tensor(
                         slot, Region::whole({1}),
-                        ByteView(reinterpret_cast<const uint8_t*>(&number), 4),
-                        take(ResultRelation::cartesian(cached_root, 1, {})),
-                        {true, true, true, true})
+                        ByteView(reinterpret_cast<const uint8_t*>(&number), 4))
                     .ok(),
                 "cached scalar source");
       inputs.inputs.push_back({name, take(builder.seal())});
@@ -245,8 +222,8 @@ void scalar_prelude_workflows() {
                 invalid.status().detail.input_id == 1 &&
                 invalid.status().detail.origin == FailureOrigin::Domain &&
                 *starts == before,
-            "bad direct named scalar reports input origin and never starts "
-            "consumer");
+            "bad direct named scalar reports input origin and never enters "
+            "consumer data poll");
   }
   for (const char* key : {"test.scalar.nan", "test.scalar.range"}) {
     auto computed = direct;
@@ -266,7 +243,7 @@ void scalar_prelude_workflows() {
                 invalid.status().detail.origin == FailureOrigin::Domain &&
                 *starts == before,
             "bad computed named scalar reports upstream origin and never "
-            "starts consumer");
+            "enters consumer data poll");
   }
   auto shared = direct;
   shared.inputs.erase(shared.inputs.begin());
@@ -284,12 +261,12 @@ void scalar_prelude_workflows() {
   auto shared_plan = take(Compiler(registry).compile(*shared_graph)).plan;
   auto frozen = take(context.freeze(shared_plan, {{ignored}}));
   auto warm_source =
-      context.execute_fragments(frozen, {{"loose", take(Footprint::all({1}))}});
+      context.execute_fragments(frozen, {{"loose", TileRequest{true, {}}}});
   require(warm_source.ok(),
           "unbounded producer can publish a value valid for a looser consumer");
   const auto produced = *producer_starts, consumed = *starts;
   auto restricted =
-      context.execute_fragments(frozen, {{"out", take(Footprint::all({1}))}});
+      context.execute_fragments(frozen, {{"out", TileRequest{true, {}}}});
   require(!restricted.ok() &&
               restricted.status().code == ErrorCode::OperationFailed &&
               restricted.status().detail.node_id == 70 &&
@@ -328,7 +305,7 @@ void foundation_tensor_workflows() {
               source_window.storage_owner_token() ==
                   view_window.storage_owner_token(),
           "public constant to identity workflow publishes Result tensor views");
-  for (bool sparse : {false, true}) {
+  {
     SchemaTemplate schema;
     schema.id = "photospider.tensor";
     ResultTensorSpec spec;
@@ -338,38 +315,19 @@ void foundation_tensor_workflows() {
     auto buffer = take(driver.root.allocator().allocate(1));
     buffer.data()[0] = 0x72;
     auto storage = std::move(buffer).freeze();
-    const Region region =
-        sparse ? Region({{UINT64_MAX - 2, 2}}) : Region::whole({UINT64_MAX});
+    const Region region = Region::whole({UINT64_MAX});
     auto builder =
         take(ResultBuilder::start(driver.root, schema, "identity.source"));
-    require(builder
-                .bind_descriptor_relation(take(
-                    ResultRelation::cartesian(driver.root, 1, {0, 8, 0, 0})))
-                .ok(),
-            "huge identity basis");
-    require(builder
-                .publish_tensor(0, region, {0, {0}}, storage,
-                                take(ResultRelation::cartesian(
-                                    driver.root, UINT64_MAX, {0, 1, 0, 0})),
-                                {true, true, true, true})
-                .ok(),
+    require(builder.publish_tensor(0, region, {0, {0}}, storage).ok(),
             "huge identity affine input");
     ExecutionBinding binding;
     binding.name = "samples";
     binding.result = take(builder.seal());
     auto run = driver.prepare("core.identity", {binding});
     ResultRef identity;
-    if (sparse) {
-      auto result = driver.context->execute_fragments(
-          take(driver.context->freeze(run.plan, run.bindings)),
-          {{"out", take(Footprint::from_regions({UINT64_MAX}, {region}))}});
-      require(result.ok(), result.status().message.c_str());
-      identity = result.value().results.at("out");
-    } else {
-      auto result = driver.context->execute(run.plan, run.bindings);
-      require(result.ok(), result.status().message.c_str());
-      identity = result.value().results.at("out");
-    }
+    auto result = driver.context->execute(run.plan, run.bindings);
+    require(result.ok(), result.status().message.c_str());
+    identity = result.value().results.at("out");
     auto window =
         take(identity.acquire_tensor(take(identity.descriptor()), 0, region));
     require(
@@ -386,32 +344,21 @@ void foundation_tensor_workflows() {
   member.descriptor = {ElementType::UInt8, {UINT64_MAX, 2}};
   huge.tensors.push_back(member);
   const auto shape = member.sample_shape();
-  const Region last_point({{UINT64_MAX - 1, 1}, {1, 1}});
   auto builder =
       take(ResultBuilder::start(driver.root, huge, "identity.huge.rank2"));
-  require(builder
-              .bind_descriptor_relation(
-                  take(ResultRelation::cartesian(driver.root, 1, {0, 8, 0, 0})))
-              .ok(),
-          "huge rank2 basis");
   auto storage_buffer = take(driver.root.allocator().allocate(1));
   storage_buffer.data()[0] = 0x5a;
   auto storage = std::move(storage_buffer).freeze();
-  auto no_input = take(ResultRelation::mapped(
-      driver.root, shape, last_point, {1}, {{-1, 0, 0, 1}}, {0, 1, 0, 0}));
-  require(builder
-              .publish_tensor(0, last_point, {0, {0, 0}}, storage, no_input,
-                              {true, true, true, true})
+  require(builder.publish_tensor(0, Region::whole(shape), {0, {0, 0}}, storage)
               .ok(),
           "huge rank2 sparse affine input");
   ExecutionBinding binding;
   binding.name = "samples";
   binding.result = take(builder.seal());
   auto prepared = driver.prepare("core.identity", {binding});
-  auto requested = take(Footprint::from_regions(shape, {last_point}));
   auto huge_output = driver.context->execute_fragments(
       take(driver.context->freeze(prepared.plan, prepared.bindings)),
-      {{"out", requested}});
+      {{"out", TileRequest{true, {}}}});
   require(huge_output.ok(), huge_output.status().message.c_str());
   auto result = huge_output.value().results.at("out");
   uint8_t byte = 0;
@@ -420,18 +367,9 @@ void foundation_tensor_workflows() {
                   .ok() &&
               byte == 0x5a,
           "huge rank2 Result identity reads a representable source span");
-  auto support = take(huge_output.value().dependencies.source_observations());
-  bool exact = false;
-  for (const auto& observation : support)
-    exact |= observation.input == "samples" &&
-             observation.target == ResultSupportTarget::Tensor &&
-             observation.samples == requested && (observation.roles & 1U);
-  require(exact,
-          "huge rank2 compact backward support retains exact coordinates");
-  auto dirty = take(
-      huge_output.value().dependencies.potential_dirty("samples", requested));
-  require(dirty.at("out") == requested,
-          "huge rank2 compact dirty preimage remains exact");
+  auto record = take(huge_output.value().dependencies.tile_record({0, 0, 0}));
+  require(record && record->inputs.size() == 1 && record->inputs[0].whole,
+          "nonspatial huge tensor records its Whole input dependency");
 }
 }  // namespace
 int main() {

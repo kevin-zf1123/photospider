@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -26,16 +27,33 @@ int check(bool ok, const char* message) {
     std::cerr << message << '\n';
   return ok ? 0 : 1;
 }
+SchemaTemplate image_schema() {
+  auto schema = gpu_result::schema(ElementType::Float32, length);
+  auto& tensor = schema.tensors[0];
+  tensor.descriptor.shape = {1, length};
+  tensor.layout.spatial = true;
+  tensor.layout.channel_axis.reset();
+  return schema;
+}
+float sample(const ResultRef& result, std::uint64_t at) {
+  float value = 0;
+  gpu_result::check(result.read_tensor(gpu_result::take(result.descriptor()), 0,
+                                       {0, at}, &value, 4));
+  return value;
+}
 Footprint point(std::uint64_t at) {
-  return Footprint::from_regions({length}, {Region({{at, 1}})}).take_value();
+  return Footprint::from_regions({1, length}, {Region({{0, 1}, {at, 1}})})
+      .take_value();
+}
+TileRequest request(const ResourceBudget& root, std::uint64_t at) {
+  return {false, gpu_result::take(TileSet::from_indices(root, {at}))};
 }
 template <bool Whole>
 Result<ResultProgramPoll> increment(const ResultProgramPhase& phase) try {
   const auto demand = gpu_result::demand(phase);
   if (!phase.tensors || phase.tensors->empty())
-    return gpu_result::need(demand);
+    return gpu_result::need(phase, demand);
   auto result = gpu_result::builder(phase);
-  auto support = gpu_result::identity(phase, Whole);
   if (phase.query.backend == Backend::Cpu)
     ++cpu_calls;
   else
@@ -46,14 +64,15 @@ Result<ResultProgramPoll> increment(const ResultProgramPhase& phase) try {
     if (phase.query.backend == Backend::Cpu) {
       for (std::uint64_t i = 0; i < count; ++i) {
         float x = 0;
-        gpu_result::check(
-            phase.read_tensor(0, 0, {box.dimensions()[0].offset + i}, &x, 4));
+        gpu_result::check(phase.read_tensor(
+            0, 0, {0, box.dimensions()[1].offset + i}, &x, 4));
         x += 1;
         std::memcpy(output.data() + i * 4, &x, 4);
       }
     } else {
       auto window = gpu_result::take(phase.acquire_native_tensor(0, 0, box));
-      auto row = gpu_result::take(window.row_run({box.dimensions()[0].offset}));
+      auto row =
+          gpu_result::take(window.row_run({0, box.dimensions()[1].offset}));
       if (row.samples != count || row.sample_stride_bytes != 4)
         return Result<ResultProgramPoll>(
             Status{ErrorCode::OperationFailed, "native source layout"});
@@ -93,9 +112,11 @@ Result<ResultProgramPoll> increment(const ResultProgramPhase& phase) try {
           phase, api->release(api->context, destination)));
     }
     gpu_result::check(result.publish_tensor(
-        0, box, StridedLayout{0, {4}, {box.dimensions()[0].offset}},
-        std::move(output).freeze(), support, {true, true, true, true},
-        phase.query.cancellation));
+        0, box,
+        StridedLayout{0,
+                      {static_cast<std::int64_t>(count * 4), 4},
+                      {0, box.dimensions()[1].offset}},
+        std::move(output).freeze(), phase.query.cancellation));
   }
   return Result<ResultProgramPoll>(
       ResultPublication{gpu_result::take(result.seal()), true});
@@ -106,7 +127,7 @@ struct Stage {
   unsigned stage = 0;
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     if (stage++ == 0)
-      return gpu_result::need(gpu_result::demand(phase));
+      return gpu_result::need(phase, gpu_result::demand(phase));
     if (stage != 2)
       return Result<ResultProgramPoll>(
           Status{ErrorCode::Internal, "state not restarted"});
@@ -123,8 +144,7 @@ struct Stage {
 };
 WorkflowDocument document(const std::string& first, bool chain) {
   WorkflowDocument doc;
-  doc.inputs = {gpu_result::declaration(
-      1, "x", gpu_result::schema(ElementType::Float32, length))};
+  doc.inputs = {gpu_result::declaration(1, "x", image_schema())};
   doc.nodes = {{1, first, {WorkflowInputReference{1}}, {}}};
   if (chain)
     doc.nodes.push_back(
@@ -137,9 +157,9 @@ int verify(const Result<DemandResult>& result, std::uint64_t at,
   if (!result.ok())
     std::cerr << static_cast<int>(result.status().code) << ": "
               << result.status().message << '\n';
-  return check(result.ok() && gpu_result::number(result.value().results.at("y"),
-                                                 at) == expected,
-               "independent increment oracle failed");
+  return check(
+      result.ok() && sample(result.value().results.at("y"), at) == expected,
+      "independent increment oracle failed");
 }
 struct FallbackReads {
   bool supplied = false, cpu_read;
@@ -148,23 +168,19 @@ struct FallbackReads {
     const bool gpu = phase.query.backend == Backend::Gpu;
     if (!supplied && (gpu || cpu_read)) {
       supplied = true;
-      return gpu_result::need(point(gpu ? 1 : 2));
+      return gpu_result::need(phase, point(gpu ? 1 : 2));
     }
     if (gpu)
       return Result<ResultProgramPoll>(
           Status{ErrorCode::BackendUnavailable, "after ancestor completion"});
-    auto result = gpu_result::builder(phase, cpu_read);
+    auto result = gpu_result::builder(phase);
     float value = 7;
     if (cpu_read)
-      gpu_result::check(phase.read_tensor(0, 0, {2}, &value, 4));
-    auto relation = gpu_result::take(ResultRelation::cartesian(
-        phase.resources, length,
-        cpu_read ? ResultSupport{0, 1, 2, 1, ResultSupportTarget::Tensor, 0}
-                 : ResultSupport{}));
+      gpu_result::check(phase.read_tensor(0, 0, {0, 2}, &value, 4));
     for (const auto& box : gpu_result::demand(phase).boxes())
       gpu_result::check(result.publish_tensor(
-          0, box, {reinterpret_cast<const uint8_t*>(&value), 4}, relation,
-          {true, true, true, true}, phase.query.cancellation));
+          0, box, {reinterpret_cast<const uint8_t*>(&value), 4},
+          phase.query.cancellation));
     return Result<ResultProgramPoll>(
         ResultPublication{gpu_result::take(result.seal()), true});
   } catch (const gpu_result::Failure& error) {
@@ -177,25 +193,23 @@ struct Ancestor {
   Ancestor(unsigned* calls, bool whole) : calls(calls), whole(whole) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     if (!phase.tensors || phase.tensors->empty())
-      return gpu_result::need(gpu_result::demand(phase));
+      return gpu_result::need(phase, gpu_result::demand(phase));
     ++*calls;
-    return gpu_result::view(phase, whole);
+    return gpu_result::view(phase);
   }
 };
 ExecutionBindings make_bindings(const ResourceBudget& root) {
-  const auto source_schema = gpu_result::schema(ElementType::Float32, length);
+  const auto source_schema = image_schema();
   auto source_builder =
       gpu_result::take(ResultBuilder::start(root, source_schema, "gpu.input"));
-  gpu_result::check(source_builder.bind_descriptor_relation(
-      gpu_result::take(ResultRelation::cartesian(root, 1, {}))));
   std::vector<float> values(length);
   for (std::uint64_t i = 0; i < length; ++i)
     values[i] = static_cast<float>(i);
+  auto storage = gpu_result::take(root.allocator().allocate(values.size() * 4));
+  std::memcpy(storage.data(), values.data(), values.size() * 4);
   gpu_result::check(source_builder.publish_tensor(
-      0, Region::whole({length}),
-      {reinterpret_cast<const std::uint8_t*>(values.data()), values.size() * 4},
-      gpu_result::take(ResultRelation::cartesian(root, length, {})),
-      {true, true, true, true}));
+      0, Region::whole({1, length}), StridedLayout{0, {length * 4, 4}},
+      std::move(storage).freeze()));
   ExecutionBinding source;
   source.name = "x";
   source.result = gpu_result::take(source_builder.seal());
@@ -212,12 +226,11 @@ int fallback_records() {
     ancestor.traits.input_schema[0].kind = OperationPortKind::Result;
     ancestor.traits.input_schema[0].result_schema_id = "example.gpu.tensor";
     ancestor.traits.input_schema[0].result_schema_version = 1;
-    ancestor.traits.outputs = {
-        gpu_result::output(gpu_result::schema(ElementType::Float32, length))};
+    ancestor.traits.outputs = {gpu_result::output(image_schema())};
     ancestor.traits.outputs[0].continuation_bytes = sizeof(Ancestor);
-    ancestor.traits.outputs[0].region_rule =
-        (mode == 2 || mode == 3) ? OperationRegionRule::Whole
-                                 : OperationRegionRule::Dependency;
+    ancestor.traits.outputs[0].region_rule = (mode == 2 || mode == 3)
+                                                 ? OperationRegionRule::Whole
+                                                 : OperationRegionRule::Tiled;
     ancestor.start_result = [&ancestors, mode](
                                 const ResultProgramQuery&,
                                 const BufferAllocator& allocator) {
@@ -228,7 +241,7 @@ int fallback_records() {
       return 1;
     auto child = ancestor;
     child.key = "fallback";
-    child.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+    child.traits.outputs[0].region_rule = OperationRegionRule::Tiled;
     child.traits.supports_gpu = true;
     child.traits.allows_cpu_fallback = true;
     child.traits.outputs[0].continuation_bytes = sizeof(FallbackReads);
@@ -245,18 +258,20 @@ int fallback_records() {
     auto doc = document("ancestor", false);
     doc.nodes.push_back({2, "fallback", {WorkflowNodeOutput{1, "value"}}, {}});
     doc.outputs = {{"y", 2, "value"}};
-    DemandQuery query{{"y", point(0)}};
+    ResourceBudget request_root;
+    DemandQuery query{{"y", request(request_root, 0)}};
     if (mode == 1 || mode == 4) {
       doc.outputs.push_back({"a", 1, "value"});
-      query.emplace("a", point(0));
+      query.emplace("a", request(request_root, 0));
       if (mode == 4) {
         doc.outputs.push_back({"b", 1, "value"});
-        query.emplace("b", point(3));
+        query.emplace("b", request(request_root, 3));
       }
     }
     GraphContext graph(doc);
     PlanningOptions planning;
     planning.execution_mode = ExecutionMode::NativeGpu;
+    planning.tile_extent = 1;
     auto plan = Compiler(registry).compile(graph, planning).take_value().plan;
     ExecutionContext context(registry, {1, true, 8, 1 << 20, 0});
     const auto root = context.resource_budget().take_value();
@@ -267,71 +282,66 @@ int fallback_records() {
                                               : mode == 3 ? 12
                                                           : 64;
     auto result = context.execute_fragments(frozen, query, {}, options);
+    if (!result.ok())
+      std::cerr << "fallback records mode=" << mode << '\n';
     if (verify(result, 0, mode == 0 || mode == 3 ? 7 : 2))
       return 1;
     const auto& evidence = result.value().dependencies;
-    if (mode == 0 || mode == 3) {
-      if (check(evidence.record_count() == 2 &&
-                    evidence.source_support().value().empty(),
-                "abandoned GPU ancestor retained"))
-        return 1;
-      auto tile = plan.tile_plan("y", Region({{0, 1}})).take_value();
-      auto ordinary = context.execute(tile, bindings, {}, options);
-      if (check(ordinary.ok() &&
-                    ordinary.value().dependencies.record_count() == 2,
-                "ordinary fallback retained abandoned records"))
-        return 1;
-    } else if (mode == 1 || mode == 4) {
-      auto expected_support = point(0).unite(point(2)).take_value();
-      if (mode == 4)
-        expected_support = expected_support.unite(point(3)).take_value();
-      if (check(evidence.source_support().value().at("x") == expected_support &&
-                    ancestors == (mode == 4 ? 4U : 3U),
-                "rollback lost prior rows or retained abandoned rows"))
-        return 1;
-      for (const auto& name : {"a", "y"}) {
-        auto restricted =
-            gpu_result::take(evidence.restrict({{name, point(0)}}));
-        if (check(restricted.source_support().value().at("x") ==
-                      point(std::string(name) == "a" ? 0 : 2),
-                  "rollback mixed distinct output support"))
-          return 1;
-      }
-      if (mode == 4) {
-        auto restricted =
-            gpu_result::take(evidence.restrict({{"b", point(3)}}));
-        if (check(restricted.source_support().value().at("x") == point(3),
-                  "rollback preserves a second named query of the same step"))
-          return 1;
-      }
-      for (std::uint64_t edited : {0, 1, 2}) {
-        auto dirty = gpu_result::take(evidence.potential_dirty(
-            "x", point(edited), 1, {}, ResultSupportTarget::Tensor, 0));
-        if (check(
-                dirty.at("a") ==
-                        (edited == 0
-                             ? point(0)
-                             : Footprint::none({length}).take_value()) &&
-                    dirty.at("y") ==
-                        (edited == 2 ? point(0)
-                                     : Footprint::none({length}).take_value()),
-                "rollback lost typed dirty subscriptions"))
-          return 1;
-      }
-    } else if (check(
-                   ancestors == 1 && evidence.record_count() == 4 &&
-                       evidence.source_support().value().at("x") ==
-                           Footprint::all({length}).take_value(),
-                   "Whole owner/evidence must survive fallback exactly once")) {
+    const TileUnit child_unit{plan.outputs().at("y"), 0, 0};
+    auto child_record = gpu_result::take(evidence.tile_record(child_unit));
+    const bool cpu_read = mode == 1 || mode == 2 || mode == 4;
+    if (check(
+            child_record && child_record->inputs.size() == (cpu_read ? 1U : 0U),
+            "CPU retry must replace abandoned GPU Needs"))
       return 1;
+    if (cpu_read) {
+      const auto& input = child_record->inputs[0];
+      if (check(std::holds_alternative<PlanStepInput>(input.producer) &&
+                    std::get<PlanStepInput>(input.producer).step_index == 0 &&
+                    input.whole == (mode == 2) &&
+                    (mode == 2 ? input.tiles.empty()
+                               : input.tiles == request(root, 2).tiles),
+                "CPU retry dependency differs"))
+        return 1;
     }
-    if (mode == 2) {
-      auto tile = plan.tile_plan("y", Region({{0, 1}})).take_value();
+    for (TileIndex edited : {0, 1, 2, 3}) {
+      ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
+      changes.push_back(
+          {PlanWorkflowInput{0}, 0, request(root, edited).tiles, false});
+      auto dirty = gpu_result::take(evidence.dirty_units(changes));
+      const bool child_dirty =
+          std::find(dirty.begin(), dirty.end(), child_unit) != dirty.end();
+      if (check(child_dirty == (cpu_read && (mode == 2 || edited == 2)),
+                "retry retains only current CPU dependency closure"))
+        return 1;
+      for (const auto& named :
+           {std::pair<const char*, TileIndex>{"a", 0}, {"b", 3}}) {
+        if (!plan.outputs().count(named.first))
+          continue;
+        const TileUnit unit{plan.outputs().at(named.first), 0, named.second};
+        const bool affected =
+            std::find(dirty.begin(), dirty.end(), unit) != dirty.end();
+        if (check(affected == (edited == named.second),
+                  "named ancestor tile dependency"))
+          return 1;
+      }
+    }
+    if (check(ancestors == (mode == 2 || mode == 3 ? 1U
+                            : mode == 4            ? 4U
+                            : mode == 1            ? 3U
+                                                   : 1U),
+              "completed ancestor executes once per tile"))
+      return 1;
+    if (mode == 0 || mode == 2 || mode == 3) {
+      auto tile = gpu_result::take(plan.tile_plan("y", request(root, 0)));
       auto ordinary = context.execute(tile, bindings, {}, options);
-      if (check(ordinary.ok() && ancestors == 2 &&
-                    ordinary.value().dependencies.source_support().value().at(
-                        "x") == Footprint::all({length}).take_value(),
-                "ordinary Whole fallback must restore complete evidence once"))
+      if (check(ordinary.ok(), "ordinary fallback execution"))
+        return 1;
+      auto record = gpu_result::take(ordinary.value().dependencies.tile_record(
+          {tile.outputs().at("y"), 0, 0}));
+      if (check(record && record->inputs.size() == (cpu_read ? 1U : 0U) &&
+                    (!cpu_read || record->inputs[0].whole),
+                "ordinary fallback preserves CPU Whole dependency"))
         return 1;
     }
   }
@@ -349,8 +359,7 @@ int main() {
   op.traits.input_schema[0].kind = OperationPortKind::Result;
   op.traits.input_schema[0].result_schema_id = "example.gpu.tensor";
   op.traits.input_schema[0].result_schema_version = 1;
-  op.traits.outputs = {
-      gpu_result::output(gpu_result::schema(ElementType::Float32, length))};
+  op.traits.outputs = {gpu_result::output(image_schema())};
   op.traits.supports_gpu = true;
   op.traits.allows_cpu_fallback = true;
   op.traits.workspace_bytes = 32768;
@@ -367,7 +376,7 @@ int main() {
   if (check(registry->register_operation(op).ok(), "register Whole"))
     return 1;
   op.key = "example.staged";
-  op.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  op.traits.outputs[0].region_rule = OperationRegionRule::Tiled;
   op.traits.outputs[0].data_movement = DataMovementKind::BitwiseMapped;
   op.traits.outputs[0].continuation_bytes = sizeof(Stage);
   op.traits.outputs[0].maximum_dependency_stages = 4;
@@ -393,6 +402,7 @@ int main() {
     return 1;
   PlanningOptions planning;
   planning.execution_mode = ExecutionMode::NativeGpu;
+  planning.tile_extent = 1;
   for (bool enabled : {false, true}) {
     ExecutionContextConfig config;
     config.cpu_workers = 1;
@@ -409,8 +419,11 @@ int main() {
     const auto root = context.resource_budget().take_value();
     const auto bindings = make_bindings(root);
     auto frozen = context.freeze(plan, bindings).take_value();
-    const auto q = point(0).unite(point(2)).take_value();
+    const TileRequest q{false,
+                        gpu_result::take(TileSet::from_indices(root, {0, 2}))};
     auto result = context.execute_fragments(frozen, {{"y", q}});
+    if (!result.ok())
+      std::cerr << "increment enabled=" << enabled << '\n';
     if (verify(result, 0, 1) || verify(result, 2, 3) ||
         check((enabled ? result.value().diagnostics.native_dispatch_count > 0
                        : result.value().diagnostics.native_dispatch_count == 0),
@@ -421,22 +434,24 @@ int main() {
       return 1;
     if (!enabled) {
       const auto& diagnostics = result.value().diagnostics;
-      if (check(diagnostics.operation_timings.size() == 2 &&
-                    diagnostics.fallback_reasons.size() == 1,
+      if (check(diagnostics.operation_timings.size() == 3 &&
+                    diagnostics.fallback_reasons.size() == 2,
                 "missing-device rejection/CPU attempt pairs"))
         return 1;
-      for (unsigned i = 0; i < 2; ++i)
-        if (check(
-                diagnostics.operation_timings[i].backend ==
-                        (i % 2 ? Backend::Cpu : Backend::Gpu) &&
-                    diagnostics.operation_timings[i].outcome ==
-                        (i % 2 ? ErrorCode::Ok : ErrorCode::BackendUnavailable),
-                "missing-device attempt outcome"))
+      for (unsigned i = 0; i < 3; ++i)
+        if (check(diagnostics.operation_timings[i].backend ==
+                          (i == 2 ? Backend::Cpu : Backend::Gpu) &&
+                      diagnostics.operation_timings[i].outcome ==
+                          (i == 2 ? ErrorCode::Ok
+                                  : ErrorCode::BackendUnavailable),
+                  "missing-device attempt outcome"))
           return 1;
     }
     result = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
     auto warm_scope = context.freeze(plan, bindings).take_value();
     auto warm = context.execute_fragments(warm_scope, {{"y", q}});
+    if (!warm.ok())
+      std::cerr << "warm increment enabled=" << enabled << '\n';
     if (verify(warm, 2, 3) ||
         check((enabled ? warm.value().diagnostics.cache_hits > 0
                        : warm.value().diagnostics.cache_hits == 0) &&
@@ -454,7 +469,10 @@ int main() {
       auto captured = context.freeze(chain_plan, bindings).take_value();
       unavailable = true;
       const auto before = starts.load();
-      auto fallback = context.execute_fragments(captured, {{"y", point(0)}});
+      auto fallback =
+          context.execute_fragments(captured, {{"y", request(root, 0)}});
+      if (!fallback.ok())
+        std::cerr << "chain " << key << " enabled=" << enabled << '\n';
       const bool staged = std::string(key) != "example.whole";
       const float expected = staged ? 1 : 2;
       const auto cache = context.cache_statistics();
@@ -486,17 +504,26 @@ int main() {
       }
       fallback = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
       unavailable = false;
-      auto retry = context.execute_fragments(captured, {{"y", point(0)}});
+      auto retry =
+          context.execute_fragments(captured, {{"y", request(root, 0)}});
       if (verify(retry, 0, expected) ||
           check(retry.value().diagnostics.cache_hits == 0,
                 "fallback ancestry reused"))
         return 1;
-      auto proof = retry.value().dependencies.source_support();
-      if (check(proof.ok() &&
-                    proof.value().at("x") ==
-                        (staged ? point(0)
-                                : Footprint::all({length}).take_value()),
-                "exact dependency support"))
+      auto proof =
+          gpu_result::take(retry.value().dependencies.tile_record({0, 0, 0}));
+      if (check(proof && proof->inputs.size() == 1 &&
+                    proof->inputs[0].tiles ==
+                        (staged ? request(root, 0).tiles
+                                : gpu_result::take(TileSet::from_indices(
+                                      root,
+                                      [&] {
+                                        std::vector<TileIndex> indices(length);
+                                        for (TileIndex i = 0; i < length; ++i)
+                                          indices[i] = i;
+                                        return indices;
+                                      }()))),
+                "source dependency tiles"))
         return 1;
     }
   }
@@ -514,7 +541,7 @@ int main() {
     if (check(root.statistics().live[ResourceKind::Payload] == length * 4,
               "Result source payload admission"))
       return 1;
-    auto result = context.execute_fragments(frozen, {{"y", point(0)}});
+    auto result = context.execute_fragments(frozen, {{"y", request(root, 0)}});
     if (native_limit == 65535) {
       if (check(result.status().code == ErrorCode::ResourceExhausted &&
                     root.statistics().live[ResourceKind::Payload] == length * 4,
@@ -530,7 +557,8 @@ int main() {
       // rejection must retire both rounded allocations before CPU retry.
       result = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
       unavailable = true;
-      auto fallback = context.execute_fragments(frozen, {{"y", point(0)}});
+      auto fallback =
+          context.execute_fragments(frozen, {{"y", request(root, 0)}});
       if (verify(fallback, 0, 1) ||
           check(
               root.statistics().peak[ResourceKind::Payload] == limit &&
@@ -545,7 +573,7 @@ int main() {
                 "released Whole Result owner"))
         return 1;
       unavailable = false;
-      auto retry = context.execute_fragments(frozen, {{"y", point(0)}});
+      auto retry = context.execute_fragments(frozen, {{"y", request(root, 0)}});
       if (verify(retry, 0, 1) ||
           check(retry.value().diagnostics.native_dispatch_count > 0,
                 "fresh native retry"))

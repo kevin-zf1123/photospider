@@ -18,7 +18,6 @@
 #include "core/dense_layout_validation.hpp"
 #include "photospider/compiler/compiler.hpp"
 #include "photospider/execution/execution.hpp"
-#include "photospider/plugin/data_definition_registry.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "plugin/library_test_hooks.hpp"
 #include "support/operation_result_fixture.hpp"
@@ -88,19 +87,6 @@
 #ifndef PS_OPERATION_UNICODE_FIXTURE_PATH
 #error "missing valid Unicode operation fixture path"
 #endif
-#ifndef PS_DATA_PROVIDER_FIXTURE_PATH
-#error "PS_DATA_PROVIDER_FIXTURE_PATH must name the valid provider fixture"
-#endif
-#ifndef PS_DATA_PROVIDER_BAD_FIXTURE_PATH
-#error \
-    "PS_DATA_PROVIDER_BAD_FIXTURE_PATH must name the invalid provider fixture"
-#endif
-#ifndef PS_DATA_PROVIDER_INVALID_UTF8_OVERLONG_FIXTURE_PATH
-#error "missing overlong provider-schema UTF-8 fixture path"
-#endif
-#ifndef PS_DATA_PROVIDER_UNICODE_FIXTURE_PATH
-#error "missing valid Unicode provider fixture path"
-#endif
 
 namespace {
 
@@ -139,15 +125,11 @@ struct CopyAwareOutput final {
     auto builder = take(ps::ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
         phase.query.semantic_key));
-    check(builder.bind_descriptor_relation(
-        take(ps::ResultRelation::cartesian(phase.resources, 1, {}))));
     const double number = 41;
     check(builder.publish_tensor(
         0, ps::Region::whole({1}),
         ps::ByteView(reinterpret_cast<const std::uint8_t*>(&number),
-                     sizeof(number)),
-        take(ps::ResultRelation::cartesian(phase.resources, 1, {})),
-        {true, true, true, true}));
+                     sizeof(number))));
     return ps::Result<ps::ResultProgramPoll>(
         ps::ResultPublication{take(builder.seal()), true});
   } catch (const multi_result::Failure& failure) {
@@ -262,16 +244,6 @@ std::uint32_t g_owner_allocation_count = 0U;
 std::uint32_t g_native_load_count = 0U;
 /** @brief Exact native close callback invocation count. */
 std::uint32_t g_native_close_count = 0U;
-/** @brief Exact copied-provider-schema retirement callback count. */
-std::uint32_t g_provider_schema_retirement_count = 0U;
-/** @brief Exact number of provider schemas retired by the observed registry. */
-std::size_t g_retired_provider_schema_count = 0U;
-/** @brief Monotonic callback sequence within one installed hook scope. */
-std::uint32_t g_lifecycle_sequence = 0U;
-/** @brief Sequence position of copied-provider-schema retirement. */
-std::uint32_t g_provider_schema_retirement_sequence = 0U;
-/** @brief Sequence position of the expected native close callback. */
-std::uint32_t g_native_close_sequence = 0U;
 
 /**
  * @brief Raises deterministic allocation failure at one expected owner seam.
@@ -319,20 +291,7 @@ void count_native_load(ps::plugin_testing::LibraryKind kind) noexcept {
 void count_native_close(ps::plugin_testing::LibraryKind kind) noexcept {
   if (kind == g_expected_library_kind) {
     ++g_native_close_count;
-    g_native_close_sequence = ++g_lifecycle_sequence;
   }
-}
-
-/**
- * @brief Records one copied-provider-schema retirement phase.
- * @param count Exact number of registry-owned schema records cleared.
- * @throws Nothing.
- * @note Native provider close must occur at a later sequence position.
- */
-void count_provider_schemas_retired(std::size_t count) noexcept {
-  ++g_provider_schema_retirement_count;
-  g_retired_provider_schema_count = count;
-  g_provider_schema_retirement_sequence = ++g_lifecycle_sequence;
 }
 
 /**
@@ -345,7 +304,7 @@ class LibraryHookScope final {
  public:
   /**
    * @brief Installs callbacks for one exact library kind and behavior.
-   * @param kind Operation or provider lifecycle to observe.
+   * @param kind Operation lifecycle to observe.
    * @param fail_allocation Whether to throw at the owner-allocation boundary.
    * @param observe_path_boundaries Whether to count native load and owner
    * allocation boundaries without injecting failure.
@@ -357,18 +316,12 @@ class LibraryHookScope final {
     g_owner_allocation_count = 0U;
     g_native_load_count = 0U;
     g_native_close_count = 0U;
-    g_provider_schema_retirement_count = 0U;
-    g_retired_provider_schema_count = 0U;
-    g_lifecycle_sequence = 0U;
-    g_provider_schema_retirement_sequence = 0U;
-    g_native_close_sequence = 0U;
     hooks_.before_owner_allocation =
         fail_allocation
             ? fail_owner_allocation
             : (observe_path_boundaries ? count_owner_allocation : nullptr);
     hooks_.native_load = observe_path_boundaries ? count_native_load : nullptr;
     hooks_.native_close = count_native_close;
-    hooks_.provider_schemas_retired = count_provider_schemas_retired;
     ps::plugin_testing::install_library_test_hooks(&hooks_);
   }
 
@@ -435,35 +388,6 @@ class LibraryHookScope final {
    */
   [[nodiscard]] std::uint32_t native_close_count() const noexcept {
     return g_native_close_count;
-  }
-
-  /**
-   * @brief Returns exact copied-provider-schema retirement callback count.
-   * @return Current scoped callback count.
-   * @throws Nothing.
-   */
-  [[nodiscard]] std::uint32_t provider_schema_retirement_count()
-      const noexcept {
-    return g_provider_schema_retirement_count;
-  }
-
-  /**
-   * @brief Returns exact number of copied schemas retired by destruction.
-   * @return Last observed schema count.
-   * @throws Nothing.
-   */
-  [[nodiscard]] std::size_t retired_provider_schema_count() const noexcept {
-    return g_retired_provider_schema_count;
-  }
-
-  /**
-   * @brief Reports whether schema retirement preceded native provider close.
-   * @return True only for two observed callbacks in the required order.
-   * @throws Nothing.
-   */
-  [[nodiscard]] bool provider_retired_before_close() const noexcept {
-    return g_provider_schema_retirement_sequence != 0U &&
-           g_native_close_sequence > g_provider_schema_retirement_sequence;
   }
 
  private:
@@ -709,11 +633,12 @@ int verify_immutable_callback_handles() {
   query.semantic_key = "fixture.copy_aware_invoke";
   const auto allocator = root.allocator();
   ps::ResultObjectInputs objects;
-  ps::ResourceVector<ps::ResultIoReply> io;
   ps::ResultProgramPhase phase{
-      query, objects,
-      io,    allocator,
-      root,  [&](std::uint64_t work) { return root.consume({work}); },
+      query,
+      objects,
+      allocator,
+      root,
+      [&](std::uint64_t work) { return root.consume({work}); },
       {}};
   bool invoke_escaped = false;
   bool invoke_succeeded = false;
@@ -824,8 +749,6 @@ struct PrevalidatedOutput final {
       schema.tensors[0].descriptor.element_type = ps::ElementType::UInt8;
     auto builder = take(ps::ResultBuilder::start(phase.resources, schema,
                                                  phase.query.semantic_key));
-    check(builder.bind_descriptor_relation(
-        take(ps::ResultRelation::cartesian(phase.resources, 1, {}))));
     const double number = 17;
     const std::uint8_t byte = 17;
     if (mode != 3)
@@ -834,9 +757,7 @@ struct PrevalidatedOutput final {
           mode == 2
               ? ps::ByteView(&byte, 1)
               : ps::ByteView(reinterpret_cast<const std::uint8_t*>(&number),
-                             sizeof(number)),
-          take(ps::ResultRelation::cartesian(phase.resources, 1, {})),
-          {true, true, true, true}));
+                             sizeof(number))));
     return ps::Result<ps::ResultProgramPoll>(
         ps::ResultPublication{take(builder.seal()), true});
   }
@@ -968,10 +889,11 @@ int verify_cpp_invocation_prevalidation() {
       registry->start_result("fixture.backend_prevalidation", query, allocator);
   PS_CHECK(valid.ok() && backend_starts == 1);
   ResultObjectInputs objects;
-  ResourceVector<ResultIoReply> io;
-  ResultProgramPhase phase{query, objects,
-                           io,    allocator,
-                           root,  [&](auto n) { return root.consume({n}); },
+  ResultProgramPhase phase{query,
+                           objects,
+                           allocator,
+                           root,
+                           [&](auto n) { return root.consume({n}); },
                            {}};
   auto continuation = valid.take_value();
   auto published = continuation.poll(phase);
@@ -1149,7 +1071,7 @@ int verify_result_registration() {
 }  // namespace
 
 /**
- * @brief Exercises operation/provider ABI validation, callbacks, freezing, and
+ * @brief Exercises operation ABI validation, callbacks, freezing, and
  * exact destroy-before-unload lifecycle.
  * @return Zero when all checks pass.
  * @throws std::bad_alloc If test setup allocation fails.
@@ -1160,8 +1082,6 @@ int main() {
   using ps::Backend;
   using ps::CancellationToken;
   using ps::Compiler;
-  using ps::DataDefinitionRegistry;
-  using ps::DataSchemaDefinition;
   using ps::ElementType;
   using ps::ErrorCode;
   using ps::GraphContext;
@@ -1169,7 +1089,6 @@ int main() {
   using ps::OperationParameterSpec;
   using ps::OperationParameterType;
   using ps::OperationRegistry;
-  using ps::OperationShapeRule;
   using ps::OperationTraits;
   using ps::ParameterValue;
   using ps::Region;
@@ -1208,31 +1127,6 @@ int main() {
     nul_operation_close_count = lifecycle.native_close_count();
   }
 
-  std::string nul_provider_path(PS_DATA_PROVIDER_FIXTURE_PATH,
-                                std::strlen(PS_DATA_PROVIDER_FIXTURE_PATH));
-  nul_provider_path.append("\0suffix", 7U);
-  ps::Status nul_provider_status;
-  bool nul_provider_schema_absent = false;
-  std::uint32_t nul_provider_owner_count = 0U;
-  std::uint32_t nul_provider_load_count = 0U;
-  std::uint32_t nul_provider_close_count = 0U;
-  std::size_t nul_provider_retired_schema_count = 0U;
-  LibraryObserver nul_provider_observer(PS_DATA_PROVIDER_FIXTURE_PATH);
-  {
-    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Provider, false,
-                               true);
-    {
-      DataDefinitionRegistry registry;
-      nul_provider_status = registry.load_provider(nul_provider_path);
-      nul_provider_schema_absent = !registry.find("fixture.float64").ok();
-    }
-    nul_provider_owner_count = lifecycle.owner_allocation_count();
-    nul_provider_load_count = lifecycle.native_load_count();
-    nul_provider_close_count = lifecycle.native_close_count();
-    nul_provider_retired_schema_count =
-        lifecycle.retired_provider_schema_count();
-  }
-
   PS_CHECK(!nul_operation_status.ok());
   PS_CHECK(nul_operation_status.code == ErrorCode::InvalidArgument);
   PS_CHECK(nul_operation_registry_empty);
@@ -1241,16 +1135,6 @@ int main() {
   PS_CHECK(nul_operation_close_count == 0U);
   PS_CHECK(nul_operation_observer.counter(
                "ps_operation_fixture_destroy_count") == 0U);
-  PS_CHECK(!nul_provider_status.ok());
-  PS_CHECK(nul_provider_status.code == ErrorCode::InvalidArgument);
-  PS_CHECK(nul_provider_schema_absent);
-  PS_CHECK(nul_provider_owner_count == 0U);
-  PS_CHECK(nul_provider_load_count == 0U);
-  PS_CHECK(nul_provider_close_count == 0U);
-  PS_CHECK(nul_provider_retired_schema_count == 0U);
-  PS_CHECK(nul_provider_observer.counter(
-               "ps_data_provider_fixture_destroy_count") == 0U);
-
   std::string missing_operation_path(PS_OPERATION_FIXTURE_PATH,
                                      std::strlen(PS_OPERATION_FIXTURE_PATH));
   missing_operation_path += ".photospider-missing";
@@ -1262,22 +1146,6 @@ int main() {
     PS_CHECK(!missing.ok());
     PS_CHECK(missing.code == ErrorCode::NotFound);
     PS_CHECK(registry.keys().empty());
-    PS_CHECK(lifecycle.owner_allocation_count() == 0U);
-    PS_CHECK(lifecycle.native_load_count() == 1U);
-    PS_CHECK(lifecycle.native_close_count() == 0U);
-  }
-
-  std::string missing_provider_path(PS_DATA_PROVIDER_FIXTURE_PATH,
-                                    std::strlen(PS_DATA_PROVIDER_FIXTURE_PATH));
-  missing_provider_path += ".photospider-missing";
-  {
-    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Provider, false,
-                               true);
-    DataDefinitionRegistry registry;
-    const ps::Status missing = registry.load_provider(missing_provider_path);
-    PS_CHECK(!missing.ok());
-    PS_CHECK(missing.code == ErrorCode::NotFound);
-    PS_CHECK(!registry.find("fixture.float64").ok());
     PS_CHECK(lifecycle.owner_allocation_count() == 0U);
     PS_CHECK(lifecycle.native_load_count() == 1U);
     PS_CHECK(lifecycle.native_close_count() == 0U);
@@ -1454,109 +1322,6 @@ int main() {
   }
   PS_CHECK(operation_observer.counter("ps_operation_fixture_destroy_count") ==
            destroy_before_retirement + 1U);
-
-  auto unicode_provider_registry = std::make_unique<DataDefinitionRegistry>();
-  const std::string invalid_provider_key("\xc0\xaf", 2U);
-  const std::string unicode_provider_key = "fixture.\xe5\x9b\xbe\xe5\x83\x8f";
-  {
-    LibraryObserver observer(
-        PS_DATA_PROVIDER_INVALID_UTF8_OVERLONG_FIXTURE_PATH);
-    PS_CHECK(observer.counter("ps_data_provider_utf8_fixture_destroy_count") ==
-             0U);
-    {
-      LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Provider,
-                                 false);
-      PS_CHECK(!unicode_provider_registry
-                    ->load_provider(
-                        PS_DATA_PROVIDER_INVALID_UTF8_OVERLONG_FIXTURE_PATH)
-                    .ok());
-      PS_CHECK(lifecycle.owner_allocation_count() == 0U);
-      PS_CHECK(lifecycle.native_close_count() == 1U);
-    }
-    PS_CHECK(!unicode_provider_registry->find(invalid_provider_key).ok());
-    PS_CHECK(!unicode_provider_registry->find(unicode_provider_key).ok());
-    PS_CHECK(observer.counter("ps_data_provider_utf8_fixture_destroy_count") ==
-             1U);
-  }
-
-  LibraryObserver unicode_provider_observer(
-      PS_DATA_PROVIDER_UNICODE_FIXTURE_PATH);
-  PS_CHECK(unicode_provider_observer.counter(
-               "ps_data_provider_utf8_fixture_destroy_count") == 0U);
-  PS_CHECK(unicode_provider_registry
-               ->load_provider(PS_DATA_PROVIDER_UNICODE_FIXTURE_PATH)
-               .ok());
-  auto unicode_schema = unicode_provider_registry->find(unicode_provider_key);
-  PS_CHECK(unicode_schema.ok());
-  DataSchemaDefinition retained_unicode_schema = unicode_schema.value();
-  {
-    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Provider,
-                               false);
-    unicode_provider_registry.reset();
-    PS_CHECK(lifecycle.provider_schema_retirement_count() == 1U);
-    PS_CHECK(lifecycle.retired_provider_schema_count() == 1U);
-    PS_CHECK(lifecycle.provider_retired_before_close());
-    PS_CHECK(lifecycle.native_close_count() == 1U);
-  }
-  PS_CHECK(unicode_provider_observer.counter(
-               "ps_data_provider_utf8_fixture_destroy_count") == 1U);
-  PS_CHECK(retained_unicode_schema.key == unicode_provider_key);
-  PS_CHECK(retained_unicode_schema.element_type == ElementType::Float64);
-  PS_CHECK(retained_unicode_schema.maximum_rank == 4U);
-
-  LibraryObserver provider_observer(PS_DATA_PROVIDER_FIXTURE_PATH);
-  PS_CHECK(provider_observer.counter(
-               "ps_data_provider_fixture_destroy_count") == 0U);
-  {
-    LibraryHookScope failure(ps::plugin_testing::LibraryKind::Provider, true);
-    bool allocation_failed = false;
-    try {
-      DataDefinitionRegistry registry;
-      static_cast<void>(registry.load_provider(PS_DATA_PROVIDER_FIXTURE_PATH));
-    } catch (const std::bad_alloc&) {
-      allocation_failed = true;
-    }
-    PS_CHECK(allocation_failed);
-    PS_CHECK(failure.owner_allocation_count() == 1U);
-    PS_CHECK(failure.native_close_count() == 1U);
-    PS_CHECK(provider_observer.counter(
-                 "ps_data_provider_fixture_destroy_count") == 1U);
-  }
-  DataSchemaDefinition retained_provider_schema;
-  auto provider_registry = std::make_unique<DataDefinitionRegistry>();
-  PS_CHECK(
-      provider_registry->load_provider(PS_DATA_PROVIDER_FIXTURE_PATH).ok());
-  PS_CHECK(!provider_registry->load_provider(PS_DATA_PROVIDER_BAD_FIXTURE_PATH)
-                .ok());
-  PS_CHECK(provider_registry->freeze().ok());
-  PS_CHECK(
-      !provider_registry->load_provider(PS_DATA_PROVIDER_FIXTURE_PATH).ok());
-  auto schema = provider_registry->find("fixture.float64");
-  PS_CHECK(schema.ok());
-  retained_provider_schema = schema.value();
-  PS_CHECK(provider_observer.counter(
-               "ps_data_provider_fixture_destroy_count") == 1U);
-  {
-    LibraryHookScope lifecycle(ps::plugin_testing::LibraryKind::Provider,
-                               false);
-    provider_registry.reset();
-    PS_CHECK(lifecycle.provider_schema_retirement_count() == 1U);
-    PS_CHECK(lifecycle.retired_provider_schema_count() == 1U);
-    PS_CHECK(lifecycle.provider_retired_before_close());
-    PS_CHECK(lifecycle.native_close_count() == 1U);
-  }
-  PS_CHECK(provider_observer.counter(
-               "ps_data_provider_fixture_destroy_count") == 2U);
-  PS_CHECK(retained_provider_schema.key == "fixture.float64");
-  PS_CHECK(retained_provider_schema.element_type == ElementType::Float64);
-  PS_CHECK(retained_provider_schema.maximum_rank == 4U);
-  {
-    DataDefinitionRegistry later_registry;
-    PS_CHECK(later_registry.load_provider(PS_DATA_PROVIDER_FIXTURE_PATH).ok());
-    PS_CHECK(later_registry.find("fixture.float64").ok());
-  }
-  PS_CHECK(provider_observer.counter(
-               "ps_data_provider_fixture_destroy_count") == 3U);
 
   PS_CHECK(verify_cpp_fixed_broadcast({4}) == 0);
   PS_CHECK(verify_cpp_fixed_broadcast({UINT64_MAX}, true) == 0);

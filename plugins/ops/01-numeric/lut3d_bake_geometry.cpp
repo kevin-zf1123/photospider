@@ -11,8 +11,9 @@
 
 #include "01-numeric/lut3d_bake_common.hpp"
 #include "01-numeric/uniform_axis.hpp"
+#include "common/registry.hpp"
+#include "common/tensor_metadata.hpp"
 #include "photospider/core/resource_allocator.hpp"
-#include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -40,6 +41,8 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
   for (const auto& input : inputs)
     if (!sole_tensor(input))
       return Answer(mismatch("bake geometry requires one Result tensor"));
+  TensorMetadata tensor;
+  std::uint32_t tuple_axes = 0;
   OperationOutputSpecialization output;
   if (kind == Geometry::Color) {
     auto checked = color_metadata(inputs[0], color.value());
@@ -48,7 +51,7 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
     const auto& dtype = std::get<std::string>(parameters.at("dtype"));
     if (dtype != "float32" && dtype != "float64")
       return Answer(invalid("bake color dtype"));
-    output.metadata.descriptor = {
+    tensor.descriptor = {
         dtype == "float32" ? ElementType::Float32 : ElementType::Float64,
         tensor_descriptor(inputs[0]).shape};
   } else {
@@ -56,12 +59,12 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
         tensor_descriptor(inputs[0]).shape != std::vector<std::uint64_t>{3, 3})
       return Answer(mismatch("bake axis requires Float64[3,3]"));
     const auto dimensions = shape(parameters);
-    output.metadata.descriptor.element_type = ElementType::Float64;
+    tensor.descriptor.element_type = ElementType::Float64;
     if (kind == Geometry::Axis) {
-      output.metadata.descriptor.shape = {3, 3};
+      tensor.descriptor.shape = {3, 3};
     } else if (kind == Geometry::Grid) {
-      output.metadata.descriptor.shape = {dimensions[0], dimensions[1],
-                                          dimensions[2], 3};
+      tensor.descriptor.shape = {dimensions[0], dimensions[1], dimensions[2],
+                                 3};
     } else {
       const auto extras = std::get<std::int64_t>(parameters.at("extra_count"));
       if (extras < 0 || extras > 1048576 ||
@@ -73,7 +76,7 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
                std::vector<std::uint64_t>{static_cast<std::uint64_t>(extras),
                                           3}))
         return Answer(mismatch("bake extras require Float64[M,3]"));
-      output.metadata.descriptor.shape = {product(dimensions, 1) + extras, 3};
+      tensor.descriptor.shape = {product(dimensions, 1) + extras, 3};
       if (kind == Geometry::Extra) {
         auto checked = color_metadata(inputs[1], color.value());
         if (!checked.ok())
@@ -82,22 +85,20 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
     }
   }
   if (kind != Geometry::Axis) {
-    auto valid = validate_color_array_descriptor(color.value(),
-                                                 output.metadata.descriptor);
+    auto valid =
+        validate_color_array_descriptor(color.value(), tensor.descriptor);
     if (!valid.ok())
       return Answer(valid);
     auto facet = encode_color_array(color.value());
     if (!facet.ok())
       return Answer(facet.status());
-    output.metadata.facets = {facet.take_value()};
-    output.metadata.atomic_trailing_axes = 1;
+    tensor.facets = {facet.take_value()};
+    tuple_axes = 1;
   }
   auto schema = numeric_ops::numeric_tensor_schema(
-      output.metadata.descriptor.element_type,
-      output.metadata.descriptor.shape);
-  schema.tensors[0].facets = std::move(output.metadata.facets);
-  schema.tensors[0].atomic_trailing_axes = output.metadata.atomic_trailing_axes;
-  output.metadata = {};
+      tensor.descriptor.element_type, tensor.descriptor.shape);
+  schema.tensors[0].facets = std::move(tensor.facets);
+  schema.tensors[0].atomic_trailing_axes = tuple_axes;
   output.metadata.result_schema =
       std::make_shared<const SchemaTemplate>(std::move(schema));
   return Answer(std::vector<OperationOutputSpecialization>{std::move(output)});

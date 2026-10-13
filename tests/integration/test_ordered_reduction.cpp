@@ -138,7 +138,7 @@ WorkflowDocument generator_document(
   output.result_schema = schema;
   output.output_schema.result_schema_id = std::string(schema.id);
   output.output_schema.result_schema_version = schema.version;
-  output.region_rule = OperationRegionRule::Dependency;
+  output.region_rule = OperationRegionRule::Tiled;
   output.continuation_bytes = sizeof(GeneratorProgram);
   output.maximum_dependency_stages = 2;
   producer.start_result = [source](const auto&, const auto& allocator) {
@@ -239,8 +239,7 @@ int order_and_cache() {
             PS_CHECK(context.cache_statistics().retained_bytes <= 128);
             if (warm && block >= 64) {
               // A complete Result can bypass state-transition lookup.
-              PS_CHECK(result.value().diagnostics.shared_computations > 0 ||
-                       result.value().diagnostics.cache_hits > 0);
+              PS_CHECK(result.value().diagnostics.cache_hits > 0);
             }
             PS_CHECK(result.value().dependencies.source_support().value().at(
                          "x") == Footprint::all(shape).take_value());
@@ -460,8 +459,7 @@ int result_and_block_reuse() {
         auto warm = context.execute(plan, bound);
         PS_REQUIRE_OK(warm);
         PS_CHECK(number(warm.value().results.at("result")) == expected);
-        PS_CHECK((warm.value().diagnostics.shared_computations > 0 ||
-                  warm.value().diagnostics.cache_hits > 0) &&
+        PS_CHECK(warm.value().diagnostics.cache_hits > 0 &&
                  warm.value().diagnostics.operation_timings.empty());
       }
     }

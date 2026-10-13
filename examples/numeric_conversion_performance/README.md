@@ -1,4 +1,4 @@
-`numeric.convert_format_strict` is a registered Result ABI 2 operation.
+`numeric.convert_format_strict` is a registered Result ABI 3 operation.
 
 The current
 performance driver builds its input Result and workflow through the public API,

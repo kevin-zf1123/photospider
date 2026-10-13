@@ -343,9 +343,7 @@ void cache_validation_and_owners(ps::CpuNumericProfile profile) {
     std::uint64_t repeat = 0, first = 0;
     require(read(repeated.results.at("filtered"), {2}, &repeat, 8).ok() &&
                 read(original.results.at("filtered"), {2}, &first, 8).ok() &&
-                repeat == first &&
-                repeated.results.at("filtered").object_id() ==
-                    original.results.at("filtered").object_id(),
+                repeat == first && repeated.diagnostics.cache_hits > 0,
             "repeated lowpass demand preserves bits");
     require(
         take(original.results.at("filtered").descriptor()).tensor_coverage(0) ==

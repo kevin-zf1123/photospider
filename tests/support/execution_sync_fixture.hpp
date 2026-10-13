@@ -42,40 +42,6 @@ class ExecutionHookScope final {
   execution_testing::ExecutionTestHooks hooks_;
 };
 
-class SharedJoinEvent final {
- public:
-  SharedJoinEvent(std::string_view operation, std::uint64_t node)
-      : operation_(operation), node_(node), hooks_(callbacks(this)) {}
-  bool wait() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return changed_.wait_for(lock, std::chrono::seconds(5),
-                             [&] { return joined_; });
-  }
-
- private:
-  static execution_testing::ExecutionTestHooks callbacks(
-      SharedJoinEvent* self) {
-    execution_testing::ExecutionTestHooks hooks;
-    hooks.structured_context = self;
-    hooks.shared_joined = [](void* context, std::string_view operation,
-                             std::uint64_t node, const void*) noexcept {
-      auto& event = *static_cast<SharedJoinEvent*>(context);
-      if (operation != event.operation_ || node != event.node_)
-        return;
-      std::lock_guard<std::mutex> lock(event.mutex_);
-      event.joined_ = true;
-      event.changed_.notify_all();
-    };
-    return hooks;
-  }
-  std::string_view operation_;
-  std::uint64_t node_;
-  std::mutex mutex_;
-  std::condition_variable changed_;
-  bool joined_ = false;
-  ExecutionHookScope hooks_;
-};
-
 class PhaseWorkGate final {
  public:
   PhaseWorkGate(std::string_view operation, std::uint64_t checkpoint)

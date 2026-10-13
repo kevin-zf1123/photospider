@@ -141,12 +141,12 @@ class ResultNativeScope final {
       return Result<MutableBuffer>(Status{ErrorCode::BackendUnavailable, {}});
     return active_->allocator_.allocate(bytes);
   }
-  static Result<ResourceVector<ResultTensorNeed>> discover(
+  static Result<ResourceVector<TileNeed>> discover(
       const ResultProgramQuery& query, std::uint32_t capacity,
       std::uint32_t candidates,
       const std::function<Status(const ResultGpuRequestTable&)>& compute,
       const std::function<Status(std::uint64_t)>& work) {
-    using Answer = Result<ResourceVector<ResultTensorNeed>>;
+    using Answer = Result<ResourceVector<TileNeed>>;
     if (!active_ || !active_->upload_ || query.backend != Backend::Gpu ||
         !compute || !candidates || active_->discovering_)
       return Answer(Status{ErrorCode::InvalidArgument,
@@ -157,7 +157,7 @@ class ResultNativeScope final {
       return Answer(
           Status{ErrorCode::ResourceExhausted, "GPU discovery table limit"});
     const auto& charge = work;
-    const auto bytes = 16 + std::uint64_t{capacity} * 144;
+    const auto bytes = 16 + std::uint64_t{capacity} * 16;
     auto status = charge(candidates);
     if (status.ok())
       status = charge(2 * bytes);

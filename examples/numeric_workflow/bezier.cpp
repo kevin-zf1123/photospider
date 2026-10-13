@@ -555,9 +555,11 @@ void cache_and_typed(ps::CpuNumericProfile profile) {
   value(first, "values", 1, raw(.5));
   const auto repeated = take(demand.request(query, {}, options));
   for (const auto* key : {"values", "axis"})
-    require(first.results.at(key).object_id() ==
-                repeated.results.at(key).object_id(),
-            "same Bezier demand retains completed Result");
+    require(
+        repeated.diagnostics.cache_hits > 0 &&
+            numeric_result_fixture::bytes(first.results.at(key)) ==
+                numeric_result_fixture::bytes(repeated.results.at(key)),
+        "repeated demand reuses bounded completed cache with identical bits");
   const auto fresh_bindings = fixture.bindings(root);
   const auto warm = take(context.execute_fragments(
       take(context.freeze(plan.plan, fresh_bindings)), query, {}, options));

@@ -11,7 +11,7 @@
 5. [Graph 生命周期](Graph-Lifecycle.zh.md)：图版本与编译阶段的生命周期。
 6. [Compute 边界](Compute-Boundaries.zh.md)：CPU/GPU 放置与回退规则。
 7. [Cache 模型](Cache-Model.zh.md)：冻结输入与有界本地结果复用。
-8. [Plugin ABI](Plugin-ABI.zh.md)：可信进程内 operation 与 provider 接口。
+8. [Plugin ABI](Plugin-ABI.zh.md)：可信进程内 operation 接口。
 9. [图像算子](Image-Operations.zh.md)：图像描述符、端口与当前图像契约。
 10. [Region 语义](Region-Semantics.zh.md)：逻辑覆盖、输入需求与边界行为。
 
@@ -20,9 +20,6 @@
 - [Result quickstart](../../../examples/result_quickstart/README.md)：使用安装包 operation 与 workflow 的最小示例。
 - [Foundations 工作流](../../../examples/foundations_workflow/README.zh.md)：可运行的安装包示例及当前场景。
 - [GPU 集成测试](../../../tests/integration/gpu/)：已注册的 GPU 行为覆盖；硬件相关用例在设备不可用时明确 skip。
-- [整数统计](Integer-Statistics.zh.md)：分页直方图与流式调色算子。
-- [外轴 FFT](External-FFT.zh.md)：分页 FFT 与资源边界。
-- [分页连通域](Paged-Components.zh.md)：连通域标签与分页筛选。
 - [基础算子](Basic-Operations.zh.md)：内置数值、颜色和图像算子的输入输出与执行规则。
 - [受管资源](Managed-Resources.zh.md)：资源预算、所有权、保留和释放。
 - [Atom 错误与质量](Atom-Errors-and-Quality.zh.md)：原子执行错误范围与数值质量等级。

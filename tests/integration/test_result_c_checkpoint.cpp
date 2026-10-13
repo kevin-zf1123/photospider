@@ -2,15 +2,16 @@
 
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <future>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -23,9 +24,36 @@ using namespace ps;  // NOLINT(build/namespaces)
 using numeric_result_fixture::take;
 struct Module {
   void* handle = dlopen(PS_RESULT_CHECKPOINT_FIXTURE, RTLD_NOW | RTLD_LOCAL);
+  mutable std::mutex mutex;
+  mutable std::condition_variable condition;
+  mutable bool entered = false, released = true;
+  Module() {
+    if (!handle)
+      return;
+    auto set_gate = reinterpret_cast<void (*)(void (*)(void*), void*)>(
+        dlsym(handle, "ps_result_checkpoint_set_gate"));
+    if (!set_gate)
+      throw std::runtime_error("missing C checkpoint gate");
+    set_gate(
+        [](void* raw) {
+          auto& self = *static_cast<Module*>(raw);
+          std::unique_lock<std::mutex> lock(self.mutex);
+          if (self.entered)
+            return;
+          self.entered = true;
+          self.condition.notify_all();
+          self.condition.wait(lock, [&] { return self.released; });
+        },
+        this);
+  }
   ~Module() {
-    if (handle)
+    if (handle) {
+      auto set_gate = reinterpret_cast<void (*)(void (*)(void*), void*)>(
+          dlsym(handle, "ps_result_checkpoint_set_gate"));
+      if (set_gate)
+        set_gate(nullptr, nullptr);
       dlclose(handle);
+    }
   }
   std::array<std::uint64_t, 6> counts() const {
     auto function = reinterpret_cast<void (*)(std::uint64_t*)>(
@@ -37,11 +65,20 @@ struct Module {
     return result;
   }
   unsigned gate(unsigned action) const {
-    auto function = reinterpret_cast<unsigned (*)(unsigned)>(
-        dlsym(handle, "ps_result_checkpoint_gate"));
-    if (!function)
-      throw std::runtime_error("missing C checkpoint gate");
-    return function(action);
+    std::lock_guard<std::mutex> lock(mutex);
+    if (action == 1) {
+      entered = false;
+      released = false;
+    } else if (action == 2) {
+      released = true;
+      condition.notify_all();
+    }
+    return entered;
+  }
+  bool wait() const {
+    std::unique_lock<std::mutex> lock(mutex);
+    return condition.wait_for(lock, std::chrono::seconds(5),
+                              [&] { return entered; });
   }
 };
 SchemaTemplate schema() {
@@ -77,12 +114,17 @@ ExecutionBindings binding(const ResourceBudget& root, double first = 1,
   auto metadata = schema();
   return {{{"source", numeric_result_fixture::source(root, value, &metadata)}}};
 }
-Footprint point(std::uint64_t index) {
-  return take(Footprint::from_regions({5}, {Region({{index, 1}})}));
+TileRequest point(const ResourceBudget& root, std::uint64_t index) {
+  return {false, take(TileSet::from_indices(root, {index}))};
+}
+PlanningOptions planning() {
+  PlanningOptions options;
+  options.tile_extent = 1;
+  return options;
 }
 double number(const ResultRef& result, std::uint64_t at) {
   double value = 0;
-  auto status = numeric_result_fixture::read(result, {at}, &value, 8);
+  auto status = numeric_result_fixture::read(result, {0, at}, &value, 8);
   if (!status.ok())
     throw std::runtime_error(status.message);
   return value;
@@ -97,7 +139,7 @@ int workflow(unsigned mode, bool cache = true,
     std::cerr << loaded.message << '\n';
   PS_CHECK(loaded.ok() && registry->freeze().ok());
   GraphContext graph(document(mode, key));
-  auto plan = take(Compiler(registry).compile(graph)).plan;
+  auto plan = take(Compiler(registry).compile(graph, planning())).plan;
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   config.result_cache_bytes = cache ? 1048576 : 0;
@@ -108,7 +150,7 @@ int workflow(unsigned mode, bool cache = true,
   ExecutionOptions options;
   if (!cache)
     options.maximum_dependency_cache_work = 0;
-  auto first = demand.request({{"value", point(2)}}, {}, options);
+  auto first = demand.request({{"value", point(root, 2)}}, {}, options);
   if (mode == 0 || mode == 12) {
     if (!first.ok())
       std::cerr << "checkpoint mode " << mode << ": " << first.status().message
@@ -125,7 +167,7 @@ int workflow(unsigned mode, bool cache = true,
     auto before = module.counts();
     PS_CHECK(before[0] == 1 && before[1] == 1 && before[2] == 3 &&
              before[3] == 0 && before[4] == 3 && before[5] == (cache ? 3 : 0));
-    auto second = demand.request({{"value", point(4)}}, {}, options);
+    auto second = demand.request({{"value", point(root, 4)}}, {}, options);
     auto after = module.counts();
     {
       if (!second.ok())
@@ -134,14 +176,20 @@ int workflow(unsigned mode, bool cache = true,
                number(second.value().results.at("value"), 4) == 15 &&
                after[0] == 2 && after[1] == 2 && after[2] - before[2] == 5 &&
                after[3] == 0);
-      auto dirty =
-          take(second.value().dependencies.potential_dirty("source", point(0)));
-      PS_CHECK(dirty.at("value") == point(4));
-      auto irrelevant =
-          take(second.value().dependencies.potential_dirty("source", point(4)));
-      PS_CHECK(irrelevant.at("value") == point(4));
-      PS_CHECK(demand.replace_bindings(binding(root, 10)).ok());
-      auto third = take(demand.request({{"value", point(4)}}, {}, options));
+      auto record = take(second.value().dependencies.tile_record(
+          {plan.outputs().at("value"), 0, 4}));
+      PS_CHECK(record && record->inputs.size() == 1 &&
+               record->inputs[0].whole && record->inputs[0].tiles.empty());
+      PS_CHECK(std::holds_alternative<PlanWorkflowInput>(
+          record->inputs[0].producer));
+      PS_CHECK(std::get<PlanWorkflowInput>(record->inputs[0].producer)
+                   .declaration_index == 0);
+      PS_CHECK(record->inputs[0].producer_output == 0);
+      auto changed = take(demand.replace_bindings(binding(root, 10)));
+      PS_CHECK(changed.potential_dirty.at("value") ==
+               take(TileSet::from_indices(root, {2, 4})));
+      auto third =
+          take(demand.request({{"value", point(root, 4)}}, {}, options));
       PS_CHECK(number(third.results.at("value"), 4) == 24 &&
                module.counts()[2] - after[2] == 5 &&
                module.counts()[3] == after[3]);
@@ -154,8 +202,7 @@ int workflow(unsigned mode, bool cache = true,
     const auto counts = module.counts();
     PS_CHECK(counts[0] == 1 && counts[1] == 1);
   }
-  PS_CHECK(context.cache_statistics().in_flight == 0 &&
-           root.statistics().live[ResourceKind::Queue] == 0);
+  PS_CHECK(root.statistics().live[ResourceKind::Queue] == 0);
   return 0;
 }
 int finite_prefix(double first, double second) {
@@ -165,7 +212,7 @@ int finite_prefix(double first, double second) {
   PS_CHECK(registry->load_plugin(PS_RESULT_CHECKPOINT_FIXTURE).ok() &&
            registry->freeze().ok());
   GraphContext graph(document(0, "fixture.result_checkpoint"));
-  auto plan = take(Compiler(registry).compile(graph)).plan;
+  auto plan = take(Compiler(registry).compile(graph, planning())).plan;
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   config.result_cache_bytes = 1048576;
@@ -173,11 +220,11 @@ int finite_prefix(double first, double second) {
   ExecutionContext context(registry, config);
   auto root = take(context.resource_budget());
   auto demand = take(context.open_demand(plan, binding(root, first, second)));
-  auto valid = take(demand.request({{"value", point(0)}}));
+  auto valid = take(demand.request({{"value", point(root, 0)}}));
   PS_CHECK(number(valid.results.at("value"), 0) == first);
   const auto before = module.counts();
   for (unsigned repeat = 0; repeat < 2; ++repeat) {
-    auto failed = demand.request({{"value", point(1)}});
+    auto failed = demand.request({{"value", point(root, 1)}});
     PS_CHECK(!failed.ok() &&
              failed.status().code == ErrorCode::OperationFailed);
     const auto after = module.counts();
@@ -185,18 +232,17 @@ int finite_prefix(double first, double second) {
              after[2] == before[2] + 2 * (repeat + 1) &&
              after[4] == before[4] + repeat + 1);
   }
-  PS_CHECK(context.cache_statistics().in_flight == 0 &&
-           root.statistics().live[ResourceKind::Queue] == 0);
+  PS_CHECK(root.statistics().live[ResourceKind::Queue] == 0);
   return 0;
 }
-int shared_prefix(unsigned mode) {
+int shared_prefix(unsigned mode, bool restore_prefix = true) {
   Module module;
   PS_CHECK(module.handle);
   auto registry = std::make_shared<OperationRegistry>();
   PS_CHECK(registry->load_plugin(PS_RESULT_CHECKPOINT_FIXTURE).ok() &&
            registry->freeze().ok());
   GraphContext graph(document(mode, "fixture.result_checkpoint"));
-  auto plan = take(Compiler(registry).compile(graph)).plan;
+  auto plan = take(Compiler(registry).compile(graph, planning())).plan;
   ExecutionContextConfig config;
   config.cpu_workers = 2;
   config.result_cache_bytes = 1048576;
@@ -210,21 +256,20 @@ int shared_prefix(unsigned mode) {
     ~Release() { module.gate(2); }
   };
   auto first = std::async(std::launch::async, [&] {
-    return context.execute_fragments(frozen, {{"value", point(2)}});
+    return context.execute_fragments(frozen, {{"value", point(root, 2)}});
   });
   Release release{module};
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (!module.gate(0) && std::chrono::steady_clock::now() < deadline &&
-         first.wait_for(std::chrono::milliseconds(0)) !=
-             std::future_status::ready)
-    std::this_thread::yield();
-  PS_CHECK(module.gate(0));
+  PS_CHECK(module.wait());
   const auto before = module.counts();
-  auto second = context.execute_fragments(frozen, {{"value", point(4)}});
+  ExecutionOptions options;
+  if (!restore_prefix)
+    options.maximum_dependency_cache_work = 0;
+  auto second = context.execute_fragments(frozen, {{"value", point(root, 2)}},
+                                          {}, options);
   const auto after = module.counts();
-  PS_CHECK(before[2] == 3 && before[3] == 0 && after[3] == 1);
-  if (mode == 8) {
+  PS_CHECK(before[2] == 3 && before[3] == 0 &&
+           after[3] == (restore_prefix ? 1 : 0));
+  if (mode == 8 && restore_prefix) {
     PS_CHECK(!second.ok() &&
              second.status().detail.origin == FailureOrigin::Protocol &&
              after[2] == before[2]);
@@ -232,18 +277,24 @@ int shared_prefix(unsigned mode) {
     if (!second.ok())
       std::cerr << second.status().message << '\n';
     PS_CHECK(second.ok() &&
-             number(second.value().results.at("value"), 4) == 15 &&
-             after[2] - before[2] == 2);
-    auto dirty =
-        take(second.value().dependencies.potential_dirty("source", point(0)));
-    PS_CHECK(dirty.at("value") == point(4));
+             number(second.value().results.at("value"), 2) == 6 &&
+             after[2] - before[2] == (restore_prefix ? 0 : 3));
+    auto record = take(second.value().dependencies.tile_record(
+        {plan.outputs().at("value"), 0, 2}));
+    PS_CHECK(record && record->inputs.size() == 1 && record->inputs[0].whole &&
+             record->inputs[0].tiles.empty());
+    PS_CHECK(
+        std::holds_alternative<PlanWorkflowInput>(record->inputs[0].producer));
+    PS_CHECK(std::get<PlanWorkflowInput>(record->inputs[0].producer)
+                 .declaration_index == 0);
+    PS_CHECK(record->inputs[0].producer_output == 0);
   }
   module.gate(2);
   auto completed = first.get();
-  PS_CHECK(
-      completed.ok() && number(completed.value().results.at("value"), 2) == 6 &&
-      module.counts()[1] == 2 && context.cache_statistics().in_flight == 0 &&
-      root.statistics().live[ResourceKind::Queue] == 0);
+  PS_CHECK(completed.ok() &&
+           number(completed.value().results.at("value"), 2) == 6 &&
+           module.counts()[1] == 2 &&
+           root.statistics().live[ResourceKind::Queue] == 0);
   return 0;
 }
 int cancelled_read() {
@@ -253,7 +304,7 @@ int cancelled_read() {
   PS_CHECK(registry->load_plugin(PS_RESULT_CHECKPOINT_FIXTURE).ok() &&
            registry->freeze().ok());
   GraphContext graph(document(18, "fixture.result_checkpoint"));
-  auto plan = take(Compiler(registry).compile(graph)).plan;
+  auto plan = take(Compiler(registry).compile(graph, planning())).plan;
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   config.managed_resources = ResourceLimits{};
@@ -263,20 +314,14 @@ int cancelled_read() {
   CancellationSource cancellation;
   module.gate(1);
   auto pending = std::async(std::launch::async, [&] {
-    return context.execute_fragments(frozen, {{"value", point(2)}},
+    return context.execute_fragments(frozen, {{"value", point(root, 2)}},
                                      cancellation.token());
   });
   struct Release {
     const Module& module;
     ~Release() { module.gate(2); }
   } release{module};
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while (!module.gate(0) && std::chrono::steady_clock::now() < deadline &&
-         pending.wait_for(std::chrono::milliseconds(0)) !=
-             std::future_status::ready)
-    std::this_thread::yield();
-  PS_CHECK(module.gate(0));
+  PS_CHECK(module.wait());
   cancellation.cancel();
   module.gate(2);
   auto result = pending.get();
@@ -284,7 +329,7 @@ int cancelled_read() {
   PS_CHECK(!result.ok() && result.status().code == ErrorCode::Cancelled &&
            counts[0] == 1 && counts[1] == 1 && counts[2] == 1 &&
            counts[4] == 1 && counts[5] == 0 &&
-           context.cache_statistics().in_flight == 0 &&
+
            root.statistics().live[ResourceKind::Queue] == 0);
   return 0;
 }
@@ -294,6 +339,7 @@ int main() try {
   PS_CHECK(workflow(0, false) == 0);
   PS_CHECK(workflow(12) == 0);
   PS_CHECK(shared_prefix(16) == 0);
+  PS_CHECK(shared_prefix(16, false) == 0);
   PS_CHECK(shared_prefix(8) == 0);
   PS_CHECK(cancelled_read() == 0);
   PS_CHECK(finite_prefix(1, std::numeric_limits<double>::infinity()) == 0);
@@ -302,7 +348,6 @@ int main() try {
                          std::numeric_limits<double>::max()) == 0);
   for (unsigned mode : {1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 14, 15, 17})
     PS_CHECK(workflow(mode) == 0);
-  PS_CHECK(workflow(10, true, "fixture.terminal_checkpoint") == 0);
   return 0;
 } catch (const std::exception& error) {
   std::cerr << error.what() << '\n';

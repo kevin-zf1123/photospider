@@ -20,9 +20,6 @@ void word(std::uint8_t* bytes, std::uint64_t value, unsigned width = 4) {
   for (unsigned i = 0; i < width; ++i)
     bytes[i] = static_cast<std::uint8_t>(value >> (i * 8));
 }
-Footprint point(std::uint64_t at) {
-  return Footprint::from_regions({16}, {Region({{at, 1}})}).take_value();
-}
 struct State {
   State(unsigned mode, CancellationSource* cancellation)
       : cancellation(cancellation), mode(mode) {}
@@ -54,15 +51,18 @@ struct State {
             }
             if (mode == 16)
               throw std::runtime_error("discovery callback exception");
-            std::array<std::uint8_t, 304> records{};
+            std::array<std::uint8_t, 48> records{};
             auto* bytes = records.data();
             word(bytes, mode == 18 ? 0 : 2);
             for (unsigned i = 0; i < 2; ++i) {
-              auto* row = bytes + 16 + i * 144;
-              word(row + 4, 1);
-              word(row + 8, 1);
-              word(row + 16, i == 0 ? 1 : 9, 8);
-              word(row + 80, 1, 8);
+              auto* row = bytes + 16 + i * 16;
+              word(row, (mode == 20 || mode == 23) ? i : 0);
+              word(row + 8,
+                   mode == 24   ? 0
+                   : mode == 27 ? 1
+                   : mode == 25 ? (i ? UINT64_C(1) << 39 : 0)
+                                : (i ? 9 : 1),
+                   8);
             }
             if (mode == 1) {
               word(bytes, 3);
@@ -71,34 +71,17 @@ struct State {
             if (mode == 2)
               word(bytes, 3);
             if (mode == 3)
-              word(bytes + 16 + 24, 1, 8);
+              word(bytes + 16 + 4, 3);
             if (mode == 4)
-              word(bytes + 16 + 8, 0);
+              word(bytes + 16 + 4, 1);
             if (mode == 5)
-              word(bytes + 16 + 4, 16);
+              word(bytes + 16 + 4, 2);
             if (mode == 6)
-              word(bytes + 16 + 80, 0, 8);
+              word(bytes + 16, 9);
             if (mode == 7)
-              word(bytes + 16 + 16, 16, 8);
+              word(bytes + 16 + 8, 16, 8);
             if (mode == 8)
               word(bytes + 8, 1);
-            if (mode == 20 || mode == 23)
-              word(bytes + 16 + 144 + 4, 2);
-            if (mode == 24 || mode == 25) {
-              for (unsigned i = 0; i < 2; ++i) {
-                auto* row = bytes + 16 + i * 144;
-                std::memset(row, 0, 144);
-                word(row + 4, 1);
-                word(row + 8, mode == 24 ? 3 : 8);
-                for (unsigned axis = 0; axis < (mode == 24 ? 3U : 8U); ++axis) {
-                  word(row + 16 + axis * 8,
-                       mode == 24 ? (axis == 2 ? i * 2 : 0)
-                                  : (i ? UINT64_C(1) << 39 : 0),
-                       8);
-                  word(row + 80 + axis * 8, mode == 24 && axis == 2 ? 2 : 1, 8);
-                }
-              }
-            }
             if (mode == 9)
               word(bytes, 4);  // Exceeds declared attempts.
             if (mode == 26)
@@ -108,7 +91,7 @@ struct State {
                 "kernel void emit(device uint* t [[buffer(0)]],"
                 "constant uint* r [[buffer(1)]], uint i "
                 "[[thread_position_in_grid]])"
-                "{if(i<76)t[i]=r[i];}";
+                "{if(i<12)t[i]=r[i];}";
             const auto* api = phase.gpu;
             std::uint64_t token = 0;
             if (api->buffer(api->context, table.bytes, table.byte_size, 1,
@@ -127,7 +110,7 @@ struct State {
             dispatch.constants = records.data();
             dispatch.constant_size = records.size();
             dispatch.constant_index = 1;
-            dispatch.grid[0] = 76;
+            dispatch.grid[0] = 12;
             dispatch.grid[1] = dispatch.grid[2] = 1;
             if (api->execute(api->context, &dispatch, 1))
               return phase.gpu_status();
@@ -140,78 +123,52 @@ struct State {
       if (mode == 22) {
         ResultProgramNeed oversized;
         for (unsigned i = 0; i < 256; ++i)
-          oversized.tensors.push_back({0, 0, point(1), 1});
+          oversized.tiles.push_back({0, false, false,
+                                     multi_result::take(TileSet::from_indices(
+                                         phase.resources, {1}))});
         return Result<ResultProgramPoll>(std::move(oversized));
       }
       if (mode != 10 && mode != 18)
         return Result<ResultProgramPoll>(ResultProgramNeed{});
     }
     float sum = 0;
-    if (mode == 25) {
-      if (phase.tensors->at({0, 0}).coverage().element_count().take_value() !=
-          2)
+    if (mode != 10 && mode != 18) {
+      if (mode == 24 &&
+          phase.tensors->at({0, 0}).coverage().element_count().take_value() !=
+              4)
         return Result<ResultProgramPoll>(
-            Status{ErrorCode::Internal, "rank-8 coverage"});
-      float value = 0;
-      for (unsigned i = 0; i < 2; ++i) {
-        multi_result::check(phase.read_tensor(
-            0, 0, std::vector<std::uint64_t>(8, i ? UINT64_C(1) << 39 : 0),
-            &value, 4));
-        sum += value;
-      }
-    } else if (mode != 10 && mode != 18) {
-      for (const auto at : {1, 9}) {
+            Status{ErrorCode::Internal, "channel tile coverage"});
+      if (mode == 25 &&
+          phase.tensors->at({0, 0}).coverage().element_count().take_value() !=
+              2)
+        return Result<ResultProgramPoll>(
+            Status{ErrorCode::Internal, "64-bit tile coverage"});
+      for (unsigned i = 0; i < (mode == 24 ? 4U : 2U); ++i) {
         float value = 0;
-        auto status = phase.read_tensor(0, 0, {static_cast<std::uint64_t>(at)},
-                                        &value, 4);
+        const TileIndex at =
+            mode == 25 ? (i ? UINT64_C(1) << 39 : 0) : (i ? 9 : 1);
+        const std::vector<std::uint64_t> coordinate =
+            mode == 24 ? std::vector<std::uint64_t>{0, 0, i}
+                       : std::vector<std::uint64_t>{0, at};
+        const unsigned port = (mode == 20 || mode == 23) ? i : 0;
+        auto status = phase.read_tensor(port, 0, coordinate, &value, 4);
         if (!status.ok())
           return Result<ResultProgramPoll>(status);
-        sum += value;
+        if (i < 2)
+          sum += value;
       }
     }
     auto builder = multi_result::take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
         phase.query.semantic_key, {},
         std::vector<std::uint64_t>(phase.association->begin(),
-                                   phase.association->end())));
-    multi_result::check(builder.bind_descriptor_relation(
-        multi_result::take(ResultRelation::cartesian(phase.resources, 1, {}))));
-    const auto shape =
-        phase.query.output.result_schema->tensors[0].sample_shape();
-    auto relation =
-        multi_result::take(ResultRelation::cartesian(phase.resources, 16, {}));
-    if (mode != 18 && mode != 10 && mode != 25) {
-      auto first = multi_result::take(ResultRelation::cartesian(
-          phase.resources, 16, {0, 1, 1, 1, ResultSupportTarget::Tensor, 0}));
-      auto second = multi_result::take(ResultRelation::cartesian(
-          phase.resources, 16, {0, 1, 9, 1, ResultSupportTarget::Tensor, 0}));
-      relation = multi_result::take(
-          ResultRelation::unite(phase.resources, {first, second}));
-    }
-    if (mode == 25) {
-      const auto input_shape =
-          phase.query.inputs[0].result_schema->tensors[0].sample_shape();
-      std::vector<ResultRelation> supports;
-      for (unsigned i = 0; i < 2; ++i) {
-        std::vector<ResultMappedAxis> axes(
-            8, {-1, i ? UINT64_C(1) << 39 : 0, 1, 1});
-        supports.push_back(multi_result::take(ResultRelation::mapped(
-            phase.resources, shape, Region::whole(shape), input_shape, axes,
-            {0, 1, 0, 0, ResultSupportTarget::Tensor, 0})));
-      }
-      relation =
-          multi_result::take(ResultRelation::unite(phase.resources, supports));
-    }
-    const auto output = phase.query.tensor_outputs.value_or(
-        multi_result::take(Footprint::all(shape)));
-    for (const auto& box : output.boxes()) {
-      std::vector<float> values(box.element_count().take_value(), sum);
-      multi_result::check(builder.publish_tensor(
-          0, box,
-          {reinterpret_cast<const std::uint8_t*>(values.data()),
-           values.size() * 4},
-          relation, {true, true, true, true}));
-    }
+                                   phase.association->end()),
+        phase.query.tile_extent));
+
+    const auto box = multi_result::take(
+        phase.query.output_tile_grid->region(phase.query.tile_unit));
+    multi_result::check(builder.publish_tensor(
+        0, box, {reinterpret_cast<const std::uint8_t*>(&sum), 4}));
     return Result<ResultProgramPoll>(
         ResultPublication{multi_result::take(builder.seal()), true});
   }
@@ -238,7 +195,6 @@ int mock_callbacks() {
     OperationDefinition op;
     op.key = "test.mock.discovery";
     op.traits.outputs[0] = multi_result::output("value", schema);
-    op.traits.outputs[0].observation_kind = ObservationKind::RequestRecord;
     op.traits.outputs[0].continuation_bytes = sizeof(MockDiscovery);
     op.start_result = [throws](const auto&, const auto& allocator) {
       return ResultContinuation::make<MockDiscovery>(allocator, throws);
@@ -254,12 +210,13 @@ int mock_callbacks() {
         registry.start_result("test.mock.discovery", query, root.allocator()));
     auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
     ResultObjectInputs inputs;
-    ResourceVector<ResultIoReply> io;
     const auto allocator = root.allocator();
     ResultProgramPhase phase{
-        query,  inputs,
-        io,     allocator,
-        root,   [&](std::uint64_t units) { return root.consume({units}); },
+        query,
+        inputs,
+        allocator,
+        root,
+        [&](std::uint64_t units) { return root.consume({units}); },
         failure};
     Status observed;
     phase.failure_observer = [&](const Status& status) { observed = status; };
@@ -268,7 +225,7 @@ int mock_callbacks() {
       // This intentionally mocked host exercises only callback fencing.
       // Native table decoding and Need attachment run below on real Metal.
       if (throws) {
-        auto table = multi_result::take(allocator.allocate(304));
+        auto table = multi_result::take(allocator.allocate(48));
         static_cast<void>(compute({table.data(), table.size(), 2}));
       }
       failure->store(ErrorCode::ResourceExhausted);
@@ -287,12 +244,30 @@ int mock_callbacks() {
   }
   return 0;
 }
+ResultRef sparse_input(const ResourceBudget& root, const SchemaTemplate& schema,
+                       float high = 21) {
+  auto builder =
+      multi_result::take(ResultBuilder::start(root, schema, "large"));
+
+  for (unsigned i = 0; i < 2; ++i) {
+    const float value = i ? high : 21;
+    const Region region({{0, 1}, {i ? UINT64_C(1) << 39 : 0, 1}});
+    auto bytes = multi_result::take(root.allocator().allocate(4));
+    std::memcpy(bytes.data(), &value, 4);
+    multi_result::check(builder.publish_tensor(
+        0, region, StridedLayout{0, {4, 4}, {0, i ? UINT64_C(1) << 39 : 0}},
+        std::move(bytes).freeze()));
+  }
+  return multi_result::take(builder.seal());
+}
 int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
         std::uint32_t capacity = 65536) {
   auto registry = std::make_shared<OperationRegistry>();
-  const auto output_schema = multi_result::schema(ElementType::Float32, {16});
+  auto output_schema = multi_result::schema(ElementType::Float32, {1, 16});
+  output_schema.tensors[0].layout.spatial = true;
+  output_schema.tensors[0].layout.channel_axis.reset();
   auto input_schema = output_schema;
-  if (mode == 24) {
+  if (mode == 24 || mode == 27) {
     auto& tensor = input_schema.tensors[0];
     tensor.descriptor.shape = {1, 1, 4};
     tensor.layout.spatial = true;
@@ -300,17 +275,19 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
     tensor.facets = {encode_semantic(rgba_semantics()).take_value()};
   }
   if (mode == 25)
-    input_schema.tensors[0].descriptor.shape =
-        std::vector<std::uint64_t>(8, UINT64_C(1) << 40);
+    input_schema.tensors[0].descriptor.shape = {1, UINT64_C(1) << 40};
   CancellationSource cancellation;
   OperationDefinition definition;
   definition.key = "test.gpu.discovery";
-  definition.traits.input_count = 1;
-  definition.traits.input_schema.resize(1);
+  const bool two_inputs = mode == 20 || mode == 23;
+  definition.traits.input_count = two_inputs ? 2 : 1;
+  definition.traits.input_schema.resize(definition.traits.input_count);
   auto& input = definition.traits.input_schema[0];
   input.kind = OperationPortKind::Result;
   input.result_schema_id = input_schema.id;
   input.result_schema_version = input_schema.version;
+  if (two_inputs)
+    definition.traits.input_schema[1] = input;
   definition.traits.supports_cpu = false;
   definition.traits.supports_gpu = true;
   definition.traits.workspace_bytes = 16384;
@@ -318,8 +295,6 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
   output = multi_result::output("value", output_schema);
   output.continuation_bytes = sizeof(State);
   output.maximum_dependency_stages = 3;
-  if (mode == 28)
-    output.observation_kind = ObservationKind::RequestRecord;
   definition.start_result = [&](const auto&, const auto& allocator) {
     return ResultContinuation::make<State>(allocator, mode, &cancellation);
   };
@@ -334,19 +309,14 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
   const auto root = context.resource_budget().take_value();
   ResultRef input_result;
   if (mode == 25) {
-    auto builder =
-        multi_result::take(ResultBuilder::start(root, input_schema, "large"));
-    multi_result::check(builder.bind_descriptor_relation(
-        multi_result::take(ResultRelation::cartesian(root, 1, {}))));
-    auto shape = input_schema.tensors[0].sample_shape();
-    for (unsigned i = 0; i < 2; ++i) {
-      std::vector<RegionDimension> dims(8, {i ? UINT64_C(1) << 39 : 0, 1});
-      const float value = 21;
-      multi_result::check(builder.publish_tensor(
-          0, Region(dims), {reinterpret_cast<const std::uint8_t*>(&value), 4},
-          multi_result::take(ResultRelation::cartesian(root, UINT64_MAX, {})),
-          {true, true, true, true}));
-    }
+    input_result = sparse_input(root, input_schema);
+  } else if (mode == 24 || mode == 27) {
+    auto builder = multi_result::take(
+        ResultBuilder::start(root, input_schema, "rgba.input"));
+    const float rgba[] = {21, 21, 21, 1};
+    multi_result::check(builder.publish_tensor(
+        0, Region::whole({1, 1, 4}),
+        {reinterpret_cast<const std::uint8_t*>(rgba), sizeof(rgba)}));
     input_result = multi_result::take(builder.seal());
   } else {
     input_result =
@@ -355,14 +325,22 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
   WorkflowDocument document;
   document.inputs = {multi_result::declaration(1, "input", input_schema)};
   document.nodes = {{1, "test.gpu.discovery", {WorkflowInputReference{1}}, {}}};
+  if (two_inputs) {
+    document.inputs.push_back(
+        multi_result::declaration(2, "input2", input_schema));
+    document.nodes[0].inputs.push_back(WorkflowInputReference{2});
+  }
   document.outputs = {{"out", 1, "value"}};
   GraphContext graph(document);
   PlanningOptions planning;
   planning.execution_mode = ExecutionMode::NativeGpu;
+  planning.tile_extent = 1;
   auto compiled =
       multi_result::take(Compiler(registry).compile(graph, planning));
-  auto frozen = multi_result::take(
-      context.freeze(compiled.plan, {{{"input", input_result}}}));
+  ExecutionBindings bindings{{{"input", input_result}}};
+  if (two_inputs)
+    bindings.inputs.push_back({"input2", input_result});
+  auto frozen = multi_result::take(context.freeze(compiled.plan, bindings));
   ExecutionOptions options;
   options.dependencies.maximum_work = work;
   options.dependencies.maximum_gpu_requests = capacity;
@@ -370,8 +348,10 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
     options.dependencies.sets.maximum_boxes = 32;
   if (mode == 23)
     options.dependencies.sets.maximum_boxes = 4;
-  const auto demand =
-      mode == 28 ? point(0).unite(point(1)).take_value() : point(0);
+  const TileRequest demand{false,
+                           multi_result::take(TileSet::from_indices(
+                               root, mode == 28 ? std::vector<TileIndex>{0, 1}
+                                                : std::vector<TileIndex>{0}))};
   const auto before = root.statistics().live[ResourceKind::Payload];
   {
     auto progress = context.execute_fragments(frozen, {{"out", demand}},
@@ -385,44 +365,62 @@ int run(unsigned mode, ErrorCode expected, std::uint64_t work = 1048576,
                 << ", message=" << progress.status().message << '\n';
     PS_CHECK(progress.status().code == expected);
     if (progress.ok()) {
-      PS_CHECK(progress.value().diagnostics.native_dispatch_count == 1);
+      PS_CHECK(progress.value().diagnostics.native_dispatch_count ==
+               (mode == 28 ? 2 : 1));
       const auto result = progress.value().results.at("out");
       float sum = 0;
       PS_CHECK(
-          result.read_tensor(result.descriptor().take_value(), 0, {0}, &sum, 4)
+          result
+              .read_tensor(result.descriptor().take_value(), 0, {0, 0}, &sum, 4)
               .ok());
       PS_CHECK(sum == (mode == 18 ? 0 : 42));
-      PS_CHECK(result.descriptor().take_value().tensor_coverage(0) == demand);
-      if (mode == 28)
-        PS_CHECK(
-            result
-                .read_tensor(result.descriptor().take_value(), 0, {1}, &sum, 4)
-                .ok() &&
-            sum == 42);
-      if (mode == 25) {
-        const auto support =
-            progress.value().dependencies.source_support().take_value();
-        const auto input_shape = input_schema.tensors[0].sample_shape();
-        auto first =
-            Footprint::from_regions(
-                input_shape, {Region(std::vector<RegionDimension>(8, {0, 1}))})
-                .take_value();
-        auto second = Footprint::from_regions(
-                          input_shape, {Region(std::vector<RegionDimension>(
-                                           8, {UINT64_C(1) << 39, 1}))})
-                          .take_value();
-        PS_CHECK(support.at("input") == first.unite(second).take_value());
-        const auto dirty = progress.value()
-                               .dependencies
-                               .potential_dirty("input", second, 1, {},
-                                                ResultSupportTarget::Tensor, 0)
-                               .take_value();
-        PS_CHECK(dirty.at("out") == demand);
-      } else if (mode != 18) {
-        const auto support =
-            progress.value().dependencies.source_support().take_value();
-        PS_CHECK(support.at("input") == point(1).unite(point(9)).take_value());
+      for (TileIndex tile : demand.tiles) {
+        PS_CHECK(result
+                     .read_tensor(multi_result::take(result.descriptor()), 0,
+                                  {0, tile}, &sum, 4)
+                     .ok());
+        PS_CHECK(sum == (mode == 18 ? 0 : 42));
+        auto record =
+            multi_result::take(progress.value().dependencies.tile_record(
+                {compiled.plan.outputs().at("out"), 0, tile}));
+        PS_CHECK(record && record->inputs.size() == (mode == 18   ? 0
+                                                     : two_inputs ? 2
+                                                                  : 1));
+        for (const auto& need : record->inputs) {
+          const auto* source = std::get_if<PlanWorkflowInput>(&need.producer);
+          PS_CHECK(source && source->declaration_index < (two_inputs ? 2 : 1));
+          const auto expected_tiles =
+              mode == 25   ? std::vector<TileIndex>{0, UINT64_C(1) << 39}
+              : mode == 24 ? std::vector<TileIndex>{0}
+              : two_inputs
+                  ? std::vector<TileIndex>{source->declaration_index ? 9U : 1U}
+                  : std::vector<TileIndex>{1, 9};
+          PS_CHECK(!need.whole && need.producer_output == 0 &&
+                   need.tiles == multi_result::take(TileSet::from_indices(
+                                     root, expected_tiles)));
+        }
       }
+      if (mode == 25) {
+        auto handle =
+            multi_result::take(context.open_demand(compiled.plan, bindings));
+        auto observed = multi_result::take(handle.request({{"out", demand}}));
+        auto updated = multi_result::take(handle.replace_bindings(
+            {{{"input", sparse_input(root, input_schema, 22)}}}));
+        PS_CHECK(updated.potential_dirty.at("out") == demand.tiles);
+        auto changed = multi_result::take(handle.request({{"out", demand}}));
+        float new_sum = 0;
+        PS_CHECK(changed.results.at("out")
+                     .read_tensor(multi_result::take(
+                                      changed.results.at("out").descriptor()),
+                                  0, {0, 0}, &new_sum, 4)
+                     .ok() &&
+                 new_sum == 43);
+      }
+      float outside = 0;
+      PS_CHECK(!result
+                    .read_tensor(multi_result::take(result.descriptor()), 0,
+                                 {0, 2}, &outside, 4)
+                    .ok());
     }
   }
   PS_CHECK(root.statistics().live[ResourceKind::Payload] == before);
@@ -456,18 +454,16 @@ int main() try {
   PS_CHECK(run(18, ErrorCode::Ok) == 0);
   PS_CHECK(run(22, ErrorCode::ResourceExhausted) == 0);
   PS_CHECK(run(23, ErrorCode::ResourceExhausted) == 0);
-  PS_CHECK(run(24, ErrorCode::InvalidArgument) == 0);
+  PS_CHECK(run(24, ErrorCode::Ok) == 0);
+  PS_CHECK(run(27, ErrorCode::InvalidArgument) == 0);
   PS_CHECK(run(25, ErrorCode::Ok) == 0);
   PS_CHECK(run(26, ErrorCode::Cancelled) == 0);
   PS_CHECK(run(28, ErrorCode::Ok) == 0);
   PS_CHECK(run(0, ErrorCode::ResourceExhausted, 64) == 0);
-  std::uint64_t single_group = 0;
-  PS_CHECK(Footprint::from_regions({16}, {Region({{1, 1}})}, {}, &single_group)
-               .ok());
-  // Start + poll + discover, three candidates, and table zero/decode leave
-  // exactly one group's normalization grant. Two groups cannot reuse it.
-  const auto one_group_budget = 3 + 3 + 2 * (16 + 2 * 144) + single_group;
-  PS_CHECK(run(20, ErrorCode::ResourceExhausted, one_group_budget) == 0);
+  PS_CHECK(run(20, ErrorCode::Ok) == 0);
+  // Three candidates, two table passes, and record/group normalization all
+  // consume the same actor work grant; the second input cannot reset it.
+  PS_CHECK(run(20, ErrorCode::ResourceExhausted, 104) == 0);
   PS_CHECK(run(0, ErrorCode::ResourceExhausted, 1048576, 0) == 0);
   std::cout
       << "Native Result discovery with GPU-emitted fixture records passed\n";

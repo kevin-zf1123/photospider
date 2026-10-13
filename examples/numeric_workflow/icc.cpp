@@ -223,7 +223,7 @@ struct ProfileOutput {
     const auto& tensor = schema.tensors[0];
     auto builder = take(ps::ResultBuilder::start(
         phase.resources, schema, phase.query.semantic_key, {}, {},
-        phase.query.tile_height, phase.query.tile_width,
+        phase.query.tile_extent, phase.query.tile_extent,
         phase.query.resources));
     check(builder.bind_descriptor_relation(
         take(ps::ResultRelation::cartesian(phase.resources, 1, {}))));
@@ -244,15 +244,6 @@ struct ProfileOutput {
     return ps::Result<ps::ResultProgramPoll>(
         ps::ResultPublication{take(builder.seal()), true});
   }
-  ps::Result<ps::ResourceVector<ps::ResultJointOutcome>> poll(
-      const ps::ResultJointPhase& phase) {
-    ps::ResourceVector<ps::ResultJointOutcome> replies;
-    for (const auto* member : phase.members)
-      replies.push_back(
-          {take(ps::result_atom_key(member->query)), poll(*member)});
-    return ps::Result<ps::ResourceVector<ps::ResultJointOutcome>>(
-        std::move(replies));
-  }
 };
 ps::OperationDefinition profile_output(const ps::ValueFacet& facet,
                                        unsigned* starts) {
@@ -265,19 +256,12 @@ ps::OperationDefinition profile_output(const ps::ValueFacet& facet,
   output.output_schema.result_schema_version = 1;
   output.output_schema.tensor_key = "samples";
   output.result_schema = color_schema(facet);
-  output.region_rule = ps::OperationRegionRule::Dependency;
+  output.region_rule = ps::OperationRegionRule::Tiled;
   output.continuation_bytes = sizeof(ProfileOutput);
   output.maximum_dependency_stages = 2;
-  output.failure_delivery = ps::FailureDelivery::PerAtomOutcome;
-  traits.joint_contract = 2;
-  traits.joint_continuation_bytes = sizeof(ProfileOutput);
   operation.start_result = [starts](const auto&, const auto& allocator) {
     ++*starts;
     return ps::ResultContinuation::make<ProfileOutput>(allocator);
-  };
-  operation.start_result_joint = [starts](const auto&, const auto& allocator) {
-    ++*starts;
-    return ps::ResultJointContinuation::make<ProfileOutput>(allocator);
   };
   return operation;
 }
@@ -425,12 +409,10 @@ void propagation() {
   const auto input_full =
       take(ps::Footprint::from_regions({2, 4}, {ps::Region({{0, 1}, {0, 4}})}));
   ps::PlanningOptions input_planning;
-  input_planning.output_regions = {{"inks", input_partial}};
+  input_planning.output_requests = {{"inks", {true, {}}}};
   auto input_roi = take(compiler.compile(graph, input_planning, bindings));
-  require(
-      take(ps::Footprint::from_regions(
-          {2, 4}, {input_roi.plan.output_regions().at("inks")})) == input_full,
-      "Result compiler ROI expands ColorArray channels");
+  require(input_roi.plan.output_requests().at("inks").whole,
+          "non-spatial color arrays use Whole requests");
   require(coverage(take(context.execute_fragments(
                             frozen, {{"inks", take(ps::Footprint::from_regions(
                                                   {2, 4}, {input_partial}))}}))
@@ -479,8 +461,8 @@ void propagation() {
   auto direct_empty =
       take(direct_result(*custom, root, schema, bindings, empty_samples));
   require(direct_empty.resources().size() == 1 &&
-              coverage(direct_empty).empty() && starts == old_starts,
-          "Empty direct Result owns profile without operator callback");
+              coverage(direct_empty).empty() && starts == old_starts + 1,
+          "Empty direct Result owns profile through ordinary callback");
   auto direct = take(direct_result(*custom, root, schema, bindings, partial));
   require(coverage(direct) == full_color && direct.resources().size() == 1,
           "direct Result publication closes a complete color and owns ICC");
@@ -500,8 +482,8 @@ void propagation() {
                                  empty_samples, true);
   require(!cancelled.ok() &&
               cancelled.status().code == ps::ErrorCode::Cancelled &&
-              starts == before_cancel,
-          "late cancellation skips Empty C2 publication and callbacks");
+              starts == before_cancel + 1,
+          "late cancellation prevents Empty publication after ordinary start");
   for (auto live : cancelled_root.statistics().live.values)
     require(live == 0, "cancelled direct Empty releases all Root resources");
   ps::ResourceLimits direct_limits;
@@ -538,11 +520,6 @@ void propagation() {
                                                          {{"inks", partial}}));
   require(coverage(sparse.results.at("inks")) == full_color,
           "named sparse Result request returns a full color");
-  auto atoms = take(generated_context.execute_atoms(generated_plan.plan, {},
-                                                    {{"inks", partial}}));
-  require(atoms.atoms.size() == 1 && atoms.atoms[0].outcome.ok() &&
-              coverage(atoms.atoms[0].outcome.value()) == full_color,
-          "partial Atom request is one complete Result color");
   auto generated_handle =
       take(generated_context.open_demand(generated_plan.plan, {}));
   require(coverage(take(generated_handle.request({{"inks", partial}}))
@@ -550,25 +527,23 @@ void propagation() {
           "Result demand handle closes a partial color");
   check(generated_handle.release({{"inks", partial}}));
   ps::PlanningOptions planning;
-  planning.output_regions = {{"inks", partial_region}};
+  planning.output_requests = {{"inks", {true, {}}}};
   auto narrow_plan =
       take(ps::Compiler(custom).compile(generated_graph, planning, bindings));
-  require(take(ps::Footprint::from_regions(
-              {1, 4}, {narrow_plan.plan.output_regions().at("inks")})) ==
-                  full_color &&
-              take(ps::Footprint::from_regions(
-                  {1, 4},
-                  {take(generated_plan.plan.tile_plan("inks", partial_region))
-                       .output_regions()
-                       .at("inks")})) == full_color,
-          "Result compiler ROI and tile normalize color channels");
+  require(
+      narrow_plan.plan.output_requests().at("inks").whole &&
+          take(generated_plan.plan.tile_plan("inks", ps::TileRequest{true, {}}))
+              .output_requests()
+              .at("inks")
+              .whole,
+      "compiler and derived plan preserve the Whole color array request");
   const auto before_empty = starts;
   auto empty = take(generated_context.execute_fragments(
       generated_frozen, {{"inks", empty_samples}}));
   require(empty.results.at("inks").resources().size() == 1 &&
               coverage(empty.results.at("inks")).empty() &&
-              starts == before_empty,
-          "Empty C2 root Result retains profile without operator callback");
+              starts == before_empty + 1,
+          "Empty Atomic root retains profile through ordinary callback");
   config.managed_resources->capacity[ps::ResourceKind::Referenced] =
       bytes.size() - 1;
   ps::ExecutionContext limited(custom, config);
@@ -582,7 +557,7 @@ void propagation() {
             "compiled ICC admission precedes Empty and nonempty callbacks");
   }
   std::cout << "ICC Result propagation: typed backing, immutable bindings, "
-               "compiler/direct/C2 ownership, partial-color closure, Empty "
+               "compiler/direct ownership, partial-color closure, Empty "
                "and pre-callback capacity PASS\n";
 }
 

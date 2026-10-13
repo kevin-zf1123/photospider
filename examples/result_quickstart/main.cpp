@@ -25,18 +25,11 @@ struct Constant final {
     if (!started.ok())
       return ps::Result<ps::ResultProgramPoll>(started.status());
     auto builder = started.take_value();
-    auto relation = ps::ResultRelation::cartesian(phase.resources, 1, {});
-    if (!relation.ok())
-      return ps::Result<ps::ResultProgramPoll>(relation.status());
-    auto status = builder.bind_descriptor_relation(relation.value());
-    if (!status.ok())
-      return ps::Result<ps::ResultProgramPoll>(status);
     const double number = 42;
-    status = builder.publish_tensor(
+    auto status = builder.publish_tensor(
         0, ps::Region::whole({1}),
         ps::ByteView(reinterpret_cast<const std::uint8_t*>(&number),
                      sizeof(number)),
-        relation.take_value(), {true, true, true, true},
         phase.query.cancellation);
     if (!status.ok())
       return ps::Result<ps::ResultProgramPoll>(status);

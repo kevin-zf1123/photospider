@@ -89,13 +89,10 @@ struct Fixture {
   }
 
   ps::Result<ps::ExecutionResult> run(const std::string& port = {},
-                                      std::uint64_t index = 0, bool one = false,
                                       bool empty = false) {
     if (!port.empty())
       document.outputs = {{port, 1, port}};
     ps::PlanningOptions planning;
-    if (one)
-      planning.output_regions[port] = ps::Region({{index, 1}});
     ps::GraphContext graph(document);
     auto compiled = ps::Compiler(registry).compile(graph, planning);
     if (!compiled.ok())
@@ -217,10 +214,10 @@ void static_errors() {
           "missing count must be rejected");
   Fixture overflow("numeric.arange_strict", integer(INT64_MAX), integer(1), 2,
                    "int64");
-  require(overflow.run("values", 0, true).status().reason ==
+  require(overflow.run("values").status().reason ==
               ps::FailureReason::ArithmeticOverflow,
           "unrequested integer overflow fails Whole");
-  require(overflow.run("values", 1, true).status().reason ==
+  require(overflow.run("values").status().reason ==
               ps::FailureReason::ArithmeticOverflow,
           "requested integer overflow must fail");
   require(overflow.run("axis").status().reason ==
@@ -245,7 +242,7 @@ void controls_and_ownership() {
   fixture.document.outputs = {{"values", 1, "values"}};
   ps::GraphContext graph(fixture.document);
   ps::PlanningOptions planning;
-  planning.output_regions["values"] = ps::Region({{0, 1}});
+  planning.output_requests["values"] = {true, {}};
   auto compiled = take(ps::Compiler(fixture.registry).compile(graph, planning));
   ps::ExecutionContextConfig config;
   config.cpu_workers = 1;
@@ -269,8 +266,11 @@ void controls_and_ownership() {
     require(rf::read(retained, {0}, &first, 8).ok(), "retained Result read");
     require(first == 0, "first value");
     auto shared = take(demand.request(query));
-    require(shared.results.at("values").object_id() == retained.object_id(),
-            "same Frozen shares the completed Result");
+    require(
+        shared.diagnostics.cache_hits > 0 &&
+            numeric_result_fixture::bytes(shared.results.at("values")) ==
+                numeric_result_fixture::bytes(retained),
+        "repeated demand reuses bounded completed cache with identical bits");
     auto fresh_bindings =
         point_math_checks::bindings(*root, fixture.backing, fixture.document);
     auto fresh = take(execution.freeze(compiled.plan, fresh_bindings));
@@ -333,7 +333,7 @@ void controls_and_ownership() {
   const auto flags = fetestexcept(FE_ALL_EXCEPT);
   Fixture rounding("numeric.linspace_strict", number(1),
                    number(0x1.0000020000001p0), 3, "float32");
-  exact<float>(take(rounding.run("values", 1, true)).results.at("values"),
+  exact<float>(take(rounding.run("values")).results.at("values"),
                {0x1.000002p0F}, 1);
   require(fegetround() == FE_DOWNWARD && fetestexcept(FE_ALL_EXCEPT) == flags,
           "caller rounding and exception flags must be restored");
@@ -391,7 +391,7 @@ void sequences() {
       "axis keeps atomic tuple observation identity");
   Fixture partial_axis("numeric.linspace_strict", number(0), number(1), 5,
                        "float64");
-  auto partial = take(partial_axis.run("axis", 1, true));
+  auto partial = take(partial_axis.run("axis"));
   exact<double>(partial.results.at("axis"), {0, 1, .25});
   auto changed = take(ps::Footprint::all({1}));
   auto dirty = take(partial.dependencies.potential_dirty("other", changed));
@@ -416,7 +416,7 @@ void sequences() {
   exact<double>(backwards.results.at("axis"), {1, 0, -.25});
   Fixture midpoint("numeric.linspace_strict", number(1),
                    number(0x1.0000020000001p0), 3, "float32");
-  exact<float>(take(midpoint.run("values", 1, true)).results.at("values"),
+  exact<float>(take(midpoint.run("values")).results.at("values"),
                {0x1.000002p0F}, 1);
   for (const char* key : {"numeric.linspace_strict", "numeric.arange_strict"}) {
     Fixture singleton(key, number(-0.0), number(0), 1, "float64", true);
@@ -425,14 +425,14 @@ void sequences() {
     exact<double>(only.results.at("axis"), {-0.0, -0.0, 0.0});
     require(singleton.other_reads == 0, "singleton scheduled its unused input");
     Fixture endpoint(key, number(7), number(0), 5, "float64", true);
-    auto required = endpoint.run("values", 0, true);
+    auto required = endpoint.run("values");
     require(
         !required.ok() && endpoint.other_reads == 1 &&
             required.status().message == "deliberately failing unneeded source",
         "non-singleton Whole values require end/step even at index zero");
     Fixture empty(key, number(0), number(1), 5, "float64", true);
     for (const char* port : {"values", "axis"}) {
-      auto result = take(empty.run(port, 0, false, true));
+      auto result = take(empty.run(port, true));
       require(
           empty.other_reads == 0 && take(result.results.at(port).descriptor())
                                         .tensor_coverage(0)
@@ -478,9 +478,8 @@ void sequences() {
       {9007199254740993LL, 9007199254740994LL, 9007199254740995LL});
   Fixture cancellation("numeric.arange_strict", integer(INT64_MIN),
                        integer(INT64_MAX), 3, "int64");
-  exact<std::int64_t>(
-      take(cancellation.run("values", 2, true)).results.at("values"),
-      {INT64_MAX - 1}, 2);
+  exact<std::int64_t>(take(cancellation.run("values")).results.at("values"),
+                      {INT64_MAX - 1}, 2);
   Fixture progression("numeric.arange_strict", number(-maximum),
                       number(maximum), 3, "float64");
   exact<double>(take(progression.run("values")).results.at("values"),
@@ -515,7 +514,7 @@ int main(int argc, char** argv) {
         std::memcpy(&other, &b, 8);
         Fixture fixture("numeric." + kind + "_strict", number(start),
                         number(other), static_cast<std::int64_t>(count), dtype);
-        auto result = fixture.run("values", index, true);
+        auto result = fixture.run("values");
         if (!result.ok()) {
           std::cout << "error " << static_cast<int>(result.status().reason)
                     << '\n';

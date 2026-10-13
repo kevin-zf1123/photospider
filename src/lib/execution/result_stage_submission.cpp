@@ -83,7 +83,7 @@ Result<std::shared_ptr<ResultStageCompletion>> submit_result_stage(
                                   "dependency waiting queue exhausted"));
   }
   if (resources) {
-    auto issued = resources->consume({0, 0, 0, 1});
+    auto issued = resources->consume({0, 1});
     if (!issued.ok()) {
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
       execution_testing::notify_before_scheduler_failure(

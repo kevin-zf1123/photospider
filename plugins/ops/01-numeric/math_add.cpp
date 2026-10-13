@@ -4,15 +4,19 @@
 #include <utility>
 #include <vector>
 
-#include "00-foundation/core_common.hpp"
-#include "00-foundation/tensor_program.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "common/registry.hpp"
+#include "common/tensor_program.hpp"
+#include "common/typed_need_validation.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal {
 namespace {
 struct Add final {
   bool started = false;
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
+    auto checked_inputs = ops_validation::typed_inputs(phase);
+    if (!checked_inputs.ok())
+      return Result<ResultProgramPoll>(checked_inputs);
     using namespace tensor_ops;  // NOLINT(build/namespaces)
     auto scratch =
         take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));
@@ -21,8 +25,13 @@ struct Add final {
     if (!started && !empty) {
       started = true;
       ResultProgramNeed need;
-      for (std::uint32_t port = 0; port < 2; ++port)
-        need.tensors.push_back({port, 0, take(Footprint::all({1})), 13});
+      for (std::uint32_t port = 0; port < 2; ++port) {
+        auto tile_need_0 = sdk::tile_need_for_samples(
+            phase.resources, phase.query, port, 0, take(Footprint::all({1})));
+        if (!tile_need_0.ok())
+          return Result<ResultProgramPoll>(tile_need_0.status());
+        need.tiles.push_back(tile_need_0.take_value());
+      }
       return Result<ResultProgramPoll>(std::move(need));
     }
     auto builder = take(ResultBuilder::start(
@@ -32,7 +41,6 @@ struct Add final {
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
             : std::vector<std::uint64_t>{}));
-    auto basis = take(ResultRelation::cartesian(phase.resources, 1, {}));
     if (!empty) {
       require(phase.consume_work(1));
       double numbers[2];
@@ -41,30 +49,11 @@ struct Add final {
       // Preserve the scalar's IEEE addition in the callback's environment.
       // This operation does not use the finite-domain numeric.add contract.
       const double number = numbers[0] + numbers[1];
-      auto data = take(ResultRelation::unite(
-          phase.resources,
-          {take(ResultRelation::cartesian(
-               phase.resources, 1,
-               {0, 5, 0, 1, ResultSupportTarget::Tensor, 0})),
-           take(ResultRelation::cartesian(
-               phase.resources, 1,
-               {1, 5, 0, 1, ResultSupportTarget::Tensor, 0}))}));
-      basis = take(ResultRelation::unite(
-          phase.resources,
-          {take(ResultRelation::cartesian(
-               phase.resources, 1,
-               {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0})),
-           take(ResultRelation::cartesian(
-               phase.resources, 1,
-               {1, 8, 0, 1, ResultSupportTarget::Descriptor, 0}))}));
-      require(builder.bind_descriptor_relation(basis));
       require(builder.publish_tensor(
           0, Region::whole({1}),
-          ByteView(reinterpret_cast<const std::uint8_t*>(&number), 8), data,
-          {true, true, true, true}, phase.query.cancellation));
+          ByteView(reinterpret_cast<const std::uint8_t*>(&number), 8),
+          phase.query.cancellation));
     }
-    if (empty)
-      require(builder.bind_descriptor_relation(basis));
     return Result<ResultProgramPoll>(
         ResultPublication{take(builder.seal()), true});
   } catch (const Status& status) {
@@ -84,8 +73,6 @@ Status register_math_add(OperationRegistry* registry) {
     port.rank = 1;
   }
   operation.traits.requires_metadata_specialization = true;
-  operation.traits.supports_gpu = core_ops::simulated_gpu;
-  operation.traits.allows_cpu_fallback = core_ops::simulated_gpu;
   operation.specialize_metadata =
       [](const auto& inputs,
          const auto&) -> Result<std::vector<OperationOutputSpecialization>> {

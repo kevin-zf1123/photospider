@@ -40,22 +40,13 @@ inline ps::ResultRef source(
   auto schema = override_schema ? *override_schema : source_schema(value);
   auto bytes = take(root.allocator().allocate(value.bytes().size()));
   std::memcpy(bytes.data(), value.bytes().data(), value.bytes().size());
-  auto builder = take(ps::ResultBuilder::start(
-      root, schema, "lowpass.input", {}, {}, 128, 128, value.resources()));
+  auto builder = take(ps::ResultBuilder::start(root, schema, "lowpass.input",
+                                               {}, {}, 128, value.resources()));
   require(builder
-              .bind_descriptor_relation(
-                  take(ps::ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
+              .publish_tensor(0, value.region(), value.layout(),
+                              std::move(bytes).freeze())
               .ok(),
-          "lowpass source descriptor");
-  require(
-      builder
-          .publish_tensor(
-              0, value.region(), value.layout(), std::move(bytes).freeze(),
-              take(ps::ResultRelation::cartesian(
-                  root, take(schema.tensors[0].sample_count()), {0, 1, 0, 0})),
-              {true, true, true, true})
-          .ok(),
-      "lowpass source Result publication");
+          "lowpass source Result publication");
   return take(builder.seal());
 }
 inline void declare_sources(ps::WorkflowDocument* document,

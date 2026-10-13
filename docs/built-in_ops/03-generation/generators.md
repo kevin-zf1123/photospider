@@ -11,8 +11,6 @@ Gaussian 与 PixelOE Vulkan 尚未交付。具体英文规格记录端口、
 [研究来源及采用边界](research-sources.md)分别说明公共语义、可运行参考及证据范围。
 具体 schema、随机映射或后端细节中仍标明未完成的部分，需要在注册成员前明确并验证。
 
-当前 Perlin 注册、参数与验证见 [Perlin 实现说明](perlin-implementation.md)。
-
 ## 图形与坐标
 
 | ID / 功能 | 输入 → 输出 | 参数与方法 | 验收 |
@@ -67,11 +65,9 @@ Philox4x64-10 的全局 x/y 为 signed32，frame/draw/stream 取 uint32 范围�
 
 解析测试覆盖坐标identity、线性渐变0/1端点、非法半径、repeat/reflect、全局seed一致；随机统计使用固定样本数与置信阈值，不能要求每次精确达到理论均值。shape/path coverage的误差用面积/轮廓检查，不仅看图。
 
-
 执行依真实依赖选择 Regional、Halo 或 Whole，完整控制数据校验与区域计算分开。
 CPU 是必需后端，GPU 按成员提供实际负载并使用独立 profile；同版本同 profile 的
 数值、数量、顺序与 ID 必须确定。旧 `field.constant`、`field.coordinate` 不再提供实现。
-
 
 ## 来源
 

@@ -4,8 +4,8 @@
 #include <utility>
 #include <vector>
 
-#include "image_vertical/image_fixture.hpp"
 #include "photospider/photospider.hpp"
+#include "support/image_input_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
@@ -20,7 +20,7 @@ struct Identity {
       auto samples = Footprint::all({1});
       if (!samples.ok())
         return Poll(samples.status());
-      need.tensors.push_back({0, 0, samples.take_value(), 13});
+      need.tiles.push_back({0, true, false, {}});
       return Poll(std::move(need));
     }
     float value = 0;
@@ -30,16 +30,10 @@ struct Identity {
     auto builder = s1_fixture::take(
         ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
                              phase.query.semantic_key));
-    s1_fixture::check(builder.bind_descriptor_relation(
-        s1_fixture::take(ResultRelation::cartesian(
-            phase.resources, 1,
-            {0, 8, 0, 1, ResultSupportTarget::Descriptor}))));
+
     s1_fixture::check(builder.publish_tensor(
         0, Region::whole({1}),
-        ByteView(reinterpret_cast<const uint8_t*>(&value), 4),
-        s1_fixture::take(ResultRelation::cartesian(
-            phase.resources, 1, {0, 5, 0, 1, ResultSupportTarget::Tensor, 0})),
-        {true, true, true, true}));
+        ByteView(reinterpret_cast<const uint8_t*>(&value), 4)));
     return Poll(ResultPublication{s1_fixture::take(builder.seal()), true});
   }
 };
@@ -65,7 +59,7 @@ int static_constraint_identity() {
     output.output_schema.result_schema_id = schema.id;
     output.output_schema.result_schema_version = 1;
     output.result_schema = schema;
-    output.region_rule = OperationRegionRule::Dependency;
+    output.region_rule = OperationRegionRule::Tiled;
     output.continuation_bytes = sizeof(Identity);
     output.maximum_dependency_stages = 2;
     operation.start_result = [](const ResultProgramQuery&,

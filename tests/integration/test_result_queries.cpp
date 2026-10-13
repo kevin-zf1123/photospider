@@ -24,25 +24,47 @@ namespace {
 using namespace ps;  // NOLINT(build/namespaces)
 using multi_result::check;
 using multi_result::take;
-ResultProgramPoll publication(const ResultProgramPhase& phase, double value,
-                              ResultSupport input = {},
-                              ResultSupport descriptor_support = {}) {
-  auto builder = take(ResultBuilder::start(phase.resources,
-                                           *phase.query.output.result_schema,
-                                           phase.query.semantic_key));
-  check(builder.bind_descriptor_relation(
-      take(ResultRelation::cartesian(phase.resources, 1, descriptor_support))));
+SchemaTemplate source_schema(unsigned width) {
+  auto schema = multi_result::schema(ElementType::Float64, {1, width});
+  schema.tensors[0].layout.spatial = true;
+  schema.tensors[0].layout.channel_axis.reset();
+  return schema;
+}
+TileNeed tile_need(const ResultProgramPhase& phase, TileIndex tile) {
+  return {0, false, false,
+          take(TileSet::from_indices(phase.resources, {tile}))};
+}
+ResourceVector<TileUnit> dirty(const ExecutionDependencies& dependencies,
+                               const ResourceBudget& root, TileIndex tile) {
+  ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
+  changes.push_back({PlanWorkflowInput{0}, 0,
+                     take(TileSet::from_indices(root, {tile})), false});
+  return take(dependencies.dirty_units(changes));
+}
+ExecutionPlan compile(const std::shared_ptr<OperationRegistry>& registry,
+                      GraphContext& graph) {
+  PlanningOptions planning;
+  planning.tile_extent = 1;
+  return take(Compiler(registry).compile(graph, planning)).plan;
+}
+ResultProgramPoll publication(const ResultProgramPhase& phase, double value) {
+  auto builder = take(ResultBuilder::start(
+      phase.resources, *phase.query.output.result_schema,
+      phase.query.semantic_key, {}, {}, phase.query.tile_extent));
   const auto& tensor = phase.query.output.result_schema->tensors[0];
   auto coverage = phase.query.tensor_outputs.value_or(
       take(Footprint::all(tensor.sample_shape())));
-  auto relation = take(ResultRelation::cartesian(
-      phase.resources, take(tensor.sample_count()), input));
   for (const auto& box : coverage.boxes()) {
     if (take(box.element_count()) != 1)
       throw std::runtime_error("source query is not one sample");
-    check(builder.publish_tensor(
-        0, box, {reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)},
-        relation, {true, true, true, true}));
+    auto storage = take(phase.resources.allocator().allocate(sizeof(value)));
+    std::memcpy(storage.data(), &value, sizeof(value));
+    StridedLayout layout;
+    layout.byte_strides.assign(box.rank(), sizeof(value));
+    for (const auto& dimension : box.dimensions())
+      layout.origin.push_back(dimension.offset);
+    check(builder.publish_tensor(0, box, std::move(layout),
+                                 std::move(storage).freeze()));
   }
   return ResultPublication{take(builder.seal()), true};
 }
@@ -54,7 +76,7 @@ struct Source {
       : calls(std::move(count)), hook(std::move(callback)) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     ++*calls;
-    auto at = phase.query.tensor_outputs->boxes()[0].dimensions()[0].offset;
+    auto at = phase.query.tensor_outputs->boxes()[0].dimensions()[1].offset;
     if (hook)
       hook(at);
     return Result<ResultProgramPoll>(publication(phase, 10 + at));
@@ -67,60 +89,29 @@ OperationDefinition source_definition(
   definition.key = "queries.source";
   definition.traits.input_count = 0;
   definition.traits.input_schema.clear();
-  definition.traits.outputs = {multi_result::output(
-      "value", multi_result::schema(ElementType::Float64, {width}))};
+  definition.traits.outputs = {
+      multi_result::output("value", source_schema(width))};
   definition.start_result = [calls, hook](const auto&, const auto& allocator) {
     return ResultContinuation::make<Source>(allocator, calls, hook);
   };
   return definition;
 }
-struct Pair {
-  bool requested = false;
-  bool metadata;
-  explicit Pair(bool metadata) : metadata(metadata) {}
-  Result<ResourceVector<ResultJointOutcome>> poll(
-      const ResultJointPhase& phase) {
-    ResourceVector<ResultJointOutcome> outcomes;
-    for (const auto* member : phase.members) {
-      const auto at = member->query.output_index;
-      const auto key = take(result_atom_key(member->query));
-      if (!requested) {
-        ResultProgramNeed need;
-        need.tensors.push_back(
-            {0, 0, take(Footprint::from_regions({2}, {Region({{at, 1}})})),
-             metadata ? 9U : 1U});
-        outcomes.push_back({key, Result<ResultProgramPoll>(std::move(need))});
-      } else {
-        double value = 0;
-        check(member->tensors->at({0, 0}).read({at}, &value, sizeof(value)));
-        outcomes.push_back(
-            {key,
-             Result<ResultProgramPoll>(publication(
-                 *member, value,
-                 ResultSupport{0, 1, at, 1, ResultSupportTarget::Tensor, 0}))});
-      }
-    }
-    requested = true;
-    return Result<ResourceVector<ResultJointOutcome>>(std::move(outcomes));
-  }
-};
 struct SinglePair {
-  bool requested = false, metadata;
+  unsigned stage = 0;
+  bool metadata;
   explicit SinglePair(bool metadata) : metadata(metadata) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     const auto at = phase.query.output_index;
-    if (!requested) {
-      requested = true;
+    if (stage < (metadata ? 2U : 1U)) {
       ResultProgramNeed need;
-      need.tensors.push_back(
-          {0, 0, take(Footprint::from_regions({2}, {Region({{at, 1}})})),
-           metadata ? 9U : 1U});
+      need.tiles.push_back(metadata && stage == 0 ? TileNeed{0, false, true, {}}
+                                                  : tile_need(phase, at));
+      ++stage;
       return Result<ResultProgramPoll>(std::move(need));
     }
     double value = 0;
-    check(phase.tensors->at({0, 0}).read({at}, &value, sizeof(value)));
-    return Result<ResultProgramPoll>(publication(
-        phase, value, {0, 1, at, 1, ResultSupportTarget::Tensor, 0}));
+    check(phase.tensors->at({0, 0}).read({0, at}, &value, sizeof(value)));
+    return Result<ResultProgramPoll>(publication(phase, value));
   }
 };
 struct Sum {
@@ -130,19 +121,16 @@ struct Sum {
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     if (next) {
       double value = 0;
-      check(phase.tensors->at({0, 0}).read({next - 1}, &value, sizeof(value)));
+      check(
+          phase.tensors->at({0, 0}).read({0, next - 1}, &value, sizeof(value)));
       total += value;
     }
     if (next < width) {
       ResultProgramNeed need;
-      need.tensors.push_back(
-          {0, 0,
-           take(Footprint::from_regions({width}, {Region({{next++, 1}})})), 1});
+      need.tiles.push_back(tile_need(phase, next++));
       return Result<ResultProgramPoll>(std::move(need));
     }
-    return Result<ResultProgramPoll>(publication(
-        phase, total,
-        ResultSupport{0, 1, 0, width, ResultSupportTarget::Tensor, 0}));
+    return Result<ResultProgramPoll>(publication(phase, total));
   }
 };
 OperationDefinition consumer_definition(bool pair, unsigned width,
@@ -156,22 +144,15 @@ OperationDefinition consumer_definition(bool pair, unsigned width,
   definition.traits.input_schema[0].result_schema_version = 1;
   definition.traits.outputs = {multi_result::output(pair ? "left" : "value")};
   definition.traits.outputs[0].maximum_dependency_stages = width + 1;
-  if (pair)
+  if (pair) {
     definition.traits.outputs.push_back(multi_result::output("right"));
+    definition.traits.outputs[1].maximum_dependency_stages = width + 1;
+  }
   definition.start_result = [pair, width, metadata](const auto&,
                                                     const auto& allocator) {
     return pair ? ResultContinuation::make<SinglePair>(allocator, metadata)
                 : ResultContinuation::make<Sum>(allocator, width);
   };
-  if (pair) {
-    definition.traits.joint_contract = 1;
-    definition.traits.joint_continuation_bytes = 512;
-    definition.traits.joint_workspace_bytes = 4096;
-    definition.start_result_joint = [metadata](const auto&,
-                                               const auto& allocator) {
-      return ResultJointContinuation::make<Pair>(allocator, metadata);
-    };
-  }
   return definition;
 }
 int workflow(bool pair, bool frozen) {
@@ -188,8 +169,8 @@ int workflow(bool pair, bool frozen) {
                                                    {"right", 20, "right"}}
                      : std::vector<WorkflowOutput>{{"total", 20, "value"}};
   GraphContext graph(doc);
-  auto plan = take(Compiler(registry).compile(graph)).plan;
-  ExecutionContext context(registry, {1, false, 16, 1024 * 1024, 0});
+  auto plan = compile(registry, graph);
+  ExecutionContext context(registry, {2, false, 16, 1024 * 1024, 0});
   auto root = take(context.resource_budget());
   std::vector<WeakResultRef> sources;
   unsigned notices = 0, previous_live = 0;
@@ -216,12 +197,10 @@ int workflow(bool pair, bool frozen) {
   if (pair) {
     PS_CHECK(multi_result::number(result.value().results.at("left")) == 10);
     PS_CHECK(multi_result::number(result.value().results.at("right")) == 11);
-    PS_CHECK(result.value().diagnostics.joint_groups == 1 &&
-             result.value().diagnostics.joint_fallbacks == 0);
   } else {
     PS_CHECK(multi_result::number(result.value().results.at("total")) ==
              width * 10 + width * (width - 1) / 2);
-    PS_CHECK(previous_live == 0);
+    PS_CHECK(previous_live == width - 1);
     for (const auto& old : sources)
       PS_CHECK(!old.lock().valid());
   }
@@ -235,19 +214,18 @@ struct ControlledSource {
       : calls(std::move(count)) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     const auto at =
-        phase.query.tensor_outputs->boxes()[0].dimensions()[0].offset;
+        phase.query.tensor_outputs->boxes()[0].dimensions()[1].offset;
     if (!requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tensors.push_back({0, 0, *phase.query.tensor_outputs, 2});
+      need.tiles.push_back(tile_need(phase, at));
       return Result<ResultProgramPoll>(std::move(need));
     }
     ++*calls;
     double control = 0;
-    check(phase.tensors->at({0, 0}).read({at}, &control, sizeof(control)));
+    check(phase.tensors->at({0, 0}).read({0, at}, &control, sizeof(control)));
     return Result<ResultProgramPoll>(
-        publication(phase, (control > 0 ? 10 : 20) + at, {},
-                    {0, 2, at, 1, ResultSupportTarget::Tensor, 0}));
+        publication(phase, (control > 0 ? 10 : 20) + at));
   }
 };
 OperationDefinition controlled_definition(
@@ -270,38 +248,34 @@ int query_dependencies(bool metadata) {
   check(registry->register_operation(consumer_definition(true, 2, metadata)));
   check(registry->freeze());
   WorkflowDocument doc;
-  const auto schema = multi_result::schema(ElementType::Float64, {2});
+  const auto schema = source_schema(2);
   doc.inputs = {multi_result::declaration(1, "control", schema)};
   doc.nodes = {{10, "queries.source", {WorkflowInputReference{1}}, {}},
                {20, "queries.consumer", {WorkflowNodeOutput{10, "value"}}, {}}};
   doc.outputs = {{"left", 20, "left"}, {"right", 20, "right"}};
   GraphContext graph(doc);
-  auto plan = take(Compiler(registry).compile(graph)).plan;
+  auto plan = compile(registry, graph);
   ExecutionContextConfig config{1, false, 16, 1024 * 1024, 1048576};
   ExecutionContext context(registry, config);
   auto root = take(context.resource_budget());
   auto frozen = take(context.freeze(
       plan,
       ExecutionBindings{{multi_result::binding(root, "control", 1, schema)}}));
-  const auto one = take(Footprint::all({1}));
+  const TileRequest one{true, {}};
   const DemandQuery wanted{{"left", one}, {"right", one}};
   const auto verify = [&](const DemandResult& result) {
     for (unsigned at = 0; at < 2; ++at) {
-      auto point = take(Footprint::from_regions({2}, {Region({{at, 1}})}));
-      auto dirty = take(result.dependencies.potential_dirty(
-          "control", point, 2, {}, ResultSupportTarget::Tensor, 0));
-      check(dirty.at(at ? "right" : "left") == one &&
-                    dirty.at(at ? "left" : "right").empty()
+      auto units = dirty(result.dependencies, root, at);
+      check(units.size() == 2 && units[0] == TileUnit{0, 0, at} &&
+                    units[1] == TileUnit{at + 1, at, 0}
                 ? Status::success()
-                : Status{ErrorCode::OperationFailed,
-                         "different Q shared Control dependencies"});
-      auto selected =
-          take(result.dependencies.restrict({{at ? "right" : "left", one}}));
-      auto support = take(selected.source_support());
-      check(support.at("control") == point
+                : Status{ErrorCode::OperationFailed, "tile ancestry mismatch"});
+      auto record = take(result.dependencies.tile_record({at + 1, at, 0}));
+      check(record && record->inputs.size() == 1 &&
+                    record->inputs[0].tiles.size() == 1 &&
+                    record->inputs[0].tiles.contains(at)
                 ? Status::success()
-                : Status{ErrorCode::OperationFailed,
-                         "different Q shared captured ancestry"});
+                : Status{ErrorCode::OperationFailed, "selected tile record"});
     }
     check(multi_result::number(result.results.at("left")) == 10 &&
                   multi_result::number(result.results.at("right")) == 11
@@ -319,13 +293,11 @@ int query_dependencies(bool metadata) {
   PS_CHECK(*calls == 2 && warm.diagnostics.cache_hits >= 2 &&
            root.statistics().live[ResourceKind::Queue] == 0);
   auto builder = take(ResultBuilder::start(root, schema, "changed.control"));
-  check(builder.bind_descriptor_relation(
-      take(ResultRelation::cartesian(root, 1, {}))));
+
   const std::array<double, 2> values{1, -1};
   check(builder.publish_tensor(
-      0, Region::whole({2}),
-      {reinterpret_cast<const std::uint8_t*>(values.data()), sizeof(values)},
-      take(ResultRelation::cartesian(root, 2, {})), {true, true, true, true}));
+      0, Region::whole({1, 2}),
+      {reinterpret_cast<const std::uint8_t*>(values.data()), sizeof(values)}));
   ExecutionBinding binding;
   binding.name = "control";
   binding.result = take(builder.seal());
@@ -333,14 +305,11 @@ int query_dependencies(bool metadata) {
   auto partial = take(context.execute_fragments(changed, wanted));
   PS_CHECK(multi_result::number(partial.results.at("left")) == 10 &&
            multi_result::number(partial.results.at("right")) == 21 &&
-           *calls == 3 && partial.diagnostics.cache_hits >= 1 &&
-           partial.diagnostics.joint_groups == 0);
+           *calls == 3 && partial.diagnostics.cache_hits >= 1);
   for (unsigned at = 0; at < 2; ++at) {
-    auto point = take(Footprint::from_regions({2}, {Region({{at, 1}})}));
-    auto dirty = take(partial.dependencies.potential_dirty(
-        "control", point, 2, {}, ResultSupportTarget::Tensor, 0));
-    PS_CHECK(dirty.at(at ? "right" : "left") == one &&
-             dirty.at(at ? "left" : "right").empty());
+    auto units = dirty(partial.dependencies, root, at);
+    PS_CHECK(units.size() == 2 && (units[0] == TileUnit{0, 0, at}) &&
+             (units[1] == TileUnit{at + 1, at, 0}));
   }
   return 0;
 }
@@ -351,27 +320,20 @@ struct Partial {
     const auto at = stage / 2;
     if (!(stage++ % 2)) {
       ResultProgramNeed need;
-      need.tensors.push_back(
-          {0, 0, take(Footprint::from_regions({2}, {Region({{at, 1}})})), 1});
+      need.tiles.push_back(tile_need(phase, at));
       return Result<ResultProgramPoll>(std::move(need));
     }
     double value = 0;
-    check(phase.tensors->at({0, 0}).read({at}, &value, sizeof(value)));
+    check(phase.tensors->at({0, 0}).read({0, at}, &value, sizeof(value)));
     if (!builder) {
       builder.emplace(take(ResultBuilder::start(
           phase.resources, *phase.query.output.result_schema,
           phase.query.semantic_key)));
-      check(builder->bind_descriptor_relation(
-          take(ResultRelation::cartesian(phase.resources, 1, {}))));
     }
     const Region point({{at, 1}});
-    auto relation = take(
-        ResultRelation::mapped(phase.resources, {2}, point, {2}, {{0, 0, 1, 1}},
-                               {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
     check(builder->publish_tensor(
         0, point,
-        {reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)},
-        relation, {true, true, true, true}));
+        {reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)}));
     return Result<ResultProgramPoll>(ResultPublication{
         stage == 4 ? take(builder->seal()) : builder->reference(), stage == 4});
   }
@@ -391,14 +353,14 @@ int partial_dependencies() {
   check(registry->register_operation(std::move(consumer)));
   check(registry->freeze());
   WorkflowDocument doc;
-  const auto schema = multi_result::schema(ElementType::Float64, {2});
+  const auto schema = source_schema(2);
   doc.inputs = {multi_result::declaration(1, "control", schema)};
   doc.nodes = {{10, "queries.source", {WorkflowInputReference{1}}, {}},
                {20, "queries.consumer", {WorkflowNodeOutput{10, "value"}}, {}}};
   doc.outputs = {{"value", 20, "value"}};
   GraphContext graph(doc);
-  auto plan = take(Compiler(registry).compile(graph)).plan;
-  ExecutionContext context(registry, {1, false, 16, 1024 * 1024, 0});
+  auto plan = compile(registry, graph);
+  ExecutionContext context(registry, {2, false, 16, 1024 * 1024, 0});
   auto root = take(context.resource_budget());
   unsigned notices = 0;
   ResultRef first;
@@ -411,19 +373,17 @@ int partial_dependencies() {
   auto frozen = take(context.freeze(
       plan,
       ExecutionBindings{{multi_result::binding(root, "control", 1, schema)}}));
-  auto result = take(context.execute_fragments(
-      frozen, {{"value", take(Footprint::all({2}))}}, {}, options));
-  PS_CHECK(notices == 2 && *calls == 2 &&
+  auto result = take(
+      context.execute_fragments(frozen, {{"value", {true, {}}}}, {}, options));
+  // A Whole unit becomes externally visible after all staged prefixes finish.
+  PS_CHECK(notices == 1 && *calls == 2 &&
            first.object_id() == result.results.at("value").object_id());
   PS_CHECK(first.descriptor(false).value().tensor_coverage(0) ==
-           take(Footprint::from_regions({2}, {Region({{0, 1}})})));
+           take(Footprint::all({2})));
   for (unsigned at = 0; at < 2; ++at) {
-    const auto point = take(Footprint::from_regions({2}, {Region({{at, 1}})}));
-    auto dirty = take(result.dependencies.potential_dirty(
-        "control", point, 2, {}, ResultSupportTarget::Tensor, 0));
-    PS_CHECK(dirty.at("value") == point);
-    auto selected = take(result.dependencies.restrict({{"value", point}}));
-    PS_CHECK(take(selected.source_support()).at("control") == point);
+    auto units = dirty(result.dependencies, root, at);
+    PS_CHECK(units.size() == 2 && (units[0] == TileUnit{0, 0, at}) &&
+             (units[1] == TileUnit{1, 0, 0}));
     PS_CHECK(multi_result::number(result.results.at("value"), {at}) == 10 + at);
   }
   PS_CHECK(root.statistics().live[ResourceKind::Queue] == 0);
@@ -435,16 +395,13 @@ struct Mixed {
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     if (stage < 2) {
       if (stage == 1)
-        check(phase.tensors->at({0, 0}).read({0}, &value, sizeof(value)));
+        check(phase.tensors->at({0, 0}).read({0, 0}, &value, sizeof(value)));
       ResultProgramNeed need;
-      need.tensors.push_back(
-          {0, 0, take(Footprint::from_regions({2}, {Region({{stage, 1}})})),
-           stage ? 9U : 1U});
+      need.tiles.push_back(tile_need(phase, stage));
       ++stage;
       return Result<ResultProgramPoll>(std::move(need));
     }
-    return Result<ResultProgramPoll>(publication(
-        phase, value, {0, 1, 0, 1, ResultSupportTarget::Tensor, 0}));
+    return Result<ResultProgramPoll>(publication(phase, value));
   }
 };
 int mixed_target_dependencies() {
@@ -458,38 +415,28 @@ int mixed_target_dependencies() {
   check(registry->register_operation(std::move(consumer)));
   check(registry->freeze());
   WorkflowDocument doc;
-  const auto schema = multi_result::schema(ElementType::Float64, {2});
+  const auto schema = source_schema(2);
   doc.inputs = {multi_result::declaration(1, "control", schema)};
   doc.nodes = {{10, "queries.source", {WorkflowInputReference{1}}, {}},
                {20, "queries.consumer", {WorkflowNodeOutput{10, "value"}}, {}}};
   doc.outputs = {{"value", 20, "value"}};
   GraphContext graph(doc);
-  auto plan = take(Compiler(registry).compile(graph)).plan;
+  auto plan = compile(registry, graph);
   ExecutionContext context(registry, {1, false, 16, 1024 * 1024, 1048576});
   auto root = take(context.resource_budget());
   const auto run = [&] {
     auto frozen =
         take(context.freeze(plan, ExecutionBindings{{multi_result::binding(
                                       root, "control", 1, schema)}}));
-    return take(context.execute_fragments(
-        frozen, {{"value", take(Footprint::all({1}))}}));
+    return take(context.execute_fragments(frozen, {{"value", {true, {}}}}));
   };
   const auto verify = [&](const DemandResult& result) {
-    auto selected =
-        take(result.dependencies.restrict(result.dependencies.coverage()));
-    auto support = take(selected.source_support());
-    check(support.at("control") == take(Footprint::all({2}))
-              ? Status::success()
-              : Status{ErrorCode::OperationFailed,
-                       "mixed target ancestry mismatch"});
     for (unsigned at = 0; at < 2; ++at) {
-      auto point = take(Footprint::from_regions({2}, {Region({{at, 1}})}));
-      auto dirty = take(selected.potential_dirty(
-          "control", point, 2, {}, ResultSupportTarget::Tensor, 0));
-      check(dirty.at("value") == take(Footprint::all({1}))
+      auto units = dirty(result.dependencies, root, at);
+      check(units.size() == 2 && units[0] == TileUnit{0, 0, at} &&
+                    units[1] == TileUnit{1, 0, 0}
                 ? Status::success()
-                : Status{ErrorCode::OperationFailed,
-                         "mixed target dirty mismatch"});
+                : Status{ErrorCode::OperationFailed, "staged Need ancestry"});
     }
     check(
         multi_result::number(result.results.at("value")) == 10
@@ -507,19 +454,20 @@ int mixed_target_dependencies() {
 struct Gate {
   std::mutex mutex;
   std::condition_variable changed;
-  bool entered = false, released = false, timed_out = false;
+  unsigned entered = 0;
+  bool released = false, timed_out = false;
   void hold() {
     std::unique_lock<std::mutex> lock(mutex);
-    entered = true;
+    ++entered;
     changed.notify_all();
     if (!changed.wait_for(lock, std::chrono::seconds(5),
                           [&] { return released; }))
       timed_out = true;
   }
-  bool wait() {
+  bool wait(unsigned count = 1) {
     std::unique_lock<std::mutex> lock(mutex);
     return changed.wait_for(lock, std::chrono::seconds(5),
-                            [&] { return entered; });
+                            [&] { return entered >= count; });
   }
   void release() {
     std::lock_guard<std::mutex> lock(mutex);
@@ -527,7 +475,7 @@ struct Gate {
     changed.notify_all();
   }
 };
-int upstream_peer_handoff() {
+int upstream_run_cancellation() {
   Gate gate;
   auto calls = std::make_shared<std::atomic<unsigned>>(0);
   auto registry = std::make_shared<OperationRegistry>();
@@ -543,8 +491,8 @@ int upstream_peer_handoff() {
                {20, "queries.consumer", {WorkflowNodeOutput{10, "value"}}, {}}};
   doc.outputs = {{"left", 20, "left"}, {"right", 20, "right"}};
   GraphContext graph(doc);
-  auto plan = take(Compiler(registry).compile(graph)).plan;
-  ExecutionContext context(registry, {1, false, 16, 1024 * 1024, 0});
+  auto plan = compile(registry, graph);
+  ExecutionContext context(registry, {2, false, 16, 1024 * 1024, 0});
   auto root = take(context.resource_budget());
   auto frozen = take(context.freeze(plan));
   CancellationSource cancellation;
@@ -554,27 +502,18 @@ int upstream_peer_handoff() {
   const bool entered = gate.wait();
   auto peer =
       std::async(std::launch::async, [&] { return context.execute(frozen); });
-  const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (context.cache_statistics().shared_computations < 2 &&
-         std::chrono::steady_clock::now() < until)
-    std::this_thread::yield();
-  const bool joined = context.cache_statistics().shared_computations >= 2;
+  const bool independent = gate.wait(2);
   cancellation.cancel();
-  const bool handed_off =
-      first.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  const bool drains = first.wait_for(std::chrono::milliseconds(20)) !=
+                      std::future_status::ready;
   gate.release();
   auto cancelled = first.get();
   auto healthy = peer.get();
-  if (!entered || !joined || !handed_off || gate.timed_out)
-    std::cerr << "upstream handoff entered=" << entered << " joined=" << joined
-              << " handed_off=" << handed_off << " timed_out=" << gate.timed_out
-              << '\n';
-  PS_CHECK(entered && joined && handed_off && !gate.timed_out);
+  PS_CHECK(entered && independent && drains && !gate.timed_out);
   PS_CHECK(cancelled.status().code == ErrorCode::Cancelled && healthy.ok());
   PS_CHECK(multi_result::number(healthy.value().results.at("left")) == 10 &&
            multi_result::number(healthy.value().results.at("right")) == 11);
-  PS_CHECK(*calls == 2 && context.cache_statistics().in_flight == 0 &&
-           root.statistics().live[ResourceKind::Queue] == 0);
+  PS_CHECK(*calls == 4 && root.statistics().live[ResourceKind::Queue] == 0);
   return 0;
 }
 }  // namespace
@@ -583,7 +522,7 @@ int main() try {
   PS_CHECK(workflow(false, false) == 0);
   PS_CHECK(workflow(true, true) == 0);
   PS_CHECK(workflow(false, true) == 0);
-  PS_CHECK(upstream_peer_handoff() == 0);
+  PS_CHECK(upstream_run_cancellation() == 0);
   PS_CHECK(query_dependencies(false) == 0);
   PS_CHECK(query_dependencies(true) == 0);
   PS_CHECK(partial_dependencies() == 0);

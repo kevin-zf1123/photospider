@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "../common/tile_request.hpp"
 #include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
 
@@ -302,17 +303,19 @@ int main(int argc, char** argv) try {
   GraphContext context(document);
   Compiler compiler(registry);
   PlanningOptions planning;
-  planning.tile_height = planning.tile_width = tile;
-  planning.output_regions = {{"out", region}};
+  planning.tile_extent = tile;
   const auto compile_start = Clock::now();
   auto compiled = checked(compiler.compile(context, planning));
+  compiled.plan = checked(
+      workflow_example::select_tiles(root, compiled.plan, "out", region));
   const auto compile_ms = ms(compile_start);
   GraphContext reference_context(
       graph(base, member, "strict", layout, raw, registry));
   auto reference_planning = planning;
-  reference_planning.output_regions = {{"out", gate}};
   auto reference_plan =
       checked(compiler.compile(reference_context, reference_planning));
+  reference_plan.plan = checked(
+      workflow_example::select_tiles(root, reference_plan.plan, "out", gate));
   ExecutionOptions options;
   options.maximum_parallelism = workers;
   options.dependencies.maximum_work = UINT64_C(1) << 44;

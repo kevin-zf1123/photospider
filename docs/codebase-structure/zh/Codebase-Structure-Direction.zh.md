@@ -11,7 +11,7 @@ include/photospider/
   compiler/      WorkflowDocument、typed IR、plan、typed identity、compiler
   execution/     context、cancellation、result、raw diagnostic
   data/          Value、Region、显式 layout 与不可变字节
-  plugin/        operation 与 data-provider ABI/registry
+  plugin/        operation ABI/registry
   core/          status、resources、cancellation 与符号导出
   benchmark/     原始 compile/plan/execute benchmark runner
   photospider.hpp 内核汇总头文件
@@ -42,7 +42,6 @@ src/lib/
 
 plugins/ops/<NN-family>/   内置算子实现
 
-tests/consumer/
 tests/fixtures/
 tests/unit/
 tests/integration/
@@ -57,7 +56,6 @@ tests/integration/
 | `photospider` / `Photospider::kernel` | 是 | 唯一的公开 compiler/executor 与 ABI runtime；同时包含内置算子的实现 |
 | `Photospider::ops_headers` | 是 | 只含头文件，提供 `photospider/ops/` 的 include 根；使用方与 `Photospider::kernel` 一起链接 |
 | `Photospider::operation_sdk` | 是 | 只含头文件的可信 operation DSO ABI |
-| `Photospider::data_provider_sdk` | 是 | 只含头文件的 data-definition/provider DSO ABI |
 | operation/provider fixture 模块 | 否 | 仅用于测试 ABI 校验与生命周期 |
 | 测试可执行文件 | 否 | 维护 unit/integration/package 行为 |
 

@@ -1,5 +1,5 @@
 #include "01-numeric/numeric_algorithms.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "common/registry.hpp"
 
 namespace ps::plugin_internal {
 Status register_numeric_subtract(OperationRegistry* registry) {

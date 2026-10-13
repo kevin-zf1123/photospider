@@ -2,7 +2,7 @@
 #include <utility>
 
 #include "01-numeric/numeric_math_operation.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "common/registry.hpp"
 
 namespace ps::plugin_internal {
 Status register_numeric_unary(OperationRegistry* registry) {

@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 
+#include "../common/tile_request.hpp"
 #include "photospider/ops/format/channel.hpp"
 #include "source.hpp"  // NOLINT(build/include_subdir)
 
@@ -28,9 +29,10 @@ int main() try {
   document.outputs = {{"red", handles[2].output.source_node, "values"}};
   ps::PlanningOptions options;
   const ps::Region roi({{1, 1}, {0, 2}});
-  options.output_regions = {{"red", roi}};
   ps::GraphContext graph(document);
   auto compiled = take(ps::Compiler(registry).compile(graph, options));
+  compiled.plan = take(workflow_example::select_tiles(
+      take(execution.resource_budget()), compiled.plan, "red", roi));
   auto result = take(execution.execute(compiled.plan, {{{"source", value}}}));
   check(read(result.results.at("red"), roi) ==
             std::vector<std::uint8_t>({12, 13}),

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -16,17 +17,12 @@
 #include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "data/memory_budget.hpp"
 #include "execution/result_cache.hpp"
-#include "execution/structured_joint_state.hpp"
 #include "execution/structured_result_cache.hpp"
 #include "photospider/photospider.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
-struct ExternalParticipantProbe : ps::execution_internal::JointParticipant {};
-static_assert(!std::is_default_constructible_v<ExternalParticipantProbe>);
-static_assert(!std::is_copy_constructible_v<ExternalParticipantProbe>);
-
 int cache_retains_resource_root() {
   using namespace ps;  // NOLINT(build/namespaces)
   using execution_internal::StructuredCacheState;
@@ -83,12 +79,7 @@ struct CacheProgram {
       requested = true;
       ResultProgramNeed need;
       for (std::uint32_t i = 0; i < phase.query.inputs.size(); ++i)
-        need.tensors.push_back(
-            {i, 0,
-             take(Footprint::all(phase.query.inputs[i]
-                                     .result_schema->tensors[0]
-                                     .sample_shape())),
-             9});
+        need.tiles.push_back({i, true, false, {}});
       return Result<ResultProgramPoll>(std::move(need));
     }
     if (calls)
@@ -96,29 +87,12 @@ struct CacheProgram {
     const auto& schema = *phase.query.output.result_schema;
     auto builder = take(ResultBuilder::start(phase.resources, schema,
                                              phase.query.semantic_key));
-    std::vector<ResultRelation> descriptor, data;
-    const auto count = take(schema.tensors[0].sample_count());
-    for (std::uint32_t i = 0; i < phase.query.inputs.size(); ++i) {
-      descriptor.push_back(take(ResultRelation::cartesian(
-          phase.resources, 1,
-          {i, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
-      data.push_back(take(ResultRelation::cartesian(
-          phase.resources, count,
-          {i, 1, 0,
-           take(phase.query.inputs[i].result_schema->tensors[0].sample_count()),
-           ResultSupportTarget::Tensor, 0})));
-    }
-    check(builder.bind_descriptor_relation(
-        take(ResultRelation::unite(phase.resources, descriptor))));
-    auto relation = take(ResultRelation::unite(phase.resources, data));
     const auto region = Region::whole(schema.tensors[0].sample_shape());
     if (mode == CacheMode::First) {
       auto window = take(phase.tensors->at({0, 0}).acquire(region));
       ResultTensorViewTransform identity;
       identity.source_axes = {{0, 0, 1, 1}};
-      check(builder.publish_tensor_view(0, region, window, identity,
-                                        std::move(relation),
-                                        {true, true, true, true}));
+      check(builder.publish_tensor_view(0, region, window, identity));
     } else {
       double value = mode == CacheMode::Constant ? 2 : 0;
       for (std::uint32_t i = 0; i < phase.query.inputs.size(); ++i) {
@@ -140,9 +114,8 @@ struct CacheProgram {
       check(phase.consume_work(phase.query.inputs.size()));
       auto bytes = take(phase.allocator.allocate(8));
       std::memcpy(bytes.data(), &value, sizeof(value));
-      check(builder.publish_tensor(
-          0, region, {0, {8}}, std::move(bytes).freeze(), std::move(relation),
-          {true, true, true, true}));
+      check(builder.publish_tensor(0, region, {0, {8}},
+                                   std::move(bytes).freeze()));
     }
     return Result<ResultProgramPoll>(
         ResultPublication{take(builder.seal()), true});
@@ -389,11 +362,11 @@ int cache_shared_route_budget() {
           .freeze(plan,
                   {{multi_result::binding(resource_root, "x", 7, schema)}})
           .take_value();
-  const DemandQuery query{{"y", Footprint::all({1}).take_value()}};
+  const DemandQuery query{{"y", TileRequest{true, {}}}};
   PS_CHECK(execution.execute_fragments(frozen, query).ok() && *calls == 1);
   // Split the old shared Whole owner into two equivalent new source nodes.
-  // The unchanged root content may reuse cached pixels. Each corresponding
-  // ancestry copy retains its own metadata admission for its new route.
+  // Ambiguous shared-to-cloned ancestry must recompute the merge. Each
+  // resulting route still participates in dirty propagation.
   document.nodes = {
       {10, leaf.key, {WorkflowInputReference{1}}, {}},
       {11, leaf.key, {WorkflowInputReference{1}}, {}},
@@ -412,16 +385,25 @@ int cache_shared_route_budget() {
                   {{multi_result::binding(resource_root, "x", 7, schema)}})
           .take_value();
   auto result = execution.execute_fragments(changed_frozen, query);
-  PS_CHECK(result.ok() && *calls == 1 &&
-           result.value().diagnostics.cache_hits > 0);
+  PS_CHECK(result.ok() && *calls == 2);
   double actual = 0;
   PS_CHECK(numeric_result_fixture::read(result.value().results.at("y"), {0},
                                         &actual, sizeof(actual))
                .ok() &&
            actual == 14);
-  auto dirty = result.value().dependencies.potential_dirty(
-      "x", query.at("y"), 7, {}, ResultSupportTarget::Tensor, 0);
-  PS_CHECK(dirty.ok() && dirty.value().at("y") == query.at("y"));
+  auto warm = execution.execute_fragments(changed_frozen, query);
+  PS_REQUIRE_OK(warm);
+  PS_CHECK(*calls == 2 && warm.value().diagnostics.cache_hits > 0);
+  ResourceVector<TileChange> changes{
+      ResourceAllocator<TileChange>(resource_root)};
+  changes.push_back({PlanWorkflowInput{0}, 0,
+                     TileSet::from_indices(resource_root, {0}).take_value(),
+                     false});
+  auto dirty = warm.value().dependencies.dirty_units(changes);
+  PS_CHECK(dirty.ok());
+  const TileUnit output{changed_plan.outputs().at("y"), 0, 0};
+  PS_CHECK(std::find(dirty.value().begin(), dirty.value().end(), output) !=
+           dirty.value().end());
   return 0;
 }
 int diamond_cache_support() {
@@ -448,7 +430,7 @@ int diamond_cache_support() {
   document.outputs = {{"y", 6, "value"}};
   GraphContext graph(document);
   auto plan = Compiler(registry).compile(graph).take_value().plan;
-  const auto q = Footprint::all({1}).take_value();
+  const TileRequest q{true, {}};
   // Public execution and retained-result replay must preserve diamond ancestry.
   ExecutionContext context(registry, configuration());
   auto frozen =
@@ -459,14 +441,20 @@ int diamond_cache_support() {
           .take_value();
   auto computed = context.execute_fragments(frozen, {{"y", q}});
   PS_CHECK(computed.ok());
-  const auto support =
-      computed.value().dependencies.source_support().take_value();
-  PS_CHECK(support.size() == 1 && support.at("x") == q);
+  const TileUnit unit{plan.outputs().at("y"), 0, 0};
+  auto support = computed.value().dependencies.tile_record(unit).take_value();
+  PS_CHECK(support && support->inputs.size() == 4);
   auto reused = context.execute_fragments(frozen, {{"y", q}});
   PS_REQUIRE_OK(reused);
-  auto replayed = reused.value().dependencies.source_support();
-  PS_REQUIRE_OK(replayed);
-  PS_CHECK(replayed.value() == support);
+  PS_CHECK(reused.value().diagnostics.cache_hits > 0);
+  auto replayed = reused.value().dependencies.tile_record(unit).take_value();
+  PS_CHECK(replayed && replayed->inputs.size() == 4);
+  auto root = context.resource_budget().take_value();
+  ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
+  changes.push_back({PlanWorkflowInput{0}, 0,
+                     TileSet::from_indices(root, {0}).take_value(), false});
+  auto dirty = reused.value().dependencies.dirty_units(changes).take_value();
+  PS_CHECK(std::find(dirty.begin(), dirty.end(), unit) != dirty.end());
   return 0;
 }
 int concurrent_reclamation() {

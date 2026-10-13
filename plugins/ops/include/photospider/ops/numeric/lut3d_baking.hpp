@@ -7,6 +7,7 @@
 
 #include "photospider/compiler/compiler.hpp"
 #include "photospider/data/lut3d_bake.hpp"
+#include "photospider/ops/export.hpp"
 #include "photospider/ops/numeric/lut3d.hpp"
 #include "photospider/ops/numeric/workflow_authoring.hpp"
 
@@ -102,7 +103,7 @@ struct BakedLut3d {
  * caller's responsibility. The builder and captures are released when this call
  * returns.
  */
-PHOTOSPIDER_API Result<BakedLut3d> bake_lut3d(
+PHOTOSPIDER_OPS_API Result<BakedLut3d> bake_lut3d(
     WorkflowDocument& document, std::shared_ptr<OperationRegistry> registry,
     WorkflowInput axis, const Lut3dSourceBuilder& source,
     const Lut3dBakeOptions& options,

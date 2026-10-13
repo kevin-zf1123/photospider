@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "../common/tile_request.hpp"
 #include "photospider/photospider.hpp"
 
 namespace channel_fixture {

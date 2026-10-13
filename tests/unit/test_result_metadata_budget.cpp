@@ -12,7 +12,6 @@
 #endif
 
 #include "execution/result_checkpoints.hpp"
-#include "execution/shared_results.hpp"
 #include "photospider/photospider.hpp"
 #include "support/test_support.hpp"
 
@@ -210,13 +209,9 @@ int weak_windows() {
   schema.id = "test.window_owner";
   schema.fields = {{"byte", ElementType::UInt8, {}, {}}};
   auto builder = ResultBuilder::start(budget, schema, "window").take_value();
-  auto relation = ResultRelation::cartesian(budget, 1, {0, 15, 0, 0},
-                                            DependencyGuarantee::Conservative)
-                      .take_value();
-  PS_CHECK(builder.bind_descriptor_relation(relation).ok());
   std::uint8_t byte = 7;
   PS_CHECK(builder.append(0, 1, ByteView(&byte, 1)).ok());
-  PS_CHECK(builder.publish(0, 1, relation, {true, true, true, true}).ok());
+  PS_CHECK(builder.publish(0, 1).ok());
   auto result = builder.seal().take_value();
   auto plan =
       result.prepare_read(result.descriptor().value(), 0, 0, 1).take_value();
@@ -263,19 +258,6 @@ int failure_copy_exhaustion() {
            observed.detail.node_id == 19);
   PS_CHECK(interpose_allocations ? observed.message.empty()
                                  : observed.message == failure.message);
-  execution_internal::SharedResults table;
-  auto a = table.join_call("snapshot", root, {}, {"r"}).take_value();
-  auto producer = table.acquire("r", root, {}, a).take_value();
-  auto b = table.join_call("snapshot", root, {}, {"r"}).take_value();
-  auto peer = table.acquire("r", root, {}, b).take_value();
-  producer.fail(failure);
-  fail_next_allocation = interpose_allocations;
-  auto waiting = peer.wait(true, 0, 0, {});
-  PS_CHECK(!fail_next_allocation && !waiting.ok() &&
-           waiting.status().reason == failure.reason &&
-           waiting.status().detail.node_id == 19);
-  PS_CHECK(interpose_allocations ? waiting.status().message.empty()
-                                 : waiting.status().message == failure.message);
   return 0;
 }
 int callback_failure_copy_exhaustion() {
@@ -298,7 +280,7 @@ int callback_failure_copy_exhaustion() {
   OperationDefinition op;
   op.key = "test.callback_failure";
   auto& output = op.traits.outputs[0];
-  output.region_rule = OperationRegionRule::Dependency;
+  output.region_rule = OperationRegionRule::Tiled;
   output.continuation_bytes = sizeof(State);
   output.maximum_dependency_stages = 1;
   output.output_schema.kind = OperationPortKind::Result;

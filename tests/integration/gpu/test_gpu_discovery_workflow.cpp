@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "support/gpu_result_fixture.hpp"
 
@@ -16,6 +17,11 @@ constexpr std::uint64_t length = 8192;
 constexpr std::uint64_t source_bytes = length * 12;
 SchemaTemplate schema(ElementType type) {
   auto value = gpu_result::schema(type, length);
+  value.tensors[0].descriptor.shape = {1, length};
+  value.tensors[0].layout.spatial = true;
+  value.tensors[0].layout.channel_axis.reset();
+  value.tensors[0].layout.height_axis = 0;
+  value.tensors[0].layout.width_axis = 1;
   value.id =
       type == ElementType::Float32 ? "discovery.data" : "discovery.control";
   return value;
@@ -24,8 +30,7 @@ ResultRef source(const ResourceBudget& root, ElementType type,
                  std::int64_t first = 0) {
   auto builder =
       take(ResultBuilder::start(root, schema(type), "discovery.input"));
-  gpu_result::check(builder.bind_descriptor_relation(
-      take(ResultRelation::cartesian(root, 1, {}))));
+
   const bool data = type == ElementType::Float32;
   auto buffer = take(root.allocator().allocate(length * (data ? 4 : 8)));
   std::memset(buffer.data(), 0, buffer.size());
@@ -39,11 +44,10 @@ ResultRef source(const ResourceBudget& root, ElementType type,
     std::memcpy(buffer.data(), &first, 8);
     std::memcpy(buffer.data() + 8, &second, 8);
   }
-  gpu_result::check(
-      builder.publish_tensor(0, Region::whole({length}), {0, {data ? 4 : 8}},
-                             std::move(buffer).freeze(),
-                             take(ResultRelation::cartesian(root, length, {})),
-                             {true, true, true, true}));
+  gpu_result::check(builder.publish_tensor(
+      0, Region::whole({1, length}),
+      {0, {static_cast<std::int64_t>(length * (data ? 4 : 8)), data ? 4 : 8}},
+      std::move(buffer).freeze()));
   return take(builder.seal());
 }
 ExecutionBindings bind(const ResultRef& data, const ResultRef& control) {
@@ -56,8 +60,29 @@ ExecutionBindings bind(const ResultRef& data, const ResultRef& control) {
   }
   return bindings;
 }
-Footprint point(std::uint64_t at) {
-  return Footprint::from_regions({length}, {Region({{at, 1}})}).take_value();
+TileRequest point(const ResourceBudget& root, std::uint64_t at) {
+  return {false, take(TileSet::from_indices(root, {at}))};
+}
+TileRequest pair(const ResourceBudget& root) {
+  return {false, take(TileSet::from_indices(root, {0, 1}))};
+}
+float number(const ResultRef& result, std::uint64_t at) {
+  float value = 0;
+  gpu_result::check(
+      result.read_tensor(take(result.descriptor()), 0, {0, at}, &value, 4));
+  return value;
+}
+bool input_tiles(const DemandResult& result, std::size_t step, TileIndex output,
+                 std::size_t input, const TileSet& expected) {
+  auto record = take(result.dependencies.tile_record({step, 0, output}));
+  if (!record)
+    return false;
+  for (const auto& need : record->inputs) {
+    const auto* source = std::get_if<PlanWorkflowInput>(&need.producer);
+    if (source && source->declaration_index == input)
+      return !need.whole && need.producer_output == 0 && need.tiles == expected;
+  }
+  return false;
 }
 WorkflowDocument document(std::int64_t capacity = 2, std::int64_t mode = 0) {
   WorkflowDocument result;
@@ -133,7 +158,11 @@ struct ThreadDiscovery {
     const auto receipt = phase.discover(1, 1, compute);
     if (!receipt.ok())
       return Result<ResultProgramPoll>(receipt.status());
-    auto output = gpu_result::builder(phase, false);
+    auto output = gpu_result::builder(phase);
+    const float zero = 0;
+    gpu_result::check(output.publish_tensor(
+        0, Region::whole({1}),
+        ByteView(reinterpret_cast<const std::uint8_t*>(&zero), 4)));
     return Result<ResultProgramPoll>(
         ResultPublication{take(output.seal()), true});
   }
@@ -170,7 +199,7 @@ void thread_probes(const std::shared_ptr<OperationRegistry>& registry,
     document.outputs = {{"empty", 1, "value"}};
     GraphContext graph(document);
     const auto compiled = take(Compiler(registry).compile(graph, options));
-    for (auto budget : {8512, 8513}) {
+    for (auto budget : {8256, 8257}) {
       ExecutionContextConfig config;
       config.gpu_enabled = true;
       ExecutionContext context(registry, config);
@@ -178,11 +207,11 @@ void thread_probes(const std::shared_ptr<OperationRegistry>& registry,
       ExecutionOptions bounds;
       bounds.dependencies.maximum_work = budget;
       entered->store(false);
-      auto run = context.execute_fragments(
-          take(context.freeze(compiled.plan)),
-          {{"empty", take(Footprint::none({1}))}}, {}, bounds);
+      auto run = context.execute_fragments(take(context.freeze(compiled.plan)),
+                                           {{"empty", TileRequest{true, {}}}},
+                                           {}, bounds);
       const auto expected = wrong            ? ErrorCode::InvalidArgument
-                            : budget == 8512 ? ErrorCode::ResourceExhausted
+                            : budget == 8256 ? ErrorCode::ResourceExhausted
                                              : ErrorCode::Ok;
       if (run.status().code != expected || entered->load() == wrong) {
         std::cerr << "thread discovery wrong=" << wrong << " budget=" << budget
@@ -197,7 +226,7 @@ void thread_probes(const std::shared_ptr<OperationRegistry>& registry,
     }
   }
   std::cout << "Metal discovery: wrong thread rejected; concurrent work "
-               "8512 rejected, 8513 passed\n";
+               "8256 rejected, 8257 passed\n";
 }
 }  // namespace
 int main(int argc, char** argv) try {
@@ -222,61 +251,73 @@ int main(int argc, char** argv) try {
       return 77;
     }
     PlanningOptions options;
+    options.tile_extent = 1;
     options.execution_mode =
         gpu ? ExecutionMode::NativeGpu : ExecutionMode::CpuExact;
     GraphContext graph(document());
     auto compiled = Compiler(registry).compile(graph, options).take_value();
     auto frozen = context.freeze(compiled.plan, bindings).take_value();
-    auto result = context.execute_fragments(
-        frozen, {{"sum", point(0).unite(point(1)).take_value()}});
+    auto result = context.execute_fragments(frozen, {{"sum", pair(root)}});
     if (!result.ok())
       std::cerr << result.status().message << '\n';
     if (check(result.ok(), "discovery workflow failed"))
       return 1;
     for (std::uint64_t at : {0, 1}) {
-      if (check(gpu_result::number(result.value().results.at("sum"), at) ==
-                    (at ? 24 : 8),
+      if (check(number(result.value().results.at("sum"), at) == (at ? 24 : 8),
                 "discovery arithmetic oracle failed"))
         return 1;
     }
-    const auto support = result.value()
-                             .dependencies.restrict({{"sum", point(0)}})
-                             .take_value()
-                             .source_support()
-                             .take_value();
-    if (check(support.at("data") == point(0).unite(point(4096)).value() &&
-                  support.at("control") == point(0),
-              "discovery relation is not exact"))
+    const auto step = compiled.plan.outputs().at("sum");
+    if (check(input_tiles(result.value(), step, 0, 0,
+                          take(TileSet::from_indices(root, {0, 4096}))) &&
+                  input_tiles(result.value(), step, 0, 1,
+                              take(TileSet::from_indices(root, {0}))),
+              "discovery tile dependencies differ"))
       return 1;
     if (check((gpu ? result.value().diagnostics.native_dispatch_count > 0
                    : result.value().diagnostics.native_dispatch_count == 0),
               "discovery/resume dispatch count failed"))
       return 1;
     auto demand = context.open_demand(compiled.plan, bindings).take_value();
-    if (check(demand.request({{"sum", point(0)}}).ok() &&
+    if (check(demand.request({{"sum", point(root, 0)}}).ok() &&
                   demand
                       .replace_bindings(
                           bind(data, source(root, ElementType::Int64, 1)))
                       .ok(),
               "dynamic binding update failed"))
       return 1;
-    auto changed = demand.request({{"sum", point(0)}});
+    auto changed = demand.request({{"sum", point(root, 0)}});
     if (check(changed.ok(), "changed discovery failed"))
       return 1;
-    if (check(gpu_result::number(changed.value().results.at("sum"), 0) == 24,
+    if (check(number(changed.value().results.at("sum"), 0) == 24,
               "new GPU address selection failed"))
       return 1;
-    auto current = changed.value().dependencies.source_support().take_value();
-    if (check(current.at("data") == point(1).unite(point(4097)).value(),
+    if (check(input_tiles(changed.value(), step, 0, 0,
+                          take(TileSet::from_indices(root, {1, 4097}))),
               "discovery retained old data edges"))
       return 1;
-    auto clean = changed.value()
-                     .dependencies.potential_dirty("data", point(0))
-                     .take_value();
-    auto dirty = changed.value()
-                     .dependencies.potential_dirty("data", point(1))
-                     .take_value();
-    if (check(clean.at("sum").empty() && dirty.at("sum") == point(0),
+    auto edit = [&](std::uint64_t at) {
+      auto builder = take(
+          ResultBuilder::start(root, schema(ElementType::Float32), "edited"));
+
+      std::vector<float> values(length, 0);
+      values[0] = 3;
+      values[4096] = 5;
+      values[1] = 11;
+      values[4097] = 13;
+      values[at] += 1;
+      gpu_result::check(builder.publish_tensor(
+          0, Region::whole({1, length}),
+          ByteView(reinterpret_cast<const std::uint8_t*>(values.data()),
+                   length * 4)));
+      return take(builder.seal());
+    };
+    auto clean = take(demand.replace_bindings(
+        bind(edit(0), source(root, ElementType::Int64, 1))));
+    auto dirty = take(demand.replace_bindings(
+        bind(edit(1), source(root, ElementType::Int64, 1))));
+    if (check(clean.potential_dirty.at("sum").empty() &&
+                  dirty.potential_dirty.at("sum") == point(root, 0).tiles,
               "discovery dirty transpose retained old edge"))
       return 1;
     auto bad_control =
@@ -284,14 +325,13 @@ int main(int argc, char** argv) try {
             .freeze(compiled.plan,
                     bind(data, source(root, ElementType::Int64, -1)))
             .take_value();
-    if (check(context.execute_fragments(bad_control, {{"sum", point(0)}})
+    if (check(context.execute_fragments(bad_control, {{"sum", point(root, 0)}})
                       .status()
                       .code == ErrorCode::InvalidArgument,
               "signed control access contract differs"))
       return 1;
-    auto old = context.execute_fragments(frozen, {{"sum", point(0)}});
-    if (check(old.ok() &&
-                  gpu_result::number(old.value().results.at("sum"), 0) == 8,
+    auto old = context.execute_fragments(frozen, {{"sum", point(root, 0)}});
+    if (check(old.ok() && number(old.value().results.at("sum"), 0) == 8,
               "frozen discovery changed"))
       return 1;
     std::cout << (gpu ? "Metal" : "CPU")
@@ -307,15 +347,15 @@ int main(int argc, char** argv) try {
       if (mode == 2)
         bounds.dependencies.maximum_gpu_requests = 0;
       auto denied = context.execute_fragments(
-          context.freeze(bad.plan, bindings).take_value(), {{"sum", point(0)}},
-          {}, bounds);
+          context.freeze(bad.plan, bindings).take_value(),
+          {{"sum", point(root, 0)}}, {}, bounds);
       if (check(denied.status().code == (mode == 1
                                              ? ErrorCode::InvalidArgument
                                              : ErrorCode::ResourceExhausted),
                 "overflow/bypass/disabled discovery accepted"))
         return 1;
     }
-    for (unsigned mode : {3, 4, 5, 6, 8, 9, 10, 11, 12, 14, 15}) {
+    for (unsigned mode : {3, 4, 5, 6, 8, 9, 10, 11, 12, 14, 15, 19}) {
       ExecutionContext fresh(registry, config);
       const auto fresh_root = take(fresh.resource_budget());
       const auto inputs = bind(source(fresh_root, ElementType::Float32),
@@ -323,7 +363,12 @@ int main(int argc, char** argv) try {
       GraphContext invalid(document(2, mode));
       auto plan = take(Compiler(registry).compile(invalid, options));
       auto failed = fresh.execute_fragments(
-          take(fresh.freeze(plan.plan, inputs)), {{"sum", point(0)}});
+          take(fresh.freeze(plan.plan, inputs)), {{"sum", point(root, 0)}});
+      if (mode == 19 &&
+          check(failed.status().reason == FailureReason::UnauthorizedRead &&
+                    failed.status().detail.origin == FailureOrigin::Protocol,
+                "descriptor receipt granted payload"))
+        return 1;
       const auto expected = mode == 10   ? ErrorCode::OperationFailed
                             : mode == 12 ? ErrorCode::ResourceExhausted
                                          : ErrorCode::InvalidArgument;
@@ -339,30 +384,55 @@ int main(int argc, char** argv) try {
                 "failed discovery retained payload or cached a result"))
         return 1;
       auto retry = fresh.execute_fragments(
-          take(fresh.freeze(compiled.plan, inputs)), {{"sum", point(0)}});
+          take(fresh.freeze(compiled.plan, inputs)), {{"sum", point(root, 0)}});
       if (check(retry.ok() &&
                     retry.value().diagnostics.native_dispatch_count > 0 &&
-                    gpu_result::number(retry.value().results.at("sum"), 0) == 8,
+                    number(retry.value().results.at("sum"), 0) == 8,
                 "normal discovery after failure did not execute"))
         return 1;
     }
     {
       GraphContext mixed(document(2, 13));
       auto plan = take(Compiler(registry).compile(mixed, options));
-      auto run = take(context.execute_fragments(
-          take(context.freeze(plan.plan, bindings)), {{"sum", point(0)}}));
-      const auto support = take(run.dependencies.source_support());
-      if (check(gpu_result::number(run.results.at("sum"), 0) == 8 &&
+      auto run = take(
+          context.execute_fragments(take(context.freeze(plan.plan, bindings)),
+                                    {{"sum", point(root, 0)}}));
+      if (check(number(run.results.at("sum"), 0) == 8 &&
                     run.diagnostics.native_dispatch_count > 0 &&
-                    support.at("data") == point(0).unite(point(4096)).value(),
-                "same-slot discovery role groups failed"))
+                    input_tiles(run, plan.plan.outputs().at("sum"), 0, 0,
+                                take(TileSet::from_indices(root, {0, 4096}))),
+                "unordered discovery tile normalization failed"))
         return 1;
-      auto empty = take(context.execute_fragments(
-          take(context.freeze(plan.plan, bindings)),
-          {{"sum", take(Footprint::none({length}))}}));
+      auto empty = take(
+          context.execute_fragments(take(context.freeze(plan.plan, bindings)),
+                                    {{"sum", TileRequest{false, {}}}}));
       if (check(empty.diagnostics.native_dispatch_count == 0,
                 "empty discovery dispatched native work"))
         return 1;
+    }
+    for (unsigned mode : {17, 18}) {
+      GraphContext valid(document(2, mode));
+      auto plan = take(Compiler(registry).compile(valid, options));
+      auto run = take(
+          context.execute_fragments(take(context.freeze(plan.plan, bindings)),
+                                    {{"sum", point(root, 0)}}));
+      if (check(
+              number(run.results.at("sum"), 0) == 8 &&
+                  run.diagnostics.native_dispatch_count == (mode == 17 ? 3 : 2),
+              "repeated or Whole discovery failed"))
+        return 1;
+      if (mode == 18) {
+        auto record = take(run.dependencies.tile_record(
+            {plan.plan.outputs().at("sum"), 0, 0}));
+        bool whole = false;
+        for (const auto& need : record->inputs) {
+          const auto* source = std::get_if<PlanWorkflowInput>(&need.producer);
+          whole |= source && source->declaration_index == 0 && need.whole &&
+                   need.tiles.empty();
+        }
+        if (check(whole, "Whole receipt lost producer dependency"))
+          return 1;
+      }
     }
     for (const bool run_limit : {false, true}) {
       ExecutionContext fresh(registry, config);
@@ -379,15 +449,17 @@ int main(int argc, char** argv) try {
       {
         auto single =
             fresh.execute_fragments(take(fresh.freeze(plan.plan, inputs)),
-                                    {{"sum", point(0)}}, {}, bounds);
+                                    {{"sum", point(root, 0)}}, {}, bounds);
         if (check(single.ok() &&
                       single.value().diagnostics.native_dispatch_count > 0,
                   "one discovery rejected by cumulative work fixture"))
           return 1;
       }
+      GraphContext repeated(document(2, 17));
+      auto repeated_plan = take(Compiler(registry).compile(repeated, options));
       auto failed = fresh.execute_fragments(
-          take(fresh.freeze(plan.plan, inputs)),
-          {{"sum", take(point(0).unite(point(1)))}}, {}, bounds);
+          take(fresh.freeze(repeated_plan.plan, inputs)),
+          {{"sum", point(fresh_root, 0)}}, {}, bounds);
       if (check(failed.status().code == ErrorCode::ResourceExhausted &&
                     fresh_root.statistics().live[ResourceKind::Payload] ==
                         source_bytes,
@@ -397,19 +469,19 @@ int main(int argc, char** argv) try {
         return 1;
       }
     }
-    std::cout << "Metal discovery: protocol failures, mixed roles, empty, "
+    std::cout << "Metal discovery: protocol failures, unordered tiles, empty, "
                  "cumulative work and owner retirement passed\n";
     thread_probes(registry, &entered);
     GraphContext large(document(128));
     auto large_plan = Compiler(registry).compile(large, options).take_value();
-    // Table: 18448 logical bytes -> 32768 native capacity. Control atlas:
+    // Table: 2064 logical bytes and exact native capacity. Control atlas:
     // 8+160. Discovery allocates neither the output nor the declared scratch;
     // those allocations occur in the later compute phase after its table
     // retires.
     const auto minimum =
         source_bytes +
-        large_plan.plan.steps()[0].traits.outputs[0].continuation_bytes +
-        32768 + 168;
+        large_plan.plan.steps()[0].traits.outputs[0].continuation_bytes + 2064 +
+        168;
     for (auto bytes : {minimum - 1, minimum}) {
       ExecutionContextConfig tight;
       tight.gpu_enabled = true;
@@ -419,7 +491,7 @@ int main(int argc, char** argv) try {
       const auto small_bindings = bind(source(small_root, ElementType::Float32),
                                        source(small_root, ElementType::Int64));
       auto query = small.freeze(large_plan.plan, small_bindings).take_value();
-      auto run = small.execute_fragments(query, {{"sum", point(0)}});
+      auto run = small.execute_fragments(query, {{"sum", point(root, 0)}});
       if (check(bytes == minimum
                     ? run.ok()
                     : run.status().code == ErrorCode::ResourceExhausted,
@@ -436,7 +508,7 @@ int main(int argc, char** argv) try {
                           minimum,
                   "discovery owners did not retire at the measured frontier"))
           return 1;
-        auto retry = small.execute_fragments(query, {{"sum", point(0)}});
+        auto retry = small.execute_fragments(query, {{"sum", point(root, 0)}});
         if (check(retry.ok() &&
                       retry.value().diagnostics.native_dispatch_count > 0,
                   "discovery frontier retry retained an old result"))

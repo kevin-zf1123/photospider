@@ -80,7 +80,7 @@ struct Fixture {
     output.result_schema = *document.inputs.at(port).result_schema;
     output.output_schema.result_schema_id = output.result_schema->id;
     output.output_schema.result_schema_version = output.result_schema->version;
-    output.region_rule = ps::OperationRegionRule::Dependency;
+    output.region_rule = ps::OperationRegionRule::Tiled;
     output.continuation_bytes = 1;
     output.maximum_dependency_stages = 1;
     const auto shape = output.result_schema->tensors[0].sample_shape();
@@ -424,8 +424,11 @@ void typed_and_cache(const std::string& profile) {
     auto cold = take(demand.request(query));
     retained = cold.results.at("values");
     auto shared = take(demand.request(query));
-    require(shared.results.at("values").object_id() == retained.object_id(),
-            "same Frozen shares interpolation identity");
+    require(
+        shared.diagnostics.cache_hits > 0 &&
+            numeric_result_fixture::bytes(shared.results.at("values")) ==
+                numeric_result_fixture::bytes(retained),
+        "repeated demand reuses bounded completed cache with identical bits");
     auto fresh_bindings = fixture.bind(root);
     auto fresh = take(execution.freeze(plan.plan, fresh_bindings));
     auto warm = take(execution.execute_fragments(fresh, query));

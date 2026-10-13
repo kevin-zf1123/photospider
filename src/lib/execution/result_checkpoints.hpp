@@ -12,16 +12,11 @@
 #include <utility>
 
 #include "core/checked_math.hpp"
-#include "execution/dependency_records.hpp"
+#include "execution/tile_records.hpp"
 #include "photospider/plugin/result_program.hpp"
 
 namespace ps::execution_internal {
 // NOLINTBEGIN(whitespace/indent_namespace)
-using ResultNeedKey = std::tuple<std::uint32_t, ResultSupportTarget,
-                                 std::uint32_t, std::uint32_t>;
-using ResultNeedHistory =
-    std::map<ResultNeedKey, Footprint, std::less<ResultNeedKey>,
-             ResourceAllocator<std::pair<const ResultNeedKey, Footprint>>>;
 // Keep every observed identity, with one admitted allocation per port's
 // growing sequence instead of one allocator header per identity. Object IDs
 // usually arrive in increasing order; checkpoint restoration also permits
@@ -123,16 +118,14 @@ class ResultInputFacts final {
 struct ResultCheckpointWitness final {
   explicit ResultCheckpointWitness(const ResourceBudget& root)
       : scope(ResourceAllocator<char>(root)),
-        needs(std::less<ResultNeedKey>{},
-              ResourceAllocator<ResultNeedHistory::value_type>(root)),
         facts(root),
-        ancestry(ResourceAllocator<decltype(ancestry)::value_type>(root)) {}
+        tiles(root),
+        tile_ancestry(
+            ResourceAllocator<std::shared_ptr<const TileRecord>>(root)) {}
   ResourceString scope;
-  ResultNeedHistory needs;
   ResultInputFacts facts;
-  ResourceVector<
-      std::pair<std::uint32_t, std::shared_ptr<const DependencyBundle>>>
-      ancestry;
+  TileRecord tiles;
+  TileRecords::Snapshot tile_ancestry;
   std::uint64_t weight = 0;
 };
 class ResultCheckpointScope final {

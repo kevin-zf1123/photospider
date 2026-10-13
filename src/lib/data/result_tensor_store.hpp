@@ -28,10 +28,9 @@ struct ResultTensorBacking {
   ResourceVector<ResourceLease> affine_metadata;
   ResourceVector<std::shared_ptr<void>> affine_growth;
   Footprint coverage;
-  ResultRelation relation;
   Status initialize(const ResourceBudget& budget, const ResultTensorSpec& spec,
                     const std::shared_ptr<PlanarPageBudget>& page_budget,
-                    const ResultGrowthLimits& limits, std::uint32_t tile_height,
-                    std::uint32_t tile_width);
+                    const ResultGrowthLimits& limits,
+                    std::uint64_t tile_extent);
 };
 }  // namespace ps::data_internal

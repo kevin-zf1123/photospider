@@ -34,8 +34,6 @@ Malformed expression syntax and invalid static parameters return `InvalidArgumen
 
 [`test_expression_operations.cpp`](../../tests/integration/test_expression_operations.cpp) covers the unsuffixed expression and LUT operations, including grammar and numeric boundaries, endpoint behavior, unit matching, interpolation near precision limits, allocation, and cancellation.
 
-[`examples/foundations_workflow`](../../examples/foundations_workflow/README.md) demonstrates Result-based `numeric`, `expression-lut`, and `generator-gain` workflows. The named-coefficient authoring API and profile examples are in [`examples/numeric_workflow`](../../examples/numeric_workflow/README.md). Direct-binding result cache eligibility is part of the [host cache model](Cache-Model.md).
-
 ```sh
 cmake --build build/kernel-dev --target test_expression_operations photospider_foundations_workflow -j8
 ctest --test-dir build/kernel-dev -R '^(test_expression_operations|test_workflow_expression_lut)$' --output-on-failure

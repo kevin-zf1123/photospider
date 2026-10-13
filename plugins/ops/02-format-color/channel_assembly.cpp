@@ -14,12 +14,13 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "common/registry.hpp"
 #include "core/status_helpers.hpp"
 #include "core/utf8_validation.hpp"
 #include "data/model_coordinates.hpp"
 #include "photospider/data/region_runs.hpp"
 #include "photospider/ops/format/channel_editing.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -724,41 +725,15 @@ Result<OperationPreparation> prepare(
 }
 
 using Poll = Result<ResultProgramPoll>;
-ResultRelation joined(const ResourceBudget& budget,
-                      ResourceVector<ResultRelation> relations) {
-  while (relations.size() > 1) {
-    ResourceVector<ResultRelation> next{
-        ResourceAllocator<ResultRelation>(budget)};
-    for (std::size_t i = 0; i < relations.size(); i += 16) {
-      const auto end = std::min(relations.size(), i + 16);
-      next.push_back(take(ResultRelation::unite(
-          budget, {relations.begin() + i, relations.begin() + end})));
-    }
-    relations = std::move(next);
-  }
-  return relations.front();
-}
-ResultBuilder assembly_builder(const ResultProgramPhase& phase, bool empty) {
+ResultBuilder assembly_builder(const ResultProgramPhase& phase,
+                               bool /*empty*/) {
   auto result = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
-  ResourceVector<ResultRelation> descriptors{
-      ResourceAllocator<ResultRelation>(phase.resources)};
-  if (empty || phase.query.inputs.empty()) {
-    descriptors.push_back(take(ResultRelation::cartesian(
-        phase.resources, 1, {0, 8, 0, 0, ResultSupportTarget::Descriptor, 0})));
-  } else {
-    for (std::uint32_t port = 0; port < phase.query.inputs.size(); ++port)
-      descriptors.push_back(take(ResultRelation::cartesian(
-          phase.resources, 1,
-          {port, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
-  }
-  require(result.bind_descriptor_relation(
-      joined(phase.resources, std::move(descriptors))));
+      phase.query.tile_extent, phase.query.resources));
   return result;
 }
 Poll empty_result(const ResultProgramPhase& phase) try {
@@ -774,12 +749,12 @@ Region span_region(const ResultTensorSpec& output, const Assembly& assembly,
                                                     span.count};
   return Region(std::move(dims));
 }
-std::vector<ResultMappedAxis> mapping(const ResultProgramQuery& query,
-                                      const Assembly& a, const Span& span) {
+std::vector<ResultViewAxis> mapping(const ResultProgramQuery& query,
+                                    const Assembly& a, const Span& span) {
   const auto& source = query.inputs[span.port].result_schema->tensors[0];
   const auto batches = query.output.result_schema->tensors[0].batch_axes.size();
   const auto source_axis = a.axes[span.port];
-  std::vector<ResultMappedAxis> axes(source.sample_shape().size());
+  std::vector<ResultViewAxis> axes(source.sample_shape().size());
   for (std::size_t i = 0; i < axes.size(); ++i) {
     if (a.scalars[span.port]) {
       axes[i].output_axis = -1;
@@ -804,13 +779,12 @@ struct Projected final {
   std::array<std::int64_t, 8> strides{};
 };
 Status unavailable_view() {
-  return core_internal::invalid_schema_domain(
-      "ViewUnavailable: no common affine owner mapping");
+  return {ErrorCode::InvalidArgument, "no common affine owner mapping",
+          FailureReason::ViewUnavailable};
 }
 // Retain the pre-Result whole-query view predicate, including cross-box owners.
 Status generic_view(const ResultProgramPhase& phase, const Assembly& a,
-                    const Footprint& outputs,
-                    const ResourceVector<ResultRelation>& relations) {
+                    const Footprint& outputs) {
   ResourceVector<Projected> views{
       ResourceAllocator<Projected>(phase.resources)};
   const auto& output = phase.query.output.result_schema->tensors[0];
@@ -831,13 +805,10 @@ Status generic_view(const ResultProgramPhase& phase, const Assembly& a,
         auto partitioned =
             execution_internal::ResultWindowAccess::visit_backing_regions(
                 window, phase.resources, [&](const Region& region) {
-                  auto pieces = take(relations[s].preimage(
-                      take(Footprint::from_regions(output.sample_shape(),
-                                                   {box})),
-                      {span.port, 1, 0, 0, ResultSupportTarget::Tensor, 0},
-                      take(Footprint::from_regions(window.spec().sample_shape(),
-                                                   {region}))));
-                  for (const auto& part : pieces.boxes()) {
+                  const auto selected =
+                      format_result::mapped_preimage(box, region, axes);
+                  if (selected) {
+                    const auto& part = *selected;
                     auto source = take(
                         phase.tensors->at({span.port, 0})
                             .acquire(format_result::mapped_region(part, axes),
@@ -925,7 +896,6 @@ struct State final {
   const Assembly* assembly;
   std::uint32_t next_input = 0;
   std::optional<ResultTensorInputs> ready;
-  std::optional<ResourceVector<ResultRelation>> relations;
   Footprint output;
   explicit State(const Assembly* value) : assembly(value) {}
   Poll poll(const ResultProgramPhase& phase) try {
@@ -936,39 +906,38 @@ struct State final {
       ready.emplace(
           std::less<std::pair<std::uint32_t, std::uint32_t>>{},
           ResourceAllocator<ResultTensorInputs::value_type>(phase.resources));
-      relations.emplace(ResourceAllocator<ResultRelation>(phase.resources));
       output = phase.query.tensor_outputs
                    ? *phase.query.tensor_outputs
                    : take(Footprint::all(spec.sample_shape()));
-      for (const auto& span : assembly->spans)
-        relations->push_back(take(ResultRelation::mapped(
-            phase.resources, spec.sample_shape(),
-            span_region(spec, *assembly, span),
-            phase.query.inputs[span.port]
-                .result_schema->tensors[0]
-                .sample_shape(),
-            mapping(phase.query, *assembly, span),
-            {span.port, 1, 0, 0, ResultSupportTarget::Tensor, 0})));
     }
     if (phase.tensors)
       for (const auto& input : *phase.tensors)
         ready->insert_or_assign(input.first, input.second);
     if (next_input < phase.query.inputs.size()) {
       ResultProgramNeed need;
-      while (next_input < phase.query.inputs.size() &&
-             need.tensors.size() < 64) {
+      while (next_input < phase.query.inputs.size() && need.tiles.size() < 64) {
         const auto port = next_input++;
         auto samples = take(Footprint::none(
             phase.query.inputs[port].result_schema->tensors[0].sample_shape()));
-        for (auto s : assembly->by_port[port])
-          require((*relations)[s].project(
-              output, [&](auto, const Footprint* selected) {
-                if (selected)
-                  samples = take(samples.unite(*selected));
-                return Status::success();
-              }));
-        const auto roles = samples.empty() ? 8U : 9U;
-        need.tensors.push_back({port, 0, std::move(samples), roles});
+        for (auto index : assembly->by_port[port]) {
+          const auto& span = assembly->spans[index];
+          const auto clipped =
+              take(output.intersect(take(Footprint::from_regions(
+                  spec.sample_shape(), {span_region(spec, *assembly, span)}))));
+          const auto axes = mapping(phase.query, *assembly, span);
+          for (const auto& box : clipped.boxes())
+            samples = take(samples.unite(take(Footprint::from_regions(
+                samples.shape(), {format_result::mapped_region(box, axes)}))));
+        }
+        const bool descriptor_only = samples.empty();
+        {
+          auto tile_need_0 =
+              sdk::tile_need_for_samples(phase.resources, phase.query, port, 0,
+                                         std::move(samples), descriptor_only);
+          if (!tile_need_0.ok())
+            return Result<ResultProgramPoll>(tile_need_0.status());
+          need.tiles.push_back(tile_need_0.take_value());
+        }
       }
       return Poll(std::move(need));
     }
@@ -977,14 +946,13 @@ struct State final {
     auto result = assembly_builder(phase, false);
     std::string policy = assembly->layout;
     if (!spec.layout.spatial && policy != "materialize") {
-      auto available = generic_view(supplied, *assembly, output, *relations);
+      auto available = generic_view(supplied, *assembly, output);
       if (!available.ok()) {
         if (policy == "view" || !format_result::view_unavailable(available))
           return Poll(available);
         policy = "materialize";
       }
     }
-    auto relation = joined(phase.resources, *relations);
     require(format_result::planes(spec, output, [&](const Region& box) {
       if (spec.layout.spatial && policy != "materialize") {
         ResourceVector<ResultTensorReadWindow> windows{
@@ -1004,8 +972,7 @@ struct State final {
         }
         for (const auto& window : windows)
           sources.push_back(&window);
-        auto status = result.publish_tensor_view(0, box, sources, relation,
-                                                 {true, true, true, true},
+        auto status = result.publish_tensor_view(0, box, sources,
                                                  phase.query.cancellation);
         if (status.ok())
           return status;
@@ -1027,7 +994,7 @@ struct State final {
                        .acquire(format_result::mapped_region(part, axes),
                                 phase.query.cancellation));
           auto status = format_result::publish(
-              supplied, &result, part, window, axes, relation,
+              supplied, &result, part, window, axes,
               spec.layout.spatial ? "materialize" : policy, span.port);
           if (!status.ok())
             return status;
@@ -1045,8 +1012,6 @@ struct ScalarState final {
   std::size_t width = 0;
   Poll poll(const ResultProgramPhase& phase) try {
     auto result = assembly_builder(phase, true);
-    auto relation = take(ResultRelation::cartesian(
-        phase.resources, 1, {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
     require(phase.consume_work(width));
     require(result.publish_tensor_kernel(
         0, Region::whole({1}),
@@ -1057,7 +1022,7 @@ struct ScalarState final {
           std::memcpy(row.value().data, bits.data(), width);
           return Status::success();
         },
-        relation, {true, true, true, true}, phase.query.cancellation));
+        phase.query.cancellation));
     return Poll(ResultPublication{take(result.seal()), true});
   } catch (const Status& status) {
     return Poll(status);
@@ -1103,7 +1068,7 @@ OperationDefinition definition(const std::string& key, int member,
   out.key = "values";
   out.output_schema = port;
   out.result_schema = tensor_ops::scalar_schema();
-  out.region_rule = OperationRegionRule::Dependency;
+  out.region_rule = OperationRegionRule::Tiled;
   out.continuation_bytes = sizeof(State);
   out.maximum_dependency_stages = 17;
   op.prepare_static = [member, profile](const auto& inputs,

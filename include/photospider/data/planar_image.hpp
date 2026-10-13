@@ -77,9 +77,9 @@ struct PHOTOSPIDER_API PlanarImageConfig final {
   std::uint32_t height_axis = 0;
   std::uint32_t width_axis = 1;
   std::optional<std::uint32_t> channel_axis = 2;
-  /** @brief Tile extents must each be a positive power of two (including 1). */
-  std::uint64_t tile_height = 128;
-  std::uint64_t tile_width = 128;
+  /** @brief Square tile extent must be a positive power of two (including 1).
+   */
+  std::uint64_t tile_extent = 128;
   /** @brief Continuous-mode row pitch; zero selects tightly packed rows. */
   std::uint64_t row_pitch_bytes = 0;
   /** @brief Maximum page-backed bytes for this image. */

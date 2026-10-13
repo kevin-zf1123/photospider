@@ -10,7 +10,7 @@ implementation_status: implemented_cpu
 
 # FMT-08: assign and remove semantic interpretation
 
-FMT-08A and FMT-08B currently use Result operation ABI 2 in package 0.30.0,
+FMT-08A and FMT-08B currently use Result operation ABI 3 in package 0.30.0,
 WorkflowDocument 4 and OperationTraits 21. The specification status remains
 Proposed; it is separate from the CPU implementation status. Current execution
 uses one Result tensor and preserves its logical structure and sample bits. The metadata-to-`channel.extract` configuration/resource chain

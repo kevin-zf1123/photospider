@@ -1,7 +1,5 @@
 # 几何变换、重采样与液化
 
-`image.stmap` 当前提供 CPU Result 路径：source 为 `photospider.image` v1/member `pixels`、batch axes `[F,L]`、Float32 cell shape `[Hs,Ws,4]`；map 为无 fields 的单 tensor Result，可使用任意结构有效的 schema/member key，Float64 cell shape `[Ho,Wo,2]`；batch 可为空以广播，也可与 source 相同。它输出同 frame/layer shape 的 canonical image Result，支持 bilinear 与 `constant`、`clamp`、`wrap`、`reflect`、`mirror` 五种显式边界。`numeric.radius_gather` 和 `numeric.radius_scatter` 当前接收 unbatched rank-one Float64 source Result 与 Int64 radius Result，输出 `photospider.tensor` v1/member `samples` Result；见[采样契约](../../kernel-architecture/Dependency-Sampling.md)。`image.split_horizontal` 提供命名多输出及偏移 Region。见[多输出](../../kernel-architecture/Multi-Output-Operations.md)。下面 validity、其他核、map 生成/合成及液化仍为扩展需求。
-
 状态Proposed。基础inverse sampler、affine与map合成为D1；非线性网格、逆解与高质量footprint为D2。向量场为Float32/64 `[Hout,Wout,2]`，不是颜色图像。默认像素边界坐标，中心 `(x+.5,y+.5)`；向量分量x,y，数组y,x,c。
 
 核心为`Iout(p)=sample(Iin,M(p))`，M从输出坐标映到输入。OpenCV公开几何变换也以反向取样区分插值与域外扩展；接入其整数像素中心坐标需要±.5适配。[^opencv]

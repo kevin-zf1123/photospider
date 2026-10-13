@@ -1,7 +1,5 @@
 # 候选依赖与实现方式选择
 
-候选调查保留研究日 2026-09-09 的版本/许可快照，本次未刷新外部资料。2026-09-13 本地状态：现有 FFT 使用内建 external-axis recipe，无外部 FFT 依赖；当前 ops-specs 的 PNT-05A 有可选 pinned OpenCV 4.12.0 adapter 和保留来源许可的 native 移植，见[实现说明](../09-composite/inpaint-ns-implementation.md)。其余候选不表示项目已安装、接受或验证。具体平台、性能、附加codec/model许可与安装消费需要在相关实现切片中确认。
-
 | 组件 | 已核验版本 / 许可标识 | 可承接职责 | 必须适配的边界 |
 | --- | --- | --- | --- |
 | LibRaw | 0.22.2，2026-07-16；LGPL-2.1或CDDL-1.0 | RAW decode/metadata | 项目明确不以生产级完整RAW渲染为目标；已扣黑/WB状态、相机支持子集[^raw] |

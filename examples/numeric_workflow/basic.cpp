@@ -63,13 +63,6 @@ int main() {
     const auto field_schema = numeric(ElementType::Float32, {2, 2});
     const auto table_schema = numeric(ElementType::Float32, {2});
     const auto controls_schema = numeric(ElementType::Float64, {3, 2});
-    auto rgba_schema = numeric(ElementType::Float32, {2, 2, 4});
-    rgba_schema.id = "photospider.image";
-    auto& rgba = rgba_schema.tensors[0];
-    rgba.key = "pixels";
-    rgba.batch_axes = {1, 1};
-    rgba.layout.spatial = true;
-    rgba.facets = {take(encode_semantic(rgba_semantics()))};
     WorkflowDocument document;
     ExecutionBindings bindings;
     auto bind = [&](std::uint64_t id, const char* name,
@@ -86,10 +79,6 @@ int main() {
     bind(2, "table", table_schema, source<float>(root, table_schema, {0, 2}));
     bind(3, "controls", controls_schema,
          source<double>(root, controls_schema, {0, 0, .5, .25, 1, 1}));
-    bind(4, "rgba", rgba_schema,
-         source<float>(root, rgba_schema,
-                       {1, .5F, .25F, 1, 1, .5F, .25F, 1, 1, .5F, .25F, 1, 1,
-                        .5F, .25F, 1}));
     const std::map<std::string, ParameterValue> domain = {
         {"domain_min", 0.},
         {"domain_max", 1.},
@@ -105,22 +94,6 @@ int main() {
          "field.apply_lut_1d",
          {WorkflowNodeOutput{10, "value"}, WorkflowInputReference{2}},
          domain},
-        {12,
-         "grade.levels",
-         {WorkflowNodeOutput{11, "value"}},
-         {{"black", 0.},
-          {"white", 2.},
-          {"gamma", 1.},
-          {"out_min", 0.},
-          {"out_max", 1.}}},
-        {13,
-         "analysis.histogram",
-         {WorkflowNodeOutput{12, "value"}},
-         {{"range_min", 0.}, {"range_max", 1.}, {"bins", INT64_C(4)}}},
-        {14,
-         "analysis.histogram_out_of_range",
-         {WorkflowNodeOutput{12, "value"}},
-         {{"range_min", 0.}, {"range_max", 1.}}},
         {15,
          "curve.sample_linear",
          {WorkflowInputReference{3}},
@@ -128,41 +101,30 @@ int main() {
         {16,
          "curve.sample_monotone",
          {WorkflowInputReference{3}},
-         curve_parameters},
-        {17,
-         "image.mask",
-         {WorkflowInputReference{4}, WorkflowNodeOutput{10, "value"}},
-         {}}};
-    document.outputs = {{"coverage", 10, "value"}, {"levels", 12, "value"},
-                        {"bins", 13, "value"},     {"outside", 14, "value"},
-                        {"linear", 15, "value"},   {"monotone", 16, "value"},
-                        {"masked", 17, "value"}};
+         curve_parameters}};
+    document.outputs = {{"coverage", 10, "value"},
+                        {"lut", 11, "value"},
+                        {"linear", 15, "value"},
+                        {"monotone", 16, "value"}};
     GraphContext graph(document);
     auto compiled = take(Compiler(registry).compile(graph));
     auto result = take(context.execute(compiled.plan, bindings));
     const float coverage[] = {0, 0, .5F, 1};
-    const std::int64_t counts[] = {2, 0, 1, 1};
     const double linear[] = {0, .125, .25, .625, 1};
     const double monotone[] = {0, .078125, .25, .546875, 1};
     for (std::uint64_t i = 0; i < 4; ++i) {
       if (sample<float>(result.results.at("coverage"), {0, 0, i / 2, i % 2}) !=
               coverage[i] ||
-          sample<float>(result.results.at("levels"), {0, 0, i / 2, i % 2}) !=
-              coverage[i] ||
-          sample<float>(result.results.at("masked"), {0, 0, i / 2, i % 2, 3}) !=
-              coverage[i] ||
-          sample<std::int64_t>(result.results.at("bins"), {i}) != counts[i])
+          sample<float>(result.results.at("lut"), {0, 0, i / 2, i % 2}) !=
+              2 * coverage[i])
         throw std::runtime_error("basic composed workflow oracle failed");
     }
     for (std::uint64_t i = 0; i < 5; ++i)
       if (sample<double>(result.results.at("linear"), {i}) != linear[i] ||
           sample<double>(result.results.at("monotone"), {i}) != monotone[i])
         throw std::runtime_error("curve oracle failed");
-    for (std::uint64_t i = 0; i < 2; ++i)
-      if (sample<std::int64_t>(result.results.at("outside"), {i}) != 0)
-        throw std::runtime_error("out-of-range oracle failed");
-    std::cout << "coverage=[0,0,.5,1] bins=[2,0,1,1] outside=[0,0] "
-                 "linear/PCHIP/masked_alpha=passed backend=cpu\n";
+    std::cout << "coverage=[0,0,.5,1] lut=[0,0,1,2] "
+                 "linear/PCHIP=passed backend=cpu\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

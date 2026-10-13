@@ -10,13 +10,6 @@ operation；raw numeric tensor 不会自动增加图像语义。Whole/GPU 请求
 tiled 使用精确 Neighborhood Data relation、独立 Validation 闭包和
 IndependentChunks，并在多个 tile poll 间复用系数 owner。
 
-native Metal Result 测试及安装消费检查通过。Whole、tiled 和 Metal oracle
-各通过 94 个 workflow、707 个输出 words；系数 oracle 通过 312 个用例。
-typed Result 检查覆盖 batch axes、下游 image split、tuple closure、ROI support、
-请求外 batch NaN、Empty 和 Result context 销毁后访问。具体
-参数、数值与错误契约见 [Gaussian 实现说明](gaussian-implementation.md)。
-FIL-04B 数学规格仍为 Proposed。
-
 Gaussian 的 x_axis/y_axis 索引完整 sample shape，包含 batch-axis 前缀。对 RGBA
 shape {N,L,H,W,4}，使用 y_axis=2、x_axis=3。参数、边界和资源契约见英文实现说明。
 

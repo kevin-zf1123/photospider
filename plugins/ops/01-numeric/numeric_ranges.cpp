@@ -11,7 +11,7 @@
 #include "01-numeric/exact_ratio.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "photospider/core/resource_allocator.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "common/registry.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal {

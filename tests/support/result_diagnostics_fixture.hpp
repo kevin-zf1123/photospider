@@ -23,18 +23,12 @@ struct BroadcastResult final {
     std::memcpy(storage.data(), &scalar, sizeof(scalar));
     auto builder = take(ps::ResultBuilder::start(phase.resources, schema,
                                                  phase.query.semantic_key));
-    check(builder.bind_descriptor_relation(
-        take(ps::ResultRelation::cartesian(phase.resources, 1, {}))));
     auto backing = std::move(storage).freeze();
     for (std::uint32_t slot = 0; slot < schema.tensors.size(); ++slot) {
       const auto shape = schema.tensors[slot].sample_shape();
-      auto count = schema.tensors[slot].sample_count();
       check(builder.publish_tensor(
           slot, ps::Region::whole(shape),
-          {0, std::vector<std::int64_t>(shape.size(), 0)}, backing,
-          take(ps::ResultRelation::cartesian(
-              phase.resources, count.ok() ? count.value() : UINT64_MAX, {})),
-          {true, true, true, true}));
+          {0, std::vector<std::int64_t>(shape.size(), 0)}, backing));
     }
     return ps::Result<ps::ResultProgramPoll>(
         ps::ResultPublication{take(builder.seal()), true});
@@ -46,7 +40,6 @@ inline int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape,
   auto registry = std::make_shared<ps::OperationRegistry>();
   ps::OperationDefinition operation;
   operation.key = "fixture.fixed_broadcast";
-  operation.traits.estimated_bytes = sizeof(double);
   auto schema = multi_result::schema(ps::ElementType::Float64, shape);
   if (extra_tensor) {
     auto extra = multi_result::schema().tensors[0];
@@ -62,7 +55,6 @@ inline int verify_cpp_fixed_broadcast(const std::vector<std::uint64_t>& shape,
   PS_CHECK(registry->register_operation(std::move(operation)).ok());
   auto copied_traits = registry->find_traits("fixture.fixed_broadcast");
   PS_CHECK(copied_traits.ok());
-  PS_CHECK(copied_traits.value().estimated_bytes == sizeof(double));
   PS_CHECK(copied_traits.value()
                .outputs[0]
                .result_schema->tensors[0]

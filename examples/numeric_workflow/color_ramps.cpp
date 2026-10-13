@@ -398,8 +398,7 @@ void rgb_failure_isolation(ps::CpuNumericProfile profile) {
     execution.dependencies.maximum_work = 100000000;
     auto wanted = take(
         ps::Footprint::from_regions({3, 4}, {ps::Region({{0, 3}, {0, 1}})}));
-    for (bool joint : {false, true}) {
-      execution.enable_joint = joint;
+    {
       auto result = context.execute_fragments(
           take(context.freeze(compiled.plan, bindings)), {{"colors", wanted}},
           {}, execution);

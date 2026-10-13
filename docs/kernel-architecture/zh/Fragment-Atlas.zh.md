@@ -42,7 +42,7 @@ class FragmentAtlasPlan final {
 
 `preparation_work()` 报告通用目录规划工作，`materialization_work()` 报告通用 packing 工作。`ResultTensorInput` overload 还会通过 `FootprintLimits::consume_work` 计入 window acquisition 和 read-bound 工作，因此 `materialization_work()` 不代表其完整计费。`ValueFragments` overload 保留调用方原有的外部计费方式。
 
-`ResultTensorInput` 可以由单个 source Result 支持，也可以包含 structured C2 producer 的 tensor Need 展开为 singleton-atom 请求后形成的私有 pieces。Atlas 的准备和物化只使用该 capability 获准的 sample coverage。复合 capability 没有单一 Result 身份（`object_id() == 0`），但这既不使获准 pieces 无效，也不会增加读取权限。输入 windows 在 atlas 打包请求 samples 期间保留原始 Result owners；物化后的 atlas 独立拥有 packed buffers。此路径处理 tensor Need，不聚合 object 或 field support。Descriptor-only Empty C2 输入不受此路径支持。
+`ResultTensorInput` 可以由单个 source Result 支持。Atlas 的准备和物化只使用该 capability 获准的 sample coverage。输入 windows 在 atlas 打包请求 samples 期间保留原始 Result owners；物化后的 atlas 独立拥有 packed buffers。此路径处理 tensor Need，不聚合 object 或 field support。
 
 目录 slot 数为 2 的幂，至少为 2 且至少为占用 tile 数的两倍，使用开放寻址和线性探测。每个 slot 为 80 字节 little-endian：0..63 是八个 uint64 tile 坐标（未使用轴为零），64..71 为 uint64 有效样本 mask（零表示空 slot），72..79 为 uint64 payload 字节偏移。
 
@@ -60,7 +60,7 @@ Native callback 使用配置的同步 invocation。Host 在 dispatch 排空前�
 
 C Result bridge 使用相同的 Need-scoped atlas。Atlas buffer tokens 和 dispatch services 仅在 active poll 内借用；释放 token pair 中任一成员会使整对失效，下一次获取返回新 handle。Host 在 publication 时冻结转交的 output scratch，旧 writable token 之后不能修改已发布字节。每个 Result output 仍记录自己的当前 association 和 dependency evidence。
 
-只有 operation 允许 CPU fallback 且失败是符合条件的 `BackendUnavailable` 时，同步 GPU attempt 才会重试 CPU。CPU attempt 开始前先排空 GPU invocation。Cancellation、stale state、protocol error、已发布 output 和其他不可重试错误不会转为 CPU retry。Result cache retention 与 active producer sharing 独立于 fallback 决策。
+只有 operation 允许 CPU fallback 且失败是符合条件的 `BackendUnavailable` 时，同步 GPU attempt 才会重试 CPU。CPU attempt 开始前先排空 GPU invocation。Cancellation、stale state、protocol error、已发布 output 和其他不可重试错误不会转为 CPU retry。Result cache retention 独立于 fallback 决策。
 
 当前 integration 源码检查 transport 与失败边界：
 

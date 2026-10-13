@@ -39,7 +39,7 @@ bool expected(const Status& status, unsigned mode, bool sticky) {
          status.message == message;
 }
 struct Counts {
-  unsigned polls = 0, destroyed = 0, scalar_starts = 0, joint_starts = 0;
+  unsigned polls = 0, destroyed = 0, scalar_starts = 0;
 };
 struct ThrowingState {
   unsigned mode;
@@ -59,27 +59,8 @@ struct ThrowingState {
     raise(mode);
   }
 };
-struct ThrowingJoint {
-  unsigned mode;
-  bool sticky;
-  Counts* counts;
-  ThrowingJoint(unsigned mode, bool sticky, Counts* counts)
-      : mode(mode), sticky(sticky), counts(counts) {}
-  ~ThrowingJoint() { ++counts->destroyed; }
-  Result<ResourceVector<ResultJointOutcome>> poll(
-      const ResultJointPhase& phase) {
-    ++counts->polls;
-    if (sticky) {
-      auto rejected = phase.allocator.allocate(9);
-      if (rejected.ok())
-        return Result<ResourceVector<ResultJointOutcome>>(
-            Status{ErrorCode::Internal, "expected bounded allocator failure"});
-    }
-    raise(mode);
-  }
-};
-OperationDefinition definition(unsigned mode, bool start, unsigned joint,
-                               bool sticky, Counts* counts) {
+OperationDefinition definition(unsigned mode, bool start, bool sticky,
+                               Counts* counts) {
   OperationDefinition op;
   op.key = "test.result_exception";
   op.traits.outputs = {multi_result::output("value")};
@@ -97,29 +78,9 @@ OperationDefinition definition(unsigned mode, bool start, unsigned joint,
     return ResultContinuation::make<ThrowingState>(allocator, mode, sticky,
                                                    counts);
   };
-  if (joint) {
-    op.traits.outputs.push_back(op.traits.outputs[0]);
-    op.traits.outputs[1].key = "right";
-    op.traits.joint_contract = joint;
-    if (joint == 2)
-      for (auto& output : op.traits.outputs)
-        output.failure_delivery = FailureDelivery::PerAtomOutcome;
-    op.traits.joint_continuation_bytes = sizeof(ThrowingJoint);
-    op.traits.joint_workspace_bytes = 8;
-    op.start_result_joint = [=](const auto&, const BufferAllocator& allocator) {
-      ++counts->joint_starts;
-      if (start) {
-        if (sticky)
-          static_cast<void>(allocator.allocate(sizeof(ThrowingJoint) + 1));
-        raise(mode);
-      }
-      return ResultJointContinuation::make<ThrowingJoint>(allocator, mode,
-                                                          sticky, counts);
-    };
-  }
   return op;
 }
-int direct(unsigned mode, bool start, unsigned joint, bool sticky,
+int direct(unsigned mode, bool start, bool sticky,
            bool throwing_observer = false) {
   Counts counts;
   ResourceBudget root;
@@ -127,8 +88,7 @@ int direct(unsigned mode, bool start, unsigned joint, bool sticky,
     ResourceAllocationScope scope(root);
     OperationRegistry registry;
     PS_CHECK(
-        registry
-            .register_operation(definition(mode, start, joint, sticky, &counts))
+        registry.register_operation(definition(mode, start, sticky, &counts))
             .ok());
     PS_CHECK(registry.freeze().ok());
     ResultProgramMetadata metadata;
@@ -139,84 +99,114 @@ int direct(unsigned mode, bool start, unsigned joint, bool sticky,
     query.semantic_key = "test.result_exception.left";
     query.snapshot_identity = "exception.snapshot";
     ResultObjectInputs objects;
-    ResourceVector<ResultIoReply> io;
     auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
     auto allocator = root.allocator().limited(8, [failure](ErrorCode code) {
       auto ok = ErrorCode::Ok;
       failure->compare_exchange_strong(ok, code);
     });
     ResultProgramPhase phase{
-        query,  objects,
-        io,     allocator,
-        root,   [&](std::uint64_t amount) { return root.consume({amount}); },
+        query,
+        objects,
+        allocator,
+        root,
+        [&](std::uint64_t amount) { return root.consume({amount}); },
         failure};
     if (throwing_observer) {
       phase.failure_observer = [](const Status&) {
         throw std::runtime_error("observer must not replace producer failure");
       };
     }
-    if (!joint) {
-      auto begun = registry.start_result("test.result_exception", query,
-                                         root.allocator());
-      if (start) {
-        PS_CHECK(!begun.ok() && expected(begun.status(), mode, sticky));
-      } else {
-        PS_CHECK(begun.ok());
-        auto continuation = begun.take_value();
-        auto polled = continuation.poll(phase);
-        PS_CHECK(!polled.ok() && expected(polled.status(), mode, sticky));
-        auto repeated = continuation.poll(phase);
-        PS_CHECK(!repeated.ok() &&
-                 repeated.status().code == polled.status().code);
-        PS_CHECK(counts.polls == 1);
-      }
+    auto begun =
+        registry.start_result("test.result_exception", query, root.allocator());
+    if (start) {
+      PS_CHECK(!begun.ok() && expected(begun.status(), mode, sticky));
     } else {
-      auto right = query;
-      right.output_index = 1;
-      right.semantic_key = "test.result_exception.right";
-      ResourceVector<ResultProgramQuery> queries{query, right};
-      auto begun =
-          registry.start_result_joint("test.result_exception", queries, root);
-      if (start) {
-        PS_CHECK(!begun.ok() && expected(begun.status(), mode, sticky));
-      } else {
-        PS_CHECK(begun.ok());
-        auto continuation = begun.take_value();
-        auto right_failure =
-            std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
-        ResultProgramPhase right_phase{
-            right,        objects, io, allocator, root, phase.consume_work,
-            right_failure};
-        ResourceVector<const ResultProgramPhase*> members{&phase, &right_phase};
-        auto group_allocator = root.allocator();
-        ResultJointPhase grouped{members, group_allocator, phase.consume_work};
-        auto polled = continuation.poll(grouped);
-        PS_CHECK(!polled.ok() && expected(polled.status(), mode, sticky));
-        auto repeated = continuation.poll(grouped);
-        PS_CHECK(!repeated.ok() && expected(repeated.status(), mode, sticky));
-        PS_CHECK(counts.polls == 1);
-      }
+      PS_CHECK(begun.ok());
+      auto continuation = begun.take_value();
+      auto polled = continuation.poll(phase);
+      PS_CHECK(!polled.ok() && expected(polled.status(), mode, sticky));
+      auto repeated = continuation.poll(phase);
+      PS_CHECK(!repeated.ok() &&
+               repeated.status().code == polled.status().code);
+      PS_CHECK(counts.polls == 1);
     }
   }
   PS_CHECK(counts.destroyed == (start ? 0U : 1U));
-  PS_CHECK(joint ? counts.joint_starts == 1 && counts.scalar_starts == 0
-                 : counts.scalar_starts == 1 && counts.joint_starts == 0);
+  PS_CHECK(counts.scalar_starts == 1);
   PS_CHECK(root.statistics().live[ResourceKind::Payload] == 0);
   return 0;
 }
-int workflow(unsigned mode, bool start, unsigned joint, bool sticky) {
+struct ServiceFailure {
+  unsigned mode;
+  Counts* counts;
+  ServiceFailure(unsigned mode, Counts* counts) : mode(mode), counts(counts) {}
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    ++counts->polls;
+    double value = 0;
+    auto failed = phase.read_tensor(0, 0, {0}, &value, sizeof(value));
+    if (mode == 0)
+      return Result<ResultProgramPoll>(failed);
+    if (mode == 1)
+      return Result<ResultProgramPoll>(ResultProgramNeed{});
+    return Result<ResultProgramPoll>(
+        Status{ErrorCode::ResourceExhausted, "later callback failure"});
+  }
+};
+int direct_service_failure(unsigned mode) {
+  ResourceBudget root;
+  ResourceAllocationScope scope(root);
+  Counts counts;
+  OperationRegistry registry;
+  OperationDefinition op;
+  op.key = "test.service_failure";
+  op.traits.outputs = {multi_result::output("value")};
+  op.traits.outputs[0].region_rule = OperationRegionRule::Whole;
+  op.traits.outputs[0].continuation_bytes = sizeof(ServiceFailure);
+  op.start_result = [&](const auto&, const auto& allocator) {
+    return ResultContinuation::make<ServiceFailure>(allocator, mode, &counts);
+  };
+  PS_CHECK(registry.register_operation(std::move(op)).ok());
+  ResultProgramMetadata metadata;
+  metadata.output.result_schema =
+      std::make_shared<const SchemaTemplate>(multi_result::schema());
+  const std::map<std::string, ParameterValue> parameters;
+  ResultProgramQuery query(metadata, parameters);
+  query.semantic_key = "direct.service";
+  auto continuation = take(
+      registry.start_result("test.service_failure", query, root.allocator()));
+  ResultObjectInputs inputs;
+  const auto allocator = root.allocator();
+  auto failure = std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok);
+  ResultProgramPhase phase{
+      query,
+      inputs,
+      allocator,
+      root,
+      [&](std::uint64_t work) { return root.consume({work}); },
+      failure};
+  auto result = continuation.poll(phase);
+  PS_CHECK(!result.ok() && result.status().code == ErrorCode::InvalidArgument);
+  if (mode == 0) {
+    PS_CHECK(result.status().reason == FailureReason::UnauthorizedRead);
+    PS_CHECK(result.status().detail.origin == FailureOrigin::Protocol);
+    PS_CHECK(result.status().detail.scope == FailureScope::Group);
+    PS_CHECK(result.status().message == "missing authorized image input");
+  }
+  PS_CHECK(continuation.poll(phase).status().code ==
+           ErrorCode::InvalidArgument);
+  PS_CHECK(counts.polls == 1);
+  return 0;
+}
+int workflow(unsigned mode, bool start, bool sticky) {
   Counts counts;
   auto registry = std::make_shared<OperationRegistry>();
   PS_CHECK(
-      registry
-          ->register_operation(definition(mode, start, joint, sticky, &counts))
+      registry->register_operation(definition(mode, start, sticky, &counts))
           .ok());
   PS_CHECK(registry->freeze().ok());
   WorkflowDocument doc;
   doc.nodes = {{1, "test.result_exception", {}, {}}};
   doc.outputs = {{"value", 1, "value"}};
-  if (joint)
-    doc.outputs.push_back({"right", 1, "right"});
   GraphContext graph(doc);
   auto plan = take(Compiler(registry).compile(graph));
   ExecutionContextConfig config;
@@ -226,15 +216,14 @@ int workflow(unsigned mode, bool start, unsigned joint, bool sticky) {
   for (unsigned repeat = 0; repeat < 2; ++repeat) {
     auto result = context.execute(plan.plan);
     if (result.ok() || !expected(result.status(), mode, sticky))
-      std::cerr << "mode=" << mode << " start=" << start << " joint=" << joint
-                << " sticky=" << sticky
+      std::cerr << "mode=" << mode << " start=" << start << " sticky=" << sticky
                 << " code=" << static_cast<unsigned>(result.status().code)
                 << " reason=" << static_cast<unsigned>(result.status().reason)
                 << " message=" << result.status().message << '\n';
     PS_CHECK(!result.ok() && expected(result.status(), mode, sticky));
   }
   auto root = take(context.resource_budget());
-  PS_CHECK(joint ? counts.joint_starts >= 2 : counts.scalar_starts == 2);
+  PS_CHECK(counts.scalar_starts == 2);
   PS_CHECK(root.statistics().live[ResourceKind::Payload] == 0);
   return 0;
 }
@@ -242,13 +231,14 @@ int workflow(unsigned mode, bool start, unsigned joint, bool sticky) {
 int main() try {
   for (unsigned mode = 0; mode < 4; ++mode)
     for (bool start : {false, true})
-      for (unsigned joint : {0U, 1U, 2U})
-        for (bool sticky : {false, true}) {
-          PS_CHECK(direct(mode, start, joint, sticky) == 0);
-          PS_CHECK(workflow(mode, start, joint, sticky) == 0);
-        }
-  PS_CHECK(direct(0, false, 0, false, true) == 0);
-  PS_CHECK(direct(0, false, 0, true, true) == 0);
+      for (bool sticky : {false, true}) {
+        PS_CHECK(direct(mode, start, sticky) == 0);
+        PS_CHECK(workflow(mode, start, sticky) == 0);
+      }
+  for (unsigned mode = 0; mode < 3; ++mode)
+    PS_CHECK(direct_service_failure(mode) == 0);
+  PS_CHECK(direct(0, false, false, true) == 0);
+  PS_CHECK(direct(0, false, true, true) == 0);
   return 0;
 } catch (const std::exception& error) {
   std::cerr << error.what() << '\n';

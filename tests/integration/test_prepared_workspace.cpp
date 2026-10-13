@@ -26,16 +26,13 @@ struct Computation final {
     *output.data() = size ? scratch.data()[size - 1] : 0;
     if (completed)
       ++*completed;
-    auto builder = take(ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, {}, phase.query.tile_height,
-        phase.query.tile_width, phase.query.resources));
-    check(builder.bind_descriptor_relation(
-        take(ResultRelation::cartesian(phase.resources, 1, {}))));
-    check(builder.publish_tensor(
-        0, Region::whole({1}), {0, {1}}, std::move(output).freeze(),
-        take(ResultRelation::cartesian(phase.resources, 1, {})),
-        {true, true, true, true}));
+    auto builder = take(
+        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
+                             phase.query.semantic_key, {}, {},
+                             phase.query.tile_extent, phase.query.resources));
+
+    check(builder.publish_tensor(0, Region::whole({1, 1}), {0, {1, 1}},
+                                 std::move(output).freeze()));
     return Result<ResultProgramPoll>(
         ResultPublication{take(builder.seal()), true});
   } catch (const multi_result::Failure& failure) {
@@ -47,7 +44,9 @@ int main() {
   auto registry = std::make_shared<OperationRegistry>();
   unsigned completed_whole = 0;
   unsigned preparations = 0;
-  const auto schema = multi_result::schema(ElementType::UInt8);
+  auto schema = multi_result::schema(ElementType::UInt8, {1, 1});
+  schema.tensors[0].layout.spatial = true;
+  schema.tensors[0].layout.channel_axis.reset();
   for (bool tiled : {false, true}) {
     OperationDefinition operation;
     operation.key = tiled ? "test.prepared_tile" : "test.prepared_whole";
@@ -62,7 +61,7 @@ int main() {
     output.output_schema.result_schema_version = schema.version;
     output.result_schema = schema;
     output.region_rule =
-        tiled ? OperationRegionRule::Dependency : OperationRegionRule::Whole;
+        tiled ? OperationRegionRule::Tiled : OperationRegionRule::Whole;
     output.continuation_bytes = sizeof(Computation);
     output.maximum_dependency_stages = 1;
     operation.start_result = [&, tiled](const ResultProgramQuery&,
@@ -102,6 +101,8 @@ int main() {
       GraphContext graph(document);
       auto compiled = Compiler(registry).compile(graph);
       PS_CHECK(compiled.ok());
+      PS_CHECK(compiled.value().plan.steps()[0].tiled ==
+               (std::string(key) == "test.prepared_tile"));
       const auto preparations_before_execution = preparations;
       for (unsigned repeat = 0; repeat < 2; ++repeat) {
         auto result = context.execute(compiled.value().plan);
@@ -112,8 +113,8 @@ int main() {
         auto descriptor = output.descriptor();
         PS_CHECK(descriptor.ok());
         std::uint8_t observed = 255;
-        PS_CHECK(
-            output.read_tensor(descriptor.value(), 0, {0}, &observed, 1).ok());
+        PS_CHECK(output.read_tensor(descriptor.value(), 0, {0, 0}, &observed, 1)
+                     .ok());
         PS_CHECK(observed == (bytes ? 17 : 0));
         PS_CHECK(preparations == preparations_before_execution);
       }

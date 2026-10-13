@@ -9,7 +9,7 @@ int main(int argc, char** argv) {
   try {
     std::string scenario = "all";
     if (argc == 2 && std::string(argv[1]) == "--help") {
-      std::cout << "--scenario all|numeric|expression-lut|generator-gain\n";
+      std::cout << "--scenario all|numeric|expression-lut\n";
       return 0;
     }
     if (argc != 1) {
@@ -19,8 +19,7 @@ int main(int argc, char** argv) {
     }
     const std::vector<std::pair<std::string, void (*)()>> scenes = {
         {"numeric", foundations::numeric},
-        {"expression-lut", foundations::expressions},
-        {"generator-gain", foundations::generator_gain}};
+        {"expression-lut", foundations::expressions}};
     unsigned ran = 0;
     for (const auto& scene : scenes)
       if (scenario == "all" || scenario == scene.first) {

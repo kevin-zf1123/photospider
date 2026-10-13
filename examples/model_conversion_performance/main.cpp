@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../channel_extraction_workflow/source.hpp"
+#include "../common/tile_request.hpp"
 #include "02-format-color/model_math.hpp"
 #include "02-format-color/model_simd.hpp"
 #include "photospider/ops.hpp"
@@ -309,14 +310,15 @@ void run_graph(const Options& o, const m::MathConfig& math, Report& r) {
   GraphContext graph(document);
   Compiler compiler(registry);
   PlanningOptions planning;
-  planning.tile_height = planning.tile_width = o.tile;
+  planning.tile_extent = o.tile;
   const std::uint64_t output_channels = (kind == 16 || kind >= 18) ? 1 : 3;
   const auto roi = Region({{0, o.height},
                            {0, o.roi_width ? o.roi_width : o.width},
                            {0, output_channels}});
-  planning.output_regions = {{"result", roi}};
   const auto begin = Clock::now();
   auto plan = take(compiler.compile(graph, planning));
+  plan.plan =
+      take(workflow_example::select_tiles(root, plan.plan, "result", roi));
   r.compile_us = micros(begin);
   ExecutionOptions options;
   options.dependencies.maximum_work = o.work;

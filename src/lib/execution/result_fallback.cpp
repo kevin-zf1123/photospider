@@ -34,12 +34,4 @@ bool ResultFallbackState::can_retry_poll(
           operation_failure == ErrorCode::BackendUnavailable) &&
          retryable_host_failure && host_latch.backend_retry_allowed();
 }
-bool ResultFallbackState::optional_joint_failure(const Status& failure) {
-  return failure.code != ErrorCode::Cancelled &&
-         failure.code != ErrorCode::Stale &&
-         failure.detail.origin != FailureOrigin::Protocol &&
-         failure.detail.origin != FailureOrigin::Domain &&
-         failure.detail.origin != FailureOrigin::Schema &&
-         failure.detail.scope == FailureScope::Unspecified;
-}
 }  // namespace ps::execution_internal

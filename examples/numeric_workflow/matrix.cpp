@@ -729,9 +729,10 @@ void prepared_rebinding(ps::CpuNumericProfile profile) {
   auto demand = take(context.open_demand(compiled.plan, fresh));
   const auto before = take(demand.request(query, {}, options));
   const auto repeated = take(demand.request(query, {}, options));
-  require(before.results.at("values").object_id() ==
-              repeated.results.at("values").object_id(),
-          "same matrix demand retains its completed Result");
+  require(repeated.diagnostics.cache_hits > 0 &&
+              numeric_result_fixture::bytes(before.results.at("values")) ==
+                  numeric_result_fixture::bytes(repeated.results.at("values")),
+          "repeated demand reuses bounded completed cache with identical bits");
   auto replacement = array(Type::Float64, {2, 2},
                            {0x4000000000000000, 0, 0, 0x4008000000000000});
   fresh.inputs[1].result = point_math_checks::source(

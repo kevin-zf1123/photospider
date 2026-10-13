@@ -1,7 +1,5 @@
 # 数值分析与示波器
 
-`analysis.histogram` 和 `analysis.histogram_out_of_range` 是独立的 Float32/Float64 Field Result 算子，输出 generic Int64 Result：分别为 dense `[bins]` 计数与 underflow/overflow `[2]` 计数。它们按显式有限范围统计，是 Whole 运算；shape、字段 facets、参数和 Result 输入契约见[基础算子实现](../../kernel-architecture/Basic-Operations.md)。这与分页整数链 `statistics.histogram/parameters/grade` 不同，后者使用 Int64 bin-domain 与 UInt8 mask，见[Integer statistics](../../kernel-architecture/Integer-Statistics.md)。FFT Spectrum 与实投影已交付；PSD、scope render 等仍为扩展需求。
-
 已实现的基础子集、精确参数和 Region 见[基础算子实现](../../kernel-architecture/Basic-Operations.md)；未标注实现的扩展条目保持 Proposed。分类表中的建议参数不覆盖现有接口。
 
 状态Proposed。统计、直方图、频谱和明确坐标的scope为D1数学核心，复杂相似性、光学测量与交互图为D2。输出先是数值结果，`scope.render`再产生可显示图像。scope亮度/颜色/网格不能改变底层统计。

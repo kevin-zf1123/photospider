@@ -9,9 +9,10 @@
 
 #include "01-numeric/exact_bake_error.hpp"
 #include "01-numeric/lut3d_bake_common.hpp"
-#include "data/dependency_metadata.hpp"
+#include "common/registry.hpp"
+#include "common/typed_need_validation.hpp"
 #include "data/lut3d_bake_validation.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -125,7 +126,6 @@ Result<std::vector<OperationOutputSpecialization>> specialize(
 }
 struct MeasureState {
   unsigned stage = 0;
-  std::shared_ptr<const dependency_internal::MetadataOwner> phase_metadata;
   std::uint64_t row = 0, batch = 0;
   Lut3dBakeReport report;
   numeric_ops::ExactBakeError arithmetic;
@@ -133,17 +133,6 @@ struct MeasureState {
   ColorModel input_model = ColorModel::Rgb, output_model = ColorModel::Rgb;
   std::uint64_t atol = 0, rtol = 0;
   ResultBuilder builder;
-  Result<ResultRelation> relation(const ResultProgramPhase& phase,
-                                  std::uint64_t count) {
-    std::vector<ResultSupport> supports;
-    for (unsigned i = 0; i < 6; ++i) {
-      supports.push_back({i, 5, 0,
-                          elements(tensor_descriptor(phase.query.inputs[i])),
-                          ResultSupportTarget::Tensor, 0});
-      supports.push_back({i, 8, 0, 1, ResultSupportTarget::Descriptor, 0});
-    }
-    return global_relation(phase, count, supports);
-  }
   Poll need(const ResultProgramPhase& phase) {
     batch = std::min<std::uint64_t>(
         kMeasureRows, tensor_descriptor(phase.query.inputs[3]).shape[0] - row);
@@ -153,14 +142,25 @@ struct MeasureState {
           rows(tensor_descriptor(phase.query.inputs[port]), row, batch);
       if (!region.ok())
         return Poll(region.status());
-      need.tensors.push_back({port, 0, region.take_value(), 13});
+      {
+        auto tile_need_0 = sdk::tile_need_for_samples(
+            phase.resources, phase.query, port, 0, region.take_value());
+        if (!tile_need_0.ok())
+          return Result<ResultProgramPoll>(tile_need_0.status());
+        need.tiles.push_back(tile_need_0.take_value());
+      }
     }
     stage = 2;
     return Poll(std::move(need));
   }
   Poll poll(const ResultProgramPhase& phase) {
-    phase_metadata.reset();
-    phase_metadata = dependency_internal::metadata_owner(65536);
+    auto checked_inputs = ops_validation::typed_inputs(phase);
+    if (!checked_inputs.ok())
+      return Result<ResultProgramPoll>(checked_inputs);
+    auto scratch =
+        phase.resources.reserve(ResourceCapacity::host(65536, 65536));
+    if (!scratch.ok())
+      return Poll(scratch.status());
     if (!stage) {
       const auto& program =
           *static_cast<const BakeProgram*>(phase.query.prepared->state());
@@ -175,7 +175,13 @@ struct MeasureState {
         auto support = all(phase, port);
         if (!support.ok())
           return Poll(support.status());
-        need.tensors.push_back({port, 0, support.take_value(), 13});
+        {
+          auto tile_need_1 = sdk::tile_need_for_samples(
+              phase.resources, phase.query, port, 0, support.take_value());
+          if (!tile_need_1.ok())
+            return Result<ResultProgramPoll>(tile_need_1.status());
+          need.tiles.push_back(tile_need_1.take_value());
+        }
       }
       stage = 1;
       return Poll(std::move(need));
@@ -257,12 +263,6 @@ struct MeasureState {
       if (!made.ok())
         return Poll(made.status());
       builder = made.take_value();
-      auto support = relation(phase, 1);
-      if (!support.ok())
-        return Poll(support.status());
-      auto bound = builder.bind_descriptor_relation(support.take_value());
-      if (!bound.ok())
-        return Poll(bound);
       const std::uint8_t passed = report.passed;
       const std::array<const void*, 11> values{
           &passed,
@@ -278,37 +278,22 @@ struct MeasureState {
           report.first_failure_lut.data()};
       const std::array<std::uint64_t, 11> sizes{1,  72, 8,  8,  24, 72,
                                                 24, 8,  24, 24, 24};
-      ResultProgramNeed need;
       for (unsigned f = 0; f < 11; ++f) {
         if (sizes[f] > phase.query.page_bytes)
           return Poll(Status{ErrorCode::ResourceExhausted,
                              "bake report field exceeds Result window",
                              FailureReason::CapacityLimit});
-        auto made = phase.allocator.allocate(sizes[f]);
-        if (!made.ok())
-          return Poll(made.status());
-        auto bytes = made.take_value();
-        std::memcpy(bytes.data(), values[f], sizes[f]);
-        auto write = builder.prepare_append(f, (f == 1 || f == 5) ? 3 : 1,
-                                            std::move(bytes).freeze());
-        if (!write.ok())
-          return Poll(write.status());
-        need.io.push_back(write.take_value());
+        auto written = builder.append(
+            f, (f == 1 || f == 5) ? 3 : 1,
+            {static_cast<const std::uint8_t*>(values[f]), sizes[f]},
+            phase.query.cancellation);
+        if (!written.ok())
+          return Poll(written);
       }
-      stage = 3;
-      return Poll(std::move(need));
     }
-    auto single_relation = relation(phase, 1),
-         triple_relation = relation(phase, 3);
-    if (!single_relation.ok() || !triple_relation.ok())
-      return Poll(!single_relation.ok() ? single_relation.status()
-                                        : triple_relation.status());
     for (unsigned field = 0; field < 11; ++field) {
       const auto count = (field == 1 || field == 5) ? 3 : 1;
-      auto published = builder.publish(
-          field, count,
-          count == 1 ? single_relation.value() : triple_relation.value(),
-          {true, true, true, true});
+      auto published = builder.publish(field, count);
       if (!published.ok())
         return Poll(published);
     }
@@ -327,12 +312,18 @@ struct TensorViewState {
   explicit TensorViewState(bool gated, bool packing)
       : gate(gated), pack(packing) {}
   Poll need_table(const ResultProgramPhase& phase) {
-    stage = 4;
+    stage = 2;
     ResultProgramNeed need;
     auto samples = all(phase, 0);
     if (!samples.ok())
       return Poll(samples.status());
-    need.tensors.push_back({0, 0, samples.take_value(), 13});
+    {
+      auto tile_need_2 = sdk::tile_need_for_samples(
+          phase.resources, phase.query, 0, 0, samples.take_value());
+      if (!tile_need_2.ok())
+        return Result<ResultProgramPoll>(tile_need_2.status());
+      need.tiles.push_back(tile_need_2.take_value());
+    }
     return Poll(std::move(need));
   }
   Poll publish(const ResultProgramPhase& phase) {
@@ -345,19 +336,6 @@ struct TensorViewState {
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
             : std::vector<std::uint64_t>{}));
-    auto descriptor = math_take(
-        ResultRelation::cartesian(phase.resources, 1,
-                                  {0, 8, 0, output.empty() ? 0U : 1U,
-                                   ResultSupportTarget::Descriptor, 0}));
-    if (gate) {
-      auto support = math_take(
-          ResultRelation::cartesian(phase.resources, 1,
-                                    {1, 8, 0, output.empty() ? 0U : 1U,
-                                     ResultSupportTarget::Descriptor, 0}));
-      descriptor = math_take(
-          ResultRelation::unite(phase.resources, {descriptor, support}));
-    }
-    math_require(builder.bind_descriptor_relation(std::move(descriptor)));
     if (!output.empty()) {
       const auto& input = phase.tensors->at({0, 0});
       if (gate && (report.association().size() < 3 ||
@@ -368,40 +346,14 @@ struct TensorViewState {
       auto window =
           math_take(input.acquire(Region::whole(input.spec().sample_shape()),
                                   phase.query.cancellation));
-      const auto count = math_take(schema.tensors[0].sample_count());
-      std::vector<ResultMappedAxis> axes(shape.size());
-      for (unsigned axis = 0; axis < shape.size(); ++axis)
-        axes[axis].output_axis = axis;
-      auto identity = math_take(
-          ResultRelation::mapped(phase.resources, shape, Region::whole(shape),
-                                 input.spec().sample_shape(), axes,
-                                 {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
-      auto validation = math_take(ResultRelation::cartesian(
-          phase.resources, count,
-          {0, 4, 0, math_take(input.spec().sample_count()),
-           ResultSupportTarget::Tensor, 0}));
-      auto relation = math_take(
-          ResultRelation::unite(phase.resources, {identity, validation}));
-      if (gate) {
-        std::vector<ResultSupport> supports;
-        for (unsigned f = 0; f < report.schema().fields.size(); ++f)
-          supports.push_back({1, 7, 0, (f == 1 || f == 5) ? 3U : 1U,
-                              ResultSupportTarget::Field, f});
-        supports.push_back({1, 8, 0, 1, ResultSupportTarget::Descriptor, 0});
-        auto accepted = math_take(global_relation(phase, count, supports));
-        relation = math_take(
-            ResultRelation::unite(phase.resources, {relation, accepted}));
-      }
       ResultTensorViewTransform transform;
       transform.source_axes.resize(shape.size());
       for (unsigned axis = 0; axis < shape.size(); ++axis)
         transform.source_axes[axis].output_axis = axis;
       for (const auto& region : output.boxes()) {
-        auto status = builder.publish_tensor_view(
-            0, region, window, transform, relation, {true, true, true, true},
-            phase.query.cancellation);
-        if (!status.ok() && status.code == ErrorCode::InvalidArgument &&
-            status.message.find("ViewUnavailable") != std::string::npos) {
+        auto status = builder.publish_tensor_view(0, region, window, transform,
+                                                  phase.query.cancellation);
+        if (!status.ok() && status.reason == FailureReason::ViewUnavailable) {
           status = builder.publish_tensor_kernel(
               0, region,
               [&](const auto& writers) {
@@ -430,7 +382,7 @@ struct TensorViewState {
                   return Status::success();
                 });
               },
-              relation, {true, true, true, true}, phase.query.cancellation);
+              phase.query.cancellation);
         }
         math_require(status);
       }
@@ -438,6 +390,9 @@ struct TensorViewState {
     return Poll(ResultPublication{math_take(builder.seal()), true});
   }
   Poll poll(const ResultProgramPhase& phase) try {
+    auto checked_inputs = ops_validation::typed_inputs(phase);
+    if (!checked_inputs.ok())
+      return Result<ResultProgramPoll>(checked_inputs);
     using namespace numeric_ops;  // NOLINT(build/namespaces)
     auto scratch = math_take(
         phase.resources.reserve(ResourceCapacity::host(65536, 65536)));
@@ -453,29 +408,13 @@ struct TensorViewState {
       if (!gate)
         return need_table(phase);
       stage = 1;
-      return Poll(ResultProgramNeed{{{1, 0, true, 0}}, {}});
+      return Poll(ResultProgramNeed{{{1, true, false, {}}}});
     }
     if (stage == 1) {
       report = phase.results.at(1);
       auto facts = report.descriptor();
       if (!facts.ok())
         return Poll(facts.status());
-      ResultProgramNeed need;
-      for (unsigned field = 0; field < report.schema().fields.size(); ++field) {
-        auto read = report.prepare_read(facts.value(), field, 0,
-                                        (field == 1 || field == 5) ? 3 : 1);
-        if (!read.ok())
-          return Poll(read.status());
-        if (read.value().byte_size() > phase.query.page_bytes)
-          return Poll(Status{ErrorCode::ResourceExhausted,
-                             "bake report field exceeds Result window",
-                             FailureReason::CapacityLimit});
-        need.io.push_back(read.take_value());
-      }
-      stage = 2;
-      return Poll(std::move(need));
-    }
-    if (stage == 2) {
       std::uint8_t passed = 0;
       const std::array<void*, 11> targets{&passed,
                                           fields.axis.data(),
@@ -491,8 +430,15 @@ struct TensorViewState {
       const std::array<std::uint64_t, 11> sizes{1,  72, 8,  8,  24, 72,
                                                 24, 8,  24, 24, 24};
       for (unsigned f = 0; f < targets.size(); ++f) {
-        const auto bytes =
-            std::get<std::shared_ptr<const CpuStorage>>(phase.io[f])->bytes();
+        auto read = report.prepare_read(facts.value(), f, 0,
+                                        (f == 1 || f == 5) ? 3 : 1);
+        if (!read.ok())
+          return Poll(read.status());
+        auto loaded =
+            read.value().load(phase.query.page_bytes, phase.query.cancellation);
+        if (!loaded.ok())
+          return Poll(loaded.status());
+        const auto bytes = loaded.value()->bytes();
         if (bytes.size() != sizes[f])
           return Poll(domain("invalid bake report read window"));
         std::memcpy(targets[f], bytes.data(), sizes[f]);
@@ -589,7 +535,7 @@ OperationDefinition operation(Kind kind) {
   out.key = kind == Kind::Measure ? "report"
             : kind == Kind::Pack  ? "table"
                                   : "values";
-  out.region_rule = OperationRegionRule::Dependency;
+  out.region_rule = OperationRegionRule::Tiled;
   out.continuation_bytes =
       kind == Kind::Measure ? sizeof(MeasureState) : sizeof(TensorViewState);
   out.maximum_dependency_stages = 1048576;
@@ -607,8 +553,8 @@ OperationDefinition operation(Kind kind) {
   if (kind == Kind::Unpack || kind == Kind::Gate) {
     numeric_ops::set_whole_tensor_output(traits, ElementType::Float64,
                                          sizeof(TensorViewState));
-    out.region_rule = OperationRegionRule::Dependency;
-    out.maximum_dependency_stages = kind == Kind::Gate ? 4 : 2;
+    out.region_rule = OperationRegionRule::Tiled;
+    out.maximum_dependency_stages = kind == Kind::Gate ? 3 : 2;
   }
   result.prepare_static =
       [kind](const auto& inputs,

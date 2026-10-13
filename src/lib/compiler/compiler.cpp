@@ -137,36 +137,6 @@ void append_parameter(DigestBuilder* digest,
   }
 }
 
-/**
- * @brief Appends one rank-general logical Region to stage identity.
- * @param digest Destination builder.
- * @param region Valid bounded logical Region.
- * @throws Nothing.
- * @note Logical offsets/extents are independent from storage layout.
- */
-void append_region(DigestBuilder* digest, const Region& region) noexcept {
-  digest->integer(region.rank());
-  for (const RegionDimension& dimension : region.dimensions()) {
-    digest->integer(dimension.offset);
-    digest->integer(dimension.extent);
-  }
-}
-
-/**
- * @brief Appends one statically inferred Value descriptor to stage identity.
- * @param digest Destination builder.
- * @param descriptor Valid output descriptor.
- * @throws Nothing.
- */
-void append_descriptor(DigestBuilder* digest,
-                       const ValueDescriptor& descriptor) noexcept {
-  digest->integer(static_cast<std::uint32_t>(descriptor.element_type));
-  digest->integer(descriptor.shape.size());
-  for (std::uint64_t extent : descriptor.shape) {
-    digest->integer(extent);
-  }
-}
-
 /** @brief Encodes canonical declaration metadata without runtime payload. */
 void append_declarations(
     DigestBuilder* digest,
@@ -219,9 +189,6 @@ std::string semantic_digest(
     digest.integer(node.outputs.size());
     for (const auto& output : node.outputs) {
       digest.text(output.key);
-      digest.integer(output.effective_atomic);
-      append_descriptor(&digest, output.descriptor);
-      contract_internal::append_facets(&digest, output.facets);
       digest.integer(static_cast<bool>(output.result_schema));
       if (output.result_schema)
         digest.text(output.result_schema->canonical());
@@ -269,37 +236,19 @@ std::string physical_digest(
     const std::string& optimized, const std::vector<PlanStep>& steps,
     const std::map<std::string, std::size_t>& outputs,
     const std::vector<WorkflowInputDeclaration>& declarations,
-    const std::map<std::string, Region>& output_regions,
-    std::uint64_t tile_height, std::uint64_t tile_width,
-    ExecutionMode execution_mode, const std::vector<PhysicalStep>& physical) {
+    const std::map<std::string, TileRequest>& output_requests,
+    std::uint64_t tile_extent, ExecutionMode execution_mode) {
   DigestBuilder digest;
   digest.text("physical-plan-v20");
   digest.integer(static_cast<std::uint32_t>(execution_mode));
-  digest.integer(physical.size());
-  for (const auto& access : physical) {
-    digest.integer(static_cast<std::uint32_t>(access.kind));
-    digest.integer(access.step_index);
-    digest.integer(access.input_index);
-    digest.integer(static_cast<std::uint32_t>(access.source_backend));
-    digest.integer(static_cast<std::uint32_t>(access.destination_backend));
-    append_descriptor(&digest, access.descriptor);
-    append_region(&digest, access.region);
-    digest.integer(access.packed_bytes);
-    digest.integer(access.allocation_bytes);
-    digest.text(access.output_name);
-    digest.integer(access.packed_layout.byte_offset);
-    digest.integer(access.packed_layout.byte_strides.size());
-    for (auto stride : access.packed_layout.byte_strides)
-      digest.integer(static_cast<std::uint64_t>(stride));
-    for (auto origin : access.packed_layout.origin)
-      digest.integer(origin);
-  }
-  digest.integer(tile_height);
-  digest.integer(tile_width);
-  digest.integer(output_regions.size());
-  for (const auto& requested : output_regions) {
+  digest.integer(tile_extent);
+  digest.integer(output_requests.size());
+  for (const auto& requested : output_requests) {
     digest.text(requested.first);
-    append_region(&digest, requested.second);
+    digest.integer(requested.second.whole);
+    digest.integer(requested.second.tiles.size());
+    for (auto tile : requested.second.tiles)
+      digest.integer(tile);
   }
   const auto image_storage = [&](const SchemaTemplate& schema) {
     for (const auto& image : schema.tensors) {
@@ -328,21 +277,12 @@ std::string physical_digest(
       }
     }
     digest.integer(static_cast<std::uint32_t>(step.backend));
-    digest.integer(step.planned_bytes);
     contract_internal::append_traits(&digest, step.traits);
-    digest.integer(step.effective_atomic);
-    append_descriptor(&digest, step.output_descriptor);
-    contract_internal::append_facets(&digest, step.output_facets);
     digest.integer(static_cast<bool>(step.output_result_schema));
     if (step.output_result_schema)
       digest.text(step.output_result_schema->canonical());
     if (step.output_result_schema)
       image_storage(*step.output_result_schema);
-    append_region(&digest, step.output_demand);
-    digest.integer(step.input_demands.size());
-    for (const Region& demand : step.input_demands) {
-      append_region(&digest, demand);
-    }
     digest.integer(step.parameters.size());
     for (const auto& parameter : step.parameters) {
       digest.text(parameter.first);
@@ -391,7 +331,7 @@ std::uint64_t microseconds(
 }  // namespace
 
 Result<ExecutionPlan> ExecutionPlan::tile_plan(
-    const std::string& name, const Region& requested_region) const {
+    const std::string& name, const TileRequest& request) const {
   if (!current() || operation_registry_.expired())
     return Result<ExecutionPlan>(
         Status::failure(ErrorCode::Stale, "tile parent is stale"));
@@ -400,57 +340,19 @@ Result<ExecutionPlan> ExecutionPlan::tile_plan(
     return Result<ExecutionPlan>(
         Status{ErrorCode::InvalidArgument, "unknown tile output"});
   const auto& step = steps_[named->second];
-  const auto* tensor = step.output_result_schema &&
-                               step.output_result_schema->tensors.size() == 1
-                           ? &step.output_result_schema->tensors[0]
-                           : nullptr;
-  const auto shape =
-      tensor ? tensor->sample_shape() : step.output_descriptor.shape;
-  if (requested_region.empty() || !requested_region.validate(shape).ok())
-    return Result<ExecutionPlan>(Status::failure(ErrorCode::InvalidArgument,
-                                                 "invalid named tile Region"));
-  Result<Region> closed_region(requested_region);
-  if (tensor) {
-    auto samples = Footprint::from_regions(shape, {requested_region});
-    if (!samples.ok())
-      return Result<ExecutionPlan>(samples.status());
-    auto closed = tensor->close_samples(samples.value());
-    if (!closed.ok())
-      return Result<ExecutionPlan>(closed.status());
-    if (closed.value().boxes().size() != 1)
-      return Result<ExecutionPlan>(Status{ErrorCode::InvalidArgument,
-                                          "tile closure requires one Region"});
-    closed_region = Result<Region>(closed.value().boxes()[0]);
-  } else {
-    closed_region = input_internal::color_output_region(
-        step.output_descriptor, step.output_facets, requested_region);
-  }
-  if (!closed_region.ok())
-    return Result<ExecutionPlan>(closed_region.status());
-  const auto region = closed_region.take_value();
-  const auto& requested = output_regions_.at(name);
-  for (std::size_t axis = 0; axis < region.rank(); ++axis) {
-    const auto part = region.dimensions()[axis],
-               allowed = requested.dimensions()[axis];
-    if (part.offset < allowed.offset ||
-        part.offset + part.extent > allowed.offset + allowed.extent)
-      return Result<ExecutionPlan>(Status::failure(
-          ErrorCode::InvalidArgument, "tile exceeds requested output"));
-  }
-  if (!tensor && !input_internal::complete_tuple_channels(
-                     steps_[named->second].output_descriptor,
-                     steps_[named->second].output_facets, region))
-    return Result<ExecutionPlan>(Status::failure(
-        ErrorCode::InvalidArgument, "tile must contain all image channels"));
+  auto resolved = request.resolve(step.tile_grid, step.tiled);
+  if (!resolved.ok())
+    return Result<ExecutionPlan>(resolved.status());
+  if (!output_requests_.at(name).contains(resolved.value()))
+    return Result<ExecutionPlan>(
+        Status{ErrorCode::InvalidArgument, "tile exceeds requested output"});
   ExecutionPlan tile = *this;
   tile.outputs_ = {{name, named->second}};
-  tile.output_regions_ = {{name, region}};
-  tile.steps_[named->second].output_demand = region;
-  tile.physical_steps_.clear();
-  tile.digest_.value = physical_digest(
-      tile.optimized_digest_.value, tile.steps_, tile.outputs_,
-      tile.input_declarations_, tile.output_regions_, tile.tile_height_,
-      tile.tile_width_, tile.execution_mode_, tile.physical_steps_);
+  tile.output_requests_ = {{name, resolved.take_value()}};
+  tile.digest_.value =
+      physical_digest(tile.optimized_digest_.value, tile.steps_, tile.outputs_,
+                      tile.input_declarations_, tile.output_requests_,
+                      tile.tile_extent_, tile.execution_mode_);
   tile.cache_key_.value = plan_cache_key(tile.digest_.value);
   if (!current())
     return Result<ExecutionPlan>(
@@ -495,17 +397,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
         ErrorCode::OperationFailed, "cannot set binary32 environment"));
   auto declarations = document.inputs;
   ResourceBindings retained_resources;
-  const auto admit_resources =
-      [&](const std::vector<ValueFacet>& facets) -> Status {
-    auto selected = resources.select(facets);
-    if (!selected.ok())
-      return selected.status();
-    auto combined = retained_resources.unite(selected.value());
-    if (!combined.ok())
-      return combined.status();
-    retained_resources = combined.take_value();
-    return Status::success();
-  };
   std::sort(declarations.begin(), declarations.end(),
             [](const auto& a, const auto& b) { return a.id < b.id; });
   std::map<std::uint64_t, std::size_t> declaration_by_id;
@@ -524,7 +415,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
     const auto status = input_internal::validate_declaration(&declaration);
     if (!status.ok())
       return Result<SemanticGraphIR>(status);
-    Status admitted;
     if (declaration.result_schema) {
       auto subset = declaration.result_schema->select_resources(resources);
       if (!subset.ok())
@@ -534,8 +424,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
         return Result<SemanticGraphIR>(joined.status());
       retained_resources = joined.take_value();
     }
-    if (!admitted.ok())
-      return Result<SemanticGraphIR>(admitted);
   }
 
   std::unordered_map<std::uint64_t, const WorkflowNode*> nodes_by_id;
@@ -631,14 +519,10 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
   SemanticGraphIR semantic;
   semantic.revision_ = snapshot.revision();
   semantic.input_declarations_ = declarations;
-  std::map<ValueRef, std::vector<ValueFacet>> output_facets;
-  std::map<ValueRef, bool> effective_atomic;
   std::map<std::pair<std::uint64_t, std::string>, std::pair<float, float>>
       scalar_intervals;
   semantic.nodes_.reserve(document.nodes.size());
-  std::map<ValueRef, ValueDescriptor> output_by_value;
   std::map<ValueRef, std::shared_ptr<const SchemaTemplate>> result_schemas;
-  std::map<ValueRef, std::uint32_t> tuple_axes;
   while (!ready.empty()) {
     const std::uint64_t id = ready.top();
     ready.pop();
@@ -656,33 +540,24 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
     if (!resolved.ok())
       return Result<SemanticGraphIR>(resolved.status());
     node.traits = resolved.take_value();
-    std::vector<bool> input_atomic(source.inputs.size(), true);
     node.inputs.reserve(source.inputs.size());
-    std::vector<OperationMetadata> input_descriptors;
-    input_descriptors.reserve(source.inputs.size());
+    std::vector<OperationMetadata> input_metadata;
+    input_metadata.reserve(source.inputs.size());
     for (std::size_t position = 0; position < source.inputs.size();
          ++position) {
       const auto& input = source.inputs[position];
       const auto& port = node.traits.input_schema[position];
       node.inputs.push_back(input);
-      ValueDescriptor descriptor;
-      std::vector<ValueFacet> facets;
       std::shared_ptr<const SchemaTemplate> result_schema;
-      std::uint32_t atomic_trailing_axes = 0;
       if (const auto* producer = std::get_if<WorkflowNodeOutput>(&input)) {
         const auto ref =
             result_ports.at({producer->source_node, producer->source_port});
-        input_atomic[position] = effective_atomic.at(ref);
-        descriptor = output_by_value.at(ref);
-        facets = output_facets.at(ref);
         result_schema = result_schemas.at(ref);
-        atomic_trailing_axes = tuple_axes.at(ref);
       } else {
         const auto id = std::get<WorkflowInputReference>(input).input_id;
         const auto& declaration = declarations[declaration_by_id.at(id)];
         result_schema = declaration.result_schema;
-        if (port.kind == OperationPortKind::Float32Scalar ||
-            port.scalar_bounds) {
+        if (port.scalar_bounds) {
           auto inserted = scalar_intervals.emplace(
               std::make_pair(id, port.tensor_key),
               std::make_pair(port.minimum, port.maximum));
@@ -696,13 +571,8 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
           }
         }
       }
-      if (input_internal::structural_image_metadata(descriptor, facets))
-        return Result<SemanticGraphIR>(
-            Status{ErrorCode::TypeMismatch,
-                   "image operations require typed Result ports"});
       auto status = input_internal::validate_port_metadata(
-          port, OperationMetadata{descriptor, facets, result_schema,
-                                  atomic_trailing_axes});
+          port, OperationMetadata{result_schema});
       if (!status.ok()) {
         if (status.detail.origin == FailureOrigin::Unspecified &&
             (status.code == ErrorCode::TypeMismatch ||
@@ -714,58 +584,31 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
         }
         return Result<SemanticGraphIR>(status);
       }
-      input_descriptors.push_back({std::move(descriptor), std::move(facets),
-                                   std::move(result_schema),
-                                   atomic_trailing_axes});
+      input_metadata.push_back({std::move(result_schema)});
     }
     auto specialized = operations_->prepare_operation(
-        source.operation, input_descriptors, source.parameters);
+        source.operation, input_metadata, source.parameters);
     if (!specialized.ok())
       return Result<SemanticGraphIR>(specialized.status());
     node.prepared = specialized.take_value();
     node.traits = node.prepared->traits();
-    auto output = infer_operation_outputs(node.traits, input_descriptors,
-                                          node.parameters);
+    auto output =
+        infer_operation_outputs(node.traits, input_metadata, node.parameters);
     if (!output.ok())
       return Result<SemanticGraphIR>(output.status());
     for (std::uint32_t oi = 0; oi < node.traits.outputs.size(); ++oi) {
       const auto& contract = node.traits.outputs[oi];
       const auto& metadata = output.value()[oi];
-      if (input_internal::structural_image_metadata(metadata.descriptor,
-                                                    metadata.facets))
-        return Result<SemanticGraphIR>(
-            Status{ErrorCode::TypeMismatch,
-                   "image output must be a typed Result slot"});
-      auto admitted = admit_resources(metadata.facets);
-      if (admitted.ok() && metadata.result_schema) {
-        auto subset = metadata.result_schema->select_resources(resources);
-        if (!subset.ok())
-          return Result<SemanticGraphIR>(subset.status());
-        auto joined = retained_resources.unite(subset.value());
-        if (!joined.ok())
-          return Result<SemanticGraphIR>(joined.status());
-        retained_resources = joined.take_value();
-      }
-      if (!admitted.ok())
-        return Result<SemanticGraphIR>(admitted);
-      bool ancestors_atomic = true;
-      for (std::size_t i = 0; i < input_atomic.size(); ++i)
-        if (!contract.input_indices ||
-            std::find(contract.input_indices->begin(),
-                      contract.input_indices->end(),
-                      i) != contract.input_indices->end())
-          ancestors_atomic = ancestors_atomic && input_atomic[i];
-      const bool atomic =
-          contract.observation_kind == ObservationKind::Atomic &&
-          ancestors_atomic;
+      auto subset = metadata.result_schema->select_resources(resources);
+      if (!subset.ok())
+        return Result<SemanticGraphIR>(subset.status());
+      auto joined = retained_resources.unite(subset.value());
+      if (!joined.ok())
+        return Result<SemanticGraphIR>(joined.status());
+      retained_resources = joined.take_value();
       const ValueRef ref{node.id, oi};
-      effective_atomic.emplace(ref, atomic);
-      output_facets.emplace(ref, metadata.facets);
-      output_by_value.emplace(ref, metadata.descriptor);
       result_schemas.emplace(ref, metadata.result_schema);
-      tuple_axes.emplace(ref, metadata.atomic_trailing_axes);
-      node.outputs.push_back({contract.key, metadata.descriptor,
-                              metadata.facets, atomic, metadata.result_schema});
+      node.outputs.push_back({contract.key, metadata.result_schema});
     }
     semantic.nodes_.push_back(std::move(node));
     for (std::uint64_t dependent : dependents[id]) {
@@ -783,35 +626,6 @@ Result<SemanticGraphIR> Compiler::analyze(const GraphSnapshot& snapshot,
   if (semantic.nodes_.size() != document.nodes.size()) {
     return Result<SemanticGraphIR>(
         Status::failure(ErrorCode::Cycle, "workflow graph contains a cycle"));
-  }
-  // Static metadata covers the complete signature, but executable ancestry is
-  // selected per result. An excluded RequestRecord port is metadata only.
-  std::set<ValueRef> required;
-  for (const auto& output : document.outputs)
-    required.insert(result_ports.at({output.node_id, output.port}));
-  for (auto it = semantic.nodes_.rbegin(); it != semantic.nodes_.rend(); ++it) {
-    const auto& node = *it;
-    if (!node.traits.side_effect_free)
-      required.insert({node.id, 0});
-    for (std::uint32_t oi = 0; oi < node.outputs.size(); ++oi) {
-      if (!required.count({node.id, oi}))
-        continue;
-      const auto& ports = node.traits.outputs[oi].input_indices;
-      for (std::size_t i = 0; i < node.inputs.size(); ++i) {
-        if (ports && std::find(ports->begin(), ports->end(), i) == ports->end())
-          continue;
-        if (const auto* producer =
-                std::get_if<WorkflowNodeOutput>(&node.inputs[i])) {
-          const auto ref =
-              result_ports.at({producer->source_node, producer->source_port});
-          if (!effective_atomic.at(ref))
-            return Result<SemanticGraphIR>(Status::failure(
-                ErrorCode::InvalidArgument,
-                "consumer requires EffectiveAtomic input ancestry"));
-          required.insert(ref);
-        }
-      }
-    }
   }
   semantic.resources_ = std::move(retained_resources);
   semantic.outputs_ = document.outputs;
@@ -875,12 +689,10 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       options.execution_mode != ExecutionMode::NativeGpu)
     return Result<ExecutionPlan>(
         Status::failure(ErrorCode::InvalidArgument, "unknown execution mode"));
-  if (options.tile_height == 0 || options.tile_width == 0 ||
-      (options.tile_height & (options.tile_height - 1)) != 0 ||
-      (options.tile_width & (options.tile_width - 1)) != 0)
+  if (!options.tile_extent || (options.tile_extent & (options.tile_extent - 1)))
     return Result<ExecutionPlan>(
         Status::failure(ErrorCode::InvalidArgument,
-                        "tile extents must be positive powers of two"));
+                        "tile extent must be a positive power of two"));
   const auto source_operations = optimized.operation_registry_.lock();
   if (optimized.revision() == 0U || optimized.nodes().empty() ||
       optimized.digest().value.empty() || !optimized.current() ||
@@ -934,11 +746,19 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
   }
   ExecutionPlan plan;
   plan.execution_mode_ = options.execution_mode;
-  plan.tile_height_ = options.tile_height;
-  plan.tile_width_ = options.tile_width;
+  plan.tile_extent_ = options.tile_extent;
   plan.revision_ = optimized.revision();
   plan.input_declarations_ = optimized.input_declarations();
   plan.resources_ = optimized.resources();
+  for (const auto& input : plan.input_declarations_) {
+    auto grid =
+        input.result_schema
+            ? TileGrid::from_schema(*input.result_schema, options.tile_extent)
+            : Result<std::optional<TileGrid>>(std::optional<TileGrid>{});
+    if (!grid.ok())
+      return Result<ExecutionPlan>(grid.status());
+    plan.input_tile_grids_.push_back(grid.take_value());
+  }
   std::map<std::uint64_t, std::size_t> declaration_by_id;
   for (std::size_t i = 0; i < plan.input_declarations_.size(); ++i)
     declaration_by_id.emplace(plan.input_declarations_[i].id, i);
@@ -955,13 +775,17 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
       step.parameters = node.parameters;
       step.prepared = node.prepared;
       step.traits = select_operation_output(node.traits, oi).take_value();
-      step.effective_atomic = output.effective_atomic;
-      step.whole_boundary =
-          step.traits.outputs[0].region_rule == OperationRegionRule::Whole ||
-          !node.traits.deterministic || !node.traits.side_effect_free;
-      step.output_descriptor = output.descriptor;
       step.output_result_schema = output.result_schema;
-      step.output_facets = output.facets;
+      if (step.output_result_schema) {
+        auto grid = TileGrid::from_schema(*step.output_result_schema,
+                                          options.tile_extent);
+        if (!grid.ok())
+          return Result<ExecutionPlan>(grid.status());
+        step.tile_grid = grid.take_value();
+      }
+      step.tiled =
+          step.traits.outputs[0].region_rule == OperationRegionRule::Tiled &&
+          step.tile_grid.has_value();
       step.backend =
           executable.count({node.id, oi}) &&
                   options.execution_mode == ExecutionMode::NativeGpu &&
@@ -974,21 +798,6 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
             Status::failure(ErrorCode::BackendUnavailable,
                             "operation has no required CPU implementation"));
       }
-      auto dense_output =
-          input_internal::dense_metadata(step.output_descriptor);
-      if (!dense_output.ok() && step.traits.outputs[0].output_schema.kind ==
-                                    OperationPortKind::RgbaFloat32)
-        return Result<ExecutionPlan>(dense_output.status());
-      step.planned_bytes =
-          std::max(node.traits.estimated_bytes,
-                   step.traits.outputs[0].maximum_output_payload_bytes.value_or(
-                       step.traits.outputs[0].preserve_output_views ? 0
-                       : dense_output.ok()
-                           ? dense_output.value().bytes
-                           : static_cast<std::uint64_t>(Value::element_size(
-                                 step.output_descriptor.element_type))));
-      if (step.output_result_schema)
-        step.planned_bytes = 0;
       step.inputs.reserve(node.inputs.size());
       for (const WorkflowInput& input : node.inputs) {
         if (const auto* source = std::get_if<WorkflowNodeOutput>(&input)) {
@@ -1018,107 +827,51 @@ Result<ExecutionPlan> Compiler::plan(const OptimizedGraphIR& optimized,
           ErrorCode::Internal, "optimized output mapping is invalid"));
     }
   }
-  if (options.output_regions.size() > plan.outputs_.size()) {
+  if (options.output_requests.size() > plan.outputs_.size()) {
     return Result<ExecutionPlan>(Status::failure(
         ErrorCode::InvalidArgument,
-        "planning options contain too many named output Regions"));
+        "planning options contain too many named output requests"));
   }
-  std::map<std::uint64_t, std::vector<std::size_t>> groups;
-  for (std::size_t i = 0; i < plan.steps_.size(); ++i) {
-    const auto& step = plan.steps_[i];
-    if (executable.count({step.node_id, step.output_index}) &&
-        step.traits.joint_contract && step.backend == Backend::Cpu &&
-        step.traits.outputs[0].observation_kind == ObservationKind::Atomic &&
-        (step.traits.outputs[0].failure_delivery ==
-             FailureDelivery::PerAtomOutcome ||
-         step.traits.joint_contract == 1))
-      groups[step.node_id].push_back(i);
-  }
-  for (auto& group : groups)
-    if (group.second.size() > 1 ||
-        plan.steps_[group.second.front()].traits.joint_contract == 2)
-      plan.execution_groups_.push_back({group.first, std::move(group.second)});
-  for (const auto& requested : options.output_regions)
+  for (const auto& requested : options.output_requests)
     if (!plan.outputs_.count(requested.first))
       return Result<ExecutionPlan>(Status::failure(
           ErrorCode::InvalidArgument, "unknown dependency output"));
-  for (auto& step : plan.steps_) {
-    step.output_demand = step.output_result_schema
-                             ? Region{}
-                             : Region::whole(step.output_descriptor.shape);
-    step.input_demands.clear();
-    step.planned_bytes = 0;  // A template has no resolved live-set reservation.
-  }
   for (const auto& output : plan.outputs_) {
-    auto& step = plan.steps_[output.second];
-    const auto requested = options.output_regions.find(output.first);
-    if (step.output_result_schema) {
-      if (!step.output_result_schema->tensors.empty()) {
-        const auto shape = step.output_result_schema->tensors[0].sample_shape();
-        auto region = requested == options.output_regions.end()
-                          ? Region::whole(shape)
-                          : requested->second;
-        auto samples = Footprint::from_regions(shape, {region});
-        if (!samples.ok())
-          return Result<ExecutionPlan>(samples.status());
-        auto closed = step.output_result_schema->tensors[0].close_samples(
-            samples.value());
-        if (!closed.ok() || closed.value().boxes().size() != 1)
-          return Result<ExecutionPlan>(Status{ErrorCode::InvalidArgument,
-                                              "invalid image output Region"});
-        plan.output_regions_.emplace(output.first, closed.value().boxes()[0]);
-        step.output_demand = closed.value().boxes()[0];
-        continue;
-      }
-      if (requested != options.output_regions.end())
-        return Result<ExecutionPlan>(Status{
-            ErrorCode::InvalidArgument,
-            "ResultRef outputs use descriptor ranges, not Value Regions"});
-      plan.output_regions_.emplace(output.first, Region{});
-      continue;
-    }
-    auto region = requested == options.output_regions.end()
-                      ? Region::whole(step.output_descriptor.shape)
-                      : requested->second;
-    auto closed_region = input_internal::color_output_region(
-        step.output_descriptor, step.output_facets, region);
-    if (!closed_region.ok())
-      return Result<ExecutionPlan>(closed_region.status());
-    region = closed_region.take_value();
-    if (region.empty() || !region.validate(step.output_descriptor.shape).ok() ||
-        !input_internal::complete_tuple_channels(step.output_descriptor,
-                                                 step.output_facets, region))
-      return Result<ExecutionPlan>(Status::failure(
-          ErrorCode::InvalidArgument, "invalid dependency output region"));
-    plan.output_regions_.emplace(output.first, region);
-    step.output_demand = region;
+    const auto& step = plan.steps_[output.second];
+    const auto requested = options.output_requests.find(output.first);
+    const auto request = requested == options.output_requests.end()
+                             ? TileRequest{true, {}}
+                             : requested->second;
+    auto resolved = request.resolve(step.tile_grid, step.tiled);
+    if (!resolved.ok())
+      return Result<ExecutionPlan>(resolved.status());
+    plan.output_requests_.emplace(output.first, resolved.take_value());
   }
   plan.optimized_digest_ = optimized.digest();
-  plan.digest_.value = physical_digest(
-      plan.optimized_digest_.value, plan.steps_, plan.outputs_,
-      plan.input_declarations_, plan.output_regions_, plan.tile_height_,
-      plan.tile_width_, plan.execution_mode_, plan.physical_steps_);
+  plan.digest_.value =
+      physical_digest(plan.optimized_digest_.value, plan.steps_, plan.outputs_,
+                      plan.input_declarations_, plan.output_requests_,
+                      plan.tile_extent_, plan.execution_mode_);
   plan.cache_key_.value = plan_cache_key(plan.digest_.value);
   plan.current_check_ = optimized.current_check_;
   plan.operation_registry_ = operations_;
   for (auto& step : plan.steps_) {
     auto metadata = std::make_shared<ResultProgramMetadata>();
-    metadata->output = {step.output_descriptor, step.output_facets,
-                        step.output_result_schema,
-                        step.traits.outputs[0].atomic_trailing_axes};
+    metadata->output = {step.output_result_schema};
+    metadata->output_tile_grid = step.tile_grid;
     for (const auto& input : step.inputs) {
       if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
         const auto& source = plan.steps_[producer->step_index];
-        metadata->inputs.push_back(
-            {source.output_descriptor, source.output_facets,
-             source.output_result_schema,
-             source.traits.outputs[0].atomic_trailing_axes});
+        metadata->input_tile_grids.push_back(source.tile_grid);
+        metadata->inputs.push_back({source.output_result_schema});
       } else {
+        metadata->input_tile_grids.push_back(
+            plan.input_tile_grids_[std::get<PlanWorkflowInput>(input)
+                                       .declaration_index]);
         const auto& source =
             plan.input_declarations_[std::get<PlanWorkflowInput>(input)
                                          .declaration_index];
-        metadata->inputs.push_back(
-            {ValueDescriptor{}, {}, source.result_schema});
+        metadata->inputs.push_back({source.result_schema});
       }
     }
     step.structured_metadata = std::move(metadata);

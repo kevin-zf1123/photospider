@@ -31,13 +31,9 @@ Ordinary Value descriptors and structured Result image descriptors have distinct
 
 The compiler resolves each named output's requested `Q`. For an image output, the Result continuation receives the captured output footprint and image slot. Its callback can request staged input needs: first Control samples, then Data image samples chosen from those control values. Each Need is checked against the Result schema, slot, logical sample domain, and the input's published coverage. A callback cannot synchronously fetch a hole or sample outside its current capability.
 
-`ResultRelation` records output-to-input support using flattened logical sample coordinates. It distinguishes input port, target, slot, and role. Data, Control, Validation, and Descriptor support remain distinct. Descriptor support covers count, basis, or semantic descriptor facts; static schema changes require recompilation. Frame and layer coordinates participate in the flattened image identity, so dirty edits can target a particular frame/layer sample.
+Whole operations keep Whole dependencies. Tensor semantic metadata such as channel roles and ColorArray tuples participates in validation and sample closure where the contract declares it; physical `PlanarImageLayout::groups` do not silently create dependency edges.
 
-After immutable bindings are replaced in a demand handle, the coordinator compares the new bindings with source samples consumed by captured evidence. It computes potential dirty output coverage from the old relation, commits the new binding generation atomically, then a new request discovers and records support under the new control values. Thus a changed, consumed Control value can invalidate an old branch and expose newly selected Data samples. An unrelated unconsumed control or tile remains clean. The evidence object itself is immutable: prior dependency queries continue to describe their original generation.
-
-Tiles are scheduling units, not logical dependency proofs. Tile projection may group samples for I/O, but relation support remains sample-based. Whole operations keep Whole dependencies. Regional or dependency operations report their actual support; no tile grid is substituted for those relations. Tensor semantic metadata such as channel roles and ColorArray tuples participates in validation and sample closure where the contract declares it; physical `PlanarImageLayout::groups` do not silently create dependency edges.
-
-`Exact` support can prove clean only when the captured relation is complete. `Conservative` support may mark a wider dirty set. `Unknown` remains unresolved and cannot be converted into an empty clean answer. Dirty means potentially affected, not numerically different. Relation traversal and footprint transformations are bounded and charged to the execution root; exceeding the work or metadata limit returns an error.
+Dirty means potentially affected, not numerically different. Footprint transformations are bounded and charged to the execution root; exceeding the work or metadata limit returns an error.
 
 ## Tile projection arithmetic
 

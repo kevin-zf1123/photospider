@@ -136,7 +136,7 @@ struct PlanarImage::Impl final {
   std::uint64_t height = 0, width = 0, channels = 0, scalar_width = 0;
   std::uint64_t page = 0, plane_step = 0, row_pitch = 0;
   std::uint64_t full_step = 0, edge_step = 0, columns = 0;
-  unsigned tile_height_shift = 0, tile_width_shift = 0;
+  unsigned tile_extent_shift = 0;
   std::uint64_t virtual_bytes = 0, sample_count = 0;
   std::uint8_t* base = nullptr;
   std::shared_ptr<Impl> view_source;
@@ -167,13 +167,13 @@ struct PlanarImage::Impl final {
     const auto plane = channel * plane_step;
     if (config.order == ImagePlaneOrder::Continuous)
       return plane + y * row_pitch + x * scalar_width;
-    const auto ty = y >> tile_height_shift, tx = x >> tile_width_shift;
-    const auto local_y = y & (config.tile_height - 1);
-    const auto local_x = x & (config.tile_width - 1);
+    const auto ty = y >> tile_extent_shift, tx = x >> tile_extent_shift;
+    const auto local_y = y & (config.tile_extent - 1);
+    const auto local_x = x & (config.tile_extent - 1);
     const auto step =
-        ty < (height >> tile_height_shift) ? full_step : edge_step;
+        ty < (height >> tile_extent_shift) ? full_step : edge_step;
     return plane + ty * columns * full_step + tx * step +
-           local_y * config.tile_width * scalar_width + local_x * scalar_width;
+           local_y * config.tile_extent * scalar_width + local_x * scalar_width;
   }
 
   std::uint64_t channel_of(const std::vector<std::uint64_t>& at) const {
@@ -295,9 +295,8 @@ Result<PlanarImage> PlanarImage::create(
                      *config.channel_axis == config.width_axis)) ||
       std::any_of(descriptor.shape.begin(), descriptor.shape.end(),
                   [](auto extent) { return extent == 0; }) ||
-      config.tile_height == 0 || config.tile_width == 0 ||
-      (config.tile_height & (config.tile_height - 1)) != 0 ||
-      (config.tile_width & (config.tile_width - 1)) != 0 ||
+      config.tile_extent == 0 ||
+      (config.tile_extent & (config.tile_extent - 1)) != 0 ||
       (config.order != ImagePlaneOrder::Continuous &&
        config.order != ImagePlaneOrder::Tiled))
     return Result<PlanarImage>(
@@ -309,10 +308,8 @@ Result<PlanarImage> PlanarImage::create(
   out->facets = std::move(facets);
   out->resources = selected.take_value();
   out->config = std::move(config);
-  for (auto size = out->config.tile_height; size > 1; size >>= 1)
-    ++out->tile_height_shift;
-  for (auto size = out->config.tile_width; size > 1; size >>= 1)
-    ++out->tile_width_shift;
+  for (auto size = out->config.tile_extent; size > 1; size >>= 1)
+    ++out->tile_extent_shift;
   out->height = out->descriptor.shape[out->config.height_axis];
   out->width = out->descriptor.shape[out->config.width_axis];
   out->channels = out->config.channel_axis
@@ -346,20 +343,20 @@ Result<PlanarImage> PlanarImage::create(
       return Result<PlanarImage>(
           core_internal::invalid_argument("tiled row pitch is fixed"));
     std::uint64_t tile_row = 0, full_span = 0, edge_span = 0;
-    if (!core_internal::checked_multiply(out->config.tile_width,
+    if (!core_internal::checked_multiply(out->config.tile_extent,
                                          out->scalar_width, &tile_row) ||
-        !core_internal::checked_multiply(out->config.tile_height, tile_row,
+        !core_internal::checked_multiply(out->config.tile_extent, tile_row,
                                          &full_span) ||
         !core_internal::checked_align_up(full_span, out->page, &out->full_step))
       return Result<PlanarImage>(exhausted("tile size overflow"));
-    const auto rem = out->height % out->config.tile_height;
+    const auto rem = out->height % out->config.tile_extent;
     if (rem && (!core_internal::checked_multiply(rem, tile_row, &edge_span) ||
                 !core_internal::checked_align_up(edge_span, out->page,
                                                  &out->edge_step)))
       return Result<PlanarImage>(exhausted("edge tile overflow"));
-    out->columns = out->width / out->config.tile_width +
-                   (out->width % out->config.tile_width != 0);
-    const auto full_rows = out->height / out->config.tile_height;
+    out->columns = out->width / out->config.tile_extent +
+                   (out->width % out->config.tile_extent != 0);
+    const auto full_rows = out->height / out->config.tile_extent;
     std::uint64_t row_steps = 0;
     if (!core_internal::checked_multiply(full_rows, out->full_step,
                                          &row_steps) ||
@@ -393,8 +390,10 @@ Result<PlanarImage> PlanarImage::assemble_view(
     const CancellationToken& cancellation, const ResourceBindings& resources) {
   using Answer = Result<PlanarImage>;
   const auto unavailable = [] {
-    return core_internal::invalid_argument(
-        "ViewUnavailable: assembly has no canonical common-owner mapping");
+    return Status{
+        ErrorCode::InvalidArgument,
+        "ViewUnavailable: assembly has no canonical common-owner mapping",
+        FailureReason::ViewUnavailable};
   };
   if (!validate_layout(descriptor, layout).ok() || requested.empty() ||
       !requested.validate(descriptor.shape).ok() || sources.empty() ||
@@ -436,10 +435,10 @@ Result<PlanarImage> PlanarImage::assemble_view(
         channel_counts[i] > requested_channels.extent - traversed ||
         source.height != descriptor.shape[layout.height_axis] ||
         source.width != descriptor.shape[layout.width_axis] ||
-        source.descriptor.element_type != descriptor.element_type ||
-        source.config.order != layout.order ||
-        source.config.row_pitch_bytes != layout.row_pitch_bytes)
+        source.descriptor.element_type != descriptor.element_type)
       return Answer(unavailable());
+    // Views preserve their owner's physical mapping. Output order and pitch
+    // are allocation preferences, not constraints on semantic compatibility.
     auto dims = Region::whole(source.descriptor.shape).dimensions();
     dims[source.config.height_axis] =
         requested.dimensions()[layout.height_axis];
@@ -507,8 +506,7 @@ Result<PlanarImage> PlanarImage::assemble_view(
   alias->columns = root->columns;
   alias->virtual_bytes = root->virtual_bytes;
   alias->base = root->base;
-  alias->tile_height_shift = root->tile_height_shift;
-  alias->tile_width_shift = root->tile_width_shift;
+  alias->tile_extent_shift = root->tile_extent_shift;
   return Answer(PlanarImage(std::move(alias)));
 }
 
@@ -640,7 +638,7 @@ Result<PlanarRowRun> PlanarImageReadWindow::row_run(
   auto end = x_end;
   if (owner.config.order == ImagePlaneOrder::Tiled) {
     const auto remaining =
-        owner.config.tile_width - (x & (owner.config.tile_width - 1));
+        owner.config.tile_extent - (x & (owner.config.tile_extent - 1));
     end = std::min(end, x + remaining);
   }
   const auto offset = owner.offset(coordinate[owner.config.height_axis], x,
@@ -660,7 +658,7 @@ Result<PlanarRectangleRun> PlanarImageReadWindow::rectangle_run(
   auto rows = dim.offset + dim.extent - y;
   if (image.config.order == ImagePlaneOrder::Tiled)
     rows = std::min(
-        rows, image.config.tile_height - (y & (image.config.tile_height - 1)));
+        rows, image.config.tile_extent - (y & (image.config.tile_extent - 1)));
   return Result<PlanarRectangleRun>(
       PlanarRectangleRun{run.value(), rows, image.row_pitch});
 }
@@ -824,8 +822,8 @@ Result<PlanarMutableRowRun> PlanarImageWriteWindow::row_run(
       impl_->region.dimensions()[image.config.width_axis].extent;
   auto end = x_end;
   if (image.config.order == ImagePlaneOrder::Tiled)
-    end = std::min(
-        end, x + image.config.tile_width - (x & (image.config.tile_width - 1)));
+    end = std::min(end, x + image.config.tile_extent -
+                            (x & (image.config.tile_extent - 1)));
   const auto offset = image.offset(coordinate[image.config.height_axis], x,
                                    image.channel_of(coordinate));
   return Result<PlanarMutableRowRun>(PlanarMutableRowRun{
@@ -843,7 +841,7 @@ Result<PlanarMutableRectangleRun> PlanarImageWriteWindow::rectangle_run(
   auto rows = dim.offset + dim.extent - y;
   if (image.config.order == ImagePlaneOrder::Tiled)
     rows = std::min(
-        rows, image.config.tile_height - (y & (image.config.tile_height - 1)));
+        rows, image.config.tile_extent - (y & (image.config.tile_extent - 1)));
   return Result<PlanarMutableRectangleRun>(
       PlanarMutableRectangleRun{run.value(), rows, image.row_pitch});
 }
@@ -989,8 +987,8 @@ Result<PlanarImageWriteWindow> PlanarImage::begin_write(
       const auto band_rows =
           impl_->config.order == ImagePlaneOrder::Tiled
               ? std::min(y.offset + y.extent - row,
-                         impl_->config.tile_height -
-                             (row & (impl_->config.tile_height - 1)))
+                         impl_->config.tile_extent -
+                             (row & (impl_->config.tile_extent - 1)))
               : y.offset + y.extent - row;
       for (std::uint64_t column = x.offset; column < x.offset + x.extent;) {
         if (cancellation.cancelled())
@@ -999,8 +997,8 @@ Result<PlanarImageWriteWindow> PlanarImage::begin_write(
         const auto samples =
             impl_->config.order == ImagePlaneOrder::Tiled
                 ? std::min(x.offset + x.extent - column,
-                           impl_->config.tile_width -
-                               (column & (impl_->config.tile_width - 1)))
+                           impl_->config.tile_extent -
+                               (column & (impl_->config.tile_extent - 1)))
                 : x.offset + x.extent - column;
         const auto first = impl_->offset(row, column, channel);
         const auto bytes = samples * impl_->scalar_width;

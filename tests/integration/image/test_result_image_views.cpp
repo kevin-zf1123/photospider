@@ -1,8 +1,10 @@
 #include <iostream>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "support/kernel_registry_fixture.hpp"
 #include "support/result_image_fixture.hpp"
 
 namespace {
@@ -65,20 +67,10 @@ void affine_source_views() {
     auto source_builder =
         take(ResultBuilder::start(source_root, source_schema, "affine.source"));
     require(source_builder
-                .bind_descriptor_relation(take(
-                    ResultRelation::cartesian(source_root, 1, {0, 8, 0, 0})))
+                .publish_tensor(0, Region::whole(slot.sample_shape()), layout,
+                                storage)
                 .ok(),
-            "affine source basis");
-    const auto source_count = slot.sample_count();
-    auto source_relation = take(ResultRelation::cartesian(
-        source_root, source_count.ok() ? source_count.value() : UINT64_MAX,
-        {0, 1, 0, 0}));
-    require(
-        source_builder
-            .publish_tensor(0, Region::whole(slot.sample_shape()), layout,
-                            storage, source_relation, {true, true, true, true})
-            .ok(),
-        "affine view source publishes");
+            "affine view source publishes");
     auto source = take(source_builder.seal());
     auto window = take(source.acquire_tensor(
         take(source.descriptor()), 0, Region::whole(slot.sample_shape())));
@@ -88,26 +80,10 @@ void affine_source_views() {
     auto target =
         take(ResultBuilder::start(target_root, target_schema, "affine.view"));
     require(target
-                .bind_descriptor_relation(take(
-                    ResultRelation::cartesian(target_root, 1, {0, 8, 0, 0})))
+                .publish_tensor_view(0, Region::whole(target_shape), window,
+                                     transform)
                 .ok(),
-            "affine target basis");
-    auto relation =
-        transform.reshape
-            ? take(ResultRelation::reshape(
-                  target_root, target_shape, Region::whole(target_shape),
-                  slot.sample_shape(), Region::whole(slot.sample_shape()),
-                  {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}))
-            : take(ResultRelation::mapped(
-                  target_root, target_shape, Region::whole(target_shape),
-                  slot.sample_shape(), transform.source_axes,
-                  {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
-    require(
-        target
-            .publish_tensor_view(0, Region::whole(target_shape), window,
-                                 transform, relation, {true, true, true, true})
-            .ok(),
-        "affine transform publishes with zero target payload capacity");
+            "affine transform publishes with zero target payload capacity");
     auto result = take(target.seal());
     source_builder = {};
     source = {};
@@ -117,7 +93,6 @@ void affine_source_views() {
                                                Region::whole(target_shape)));
     require(retained.storage_owner_token() == owner_token &&
                 target_root.statistics().peak[ResourceKind::Payload] == 0 &&
-                target_root.statistics().issued.io_bytes == 0 &&
                 source_root.statistics().live[ResourceKind::Payload] ==
                     bytes.size(),
             "view retains source root without payload copy or double charge");
@@ -156,24 +131,15 @@ void affine_view_failures() {
   spec.descriptor = {ElementType::UInt8, {2}};
   schema.tensors.push_back(spec);
   const Region left({{0, 1}}), right({{1, 1}});
-  auto relation = take(ResultRelation::cartesian(root, 2, {0, 1, 0, 0}));
   auto make = [&] {
     auto builder = take(ResultBuilder::start(root, schema, "affine.prefix"));
-    require(builder
-                .bind_descriptor_relation(
-                    take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
-                .ok(),
-            "affine prefix basis");
     return builder;
   };
   auto storage =
       take(Value::create({ElementType::UInt8, {1}}, left, {0, {0}}, {3}))
           .storage();
   auto first = make();
-  require(first
-              .publish_tensor(0, left, {0, {0}}, storage, relation,
-                              {true, true, true, true})
-              .ok(),
+  require(first.publish_tensor(0, left, {0, {0}}, storage).ok(),
           "first affine prefix");
   auto first_ref = first.reference();
   auto facts = take(first_ref.descriptor(false));
@@ -181,19 +147,15 @@ void affine_view_failures() {
   ResultTensorViewTransform identity;
   identity.source_axes = {{0, 0, 1, 1}};
   auto second = make();
-  require(second
-              .publish_tensor_view(0, left, input, identity, relation,
-                                   {true, true, true, true})
-              .ok(),
+  require(second.publish_tensor_view(0, left, input, identity).ok(),
           "first affine ownership edge");
   auto second_ref = second.reference();
   auto second_window = take(
       second_ref.acquire_tensor(take(second_ref.descriptor(false)), 0, left));
   ResultTensorViewTransform translated;
   translated.source_axes = {{0, 0, 1, 1, 1}};
-  require(first.publish_tensor_view(0, right, second_window, translated,
-                                    relation, {true, true, true, true})
-                  .code == ErrorCode::TypeMismatch,
+  require(first.publish_tensor_view(0, right, second_window, translated).code ==
+              ErrorCode::TypeMismatch,
           "indirect affine ownership cycle rejected before publication");
   require(*take(first_ref.acquire_tensor(facts, 0, left))
                   .row_run({0})
@@ -203,21 +165,18 @@ void affine_view_failures() {
   auto unauthorized = make();
   ResultTensorViewTransform outside;
   outside.source_axes = {{0, 1, 1, 1}};
-  const auto failed = unauthorized.publish_tensor_view(
-      0, left, input, outside, relation, {true, true, true, true});
-  require(failed.reason == FailureReason::UnauthorizedRead &&
-              failed.detail.origin == FailureOrigin::Protocol &&
-              failed.detail.scope == FailureScope::Group &&
-              unauthorized
-                      .publish_tensor_view(0, left, input, identity, relation,
-                                           {true, true, true, true})
-                      .reason == failed.reason,
-          "unauthorized transform is sticky with complete first cause");
+  const auto failed = unauthorized.publish_tensor_view(0, left, input, outside);
+  require(
+      failed.reason == FailureReason::UnauthorizedRead &&
+          failed.detail.origin == FailureOrigin::Protocol &&
+          failed.detail.scope == FailureScope::Group &&
+          unauthorized.publish_tensor_view(0, left, input, identity).reason ==
+              failed.reason,
+      "unauthorized transform is sticky with complete first cause");
   auto cancelled = make();
   CancellationSource stop;
   stop.cancel();
-  require(cancelled.publish_tensor_view(0, left, input, identity, relation,
-                                        {true, true, true, true}, stop.token())
+  require(cancelled.publish_tensor_view(0, left, input, identity, stop.token())
                       .code == ErrorCode::Cancelled &&
               cancelled.seal().status().code == ErrorCode::Cancelled,
           "pre-cancelled affine view publication is sticky");
@@ -225,14 +184,8 @@ void affine_view_failures() {
   auto other =
       take(Value::create({ElementType::UInt8, {1}}, left, {0, {0}}, {4}))
           .storage();
-  require(fragmented
-                  .publish_tensor(0, left, {0, {0}}, storage, relation,
-                                  {true, true, true, true})
-                  .ok() &&
-              fragmented
-                  .publish_tensor(0, right, {0, {0}, {1}}, other, relation,
-                                  {true, true, true, true})
-                  .ok(),
+  require(fragmented.publish_tensor(0, left, {0, {0}}, storage).ok() &&
+              fragmented.publish_tensor(0, right, {0, {0}, {1}}, other).ok(),
           "unrelated source blocks");
   auto fragmented_ref = take(fragmented.seal());
   auto fragmented_window = take(fragmented_ref.acquire_tensor(
@@ -242,36 +195,13 @@ void affine_view_failures() {
   require(
       fragmented_unauthorized
                   .publish_tensor_view(0, Region::whole({2}), fragmented_window,
-                                       outside, relation,
-                                       {true, true, true, true})
+                                       outside)
                   .reason == FailureReason::UnauthorizedRead &&
           fragmented_unauthorized.seal().status().reason ==
               FailureReason::UnauthorizedRead,
       "unavailable physical source cannot hide sticky authorization failure");
-  auto unfinished = make();
-  require(
-      unfinished.publish_tensor_view(0, Region::whole({2}), fragmented_window,
-                                     identity, relation,
-                                     {false, true, true, true})
-                  .code == ErrorCode::TypeMismatch &&
-          unfinished.seal().status().code == ErrorCode::TypeMismatch,
-      "unavailable physical source cannot hide publication finality failure");
-  auto foreign = make();
-  ResourceBudget foreign_root;
-  auto foreign_relation =
-      take(ResultRelation::cartesian(foreign_root, 2, {0, 1, 0, 0}));
-  require(
-      foreign.publish_tensor_view(0, Region::whole({2}), fragmented_window,
-                                  identity, foreign_relation,
-                                  {true, true, true, true})
-                  .code == ErrorCode::TypeMismatch &&
-          foreign.seal().status().code == ErrorCode::TypeMismatch,
-      "unavailable physical source cannot hide foreign relation provenance");
   auto uniform = make();
-  require(uniform
-              .publish_tensor(0, Region::whole({2}), {0, {0}}, storage,
-                              relation, {true, true, true, true})
-              .ok(),
+  require(uniform.publish_tensor(0, Region::whole({2}), {0, {0}}, storage).ok(),
           "uniform reshape source");
   auto uniform_ref = take(uniform.seal());
   auto uniform_window = take(uniform_ref.acquire_tensor(
@@ -281,17 +211,10 @@ void affine_view_failures() {
     three_schema.tensors[0].descriptor.shape = {3};
     auto three =
         take(ResultBuilder::start(root, three_schema, "reshape.mismatch"));
-    require(three
-                .bind_descriptor_relation(
-                    take(ResultRelation::cartesian(root, 1, {0, 8, 0, 0})))
-                .ok(),
-            "reshape mismatch basis");
     ResultTensorViewTransform reshape;
     reshape.reshape = true;
-    auto mismatch = three.publish_tensor_view(
-        0, Region::whole({3}), *source, reshape,
-        take(ResultRelation::cartesian(root, 3, {0, 1, 0, 0})),
-        {true, true, true, true});
+    auto mismatch =
+        three.publish_tensor_view(0, Region::whole({3}), *source, reshape);
     require(mismatch.code == ErrorCode::InvalidArgument &&
                 mismatch.detail.origin == FailureOrigin::Protocol &&
                 mismatch.detail.scope == FailureScope::Group &&
@@ -301,15 +224,67 @@ void affine_view_failures() {
   }
   auto explicit_copy = make();
   auto unavailable = explicit_copy.publish_tensor_view(
-      0, Region::whole({2}), fragmented_window, identity, relation,
-      {true, true, true, true});
+      0, Region::whole({2}), fragmented_window, identity);
   const std::uint8_t bytes[] = {3, 4};
-  require(unavailable.message.find("ViewUnavailable") != std::string::npos &&
+  require(unavailable.reason == FailureReason::ViewUnavailable &&
               explicit_copy
-                  .publish_tensor(0, Region::whole({2}), ByteView(bytes, 2),
-                                  relation, {true, true, true, true})
+                  .publish_tensor(0, Region::whole({2}), ByteView(bytes, 2))
                   .ok(),
           "unavailable physical view permits explicit copy retry");
+}
+void identity_materializes_fragmented_input() {
+  ResultRef retained;
+  {
+    auto registry = ps::test::kernel_registry();
+    ExecutionContext context(registry);
+    auto root = take(context.resource_budget());
+    SchemaTemplate schema;
+    schema.id = "test.identity.fragments";
+    ResultTensorSpec tensor;
+    tensor.key = "samples";
+    tensor.descriptor = {ElementType::UInt8, {2}};
+    schema.tensors.push_back(tensor);
+    auto builder =
+        take(ResultBuilder::start(root, schema, "identity.fragments"));
+    const std::uint8_t expected[] = {3, 241};
+    for (std::uint64_t index = 0; index < 2; ++index) {
+      auto buffer = take(root.allocator().allocate(1));
+      buffer.data()[0] = expected[index];
+      require(builder
+                  .publish_tensor(0, Region({{index, 1}}), {0, {1}, {index}},
+                                  std::move(buffer).freeze())
+                  .ok(),
+              "separate fragment backing");
+    }
+    auto source = take(builder.seal());
+    WorkflowDocument document;
+    WorkflowInputDeclaration input;
+    input.id = 1;
+    input.name = "input";
+    input.result_schema = std::make_shared<SchemaTemplate>(schema);
+    document.inputs = {input};
+    document.nodes = {{1, "core.identity", {WorkflowInputReference{1}}, {}}};
+    document.outputs = {{"out", 1, "value"}};
+    GraphContext graph(document);
+    auto plan = take(Compiler(registry).compile(graph)).plan;
+    retained =
+        take(context.execute(plan, {{{"input", source}}})).results.at("out");
+    auto result_window = take(retained.acquire_tensor(
+        take(retained.descriptor()), 0, Region::whole({2})));
+    auto source_window = take(source.acquire_tensor(take(source.descriptor()),
+                                                    0, Region::whole({2})));
+    for (std::uint64_t index = 0; index < 2; ++index) {
+      auto output = take(result_window.row_run({index}));
+      require(*output.data == expected[index] &&
+                  output.data != take(source_window.row_run({index})).data,
+              "identity copies exact bits when no affine view exists");
+    }
+  }
+  std::uint8_t value = 0;
+  require(retained.read_tensor(take(retained.descriptor()), 0, {1}, &value, 1)
+                  .ok() &&
+              value == 241,
+          "materialized identity survives context and source handles");
 }
 void view_graph_and_growth() {
   ResourceBudget root;
@@ -319,36 +294,21 @@ void view_graph_and_growth() {
   spec.tensors[0].descriptor.shape = {1, 2};
   auto first = take(ResultBuilder::start(root, spec, "view.graph.first"));
   auto second = take(ResultBuilder::start(root, spec, "view.graph.second"));
-  auto basis = take(ResultRelation::cartesian(root, 1, {0, 1, 0, 0}));
-  require(first.bind_descriptor_relation(basis).ok() &&
-              second.bind_descriptor_relation(basis).ok(),
-          "graph bases");
-  auto relation = take(ResultRelation::cartesian(root, 2, {0, 1, 0, 0}));
   const Region left({{0, 1}, {0, 1}, {0, 1}, {0, 1}});
   const Region right({{0, 1}, {0, 1}, {0, 1}, {1, 1}});
   const float sample = .5F;
   const ByteView bytes(reinterpret_cast<const std::uint8_t*>(&sample), 4);
-  require(
-      first.publish_tensor(0, right, bytes, relation, {true, true, true, true})
-              .ok() &&
-          second
-              .publish_tensor(0, left, bytes, relation,
-                              {true, true, true, true})
-              .ok(),
-      "graph prefixes");
+  require(first.publish_tensor(0, right, bytes).ok() &&
+              second.publish_tensor(0, left, bytes).ok(),
+          "graph prefixes");
   auto first_ref = first.reference(), second_ref = second.reference();
   auto first_window = take(
       first_ref.acquire_tensor(take(first_ref.descriptor(false)), 0, right));
   auto second_window = take(
       second_ref.acquire_tensor(take(second_ref.descriptor(false)), 0, left));
-  require(first
-              .publish_tensor_view(0, left, {&second_window}, relation,
-                                   {true, true, true, true})
-              .ok(),
+  require(first.publish_tensor_view(0, left, {&second_window}).ok(),
           "acyclic view edge");
-  require(!second.publish_tensor_view(0, right, {&first_window}, relation,
-                                      {true, true, true, true})
-                  .ok() &&
+  require(!second.publish_tensor_view(0, right, {&first_window}).ok() &&
               !second.seal().ok(),
           "indirect Result view cycle rejected");
   require(
@@ -362,13 +322,8 @@ void view_graph_and_growth() {
       take(ResultBuilder::start(root, spec, "view.concurrent.source"));
   auto target =
       take(ResultBuilder::start(root, spec, "view.concurrent.target"));
-  require(source.bind_descriptor_relation(basis).ok() &&
-              target.bind_descriptor_relation(basis).ok(),
-          "concurrent view bases");
-  require(
-      source.publish_tensor(0, left, bytes, relation, {true, true, true, true})
-          .ok(),
-      "concurrent source prefix");
+  require(source.publish_tensor(0, left, bytes).ok(),
+          "concurrent source prefix");
   auto source_ref = source.reference(), target_ref = target.reference();
   auto retained = take(
       source_ref.acquire_tensor(take(source_ref.descriptor(false)), 0, left));
@@ -376,27 +331,23 @@ void view_graph_and_growth() {
   std::condition_variable ready;
   bool entered = false, release = false;
   auto writer = std::async(std::launch::async, [&] {
-    return source.publish_tensor_kernel(
-        0, right,
-        [&](const auto&) {
-          std::unique_lock<std::mutex> lock(mutex);
-          entered = true;
-          ready.notify_all();
-          ready.wait(lock, [&] { return release; });
-          lock.unlock();
-          return target_ref.descriptor(false).ok()
-                     ? Status::success()
-                     : Status{ErrorCode::OperationFailed, {}};
-        },
-        relation, {true, true, true, true});
+    return source.publish_tensor_kernel(0, right, [&](const auto&) {
+      std::unique_lock<std::mutex> lock(mutex);
+      entered = true;
+      ready.notify_all();
+      ready.wait(lock, [&] { return release; });
+      lock.unlock();
+      return target_ref.descriptor(false).ok()
+                 ? Status::success()
+                 : Status{ErrorCode::OperationFailed, {}};
+    });
   });
   {
     std::unique_lock<std::mutex> lock(mutex);
     ready.wait(lock, [&] { return entered; });
   }
   auto alias = std::async(std::launch::async, [&] {
-    return target.publish_tensor_view(0, left, {&retained}, relation,
-                                      {true, true, true, true});
+    return target.publish_tensor_view(0, left, {&retained});
   });
   const auto completes =
       alias.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
@@ -411,15 +362,12 @@ void view_graph_and_growth() {
 
   spec.tensors[0].descriptor.shape = {1, 64};
   auto source64 = take(ResultBuilder::start(root, spec, "growth.source"));
-  require(source64.bind_descriptor_relation(basis).ok(), "growth source basis");
-  relation = take(ResultRelation::cartesian(root, 64, {0, 1, 0, 0}));
   std::vector<float> pixels(64, .25F);
   require(source64
               .publish_tensor(
                   0, Region::whole(spec.tensors[0].sample_shape()),
                   ByteView(reinterpret_cast<const std::uint8_t*>(pixels.data()),
-                           256),
-                  relation, {true, true, true, true})
+                           256))
               .ok(),
           "growth source");
   source_ref = take(source64.seal());
@@ -427,15 +375,13 @@ void view_graph_and_growth() {
   growth.maximum_bytes = 4096;
   auto bounded =
       take(ResultBuilder::start(root, spec, "growth.target", growth));
-  require(bounded.bind_descriptor_relation(basis).ok(), "bounded basis");
   std::uint64_t successful = 0;
   Status outcome;
   for (std::uint64_t x = 0; x < 64; ++x) {
     const Region cell({{0, 1}, {0, 1}, {0, 1}, {x, 1}});
     auto input =
         take(source_ref.acquire_tensor(take(source_ref.descriptor()), 0, cell));
-    outcome = bounded.publish_tensor_view(0, cell, {&input}, relation,
-                                          {true, true, true, true});
+    outcome = bounded.publish_tensor_view(0, cell, {&input});
     if (!outcome.ok()) {
       break;
     }
@@ -462,11 +408,7 @@ void large_view() {
       image_schema.tensors[0].batch_axes[1] = 1;
   image_schema.tensors[0].descriptor.shape = {1025, 1025};
   auto builder = take(ResultBuilder::start(root, image_schema, "large.source"));
-  auto basis = take(ResultRelation::cartesian(root, 1, {0, 1, 0, 0}));
-  require(builder.bind_descriptor_relation(basis).ok(), "large source basis");
   const auto shape = image_schema.tensors[0].sample_shape();
-  const auto count = take(image_schema.tensors[0].sample_count());
-  auto independent = take(ResultRelation::cartesian(root, count, {0, 1, 0, 0}));
   require(builder
               .publish_tensor_kernel(
                   0, Region::whole(shape),
@@ -486,27 +428,19 @@ void large_view() {
                       }
                     }
                     return Status::success();
-                  },
-                  independent, {true, true, true, true})
+                  })
               .ok(),
           "large direct-write publication");
   auto original = take(builder.seal());
   auto window = take(original.acquire_tensor(take(original.descriptor()), 0,
                                              Region::whole(shape)));
-  std::vector<ResultMappedAxis> axes;
+  std::vector<ResultViewAxis> axes;
   for (std::int32_t i = 0; i < 4; ++i) {
     axes.push_back({i, 0, 1, 1});
   }
-  auto identity = take(
-      ResultRelation::mapped(root, shape, Region::whole(shape), shape, axes,
-                             {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
   auto output = take(ResultBuilder::start(root, image_schema, "large.view"));
-  require(output.bind_descriptor_relation(basis).ok(), "large view basis");
   const auto before = root.statistics().issued.work;
-  require(output
-              .publish_tensor_view(0, Region::whole(shape), {&window}, identity,
-                                   {true, true, true, true})
-              .ok(),
+  require(output.publish_tensor_view(0, Region::whole(shape), {&window}).ok(),
           "view publication above one million samples");
   require(root.statistics().issued.work - before < 10000,
           "structured view certification scales with rectangles");
@@ -522,6 +456,7 @@ int main() {
   try {
     affine_source_views();
     affine_view_failures();
+    identity_materializes_fragmented_input();
     view_graph_and_growth();
     large_view();
     return 0;

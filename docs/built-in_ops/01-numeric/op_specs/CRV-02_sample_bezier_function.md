@@ -179,7 +179,7 @@ strict computations for all profiles. Acceleration may change inverse/evaluation
 methods within the final-output bound, but cannot accept a backward fold or
 move an anchor. Strict returns the same bits on supported CPU platforms.
 Each fixed accelerated profile must give consistent bits across sample ordering,
-batch/SIMD width and optional joint execution; different platform profiles may
+batch/SIMD width; different platform profiles may
 differ within the stated tolerance. GPU/Metal is outside this CPU scope.
 
 Finite anchor hits and clamped endpoints are exact after output conversion in
@@ -423,7 +423,7 @@ be labeled a CertifiedBound QualityReport without the required kernel evidence.
 | B09 | Below/above-domain reject reports InvalidDomain before y arithmetic (after complete input collection); clamp numerically selects only the endpoint y and preserves requested axis |
 | B10 | Invalid remote x topology fails a local values request; generic y NaN outside all evaluated stencils does not; selected segment interior y NaN fails; exact anchor ignores invalid y handles |
 | B11 | All count/K/degree/shape boundaries and one-past-limit cases; missing parameters, wrong arity/dtype, nonfinite reconstructed controls, unaligned/strided views |
-| B12 | Nonzero/disjoint ROI, reverse order, SIMD tails and joint on/off reproduce requested outputs with complete input collection and complete output allocation |
+| B12 | Nonzero/disjoint ROI, reverse order, SIMD tails reproduce requested outputs with complete input collection and complete output allocation |
 | B13 | Every x mutation invalidates old values witnesses; any y mutation invalidates recorded values demand; axis ignores all controls; count=1 ignores end changes |
 | B14 | Strict rounding near flat x tangencies, steep y, exact zeros and halfway output cases; acceleration must bound y error or execute strict fallback |
 | B15 | Identical complete-output admission for small ROI and full demand, forced topology/root capacity/work failures, cancellation and recovery, cache-off and release of unpublished objects |

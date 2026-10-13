@@ -22,6 +22,7 @@
 #include "channel_extraction_workflow/source.hpp"
 #include "numeric_workflow/icc_fixture.hpp"
 #include "photospider/photospider.hpp"
+#include "support/tile_oracle.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -142,10 +143,7 @@ Result<ExecutionResult> run_source(
   document.outputs = {{"converted", 1, "values"}};
   auto registry = probe_registry(probe);
   PlanningOptions planning;
-  planning.tile_height = source.tile_height;
-  planning.tile_width = source.tile_width;
-  if (roi)
-    planning.output_regions = {{"converted", *roi}};
+  planning.tile_extent = source.tile_width;
   GraphContext graph(document);
   auto compiled = Compiler(registry).compile(graph, planning, source.resources);
   if (!compiled.ok())
@@ -153,6 +151,16 @@ Result<ExecutionResult> run_source(
   ExecutionContextConfig config;
   config.cpu_workers = 1;
   ExecutionContext context(registry, config);
+  if (roi) {
+    auto selected = workflow_example::select_tiles(
+        take(context.resource_budget()), compiled.value().plan, "converted",
+        *roi);
+    if (!selected.ok())
+      return Result<ExecutionResult>(selected.status());
+    auto stages = compiled.take_value();
+    stages.plan = selected.take_value();
+    compiled = Result<CompiledWorkflow>(std::move(stages));
+  }
   ExecutionBindings bindings;
   bindings.inputs.push_back(
       {"source",
@@ -249,12 +257,11 @@ int numeric_cases() {
   auto partial = run(ElementType::Float64, {3}, pack<double>({0, 1, 1e100}),
                      {{"dtype", std::string("uint8")}, {"rescale", false}},
                      Region({{0, 2}}));
-  PS_CHECK(partial.ok());
-  PS_CHECK(read<std::uint8_t>(partial.value().results.at("converted"), {1}) ==
-           1);
+  PS_CHECK(!partial.ok());
   auto rejected = run(ElementType::Float64, {3}, pack<double>({0, 1, 1e100}),
                       {{"dtype", std::string("uint8")}, {"rescale", false}});
-  PS_CHECK(!rejected.ok());
+  PS_CHECK(!rejected.ok() && partial.status().code == rejected.status().code &&
+           partial.status().reason == rejected.status().reason);
   const auto nan_bits = UINT64_C(0xfff0000000000001);
   double signaling;
   std::memcpy(&signaling, &nan_bits, 8);
@@ -273,9 +280,8 @@ int numeric_cases() {
   const double adjacent =
       std::nextafter(max32, std::numeric_limits<double>::infinity());
   auto near_limit =
-      run(ElementType::Float64, {2}, pack<double>({adjacent, max32 * 2}),
-          {{"dtype", std::string("float32")}, {"rescale", false}},
-          Region({{0, 1}}));
+      run(ElementType::Float64, {1}, pack<double>({adjacent}),
+          {{"dtype", std::string("float32")}, {"rescale", false}});
   PS_CHECK(near_limit.ok());
   PS_CHECK(read<float>(near_limit.value().results.at("converted"), {0}) ==
            std::numeric_limits<float>::max());
@@ -666,8 +672,12 @@ int planar_tile_oracle(std::uint64_t side) {
   PS_CHECK(actual == expected);
   samples.back() = std::numeric_limits<float>::quiet_NaN();
   const Region roi({{32, 64}, {32, 64}, {0, 1}});
+  auto full_tile = run_planar(ElementType::Float32, side, pack(samples),
+                              parameters, side, roi, side);
+  PS_CHECK(!full_tile.ok() &&
+           full_tile.status().reason == FailureReason::InvalidDomain);
   auto partial = run_planar(ElementType::Float32, side, pack(samples),
-                            parameters, side, roi, side);
+                            parameters, side, roi, 32);
   PS_CHECK(partial.ok());
   std::vector<std::uint8_t> region_bytes(64 * 64);
   PS_CHECK(read_bytes(partial.value().results.at("converted"), roi,
@@ -1048,10 +1058,10 @@ int result_batches_and_views() {
     original = {};
     viewed = Result<ExecutionResult>(ExecutionResult{});
     PS_CHECK(channel_fixture::read(retained, roi) == expected);
-    PS_CHECK(!retained
-                  .acquire_tensor(take(retained.descriptor()), 0,
-                                  Region::whole(shape))
-                  .ok());
+    PS_CHECK(retained
+                 .acquire_tensor(take(retained.descriptor()), 0,
+                                 Region::whole(shape))
+                 .ok() == (storage == 0));
     auto empty = run_source(source, identity, {}, nullptr, nullptr, true);
     PS_CHECK(empty.ok());
     PS_CHECK(take(empty.value().results.at("converted").descriptor())
@@ -1071,7 +1081,8 @@ int result_batches_and_views() {
       PS_CHECK(read<float>(output, at) ==
                static_cast<float>(static_cast<double>(code) * 2 / 255));
     }
-    const auto q = take(Footprint::from_regions(shape, {roi}));
+    const auto q = take(Footprint::from_regions(
+        shape, {tile_oracle::coverage(retained.schema(), roi)}));
     PS_CHECK(
         take(converted.value().dependencies.source_support()).at("source") ==
         q);
@@ -1093,11 +1104,12 @@ int result_batches_and_views() {
                    roi);
     PS_CHECK(!invalid.ok() &&
              invalid.status().reason == FailureReason::ArithmeticOverflow);
-    PS_CHECK(invalid.status().message.find("coordinate=[1,0,1,0,1]") !=
-             std::string::npos);
     PS_CHECK(invalid.status().message.find(
-                 "source_dtype=float64 target_dtype=uint8 range_index=1 "
-                 "channel_axis=2 channel=1") != std::string::npos);
+                 storage == 0 ? "coordinate=[0,0,0,0,0]"
+                              : "coordinate=[1,0,0,0,0]") != std::string::npos);
+    PS_CHECK(invalid.status().message.find(
+                 "source_dtype=float64 target_dtype=uint8 range_index=0 "
+                 "channel_axis=2 channel=0") != std::string::npos);
     auto forced = run_source(
         source,
         {{"dtype", std::string("float32")}, {"layout", std::string("view")}},

@@ -1,10 +1,8 @@
 #pragma once
 
 #include <array>
-#include <functional>
-#include <string_view>
 
-#include "photospider/data/result.hpp"
+#include "photospider/core/status.hpp"
 
 namespace ps {
 /** @brief Signed/HDR finite associated color; A in [0,1], A=0 implies P=0. */
@@ -103,37 +101,4 @@ PHOTOSPIDER_API Result<WeightedLayerSum> weighted_layer_add(
 PHOTOSPIDER_API Result<OptionalLayerPixel> weighted_layer_finalize(
     const WeightedLayerSum& input);
 
-enum class LayerRepresentation : std::uint32_t {
-  Layer = 1,
-  Response = 2,
-  RawSum = 3,
-  Contributions = 4,
-  WeightedSum = 5,
-  OptionalLayer = 6
-};
-/** @brief Version-one space is linear sRGB, D65, relative scene-referred units.
- * Layer/Response/RawSum have H*W raster observations. Contributions is a
- * dynamic ordered collection (including zero rows); WeightedSum and
- * OptionalLayer have one logical output location. A complete Layer stores
- * associated coverage[4] and emission[3] fields; no field can publish
- * independently.
- */
-struct LayerSpec final {
-  std::uint64_t height = 1, width = 1;
-  std::uint32_t working_space = 1;
-};
-PHOTOSPIDER_API Result<SchemaTemplate> layer_schema(
-    LayerRepresentation representation, const LayerSpec& spec = {});
-PHOTOSPIDER_API Result<LayerSpec> layer_spec(const SchemaTemplate& schema);
-PHOTOSPIDER_API bool has_layer_schema(std::string_view id) noexcept;
-/** @brief Static closed-schema check, no I/O; unrelated ids are untouched. */
-PHOTOSPIDER_API Status validate_layer_schema(const SchemaTemplate& schema);
-/** @brief Explicit bounded paged validation before runtime publication. All
- * seven Layer components participate even if a later consumer needs only P.
- * Root provenance, work and I/O limits apply; hook adds an independent limit.
- */
-PHOTOSPIDER_API Status validate_layer_result(
-    const ResultRef& result, const ResourceBudget& resources,
-    std::uint64_t maximum_window, const CancellationToken& cancellation = {},
-    const std::function<Status(std::uint64_t)>& consume_work = {});
 }  // namespace ps

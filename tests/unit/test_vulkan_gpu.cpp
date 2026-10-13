@@ -71,13 +71,10 @@ struct DependencyCompute {
     auto builder = multi_result::take(
         ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
                              phase.query.semantic_key));
-    multi_result::check(builder.bind_descriptor_relation(
-        multi_result::take(ResultRelation::cartesian(phase.resources, 1, {}))));
-    multi_result::check(builder.publish_tensor(
-        0, value.value().region(), value.value().layout(),
-        value.value().storage(),
-        multi_result::take(ResultRelation::cartesian(phase.resources, 1, {})),
-        {true, true, true, true}));
+
+    multi_result::check(builder.publish_tensor(0, value.value().region(),
+                                               value.value().layout(),
+                                               value.value().storage()));
     return Result<ResultProgramPoll>(
         ResultPublication{multi_result::take(builder.seal()), true});
   }

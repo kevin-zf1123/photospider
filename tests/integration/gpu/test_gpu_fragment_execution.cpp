@@ -21,21 +21,39 @@ constexpr char shader[] = PS_FRAGMENT_ATLAS_MSL_V11
     " device const ulong* directory [[buffer(1)]],"
     " device uint* output [[buffer(2)]], constant ulong* c [[buffer(3)]]) {"
     " float sum=0; uint missing=0; ulong at[8]={0}, address=0;"
-    " for (uint i=0; i<65; ++i) { at[0]=c[4]+i*64;"
-    " if (!ps_atlas_address(directory,c[0],c+1,c+2,1,at,c[3],4,address))"
+    " for (uint i=0; i<65; ++i) { at[1]=c[6]+i*64;"
+    " if (!ps_atlas_address(directory,c[0],c+1,c+3,2,at,c[5],4,address))"
     " {missing=1; continue;}"
     " uint bits=0; for (uint b=0;b<4;++b) bits|=uint(data[address+b])<<(8*b);"
     " sum+=as_type<float>(bits); }"
     " output[0]=as_type<uint>(sum); output[1]=missing; }";
 // NOLINTEND
 
-Footprint point(std::uint64_t at) {
-  return take(Footprint::from_regions({length}, {Region({{at, 1}})}));
+SchemaTemplate spatial_schema(ElementType type) {
+  auto schema = gpu_result::schema(type, length);
+  schema.tensors[0].descriptor.shape = {1, length};
+  schema.tensors[0].layout.spatial = true;
+  schema.tensors[0].layout.channel_axis.reset();
+  return schema;
 }
-Result<ResultProgramPoll> need(std::uint32_t input, std::uint32_t roles,
-                               Footprint samples) {
+TileRequest request(std::initializer_list<TileIndex> indices) {
+  return {false, take(TileSet::from_indices(ResourceBudget{}, indices))};
+}
+float number(const ResultRef& result, std::uint64_t at) {
+  float value = 0;
+  check(result.read_tensor(take(result.descriptor()), 0, {0, at}, &value, 4));
+  return value;
+}
+Footprint point(std::uint64_t at) {
+  return take(
+      Footprint::from_regions({1, length}, {Region({{0, 1}, {at, 1}})}));
+}
+Result<ResultProgramPoll> need(const ResultProgramPhase& phase,
+                               std::uint32_t input, Footprint samples,
+                               bool descriptor_only = false) {
   ResultProgramNeed need;
-  need.tensors.push_back({input, 0, std::move(samples), roles});
+  need.tiles.push_back(take(sdk::tile_need_for_samples(
+      phase.resources, phase.query, input, 0, samples, descriptor_only)));
   return Result<ResultProgramPoll>(std::move(need));
 }
 ResultRef block_state(const ResultProgramPhase& phase, std::uint64_t offset,
@@ -44,15 +62,13 @@ ResultRef block_state(const ResultProgramPhase& phase, std::uint64_t offset,
   schema.id = "example.gpu.block";
   auto builder =
       take(ResultBuilder::start(phase.resources, schema, "sparse.block"));
-  check(builder.bind_descriptor_relation(
-      take(ResultRelation::cartesian(phase.resources, 1, {}))));
+
   auto memory = take(phase.allocator.allocate(12));
   std::memcpy(memory.data(), &offset, 8);
   std::memcpy(memory.data() + 8, &sum, 4);
-  check(builder.publish_tensor(
-      0, Region::whole({12}), {0, {1}}, std::move(memory).freeze(),
-      take(ResultRelation::cartesian(phase.resources, 12, {})),
-      {true, true, true, true}, phase.query.cancellation));
+  check(builder.publish_tensor(0, Region::whole({12}), {0, {1}},
+                               std::move(memory).freeze(),
+                               phase.query.cancellation));
   return take(builder.seal());
 }
 std::array<std::uint8_t, 12> block_bytes(const ResultRef& state) {
@@ -75,7 +91,7 @@ Result<ResultRef> native_sum(const ResultProgramPhase& phase,
     throw std::runtime_error("atlas not reused within poll");
   if (atlas->payload_bytes !=
           take(phase.tensors->at({0, 0}).coverage().element_count()) * 4 ||
-      atlas->address({offset + 1}).status().code != ErrorCode::NotFound)
+      atlas->address({0, offset + 1}).status().code != ErrorCode::NotFound)
     throw std::runtime_error("atlas filled a sparse hole");
   auto memory = take(phase.allocator.allocate(8));
   const auto* api = phase.gpu;
@@ -100,8 +116,12 @@ Result<ResultRef> native_sum(const ResultProgramPhase& phase,
       {sizeof(ps_gpu_buffer_binding_v1), 1, directory, 0,
        atlas->directory.bytes().size(), 0},
       {sizeof(ps_gpu_buffer_binding_v1), 2, destination, 0, memory.size(), 1}};
-  const std::uint64_t constants[] = {atlas->slot_count, length,
-                                     atlas->tile_shape[0], atlas->payload_bytes,
+  const std::uint64_t constants[] = {atlas->slot_count,
+                                     1,
+                                     length,
+                                     atlas->tile_shape[0],
+                                     atlas->tile_shape[1],
+                                     atlas->payload_bytes,
                                      offset};
   ps_gpu_dispatch_v1 command{};
   command.struct_size = sizeof(command);
@@ -136,10 +156,10 @@ struct SparseState {
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
     if (mode >= 8 && mode <= 11) {
       if (phase.gpu->buffer(nullptr, nullptr, 1, 0, nullptr) !=
-              PS_RESULT_STATUS_FAILURE_V2 ||
+              PS_RESULT_STATUS_FAILURE_V3 ||
           phase.gpu->execute(nullptr, nullptr, 0) !=
-              PS_RESULT_STATUS_FAILURE_V2 ||
-          phase.gpu->release(nullptr, 0) != PS_RESULT_STATUS_FAILURE_V2)
+              PS_RESULT_STATUS_FAILURE_V3 ||
+          phase.gpu->release(nullptr, 0) != PS_RESULT_STATUS_FAILURE_V3)
         throw std::runtime_error("null native service context accepted");
       if (mode == 9)
         static_cast<void>(phase.consume_work(UINT64_MAX));
@@ -156,35 +176,23 @@ struct SparseState {
       return Result<ResultProgramPoll>(
           Status{ErrorCode::OperationFailed, "ignored first native failure"});
     }
-    if (mode == 7) {
-      if (!stage++)
-        return need(0, 9, take(Footprint::none({length})));
-      const auto atlas = take(phase.acquire_native_atlas(0, 0));
-      if (atlas->payload_bytes || atlas->payload.bytes().size() != 1 ||
-          atlas->slot_count != 2 ||
-          atlas->address({0}).status().code != ErrorCode::NotFound)
-        throw std::runtime_error("empty atlas invented a sample");
-      auto builder = gpu_result::builder(phase);
-      return Result<ResultProgramPoll>(
-          ResultPublication{take(builder.seal()), true});
-    }
     if (!stage) {
       const auto demand = gpu_result::demand(phase);
       check(phase.consume_work(take(demand.element_count())));
       check(demand.visit(
           [&](const auto& at) {
-            outputs.push_back(at[0]);
+            outputs.push_back(at[1]);
             return Status::success();
           },
           length, phase.query.cancellation));
       if (!outputs.empty()) {
         sums = take(phase.allocator.allocate(outputs.size() * 4));
         stage = 1;
-        return need(1, 10, point(outputs[0]));
+        return need(phase, 1, point(outputs[0]));
       }
     } else if (stage == 1) {
       std::int64_t control = 0;
-      check(phase.read_tensor(1, 0, {outputs[cursor]}, &control, 8));
+      check(phase.read_tensor(1, 0, {0, outputs[cursor]}, &control, 8));
       if (control < 0 || control >= 64)
         return Result<ResultProgramPoll>(
             Status{ErrorCode::OperationFailed, "invalid control"});
@@ -193,13 +201,14 @@ struct SparseState {
       check(phase.consume_work(65));
       std::vector<Region> boxes;
       for (std::uint64_t i = 0; i < (mode == 1 ? 64 : 65); ++i)
-        boxes.push_back(Region({{offset + i * 64, 1}}));
+        boxes.push_back(Region({{0, 1}, {offset + i * 64, 1}}));
       FootprintLimits limits;
       limits.cancellation = phase.query.cancellation;
       limits.consume_work = phase.consume_work;
       stage = 2;
-      return need(0, mode == 3 ? 8 : 9,
-                  take(Footprint::from_regions({length}, boxes, limits)));
+      return need(phase, 0,
+                  take(Footprint::from_regions({1, length}, boxes, limits)),
+                  mode == 3);
     } else {
       float sum = 0;
       if (mode == 2)
@@ -210,7 +219,7 @@ struct SparseState {
         check(phase.consume_work(65));
         for (std::uint64_t i = 0; i < 65; ++i) {
           float sample = 0;
-          check(phase.read_tensor(0, 0, {offset + i * 64}, &sample, 4));
+          check(phase.read_tensor(0, 0, {0, offset + i * 64}, &sample, 4));
           sum += sample;
         }
       } else {
@@ -225,7 +234,7 @@ struct SparseState {
       std::memcpy(sums.data() + cursor * 4, &sum, 4);
       if (++cursor < outputs.size()) {
         stage = 1;
-        return need(1, 10, point(outputs[cursor]));
+        return need(phase, 1, point(outputs[cursor]));
       }
     }
     auto builder = take(ResultBuilder::start(
@@ -234,49 +243,13 @@ struct SparseState {
         phase.association
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
-            : std::vector<std::uint64_t>{}));
-    auto basis = take(ResultRelation::cartesian(phase.resources, 1, {}));
-    if (!outputs.empty()) {
-      basis = take(ResultRelation::unite(
-          phase.resources,
-          {take(ResultRelation::cartesian(
-               phase.resources, 1,
-               {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0})),
-           take(ResultRelation::cartesian(
-               phase.resources, 1,
-               {1, 8, 0, 1, ResultSupportTarget::Descriptor, 0}))}));
-    }
-    check(builder.bind_descriptor_relation(basis));
-    check(phase.consume_work(outputs.size() * 66));
-    auto relation =
-        outputs.empty()
-            ? take(ResultRelation::cartesian(phase.resources, length, {}))
-            : take(ResultRelation::sample_rows(
-                  phase.resources, length, outputs.size() * 66,
-                  [&](std::uint64_t row) {
-                    const auto observation = row / 66, sample = row % 66;
-                    ResultSupport support =
-                        sample == 65
-                            ? ResultSupport{1,
-                                            2,
-                                            outputs[observation],
-                                            1,
-                                            ResultSupportTarget::Tensor,
-                                            0}
-                            : ResultSupport{0,
-                                            1,
-                                            offsets[observation] + sample * 64,
-                                            1,
-                                            ResultSupportTarget::Tensor,
-                                            0};
-                    return Result<ResultRelationRow>(
-                        ResultRelationRow{outputs[observation], support});
-                  }));
+            : std::vector<std::uint64_t>{},
+        phase.query.tile_extent));
     auto storage = std::move(sums).freeze();
     for (std::size_t i = 0; i < outputs.size(); ++i)
-      check(builder.publish_tensor(
-          0, Region({{outputs[i], 1}}), {i * 4, {4}, {outputs[i]}}, storage,
-          relation, {true, true, true, true}, phase.query.cancellation));
+      check(builder.publish_tensor(0, Region({{0, 1}, {outputs[i], 1}}),
+                                   {i * 4, {4, 4}, {0, outputs[i]}}, storage,
+                                   phase.query.cancellation));
     return Result<ResultProgramPoll>(
         ResultPublication{take(builder.seal()), true});
   } catch (const gpu_result::Failure& failed) {
@@ -309,7 +282,7 @@ struct AtlasProbe {
       for (std::uint64_t n = 0; n < 2; ++n)
         for (std::uint64_t l = 0; l < 2; ++l)
           boxes.push_back(Region({{n, 1}, {l, 1}, {0, 2}, {1, 1}}));
-      return need(0, 9, take(Footprint::from_regions({2, 2, 2, 4}, boxes)));
+      return need(phase, 0, take(Footprint::from_regions({2, 2, 2, 4}, boxes)));
     }
     const auto atlas = take(phase.acquire_native_atlas(0, 0));
     if (atlas->payload_bytes != 32 ||
@@ -361,11 +334,9 @@ struct AtlasProbe {
     if (missing)
       throw std::runtime_error("spatial batch shader lookup");
     auto builder = gpu_result::builder(phase);
-    check(builder.publish_tensor(
-        0, Region::whole({1}), {0, {4}}, std::move(output).freeze(),
-        take(ResultRelation::cartesian(
-            phase.resources, 1, {0, 1, 29, 1, ResultSupportTarget::Tensor, 0})),
-        {true, true, true, true}, phase.query.cancellation));
+    check(builder.publish_tensor(0, Region::whole({1}), {0, {4}},
+                                 std::move(output).freeze(),
+                                 phase.query.cancellation));
     return Result<ResultProgramPoll>(
         ResultPublication{take(builder.seal()), true});
   } catch (const gpu_result::Failure& failed) {
@@ -407,8 +378,7 @@ int spatial_owner() {
     root = take(context.resource_budget());
     auto builder =
         take(ResultBuilder::start(root, input_schema, "batch.input"));
-    check(builder.bind_descriptor_relation(
-        take(ResultRelation::cartesian(root, 1, {}))));
+
     auto memory = take(root.allocator().allocate(128));
     for (std::uint32_t i = 0; i < 32; ++i) {
       const float value = static_cast<float>(i + 1);
@@ -416,9 +386,7 @@ int spatial_owner() {
     }
     check(builder.publish_tensor(0, Region::whole({2, 2, 2, 4}),
                                  {0, {64, 32, 16, 4}},
-                                 std::move(memory).freeze(),
-                                 take(ResultRelation::cartesian(root, 32, {})),
-                                 {true, true, true, true}));
+                                 std::move(memory).freeze()));
     ExecutionBinding binding;
     binding.name = "data";
     binding.result = take(builder.seal());
@@ -429,6 +397,7 @@ int spatial_owner() {
     doc.outputs = {{"out", 1, "value"}};
     GraphContext graph(doc);
     PlanningOptions planning;
+    planning.tile_extent = 1;
     planning.execution_mode = ExecutionMode::NativeGpu;
     auto plan = take(Compiler(registry).compile(graph, planning)).plan;
     auto output = take(context.execute(plan, {{binding}}));
@@ -474,12 +443,11 @@ int require(bool valid, const char* message) {
 ExecutionBindings inputs(const ResourceBudget& root, unsigned layout = 0) {
   ExecutionBindings bindings;
   for (bool control : {false, true}) {
-    auto schema = gpu_result::schema(
-        control ? ElementType::Int64 : ElementType::Float32, length);
+    auto schema =
+        spatial_schema(control ? ElementType::Int64 : ElementType::Float32);
     auto builder =
         take(ResultBuilder::start(root, schema, control ? "control" : "data"));
-    check(builder.bind_descriptor_relation(
-        take(ResultRelation::cartesian(root, 1, {}))));
+
     if (!control && layout == 4) {
       ExecutionBinding binding;
       binding.name = "data";
@@ -502,18 +470,18 @@ ExecutionBindings inputs(const ResourceBudget& root, unsigned layout = 0) {
       }
     }
     auto storage = std::move(memory).freeze();
-    auto relation = take(ResultRelation::cartesian(root, length, {}));
     if (!control && layout == 3) {
       for (std::uint64_t i = 0; i < 65; ++i)
-        check(builder.publish_tensor(0, Region({{i * 64, 1}}), {0, {4}},
-                                     storage, relation,
-                                     {true, true, true, true}));
+        check(builder.publish_tensor(
+            0, Region({{0, 1}, {i * 64, 1}}),
+            {0, {static_cast<std::int64_t>(length * 4), 4}}, storage));
     } else {
       const auto stride = control ? 8 : layout == 1 ? -4 : layout == 2 ? 0 : 4;
       const auto offset = !control && layout == 1 ? (length - 1) * 4 : 0;
-      check(builder.publish_tensor(0, Region::whole({length}),
-                                   {offset, {stride}}, storage, relation,
-                                   {true, true, true, true}));
+      check(builder.publish_tensor(
+          0, Region::whole({1, length}),
+          {offset, {static_cast<std::int64_t>(length * width), stride}},
+          storage));
     }
     ExecutionBinding binding;
     binding.name = control ? "control" : "data";
@@ -535,8 +503,7 @@ int main() try {
     port.result_schema_id = "example.gpu.tensor";
     port.result_schema_version = 1;
   }
-  traits.outputs = {
-      gpu_result::output(gpu_result::schema(ElementType::Float32, length))};
+  traits.outputs = {gpu_result::output(spatial_schema(ElementType::Float32))};
   traits.supports_gpu = true;
   traits.outputs[0].continuation_bytes = sizeof(SparseState);
   traits.workspace_bytes = length * 4 + 32;
@@ -547,6 +514,8 @@ int main() try {
   };
   check(registry->register_operation(definition));
   for (unsigned mode = 1; mode <= 11; ++mode) {
+    if (mode == 7)
+      continue;
     auto op = definition;
     op.key = "example.atlas_failure_" + std::to_string(mode);
     op.start_result = [mode](const ResultProgramQuery&,
@@ -571,10 +540,9 @@ int main() try {
   check(registry->freeze());
   WorkflowDocument document;
   document.inputs = {
-      gpu_result::declaration(1, "data",
-                              gpu_result::schema(ElementType::Float32, length)),
+      gpu_result::declaration(1, "data", spatial_schema(ElementType::Float32)),
       gpu_result::declaration(2, "control",
-                              gpu_result::schema(ElementType::Int64, length))};
+                              spatial_schema(ElementType::Int64))};
   document.nodes = {{1,
                      definition.key,
                      {WorkflowInputReference{1}, WorkflowInputReference{2}},
@@ -592,28 +560,37 @@ int main() try {
       return 77;
     }
     PlanningOptions planning;
+    planning.tile_extent = 1;
     planning.execution_mode =
         gpu ? ExecutionMode::NativeGpu : ExecutionMode::CpuExact;
     const auto plan = take(Compiler(registry).compile(graph, planning)).plan;
     const auto frozen = take(context.freeze(plan, bindings));
-    const auto query = take(take(point(0).unite(point(1))).unite(point(2)));
+    const auto query = request({0, 1, 2});
     auto result = take(context.execute_fragments(frozen, {{"sum", query}}));
     for (std::uint64_t i = 0; i < 3; ++i)
-      if (require(gpu_result::number(result.results.at("sum"), i) ==
-                      2145 * (i == 1 ? 2 : 1),
-                  "independent arithmetic oracle failed"))
+      if (require(
+              number(result.results.at("sum"), i) == 2145 * (i == 1 ? 2 : 1),
+              "independent arithmetic oracle failed"))
         return 1;
-    auto support = take(take(result.dependencies.restrict({{"sum", point(0)}}))
-                            .source_support());
-    auto reused = take(take(result.dependencies.restrict({{"sum", point(2)}}))
-                           .source_support());
-    if (require(take(support.at("data").element_count()) == 65 &&
-                    support.at("control") == point(0) &&
-                    take(support.at("data").intersect(point(1))).empty() &&
-                    reused.at("control") == point(2) &&
-                    reused.at("data") == support.at("data"),
-                "sparse dependency evidence or current block witness failed"))
-      return 1;
+    std::vector<TileIndex> data;
+    for (TileIndex i = 0; i < 65; ++i)
+      data.push_back(i * 64);
+    for (TileIndex output : {0u, 2u}) {
+      auto record = take(result.dependencies.tile_record({0, 0, output}));
+      if (require(record && record->inputs.size() == 2, "sparse tile record"))
+        return 1;
+      for (const auto& input : record->inputs) {
+        const auto source =
+            std::get<PlanWorkflowInput>(input.producer).declaration_index;
+        const auto expected =
+            source == 0 ? take(TileSet::from_indices(ResourceBudget{},
+                                                     data.data(), data.size()))
+                        : request({output}).tiles;
+        if (require(!input.whole && input.tiles == expected,
+                    "sparse dependency or current block witness"))
+          return 1;
+      }
+    }
     const auto& diagnostics = result.diagnostics;
     std::uint64_t dispatches = 0;
     for (const auto& timing : diagnostics.operation_timings) {
@@ -634,13 +611,15 @@ int main() try {
               << "; block_hits=" << diagnostics.block_cache_hits << '\n';
     if (gpu) {
       auto fresh = take(context.freeze(plan, bindings));
-      auto hit = take(context.execute_fragments(fresh, {{"sum", point(2)}}));
-      if (require(gpu_result::number(hit.results.at("sum"), 2) == 2145,
+      auto hit =
+          take(context.execute_fragments(fresh, {{"sum", request({2})}}));
+      if (require(number(hit.results.at("sum"), 2) == 2145,
                   "native result across repeated Result requests"))
         return 1;
     }
   }
   PlanningOptions planning;
+  planning.tile_extent = 1;
   planning.execution_mode = ExecutionMode::NativeGpu;
   const auto plan = take(Compiler(registry).compile(graph, planning)).plan;
   constexpr std::uint64_t source_bytes = length * 12;
@@ -654,7 +633,7 @@ int main() try {
     const auto root = take(small.resource_budget());
     const auto bound = inputs(root);
     const auto frozen = take(small.freeze(plan, bound));
-    auto result = small.execute_fragments(frozen, {{"sum", point(0)}});
+    auto result = small.execute_fragments(frozen, {{"sum", request({0})}});
     if (require(bytes == minimum
                     ? result.ok()
                     : result.status().code == ErrorCode::ResourceExhausted,
@@ -669,9 +648,10 @@ int main() try {
       if (require(root.statistics().live[ResourceKind::Payload] == source_bytes,
                   "native owner retirement"))
         return 1;
-      auto retry = take(small.execute_fragments(frozen, {{"sum", point(0)}}));
+      auto retry =
+          take(small.execute_fragments(frozen, {{"sum", request({0})}}));
       if (require(retry.diagnostics.native_dispatch_count > 0 &&
-                      gpu_result::number(retry.results.at("sum"), 0) == 2145,
+                      number(retry.results.at("sum"), 0) == 2145,
                   "native retry after owner retirement"))
         return 1;
     }
@@ -682,11 +662,12 @@ int main() try {
     ExecutionContext arranged(registry, config);
     const auto bound = inputs(take(arranged.resource_budget()), layout);
     const auto frozen = take(arranged.freeze(plan, bound));
-    auto result = take(arranged.execute_fragments(frozen, {{"sum", point(0)}}));
-    if (require(gpu_result::number(result.results.at("sum"), 0) ==
-                        (layout == 2 ? 65 : 2145) &&
-                    result.diagnostics.native_dispatch_count > 0,
-                "negative, broadcast, or fragmented Result atlas"))
+    auto result =
+        take(arranged.execute_fragments(frozen, {{"sum", request({0})}}));
+    if (require(
+            number(result.results.at("sum"), 0) == (layout == 2 ? 65 : 2145) &&
+                result.diagnostics.native_dispatch_count > 0,
+            "negative, broadcast, or fragmented Result atlas"))
       return 1;
   }
   for (unsigned mode : {1U, 2U, 3U, 4U, 5U, 6U, 8U, 9U, 10U, 11U}) {
@@ -704,7 +685,7 @@ int main() try {
     const auto bound = inputs(root);
     for (unsigned attempt = 0; attempt < 2; ++attempt) {
       const auto frozen = take(isolated.freeze(bad_plan, bound));
-      auto failed = isolated.execute_fragments(frozen, {{"sum", point(0)}});
+      auto failed = isolated.execute_fragments(frozen, {{"sum", request({0})}});
       const auto expected = mode == 9 ? ErrorCode::ResourceExhausted
                             : mode == 1 || mode == 6
                                 ? ErrorCode::OperationFailed
@@ -726,15 +707,14 @@ int main() try {
     }
     const auto frozen = take(isolated.freeze(plan, bound));
     auto recovered =
-        take(isolated.execute_fragments(frozen, {{"sum", point(0)}}));
+        take(isolated.execute_fragments(frozen, {{"sum", request({0})}}));
     if (require(recovered.diagnostics.native_dispatch_count > 0 &&
-                    gpu_result::number(recovered.results.at("sum"), 0) == 2145,
+                    number(recovered.results.at("sum"), 0) == 2145,
                 "fresh native retry after atlas failure"))
       return 1;
   }
   {
     auto empty_document = document;
-    empty_document.nodes[0].operation = "example.atlas_failure_7";
     GraphContext empty_graph(empty_document);
     const auto empty_plan =
         take(Compiler(registry).compile(empty_graph, planning)).plan;
@@ -742,8 +722,8 @@ int main() try {
     const auto root = take(empty_context.resource_budget());
     const auto bound = inputs(root, 4);
     const auto frozen = take(empty_context.freeze(empty_plan, bound));
-    auto output = take(empty_context.execute_fragments(
-        frozen, {{"sum", take(Footprint::none({length}))}}));
+    auto output =
+        take(empty_context.execute_fragments(frozen, {{"sum", TileRequest{}}}));
     if (require(take(output.results.at("sum").descriptor())
                         .tensor_coverage(0)
                         .empty() &&
@@ -767,7 +747,9 @@ int main() try {
       ++delivered;
       return Status::success();
     };
-    auto result = context.execute(cancelled_plan, bindings, {}, options);
+    auto frozen = take(context.freeze(cancelled_plan, bindings));
+    auto result =
+        context.execute_fragments(frozen, {{"sum", request({0})}}, {}, options);
     const auto& status = result.status();
     if (require(
             delivered == 0 &&

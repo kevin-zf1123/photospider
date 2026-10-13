@@ -4,11 +4,11 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-const ps_result_port_v2* fixture_expression_prototype(void);
-int fixture_expression_metadata(void*, const ps_result_port_v2*, uint32_t,
-                                const ps_result_parameter_value_v2*, uint32_t,
-                                const ps_result_port_v2*, uint32_t,
-                                const ps_result_metadata_sink_v2*);
+const ps_result_port_v3* fixture_expression_prototype(void);
+int fixture_expression_metadata(void*, const ps_result_port_v3*, uint32_t,
+                                const ps_result_parameter_value_v3*, uint32_t,
+                                const ps_result_port_v3*, uint32_t,
+                                const ps_result_metadata_sink_v3*);
 #ifdef __cplusplus
 }
 #endif

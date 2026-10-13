@@ -126,22 +126,9 @@ inline Result<ResultRef> unpack_block_state(const Value& state,
   if (!builder.ok())
     return Result<ResultRef>(builder.status());
   auto writer = builder.take_value();
-  auto descriptor = ResultRelation::cartesian(phase.resources, 1, {});
-  if (!descriptor.ok())
-    return Result<ResultRef>(descriptor.status());
-  auto status = writer.bind_descriptor_relation(descriptor.take_value());
-  if (!status.ok())
-    return Result<ResultRef>(status);
-  auto count = schema.tensors[0].sample_count();
-  if (!count.ok())
-    return Result<ResultRef>(count.status());
-  auto relation = ResultRelation::cartesian(phase.resources, count.value(), {});
-  if (!relation.ok())
-    return Result<ResultRef>(relation.status());
-  status = writer.publish_tensor(
+  auto status = writer.publish_tensor(
       0, Region::whole(schema.tensors[0].sample_shape()), state.layout(),
-      state.storage(), relation.take_value(), {true, true, true, true},
-      phase.query.cancellation);
+      state.storage(), phase.query.cancellation);
   return status.ok() ? writer.seal() : Result<ResultRef>(status);
 }
 }  // namespace ps::execution_internal

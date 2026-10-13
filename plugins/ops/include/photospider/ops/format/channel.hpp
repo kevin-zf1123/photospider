@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "photospider/data/tensor_description.hpp"
+#include "photospider/ops/export.hpp"
 #include "photospider/ops/numeric/workflow_authoring.hpp"
 #include "photospider/plugin/operation_types.hpp"
 
@@ -24,7 +25,7 @@ namespace detail {
  * belongs to the caller. Canonicalization and string allocation may throw;
  * calls are thread-safe.
  */
-PHOTOSPIDER_API std::string schema_assertion(const SchemaTemplate& schema);
+PHOTOSPIDER_OPS_API std::string schema_assertion(const SchemaTemplate& schema);
 inline std::string layout_assertion(const ResultTensorLayout& layout) {
   if (!layout.spatial)
     return "none";

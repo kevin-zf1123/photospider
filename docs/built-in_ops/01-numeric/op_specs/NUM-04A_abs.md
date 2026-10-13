@@ -87,7 +87,6 @@ and uses Elementwise registration. Its shared reader/writer rejects NaN/Inf;
 the new target adds UInt8/Int64 and the selected nonfinite/payload semantics.
 
 - [Current registration/callback](../../../../plugins/ops/01-numeric/numeric_abs.cpp).
-- [Current finite reader/writer](../../../../plugins/ops/00-foundation/basic_common.hpp).
 - [Existing tests](../../../../tests/integration/test_basic_operations.cpp).
 
 ## Maintained implementation and validation

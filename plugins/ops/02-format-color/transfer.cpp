@@ -17,8 +17,10 @@
 #include "02-format-color/transfer_prepare.hpp"
 #include "02-format-color/transfer_runtime.hpp"
 #include "02-format-color/transfer_simd.hpp"
+#include "common/registry.hpp"
+#include "common/typed_need_validation.hpp"
 #include "photospider/data/region_runs.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal::transfer_ops {
 using data_internal::format_numeric::ExactWorkFailure;
@@ -418,17 +420,15 @@ inline Status located(Status status, const std::vector<std::uint64_t>& at) {
 using tensor_ops::require;
 using tensor_ops::take;
 using Poll = Result<ResultProgramPoll>;
-ResultBuilder result_builder(const ResultProgramPhase& phase, bool empty) {
+ResultBuilder result_builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto builder = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
-  require(builder.bind_descriptor_relation(take(ResultRelation::cartesian(
-      phase.resources, 1,
-      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+      phase.query.tile_extent, phase.query.resources));
+
   return builder;
 }
 Poll empty_result(const ResultProgramPhase& phase) try {
@@ -497,42 +497,15 @@ Status evaluate(const ResultProgramPhase& phase, const Preparation& state,
       return Status::success();
   }
 }
-ResultRelation support(const ResultProgramPhase& phase,
-                       const Preparation& state) {
-  const auto& tensor = phase.query.output.result_schema->tensors[0];
-  const auto shape = tensor.sample_shape();
-  std::vector<ResultMappedAxis> axes(shape.size());
-  for (std::size_t i = 0; i < axes.size(); ++i)
-    axes[i].output_axis = static_cast<std::int32_t>(i);
-  ResourceVector<ResultRelation> relations;
-  for (const auto& span : state.spans) {
-    require(phase.consume_work(shape.size() + 1));
-    relations.push_back(take(ResultRelation::mapped(
-        phase.resources, shape, span.region, shape, axes,
-        {0, span.roles, 0, 0, ResultSupportTarget::Tensor, 0})));
-  }
-  relations.push_back(take(ResultRelation::cartesian(
-      phase.resources, take(tensor.sample_count()),
-      {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
-  while (relations.size() > 1) {
-    ResourceVector<ResultRelation> next;
-    for (std::size_t i = 0; i < relations.size(); i += 16) {
-      require(phase.consume_work(17));
-      std::vector<ResultRelation> group;
-      for (std::size_t j = i; j < std::min(i + 16, relations.size()); ++j)
-        group.push_back(relations[j]);
-      next.push_back(take(ResultRelation::unite(phase.resources, group)));
-    }
-    relations = std::move(next);
-  }
-  return relations.front();
-}
 struct Continuation final {
   const Preparation* state;
   bool requested = false;
   Footprint output;
   explicit Continuation(const Preparation* s) : state(s) {}
   Poll poll(const ResultProgramPhase& phase) try {
+    auto checked_inputs = ops_validation::typed_inputs(phase);
+    if (!checked_inputs.ok())
+      return Result<ResultProgramPoll>(checked_inputs);
     const auto& tensor = phase.query.output.result_schema->tensors[0];
     if (!requested) {
       requested = true;
@@ -540,31 +513,13 @@ struct Continuation final {
                    ? *phase.query.tensor_outputs
                    : take(Footprint::all(tensor.sample_shape()));
       ResultProgramNeed need;
-      std::uint32_t roles = 9;
-      for (const auto& span : state->spans) {
-        if (!(span.roles & 4))
-          continue;
-        for (const auto& box : output.boxes()) {
-          require(phase.consume_work(box.rank() + 1));
-          bool overlap = true;
-          for (std::size_t axis = 0; axis < box.rank(); ++axis) {
-            const auto a = box.dimensions()[axis];
-            const auto b = span.region.dimensions()[axis];
-            if (a.offset >= b.offset + b.extent ||
-                b.offset >= a.offset + a.extent) {
-              overlap = false;
-              break;
-            }
-          }
-          if (overlap) {
-            roles |= 4;
-            break;
-          }
-        }
-        if (roles & 4)
-          break;
+      {
+        auto tile_need_0 = sdk::tile_need_for_samples(
+            phase.resources, phase.query, 0, 0, output);
+        if (!tile_need_0.ok())
+          return Result<ResultProgramPoll>(tile_need_0.status());
+        need.tiles.push_back(tile_need_0.take_value());
       }
-      need.tensors.push_back({0, 0, output, roles});
       return Poll(std::move(need));
     }
     input_internal::Float32Environment environment;
@@ -581,8 +536,7 @@ struct Continuation final {
     auto result = [&]() -> Poll {
       try {
         auto builder = result_builder(phase, false);
-        const auto relation = support(phase, *state);
-        std::vector<ResultMappedAxis> axes(tensor.sample_shape().size());
+        std::vector<ResultViewAxis> axes(tensor.sample_shape().size());
         for (std::size_t i = 0; i < axes.size(); ++i)
           axes[i].output_axis = static_cast<std::int32_t>(i);
         require(format_result::planes(tensor, output, [&](const Region& box) {
@@ -593,9 +547,8 @@ struct Continuation final {
             require(evaluate(phase, *state, &runner, source, box, nullptr));
             runner.diagnostics.view_elements = prior_views;
             format_result::PublicationCounts counts;
-            auto status =
-                format_result::publish(phase, &builder, box, source, axes,
-                                       relation, state->layout, 0, &counts);
+            auto status = format_result::publish(
+                phase, &builder, box, source, axes, state->layout, 0, &counts);
             runner.diagnostics.view_elements += counts.viewed;
             runner.diagnostics.copied_elements += counts.copied;
             return status;
@@ -614,7 +567,7 @@ struct Continuation final {
                   return failure.status;
                 }
               },
-              relation, {true, true, true, true}, phase.query.cancellation);
+              phase.query.cancellation);
         }));
         require(consume(1));
         return Poll(ResultPublication{take(builder.seal()), true});
@@ -666,7 +619,7 @@ OperationDefinition operation(bool encode, SequenceProfile profile,
   out.key = "values";
   out.output_schema = port;
   out.result_schema = tensor_ops::scalar_schema();
-  out.region_rule = OperationRegionRule::Dependency;
+  out.region_rule = OperationRegionRule::Tiled;
   out.continuation_bytes = sizeof(Continuation);
   out.maximum_dependency_stages = 2;
   d.prepare_static = [encode, profile](const auto& inputs, const auto& params) {

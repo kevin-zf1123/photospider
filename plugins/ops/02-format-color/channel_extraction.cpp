@@ -11,12 +11,13 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "common/registry.hpp"
 #include "core/status_helpers.hpp"
 #include "core/utf8_validation.hpp"
 #include "data/content_digest.hpp"
 #include "photospider/data/tensor_description.hpp"
 #include "photospider/ops/format/channel.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::format::detail {
 std::string schema_assertion(const SchemaTemplate& schema) {
@@ -347,17 +348,15 @@ Result<OperationPreparation> prepare_extraction(
 using format_result::require;
 using format_result::take;
 using Poll = Result<ResultProgramPoll>;
-ResultBuilder builder(const ResultProgramPhase& phase, bool empty) {
+ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto result = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
-  require(result.bind_descriptor_relation(take(ResultRelation::cartesian(
-      phase.resources, 1,
-      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+      phase.query.tile_extent, phase.query.resources));
+
   return result;
 }
 Poll empty_result(const ResultProgramPhase& phase) try {
@@ -383,24 +382,21 @@ struct ChannelState final {
     const auto axes = format_result::extraction_axes(
         input_shape.size(), input_spec.batch_axes.size() + selected.axis,
         selected.index, selected.keepdims);
-    const auto relation = take(ResultRelation::mapped(
-        phase.resources, output_shape, Region::whole(output_shape), input_shape,
-        axes, {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
+
     if (!requested) {
       requested = true;
       auto support = take(Footprint::none(input_shape));
-      require(relation.project(output, [&](auto, const Footprint* samples) {
-        if (!samples)
-          return Status{ErrorCode::Internal,
-                        "channel extraction mapping absent"};
-        auto united = support.unite(*samples);
-        if (!united.ok())
-          return united.status();
-        support = united.take_value();
-        return Status::success();
-      }));
+      for (const auto& box : output.boxes())
+        support = take(support.unite(take(Footprint::from_regions(
+            input_shape, {format_result::mapped_region(box, axes)}))));
       ResultProgramNeed need;
-      need.tensors.push_back({0, 0, std::move(support), 9});
+      {
+        auto tile_need_0 = sdk::tile_need_for_samples(
+            phase.resources, phase.query, 0, 0, std::move(support));
+        if (!tile_need_0.ok())
+          return Result<ResultProgramPoll>(tile_need_0.status());
+        need.tiles.push_back(tile_need_0.take_value());
+      }
       return Poll(std::move(need));
     }
     auto result = builder(phase, false);
@@ -413,7 +409,7 @@ struct ChannelState final {
       if (!window.ok())
         return window.status();
       return format_result::publish(phase, &result, box, window.value(), axes,
-                                    relation, policy);
+                                    policy);
     }));
     return Poll(ResultPublication{take(result.seal()), true});
   } catch (const Status& status) {
@@ -457,7 +453,7 @@ OperationDefinition extraction(const std::string& key, bool named,
   output.key = "values";
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
-  output.region_rule = OperationRegionRule::Dependency;
+  output.region_rule = OperationRegionRule::Tiled;
   output.continuation_bytes = sizeof(ChannelState);
   output.maximum_dependency_stages = 2;
   definition.prepare_static = [named, profile](const auto& inputs,

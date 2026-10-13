@@ -8,8 +8,10 @@
 #include <utility>
 #include <vector>
 
-#include "00-foundation/numeric_common.hpp"
 #include "01-numeric/ordered_result.hpp"
+#include "common/numeric_common.hpp"
+#include "common/typed_need_validation.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
@@ -64,6 +66,9 @@ struct OrderedReductionState final {
   unsigned pass;
   double sum = 0, mean = 0;
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    auto checked_inputs = ops_validation::typed_inputs(phase);
+    if (!checked_inputs.ok())
+      return Result<ResultProgramPoll>(checked_inputs);
     if (phase.query.tensor_outputs && phase.query.tensor_outputs->empty())
       return ordered_empty_output(phase);
     input_internal::Float32Environment environment;
@@ -98,13 +103,7 @@ struct OrderedReductionState final {
           cursor = 0;
         } else {
           const double result = sum / static_cast<double>(total);
-          auto relation = ResultRelation::cartesian(
-              phase.resources, 1,
-              {0, 5, 0, total, ResultSupportTarget::Tensor, 0});
-          if (!relation.ok())
-            return Result<ResultProgramPoll>(relation.status());
-          return ordered_output(phase, Region::whole({1}), result,
-                                relation.take_value());
+          return ordered_output(phase, Region::whole({1}), result);
         }
       }
     }
@@ -130,7 +129,14 @@ struct OrderedReductionState final {
       return Result<ResultProgramPoll>(samples.status());
     ready = true;
     ResultProgramNeed need;
-    need.tensors.push_back({0, 0, samples.take_value(), pass == 0 ? 4U : 5U});
+    {
+      auto tile_need_0 = sdk::tile_need_for_samples(
+          phase.resources, phase.query, 0, 0, samples.take_value(),
+          ((pass == 0 ? 4U : 5U) & 7U) == 0);
+      if (!tile_need_0.ok())
+        return Result<ResultProgramPoll>(tile_need_0.status());
+      need.tiles.push_back(tile_need_0.take_value());
+    }
     return Result<ResultProgramPoll>(std::move(need));
   }
   Result<ResultRef> advance(const ResultProgramPhase& phase) const {
@@ -198,9 +204,8 @@ inline OperationDefinition ordered_reduction(const char* key, bool variance) {
   traits.requires_metadata_specialization = true;
   set_whole_tensor_output(traits, ElementType::Float64,
                           sizeof(OrderedReductionState));
-  traits.outputs[0].requires_dense_output = true;
   traits.outputs[0].key = "value";
-  traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  traits.outputs[0].region_rule = OperationRegionRule::Tiled;
   traits.outputs[0].continuation_bytes = sizeof(OrderedReductionState);
   traits.workspace_bytes = 24;
   traits.outputs[0].maximum_dependency_stages = 1048576;

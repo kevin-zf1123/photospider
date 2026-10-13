@@ -296,241 +296,6 @@ int luts() {
                (std::vector<std::uint64_t>{2, 2}));
   return 0;
 }
-struct MetadataIdentityProgram {
-  bool requested = false;
-  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
-    using multi_result::check;
-    using multi_result::take;
-    using Poll = Result<ResultProgramPoll>;
-    auto scratch =
-        take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));
-    const auto& input = phase.query.inputs[0].result_schema->tensors[0];
-    const auto shape = input.sample_shape();
-    const bool empty =
-        phase.query.tensor_outputs && phase.query.tensor_outputs->empty();
-    if (!empty && !requested) {
-      requested = true;
-      ResultProgramNeed need;
-      need.tensors.push_back({0, 0, take(Footprint::all(shape)), 9});
-      return Poll(std::move(need));
-    }
-    auto builder = take(ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        phase.association
-            ? std::vector<std::uint64_t>(phase.association->begin(),
-                                         phase.association->end())
-            : std::vector<std::uint64_t>{},
-        phase.query.tile_height, phase.query.tile_width,
-        phase.query.resources));
-    check(builder.bind_descriptor_relation(take(ResultRelation::cartesian(
-        phase.resources, 1,
-        empty
-            ? ResultSupport{}
-            : ResultSupport{0, 8, 0, 1, ResultSupportTarget::Descriptor, 0}))));
-    if (!empty) {
-      check(phase.consume_work(shape.size() + 1));
-      double number = static_cast<double>(
-          shape.size() * 100 + shape[0] +
-          static_cast<std::uint32_t>(input.descriptor.element_type));
-      if (input.descriptor.element_type == ElementType::Float64) {
-        double first = 0;
-        check(phase.read_tensor(
-            0, 0, std::vector<std::uint64_t>(shape.size(), 0), &first, 8));
-        if (std::signbit(first))
-          number += 7;
-      }
-      if (!input.facets.empty() && !input.facets[0].payload.empty())
-        number += input.facets[0].payload[0];
-      check(builder.publish_tensor(
-          0, Region::whole({1}),
-          ByteView(reinterpret_cast<const std::uint8_t*>(&number), 8),
-          take(ResultRelation::cartesian(phase.resources, 1,
-                                         {0, 1, 0, take(input.sample_count()),
-                                          ResultSupportTarget::Tensor, 0},
-                                         DependencyGuarantee::Conservative)),
-          {true, true, true, true}));
-    }
-    return Poll(ResultPublication{take(builder.seal()), true});
-  } catch (const multi_result::Failure& failure) {
-    return Result<ResultProgramPoll>(failure.status);
-  }
-};
-int compact_identity() {
-  auto registry = std::make_shared<OperationRegistry>();
-  std::atomic<unsigned> calls{0};
-  OperationDefinition metadata;
-  metadata.key = "fixture.metadata";
-  metadata.traits.input_count = 1;
-  metadata.traits.input_schema.resize(1);
-  metadata.traits.input_schema[0].kind = OperationPortKind::Result;
-  metadata.traits.input_schema[0].tensor_key = "data";
-  metadata.traits.outputs[0] = multi_result::output("value");
-  metadata.traits.outputs[0].region_rule = OperationRegionRule::Whole;
-  metadata.start_result = [&](const ResultProgramQuery&,
-                              const BufferAllocator& allocator) {
-    ++calls;
-    return ResultContinuation::make<MetadataIdentityProgram>(allocator);
-  };
-  PS_CHECK(registry->register_operation(metadata).ok());
-  OperationDefinition view;
-  view.key = "fixture.partial";
-  view.traits.input_count = 1;
-  view.traits.input_schema = metadata.traits.input_schema;
-  view.traits.outputs[0] = multi_result::output(
-      "value", numeric_result_fixture::source_schema(array<double>({0})));
-  view.traits.requires_metadata_specialization = true;
-  view.specialize_metadata = [](const auto& inputs, const auto&) {
-    OperationOutputSpecialization output;
-    output.metadata.result_schema = inputs[0].result_schema;
-    return Result<std::vector<OperationOutputSpecialization>>(
-        std::vector<OperationOutputSpecialization>{std::move(output)});
-  };
-  view.start_result = [&](const ResultProgramQuery&,
-                          const BufferAllocator& allocator) {
-    ++calls;
-    return ResultContinuation::make<multi_result::Program>(allocator, 0);
-  };
-  PS_CHECK(registry->register_operation(view).ok());
-  PS_CHECK(registry->freeze().ok());
-  ExecutionContext execution(registry, {2, false, 16, 1024 * 1024, 65536});
-  auto root = execution.resource_budget().take_value();
-  auto check = [&](const Value& v, double expected, bool cacheable = true,
-                   std::uint64_t cache_work = 0) {
-    GraphContext graph(document(
-        {v}, {{1, "fixture.metadata", {WorkflowInputReference{1}}, {}}}));
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
-    const auto before = calls.load();
-    std::vector<std::uint8_t> observed;
-    unsigned publications = 0;
-    ExecutionOptions options;
-    options.maximum_dependency_cache_work = cacheable ? 1048576 : cache_work;
-    options.result_publication = [&](ValueRef ref, const ResultRef& result) {
-      if (ref != ValueRef{1, 0})
-        return Status{ErrorCode::InvalidArgument, "wrong publication target"};
-      observed = numeric_result_fixture::bytes(result);
-      ++publications;
-      return Status::success();
-    };
-    auto first_binding = numeric_result_fixture::bind_sources(root, {v});
-    auto second_binding = numeric_result_fixture::bind_sources(root, {v});
-    auto a = execution.execute(plan, first_binding, {}, options);
-    const auto first = observed;
-    observed.clear();
-    auto b = execution.execute(plan, second_binding, {}, options);
-    if (!a.ok() || !b.ok())
-      return false;
-    const auto& first_result = a.value().results.at("result");
-    const auto& second_result = b.value().results.at("result");
-    const auto observations = b.value().dependencies.source_observations();
-    if (!observations.ok())
-      return false;
-    bool data = false, descriptor = false;
-    for (const auto& observation : observations.value()) {
-      if (observation.input != "input0" || observation.slot != 0)
-        return false;
-      if (observation.target == ResultSupportTarget::Tensor) {
-        if (observation.roles != 1 ||
-            observation.samples !=
-                Footprint::all(v.descriptor().shape).take_value())
-          return false;
-        data = true;
-      } else if (observation.target == ResultSupportTarget::Descriptor) {
-        if (observation.roles != 8)
-          return false;
-        descriptor = true;
-      } else {
-        return false;
-      }
-    }
-    return data && descriptor &&
-           a.value().diagnostics.dependency_cache_work <=
-               options.maximum_dependency_cache_work &&
-           b.value().diagnostics.dependency_cache_work <=
-               options.maximum_dependency_cache_work &&
-           publications == 2 && first.size() == 8 && first == observed &&
-           multi_result::number(first_result) == expected &&
-           multi_result::number(second_result) == expected &&
-           first_result.object_id() != second_result.object_id() &&
-           first_result.association().size() == 1 &&
-           second_result.association().size() == 1 &&
-           first_result.association()[0] ==
-               first_binding.inputs[0].result.object_id() &&
-           second_result.association()[0] ==
-               second_binding.inputs[0].result.object_id() &&
-           b.value().diagnostics.cache_hits == (cacheable ? 1U : 0U) &&
-           calls == before + (cacheable ? 1U : 2U);
-  };
-  PS_CHECK(check(array<double>(std::vector<double>(256)), 359));
-  PS_CHECK(check(array<double>(std::vector<double>(257)), 360));
-  const auto integers =
-      Value::create({ElementType::Int64, {256}}, Region::whole({256}), {0, {8}},
-                    std::vector<std::uint8_t>(2048))
-          .take_value();
-  PS_CHECK(check(integers, 358));
-  PS_CHECK(check(array<float>({0}), 105));
-  PS_CHECK(check(array<double>(std::vector<double>(256), {128, 2}), 331));
-  PS_CHECK(check(array<double>({0.}), 104));
-  PS_CHECK(check(array<double>({-0.}), 111));
-  PS_CHECK(check(array<double>({0.}, {}, {{"vendor.note", 1, {1}}}), 105));
-  PS_CHECK(check(array<double>({0.}, {}, {{"vendor.note", 1, {2}}}), 106));
-  auto bytes =
-      Value::create({ElementType::UInt8, {2048}}, Region::whole({2048}),
-                    {0, {1}}, std::vector<std::uint8_t>(2048))
-          .take_value();
-  PS_CHECK(check(bytes, 2149));
-  auto oversized =
-      Value::create({ElementType::UInt8, {2049}}, Region::whole({2049}),
-                    {0, {1}}, std::vector<std::uint8_t>(2049))
-          .take_value();
-  PS_CHECK(check(oversized, 2150));
-  PS_CHECK(check(array<double>(std::vector<double>(257)), 360, false));
-  PS_CHECK(check(oversized, 2150, false));
-  PS_CHECK(check(oversized, 2150, false, 1));
-  const auto input = array<double>({1, 2, 3, 4});
-  GraphContext graph(document(
-      {input}, {{1, "fixture.partial", {WorkflowInputReference{1}}, {}}}));
-  PlanningOptions options;
-  options.output_regions["result"] = Region({{1, 2}});
-  auto partial = Compiler(registry).compile(graph, options).take_value().plan;
-  const auto before = calls.load();
-  auto first = execution.execute(
-      partial, numeric_result_fixture::bind_sources(root, {input}));
-  auto second = execution.execute(
-      partial, numeric_result_fixture::bind_sources(root, {input}));
-  PS_CHECK(first.ok() && second.ok() && calls == before + 1 &&
-           second.value().diagnostics.cache_hits == 1);
-  const auto& result = second.value().results.at("result");
-  PS_CHECK(multi_result::number(result, {1}) == 2 &&
-           multi_result::number(result, {2}) == 3);
-  double inaccessible = 0;
-  PS_CHECK(
-      !result.read_tensor(result.descriptor().value(), 0, {0}, &inaccessible, 8)
-           .ok());
-  auto inside = Footprint::from_regions({4}, {Region({{1, 1}})}).take_value();
-  auto outside = Footprint::from_regions({4}, {Region({{3, 1}})}).take_value();
-  auto dirty = second.value().dependencies.potential_dirty("input0", inside);
-  PS_CHECK(dirty.ok() && dirty.value().at("result") == inside);
-  auto clean = second.value().dependencies.potential_dirty("input0", outside);
-  PS_CHECK(clean.ok() && clean.value().at("result").empty());
-  ResultRef retained;
-  ResourceBudget retained_root;
-  {
-    ExecutionContext transient(registry);
-    retained_root = transient.resource_budget().take_value();
-    auto published = transient.execute(
-        partial, numeric_result_fixture::bind_sources(retained_root, {input}));
-    PS_CHECK(published.ok());
-    retained = published.value().results.at("result");
-  }
-  PS_CHECK(multi_result::number(retained, {1}) == 2 &&
-           multi_result::number(retained, {2}) == 3);
-  PS_CHECK(retained_root.statistics().live[ResourceKind::Payload] == 32);
-  retained = {};
-  PS_CHECK(retained_root.statistics().live[ResourceKind::Payload] == 0);
-  return 0;
-}
-
 int allocation_cancellation() {
   auto registry = make_default_operation_registry();
   ExecutionContext execution(registry);
@@ -594,8 +359,7 @@ int result_contracts() {
                                    parameters("c[0]*x+c[1]")}}),
                  {3, 4, 5}));
   auto frozen = execution.freeze(plan, bound).take_value();
-  auto empty = execution.execute_fragments(
-      frozen, {{"result", Footprint::none({3}).take_value()}});
+  auto empty = execution.execute_fragments(frozen, {{"result", {false, {}}}});
   PS_CHECK(empty.ok() &&
            empty.value()
                .results.at("result")
@@ -607,10 +371,7 @@ int result_contracts() {
   bound.inputs[0].result =
       numeric_result_fixture::source(root, array<double>({NAN}));
   frozen = execution.freeze(plan, bound).take_value();
-  PS_CHECK(execution
-               .execute_fragments(
-                   frozen, {{"result", Footprint::none({3}).take_value()}})
-               .ok());
+  PS_CHECK(execution.execute_fragments(frozen, {{"result", {false, {}}}}).ok());
   const std::vector<Value> lookup{signal({.25F}), signal({0, 1, 2})};
   const std::vector<WorkflowNode> lookup_nodes{
       {1,
@@ -622,18 +383,15 @@ int result_contracts() {
   auto lookup_bindings = numeric_result_fixture::bind_sources(root, lookup);
   auto lookup_frozen =
       execution.freeze(lookup_plan, lookup_bindings).take_value();
-  auto lookup_empty = execution.execute_fragments(
-      lookup_frozen, {{"result", Footprint::none({1}).take_value()}});
+  auto lookup_empty =
+      execution.execute_fragments(lookup_frozen, {{"result", {false, {}}}});
   PS_CHECK(lookup_empty.ok() &&
            lookup_empty.value().dependencies.source_support().value().empty());
   lookup_bindings.inputs[1].result =
       numeric_result_fixture::source(root, signal({0, 1, NAN}));
   lookup_frozen = execution.freeze(lookup_plan, lookup_bindings).take_value();
-  PS_CHECK(
-      execution
-          .execute_fragments(lookup_frozen,
-                             {{"result", Footprint::none({1}).take_value()}})
-          .ok());
+  PS_CHECK(execution.execute_fragments(lookup_frozen, {{"result", {false, {}}}})
+               .ok());
   auto failed = execution.execute(lookup_frozen);
   PS_CHECK(!failed.ok() && failed.status().code == ErrorCode::InvalidArgument);
   auto batched_storage = array<float>({0, .25F, .5F, 1}, {2, 2});
@@ -765,8 +523,7 @@ int c_contract() {
   auto root = context.resource_budget().take_value();
   auto bound = numeric_result_fixture::bind_sources(root, {coefficients});
   auto frozen = context.freeze(empty_plan, bound).take_value();
-  auto empty = context.execute_fragments(
-      frozen, {{"result", Footprint::none({65}).take_value()}});
+  auto empty = context.execute_fragments(frozen, {{"result", {false, {}}}});
   PS_CHECK(empty.ok());
   PS_CHECK(empty.value()
                .results.at("result")
@@ -785,7 +542,6 @@ int c_contract() {
 int main() {
   PS_CHECK(expressions() == 0);
   PS_CHECK(luts() == 0);
-  PS_CHECK(compact_identity() == 0);
   PS_CHECK(allocation_cancellation() == 0);
   PS_CHECK(result_contracts() == 0);
   PS_CHECK(c_contract() == 0);

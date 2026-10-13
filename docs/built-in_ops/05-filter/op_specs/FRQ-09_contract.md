@@ -29,8 +29,6 @@ Inherits [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-num
 
 Letter suffixes identify distinct mathematical or interface objects, not quality tiers that a backend may choose arbitrarily. Primitives may propose separately named strict and accelerated variants. Helpers only orchestrate explicit stages. An external engine requires fixed resources and approval before it can have an executable configuration.
 
-## Shared Mathematics, Units, and Profiles
-
 ### Exact One-Dimensional Matrix Definitions
 k,n=0..N-1 .
 - Type I: A_kn=cos(πkn/(N-1))*w_n, with w_0=w_(N-1)=1 and all other w_n=2, for N>1.

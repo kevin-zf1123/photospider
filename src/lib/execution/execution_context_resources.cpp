@@ -119,8 +119,6 @@ ExecutionContext::ExecutionContext(
  * @copydetails ExecutionContext::~ExecutionContext
  */
 ExecutionContext::~ExecutionContext() noexcept {
-  if (impl_)
-    impl_->shared_results.shutdown();
   if (impl_ && impl_->demands)
     execution_internal::close_demand_coordinator(impl_->demands);
   if (impl_ && impl_->cache)
@@ -142,12 +140,7 @@ SchedulerStatistics ExecutionContext::scheduler_statistics() const {
   return result;
 }
 ResultCacheStatistics ExecutionContext::cache_statistics() const {
-  auto result =
-      impl_->cache ? impl_->cache->statistics() : ResultCacheStatistics{};
-  const auto structured = impl_->shared_results.statistics();
-  result.in_flight += structured.first;
-  result.shared_computations += structured.second;
-  return result;
+  return impl_->cache ? impl_->cache->statistics() : ResultCacheStatistics{};
 }
 
 /**

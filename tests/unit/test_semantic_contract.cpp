@@ -118,12 +118,8 @@ struct TensorProgram {
       requested = true;
       ResultProgramNeed need;
       for (unsigned i = 0; i < phase.query.inputs.size(); ++i)
-        need.tensors.push_back(
-            {i, 0,
-             take(Footprint::all(phase.query.inputs[i]
-                                     .result_schema->tensors[0]
-                                     .sample_shape())),
-             copy_samples && i == 0 ? 13U : 8U});
+        need.tiles.push_back(
+            {i, copy_samples && i == 0, !(copy_samples && i == 0), {}});
       return Result<ResultProgramPoll>(std::move(need));
     }
     const auto count = take(demand.element_count());
@@ -138,24 +134,11 @@ struct TensorProgram {
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
             : std::vector<std::uint64_t>{}));
-    std::vector<ResultRelation> descriptor;
-    if (!demand.empty()) {
-      for (unsigned i = 0; i < phase.query.inputs.size(); ++i)
-        descriptor.push_back(take(ResultRelation::cartesian(
-            phase.resources, 1,
-            {i, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
-    }
-    check(builder.bind_descriptor_relation(
-        descriptor.empty()
-            ? take(ResultRelation::cartesian(phase.resources, 1, {}))
-            : take(ResultRelation::unite(phase.resources, descriptor))));
     const auto width = Value::element_size(spec.descriptor.element_type);
     for (const auto& box : demand.boxes()) {
       const auto size = take(box.element_count());
       auto bytes = take(phase.allocator.allocate(size * width));
       std::memset(bytes.data(), 0, bytes.size());
-      auto relation = take(ResultRelation::cartesian(
-          phase.resources, take(spec.sample_count()), {}));
       if (copy_samples) {
         const auto& input = phase.query.inputs[0].result_schema->tensors[0];
         std::uint64_t next = 0;
@@ -175,24 +158,9 @@ struct TensorProgram {
                       return status;
                     },
                     size, phase.query.cancellation));
-        std::vector<ResultMappedAxis> axes;
-        for (unsigned axis = 0; axis < shape.size(); ++axis)
-          axes.push_back({static_cast<std::int32_t>(axis), 0, 1, 1});
-        relation = take(ResultRelation::mapped(
-            phase.resources, shape, box, input.sample_shape(), axes,
-            {0, 1, 0, 1, ResultSupportTarget::Tensor, 0}));
-        std::vector<ResultMappedAxis> validation(input.sample_shape().size());
-        for (unsigned axis = 0; axis < validation.size(); ++axis)
-          validation[axis].extent = input.sample_shape()[axis];
-        auto tuples = take(ResultRelation::mapped(
-            phase.resources, shape, box, input.sample_shape(), validation,
-            {0, 4, 0, 1, ResultSupportTarget::Tensor, 0}));
-        relation =
-            take(ResultRelation::unite(phase.resources, {relation, tuples}));
       }
-      check(builder.publish_tensor(0, box, ByteView(bytes.data(), bytes.size()),
-                                   std::move(relation),
-                                   {true, true, true, true}));
+      check(
+          builder.publish_tensor(0, box, ByteView(bytes.data(), bytes.size())));
     }
     return Result<ResultProgramPoll>(
         ResultPublication{take(builder.seal()), true});
@@ -282,15 +250,12 @@ OperationDefinition copy_definition(const std::string& key,
 ResultRef source(const ResourceBudget& root, const SchemaTemplate& schema,
                  const std::vector<float>& values) {
   auto builder = take(ResultBuilder::start(root, schema, "semantic.source"));
-  check(builder.bind_descriptor_relation(
-      take(ResultRelation::cartesian(root, 1, {}))));
+
   const auto& tensor = schema.tensors[0];
   check(builder.publish_tensor(
       0, Region::whole(tensor.sample_shape()),
       ByteView(reinterpret_cast<const std::uint8_t*>(values.data()),
-               values.size() * sizeof(float)),
-      take(ResultRelation::cartesian(root, take(tensor.sample_count()), {})),
-      {true, true, true, true}));
+               values.size() * sizeof(float))));
   return take(builder.seal());
 }
 int inference() {
@@ -339,11 +304,9 @@ int inference() {
   PS_CHECK(continuation.ok());
 
   ResultObjectInputs objects;
-  ResourceVector<ResultIoReply> io;
   ResultProgramPhase phase{
       query,
       objects,
-      io,
       allocator,
       root,
       [&](std::uint64_t units) { return root.consume({units}); },
@@ -656,97 +619,6 @@ int dtype_masks() {
   PS_CHECK(digests[0] != digests[1]);
   return 0;
 }
-int builtin_identity() {
-  auto registry = make_default_operation_registry();
-  Compiler compiler(registry);
-  ExecutionContextConfig config;
-  config.managed_resources = ResourceLimits{};
-  ExecutionContext execution(registry, config);
-  auto bytes = Value::create({ElementType::UInt8, {2}}, Region::whole({2}),
-                             {0, {1}}, {3, 7}, {{"opaque", 1, {9}}})
-                   .take_value();
-  auto root = take(execution.resource_budget());
-  auto byte_schema = multi_result::schema(ElementType::UInt8, {2});
-  byte_schema.tensors[0].facets = bytes.facets();
-  auto builder =
-      take(ResultBuilder::start(root, byte_schema, "identity.source"));
-  check(builder.bind_descriptor_relation(
-      take(ResultRelation::cartesian(root, 1, {}))));
-  check(builder.publish_tensor(
-      0, bytes.region(), bytes.layout(), bytes.storage(),
-      take(ResultRelation::cartesian(root, 2, {})), {true, true, true, true}));
-  const std::vector<ResultRef> inputs{
-      take(builder.seal()),
-      source(root, semantic_schema(rgba_semantics()), {-2, 4, .25F, .5F}),
-      source(root, semantic_schema(coverage_semantics()), {.5F}),
-      source(root, semantic_schema(signal()), {1, 2, 3})};
-  for (const auto& input : inputs) {
-    for (const auto* key :
-         {"core.identity", "core.delay", "core.gpu_fallback_probe"}) {
-      WorkflowDocument doc;
-      doc.inputs = {multi_result::declaration(1, "input", input.schema())};
-      std::map<std::string, ParameterValue> parameters;
-      if (std::string(key) == "core.delay")
-        parameters["milliseconds"] = INT64_C(0);
-      doc.nodes = {{1, key, {WorkflowInputReference{1}}, parameters}};
-      doc.outputs = {{"output", 1, "value"}};
-      GraphContext graph(doc);
-      auto compiled = compiler.compile(graph);
-      PS_CHECK(compiled.ok());
-      auto run = execution.execute(compiled.value().plan, {{{"input", input}}});
-      PS_CHECK(run.ok());
-      const auto& output = run.value().results.at("output");
-      PS_CHECK(output.schema().tensors[0].descriptor.element_type ==
-               input.schema().tensors[0].descriptor.element_type);
-      PS_CHECK(output.schema().tensors[0].facets[0].payload ==
-               input.schema().tensors[0].facets[0].payload);
-      const auto shape = input.schema().tensors[0].sample_shape();
-      auto coverage = take(Footprint::all(shape));
-      const auto input_facts = take(input.descriptor());
-      const auto output_facts = take(output.descriptor());
-      const auto width = Value::element_size(
-          input.schema().tensors[0].descriptor.element_type);
-      auto compared = coverage.visit(
-          [&](const auto& at) {
-            std::uint8_t expected[8]{}, actual[8]{};
-            auto status =
-                input.read_tensor(input_facts, 0, at, expected, width);
-            if (status.ok())
-              status = output.read_tensor(output_facts, 0, at, actual, width);
-            if (!status.ok())
-              return status;
-            return std::memcmp(expected, actual, width) == 0
-                       ? Status::success()
-                       : Status{ErrorCode::OperationFailed,
-                                "identity changed sample bits"};
-          },
-          take(coverage.element_count()));
-      PS_CHECK(compared.ok());
-    }
-  }
-  WorkflowDocument bad;
-  WorkflowInputDeclaration bad_input;
-  bad_input.id = 1;
-  bad_input.name = "input";
-  SchemaTemplate bad_schema;
-  bad_schema.id = "photospider.tensor";
-  ResultTensorSpec bad_tensor;
-  bad_tensor.key = "samples";
-  bad_tensor.descriptor = bytes.descriptor();
-  bad_tensor.facets = bytes.facets();
-  bad_schema.tensors.push_back(bad_tensor);
-  bad_input.result_schema = std::make_shared<SchemaTemplate>(bad_schema);
-  bad.inputs = {bad_input};
-  bad.nodes = {{1,
-                "math.add",
-                {WorkflowInputReference{1}, WorkflowInputReference{1}},
-                {}}};
-  bad.outputs = {{"output", 1, "value"}};
-  GraphContext bad_graph(bad);
-  PS_CHECK(compiler.compile(bad_graph).status().code ==
-           ErrorCode::TypeMismatch);
-  return 0;
-}
 int c_contract() {
 #ifdef PS_CONTRACT_FIXTURE
   auto registry = std::make_shared<OperationRegistry>();
@@ -804,12 +676,9 @@ int c_contract() {
             .take_value();
     auto builder =
         ResultBuilder::start(root, schema, "contract.source").take_value();
-    multi_result::check(builder.bind_descriptor_relation(
-        ResultRelation::cartesian(root, 1, {}).take_value()));
+
     multi_result::check(builder.publish_tensor(
-        0, backing.region(), backing.layout(), backing.storage(),
-        ResultRelation::cartesian(root, length, {}).take_value(),
-        {true, true, true, true}));
+        0, backing.region(), backing.layout(), backing.storage()));
     ExecutionBinding binding;
     binding.name = declaration.name;
     binding.result = builder.seal().take_value();
@@ -854,20 +723,17 @@ int c_contract() {
               PS_CHECK(output.read_tensor(facts, 0, {i}, &number, 8).ok());
             }
             PS_CHECK(number == (i == 0 ? 2 : -3));
-            const auto changed =
-                Footprint::from_regions({3}, {Region({{0, 1}})}).take_value();
-            auto dirty = run.value().dependencies.potential_dirty(
-                doc.inputs[i].name, changed, 1, {}, ResultSupportTarget::Tensor,
-                0);
-            PS_CHECK(dirty.ok() &&
-                     dirty.value().at("output") ==
-                         Footprint::from_regions({count}, {Region({{i, 1}})})
-                             .take_value());
-            auto unrelated = run.value().dependencies.potential_dirty(
-                doc.inputs[i].name,
-                Footprint::from_regions({3}, {Region({{1, 1}})}).take_value(),
-                1, {}, ResultSupportTarget::Tensor, 0);
-            PS_CHECK(unrelated.ok() && unrelated.value().at("output").empty());
+            ResourceVector<TileChange> changes{
+                ResourceAllocator<TileChange>(root)};
+            changes.push_back({PlanWorkflowInput{i}, 0,
+                               take(TileSet::from_indices(root, {0})), false});
+            auto dirty = run.value().dependencies.dirty_units(changes);
+            PS_CHECK(dirty.ok() && dirty.value().size() == 1);
+            PS_CHECK((dirty.value()[0] == TileUnit{0, 0, 0}));
+            auto record = take(run.value().dependencies.tile_record({0, 0, 0}));
+            PS_CHECK(record && record->inputs.size() == count);
+            for (const auto& input : record->inputs)
+              PS_CHECK(input.whole && input.tiles.empty());
           }
         }
       }
@@ -908,8 +774,7 @@ int c_contract() {
   ExecutionBindings half_bindings{
       {source(halves.inputs[0], .5, 0), source(halves.inputs[1], .5, 0)}};
   auto frozen = execution.freeze(half_plan.plan, half_bindings).take_value();
-  auto empty = execution.execute_fragments(
-      frozen, {{"output", Footprint::from_regions({2}, {}).take_value()}});
+  auto empty = execution.execute_fragments(frozen, {{"output", {false, {}}}});
   PS_CHECK(empty.ok());
   const auto& empty_output = empty.value().results.at("output");
   auto empty_facts = empty_output.descriptor().take_value();
@@ -929,15 +794,10 @@ int c_contract() {
   auto huge_run = execution.execute(
       huge_plan.value().plan,
       {{source(huge.inputs[0], 2, 3), source(huge.inputs[1], -3, 3)}});
-  PS_CHECK(huge_run.ok());
-  for (unsigned i = 0; i < 2; ++i) {
-    float value = 0;
-    const auto& output = huge_run.value().results.at("output");
-    PS_CHECK(
-        output.read_tensor(output.descriptor().take_value(), 0, {i}, &value, 4)
-            .ok() &&
-        value == (i ? -3 : 2));
-  }
+  // Non-spatial inputs are Whole. A sparse prefix cannot authorize the
+  // missing remainder, even when the callback reads only the first sample.
+  PS_CHECK(!huge_run.ok() &&
+           huge_run.status().code == ErrorCode::InvalidArgument);
   auto shifted = signal();
   shifted.sample_origin = 2;
   shifted.sample_step = 1;
@@ -1007,7 +867,6 @@ int main() {
   PS_CHECK(codec() == 0);
   PS_CHECK(inference() == 0);
   PS_CHECK(c_contract() == 0);
-  PS_CHECK(builtin_identity() == 0);
   PS_CHECK(dtype_masks() == 0);
   return 0;
 }

@@ -33,8 +33,6 @@ flowchart LR
 
 普通 callback 使用 CPU callback FIFO。Whole range job 与 planar `CPU_STAGES` job 使用另一个共享 range/stage job list。两个结构共用 scheduler mutex 和 worker pool，因此 callback、range job 和 staged job 会争用 worker 容量。调度器在 callback 与 range 工作之间轮换机会；range worker 领取互不重叠的 block，stage coordinator 提交 tile 工作并在每个 stage barrier 等待。Whole callback 调用线程也直接参与自己的 range barrier。GPU callback lane 使用独立队列，但共享 context 的等待容量。Range block 和 stage tile 会增加普通 callback 的等待时间。
 
-## 3. 契约规约与接口 (Formal Contracts & APIs)
-
 ### CPU Whole range service
 
 ```c
@@ -71,11 +69,11 @@ Structured CPU Result Whole poll 会通过 `ResultProgramPhase::cpu_parallel` �
 
 ### Structured Result callback wave
 
-Structured coordinator 登记请求的 named Result roots，并推进其 dependency Actor。潜在的 CPU contract-1 joint 候选根会延迟启动，直到其 consumer Actor 验证 Need 并登记 producer inputs，使 peer C1 inputs 可以在候选启动前合组。经过验证的 Need 会把符合条件的计算型输入加入 pending frontier。Need 中每个 input 都有独立 cursor；coordinator 在可推进的 input 之间轮转，并保证每个 Actor 在一次 traversal 中最多访问一次。这避免深层 dependency chain 随 peer input 被重复递归遍历。
+Structured coordinator 登记请求的 named Result roots，并推进其 dependency Actor。经过验证的 Need 会把符合条件的计算型输入加入 pending frontier。Need 中每个 input 都有独立 cursor；coordinator 在可推进的 input 之间轮转，并保证每个 Actor 在一次 traversal 中最多访问一次。这避免深层 dependency chain 随 peer input 被重复递归遍历。
 
 Frontier 有 queued callback work 时，coordinator 从 Root-owned pending list 提交最多 `maximum_parallelism` 个 task。它等待已提交 callback 退出，再读取 phase result 并串行应用，然后推进下一个 dependency frontier。该上限作用于已提交的 callback task，不是另建 Result graph scheduler。CPU staged-tile controller 与 GPU callback 仍使用各自的 inline/controller 和 single-lane 路径。
 
-Run coordinator 拥有调度策略和发布顺序。独立组件分别拥有每 Run cache quota 与 checkpoint scopes、actor phase/continuation state、Need producer cursor、joint 推进状态和每次 submission 的 stage 数据。Need cursor 拥有 producer 和每个输入的请求状态；coordinator 校验并登记每个已提供 envelope 后才推进 cursor。每个 submission 的 transfer、tile 和 native observations 保留至 task 退出，再由 coordinator 合并。Joint worker 标记 callback 已进入并运行共享 callback；coordinator 在退休时只计一次该 group。Joint participant 标记的构造函数是私有的，只有 coordinator 能调用；它不能复制或移动，并且只作为 coordinator 中 `final` Actor 类型的一部分创建。因此 coordinator 转换回 Actor 的每个 participant 都确实是 Actor，coordinator 之外的代码无法创建其他 participant 类型。Result poll timing 从 phase 创建计至 coordinator 退休，包括 queue 与 wave 等待，因此不是纯计算时长。同步 Run 完成和 shutdown 会先排空已提交工作，再释放借给 callback 的状态。
+Run coordinator 拥有调度策略和发布顺序。独立组件分别拥有每 Run cache quota 与 checkpoint scopes、actor phase/continuation state、Need producer cursor和每次 submission 的 stage 数据。Need cursor 拥有 producer 和每个输入的请求状态；coordinator 校验并登记每个已提供 envelope 后才推进 cursor。每个 submission 的 transfer、tile 和 native observations 保留至 task 退出，再由 coordinator 合并。Result poll timing 从 phase 创建计至 coordinator 退休，包括 queue 与 wave 等待，因此不是纯计算时长。同步 Run 完成和 shutdown 会先排空已提交工作，再释放借给 callback 的状态。
 
 ### Planar staged tile service
 

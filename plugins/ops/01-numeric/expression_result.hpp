@@ -10,10 +10,11 @@
 #include <utility>
 #include <vector>
 
-#include "00-foundation/numeric_common.hpp"
+#include "01-numeric/expression.hpp"
+#include "01-numeric/expression_metadata.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
-#include "plugin/expression.hpp"
-#include "plugin/operation_semantics.hpp"
+#include "common/floating_environment.hpp"
+#include "common/numeric_common.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::expression_result {
@@ -108,10 +109,9 @@ struct Prepared final {
 struct Kernel final {
   bool lut;
   explicit Kernel(bool lookup) : lut(lookup) {}
-  static std::uint32_t support_roles() { return 5; }
   Status write(const ResultProgramPhase& phase,
                const ResourceVector<ResultTensorWriteWindow>& writers) {
-    input_internal::Float32Environment environment;
+    FloatingEnvironment environment;
     if (!environment.active())
       return {ErrorCode::OperationFailed,
               "expression numeric environment unavailable"};
@@ -224,12 +224,12 @@ inline OperationDefinition operation(const char* key, bool lut) {
       [lut](const auto& inputs,
             const auto& params) -> Result<OperationPreparation> {
     try {
-      input_internal::Float32Environment environment;
+      FloatingEnvironment environment;
       if (!environment.active())
         return Result<OperationPreparation>(
             Status{ErrorCode::OperationFailed,
                    "numeric metadata environment unavailable"});
-      std::vector<OperationMetadata> metadata;
+      std::vector<TensorMetadata> metadata;
       for (const auto& input : inputs) {
         if (!input.result_schema || !input.result_schema->fields.empty() ||
             input.result_schema->tensors.size() != 1)
@@ -248,15 +248,8 @@ inline OperationDefinition operation(const char* key, bool lut) {
           lut ? metadata[0].descriptor.shape
               : std::vector<std::uint64_t>{static_cast<std::uint64_t>(
                     std::get<std::int64_t>(params.at("count")))});
-      OperationTraits transform;
-      transform.outputs[0].output_semantic_rule =
-          lut ? OperationSemanticRule::ApplyLut1d
-              : OperationSemanticRule::SampleExpression;
-      transform.outputs[0].output_semantic_parameter =
-          lut ? "out_of_domain" : "expression";
-      schema.tensors[0].facets =
-          math_take(contract_internal::infer_transformed_facets(
-              transform, metadata, params, schema.tensors[0].descriptor));
+      schema.tensors[0].facets = math_take(infer_expression_facets(
+          lut, metadata, params, schema.tensors[0].descriptor));
       auto state = std::make_shared<Prepared>();
       if (lut) {
         schema.tensors[0].batch_axes =

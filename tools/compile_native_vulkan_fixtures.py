@@ -22,9 +22,7 @@ lines = ['#pragma once', '#include <cstdint>',
 with tempfile.TemporaryDirectory() as temporary:
     for source, entry, name in [
             ('native_vulkan.slang', 'transform', 'kNativeVulkanSpirv'),
-            ('native_vulkan.slang', 'numeric_probe', 'kNativeVulkanNumericProbeSpirv'),
-            ('perlin_coordinates.slang', 'produce', 'kPerlinCoordinatesSpirv'),
-            ('gaussian_input.slang', 'produce', 'kGaussianInputSpirv')]:
+            ('native_vulkan.slang', 'numeric_probe', 'kNativeVulkanNumericProbeSpirv')]:
         output = Path(temporary) / (entry + '.spv')
         subprocess.run([str(a.slangc), str(fixtures / source), '-entry', entry, '-target', 'spirv',
                         '-profile', 'spirv_1_3', '-fvk-use-entrypoint-name',

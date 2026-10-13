@@ -7,6 +7,7 @@
 #include "photospider/compiler/workflow_document.hpp"
 #include "photospider/core/numeric_diagnostics.hpp"
 #include "photospider/data/value.hpp"
+#include "photospider/ops/export.hpp"
 
 namespace ps::numeric {
 /** @brief Authors a Whole Result sampler for a bounded expression.
@@ -72,7 +73,7 @@ namespace ps::numeric {
  * immutable storage beyond context lifetime. See the NUM-01 specification and
  * examples/numeric_workflow for the grammar, error and resource rules.
  */
-PHOTOSPIDER_API Result<WorkflowNode> sample_expression_node(
+PHOTOSPIDER_OPS_API Result<WorkflowNode> sample_expression_node(
     std::uint64_t id, std::string expression, WorkflowInput start,
     WorkflowInput end, std::int64_t count,
     const std::map<std::string, WorkflowInput>& coefficients = {},

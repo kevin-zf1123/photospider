@@ -43,5 +43,3 @@ Shape/type errors fail specialization. Nonfinite data, work exhaustion, allocati
 ## Acceptance and implementation evidence
 
 The CPU Whole and tiled integration tests exercise Result bindings, output schema, exact reads, nonzero and disjoint regions, outside-region NaN, finite work and scratch failures, and cancellation/error paths. For a 17-by-35 Float64 field, the tiled ROI y=[3,14), x=[5,32) yields 12 source reads totaling 7,128 bytes and 12 ordered publications covering 297 samples. The native Metal Result test covers dispatch, affine native input, cancellation, bitwise CPU comparison, and result lifetime. The oracle covers a finite fixture set rather than the complete input domain or every GPU device.
-
-See [Perlin implementation](../perlin-implementation.md) for current execution details and the [public workflow](../../../../examples/perlin_workflow/README.md) for build and run commands.

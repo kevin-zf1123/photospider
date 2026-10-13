@@ -73,11 +73,18 @@ Result<ExecutionResult> execute(Fixture& f, WorkflowNodeOutput output,
   f.document.outputs = {{"result", output.source_node, output.source_port}};
   GraphContext graph(f.document);
   PlanningOptions planning;
-  if (region)
-    planning.output_regions = {{"result", *region}};
   auto compiled = Compiler(registry).compile(graph, planning);
   if (!compiled.ok())
     return Result<ExecutionResult>(compiled.status());
+  if (region) {
+    auto selected = workflow_example::select_tiles(
+        f.root, compiled.value().plan, "result", *region);
+    if (!selected.ok())
+      return Result<ExecutionResult>(selected.status());
+    auto stages = compiled.take_value();
+    stages.plan = selected.take_value();
+    compiled = Result<CompiledWorkflow>(std::move(stages));
+  }
   return context.execute(compiled.value().plan, f.bindings);
 }
 const ResultTensorSpec& spec(const ExecutionResult& run) {
@@ -320,7 +327,7 @@ void roi_and_lifetime() {
         add(&f, ElementType::UInt16, {130, 131, 2}, gray(2), bits, layout, {2});
     const Region source_roi({{1, 1}, {127, 3}, {127, 4}, {1, 1}});
     const Region output_roi({{1, 1}, {127, 3}, {127, 4}});
-    f.sources[0].coverage = {source_roi};
+    f.sources[0].coverage = {Region({{1, 1}, {0, 130}, {0, 131}, {0, 2}})};
     format::ExtractAlphaOptions e;
     e.group = "gray";
     e.layout = "view";
@@ -332,8 +339,8 @@ void roi_and_lifetime() {
     require(
         channel_fixture::read(run.results.at("result"), output_roi) == expected,
         "batched cross-tile ROI exact bytes");
-    require(assembly_fixture::source_bytes(run, f) == 24,
-            "ROI source support exact");
+    require(assembly_fixture::source_bytes(run, f) == 130 * 131 * 2,
+            "complete spatial tiles read the alpha plane");
     auto retained = run.results.at("result");
     f.bindings.inputs.clear();
     run = {};

@@ -52,9 +52,6 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
   digest->integer(traits.cpu_staged_tiles);
   digest->integer(traits.requires_metadata_specialization);
   digest->integer(traits.share_blocks_across_outputs);
-  digest->integer(traits.joint_contract);
-  digest->integer(traits.joint_continuation_bytes);
-  digest->integer(traits.joint_workspace_bytes);
 
   digest->integer(traits.outputs.size());
   if (traits.outputs.size() != 1) {
@@ -72,8 +69,6 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
     digest->text(output.result_schema->canonical());
   digest->text(output.key);
   digest->integer(static_cast<std::uint32_t>(output.data_movement));
-  digest->integer(static_cast<std::uint32_t>(output.data_movement_view_policy));
-  digest->integer(output.regional_atomic);
   digest->integer(output.preserve_output_views);
   digest->integer(output.requires_input_views);
   digest->integer(output.maximum_output_payload_bytes.has_value());
@@ -95,19 +90,11 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
   digest->integer(traits.supports_cpu ? 1U : 0U);
   digest->integer(traits.supports_gpu ? 1U : 0U);
   digest->integer(traits.allows_cpu_fallback ? 1U : 0U);
-  digest->integer(traits.estimated_bytes);
   digest->integer(traits.workspace_bytes);
   digest->integer(traits.workspace_input_multiplier);
   digest->integer(traits.version);
   digest->integer(traits.cacheable ? 1U : 0U);
-  digest->integer(
-      static_cast<std::uint32_t>(traits.outputs[0].output_element_type));
-  digest->integer(static_cast<std::uint32_t>(traits.outputs[0].shape_rule));
   digest->integer(static_cast<std::uint32_t>(traits.outputs[0].region_rule));
-  digest->integer(traits.outputs[0].halo_radius);
-  digest->text(traits.outputs[0].halo_radius_parameter);
-  digest->text(traits.outputs[0].spatial_factor_parameter);
-  digest->integer(traits.outputs[0].spatial_factor);
   digest->integer(traits.parameter_schema.size());
   for (const OperationParameterSpec& parameter : traits.parameter_schema) {
     digest->text(parameter.key);
@@ -120,41 +107,12 @@ void append_traits(Digest* digest, const OperationTraits& traits) {
     digest->integer(minimum);
     digest->integer(maximum);
   }
-  digest->integer(traits.outputs[0].fixed_output_shape.size());
-  for (std::uint64_t extent : traits.outputs[0].fixed_output_shape) {
-    digest->integer(extent);
-  }
-  digest->integer(
-      static_cast<std::uint32_t>(traits.outputs[0].output_dtype_rule));
-  digest->integer(traits.outputs[0].output_dtype_input);
-  digest->text(traits.outputs[0].output_dtype_parameter);
-  digest->integer(traits.outputs[0].output_axes.size());
-  for (const auto& axis : traits.outputs[0].output_axes) {
-    digest->integer(static_cast<std::uint32_t>(axis.source));
-    digest->integer(axis.constant);
-    digest->text(axis.parameter);
-    digest->integer(axis.input);
-    digest->integer(axis.axis);
-    digest->integer(axis.offset);
-    digest->text(axis.subtract_parameter);
-    digest->integer(axis.divisor);
-    digest->integer(axis.multiplier);
-  }
   digest->integer(traits.repeated_minimum);
   digest->integer(traits.repeated_maximum);
   digest->integer(traits.repeated_resolved);
   digest->integer(traits.repeated_match);
   digest->integer(
-      static_cast<std::uint32_t>(traits.outputs[0].output_semantic_rule));
-  digest->integer(traits.outputs[0].output_semantic_input);
-  append_facets(digest, traits.outputs[0].output_facets);
-  digest->text(traits.outputs[0].output_semantic_parameter);
-  digest->integer(traits.outputs[0].requires_dense_output);
-  digest->integer(
-      static_cast<std::uint32_t>(traits.outputs[0].observation_kind));
-  digest->integer(
       static_cast<std::uint32_t>(traits.outputs[0].failure_delivery));
-  digest->integer(traits.outputs[0].atomic_trailing_axes);
   digest->integer(traits.outputs[0].continuation_bytes);
   digest->integer(traits.outputs[0].maximum_dependency_stages);
 }

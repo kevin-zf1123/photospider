@@ -4,7 +4,6 @@
 #include <utility>
 #include <vector>
 
-#include "../../examples/atom_outcomes_workflow/operations.hpp"
 #include "photospider/photospider.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
@@ -25,7 +24,7 @@ struct State {
     if (input && !requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tensors.push_back({0, 0, take(Footprint::all({1})), 1});
+      need.tiles.push_back({0, true, false, {}});
       return Result<ResultProgramPoll>(std::move(need));
     }
     if (input) {
@@ -40,37 +39,13 @@ struct State {
         phase.query.semantic_key, {},
         std::vector<std::uint64_t>(phase.association->begin(),
                                    phase.association->end())));
-    check(builder.bind_descriptor_relation(
-        take(ResultRelation::cartesian(phase.resources, 1, {}))));
+
     const double number = 19;
     check(builder.publish_tensor(
         0, Region::whole({1}),
-        {reinterpret_cast<const std::uint8_t*>(&number), sizeof(number)},
-        take(ResultRelation::cartesian(
-            phase.resources, 1,
-            input ? ResultSupport{0, 1, 0, 1, ResultSupportTarget::Tensor, 0}
-                  : ResultSupport{})),
-        {true, true, true, true}));
+        {reinterpret_cast<const std::uint8_t*>(&number), sizeof(number)}));
     return Result<ResultProgramPoll>(
         ResultPublication{take(builder.seal()), true});
-  }
-};
-struct JointState {
-  Counts* counts;
-  Result<ResultProgramPoll> member(const ResultProgramPhase& phase) {
-    return Result<ResultProgramPoll>(atom_result::publish(phase, 19, 0, false));
-  }
-  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    ++counts->poll;
-    return member(phase);
-  }
-  Result<ResourceVector<ResultJointOutcome>> poll(
-      const ResultJointPhase& phase) {
-    ++counts->poll;
-    ResourceVector<ResultJointOutcome> replies;
-    for (const auto* item : phase.members)
-      replies.push_back({take(result_atom_key(item->query)), member(*item)});
-    return Result<ResourceVector<ResultJointOutcome>>(std::move(replies));
   }
 };
 OperationDefinition operation(Counts* counts, bool input) {
@@ -97,26 +72,7 @@ int stages(unsigned mode, std::uint64_t maximum, std::uint64_t queue) {
   auto registry = std::make_shared<OperationRegistry>();
   auto op = operation(&count, mode == 1 || mode == 3);
   if (mode == 1)
-    op.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
-  if (mode == 2) {
-    op = atom_result::operation(0, "dispatch_probe");
-    op.traits.cacheable = false;
-    op.traits.input_count = 0;
-    op.traits.input_schema.clear();
-    op.traits.outputs[0].result_schema = atom_result::schema(1);
-    op.traits.outputs[0].continuation_bytes = sizeof(JointState);
-    op.traits.joint_continuation_bytes = sizeof(JointState);
-    op.start_result = [&](const auto&, const auto& allocator) {
-      ++count.start;
-      return ResultContinuation::make<JointState>(allocator,
-                                                  JointState{&count});
-    };
-    op.start_result_joint = [&](const auto&, const auto& allocator) {
-      ++count.start;
-      return ResultJointContinuation::make<JointState>(allocator,
-                                                       JointState{&count});
-    };
-  }
+    op.traits.outputs[0].region_rule = OperationRegionRule::Tiled;
   check(registry->register_operation(std::move(op)));
   if (mode == 3) {
     auto source = operation(&count, false);
@@ -153,19 +109,9 @@ int stages(unsigned mode, std::uint64_t maximum, std::uint64_t queue) {
   }
   GraphContext graph(doc);
   auto plan = take(Compiler(registry).compile(graph));
-  const auto execute = [&] {
-    return mode == 2
-               ? context.execute_atoms(plan.plan, bindings,
-                                       {{"value", take(Footprint::all({1}))}})
-               : context.execute(plan.plan, bindings);
-  };
+  const auto execute = [&] { return context.execute(plan.plan, bindings); };
   const auto failed = [&](const Result<ExecutionResult>& result) {
-    if (!result.ok())
-      return result.status().code == ErrorCode::ResourceExhausted;
-    return mode == 2 && result.value().atoms.size() == 1 &&
-           !result.value().atoms[0].outcome.ok() &&
-           result.value().atoms[0].outcome.status().code ==
-               ErrorCode::ResourceExhausted;
+    return !result.ok() && result.status().code == ErrorCode::ResourceExhausted;
   };
   auto result = execute();
   if (!maximum || !queue) {
@@ -181,10 +127,7 @@ int stages(unsigned mode, std::uint64_t maximum, std::uint64_t queue) {
                 << " source=" << count.source << " " << result.status().message
                 << '\n';
     PS_CHECK(result.ok());
-    if (mode == 2)
-      PS_CHECK(result.value().atoms.at(0).outcome.ok());
-    else
-      PS_CHECK(multi_result::number(result.value().results.at("value")) == 19);
+    PS_CHECK(multi_result::number(result.value().results.at("value")) == 19);
     PS_CHECK(root.statistics().issued.stages == maximum);
     const auto before = count.start + count.poll + count.source;
     result = execute();
@@ -228,7 +171,7 @@ int source_failure() {
           if (!requested) {
             requested = true;
             ResultProgramNeed need;
-            need.tensors.push_back({0, 0, take(Footprint::all({1})), 1});
+            need.tiles.push_back({0, true, false, {}});
             return Result<ResultProgramPoll>(std::move(need));
           }
           ++*callbacks;
@@ -265,17 +208,13 @@ int source_failure() {
 }
 }  // namespace
 int main() try {
-  for (unsigned mode = 0; mode < 4; ++mode) {
+  for (unsigned mode : {0U, 1U, 3U}) {
     PS_CHECK(stages(mode, 0, 1) == 0);
     PS_CHECK(stages(mode, 10, 0) == 0);
     // Every physical Result start and poll is admitted separately. A direct
     // publication needs two dispatches; a tensor Need adds a third. The
     // upstream source in mode 3 contributes its own start/publication pair.
-    PS_CHECK(stages(mode,
-                    mode == 0 || mode == 2 ? 2
-                    : mode == 1            ? 3
-                                           : 5,
-                    1) == 0);
+    PS_CHECK(stages(mode, mode == 0 ? 2 : mode == 1 ? 3 : 5, 1) == 0);
   }
   PS_CHECK(source_failure() == 0);
   return 0;

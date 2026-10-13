@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "photospider/ops/export.hpp"
 #include "photospider/ops/format/channel_assembly.hpp"
 
 namespace ps::format {
@@ -74,7 +75,7 @@ struct ChannelReplacement final {
  * the document. Execution copies exact bits over requested regions and honors
  * cancellation.
  */
-PHOTOSPIDER_API Result<WorkflowNodeOutput> swizzle_channels(
+PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> swizzle_channels(
     WorkflowDocument& document, const std::vector<ChannelEditInput>& inputs,
     const std::vector<ChannelEditSource>& slots,
     const ChannelAssemblyOptions& options = {});
@@ -92,7 +93,7 @@ PHOTOSPIDER_API Result<WorkflowNodeOutput> swizzle_channels(
  * dtype. Transaction, exception, ownership and execution guarantees match
  * `swizzle_channels`.
  */
-PHOTOSPIDER_API Result<WorkflowNodeOutput> replace_channels(
+PHOTOSPIDER_OPS_API Result<WorkflowNodeOutput> replace_channels(
     WorkflowDocument& document, const std::vector<ChannelEditInput>& inputs,
     const std::vector<ChannelReplacement>& replacements,
     const ChannelAssemblyOptions& options = {});

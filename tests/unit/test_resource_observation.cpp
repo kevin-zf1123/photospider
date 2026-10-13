@@ -25,7 +25,7 @@ ResourceCapacity payload(std::uint64_t bytes) {
 int reservation_and_commit() {
   ResourceBudget root;
   auto seen = std::make_shared<core_internal::PayloadObservation>();
-  core_internal::ResourcePayloadScope scope(root, {seen, seen});
+  core_internal::ResourcePayloadScope scope(root, {seen});
   auto lease = root.reserve(payload(64)).take_value();
   PS_CHECK(seen->peaks() == core_internal::PayloadObservation::Snapshot(0, 64));
   core_internal::ResourcePayloadAccess::commit(lease, 32);
@@ -64,8 +64,7 @@ int allocator_fences() {
   ResourceBudget root, unrelated;
   auto prior = root.allocator().allocate(128).take_value();
   auto seen = std::make_shared<core_internal::PayloadObservation>();
-  auto producer = std::make_shared<core_internal::PayloadObservation>();
-  core_internal::ResourcePayloadScope scope(root, {seen, producer});
+  core_internal::ResourcePayloadScope scope(root, {seen});
   auto ignored = unrelated.allocator().allocate(128).take_value();
   PS_CHECK(seen->peaks() == core_internal::PayloadObservation::Snapshot(0, 0));
   auto allocator =
@@ -74,8 +73,6 @@ int allocator_fences() {
   auto second = allocator.allocate(16).take_value();
   PS_CHECK(!allocator.allocate(17).ok());
   PS_CHECK(seen->live_bytes() ==
-           core_internal::PayloadObservation::Snapshot(48, 48));
-  PS_CHECK(producer->peaks() ==
            core_internal::PayloadObservation::Snapshot(48, 48));
   first = {};
   PS_CHECK(seen->live_bytes() ==
@@ -104,7 +101,7 @@ int thread_and_lifetime() {
     auto seen = std::make_shared<core_internal::PayloadObservation>();
     weak = seen;
     {
-      core_internal::ResourcePayloadScope scope(root, {seen, {}});
+      core_internal::ResourcePayloadScope scope(root, {seen});
       metadata = root.reserve(ResourceCapacity::host(8, 8)).take_value();
       const auto capture = core_internal::ResourcePayloadScope::capture(root);
       std::array<MutableBuffer, 4> buffers;
@@ -137,15 +134,15 @@ int nested_scopes() {
   auto outer = std::make_shared<core_internal::PayloadObservation>();
   auto inner = std::make_shared<core_internal::PayloadObservation>();
   auto foreign = std::make_shared<core_internal::PayloadObservation>();
-  core_internal::ResourcePayloadScope first(root, {outer, {}});
+  core_internal::ResourcePayloadScope first(root, {outer});
   auto a = root.allocator().allocate(8).take_value();
   {
-    core_internal::ResourcePayloadScope second(other, {foreign, {}});
+    core_internal::ResourcePayloadScope second(other, {foreign});
     auto b = root.allocator().allocate(8).take_value();
     PS_CHECK(outer->live_bytes().first == 16);
     PS_CHECK(foreign->peaks().first == 0);
     {
-      core_internal::ResourcePayloadScope third(root, {inner, {}});
+      core_internal::ResourcePayloadScope third(root, {inner});
       auto c = root.allocator().allocate(32).take_value();
       PS_CHECK(inner->live_bytes().first == 32);
       PS_CHECK(outer->live_bytes().first == 16);
@@ -171,15 +168,12 @@ int image_pages() {
   for (bool fail : {false, true}) {
     ResourceBudget root;
     auto seen = std::make_shared<core_internal::PayloadObservation>();
-    core_internal::ResourcePayloadScope scope(root, {seen, {}});
+    core_internal::ResourcePayloadScope scope(root, {seen});
     {
       auto builder =
-          ResultBuilder::start(root, image_schema(), "page", {}, {}, 1, 1)
+          ResultBuilder::start(root, image_schema(), "page", {}, {}, 1)
               .take_value();
-      PS_CHECK(builder
-                   .bind_descriptor_relation(
-                       ResultRelation::cartesian(root, 1, {}).take_value())
-                   .ok());
+
       const auto region = Region::whole({2, 4});
       bool entered = false;
       auto status = builder.publish_tensor_kernel(
@@ -191,9 +185,7 @@ int image_pages() {
             if (fail)
               return Status::failure(ErrorCode::OperationFailed, "rollback");
             return Status::success();
-          },
-          ResultRelation::cartesian(root, 8, {}).take_value(),
-          {true, true, true, true});
+          });
       PS_CHECK(entered && status.ok() != fail);
       PS_CHECK(seen->peaks().first > 0);
       PS_CHECK(seen->peaks().first == seen->peaks().second);
@@ -217,7 +209,7 @@ int native_capacity() {
   for (bool scope_first : {false, true}) {
     ResourceBudget root;
     auto seen = std::make_shared<core_internal::PayloadObservation>();
-    core_internal::ResourcePayloadScope scope(root, {seen, {}});
+    core_internal::ResourcePayloadScope scope(root, {seen});
     const auto capacity = device->allocation_capacity(17).take_value();
     auto host = root.allocator();
     auto allocator =
@@ -249,7 +241,7 @@ int failed_native_attempt() {
   for (std::uint32_t point : {1U, 2U, 3U}) {
     ResourceBudget root;
     auto seen = std::make_shared<core_internal::PayloadObservation>();
-    core_internal::ResourcePayloadScope scope(root, {seen, {}});
+    core_internal::ResourcePayloadScope scope(root, {seen});
     releasing_native = seen.get();
     releasing_capacity = device->allocation_capacity(17).take_value();
     release_was_observed = false;

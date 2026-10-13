@@ -26,7 +26,6 @@ class PayloadObservation final {
 
 struct PayloadCapture final {
   std::shared_ptr<PayloadObservation> run;
-  std::shared_ptr<PayloadObservation> producer;
 };
 
 // Admission captures the matching Root scope. Commit and retirement use the

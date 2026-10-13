@@ -58,7 +58,7 @@ The pure `weighted_layer_leaf` and `weighted_layer_add` helpers do not select an
 
 `SchemaTemplate::validate` returns `TypeMismatch` for the six Result schema IDs and the `photospider.layer` facet. `layer_schema` can construct a description for a pure value contract, but that description cannot pass the Result validation boundary. The optional work hook to `validate_layer_result` adds an independent work limit; Root work and I/O are also charged.
 
-Pure helper behavior is covered by `test_layer` and the installed-package consumer `installed_layer_values`. These checks cover the arithmetic API; they do not exercise a Layer operation, image workflow, or GPU path.
+Pure helper behavior is covered by `test_layer`. These checks cover the arithmetic API; they do not exercise a Layer operation, image workflow, or GPU path.
 
 ## 5. Limitations and non-goals
 

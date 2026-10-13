@@ -2,17 +2,6 @@
 
 除下述已实现条目外，状态为 Proposed。阈值key、clone与简单despill为D1；matting、heal、patch搜索为D2；生成式处理见模型规划。输入图像、hole/edit mask、允许采样区域、参考层和原始快照分别提供。默认Float32、线性或算法声明的颜色域；alpha/coverage/confidence/labels不可混用。
 
-## 已实现条目
-
-PNT-05A 已提供 native CPU operation 和可选 OpenCV 4.12.0 adapter。两者都接收
-带 `photospider.image` v1 schema 的 image 与 coverage Result，要求不透明线性
-RGBA、二值 mask 和必填 Int64 `radius`（1..32），并使用 Whole 需求及
-CompleteBundle 输出。Whole Result 保留 batch axes、接受的图像 schema、语义
-facets 与 resources；该 profile 只接受 canonical linear-sRGB RGBA，不接受
-CMYK 或 ICC ColorArray。ROI 只影响结果采集，不缩小算法的全域验证。native 与 adapter 的受控内存边界
-不同；GPU 不支持。详见[规格书](op_specs/PNT-05A_local_inpaint_navier_stokes.md)
-及[实现、公开 workflow 与当前验证](inpaint-ns-implementation.md)。
-
 ## 算子目录
 
 | ID / 功能 | 输入 → 输出 | 方法、参数与边界 | 验收 / 使用面 |
@@ -38,7 +27,7 @@ CMYK 或 ICC ColorArray。ROI 只影响结果采集，不缩小算法的全域�
 | PNT-10 smudge / paint feedback | previous stroke state+brush samples→new state/image | 搬运颜色、混色、湿度等有状态过程；D2 | 状态顺序、分段重放、颜色守恒政策；不伪装纯无状态滤镜 |
 | PNT-11 brightness to alpha | opaque artwork→line RGB+alpha | 提取指定亮度、反转或曲线→coverage，再按声明颜色重建 | 白底黑线端点，彩线的颜色保留策略 |
 
-本表固定结果可采用已实现命名多输出；动态字段和状态可用 Result schema。BrushState 与 causal constant-spacing helper、IterativeState 和限定对角迭代已有表示/示例，见[结构化表示](../../kernel-architecture/Structured-Representations.md)；通用 stroke replay、smudge、matting/Poisson solver 节点仍须实现。CPU参考先行；key/简单despill适合GPU，稀疏求解、补丁搜索和顺序paint需要独立并行与确定性方案。算法半径不一定等于依赖halo，迭代与连通求解按W或明确协调。
+本表固定结果可采用已实现命名多输出；动态字段和状态可用 Result schema。CPU参考先行；key/简单despill适合GPU，稀疏求解、补丁搜索和顺序paint需要独立并行与确定性方案。算法半径不一定等于依赖halo，迭代与连通求解按W或明确协调。
 
 ## D1 参考模式
 

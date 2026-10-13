@@ -11,6 +11,7 @@
 
 #include "channel_extraction_workflow/source.hpp"
 #include "photospider/ops/format/channel.hpp"
+#include "support/tile_oracle.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -91,10 +92,21 @@ struct Fixture {
     graph = std::make_unique<GraphContext>(document);
     return Compiler(registry).compile(*graph, planning, resources);
   }
-  Result<ExecutionResult> execute(const PlanningOptions& planning = {}) {
+  Result<ExecutionResult> execute(const PlanningOptions& planning = {},
+                                  const std::optional<Region>& region = {}) {
     auto plan = compile(planning);
     if (!plan.ok())
       return Result<ExecutionResult>(plan.status());
+    if (region) {
+      auto selected =
+          workflow_example::select_tiles(take(context.resource_budget()),
+                                         plan.value().plan, "literal", *region);
+      if (!selected.ok())
+        return Result<ExecutionResult>(selected.status());
+      auto stages = plan.take_value();
+      stages.plan = selected.take_value();
+      plan = Result<CompiledWorkflow>(std::move(stages));
+    }
     return context.execute(plan.value().plan, bindings);
   }
 };
@@ -102,10 +114,11 @@ void oracle(const ExecutionResult& run, const Region& q,
             const std::vector<std::uint8_t>& bits) {
   const auto& result = run.results.at("literal");
   const auto shape = result.schema().tensors[0].sample_shape();
-  const auto query = take(Footprint::from_regions(shape, {q}));
+  const auto complete = tile_oracle::coverage(result.schema(), q);
+  const auto query = take(Footprint::from_regions(shape, {complete}));
   check(take(result.descriptor()).tensor_coverage(0) == query,
-        "literal exact coverage");
-  const auto bytes = read(result, q);
+        "literal complete tile or Whole coverage");
+  const auto bytes = read(result, complete);
   for (std::size_t i = 0; i < bytes.size(); ++i)
     check(bytes[i] == bits[i % bits.size()], "literal exact bit repetition");
   require(take(result.tensor_relation(0))
@@ -140,8 +153,7 @@ void bit_patterns() {
             keep ? std::vector<RegionDimension>{{1, 1}, {0, 1}, {1, 2}}
                  : std::vector<RegionDimension>{{1, 1}, {1, 2}});
         PlanningOptions planning;
-        planning.output_regions = {{"literal", q}};
-        auto run = take(f.execute(planning));
+        auto run = take(f.execute(planning, q));
         oracle(run, q, bits);
         const auto all =
             take(Footprint::all(f.schema.tensors[0].sample_shape()));
@@ -171,8 +183,7 @@ void planar_batches() {
         dims.insert(dims.begin() + (chw ? 2 : 4), {0, 1});
       const Region q(dims);
       PlanningOptions planning;
-      planning.output_regions = {{"literal", q}};
-      auto run = take(f.execute(planning));
+      auto run = take(f.execute(planning, q));
       oracle(run, q, {0xff, 3});
       const auto& tensor = run.results.at("literal").schema().tensors[0];
       check(tensor.layout.spatial && tensor.layout.groups.empty() &&
@@ -184,16 +195,24 @@ void disjoint_metadata_lifetime() {
   ResourceBudget root;
   std::optional<ResultTensorReadWindow> retained;
   {
-    Fixture f(ElementType::UInt8, {3, 260, 2});
+    ResultTensorLayout layout;
+    layout.spatial = true;
+    Fixture f(ElementType::UInt8, {3, 260, 2}, layout);
     f.schema.tensors[0].facets = {{"example.annotation", 1, {1, 2, 3}}};
     f.schema.tensors[0].atomic_trailing_axes = 1;
     f.bind();
     f.node({91}, 2, false);
-    auto plan = take(f.compile());
+    PlanningOptions planning;
+    planning.tile_extent = 1;
+    planning.output_requests = {
+        {"literal",
+         {false, take(TileSet::from_indices(take(f.context.resource_budget()),
+                                            {1, 2, 649, 650, 651}))}}};
+    auto plan = take(f.compile(planning));
     auto frozen = take(f.context.freeze(plan.plan, f.bindings));
     auto q = take(Footprint::from_regions(
         {3, 260}, {Region({{0, 1}, {1, 2}}), Region({{2, 1}, {129, 3}})}));
-    auto run = take(f.context.execute_fragments(frozen, {{"literal", q}}));
+    auto run = take(f.context.execute(frozen));
     const auto& result = run.results.at("literal");
     const auto& tensor = result.schema().tensors[0];
     check(result.schema().id == f.schema.id && tensor.key == "pixels" &&

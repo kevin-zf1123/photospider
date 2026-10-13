@@ -9,9 +9,7 @@ implementation_status: not_implemented
 
 # Path geometry, associations and publication
 
-Inherit [GEN common](GEN_common_contract.md) and the existing [structured
-representations](../../../kernel-architecture/Structured-Representations.md). Existing
-representation support does not implement these operators or new Result types.
+Inherit [GEN common](GEN_common_contract.md).
 
 ## Geometry authority and attributes
 
@@ -19,10 +17,7 @@ Core verbs M/L/Q/C/Z have arity1/1/2/3/0. A single M is a legal zero-length open
 subpath. Z terminates the subpath, agrees with closed and represents one actual closing
 segment; do not add another closure edge. Empty paths have zero verb, control and
 subpath rows and offsets=[0]. Primitive authority requires empty Core fields and
-correctly associated references/payloads. Existing PathSet Float64 controls are finite,
-in pixel-xy-right-down coordinates. Current schema limits include 1,048,576 segments,
-4,194,304 controls and spline degree<=16; verify the actual public schema before
-integration rather than defining a private Python type.
+correctly associated references/payloads.
 
 A copied Result gets rebuilt associations, never stale source ObjectIds. Concat
 preserves port and subpath order. Dynamic splitting returns a flat PathSet and partition
@@ -74,8 +69,7 @@ ArcLengthTable is a formal Result design: source segment IDs and ranges, ordered
 with cumulative lower/upper s bounds, totals and a correctly-rounded length. Fields bind
 to the source path snapshot and table identity. PathSamples variants carry positions,
 source segment and local t, with arc_s only when computed. PathPartition and quality
-reports also need factories/codecs/association validation. These logical fields are not
-evidence that current representation.hpp implements them.
+reports also need factories/codecs/association validation.
 
 ## Deterministic flattening
 

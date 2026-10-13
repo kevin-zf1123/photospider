@@ -12,6 +12,7 @@
 #include "../support/transfer_result_fixture.hpp"
 #include "numeric_workflow/icc_fixture.hpp"
 #include "photospider/core/resource_allocator.hpp"
+#include "support/tile_oracle.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
@@ -284,7 +285,7 @@ void whole_failure() {
     doc.outputs = {{"result", 2, "values"}};
     GraphContext graph(doc);
     PlanningOptions planning;
-    planning.output_regions = {{"result", Region({{1, 1}, {2, 1}, {3, 1}})}};
+    planning.output_requests = {{"result", {true, {}}}};
     auto plan = take(Compiler(registry).compile(graph, planning));
     ExecutionContext context(registry);
     auto result = context.execute(plan.plan);
@@ -323,8 +324,9 @@ void retained_identity() {
         GraphContext graph(transfer_fixture::document(
             source, "color.transfer_decode_strict", params));
         PlanningOptions planning;
-        planning.output_regions = {{"result", region}};
         auto plan = take(Compiler(registry).compile(graph, planning));
+        plan.plan = take(
+            workflow_example::select_tiles(root, plan.plan, "result", region));
         auto result = take(context.execute(
             plan.plan, transfer_fixture::bindings(source), {}, options()));
         retained = result.results.at("result");
@@ -337,8 +339,8 @@ void retained_identity() {
           viewed += timing.numeric.view_elements;
           copied += timing.numeric.copied_elements;
         }
-        require(viewed == (std::string(policy) == "materialize" ? 0U : 3U) &&
-                    copied == (std::string(policy) == "materialize" ? 3U : 0U),
+        require(viewed == (std::string(policy) == "materialize" ? 0U : 5U) &&
+                    copied == (std::string(policy) == "materialize" ? 5U : 0U),
                 "identity publication counters");
       }
       const auto bytes = channel_fixture::read(retained, region);
@@ -444,8 +446,7 @@ void result_batches_metadata_resources() {
                                            layout, {2, 2});
       input.resources = take(ResourceBindings::create({profile}, profile_root));
       const std::array<double, 5> values{
-          .25, std::numeric_limits<double>::quiet_NaN(), .5,
-          std::numeric_limits<double>::quiet_NaN(), .75};
+          .25, .375, .5, std::numeric_limits<double>::quiet_NaN(), .75};
       for (std::size_t i = 0; i < input.bytes.size() / 8; ++i)
         std::memcpy(input.bytes.data() + i * 8, &values[i % 5], 8);
       auto registry = make_default_operation_registry();
@@ -475,9 +476,10 @@ void result_batches_metadata_resources() {
           source, "color.transfer_decode_strict", params);
       GraphContext graph(doc);
       PlanningOptions planning;
-      planning.output_regions = {{"result", roi}};
       auto compiled =
           take(Compiler(registry).compile(graph, planning, input.resources));
+      compiled.plan = take(
+          workflow_example::select_tiles(root, compiled.plan, "result", roi));
       const auto bindings = transfer_fixture::bindings(source);
       auto a = std::async(std::launch::async, [&] {
         return context.execute(compiled.plan, bindings, {}, options());
@@ -510,14 +512,21 @@ void result_batches_metadata_resources() {
       require(retained.resources().icc_profile(identity).ok(),
               "unselected ICC owner lost");
       const auto shape = spec.sample_shape();
-      const auto query = take(Footprint::from_regions(shape, {roi}));
+      const auto query = take(Footprint::from_regions(
+          shape, {tile_oracle::coverage(retained.schema(), roi)}));
       require(take(first.dependencies.source_support()).at("input") == query,
-              "batched input support widened");
+              "batched input support covers complete tiles or Whole");
       auto dirty =
           take(first.dependencies.potential_dirty(
                    "input", query, 4, {}, ResultSupportTarget::Tensor, 0))
               .at("result");
-      require(dirty == query, "semantic Validation mapping lost");
+      auto validated =
+          tile_oracle::coverage(retained.schema(), roi).dimensions();
+      validated.back() = {0, 3};
+      require(
+          dirty == take(Footprint::from_regions(shape, {Region(validated)})),
+          "semantic Validation covers transformed RGB, excluding untouched "
+          "alpha and AOV");
       auto converted_doc =
           transfer_fixture::document(source, "color.transfer_encode_strict",
                                      {{"group", std::string("color")},

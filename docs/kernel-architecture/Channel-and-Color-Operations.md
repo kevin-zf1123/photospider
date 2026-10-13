@@ -1,6 +1,6 @@
 # Channel and color operations
 
-The default registry exposes FMT-01 extraction, FMT-02 assembly, FMT-03 editing authoring helpers over assembly, FMT-04 alpha association, FMT-05A alpha setting, FMT-06 numeric conversion, FMT-08 metadata assignment, FMT-09 transfer conversion, FMT-10 RGB basis conversion, the `channel.literal_like_<profile>` and `channel.scalar_literal_<profile>` Result primitives, and FMT-11 model conversions. FMT-05B/C remain compile-time helper compositions over registered operations; FMT-10D is a public graph helper over registered A/B/C operations. The twelve FMT-02/FMT-03-related CPU keys and sixty FMT-11-related keys use Result operation ABI 2 and single-tensor Results. See the [Chinese mirror](zh/Channel-and-Color-Operations.zh.md) for the same current contract.
+The default registry exposes FMT-01 extraction, FMT-02 assembly, FMT-03 editing authoring helpers over assembly, FMT-04 alpha association, FMT-05A alpha setting, FMT-06 numeric conversion, FMT-08 metadata assignment, FMT-09 transfer conversion, FMT-10 RGB basis conversion, the `channel.literal_like_<profile>` and `channel.scalar_literal_<profile>` Result primitives, and FMT-11 model conversions. FMT-05B/C remain compile-time helper compositions over registered operations; FMT-10D is a public graph helper over registered A/B/C operations. The twelve FMT-02/FMT-03-related CPU keys and sixty FMT-11-related keys use Result operation ABI 3 and single-tensor Results. See the [Chinese mirror](zh/Channel-and-Color-Operations.zh.md) for the same current contract.
 
 The table distinguishes registered Result operations from remaining Proposed specifications. A Proposed decision status does not change registration status.
 
@@ -15,10 +15,10 @@ The `photospider/ops/format/*.hpp` authoring helpers named below belong to the h
 | Scalar literal | `channel.scalar_literal_<profile>` | Registered no-input Whole Result primitive for prepared native bits in shape `[1]`; used by FMT-03 scalar sources. |
 | Metadata editing | `metadata.assign_<profile>`; `format::assign_metadata`, `format::remove_metadata` | Registered Result operations; one tensor member and no fields; same-coordinate Data plus Descriptor roles, without Validation/Control or planar callbacks. |
 | Channel assembly and editing | `channel.assemble_<profile>`, `channel.concatenate_<profile>`, `channel.assemble_mapped_<profile>`; installed helpers in `channel_assembly.hpp` and `channel_editing.hpp` | Registered Result keys; FMT-03 helpers lower transactionally to mapped assembly. There is no native swizzle/replace key. |
-| Alpha association and editing | `alpha.associate_<profile>`, `alpha.unassociate_<profile>`, `alpha.set_<profile>`; installed helpers in `photospider/ops/format/alpha.hpp` | Nine Result ABI 2 keys cover three members across the strict, Apple Silicon and x86-64 CPU profiles. FMT-05B/C helpers compile transactionally into registered extraction, literal-like fill, mapped assembly and metadata assignment operations. |
-| Numeric format conversion | `numeric.convert_format_strict` | One registered strict Result ABI 2 key for all 49 pairs among seven supported dtypes. |
-| Transfer conversion | `color.transfer_encode_<profile>`, `color.transfer_decode_<profile>`; `TransferDefinition` codec in `photospider/ops/format/transfer.hpp` | Six registered Result ABI 2 keys across encode/decode and three CPU profiles; generic and spatial single-tensor inputs. |
-| RGB basis conversion | `color.rgb_to_xyz_<profile>`, `color.xyz_to_rgb_<profile>`, `color.adapt_xyz_white_<profile>`; installed helpers in `photospider/ops/format/rgb_basis.hpp` | Nine registered Result ABI 2 CPU keys cover A/B/C across three profiles. `format::convert_linear_rgb` transactionally composes registered stages; it adds no D key. |
+| Alpha association and editing | `alpha.associate_<profile>`, `alpha.unassociate_<profile>`, `alpha.set_<profile>`; installed helpers in `photospider/ops/format/alpha.hpp` | Nine Result ABI 3 keys cover three members across the strict, Apple Silicon and x86-64 CPU profiles. FMT-05B/C helpers compile transactionally into registered extraction, literal-like fill, mapped assembly and metadata assignment operations. |
+| Numeric format conversion | `numeric.convert_format_strict` | One registered strict Result ABI 3 key for all 49 pairs among seven supported dtypes. |
+| Transfer conversion | `color.transfer_encode_<profile>`, `color.transfer_decode_<profile>`; `TransferDefinition` codec in `photospider/ops/format/transfer.hpp` | Six registered Result ABI 3 keys across encode/decode and three CPU profiles; generic and spatial single-tensor inputs. |
+| RGB basis conversion | `color.rgb_to_xyz_<profile>`, `color.xyz_to_rgb_<profile>`, `color.adapt_xyz_white_<profile>`; installed helpers in `photospider/ops/format/rgb_basis.hpp` | Nine registered Result ABI 3 CPU keys cover A/B/C across three profiles. `format::convert_linear_rgb` transactionally composes registered stages; it adds no D key. |
 | Model conversion | `color.*_<profile>` for A-R and T; FMT-11S helper lowers to `mask.threshold_channel_<profile>` | 57 native model keys across three CPU profiles; S adds no color key. One-tensor Float32/Float64 Results, rank at most 8; sample counts follow Result schema representability and execution resource limits. |
 
 Profile-suffixed channel extraction, assembly, alpha, metadata, transfer, RGB basis, literal-like fill and scalar-literal operations use `strict`, `accelerated_apple_silicon` or `accelerated_x86_64`; accelerated variants require the matching host capability. Numeric conversion uses its single unsuffixed strict key. Model-conversion keys use the strict, accelerated Apple Silicon and accelerated x86-64 profiles. Current Result operations use `start_result` and the Result tensor protocol.
@@ -148,7 +148,7 @@ helpers assert source schema and physical layout at compile time. FMT-05A
 
 ## FMT-06 numeric conversion
 
-`numeric.convert_format_strict` is the single registered strict Result ABI 2 key.
+`numeric.convert_format_strict` is the single registered strict Result ABI 3 key.
 It accepts one Result containing one tensor member and no fields, then publishes
 one `values` output Result containing one tensor. The seven supported source and
 target dtypes provide 49 conversion pairs. Complete sample rank, including batch
@@ -206,8 +206,7 @@ process up to 1024 samples, while the general curve path batches at most 64. Str
 fallback and floating-environment behavior follow NUM. Transfer operations have
 no GPU backend. The focused `test_transfer_operations` and
 `test_transfer_runtime`, `test_transfer_math` and `test_transfer_simd` pass, as do
-six shared FMT regression tests, `test_result_execution` and
-`test_shared_results`. The integration test completed
+six shared FMT regression tests, `test_result_execution`. The integration test completed
 16,760 golden attempts on strict and Apple Silicon profiles; x86-64 was skipped
 because the backend is unavailable on this host. They do not establish a full matrix or performance
 conclusion.
@@ -217,7 +216,7 @@ conclusion.
 The registry provides `color.rgb_to_xyz_<profile>`,
 `color.xyz_to_rgb_<profile>` and `color.adapt_xyz_white_<profile>` for the strict,
 accelerated Apple Silicon and accelerated x86-64 profiles. Together these are
-nine Result ABI 2 CPU keys. Each accepts one Result containing one Float32 or
+nine Result ABI 3 CPU keys. Each accepts one Result containing one Float32 or
 Float64 tensor and no fields, and publishes one `values` Result with one tensor.
 The result preserves Result schema identity, tensor key, logical shape and batch
 axes, updates applicable semantic facets and sets `atomic_trailing_axes` to zero.

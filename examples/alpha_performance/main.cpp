@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "../common/tile_request.hpp"
 #include "photospider/ops.hpp"
 #include "photospider/photospider.hpp"
 
@@ -275,9 +276,10 @@ int main(int argc, char** argv) try {
   const auto setup_us = us(setup_start);
   GraphContext graph(document);
   PlanningOptions planning;
-  planning.output_regions = {{"result", roi}};
   auto start = Clock::now();
   auto compiled = checked(Compiler(registry).compile(graph, planning));
+  compiled.plan = checked(
+      workflow_example::select_tiles(root, compiled.plan, "result", roi));
   const auto compile_us = us(start);
   const auto baseline = root.statistics();
   ExecutionOptions execution;

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "data/content_digest.hpp"
+#include "execution/tile_cache.hpp"
 #include "photospider/execution/execution.hpp"
 #include "photospider/plugin/result_program.hpp"
 
@@ -24,11 +25,15 @@ class ResultCacheProof final {
         cancellation_(cancellation) {}
   Result<ResourceString> supplied_facts(const ResultObjectInputs&,
                                         const ResultTensorInputs&);
-  Result<ResourceString> source_digest(
-      const std::vector<ExecutionBinding>&,
-      const ResourceVector<SourceObservation>&);
+  Result<ResourceString> tile_source_digest(
+      const ExecutionPlan&, const std::vector<ExecutionBinding>&,
+      const ResourceVector<TileCacheSource>&);
 
  private:
+  // A selected logical byte range, not dependency evidence or read authority.
+  struct SourceRange;
+  Result<ResourceString> source_digest(const std::vector<ExecutionBinding>&,
+                                       const ResourceVector<SourceRange>&);
   Status hash_facts(content_internal::Sha256&, const ResultRef&,
                     const ResultDescriptor&);
   const ResourceBudget& root_;

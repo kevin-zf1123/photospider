@@ -2,7 +2,6 @@
 #pragma once
 
 #include "data/value_validation.hpp"
-#include "photospider/data/dependency.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 
 namespace ps::input_internal {
@@ -27,18 +26,6 @@ Result<std::uint32_t> resolve_tensor_member(const OperationPortConstraint& port,
 Status validate_port_metadata(const OperationPortConstraint& port,
                               const OperationMetadata& metadata);
 
-Status validate_port_metadata(const OperationPortConstraint& port,
-                              const ValueDescriptor& descriptor,
-                              const std::vector<ValueFacet>& facets);
-
-/** @brief Shared checked Whole/elementwise/halo demand rule for planning and
- * direct invocation. Halo traits must have their static parameter resolved.
- */
-Result<Region> derive_input_demand(
-    const OperationTraits& traits, const Region& output_demand,
-    const std::vector<std::uint64_t>& output_shape,
-    const std::vector<std::uint64_t>& input_shape, OperationPortKind kind);
-
 /** @brief Validate a bounded scalar tensor using captured immutable coverage.
  * Reads its logical sample through Result access without dense-layout
  * assumptions. numeric_failure distinguishes external admission from computed
@@ -52,10 +39,4 @@ Status validate_port_tensor(const OperationPortConstraint& port,
                             const CancellationToken& cancellation,
                             const std::function<ErrorCode()>& stop);
 
-/** @brief Copies a static need as Validation with fixed full channel interval.
- * @note Caller has validated metadata and mapping rank. Source tags and all
- * leading-axis relations remain unchanged.
- */
-DependencyMappedNeed validation_map(DependencyMappedNeed support,
-                                    const OperationMetadata& metadata);
 }  // namespace ps::input_internal

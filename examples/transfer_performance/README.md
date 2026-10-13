@@ -1,4 +1,4 @@
-FMT-09 encode/decode use Result operation ABI 2, and the current benchmark driver
+FMT-09 encode/decode use Result operation ABI 3, and the current benchmark driver
 uses the public Result API.
 
 Current Result performance has no full

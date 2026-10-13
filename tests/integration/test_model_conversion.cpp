@@ -98,12 +98,19 @@ Result<ExecutionResult> execute(const Fixture& f, const std::string& key,
   GraphContext graph(doc);
   Compiler compiler(registry);
   PlanningOptions planning;
-  planning.tile_height = planning.tile_width = 128;
-  if (roi)
-    planning.output_regions = {{"result", *roi}};
+  planning.tile_extent = 128;
   auto compiled = compiler.compile(graph, planning);
   if (!compiled.ok())
     return Answer(compiled.status());
+  if (roi) {
+    auto selected = workflow_example::select_tiles(
+        take(context.resource_budget()), compiled.value().plan, "result", *roi);
+    if (!selected.ok())
+      return Result<ExecutionResult>(selected.status());
+    auto stages = compiled.take_value();
+    stages.plan = selected.take_value();
+    compiled = Result<CompiledWorkflow>(std::move(stages));
+  }
   auto result =
       context.execute(compiled.value().plan, bindings, {}, execution_options);
   if (result.ok() && !f.planar && key.find("color.color_to_gray_") == 0 &&
@@ -293,7 +300,7 @@ int main() {
       f.description->groups[0].alpha = 6;
       auto l = execute(f, "color.xyz_to_cielab_strict", {},
                        Region({{0, 1}, {1, 1}}));
-      PS_CHECK(l.ok() && read(l.value(), {0, 1}) == one);
+      PS_CHECK(!l.ok());
       auto q = execute(f, "color.color_to_gray_strict", {});
       if (!q.ok())
         std::cerr << q.status().message << '\n';
@@ -327,8 +334,11 @@ int main() {
       auto override = *f.description;
       override.groups[0].interpretation.white =
           std::array<double, 2>{.3127, .3290};
+      auto finite_source = f;
+      finite_source.raw[1] = bits(.5, narrow);
+      finite_source.raw[3] = bits(.5, narrow);
       auto overridden = execute(
-          f, "color.xyz_to_cielab_strict",
+          finite_source, "color.xyz_to_cielab_strict",
           {{"metadata_mode", std::string("override")},
            {"metadata_override", take(tensor_description_parameter(override))}},
           Region({{0, 1}, {1, 1}}));
@@ -442,8 +452,16 @@ int main() {
       image.published = {Region({{1, 2}, {126, 7}, {5, 1}})};
       auto sparse = execute(image, "color.xyz_to_cielab_strict", {},
                             Region({{1, 2}, {126, 7}, {1, 1}}));
-      if (!sparse.ok())
-        std::cerr << "sparse planar: " << sparse.status().message << '\n';
+      PS_CHECK(!sparse.ok());
+      image.published = {Region::whole(image.descriptor.shape)};
+      for (unsigned y = 0; y < 3; ++y)
+        for (unsigned x = 0; x < 133; ++x) {
+          image.raw[(y * 133 + x) * 7 + 1] = bits(.5, narrow);
+          image.raw[(y * 133 + x) * 7 + 3] = bits(.5, narrow);
+          image.raw[(y * 133 + x) * 7 + 5] = one;
+        }
+      sparse = execute(image, "color.xyz_to_cielab_strict", {},
+                       Region({{1, 2}, {126, 7}, {1, 1}}));
       PS_CHECK(sparse.ok() && read(sparse.value(), {2, 132, 1}) == one);
       // This permuted channel mapping exceeds the canonical spatial view.
       auto image_view = execute(image, "color.color_to_gray_strict",
@@ -497,11 +515,13 @@ int main() {
     }
     // Disjoint demand, exact forward dirty relation, Empty and cancellation.
     {
-      ValueDescriptor d{ElementType::Float32, {3, 3}};
-      const std::array<float, 9> samples{NAN, 1, NAN, NAN, 2, NAN, NAN, 3, NAN};
+      ValueDescriptor d{ElementType::Float32, {3, 1, 3}};
+      const std::array<float, 9> samples{.5, 1, .5, NAN, NAN, NAN, .5, 3, .5};
       std::vector<std::uint8_t> data(sizeof(samples));
       std::memcpy(data.data(), samples.data(), data.size());
-      auto backing = channel_fixture::source(d);
+      ResultTensorLayout layout;
+      layout.spatial = true;
+      auto backing = channel_fixture::source(d, {}, layout);
       backing.bytes = data;
       auto registry = make_default_operation_registry();
       ExecutionContextConfig config;
@@ -509,7 +529,7 @@ int main() {
       ExecutionContext context(registry, config);
       auto source =
           channel_fixture::publish(take(context.resource_budget()), backing);
-      auto p = raw(1);
+      auto p = raw(2);
       p["white_x"] = .25;
       p["white_y"] = .25;
       WorkflowDocument doc;
@@ -521,10 +541,13 @@ int main() {
           {1, "color.xyz_to_cielab_strict", {WorkflowInputReference{1}}, p}};
       doc.outputs = {{"result", 1, "values"}};
       GraphContext graph(doc);
-      auto compiled = take(Compiler(registry).compile(graph));
+      PlanningOptions planning;
+      planning.tile_extent = 1;
+      auto compiled = take(Compiler(registry).compile(graph, planning));
       auto frozen = take(context.freeze(compiled.plan, {{{"source", source}}}));
-      auto q = take(Footprint::from_regions(
-          d.shape, {Region({{0, 1}, {0, 1}}), Region({{2, 1}, {0, 1}})}));
+      auto q = take(
+          Footprint::from_regions(d.shape, {Region({{0, 1}, {0, 1}, {0, 3}}),
+                                            Region({{2, 1}, {0, 1}, {0, 3}})}));
       auto answer = context.execute_fragments(frozen, {{"result", q}});
       if (!answer.ok())
         std::cerr << "disjoint: " << answer.status().message << '\n';
@@ -536,25 +559,27 @@ int main() {
                    .results.at("result")
                    .read_tensor(
                        take(answer.value().results.at("result").descriptor()),
-                       0, {0, 0}, &value, 4)
+                       0, {0, 0, 0}, &value, 4)
                    .ok() &&
                value == 1);
       PS_CHECK(!answer.value()
                     .results.at("result")
                     .read_tensor(
                         take(answer.value().results.at("result").descriptor()),
-                        0, {1, 0}, &value, 4)
+                        0, {1, 0, 0}, &value, 4)
                     .ok());
-      auto unrelated =
-          take(Footprint::from_regions(d.shape, {Region({{0, 1}, {0, 1}})}));
+      auto unrelated = take(
+          Footprint::from_regions(d.shape, {Region({{1, 1}, {0, 1}, {0, 3}})}));
       auto dirty = take(answer.value().dependencies.potential_dirty(
           "source", unrelated, 7, {}, ResultSupportTarget::Tensor, 0));
       PS_CHECK(dirty.at("result").empty());
-      auto luminance =
-          take(Footprint::from_regions(d.shape, {Region({{0, 1}, {1, 1}})}));
+      auto luminance = take(
+          Footprint::from_regions(d.shape, {Region({{0, 1}, {0, 1}, {1, 1}})}));
       dirty = take(answer.value().dependencies.potential_dirty(
           "source", luminance, 7, {}, ResultSupportTarget::Tensor, 0));
-      PS_CHECK(dirty.at("result") == unrelated);
+      PS_CHECK(dirty.at("result") ==
+               take(Footprint::from_regions(
+                   d.shape, {Region({{0, 1}, {0, 1}, {0, 3}})})));
       auto empty = context.execute_fragments(
           frozen, {{"result", take(Footprint::none(d.shape))}});
       PS_CHECK(empty.ok() &&
@@ -576,7 +601,7 @@ int main() {
       doc.nodes[0].parameters["white_x"] = .75;
       GraphContext invalid(doc);
       PlanningOptions empty_plan;
-      empty_plan.output_regions = {{"result", Region({{0, 0}, {0, 0}})}};
+      empty_plan.output_requests = {{"result", {}}};
       PS_CHECK(!Compiler(registry).compile(invalid, empty_plan).ok());
     }
     // S is a graph authoring helper over an admitted MASK constituent, not a

@@ -12,7 +12,8 @@
 #include <vector>
 
 #include "photospider/photospider.hpp"
-#include "support/image_scene_fixture.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
+#include "support/image_input_fixture.hpp"
 #include "support/test_support.hpp"
 #if defined(PHOTOSPIDER_LOCAL_EXECUTION_SYNC_TESTS)
 #include "support/execution_sync_fixture.hpp"
@@ -49,21 +50,92 @@ ExecutionContextConfig config(bool gpu = false) {
   result.maximum_dependency_cache_metadata = 262144;
   return result;
 }
+struct ScalarConsumer {
+  bool requested = false;
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
+    if (!requested) {
+      requested = true;
+      ResultProgramNeed need;
+      {
+        auto selected = sdk::tile_need_for_samples(
+            phase.resources, phase.query, 0, 0, take(Footprint::all({1})),
+            ((13) & 7U) == 0);
+        if (!selected.ok())
+          return Result<ResultProgramPoll>(selected.status());
+        need.tiles.push_back(selected.take_value());
+      }
+      return Result<ResultProgramPoll>(std::move(need));
+    }
+    float value;
+    check(phase.read_tensor(0, 0, {0}, &value, sizeof(value)));
+    auto builder = take(ResultBuilder::start(phase.resources,
+                                             *phase.query.output.result_schema,
+                                             phase.query.semantic_key));
+
+    check(builder.publish_tensor(
+        0, Region::whole({1}),
+        {reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)}));
+    return Result<ResultProgramPoll>(
+        ResultPublication{take(builder.seal()), true});
+  }
+};
+OperationDefinition scalar_consumer(bool unit,
+                                    std::atomic<unsigned>* starts = nullptr) {
+  OperationDefinition operation;
+  operation.key = unit ? "test.scalar.unit" : "test.scalar.wide";
+  auto& traits = operation.traits;
+  traits.input_count = 1;
+  OperationPortConstraint port;
+  port.kind = OperationPortKind::Result;
+  port.element_type = static_cast<std::uint32_t>(ElementType::Float32);
+  port.scalar_bounds = true;
+  port.minimum = 0;
+  port.maximum = unit ? 1 : 16;
+  traits.input_schema = {port};
+  auto& output = traits.outputs[0];
+  output.output_schema.kind = OperationPortKind::Result;
+  output.result_schema = s1_fixture::schema({1}, false);
+  output.output_schema.result_schema_id = output.result_schema->id;
+  output.output_schema.result_schema_version = output.result_schema->version;
+  output.region_rule = OperationRegionRule::Whole;
+  output.maximum_dependency_stages = 2;
+  output.continuation_bytes = sizeof(ScalarConsumer);
+  operation.start_result = [starts](const auto&, const auto& allocator) {
+    if (starts)
+      ++*starts;
+    return ResultContinuation::make<ScalarConsumer>(allocator);
+  };
+  return operation;
+}
+namespace scalar_scene {
+struct Scene {
+  WorkflowDocument document;
+  ExecutionBindings bindings;
+  std::vector<float> expected;
+};
+inline void require(bool condition, const char* message) {
+  if (!condition)
+    throw std::runtime_error(message);
+}
+inline void check(const Scene& scene, const ResultRef& result) {
+  float value;
+  s1_fixture::check(result.read_tensor(s1_fixture::take(result.descriptor()), 0,
+                                       {0}, &value, sizeof(value)));
+  require(value == scene.expected[0], "computed scalar oracle");
+}
+}  // namespace scalar_scene
 struct Fixture;
 struct Scale {
   Fixture* fixture;
+  bool requested = false;
   explicit Scale(Fixture* owner) : fixture(owner) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& call);
 };
 struct Fixture {
   std::shared_ptr<OperationRegistry> registry =
       std::make_shared<OperationRegistry>();
-  std::shared_ptr<OperationRegistry> base;
   std::atomic<unsigned> producers{0}, consumers{0};
-  std::function<void(const ResultProgramPhase&)> gate;
-  explicit Fixture(std::shared_ptr<OperationRegistry> original,
-                   unsigned semantics = 0)
-      : base(std::move(original)) {
+  explicit Fixture(std::shared_ptr<OperationRegistry>, unsigned semantics = 0) {
     OperationDefinition producer;
     producer.key = "coefficient.scale";
     auto& traits = producer.traits;
@@ -88,52 +160,33 @@ struct Fixture {
     output.output_schema.result_schema_id = schema.id;
     output.output_schema.result_schema_version = schema.version;
     output.result_schema = schema;
-    output.region_rule = OperationRegionRule::Dependency;
-    output.maximum_dependency_stages = 1;
+    output.region_rule = OperationRegionRule::Tiled;
+    output.maximum_dependency_stages = 2;
     output.continuation_bytes = sizeof(Scale);
     producer.start_result = [this](const auto&, const auto& allocator) {
       return ResultContinuation::make<Scale>(allocator, this);
     };
     check(registry->register_operation(std::move(producer)));
-    for (const char* name :
-         {"image.exposure_gain", "image.opacity", "image.brush_circle"}) {
-      OperationDefinition wrapper;
-      wrapper.key = name;
-      wrapper.traits = take(base->find_traits(name));
-      wrapper.specialize_metadata = [this, key = std::string(name)](
-                                        const auto& inputs,
-                                        const auto& parameters)
-          -> Result<std::vector<OperationOutputSpecialization>> {
-        auto resolved = base->resolve_traits(key, inputs, parameters);
-        if (!resolved.ok())
-          return Result<std::vector<OperationOutputSpecialization>>(
-              resolved.status());
-        std::vector<OperationOutputSpecialization> outputs;
-        for (const auto& output : resolved.value().outputs) {
-          OperationOutputSpecialization item;
-          item.metadata.result_schema =
-              std::make_shared<SchemaTemplate>(*output.result_schema);
-          outputs.push_back(std::move(item));
-        }
-        return Result<std::vector<OperationOutputSpecialization>>(
-            std::move(outputs));
-      };
-      wrapper.start_result = [this, key = std::string(name)](
-                                 const auto& query, const auto& allocator) {
-        ++consumers;
-        auto nested = query;
-        nested.prepared.reset();
-        return base->start_result(key, nested, allocator);
-      };
-      check(registry->register_operation(std::move(wrapper)));
-    }
+    check(registry->register_operation(scalar_consumer(false, &consumers)));
+    check(registry->register_operation(scalar_consumer(true, &consumers)));
     check(registry->freeze());
   }
 };
 Result<ResultProgramPoll> Scale::poll(const ResultProgramPhase& call) {
+  if (!requested) {
+    requested = true;
+    ResultProgramNeed need;
+    {
+      auto selected = sdk::tile_need_for_samples(call.resources, call.query, 0,
+                                                 0, take(Footprint::all({1})),
+                                                 ((13) & 7U) == 0);
+      if (!selected.ok())
+        return Result<ResultProgramPoll>(selected.status());
+      need.tiles.push_back(selected.take_value());
+    }
+    return Result<ResultProgramPoll>(std::move(need));
+  }
   ++fixture->producers;
-  if (fixture->gate)
-    fixture->gate(call);
   float input = 0;
   check(call.read_tensor(0, 0, {0}, &input, 4));
   float output = input * 2;
@@ -162,63 +215,53 @@ Result<ResultProgramPoll> Scale::poll(const ResultProgramPhase& call) {
     schema.tensors[0].facets = {{"vendor.scalar", 1, {42}}};
   auto builder = take(
       ResultBuilder::start(call.resources, schema, call.query.semantic_key));
-  check(builder.bind_descriptor_relation(take(ResultRelation::cartesian(
-      call.resources, 1, {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0}))));
-  check(builder.publish_tensor(
-      0, Region::whole({1}), layouts[layout], std::move(bytes).freeze(),
-      take(ResultRelation::cartesian(
-          call.resources, 1, {0, 5, 0, 1, ResultSupportTarget::Tensor, 0})),
-      {true, true, true, true}));
+
+  check(builder.publish_tensor(0, Region::whole({1}), layouts[layout],
+                               std::move(bytes).freeze()));
   return Result<ResultProgramPoll>(
       ResultPublication{take(builder.seal()), true});
 }
-image_scene::Scene scene(const ResourceBudget& root, unsigned kind = 0,
-                         int layout = 0, int mode = 0) {
-  auto result = image_scene::scene(root, kind);
-  const std::size_t port = kind == 7 ? 4 : 1;
-  result.document.nodes[0].inputs[port] = WorkflowNodeOutput{5, "value"};
-  result.document.nodes.insert(result.document.nodes.begin(),
-                               {5,
-                                "coefficient.scale",
-                                {WorkflowInputReference{100}},
-                                {{"layout", static_cast<std::int64_t>(layout)},
-                                 {"mode", static_cast<std::int64_t>(mode)}}});
-  const auto coefficient = s1_fixture::scalar(root, kind == 0   ? 1.F
-                                                    : kind == 1 ? .25F
-                                                                : .125F);
-  result.document.inputs.push_back(
-      s1_fixture::declaration(100, "coefficient", coefficient));
-  result.bindings.inputs.push_back({"coefficient", coefficient});
+scalar_scene::Scene scene(const ResourceBudget& root, unsigned kind = 0,
+                          int layout = 0, int mode = 0) {
+  scalar_scene::Scene result;
+  const auto coefficient = s1_fixture::scalar(root, kind == 0 ? 1.F : .25F);
+  result.document.inputs = {
+      s1_fixture::declaration(100, "coefficient", coefficient)};
+  result.bindings.inputs = {{"coefficient", coefficient}};
+  result.document.nodes = {{5,
+                            "coefficient.scale",
+                            {WorkflowInputReference{100}},
+                            {{"layout", static_cast<std::int64_t>(layout)},
+                             {"mode", static_cast<std::int64_t>(mode)}}},
+                           {10,
+                            kind == 0 ? "test.scalar.wide" : "test.scalar.unit",
+                            {WorkflowNodeOutput{5, "value"}},
+                            {}}};
+  result.document.outputs = {{"result", 10, "value"}};
+  result.expected = {kind == 0 ? 2.F : .5F};
   return result;
 }
 int valid_views(const std::shared_ptr<OperationRegistry>& base) {
-  std::uint64_t dispatches = 0;
   for (unsigned semantic = 0; semantic < 3; ++semantic) {
     Fixture f(base, semantic);
     Compiler compiler(f.registry);
-    ExecutionContext execution(f.registry, config(true));
+    ExecutionContext execution(f.registry, config());
     const auto root = take(execution.resource_budget());
-    for (unsigned kind : {0U, 1U, 7U})
+    for (unsigned kind : {0U, 1U})
       for (int layout = 0; layout < 5; ++layout) {
         auto s = scene(root, kind, layout);
         GraphContext graph(s.document);
-        for (auto mode : {ExecutionMode::CpuExact, ExecutionMode::NativeGpu}) {
+        for (auto mode : {ExecutionMode::CpuExact}) {
           PlanningOptions options;
           options.execution_mode = mode;
           auto compiled = compiler.compile(graph, options);
           PS_CHECK(compiled.ok());
           auto result = execution.execute(compiled.value().plan, s.bindings);
           PS_CHECK(result.ok());
-          image_scene::check(s, result.value().results.at("result"));
-          dispatches += result.value().diagnostics.native_dispatch_count;
-          if (mode == ExecutionMode::NativeGpu && execution.gpu_enabled())
-            PS_CHECK(result.value().diagnostics.native_dispatch_count == 1 &&
-                     result.value().diagnostics.fallback_reasons.empty());
+          scalar_scene::check(s, result.value().results.at("result"));
         }
       }
   }
-  std::cout << "computed_scalar layouts=5 semantic_kinds=3 native_dispatches="
-            << dispatches << " oracle=passed\n";
   return 0;
 }
 int reuse_and_errors(const std::shared_ptr<OperationRegistry>& base) {
@@ -239,7 +282,7 @@ int reuse_and_errors(const std::shared_ptr<OperationRegistry>& base) {
     for (std::size_t i = 0; i < oracle.expected.size(); ++i)
       if (i % 4 != 3)
         oracle.expected[i] *= coefficient;
-    image_scene::check(oracle, result.value().results.at("result"));
+    scalar_scene::check(oracle, result.value().results.at("result"));
     return true;
   };
   for (float coefficient : {.5F, 1.F, 2.F, 8.F})
@@ -261,7 +304,7 @@ int reuse_and_errors(const std::shared_ptr<OperationRegistry>& base) {
                 << " code=" << static_cast<unsigned>(failed.status().code)
                 << " message=" << failed.status().message << '\n';
     PS_CHECK(failed.status().code == expected);
-    PS_CHECK(f.consumers == before);
+    PS_CHECK(f.consumers == before + 1);
     // Generic tensors may contain NaN or out-of-range controls. A Result cannot
     // publish a different schema from the one compiled for its producer.
     auto document = bad.document;
@@ -279,7 +322,7 @@ int reuse_and_errors(const std::shared_ptr<OperationRegistry>& base) {
     auto produced = f.producers.load();
     PS_CHECK(execution.execute(full_plan, bad.bindings).status().code ==
              expected);
-    PS_CHECK(f.consumers == before && f.producers == produced);
+    PS_CHECK(f.consumers == before + 2 && f.producers == produced);
   }
   auto opacity = scene(root, 1);
   opacity.bindings.inputs.back().result = s1_fixture::scalar(root, .75F);
@@ -288,7 +331,7 @@ int reuse_and_errors(const std::shared_ptr<OperationRegistry>& base) {
   const auto before_opacity = f.consumers.load();
   PS_CHECK(execution.execute(opacity_plan, opacity.bindings).status().code ==
            ErrorCode::OperationFailed);
-  PS_CHECK(f.consumers == before_opacity);
+  PS_CHECK(f.consumers == before_opacity + 1);
   const auto before_gain = f.producers.load();
   PS_CHECK(check(.75F));  // The same cached 1.5 value is valid as gain.
   PS_CHECK(f.producers == before_gain);
@@ -325,19 +368,20 @@ int payload_admission(const std::shared_ptr<OperationRegistry>& base) {
   {
     ResourceCapacity held;
     held[ResourceKind::Payload] =
-        root.available_capacity()[ResourceKind::Payload] - sizeof(Scale) - 8;
+        root.available_capacity()[ResourceKind::Payload] - sizeof(Scale) -
+        sizeof(ScalarConsumer) - 8;
     auto reservation = take(root.reserve(held));
     const auto before = root.statistics().live[ResourceKind::Payload];
     auto failed = execution.execute(plan, input.bindings);
     PS_CHECK(!failed.ok() &&
              failed.status().code == ErrorCode::ResourceExhausted);
-    PS_CHECK(fixture.producers == 1 && fixture.consumers == 0);
+    PS_CHECK(fixture.producers == 1 && fixture.consumers == 1);
     PS_CHECK(root.statistics().live[ResourceKind::Payload] == before);
   }
   PS_CHECK(root.statistics().live[ResourceKind::Payload] == baseline);
   auto retried = execution.execute(plan, input.bindings);
-  PS_CHECK(retried.ok() && fixture.producers == 2 && fixture.consumers == 1);
-  image_scene::check(input, retried.value().results.at("result"));
+  PS_CHECK(retried.ok() && fixture.producers == 2 && fixture.consumers == 2);
+  scalar_scene::check(input, retried.value().results.at("result"));
   return 0;
 }
 int semantic_binding_identity(const std::shared_ptr<OperationRegistry>& base) {
@@ -353,14 +397,11 @@ int semantic_binding_identity(const std::shared_ptr<OperationRegistry>& base) {
     auto schema = s1_fixture::schema({1}, false);
     schema.tensors[0].facets = {take(encode_semantic(semantic))};
     auto builder = take(ResultBuilder::start(root, schema, "semantic.input"));
-    check(builder.bind_descriptor_relation(
-        take(ResultRelation::cartesian(root, 1, {}))));
+
     const float number = 1;
     check(builder.publish_tensor(
         0, Region::whole({1}),
-        ByteView(reinterpret_cast<const std::uint8_t*>(&number), 4),
-        take(ResultRelation::cartesian(root, 1, {})),
-        {true, true, true, true}));
+        ByteView(reinterpret_cast<const std::uint8_t*>(&number), 4)));
     auto result = take(builder.seal());
     s.document.inputs.back().result_schema =
         std::make_shared<SchemaTemplate>(schema);
@@ -373,99 +414,14 @@ int semantic_binding_identity(const std::shared_ptr<OperationRegistry>& base) {
     for (std::size_t i = 0; i < s.expected.size(); ++i)
       if (i % 4 != 3)
         s.expected[i] *= static_cast<float>((2 + origin) / 2);
-    image_scene::check(s, output.value().results.at("result"));
+    scalar_scene::check(s, output.value().results.at("result"));
   }
   return 0;
 }
-#if defined(PHOTOSPIDER_LOCAL_EXECUTION_SYNC_TESTS)
-int shared_invalid_and_cancel(const std::shared_ptr<OperationRegistry>& base) {
-  Fixture f(base);
-  std::mutex mutex;
-  std::condition_variable changed;
-  bool entered = false, release = false;
-  CancellationToken producer_token;
-  f.gate = [&](const ResultProgramPhase& call) {
-    std::unique_lock<std::mutex> lock(mutex);
-    entered = true;
-    producer_token = call.query.cancellation;
-    changed.notify_all();
-    image_scene::require(changed.wait_for(lock, std::chrono::seconds(15),
-                                          [&] { return release; }),
-                         "shared scalar callback gate timed out");
-  };
-  ExecutionContext execution(f.registry, config());
-  const auto root = take(execution.resource_budget());
-  auto s = scene(root, 0, 0, 1);
-  GraphContext graph(s.document);
-  auto plan = Compiler(f.registry).compile(graph).take_value().plan;
-  auto frozen = take(execution.freeze(plan, s.bindings));
-  CancellationSource cancel;
-  ps::test::SharedJoinEvent joined("coefficient.scale", 5);
-  std::future<Result<ExecutionResult>> first, second;
-  ps::test::OnExit cleanup([&] {
-    cancel.cancel();
-    {
-      std::lock_guard<std::mutex> lock(mutex);
-      release = true;
-      changed.notify_all();
-    }
-    if (first.valid())
-      first.wait();
-    if (second.valid())
-      second.wait();
-  });
-  first = std::async(std::launch::async,
-                     [&] { return execution.execute(frozen, cancel.token()); });
-  bool callback_entered;
-  {
-    std::unique_lock<std::mutex> lock(mutex);
-    callback_entered = changed.wait_for(lock, std::chrono::seconds(5),
-                                        [&] { return entered; });
-  }
-  second =
-      std::async(std::launch::async, [&] { return execution.execute(frozen); });
-  const bool waiter_joined = joined.wait();
-  const auto active = execution.cache_statistics();
-  const bool shared = callback_entered && waiter_joined &&
-                      active.shared_computations > 0 && active.in_flight == 1;
-  // Release on failure as well, so cancellation regressions cannot strand work.
-  if (shared)
-    cancel.cancel();
-  const bool returned_while_blocked =
-      shared &&
-      first.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
-  auto cancelled =
-      returned_while_blocked ? first.get().status().code : ErrorCode::Internal;
-  bool independent;
-  {
-    std::lock_guard<std::mutex> lock(mutex);
-    independent = !producer_token.cancelled();
-    release = true;
-  }
-  changed.notify_all();
-  if (!returned_while_blocked)
-    cancelled = first.get().status().code;
-  auto result = second.get();
-  std::cout << "shared=" << shared
-            << " returned_while_blocked=" << returned_while_blocked
-            << " cancelled=" << static_cast<unsigned>(cancelled)
-            << " independent=" << independent << " producers=" << f.producers
-            << " consumers=" << f.consumers << '\n';
-  PS_CHECK(shared && returned_while_blocked &&
-           cancelled == ErrorCode::Cancelled && independent);
-  PS_CHECK(result.status().code == ErrorCode::OperationFailed &&
-           f.consumers == 0 && f.producers == 1);
-  const auto produced = f.producers.load();
-  PS_CHECK(execution.execute(plan, s.bindings).status().code ==
-           ErrorCode::OperationFailed);
-  PS_CHECK(f.producers == produced && f.consumers == 0);
-  PS_CHECK(execution.cache_statistics().in_flight == 0);
-  return 0;
-}
-#endif
 int metadata_rejection() {
   for (unsigned kind = 0; kind < 6; ++kind) {
-    auto registry = make_default_operation_registry(false);
+    auto registry = std::make_shared<OperationRegistry>();
+    check(registry->register_operation(scalar_consumer(false)));
     OperationDefinition producer;
     producer.key = "bad";
     producer.traits.input_count = 0;
@@ -519,17 +475,12 @@ int main(int argc, char** argv) {
     hooks.native_device = true;
     ps::test::ExecutionHookScope native(hooks);
 #endif
-    auto base = make_default_operation_registry();
-#if defined(PHOTOSPIDER_LOCAL_EXECUTION_SYNC_TESTS)
-    if (argc == 2 && std::string(argv[1]) == "--sharing-only")
-      return shared_invalid_and_cancel(base);
-#else
+    auto base = std::make_shared<OperationRegistry>();
     static_cast<void>(argv);
     if (argc != 1) {
       std::cerr << "unexpected installed test argument\n";
       return 1;
     }
-#endif
     PS_CHECK(valid_views(base) == 0);
     PS_CHECK(reuse_and_errors(base) == 0);
     PS_CHECK(metadata_rejection() == 0);

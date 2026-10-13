@@ -50,11 +50,9 @@ Result<ResultRef> invoke_constant(const OperationRegistry& registry,
     return Result<ResultRef>(state.status());
 
   ResultObjectInputs objects;
-  ResourceVector<ResultIoReply> io;
   ResultProgramPhase phase{
       query,
       objects,
-      io,
       allocator,
       root,
       [&](std::uint64_t units) { return root.consume({units}); },
@@ -173,11 +171,6 @@ int compilation() {
     return ResultContinuation::make<multi_result::Program>(allocator, 0);
   };
   PS_CHECK(registry->register_operation(identity).ok());
-  auto mixed_record = definition();
-  mixed_record.key = "test.record_and_value";
-  mixed_record.traits.outputs[0].observation_kind =
-      ObservationKind::RequestRecord;
-  PS_CHECK(registry->register_operation(mixed_record).ok());
   PS_CHECK(registry->freeze().ok());
   WorkflowDocument document;
   document.nodes = {{1, op.key, {}, {}},
@@ -220,13 +213,6 @@ int compilation() {
   document.outputs.back().port = "absent";
   GraphContext bad(document);
   PS_CHECK(!compiler.compile(bad).ok());
-  document.nodes[0].operation = mixed_record.key;
-  document.outputs = {{"selected", 2, "value"}};
-  GraphContext atomic_sibling(document);
-  PS_CHECK(compiler.compile(atomic_sibling).ok());
-  document.nodes[1].inputs = {WorkflowNodeOutput{1, "first"}};
-  GraphContext terminal_consumer(document);
-  PS_CHECK(!compiler.compile(terminal_consumer).ok());
   return 0;
 }
 

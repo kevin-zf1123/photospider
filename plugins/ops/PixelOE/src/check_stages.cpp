@@ -626,9 +626,9 @@ struct Memory {
 ps::Result<ps::ResultProgramPoll> run(const ps::ResultProgramPhase& call,
                                       const ps::ResourceBudget& budget) {
   Memory memory{call, budget, {}};
-  ps_result_services_v2 services{};
+  ps_result_services_v3 services{};
   services.struct_size = sizeof(services);
-  services.abi_version = PS_RESULT_OPERATION_ABI_VERSION_2;
+  services.abi_version = PS_RESULT_OPERATION_ABI_VERSION_3;
   services.context = &memory;
   services.gpu = call.gpu;
   services.cancelled = [](void* p) {
@@ -672,15 +672,11 @@ ps::Result<ps::ResultProgramPoll> run(const ps::ResultProgramPhase& call,
       ps::ResultBuilder::start(call.resources, *call.query.output.result_schema,
                                call.query.semantic_key)
           .take_value();
-  auto relation = ps::ResultRelation::cartesian(call.resources, 1, {0, 1, 0, 0})
-                      .take_value();
-  check(builder.bind_descriptor_relation(relation).ok(), "stage descriptor");
   const float value = 1;
   check(builder
             .publish_tensor(
                 0, ps::Region::whole({1}),
-                ps::ByteView(reinterpret_cast<const uint8_t*>(&value), 4),
-                relation, {true, true, true, true})
+                ps::ByteView(reinterpret_cast<const uint8_t*>(&value), 4))
             .ok(),
         "stage Result publication");
   return ps::Result<ps::ResultProgramPoll>(

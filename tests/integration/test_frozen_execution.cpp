@@ -2,11 +2,12 @@
 #include <string>
 
 #include "photospider/photospider.hpp"
+#include "support/kernel_registry_fixture.hpp"
 #include "support/test_support.hpp"
 
 int main() {
   using namespace ps;  // NOLINT(build/namespaces)
-  auto operations = make_default_operation_registry();
+  auto operations = test::kernel_registry();
   Compiler compiler(operations);
   ExecutionContext execution(operations);
   const auto root = execution.resource_budget().take_value();
@@ -51,10 +52,10 @@ int main() {
   PS_CHECK(result.ok() && result.value().results.size() == 2 &&
            test::named_scalar(result.value(), "sum") == 5);
   frozen = retained;
-  auto tile = frozen.for_region("sum", Region::whole({1}));
+  auto tile = frozen.for_tiles("sum", TileRequest{true, {}});
   PS_CHECK(tile.ok());
   PS_CHECK(execution.execute(tile.value()).ok());
-  auto left = frozen.for_region("left", Region::whole({1}));
+  auto left = frozen.for_tiles("left", TileRequest{true, {}});
   PS_CHECK(left.ok() && frozen.plan().outputs().size() == 2 &&
            tile.value().plan().outputs().count("sum") == 1 &&
            tile.value().plan().outputs().count("left") == 0);
@@ -67,12 +68,12 @@ int main() {
            ErrorCode::Cancelled);
   PS_CHECK(execution.execute(FrozenExecution{}).status().code ==
            ErrorCode::Stale);
-  ExecutionContext foreign(make_default_operation_registry());
+  ExecutionContext foreign(test::kernel_registry());
   PS_CHECK(foreign.execute(frozen).status().code == ErrorCode::Stale);
-  PS_CHECK(!frozen.for_region("missing", Region::whole({1})).ok());
+  PS_CHECK(!frozen.for_tiles("missing", TileRequest{true, {}}).ok());
   auto handle = execution.open_demand(frozen.plan(), {}).take_value();
   auto pinned = handle.freeze().take_value();
-  DemandQuery query{{"sum", Footprint::all({1}).take_value()}};
+  DemandQuery query{{"sum", TileRequest{true, {}}}};
   auto first = handle.request(query);
   PS_CHECK(first.ok() && first.value().generation == 1);
   auto replaced = handle.replace_bindings({});

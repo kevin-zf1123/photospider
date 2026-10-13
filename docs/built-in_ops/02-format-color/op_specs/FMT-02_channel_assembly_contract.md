@@ -12,7 +12,7 @@ clarification_status: complete
 # FMT-02: channel assembly and concatenation family
 
 Runtime contract: A/B/C and the scalar literal provider are registered as
-twelve Result operation ABI 2 CPU keys: `assemble`, `concatenate`,
+twelve Result operation ABI 3 CPU keys: `assemble`, `concatenate`,
 `assemble_mapped`, and `scalar_literal`, each with `strict`, `accelerated_apple_silicon`, and `accelerated_x86_64` profiles.
 The public authoring helpers are installed in
 `photospider/ops/format/channel_assembly.hpp` and `channel_editing.hpp`. The FMT

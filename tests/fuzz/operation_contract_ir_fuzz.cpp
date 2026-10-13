@@ -82,17 +82,11 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   ps::OperationTraits traits;
   // The C++ trait schema and the C plugin table have independent versions.
   traits.version = reader.next();
-  traits.outputs[0].output_element_type = static_cast<ps::ElementType>(
-      (reader.next() % 6U) + PS_RESULT_ELEMENT_UINT8_V2);
-  traits.outputs[0].shape_rule =
-      static_cast<ps::OperationShapeRule>((reader.next() % 6U) + 1U);
+  const auto element_type = static_cast<ps::ElementType>(
+      (reader.next() % 7U) + PS_RESULT_ELEMENT_UINT8_V3);
+  const std::uint64_t extent = 1U + reader.next() % 16U;
   traits.outputs[0].region_rule =
       static_cast<ps::OperationRegionRule>((reader.next() % 6U) + 1U);
-  traits.outputs[0].halo_radius = reader.next();
-  if (traits.outputs[0].shape_rule == ps::OperationShapeRule::Fixed) {
-    traits.outputs[0].fixed_output_shape = {
-        static_cast<std::uint64_t>(reader.next() % 16U)};
-  }
   auto& output = traits.outputs[0];
   output.continuation_bytes = 1;
   output.maximum_dependency_stages = 1;
@@ -101,7 +95,7 @@ OperationContractIrStage exercise_operation_contract_ir_input(
   schema.version = 1;
   ps::ResultTensorSpec tensor;
   tensor.key = "samples";
-  tensor.descriptor = {output.output_element_type, {1}};
+  tensor.descriptor = {element_type, {extent}};
   schema.tensors.push_back(std::move(tensor));
   output.result_schema = std::move(schema);
   output.output_schema.kind = ps::OperationPortKind::Result;

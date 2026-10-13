@@ -4,7 +4,7 @@
 #include <memory>
 #include <utility>
 
-#include "execution/dependency_records.hpp"
+#include "execution/tile_cache.hpp"
 #include "photospider/plugin/result_program.hpp"
 
 namespace ps::execution_internal {
@@ -16,10 +16,8 @@ struct StructuredCacheManifest final {
   ResourceLease lease;
   ResourceString key, content;
   ResultRef result;
-  ResourceVector<SourceObservation> sources;
+  std::shared_ptr<const TileCacheSnapshot> tiles;
   ResourceVector<StructuredCacheNeed> replay;
-  ResultRelation obligations;
-  std::shared_ptr<const DependencyBundle> bundle;
   Backend backend = Backend::Cpu;
   std::uint64_t metadata = 0, epoch = 0;
 };

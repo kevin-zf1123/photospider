@@ -15,7 +15,7 @@ Inherit [FMT-common](FMT_common_contract.md), the NUM numerical/execution baseli
 [model coverage](FMT_model_conversion_coverage.md) and
 [canonical image/codec boundary](FMT_codec_boundary.md). The family contains [A decode](FMT-09A_decode_transfer.md) and
 [B encode](FMT-09B_encode_transfer.md). Each direction has strict, accelerated
-Apple Silicon and accelerated x86-64 CPU Result ABI 2 keys. Their exact scalar
+Apple Silicon and accelerated x86-64 CPU Result ABI 3 keys. Their exact scalar
 definitions are normative in [FMT-09 mathematics](FMT-09_transfer_math.md). The
 specification remains Proposed; registration and implementation status are separate.
 

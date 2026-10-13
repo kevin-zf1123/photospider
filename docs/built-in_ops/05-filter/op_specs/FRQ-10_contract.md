@@ -38,8 +38,6 @@ Inherits [FILTER common contract](FILTER_common_contract.md), [NUM](../../01-num
 
 Letter suffixes identify distinct mathematical or interface objects, not quality tiers that a backend may choose arbitrarily. Primitives may propose separately named strict and accelerated variants. Helpers only orchestrate explicit stages. An external engine requires fixed resources and approval before it can have an executable configuration.
 
-## Shared Mathematics, Units, and Profiles
-
 ### Analysis and Synthesis Profiles
 **haar_mean_lifting_v1**: Apply the 1D transform along x first, then along y separately for x-low and x-high. Pair e=x[2i], o=x[2i+1]; for odd lengths, set the final o=e (duplicate-last). Compute d=RN_t(o-e), s=RN_t(e+d/2). Inverse: e=RN_t(s-d/2), o=RN_t(d+e), then crop to the saved original length. Each level’s four bands have size ceil(H/2),ceil(W/2): LL is x-low/y-low, LH_y is x-low/y-high, HL_x is x-high/y-low, and HH is x-high/y-high. Recursively decompose only LL at each level and publish the detail bands and final LL. Detail is a difference and low is a mean, not an orthonormal sqrt(2) scaling. Floating-point lifting does not claim bit-perfect reconstruction.
 

@@ -38,7 +38,7 @@ struct State {
     if (!supplied) {
       supplied = true;
       ResultProgramNeed need;
-      need.tensors.push_back({0, 0, *phase.query.tensor_outputs, 1});
+      need.tiles.push_back({0, true, false, {}});
       return Result<ResultProgramPoll>(std::move(need));
     }
     float sample = 0;
@@ -91,13 +91,9 @@ struct State {
         phase.query.semantic_key, {},
         std::vector<std::uint64_t>(phase.association->begin(),
                                    phase.association->end())));
-    multi_result::check(builder.bind_descriptor_relation(
-        multi_result::take(ResultRelation::cartesian(phase.resources, 1, {}))));
-    multi_result::check(builder.publish_tensor(
-        0, Region::whole({1}), {0, {4}}, std::move(output).freeze(),
-        multi_result::take(ResultRelation::cartesian(
-            phase.resources, 1, {0, 1, 0, 1, ResultSupportTarget::Tensor, 0})),
-        {true, true, true, true}));
+
+    multi_result::check(builder.publish_tensor(0, Region::whole({1}), {0, {4}},
+                                               std::move(output).freeze()));
     return Result<ResultProgramPoll>(
         ResultPublication{multi_result::take(builder.seal()), true});
   }

@@ -690,14 +690,14 @@ void specialization_contract(ps::CpuNumericProfile profile) {
       profile};
   Fixture fixture(0, options, axis());
   auto schema = take(fixture.run("report")).results.at("report").schema();
-  for (unsigned kind = 0; kind < 5; ++kind) {
+  for (unsigned kind = 0; kind < 3; ++kind) {
     auto registry = std::make_shared<ps::OperationRegistry>();
     ps::OperationDefinition definition;
     definition.key = "example.specialized_report";
     definition.traits.requires_metadata_specialization = true;
     auto& out = definition.traits.outputs[0];
     out.key = "report";
-    out.region_rule = ps::OperationRegionRule::Dependency;
+    out.region_rule = ps::OperationRegionRule::Tiled;
     out.continuation_bytes = 1;
     out.maximum_dependency_stages = 1;
     out.result_schema = schema;
@@ -711,10 +711,6 @@ void specialization_contract(ps::CpuNumericProfile profile) {
         specialized.id = "example.other_schema";
       if (kind == 2)
         specialized.version = 2;
-      if (kind == 3)
-        output.metadata.descriptor.shape = {1};
-      if (kind == 4)
-        output.regional_atomic = true;
       output.metadata.result_schema =
           std::make_shared<const ps::SchemaTemplate>(specialized);
       return ps::Result<std::vector<ps::OperationOutputSpecialization>>(
@@ -733,8 +729,7 @@ void specialization_contract(ps::CpuNumericProfile profile) {
     ps::GraphContext graph(document);
     auto compiled = ps::Compiler(registry).compile(graph);
     require(compiled.ok() == (kind == 0),
-            "Result specialization preserves kind/id/version and excludes "
-            "Value flags");
+            "Result specialization preserves schema id/version");
   }
   std::cout << "Result schema specialization compiler admission and "
                "kind/id/version guards PASS\n";
@@ -1106,9 +1101,10 @@ void cache_and_preparation(ps::CpuNumericProfile profile) {
   auto demand = take(context.open_demand(compiled.plan, bound));
   auto cold = take(demand.request(query, {}, execution));
   auto repeated = take(demand.request(query, {}, execution));
-  require(cold.results.at("table").object_id() ==
-              repeated.results.at("table").object_id(),
-          "same bake demand retains completed table Result");
+  require(repeated.diagnostics.cache_hits > 0 &&
+              numeric_result_fixture::bytes(cold.results.at("table")) ==
+                  numeric_result_fixture::bytes(repeated.results.at("table")),
+          "repeated demand reuses bounded completed cache with identical bits");
   auto fresh = take(fixture.bindings(root));
   publications.clear();
   auto warm = take(context.execute_fragments(

@@ -1,11 +1,13 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <functional>
 #include <future>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -20,6 +22,8 @@ using namespace ps;  // NOLINT(build/namespaces)
 using multi_result::check;
 using multi_result::take;
 struct Probe {
+  std::mutex mutex;
+  std::condition_variable changed;
   std::atomic<unsigned> active{0}, peak{0}, alive{0}, callbacks{0},
       empty_queries{0};
   std::atomic<bool> paired{false};
@@ -44,15 +48,17 @@ struct Work {
     auto peak = probe.peak.load();
     while (peak < active && !probe.peak.compare_exchange_weak(peak, active)) {
     }
-    if (active > 1)
+    if (active > 1) {
+      std::lock_guard<std::mutex> lock(probe.mutex);
       probe.paired = true;
-    const auto until =
-        std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (probe.overlap && !probe.paired &&
-           std::chrono::steady_clock::now() < until)
-      std::this_thread::yield();
-    if (probe.overlap && !probe.paired)
-      return 1;
+      probe.changed.notify_all();
+    }
+    if (probe.overlap) {
+      std::unique_lock<std::mutex> lock(probe.mutex);
+      if (!probe.changed.wait_for(lock, std::chrono::seconds(5),
+                                  [&] { return probe.paired.load(); }))
+        return 1;
+    }
     if (tile->begin[1] != 0 || tile->end[1] != 1 || tile->begin[2] != 0 ||
         tile->end[2] != 1 || tile->end[0] - tile->begin[0] != 1)
       return 6;
@@ -97,10 +103,9 @@ struct Tile {
       ++requests;
       ResultProgramNeed need;
       if (probe->dynamic && requests == 1)
-        need.tensors.push_back(
-            {0, 0, take(Footprint::from_regions(shape, {})), 2});
+        need.tiles.push_back({0, false, true, {}});
       else
-        need.tensors.push_back({0, 0, take(Footprint::all(shape)), 1});
+        need.tiles.push_back({0, true, false, {}});
       return Answer(std::move(need));
     }
     if (!phase.cpu_tiles || phase.cpu_tiles->maximum_workers == 0)
@@ -133,20 +138,11 @@ struct Tile {
         phase.query.semantic_key, {},
         std::vector<std::uint64_t>(phase.association->begin(),
                                    phase.association->end())));
-    check(builder.bind_descriptor_relation(
-        take(ResultRelation::cartesian(phase.resources, 1, {}))));
-    ResultTensorViewTransform identity;
-    for (unsigned axis = 0; axis < shape.size(); ++axis)
-      identity.source_axes.push_back(
-          {static_cast<std::int32_t>(axis), 0, 1, 1});
-    auto relation = take(ResultRelation::mapped(
-        phase.resources, shape, Region::whole(shape), shape,
-        identity.source_axes, {0, 1, 0, 1, ResultSupportTarget::Tensor, 0}));
+
     StridedLayout layout = probe->components == 1 ? StridedLayout{0, {8}}
                                                   : StridedLayout{0, {24, 8}};
-    check(builder.publish_tensor(
-        0, Region::whole(shape), layout, std::move(buffer).freeze(),
-        std::move(relation), {true, true, true, true}));
+    check(builder.publish_tensor(0, Region::whole(shape), layout,
+                                 std::move(buffer).freeze()));
     return Answer(ResultPublication{take(builder.seal()), true});
   } catch (const multi_result::Failure& failure) {
     return Result<ResultProgramPoll>(failure.status);
@@ -204,7 +200,7 @@ int run(unsigned grant, unsigned mode, unsigned layers = 1,
   GraphContext graph(document);
   probe.invalidate = [&] { graph.replace(document); };
   PlanningOptions planning;
-  planning.tile_width = 1;
+  planning.tile_extent = 1;
   auto plan = take(Compiler(registry).compile(graph, planning));
   ExecutionContextConfig config;
   config.cpu_workers = 4;
@@ -217,16 +213,14 @@ int run(unsigned grant, unsigned mode, unsigned layers = 1,
   ExecutionContext context(registry, config);
   auto root = take(context.resource_budget());
   auto builder = take(ResultBuilder::start(root, schema, "input"));
-  check(builder.bind_descriptor_relation(
-      take(ResultRelation::cartesian(root, 1, {}))));
+
   std::vector<std::int64_t> values(12 * components);
   for (unsigned i = 0; i < values.size(); ++i)
     values[i] = i;
   check(builder.publish_tensor(
       0, Region::whole(shape),
-      {reinterpret_cast<const std::uint8_t*>(values.data()), values.size() * 8},
-      take(ResultRelation::cartesian(root, values.size(), {})),
-      {true, true, true, true}));
+      {reinterpret_cast<const std::uint8_t*>(values.data()),
+       values.size() * 8}));
   ExecutionBinding input;
   input.name = "input";
   input.result = take(builder.seal());
@@ -271,11 +265,9 @@ int run(unsigned grant, unsigned mode, unsigned layers = 1,
   } else {
     if (!result.ok())
       std::cerr << result.status().message << '\n';
-    // Empty metadata and full payload Needs have distinct producer queries.
-    // A layered dynamic consumer therefore runs its upstream producer twice.
-    const auto stages = layers + (dynamic && layers == 2 ? 1U : 0U);
+    const auto stages = layers;
     PS_CHECK(result.ok() && delivered == 1 && probe.callbacks == 12 * stages);
-    PS_CHECK(probe.empty_queries == (dynamic && layers == 2 ? 1U : 0U));
+    PS_CHECK(probe.empty_queries == 0);
     PS_CHECK(result.value().diagnostics.cpu_stage_count == stages);
     PS_CHECK(result.value().diagnostics.cpu_tile_callback_count == 12 * stages);
     if (grant > 1)

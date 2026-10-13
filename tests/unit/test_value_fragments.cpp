@@ -326,22 +326,17 @@ int main() {
     auto made = ResultBuilder::start(root, typed_schema, "partial.image");
     PS_REQUIRE_OK(made);
     auto builder = made.take_value();
-    auto witness = ResultRelation::cartesian(root, 4, {}).take_value();
-    PS_CHECK(!builder
-                  .publish_tensor(0, region,
-                                  ByteView(generic.bytes().data(), 16), witness,
-                                  {true, true, true, true})
-                  .ok());
+
+    PS_CHECK(
+        !builder.publish_tensor(0, region, ByteView(generic.bytes().data(), 16))
+             .ok());
   }
   auto made = ResultBuilder::start(root, typed_schema, "complete.image");
   PS_REQUIRE_OK(made);
   auto builder = made.take_value();
-  PS_REQUIRE_OK(builder.bind_descriptor_relation(
-      ResultRelation::cartesian(root, 1, {}).take_value()));
-  PS_REQUIRE_OK(builder.publish_tensor(
-      0, generic.region(), ByteView(generic.bytes().data(), 16),
-      ResultRelation::cartesian(root, 4, {}).take_value(),
-      {true, true, true, true}));
+
+  PS_REQUIRE_OK(builder.publish_tensor(0, generic.region(),
+                                       ByteView(generic.bytes().data(), 16)));
   auto typed = builder.seal();
   PS_REQUIRE_OK(typed);
   float component = 1;

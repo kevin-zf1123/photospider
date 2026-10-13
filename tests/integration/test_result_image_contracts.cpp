@@ -14,11 +14,14 @@
 #include <vector>
 
 #include "../../examples/numeric_workflow/icc_fixture.hpp"
-#include "../../examples/unified_result_workflow/minimal_ops.hpp"
+#include "support/unified_result_fixture.hpp"
 #include "photospider/photospider.hpp"
+#include "support/multi_output_result_fixture.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
+using multi_result::check;
+using multi_result::take;
 void require(bool condition, std::string_view message) {
   if (!condition)
     throw std::runtime_error(std::string(message));
@@ -30,15 +33,11 @@ void zero(const ResourceBudget& root) {
 ResultRef image(const ResourceBudget& root, const SchemaTemplate& schema,
                 float bias = 0, ResourceBindings resources = {},
                 uint32_t biased_slot = UINT32_MAX) {
-  auto made = ResultBuilder::start(root, schema, "source", {}, {}, 1, 1,
+  auto made = ResultBuilder::start(root, schema, "source", {}, {}, 1,
                                    std::move(resources));
   require(made.ok(), made.status().message);
   auto builder = made.take_value();
-  require(builder
-              .bind_descriptor_relation(
-                  ResultRelation::cartesian(root, 1, {0, 8, 0, 0}).take_value())
-              .ok(),
-          "image basis");
+
   for (uint32_t slot = 0; slot < schema.tensors.size(); ++slot) {
     auto count = schema.tensors[slot].sample_count().value();
     std::vector<float> samples(count);
@@ -48,9 +47,7 @@ ResultRef image(const ResourceBudget& root, const SchemaTemplate& schema,
     auto status = builder.publish_tensor(
         slot, Region::whole(schema.tensors[slot].sample_shape()),
         ByteView(reinterpret_cast<uint8_t*>(samples.data()),
-                 samples.size() * 4),
-        ResultRelation::cartesian(root, count, {0, 1, 0, 0}).take_value(),
-        {true, true, true, true});
+                 samples.size() * 4));
     require(status.ok(), status.message);
   }
   return builder.seal().take_value();
@@ -64,22 +61,14 @@ void captured_prefix() {
     schema.fields = {
         {"rows", ElementType::Int64, {ResultExtentKind::RuntimeCount}, {}}};
     auto builder = ResultBuilder::start(root, schema, "scope").take_value();
-    require(
-        builder
-            .bind_descriptor_relation(
-                ResultRelation::cartesian(root, 1, {0, 8, 0, 0}).take_value())
-            .ok(),
-        "basis");
+
     const int64_t first = 1, second = 2;
-    auto witness =
-        ResultRelation::cartesian(root, 2, {0, 1, 0, 0}).take_value();
     require(
         builder
             .append(0, 1, ByteView(reinterpret_cast<const uint8_t*>(&first), 8))
             .ok(),
         "append first");
-    require(builder.publish(0, 1, witness, {true, true, true, true}).ok(),
-            "publish first");
+    require(builder.publish(0, 1).ok(), "publish first");
     auto old = builder.reference().capture().take_value();
     auto weak = old.weak();
     auto facts = old.descriptor(false).take_value();
@@ -88,8 +77,7 @@ void captured_prefix() {
                         ByteView(reinterpret_cast<const uint8_t*>(&second), 8))
                 .ok(),
             "append second");
-    require(builder.publish(0, 2, witness, {true, true, true, true}).ok(),
-            "publish second");
+    require(builder.publish(0, 2).ok(), "publish second");
     auto complete = builder.seal().take_value();
     auto locked = weak.lock();
     require(locked.valid() && locked.descriptor(false).value().rows(0) == 1,
@@ -135,7 +123,7 @@ void resource_admission() {
             "transient peak accounted");
   }
   zero(roomy);
-  auto schema = unified_example::image_schema();
+  auto schema = unified_result_fixture::image_schema();
   schema.tensors[0].facets = {
       {"test.large", 1, std::vector<uint8_t>(65536, 7)}};
   limits.capacity[ResourceKind::Host] = 16384;
@@ -171,27 +159,18 @@ void resource_admission() {
   limits.capacity[ResourceKind::Payload] = 32768;
   ResourceBudget pages(limits);
   {
-    schema = unified_example::image_schema();
+    schema = unified_result_fixture::image_schema();
     schema.tensors[0].batch_axes[0] = 3;
     schema.tensors[0].batch_axes[1] = 1;
     schema.tensors[0].descriptor.shape = {1, 1};
     schema.publication = PublishPolicy::StablePrefix;
-    auto builder =
-        ResultBuilder::start(pages, schema, "transaction", {}, {}, 1, 1)
-            .take_value();
-    require(
-        builder
-            .bind_descriptor_relation(
-                ResultRelation::cartesian(pages, 1, {0, 8, 0, 0}).take_value())
-            .ok(),
-        "transaction basis");
-    auto relation =
-        ResultRelation::cartesian(pages, 3, {0, 1, 0, 0}).take_value();
+    auto builder = ResultBuilder::start(pages, schema, "transaction", {}, {}, 1)
+                       .take_value();
+
     float value = 4;
     require(builder
                 .publish_tensor(0, Region({{0, 1}, {0, 1}, {0, 1}, {0, 1}}),
-                                ByteView(reinterpret_cast<uint8_t*>(&value), 4),
-                                relation, {true, true, true, true})
+                                ByteView(reinterpret_cast<uint8_t*>(&value), 4))
                 .ok(),
             "old frame");
     auto old = builder.reference().capture().take_value();
@@ -202,8 +181,7 @@ void resource_admission() {
     float next[] = {5, 6};
     auto failed =
         builder.publish_tensor(0, Region({{1, 2}, {0, 1}, {0, 1}, {0, 1}}),
-                               ByteView(reinterpret_cast<uint8_t*>(next), 8),
-                               relation, {true, true, true, true});
+                               ByteView(reinterpret_cast<uint8_t*>(next), 8));
     require(failed.code == ErrorCode::ResourceExhausted,
             "second frame preparation refused");
     require(pages.statistics().live[ResourceKind::Payload] == 32768 - baseline,
@@ -256,29 +234,26 @@ struct Join {
     }
     if (!stage++) {
       ResultProgramNeed need;
-      need.tensors = {{0, 0, upstream.value(), 1}, {1, 0, samples.value(), 1}};
+      need.tiles = {take(sdk::tile_need_for_samples(
+                        phase.resources, phase.query, 0, 0, upstream.value())),
+                    take(sdk::tile_need_for_samples(
+                        phase.resources, phase.query, 1, 0, samples.value()))};
       return Result<ResultProgramPoll>(std::move(need));
     }
-    auto builder = ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {}, {}, phase.query.tile_height,
-        phase.query.tile_width, phase.query.resources);
+    auto builder =
+        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
+                             phase.query.semantic_key, {}, {},
+                             phase.query.tile_extent, phase.query.resources);
     if (!builder.ok())
       return Result<ResultProgramPoll>(builder.status());
     auto output = builder.take_value();
-    auto basis = ResultRelation::cartesian(phase.resources, 1, {0, 8, 0, 0});
-    if (!basis.ok())
-      return Result<ResultProgramPoll>(basis.status());
-    auto status = output.bind_descriptor_relation(basis.take_value());
-    if (!status.ok())
-      return Result<ResultProgramPoll>(status);
+    Status status;
     for (const auto& box : samples.value().boxes()) {
       auto count = box.element_count().value();
       auto bytes = phase.allocator.allocate(count * 4);
       if (!bytes.ok())
         return Result<ResultProgramPoll>(bytes.status());
       auto buffer = bytes.take_value();
-      ResourceVector<ResultRelationRow> rows;
       uint64_t position = 0;
       auto selected = Footprint::from_regions(samples.value().shape(), {box});
       if (!selected.ok())
@@ -297,28 +272,13 @@ struct Join {
               return read;
             const float sum = first + second;
             std::memcpy(buffer.data() + 4 * position++, &sum, 4);
-            auto index = unified_example::flat(at, samples.value().shape());
-            rows.push_back(
-                {index,
-                 {0, 1, unified_example::flat(source, samples.value().shape()),
-                  1, ResultSupportTarget::Tensor, 0}});
-            rows.push_back(
-                {index, {1, 1, index, 1, ResultSupportTarget::Tensor, 0}});
             return Status::success();
           },
           count);
       if (!status.ok())
         return Result<ResultProgramPoll>(status);
-      auto relation = ResultRelation::sample_rows(
-          phase.resources,
-          phase.query.output.result_schema->tensors[0].sample_count().value(),
-          rows.size(),
-          [&](auto i) { return Result<ResultRelationRow>(rows[i]); });
-      if (!relation.ok())
-        return Result<ResultProgramPoll>(relation.status());
-      status = output.publish_tensor(
-          0, box, ByteView(buffer.data(), buffer.size()), relation.take_value(),
-          {true, true, true, true});
+      status =
+          output.publish_tensor(0, box, ByteView(buffer.data(), buffer.size()));
       if (!status.ok())
         return Result<ResultProgramPoll>(status);
     }
@@ -331,20 +291,30 @@ struct Join {
 Status join(OperationRegistry* registry, const SchemaTemplate& schema) {
   OperationDefinition op;
   op.key = "test.image.join";
-  op.traits = unified_example::traits(2, sizeof(Join));
+  op.traits = unified_result_fixture::traits(2, sizeof(Join));
   op.traits.parameter_schema = {
       {"temporal", OperationParameterType::Bool, false, false, 0, 0}};
-  unified_example::result_output(&op.traits.outputs[0], schema);
+  unified_result_fixture::result_output(&op.traits.outputs[0], schema);
   for (auto& port : op.traits.input_schema)
-    unified_example::result_port(&port, schema);
+    unified_result_fixture::result_port(&port, schema);
   op.start_result = [](const ResultProgramQuery&,
                        const BufferAllocator& allocator) {
     return ResultContinuation::make<Join>(allocator);
   };
   return registry->register_operation(std::move(op));
 }
+ResourceVector<TileUnit> dirty(const ExecutionDependencies& dependencies,
+                               const ResourceBudget& root, TileIndex tile) {
+  ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
+  changes.push_back({PlanWorkflowInput{0}, 0,
+                     take(TileSet::from_indices(root, {tile})), false});
+  return take(dependencies.dirty_units(changes));
+}
+TileRequest request(std::initializer_list<TileIndex> tiles) {
+  return {false, take(TileSet::from_indices(ResourceBudget{}, tiles))};
+}
 void alias_diamond() {
-  auto schema = unified_example::image_schema();
+  auto schema = unified_result_fixture::image_schema();
   auto registry = std::make_shared<OperationRegistry>();
   require(join(registry.get(), schema).ok(), "join registration");
   require(registry->freeze().ok(), "freeze joins");
@@ -381,44 +351,38 @@ void alias_diamond() {
   doc.outputs = {{"left", 3, "value"}, {"right", 4, "value"}};
   GraphContext graph(doc);
   PlanningOptions geometry;
-  geometry.tile_height = geometry.tile_width = 2;
+  geometry.tile_extent = 2;
   auto plan = Compiler(registry).compile(graph, geometry).take_value().plan;
   auto frozen = context.freeze(plan, {{binding}}).take_value();
-  auto q = Footprint::from_regions({2, 2, 2, 4},
-                                   {Region({{1, 1}, {1, 1}, {1, 1}, {2, 1}})})
-               .take_value();
+  const auto q = request({7});
   for (unsigned iteration = 0; iteration < 2; ++iteration) {
     auto result =
         context.execute_fragments(frozen, {{"left", q}, {"right", q}});
     require(result.ok(), result.status().message);
+    ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
+    changes.push_back({PlanWorkflowInput{0}, 0, q.tiles, false});
     {
       const auto available = root.available_capacity();
       const auto bytes = std::min(available[ResourceKind::Host],
                                   available[ResourceKind::Metadata]) -
                          ResourceBudget::lease_metadata_bytes();
-      auto blocker =
-          root.reserve(ResourceCapacity::host(bytes, bytes)).take_value();
-      auto denied = result.value().dependencies.source_support();
+      auto blocker = take(root.reserve(ResourceCapacity::host(bytes, bytes)));
+      auto denied = result.value().dependencies.dirty_units(changes);
       require(
           !denied.ok() && denied.status().code == ErrorCode::ResourceExhausted,
-          "returned source map admission failure is a typed result");
+          "dirty closure metadata admission");
     }
     const auto before_maps = root.statistics().live[ResourceKind::Metadata];
     {
-      auto coverage = result.value().dependencies.coverage();
-      auto guarantees = result.value().dependencies.guarantees();
+      auto units = dirty(result.value().dependencies, root, 7);
+      require(units.size() == 4, "diamond includes all four computation units");
+      for (std::size_t step = 0; step < 4; ++step)
+        require(units[step] == TileUnit{step, 0, 7}, "diamond unit identity");
       require(root.statistics().live[ResourceKind::Metadata] > before_maps,
-              "returned evidence maps own root capacity");
+              "returned dirty units own root capacity");
     }
     require(root.statistics().live[ResourceKind::Metadata] == before_maps,
-            "returned map capacity retires");
-    auto observations = result.value().dependencies.source_observations();
-    require(observations.ok() && !observations.value().empty(),
-            "cold/warm diamond ancestry");
-    auto dirty = result.value().dependencies.potential_dirty("source", q);
-    require(dirty.ok() && dirty.value().at("left") == q &&
-                dirty.value().at("right") == q,
-            "rebound alias dirty");
+            "dirty unit capacity retires");
     for (const auto& key : {"left", "right"}) {
       auto owner = result.value().results.at(key);
       float read = 0;
@@ -436,266 +400,140 @@ void alias_diamond() {
   GraphContext temporal_graph(doc);
   auto temporal_plan =
       Compiler(registry).compile(temporal_graph, geometry).take_value().plan;
-  auto near = Footprint::from_regions(
-                  {2, 2, 2, 4}, {Region({{0, 1}, {0, 1}, {1, 1}, {2, 1}})})
-                  .take_value();
-  auto next = Footprint::from_regions(
-                  {2, 2, 2, 4}, {Region({{1, 1}, {0, 1}, {1, 1}, {2, 1}})})
-                  .take_value();
   auto result = context.execute_fragments(
-      context.freeze(temporal_plan, {{binding}}).take_value(), {{"out", near}});
+      take(context.freeze(temporal_plan, {{binding}})),
+      {{"out", request({1})}});
   require(result.ok(), result.status().message);
-  auto dirty = result.value().dependencies.potential_dirty("source", next);
-  require(dirty.ok() && dirty.value().at("out") == near,
-          "cross-frame support transpose");
-  auto unrelated = Footprint::from_regions(
-                       {2, 2, 2, 4}, {Region({{1, 1}, {0, 1}, {1, 1}, {3, 1}})})
-                       .take_value();
-  dirty = result.value().dependencies.potential_dirty("source", unrelated);
-  require(dirty.ok() && dirty.value().at("out").empty(),
-          "unrelated sample in same tile stays clean");
+  require(dirty(result.value().dependencies, root, 5) ==
+              ResourceVector<TileUnit>({TileUnit{0, 0, 1}},
+                                       ResourceAllocator<TileUnit>(root)),
+          "cross-frame tile dependency");
+  require(dirty(result.value().dependencies, root, 4).empty(),
+          "unrequested neighboring tile stays clean");
+  // Width coordinates 2 and 3 are in the same square tile and dirty together.
+  auto grid = take(TileGrid::from_schema(schema, 2));
+  const uint64_t at[] = {1, 0, 1, 3};
+  require(take(sdk::tile_for_coordinate(*grid, at, 4)) == 5 &&
+              dirty(result.value().dependencies, root, 5).size() == 1,
+          "same-tile edit dirties consumer");
 }
 SchemaTemplate chunk_schema(uint64_t count, ElementType type, const char* id) {
   SchemaTemplate schema;
   schema.id = id;
   ResultTensorSpec member;
   member.key = "samples";
-  member.descriptor = {type, {count}};
+  member.descriptor = {type, count == 1 ? std::vector<uint64_t>{1}
+                                        : std::vector<uint64_t>{1, count}};
+  member.layout.spatial = count != 1;
+  member.layout.channel_axis.reset();
   schema.tensors.push_back(std::move(member));
   return schema;
 }
 struct Probe {
-  unsigned stage = 0;
+  bool requested = false, bad;
+  explicit Probe(bool bad) : bad(bad) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    const auto shape =
-        phase.query.inputs[0].result_schema->tensors[1].sample_shape();
-    const std::vector<uint64_t> at{0, 1, 0, 2};
-    if (!stage++) {
-      ResultProgramNeed need;
-      need.results = {{0, 0, true, 0}};
-      if (!phase.query.tensor_outputs->empty())
-        need.tensors = {{0, 1,
-                         Footprint::from_regions(
-                             shape, {Region({{0, 1}, {1, 1}, {0, 1}, {2, 1}})})
-                             .take_value(),
-                         1}};
-      return Result<ResultProgramPoll>(std::move(need));
+    if (!requested) {
+      requested = true;
+      return Result<ResultProgramPoll>(
+          ResultProgramNeed{{{0, true, false, {}}}});
     }
-    const auto guarantee = static_cast<DependencyGuarantee>(
-        std::get<int64_t>(phase.query.parameters.at("guarantee")));
-    auto basis =
-        guarantee == DependencyGuarantee::Unknown
-            ? ResultRelation::unknown(phase.resources, 1)
-            : ResultRelation::cartesian(
-                  phase.resources, 1,
-                  {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0}, guarantee);
-    if (!basis.ok())
-      return Result<ResultProgramPoll>(basis.status());
-    Result<ResultRelation> relation =
-        ResultRelation::cartesian(phase.resources, 1, {0, 1, 0, 0});
     float value = 0;
-    if (!phase.query.tensor_outputs->empty()) {
-      if (std::get<bool>(phase.query.parameters.at("bad"))) {
-        float ignored = 0;
-        static_cast<void>(
-            phase.tensors->at({0, 1}).read({0, 1, 0, 0}, &ignored, 4));
-      }
-      auto read = phase.read_tensor(0, 1, at, &value, 4);
-      if (!read.ok())
-        return Result<ResultProgramPoll>(read);
-      relation = ResultRelation::cartesian(
-          phase.resources, 1, {0, 1, 5, 1, ResultSupportTarget::Tensor, 1});
-    }
-    if (!relation.ok())
-      return Result<ResultProgramPoll>(relation.status());
-    auto started =
-        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key);
-    if (!started.ok())
-      return Result<ResultProgramPoll>(started.status());
-    auto builder = started.take_value();
-    auto status = builder.bind_descriptor_relation(basis.take_value());
-    if (!status.ok())
-      return Result<ResultProgramPoll>(status);
-    for (const auto& box : phase.query.tensor_outputs->boxes()) {
-      status = builder.publish_tensor(
-          0, box, ByteView(reinterpret_cast<const uint8_t*>(&value), 4),
-          relation.value(), {true, true, true, true});
-      if (!status.ok())
-        return Result<ResultProgramPoll>(status);
-    }
-    auto sealed = builder.seal();
-    return sealed.ok() ? Result<ResultProgramPoll>(
-                             ResultPublication{sealed.take_value(), true})
-                       : Result<ResultProgramPoll>(sealed.status());
+    if (bad)
+      static_cast<void>(phase.read_tensor(0, 1, {1, 0, 0, 0}, &value, 4));
+    check(phase.read_tensor(0, 1, {0, 1, 0, 2}, &value, 4));
+    auto builder = take(ResultBuilder::start(phase.resources,
+                                             *phase.query.output.result_schema,
+                                             phase.query.semantic_key));
+    check(builder.publish_tensor(
+        0, Region::whole({1}), {reinterpret_cast<const uint8_t*>(&value), 4}));
+    return Result<ResultProgramPoll>(
+        ResultPublication{take(builder.seal()), true});
   }
 };
 struct Escaped {
-  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
-    float zero = 0;
-    auto known =
-        ResultRelation::cartesian(phase.resources, 1,
-                                  {0, 1, 5, 1, ResultSupportTarget::Tensor, 1})
-            .take_value();
-    auto unresolved = ResultRelation::unknown(phase.resources, 1).take_value();
-    auto relation = ResultRelation::unite(phase.resources, {known, unresolved})
-                        .take_value();
-    auto basis = ResultRelation::cartesian(phase.resources, 1, {0, 8, 0, 0})
-                     .take_value();
-    auto builder =
-        ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key)
-            .take_value();
-    auto status = builder.bind_descriptor_relation(std::move(basis));
-    if (!status.ok())
-      return Result<ResultProgramPoll>(status);
-    status = builder.publish_tensor(
-        0, Region::whole({1}),
-        ByteView(reinterpret_cast<const uint8_t*>(&zero), 4),
-        std::move(relation), {true, true, true, true});
-    if (!status.ok())
-      return Result<ResultProgramPoll>(status);
-    return Result<ResultProgramPoll>(
-        ResultPublication{builder.seal().take_value(), true});
+  Result<ResultProgramPoll> poll(const ResultProgramPhase&) {
+    return Result<ResultProgramPoll>(ResultProgramNeed{{{0, true, false, {}}}});
   }
 };
-void slots_and_guarantees() {
-  auto schema = unified_example::image_schema();
+void slots_whole_contract() {
+  auto schema = unified_result_fixture::image_schema();
   auto depth = schema.tensors[0];
   depth.key = "depth";
-  depth.batch_axes[0] = 1;
-  depth.batch_axes[1] = 2;
+  depth.batch_axes = {1, 2};
   depth.descriptor.shape = {1, 3};
   schema.tensors.push_back(depth);
   auto registry = std::make_shared<OperationRegistry>();
   OperationDefinition op;
   op.key = "test.image.probe";
-  op.traits = unified_example::traits(1, sizeof(Probe));
-  unified_example::result_port(&op.traits.input_schema[0], schema);
-  unified_example::result_output(
+  op.traits = unified_result_fixture::traits(1, sizeof(Probe));
+  unified_result_fixture::result_port(&op.traits.input_schema[0], schema);
+  unified_result_fixture::result_output(
       &op.traits.outputs[0],
       chunk_schema(1, ElementType::Float32, "test.probe.result"));
   op.traits.parameter_schema = {
-      {"guarantee", OperationParameterType::Int64, true, true, 1, 3},
       {"bad", OperationParameterType::Bool, true, false, 0, 0}};
-  op.start_result = [](const ResultProgramQuery&,
-                       const BufferAllocator& allocator) {
-    return ResultContinuation::make<Probe>(allocator);
+  op.start_result = [](const auto& query, const auto& allocator) {
+    return ResultContinuation::make<Probe>(
+        allocator, std::get<bool>(query.parameters.at("bad")));
   };
-  require(registry->register_operation(std::move(op)).ok(),
-          "probe registration");
-  OperationDefinition escaped;
-  escaped.key = "test.image.escaped";
-  escaped.traits = unified_example::traits(1, sizeof(Escaped));
-  unified_example::result_port(&escaped.traits.input_schema[0], schema);
-  unified_example::result_output(
-      &escaped.traits.outputs[0],
-      chunk_schema(1, ElementType::Float32, "test.probe.result"));
-  escaped.traits.outputs[0].input_indices = std::vector<uint32_t>{};
-  escaped.start_result = [](const ResultProgramQuery&,
-                            const BufferAllocator& allocator) {
+  check(registry->register_operation(op));
+  op.key = "test.image.escaped";
+  op.traits.outputs[0].input_indices = std::vector<uint32_t>{};
+  op.start_result = [](const auto&, const auto& allocator) {
     return ResultContinuation::make<Escaped>(allocator);
   };
-  require(registry->register_operation(std::move(escaped)).ok(),
-          "escaped registration");
-  require(registry->freeze().ok(), "probe freeze");
-  ExecutionContextConfig config;
-  config.managed_resources = ResourceLimits{};
-  ExecutionContext context(registry, config);
-  auto root = context.resource_budget().take_value();
-  ExecutionBinding binding;
-  binding.name = "source";
-  binding.result = image(root, schema);
+  check(registry->register_operation(op));
+  check(registry->freeze());
+  ExecutionContext context(registry);
+  auto root = take(context.resource_budget());
+  ExecutionBinding binding{"source", image(root, schema)};
   WorkflowDocument doc;
-  WorkflowInputDeclaration declaration;
-  declaration.id = 1;
-  declaration.name = "source";
-  declaration.result_schema = std::make_shared<SchemaTemplate>(schema);
-  doc.inputs = {declaration};
-  {
-    auto escaped = doc;
-    escaped.nodes = {
-        {1, "test.image.escaped", {WorkflowInputReference{1}}, {}}};
-    escaped.outputs = {{"out", 1, "value"}};
-    GraphContext graph(escaped);
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
-    auto refused = context.execute(plan, {{binding}});
-    require(
-        !refused.ok() && refused.status().code == ErrorCode::InvalidArgument,
-        "Unknown union declared spans obey projection");
-  }
-  for (int64_t g = 1; g <= 3; ++g) {
-    doc.nodes.push_back({static_cast<uint64_t>(g),
-                         "test.image.probe",
-                         {WorkflowInputReference{1}},
-                         {{"guarantee", g}, {"bad", false}}});
-    doc.outputs.push_back(
-        {"g" + std::to_string(g), static_cast<uint64_t>(g), "value"});
-  }
+  doc.inputs = {multi_result::declaration(1, "source", schema)};
+  doc.nodes = {
+      {1, "test.image.probe", {WorkflowInputReference{1}}, {{"bad", false}}}};
+  doc.outputs = {{"out", 1, "value"}};
   GraphContext graph(doc);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
-  auto frozen = context.freeze(plan, {{binding}}).take_value();
-  auto q = Footprint::all({1}).take_value();
-  auto result =
-      context.execute_fragments(frozen, {{"g1", q}, {"g2", q}, {"g3", q}});
-  require(result.ok(), result.status().message);
-  auto guarantees = result.value().dependencies.guarantees();
-  require(guarantees.at("g1") == DependencyGuarantee::Exact &&
-              guarantees.at("g2") == DependencyGuarantee::Conservative &&
-              guarantees.at("g3") == DependencyGuarantee::Unknown,
-          "independent root guarantees");
-  auto unknown = result.value().dependencies.potential_dirty(
-      "source", Footprint::all(depth.sample_shape()).value(), 1, {},
-      ResultSupportTarget::Tensor, 1);
-  require(!unknown.ok() && unknown.status().code == ErrorCode::NotFound,
-          "Unknown descriptor remains unresolved");
-  auto empty =
-      context.execute_fragments(frozen, {{"g2", Footprint::none({1}).value()}});
-  require(empty.ok(), empty.status().message);
-  require(empty.value().dependencies.guarantees().at("g2") ==
-              DependencyGuarantee::Conservative,
-          "Empty retains descriptor guarantee");
-  auto obligations = empty.value().dependencies.source_observations();
-  require(obligations.ok() && !obligations.value().empty() &&
-              obligations.value()[0].target == ResultSupportTarget::Descriptor,
-          "Empty retains descriptor ancestry");
-  auto handle = context.open_demand(plan, {{binding}}).take_value();
-  require(handle.request({{"g1", q}}).ok(), "slot demand");
-  binding.result = image(root, schema, 50, {}, 0);
-  auto update = handle.replace_bindings({{binding}}, {2, {}});
-  require(update.ok(), update.status().message);
-  require(update.value().potential_dirty.at("g1").empty(),
-          "unrelated slot is not read or dirty");
-  binding.result = image(root, schema, 100, {}, 1);
-  update = handle.replace_bindings({{binding}}, {2, {}});
-  require(update.ok(), update.status().message);
-  require(update.value().potential_dirty.at("g1") == q, "slot 1 data dirty");
-  auto changed = handle.request({{"g1", q}});
-  require(changed.ok(), changed.status().message);
+  auto plan = take(Compiler(registry).compile(
+                       graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1}))
+                  .plan;
+  auto handle = take(context.open_demand(plan, {{binding}}));
+  const DemandQuery query{{"out", TileRequest{true, {}}}};
+  auto result = take(handle.request(query));
+  auto record = take(result.dependencies.tile_record({0, 0, 0}));
+  require(record && record->inputs.size() == 1 && record->inputs[0].whole,
+          "multi-tensor producer has Whole authorization");
   float value = 0;
+  check(result.results.at("out").read_tensor(
+      take(result.results.at("out").descriptor()), 0, {0}, &value, 4));
+  require(value == 5, "second tensor member value");
+  for (auto slot : {0u, 1u}) {
+    binding.result = image(root, schema, slot ? 100 : 50, {}, slot);
+    auto update = take(handle.replace_bindings({{binding}}));
+    require(update.potential_dirty.at("out") ==
+                take(TileSet::from_indices(root, {0})),
+            "any member edit dirties Whole producer");
+    auto changed = take(handle.request(query));
+    check(changed.results.at("out").read_tensor(
+        take(changed.results.at("out").descriptor()), 0, {0}, &value, 4));
+    require(value == (slot ? 105 : 5), "member replacement numerical value");
+  }
+  auto empty = take(handle.request({{"out", TileRequest{}}}));
   require(
-      changed.value()
-              .results.at("g1")
-              .read_tensor(
-                  changed.value().results.at("g1").descriptor().take_value(), 0,
-                  {0}, &value, 4)
-              .ok() &&
-          value == 105,
-      "slot 1 replacement value");
-  for (auto target : {ResultSupportTarget::Value, ResultSupportTarget::Field})
-    require(!changed.value()
-                 .dependencies
-                 .potential_dirty("source", Footprint::all({1}).value(), 1, {},
-                                  target, 99)
-                 .ok(),
-            "invalid typed dirty target rejected");
-  doc.outputs = {{"bad", 1, "value"}};
-  doc.nodes[0].parameters["bad"] = true;
-  GraphContext invalid(doc);
-  auto bad_plan = Compiler(registry).compile(invalid).take_value().plan;
-  auto bad = context.execute(bad_plan, {{binding}});
-  require(!bad.ok() && bad.status().code == ErrorCode::InvalidArgument,
-          "ignored direct capability failure is sticky");
+      !take(empty.dependencies.tile_record({0, 0, 0})) &&
+          take(empty.results.at("out").descriptor()).tensor_coverage(0).empty(),
+      "empty request has no input dependency or payload");
+  for (bool escaped : {false, true}) {
+    auto invalid = doc;
+    invalid.nodes[0].operation =
+        escaped ? "test.image.escaped" : "test.image.probe";
+    invalid.nodes[0].parameters["bad"] = true;
+    GraphContext bad_graph(invalid);
+    auto bad_plan = take(Compiler(registry).compile(bad_graph)).plan;
+    auto bad = context.execute(bad_plan, {{binding}});
+    require(!bad.ok() && bad.status().code == ErrorCode::InvalidArgument,
+            "projection escape or ignored out-of-domain read fails");
+  }
 }
 
 struct ChunkObserver {
@@ -714,37 +552,30 @@ struct ChunkCopy {
     const auto& samples = *phase.query.tensor_outputs;
     if (!stage++) {
       ResultProgramNeed need;
-      need.tensors = {{0, 0, samples, 1}};
+      need.tiles = {take(sdk::tile_need_for_samples(
+          phase.resources, phase.query, 0, 0, samples))};
       return Result<ResultProgramPoll>(std::move(need));
     }
     const auto region = samples.boxes()[0];
-    const auto at = region.dimensions()[0].offset;
+    const auto at = region.dimensions().back().offset;
     if (at == observer->fail_at)
       return Result<ResultProgramPoll>(
           Status{ErrorCode::OperationFailed, "deliberate chunk failure"});
     auto builder =
         ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key)
+                             phase.query.semantic_key, {}, {},
+                             phase.query.tile_extent)
             .take_value();
-    auto basis = ResultRelation::cartesian(
-        phase.resources, 1, {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0});
-    if (!basis.ok())
-      return Result<ResultProgramPoll>(basis.status());
-    auto status = builder.bind_descriptor_relation(basis.take_value());
-    if (!status.ok())
-      return Result<ResultProgramPoll>(status);
+    Status status;
     double value = 0;
-    status = phase.read_tensor(0, 0, {at}, &value, 8);
+    status = phase.read_tensor(0, 0, {0, at}, &value, 8);
     if (!status.ok())
       return Result<ResultProgramPoll>(status);
-    auto relation = ResultRelation::mapped(
-        phase.resources, samples.shape(), region, samples.shape(),
-        {{0, 0, 1, 1}}, {0, 1, 0, 0, ResultSupportTarget::Tensor, 0});
-    if (!relation.ok())
-      return Result<ResultProgramPoll>(relation.status());
-    status = builder.publish_tensor(
-        0, region, ByteView(reinterpret_cast<const uint8_t*>(&value), 8),
-        relation.take_value(), {true, true, true, true});
+    auto bytes = take(phase.allocator.allocate(8));
+    std::memcpy(bytes.data(), &value, 8);
+    status =
+        builder.publish_tensor(0, region, StridedLayout{0, {8, 8}, {0, at}},
+                               std::move(bytes).freeze());
     if (!status.ok())
       return Result<ResultProgramPoll>(status);
     auto result = builder.seal().take_value();
@@ -766,17 +597,18 @@ struct ChunkSum {
         phase.query.inputs[0].result_schema->tensors[0].sample_count().value();
     if (waiting) {
       double value = 0;
-      auto status = phase.read_tensor(0, 0, {cursor}, &value, 8);
+      auto status = phase.read_tensor(0, 0, {0, cursor}, &value, 8);
       if (!status.ok())
         return Result<ResultProgramPoll>(status);
       if (!cursor && observer->keep_first) {
-        auto window = phase.tensors->at({0, 0}).acquire(Region({{0, 1}}));
+        auto window =
+            phase.tensors->at({0, 0}).acquire(Region({{0, 1}, {0, 1}}));
         if (!window.ok())
           return Result<ResultProgramPoll>(window.status());
         retained = window.take_value();
       }
       if (retained.valid()) {
-        auto first = retained.row_run({0});
+        auto first = retained.row_run({0, 0});
         if (!first.ok())
           return Result<ResultProgramPoll>(first.status());
         double first_value = 0;
@@ -789,18 +621,21 @@ struct ChunkSum {
         if (weak.lock().valid())
           ++live;
       observer->maximum_live = std::max(observer->maximum_live, live);
-      require(live <= (observer->keep_first ? 2U : 1U),
-              "consumed history does not keep old chunk payload owners alive");
+      require(live == cursor + 1,
+              "completed input tiles remain available until consuming closure "
+              "retires");
       sum += value;
       ++cursor;
       waiting = false;
     }
     if (cursor < count) {
-      auto samples = Footprint::from_regions({count}, {Region({{cursor, 1}})});
+      auto samples =
+          Footprint::from_regions({1, count}, {Region({{0, 1}, {cursor, 1}})});
       if (!samples.ok())
         return Result<ResultProgramPoll>(samples.status());
       ResultProgramNeed need;
-      need.tensors = {{0, 0, samples.take_value(), 1}};
+      need.tiles = {take(sdk::tile_need_for_samples(
+          phase.resources, phase.query, 0, 0, samples.value()))};
       waiting = true;
       return Result<ResultProgramPoll>(std::move(need));
     }
@@ -819,21 +654,10 @@ struct ChunkSum {
                        phase.resources, *phase.query.output.result_schema,
                        phase.query.semantic_key, {}, std::move(association))
                        .take_value();
-    auto basis = ResultRelation::cartesian(
-        phase.resources, 1, {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0});
-    if (!basis.ok())
-      return Result<ResultProgramPoll>(basis.status());
-    auto status = builder.bind_descriptor_relation(basis.take_value());
-    if (!status.ok())
-      return Result<ResultProgramPoll>(status);
-    auto relation = ResultRelation::cartesian(
-        phase.resources, 1, {0, 1, 0, count, ResultSupportTarget::Tensor, 0});
-    if (!relation.ok())
-      return Result<ResultProgramPoll>(relation.status());
+    Status status;
     status = builder.publish_tensor(
         0, Region::whole({1}),
-        ByteView(reinterpret_cast<const uint8_t*>(&sum), 8),
-        relation.take_value(), {true, true, true, true});
+        ByteView(reinterpret_cast<const uint8_t*>(&sum), 8));
     if (!status.ok())
       return Result<ResultProgramPoll>(status);
     return Result<ResultProgramPoll>(
@@ -855,9 +679,9 @@ void staged_input_retirement() {
     auto registry = std::make_shared<OperationRegistry>();
     OperationDefinition copy;
     copy.key = "test.chunk.copy";
-    copy.traits = unified_example::traits(1, sizeof(ChunkCopy));
-    unified_example::result_port(&copy.traits.input_schema[0], schema);
-    unified_example::result_output(&copy.traits.outputs[0], schema);
+    copy.traits = unified_result_fixture::traits(1, sizeof(ChunkCopy));
+    unified_result_fixture::result_port(&copy.traits.input_schema[0], schema);
+    unified_result_fixture::result_output(&copy.traits.outputs[0], schema);
     copy.start_result = [observer](const auto&, const auto& allocator) {
       return ResultContinuation::make<ChunkCopy>(allocator, observer);
     };
@@ -865,10 +689,12 @@ void staged_input_retirement() {
             "chunk copy registration");
     OperationDefinition reduction;
     reduction.key = "test.chunk.sum";
-    reduction.traits = unified_example::traits(1, sizeof(ChunkSum));
+    reduction.traits = unified_result_fixture::traits(1, sizeof(ChunkSum));
     reduction.traits.outputs[0].maximum_dependency_stages = 4096;
-    unified_example::result_port(&reduction.traits.input_schema[0], schema);
-    unified_example::result_output(&reduction.traits.outputs[0], output_schema);
+    unified_result_fixture::result_port(&reduction.traits.input_schema[0],
+                                        schema);
+    unified_result_fixture::result_output(&reduction.traits.outputs[0],
+                                          output_schema);
     reduction.start_result = [observer](const auto&, const auto& allocator) {
       return ResultContinuation::make<ChunkSum>(allocator, observer);
     };
@@ -876,9 +702,10 @@ void staged_input_retirement() {
                 registry->freeze().ok(),
             "chunk sum registration and freeze");
     ExecutionContextConfig config;
-    config.maximum_live_bytes = 4096;
+    config.maximum_live_bytes = count * 8 + 4096;
     config.managed_resources = ResourceLimits{};
-    config.managed_resources->capacity[ResourceKind::Payload] = 4096;
+    config.managed_resources->capacity[ResourceKind::Payload] =
+        count * 8 + 4096;
     config.managed_resources->capacity[ResourceKind::Metadata] = 64 * 1048576;
     auto context = std::make_unique<ExecutionContext>(registry, config);
     auto root = context->resource_budget().take_value();
@@ -888,19 +715,10 @@ void staged_input_retirement() {
       std::memcpy(buffer.data(), &one, 8);
       auto builder =
           ResultBuilder::start(root, schema, "chunk.input").take_value();
-      require(
-          builder
-              .bind_descriptor_relation(
-                  ResultRelation::cartesian(root, 1, {0, 8, 0, 0}).take_value())
-              .ok(),
-          "broadcast chunk source basis");
+
       require(builder
-                  .publish_tensor(
-                      0, Region::whole({count}), {0, {0}},
-                      std::move(buffer).freeze(),
-                      ResultRelation::cartesian(root, count, {0, 1, 0, 0})
-                          .take_value(),
-                      {true, true, true, true})
+                  .publish_tensor(0, Region::whole({1, count}), {0, {0, 0}},
+                                  std::move(buffer).freeze())
                   .ok(),
               "broadcast chunk source");
       ExecutionBinding binding;
@@ -916,7 +734,11 @@ void staged_input_retirement() {
                    {2, "test.chunk.sum", {WorkflowNodeOutput{1, "value"}}, {}}};
       doc.outputs = {{"out", 2, "value"}};
       GraphContext graph(doc);
-      auto plan = Compiler(registry).compile(graph).take_value().plan;
+      auto plan =
+          Compiler(registry)
+              .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+              .take_value()
+              .plan;
       ExecutionOptions options;
       options.maximum_dependency_work = UINT64_C(1) << 30;
       options.dependencies.maximum_work = UINT64_C(1) << 30;
@@ -941,33 +763,22 @@ void staged_input_retirement() {
                 "public workflow completes chunk sum with full historical "
                 "association");
         for (uint64_t edited : {uint64_t{0}, count / 2, count - 1}) {
-          auto changed =
-              Footprint::from_regions({count}, {Region({{edited, 1}})})
-                  .take_value();
-          auto dirty =
-              result.value().dependencies.potential_dirty("source", changed);
-          require(dirty.ok() && dirty.value().at("out") ==
-                                    Footprint::all({1}).take_value(),
-                  "payload-free ancestry preserves early, middle and late "
-                  "source dirty mapping");
+          auto units = dirty(result.value().dependencies, root, edited);
+          require(units.size() == 2 && units.back() == TileUnit{1, 0, 0},
+                  "historical tile dependency survives payload retirement");
         }
-        FootprintLimits evidence_limits;
-        evidence_limits.maximum_work = UINT64_C(1) << 30;
-        auto support =
-            result.value().dependencies.source_support(evidence_limits);
-        require(support.ok(), support.status().message);
-        require(
-            support.value().at("source") ==
-                Footprint::all({count}).take_value(),
-            "complete payload-free source support survives chunk retirement");
-        require(observer->maximum_live == (observer->keep_first ? 2U : 1U),
-                "only current and explicitly retained chunks remain live");
+        auto record = take(result.value().dependencies.tile_record({1, 0, 0}));
+        require(record && record->inputs.size() == 1 &&
+                    record->inputs[0].tiles.size() == count,
+                "sum records all source tiles");
+        require(observer->maximum_live == count,
+                "input tiles live until consumer closure retires");
       }
       for (const auto& weak : observer->produced)
         require(!weak.lock().valid(),
                 "chunk payload owners retire when execution actors finish");
-      require(root.statistics().peak[ResourceKind::Payload] <= 4096,
-              "chunk count does not increase live payload capacity");
+      require(root.statistics().peak[ResourceKind::Payload] <= count * 8 + 4096,
+              "retained tiles remain within explicit payload capacity");
     }
     context.reset();
     zero(root);
@@ -991,9 +802,8 @@ struct BlockProgram {
     using Answer = Result<ResultProgramPoll>;
     if (!stage++) {
       ResultProgramNeed need;
-      need.tensors = {
-          {0, 0, Footprint::from_regions({2}, {Region({{0, 1}})}).take_value(),
-           5}};
+      need.tiles = {
+          {0, false, false, take(TileSet::from_indices(phase.resources, {0}))}};
       return Answer(std::move(need));
     }
     const auto state = [&](double number) {
@@ -1010,14 +820,9 @@ struct BlockProgram {
       }
       auto builder =
           ResultBuilder::start(phase.resources, schema, "block.state", {}, {},
-                               128, 128, observer->resources)
+                               128, observer->resources)
               .take_value();
-      require(builder
-                  .bind_descriptor_relation(
-                      ResultRelation::cartesian(phase.resources, 1, {})
-                          .take_value())
-                  .ok(),
-              "block state basis");
+
       const double colors[] = {number / 10, 0, 0, 0};
       require(
           builder
@@ -1025,12 +830,7 @@ struct BlockProgram {
                   0, Region::whole(schema.tensors[0].sample_shape()),
                   observer->mode == 10
                       ? ByteView(reinterpret_cast<const uint8_t*>(colors), 32)
-                      : ByteView(reinterpret_cast<const uint8_t*>(&number), 8),
-                  ResultRelation::cartesian(
-                      phase.resources,
-                      schema.tensors[0].sample_count().take_value(), {})
-                      .take_value(),
-                  {true, true, true, true})
+                      : ByteView(reinterpret_cast<const uint8_t*>(&number), 8))
               .ok(),
           "block state payload");
       return builder.seal().take_value();
@@ -1074,7 +874,7 @@ struct BlockProgram {
             throw std::runtime_error("block compute failure");
           if (observer->mode == 3) {
             double ignored = 0;
-            static_cast<void>(phase.read_tensor(0, 0, {1}, &ignored, 8));
+            static_cast<void>(phase.read_tensor(0, 0, {0, 1}, &ignored, 8));
           }
           if (observer->mode == 4)
             observer->cancellation.cancel();
@@ -1093,7 +893,7 @@ struct BlockProgram {
           if (observer->mode == 7)
             return Result<ResultRef>(prepared);
           double value = 0;
-          auto status = phase.read_tensor(0, 0, {0}, &value, 8);
+          auto status = phase.read_tensor(0, 0, {0, 0}, &value, 8);
           return status.ok() ? Result<ResultRef>(state(1 + value))
                              : Result<ResultRef>(status);
         });
@@ -1120,25 +920,14 @@ struct BlockProgram {
     // still report its original sticky cause.
     auto builder =
         ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key)
+                             phase.query.semantic_key, {}, {},
+                             phase.query.tile_extent)
             .take_value();
-    require(builder
-                .bind_descriptor_relation(
-                    ResultRelation::cartesian(
-                        phase.resources, 1,
-                        {0, 8, 0, 0, ResultSupportTarget::Descriptor, 0})
-                        .take_value())
-                .ok(),
-            "block output basis");
+
     require(builder
                 .publish_tensor(
                     0, phase.query.tensor_outputs->boxes()[0],
-                    ByteView(reinterpret_cast<const uint8_t*>(&number), 8),
-                    ResultRelation::cartesian(
-                        phase.resources, 2,
-                        {0, 5, 0, 1, ResultSupportTarget::Tensor, 0})
-                        .take_value(),
-                    {true, true, true, true})
+                    ByteView(reinterpret_cast<const uint8_t*>(&number), 8))
                 .ok(),
             "block output payload");
     return Answer(ResultPublication{builder.seal().take_value(), true});
@@ -1160,11 +949,12 @@ void result_blocks() {
     auto registry = std::make_shared<OperationRegistry>();
     OperationDefinition operation;
     operation.key = "test.block";
-    operation.traits = unified_example::traits(1, sizeof(BlockProgram));
+    operation.traits = unified_result_fixture::traits(1, sizeof(BlockProgram));
     if (mode == 9)
       operation.traits.workspace_bytes = 0;
-    unified_example::result_port(&operation.traits.input_schema[0], schema);
-    unified_example::result_output(&operation.traits.outputs[0], schema);
+    unified_result_fixture::result_port(&operation.traits.input_schema[0],
+                                        schema);
+    unified_result_fixture::result_output(&operation.traits.outputs[0], schema);
     operation.start_result = [observer](const auto&, const auto& allocator) {
       return ResultContinuation::make<BlockProgram>(allocator, observer);
     };
@@ -1192,18 +982,12 @@ void result_blocks() {
       auto make_source = [&](const ResourceBudget& budget) {
         auto builder =
             ResultBuilder::start(budget, schema, "block.input").take_value();
-        require(builder
-                    .bind_descriptor_relation(
-                        ResultRelation::cartesian(budget, 1, {}).take_value())
-                    .ok(),
-                "block source basis");
+
         double numbers[] = {2, 4};
         require(builder
                     .publish_tensor(
-                        0, Region::whole({2}),
-                        ByteView(reinterpret_cast<const uint8_t*>(numbers), 16),
-                        ResultRelation::cartesian(budget, 2, {}).take_value(),
-                        {true, true, true, true})
+                        0, Region::whole({1, 2}),
+                        ByteView(reinterpret_cast<const uint8_t*>(numbers), 16))
                     .ok(),
                 "block source payload");
         return builder.seal().take_value();
@@ -1223,11 +1007,13 @@ void result_blocks() {
       document.nodes = {node};
       document.outputs = {{"out", 2, "value"}};
       GraphContext graph(document);
-      auto plan = Compiler(registry).compile(graph).take_value().plan;
+      auto plan =
+          Compiler(registry)
+              .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+              .take_value()
+              .plan;
       auto frozen = context->freeze(plan, {{{"x", input}}}).take_value();
-      auto point = [&](uint64_t at) {
-        return Footprint::from_regions({2}, {Region({{at, 1}})}).take_value();
-      };
+      auto point = [&](uint64_t at) { return request({at}); };
       ExecutionOptions options;
       if (mode == 12)
         options.maximum_dependency_cache_work = 16;
@@ -1246,10 +1032,11 @@ void result_blocks() {
           observer->previous_owner = {};
           require(!observer->previous.lock().valid(),
                   "block cache retains no prior Result state owner");
-          auto support =
-              second.value().dependencies.source_support().take_value();
-          require(support.at("x") == point(0),
-                  "block hit keeps current Need support");
+          auto record =
+              take(second.value().dependencies.tile_record({0, 0, 1}));
+          require(record && record->inputs.size() == 1 &&
+                      record->inputs[0].tiles == request({0}).tiles,
+                  "block hit keeps current tile Need");
         } else if (mode == 12) {
           require(observer->computations == 1 &&
                       first.value().diagnostics.dependency_cache_work <= 16,
@@ -1309,8 +1096,8 @@ struct CheckpointSum {
     using Answer = Result<ResultProgramPoll>;
     const auto& requested = *phase.query.tensor_outputs;
     const auto region = requested.boxes()[0];
-    const auto target = region.dimensions()[0].offset;
-    const auto count = requested.shape()[0];
+    const auto target = region.dimensions().back().offset;
+    const auto count = requested.shape().back();
     if (!started) {
       started = true;
       auto absent = phase.checkpoint_before(99, target);
@@ -1336,7 +1123,7 @@ struct CheckpointSum {
         observer->restored.push_back(prior.value()->sequence());
         if (observer->bad_read) {
           double ignored = 0;
-          static_cast<void>(phase.read_tensor(0, 0, {0}, &ignored, 8));
+          static_cast<void>(phase.read_tensor(0, 0, {0, 0}, &ignored, 8));
         }
         if (observer->cancel) {
           observer->cancel->cancel();
@@ -1350,24 +1137,16 @@ struct CheckpointSum {
     }
     if (waiting) {
       double value = 0;
-      auto status = phase.read_tensor(0, 0, {cursor}, &value, 8);
+      auto status = phase.read_tensor(0, 0, {0, cursor}, &value, 8);
       if (!status.ok())
         return Answer(status);
       carry += value;
       auto schema = chunk_schema(1, ElementType::Float64, "test.carry");
       auto builder =
           ResultBuilder::start(phase.resources, schema, "carry").take_value();
-      status = builder.bind_descriptor_relation(
-          ResultRelation::cartesian(phase.resources, 1, {0, 8, 0, 0})
-              .take_value());
-      if (!status.ok())
-        return Answer(status);
       status = builder.publish_tensor(
           0, Region::whole({1}),
-          ByteView(reinterpret_cast<const uint8_t*>(&carry), 8),
-          ResultRelation::cartesian(phase.resources, 1, {0, 1, 0, 0})
-              .take_value(),
-          {true, true, true, true});
+          ByteView(reinterpret_cast<const uint8_t*>(&carry), 8));
       if (!status.ok())
         return Answer(status);
       auto state = builder.seal().take_value();
@@ -1394,36 +1173,22 @@ struct CheckpointSum {
     }
     if (cursor <= target) {
       ResultProgramNeed need;
-      auto samples = Footprint::from_regions({count}, {Region({{cursor, 1}})})
-                         .take_value();
-      need.tensors = {{0, 0, samples, 5}};
+      auto samples =
+          Footprint::from_regions({1, count}, {Region({{0, 1}, {cursor, 1}})})
+              .take_value();
+      need.tiles = {take(sdk::tile_need_for_samples(
+          phase.resources, phase.query, 0, 0, samples))};
       waiting = true;
       return Answer(std::move(need));
     }
     auto builder =
         ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key)
+                             phase.query.semantic_key, {}, {},
+                             phase.query.tile_extent)
             .take_value();
-    auto status = builder.bind_descriptor_relation(
-        ResultRelation::cartesian(
-            phase.resources, 1,
-            {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0})
-            .take_value());
-    if (!status.ok())
-      return Answer(status);
-    auto relation = start <= target
-                        ? ResultRelation::mapped(
-                              phase.resources, {count}, region, {count},
-                              {{-1, start, 0, target - start + 1}},
-                              {0, 1, 0, 0, ResultSupportTarget::Tensor, 0})
-                        : ResultRelation::cartesian(
-                              phase.resources, count,
-                              {0, 1, 0, 0, ResultSupportTarget::Tensor, 0});
-    if (!relation.ok())
-      return Answer(relation.status());
+    Status status;
     status = builder.publish_tensor(
-        0, region, ByteView(reinterpret_cast<const uint8_t*>(&carry), 8),
-        relation.take_value(), {true, true, true, true});
+        0, region, ByteView(reinterpret_cast<const uint8_t*>(&carry), 8));
     if (!status.ok())
       return Answer(status);
     return Answer(ResultPublication{builder.seal().take_value(), true});
@@ -1437,21 +1202,17 @@ struct DynamicCheckpointSource {
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     auto builder =
         ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
-                             phase.query.semantic_key)
+                             phase.query.semantic_key, {}, {},
+                             phase.query.tile_extent)
             .take_value();
-    auto status = builder.bind_descriptor_relation(
-        ResultRelation::cartesian(phase.resources, 1, {}).take_value());
-    if (!status.ok())
-      return Result<ResultProgramPoll>(status);
+    Status status;
     const auto base = ++*calls;
     std::array<double, 8> values{};
     for (uint64_t i = 0; i < values.size(); ++i)
       values[i] = i + base;
     status = builder.publish_tensor(
-        0, Region::whole({8}),
-        ByteView(reinterpret_cast<const uint8_t*>(values.data()), 64),
-        ResultRelation::cartesian(phase.resources, 8, {}).take_value(),
-        {true, true, true, true});
+        0, Region::whole({1, 8}),
+        ByteView(reinterpret_cast<const uint8_t*>(values.data()), 64));
     if (!status.ok())
       return Result<ResultProgramPoll>(status);
     return Result<ResultProgramPoll>(
@@ -1467,8 +1228,8 @@ void impure_whole_results() {
     OperationDefinition dynamic;
     dynamic.key = "test.impure.whole";
     dynamic.traits =
-        unified_example::traits(0, sizeof(DynamicCheckpointSource));
-    unified_example::result_output(&dynamic.traits.outputs[0], schema);
+        unified_result_fixture::traits(0, sizeof(DynamicCheckpointSource));
+    unified_result_fixture::result_output(&dynamic.traits.outputs[0], schema);
     dynamic.traits.deterministic = mode == 1;
     dynamic.traits.side_effect_free = mode == 0;
     dynamic.traits.cacheable = false;
@@ -1477,17 +1238,14 @@ void impure_whole_results() {
       return ResultContinuation::make<DynamicCheckpointSource>(allocator,
                                                                calls);
     };
-    for (unsigned invalid_mode = 0; invalid_mode < 4; ++invalid_mode) {
+    for (unsigned invalid_mode = 0; invalid_mode < 3; ++invalid_mode) {
       auto invalid = dynamic;
       invalid.key += ".invalid" + std::to_string(invalid_mode);
       if (invalid_mode == 0)
-        invalid.traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+        invalid.traits.outputs[0].region_rule = OperationRegionRule::Tiled;
       else if (invalid_mode == 1)
-        invalid.traits.outputs[0].observation_kind =
-            ObservationKind::RequestRecord;
-      else if (invalid_mode == 2)
         invalid.traits.outputs[0].failure_delivery =
-            FailureDelivery::PerAtomOutcome;
+            static_cast<FailureDelivery>(1);
       else
         invalid.traits.cacheable = true;
       require(registry->register_operation(std::move(invalid)).code ==
@@ -1498,9 +1256,9 @@ void impure_whole_results() {
             "non-pure Whole Result registration");
     OperationDefinition copy;
     copy.key = "test.impure.copy";
-    copy.traits = unified_example::traits(1, sizeof(ChunkCopy));
-    unified_example::result_port(&copy.traits.input_schema[0], schema);
-    unified_example::result_output(&copy.traits.outputs[0], schema);
+    copy.traits = unified_result_fixture::traits(1, sizeof(ChunkCopy));
+    unified_result_fixture::result_port(&copy.traits.input_schema[0], schema);
+    unified_result_fixture::result_output(&copy.traits.outputs[0], schema);
     copy.start_result = [chunks](const auto&, const auto& allocator) {
       return ResultContinuation::make<ChunkCopy>(allocator, chunks);
     };
@@ -1523,15 +1281,18 @@ void impure_whole_results() {
                      {"c", 3, "value"},
                      {"d", 4, "value"}};
       GraphContext graph(doc);
-      auto plan = Compiler(registry).compile(graph).take_value().plan;
+      auto plan =
+          Compiler(registry)
+              .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+              .take_value()
+              .plan;
       auto frozen = context->freeze(plan, {}).take_value();
-      auto point =
-          Footprint::from_regions({8}, {Region({{0, 1}})}).take_value();
+      auto point = request({0});
       ExecutionOptions options;
       options.maximum_parallelism = 1;
       options.maximum_dependency_cache_work = 0;
-      const DemandQuery demand{{"a", point},
-                               {"b", point},
+      const DemandQuery demand{{"a", TileRequest{true, {}}},
+                               {"b", TileRequest{true, {}}},
                                {"c", point},
                                {"d", point}};
       auto first = context->execute_fragments(frozen, demand, {}, options);
@@ -1546,7 +1307,7 @@ void impure_whole_results() {
         const auto& output = execution.results.at(name);
         double value = 0;
         require(output
-                    .read_tensor(output.descriptor().take_value(), 0, {0},
+                    .read_tensor(output.descriptor().take_value(), 0, {0, 0},
                                  &value, sizeof(value))
                     .ok(),
                 "non-pure Whole Result payload read");
@@ -1575,9 +1336,9 @@ void result_checkpoints() {
     auto registry = std::make_shared<OperationRegistry>();
     OperationDefinition copy;
     copy.key = "checkpoint.copy";
-    copy.traits = unified_example::traits(1, sizeof(ChunkCopy));
-    unified_example::result_port(&copy.traits.input_schema[0], schema);
-    unified_example::result_output(&copy.traits.outputs[0], schema);
+    copy.traits = unified_result_fixture::traits(1, sizeof(ChunkCopy));
+    unified_result_fixture::result_port(&copy.traits.input_schema[0], schema);
+    unified_result_fixture::result_output(&copy.traits.outputs[0], schema);
     copy.start_result = [chunks](const auto&, const auto& allocator) {
       return ResultContinuation::make<ChunkCopy>(allocator, chunks);
     };
@@ -1588,8 +1349,8 @@ void result_checkpoints() {
       OperationDefinition dynamic;
       dynamic.key = "checkpoint.dynamic";
       dynamic.traits =
-          unified_example::traits(0, sizeof(DynamicCheckpointSource));
-      unified_example::result_output(&dynamic.traits.outputs[0], schema);
+          unified_result_fixture::traits(0, sizeof(DynamicCheckpointSource));
+      unified_result_fixture::result_output(&dynamic.traits.outputs[0], schema);
       dynamic.traits.deterministic = dynamic.traits.side_effect_free =
           dynamic.traits.cacheable = false;
       dynamic.traits.outputs[0].region_rule = OperationRegionRule::Whole;
@@ -1603,9 +1364,9 @@ void result_checkpoints() {
     }
     OperationDefinition sum;
     sum.key = "checkpoint.sum";
-    sum.traits = unified_example::traits(1, sizeof(CheckpointSum));
-    unified_example::result_port(&sum.traits.input_schema[0], schema);
-    unified_example::result_output(&sum.traits.outputs[0], schema);
+    sum.traits = unified_result_fixture::traits(1, sizeof(CheckpointSum));
+    unified_result_fixture::result_port(&sum.traits.input_schema[0], schema);
+    unified_result_fixture::result_output(&sum.traits.outputs[0], schema);
     sum.start_result = [observer](const auto&, const auto& allocator) {
       return ResultContinuation::make<CheckpointSum>(allocator, observer);
     };
@@ -1620,22 +1381,14 @@ void result_checkpoints() {
       auto make_source = [&](const ResourceBudget& budget, double bias = 0) {
         auto builder =
             ResultBuilder::start(budget, schema, "input").take_value();
-        require(builder
-                    .bind_descriptor_relation(
-                        ResultRelation::cartesian(budget, 1, {0, 8, 0, 0})
-                            .take_value())
-                    .ok(),
-                "checkpoint input basis");
+
         double values[8];
         for (uint64_t i = 0; i < 8; ++i)
           values[i] = i + 1 + bias;
         require(builder
                     .publish_tensor(
-                        0, Region::whole({8}),
-                        ByteView(reinterpret_cast<const uint8_t*>(values), 64),
-                        ResultRelation::cartesian(budget, 8, {0, 1, 0, 0})
-                            .take_value(),
-                        {true, true, true, true})
+                        0, Region::whole({1, 8}),
+                        ByteView(reinterpret_cast<const uint8_t*>(values), 64))
                     .ok(),
                 "checkpoint input samples");
         return builder.seal().take_value();
@@ -1684,11 +1437,13 @@ void result_checkpoints() {
                        {"b", 23, "value"},
                        {"c", 24, "value"}};
       GraphContext graph(doc);
-      auto plan = Compiler(registry).compile(graph).take_value().plan;
+      auto plan =
+          Compiler(registry)
+              .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+              .take_value()
+              .plan;
       auto frozen = context->freeze(plan, {{binding}}).take_value();
-      const auto point = [](uint64_t at) {
-        return Footprint::from_regions({8}, {Region({{at, 1}})}).take_value();
-      };
+      const auto point = [](uint64_t at) { return request({at}); };
       ExecutionOptions options;
       options.maximum_parallelism = 1;
       if (mode == 4)
@@ -1728,7 +1483,7 @@ void result_checkpoints() {
                   "completed checkpoint scope remains active at barrier");
         }
         auto second = context->execute_fragments(
-            other, {{mode == 6 ? "a" : "b", point(mode == 6 ? 2 : 5)}},
+            other, {{mode == 9 ? "b" : "a", point(mode == 9 ? 5 : 2)}},
             cancelled.token());
         {
           std::lock_guard<std::mutex> lock(mutex);
@@ -1747,29 +1502,26 @@ void result_checkpoints() {
                   "negative checkpoint probe restores the completed state");
         } else {
           require(second.ok(), second.status().message);
-          const auto& output = second.value().results.at(mode == 6 ? "a" : "b");
+          const auto& output = second.value().results.at(mode == 9 ? "b" : "a");
           double actual = 0;
           require(
               output.read_tensor(output.descriptor().take_value(), 0,
-                                 {mode == 6 ? 2U : 5U}, &actual, 8)
+                                 {0, mode == 9 ? 5U : 2U}, &actual, 8)
                       .ok() &&
                   actual == (mode == 6   ? 306.0
                              : mode == 9 ? 27.0
-                                         : 21.0),
+                                         : 6.0),
               "active frozen runs isolate bindings and share only completed "
               "state");
           require(observer->starts == (mode == 6 || mode == 9
                                            ? std::vector<uint64_t>{0, 0}
                                            : std::vector<uint64_t>{0, 3}),
                   "checkpoint sharing uses the full frozen input basis");
-          auto dirty = second.value().dependencies.potential_dirty("source",
-                                                                   point(0), 1);
-          require(
-              dirty.ok() && (mode == 9 ||
-                             !dirty.value().at(mode == 6 ? "a" : "b").empty()),
-              "peer checkpoint lookup imports payload-free source ancestry");
+          auto units = dirty(second.value().dependencies, root, 0);
+          require(mode == 9 ? units.empty() : !units.empty(),
+                  "checkpoint restores source tile ancestry");
           if (mode == 7)
-            require(chunks->produced.size() == 6,
+            require(chunks->produced.size() == 3,
                     "completed peer checkpoint avoids earlier source "
                     "recomputation");
           if (mode == 9)
@@ -1804,10 +1556,9 @@ void result_checkpoints() {
           }
           require(observer->restored == restored,
                   "restored phase and sequence agree with computation cursors");
-          if (mode >= 4)
-            require(observer->starts == std::vector<uint64_t>(queries, 0) &&
-                        observer->restored.empty(),
-                    "disabled or unretained checkpoints never restore state");
+          require(observer->starts == std::vector<uint64_t>(queries, 0) &&
+                      observer->restored.empty(),
+                  "different computation units do not share checkpoint state");
           for (const auto& entry :
                {std::make_pair("a", 6.0), std::make_pair("b", 21.0),
                 std::make_pair("c", 1.0)}) {
@@ -1819,20 +1570,22 @@ void result_checkpoints() {
                                                               : 0U;
             double actual = 0;
             require(output.read_tensor(output.descriptor().take_value(), 0,
-                                       {at}, &actual, 8)
+                                       {0, at}, &actual, 8)
                             .ok() &&
                         actual == entry.second,
                     "checkpoint result values");
           }
           for (uint64_t edited : {0U, 2U, 4U, 7U}) {
-            auto dirty = result.value().dependencies.potential_dirty(
-                "source", point(edited), 1);
-            require(dirty.ok(), dirty.status().message);
-            require(dirty.value().at("a").empty() == (edited > 2) &&
-                        (mode == 5 ||
-                         (dirty.value().at("b").empty() == (edited > 5) &&
-                          dirty.value().at("c").empty() == (edited > 0))),
-                    "restored checkpoint carries complete prefix ancestry");
+            auto units = dirty(result.value().dependencies, root, edited);
+            const auto is_dirty = [&](const char* name, TileIndex tile) {
+              return std::find(units.begin(), units.end(),
+                               TileUnit{plan.outputs().at(name), 0, tile}) !=
+                     units.end();
+            };
+            require(is_dirty("a", 2) == (edited <= 2) &&
+                        (mode == 5 || (is_dirty("b", 5) == (edited <= 5) &&
+                                       is_dirty("c", 0) == (edited == 0))),
+                    "checkpoint restores complete prefix tile dependencies");
           }
           const auto depth = mode == 8 ? 12U : 1U;
           require(chunks->produced.size() >= (mode == 5 ? 3U : 6U) * depth &&
@@ -1863,7 +1616,7 @@ void result_checkpoints() {
   }
 }
 void tuple_metadata() {
-  auto schema = unified_example::image_schema();
+  auto schema = unified_result_fixture::image_schema();
   auto& image = schema.tensors[0];
   image.descriptor.shape = {2, 4, 4};
   image.layout.channel_axis = 2;
@@ -1930,7 +1683,7 @@ void profile_owner() {
             .take_value();
     identity = profile.identity();
     auto resources = ResourceBindings::create({profile}, root).take_value();
-    auto schema = unified_example::image_schema();
+    auto schema = unified_result_fixture::image_schema();
     schema.id = "test.profile";
     auto& slot = schema.tensors[0];
     slot.batch_axes[0] = slot.batch_axes[1] = 1;
@@ -1998,7 +1751,7 @@ int main() {
     impure_whole_results();
     tuple_metadata();
     alias_diamond();
-    slots_and_guarantees();
+    slots_whole_contract();
     profile_owner();
     std::cout << "Result image contracts passed\n";
     return 0;

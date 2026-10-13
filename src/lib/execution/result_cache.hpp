@@ -180,10 +180,20 @@ class ResultCache final {
       if (!extra.ok())
         return;
       decltype(entries_) retired;
+      decltype(entries_)::node_type rejected;
       std::lock_guard<std::mutex> lock(mutex_);
-      if (closing_ || manifest->epoch != epoch_ ||
-          entries_.count(std::string(manifest->key)))
+      if (closing_ || manifest->epoch != epoch_)
         return;
+      auto previous = entries_.find(std::string(manifest->key));
+      if (previous != entries_.end()) {
+        if (!previous->second.structured)
+          return;
+        // Equal payload keys can have different dependency routes after a
+        // graph edit. Keep the newly computed witness, otherwise an ambiguous
+        // old route would force every subsequent request to recompute.
+        lru_.splice(lru_.begin(), lru_, previous->second.order);
+        retired.insert(evict());
+      }
       std::uint64_t fresh = 0;
       for (const auto& allocation : footprint.value())
         if (!owners_.count(allocation.owner))
@@ -265,7 +275,9 @@ class ResultCache final {
               owners_.erase(owner);
             }
           }
-          retired.insert(entries_.extract(inserted));
+          // A replaced entry with the same key can already be in retired.
+          // Keep failed new admission separate so both drain outside the lock.
+          rejected = entries_.extract(inserted);
         }
         lru_.pop_back();
         throw;

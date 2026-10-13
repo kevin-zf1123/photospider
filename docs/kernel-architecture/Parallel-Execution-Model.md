@@ -33,8 +33,6 @@ flowchart LR
 
 Ordinary callbacks use the CPU callback FIFO. Whole range jobs and planar `CPU_STAGES` jobs use a separate shared range/stage job list. Both structures share the scheduler mutex and worker pool, so callbacks, range jobs, and staged jobs compete for worker capacity. The scheduler alternates callback and range opportunities; range workers claim disjoint blocks, while the stage coordinator submits tile work and waits at each stage barrier. The Whole callback thread also participates directly in its range barrier. The GPU callback lane has a separate queue but shares the context's aggregate waiting allowance. Range blocks and stage tiles can increase an ordinary callback's wait.
 
-## 3. Formal contracts & APIs
-
 ### CPU Whole range service
 
 ```c
@@ -71,11 +69,11 @@ Structured CPU Result Whole polls receive this borrowed service as `ResultProgra
 
 ### Structured Result callback waves
 
-The structured coordinator registers requested named Result roots and advances their dependency Actors. Potential CPU contract-1 joint candidate roots remain deferred until their consuming Actor validates its Need and registers the producer inputs, allowing peer C1 inputs to join before candidate start. A validated Need adds eligible computed inputs to the pending frontier. Each Need input has an independent cursor; the coordinator rotates among inputs that can make progress, and an Actor is visited at most once per traversal. This keeps a deep dependency chain from being recursively revisited for every peer input.
+The structured coordinator registers requested named Result roots and advances their dependency Actors. A validated Need adds eligible computed inputs to the pending frontier. Each Need input has an independent cursor; the coordinator rotates among inputs that can make progress, and an Actor is visited at most once per traversal. This keeps a deep dependency chain from being recursively revisited for every peer input.
 
 When the frontier has queued callback work, the coordinator submits up to `maximum_parallelism` tasks from its Root-owned pending list. It waits for submitted callbacks to retire before reading their phase results and applying them serially, then advances the next dependency frontier. The limit applies to submitted callback tasks, not a second scheduler for the Result graph. CPU staged-tile coordination and GPU callbacks keep their existing inline/controller and single-lane paths.
 
-The Run coordinator owns scheduling policy and publication order. Separate components own the Run cache quota and checkpoint scopes, actor phase/continuation state, Need producer cursor, joint advancement state, and per-submission stage data. The Need cursor owns its producer and per-input request state; the coordinator validates and registers each supplied envelope before advancing that cursor. Submission-local transfer, tile and native observations remain with each task until retirement, when the coordinator merges them. Joint workers mark callback entry and execute the shared callback; the coordinator accounts for the group once at retirement. The joint participant marker has a private constructor that only the coordinator can call, cannot be copied or moved, and is created only as part of the coordinator's `final` Actor type. So every participant the coordinator converts back to an Actor is an Actor, and code outside the coordinator cannot create another participant type. Result poll timing spans phase creation through coordinator retirement, including queue and wave waiting, so it is not a compute-only duration. Shutdown and synchronous Run completion drain submitted work before releasing borrowed callback state.
+The Run coordinator owns scheduling policy and publication order. Separate components own the Run cache quota and checkpoint scopes, actor phase/continuation state, Need producer cursor, and per-submission stage data. The Need cursor owns its producer and per-input request state; the coordinator validates and registers each supplied envelope before advancing that cursor. Submission-local transfer, tile and native observations remain with each task until retirement, when the coordinator merges them. Result poll timing spans phase creation through coordinator retirement, including queue and wave waiting, so it is not a compute-only duration. Shutdown and synchronous Run completion drain submitted work before releasing borrowed callback state.
 
 ### Planar staged tile service
 

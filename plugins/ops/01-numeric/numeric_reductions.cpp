@@ -15,9 +15,9 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/exact_moments.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
+#include "common/registry.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/semantic.hpp"
-#include "plugin/builtin_operations.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal {
@@ -251,8 +251,7 @@ struct ReductionKernel final {
     }
     return finish(work(1));
   }
-  Status publish(const ResultProgramPhase& phase, ResultBuilder& builder,
-                 ResultRelation relation) {
+  Status publish(const ResultProgramPhase& phase, ResultBuilder& builder) {
     const auto& target = phase.query.output.result_schema->tensors[0];
     const auto region = Region::whole(target.sample_shape());
     if (kind != ReductionKind::Count)
@@ -262,7 +261,6 @@ struct ReductionKernel final {
             return numeric_ops::math_callback(
                 phase, [&] { return write(phase, writers); });
           },
-          std::move(relation), {true, true, true, true},
           phase.query.cancellation);
     auto description = numeric_ops::math_take(
         metadata(kind, phase.query.inputs[0].result_schema->tensors[0],
@@ -293,8 +291,7 @@ struct ReductionKernel final {
     return builder.publish_tensor(
         0, region,
         {0, std::vector<int64_t>(description.output.shape.size(), 0)},
-        std::move(bytes).freeze(), std::move(relation),
-        {true, true, true, true}, phase.query.cancellation);
+        std::move(bytes).freeze(), phase.query.cancellation);
   }
 };
 using ReductionProgram = numeric_ops::WholeTensorProgram<ReductionKernel>;

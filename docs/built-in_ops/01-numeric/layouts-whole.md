@@ -70,7 +70,3 @@ retirement. It documents a Result input path.
 The Result operation declares zero fixed workspace
 bytes and reserves up to 4096 bytes of Host scratch for rank<=8 coordinate
 vectors. Earlier regional checks do not establish Whole behavior.
-
-```sh
-cmake --install build/kernel-dev --prefix build/kernel-dev/consumer-install
-```

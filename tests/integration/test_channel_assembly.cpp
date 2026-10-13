@@ -247,10 +247,8 @@ void planar() {
       component.row_pitch_bytes = 560;
     Fixture f;
     std::vector<WorkflowInput> inputs;
-    const Region part({{127, 3}, {127, 3}});
     for (unsigned i = 0; i < 4; ++i)
-      inputs.push_back(
-          f.image({ElementType::Float32, {131, 133}}, component, {part}));
+      inputs.push_back(f.image({ElementType::Float32, {131, 133}}, component));
     format::ChannelAssemblyOptions options;
     options.metadata_mode = "raw";
 #if defined(__aarch64__) && defined(__APPLE__)
@@ -266,15 +264,13 @@ void planar() {
       auto result = run(f, edge, roi);
       check_oracle(result, f, 2, {{}, {}, {}, {}},
                    {{0, 0}, {1, 0}, {2, 0}, {3, 0}}, roi);
-      require(source_bytes(result, f) == 36,
-              "only one input ROI in sample support");
+      require(source_bytes(result, f) == 131 * 133 * 16,
+              "complete output tiles require every input component");
     }
     Fixture c;
     PlanarImageConfig config;
     config.order = order;
-    auto source = c.image({ElementType::UInt8, {131, 133, 3}}, config,
-                          {Region({{127, 3}, {127, 3}, {0, 1}}),
-                           Region({{127, 3}, {127, 3}, {2, 1}})});
+    auto source = c.image({ElementType::UInt8, {131, 133, 3}}, config);
     auto edge = take(
         format::assemble_mapped_channels(c.document, {source}, 2, {{false, 2}},
                                          {{0, "index", "2", 0, {}},
@@ -284,7 +280,7 @@ void planar() {
     const Region roi({{127, 3}, {127, 3}, {0, 3}});
     auto result = run(c, edge, roi);
     check_oracle(result, c, 2, {2}, {{0, 2}, {0, 0}, {0, 2}}, roi);
-    require(source_bytes(result, c) == 18,
+    require(source_bytes(result, c) == 131 * 133 * 2,
             "gap excluded and reuse deduplicated in sample support");
     // Split/reassemble restores a canonical common owner and survives context.
     Fixture split;
@@ -420,7 +416,7 @@ void mixed_chain_and_limits() {
   GraphContext graph(f.document);
   Compiler compiler(registry);
   PlanningOptions planning;
-  planning.output_regions = {{"result", Region({{0, 1}, {0, 1}, {0, 1}})}};
+  planning.output_requests = {{"result", {true, {}}}};
   auto compiled = take(compiler.compile(graph, planning));
   ExecutionContext context(registry);
   f.bind_to(context);

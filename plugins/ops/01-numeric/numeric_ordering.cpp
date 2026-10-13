@@ -17,7 +17,7 @@
 #include "01-numeric/numeric_tensor_program.hpp"
 #include "01-numeric/stable_order.hpp"
 #include "photospider/data/semantic.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "common/registry.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal {

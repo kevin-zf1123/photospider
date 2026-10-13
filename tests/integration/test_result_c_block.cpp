@@ -74,7 +74,9 @@ int workflow(unsigned mode, bool cache) {
                   {{"mode", static_cast<std::int64_t>(mode)}}}};
     doc.outputs = {{"value", 10, "value"}, {"control", 10, "control"}};
     GraphContext graph(doc);
-    auto plan = take(Compiler(registry).compile(graph)).plan;
+    PlanningOptions planning;
+    planning.tile_extent = 1;
+    auto plan = take(Compiler(registry).compile(graph, planning)).plan;
     ExecutionContextConfig config;
     config.cpu_workers = 1;
     config.result_cache_bytes = cache ? 1048576 : 0;
@@ -83,7 +85,7 @@ int workflow(unsigned mode, bool cache) {
     root = take(context.resource_budget());
     std::array<double, 6> numbers{0, 1, 0x1p54, 4, 5, 6};
     auto demand = take(context.open_demand(plan, binding(root, numbers)));
-    auto point = take(Footprint::from_regions({6}, {Region({{5, 1}})}));
+    TileRequest point{false, take(TileSet::from_indices(root, {5}))};
     DemandQuery query{{"value", point}};
     const auto before = module.counts();
     if (mode == 0) {
@@ -93,32 +95,47 @@ int workflow(unsigned mode, bool cache) {
       PS_CHECK(initial.ok());
       auto other = take(demand.request({{"control", point}}));
       double control_value = 0;
-      PS_CHECK(numeric_result_fixture::read(other.results.at("control"), {5},
+      PS_CHECK(numeric_result_fixture::read(other.results.at("control"), {0, 5},
                                             &control_value, 8)
                    .ok() &&
                control_value == 0x1p54 + 16);
-      auto control_dirty = take(other.dependencies.potential_dirty(
-          "source", take(Footprint::all({6})), 2));
-      auto data_dirty = take(other.dependencies.potential_dirty(
-          "source", take(Footprint::all({6})), 1));
-      PS_CHECK(control_dirty.at("control") == point &&
-               data_dirty.at("control").empty());
+      const auto control_step = plan.outputs().at("control");
+      auto control_record = take(other.dependencies.tile_record(
+          {control_step, plan.steps()[control_step].output_index, 5}));
+      PS_CHECK(control_record && control_record->inputs.size() == 1);
+      PS_CHECK(control_record->inputs[0].whole &&
+               control_record->inputs[0].tiles.empty());
+      PS_CHECK(std::holds_alternative<PlanWorkflowInput>(
+          control_record->inputs[0].producer));
+      PS_CHECK(std::get<PlanWorkflowInput>(control_record->inputs[0].producer)
+                   .declaration_index == 0);
+      PS_CHECK(control_record->inputs[0].producer_output == 0);
+      PS_CHECK(module.counts()[2] - before[2] == (cache ? 6 : 12));
       numbers[0] = 1;
-      PS_CHECK(demand.replace_bindings(binding(root, numbers)).ok());
+      auto replacement = take(demand.replace_bindings(binding(root, numbers)));
+      PS_CHECK(replacement.potential_dirty.at("value") == point.tiles);
+      PS_CHECK(replacement.potential_dirty.at("control") == point.tiles);
       auto changed = take(demand.request(query));
       volatile double expected = 0;
       for (const auto number : numbers)
         expected = expected + number;
       double actual = 0;
-      PS_CHECK(numeric_result_fixture::read(changed.results.at("value"), {5},
+      PS_CHECK(numeric_result_fixture::read(changed.results.at("value"), {0, 5},
                                             &actual, 8)
                    .ok() &&
                actual == expected);
-      PS_CHECK(take(changed.dependencies.source_support()).at("source") ==
-               take(Footprint::all({6})));
-      auto dirty = take(changed.dependencies.potential_dirty(
-          "source", take(Footprint::from_regions({6}, {Region({{0, 1}})}))));
-      PS_CHECK(dirty.at("value") == point);
+      const auto value_step = plan.outputs().at("value");
+      auto value_record = take(changed.dependencies.tile_record(
+          {value_step, plan.steps()[value_step].output_index, 5}));
+      PS_CHECK(value_record && value_record->inputs.size() == 1);
+      PS_CHECK(value_record->inputs[0].whole &&
+               value_record->inputs[0].tiles.empty());
+      PS_CHECK(std::holds_alternative<PlanWorkflowInput>(
+          value_record->inputs[0].producer));
+      PS_CHECK(std::get<PlanWorkflowInput>(value_record->inputs[0].producer)
+                   .declaration_index == 0);
+      PS_CHECK(value_record->inputs[0].producer_output == 0);
+      PS_CHECK(module.counts()[2] - before[2] == (cache ? 12 : 18));
     } else {
       for (unsigned repeat = 0; repeat < 2; ++repeat) {
         auto failed = demand.request(query);
@@ -135,7 +152,7 @@ int workflow(unsigned mode, bool cache) {
       }
     }
     PS_CHECK(module.counts()[0] == module.counts()[1] &&
-             context.cache_statistics().in_flight == 0 &&
+
              root.statistics().live[ResourceKind::Queue] == 0);
   }
   for (auto bytes : root.statistics().live.values)

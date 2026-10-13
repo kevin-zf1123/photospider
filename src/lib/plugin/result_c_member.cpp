@@ -16,6 +16,7 @@
 #include "data/result_window_access.hpp"
 #include "execution/cpu_range_context.hpp"
 #include "plugin/result_c_poll_lease.hpp"
+#include "plugin/result_need_validation.hpp"
 
 namespace ps::plugin_internal::result_c {
 namespace {
@@ -36,10 +37,10 @@ struct ManagedRegion {
   ResourceLease lease;
   Region region;
 };
-Result<ManagedRegion> region(const ps_result_region_v2* source,
+Result<ManagedRegion> region(const ps_result_region_v3* source,
                              const std::vector<std::uint64_t>& shape) {
   if (!source ||
-      reinterpret_cast<std::uintptr_t>(source) % alignof(ps_result_region_v2) ||
+      reinterpret_cast<std::uintptr_t>(source) % alignof(ps_result_region_v3) ||
       source->struct_size != sizeof(*source) || source->rank != shape.size())
     return Result<ManagedRegion>(invalid("invalid Result region"));
   auto admitted = bridge_capacity(source->rank * sizeof(RegionDimension));
@@ -59,29 +60,20 @@ Result<ManagedRegion> region(const ps_result_region_v2* source,
 class CResultMemberBridge final {
  public:
   CResultMemberBridge(std::shared_ptr<const Definition> definition,
-                      MutableBuffer bytes, bool owns_payload = true,
-                      std::shared_ptr<std::uint64_t> handles = {},
-                      std::shared_ptr<FailureLatch> joint_failure = {})
+                      MutableBuffer bytes)
       : definition_(std::move(definition)),
         bytes_(std::move(bytes)),
         retained_(std::less<std::uint64_t>{},
-                  ResourceAllocator<Retained::value_type>{}),
-        owns_payload_(owns_payload),
-        joint_failure_(std::move(joint_failure)),
-        handles_(std::move(handles)),
-        next_handle_(handles_ ? *handles_ : owned_next_handle_) {}
+                  ResourceAllocator<Retained::value_type>{}) {}
   ~CResultMemberBridge() noexcept {
-    if (entered_ && owns_payload_) {
+    if (entered_) {
       try {
         definition_->api.destroy(definition_->api.user_data, bytes_.data());
       } catch (...) {
       }
     }
   }
-  using Borrow = std::function<int(const ps_result_query_v2*,
-                                   const ps_result_services_v2*)>;
-  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase,
-                                 const Borrow& borrow = {}) {
+  Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
     phase_ = &phase;
     owner_ = std::this_thread::get_id();
     active_ = true;
@@ -113,9 +105,6 @@ class CResultMemberBridge final {
       windows_ =
           Windows(std::less<std::uint64_t>{},
                   ResourceAllocator<Windows::value_type>(phase.resources));
-      relations_ =
-          Relations(std::less<std::uint64_t>{},
-                    ResourceAllocator<Relations::value_type>(phase.resources));
       window_records_ = ResourceVector<std::shared_ptr<WindowRecord>>(
           ResourceAllocator<std::shared_ptr<WindowRecord>>(phase.resources));
       retained_ =
@@ -135,39 +124,35 @@ class CResultMemberBridge final {
     const auto& query = frame.query;
     if (!entered_) {
       entered_ = true;
-      if (!borrow) {
-        const auto result = definition_->api.start(
-            definition_->api.user_data, bytes_.data(), &query, &services);
-        auto status = callback_failure();
-        if (status.ok())
-          status = callback_outcome(result);
-        if (!status.ok())
-          return Result<ResultProgramPoll>(status);
-        lease->retire();
-        lease = std::allocate_shared<Lease>(
-            ResourceAllocator<Lease>(phase.resources));
-        lease->owner = this;
-        lease->cancellation = phase.query.cancellation;
-        leases_.push_back(lease);
-        exit.lease = lease;
-        services = services_for(lease.get(), phase);
-      }
+      const auto result = definition_->api.start(
+          definition_->api.user_data, bytes_.data(), &query, &services);
+      auto status = callback_failure();
+      if (status.ok())
+        status = callback_outcome(result);
+      if (!status.ok())
+        return Result<ResultProgramPoll>(status);
+      lease->retire();
+      lease = std::allocate_shared<Lease>(
+          ResourceAllocator<Lease>(phase.resources));
+      lease->owner = this;
+      lease->cancellation = phase.query.cancellation;
+      leases_.push_back(lease);
+      exit.lease = lease;
+      services = services_for(lease.get(), phase);
     }
-    const auto result =
-        borrow ? borrow(&query, &services)
-               : definition_->api.poll(definition_->api.user_data,
-                                       bytes_.data(), &query, &services);
+    const auto result = definition_->api.poll(definition_->api.user_data,
+                                              bytes_.data(), &query, &services);
     auto failure = callback_failure();
     if (!failure.ok())
       return Result<ResultProgramPoll>(failure);
-    if (result == PS_RESULT_NEED_V2) {
+    if (result == PS_RESULT_NEED_V3) {
       if (published_.valid())
         return Result<ResultProgramPoll>(invalid("Need after publication"));
       return Result<ResultProgramPoll>(std::move(need_));
     }
-    if (result != PS_RESULT_PUBLISH_V2)
+    if (result != PS_RESULT_PUBLISH_V3)
       return Result<ResultProgramPoll>(callback_outcome(result ? result : 1));
-    if (!need_.tensors.empty() || !need_.results.empty() || !need_.io.empty())
+    if (!need_.tiles.empty())
       return Result<ResultProgramPoll>(
           invalid("publication with pending Need"));
     if (!published_.valid())
@@ -177,8 +162,7 @@ class CResultMemberBridge final {
   }
 
   bool terminal_failure_conflicts() const noexcept {
-    return published_.valid() || !need_.tensors.empty() ||
-           !need_.results.empty() || !need_.io.empty();
+    return published_.valid() || !need_.tiles.empty();
   }
   Status failure_status() const {
     if (violation_.load())
@@ -227,16 +211,10 @@ class CResultMemberBridge final {
     ResourceBudget budget;
     CancellationToken cancellation;
     std::shared_ptr<std::atomic<ErrorCode>> failure;
-    std::shared_ptr<FailureLatch> first_failure, joint_failure;
+    std::shared_ptr<FailureLatch> first_failure;
     std::atomic<bool> active{true};
     std::uint64_t handles = 1;
-    bool group_operational_failures = false;
     Status record(Status status) const {
-      if (joint_failure) {
-        auto shared = joint_failure->snapshot();
-        if (!shared.ok())
-          return shared;
-      }
       if (!status.ok()) {
         if (status.code == ErrorCode::InvalidArgument &&
             status.reason == FailureReason::None) {
@@ -245,12 +223,6 @@ class CResultMemberBridge final {
         }
         if (first_failure)
           status = first_failure->record(status);
-        if (group_operational_failures && joint_failure &&
-            ((status.code != ErrorCode::Cancelled &&
-              status.code != ErrorCode::Stale) ||
-             status.detail.scope == FailureScope::Run ||
-             status.detail.scope == FailureScope::Group))
-          status = joint_failure->record(status);
         if (failure) {
           auto expected = ErrorCode::Ok;
           failure->compare_exchange_strong(expected, status.code);
@@ -263,9 +235,6 @@ class CResultMemberBridge final {
       std::uint64_t, std::shared_ptr<WindowRecord>, std::less<std::uint64_t>,
       ResourceAllocator<
           std::pair<const std::uint64_t, std::shared_ptr<WindowRecord>>>>;
-  using Relations = std::map<
-      std::uint64_t, ResultRelation, std::less<std::uint64_t>,
-      ResourceAllocator<std::pair<const std::uint64_t, ResultRelation>>>;
   using BlockStates =
       std::map<std::uint64_t, ResultRef, std::less<std::uint64_t>,
                ResourceAllocator<std::pair<const std::uint64_t, ResultRef>>>;
@@ -278,11 +247,6 @@ class CResultMemberBridge final {
       WindowRecord& record, const std::uint64_t* at, std::uint32_t rank,
       const std::function<Status(const std::vector<std::uint64_t>&)>& read,
       unsigned lookups = 1) {
-    if (record.joint_failure) {
-      auto shared = record.joint_failure->snapshot();
-      if (!shared.ok())
-        return shared;
-    }
     if (!record.active.load() || !array(at, rank, 8))
       return record.record(invalid("expired or malformed image window read"));
     if (record.cancellation.cancelled())
@@ -306,12 +270,12 @@ class CResultMemberBridge final {
     return record.record(read(std::vector<std::uint64_t>(at, at + rank)));
   }
   static int window_row(void* raw, const std::uint64_t* at, std::uint32_t rank,
-                        ps_result_tensor_row_v2* output) noexcept {
+                        ps_result_tensor_row_v3* output) noexcept {
     auto& record = *static_cast<WindowRecord*>(raw);
     try {
       if (!output ||
           reinterpret_cast<std::uintptr_t>(output) %
-              alignof(ps_result_tensor_row_v2) ||
+              alignof(ps_result_tensor_row_v3) ||
           output->struct_size != sizeof(*output))
         return code(record.record(invalid("invalid image row destination")));
       return code(window_read(record, at, rank, [&](const auto& coordinate) {
@@ -330,12 +294,12 @@ class CResultMemberBridge final {
   }
   static int window_rectangle(void* raw, const std::uint64_t* at,
                               std::uint32_t rank,
-                              ps_result_tensor_rectangle_v2* output) noexcept {
+                              ps_result_tensor_rectangle_v3* output) noexcept {
     auto& record = *static_cast<WindowRecord*>(raw);
     try {
       if (!output ||
           reinterpret_cast<std::uintptr_t>(output) %
-              alignof(ps_result_tensor_rectangle_v2) ||
+              alignof(ps_result_tensor_rectangle_v3) ||
           output->struct_size != sizeof(*output))
         return code(
             record.record(invalid("invalid image rectangle destination")));
@@ -346,7 +310,7 @@ class CResultMemberBridge final {
             if (!run.ok())
               return run.status();
             *output = {sizeof(*output),
-                       {sizeof(ps_result_tensor_row_v2), run.value().row.data,
+                       {sizeof(ps_result_tensor_row_v3), run.value().row.data,
                         run.value().row.samples, run.value().row.bytes,
                         run.value().row.sample_stride_bytes},
                        run.value().rows,
@@ -361,12 +325,12 @@ class CResultMemberBridge final {
     }
   }
   Status acquire_window(
-      const ResultTensorInput& source, const ps_result_region_v2* requested,
-      ps_result_tensor_window_v2* output, std::uint64_t* handle,
+      const ResultTensorInput& source, const ps_result_region_v3* requested,
+      ps_result_tensor_window_v3* output, std::uint64_t* handle,
       std::optional<std::pair<std::uint32_t, std::uint32_t>> native = {}) {
     if (!output || !handle ||
         reinterpret_cast<std::uintptr_t>(output) %
-            alignof(ps_result_tensor_window_v2) ||
+            alignof(ps_result_tensor_window_v3) ||
         output->struct_size != sizeof(*output) ||
         next_handle_ >= quality_handle_base || windows_.size() >= 1024)
       return invalid("invalid image window request");
@@ -387,8 +351,6 @@ class CResultMemberBridge final {
     record->cancellation = phase_->query.cancellation;
     record->failure = phase_->failure;
     record->first_failure = window_failure_;
-    record->joint_failure = joint_failure_;
-    record->group_operational_failures = definition_->joint.contract == 2;
     const auto token = next_handle_++;
     windows_.emplace(token, record);
     window_records_.push_back(record);
@@ -410,8 +372,8 @@ class CResultMemberBridge final {
   }
   static int acquire_tensor_window(void* raw, std::uint32_t input,
                                    std::uint32_t slot,
-                                   const ps_result_region_v2* requested,
-                                   ps_result_tensor_window_v2* output,
+                                   const ps_result_region_v3* requested,
+                                   ps_result_tensor_window_v3* output,
                                    std::uint64_t* handle) {
     return call(raw, [&](CResultMemberBridge& state) {
       if (!state.phase_->tensors)
@@ -425,8 +387,8 @@ class CResultMemberBridge final {
   }
   static int acquire_native_tensor_window(void* raw, std::uint32_t input,
                                           std::uint32_t slot,
-                                          const ps_result_region_v2* requested,
-                                          ps_result_tensor_window_v2* output,
+                                          const ps_result_region_v3* requested,
+                                          ps_result_tensor_window_v3* output,
                                           std::uint64_t* handle) {
     return call(raw, [&](CResultMemberBridge& state) {
       if (!state.phase_->tensors)
@@ -439,8 +401,8 @@ class CResultMemberBridge final {
     });
   }
   static int acquire_retained_window(void* raw, std::uint64_t input,
-                                     const ps_result_region_v2* requested,
-                                     ps_result_tensor_window_v2* output,
+                                     const ps_result_region_v3* requested,
+                                     ps_result_tensor_window_v3* output,
                                      std::uint64_t* handle) {
     return call(raw, [&](CResultMemberBridge& state) {
       auto found = state.retained_.find(input);
@@ -480,264 +442,16 @@ class CResultMemberBridge final {
       return Status::success();
     });
   }
-  static int make_mapping(void* raw, std::uint32_t output_slot,
-                          std::uint32_t input, std::uint32_t target,
-                          std::uint32_t input_slot, std::uint32_t roles,
-                          const ps_result_region_v2* output,
-                          const ps_result_mapped_axis_v2* axes,
-                          std::uint32_t count, std::uint64_t* handle) {
-    return call(raw, [&](CResultMemberBridge& state) {
-      if (!handle || !array(axes, count, 8) ||
-          input >= state.phase_->query.inputs.size() ||
-          state.next_handle_ >= quality_handle_base ||
-          state.relations_.size() >= 1024)
-        return invalid("invalid mapped relation request");
-      const auto& query = state.phase_->query;
-      auto scratch = bridge_capacity(16 * sizeof(std::uint64_t) +
-                                     count * sizeof(ResultMappedAxis));
-      if (!scratch.ok())
-        return scratch.status();
-      std::vector<std::uint64_t> output_shape, input_shape;
-      if (!query.output.result_schema ||
-          output_slot >= query.output.result_schema->tensors.size())
-        return invalid("invalid mapping output slot");
-      output_shape =
-          query.output.result_schema->tensors[output_slot].sample_shape();
-      const auto& source = query.inputs[input];
-      if (target == PS_RESULT_TARGET_TENSOR_V2 && source.result_schema &&
-          input_slot < source.result_schema->tensors.size())
-        input_shape = source.result_schema->tensors[input_slot].sample_shape();
-      else
-        return invalid("invalid mapping input target");
-      if (count != input_shape.size())
-        return invalid("mapping input rank mismatch");
-      auto coverage = region(output, output_shape);
-      if (!coverage.ok())
-        return coverage.status();
-      ResourceVector<ResultMappedAxis> mapping(
-          ResourceAllocator<ResultMappedAxis>(state.phase_->resources));
-      for (std::uint32_t axis = 0; axis < count; ++axis)
-        mapping.push_back({axes[axis].output_axis, axes[axis].source_origin,
-                           axes[axis].step, axes[axis].extent,
-                           axes[axis].output_origin});
-      auto made = ResultRelation::mapped(
-          state.phase_->resources, output_shape, coverage.value().region,
-          input_shape,
-          std::vector<ResultMappedAxis>(mapping.begin(), mapping.end()),
-          {input, roles, 0, 0, static_cast<ResultSupportTarget>(target),
-           input_slot});
-      if (!made.ok())
-        return made.status();
-      const auto token = state.next_handle_++;
-      state.relations_.emplace(token, made.take_value());
-      *handle = token;
-      return Status::success();
-    });
-  }
-  static int make_tensor_cartesian(void* raw, uint32_t output_slot,
-                                   uint32_t input, uint32_t input_slot,
-                                   uint32_t roles, uint64_t first,
-                                   uint64_t count, uint32_t guarantee,
-                                   uint64_t* handle) {
-    return call(raw, [&](CResultMemberBridge& state) {
-      const auto& query = state.phase_->query;
-      if (!handle || !query.output.result_schema ||
-          output_slot >= query.output.result_schema->tensors.size() ||
-          input >= query.inputs.size() || !query.inputs[input].result_schema ||
-          input_slot >= query.inputs[input].result_schema->tensors.size() ||
-          !roles || (roles & ~7U) ||
-          (guarantee != PS_RESULT_EXACT_V2 &&
-           guarantee != PS_RESULT_CONSERVATIVE_V2) ||
-          state.next_handle_ >= quality_handle_base ||
-          state.relations_.size() >= 1024)
-        return invalid("invalid Cartesian tensor relation request");
-      const auto cardinality =
-          [](const ResultTensorSpec& tensor) -> Result<uint64_t> {
-        uint64_t count = 1;
-        const auto rank =
-            tensor.batch_axes.size() + tensor.descriptor.shape.size();
-        for (std::size_t axis = 0; axis < rank; ++axis) {
-          const auto extent =
-              axis < tensor.batch_axes.size()
-                  ? tensor.batch_axes[axis]
-                  : tensor.descriptor.shape[axis - tensor.batch_axes.size()];
-          if (!core_internal::can_multiply(count, extent))
-            return Result<uint64_t>(Status{ErrorCode::ResourceExhausted,
-                                           "Cartesian tensor domain overflow"});
-          count *= extent;
-        }
-        return Result<uint64_t>(count);
-      };
-      const auto source_count =
-          cardinality(query.inputs[input].result_schema->tensors[input_slot]);
-      const auto output_count =
-          cardinality(query.output.result_schema->tensors[output_slot]);
-      if (!source_count.ok())
-        return source_count.status();
-      if (!output_count.ok())
-        return output_count.status();
-      if (first > source_count.value() || count > source_count.value() - first)
-        return invalid("Cartesian tensor support exceeds source domain");
-      auto relation = ResultRelation::cartesian(
-          state.phase_->resources, output_count.value(),
-          {input, roles, first, count, ResultSupportTarget::Tensor, input_slot},
-          static_cast<DependencyGuarantee>(guarantee));
-      if (!relation.ok())
-        return relation.status();
-      const auto token = state.next_handle_++;
-      state.relations_.emplace(token, relation.take_value());
-      *handle = token;
-      return Status::success();
-    });
-  }
-  static int make_reshape(void* raw, uint32_t output_slot, uint32_t input,
-                          uint32_t input_slot, uint32_t roles,
-                          const ps_result_region_v2* output,
-                          const ps_result_region_v2* source_window,
-                          uint64_t* handle) {
-    return call(raw, [&](CResultMemberBridge& state) {
-      const auto& query = state.phase_->query;
-      if (!handle || !query.output.result_schema ||
-          output_slot >= query.output.result_schema->tensors.size() ||
-          input >= query.inputs.size() || !query.inputs[input].result_schema ||
-          input_slot >= query.inputs[input].result_schema->tensors.size() ||
-          state.next_handle_ >= quality_handle_base ||
-          state.relations_.size() >= 1024)
-        return invalid("invalid reshape relation request");
-      auto shape_lease = bridge_capacity(16 * sizeof(uint64_t));
-      if (!shape_lease.ok())
-        return shape_lease.status();
-      const auto output_shape =
-          query.output.result_schema->tensors[output_slot].sample_shape();
-      const auto input_shape =
-          query.inputs[input].result_schema->tensors[input_slot].sample_shape();
-      auto coverage = region(output, output_shape);
-      if (!coverage.ok())
-        return coverage.status();
-      auto source = region(source_window, input_shape);
-      if (!source.ok())
-        return source.status();
-      auto made = ResultRelation::reshape(
-          state.phase_->resources, output_shape, coverage.value().region,
-          input_shape, source.value().region,
-          {input, roles, 0, 0, ResultSupportTarget::Tensor, input_slot});
-      if (!made.ok())
-        return made.status();
-      const auto token = state.next_handle_++;
-      state.relations_.emplace(token, made.take_value());
-      *handle = token;
-      return Status::success();
-    });
-  }
-  static int make_neighborhood(void* raw, uint32_t output_slot, uint32_t input,
-                               uint32_t input_slot, uint32_t roles,
-                               const uint64_t* radii, uint32_t rank,
-                               uint32_t periodic, uint64_t* handle) {
-    return call(raw, [&](CResultMemberBridge& state) {
-      const auto& query = state.phase_->query;
-      if (!handle || !rank || !array(radii, rank, 8) || periodic > 1 ||
-          !query.output.result_schema ||
-          output_slot >= query.output.result_schema->tensors.size() ||
-          input >= query.inputs.size() || !query.inputs[input].result_schema ||
-          input_slot >= query.inputs[input].result_schema->tensors.size() ||
-          state.next_handle_ >= quality_handle_base ||
-          state.relations_.size() >= 1024)
-        return invalid("invalid neighborhood relation request");
-      auto scratch = bridge_capacity(24 * sizeof(uint64_t));
-      if (!scratch.ok())
-        return scratch.status();
-      const auto output_shape =
-          query.output.result_schema->tensors[output_slot].sample_shape();
-      const auto input_shape =
-          query.inputs[input].result_schema->tensors[input_slot].sample_shape();
-      if (output_shape != input_shape || rank != input_shape.size())
-        return invalid("neighborhood tensor domains differ");
-      auto made = ResultRelation::neighborhood(
-          state.phase_->resources, output_shape,
-          std::vector<uint64_t>(radii, radii + rank), periodic != 0,
-          {input, roles, 0, 0, ResultSupportTarget::Tensor, input_slot});
-      if (!made.ok())
-        return made.status();
-      const auto token = state.next_handle_++;
-      state.relations_.emplace(token, made.take_value());
-      *handle = token;
-      return Status::success();
-    });
-  }
-  static int release_relation(void* raw, std::uint64_t handle) {
-    return call(raw, [&](CResultMemberBridge& state) {
-      return state.relations_.erase(handle)
-                 ? Status::success()
-                 : invalid("expired relation handle");
-    });
-  }
-  static int make_prefix(void* raw, uint32_t output_slot, uint32_t input,
-                         uint32_t input_slot, uint32_t roles,
-                         uint64_t* handle) {
-    return call(raw, [&](CResultMemberBridge& state) {
-      const auto& query = state.phase_->query;
-      if (!handle || !query.output.result_schema ||
-          output_slot >= query.output.result_schema->tensors.size() ||
-          input >= query.inputs.size() || !query.inputs[input].result_schema ||
-          input_slot >= query.inputs[input].result_schema->tensors.size() ||
-          state.next_handle_ >= quality_handle_base ||
-          state.relations_.size() >= 1024)
-        return invalid("invalid prefix relation request");
-      auto lease = bridge_capacity(16 * sizeof(uint64_t));
-      if (!lease.ok())
-        return lease.status();
-      const auto output_shape =
-          query.output.result_schema->tensors[output_slot].sample_shape();
-      const auto input_shape =
-          query.inputs[input].result_schema->tensors[input_slot].sample_shape();
-      if (output_shape.size() != 1 || input_shape != output_shape)
-        return invalid("prefix requires equal rank-one tensor domains");
-      auto made = ResultRelation::prefix(
-          state.phase_->resources, output_shape[0], input, roles,
-          ResultSupportTarget::Tensor, input_slot);
-      if (!made.ok())
-        return made.status();
-      const auto token = state.next_handle_++;
-      state.relations_.emplace(token, made.take_value());
-      *handle = token;
-      return Status::success();
-    });
-  }
-  static int publish_tensor_with_relation(void* raw, std::uint32_t slot,
-                                          const ps_result_region_v2* box,
-                                          const std::uint8_t* bytes,
-                                          std::uint64_t size,
-                                          std::uint64_t handle,
-                                          std::uint32_t finality) {
-    return call(raw, [&](CResultMemberBridge& state) {
-      const auto schema = state.phase_->query.output.result_schema;
-      auto found = state.relations_.find(handle);
-      if (!schema || slot >= schema->tensors.size() ||
-          found == state.relations_.end() || finality != PS_RESULT_FINAL_V2 ||
-          size > SIZE_MAX || (!bytes && size))
-        return invalid("invalid mapped image publication");
-      auto coverage = region(box, schema->tensors[slot].sample_shape());
-      if (!coverage.ok())
-        return coverage.status();
-      return state.publication(state.builder_.publish_tensor(
-          slot, coverage.value().region, ByteView(bytes, size), found->second,
-          {true, true, true, true}, state.phase_->query.cancellation));
-    });
-  }
-  static int publish_tensor_view(void* raw, std::uint32_t slot,
-                                 const ps_result_region_v2* box,
-                                 const std::uint64_t* handles,
-                                 std::uint32_t count,
-                                 const ps_result_tensor_transform_v2* transform,
-                                 std::uint64_t handle, std::uint32_t finality) {
+  static int publish_tensor_view(
+      void* raw, std::uint32_t slot, const ps_result_region_v3* box,
+      const std::uint64_t* handles, std::uint32_t count,
+      const ps_result_tensor_transform_v3* transform) {
     return call(
         raw,
         [&](CResultMemberBridge& state) {
           const auto schema = state.phase_->query.output.result_schema;
-          auto found = state.relations_.find(handle);
           if (!schema || slot >= schema->tensors.size() ||
-              found == state.relations_.end() || !array(handles, count, 16) ||
-              !count || finality != PS_RESULT_FINAL_V2)
+              !array(handles, count, 16) || !count)
             return invalid("invalid image view publication");
           auto coverage = region(box, schema->tensors[slot].sample_shape());
           if (!coverage.ok())
@@ -753,7 +467,7 @@ class CResultMemberBridge final {
           }
           if (transform) {
             if (reinterpret_cast<std::uintptr_t>(transform) %
-                    alignof(ps_result_tensor_transform_v2) ||
+                    alignof(ps_result_tensor_transform_v3) ||
                 transform->struct_size != sizeof(*transform) || count != 1 ||
                 transform->reshape > 1 ||
                 !array(transform->axes, transform->source_rank, 8) ||
@@ -779,24 +493,22 @@ class CResultMemberBridge final {
             }
             return state.publication(state.builder_.publish_tensor_view(
                 slot, coverage.value().region, *windows.front(), mapping,
-                found->second, {true, true, true, true},
                 state.phase_->query.cancellation));
           }
           return state.publication(state.builder_.publish_tensor_view(
               slot, coverage.value().region,
               std::vector<const ResultTensorReadWindow*>(windows.begin(),
                                                          windows.end()),
-              found->second, {true, true, true, true},
               state.phase_->query.cancellation));
         },
         true);
   }
   static int report_numeric(void* raw,
-                            const ps_result_numeric_report_v2* source) {
+                            const ps_result_numeric_report_v3* source) {
     return call(raw, [&](CResultMemberBridge& state) {
       if (!source ||
           reinterpret_cast<std::uintptr_t>(source) %
-              alignof(ps_result_numeric_report_v2) ||
+              alignof(ps_result_numeric_report_v3) ||
           source->struct_size != sizeof(*source) ||
           !state.phase_->report_numeric)
         return invalid("invalid numeric report");
@@ -820,7 +532,7 @@ class CResultMemberBridge final {
   }
   static int acquire_native_atlas(void* raw, std::uint32_t input,
                                   std::uint32_t slot,
-                                  ps_result_native_atlas_v2* output) {
+                                  ps_result_native_atlas_v3* output) {
     auto* lease = static_cast<Lease*>(raw);
     return call(
         raw,
@@ -860,7 +572,7 @@ class CResultMemberBridge final {
           if (!packed.ok())
             return packed.status();
           const auto& atlas = *packed.value();
-          ps_result_native_atlas_v2 value{};
+          ps_result_native_atlas_v3 value{};
           value.struct_size = sizeof(value);
           value.rank = atlas.descriptor.shape.size();
           value.element_type =
@@ -897,14 +609,14 @@ class CResultMemberBridge final {
     *handle = token;
     return Status::success();
   }
-  static int create_block_state(void* raw, const ps_result_schema_v2* source,
+  static int create_block_state(void* raw, const ps_result_schema_v3* source,
                                 const std::uint8_t* bytes, std::uint64_t size,
                                 std::uint64_t* handle) {
     return call(
         raw,
         [&](CResultMemberBridge& state) {
           if (!array(source, 1, 1) || source->struct_size != sizeof(*source) ||
-              source->publication != PS_RESULT_COMPLETE_BUNDLE_V2 ||
+              source->publication != PS_RESULT_COMPLETE_BUNDLE_V3 ||
               source->field_count || source->metadata_count ||
               source->domain_rank || source->tensor_count != 1 ||
               !array(source->tensors, 1, 1) || source->tensors[0].facet_count ||
@@ -947,18 +659,9 @@ class CResultMemberBridge final {
           auto published = std::move(buffer).publish();
           if (!published.ok())
             return published.status();
-          auto facts =
-              ResultRelation::cartesian(state.phase_->resources, 1, {});
-          auto relation = ResultRelation::cartesian(state.phase_->resources,
-                                                    count.value(), {});
-          if (!facts.ok() || !relation.ok())
-            return !facts.ok() ? facts.status() : relation.status();
-          auto status = writer.bind_descriptor_relation(facts.take_value());
-          if (status.ok())
-            status = writer.publish_tensor(
-                0, Region::whole(descriptor.shape), published.value().layout(),
-                published.value().storage(), relation.take_value(),
-                {true, true, true, true}, state.phase_->query.cancellation);
+          auto status = writer.publish_tensor(
+              0, Region::whole(descriptor.shape), published.value().layout(),
+              published.value().storage(), state.phase_->query.cancellation);
           if (!status.ok())
             return status;
           auto result = writer.seal();
@@ -1053,7 +756,7 @@ class CResultMemberBridge final {
   }
   static int checkpoint_before(void* raw, std::uint32_t phase,
                                std::uint64_t before,
-                               ps_result_checkpoint_v2* destination) {
+                               ps_result_checkpoint_v3* destination) {
     auto* lease = static_cast<Lease*>(raw);
     return call(raw, [&](CResultMemberBridge& state) {
       if (!array(destination, 1, 1) ||
@@ -1063,7 +766,7 @@ class CResultMemberBridge final {
       auto found = state.phase_->checkpoint_before(phase, before);
       if (!found.ok())
         return found.status();
-      ps_result_checkpoint_v2 result{};
+      ps_result_checkpoint_v3 result{};
       result.struct_size = sizeof(result);
       if (found.value()) {
         if (found.value()->phase() != phase ||
@@ -1175,7 +878,7 @@ class CResultMemberBridge final {
   }
   static int block(void* raw, std::uint32_t kind, std::uint64_t begin,
                    std::uint64_t end, std::uint64_t mode,
-                   std::uint64_t incoming, ps_result_block_compute_v2 compute,
+                   std::uint64_t incoming, ps_result_block_compute_v3 compute,
                    void* user, std::uint64_t* outgoing) {
     auto* lease = static_cast<Lease*>(raw);
     return call(raw, [&](CResultMemberBridge& state) {
@@ -1191,7 +894,7 @@ class CResultMemberBridge final {
               ~Exit() { active = false; }
             } exit{state.in_block_};
             state.in_block_ = true;
-            ps_result_block_services_v2 services{
+            ps_result_block_services_v3 services{
                 sizeof(services),
                 raw,
                 read_tensor,
@@ -1227,7 +930,7 @@ class CResultMemberBridge final {
   }
   static int discover(void* raw, std::uint32_t capacity,
                       std::uint32_t candidates,
-                      ps_result_discovery_compute_v2 compute, void* user,
+                      ps_result_discovery_compute_v3 compute, void* user,
                       std::uint64_t* handle) {
     auto* lease = static_cast<Lease*>(raw);
     return call(raw, [&](CResultMemberBridge& state) {
@@ -1242,7 +945,7 @@ class CResultMemberBridge final {
               ~Scope() { active = false; }
             } scope{state.in_discovery_};
             state.in_discovery_ = true;
-            const ps_result_discovery_services_v2 services{
+            const ps_result_discovery_services_v3 services{
                 sizeof(services),
                 raw,
                 read_tensor,
@@ -1259,7 +962,7 @@ class CResultMemberBridge final {
           });
       if (!result.ok())
         return result.status();
-      state.discovery_pending_ |= !result.value()->tensors.empty();
+      state.discovery_pending_ |= !result.value()->tiles.empty();
       const auto token = state.next_handle_++;
       state.discoveries_.emplace(token, result.take_value());
       *handle = token;
@@ -1267,28 +970,25 @@ class CResultMemberBridge final {
     });
   }
   static int discovery_requests(void* raw, std::uint64_t handle,
-                                ps_result_discovery_request_v2* output,
+                                ps_result_discovery_request_v3* output,
                                 std::uint32_t capacity, std::uint32_t* count) {
     return call(raw, [&](CResultMemberBridge& state) {
       auto found = state.discoveries_.find(handle);
       if (found == state.discoveries_.end() ||
           !array(output, capacity, 65536) || !array(count, 1, 1))
         return invalid("invalid Result discovery receipt");
-      const auto& needs = found->second->tensors;
+      const auto& needs = found->second->tiles;
       auto charged = state.phase_->consume_work(needs.size());
       if (!charged.ok())
         return charged;
-      std::uint64_t size = 0, units = 0;
-      for (const auto& need : needs) {
-        size += need.samples.boxes().size();
-        units +=
-            need.samples.boxes().size() * (1 + 2 * need.samples.shape().size());
-      }
+      std::uint64_t size = 0;
+      for (const auto& need : needs)
+        size += need.whole || need.descriptor_only ? 1 : need.tiles.size();
       if (size > 65536 || (capacity && capacity < size))
         return Status{ErrorCode::ResourceExhausted,
                       "Result discovery receipt capacity"};
       if (capacity) {
-        charged = state.phase_->consume_work(units);
+        charged = state.phase_->consume_work(size);
         if (!charged.ok())
           return charged;
         for (std::uint64_t i = 0; i < size; ++i)
@@ -1296,19 +996,21 @@ class CResultMemberBridge final {
             return invalid("invalid Result discovery record destination");
         std::uint64_t index = 0;
         for (const auto& need : needs) {
-          for (const auto& box : need.samples.boxes()) {
+          const auto emit = [&](std::uint32_t kind, TileIndex tile) {
             auto& record = output[index++];
             record = {};
             record.struct_size = sizeof(record);
             record.input = need.input;
-            record.slot = need.slot;
-            record.roles = need.roles;
-            record.region.struct_size = sizeof(record.region);
-            record.region.rank = box.rank();
-            for (std::uint32_t axis = 0; axis < box.rank(); ++axis) {
-              record.region.offset[axis] = box.dimensions()[axis].offset;
-              record.region.extent[axis] = box.dimensions()[axis].extent;
-            }
+            record.kind = kind;
+            record.tile = tile;
+          };
+          if (need.whole || need.descriptor_only) {
+            emit(need.whole ? PS_RESULT_DISCOVERY_WHOLE_V3
+                            : PS_RESULT_DISCOVERY_DESCRIPTOR_V3,
+                 0);
+          } else {
+            for (auto tile : need.tiles)
+              emit(PS_RESULT_DISCOVERY_TILE_V3, tile);
           }
         }
       }
@@ -1323,7 +1025,7 @@ class CResultMemberBridge final {
                  : invalid("expired Result discovery receipt");
     });
   }
-  static ps_result_services_v2 services_for(Lease* lease,
+  static ps_result_services_v3 services_for(Lease* lease,
                                             const ResultProgramPhase& phase) {
     lease->native_views = Lease::NativeViews(
         std::less<std::uint64_t>{},
@@ -1499,11 +1201,6 @@ class CResultMemberBridge final {
       return 6;
     }
     Status status;
-    if (state.joint_failure_) {
-      status = state.joint_failure_->snapshot();
-      if (!status.ok())
-        return code(status);
-    }
     if (state.window_failure_)
       status = state.window_failure_->snapshot();
     if (state.violation_.load())
@@ -1531,22 +1228,11 @@ class CResultMemberBridge final {
                 FailureReason::UnauthorizedRead,
                 {FailureOrigin::Protocol, FailureScope::Group}};
     if (view_probe && status.code == ErrorCode::InvalidArgument &&
-        status.message.find("ViewUnavailable") != std::string::npos)
-      return PS_RESULT_VIEW_UNAVAILABLE_V2;
+        status.reason == FailureReason::ViewUnavailable)
+      return PS_RESULT_VIEW_UNAVAILABLE_V3;
     if (!status.ok()) {
       if (state.failure_.ok())
         state.failure_ = std::move(status);
-      if (state.joint_failure_ && state.definition_->joint.contract == 2 &&
-          ((state.failure_.code != ErrorCode::Cancelled &&
-            state.failure_.code != ErrorCode::Stale) ||
-           state.failure_.detail.scope == FailureScope::Run ||
-           state.failure_.detail.scope == FailureScope::Group)) {
-        if (state.failure_.code == ErrorCode::InvalidArgument &&
-            state.failure_.detail.origin == FailureOrigin::Unspecified)
-          state.failure_.detail = {FailureOrigin::Protocol,
-                                   FailureScope::Group};
-        state.failure_ = state.joint_failure_->record(state.failure_);
-      }
       try {
         if (state.phase_->failure_observer)
           state.phase_->failure_observer(state.failure_);
@@ -1560,87 +1246,56 @@ class CResultMemberBridge final {
     }
     return code(state.failure_.ok() ? status : state.failure_);
   }
-  Result<Footprint> samples(std::uint32_t input, std::uint32_t slot,
-                            const ps_result_region_v2* regions,
-                            std::uint32_t count) {
-    if (input >= phase_->query.inputs.size() || !array(regions, count, 65536))
-      return Result<Footprint>(invalid("invalid tensor Need"));
-    const auto& metadata = phase_->query.inputs[input];
-    if (!metadata.result_schema ||
-        slot >= metadata.result_schema->tensors.size())
-      return Result<Footprint>(invalid("invalid image Need slot"));
-    auto shape_admission = bridge_capacity(8 * sizeof(uint64_t));
-    if (!shape_admission.ok())
-      return Result<Footprint>(shape_admission.status());
-    const auto shape = metadata.result_schema->tensors[slot].sample_shape();
-    auto charged = phase_->consume_work(count * (1 + 2 * shape.size()));
-    if (!charged.ok())
-      return Result<Footprint>(charged);
-    auto admitted = bridge_capacity(
-        count * (sizeof(Region) + shape.size() * sizeof(RegionDimension)));
-    if (!admitted.ok())
-      return Result<Footprint>(admitted.status());
-    std::vector<Region> boxes;
-    boxes.reserve(count);
-    for (std::uint32_t i = 0; i < count; ++i) {
-      auto box = region(regions + i, shape);
-      if (!box.ok())
-        return Result<Footprint>(box.status());
-      boxes.push_back(std::move(box.value().region));
-    }
-    FootprintLimits limits;
-    limits.consume_work = phase_->consume_work;
-    limits.cancellation = phase_->query.cancellation;
-    return Footprint::from_regions(shape, boxes, limits);
-  }
-  Result<ResultRelation> relation(std::uint64_t outputs,
-                                  const ps_result_relation_row_v2* rows,
-                                  std::uint32_t count,
-                                  std::uint32_t guarantee) {
-    if (!array(rows, count, 65536) || guarantee < 1 || guarantee > 3)
-      return Result<ResultRelation>(invalid("invalid Result relation rows"));
-    if (guarantee == PS_RESULT_UNKNOWN_V2)
-      return count ? Result<ResultRelation>(invalid("Unknown has rows"))
-                   : ResultRelation::unknown(phase_->resources, outputs);
-    if (!count)
-      return ResultRelation::cartesian(
-          phase_->resources, outputs, {0, 1, 0, 0},
-          static_cast<DependencyGuarantee>(guarantee));
-    return ResultRelation::sample_rows(
-        phase_->resources, outputs, count,
-        [&](std::uint64_t i) {
-          const auto& row = rows[i];
-          if (row.target != PS_RESULT_TARGET_FIELD_V2 &&
-              row.target != PS_RESULT_TARGET_TENSOR_V2 &&
-              row.target != PS_RESULT_TARGET_DESCRIPTOR_V2)
-            return Result<ResultRelationRow>(
-                invalid("invalid Result relation target"));
-          return Result<ResultRelationRow>(
-              {row.output,
-               {row.input, row.roles, row.first, row.count,
-                static_cast<ResultSupportTarget>(row.target), row.slot}});
-        },
-        static_cast<DependencyGuarantee>(guarantee));
-  }
-  static int need_tensor(void* c, std::uint32_t input, std::uint32_t slot,
-                         std::uint32_t roles, const ps_result_region_v2* boxes,
-                         std::uint32_t count) {
+  static int need_tiles(void* c, const ps_result_tile_need_v3* request) {
     return call(c, [&](CResultMemberBridge& s) {
-      if (!roles || (roles & ~15U))
-        return invalid("invalid image Need roles");
-      auto samples = s.samples(input, slot, boxes, count);
-      if (!samples.ok())
-        return samples.status();
-      s.need_.tensors.push_back({input, slot, samples.take_value(), roles});
-      return Status::success();
-    });
-  }
-  static int need_result(void* c, std::uint32_t input, std::uint32_t field,
-                         std::uint32_t complete, std::uint64_t rows) {
-    return call(c, [&](CResultMemberBridge& s) {
-      if (complete > 1)
-        return invalid("invalid Result completion enum");
-      s.need_.results.push_back({input, field, complete != 0, rows});
+      if (!request ||
+          reinterpret_cast<std::uintptr_t>(request) %
+              alignof(ps_result_tile_need_v3) ||
+          request->struct_size != sizeof(*request) || request->whole > 1 ||
+          request->descriptor_only > 1 ||
+          !array(request->tiles, request->tile_count, 65536) ||
+          static_cast<unsigned>(request->whole) + request->descriptor_only +
+                  (request->tile_count != 0) !=
+              1 ||
+          request->input >= s.phase_->query.inputs.size() ||
+          s.need_.tiles.size() >= 65536)
+        return invalid_result_need("invalid C tile Need");
+      const auto& query = s.phase_->query;
+      const auto& selection =
+          s.definition_->traits.outputs[query.output_index].input_indices;
+      if (selection && std::find(selection->begin(), selection->end(),
+                                 request->input) == selection->end())
+        return invalid_result_need(
+            "C tile Need is outside the output input projection");
+      auto charged = s.phase_->consume_work(request->tile_count + 1);
+      if (!charged.ok())
+        return charged;
+      auto indices = TileSet::from_indices(s.phase_->resources, request->tiles,
+                                           request->tile_count);
+      if (!indices.ok())
+        return indices.status();
+      const auto& schema = query.inputs[request->input].result_schema;
+      if (!schema)
+        return invalid_result_need("C tile Need has no input schema");
+      if (!query.input_tile_grids.empty() &&
+          query.input_tile_grids.size() != query.inputs.size())
+        return invalid_result_need("incomplete compiled C input grids");
+      auto grid = query.input_tile_grids.empty()
+                      ? TileGrid::from_schema(*schema, query.tile_extent)
+                      : Result<std::optional<TileGrid>>(
+                            query.input_tile_grids[request->input]);
+      if (!grid.ok())
+        return grid.status();
+      TileNeed need{request->input, request->whole != 0,
+                    request->descriptor_only != 0, indices.take_value()};
+      auto valid = need.resolve(grid.value(), grid.value().has_value(),
+                                s.phase_->resources);
+      if (!valid.ok())
+        return valid.status().code == ErrorCode::InvalidArgument
+                   ? invalid_result_need(
+                         "C tile Need is outside the compiled grid")
+                   : valid.status();
+      s.need_.tiles.push_back(std::move(need));
       return Status::success();
     });
   }
@@ -1757,33 +1412,20 @@ class CResultMemberBridge final {
       auto made = ResultBuilder::start(
           s.phase_->resources, *s.phase_->query.output.result_schema,
           s.phase_->query.semantic_key, {}, std::move(association),
-          s.phase_->query.tile_height, s.phase_->query.tile_width,
-          s.phase_->query.resources);
+          s.phase_->query.tile_extent, s.phase_->query.resources);
       if (!made.ok())
         return made.status();
       s.builder_ = made.take_value();
       return Status::success();
     });
   }
-  static int descriptor(void* c, const ps_result_relation_row_v2* rows,
-                        std::uint32_t count, std::uint32_t guarantee) {
-    return call(c, [&](CResultMemberBridge& s) {
-      auto relation = s.relation(1, rows, count, guarantee);
-      if (!relation.ok())
-        return relation.status();
-      return s.builder_.bind_descriptor_relation(relation.take_value());
-    });
-  }
   static int publish_tensor(void* c, std::uint32_t slot,
-                            const ps_result_region_v2* box,
-                            const std::uint8_t* bytes, std::uint64_t size,
-                            const ps_result_relation_row_v2* rows,
-                            std::uint32_t count, std::uint32_t guarantee,
-                            std::uint32_t finality) {
+                            const ps_result_region_v3* box,
+                            const std::uint8_t* bytes, std::uint64_t size) {
     return call(c, [&](CResultMemberBridge& s) {
       const auto& schema = s.phase_->query.output.result_schema;
       if (!schema || slot >= schema->tensors.size() || size > SIZE_MAX ||
-          (!bytes && size) || finality != 15)
+          (!bytes && size))
         return invalid("invalid image publication envelope");
       auto shape_admission = bridge_capacity(8 * sizeof(uint64_t));
       if (!shape_admission.ok())
@@ -1791,30 +1433,21 @@ class CResultMemberBridge final {
       auto coverage = region(box, schema->tensors[slot].sample_shape());
       if (!coverage.ok())
         return coverage.status();
-      auto relation = s.relation(schema->tensors[slot].sample_count().value(),
-                                 rows, count, guarantee);
-      if (!relation.ok())
-        return relation.status();
       return s.publication(s.builder_.publish_tensor(
           slot, coverage.value().region, ByteView(bytes, size),
-          relation.take_value(), {true, true, true, true},
           s.phase_->query.cancellation));
     });
   }
   static int publish_tensor_buffer(void* raw, std::uint32_t slot,
-                                   const ps_result_region_v2* box,
-                                   std::uint8_t* bytes, std::uint64_t size,
-                                   const ps_result_relation_row_v2* rows,
-                                   std::uint32_t count, std::uint32_t guarantee,
-                                   std::uint32_t finality) {
+                                   const ps_result_region_v3* box,
+                                   std::uint8_t* bytes, std::uint64_t size) {
     return call(raw, [&](CResultMemberBridge& state) {
       const auto& schema = state.phase_->query.output.result_schema;
       auto found =
           std::find_if(state.scratch_.begin(), state.scratch_.end(),
                        [&](auto& buffer) { return buffer.data() == bytes; });
       if (!schema || slot >= schema->tensors.size() ||
-          finality != PS_RESULT_FINAL_V2 || found == state.scratch_.end() ||
-          found->size() != size)
+          found == state.scratch_.end() || found->size() != size)
         return invalid("invalid Result buffer publication");
       auto admission = bridge_capacity(
           8 * (2 * sizeof(std::uint64_t) + sizeof(std::int64_t)));
@@ -1830,12 +1463,6 @@ class CResultMemberBridge final {
           !core_internal::can_multiply(samples.value(), width) ||
           samples.value() * width != size)
         return invalid("Result buffer publication size mismatch");
-      auto domain = spec.sample_count();
-      if (!domain.ok())
-        return domain.status();
-      auto relation = state.relation(domain.value(), rows, count, guarantee);
-      if (!relation.ok())
-        return relation.status();
       StridedLayout layout{
           0, std::vector<std::int64_t>(box->rank),
           std::vector<std::uint64_t>(box->offset, box->offset + box->rank)};
@@ -1850,7 +1477,6 @@ class CResultMemberBridge final {
       state.scratch_.erase(found);
       return state.publication(state.builder_.publish_tensor(
           slot, region_value.value().region, layout, std::move(buffer),
-          relation.take_value(), {true, true, true, true},
           state.phase_->query.cancellation));
     });
   }
@@ -1859,66 +1485,57 @@ class CResultMemberBridge final {
     return call(c, [&](CResultMemberBridge& s) {
       if (!bytes || !size || size > SIZE_MAX)
         return invalid("invalid field payload");
-      auto made = s.phase_->allocator.allocate(size);
-      if (!made.ok())
-        return made.status();
-      auto copy = made.take_value();
-      auto work = s.phase_->consume_work(size);
-      if (!work.ok())
-        return work;
-      std::memcpy(copy.data(), bytes, size);
-      auto write =
-          s.builder_.prepare_append(field, rows, std::move(copy).freeze());
-      if (!write.ok())
-        return write.status();
-      s.need_.io.push_back(write.take_value());
-      return s.publication(Status::success());
+      return s.publication(s.builder_.append(field, rows, ByteView(bytes, size),
+                                             s.phase_->query.cancellation));
     });
   }
-  static int publish_field(void* c, std::uint32_t field, std::uint64_t end,
-                           const ps_result_relation_row_v2* rows,
-                           std::uint32_t count, std::uint32_t guarantee,
-                           std::uint32_t finality) {
+  static int publish_field(void* c, std::uint32_t field, std::uint64_t end) {
     return call(c, [&](CResultMemberBridge& s) {
-      if (finality != 15)
-        return invalid("incomplete field finality");
-      auto relation = s.relation(end, rows, count, guarantee);
-      return relation.ok() ? s.publication(s.builder_.publish(
-                                 field, end, relation.take_value(),
-                                 {true, true, true, true}))
-                           : relation.status();
+      return s.publication(s.builder_.publish(field, end));
     });
   }
-  static int need_field_read(void* c, std::uint32_t input, std::uint32_t field,
-                             std::uint64_t first, std::uint64_t rows) {
+  static int read_field(void* c, std::uint32_t input, std::uint32_t field,
+                        std::uint64_t first, std::uint64_t rows,
+                        std::uint8_t* bytes, std::uint64_t size) {
     return call(c, [&](CResultMemberBridge& s) {
+      if ((!bytes && size) || size > SIZE_MAX)
+        return invalid("invalid field read destination");
       auto found = s.phase_->results.find(input);
       if (found == s.phase_->results.end())
-        return invalid("Result field input is not ready");
+        return Status{ErrorCode::InvalidArgument,
+                      "Result field Whole Need is absent",
+                      FailureReason::UnauthorizedRead,
+                      {FailureOrigin::Protocol, FailureScope::Group}};
       auto facts = found->second.descriptor(false);
       if (!facts.ok())
         return facts.status();
+      if (field >= facts.value().field_count() ||
+          first > facts.value().rows(field) ||
+          rows > facts.value().rows(field) - first)
+        return invalid("invalid field read range");
       auto read = found->second.prepare_read(facts.value(), field, first, rows);
       if (!read.ok())
         return read.status();
-      s.need_.io.push_back(read.take_value());
-      return Status::success();
-    });
-  }
-  static int read_io(void* c, std::uint32_t index, std::uint64_t offset,
-                     std::uint8_t* bytes, std::uint64_t size) {
-    return call(c, [&](CResultMemberBridge& s) {
-      if (index >= s.phase_->io.size() || !bytes || !size || size > SIZE_MAX)
-        return invalid("invalid I/O reply read");
-      const auto* window =
-          std::get_if<std::shared_ptr<const CpuStorage>>(&s.phase_->io[index]);
-      if (!window || offset > (*window)->bytes().size() ||
-          size > (*window)->bytes().size() - offset)
-        return invalid("I/O reply bounds");
+      if (read.value().byte_size() != size)
+        return invalid("field read byte size mismatch");
+      if (size > s.phase_->query.page_bytes)
+        return Status{ErrorCode::ResourceExhausted,
+                      "field read exceeds window limit",
+                      FailureReason::CapacityLimit};
       auto work = s.phase_->consume_work(size);
       if (!work.ok())
         return work;
-      std::memcpy(bytes, (*window)->bytes().data() + offset, size);
+      if (s.phase_->query.cancellation.cancelled())
+        return Status{ErrorCode::Cancelled, {}};
+      if (!size)
+        return Status::success();
+      auto window = read.value().load(s.phase_->query.page_bytes,
+                                      s.phase_->query.cancellation);
+      if (!window.ok())
+        return window.status();
+      if (s.phase_->query.cancellation.cancelled())
+        return Status{ErrorCode::Cancelled, {}};
+      std::memcpy(bytes, window.value()->bytes().data(), size);
       return Status::success();
     });
   }
@@ -1926,11 +1543,6 @@ class CResultMemberBridge final {
     return call(c, [&](CResultMemberBridge& s) {
       if (complete > 1)
         return invalid("invalid Result publication");
-      if (!complete &&
-          (!s.owns_payload_ ||
-           s.definition_->traits.outputs[s.phase_->query.output_index]
-                   .observation_kind == ObservationKind::RequestRecord))
-        return invalid("terminal Result requires complete publication");
       if (s.published_.valid())
         return Status{ErrorCode::OperationFailed,
                       "Result plugin published more than once in one poll"};
@@ -1952,20 +1564,27 @@ class CResultMemberBridge final {
     });
   }
   static int result_descriptor(void* c, std::uint32_t input,
-                               ps_result_descriptor_v2* output) {
+                               ps_result_descriptor_v3* output) {
     return call(c, [&](CResultMemberBridge& s) {
       if (!output ||
           reinterpret_cast<std::uintptr_t>(output) %
-              alignof(ps_result_descriptor_v2) ||
+              alignof(ps_result_descriptor_v3) ||
           output->struct_size != sizeof(*output))
         return invalid("invalid Result descriptor destination");
+      const auto descriptor = s.phase_->descriptors
+                                  ? s.phase_->descriptors->find(input)
+                                  : ResultDescriptorInputs::const_iterator{};
       auto found = s.phase_->results.find(input);
-      if (found == s.phase_->results.end())
+      const bool metadata_only =
+          s.phase_->descriptors && descriptor != s.phase_->descriptors->end();
+      if (found == s.phase_->results.end() && !metadata_only)
         return Status{ErrorCode::InvalidArgument,
                       "Result descriptor Need is absent",
                       FailureReason::UnauthorizedRead,
                       {FailureOrigin::Protocol, FailureScope::Group}};
-      auto facts = found->second.descriptor(false);
+      auto facts = found != s.phase_->results.end()
+                       ? found->second.descriptor(false)
+                       : Result<ResultDescriptor>(descriptor->second);
       if (!facts.ok())
         return facts.status();
       *output = {};
@@ -1981,12 +1600,11 @@ class CResultMemberBridge final {
     });
   }
 
-  static ps_result_services_v2 service(Lease* lease) {
-    return {sizeof(ps_result_services_v2),
-            PS_RESULT_OPERATION_ABI_VERSION_2,
+  static ps_result_services_v3 service(Lease* lease) {
+    return {sizeof(ps_result_services_v3),
+            PS_RESULT_OPERATION_ABI_VERSION_3,
             lease,
-            need_tensor,
-            need_result,
+            need_tiles,
             read_tensor,
             retain_tensor,
             read_retained,
@@ -1996,30 +1614,21 @@ class CResultMemberBridge final {
             work,
             cancelled,
             begin,
-            descriptor,
             publish_tensor,
             append_field,
             publish_field,
-            need_field_read,
-            read_io,
+            read_field,
             publish_result,
             result_descriptor,
             acquire_tensor_window,
             acquire_retained_window,
             retain_window,
             release_window,
-            make_mapping,
-            make_reshape,
-            release_relation,
-            publish_tensor_with_relation,
             publish_tensor_view,
             report_numeric,
-            make_prefix,
-            make_neighborhood,
             nullptr,
             nullptr,
             nullptr,
-            make_tensor_cartesian,
             acquire_native_tensor_window,
             acquire_native_atlas,
             create_block_state,
@@ -2038,7 +1647,6 @@ class CResultMemberBridge final {
   MutableBuffer bytes_;
   Retained retained_;
   Windows windows_;
-  Relations relations_;
   BlockStates block_states_;
   bool in_block_ = false;
   Discoveries discoveries_;
@@ -2057,11 +1665,7 @@ class CResultMemberBridge final {
   bool entered_ = false, published_complete_ = false;
   bool publication_started_ = false;
   ResourceVector<std::shared_ptr<Lease>> leases_;
-  bool owns_payload_;
-  std::shared_ptr<FailureLatch> joint_failure_;
-  std::shared_ptr<std::uint64_t> handles_;
-  std::uint64_t owned_next_handle_ = 1;
-  std::uint64_t& next_handle_;
+  std::uint64_t next_handle_ = 1;
 };
 
 std::uint64_t c_member_storage_bytes() noexcept {
@@ -2078,24 +1682,5 @@ Result<ResultContinuation> start_c_member(
     std::memset(buffer.data(), 0, buffer.size());
   return ResultContinuation::make<CResultMemberBridge>(allocator, owner,
                                                        std::move(buffer));
-}
-std::shared_ptr<CResultMemberBridge> make_c_joint_member(
-    std::shared_ptr<const Definition> owner, const ResourceBudget& resources,
-    std::shared_ptr<std::uint64_t> handles,
-    std::shared_ptr<FailureLatch> failure) {
-  return std::allocate_shared<CResultMemberBridge>(
-      ResourceAllocator<CResultMemberBridge>(resources), std::move(owner),
-      MutableBuffer{}, false, std::move(handles), std::move(failure));
-}
-Result<ResultProgramPoll> poll_c_member(CResultMemberBridge& owner,
-                                        const ResultProgramPhase& phase,
-                                        const MemberBorrow& borrow) {
-  return owner.poll(phase, borrow);
-}
-Status c_member_failure(const CResultMemberBridge& owner) {
-  return owner.failure_status();
-}
-bool c_member_terminal_conflicts(const CResultMemberBridge& owner) noexcept {
-  return owner.terminal_failure_conflicts();
 }
 }  // namespace ps::plugin_internal::result_c

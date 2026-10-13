@@ -42,10 +42,14 @@ for workers in [2,4]:
 run(['empty=true'])
 run(['roi=true', 'output='+str(out/'roi.f32')])
 assert (out/'roi.f32').read_bytes() == files[0].read_bytes()
+run(['roi=true', 'tile_extent=16', 'output='+str(out/'tile-roi.f32')])
+assert (out/'tile-roi.f32').read_bytes() == files[0].read_bytes()
 for value,name in [(math.nan,'nan'),(math.inf,'infinity'),(-.01,'negative'),(1.01,'above_one')]:
     x=array('f',[.5])*(128*128*3);x[(64*128+64)*3+1]=value
     (out/'invalid.f32').write_bytes(x.tobytes())
     run(['input='+str(out/'invalid.f32')],ok=False)
+    run(['input='+str(out/'invalid.f32'), 'roi=true', 'tile_extent=16'],ok=False)
+    run(['input='+str(out/'invalid.f32'), 'empty=true', 'tile_extent=16'])
 run(['pixel_size=1'],ok=False);run(['mode=unknown'],ok=False);run(['budget=1024'],ok=False)
 for args, code in [(['cancel_after_us=0'], 6),
                    (['work_budget=1'], 5)]:

@@ -4,11 +4,12 @@
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "00-foundation/tensor_program.hpp"
+#include "common/tensor_program.hpp"
 #include "data/content_digest.hpp"
 #include "data/result_window_access.hpp"
 #include "photospider/ops/format/channel.hpp"
@@ -50,11 +51,11 @@ inline std::string assembly_source_assertion(
   }
   return "result-inputs-v1:" + digest.finish();
 }
-inline std::vector<ResultMappedAxis> extraction_axes(std::size_t source_rank,
-                                                     std::uint32_t axis,
-                                                     std::uint64_t index,
-                                                     bool keepdims) {
-  std::vector<ResultMappedAxis> result(source_rank);
+inline std::vector<ResultViewAxis> extraction_axes(std::size_t source_rank,
+                                                   std::uint32_t axis,
+                                                   std::uint64_t index,
+                                                   bool keepdims) {
+  std::vector<ResultViewAxis> result(source_rank);
   for (std::size_t i = 0; i < source_rank; ++i) {
     if (i == axis)
       result[i].source_origin = index;
@@ -65,7 +66,7 @@ inline std::vector<ResultMappedAxis> extraction_axes(std::size_t source_rank,
   return result;
 }
 inline Region mapped_region(const Region& output,
-                            const std::vector<ResultMappedAxis>& axes) {
+                            const std::vector<ResultViewAxis>& axes) {
   std::vector<RegionDimension> source;
   for (const auto& axis : axes) {
     const auto dimension = axis.output_axis < 0
@@ -74,35 +75,76 @@ inline Region mapped_region(const Region& output,
     const auto first = take(axis.source_coordinate(dimension.offset));
     const auto last =
         take(axis.source_coordinate(dimension.offset + dimension.extent - 1));
-    source.push_back({std::min(first, last),
-                      std::max(first, last) - std::min(first, last) + 1});
+    source.push_back(
+        {std::min(first, last),
+         std::max(first, last) - std::min(first, last) + axis.extent});
   }
   return Region(std::move(source));
 }
+// Invert a physical affine point map inside one bounded output box. This is
+// geometry for view partitioning; dependency recording is owned by tile Needs.
+inline std::optional<Region> mapped_preimage(
+    const Region& output, const Region& source,
+    const std::vector<ResultViewAxis>& axes) {
+  auto dimensions = output.dimensions();
+  for (std::size_t i = 0; i < axes.size(); ++i) {
+    const auto& axis = axes[i];
+    const auto input = source.dimensions()[i];
+    const __int128 low = input.offset, high = low + input.extent;
+    if (axis.output_axis < 0 || axis.step == 0) {
+      const auto coordinate = take(axis.source_coordinate(0));
+      if (coordinate < low || coordinate >= high)
+        return {};
+      continue;
+    }
+    auto& dimension = dimensions[axis.output_axis];
+    const auto bound = [&](auto predicate) {
+      std::uint64_t first = 0, last = dimension.extent;
+      while (first < last) {
+        const auto middle = first + (last - first) / 2;
+        const auto coordinate =
+            take(axis.source_coordinate(dimension.offset + middle));
+        if (predicate(static_cast<__int128>(coordinate)))
+          last = middle;
+        else
+          first = middle + 1;
+      }
+      return first;
+    };
+    const auto first = axis.step > 0
+                           ? bound([&](auto value) { return value >= low; })
+                           : bound([&](auto value) { return value < high; });
+    const auto last = axis.step > 0
+                          ? bound([&](auto value) { return value >= high; })
+                          : bound([&](auto value) { return value < low; });
+    if (first >= last)
+      return {};
+    dimension.offset += first;
+    dimension.extent = last - first;
+  }
+  return Region(std::move(dimensions));
+}
 inline bool view_unavailable(const Status& status) {
-  return status.code == ErrorCode::InvalidArgument &&
-         status.message.find("ViewUnavailable") != std::string::npos;
+  return status.reason == FailureReason::ViewUnavailable;
 }
 struct PublicationCounts {
   std::uint64_t copied = 0, viewed = 0;
 };
 inline Status publish(const ResultProgramPhase& phase, ResultBuilder* builder,
                       const Region& box, const ResultTensorReadWindow& window,
-                      const std::vector<ResultMappedAxis>& axes,
-                      ResultRelation relation, const std::string& policy,
-                      std::uint32_t port = 0,
+                      const std::vector<ResultViewAxis>& axes,
+                      const std::string& policy, std::uint32_t port = 0,
                       PublicationCounts* counts = nullptr) {
   const auto& tensor = phase.query.output.result_schema->tensors[0];
-  Status status{ErrorCode::InvalidArgument, "ViewUnavailable"};
+  Status status{ErrorCode::InvalidArgument, "ViewUnavailable",
+                FailureReason::ViewUnavailable};
   if (policy != "materialize") {
     ResultTensorViewTransform transform;
     transform.source_axes = axes;
-    status = builder->publish_tensor_view(0, box, window, transform, relation,
-                                          {true, true, true, true},
+    status = builder->publish_tensor_view(0, box, window, transform,
                                           phase.query.cancellation);
     if (tensor.layout.spatial && view_unavailable(status))
-      status = builder->publish_tensor_view(0, box, {&window}, relation,
-                                            {true, true, true, true},
+      status = builder->publish_tensor_view(0, box, {&window},
                                             phase.query.cancellation);
   }
   if (policy != "materialize" && view_unavailable(status)) {
@@ -113,20 +155,15 @@ inline Status publish(const ResultProgramPhase& phase, ResultBuilder* builder,
                   phase.consume_work(source_region.rank() + box.rank() + 1);
               if (!work.ok())
                 return work;
-              const auto outputs =
-                  take(Footprint::from_regions(tensor.sample_shape(), {box}));
-              const auto source = take(Footprint::from_regions(
-                  window.spec().sample_shape(), {source_region}));
-              const auto parts = take(relation.preimage(
-                  outputs, {port, 1, 0, 0, ResultSupportTarget::Tensor, 0},
-                  source));
-              for (const auto& part : parts.boxes()) {
+              const auto selected = mapped_preimage(box, source_region, axes);
+              if (selected) {
+                const auto& part = *selected;
                 auto input = phase.tensors->at({port, 0}).acquire(
                     mapped_region(part, axes), phase.query.cancellation);
                 if (!input.ok())
                   return input.status();
                 auto published = publish(phase, builder, part, input.value(),
-                                         axes, relation, policy, port, counts);
+                                         axes, policy, port, counts);
                 if (!published.ok())
                   return published;
               }
@@ -255,7 +292,7 @@ inline Status publish(const ResultProgramPhase& phase, ResultBuilder* builder,
         }
         return Status::success();
       },
-      relation, {true, true, true, true}, phase.query.cancellation);
+      phase.query.cancellation);
   if (copied.ok() && counts)
     counts->copied += take(box.element_count());
   return copied;

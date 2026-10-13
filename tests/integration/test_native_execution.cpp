@@ -27,13 +27,9 @@ SchemaTemplate schema(const ValueDescriptor& descriptor,
 ResultRef source(const ResourceBudget& root, const Value& backing) {
   auto builder = multi_result::take(ResultBuilder::start(
       root, schema(backing.descriptor(), backing.facets()), "native.source"));
-  multi_result::check(builder.bind_descriptor_relation(
-      multi_result::take(ResultRelation::cartesian(root, 1, {}))));
+
   multi_result::check(builder.publish_tensor(
-      0, backing.region(), backing.layout(), backing.storage(),
-      multi_result::take(ResultRelation::cartesian(
-          root, backing.region().element_count().take_value(), {})),
-      {true, true, true, true}));
+      0, backing.region(), backing.layout(), backing.storage()));
   return multi_result::take(builder.seal());
 }
 std::vector<float> numbers(const ResultRef& result) {
@@ -49,16 +45,6 @@ std::vector<float> numbers(const ResultRef& result) {
       1024));
   return values;
 }
-ResultRelation identity(const ResultProgramPhase& phase, const Region& box) {
-  const auto shape =
-      phase.query.output.result_schema->tensors[0].sample_shape();
-  std::vector<ResultMappedAxis> axes;
-  for (unsigned axis = 0; axis < shape.size(); ++axis)
-    axes.push_back({static_cast<std::int32_t>(axis), 0, 1, 1});
-  return multi_result::take(
-      ResultRelation::mapped(phase.resources, shape, box, shape, axes,
-                             {0, 1, 0, 1, ResultSupportTarget::Tensor, 0}));
-}
 struct Scale {
   std::function<void()>* after;
   bool host, requested = false;
@@ -70,7 +56,7 @@ struct Scale {
     if (!requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tensors.push_back({0, 0, demand, 1});
+      need.tiles.push_back({0, true, false, {}});
       return Result<ResultProgramPoll>(std::move(need));
     }
     auto builder = multi_result::take(ResultBuilder::start(
@@ -78,8 +64,7 @@ struct Scale {
         phase.query.semantic_key, {},
         std::vector<std::uint64_t>(phase.association->begin(),
                                    phase.association->end())));
-    multi_result::check(builder.bind_descriptor_relation(
-        multi_result::take(ResultRelation::cartesian(phase.resources, 1, {}))));
+
     for (const auto& box : demand.boxes()) {
       if (host) {
         std::vector<std::uint64_t> probe;
@@ -97,9 +82,8 @@ struct Scale {
         for (unsigned axis = 0; axis < spec.sample_shape().size(); ++axis)
           transform.source_axes.push_back(
               {static_cast<std::int32_t>(axis), 0, 1, 1});
-        multi_result::check(builder.publish_tensor_view(
-            0, box, window, transform, identity(phase, box),
-            {true, true, true, true}));
+        multi_result::check(
+            builder.publish_tensor_view(0, box, window, transform));
         continue;
       }
       const auto count = multi_result::take(box.element_count());
@@ -170,9 +154,8 @@ struct Scale {
       }
       auto storage = std::move(output).freeze();
       native_capacity = storage->capacity();
-      multi_result::check(builder.publish_tensor(
-          0, box, {0, strides}, std::move(storage), identity(phase, box),
-          {true, true, true, true}));
+      multi_result::check(
+          builder.publish_tensor(0, box, {0, strides}, std::move(storage)));
     }
     return Result<ResultProgramPoll>(
         ResultPublication{multi_result::take(builder.seal()), true});
@@ -230,7 +213,7 @@ struct NativeFailure {
     if (mode == 5 && !requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tensors.push_back({0, 0, *phase.query.tensor_outputs, 1});
+      need.tiles.push_back({0, true, false, {}});
       return Result<ResultProgramPoll>(std::move(need));
     }
     if (phase.query.backend == Backend::Gpu) {
@@ -272,14 +255,11 @@ struct NativeFailure {
     auto builder = multi_result::take(
         ResultBuilder::start(phase.resources, *phase.query.output.result_schema,
                              phase.query.semantic_key));
-    multi_result::check(builder.bind_descriptor_relation(
-        multi_result::take(ResultRelation::cartesian(phase.resources, 1, {}))));
+
     const std::array<float, 4> values{7, 7, 7, 7};
     multi_result::check(builder.publish_tensor(
         0, Region::whole({4}),
-        {reinterpret_cast<const std::uint8_t*>(values.data()), 16},
-        multi_result::take(ResultRelation::cartesian(phase.resources, 4, {})),
-        {true, true, true, true}));
+        {reinterpret_cast<const std::uint8_t*>(values.data()), 16}));
     return Result<ResultProgramPoll>(
         ResultPublication{multi_result::take(builder.seal()), true});
   }

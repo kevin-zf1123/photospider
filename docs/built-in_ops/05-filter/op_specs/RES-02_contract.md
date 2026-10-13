@@ -27,12 +27,8 @@ This specification defines the intended mathematics and interface contract only;
 
 Suffix letters denote distinct mathematical/interface objects, not quality tiers that a backend may choose arbitrarily. A primitive may propose strict and accelerated profiles; a helper only orchestrates explicit stages.
 
-## Shared Mathematics, Units, and Profiles
-
-
 ### Patch, Search, and Boundary
 For each output q, candidate p ranges over the in-image square search window of radius s; out-of-image candidates are not reflected into extra candidates. Patch offsets d∈[-r,r]² access q+d and p+d using reflect_half. The guide and filtered input may differ. The G guide components and metric_scale are explicit, with G=1..4. The exact distance is D(q,p)=Σ_(d,c) ((g(q+d,c)-g(p+d,c))*scale_c)² / ((2r+1)²*G). The self-weight is 1; other weights are member-defined baked64 values. The output is RN_t(Σ_p w(q,p)*input[p]/Σ_p w). No maximum-neighbor rule replaces the self-weight, and there is no extra block-overlap aggregation. A zero patch radius remains nonlocal patch similarity, not identity; a zero search radius is explicitly identity.
-
 
 ## Shared Execution and Numeric Obligations
 

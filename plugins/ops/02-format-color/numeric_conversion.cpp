@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include "photospider/plugin/tile_helpers.hpp"
+
 #if defined(__aarch64__)
 #include <arm_neon.h>
 #endif
@@ -26,10 +28,10 @@
 #endif
 
 #include "02-format-color/result_mapping.hpp"
+#include "common/registry.hpp"
 #include "data/exact_numeric.hpp"
 #include "photospider/data/region_runs.hpp"
 #include "photospider/data/tensor_description.hpp"
-#include "plugin/builtin_operations.hpp"
 
 namespace ps::plugin_internal {
 #if defined(PHOTOSPIDER_HAS_CONVERSION_SME)
@@ -1167,17 +1169,15 @@ std::uint64_t infallible_prefix(const std::uint8_t* source, std::uint64_t count,
 using tensor_ops::require;
 using tensor_ops::take;
 using Poll = Result<ResultProgramPoll>;
-ResultBuilder result_builder(const ResultProgramPhase& phase, bool empty) {
+ResultBuilder result_builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto builder = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
-  require(builder.bind_descriptor_relation(take(ResultRelation::cartesian(
-      phase.resources, 1,
-      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+      phase.query.tile_extent, phase.query.resources));
+
   return builder;
 }
 Poll empty_result(const ResultProgramPhase& phase) try {
@@ -1337,7 +1337,13 @@ struct Continuation final {
       output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
                                           : take(Footprint::all(shape));
       ResultProgramNeed need;
-      need.tensors.push_back({0, 0, output, 9});
+      {
+        auto tile_need_0 = sdk::tile_need_for_samples(
+            phase.resources, phase.query, 0, 0, output);
+        if (!tile_need_0.ok())
+          return Result<ResultProgramPoll>(tile_need_0.status());
+        need.tiles.push_back(tile_need_0.take_value());
+      }
       return Poll(std::move(need));
     }
     FloatingEnvironment environment;
@@ -1345,24 +1351,17 @@ struct Continuation final {
     auto scratch =
         take(phase.resources.reserve(ResourceCapacity::host(16384, 16384)));
     auto builder = result_builder(phase, false);
-    std::vector<ResultMappedAxis> axes(shape.size());
+    std::vector<ResultViewAxis> axes(shape.size());
     for (std::size_t i = 0; i < axes.size(); ++i)
       axes[i].output_axis = static_cast<std::int32_t>(i);
-    const auto relation = take(ResultRelation::unite(
-        phase.resources,
-        {take(ResultRelation::mapped(
-             phase.resources, shape, Region::whole(shape), shape, axes,
-             {0, 1, 0, 0, ResultSupportTarget::Tensor, 0})),
-         take(ResultRelation::cartesian(
-             phase.resources, take(tensor.sample_count()),
-             {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0}))}));
+
     bool u8_lookup_ready = !state->fast_u8_f32;
     require(format_result::planes(tensor, output, [&](const Region& box) {
       auto window = take(
           phase.tensors->at({0, 0}).acquire(box, phase.query.cancellation));
       if (state->identity && !state->materialize)
         return format_result::publish(phase, &builder, box, window, axes,
-                                      relation, state->layout);
+                                      state->layout);
       return builder.publish_tensor_kernel(
           0, box,
           [&](const auto& writers) {
@@ -1377,7 +1376,7 @@ struct Continuation final {
               return failure.status;
             }
           },
-          relation, {true, true, true, true}, phase.query.cancellation);
+          phase.query.cancellation);
     }));
     require(checkpoint(phase, 1));
     return Poll(ResultPublication{take(builder.seal()), true});
@@ -1415,7 +1414,7 @@ OperationDefinition conversion() {
   output.key = "values";
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
-  output.region_rule = OperationRegionRule::Dependency;
+  output.region_rule = OperationRegionRule::Tiled;
   output.continuation_bytes = sizeof(Continuation);
   output.maximum_dependency_stages = 2;
   definition.prepare_static = [](const auto& inputs, const auto& params) {

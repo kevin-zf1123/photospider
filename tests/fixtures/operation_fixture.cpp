@@ -7,6 +7,7 @@
 #include <mutex>
 
 #include "photospider/plugin/result_operation_plugin_api.h"
+#include "photospider/plugin/result_tile_helpers.h"
 
 namespace {
 struct Observations {
@@ -23,26 +24,26 @@ struct CancellationGate {
 struct State {
   bool requested = false;
 };
-const ps_result_region_v2 scalar_region = [] {
-  ps_result_region_v2 value{};
+const ps_result_region_v3 scalar_region = [] {
+  ps_result_region_v3 value{};
   value.struct_size = sizeof(value);
   value.rank = 1;
   value.extent[0] = 1;
   return value;
 }();
-const ps_result_tensor_spec_v2 tensor = [] {
-  ps_result_tensor_spec_v2 value{};
+const ps_result_tensor_spec_v3 tensor = [] {
+  ps_result_tensor_spec_v3 value{};
   value.struct_size = sizeof(value);
   value.key = "number";
   value.key_size = 6;
-  value.element_type = PS_RESULT_ELEMENT_FLOAT64_V2;
+  value.element_type = PS_RESULT_ELEMENT_FLOAT64_V3;
   value.rank = 1;
   value.shape[0] = 1;
-  value.channel_axis = PS_RESULT_NO_CHANNEL_V2;
+  value.channel_axis = PS_RESULT_NO_CHANNEL_V3;
   return value;
 }();
-const ps_result_schema_v2 schema = [] {
-  ps_result_schema_v2 value{};
+const ps_result_schema_v3 schema = [] {
+  ps_result_schema_v3 value{};
   value.struct_size = sizeof(value);
   value.id = "fixture.scalar";
   value.id_size = 14;
@@ -52,40 +53,40 @@ const ps_result_schema_v2 schema = [] {
   value.tensor_count = 1;
   return value;
 }();
-const ps_result_port_v2 port = [] {
-  ps_result_port_v2 value{};
+const ps_result_port_v3 port = [] {
+  ps_result_port_v3 value{};
   value.struct_size = sizeof(value);
-  value.kind = PS_RESULT_OBJECT_V2;
+  value.kind = PS_RESULT_OBJECT_V3;
   value.schema = &schema;
   return value;
 }();
-const ps_result_output_v2 output = [] {
-  ps_result_output_v2 value{};
+const ps_result_output_v3 output = [] {
+  ps_result_output_v3 value{};
   value.struct_size = sizeof(value);
   value.key = "value";
   value.key_size = 5;
   value.port = port;
   value.input_count = UINT32_MAX;
-  value.execution = PS_RESULT_WHOLE_V2;
+  value.execution = PS_RESULT_WHOLE_V3;
   return value;
 }();
-const ps_result_parameter_descriptor_v2 scale = {
-    sizeof(scale), "scale", 5, PS_RESULT_PARAMETER_FLOAT64_V2,
+const ps_result_parameter_descriptor_v3 scale = {
+    sizeof(scale), "scale", 5, PS_RESULT_PARAMETER_FLOAT64_V3,
     1};  // NOLINT(whitespace/indent_namespace)
-int resolve(void* user, const ps_result_port_v2* inputs, std::uint32_t count,
-            const ps_result_parameter_value_v2*, std::uint32_t,
-            const ps_result_port_v2*, std::uint32_t,
-            const ps_result_metadata_sink_v2* sink) {
+int resolve(void* user, const ps_result_port_v3* inputs, std::uint32_t count,
+            const ps_result_parameter_value_v3*, std::uint32_t,
+            const ps_result_port_v3*, std::uint32_t,
+            const ps_result_metadata_sink_v3* sink) {
   if (count != 1 || !inputs[0].schema || inputs[0].schema->tensor_count != 1 ||
       inputs[0].schema->field_count)
     return 5;
   auto result_schema = *inputs[0].schema;
   auto result_tensor = result_schema.tensors[0];
-  if (result_tensor.element_type != PS_RESULT_ELEMENT_FLOAT64_V2 ||
+  if (result_tensor.element_type != PS_RESULT_ELEMENT_FLOAT64_V3 ||
       result_tensor.rank != 1 || result_tensor.shape[0] != 1 ||
       result_tensor.batch_rank)
     return 5;
-  const ps_result_facet_view_v2 invalid_facet = {
+  const ps_result_facet_view_v3 invalid_facet = {
       sizeof(invalid_facet), "bad.facet", 9, 0, nullptr, 0};
   if (!user) {
     result_tensor.facets = &invalid_facet;
@@ -96,8 +97,8 @@ int resolve(void* user, const ps_result_port_v2* inputs, std::uint32_t count,
   result.schema = &result_schema;
   return sink->set_output(sink->context, 0, &result);
 }
-int start(void* user, void* raw, const ps_result_query_v2* query,
-          const ps_result_services_v2* services) {
+int start(void* user, void* raw, const ps_result_query_v3* query,
+          const ps_result_services_v3* services) {
   *static_cast<State*>(raw) = {};
   if (!user)
     return 0;
@@ -111,31 +112,24 @@ int start(void* user, void* raw, const ps_result_query_v2* query,
     return observed.mode == 1 ? 3 : observed.mode == 2 ? 1 : 99;
   return 0;
 }
-int publish(const ps_result_services_v2* services, double value, unsigned bad) {
-  const ps_result_relation_row_v2 descriptor = {
-      0, 0, 8, PS_RESULT_TARGET_DESCRIPTOR_V2, 0, 0, 1};
-  const ps_result_relation_row_v2 support = {
-      0, 0, 1, PS_RESULT_TARGET_TENSOR_V2, 0, 0, 1};
+int publish(const ps_result_services_v3* services, double value, unsigned bad) {
   // The extra byte exercises the Result publication's exact payload envelope.
   std::array<std::uint8_t, 9> bytes{};
   std::memcpy(bytes.data(), &value, sizeof(value));
-  if (services->begin_result(services->context) ||
-      services->bind_descriptor(services->context, &descriptor, 1, 1))
+  if (services->begin_result(services->context))
     return 1;
-  const int written = services->publish_tensor(
-      services->context, bad == 1 ? 99 : 0, &scalar_region, bytes.data(),
-      bad == 2 ? 9 : 8, &support, 1, 1, PS_RESULT_FINAL_V2);
+  const int written =
+      services->publish_tensor(services->context, bad == 1 ? 99 : 0,
+                               &scalar_region, bytes.data(), bad == 2 ? 9 : 8);
   return written ? written : services->publish_result(services->context, 1);
 }
-int poll(void* user, void* raw, const ps_result_query_v2* query,
-         const ps_result_services_v2* services) {
+int poll(void* user, void* raw, const ps_result_query_v3* query,
+         const ps_result_services_v3* services) {
   auto& state = *static_cast<State*>(raw);
   auto& observed = *static_cast<Observations*>(user);
   if (!state.requested) {
     state.requested = true;
-    return services->need_tensor(services->context, 0, 0, 9, &scalar_region, 1)
-               ? 1
-               : PS_RESULT_NEED_V2;
+    return ps_result_need_whole_v3(services, 0) ? 1 : PS_RESULT_NEED_V3;
   }
   std::uint64_t coordinate = 0;
   double number = 0;
@@ -151,7 +145,7 @@ int poll(void* user, void* raw, const ps_result_query_v2* query,
   }
   if (observed.mode == 14) {
     static_cast<void>(publish(services, number, 2));
-    return PS_RESULT_PUBLISH_V2;
+    return PS_RESULT_PUBLISH_V3;
   }
   if (observed.mode >= 6) {
     const int first = observed.mode == 11
@@ -185,20 +179,20 @@ int poll(void* user, void* raw, const ps_result_query_v2* query,
       }
       observed.waiting.store(0, std::memory_order_release);
     }
-    return PS_RESULT_PUBLISH_V2;
+    return PS_RESULT_PUBLISH_V3;
   }
   if (query->backend == 2 && (observed.mode == 4 || observed.mode == 5)) {
     static_cast<void>(publish(services, number, observed.mode == 5));
     return 3;
   }
-  return publish(services, number, false) ? 1 : PS_RESULT_PUBLISH_V2;
+  return publish(services, number, false) ? 1 : PS_RESULT_PUBLISH_V3;
 }
 void destroy_state(void*, void*) {}
 void destroy_plugin(void*) {
   destroy_count.fetch_add(1);
 }
 const auto operations = [] {
-  std::array<ps_result_operation_v2, 16> result{};
+  std::array<ps_result_operation_v3, 16> result{};
   const std::array<const char*, 16> keys = {
       "fixture.double",
       "fixture.bad_facet",
@@ -221,8 +215,8 @@ const auto operations = [] {
     op.struct_size = sizeof(op);
     op.key = keys[i];
     op.key_size = std::strlen(keys[i]);
-    op.flags = PS_RESULT_FLAG_CPU_V2 | PS_RESULT_FLAG_DETERMINISTIC_V2 |
-               PS_RESULT_FLAG_SIDE_EFFECT_FREE_V2;
+    op.flags = PS_RESULT_FLAG_CPU_V3 | PS_RESULT_FLAG_DETERMINISTIC_V3 |
+               PS_RESULT_FLAG_SIDE_EFFECT_FREE_V3;
     op.inputs = &port;
     op.input_count = 1;
     op.outputs = &output;
@@ -239,7 +233,7 @@ const auto operations = [] {
       op.user_data = &observations[mode];
     }
     if (i >= 2 && i <= 14)
-      op.flags |= PS_RESULT_FLAG_GPU_V2 | PS_RESULT_FLAG_CPU_FALLBACK_V2;
+      op.flags |= PS_RESULT_FLAG_GPU_V3 | PS_RESULT_FLAG_CPU_FALLBACK_V3;
     if (!i) {
       op.parameters = &scale;
       op.parameter_count = 1;
@@ -247,13 +241,13 @@ const auto operations = [] {
   }
   return result;
 }();
-const ps_result_operation_plugin_api_v2 api = {
-    sizeof(api),       PS_RESULT_OPERATION_ABI_VERSION_2,
+const ps_result_operation_plugin_api_v3 api = {
+    sizeof(api),       PS_RESULT_OPERATION_ABI_VERSION_3,
     operations.data(), operations.size(),
     nullptr,           destroy_plugin};  // NOLINT(whitespace/indent_namespace)
 }  // namespace
-extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v2*
-ps_result_operation_plugin_get_api_v2(void) {
+extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v3*
+ps_result_operation_plugin_get_api_v3(void) {
   return &api;
 }
 extern "C" PS_RESULT_EXPORT std::uint32_t ps_operation_fixture_destroy_count() {

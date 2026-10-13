@@ -12,15 +12,17 @@
 #include <utility>
 #include <vector>
 
-#include "00-foundation/tensor_program.hpp"
 #include "02-format-color/model_math.hpp"
 #include "02-format-color/model_simd.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "common/registry.hpp"
+#include "common/tensor_program.hpp"
+#include "common/typed_need_validation.hpp"
 #include "core/status_helpers.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/tensor_description.hpp"
 #include "photospider/ops/format/channel.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -44,8 +46,8 @@ struct Preparation final {
   struct Span final {
     Region region;
     Slot slot;
-    unsigned mask = 0, roles = 1;
-    std::vector<std::vector<ResultMappedAxis>> maps;
+    unsigned mask = 0;
+    std::vector<std::vector<ResultViewAxis>> maps;
   };
   std::vector<Span> spans;
 };
@@ -947,14 +949,10 @@ Result<OperationPreparation> prepare(
       span.mask = slot.component < 0
                       ? 1U
                       : support(kind, slot.component, out.math.gray);
-      span.roles = slot.component >= 0 &&
-                           (out.math.semantic || kind == Kind::BinaryToGray)
-                       ? 5U
-                       : 1U;
       for (unsigned c = 0; c < 3; ++c) {
         if (!(span.mask & (1U << c)))
           continue;
-        std::vector<ResultMappedAxis> axes(full_shape.size());
+        std::vector<ResultViewAxis> axes(full_shape.size());
         for (unsigned axis = 0; axis < axes.size(); ++axis) {
           auto& map = axes[axis];
           if (out.source_axis && axis == *out.source_axis) {
@@ -1020,17 +1018,15 @@ void check(Status status) {
   if (!status.ok())
     throw status;
 }
-ResultBuilder builder_for(const ResultProgramPhase& phase, bool empty) {
+ResultBuilder builder_for(const ResultProgramPhase& phase, bool /*empty*/) {
   auto builder = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
-  check(builder.bind_descriptor_relation(take(ResultRelation::cartesian(
-      phase.resources, 1,
-      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+      phase.query.tile_extent, phase.query.resources));
+
   return builder;
 }
 Poll empty_result(const ResultProgramPhase& phase) try {
@@ -1051,36 +1047,8 @@ std::optional<Region> intersection(const Region& a, const Region& b) {
   }
   return Region(std::move(dims));
 }
-ResultRelation relation_for(const ResultProgramPhase& phase,
-                            const Preparation& p) {
-  const auto& tensor = phase.query.output.result_schema->tensors[0];
-  const auto shape = tensor.sample_shape();
-  ResourceVector<ResultRelation> pieces;
-  for (const auto& span : p.spans)
-    for (const auto& map : span.maps) {
-      check(phase.consume_work(shape.size() + 1));
-      pieces.push_back(take(ResultRelation::mapped(
-          phase.resources, shape, span.region, p.source_shape, map,
-          {0, span.roles, 0, 0, ResultSupportTarget::Tensor, 0})));
-    }
-  pieces.push_back(take(ResultRelation::cartesian(
-      phase.resources, take(tensor.sample_count()),
-      {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
-  while (pieces.size() > 1) {
-    ResourceVector<ResultRelation> next;
-    for (std::size_t first = 0; first < pieces.size(); first += 16) {
-      check(phase.consume_work(17));
-      std::vector<ResultRelation> group;
-      for (auto i = first; i < std::min(first + 16, pieces.size()); ++i)
-        group.push_back(pieces[i]);
-      next.push_back(take(ResultRelation::unite(phase.resources, group)));
-    }
-    pieces = std::move(next);
-  }
-  return pieces.front();
-}
 std::vector<std::uint64_t> mapped_coordinate(
-    const std::vector<ResultMappedAxis>& map,
+    const std::vector<ResultViewAxis>& map,
     const std::vector<std::uint64_t>& at) {
   std::vector<std::uint64_t> source;
   for (const auto& axis : map)
@@ -1286,6 +1254,9 @@ struct State final {
   Footprint output;
   explicit State(const Preparation* prepared) : p(prepared) {}
   Poll poll(const ResultProgramPhase& phase) try {
+    auto checked_inputs = ops_validation::typed_inputs(phase);
+    if (!checked_inputs.ok())
+      return Result<ResultProgramPoll>(checked_inputs);
     const auto& spec = phase.query.output.result_schema->tensors[0];
     if (!requested) {
       requested = true;
@@ -1293,7 +1264,6 @@ struct State final {
                    ? *phase.query.tensor_outputs
                    : take(Footprint::all(spec.sample_shape()));
       std::vector<Region> regions;
-      unsigned roles = 8;
       for (const auto& span : p->spans)
         for (const auto& box : output.boxes()) {
           check(phase.consume_work(box.rank() + 1));
@@ -1301,14 +1271,19 @@ struct State final {
           if (!part)
             continue;
           for (const auto& map : span.maps) {
-            roles |= span.roles;
             regions.push_back(format_result::mapped_region(*part, map));
           }
         }
       ResultProgramNeed need;
-      need.tensors.push_back(
-          {0, 0, take(Footprint::from_regions(p->source_shape, regions)),
-           roles});
+      {
+        auto tile_need_0 = sdk::tile_need_for_samples(
+            phase.resources, phase.query, 0, 0,
+            take(Footprint::from_regions(p->source_shape, regions)),
+            regions.empty());
+        if (!tile_need_0.ok())
+          return Result<ResultProgramPoll>(tile_need_0.status());
+        need.tiles.push_back(tile_need_0.take_value());
+      }
       return Poll(std::move(need));
     }
     input_internal::Float32Environment environment;
@@ -1349,7 +1324,6 @@ struct State final {
     auto result = [&]() -> Poll {
       try {
         auto builder = builder_for(phase, false);
-        const auto relation = relation_for(phase, *p);
         for (const auto& span : p->spans)
           for (const auto& box : output.boxes()) {
             check(work(box.rank() + 1));
@@ -1372,8 +1346,8 @@ struct State final {
                     format_result::PublicationCounts counts;
                     const auto status = format_result::publish(
                         phase, &builder, region, inputs[0], span.maps[0],
-                        relation, p->layout == Layout::View ? "view" : "auto",
-                        0, &counts);
+                        p->layout == Layout::View ? "view" : "auto", 0,
+                        &counts);
                     report.view_elements += counts.viewed;
                     report.copied_elements += counts.copied;
                     return status;
@@ -1391,7 +1365,6 @@ struct State final {
                           return status;
                         }
                       },
-                      relation, {true, true, true, true},
                       phase.query.cancellation);
                 }));
           }
@@ -1444,7 +1417,7 @@ OperationDefinition definition(Kind kind, SequenceProfile profile,
   output.key = "values";
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
-  output.region_rule = OperationRegionRule::Dependency;
+  output.region_rule = OperationRegionRule::Tiled;
   output.continuation_bytes = sizeof(State);
   output.maximum_dependency_stages = 2;
   def.prepare_static = [kind, profile](const auto& inputs, const auto& params) {

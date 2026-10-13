@@ -337,7 +337,7 @@ void probability_dependencies(ps::CpuNumericProfile profile) {
     output.output_schema.result_schema_id = schema.id;
     output.output_schema.result_schema_version = schema.version;
     output.result_schema = schema;
-    output.region_rule = ps::OperationRegionRule::Dependency;
+    output.region_rule = ps::OperationRegionRule::Tiled;
     output.regional_atomic = true;
     output.continuation_bytes = 1;
     output.maximum_dependency_stages = 1;
@@ -565,8 +565,6 @@ void failure_and_schema(ps::CpuNumericProfile profile) {
   auto oversized = registry->resolve_traits(
       node.operation,
       {ps::OperationMetadata{
-          {},
-          {},
           std::make_shared<ps::SchemaTemplate>(oversized_schema)}},
       node.parameters);
   require(!oversized.ok() &&
@@ -750,13 +748,19 @@ struct BlockProbeState {
       : control(std::move(observed)) {}
   ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
     using Answer = ps::Result<ps::ResultProgramPoll>;
-    const auto atom = take(ps::result_atom_key(phase.query));
-    const auto coordinate = atom.coordinate[0];
+    if (!phase.query.tensor_outputs ||
+        phase.query.tensor_outputs->boxes().size() != 1 ||
+        phase.query.tensor_outputs->boxes()[0].rank() != 1 ||
+        phase.query.tensor_outputs->boxes()[0].dimensions()[0].extent != 1)
+      return Answer(ps::Status{ps::ErrorCode::InvalidArgument,
+                               "block probe requires one sample"});
+    const auto coordinate =
+        phase.query.tensor_outputs->boxes()[0].dimensions()[0].offset;
     const auto roles = phase.query.output_index ? 2U : 1U;
     if (!requested) {
       requested = true;
       ps::ResultProgramNeed need;
-      need.tensors.push_back({0, 0, *phase.query.tensor_outputs, roles});
+      need.tiles.push_back({0, 0, *phase.query.tensor_outputs, roles});
       return Answer(std::move(need));
     }
     auto state = probe_state(phase.resources, 0);
@@ -823,7 +827,7 @@ ps::OperationDefinition block_probe(
                      i ? "manual.block.indices" : "manual.block.values");
     output.output_schema.result_schema_id = output.result_schema->id;
     output.output_schema.result_schema_version = output.result_schema->version;
-    output.region_rule = ps::OperationRegionRule::Dependency;
+    output.region_rule = ps::OperationRegionRule::Tiled;
     output.continuation_bytes = sizeof(BlockProbeState);
     output.maximum_dependency_stages = 2;
   }
@@ -910,16 +914,13 @@ void block_contracts() {
       point_math_checks::released(root);
     }
   }
-  for (unsigned invalid = 0; invalid < 4; ++invalid) {
+  for (unsigned invalid = 0; invalid < 3; ++invalid) {
     auto definition = block_probe(true, std::make_shared<BlockProbeControl>());
     if (invalid == 0) {
       definition.traits.deterministic = false;
       definition.traits.cacheable = false;
     } else if (invalid == 1) {
       definition.traits.outputs[0].regional_atomic = true;
-    } else if (invalid == 2) {
-      definition.traits.outputs[0].observation_kind =
-          ps::ObservationKind::RequestRecord;
     } else {
       definition.traits.side_effect_free = false;
       definition.traits.cacheable = false;
@@ -964,8 +965,11 @@ void changed_probability_and_source(ps::CpuNumericProfile profile) {
     const ps::DemandQuery query{{"values", take(ps::Footprint::all({1}))}};
     retained = take(demand.request(query)).results.at("values");
     auto shared = take(demand.request(query));
-    require(shared.results.at("values").object_id() == retained.object_id(),
-            "same frozen demand shares Result identity");
+    require(
+        shared.diagnostics.cache_hits > 0 &&
+            numeric_result_fixture::bytes(shared.results.at("values")) ==
+                numeric_result_fixture::bytes(retained),
+        "repeated demand reuses bounded completed cache with identical bits");
     auto fresh_bindings = fixture.bind(root);
     auto fresh = take(context.freeze(plan.plan, fresh_bindings));
     auto warm = take(context.execute_fragments(fresh, query));

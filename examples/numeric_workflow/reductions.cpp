@@ -322,7 +322,7 @@ void source_node(Fixture* fixture,
     output.result_schema->publication = ps::PublishPolicy::StablePrefix;
   output.output_schema.result_schema_id = output.result_schema->id;
   output.output_schema.result_schema_version = output.result_schema->version;
-  output.region_rule = ps::OperationRegionRule::Dependency;
+  output.region_rule = ps::OperationRegionRule::Tiled;
   output.regional_atomic = true;
   output.continuation_bytes = sizeof(SourceProgram);
   output.maximum_dependency_stages = fail_tail ? 2 : 1;
@@ -413,7 +413,7 @@ void metadata_count(ps::CpuNumericProfile profile) {
   output.result_schema = schema;
   output.output_schema.result_schema_id = schema.id;
   output.output_schema.result_schema_version = schema.version;
-  output.region_rule = ps::OperationRegionRule::Dependency;
+  output.region_rule = ps::OperationRegionRule::Tiled;
   output.regional_atomic = true;
   output.continuation_bytes = 1;
   output.maximum_dependency_stages = 1;
@@ -716,8 +716,11 @@ void cache_and_lifetime(ps::CpuNumericProfile profile) {
     retained = cold.results.at("values");
     auto shared = take(demand.request({{"values", query}}));
     check_numeric(shared, profile, 0, false);
-    require(shared.results.at("values").object_id() == retained.object_id(),
-            "same Frozen shares reducer identity");
+    require(
+        shared.diagnostics.cache_hits > 0 &&
+            numeric_result_fixture::bytes(shared.results.at("values")) ==
+                numeric_result_fixture::bytes(retained),
+        "repeated demand reuses bounded completed cache with identical bits");
     auto fresh_bindings = fixture.bind(root);
     auto fresh = take(context.freeze(plan.plan, fresh_bindings));
     auto warm = take(context.execute_fragments(fresh, {{"values", query}}));

@@ -561,9 +561,12 @@ void cache_and_upstream(ps::CpuNumericProfile profile) {
       const auto cold = take(demand.request(query, {}, options));
       const auto repeated = take(demand.request(query, {}, options));
       for (const auto* name : {"samples", "positions"})
-        require(cold.results.at(name).object_id() ==
-                    repeated.results.at(name).object_id(),
-                "repeated resampling demand retains completed Results");
+        require(
+            repeated.diagnostics.cache_hits > 0 &&
+                numeric_result_fixture::bytes(cold.results.at(name)) ==
+                    numeric_result_fixture::bytes(repeated.results.at(name)),
+            "repeated demand reuses bounded completed cache with identical "
+            "bits");
       const auto fresh = fixture.bindings(root);
       const auto warm = take(context.execute_fragments(
           take(context.freeze(plan, fresh)), query, {}, options));

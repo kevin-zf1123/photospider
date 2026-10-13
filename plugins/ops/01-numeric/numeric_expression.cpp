@@ -17,7 +17,7 @@
 #include "01-numeric/sequence_profiles.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/ops/numeric/expression.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "common/registry.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
 namespace {

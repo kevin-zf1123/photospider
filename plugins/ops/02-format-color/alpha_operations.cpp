@@ -12,7 +12,9 @@
 #include "02-format-color/alpha_common.hpp"
 #include "02-format-color/alpha_math.hpp"
 #include "02-format-color/alpha_numeric_metadata.hpp"
+#include "common/typed_need_validation.hpp"
 #include "photospider/data/region_runs.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal {
 namespace alpha_ops {
@@ -22,8 +24,8 @@ struct Slot final {
   bool alpha = false;
 };
 struct Map final {
-  std::uint32_t port = 0, roles = 1;
-  std::vector<ResultMappedAxis> axes;
+  std::uint32_t port = 0;
+  std::vector<ResultViewAxis> axes;
 };
 struct Span final {
   std::uint64_t first = 0, count = 1;
@@ -52,7 +54,7 @@ Map mapping(const Preparation& state,
   const auto source_axis =
       map.port == 0 ? state.input_axis : std::optional<std::uint32_t>{};
   for (std::size_t axis = 0; axis < input.sample_shape().size(); ++axis) {
-    ResultMappedAxis item;
+    ResultViewAxis item;
     if (alpha && state.scalar) {
       item.source_origin = 0;
     } else if (axis < batches) {
@@ -71,15 +73,14 @@ Map mapping(const Preparation& state,
   }
   return map;
 }
-bool same_axis(const ResultMappedAxis& a, const ResultMappedAxis& b) {
+bool same_axis(const ResultViewAxis& a, const ResultViewAxis& b) {
   return a.output_axis == b.output_axis && a.source_origin == b.source_origin &&
          a.step == b.step && a.extent == b.extent &&
          a.output_origin == b.output_origin;
 }
 std::optional<Map> merge_map(const Map& first, const Map& second,
                              std::uint32_t output_axis, std::uint64_t start) {
-  if (first.port != second.port || first.roles != second.roles ||
-      first.axes.size() != second.axes.size())
+  if (first.port != second.port || first.axes.size() != second.axes.size())
     return {};
   auto result = first;
   for (std::size_t i = 0; i < first.axes.size(); ++i) {
@@ -104,8 +105,7 @@ std::optional<Map> merge_map(const Map& first, const Map& second,
 }
 bool matches_map(const Map& merged, const Map& item, std::uint32_t output_axis,
                  std::uint64_t channel) {
-  if (merged.port != item.port || merged.roles != item.roles ||
-      merged.axes.size() != item.axes.size())
+  if (merged.port != item.port || merged.axes.size() != item.axes.size())
     return false;
   for (std::size_t i = 0; i < item.axes.size(); ++i) {
     const auto& a = merged.axes[i];
@@ -446,7 +446,6 @@ Result<OperationPreparation> prepare_alpha(
   }
   OperationOutputSpecialization output;
   output.metadata = inputs[0];
-  output.metadata.atomic_trailing_axes = 0;
   auto schema = *inputs[0].result_schema;
   auto& output_spec = schema.tensors[0];
   output_spec.atomic_trailing_axes = 0;
@@ -560,11 +559,6 @@ Result<OperationPreparation> prepare_alpha(
     return Answer(valid_shape);
   }
   s.alpha_map = mapping(s, inputs, true, s.alpha_index);
-  s.alpha_map.roles = static_cast<std::uint32_t>(
-      s.raw ? DependencyRole::Data : DependencyRole::Validation);
-  if (action != Action::Set) {
-    s.alpha_map.roles |= static_cast<std::uint32_t>(DependencyRole::Data);
-  }
   bool identity_view =
       action == Action::Set && !s.external && s.input_axis == s.output_axis;
   for (std::size_t k = 0; k < source_map.size(); ++k) {
@@ -577,8 +571,6 @@ Result<OperationPreparation> prepare_alpha(
     auto data = mapping(
         s, inputs, slot.alpha,
         slot.alpha ? s.alpha_index : static_cast<std::uint64_t>(original));
-    if (slot.alpha || (!s.raw && slot.color))
-      data.roles |= 4;
     s.data_maps.push_back(std::move(data));
     const auto actual =
         slot.alpha ? s.alpha_index : static_cast<std::uint64_t>(original);
@@ -635,8 +627,8 @@ using tensor_ops::require;
 using tensor_ops::take;
 using Poll = Result<ResultProgramPoll>;
 Status unavailable_view() {
-  return invalid(
-      "ViewUnavailable: full set-alpha map has no common affine owner");
+  return {ErrorCode::InvalidArgument, "no common affine owner mapping",
+          FailureReason::ViewUnavailable};
 }
 std::optional<std::uint32_t> output_axis(const Preparation& s,
                                          const ResultTensorSpec& spec) {
@@ -645,39 +637,14 @@ std::optional<std::uint32_t> output_axis(const Preparation& s,
                    spec.batch_axes.size() + *s.output_axis)}
              : std::nullopt;
 }
-ResultRelation joined(const ResultProgramPhase& phase,
-                      ResourceVector<ResultRelation> relations) {
-  const auto& root = phase.resources;
-  while (relations.size() > 1) {
-    ResourceVector<ResultRelation> next{
-        ResourceAllocator<ResultRelation>(root)};
-    for (std::size_t i = 0; i < relations.size(); i += 16) {
-      require(phase.consume_work(17));
-      std::vector<ResultRelation> group;
-      const auto end = std::min(relations.size(), i + 16);
-      for (auto j = i; j < end; ++j)
-        group.push_back(relations[j]);
-      next.push_back(take(ResultRelation::unite(root, std::move(group))));
-    }
-    relations = std::move(next);
-  }
-  return relations.front();
-}
-ResultBuilder builder(const ResultProgramPhase& phase, bool empty) {
+ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto result = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
-  ResourceVector<ResultRelation> relations{
-      ResourceAllocator<ResultRelation>(phase.resources)};
-  for (std::uint32_t port = 0; port < phase.query.inputs.size(); ++port)
-    relations.push_back(take(ResultRelation::cartesian(
-        phase.resources, 1,
-        {port, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0})));
-  require(result.bind_descriptor_relation(joined(phase, std::move(relations))));
+      phase.query.tile_extent, phase.query.resources));
   return result;
 }
 Poll empty_result(const ResultProgramPhase& phase) try {
@@ -692,30 +659,6 @@ Region channel_region(const Region& box, std::optional<std::uint32_t> axis,
   if (axis)
     dims[*axis] = {channel, 1};
   return Region(std::move(dims));
-}
-ResultRelation relation(const ResultProgramPhase& phase, const Preparation& s) {
-  const auto& spec = phase.query.output.result_schema->tensors[0];
-  const auto shape = spec.sample_shape();
-  const auto axis = output_axis(s, spec);
-  ResourceVector<ResultRelation> relations{
-      ResourceAllocator<ResultRelation>(phase.resources)};
-  for (const auto& span : s.spans) {
-    require(phase.consume_work(span.map.axes.size() + 1));
-    auto dims = Region::whole(shape).dimensions();
-    if (axis)
-      dims[*axis] = {span.first, span.count};
-    const auto& map = span.map;
-    relations.push_back(take(ResultRelation::mapped(
-        phase.resources, shape, Region(std::move(dims)),
-        phase.query.inputs[map.port].result_schema->tensors[0].sample_shape(),
-        map.axes,
-        {map.port, map.roles, 0, 0, ResultSupportTarget::Tensor, 0})));
-  }
-  for (std::uint32_t port = 0; port < phase.query.inputs.size(); ++port)
-    relations.push_back(take(ResultRelation::cartesian(
-        phase.resources, take(spec.sample_count()),
-        {port, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
-  return joined(phase, std::move(relations));
 }
 // Inspect only authorized backing metadata. This proves the full declared map
 // but does not grant any additional sample authorization or output coverage.
@@ -982,9 +925,11 @@ struct State final {
   const Preparation* state;
   bool requested = false;
   Footprint output;
-  ResultRelation support;
   explicit State(const Preparation* prepared) : state(prepared) {}
   Poll poll(const ResultProgramPhase& phase) try {
+    auto checked_inputs = ops_validation::typed_inputs(phase);
+    if (!checked_inputs.ok())
+      return Result<ResultProgramPoll>(checked_inputs);
     auto scratch =
         take(phase.resources.reserve(ResourceCapacity::host(16384, 16384)));
     const auto& spec = phase.query.output.result_schema->tensors[0];
@@ -994,7 +939,6 @@ struct State final {
       output = phase.query.tensor_outputs
                    ? *phase.query.tensor_outputs
                    : take(Footprint::all(spec.sample_shape()));
-      support = relation(phase, s);
       ResultProgramNeed need;
       FootprintLimits limits;
       limits.cancellation = phase.query.cancellation;
@@ -1004,19 +948,35 @@ struct State final {
       for (std::uint32_t port = 0; port < phase.query.inputs.size(); ++port) {
         auto samples = take(Footprint::none(
             phase.query.inputs[port].result_schema->tensors[0].sample_shape()));
-        std::uint32_t roles = 8;
-        require(support.project(
-            output,
-            [&](auto source, const Footprint* selected) {
-              require(phase.consume_work(1));
-              if (source.input == port && selected) {
-                roles |= source.roles;
-                samples = take(samples.unite(*selected, limits));
-              }
-              return Status::success();
-            },
-            limits));
-        need.tensors.push_back({port, 0, std::move(samples), roles});
+        for (const auto& span : s.spans) {
+          if (span.map.port != port)
+            continue;
+          require(phase.consume_work(span.map.axes.size() + 1));
+          auto dims = Region::whole(spec.sample_shape()).dimensions();
+          const auto axis = output_axis(s, spec);
+          if (axis)
+            dims[*axis] = {span.first, span.count};
+          const auto selected = take(output.intersect(
+              take(Footprint::from_regions(spec.sample_shape(),
+                                           {Region(std::move(dims))}, limits)),
+              limits));
+          for (const auto& box : selected.boxes())
+            samples = take(samples.unite(
+                take(Footprint::from_regions(
+                    samples.shape(),
+                    {format_result::mapped_region(box, span.map.axes)},
+                    limits)),
+                limits));
+        }
+        const bool descriptor_only = samples.empty();
+        {
+          auto tile_need_0 =
+              sdk::tile_need_for_samples(phase.resources, phase.query, port, 0,
+                                         std::move(samples), descriptor_only);
+          if (!tile_need_0.ok())
+            return Result<ResultProgramPoll>(tile_need_0.status());
+          need.tiles.push_back(tile_need_0.take_value());
+        }
       }
       return Poll(std::move(need));
     }
@@ -1049,8 +1009,7 @@ struct State final {
           if (address < 0 || address > UINT64_MAX)
             return invalid("view address overflow");
           layout.byte_offset = static_cast<std::uint64_t>(address);
-          return result.publish_tensor(0, box, layout, proof.owner, support,
-                                       {true, true, true, true},
+          return result.publish_tensor(0, box, layout, proof.owner,
                                        phase.query.cancellation);
         }
         const auto axis = output_axis(s, spec);
@@ -1065,7 +1024,7 @@ struct State final {
                        .acquire(format_result::mapped_region(part, map.axes),
                                 phase.query.cancellation));
           require(format_result::publish(phase, &result, part, source, map.axes,
-                                         support, policy, map.port));
+                                         policy, map.port));
         }
         return Status::success();
       }
@@ -1080,7 +1039,7 @@ struct State final {
               return status;
             }
           },
-          support, {true, true, true, true}, phase.query.cancellation);
+          phase.query.cancellation);
     }));
     require(phase.consume_work(1));
     if (phase.query.cancellation.cancelled())
@@ -1136,7 +1095,7 @@ OperationDefinition alpha_definition(const std::string& key, Action action,
   out.key = "values";
   out.output_schema = port;
   out.result_schema = tensor_ops::scalar_schema();
-  out.region_rule = OperationRegionRule::Dependency;
+  out.region_rule = OperationRegionRule::Tiled;
   out.continuation_bytes = sizeof(State);
   out.maximum_dependency_stages = 2;
   d.prepare_static = [action, profile](const auto& inputs, const auto& params) {

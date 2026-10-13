@@ -139,11 +139,9 @@ void planar_and_scalar() {
     Fixture f;
     PlanarImageConfig config;
     config.order = order;
-    const Region part({{127, 3}, {127, 3}, {1, 2}});
-    f.image({ElementType::Float32, {131, 133, 4}}, config, {part});
+    f.image({ElementType::Float32, {131, 133, 4}}, config);
     config.channel_axis.reset();
-    f.image({ElementType::Float32, {131, 133}}, config,
-            {Region({{127, 3}, {127, 3}})});
+    f.image({ElementType::Float32, {131, 133}}, config);
     f.add({ElementType::Float32, {1}});
     auto inputs = edit_inputs(f, {{false, 2}, {true, {}}, {false, {}, true}});
     format::ChannelAssemblyOptions options;
@@ -155,7 +153,7 @@ void planar_and_scalar() {
     auto result = run(f, edge, roi);
     check_oracle(result, f, 2, {2, {}, {}}, {{1, 0}, {0, 1}, {0, 2}, {2, 0}},
                  roi);
-    require(source_bytes(result, f) == 112,
+    require(source_bytes(result, f) == 131 * 133 * 12 + 4,
             "sparse base/external/scalar exact sample support");
     const Region alpha({{127, 3}, {127, 3}, {3, 1}});
     for (const std::uint32_t bits :
@@ -167,8 +165,8 @@ void planar_and_scalar() {
       result = run(f, edge, alpha);
       check_oracle(result, f, 2, {2, {}, {}}, {{1, 0}, {0, 1}, {0, 2}, {2, 0}},
                    alpha);
-      require(source_bytes(result, f) == 4,
-              "scalar sample support excludes base pixels");
+      require(source_bytes(result, f) == 131 * 133 * 12 + 4,
+              "complete output tiles still require base pixels and scalar");
     }
     options.layout = "view";
     edge = take(format::replace_channels(f.document, inputs,
@@ -215,8 +213,8 @@ void dependencies_and_errors() {
   auto partial = run(f, edge, alpha.boxes()[0]);
   auto needs = take(partial.dependencies.source_support());
   require(take(needs.at("input2").element_count()) == 1 &&
-              (!needs.count("input1") || needs.at("input1").empty()),
-          "scalar backward exact");
+              take(needs.at("input1").element_count()) == 6,
+          "Whole request reads the retained base channels and scalar once");
   auto dirty = take(complete.dependencies.potential_dirty(
                         "input2", take(Footprint::all({1})), 1, {},
                         ResultSupportTarget::Tensor, 0))

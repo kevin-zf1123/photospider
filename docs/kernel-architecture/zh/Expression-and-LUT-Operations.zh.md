@@ -34,8 +34,6 @@
 
 [`test_expression_operations.cpp`](../../../tests/integration/test_expression_operations.cpp) 覆盖未带后缀表达式和 LUT 操作，包括语法与数值边界、端点行为、单位匹配、接近精度边界的插值、分配和取消。
 
-[`examples/foundations_workflow`](../../../examples/foundations_workflow/README.zh.md) 展示基于 Result 的 `numeric`、`expression-lut` 和 `generator-gain` workflow。具名系数 authoring API 和 profile 示例位于 [`examples/numeric_workflow`](../../../examples/numeric_workflow/README.md)。直接绑定的结果缓存准入见[宿主缓存模型](Cache-Model.zh.md)。
-
 ```sh
 cmake --build build/kernel-dev --target test_expression_operations photospider_foundations_workflow -j8
 ctest --test-dir build/kernel-dev -R '^(test_expression_operations|test_workflow_expression_lut)$' --output-on-failure

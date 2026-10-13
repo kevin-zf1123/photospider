@@ -25,7 +25,6 @@
 #include "data/result_support.hpp"
 #include "data/result_window_access.hpp"
 #include "data/value_validation.hpp"
-#include "photospider/data/representation.hpp"
 #include "photospider/data/tensor_description.hpp"
 
 namespace ps {
@@ -68,15 +67,13 @@ Result<ResourceVector<ResultRef::CacheStorage>> ResultRef::cache_storage(
       return Answer(Status{ErrorCode::NotFound, {}});
     for (std::size_t field = 0; field < source.schema.fields.size(); ++field) {
       const auto& storage = source.fields[field].storage;
-      if (!storage.valid())
+      if (!storage)
         continue;
-      const auto size = storage.size();
-      std::uint64_t rounded = 0;
-      if (!core_internal::checked_align_up(size, 4096, &rounded))
-        return Answer(Status{ErrorCode::ResourceExhausted, {}});
-      auto status = add(storage.impl_.get(), rounded);
-      if (!status.ok())
-        return Answer(status);
+      for (const auto& chunk : storage->chunks) {
+        auto status = add(chunk.bytes.get(), chunk.bytes->capacity());
+        if (!status.ok())
+          return Answer(status);
+      }
     }
     for (std::size_t slot = 0; slot < source.schema.tensors.size(); ++slot) {
       const auto& tensor = source.tensors[slot];
@@ -154,10 +151,6 @@ Result<ResultRef> ResultRef::rebind_cached(
   }
   if (!impl_->complete || !impl_->status().ok())
     return Result<ResultRef>(Status{ErrorCode::NotFound, {}});
-  // Self-associated PrimitiveRef rows need explicit ID relocation, so the
-  // content cache does not admit this family until it can relocate those rows.
-  if (impl_->schema.id == "photospider.path_set")
-    return Result<ResultRef>(Status{ErrorCode::NotFound, {}});
   auto charged = work(1 + impl_->schema.canonical_size() + association.size());
   if (!charged.ok())
     return Result<ResultRef>(charged);
@@ -177,7 +170,7 @@ Result<ResultRef> ResultRef::rebind_cached(
   auto started = ResultBuilder::start(
       impl_->budget, impl_->schema, scope, impl_->limits,
       std::vector<std::uint64_t>(association.begin(), association.end()), 128,
-      128, impl_->resources);
+      impl_->resources);
   if (!started.ok())
     return Result<ResultRef>(started.status());
   auto builder = started.take_value();
@@ -185,7 +178,6 @@ Result<ResultRef> ResultRef::rebind_cached(
   target->cache_metadata = admitted.take_value();
   target->fields = impl_->fields;
   target->tensors = impl_->tensors;
-  target->descriptor_relation = impl_->descriptor_relation;
   target->image_budget = impl_->image_budget;
   target->bytes = impl_->bytes;
   lock.unlock();
@@ -198,7 +190,6 @@ Result<ResultRef> ResultRef::rebind_cached(
   if (!sealed.ok())
     return sealed;
   auto result = sealed.take_value();
-  result.request_record_ = request_record_;
   return Result<ResultRef>(std::move(result));
 } catch (const std::bad_alloc&) {
   return Result<ResultRef>(Status{ErrorCode::ResourceExhausted, {}});
@@ -331,17 +322,5 @@ Status ResultRef::production_status() const {
   return impl_->failure.ok() && !impl_->cancelled_publication.load()
              ? data_internal::unavailable()
              : impl_->status();
-}
-Result<ResultRelation> ResultRef::descriptor_relation() const {
-  if (captured_)
-    return Result<ResultRelation>(captured_->basis);
-  if (!impl_)
-    return Result<ResultRelation>(Status{ErrorCode::Stale, {}});
-  std::lock_guard<std::timed_mutex> lock(impl_->mutex);
-  if (!impl_->descriptor_relation.valid() ||
-      (!impl_->complete &&
-       impl_->schema.publication == PublishPolicy::CompleteBundle))
-    return Result<ResultRelation>(data_internal::unavailable());
-  return Result<ResultRelation>(impl_->descriptor_relation);
 }
 }  // namespace ps

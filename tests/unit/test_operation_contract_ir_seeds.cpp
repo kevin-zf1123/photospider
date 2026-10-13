@@ -58,7 +58,7 @@ int main() {
            OperationContractIrStage::CompilerAccepted);
 
   auto invalid_workflow = valid;
-  invalid_workflow[7] =
+  invalid_workflow[6] =
       0;  // Select an unknown operation after valid registration.
   PS_CHECK(exercise_operation_contract_ir_input(invalid_workflow.data(),
                                                 invalid_workflow.size()) ==

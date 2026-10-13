@@ -42,7 +42,7 @@ class FragmentAtlasPlan final {
 
 `preparation_work()` reports the generic directory-planning work. `materialization_work()` reports the generic packing work. The `ResultTensorInput` overload precharges window acquisition and read-bound work through `FootprintLimits::consume_work`, so `materialization_work()` is not its complete charge. The older `ValueFragments` overloads preserve their caller-charged work convention; their `consume_work` callback is not invoked.
 
-A `ResultTensorInput` may represent one source Result or private pieces created when a structured C2 producer's tensor Need is expanded into singleton-atom requests. Atlas preparation and materialization use only the capability's granted sample coverage. A compound capability has no single Result identity (`object_id() == 0`), but that value does not invalidate the authorized pieces or add read permission. The input windows retain their original Result owners while the atlas packs the requested samples; the atlas owns its packed buffers independently afterward. This path handles tensor Needs; it does not aggregate object or field support. Descriptor-only Empty C2 inputs are not supported.
+A `ResultTensorInput` may represent one source Result. Atlas preparation and materialization use only the capability's granted sample coverage. The input windows retain their original Result owners while the atlas packs the requested samples; the atlas owns its packed buffers independently afterward. This path handles tensor Needs; it does not aggregate object or field support.
 
 The directory has a power-of-two slot count, at least two and at least twice the occupied tile count. Slots use open addressing with linear probing. Each slot is 80 little-endian bytes:
 
@@ -62,7 +62,7 @@ Native callbacks use the configured synchronous invocation. The host keeps nativ
 
 The C Result bridge uses the same Need-scoped atlas. Atlas buffer tokens and dispatch services are borrowed for the active poll; releasing either member of the token pair retires the pair, and a later acquisition returns new handles. The host freezes transferred output scratch on publication, so a previously writable token cannot modify published bytes. Each Result output still records its own current association and dependency evidence.
 
-Synchronous GPU attempts may retry on CPU only when the operation permits CPU fallback and the failure is an eligible `BackendUnavailable`. The GPU invocation drains before its views retire or the CPU attempt starts. Cancellation, stale state, protocol errors, published output and other non-retryable failures do not become CPU retries. Result cache retention and active producer sharing remain separate from this fallback decision.
+Synchronous GPU attempts may retry on CPU only when the operation permits CPU fallback and the failure is an eligible `BackendUnavailable`. The GPU invocation drains before its views retire or the CPU attempt starts. Cancellation, stale state, protocol errors, published output and other non-retryable failures do not become CPU retries. Result cache retention remains separate from this fallback decision.
 
 Current integration sources exercise the transport and failure boundaries:
 

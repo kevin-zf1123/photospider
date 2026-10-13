@@ -18,94 +18,130 @@
 
 #include "../../examples/numeric_workflow/result_fixture.hpp"
 #include "photospider/photospider.hpp"
+#include "support/conditional_sum_fixture.hpp"
 #include "support/multi_output_result_fixture.hpp"
 #include "support/test_support.hpp"
 
 namespace {
 using namespace ps;  // NOLINT(build/namespaces)
-Footprint point(std::uint64_t at, std::uint64_t size = 5) {
-  return Footprint::from_regions({size}, {Region({{at, 1}})}).take_value();
+TileSet point(std::uint64_t at, std::uint64_t size = 5) {
+  if (at >= size)
+    throw std::runtime_error("test tile outside domain");
+  return multi_result::take(TileSet::from_indices(ResourceBudget{}, {at}));
+}
+TileSet all_tiles(std::uint64_t size) {
+  std::vector<TileIndex> indices;
+  for (TileIndex i = 0; i < size; ++i)
+    indices.push_back(i);
+  return multi_result::take(
+      TileSet::from_indices(ResourceBudget{}, indices.data(), indices.size()));
+}
+TileSet dirty_tiles(const ExecutionDependencies& dependencies,
+                    std::size_t input, const TileSet& changed,
+                    std::size_t step = 0) {
+  ResourceBudget root;
+  ResourceVector<TileChange> changes{ResourceAllocator<TileChange>(root)};
+  changes.push_back({PlanWorkflowInput{input}, 0, changed, false});
+  auto dirty = multi_result::take(dependencies.dirty_units(changes));
+  std::vector<TileIndex> tiles;
+  for (const auto& unit : dirty)
+    if (unit.step == step)
+      tiles.push_back(unit.tile);
+  return multi_result::take(
+      TileSet::from_indices(root, tiles.data(), tiles.size()));
 }
 template <class T>
 Value values(ElementType type, const std::vector<T>& numbers) {
-  auto writer =
-      MutableValue::allocate({type, {numbers.size()}},
-                             Region::whole({numbers.size()}), BufferAllocator{})
-          .take_value();
+  auto writer = MutableValue::allocate({type, {1, numbers.size()}},
+                                       Region::whole({1, numbers.size()}),
+                                       BufferAllocator{})
+                    .take_value();
   std::memcpy(writer.data(), numbers.data(), writer.size());
   return std::move(writer).publish().take_value();
 }
 ResultRef source(const ResourceBudget& root, const Value& backing) {
   // Immutable caller backing stays in Root Referenced accounting.
-  const auto schema = numeric_result_fixture::source_schema(backing);
-  auto builder =
-      multi_result::take(ResultBuilder::start(root, schema, "test.source"));
-  multi_result::check(builder.bind_descriptor_relation(
-      multi_result::take(ResultRelation::cartesian(root, 1, {}))));
+  auto schema = numeric_result_fixture::source_schema(backing);
+  schema.tensors[0].layout.spatial = true;
+  schema.tensors[0].layout.channel_axis.reset();
+  auto builder = multi_result::take(
+      ResultBuilder::start(root, schema, "test.source", {}, {}, 1));
+
   multi_result::check(builder.publish_tensor(
       0, backing.region(), backing.layout(),
-      multi_result::take(root.reference(backing.storage())),
-      multi_result::take(ResultRelation::cartesian(
-          root, multi_result::take(schema.tensors[0].sample_count()), {})),
-      {true, true, true, true}));
+      multi_result::take(root.reference(backing.storage()))));
   return multi_result::take(builder.seal());
 }
-WorkflowDocument scatter_document() {
+WorkflowDocument routing_document() {
   WorkflowDocument document;
   numeric_result_fixture::declare_sources(
       &document, {values<double>(ElementType::Float64, {1, 2, 3, 0, 5}),
                   values<std::int64_t>(ElementType::Int64, {0, 0, 0, 0, 0})});
+  for (auto& input : document.inputs) {
+    auto spatial = std::make_shared<SchemaTemplate>(*input.result_schema);
+    spatial->tensors[0].layout.spatial = true;
+    spatial->tensors[0].layout.channel_axis.reset();
+    input.result_schema = std::move(spatial);
+  }
   document.inputs[0].name = "data";
-  document.inputs[1].name = "radius";
+  document.inputs[1].name = "control";
   document.nodes = {{1,
-                     "numeric.radius_scatter",
+                     "test.conditional_sum",
                      {WorkflowInputReference{1}, WorkflowInputReference{2}},
                      {}}};
   document.outputs = {{"sum", 1, "value"}};
   return document;
 }
 int generations() {
-  auto registry = make_default_operation_registry();
-  GraphContext graph(scatter_document());
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto registry = ps::test::conditional_sum_registry();
+  GraphContext graph(routing_document());
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   ExecutionContext context(registry, {1, false, 8, 4096});
   const auto root = context.resource_budget().take_value();
   ExecutionBindings bindings{
       {{"data",
         source(root, values<double>(ElementType::Float64, {1, 2, 3, 0, 5}))},
-       {"radius", source(root, values<std::int64_t>(ElementType::Int64,
-                                                    {0, 0, 0, 0, 0}))}}};
+       {"control", source(root, values<std::int64_t>(ElementType::Int64,
+                                                     {0, 0, 0, 0, 0}))}}};
   auto opened = context.open_demand(plan, bindings);
   PS_CHECK(opened.ok());
   auto demand = opened.take_value();
   PS_CHECK(demand.generation().value() == 1);
-  const auto q = point(0).unite(point(4)).take_value();
-  DemandQuery query{{"sum", q}};
+  const auto q = point(0).unite(point(4), ResourceBudget{}).take_value();
+  DemandQuery query{{"sum", TileRequest{false, q}}};
   auto before = demand.request(query);
-  if (!before.ok())
-    std::cerr << before.status().message << '\n';
+  PS_REQUIRE_OK(before);
   PS_CHECK(before.ok() && before.value().generation == 1);
   PS_CHECK(before.value()
                .results.at("sum")
                .descriptor()
                .take_value()
-               .tensor_coverage(0) == q);
+               .tensor_coverage(0) ==
+           multi_result::take(Footprint::from_regions(
+               {1, 5}, {Region({{0, 1}, {0, 1}}), Region({{0, 1}, {4, 1}})})));
   double result = 0;
-  PS_CHECK(numeric_result_fixture::read(before.value().results.at("sum"), {0},
-                                        &result, 8)
+  PS_CHECK(numeric_result_fixture::read(before.value().results.at("sum"),
+                                        {0, 0}, &result, 8)
                .ok() &&
            result == 1);
-  PS_CHECK(!numeric_result_fixture::read(before.value().results.at("sum"), {1},
-                                         &result, 8)
+  PS_CHECK(!numeric_result_fixture::read(before.value().results.at("sum"),
+                                         {0, 1}, &result, 8)
                 .ok());
   auto retained = demand.request(query);
   PS_CHECK(retained.ok() &&
-           retained.value().diagnostics.operation_timings.empty() &&
-           retained.value().results.at("sum").object_id() ==
-               before.value().results.at("sum").object_id());
+           !retained.value().diagnostics.operation_timings.empty() &&
+           retained.value().diagnostics.cache_hits == 0 &&
+           numeric_result_fixture::read(retained.value().results.at("sum"),
+                                        {0, 0}, &result, 8)
+               .ok() &&
+           result == 1);
   auto frozen = demand.freeze().take_value();
   bindings.inputs[1].result =
-      source(root, values<std::int64_t>(ElementType::Int64, {0, 0, 0, 3, 0}));
+      source(root, values<std::int64_t>(ElementType::Int64, {0, 0, 0, 1, 0}));
   auto edit = demand.replace_bindings(bindings);
   if (!edit.ok())
     std::cerr << edit.status().message << '\n';
@@ -115,38 +151,37 @@ int generations() {
   auto same_value = demand.request(query);
   PS_CHECK(same_value.ok() &&
            numeric_result_fixture::read(same_value.value().results.at("sum"),
-                                        {0}, &result, 8)
+                                        {0, 0}, &result, 8)
                .ok() &&
            result == 1);
-  PS_CHECK(same_value.value()
-               .dependencies.potential_dirty("data", point(3))
-               .value()
-               .at("sum") == q);
+  PS_CHECK(dirty_tiles(same_value.value().dependencies, 0, point(3), 0) == q);
   auto old = context.execute_fragments(frozen, query);
   PS_CHECK(old.ok() && old.value().generation == 0);
-  PS_CHECK(old.value()
-               .dependencies.potential_dirty("data", point(3))
-               .value()
-               .at("sum")
-               .empty());
+  PS_CHECK(dirty_tiles(old.value().dependencies, 0, point(3), 0).empty());
   bindings.inputs[0].result =
       source(root, values<double>(ElementType::Float64, {1, 2, 3, 9, 5}));
   auto changed = demand.replace_bindings(bindings);
   PS_CHECK(changed.ok() && changed.value().potential_dirty.at("sum") == q);
   auto fresh = demand.request(query);
   PS_CHECK(fresh.ok() &&
-           numeric_result_fixture::read(fresh.value().results.at("sum"), {4},
+           numeric_result_fixture::read(fresh.value().results.at("sum"), {0, 4},
                                         &result, 8)
                .ok() &&
            result == 14);
-  // Only current witness samples are compared: radius[0..4] and data{0,3,4}.
+  // Only current witness samples are compared: control[0..4] and data{0,3,4}.
   bindings.inputs[0].result =
       source(root, values<double>(ElementType::Float64, {1, 2, 777, 9, 5}));
   auto unrelated =
-      demand.replace_bindings(bindings, SnapshotAccessOptions{10, {}});
+      demand.replace_bindings(bindings, SnapshotAccessOptions{8, {}});
   PS_CHECK(unrelated.ok() &&
            unrelated.value().potential_dirty.at("sum").empty());
-  auto failed = demand.replace_bindings(bindings, SnapshotAccessOptions{9, {}});
+  auto comparison = bindings;
+  comparison.inputs[0].result =
+      source(root, values<double>(ElementType::Float64, {1, 2, 777, 9, 5}));
+  comparison.inputs[1].result =
+      source(root, values<std::int64_t>(ElementType::Int64, {0, 0, 0, 1, 0}));
+  auto failed =
+      demand.replace_bindings(comparison, SnapshotAccessOptions{7, {}});
   PS_CHECK(failed.status().code == ErrorCode::ResourceExhausted);
   PS_CHECK(demand.generation().value() == unrelated.value().generation);
   auto bad_bindings = bindings;
@@ -158,7 +193,7 @@ int generations() {
   PS_CHECK(demand.release(query).code == ErrorCode::NotFound);
   auto no_subscriptions = demand.replace_bindings(bindings);
   PS_CHECK(no_subscriptions.ok() && no_subscriptions.value().coverage.empty());
-  auto empty = demand.request({{"sum", Footprint::none({5}).take_value()}});
+  auto empty = demand.request({{"sum", TileRequest{false, TileSet{}}}});
   PS_CHECK(empty.ok() && empty.value()
                              .results.at("sum")
                              .descriptor()
@@ -166,8 +201,7 @@ int generations() {
                              .tensor_coverage(0)
                              .empty());
   PS_CHECK(
-      empty.value().dependencies.source_observations().take_value().empty());
-  PS_CHECK(empty.value().dependencies.coverage().at("sum").empty());
+      !multi_result::take(empty.value().dependencies.tile_record({0, 0, 0})));
   PS_CHECK(demand.request({}).ok());
   PS_CHECK(demand.cancel() && !demand.cancel());
   PS_CHECK(demand.request(query).status().code == ErrorCode::Cancelled);
@@ -181,7 +215,7 @@ struct Gate {
   bool release = false;
   bool ignore_cancellation = false;
   unsigned released = 0;
-  std::atomic<unsigned> active{0}, joint_starts{0}, joint_polls{0};
+  std::atomic<unsigned> active{0};
   std::atomic<unsigned> narrow_starts{0}, wide_starts{0};
   bool await(unsigned count) {
     std::unique_lock<std::mutex> lock(mutex);
@@ -201,7 +235,9 @@ struct Gate {
 };
 SchemaTemplate tensor_schema(ElementType type = ElementType::Float64,
                              std::uint64_t count = 2) {
-  auto schema = multi_result::schema(type, {count});
+  auto schema = multi_result::schema(type, {1, count});
+  schema.tensors[0].layout.spatial = true;
+  schema.tensors[0].layout.channel_axis.reset();
   schema.id = "manual.lowpass.input";
   schema.tensors[0].key = "data";
   return schema;
@@ -226,6 +262,12 @@ ExecutionBinding snapshot_binding(const ExecutionContext& context,
 WorkflowDocument identity_document(const Value& value) {
   WorkflowDocument document;
   numeric_result_fixture::declare_sources(&document, {value});
+  for (auto& input : document.inputs) {
+    auto spatial = std::make_shared<SchemaTemplate>(*input.result_schema);
+    spatial->tensors[0].layout.spatial = true;
+    spatial->tensors[0].layout.channel_axis.reset();
+    input.result_schema = std::move(spatial);
+  }
   document.inputs[0].name = "image";
   document.nodes = {
       {1, "test.snapshot_identity", {WorkflowInputReference{1}}, {}}};
@@ -235,13 +277,12 @@ WorkflowDocument identity_document(const Value& value) {
 struct GatedProgram {
   std::shared_ptr<Gate> gate;
   std::shared_ptr<std::atomic<unsigned>> effects;
-  bool terminal = false, whole = false, staged = false;
+  bool whole = false, staged = false;
   unsigned stage = 0;
-  GatedProgram(std::shared_ptr<Gate> gate, bool terminal, bool whole,
-               bool staged, std::shared_ptr<std::atomic<unsigned>> effects = {})
+  GatedProgram(std::shared_ptr<Gate> gate, bool whole, bool staged,
+               std::shared_ptr<std::atomic<unsigned>> effects = {})
       : gate(std::move(gate)),
         effects(std::move(effects)),
-        terminal(terminal),
         whole(whole),
         staged(staged) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) {
@@ -250,13 +291,14 @@ struct GatedProgram {
     const auto shape = schema.tensors[0].sample_shape();
     const auto outputs = phase.query.tensor_outputs.value_or(
         multi_result::take(Footprint::all(shape)));
-    const auto wanted = terminal ? point(0, shape[0])
-                        : whole  ? multi_result::take(Footprint::all(shape))
-                                 : outputs;
+    const auto wanted =
+        whole ? multi_result::take(Footprint::all(shape)) : outputs;
     if (!effects && !outputs.empty() && stage < (staged ? 2U : 1U)) {
-      const auto roles = staged && stage == 0 ? 8U : 1U;
+      const bool descriptor_only = staged && stage == 0;
       ++stage;
-      return Answer(ResultProgramNeed{{}, {}, {{0, 0, wanted, roles}}});
+      return Answer(
+          ResultProgramNeed{{multi_result::take(sdk::tile_need_for_samples(
+              phase.resources, phase.query, 0, 0, wanted, descriptor_only))}});
     }
     if (gate && !outputs.empty()) {
       ++gate->active;
@@ -286,74 +328,31 @@ struct GatedProgram {
         phase.association
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
-            : std::vector<std::uint64_t>{}));
-    multi_result::check(builder.bind_descriptor_relation(
-        multi_result::take(ResultRelation::cartesian(phase.resources, 1, {}))));
+            : std::vector<std::uint64_t>{},
+        phase.query.tile_extent));
+
     const double effect = effects ? ++*effects : 0;
     for (const auto& box : outputs.boxes()) {
       auto bytes = multi_result::take(phase.allocator.allocate(
           multi_result::take(box.element_count()) * 8));
-      for (std::uint64_t i = 0; i < box.dimensions()[0].extent; ++i) {
-        const auto at = box.dimensions()[0].offset + i;
+      for (std::uint64_t i = 0; i < box.dimensions()[1].extent; ++i) {
+        const auto at = box.dimensions()[1].offset + i;
         double value = effect;
         if (!effects) {
-          auto status = phase.read_tensor(0, 0, {terminal ? 0 : at}, &value, 8);
+          auto status = phase.read_tensor(0, 0, {0, at}, &value, 8);
           if (!status.ok())
             return Answer(status);
           if (!std::isfinite(value))
             return Answer(Status{ErrorCode::OperationFailed,
                                  "nonfinite sample " + std::to_string(at)});
-          if (terminal)
-            value += multi_result::take(outputs.element_count());
         }
         std::memcpy(bytes.data() + i * 8, &value, 8);
       }
-      auto relation =
-          effects ? multi_result::take(ResultRelation::cartesian(
-                        phase.resources, shape[0], {}))
-          : whole ? multi_result::take(ResultRelation::cartesian(
-                        phase.resources, shape[0],
-                        {0, 1, 0, shape[0], ResultSupportTarget::Tensor, 0}))
-                  : multi_result::take(ResultRelation::mapped(
-                        phase.resources, shape, box, shape,
-                        terminal ? std::vector<ResultMappedAxis>{{-1, 0, 0, 1}}
-                                 : std::vector<ResultMappedAxis>{{0, 0, 1, 1}},
-                        {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
-      multi_result::check(
-          builder.publish_tensor(0, box, {0, {8}, {box.dimensions()[0].offset}},
-                                 std::move(bytes).freeze(), std::move(relation),
-                                 {true, true, true, true}));
+      multi_result::check(builder.publish_tensor(
+          0, box, {0, {8, 8}, {0, box.dimensions()[1].offset}},
+          std::move(bytes).freeze()));
     }
     return Answer(ResultPublication{multi_result::take(builder.seal()), true});
-  }
-};
-struct GatedJoint {
-  std::shared_ptr<Gate> gate;
-  std::array<GatedProgram, 2> states;
-  explicit GatedJoint(const std::shared_ptr<Gate>& gate)
-      : gate(gate),
-        states{GatedProgram(gate, false, false, false),
-               GatedProgram(gate, false, false, false)} {
-    ++this->gate->joint_starts;
-  }
-  Result<ResourceVector<ResultJointOutcome>> poll(
-      const ResultJointPhase& phase) {
-    ++gate->joint_polls;
-    ResourceVector<ResultJointOutcome> outcomes;
-    for (const auto* member : phase.members) {
-      const auto key = multi_result::take(result_atom_key(member->query));
-      auto result = states.at(key.coordinate.at(0)).poll(*member);
-      if (!result.ok() && result.status().code == ErrorCode::OperationFailed &&
-          result.status().message.find("nonfinite sample ") == 0) {
-        result = Result<ResultProgramPoll>(
-            Status{ErrorCode::OperationFailed,
-                   result.status().message,
-                   FailureReason::InvalidDomain,
-                   {FailureOrigin::Domain, FailureScope::Atom, key}});
-      }
-      outcomes.push_back({key, std::move(result)});
-    }
-    return Result<ResourceVector<ResultJointOutcome>>(std::move(outcomes));
   }
 };
 OperationDefinition copy_definition(const std::string& key,
@@ -363,7 +362,7 @@ OperationDefinition copy_definition(const std::string& key,
   op.traits.input_count = 1;
   op.traits.input_schema.resize(1);
   op.traits.input_schema[0].kind = OperationPortKind::Result;
-  op.traits.input_schema[0].rank = 1;
+  op.traits.input_schema[0].rank = 2;
   op.traits.outputs[0] = multi_result::output("value", tensor_schema());
   op.traits.outputs[0].continuation_bytes = state;
   op.traits.outputs[0].maximum_dependency_stages = 4;
@@ -371,7 +370,7 @@ OperationDefinition copy_definition(const std::string& key,
   op.traits.requires_metadata_specialization = true;
   op.traits.outputs[0].output_schema.result_schema_id.clear();
   op.traits.outputs[0].output_schema.result_schema_version = 0;
-  op.traits.outputs[0].output_schema.rank = 1;
+  op.traits.outputs[0].output_schema.rank = 2;
   op.specialize_metadata = [](const std::vector<OperationMetadata>& inputs,
                               const std::map<std::string, ParameterValue>&) {
     OperationOutputSpecialization output;
@@ -383,19 +382,16 @@ OperationDefinition copy_definition(const std::string& key,
 }
 std::shared_ptr<OperationRegistry> gated_registry(
     const std::shared_ptr<Gate>& gate, bool staged = false,
-    std::shared_ptr<std::atomic<unsigned>> effects = {}, bool terminal = false,
-    bool whole = false, bool gpu_fallback = false, bool per_atom = false) {
+    std::shared_ptr<std::atomic<unsigned>> effects = {}, bool whole = false,
+    bool gpu_fallback = false) {
   auto registry = std::make_shared<OperationRegistry>();
   auto op = copy_definition("wait", sizeof(GatedProgram));
   op.traits.supports_gpu = gpu_fallback;
   op.traits.allows_cpu_fallback = gpu_fallback;
   op.traits.outputs[0].region_rule =
-      whole ? OperationRegionRule::Whole : OperationRegionRule::Dependency;
-  if (terminal)
-    op.traits.outputs[0].observation_kind = ObservationKind::RequestRecord;
-  op.start_result = [gate, terminal, whole, staged](
-                        const ResultProgramQuery& query,
-                        const BufferAllocator& allocator) {
+      whole ? OperationRegionRule::Whole : OperationRegionRule::Tiled;
+  op.start_result = [gate, whole, staged](const ResultProgramQuery& query,
+                                          const BufferAllocator& allocator) {
     if (gate && query.tensor_outputs) {
       const auto count =
           multi_result::take(query.tensor_outputs->element_count());
@@ -404,26 +400,9 @@ std::shared_ptr<OperationRegistry> gated_registry(
       if (count == 2)
         ++gate->wide_starts;
     }
-    return ResultContinuation::make<GatedProgram>(allocator, gate, terminal,
-                                                  whole, staged);
+    return ResultContinuation::make<GatedProgram>(allocator, gate, whole,
+                                                  staged);
   };
-  if (per_atom) {
-    op.traits.outputs[0].failure_delivery = FailureDelivery::PerAtomOutcome;
-    op.traits.joint_contract = 2;
-    op.traits.joint_continuation_bytes = sizeof(GatedJoint);
-    op.traits.joint_workspace_bytes = 512;
-    op.start_result_joint = [gate](const ResourceVector<ResultProgramQuery>&,
-                                   const BufferAllocator& allocator) {
-      return ResultJointContinuation::make<GatedJoint>(allocator, gate);
-    };
-    auto consumer = copy_definition("pass", sizeof(GatedProgram));
-    consumer.start_result = [](const ResultProgramQuery&,
-                               const BufferAllocator& allocator) {
-      return ResultContinuation::make<GatedProgram>(allocator, nullptr, false,
-                                                    false, false);
-    };
-    multi_result::check(registry->register_operation(std::move(consumer)));
-  }
   if (effects) {
     OperationDefinition effect;
     effect.key = "effect";
@@ -437,7 +416,7 @@ std::shared_ptr<OperationRegistry> gated_registry(
     effect.start_result = [effects](const ResultProgramQuery&,
                                     const BufferAllocator& allocator) {
       return ResultContinuation::make<GatedProgram>(allocator, nullptr, false,
-                                                    false, false, effects);
+                                                    false, effects);
     };
     multi_result::check(registry->register_operation(std::move(effect)));
   }
@@ -456,21 +435,26 @@ int edit_and_cancel() {
   auto gate = std::make_shared<Gate>();
   auto registry = gated_registry(gate);
   GraphContext graph(gate_document());
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   auto context = std::make_unique<ExecutionContext>(
       registry, ExecutionContextConfig{2, false, 8, 4096});
   ExecutionBindings bindings{
       {binding(*context, "x", values<double>(ElementType::Float64, {1, 2}))}};
   auto demand = multi_result::take(context->open_demand(plan, bindings));
   gate->open();
-  PS_CHECK(demand.request({{"y", point(0, 2)}}).ok());
+  PS_CHECK(demand.request({{"y", TileRequest{false, point(0, 2)}}}).ok());
   {
     std::lock_guard<std::mutex> lock(gate->mutex);
     gate->entered = 0;
     gate->release = false;
   }
-  auto old = std::async(std::launch::async,
-                        [&] { return demand.request({{"y", point(0, 2)}}); });
+  auto old = std::async(std::launch::async, [&] {
+    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+  });
   PS_CHECK(gate->await(1));
   bindings.inputs[0].result =
       binding(*context, bindings.inputs[0].name,
@@ -481,13 +465,13 @@ int edit_and_cancel() {
   PS_CHECK(replaced.value().potential_dirty.at("y") == point(0, 2));
   gate->open();
   PS_CHECK(old.get().status().code == ErrorCode::Stale && gate->active == 0);
-  auto next = demand.request({{"y", point(0, 2)}});
+  auto next = demand.request({{"y", TileRequest{false, point(0, 2)}}});
   PS_CHECK(next.ok() && next.value().generation == 2);
   double value = 0;
-  PS_CHECK(
-      numeric_result_fixture::read(next.value().results.at("y"), {0}, &value, 8)
-          .ok() &&
-      value == 3);
+  PS_CHECK(numeric_result_fixture::read(next.value().results.at("y"), {0, 0},
+                                        &value, 8)
+               .ok() &&
+           value == 3);
   next = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
   // Each request owns its token; cancelling one does not stop the other.
   {
@@ -496,10 +480,12 @@ int edit_and_cancel() {
     gate->release = false;
   }
   CancellationSource cancel;
-  auto a = std::async(std::launch::async,
-                      [&] { return demand.request({{"y", point(0, 2)}}); });
+  auto a = std::async(std::launch::async, [&] {
+    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+  });
   auto b = std::async(std::launch::async, [&] {
-    return demand.request({{"y", point(1, 2)}}, cancel.token());
+    return demand.request({{"y", TileRequest{false, point(1, 2)}}},
+                          cancel.token());
   });
   PS_CHECK(gate->await(2));
   cancel.cancel();
@@ -513,20 +499,23 @@ int edit_and_cancel() {
     gate->entered = 0;
     gate->release = false;
   }
-  auto pending = std::async(
-      std::launch::async, [&] { return demand.request({{"y", point(0, 2)}}); });
+  auto pending = std::async(std::launch::async, [&] {
+    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+  });
   PS_CHECK(gate->await(1));
   context.reset();
   PS_CHECK(pending.get().status().code == ErrorCode::Cancelled &&
            gate->active == 0);
-  PS_CHECK(demand.request({{"y", point(0, 2)}}).status().code ==
-           ErrorCode::Cancelled);
+  PS_CHECK(
+      demand.request({{"y", TileRequest{false, point(0, 2)}}}).status().code ==
+      ErrorCode::Cancelled);
   return 0;
 }
 int replacement_during_shutdown() {
   auto registry = gated_registry(nullptr);
   GraphContext graph(gate_document());
-  auto compiled = Compiler(registry).compile(graph);
+  auto compiled = Compiler(registry).compile(
+      graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1});
   PS_REQUIRE_OK(compiled);
   auto plan = compiled.take_value().plan;
   for (unsigned attempt = 0; attempt < 16; ++attempt) {
@@ -560,7 +549,11 @@ int isolation_and_limits() {
   gate->open();
   auto registry = gated_registry(gate);
   GraphContext graph(gate_document());
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   ExecutionContextConfig config{1, false, 4, 4096};
   config.maximum_demands = 1;
   ExecutionContext context(registry, config);
@@ -571,21 +564,24 @@ int isolation_and_limits() {
   auto demand = context.open_demand(plan, bindings).take_value();
   PS_CHECK(context.open_demand(plan, bindings).status().code ==
            ErrorCode::ResourceExhausted);
-  PS_CHECK(demand.request({{"y", point(0, 2)}}).ok());
-  PS_CHECK(demand.request({{"y", point(1, 2)}}).status().code ==
-           ErrorCode::OperationFailed);
+  PS_CHECK(demand.request({{"y", TileRequest{false, point(0, 2)}}}).ok());
   PS_CHECK(
-      demand.request({{"y", Footprint::all({2}).take_value()}}).status().code ==
+      demand.request({{"y", TileRequest{false, point(1, 2)}}}).status().code ==
       ErrorCode::OperationFailed);
-  PS_CHECK(demand.request({{"y", point(0, 2)}}).ok());
+  PS_CHECK(
+      demand.request({{"y", TileRequest{false, all_tiles(2)}}}).status().code ==
+      ErrorCode::OperationFailed);
+  PS_CHECK(demand.request({{"y", TileRequest{false, point(0, 2)}}}).ok());
   auto frozen = demand.freeze().take_value();
   PS_CHECK(graph.replace(gate_document()) > 0);
-  PS_CHECK(demand.request({{"y", point(0, 2)}}).ok());
+  PS_CHECK(demand.request({{"y", TileRequest{false, point(0, 2)}}}).ok());
   PS_CHECK(demand.cancel());
   auto fresh = context.open_demand(frozen.plan(), bindings, DemandConfig{1});
   PS_CHECK(fresh.ok());
-  PS_CHECK(fresh.value().request({{"y", point(0, 2)}}).status().code ==
-           ErrorCode::ResourceExhausted);
+  PS_CHECK(fresh.value()
+               .request({{"y", TileRequest{false, point(0, 2)}}})
+               .status()
+               .code == ErrorCode::ResourceExhausted);
   return 0;
 }
 int combined_tokens() {
@@ -609,7 +605,7 @@ int combined_tokens() {
   return 0;
 }
 std::shared_ptr<OperationRegistry> snapshot_registry() {
-  auto registry = make_default_operation_registry(false);
+  auto registry = std::make_shared<OperationRegistry>();
   auto op =
       copy_definition("test.snapshot_identity", sizeof(multi_result::Program));
   op.traits.workspace_bytes = 4096;
@@ -626,7 +622,7 @@ int snapshot_replacement() {
   ExecutionContext context(registry, {1, false, 8, 16384});
   for (auto type : {ElementType::UInt8, ElementType::Int64,
                     ElementType::Float32, ElementType::Float64}) {
-    auto writer = MutableValue::allocate({type, {3}}, Region::whole({3}),
+    auto writer = MutableValue::allocate({type, {1, 3}}, Region::whole({1, 3}),
                                          BufferAllocator{})
                       .take_value();
     std::memset(writer.data(), 0, writer.size());
@@ -636,17 +632,23 @@ int snapshot_replacement() {
     auto document = identity_document(initial);
     document.nodes[0].operation = "test.snapshot_identity";
     GraphContext graph(document);
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
+    auto plan =
+        Compiler(registry)
+            .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+            .take_value()
+            .plan;
     ExecutionBindings bindings{
         {snapshot_binding(context, "image", snapshot, initial)}};
     auto demand = context.open_demand(plan, bindings).take_value();
-    const auto q = point(0, 3).unite(point(2, 3)).take_value();
-    PS_CHECK(demand.request({{"result", q}}).ok());
+    const auto q =
+        point(0, 3).unite(point(2, 3), ResourceBudget{}).take_value();
+    PS_CHECK(demand.request({{"result", TileRequest{false, q}}}).ok());
     auto frozen = demand.freeze().take_value();
     for (auto at : {0U, 2U}) {
-      auto patch = MutableValue::allocate(initial.descriptor(),
-                                          Region({{at, 1}}), BufferAllocator{})
-                       .take_value();
+      auto patch =
+          MutableValue::allocate(initial.descriptor(),
+                                 Region({{0, 1}, {at, 1}}), BufferAllocator{})
+              .take_value();
       // Includes nonfinite generic float payloads; dirty compares bits.
       std::memset(patch.data(), 0xff, patch.size());
       snapshot = store.patch(snapshot, std::move(patch).publish().take_value())
@@ -658,19 +660,20 @@ int snapshot_replacement() {
       PS_CHECK(changed.value().potential_dirty.at("result") ==
                (at == 0 ? point(0, 3) : q));
     }
-    auto final = demand.request({{"result", q}});
+    auto final = demand.request({{"result", TileRequest{false, q}}});
     PS_CHECK(final.ok());
     std::uint8_t bytes[8]{};
     const auto width = Value::element_size(type);
     PS_CHECK(numeric_result_fixture::read(final.value().results.at("result"),
-                                          {2}, bytes, width)
+                                          {0, 2}, bytes, width)
                  .ok());
     for (unsigned i = 0; i < width; ++i)
       PS_CHECK(bytes[i] == 0xff);
-    auto old = context.execute_fragments(frozen, {{"result", q}});
+    auto old =
+        context.execute_fragments(frozen, {{"result", TileRequest{false, q}}});
     PS_CHECK(old.ok() &&
-             numeric_result_fixture::read(old.value().results.at("result"), {2},
-                                          bytes, width)
+             numeric_result_fixture::read(old.value().results.at("result"),
+                                          {0, 2}, bytes, width)
                  .ok());
     for (unsigned i = 0; i < width; ++i)
       PS_CHECK(bytes[i] == 0);
@@ -689,7 +692,11 @@ int owner_retirement() {
   gate->open();
   auto registry = gated_registry(gate);
   GraphContext graph(gate_document());
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   auto context = std::make_unique<ExecutionContext>(registry);
   ExecutionBindings ordinary{
       {binding(*context, "x", values<double>(ElementType::Float64, {1, 2}))}};
@@ -707,8 +714,8 @@ int owner_retirement() {
               ++retired;
           }));
     });
-    auto writer = MutableValue::allocate({ElementType::Float64, {2}},
-                                         Region::whole({2}), allocator)
+    auto writer = MutableValue::allocate({ElementType::Float64, {1, 2}},
+                                         Region::whole({1, 2}), allocator)
                       .take_value();
     ExecutionBindings bindings{
         {binding(*context, "x", std::move(writer).publish().take_value())}};
@@ -727,17 +734,7 @@ int owner_retirement() {
            closing.generation().status().code == ErrorCode::Cancelled);
   return 0;
 }
-bool await_shared(const ExecutionContext& context, std::uint64_t previous) {
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(3);
-  while (context.cache_statistics().shared_computations <= previous) {
-    if (std::chrono::steady_clock::now() >= deadline)
-      return false;
-    std::this_thread::yield();
-  }
-  return true;
-}
-int shared_ancestors() {
+int concurrent_ancestors() {
   for (unsigned scenario = 0; scenario < 6; ++scenario) {
     const auto cancelled = scenario % 3;
     auto gate = std::make_shared<Gate>();
@@ -746,8 +743,12 @@ int shared_ancestors() {
     document.nodes.push_back({2, "wait", {WorkflowNodeOutput{1, "value"}}, {}});
     document.outputs = {{"inner", 1, "value"}, {"outer", 2, "value"}};
     GraphContext graph(document);
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
-    ExecutionContext context(registry, {1, false, 8, 4096});
+    auto plan =
+        Compiler(registry)
+            .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+            .take_value()
+            .plan;
+    ExecutionContext context(registry, {2, false, 8, 4096});
     auto demand =
         context
             .open_demand(
@@ -756,21 +757,24 @@ int shared_ancestors() {
             .take_value();
     CancellationSource stop_outer, stop_inner;
     auto outer = std::async(std::launch::async, [&] {
-      return demand.request({{"outer", point(0, 2)}}, stop_outer.token());
+      return demand.request({{"outer", TileRequest{false, point(0, 2)}}},
+                            stop_outer.token());
     });
     PS_CHECK(gate->await(1));
     auto inner = std::async(std::launch::async, [&] {
-      return demand.request({{"inner", point(0, 2)}}, stop_inner.token());
+      return demand.request({{"inner", TileRequest{false, point(0, 2)}}},
+                            stop_inner.token());
     });
-    // Observe a real directory join before cancellation; no timing sleep.
-    PS_CHECK(await_shared(context, 0));
+    // Both independent runs reach their input callback before cancellation.
+    PS_CHECK(gate->await(2));
     if (cancelled == 1)
       stop_outer.cancel();
     if (cancelled == 2)
       stop_inner.cancel();
+    gate->allow(2);
+    auto inner_result = inner.get();
     gate->open();
     auto outer_result = outer.get();
-    auto inner_result = inner.get();
     if (outer_result.ok() != (cancelled != 1) ||
         inner_result.ok() != (cancelled != 2))
       std::cerr << "shared scenario " << scenario
@@ -787,42 +791,34 @@ int shared_ancestors() {
     if (outer_result.ok()) {
       double value = 0;
       PS_CHECK(numeric_result_fixture::read(
-                   outer_result.value().results.at("outer"), {0}, &value, 8)
+                   outer_result.value().results.at("outer"), {0, 0}, &value, 8)
                    .ok() &&
                value == 7);
-      if (outer_result.value().dependencies.record_count() !=
-          (scenario >= 3 ? 6U : 4U))
-        std::cerr << "outer scenario " << scenario << " records "
-                  << outer_result.value().dependencies.record_count() << "\n";
-      PS_CHECK(outer_result.value().dependencies.record_count() ==
-               (scenario >= 3 ? 6U : 4U));
-      PS_CHECK(outer_result.value()
-                   .dependencies.potential_dirty("x", point(0, 2))
-                   .value()
-                   .at("outer") == point(0, 2));
+      PS_CHECK(multi_result::take(
+          outer_result.value().dependencies.tile_record({0, 0, 0})));
+      PS_CHECK(multi_result::take(
+          outer_result.value().dependencies.tile_record({1, 0, 0})));
+      PS_CHECK(dirty_tiles(outer_result.value().dependencies, 0, point(0, 2),
+                           1) == point(0, 2));
     }
     if (inner_result.ok()) {
       double value = 0;
       PS_CHECK(numeric_result_fixture::read(
-                   inner_result.value().results.at("inner"), {0}, &value, 8)
+                   inner_result.value().results.at("inner"), {0, 0}, &value, 8)
                    .ok() &&
                value == 7);
-      PS_CHECK(inner_result.value().diagnostics.shared_computations >= 1);
       PS_CHECK(context.resource_budget()
                    .value()
                    .statistics()
                    .live[ResourceKind::Payload] >= 8);
-      if (inner_result.value().dependencies.record_count() != 2U)
-        std::cerr << "inner scenario " << scenario << " records "
-                  << inner_result.value().dependencies.record_count() << "\n";
-      PS_CHECK(inner_result.value().dependencies.record_count() == 2U);
-      PS_CHECK(inner_result.value()
-                   .dependencies.potential_dirty("x", point(0, 2))
-                   .value()
-                   .at("inner") == point(0, 2));
+      PS_CHECK(multi_result::take(
+          inner_result.value().dependencies.tile_record({0, 0, 0})));
+      PS_CHECK(!multi_result::take(
+          inner_result.value().dependencies.tile_record({1, 0, 0})));
+      PS_CHECK(dirty_tiles(inner_result.value().dependencies, 0, point(0, 2),
+                           0) == point(0, 2));
     }
-    PS_CHECK(gate->entered == (cancelled == 1 ? 1U : 2U));
-    PS_CHECK(context.cache_statistics().in_flight == 0);
+    PS_CHECK(gate->entered == (cancelled == 1 ? 2U : 3U));
   }
   return 0;
 }
@@ -830,8 +826,12 @@ int auxiliary_cancellation() {
   auto gate = std::make_shared<Gate>();
   auto registry = gated_registry(gate, true);
   GraphContext graph(gate_document());
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContext context(registry, {1, false, 8, 4096});
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
+  ExecutionContext context(registry, {2, false, 8, 4096});
   auto demand =
       context
           .open_demand(
@@ -842,19 +842,20 @@ int auxiliary_cancellation() {
   ExecutionOptions options;
   options.dependencies.sets.cancellation = auxiliary.token();
   auto a = std::async(std::launch::async, [&] {
-    return demand.request({{"y", point(0, 2)}}, {}, options);
+    return demand.request({{"y", TileRequest{false, point(0, 2)}}}, {},
+                          options);
   });
   PS_CHECK(gate->await(1));
-  auto b = std::async(std::launch::async,
-                      [&] { return demand.request({{"y", point(0, 2)}}); });
-  PS_CHECK(await_shared(context, 0));
+  auto b = std::async(std::launch::async, [&] {
+    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+  });
+  PS_CHECK(gate->await(2));
   auxiliary.cancel();
   gate->open();
   PS_CHECK(a.get().status().code == ErrorCode::Cancelled);
   auto survived = b.get();
-  PS_CHECK(survived.ok() &&
-           survived.value().diagnostics.shared_computations == 1);
-  PS_CHECK(gate->entered == 1 && gate->active == 0);
+  PS_CHECK(survived.ok());
+  PS_CHECK(gate->entered == 2 && gate->active == 0);
   return 0;
 }
 int impure_ancestor() {
@@ -866,39 +867,54 @@ int impure_ancestor() {
                     {2, "wait", {WorkflowNodeOutput{1, "value"}}, {}}};
   document.outputs = {{"y", 2, "value"}};
   GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   ExecutionContext context(registry, {2, false, 8, 4096});
   auto demand = context.open_demand(plan, {}).take_value();
-  auto a = std::async(std::launch::async,
-                      [&] { return demand.request({{"y", point(0, 2)}}); });
+  auto a = std::async(std::launch::async, [&] {
+    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+  });
   PS_CHECK(gate->await(1));
-  auto b = std::async(std::launch::async,
-                      [&] { return demand.request({{"y", point(0, 2)}}); });
+  auto b = std::async(std::launch::async, [&] {
+    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+  });
   PS_CHECK(gate->await(2));
+  // Both callbacks overlap; serialize publication because the handle
+  // permits a Stale result when concurrent structural commits collide.
+  gate->allow(1);
+  auto first = a.get();
   gate->open();
-  auto first = a.get(), second = b.get();
+  auto second = b.get();
+  PS_REQUIRE_OK(first);
+  PS_REQUIRE_OK(second);
   PS_CHECK(first.ok() && second.ok());
   double x = 0, y = 0;
   PS_CHECK(
-      numeric_result_fixture::read(first.value().results.at("y"), {0}, &x, 8)
+      numeric_result_fixture::read(first.value().results.at("y"), {0, 0}, &x, 8)
           .ok());
-  PS_CHECK(
-      numeric_result_fixture::read(second.value().results.at("y"), {0}, &y, 8)
-          .ok());
+  PS_CHECK(numeric_result_fixture::read(second.value().results.at("y"), {0, 0},
+                                        &y, 8)
+               .ok());
   PS_CHECK(x == 1 && y == 2 && *effects == 2);
-  PS_CHECK(context.cache_statistics().shared_computations == 0);
-  PS_CHECK(first.value().dependencies.record_count() == 4 &&
-           second.value().dependencies.record_count() == 4);
+  for (const auto* dependencies :
+       {&first.value().dependencies, &second.value().dependencies}) {
+    PS_CHECK(multi_result::take(dependencies->tile_record({0, 0, 0})));
+    PS_CHECK(multi_result::take(dependencies->tile_record({1, 0, 0})));
+  }
   return 0;
 }
-int shared_fallback() {
+int concurrent_fallback() {
   auto gate = std::make_shared<Gate>();
-  auto registry = gated_registry(gate, false, {}, false, true, true);
+  auto registry = gated_registry(gate, false, {}, true, true);
   auto doc = gate_document();
   doc.nodes.push_back({2, "wait", {WorkflowNodeOutput{1, "value"}}, {}});
   doc.outputs = {{"y", 2, "value"}};
   GraphContext graph(doc);
   PlanningOptions planning;
+  planning.tile_extent = 1;
   planning.execution_mode = ExecutionMode::NativeGpu;
   auto plan = Compiler(registry).compile(graph, planning).take_value().plan;
   ExecutionContext context(registry, {2, false, 8, 4096, 128});
@@ -910,12 +926,13 @@ int shared_fallback() {
           .take_value();
   CancellationSource stop;
   auto owner = std::async(std::launch::async, [&] {
-    return demand.request({{"y", point(0, 2)}}, stop.token());
+    return demand.request({{"y", TileRequest{true, {}}}}, stop.token());
   });
   PS_CHECK(gate->await(1));
-  auto other = std::async(std::launch::async,
-                          [&] { return demand.request({{"y", point(0, 2)}}); });
-  PS_CHECK(await_shared(context, 0));
+  auto other = std::async(std::launch::async, [&] {
+    return demand.request({{"y", TileRequest{true, {}}}});
+  });
+  PS_CHECK(gate->await(2));
   stop.cancel();
   gate->open();
   auto cancelled = owner.get();
@@ -923,16 +940,16 @@ int shared_fallback() {
   double actual = 0;
   PS_CHECK(cancelled.status().code == ErrorCode::Cancelled);
   PS_CHECK(completed.ok() &&
-           numeric_result_fixture::read(completed.value().results.at("y"), {0},
-                                        &actual, 8)
+           numeric_result_fixture::read(completed.value().results.at("y"),
+                                        {0, 0}, &actual, 8)
                .ok() &&
            actual == 7);
-  PS_CHECK(completed.value().diagnostics.shared_computations == 1 &&
-           completed.value().diagnostics.selected_backends.at({2, 0}) ==
-               Backend::Cpu);
+  PS_CHECK(completed.value().diagnostics.selected_backends.at({2, 0}) ==
+           Backend::Cpu);
   PS_CHECK(context.cache_statistics().retained_bytes == 0);
-  PS_CHECK(
-      demand.request({{"y", point(0, 2)}}).value().diagnostics.cache_hits == 0);
+  PS_CHECK(demand.request({{"y", TileRequest{true, {}}}})
+               .value()
+               .diagnostics.cache_hits == 0);
   return 0;
 }
 struct ProtocolCancellationProbe {
@@ -952,7 +969,7 @@ struct ProtocolCancelProgram {
     ++probe->polls;
     double value = 0;
     // No Need has granted this input. The real read records Protocol first.
-    auto failure = phase.read_tensor(0, 0, {0}, &value, sizeof(value));
+    auto failure = phase.read_tensor(0, 0, {0, 0}, &value, sizeof(value));
     probe->latched_before_cancel =
         phase.failure && phase.failure->load() == ErrorCode::InvalidArgument;
     probe->cancellation.cancel();
@@ -970,7 +987,11 @@ int protocol_first_cause() {
   multi_result::check(registry->register_operation(std::move(op)));
   multi_result::check(registry->freeze());
   GraphContext graph(gate_document());
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   ExecutionContext context(registry, {1, false, 8, 4096});
   auto demand =
       context
@@ -978,8 +999,8 @@ int protocol_first_cause() {
               plan, {{binding(context, "x",
                               values<double>(ElementType::Float64, {7, 9}))}})
           .take_value();
-  auto failed =
-      demand.request({{"y", point(0, 2)}}, probe->cancellation.token());
+  auto failed = demand.request({{"y", TileRequest{false, point(0, 2)}}},
+                               probe->cancellation.token());
   PS_CHECK(!failed.ok() && failed.status().code == ErrorCode::InvalidArgument &&
            failed.status().message == "missing authorized image input" &&
            failed.status().reason == FailureReason::UnauthorizedRead &&
@@ -989,22 +1010,25 @@ int protocol_first_cause() {
   PS_CHECK(probe->latched_before_cancel &&
            probe->cancellation.token().cancelled() && probe->starts == 1 &&
            probe->polls == 1 && probe->destroys == 1);
-  PS_CHECK(context.cache_statistics().in_flight == 0 &&
-           context.cache_statistics().retained_bytes == 0);
+  PS_CHECK(context.cache_statistics().retained_bytes == 0);
   return 0;
 }
-int late_flight_and_frozen() {
+int cancelled_run_and_frozen() {
   auto gate = std::make_shared<Gate>();
   gate->ignore_cancellation = true;
   auto registry = gated_registry(gate, true);
   GraphContext graph(gate_document());
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   ExecutionContext context(registry, {2, false, 8, 4096});
   ExecutionBindings bindings{
       {binding(context, "x", values<double>(ElementType::Float64, {7, 9}))}};
   auto demand = context.open_demand(plan, bindings).take_value();
   CancellationSource stop;
-  DemandQuery query{{"y", point(0, 2)}};
+  DemandQuery query{{"y", TileRequest{false, point(0, 2)}}};
   auto p0 = std::async(std::launch::async,
                        [&] { return demand.request(query, stop.token()); });
   PS_CHECK(gate->await(1));
@@ -1017,12 +1041,13 @@ int late_flight_and_frozen() {
   PS_CHECK(p0.get().status().code == ErrorCode::Cancelled);
   auto follower =
       std::async(std::launch::async, [&] { return demand.request(query); });
-  PS_CHECK(await_shared(context, 0));
-  gate->open();
+  PS_CHECK(gate->await(3));
+  gate->allow(2);
   PS_CHECK(p1.get().ok());
+  gate->open();
   auto joined = follower.get();
-  PS_CHECK(joined.ok() && joined.value().diagnostics.shared_computations == 1);
-  PS_CHECK(gate->entered == 2 && context.cache_statistics().in_flight == 0);
+  PS_CHECK(joined.ok());
+  PS_CHECK(gate->entered == 3);
   // Retire the completed caller before exercising a new producer.
   joined = Result<DemandResult>(Status{ErrorCode::Cancelled, {}});
   // A frozen waiter retains the old bundle while latest publication is stale.
@@ -1037,11 +1062,10 @@ int late_flight_and_frozen() {
   auto latest =
       std::async(std::launch::async, [&] { return demand.request(query); });
   PS_CHECK(gate->await(1));
-  const auto shared_before = context.cache_statistics().shared_computations;
   auto pinned = std::async(std::launch::async, [&] {
     return context.execute_fragments(frozen, query);
   });
-  PS_CHECK(await_shared(context, shared_before));
+  PS_CHECK(gate->await(2));
   bindings.inputs[0].result =
       binding(context, bindings.inputs[0].name,
               values<double>(ElementType::Float64, {8, 9}))
@@ -1051,88 +1075,21 @@ int late_flight_and_frozen() {
   PS_CHECK(latest.get().status().code == ErrorCode::Stale);
   auto old = pinned.get();
   double result = 0;
-  PS_CHECK(
-      old.ok() &&
-      numeric_result_fixture::read(old.value().results.at("y"), {0}, &result, 8)
-          .ok() &&
-      result == 7);
-  PS_CHECK(gate->entered == 1);
+  PS_CHECK(old.ok() &&
+           numeric_result_fixture::read(old.value().results.at("y"), {0, 0},
+                                        &result, 8)
+               .ok() &&
+           result == 7);
+  PS_CHECK(gate->entered == 2);
   auto current = demand.request(query);
   PS_CHECK(current.ok() &&
-           numeric_result_fixture::read(current.value().results.at("y"), {0},
+           numeric_result_fixture::read(current.value().results.at("y"), {0, 0},
                                         &result, 8)
                .ok() &&
            result == 8);
   return 0;
 }
-int shared_terminal() {
-  auto gate = std::make_shared<Gate>();
-  auto registry = gated_registry(gate, true, {}, true);
-  auto document = gate_document();
-  document.inputs[0] =
-      multi_result::declaration(1, "x", tensor_schema(ElementType::Float64, 3));
-  GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContext context(registry, {2, false, 8, 4096, 512});
-  ExecutionBindings bindings{
-      {binding(context, "x", values<double>(ElementType::Float64, {7, 8, 9}))}};
-  auto demand = context.open_demand(plan, bindings).take_value();
-  const auto wide = point(0, 3).unite(point(2, 3)).take_value();
-  auto first = std::async(std::launch::async,
-                          [&] { return demand.request({{"y", wide}}); });
-  PS_CHECK(gate->await(1));
-  auto same = std::async(std::launch::async,
-                         [&] { return demand.request({{"y", wide}}); });
-  PS_CHECK(await_shared(context, 0));
-  auto subset = std::async(
-      std::launch::async, [&] { return demand.request({{"y", point(0, 3)}}); });
-  PS_CHECK(gate->await(2));
-  gate->open();
-  auto a = first.get(), b = same.get(), c = subset.get();
-  PS_CHECK(a.ok() && b.ok() && c.ok() && gate->entered == 2);
-  double value = 0;
-  for (const auto* result : {&a.value(), &b.value()}) {
-    PS_CHECK(
-        numeric_result_fixture::read(result->results.at("y"), {2}, &value, 8)
-            .ok() &&
-        value == 9);
-    PS_CHECK(
-        !numeric_result_fixture::read(result->results.at("y"), {1}, &value, 8)
-             .ok());
-    PS_CHECK(!result->dependencies.restrict({{"y", point(0, 3)}}).ok());
-    PS_CHECK(result->dependencies.coverage().at("y") == wide);
-    PS_CHECK(result->dependencies.certificate({1, 0}).status().code ==
-             ErrorCode::NotFound);
-  }
-  PS_CHECK(
-      numeric_result_fixture::read(c.value().results.at("y"), {0}, &value, 8)
-          .ok() &&
-      value == 8);
-  PS_CHECK(b.value().diagnostics.shared_computations == 1 &&
-           c.value().diagnostics.shared_computations == 0);
-  auto reused = demand.request({{"y", wide}});
-  PS_CHECK(reused.ok() && reused.value().diagnostics.cache_hits == 0 &&
-           reused.value().diagnostics.shared_computations > 0 &&
-           reused.value().results.at("y").object_id() ==
-               a.value().results.at("y").object_id());
-  PS_CHECK(demand.replace_bindings(bindings).ok());
-  auto warm = demand.request({{"y", wide}});
-  PS_CHECK(warm.ok() && warm.value().diagnostics.cache_hits == 1 &&
-           gate->entered == 2);
-  PS_CHECK(!warm.value().dependencies.restrict({{"y", point(0, 3)}}).ok());
-  auto changed = demand.replace_bindings({{binding(
-      context, "x", values<double>(ElementType::Float64, {7, 8, 222}))}});
-  PS_CHECK(changed.ok() && changed.value().potential_dirty.at("y").empty());
-  auto content_hit = demand.request({{"y", wide}});
-  PS_CHECK(content_hit.ok() &&
-           content_hit.value().diagnostics.cache_hits == 1 &&
-           gate->entered == 2);
-  PS_CHECK(numeric_result_fixture::read(content_hit.value().results.at("y"),
-                                        {2}, &value, 8)
-               .ok() &&
-           value == 9);
-  return 0;
-}
+
 int cache_work_and_epoch() {
   auto gate = std::make_shared<Gate>();
   auto registry = gated_registry(gate, true);
@@ -1142,7 +1099,11 @@ int cache_work_and_epoch() {
         {i, "wait", {WorkflowNodeOutput{i - 1, "value"}}, {}});
   document.outputs = {{"y", 64, "value"}};
   GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   ExecutionContextConfig config{1, false, 8, 65536, 32768};
   ResourceLimits resources;
   // This deep graph retains each Result's mandatory structural ancestry.
@@ -1161,7 +1122,8 @@ int cache_work_and_epoch() {
   // one-unit optional cache-proof budget exercised below.
   options.maximum_dependency_work = 16 * 1048576;
   options.maximum_dependency_cache_work = 1;
-  auto bounded = demand.request({{"y", point(0, 2)}}, {}, options);
+  auto bounded =
+      demand.request({{"y", TileRequest{false, point(0, 2)}}}, {}, options);
   PS_CHECK(bounded.ok() && gate->entered == 64);
   PS_CHECK(bounded.value().diagnostics.dependency_cache_records_visited == 0 &&
            bounded.value().diagnostics.dependency_cache_work == 0);
@@ -1169,7 +1131,11 @@ int cache_work_and_epoch() {
   // A real outstanding producer captured the old epoch. Its successful late
   // completion cannot repopulate a cleared cache, even with a live waiter.
   GraphContext short_graph(gate_document());
-  auto short_plan = Compiler(registry).compile(short_graph).take_value().plan;
+  auto short_plan =
+      Compiler(registry)
+          .compile(short_graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   ExecutionBindings short_bindings{
       {binding(context, "x", values<double>(ElementType::Float64, {7, 9}))}};
   auto short_demand =
@@ -1180,18 +1146,18 @@ int cache_work_and_epoch() {
     gate->entered = 0;
   }
   auto pending = std::async(std::launch::async, [&] {
-    return short_demand.request({{"y", point(0, 2)}});
+    return short_demand.request({{"y", TileRequest{false, point(0, 2)}}});
   });
   PS_CHECK(gate->await(1));
   context.clear_result_cache();
   gate->open();
   PS_CHECK(pending.get().ok() &&
            context.cache_statistics().retained_bytes == 0);
-  PS_CHECK(short_demand.request({{"y", point(0, 2)}})
+  PS_CHECK(short_demand.request({{"y", TileRequest{false, point(0, 2)}}})
                .value()
                .diagnostics.cache_hits == 0);
   PS_CHECK(short_demand.replace_bindings(short_bindings).ok());
-  PS_CHECK(short_demand.request({{"y", point(0, 2)}})
+  PS_CHECK(short_demand.request({{"y", TileRequest{false, point(0, 2)}}})
                .value()
                .diagnostics.cache_hits == 1);
   PS_CHECK(gate->entered == 2);
@@ -1200,45 +1166,52 @@ int cache_work_and_epoch() {
 int cached_whole_ancestor() {
   auto gate = std::make_shared<Gate>();
   gate->open();
-  auto registry = gated_registry(gate, false, {}, false, true);
+  auto registry = gated_registry(gate, false, {}, true);
   auto document = gate_document();
   document.nodes.push_back({2, "wait", {WorkflowNodeOutput{1, "value"}}, {}});
   document.outputs = {{"y", 2, "value"}, {"ancestor", 1, "value"}};
   GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   ExecutionContext context(registry, {1, false, 8, 4096, 512});
   ExecutionBindings bindings{
       {binding(context, "x", values<double>(ElementType::Float64, {7, 9}))}};
   auto demand = context.open_demand(plan, bindings).take_value();
-  auto first = demand.request({{"y", point(0, 2)}});
+  auto first = demand.request({{"y", TileRequest{true, {}}}});
   PS_CHECK(first.ok() && gate->entered == 2);
-  auto reused = demand.request({{"y", point(0, 2)}});
-  PS_CHECK(reused.ok() && reused.value().diagnostics.cache_hits == 0 &&
-           reused.value().diagnostics.shared_computations > 0 &&
-           reused.value().results.at("y").object_id() ==
-               first.value().results.at("y").object_id());
+  auto reused = demand.request({{"y", TileRequest{true, {}}}});
+  PS_CHECK(reused.ok() && reused.value().diagnostics.cache_hits == 2 &&
+           reused.value().diagnostics.operation_timings.empty());
   PS_CHECK(demand.replace_bindings(bindings).ok());
-  auto warm = demand.request({{"y", point(0, 2)}});
+  auto warm = demand.request({{"y", TileRequest{true, {}}}});
   PS_CHECK(warm.ok() && gate->entered == 2 &&
            warm.value().diagnostics.cache_hits == 2);
   PS_CHECK(warm.value().diagnostics.operation_timings.empty());
-  PS_CHECK(warm.value().dependencies.source_support().value().at("x") ==
-           Footprint::all({2}).take_value());
+  PS_CHECK(multi_result::take(warm.value().dependencies.tile_record({0, 0, 0}))
+               ->inputs[0]
+               .tiles == all_tiles(2));
   double value = 0;
-  PS_CHECK(
-      numeric_result_fixture::read(warm.value().results.at("y"), {0}, &value, 8)
-          .ok() &&
-      value == 7);
+  PS_CHECK(numeric_result_fixture::read(warm.value().results.at("y"), {0, 0},
+                                        &value, 8)
+               .ok() &&
+           value == 7);
   // The root's 16-byte result survives while its Whole ancestor's pixels
   // are evicted. Importing its evidence must not block a later actual read.
   document.outputs = {{"a_desc", 2, "value"}, {"z_ancestor", 1, "value"}};
   GraphContext named_graph(document);
-  auto named_plan = Compiler(registry).compile(named_graph).take_value().plan;
+  auto named_plan =
+      Compiler(registry)
+          .compile(named_graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   ExecutionContext tight(registry, {1, false, 8, 4096, 16});
   ExecutionBindings tight_bindings{
       {binding(tight, "x", values<double>(ElementType::Float64, {7, 9}))}};
   auto query = tight.open_demand(named_plan, tight_bindings).take_value();
-  PS_CHECK(query.request({{"a_desc", point(0, 2)}}).ok());
+  PS_CHECK(query.request({{"a_desc", TileRequest{true, {}}}}).ok());
   // A -> B -> C: the 16-byte LRU retains C and evicts B pixels. The
   // active C subscription must still transpose an A edit through B evidence.
   const auto old_bundle = query.freeze().take_value();
@@ -1247,38 +1220,40 @@ int cached_whole_ancestor() {
   auto change = query.replace_bindings(tight_bindings);
   PS_CHECK(change.ok() &&
            change.value().potential_dirty.at("a_desc") == point(0, 2));
-  auto updated = query.request({{"a_desc", point(0, 2)}});
+  auto updated = query.request({{"a_desc", TileRequest{true, {}}}});
   PS_CHECK(updated.ok() &&
            numeric_result_fixture::read(updated.value().results.at("a_desc"),
-                                        {0}, &value, 8)
+                                        {0, 0}, &value, 8)
                .ok() &&
            value == 11);
-  auto pinned = tight.execute_fragments(old_bundle, {{"a_desc", point(0, 2)}});
+  auto pinned =
+      tight.execute_fragments(old_bundle, {{"a_desc", TileRequest{true, {}}}});
   PS_CHECK(pinned.ok() &&
            numeric_result_fixture::read(pinned.value().results.at("a_desc"),
-                                        {0}, &value, 8)
+                                        {0, 0}, &value, 8)
                .ok() &&
            value == 7);
   // Restore the current descendant to the single-entry LRU before asking for
   // both nodes; the old frozen computation must not replace current evidence.
   PS_CHECK(query.replace_bindings(tight_bindings).ok());
-  PS_CHECK(query.request({{"a_desc", point(0, 2)}}).ok());
+  PS_CHECK(query.request({{"a_desc", TileRequest{true, {}}}}).ok());
   const auto previous = gate->entered;
   PS_CHECK(query.replace_bindings(tight_bindings).ok());
-  auto both =
-      query.request({{"a_desc", point(0, 2)}, {"z_ancestor", point(1, 2)}});
+  auto both = query.request({{"a_desc", TileRequest{true, {}}},
+                             {"z_ancestor", TileRequest{true, {}}}});
   PS_CHECK(both.ok() && both.value().diagnostics.cache_hits == 1 &&
            gate->entered == previous + 1);
   PS_CHECK(numeric_result_fixture::read(both.value().results.at("z_ancestor"),
-                                        {1}, &value, 8)
+                                        {0, 1}, &value, 8)
                .ok() &&
            value == 9);
-  PS_CHECK(both.value().dependencies.source_support().value().at("x") ==
-           Footprint::all({2}).take_value());
+  PS_CHECK(multi_result::take(both.value().dependencies.tile_record({0, 0, 0}))
+               ->inputs[0]
+               .tiles == all_tiles(2));
   // A clear invalidates even an owning candidate whose verification is active.
   // Restore C to the single-entry LRU, then block its mandatory cold B replay.
   PS_CHECK(query.replace_bindings(tight_bindings).ok());
-  PS_CHECK(query.request({{"a_desc", point(0, 2)}}).ok());
+  PS_CHECK(query.request({{"a_desc", TileRequest{true, {}}}}).ok());
   PS_CHECK(tight.cache_statistics().retained_bytes == 16);
   {
     std::lock_guard<std::mutex> lock(gate->mutex);
@@ -1289,7 +1264,7 @@ int cached_whole_ancestor() {
   PS_CHECK(query.replace_bindings(tight_bindings).ok());
   const auto starts_before = gate->wide_starts.load();
   auto verifying = std::async(std::launch::async, [&] {
-    return query.request({{"a_desc", point(0, 2)}});
+    return query.request({{"a_desc", TileRequest{true, {}}}});
   });
   PS_CHECK(gate->await(1));
   // Only B has entered its factory: C is still verifying its cached candidate.
@@ -1302,15 +1277,17 @@ int cached_whole_ancestor() {
            gate->entered == 2 && gate->wide_starts == starts_before + 2 &&
            tight.cache_statistics().retained_bytes == 0);
   PS_CHECK(numeric_result_fixture::read(cleared.value().results.at("a_desc"),
-                                        {0}, &value, 8)
+                                        {0, 0}, &value, 8)
                .ok() &&
            value == 11);
   PS_CHECK(numeric_result_fixture::read(cleared.value().results.at("a_desc"),
-                                        {1}, &value, 8)
+                                        {0, 1}, &value, 8)
                .ok() &&
            value == 9);
-  PS_CHECK(cleared.value().dependencies.source_support().value().at("x") ==
-           Footprint::all({2}).take_value());
+  PS_CHECK(
+      multi_result::take(cleared.value().dependencies.tile_record({0, 0, 0}))
+          ->inputs[0]
+          .tiles == all_tiles(2));
   return 0;
 }
 int cache_snapshot_bits() {
@@ -1321,11 +1298,13 @@ int cache_snapshot_bits() {
     std::vector<std::uint8_t> bytes(width * 3);
     for (std::size_t i = 0; i < bytes.size(); ++i)
       bytes[i] = static_cast<std::uint8_t>(255 - i);
-    auto reversed =
-        Value::create({type, {3}}, Region::whole({3}),
-                      {width * 2, {-static_cast<std::int64_t>(width)}}, bytes)
-            .take_value();
-    auto writer = MutableValue::allocate({type, {3}}, Region::whole({3}),
+    auto reversed = Value::create({type, {1, 3}}, Region::whole({1, 3}),
+                                  {width * 2,
+                                   {static_cast<std::int64_t>(width * 3),
+                                    -static_cast<std::int64_t>(width)}},
+                                  bytes)
+                        .take_value();
+    auto writer = MutableValue::allocate({type, {1, 3}}, Region::whole({1, 3}),
                                          BufferAllocator{})
                       .take_value();
     for (std::size_t i = 0; i < 3; ++i)
@@ -1335,13 +1314,18 @@ int cache_snapshot_bits() {
     auto document = identity_document(packed);
     document.nodes[0].operation = "test.snapshot_identity";
     GraphContext graph(document);
-    auto plan = Compiler(registry).compile(graph).take_value().plan;
+    auto plan =
+        Compiler(registry)
+            .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+            .take_value()
+            .plan;
     ExecutionContext context(registry, {1, false, 8, 4096, 512});
     auto demand =
         context.open_demand(plan, {{binding(context, "image", packed)}})
             .take_value();
-    const auto q = point(0, 3).unite(point(2, 3)).take_value();
-    auto initial = demand.request({{"result", q}});
+    const auto q =
+        point(0, 3).unite(point(2, 3), ResourceBudget{}).take_value();
+    auto initial = demand.request({{"result", TileRequest{false, q}}});
     PS_CHECK(initial.ok() && initial.value().diagnostics.cache_hits == 0);
     InputSnapshotStore store({1024, 1});
     auto snapshot = std::make_shared<const InputSnapshot>(
@@ -1350,12 +1334,12 @@ int cache_snapshot_bits() {
         {{snapshot_binding(context, "image", *snapshot, packed)}});
     PS_CHECK(edited.ok() &&
              edited.value().potential_dirty.at("result").empty());
-    auto same = demand.request({{"result", q}});
-    PS_CHECK(same.ok() && same.value().diagnostics.cache_hits == 1);
+    auto same = demand.request({{"result", TileRequest{false, q}}});
+    PS_CHECK(same.ok() && same.value().diagnostics.cache_hits == 2);
     for (auto at : {0U, 2U}) {
       std::uint8_t observed[8]{};
       PS_CHECK(numeric_result_fixture::read(same.value().results.at("result"),
-                                            {at}, observed, width)
+                                            {0, at}, observed, width)
                    .ok());
       PS_CHECK(std::memcmp(observed, bytes.data() + (2 - at) * width, width) ==
                0);
@@ -1363,39 +1347,41 @@ int cache_snapshot_bits() {
   }
   return 0;
 }
-std::shared_ptr<OperationRegistry> radius_cache_fixture_registry() {
-  return make_default_operation_registry();
+std::shared_ptr<OperationRegistry> routing_cache_fixture_registry() {
+  return ps::test::conditional_sum_registry();
 }
-WorkflowDocument radius_cache_fixture_document() {
-  return scatter_document();
+WorkflowDocument routing_cache_fixture_document() {
+  return routing_document();
 }
 int content_cache() {
-  auto registry = radius_cache_fixture_registry();
-  auto document = radius_cache_fixture_document();
+  auto registry = routing_cache_fixture_registry();
+  auto document = routing_cache_fixture_document();
   GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   ExecutionContextConfig config{1, false, 8, 4096};
   config.result_cache_bytes = 2048;
   ExecutionContext context(registry, config);
   ExecutionBindings bindings{
       {binding(context, "data",
                values<double>(ElementType::Float64, {1, 2, 3, 0, 5})),
-       binding(context, "radius",
+       binding(context, "control",
                values<std::int64_t>(ElementType::Int64, {0, 0, 0, 0, 0}))}};
   auto demand = context.open_demand(plan, bindings).take_value();
-  const auto q = point(0).unite(point(4)).take_value();
-  DemandQuery query{{"sum", q}};
+  const auto q = point(0).unite(point(4), ResourceBudget{}).take_value();
+  DemandQuery query{{"sum", TileRequest{false, q}}};
   auto first = demand.request(query);
   PS_CHECK(first.ok() && first.value().diagnostics.cache_hits == 0);
   auto frozen = context.freeze(plan, bindings).take_value();
   auto reused = demand.request(query);
-  PS_CHECK(reused.ok() && reused.value().diagnostics.cache_hits == 0 &&
-           reused.value().diagnostics.shared_computations > 0 &&
-           reused.value().results.at("sum").object_id() ==
-               first.value().results.at("sum").object_id());
+  PS_CHECK(reused.ok() && reused.value().diagnostics.cache_hits == 2 &&
+           reused.value().diagnostics.operation_timings.empty());
   PS_CHECK(demand.replace_bindings(bindings).ok());
   auto warm = demand.request(query);
-  PS_CHECK(warm.ok() && warm.value().diagnostics.cache_hits == 1 &&
+  PS_CHECK(warm.ok() && warm.value().diagnostics.cache_hits == 2 &&
            warm.value().diagnostics.operation_timings.empty());
   bindings.inputs[0].result =
       binding(context, bindings.inputs[0].name,
@@ -1406,15 +1392,18 @@ int content_cache() {
                .potential_dirty.at("sum")
                .empty());
   auto unchanged = demand.request(query);
-  PS_CHECK(unchanged.ok() && unchanged.value().diagnostics.cache_hits == 1);
+  PS_CHECK(unchanged.ok() && unchanged.value().diagnostics.cache_hits == 2);
   PS_CHECK(unchanged.value().results.at("sum").association() !=
            first.value().results.at("sum").association());
   // Cached and freshly computed rows must merge under the current identity.
-  auto mixed = demand.request({{"sum", point(0).unite(point(1)).take_value()}});
-  PS_CHECK(mixed.ok() && mixed.value().diagnostics.cache_hits == 0);
+  auto mixed = demand.request(
+      {{"sum",
+        TileRequest{false,
+                    point(0).unite(point(1), ResourceBudget{}).take_value()}}});
+  PS_CHECK(mixed.ok() && mixed.value().diagnostics.cache_hits == 1);
   bindings.inputs[1].result =
       binding(context, bindings.inputs[1].name,
-              values<std::int64_t>(ElementType::Int64, {0, 0, 0, 3, 0}))
+              values<std::int64_t>(ElementType::Int64, {0, 0, 0, 1, 0}))
           .result;
   PS_CHECK(demand.replace_bindings(bindings).ok());
   auto changed_relation = demand.request(query);
@@ -1422,22 +1411,16 @@ int content_cache() {
            changed_relation.value().diagnostics.cache_hits == 0);
   double answer = 0;
   PS_CHECK(numeric_result_fixture::read(
-               changed_relation.value().results.at("sum"), {0}, &answer, 8)
+               changed_relation.value().results.at("sum"), {0, 0}, &answer, 8)
                .ok() &&
            answer == 1);
-  PS_CHECK(changed_relation.value()
-               .dependencies.potential_dirty("data", point(3))
-               .value()
-               .at("sum") == q);
+  PS_CHECK(dirty_tiles(changed_relation.value().dependencies, 0, point(3), 0) ==
+           q);
   PS_CHECK(demand.replace_bindings(bindings).ok());
-  PS_CHECK(demand.request(query).value().diagnostics.cache_hits == 1);
+  PS_CHECK(demand.request(query).value().diagnostics.cache_hits == 2);
   auto old = context.execute_fragments(frozen, query);
-  PS_CHECK(old.ok() && old.value().diagnostics.cache_hits == 1);
-  PS_CHECK(old.value()
-               .dependencies.potential_dirty("data", point(3))
-               .value()
-               .at("sum")
-               .empty());
+  PS_CHECK(old.ok() && old.value().diagnostics.cache_hits == 2);
+  PS_CHECK(dirty_tiles(old.value().dependencies, 0, point(3), 0).empty());
   bindings.inputs[0].result =
       binding(context, bindings.inputs[0].name,
               values<double>(ElementType::Float64, {1, 2, 777, 9, 5}))
@@ -1445,34 +1428,29 @@ int content_cache() {
   PS_CHECK(demand.replace_bindings(bindings).ok());
   auto latest = demand.request(query);
   PS_CHECK(latest.ok() && latest.value().diagnostics.cache_hits == 0);
-  PS_CHECK(numeric_result_fixture::read(latest.value().results.at("sum"), {4},
-                                        &answer, 8)
+  PS_CHECK(numeric_result_fixture::read(latest.value().results.at("sum"),
+                                        {0, 4}, &answer, 8)
                .ok() &&
            answer == 14);
   context.clear_result_cache();
   PS_CHECK(context.cache_statistics().retained_bytes == 0);
-  PS_CHECK(latest.value()
-               .dependencies.potential_dirty("data", point(3))
-               .value()
-               .at("sum") == q);
+  PS_CHECK(dirty_tiles(latest.value().dependencies, 0, point(3), 0) == q);
   PS_CHECK(demand.request(query).value().diagnostics.cache_hits == 0);
   config.result_cache_bytes = 16;
   ExecutionContext small(registry, config);
   ExecutionBindings small_bindings{
       {binding(small, "data",
                values<double>(ElementType::Float64, {1, 2, 777, 9, 5})),
-       binding(small, "radius",
-               values<std::int64_t>(ElementType::Int64, {0, 0, 0, 3, 0}))}};
+       binding(small, "control",
+               values<std::int64_t>(ElementType::Int64, {0, 0, 0, 1, 0}))}};
   auto limited = small.open_demand(plan, small_bindings).take_value();
-  PS_CHECK(limited.request({{"sum", point(0)}}).ok());
-  PS_CHECK(limited.request({{"sum", point(1)}}).ok());
-  PS_CHECK(limited.request({{"sum", point(2)}}).ok());
-  auto all = limited.request({{"sum", Footprint::all({5}).take_value()}});
+  PS_CHECK(limited.request({{"sum", TileRequest{false, point(0)}}}).ok());
+  PS_CHECK(limited.request({{"sum", TileRequest{false, point(1)}}}).ok());
+  PS_CHECK(limited.request({{"sum", TileRequest{false, point(2)}}}).ok());
+  auto all = limited.request({{"sum", TileRequest{false, all_tiles(5)}}});
   PS_CHECK(all.ok() && small.cache_statistics().evictions > 0);
-  PS_CHECK(all.value()
-               .dependencies.potential_dirty("radius", point(3))
-               .value()
-               .at("sum") == Footprint::all({5}).take_value());
+  PS_CHECK(dirty_tiles(all.value().dependencies, 1, point(3), 0) ==
+           all_tiles(5));
   bindings.inputs[0].result =
       binding(context, bindings.inputs[0].name,
               values<double>(ElementType::Float64, {1, 2, 777, 10, 5}))
@@ -1480,14 +1458,17 @@ int content_cache() {
   small_bindings.inputs[0] = binding(
       small, "data", values<double>(ElementType::Float64, {1, 2, 777, 10, 5}));
   auto edit = limited.replace_bindings(small_bindings);
-  PS_CHECK(edit.ok() && edit.value().potential_dirty.at("sum") ==
-                            Footprint::all({5}).take_value());
+  PS_CHECK(edit.ok() && edit.value().potential_dirty.at("sum") == all_tiles(5));
   return 0;
 }
 int structured_content_cache() {
-  auto registry = make_default_operation_registry();
-  GraphContext graph(scatter_document());
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
+  auto registry = ps::test::conditional_sum_registry();
+  GraphContext graph(routing_document());
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
   ExecutionContextConfig config{1, false, 8, 4096};
   config.result_cache_bytes = 2048;
   ExecutionContext context(registry, config);
@@ -1495,14 +1476,14 @@ int structured_content_cache() {
   const auto data = [&](std::vector<double> numbers) {
     return source(root, values<double>(ElementType::Float64, numbers));
   };
-  const auto radius = [&](std::vector<std::int64_t> numbers) {
+  const auto control = [&](std::vector<std::int64_t> numbers) {
     return source(root, values<std::int64_t>(ElementType::Int64, numbers));
   };
   ExecutionBindings bindings{
-      {{"data", data({1, 2, 3, 0, 5})}, {"radius", radius({0, 0, 0, 0, 0})}}};
+      {{"data", data({1, 2, 3, 0, 5})}, {"control", control({0, 0, 0, 0, 0})}}};
   auto demand = context.open_demand(plan, bindings).take_value();
-  const auto q = point(0).unite(point(4)).take_value();
-  DemandQuery query{{"sum", q}};
+  const auto q = point(0).unite(point(4), ResourceBudget{}).take_value();
+  DemandQuery query{{"sum", TileRequest{false, q}}};
   std::uint64_t first_id = 0;
   const void* first_storage = nullptr;
   {
@@ -1512,61 +1493,57 @@ int structured_content_cache() {
     first_id = output.object_id();
     auto window = output
                       .acquire_tensor(output.descriptor().take_value(), 0,
-                                      Region({{0, 1}}))
+                                      Region({{0, 1}, {0, 1}}))
                       .take_value();
     first_storage = window.storage_owner_token();
   }
-  PS_CHECK(context.cache_statistics().entries == 1 &&
+  PS_CHECK(context.cache_statistics().entries == 2 &&
            context.cache_statistics().retained_bytes > 0);
   bindings.inputs[0].result = data({1, 2, 777, 0, 5});
-  bindings.inputs[1].result = radius({0, 0, 0, 0, 0});
+  bindings.inputs[1].result = control({0, 0, 0, 0, 0});
   PS_CHECK(demand.replace_bindings(bindings).ok());
   auto warm = demand.request(query);
   if (!warm.ok())
     std::cerr << warm.status().message << '\n';
-  PS_CHECK(warm.ok() && warm.value().diagnostics.cache_hits == 1 &&
+  PS_CHECK(warm.ok() && warm.value().diagnostics.cache_hits == 2 &&
            warm.value().diagnostics.operation_timings.empty());
   auto held = warm.value().results.at("sum");
   PS_CHECK(held.object_id() != first_id);
   const auto association = held.association();
-  PS_CHECK(association.size() == 2 &&
-           association[0] == bindings.inputs[0].result.object_id() &&
-           association[1] == bindings.inputs[1].result.object_id());
-  auto window =
-      held.acquire_tensor(held.descriptor().take_value(), 0, Region({{0, 1}}))
-          .take_value();
+  PS_CHECK(association.size() == 4);
+  for (std::size_t tile = 0; tile < 2; ++tile) {
+    PS_CHECK(association[tile * 2] == bindings.inputs[0].result.object_id());
+    PS_CHECK(association[tile * 2 + 1] ==
+             bindings.inputs[1].result.object_id());
+  }
+  auto window = held.acquire_tensor(held.descriptor().take_value(), 0,
+                                    Region({{0, 1}, {0, 1}}))
+                    .take_value();
   PS_CHECK(window.storage_owner_token() == first_storage);
   double number = 0;
-  PS_CHECK(numeric_result_fixture::read(held, {4}, &number, 8).ok() &&
+  PS_CHECK(numeric_result_fixture::read(held, {0, 4}, &number, 8).ok() &&
            number == 5);
-  PS_CHECK(warm.value()
-               .dependencies.potential_dirty("data", point(2))
-               .value()
-               .at("sum")
-               .empty());
-  bindings.inputs[1].result = radius({0, 0, 0, 3, 0});
+  PS_CHECK(dirty_tiles(warm.value().dependencies, 0, point(2), 0).empty());
+  bindings.inputs[1].result = control({0, 0, 0, 1, 0});
   PS_CHECK(demand.replace_bindings(bindings).ok());
   auto routed = demand.request(query);
   PS_CHECK(routed.ok() && routed.value().diagnostics.cache_hits == 0 &&
-           routed.value()
-                   .dependencies.potential_dirty("data", point(3))
-                   .value()
-                   .at("sum") == q);
+           dirty_tiles(routed.value().dependencies, 0, point(3), 0) == q);
   bindings.inputs[0].result = data({1, 2, 777, 9, 5});
   PS_CHECK(demand.replace_bindings(bindings).ok());
   auto changed = demand.request(query);
   PS_CHECK(changed.ok() && changed.value().diagnostics.cache_hits == 0 &&
-           numeric_result_fixture::read(changed.value().results.at("sum"), {4},
-                                        &number, 8)
+           numeric_result_fixture::read(changed.value().results.at("sum"),
+                                        {0, 4}, &number, 8)
                .ok() &&
            number == 14);
   context.clear_result_cache();
   PS_CHECK(context.cache_statistics().retained_bytes == 0 &&
            context.cache_statistics().entries == 0);
-  PS_CHECK(numeric_result_fixture::read(held, {4}, &number, 8).ok() &&
+  PS_CHECK(numeric_result_fixture::read(held, {0, 4}, &number, 8).ok() &&
            number == 5);
   bindings.inputs[0].result = data({1, 2, 777, 9, 5});
-  bindings.inputs[1].result = radius({0, 0, 0, 3, 0});
+  bindings.inputs[1].result = control({0, 0, 0, 1, 0});
   PS_CHECK(demand.replace_bindings(bindings).ok());
   auto after_clear = demand.request(query);
   PS_CHECK(after_clear.ok() && after_clear.value().diagnostics.cache_hits == 0);
@@ -1589,7 +1566,7 @@ int structured_content_cache() {
     auto completed = context.execute_fragments(fresh, query, {}, bounded);
     PS_CHECK(completed.ok() &&
              numeric_result_fixture::read(completed.value().results.at("sum"),
-                                          {4}, &number, 8)
+                                          {0, 4}, &number, 8)
                  .ok() &&
              number == 14);
   }
@@ -1633,7 +1610,7 @@ int structured_content_cache() {
           {{"data",
             source(aggregate_root, values<double>(ElementType::Float64,
                                                   {seed + 1.0, 2, 3, 0, 5}))},
-           {"radius",
+           {"control",
             source(aggregate_root, values<std::int64_t>(ElementType::Int64,
                                                         {0, 0, 0, 0, 0}))}}};
       auto frozen = aggregate.freeze(plan, current).take_value();
@@ -1646,27 +1623,32 @@ int structured_content_cache() {
   }
   return 0;
 }
-int shared_failure_isolation() {
+int concurrent_failure_isolation() {
   auto gate = std::make_shared<Gate>();
   auto registry = gated_registry(gate, true);
   GraphContext graph(gate_document());
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContext context(registry, {2, false, 8, 4096});
+  auto plan =
+      Compiler(registry)
+          .compile(graph, PlanningOptions{ExecutionMode::CpuExact, {}, 1})
+          .take_value()
+          .plan;
+  ExecutionContext context(registry, {3, false, 8, 4096});
   ExecutionBindings bindings{
       {binding(context, "x",
                values<double>(ElementType::Float64,
                               {1, std::numeric_limits<double>::infinity()}))}};
   auto demand = context.open_demand(plan, bindings).take_value();
-  const DemandQuery wide{{"y", Footprint::all({2}).take_value()}};
+  const DemandQuery wide{{"y", TileRequest{false, all_tiles(2)}}};
   auto producer =
       std::async(std::launch::async, [&] { return demand.request(wide); });
   PS_CHECK(gate->await(1));
   auto follower =
       std::async(std::launch::async, [&] { return demand.request(wide); });
-  PS_CHECK(await_shared(context, 0));
-  auto narrow = std::async(
-      std::launch::async, [&] { return demand.request({{"y", point(0, 2)}}); });
   PS_CHECK(gate->await(2));
+  auto narrow = std::async(std::launch::async, [&] {
+    return demand.request({{"y", TileRequest{false, point(0, 2)}}});
+  });
+  PS_CHECK(gate->await(3));
   gate->open();
   auto failed = producer.get(), shared_failure = follower.get();
   auto survived = narrow.get();
@@ -1677,12 +1659,12 @@ int shared_failure_isolation() {
            failed.status().message == "nonfinite sample 1");
   double value = 0;
   PS_CHECK(survived.ok() &&
-           numeric_result_fixture::read(survived.value().results.at("y"), {0},
-                                        &value, 8)
+           numeric_result_fixture::read(survived.value().results.at("y"),
+                                        {0, 0}, &value, 8)
                .ok() &&
            value == 1);
-  PS_CHECK(gate->entered == 2 && gate->narrow_starts == 1 &&
-           gate->wide_starts == 1);
+  PS_CHECK(gate->entered == 5 && gate->narrow_starts == 5 &&
+           gate->wide_starts == 0);
   {
     std::lock_guard<std::mutex> lock(gate->mutex);
     gate->entered = 0;
@@ -1695,90 +1677,18 @@ int shared_failure_isolation() {
                               std::numeric_limits<double>::infinity()}))
           .result;
   PS_CHECK(demand.replace_bindings(bindings).ok());
-  auto later_atom = std::async(
-      std::launch::async, [&] { return demand.request({{"y", point(1, 2)}}); });
+  auto later_atom = std::async(std::launch::async, [&] {
+    return demand.request({{"y", TileRequest{false, point(1, 2)}}});
+  });
   PS_CHECK(gate->await(1));
   auto ordered = std::async(std::launch::async, [&] {
-    return demand.request({{"y", Footprint::all({2}).take_value()}});
+    return demand.request({{"y", TileRequest{false, all_tiles(2)}}});
   });
   PS_CHECK(gate->await(2));
   gate->allow(1);
   PS_CHECK(later_atom.get().status().message == "nonfinite sample 1");
   gate->open();
   PS_CHECK(ordered.get().status().message == "nonfinite sample 0");
-  return 0;
-}
-int joint_failure_isolation() {
-  auto gate = std::make_shared<Gate>();
-  auto registry = gated_registry(gate, false, {}, false, false, false, true);
-  auto document = gate_document();
-  document.nodes.push_back({2, "pass", {WorkflowNodeOutput{1, "value"}}, {}});
-  document.outputs = {{"y", 2, "value"}};
-  GraphContext graph(document);
-  auto plan = Compiler(registry).compile(graph).take_value().plan;
-  ExecutionContext context(registry, {2, false, 8, 4096});
-  ExecutionBindings bindings{
-      {binding(context, "x",
-               values<double>(ElementType::Float64,
-                              {1, std::numeric_limits<double>::infinity()}))}};
-  auto demand = context.open_demand(plan, bindings).take_value();
-  auto wide = std::async(std::launch::async, [&] {
-    return demand.request({{"y", Footprint::all({2}).take_value()}});
-  });
-  PS_CHECK(gate->await(1));
-  auto narrow = std::async(
-      std::launch::async, [&] { return demand.request({{"y", point(0, 2)}}); });
-  PS_CHECK(await_shared(context, 0));
-  gate->open();
-  auto failed = wide.get(), survived = narrow.get();
-  PS_CHECK(failed.status().code == ErrorCode::OperationFailed &&
-           failed.status().message == "nonfinite sample 1");
-  PS_CHECK(failed.status().reason == FailureReason::InvalidDomain &&
-           failed.status().detail.origin == FailureOrigin::Domain &&
-           failed.status().detail.scope == FailureScope::Atom &&
-           failed.status().detail.atom &&
-           failed.status().detail.atom->rank == 1 &&
-           failed.status().detail.atom->coordinate ==
-               (std::array<std::uint64_t, 8>{1}));
-  PS_CHECK(gate->joint_starts > 0 && gate->joint_polls > 0);
-  double value = 0;
-  PS_CHECK(survived.ok() &&
-           numeric_result_fixture::read(survived.value().results.at("y"), {0},
-                                        &value, 8)
-               .ok() &&
-           value == 1);
-  PS_CHECK(gate->entered == 2 &&
-           context.cache_statistics().shared_computations >= 1);
-  {
-    std::lock_guard<std::mutex> lock(gate->mutex);
-    gate->entered = 0;
-    gate->release = false;
-  }
-  bindings.inputs[0].result =
-      binding(context, bindings.inputs[0].name,
-              values<double>(ElementType::Float64,
-                             {std::numeric_limits<double>::infinity(),
-                              std::numeric_limits<double>::infinity()}))
-          .result;
-  PS_CHECK(demand.replace_bindings(bindings).ok());
-  auto later_atom = std::async(
-      std::launch::async, [&] { return demand.request({{"y", point(1, 2)}}); });
-  PS_CHECK(gate->await(1));
-  auto ordered = std::async(std::launch::async, [&] {
-    return demand.request({{"y", Footprint::all({2}).take_value()}});
-  });
-  PS_CHECK(gate->await(2));
-  gate->allow(1);
-  PS_CHECK(later_atom.get().status().message == "nonfinite sample 1");
-  gate->open();
-  auto first_failure = ordered.get();
-  PS_CHECK(first_failure.status().message == "nonfinite sample 0" &&
-           first_failure.status().reason == FailureReason::InvalidDomain &&
-           first_failure.status().detail.scope == FailureScope::Atom &&
-           first_failure.status().detail.atom &&
-           first_failure.status().detail.atom->rank == 1 &&
-           first_failure.status().detail.atom->coordinate ==
-               (std::array<std::uint64_t, 8>{0}));
   return 0;
 }
 }  // namespace
@@ -1790,19 +1700,17 @@ int main() {
   PS_CHECK(isolation_and_limits() == 0);
   PS_CHECK(snapshot_replacement() == 0);
   PS_CHECK(owner_retirement() == 0);
-  PS_CHECK(shared_ancestors() == 0);
-  PS_CHECK(joint_failure_isolation() == 0);
-  PS_CHECK(shared_failure_isolation() == 0);
+  PS_CHECK(concurrent_ancestors() == 0);
+  PS_CHECK(concurrent_failure_isolation() == 0);
   PS_CHECK(auxiliary_cancellation() == 0);
   PS_CHECK(impure_ancestor() == 0);
-  PS_CHECK(shared_fallback() == 0);
+  PS_CHECK(concurrent_fallback() == 0);
   PS_CHECK(protocol_first_cause() == 0);
-  PS_CHECK(shared_terminal() == 0);
   PS_CHECK(content_cache() == 0);
   PS_CHECK(structured_content_cache() == 0);
   PS_CHECK(cache_work_and_epoch() == 0);
   PS_CHECK(cache_snapshot_bits() == 0);
-  PS_CHECK(late_flight_and_frozen() == 0);
+  PS_CHECK(cancelled_run_and_frozen() == 0);
   PS_CHECK(cached_whole_ancestor() == 0);
   return 0;
 }

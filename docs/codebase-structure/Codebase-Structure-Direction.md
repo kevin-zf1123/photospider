@@ -11,7 +11,7 @@ include/photospider/
   compiler/      WorkflowDocument, typed IR, plan, typed identities, compiler
   execution/     context, cancellation, result, raw diagnostics
   data/          Value, Region, explicit layout and immutable bytes
-  plugin/        operation and data-provider ABI/registry
+  plugin/        operation ABI/registry
   core/          status, resources, cancellation and symbol export
   benchmark/     raw compile/plan/execute benchmark runner
   photospider.hpp kernel convenience include
@@ -42,7 +42,6 @@ src/lib/
 
 plugins/ops/<NN-family>/   built-in operation implementations
 
-tests/consumer/
 tests/fixtures/
 tests/unit/
 tests/integration/
@@ -57,7 +56,6 @@ Private source homes follow responsibility. `src/lib/core/` holds primitives wit
 | `photospider` / `Photospider::kernel` | yes | one public compiler/executor and ABI runtime; also contains the built-in operation implementations |
 | `Photospider::ops_headers` | yes | header-only include root for `photospider/ops/`; consumers link it together with `Photospider::kernel` |
 | `Photospider::operation_sdk` | yes | header-only trusted operation DSO ABI |
-| `Photospider::data_provider_sdk` | yes | header-only data-definition/provider DSO ABI |
 | operation/provider fixture modules | no | test-only ABI validation and lifecycle |
 | test executables | no | maintained unit/integration/package behavior |
 

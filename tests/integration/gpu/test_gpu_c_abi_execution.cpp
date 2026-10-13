@@ -7,6 +7,7 @@
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include "support/gpu_result_fixture.hpp"
 
@@ -16,6 +17,9 @@ using gpu_result::take;
 constexpr std::uint64_t length = 8192;
 SchemaTemplate schema(std::uint64_t count = length) {
   auto value = gpu_result::schema(ElementType::Float32, count);
+  value.tensors[0].descriptor.shape = {1, count};
+  value.tensors[0].layout.spatial = true;
+  value.tensors[0].layout.channel_axis.reset();
   value.id = "c.gpu.samples";
   value.tensors[0].key = "samples";
   return value;
@@ -23,18 +27,17 @@ SchemaTemplate schema(std::uint64_t count = length) {
 ExecutionBindings inputs(const ResourceBudget& root,
                          std::uint64_t count = length) {
   auto builder = take(ResultBuilder::start(root, schema(count), "c.input"));
-  gpu_result::check(builder.bind_descriptor_relation(
-      take(ResultRelation::cartesian(root, 1, {}))));
+
   auto buffer = take(root.allocator().allocate(count * 4));
   std::memset(buffer.data(), 0, buffer.size());
   for (std::uint64_t i = 1; i <= 65; ++i) {
     const float value = static_cast<float>(i);
     std::memcpy(buffer.data() + i * 64 * 4, &value, 4);
   }
-  gpu_result::check(builder.publish_tensor(
-      0, Region::whole({count}), {0, {4}}, std::move(buffer).freeze(),
-      take(ResultRelation::cartesian(root, count, {})),
-      {true, true, true, true}));
+  gpu_result::check(
+      builder.publish_tensor(0, Region::whole({1, count}),
+                             {0, {static_cast<std::int64_t>(count * 4), 4}},
+                             std::move(buffer).freeze()));
   ExecutionBindings bindings;
   ExecutionBinding binding;
   binding.name = "x";
@@ -42,8 +45,14 @@ ExecutionBindings inputs(const ResourceBudget& root,
   bindings.inputs.push_back(std::move(binding));
   return bindings;
 }
-Footprint point(std::uint64_t at) {
-  return Footprint::from_regions({length}, {Region({{at, 1}})}).take_value();
+TileRequest point(std::uint64_t at) {
+  return {false, take(TileSet::from_indices(ResourceBudget{}, {at}))};
+}
+float number(const ResultRef& result, std::uint64_t at) {
+  float value = 0;
+  gpu_result::check(
+      result.read_tensor(take(result.descriptor()), 0, {0, at}, &value, 4));
+  return value;
 }
 WorkflowDocument document(std::int64_t mode, std::uint64_t count = length) {
   WorkflowDocument result;
@@ -60,8 +69,7 @@ int check(bool value, const char* message) {
     std::cerr << message << '\n';
   return value ? 0 : 1;
 }
-bool whole_query(const OperationRegistry& registry,
-                 const ResourceBudget& root) {
+bool unit_query(const OperationRegistry& registry, const ResourceBudget& root) {
   ResultProgramMetadata metadata;
   metadata.output.result_schema =
       std::make_shared<const SchemaTemplate>(schema());
@@ -69,26 +77,27 @@ bool whole_query(const OperationRegistry& registry,
   const std::map<std::string, ParameterValue> parameters{
       {"mode", std::int64_t{0}}};
   ResultProgramQuery query(metadata, parameters);
+  query.tile_extent = 1;
+  query.tile_unit = 0;
+  query.output_request = point(0);
   query.semantic_key = "example.c_native_sum";
   auto continuation = take(registry.start_result(
       std::string(query.semantic_key), query, root.allocator()));
 
   ResultObjectInputs objects;
-  ResourceVector<ResultIoReply> io;
   auto allocator = root.allocator();
   ResultProgramPhase phase{
       query,
       objects,
-      io,
       allocator,
       root,
       [&](std::uint64_t work) { return root.consume({work}); },
       std::make_shared<std::atomic<ErrorCode>>(ErrorCode::Ok)};
   auto polled = take(continuation.poll(phase));
   const auto* need = std::get_if<ResultProgramNeed>(&polled);
-  return need && need->tensors.size() == 1 && need->tensors[0].roles == 10 &&
-         need->tensors[0].samples.contains({0}) &&
-         take(need->tensors[0].samples.element_count()) == 1;
+  return need && need->tiles.size() == 1 && need->tiles[0].input == 0 &&
+         !need->tiles[0].whole && !need->tiles[0].descriptor_only &&
+         need->tiles[0].tiles == point(0).tiles;
 }
 }  // namespace
 int main(int argc, char** argv) try {
@@ -103,8 +112,8 @@ int main(int argc, char** argv) try {
   config.gpu_enabled = true;
   config.result_cache_bytes = 1048576;
   ExecutionContext context(registry, config);
-  if (check(whole_query(*registry, take(context.resource_budget())),
-            "C complete-object query was treated as Empty"))
+  if (check(unit_query(*registry, take(context.resource_budget())),
+            "C tile query did not request its control tile"))
     return 1;
   const auto bindings = inputs(take(context.resource_budget()));
   for (bool gpu : {false, true}) {
@@ -114,6 +123,7 @@ int main(int argc, char** argv) try {
     }
     GraphContext graph(document(0));
     PlanningOptions options;
+    options.tile_extent = 1;
     options.execution_mode =
         gpu ? ExecutionMode::NativeGpu : ExecutionMode::CpuExact;
     auto compiled = Compiler(registry).compile(graph, options);
@@ -121,21 +131,26 @@ int main(int argc, char** argv) try {
       return 1;
     auto frozen = context.freeze(compiled.value().plan, bindings).take_value();
     auto result = context.execute_fragments(
-        frozen, {{"sum", point(0).unite(point(1)).take_value()}});
+        frozen, {{"sum", TileRequest{false, take(TileSet::from_indices(
+                                                ResourceBudget{}, {0, 1}))}}});
     if (!result.ok())
       std::cerr << result.status().message << '\n';
     if (check(result.ok(), "C workflow failed"))
       return 1;
     for (std::uint64_t i : {0, 1}) {
-      if (check(gpu_result::number(result.value().results.at("sum"), i) == 2145,
+      if (check(number(result.value().results.at("sum"), i) == 2145,
                 "C independent sum failed"))
         return 1;
     }
-    auto evidence =
-        result.value().dependencies.restrict({{"sum", point(1)}}).take_value();
-    auto support = evidence.source_support().take_value().at("x");
-    if (check(support.contains({1}) && !support.contains({0}) &&
-                  support.element_count().value() == 66,
+    auto evidence = take(result.value().dependencies.tile_record({0, 0, 1}));
+    std::vector<TileIndex> expected{1};
+    for (TileIndex i = 1; i <= 65; ++i)
+      expected.push_back(i * 64);
+    if (check(evidence && evidence->inputs.size() == 1 &&
+                  !evidence->inputs[0].whole &&
+                  evidence->inputs[0].tiles ==
+                      take(TileSet::from_indices(
+                          ResourceBudget{}, expected.data(), expected.size())),
               "C block state imported obsolete control"))
       return 1;
     const auto& d = result.value().diagnostics;
@@ -148,8 +163,8 @@ int main(int argc, char** argv) try {
     std::cout << (gpu ? "C Metal" : "C CPU")
               << ": sums=2145,2145; dispatches=" << d.native_dispatch_count
               << "; block_hits=" << d.block_cache_hits << '\n';
-    auto empty = take(context.execute_fragments(
-        frozen, {{"sum", take(Footprint::none({length}))}}));
+    auto empty =
+        take(context.execute_fragments(frozen, {{"sum", TileRequest{}}}));
     if (check(take(empty.results.at("sum").descriptor())
                       .tensor_coverage(0)
                       .empty() &&
@@ -162,10 +177,9 @@ int main(int argc, char** argv) try {
     auto minimum_binding = inputs(take(context.resource_budget()), 4225);
     auto minimum_frozen =
         take(context.freeze(minimum_plan.plan, minimum_binding));
-    auto minimum_output = take(context.execute_fragments(
-        minimum_frozen,
-        {{"sum", take(Footprint::from_regions({4225}, {Region({{0, 1}})}))}}));
-    if (check(gpu_result::number(minimum_output.results.at("sum"), 0) == 2145,
+    auto minimum_output =
+        take(context.execute_fragments(minimum_frozen, {{"sum", point(0)}}));
+    if (check(number(minimum_output.results.at("sum"), 0) == 2145,
               "C dynamic Result metadata changed minimum input"))
       return 1;
     GraphContext invalid_graph(document(0, 4224));
@@ -179,7 +193,7 @@ int main(int argc, char** argv) try {
       auto renewed_frozen = take(context.freeze(renewed_plan.plan, bindings));
       auto renewed =
           take(context.execute_fragments(renewed_frozen, {{"sum", point(0)}}));
-      if (check(gpu_result::number(renewed.results.at("sum"), 0) == 2145 &&
+      if (check(number(renewed.results.at("sum"), 0) == 2145 &&
                     renewed.diagnostics.native_dispatch_count > 0,
                 "C released atlas token could not be reacquired"))
         return 1;
@@ -231,8 +245,7 @@ int main(int argc, char** argv) try {
       auto retry = fresh.execute_fragments(retry_frozen, {{"sum", point(0)}});
       if (check(
               retry.ok() &&
-                  gpu_result::number(retry.value().results.at("sum"), 0) ==
-                      2145 &&
+                  number(retry.value().results.at("sum"), 0) == 2145 &&
                   (gpu ? retry.value().diagnostics.native_dispatch_count > 0
                        : retry.value().diagnostics.native_dispatch_count == 0),
               "C failed stage retained owners or bypassed real retry"))

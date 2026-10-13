@@ -19,43 +19,25 @@ struct TupleProgram {
     using namespace ps;  // NOLINT(build/namespaces)
     using multi_result::check;
     using multi_result::take;
-    const auto shape =
-        phase.query.output.result_schema->tensors[0].sample_shape();
     if (!requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tensors.push_back({0, 0, take(Footprint::all(shape)), 13});
+      need.tiles.push_back({0, true, false, {}});
       return Result<ResultProgramPoll>(std::move(need));
     }
     auto builder = take(ResultBuilder::start(phase.resources,
                                              *phase.query.output.result_schema,
                                              phase.query.semantic_key));
-    check(builder.bind_descriptor_relation(take(ResultRelation::cartesian(
-        phase.resources, 1,
-        {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0}))));
-    for (const auto& box : phase.query.tensor_outputs->boxes()) {
-      const std::vector<ResultMappedAxis> data{{0, 0, 1, 1}, {1, 0, 1, 1}};
-      auto witness = take(
-          ResultRelation::mapped(phase.resources, shape, box, shape, data,
-                                 {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
-      if (mode) {
-        auto validation = data;
-        validation[1] = {-1, 0, 0, mode == 2 ? 2U : 3U};
-        if (mode == 1)
-          validation[0] = {-1, 1, 0, 1};
-        auto tuples = take(ResultRelation::mapped(
-            phase.resources, shape, box, shape, validation,
-            {0, 4, 0, 0, ResultSupportTarget::Tensor, 0}));
-        witness =
-            take(ResultRelation::unite(phase.resources, {witness, tuples}));
-      }
+    const unsigned channels = mode == 1 ? 2 : 3;
+    const unsigned rows = mode == 2 ? 1 : 2;
+    for (unsigned row = 0; row < rows; ++row) {
       std::array<double, 3> values{};
-      for (unsigned channel = 0; channel < 3; ++channel)
-        check(phase.read_tensor(0, 0, {0, channel}, &values[channel], 8));
+      for (unsigned channel = 0; channel < channels; ++channel)
+        check(phase.read_tensor(0, 0, {row, channel}, &values[channel], 8));
       check(builder.publish_tensor(
-          0, box,
-          ByteView(reinterpret_cast<const std::uint8_t*>(values.data()), 24),
-          std::move(witness), {true, true, true, true}));
+          0, Region({{row, 1}, {0, channels}}),
+          ByteView(reinterpret_cast<const std::uint8_t*>(values.data()),
+                   channels * sizeof(double))));
     }
     return Result<ResultProgramPoll>(
         ResultPublication{take(builder.seal()), true});
@@ -72,7 +54,7 @@ int main() {
       encode_color_array(ColorArrayDescriptor{}).take_value()};
   PS_REQUIRE_OK(schema.validate());
   auto registry = std::make_shared<OperationRegistry>();
-  for (unsigned mode = 0; mode < 4; ++mode) {
+  for (unsigned mode = 0; mode < 3; ++mode) {
     OperationDefinition definition;
     definition.key = "test.tuple." + std::to_string(mode);
     definition.traits.input_count = 1;
@@ -92,7 +74,7 @@ int main() {
   ExecutionContext context(registry);
   auto root = context.resource_budget().take_value();
   auto input = multi_result::binding(root, "x", 1, schema);
-  for (unsigned mode = 0; mode < 4; ++mode) {
+  for (unsigned mode = 0; mode < 3; ++mode) {
     WorkflowDocument document;
     document.inputs = {multi_result::declaration(1, "x", schema)};
     document.nodes = {{1,
@@ -105,16 +87,19 @@ int main() {
     PS_REQUIRE_OK(plan);
     auto demand =
         context.open_demand(plan.value().plan, {{input}}).take_value();
-    auto query = Footprint::from_regions({2, 3}, {Region({{0, 1}, {0, 3}})})
-                     .take_value();
+    const TileRequest query{true, {}};
     auto result = demand.request({{"y", query}});
-    if (mode == 3) {
+    if (mode == 0) {
       PS_REQUIRE_OK(result);
       PS_CHECK(multi_result::number(result.value().results.at("y"), {0, 2}) ==
                1);
     } else {
-      PS_CHECK(result.status().code == ErrorCode::InvalidArgument);
-      PS_CHECK(result.status().detail.origin == FailureOrigin::Protocol);
+      PS_CHECK(
+          result.status().code ==
+          (mode == 1 ? ErrorCode::TypeMismatch : ErrorCode::InvalidArgument));
+      PS_CHECK(
+          result.status().detail.origin ==
+          (mode == 1 ? FailureOrigin::Unspecified : FailureOrigin::Protocol));
       PS_CHECK(result.status().detail.scope == FailureScope::Group);
     }
   }

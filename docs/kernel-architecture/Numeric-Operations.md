@@ -1,6 +1,6 @@
 # Numeric operations
 
-The default registry contains unsuffixed finite-domain arithmetic and clamp keys, staged scalar reductions, an ordered scan, and profile-specific numeric families. Their parameter, execution and output contracts differ, so choose a key by its exact name. Operation plugins use the Result operation C ABI 2.
+The default registry contains unsuffixed finite-domain arithmetic and clamp keys, staged scalar reductions, an ordered scan, and profile-specific numeric families. Their parameter, execution and output contracts differ, so choose a key by its exact name. Operation plugins use the Result operation C ABI 3.
 
 ## Unsuffixed Result numeric operations
 
@@ -69,6 +69,6 @@ Invalid static parameters return `InvalidArgument`. Unsupported or incompatible 
 
 ## Public workflows and checks
 
-[`tests/integration/test_numeric_operations.cpp`](../../tests/integration/test_numeric_operations.cpp) covers registered arithmetic behavior. Split Result numeric oracles live under [`tests/integration/numeric`](../../tests/integration/numeric), with separate files for arithmetic, arrays, sequences, statistics, matrix, calculus, curves, Bezier, LUTs, baking, expressions, filters and color ramps. Ordered reduction and scan behavior is exercised by [`test_ordered_reduction.cpp`](../../tests/integration/test_ordered_reduction.cpp), [`test_ordered_scan.cpp`](../../tests/integration/test_ordered_scan.cpp) and [`test_scan_waiters.cpp`](../../tests/integration/test_scan_waiters.cpp). These tests use independent numerical expectations; block-cache observations do not establish performance. The installed Result numeric consumer is registered as `installed_result_numeric` in `tests/consumer/CMakeLists.txt`.
+[`tests/integration/test_numeric_operations.cpp`](../../tests/integration/test_numeric_operations.cpp) covers registered arithmetic behavior. Split Result numeric oracles live under [`tests/integration/numeric`](../../tests/integration/numeric), with separate files for arithmetic, arrays, sequences, statistics, matrix, calculus, curves, Bezier, LUTs, baking, expressions, filters and color ramps. Ordered reduction and scan behavior is exercised by [`test_ordered_reduction.cpp`](../../tests/integration/test_ordered_reduction.cpp), [`test_ordered_scan.cpp`](../../tests/integration/test_ordered_scan.cpp) and [`test_scan_waiters.cpp`](../../tests/integration/test_scan_waiters.cpp). These tests use independent numerical expectations; block-cache observations do not establish performance.
 
 Generic arithmetic keys do not declare planar image capability. Their registration does not imply that a structural planar image can be passed as a generic numeric array.

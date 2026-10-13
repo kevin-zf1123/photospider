@@ -210,9 +210,11 @@ void bindings_errors_and_cache(ps::CpuNumericProfile profile) {
         {raw(1), raw(1.5), raw(2), raw(2.5), raw(3)});
   auto warmed = take(demand.request({{"values", all}, {"axis", axis}}));
   for (const char* name : {"values", "axis"})
-    require(first.results.at(name).object_id() ==
-                warmed.results.at(name).object_id(),
-            "same Frozen shares each completed output Result");
+    require(
+        warmed.diagnostics.cache_hits > 0 &&
+            numeric_result_fixture::bytes(first.results.at(name)) ==
+                numeric_result_fixture::bytes(warmed.results.at(name)),
+        "repeated demand reuses bounded completed cache with identical bits");
   const auto coefficient = take(ps::Footprint::all({1}));
   const auto dirty =
       take(first.dependencies.potential_dirty("input2", coefficient));

@@ -56,8 +56,9 @@ int main() try {
   ps::Compiler compiler(registry);
   ps::GraphContext graph(document);
   ps::PlanningOptions planning;
-  planning.output_regions = {{"edited", ps::Region({{0, 1}, {1, 1}, {0, 4}})}};
   auto compiled = checked(compiler.compile(graph, planning));
+  compiled.plan = checked(workflow_example::select_tiles(
+      root, compiled.plan, "edited", ps::Region({{0, 1}, {1, 1}, {0, 4}})));
   auto result = checked(context.execute(compiled.plan, bindings));
   const auto& value = result.results.at("edited");
   const auto bytes =

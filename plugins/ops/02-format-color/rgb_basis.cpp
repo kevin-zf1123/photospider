@@ -14,12 +14,15 @@
 #include <utility>
 #include <vector>
 
-#include "00-foundation/tensor_program.hpp"
 #include "02-format-color/result_mapping.hpp"
 #include "02-format-color/rgb_basis_math.hpp"
+#include "common/registry.hpp"
+#include "common/tensor_program.hpp"
+#include "common/typed_need_validation.hpp"
 #include "photospider/data/region_runs.hpp"
 #include "photospider/ops/numeric/workflow_authoring.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "photospider/ops/registry.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::basis_ops {
@@ -313,7 +316,7 @@ struct Preparation final {
   std::string layout;
   struct Span final {
     Region region;
-    unsigned terms, roles;
+    unsigned terms;
   };
   std::vector<Span> spans;
   bool narrow = false, semantic = true, is_identity = false,
@@ -671,9 +674,8 @@ OperationPreparation prepare_impl(const std::vector<OperationMetadata>& inputs,
     auto dims = Region::whole(full_shape).dimensions();
     dims[state->axis] = {boundaries[i - 1], boundaries[i] - boundaries[i - 1]};
     const bool color = state->row(boundaries[i - 1]) >= 0;
-    state->spans.push_back({Region(std::move(dims)),
-                            color && !state->is_identity ? 3U : 1U,
-                            semantic && color ? 5U : 1U});
+    state->spans.push_back(
+        {Region(std::move(dims)), color && !state->is_identity ? 3U : 1U});
   }
   OperationPreparation result;
   result.outputs.push_back(std::move(output));
@@ -811,17 +813,15 @@ Status evaluate(
   return Status::success();
 }
 using Poll = Result<ResultProgramPoll>;
-ResultBuilder result_builder(const ResultProgramPhase& phase, bool empty) {
+ResultBuilder result_builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto builder = checked(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
-  checked(builder.bind_descriptor_relation(checked(ResultRelation::cartesian(
-      phase.resources, 1,
-      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+      phase.query.tile_extent, phase.query.resources));
+
   return builder;
 }
 Poll empty_result(const ResultProgramPhase& phase) try {
@@ -830,10 +830,9 @@ Poll empty_result(const ResultProgramPhase& phase) try {
 } catch (const CheckedFailure& failure) {
   return Poll(failure.status);
 }
-std::vector<ResultMappedAxis> mapping(std::size_t rank,
-                                      const Preparation& state, unsigned terms,
-                                      unsigned term) {
-  std::vector<ResultMappedAxis> axes(rank);
+std::vector<ResultViewAxis> mapping(std::size_t rank, const Preparation& state,
+                                    unsigned terms, unsigned term) {
+  std::vector<ResultViewAxis> axes(rank);
   for (unsigned a = 0; a < rank; ++a) {
     axes[a].output_axis = static_cast<std::int32_t>(a);
     if (terms == 3 && a == state.axis) {
@@ -843,38 +842,6 @@ std::vector<ResultMappedAxis> mapping(std::size_t rank,
   }
   return axes;
 }
-ResultRelation relation(const ResultProgramPhase& phase,
-                        const Preparation& state) {
-  const auto& spec = phase.query.output.result_schema->tensors[0];
-  const auto shape = spec.sample_shape();
-  ResourceVector<ResultRelation> relations;
-  for (const auto& span : state.spans)
-    for (unsigned j = 0; j < span.terms; ++j) {
-      checked(phase.consume_work(shape.size() + 1));
-      relations.push_back(checked(ResultRelation::mapped(
-          phase.resources, shape, span.region, shape,
-          mapping(shape.size(), state, span.terms, j),
-          {0, span.roles, 0, 0, ResultSupportTarget::Tensor, 0})));
-    }
-  relations.push_back(checked(ResultRelation::cartesian(
-      phase.resources, checked(spec.sample_count()),
-      {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0})));
-  while (relations.size() > 1) {
-    ResourceVector<ResultRelation> next;
-    for (std::size_t i = 0; i < relations.size(); i += 16) {
-      checked(phase.consume_work(17));
-      std::vector<ResultRelation> group;
-      for (auto j = i; j < std::min(i + 16, relations.size()); ++j)
-        group.push_back(relations[j]);
-      next.push_back(checked(ResultRelation::unite(phase.resources, group)));
-    }
-    relations = std::move(next);
-  }
-  return relations.front();
-}
-// A channel plane traverses the window sample axis, or its row axis when the
-// generic sample axis is the channel itself. Both strides are authorized by
-// the window; no unrequested peer channels are gathered.
 Status run_plane(const ResultProgramPhase& phase, const Preparation& state,
                  Workspace* work, NumericDiagnostics* report,
                  const Region& plane,
@@ -995,6 +962,9 @@ struct Continuation final {
   Footprint output;
   explicit Continuation(const Preparation* p) : state(p) {}
   Poll poll(const ResultProgramPhase& phase) try {
+    auto checked_inputs = ops_validation::typed_inputs(phase);
+    if (!checked_inputs.ok())
+      return Result<ResultProgramPoll>(checked_inputs);
     const auto& spec = phase.query.output.result_schema->tensors[0];
     const auto shape = spec.sample_shape();
     if (!requested) {
@@ -1002,7 +972,6 @@ struct Continuation final {
       output = phase.query.tensor_outputs ? *phase.query.tensor_outputs
                                           : checked(Footprint::all(shape));
       std::vector<Region> regions;
-      unsigned roles = 9;
       for (const auto& span : state->spans)
         for (const auto& box : output.boxes()) {
           checked(phase.consume_work(shape.size() + 1));
@@ -1019,7 +988,6 @@ struct Continuation final {
           }
           if (dims.size() != shape.size())
             continue;
-          roles |= span.roles;
           for (unsigned j = 0; j < span.terms; ++j) {
             auto source = dims;
             if (span.terms == 3)
@@ -1028,8 +996,14 @@ struct Continuation final {
           }
         }
       ResultProgramNeed need;
-      need.tensors.push_back(
-          {0, 0, checked(Footprint::from_regions(shape, regions)), roles});
+      {
+        auto tile_need_0 = sdk::tile_need_for_samples(
+            phase.resources, phase.query, 0, 0,
+            checked(Footprint::from_regions(shape, regions)), regions.empty());
+        if (!tile_need_0.ok())
+          return Result<ResultProgramPoll>(tile_need_0.status());
+        need.tiles.push_back(tile_need_0.take_value());
+      }
       return Poll(std::move(need));
     }
     input_internal::Float32Environment environment;
@@ -1045,7 +1019,6 @@ struct Continuation final {
     auto result = [&]() -> Poll {
       try {
         auto builder = result_builder(phase, false);
-        const auto support = relation(phase, *state);
         const bool view = state->is_identity && !state->materialize;
         MutableBuffer scratch;
         Workspace* work = nullptr;
@@ -1067,10 +1040,9 @@ struct Continuation final {
                                 Region(std::move(dims)), sources, nullptr));
             }
             format_result::PublicationCounts counts;
-            const auto status =
-                format_result::publish(phase, &builder, box, sources[0],
-                                       mapping(shape.size(), *state, 1, 0),
-                                       support, state->layout, 0, &counts);
+            const auto status = format_result::publish(
+                phase, &builder, box, sources[0],
+                mapping(shape.size(), *state, 1, 0), state->layout, 0, &counts);
             report.copied_elements += counts.copied;
             report.view_elements += counts.viewed;
             return status;
@@ -1109,7 +1081,7 @@ struct Continuation final {
                   return f.status;
                 }
               },
-              support, {true, true, true, true}, phase.query.cancellation);
+              phase.query.cancellation);
         }));
         checked(consume(1));
         return Poll(ResultPublication{checked(builder.seal()), true});
@@ -1175,7 +1147,7 @@ OperationDefinition definition(unsigned member, const std::string& suffix,
   output.key = "values";
   output.output_schema = port;
   output.result_schema = tensor_ops::scalar_schema();
-  output.region_rule = OperationRegionRule::Dependency;
+  output.region_rule = OperationRegionRule::Tiled;
   output.continuation_bytes = sizeof(Continuation);
   output.maximum_dependency_stages = 2;
   op.prepare_static = [member, profile](const auto& inputs,

@@ -160,8 +160,7 @@ struct Fixture {
     }
     return ps::Result<ps::ExecutionBindings>(std::move(bindings));
   }
-  ps::Result<ps::DemandResult> run(const ps::Footprint& wanted,
-                                   bool joint = true) const {
+  ps::Result<ps::DemandResult> run(const ps::Footprint& wanted) const {
     ps::GraphContext graph(document);
     auto compiled = ps::Compiler(registry).compile(graph);
     if (!compiled.ok())
@@ -177,7 +176,6 @@ struct Fixture {
     if (!frozen.ok())
       return ps::Result<ps::DemandResult>(frozen.status());
     ps::ExecutionOptions options;
-    options.enable_joint = joint;
     options.maximum_dependency_work = UINT64_C(1) << 30;
     options.dependencies.maximum_work = UINT64_C(1) << 30;
     return context.execute_fragments(frozen.value(), {{"values", wanted}}, {},
@@ -215,9 +213,9 @@ void examples(ps::CpuNumericProfile profile) {
           method, profile,
           {numbers(narrow, input), numbers(narrow, {logarithmic ? 1. : -2.}),
            numbers(narrow, {logarithmic ? 16. : 2.})});
-      for (bool joint : {false, true}) {
+      {
         auto result =
-            take(fixture.run(take(ps::Footprint::all({input.size()})), joint));
+            take(fixture.run(take(ps::Footprint::all({input.size()}))));
         const auto& output = result.results.at("values");
         require(output.schema().tensors[0].facets.empty(),
                 "generic shaper result");
@@ -244,7 +242,7 @@ void examples(ps::CpuNumericProfile profile) {
   }
   std::cout
       << "four public shapers, both dtypes, exact landmarks/extrapolation, "
-         "joint/cache-off, Whole witnesses, Empty and owner lifetime PASS\n";
+         "cache-off, Whole witnesses, Empty and owner lifetime PASS\n";
 }
 ps::ResultRef direct(const ps::WorkflowNode& node,
                      const std::vector<SampleInput>& inputs) {
@@ -443,10 +441,8 @@ void partitions_and_cache(ps::CpuNumericProfile profile) {
     double previous = -1e300;
     for (unsigned j = 0; j < samples.size(); ++j) {
       const auto i = samples.size() - j - 1;
-      auto partial =
-          take(fixture.run(take(ps::Footprint::from_regions(
-                               {samples.size()}, {ps::Region({{i, 1}})})),
-                           false));
+      auto partial = take(fixture.run(take(ps::Footprint::from_regions(
+          {samples.size()}, {ps::Region({{i, 1}})}))));
       require(read(partial.results.at("values"), {i}) == read(output, {i}),
               "reverse partition matches joint mapping");
       const auto raw = read(output, {j});
@@ -489,7 +485,7 @@ void partitions_and_cache(ps::CpuNumericProfile profile) {
           take(publish_input(fixture.values[port], root));
       require(demand.replace_bindings(bindings).ok(), "replace shaper bound");
       auto changed = take(demand.request({{"values", one}}, {}, options));
-      auto fresh = take(fixture.run(one, false));
+      auto fresh = take(fixture.run(one));
       require(read(changed.results.at("values"), {1}) ==
                       read(fresh.results.at("values"), {1}) &&
                   read(changed.results.at("values"), {1}) != read(output, {1}),

@@ -17,12 +17,10 @@ struct Follow {
     using dependency_fixture::check;
     using dependency_fixture::take;
     const auto need = [&](std::uint32_t port) {
-      auto samples = take(Footprint::from_regions(
-          phase.query.inputs[port].result_schema->tensors[0].sample_shape(),
-          {Region({{position, 1}})}));
       ResultProgramNeed batch;
-      batch.tensors.push_back(
-          {port, 0, std::move(samples), port == 0 ? 2U : 1U});
+      batch.tiles.push_back(
+          {port, false, false,
+           take(TileSet::from_indices(phase.resources, {position}))});
       return Result<ResultProgramPoll>(std::move(batch));
     };
     check(phase.consume_work(1));
@@ -34,14 +32,14 @@ struct Follow {
                    "follow requires one requested sample"});
       controls = ResourceVector<std::uint64_t>(
           ResourceAllocator<std::uint64_t>(phase.resources));
-      atom = phase.query.tensor_outputs->boxes()[0].dimensions()[0].offset;
+      atom = phase.query.tensor_outputs->boxes()[0].dimensions()[1].offset;
       position = atom;
       stage = 1;
       return need(0);
     }
     if (stage == 1) {
       std::int64_t pointer = 0;
-      check(phase.read_tensor(0, 0, {position}, &pointer, 8));
+      check(phase.read_tensor(0, 0, {0, position}, &pointer, 8));
       controls.push_back(position);
       if (pointer >= 0) {
         position = static_cast<std::uint64_t>(pointer);
@@ -52,7 +50,7 @@ struct Follow {
       return need(1);
     }
     double sample = 0;
-    check(phase.read_tensor(1, 0, {position}, &sample, 8));
+    check(phase.read_tensor(1, 0, {0, position}, &sample, 8));
     auto builder = take(ResultBuilder::start(
         phase.resources, *phase.query.output.result_schema,
         phase.query.semantic_key, {},
@@ -60,31 +58,12 @@ struct Follow {
             ? std::vector<std::uint64_t>(phase.association->begin(),
                                          phase.association->end())
             : std::vector<std::uint64_t>{},
-        phase.query.tile_height, phase.query.tile_width,
-        phase.query.resources));
-    check(builder.bind_descriptor_relation(take(ResultRelation::unite(
-        phase.resources,
-        {take(ResultRelation::cartesian(
-             phase.resources, 1,
-             {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0})),
-         take(ResultRelation::cartesian(
-             phase.resources, 1,
-             {1, 8, 0, 1, ResultSupportTarget::Descriptor, 0}))}))));
-    auto relation = take(ResultRelation::sample_rows(
-        phase.resources,
-        take(phase.query.output.result_schema->tensors[0].sample_count()),
-        controls.size() + 1, [&](std::uint64_t row) {
-          return Result<ResultRelationRow>(ResultRelationRow{
-              atom, row < controls.size()
-                        ? ResultSupport{0, 2, controls[row], 1,
-                                        ResultSupportTarget::Tensor, 0}
-                        : ResultSupport{1, 1, position, 1,
-                                        ResultSupportTarget::Tensor, 0}});
-        }));
-    check(builder.publish_tensor(
-        0, Region({{atom, 1}}),
-        {reinterpret_cast<const std::uint8_t*>(&sample), 8},
-        std::move(relation), {true, true, true, true}));
+        phase.query.tile_extent, phase.query.resources));
+    auto storage = take(phase.resources.allocator().allocate(sizeof(sample)));
+    std::memcpy(storage.data(), &sample, sizeof(sample));
+    check(builder.publish_tensor(0, Region({{0, 1}, {atom, 1}}),
+                                 {0, {8, 8}, {0, atom}},
+                                 std::move(storage).freeze()));
     return Result<ResultProgramPoll>(
         ResultPublication{take(builder.seal()), true});
   } catch (const dependency_fixture::Failure& error) {
@@ -96,18 +75,23 @@ void progressive_workflow() {
   using dependency_fixture::check;
   using dependency_fixture::take;
   constexpr std::uint64_t extent = 1000000000;
-  const auto control_schema =
-      dependency_fixture::schema(ElementType::Int64, extent);
-  const auto payload_schema =
+  auto control_schema = dependency_fixture::schema(ElementType::Int64, extent);
+  auto payload_schema =
       dependency_fixture::schema(ElementType::Float64, extent);
+  for (auto* schema : {&control_schema, &payload_schema}) {
+    auto& tensor = schema->tensors[0];
+    tensor.descriptor.shape = {1, extent};
+    tensor.layout.spatial = true;
+    tensor.layout.channel_axis.reset();
+  }
   auto registry = std::make_shared<OperationRegistry>();
   std::vector<std::uint64_t> controls, payloads;
   check(registry->register_operation(dependency_fixture::source(
       "example.controls", control_schema,
       [&](const ResultProgramQuery&, const Region& region, std::uint8_t* bytes,
           std::uint64_t size) {
-        const auto i = region.dimensions()[0].offset;
-        if (region.dimensions()[0].extent != 1 || size != 8 ||
+        const auto i = region.dimensions()[1].offset;
+        if (region.dimensions()[1].extent != 1 || size != 8 ||
             (i != 0 && i != 1 && i != 3))
           return Status{ErrorCode::OperationFailed,
                         "unexpected control generation"};
@@ -120,8 +104,8 @@ void progressive_workflow() {
       "example.payload", payload_schema,
       [&](const ResultProgramQuery&, const Region& region, std::uint8_t* bytes,
           std::uint64_t size) {
-        const auto i = region.dimensions()[0].offset;
-        if (region.dimensions()[0].extent != 1 || size != 8 || i != extent - 1)
+        const auto i = region.dimensions()[1].offset;
+        if (region.dimensions()[1].extent != 1 || size != 8 || i != extent - 1)
           return Status{ErrorCode::OperationFailed,
                         "unexpected payload generation"};
         payloads.push_back(i);
@@ -138,7 +122,7 @@ void progressive_workflow() {
     input.kind = OperationPortKind::Result;
     input.element_type = static_cast<std::uint32_t>(
         i == 0 ? ElementType::Int64 : ElementType::Float64);
-    input.rank = 1;
+    input.rank = 2;
   }
   follow.traits.outputs = {
       dependency_fixture::output(payload_schema, sizeof(Follow), 8)};
@@ -159,33 +143,40 @@ void progressive_workflow() {
   document.outputs = {{"sample", 3, "value"}};
   GraphContext graph(document);
   PlanningOptions options;
-  options.output_regions = {{"sample", Region({{0, 1}})}};
+  ResourceBudget requests;
+  options.tile_extent = 1;
+  options.output_requests = {
+      {"sample", {false, take(TileSet::from_indices(requests, {0}))}}};
   auto compiled = take(Compiler(registry).compile(graph, options));
   ExecutionContext execution(registry, {1, false, 4, 128});
   auto result = take(execution.execute(compiled.plan));
   const auto peak = take(execution.resource_budget())
                         .statistics()
                         .peak[ResourceKind::Payload];
-  if (dependency_fixture::number(result.results.at("sample")) != 17.25 ||
-      controls != std::vector<std::uint64_t>({0, 1, 3}) ||
+  double value = 0;
+  const auto& output = result.results.at("sample");
+  check(output.read_tensor(take(output.descriptor()), 0, {0, 0}, &value, 8));
+  if (value != 17.25 || controls != std::vector<std::uint64_t>({0, 1, 3}) ||
       payloads != std::vector<std::uint64_t>({extent - 1}) || peak > 128)
     throw std::runtime_error("progressive independent oracle failed");
-  std::vector<std::uint64_t> control_support, payload_support;
-  auto relation = take(result.results.at("sample").tensor_relation(0));
-  check(relation.visit(0, 16, [&](ResultSupport support) {
-    if (support.target != ResultSupportTarget::Tensor || support.slot != 0 ||
-        support.count != 1 || support.input > 1 ||
-        support.roles != (support.input == 0 ? 2U : 1U))
-      return Status{ErrorCode::OperationFailed,
-                    "follow typed support mismatch"};
-    (support.input == 0 ? control_support : payload_support)
-        .push_back(support.first);
-    return Status::success();
-  }));
-  if (control_support != controls || payload_support != payloads)
-    throw std::runtime_error("follow lost historical Control support");
+  auto record = take(result.dependencies.tile_record({2, 0, 0}));
+  if (!record || record->inputs.size() != 2 || record->inputs[0].whole ||
+      record->inputs[1].whole ||
+      record->inputs[0].tiles !=
+          take(TileSet::from_indices(requests, controls)) ||
+      record->inputs[1].tiles !=
+          take(TileSet::from_indices(requests, payloads)))
+    throw std::runtime_error("follow lost historical tile Needs");
   std::cout
       << "progressive: value=17.25, controls=[0,1,3], payload=[999999999], "
          "generated_bytes=32, peak_payload="
       << peak << ", budget=128\n";
+}
+
+int main() try {
+  progressive_workflow();
+  return 0;
+} catch (const std::exception& error) {
+  std::cerr << error.what() << '\n';
+  return 1;
 }

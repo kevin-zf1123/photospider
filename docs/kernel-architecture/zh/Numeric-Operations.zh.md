@@ -1,6 +1,6 @@
 # 数值算子
 
-默认 registry 提供未带后缀的有限域算术与 clamp、分阶段标量归约、有序扫描，以及带 profile 的数值算子族。各 key 的参数、执行和输出契约不同，调用方应按完整 key 选择。Operation plugin 使用 Result operation C ABI 2。
+默认 registry 提供未带后缀的有限域算术与 clamp、分阶段标量归约、有序扫描，以及带 profile 的数值算子族。各 key 的参数、执行和输出契约不同，调用方应按完整 key 选择。Operation plugin 使用 Result operation C ABI 3。
 
 ## 未带后缀的 Result 数值算子
 
@@ -69,6 +69,6 @@ Profile-specific 逐元素和归约实现通过执行资源预算计量 work 和
 
 ## 公开 workflow 与检查
 
-[`tests/integration/test_numeric_operations.cpp`](../../../tests/integration/test_numeric_operations.cpp) 覆盖注册的 arithmetic 行为。分族 Result numeric oracle 位于 [`tests/integration/numeric`](../../../tests/integration/numeric)，分别覆盖 arithmetic、arrays、sequences、statistics、matrix、calculus、curves、Bezier、LUT、baking、expression、filters 和 color ramps。Ordered reduction 与 scan 行为由 [`test_ordered_reduction.cpp`](../../../tests/integration/test_ordered_reduction.cpp)、[`test_ordered_scan.cpp`](../../../tests/integration/test_ordered_scan.cpp) 和 [`test_scan_waiters.cpp`](../../../tests/integration/test_scan_waiters.cpp) 覆盖。这些测试使用独立数值期望；block-cache 观察不构成性能证据。`installed_result_numeric` 是 `tests/consumer/CMakeLists.txt` 中的已安装 package consumer 入口。
+[`tests/integration/test_numeric_operations.cpp`](../../../tests/integration/test_numeric_operations.cpp) 覆盖注册的 arithmetic 行为。分族 Result numeric oracle 位于 [`tests/integration/numeric`](../../../tests/integration/numeric)，分别覆盖 arithmetic、arrays、sequences、statistics、matrix、calculus、curves、Bezier、LUT、baking、expression、filters 和 color ramps。Ordered reduction 与 scan 行为由 [`test_ordered_reduction.cpp`](../../../tests/integration/test_ordered_reduction.cpp)、[`test_ordered_scan.cpp`](../../../tests/integration/test_ordered_scan.cpp) 和 [`test_scan_waiters.cpp`](../../../tests/integration/test_scan_waiters.cpp) 覆盖。这些测试使用独立数值期望；block-cache 观察不构成性能证据。
 
 Generic 算术 key 未声明 planar image capability。注册这些 key 不代表 structural planar image 可以作为 generic numeric array 输入。

@@ -25,12 +25,13 @@ int main(int argc, char** argv) try {
   uint32_t w = std::stoul(argv[1]), h = std::stoul(argv[2]);
   int reps = argc > 3 ? std::stoi(argv[3]) : 3;
   Memory memory;
-  ps_result_services_v2 services{};
+  ps_result_services_v3 services{};
   services.struct_size = sizeof(services);
-  services.abi_version = PS_RESULT_OPERATION_ABI_VERSION_2;
+  services.abi_version = PS_RESULT_OPERATION_ABI_VERSION_3;
   services.context = &memory;
   services.cancelled = [](void*) { return 0; };
-  services.allocate_scratch = [](void* p, uint64_t n, uint8_t** destination) -> int {
+  services.allocate_scratch = [](void* p, uint64_t n,
+                                 uint8_t** destination) -> int {
     auto& m = *static_cast<Memory*>(p);
     auto* data = static_cast<uint8_t*>(std::calloc(n, 1));
     if (data) {

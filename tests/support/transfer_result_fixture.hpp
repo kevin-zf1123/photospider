@@ -71,8 +71,12 @@ inline Status publish(channel_fixture::Source& source, const Region& region,
         return Status::success();
       },
       UINT64_MAX);
-  if (status.ok())
+  if (status.ok()) {
     source.coverage.push_back(region);
+    source.coverage =
+        take(Footprint::from_regions(tensor.sample_shape(), source.coverage))
+            .boxes();
+  }
   return status;
 }
 inline channel_fixture::Source source(const channel_fixture::Source& original,

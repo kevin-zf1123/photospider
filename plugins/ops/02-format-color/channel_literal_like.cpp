@@ -8,9 +8,10 @@
 
 #include "01-numeric/sequence_profiles.hpp"
 #include "02-format-color/result_mapping.hpp"
+#include "common/registry.hpp"
 #include "core/status_helpers.hpp"
 #include "photospider/data/tensor_description.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal {
 namespace {
@@ -40,17 +41,15 @@ void fill(const LiteralPreparation& s, std::uint8_t* out, std::uint64_t n) {
 using format_result::require;
 using format_result::take;
 using Poll = Result<ResultProgramPoll>;
-ResultBuilder builder(const ResultProgramPhase& phase, bool empty) {
+ResultBuilder builder(const ResultProgramPhase& phase, bool /*empty*/) {
   auto result = take(ResultBuilder::start(
       phase.resources, *phase.query.output.result_schema,
       phase.query.semantic_key, {},
       phase.association ? std::vector<std::uint64_t>(phase.association->begin(),
                                                      phase.association->end())
                         : std::vector<std::uint64_t>{},
-      phase.query.tile_height, phase.query.tile_width, phase.query.resources));
-  require(result.bind_descriptor_relation(take(ResultRelation::cartesian(
-      phase.resources, 1,
-      {0, 8, 0, empty ? 0U : 1U, ResultSupportTarget::Descriptor, 0}))));
+      phase.query.tile_extent, phase.query.resources));
+
   return result;
 }
 Poll empty_result(const ResultProgramPhase& phase) try {
@@ -67,11 +66,17 @@ struct LiteralState final {
     if (!requested) {
       requested = true;
       ResultProgramNeed need;
-      need.tensors.push_back(
-          {0, 0,
-           take(Footprint::none(
-               phase.query.inputs[0].result_schema->tensors[0].sample_shape())),
-           8});
+      {
+        auto tile_need_0 = sdk::tile_need_for_samples(
+            phase.resources, phase.query, 0, 0,
+            take(Footprint::none(phase.query.inputs[0]
+                                     .result_schema->tensors[0]
+                                     .sample_shape())),
+            true);
+        if (!tile_need_0.ok())
+          return Result<ResultProgramPoll>(tile_need_0.status());
+        need.tiles.push_back(tile_need_0.take_value());
+      }
       return Poll(std::move(need));
     }
     if (state.require_view)
@@ -83,9 +88,7 @@ struct LiteralState final {
                             ? *phase.query.tensor_outputs
                             : take(Footprint::all(tensor.sample_shape()));
     auto result = builder(phase, false);
-    const auto relation = take(ResultRelation::cartesian(
-        phase.resources, take(tensor.sample_count()),
-        {0, 8, 0, 1, ResultSupportTarget::Descriptor, 0}));
+
     require(format_result::planes(tensor, output, [&](const Region& box) {
       return result.publish_tensor_kernel(
           0, box,
@@ -139,7 +142,7 @@ struct LiteralState final {
             }
             return Status::success();
           },
-          relation, {true, true, true, true}, phase.query.cancellation);
+          phase.query.cancellation);
     }));
     return Poll(ResultPublication{take(result.seal()), true});
   } catch (const Status& status) {
@@ -305,7 +308,7 @@ Status register_channel_literal_like(OperationRegistry* registry) {
     output.key = "values";
     output.output_schema = port;
     output.result_schema = tensor_ops::scalar_schema();
-    output.region_rule = OperationRegionRule::Dependency;
+    output.region_rule = OperationRegionRule::Tiled;
     output.continuation_bytes = sizeof(LiteralState);
     output.maximum_dependency_stages = 2;
     d.prepare_static = [kind = profile.second](const auto& inputs,

@@ -14,8 +14,7 @@ namespace ps {
  * @note Each Value is a complete rectangle. Holes never become valid pixels.
  * Copies retain shared storage owners; concurrent const reads are safe. This
  * carrier conveys bytes/metadata only: execution records must separately retain
- * producer, snapshot and effective-observation provenance. It grants no right
- * to reclassify a RequestRecord producer as an external atomic input.
+ * producer and snapshot provenance.
  * Allocating methods may throw bad_alloc; no failed method publishes a result.
  */
 class PHOTOSPIDER_API ValueFragments final {
@@ -37,7 +36,8 @@ class PHOTOSPIDER_API ValueFragments final {
    * @param resources Facet resources, inferred from the first fragment when
    * omitted. Empty CMYK coverage still requires explicit owning resources.
    * @return Complete fragments or InvalidArgument/TypeMismatch/NotFound (hole),
-   * ResourceExhausted/Cancelled. Typed tensors require full C in every fragment.
+   * ResourceExhausted/Cancelled. Typed tensors require full C in every
+   * fragment.
    */
   static Result<ValueFragments> create(ValueDescriptor descriptor,
                                        std::vector<ValueFacet> facets,

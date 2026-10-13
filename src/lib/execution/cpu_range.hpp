@@ -193,8 +193,8 @@ class CpuRangeQueue final {
       if (!admitted.ok())
         return admitted.status();
       lease = admitted.take_value();
-      auto charged = resources->consume(
-          {count, 0, 0, count / grain + (count % grain != 0)});
+      auto charged =
+          resources->consume({count, count / grain + (count % grain != 0)});
       if (!charged.ok())
         return charged;
     }
@@ -295,7 +295,7 @@ class CpuRangeQueue final {
       if (!admitted.ok())
         return admitted.status();
       lease = admitted.take_value();
-      auto charged = resources->consume({count, 0, 0, count});
+      auto charged = resources->consume({count, count});
       if (!charged.ok())
         return charged;
     }

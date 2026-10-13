@@ -10,6 +10,8 @@
 #include <vector>
 
 #include "01-numeric/numeric_tensor_program.hpp"
+#include "common/typed_need_validation.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
@@ -65,6 +67,9 @@ struct FiniteElementwiseProgram final {
         UINT64_MAX, phase.query.cancellation);
   }
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
+    auto checked_inputs = ops_validation::typed_inputs(phase);
+    if (!checked_inputs.ok())
+      return Result<ResultProgramPoll>(checked_inputs);
     auto scratch =
         math_take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));
     const auto& schema = *phase.query.output.result_schema;
@@ -84,15 +89,25 @@ struct FiniteElementwiseProgram final {
           const auto& spec = phase.query.inputs[port].result_schema->tensors[0];
           auto validation = math_take(spec.close_samples(output, limits));
           expanded = expanded || validation != output;
-          need.tensors.push_back({port, 0, std::move(validation), 4});
+          {
+            auto tile_need_0 = sdk::tile_need_for_samples(
+                phase.resources, phase.query, port, 0, std::move(validation));
+            if (!tile_need_0.ok())
+              return Result<ResultProgramPoll>(tile_need_0.status());
+            need.tiles.push_back(tile_need_0.take_value());
+          }
         } else {
-          need.tensors.push_back({port, 0, output, 1});
+          {
+            auto tile_need_1 = sdk::tile_need_for_samples(
+                phase.resources, phase.query, port, 0, output);
+            if (!tile_need_1.ok())
+              return Result<ResultProgramPoll>(tile_need_1.status());
+            need.tiles.push_back(tile_need_1.take_value());
+          }
         }
       }
       if (stage == 0 && !expanded) {
         // A coincident validation/data footprint needs only one supply poll.
-        for (auto& tensor : need.tensors)
-          tensor.roles = 5;
         stage = 2;
       } else {
         ++stage;
@@ -104,54 +119,7 @@ struct FiniteElementwiseProgram final {
         phase.association ? std::vector<uint64_t>(phase.association->begin(),
                                                   phase.association->end())
                           : std::vector<uint64_t>{},
-        phase.query.tile_height, phase.query.tile_width,
-        phase.query.resources));
-    ResultRelation basis, relation;
-    // Empty has no input observations or payload reads. Static preparation has
-    // already checked the complete schema envelope.
-    if (output.empty()) {
-      basis = math_take(ResultRelation::cartesian(phase.resources, 1, {}));
-    } else {
-      for (uint32_t port = 0; port < inputs; ++port) {
-        auto descriptor = math_take(ResultRelation::cartesian(
-            phase.resources, 1,
-            {port, 8, 0, 1, ResultSupportTarget::Descriptor, 0}));
-        basis = basis.valid() ? math_take(ResultRelation::unite(
-                                    phase.resources, {basis, descriptor}))
-                              : std::move(descriptor);
-        std::vector<ResultMappedAxis> axes(shape.size());
-        for (uint32_t axis = 0; axis < shape.size(); ++axis)
-          axes[axis].output_axis = axis;
-        auto data = math_take(ResultRelation::mapped(
-            phase.resources, shape, Region::whole(shape), shape, axes,
-            {port, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
-        const auto& spec = phase.query.inputs[port].result_schema->tensors[0];
-        auto tuple =
-            input_internal::tuple_channel_axis(spec.descriptor, spec.facets);
-        if (tuple) {
-          const auto axis = spec.batch_axes.size() + *tuple;
-          axes[axis].output_axis = -1;
-          axes[axis].extent = shape[axis];
-        }
-        for (std::size_t cell =
-                 spec.descriptor.shape.size() - spec.atomic_trailing_axes;
-             cell < spec.descriptor.shape.size(); ++cell) {
-          const auto axis = spec.batch_axes.size() + cell;
-          axes[axis].output_axis = -1;
-          axes[axis].extent = shape[axis];
-        }
-        auto validation = math_take(ResultRelation::mapped(
-            phase.resources, shape, Region::whole(shape), shape, axes,
-            {port, 4, 0, 0, ResultSupportTarget::Tensor, 0}));
-        auto observed = math_take(
-            ResultRelation::unite(phase.resources, {data, validation}));
-        relation = relation.valid()
-                       ? math_take(ResultRelation::unite(phase.resources,
-                                                         {relation, observed}))
-                       : std::move(observed);
-      }
-    }
-    math_require(builder.bind_descriptor_relation(basis));
+        phase.query.tile_extent, phase.query.resources));
     if (!output.empty()) {
       input_internal::Float32Environment environment;
       if (!environment.active())
@@ -173,7 +141,7 @@ struct FiniteElementwiseProgram final {
                 return phase.consume_work(0);
               });
             },
-            relation, {true, true, true, true}, phase.query.cancellation));
+            phase.query.cancellation));
     }
     return Result<ResultProgramPoll>(
         ResultPublication{math_take(builder.seal()), true});
@@ -195,7 +163,7 @@ inline OperationDefinition finite_elementwise(const char* key,
   set_whole_tensor_output(traits, ElementType::Float64,
                           sizeof(FiniteElementwiseProgram));
   traits.outputs[0].key = "value";
-  traits.outputs[0].region_rule = OperationRegionRule::Dependency;
+  traits.outputs[0].region_rule = OperationRegionRule::Tiled;
   traits.outputs[0].maximum_dependency_stages = 3;
   traits.requires_metadata_specialization = true;
   operation.specialize_metadata =

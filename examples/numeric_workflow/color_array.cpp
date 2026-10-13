@@ -326,8 +326,7 @@ void public_workflow() {
     return point_math_checks::bindings(root, {backing}, document);
   };
   auto snapshot = take(context.freeze(compiled.plan, bind(input)));
-  for (bool joint : {false, true}) {
-    options.enable_joint = joint;
+  {
     auto result = take(
         context.execute_fragments(snapshot, {{"absolute", roi}}, {}, options));
     double actual = 0;
@@ -390,7 +389,7 @@ void public_workflow() {
   require(pixel == std::array<double, 4>{-12, 13, 14, 1},
           "owned Result window keeps complete tuple after source retirement");
   std::cout << "color workflow: abs(-12)=12, Whole typed validation, "
-               "dirty/cache, joint, owned windows PASS\n";
+               "dirty/cache, owned windows PASS\n";
 }
 struct ColorProbe {
   unsigned stage = 0;
@@ -410,14 +409,14 @@ struct ColorProbe {
         const auto validation = history || !wrong ? row : box.dimensions()[1];
         if (!history || !stage)
           for (unsigned channel : {0U, 1U})
-            need.tensors.push_back(
+            need.tiles.push_back(
                 {0, 0,
                  take(ps::Footprint::from_regions(
                      {2, 3},
                      {ps::Region({validation, {channel, channel ? 2U : 1U}})})),
                  4});
         if (!history || stage)
-          need.tensors.push_back(
+          need.tiles.push_back(
               {0, 0,
                take(ps::Footprint::from_regions(
                    {2, 3},
@@ -507,7 +506,7 @@ ps::OperationDefinition probe_definition(const ps::SchemaTemplate& schema,
   auto& output = operation.traits.outputs[0];
   output.output_schema = operation.traits.input_schema[0];
   output.result_schema = schema;
-  output.region_rule = ps::OperationRegionRule::Dependency;
+  output.region_rule = ps::OperationRegionRule::Tiled;
   output.continuation_bytes = sizeof(ColorProbe);
   output.maximum_dependency_stages = 3;
   operation.start_result = [wrong, history](const auto&,
@@ -566,7 +565,7 @@ struct TupleView {
     if (!requested) {
       requested = true;
       ps::ResultProgramNeed need;
-      need.tensors.push_back({0, 0, samples, 5});
+      need.tiles.push_back({0, 0, samples, 5});
       return ps::Result<ps::ResultProgramPoll>(std::move(need));
     }
     auto builder = take(ps::ResultBuilder::start(
@@ -653,127 +652,7 @@ void tuple_output_view() {
   std::cout
       << "color tuple output: grouped Validation, owned zero-copy view PASS\n";
 }
-struct JointPartialProbe {
-  unsigned mode;
-  explicit JointPartialProbe(unsigned mode) : mode(mode) {}
-  ps::Result<ps::ResourceVector<ps::ResultJointOutcome>> poll(
-      const ps::ResultJointPhase& phase) {
-    ps::ResourceVector<ps::ResultJointOutcome> outcomes;
-    for (const auto* member : phase.members) {
-      const auto key = take(ps::result_atom_key(member->query));
-      ps::ResultProgramNeed need;
-      const auto row = key.coordinate[0];
-      if (mode == 2) {
-        for (unsigned channel : {0U, 1U})
-          need.tensors.push_back(
-              {0, 0,
-               take(ps::Footprint::from_regions(
-                   {2, 3},
-                   {ps::Region({{row, 1}, {channel, channel ? 2U : 1U}})})),
-               4});
-      } else {
-        need.tensors.push_back(
-            {0, 0,
-             take(ps::Footprint::from_regions(
-                 {2, 3},
-                 {ps::Region({{row, 1}, {0, mode == 0 && row ? 1U : 3U}})})),
-             4});
-      }
-      outcomes.push_back(
-          {key, ps::Result<ps::ResultProgramPoll>(std::move(need))});
-    }
-    return ps::Result<ps::ResourceVector<ps::ResultJointOutcome>>(
-        std::move(outcomes));
-  }
-};
-void joint_partial_validation(const ps::ValueFacet& facet, unsigned mode = 0) {
-  ps::ResourceBudget root;
-  ps::ResourceAllocationScope scope(root);
-  ps::SchemaTemplate input_schema;
-  input_schema.id = "manual.color_input";
-  ps::ResultTensorSpec color;
-  color.key = "color";
-  color.descriptor = {ps::ElementType::Float64, {2, 3}};
-  color.facets = {facet};
-  input_schema.tensors.push_back(std::move(color));
-  ps::SchemaTemplate output_schema;
-  output_schema.id = "manual.color_output";
-  ps::ResultTensorSpec number;
-  number.key = "number";
-  number.descriptor = {ps::ElementType::Float64, {2}};
-  output_schema.tensors.push_back(std::move(number));
-  ps::OperationDefinition operation;
-  operation.key = "manual.color_joint";
-  operation.traits.input_count = 1;
-  operation.traits.input_schema.resize(1);
-  operation.traits.input_schema[0].kind = ps::OperationPortKind::Result;
-  operation.traits.input_schema[0].result_schema_id = "manual.color_input";
-  operation.traits.input_schema[0].result_schema_version = 1;
-  auto& output = operation.traits.outputs[0];
-  output.output_schema.kind = ps::OperationPortKind::Result;
-  output.output_schema.result_schema_id = "manual.color_output";
-  output.output_schema.result_schema_version = 1;
-  output.result_schema = output_schema;
-  output.region_rule = ps::OperationRegionRule::Dependency;
-  output.continuation_bytes = 256;
-  output.maximum_dependency_stages = 3;
-  output.failure_delivery = ps::FailureDelivery::PerAtomOutcome;
-  operation.traits.joint_contract = 2;
-  operation.traits.joint_continuation_bytes = sizeof(JointPartialProbe);
-  operation.start_result = [](const auto&, const auto&) {
-    return ps::Result<ps::ResultContinuation>(
-        ps::Status{ps::ErrorCode::Internal, "unexpected singleton"});
-  };
-  operation.start_result_joint = [mode](const auto&, const auto& allocator) {
-    return ps::ResultJointContinuation::make<JointPartialProbe>(allocator,
-                                                                mode);
-  };
-  ps::OperationRegistry registry;
-  require(registry.register_operation(std::move(operation)).ok() &&
-              registry.freeze().ok(),
-          "register Result joint validation probe");
-  ps::OperationMetadata input;
-  input.result_schema =
-      std::make_shared<const ps::SchemaTemplate>(input_schema);
-  auto inferred = take(ps::infer_operation_outputs(
-      take(registry.find_traits("manual.color_joint")), {input}, {}));
-  ps::ResultProgramMetadata metadata{{input}, inferred[0]};
-  std::map<std::string, ps::ParameterValue> parameters;
-  ps::ResourceVector<ps::ResultProgramQuery> queries;
-  for (unsigned i = 0; i < 2; ++i) {
-    queries.emplace_back(metadata, parameters);
-    queries.back().semantic_key = "color-joint";
-    queries.back().snapshot_identity = "color-history";
-    queries.back().tensor_outputs =
-        take(ps::Footprint::from_regions({2}, {ps::Region({{i, 1}})}));
-  }
-  auto joint =
-      take(registry.start_result_joint("manual.color_joint", queries, root));
-  auto allocator = root.allocator();
-  auto work = [&](std::uint64_t n) { return root.consume({n}); };
-  ps::ResultObjectInputs inputs;
-  ps::ResourceVector<ps::ResultIoReply> io;
-  ps::ResourceVector<ps::ResultProgramPhase> phases;
-  for (const auto& query : queries)
-    phases.push_back({query, inputs, io, allocator, root, work, {}});
-  ps::ResourceVector<const ps::ResultProgramPhase*> ready;
-  for (const auto& phase : phases)
-    ready.push_back(&phase);
-  const auto payload_before = root.statistics().live[ps::ResourceKind::Payload];
-  auto replies = joint.poll({ready, allocator, work});
-  if (!mode)
-    require(
-        !replies.ok() &&
-            replies.status().detail.origin == ps::FailureOrigin::Protocol &&
-            replies.status().detail.scope == ps::FailureScope::Group,
-        "joint partial transport fails entire group before any member commit");
-  else
-    require(replies.ok() && replies.value().size() == 2,
-            "joint complete or split tuple transport accepted");
-  require(root.statistics().live[ps::ResourceKind::Payload] == payload_before,
-          "joint partial Validation publishes no payload");
-}
-void history_and_joint() {
+void validation_history() {
   for (bool wrong : {false, true}) {
     auto batch = run_probe(wrong, true, take(ps::Footprint::all({2})));
     require(batch.ok() != wrong,
@@ -792,12 +671,8 @@ void history_and_joint() {
                 "cross-observation history cannot satisfy closure");
     }
   }
-  const auto facet =
-      take(ps::encode_color_array(description(ps::ColorModel::Xyz)));
-  for (unsigned mode = 0; mode < 3; ++mode)
-    joint_partial_validation(facet, mode);
   std::cout << "color protocol: historical Validation, cross-observation "
-               "isolation, joint transport preflight PASS\n";
+               "isolation PASS\n";
 }
 void grouping_schema() {
   const auto facet =
@@ -865,16 +740,9 @@ int main(int argc, char** argv) {
                   << '\n';
       return 0;
     }
-    if (argc == 2 && std::string(argv[1]) == "--joint-validation") {
-      for (unsigned mode = 0; mode < 3; ++mode)
-        joint_partial_validation(
-            take(ps::encode_color_array(description(ps::ColorModel::Xyz))),
-            mode);
-      return 0;
-    }
     if (argc == 2 && std::string(argv[1]) == "--dependency-proof") {
       mapping_proof();
-      history_and_joint();
+      validation_history();
       grouping_schema();
       return 0;
     }
@@ -884,7 +752,7 @@ int main(int argc, char** argv) {
     public_workflow();
     tuple_output_view();
     mapping_proof();
-    history_and_joint();
+    validation_history();
     grouping_schema();
     return 0;
   } catch (const std::exception& error) {

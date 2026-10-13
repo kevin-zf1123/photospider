@@ -34,39 +34,39 @@ constexpr char kSecondaryKey[] = "fixture.dense_multi_invalid";
 #error "PS_DENSE_LIMIT_CASE must be in 1..5"
 #endif
 
-int never(void*, void*, const ps_result_query_v2*,
-          const ps_result_services_v2*) {
+int never(void*, void*, const ps_result_query_v3*,
+          const ps_result_services_v3*) {
   ++callback_count;
   return 1;
 }
-ps_result_field_spec_v2 make_field(const std::uint64_t* shape,
+ps_result_field_spec_v3 make_field(const std::uint64_t* shape,
                                    std::uint32_t rank) {
-  ps_result_field_spec_v2 field{};
+  ps_result_field_spec_v3 field{};
   field.struct_size = sizeof(field);
   field.key = "record";
   field.key_size = 6;
-  field.element_type = PS_RESULT_ELEMENT_UINT8_V2;
+  field.element_type = PS_RESULT_ELEMENT_UINT8_V3;
   field.record_rank = rank;
   for (std::uint32_t axis = 0; axis < rank; ++axis)
     field.record_shape[axis] = shape[axis];
-  field.rows.kind = PS_RESULT_EXTENT_FIXED_V2;
+  field.rows.kind = PS_RESULT_EXTENT_FIXED_V3;
   field.rows.value = 1;
   field.rows.divisor = 1;
   return field;
 }
-ps_result_schema_v2 make_schema(const ps_result_field_spec_v2* field) {
-  ps_result_schema_v2 schema{};
+ps_result_schema_v3 make_schema(const ps_result_field_spec_v3* field) {
+  ps_result_schema_v3 schema{};
   schema.struct_size = sizeof(schema);
   schema.id = "fixture.record";
   schema.id_size = 14;
   schema.version = 1;
-  schema.publication = PS_RESULT_COMPLETE_BUNDLE_V2;
+  schema.publication = PS_RESULT_COMPLETE_BUNDLE_V3;
   schema.fields = field;
   schema.field_count = 1;
   return schema;
 }
-ps_result_operation_v2 make_operation(const char* key, std::uint32_t size,
-                                      const ps_result_output_v2* output) {
+ps_result_operation_v3 make_operation(const char* key, std::uint32_t size,
+                                      const ps_result_output_v3* output) {
   auto operation =
       result_registry_fixture::make_operation(key, size, nullptr, 0, output);
   operation.start = never;
@@ -84,12 +84,12 @@ const auto secondary = make_field(secondary_shape, 1);
 const auto secondary_schema = make_schema(&secondary);
 const auto secondary_output =
     result_registry_fixture::make_output(&secondary_schema);
-const ps_result_operation_v2 descriptors[] = {
+const ps_result_operation_v3 descriptors[] = {
     make_operation(kPrimaryKey, sizeof(kPrimaryKey) - 1, &primary_output),
     make_operation(kSecondaryKey, sizeof(kSecondaryKey) - 1,
                    &secondary_output)};
 #else
-const ps_result_operation_v2 descriptors[] = {
+const ps_result_operation_v3 descriptors[] = {
     make_operation(kPrimaryKey, sizeof(kPrimaryKey) - 1, &primary_output)};
 #endif
 // NOLINTEND
@@ -99,15 +99,15 @@ void destroy_fixture(void* context) {
     ++destroy_count;
 }
 // NOLINTBEGIN(whitespace/indent_namespace)
-const ps_result_operation_plugin_api_v2 api = {
-    sizeof(api),     PS_RESULT_OPERATION_ABI_VERSION_2,
+const ps_result_operation_plugin_api_v3 api = {
+    sizeof(api),     PS_RESULT_OPERATION_ABI_VERSION_3,
     descriptors,     sizeof(descriptors) / sizeof(descriptors[0]),
     &context_marker, destroy_fixture};
 // NOLINTEND
 }  // namespace
 
-extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v2*
-ps_result_operation_plugin_get_api_v2(void) {
+extern "C" PS_RESULT_EXPORT const ps_result_operation_plugin_api_v3*
+ps_result_operation_plugin_get_api_v3(void) {
   return &api;
 }
 extern "C" PS_RESULT_EXPORT std::uint32_t

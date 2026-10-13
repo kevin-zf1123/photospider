@@ -12,10 +12,10 @@
 namespace {
 struct Prototype {
   ps::ValueFacet facet;
-  ps_result_facet_view_v2 view{};
-  ps_result_tensor_spec_v2 tensor{};
-  ps_result_schema_v2 schema{};
-  ps_result_port_v2 port{};
+  ps_result_facet_view_v3 view{};
+  ps_result_tensor_spec_v3 tensor{};
+  ps_result_schema_v3 schema{};
+  ps_result_port_v3 port{};
   Prototype(ps::ValueFacet facet, std::uint64_t count)
       : facet(std::move(facet)) {
     view = {sizeof(view),
@@ -27,22 +27,22 @@ struct Prototype {
     tensor.struct_size = sizeof(tensor);
     tensor.key = "samples";
     tensor.key_size = 7;
-    tensor.element_type = PS_RESULT_ELEMENT_FLOAT32_V2;
+    tensor.element_type = PS_RESULT_ELEMENT_FLOAT32_V3;
     tensor.rank = 1;
     tensor.shape[0] = count;
-    tensor.channel_axis = PS_RESULT_NO_CHANNEL_V2;
+    tensor.channel_axis = PS_RESULT_NO_CHANNEL_V3;
     tensor.facets = &view;
     tensor.facet_count = 1;
     schema.struct_size = sizeof(schema);
     schema.id = "fixture.expression";
     schema.id_size = 18;
     schema.version = 1;
-    schema.publication = PS_RESULT_COMPLETE_BUNDLE_V2;
+    schema.publication = PS_RESULT_COMPLETE_BUNDLE_V3;
     schema.tensors = &tensor;
     schema.tensor_count = 1;
     port.struct_size = sizeof(port);
-    port.kind = PS_RESULT_OBJECT_V2;
-    port.element_type = PS_RESULT_ELEMENT_FLOAT32_V2;
+    port.kind = PS_RESULT_OBJECT_V3;
+    port.element_type = PS_RESULT_ELEMENT_FLOAT32_V3;
     port.rank = 1;
     port.requires_semantics = 1;
     port.schema = &schema;
@@ -69,7 +69,7 @@ int status_code(const ps::Status& status) {
 }
 }  // namespace
 
-extern "C" const ps_result_port_v2* fixture_expression_prototype(void) {
+extern "C" const ps_result_port_v3* fixture_expression_prototype(void) {
   try {
     static const Prototype prototype(prototype_facet(), 1);
     return &prototype.port;
@@ -78,27 +78,27 @@ extern "C" const ps_result_port_v2* fixture_expression_prototype(void) {
   }
 }
 extern "C" int fixture_expression_metadata(
-    void*, const ps_result_port_v2* inputs, uint32_t input_count,
-    const ps_result_parameter_value_v2* parameters, uint32_t parameter_count,
-    const ps_result_port_v2*, uint32_t output_count,
-    const ps_result_metadata_sink_v2* sink) {
+    void*, const ps_result_port_v3* inputs, uint32_t input_count,
+    const ps_result_parameter_value_v3* parameters, uint32_t parameter_count,
+    const ps_result_port_v3*, uint32_t output_count,
+    const ps_result_metadata_sink_v3* sink) {
   try {
     if (input_count != 1 || output_count != 1 || !inputs[0].schema ||
         inputs[0].schema->field_count || inputs[0].schema->tensor_count != 1)
       return 5;
     const auto& tensor = inputs[0].schema->tensors[0];
     if (tensor.rank != 1 || tensor.batch_rank ||
-        tensor.element_type != PS_RESULT_ELEMENT_FLOAT64_V2)
+        tensor.element_type != PS_RESULT_ELEMENT_FLOAT64_V3)
       return 5;
     std::map<std::string, ps::ParameterValue> values;
     for (std::uint32_t i = 0; i < parameter_count; ++i) {
       const auto& p = parameters[i];
       std::string key(p.key, p.key_size);
-      if (p.type == PS_RESULT_PARAMETER_STRING_V2)
+      if (p.type == PS_RESULT_PARAMETER_STRING_V3)
         values.emplace(key, std::string(p.string_value, p.string_size));
-      else if (p.type == PS_RESULT_PARAMETER_INT64_V2)
+      else if (p.type == PS_RESULT_PARAMETER_INT64_V3)
         values.emplace(key, p.int64_value);
-      else if (p.type == PS_RESULT_PARAMETER_FLOAT64_V2)
+      else if (p.type == PS_RESULT_PARAMETER_FLOAT64_V3)
         values.emplace(key, p.float64_value);
       else
         return 6;

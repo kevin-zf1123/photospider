@@ -46,7 +46,7 @@ publication; unrelated unobserved sample errors do not. Preserve upstream scope.
 
 ## Storage, resources and implementation identity
 
-The helper appends the registered MASK threshold Result operation. The lowering target uses Result ABI 2. This operation materializes output and rejects forced view. Empty demand is stateless and publication is transactional.
+The helper appends the registered MASK threshold Result operation. The lowering target uses Result ABI 3. This operation materializes output and rejects forced view. Empty demand is stateless and publication is transactional.
 
 ## Independent acceptance and conceptual workflow
 

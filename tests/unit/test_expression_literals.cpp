@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <cstring>
 
-#include "plugin/expression.hpp"
+#include "01-numeric/expression.hpp"
 #include "support/test_support.hpp"
 
 int main() {

@@ -13,9 +13,11 @@
 #include "01-numeric/array_parameters.hpp"
 #include "01-numeric/array_profiles.hpp"
 #include "01-numeric/numeric_tensor_program.hpp"
+#include "common/registry.hpp"
+#include "common/typed_need_validation.hpp"
 #include "photospider/core/resource_allocator.hpp"
 #include "photospider/data/semantic.hpp"
-#include "plugin/builtin_operations.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 #include "plugin/port_validation.hpp"
 
 namespace ps::plugin_internal {
@@ -32,6 +34,9 @@ struct LayoutProgram final {
   LayoutProgram(LayoutKind kind, SequenceProfile profile)
       : kind(kind), profile(profile) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
+    auto checked_inputs = ops_validation::typed_inputs(phase);
+    if (!checked_inputs.ok())
+      return Result<ResultProgramPoll>(checked_inputs);
     using namespace numeric_ops;  // NOLINT(build/namespaces)
     auto scratch =
         math_take(phase.resources.reserve(ResourceCapacity::host(4096, 4096)));
@@ -50,13 +55,16 @@ struct LayoutProgram final {
       started = true;
       if (!output.empty()) {
         ResultProgramNeed need;
-        for (uint32_t port = 0; port < active_ports; ++port)
-          need.tensors.push_back(
-              {port, 0,
-               math_take(Footprint::all(phase.query.inputs[port]
-                                            .result_schema->tensors[0]
-                                            .sample_shape())),
-               13});
+        for (uint32_t port = 0; port < active_ports; ++port) {
+          auto tile_need_0 = sdk::tile_need_for_samples(
+              phase.resources, phase.query, port, 0,
+              math_take(Footprint::all(phase.query.inputs[port]
+                                           .result_schema->tensors[0]
+                                           .sample_shape())));
+          if (!tile_need_0.ok())
+            return Result<ResultProgramPoll>(tile_need_0.status());
+          need.tiles.push_back(tile_need_0.take_value());
+        }
         return Result<ResultProgramPoll>(std::move(need));
       }
     }
@@ -65,31 +73,7 @@ struct LayoutProgram final {
         phase.association ? std::vector<uint64_t>(phase.association->begin(),
                                                   phase.association->end())
                           : std::vector<uint64_t>{}));
-    ResultRelation descriptor, relation;
     const auto count = math_take(schema.tensors[0].sample_count());
-    for (uint32_t port = 0; port < active_ports; ++port) {
-      auto basis = math_take(
-          ResultRelation::cartesian(phase.resources, 1,
-                                    {port, 8, 0, output.empty() ? 0U : 1U,
-                                     ResultSupportTarget::Descriptor, 0}));
-      descriptor = descriptor.valid()
-                       ? math_take(ResultRelation::unite(phase.resources,
-                                                         {descriptor, basis}))
-                       : std::move(basis);
-      if (!output.empty()) {
-        auto support = math_take(
-            ResultRelation::cartesian(phase.resources, count,
-                                      {port, 1, 0,
-                                       math_take(phase.query.inputs[port]
-                                                     .result_schema->tensors[0]
-                                                     .sample_count()),
-                                       ResultSupportTarget::Tensor, 0}));
-        relation = relation.valid() ? math_take(ResultRelation::unite(
-                                          phase.resources, {relation, support}))
-                                    : std::move(support);
-      }
-    }
-    math_require(builder.bind_descriptor_relation(std::move(descriptor)));
     if (output.empty())
       return Result<ResultProgramPoll>(
           ResultPublication{math_take(builder.seal()), true});
@@ -146,14 +130,13 @@ struct LayoutProgram final {
     if (layout != "dense") {
       auto window = math_take(phase.tensors->at({0, 0}).acquire(
           Region::whole(source_shape), phase.query.cancellation));
-      auto status = builder.publish_tensor_view(
-          0, Region::whole(target_shape), window, transform, relation,
-          {true, true, true, true}, phase.query.cancellation);
+      auto status =
+          builder.publish_tensor_view(0, Region::whole(target_shape), window,
+                                      transform, phase.query.cancellation);
       math_require(phase.consume_work(1));
       if (status.ok()) {
         viewed = true;
-      } else if (status.code != ErrorCode::InvalidArgument ||
-                 status.message.find("ViewUnavailable") == std::string::npos) {
+      } else if (status.reason != FailureReason::ViewUnavailable) {
         return Result<ResultProgramPoll>(status);
       } else if (layout == "view") {
         return Result<ResultProgramPoll>(
@@ -230,7 +213,7 @@ struct LayoutProgram final {
               return phase.consume_work(1);
             });
           },
-          relation, {true, true, true, true}, phase.query.cancellation));
+          phase.query.cancellation));
     }
     if (phase.report_numeric) {
       NumericDiagnostics report;

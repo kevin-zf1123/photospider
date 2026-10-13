@@ -11,21 +11,13 @@
 #include <utility>
 #include <vector>
 
+#include "common/result_support.hpp"
+#include "common/typed_need_validation.hpp"
 #include "photospider/plugin/operation_registry.hpp"
 #include "photospider/plugin/result_program.hpp"
-#include "plugin/failure_latch.hpp"
+#include "photospider/plugin/tile_helpers.hpp"
 
 namespace ps::plugin_internal::numeric_ops {
-template <class T>
-T math_take(Result<T> answer) {
-  if (!answer.ok())
-    throw answer.status();
-  return answer.take_value();
-}
-inline void math_require(Status status) {
-  if (!status.ok())
-    throw status;
-}
 // A window owns only a Need-authorized rectangle. Logical batch coordinates
 // select its physical pieces; affine and paged storage use the same reader.
 class MathTensorReader final {
@@ -104,78 +96,18 @@ inline void math_next(std::vector<uint64_t>& at,
     at[axis] = 0;
   }
 }
-inline SchemaTemplate numeric_tensor_schema(
-    ElementType dtype, const std::vector<uint64_t>& shape) {
-  SchemaTemplate schema;
-  schema.id = "photospider.tensor";
-  ResultTensorSpec tensor;
-  tensor.key = "samples";
-  tensor.descriptor = {dtype, shape};
-  schema.tensors.push_back(std::move(tensor));
-  return schema;
-}
-inline void set_whole_tensor_output(OperationTraits& traits, ElementType type,
-                                    uint64_t continuation, uint32_t index = 0) {
-  auto& output = traits.outputs[index];
-  output.key = "values";
-  output.output_schema.kind = OperationPortKind::Result;
-  output.output_schema.result_schema_id = "photospider.tensor";
-  output.output_schema.result_schema_version = 1;
-  output.result_schema = numeric_tensor_schema(type, {1});
-  output.region_rule = OperationRegionRule::Whole;
-  output.continuation_bytes = continuation;
-  output.maximum_dependency_stages = 2;
-}
-inline void math_record_failure(const ResultProgramPhase& phase,
-                                const Status& failure) {
-  // Checked private kernels own this cause. Record its full status before the
-  // ambient allocator's code-only flag is observed by the coordinator.
-  if (phase.failure_latch)
-    phase.failure_latch->record(failure);
-  if (phase.failure_observer)
-    phase.failure_observer(failure);
-}
-inline Status math_whole_failure(Status failure) {
-  if (failure.detail.scope == FailureScope::Atom) {
-    failure.detail.scope = FailureScope::Run;
-    failure.detail.atom.reset();
-  }
-  return failure;
-}
-template <class Callback>
-Status math_callback(const ResultProgramPhase& phase, Callback&& callback) {
-  try {
-    auto status = math_whole_failure(callback());
-    if (!status.ok())
-      math_record_failure(phase, status);
-    return status;
-  } catch (const Status& status) {
-    auto failure = math_whole_failure(status);
-    math_record_failure(phase, failure);
-    return failure;
-  } catch (const std::bad_alloc&) {
-    auto failure = Status{ErrorCode::ResourceExhausted,
-                          {},
-                          FailureReason::CapacityLimit,
-                          {FailureOrigin::Resource, FailureScope::Run}};
-    math_record_failure(phase, failure);
-    return failure;
-  }
-}
 template <class Kernel>
 using WholeTensorPublication = decltype(std::declval<Kernel&>().publish(
-    std::declval<const ResultProgramPhase&>(), std::declval<ResultBuilder&>(),
-    std::declval<ResultRelation>()));
+    std::declval<const ResultProgramPhase&>(), std::declval<ResultBuilder&>()));
 template <class Kernel>
 WholeTensorPublication<Kernel> publish_whole_tensor(
     Kernel& kernel, const ResultProgramPhase& phase, ResultBuilder& builder,
-    ResultRelation relation, int) {
-  return kernel.publish(phase, builder, std::move(relation));
+    int) {
+  return kernel.publish(phase, builder);
 }
 template <class Kernel>
 Status publish_whole_tensor(Kernel& kernel, const ResultProgramPhase& phase,
-                            ResultBuilder& builder, ResultRelation relation,
-                            int64_t) {
+                            ResultBuilder& builder, int64_t) {
   const auto shape =
       phase.query.output.result_schema->tensors[0].sample_shape();
   return builder.publish_tensor_kernel(
@@ -184,7 +116,7 @@ Status publish_whole_tensor(Kernel& kernel, const ResultProgramPhase& phase,
         return math_callback(phase,
                              [&] { return kernel.write(phase, writers); });
       },
-      std::move(relation), {true, true, true, true}, phase.query.cancellation);
+      phase.query.cancellation);
 }
 inline bool whole_tensor_port_selected(const ResultProgramQuery& query,
                                        uint32_t port) {
@@ -194,14 +126,6 @@ inline bool whole_tensor_port_selected(const ResultProgramQuery& query,
       query.prepared->traits().outputs.at(query.output_index).input_indices;
   return !selected ||
          std::find(selected->begin(), selected->end(), port) != selected->end();
-}
-template <class Kernel>
-auto whole_tensor_support_roles(int) -> decltype(Kernel::support_roles()) {
-  return Kernel::support_roles();
-}
-template <class Kernel>
-std::uint32_t whole_tensor_support_roles(int64_t) {
-  return 1;
 }
 // Shared private Whole protocol. Numerical kernels receive authorized input
 // capabilities and one borrowed packed writer; no Value operation is invoked.
@@ -216,6 +140,9 @@ struct WholeTensorProgram final {
   explicit WholeTensorProgram(Args&&... args)
       : kernel(std::forward<Args>(args)...) {}
   Result<ResultProgramPoll> poll(const ResultProgramPhase& phase) try {
+    auto checked_inputs = ops_validation::typed_inputs(phase);
+    if (!checked_inputs.ok())
+      return Result<ResultProgramPoll>(checked_inputs);
     // Region/coordinate and small callback argument vectors are ordinary C++
     // scratch; admit their bounded capacity before either stage allocates.
     auto scratch =
@@ -238,19 +165,22 @@ struct WholeTensorProgram final {
     }
     if (!output.empty() && next_input < phase.query.inputs.size()) {
       ResultProgramNeed need;
-      while (next_input < phase.query.inputs.size() &&
-             need.tensors.size() < 64) {
+      while (next_input < phase.query.inputs.size() && need.tiles.size() < 64) {
         const auto port = next_input++;
         if (!whole_tensor_port_selected(phase.query, port))
           continue;
-        need.tensors.push_back(
-            {port, 0,
-             math_take(Footprint::all(phase.query.inputs[port]
-                                          .result_schema->tensors[0]
-                                          .sample_shape())),
-             13});
+        {
+          auto tile_need_0 = sdk::tile_need_for_samples(
+              phase.resources, phase.query, port, 0,
+              math_take(Footprint::all(phase.query.inputs[port]
+                                           .result_schema->tensors[0]
+                                           .sample_shape())));
+          if (!tile_need_0.ok())
+            return Result<ResultProgramPoll>(tile_need_0.status());
+          need.tiles.push_back(tile_need_0.take_value());
+        }
       }
-      if (!need.tensors.empty())
+      if (!need.tiles.empty())
         return Result<ResultProgramPoll>(std::move(need));
     }
     auto builder = math_take(ResultBuilder::start(
@@ -258,51 +188,14 @@ struct WholeTensorProgram final {
         phase.association ? std::vector<uint64_t>(phase.association->begin(),
                                                   phase.association->end())
                           : std::vector<uint64_t>{},
-        128, 128, phase.query.resources));
-    ResultRelation descriptors, data;
-    const auto count = math_take(schema.tensors[0].sample_count());
-    for (uint32_t port = 0; port < phase.query.inputs.size(); ++port) {
-      if (!whole_tensor_port_selected(phase.query, port))
-        continue;
-      auto descriptor = math_take(
-          ResultRelation::cartesian(phase.resources, 1,
-                                    {port, 8, 0, output.empty() ? 0U : 1U,
-                                     ResultSupportTarget::Descriptor, 0}));
-      descriptors = descriptors.valid()
-                        ? math_take(ResultRelation::unite(
-                              phase.resources, {descriptors, descriptor}))
-                        : std::move(descriptor);
-      if (!output.empty()) {
-        const auto input_count = math_take(
-            phase.query.inputs[port].result_schema->tensors[0].sample_count());
-        auto input = math_take(ResultRelation::cartesian(
-            phase.resources, count,
-            {port, whole_tensor_support_roles<Kernel>(0), 0, input_count,
-             ResultSupportTarget::Tensor, 0}));
-        data = data.valid() ? math_take(ResultRelation::unite(phase.resources,
-                                                              {data, input}))
-                            : std::move(input);
-      }
-    }
-    if (!descriptors.valid()) {
-      // An empty runtime projection uses compiled metadata only. The empty
-      // support is a known constant witness and schedules no source actor.
-      descriptors = math_take(ResultRelation::cartesian(
-          phase.resources, 1,
-          {0, 8, 0, 0, ResultSupportTarget::Descriptor, 0}));
-      data = math_take(ResultRelation::cartesian(
-          phase.resources, count,
-          {0, 1, 0, 0, ResultSupportTarget::Tensor, 0}));
-    }
-    math_require(builder.bind_descriptor_relation(std::move(descriptors)));
+        phase.query.tile_extent, phase.query.resources));
     if (!output.empty()) {
       // The phase container expires after each poll. These owning capabilities
       // retain only captured input facts and an owning failure latch, so a
       // bounded multi-envelope gather does not retain any phase callback.
       auto supplied = phase;
       supplied.tensors = &*ready;
-      math_require(
-          publish_whole_tensor(kernel, supplied, builder, std::move(data), 0));
+      math_require(publish_whole_tensor(kernel, supplied, builder, 0));
     }
     return Result<ResultProgramPoll>(
         ResultPublication{math_take(builder.seal()), true});

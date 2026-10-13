@@ -1,26 +1,3 @@
----
-spec_schema_version: 1
-id: PNT-05A
-parent_id: PNT-05
-function: local_inpaint_navier_stokes
-operation_keys:
-  - image.local_inpaint_navier_stokes_openCV
-  - image.local_inpaint_navier_stokes_native_apple_silicon
-category: 09-composite
-kind: primitive
-status: Specified
-implementation_scope: builtin_operations
-implementation_status: implemented
-result_operation_abi: 2
-operation_api: Result
-workflow_schema: 4
-operation_traits: 21
-kernel_package: "0.30.0"
-backend: CPU
-region_rule: Whole
-numeric_profile: opencv_4_12_ns_f32_planar_v1
----
-
 # PNT-05A: local_inpaint_navier_stokes
 
 ## Implementation backends
@@ -31,8 +8,6 @@ output port `image` and required static Int64 parameter `radius`.
 
 | Public operation key | Implementation boundary |
 | --- | --- |
-| `image.local_inpaint_navier_stokes_openCV` | Optional OpenCV 4.12.0 `cv::inpaint(..., INPAINT_NS)` adapter on three Float32 planes |
-| `image.local_inpaint_navier_stokes_native_apple_silicon` | Native CPU implementation; no OpenCV headers, symbols, calls or linkage in this path or a native-only consumer |
 
 Both expose only named output `image` and required Int64 radius. The unsuffixed
 operation is the semantic family, not a third registration or alias.
@@ -57,11 +32,6 @@ does not establish this numerical profile: a build allowing FP contraction can
 exceed the tolerance in section 9. Process channels sequentially in R, G, B
 order; native optimizations must retain deterministic reference tolerance.
 
-This English specification defines the implementation and acceptance contract.
-Actual coverage and limitations are recorded in the
-[implementation documentation](../inpaint-ns-implementation.md).
-The spelling is `navier_stokes`; no `navier_stoke` alias is provided.
-
 ## 1. Purpose and scope
 
 Fill an explicit binary hole mask using known neighboring image colors, while
@@ -78,7 +48,7 @@ pixel compatibility are outside scope. No implicit algorithm substitution.
 
 The public keys are listed above; each has only the named output port `image`.
 PNT-05 is the existing family; PNT-05A is this concrete profile.
-The operations use Result operation ABI 2 with WorkflowDocument 4,
+The operations use Result operation ABI 3 with WorkflowDocument 4,
 OperationTraits 22, and Photospider package 0.30.0. There is no GPU backend.
 Accepted public Result and runtime contracts take precedence over research pages.
 
@@ -351,10 +321,3 @@ determinism or failure semantics require reviewed semantic identity decisions.
 Explanation-only revisions do not automatically require an ABI change.
 
 ## 15. Sources
-
-The [OpenCV 4.12 inpaint API](https://docs.opencv.org/4.12.0/d7/d8b/group__photo__inpaint.html)
-and tagged [OpenCV source](https://github.com/opencv/opencv/blob/4.12.0/modules/photo/src/inpaint.cpp)
-define the numerical reference. The port license is installed at
-`share/licenses/Photospider/inpaint_ns_license.txt`. See the
-[keying and paint catalog](../keying-paint.md) and
-[Result implementation](../inpaint-ns-implementation.md).

@@ -18,7 +18,7 @@
 
 静态命名多输出使用 `WorkflowNodeOutput{node, port}` 和
 `WorkflowOutput{name, node, port}`，各输出可有不同 shape、Region 和依赖。
-pure 算子的未请求端口不执行，`enable_joint` 仅选择可选物理优化。
+pure 算子的未请求端口不执行。
 动态 count 和多字段全局对象使用编译器可见 `SchemaTemplate`、`OperationPortKind::Result`
 和不可变 `ResultRef`。Value 的各轴仍为正，不能用零长度 Value 模拟空集合。
 终端 RequestRecord 不能替代可组合 Result。
@@ -28,8 +28,7 @@ Result 的 `CompleteBundle` 在 seal 前不可见；`StablePrefix` 和 `Independ
 旧 descriptor 快照不随之后发布增长。关联使用准确 ObjectId；相同 shape 或数值
 不能代替对象关联。源字段和 descriptor 支持分别保留，空集合仍有 count/basis 校验依赖。
 见[多输出](../../kernel-architecture/Multi-Output-Operations.md)、
-[全局结果](../../kernel-architecture/Global-Results.md)、
-[结构化表示](../../kernel-architecture/Structured-Representations.md)。
+[全局结果](../../kernel-architecture/Global-Results.md)。
 
 ## 颜色、alpha 与 emission
 
@@ -108,7 +107,7 @@ Result 的页大小、文件偏移、descriptor revision 和资源限额不进�
 Atom、ValidationDomain、Association 为语义失败范围；Group、Run、Waiter 记录运行影响范围。
 失败保留实际 upstream node/input 身份。host read/work/allocation 失败是 sticky，callback
 不能返回成功掩盖它。发布前检查整个 envelope 与关联字段；失败不得附带成功 Value/证书。
-普通 `execute` 保持 fail-fast；`execute_atoms` 从满足 Atomic/PerAtomOutcome 契约的 CPU structured Result dependency plan 收集独立 observation，并使用该 context 的受管 Root。普通 structured Result 同样使用 context Root；默认构造 context 时无需显式提供 `managed_resources`。
+普通 `execute` 保持 fail-fast。普通 structured Result 同样使用 context Root；默认构造 context 时无需显式提供 `managed_resources`。
 已认证前缀可在之后运行失败时保留，不能称作完整成功结果。
 
 `QualityReport` 区分 Measured 与 CertifiedBound。有限 residual 包括零 residual 都不自动

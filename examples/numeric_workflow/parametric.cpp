@@ -385,9 +385,10 @@ void cache_composition_and_typed(ps::CpuNumericProfile profile) {
   const auto cold = take(demand.request(query, {}, options));
   value(cold, 0, 0, raw(1));
   const auto repeated = take(demand.request(query, {}, options));
-  require(cold.results.at("values").object_id() ==
-              repeated.results.at("values").object_id(),
-          "same parametric demand retains completed Result");
+  require(repeated.diagnostics.cache_hits > 0 &&
+              numeric_result_fixture::bytes(cold.results.at("values")) ==
+                  numeric_result_fixture::bytes(repeated.results.at("values")),
+          "repeated demand reuses bounded completed cache with identical bits");
   const auto fresh = fixture.bindings(root);
   const auto warm = take(context.execute_fragments(
       take(context.freeze(plan.plan, fresh)), query, {}, options));

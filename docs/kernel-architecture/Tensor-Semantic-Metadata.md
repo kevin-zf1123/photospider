@@ -49,7 +49,7 @@ The `photospider.tensor-description` facet is bounded to 4096 bytes. Text is str
 
 ## 3. Execution and state machine
 
-`ps::format::assign_metadata` appends one node after checking edit syntax, types, options, path overlap, and bounded transaction encoding. The compiler then resolves source-relative selectors and validates the complete candidate. The current package is 0.33.0, WorkflowDocument schema is 5, OperationTraits version is 25, and the Result C operation ABI is 2. Each input Result contains one tensor member and no fields. An internal node may supply an optional canonical-schema assertion; the public helper does not set it.
+`ps::format::assign_metadata` appends one node after checking edit syntax, types, options, path overlap, and bounded transaction encoding. The compiler then resolves source-relative selectors and validates the complete candidate. The current package is 0.33.0, WorkflowDocument schema is 5, OperationTraits version is 25, and the Result C operation ABI is 3. Each input Result contains one tensor member and no fields. An internal node may supply an optional canonical-schema assertion; the public helper does not set it.
 
 ```text
 authoring: validate edit syntax -> encode bounded transaction -> append node

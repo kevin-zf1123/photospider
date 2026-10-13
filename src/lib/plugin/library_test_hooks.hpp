@@ -7,10 +7,8 @@ namespace ps::plugin_testing {
 
 /** @brief Closed native-library kind vocabulary for private lifecycle tests. */
 enum class LibraryKind : std::uint32_t {
-  /** @brief Operation ABI v3 library. */
+  /** @brief Result operation ABI v2 library. */
   Operation = 1U,
-  /** @brief Data-provider ABI v1 library. */
-  Provider = 2U,
 };
 
 /**
@@ -24,7 +22,7 @@ using BeforeOwnerAllocationHook = void (*)(LibraryKind kind);
 
 /**
  * @brief Nonthrowing callback invoked immediately before native loading.
- * @param kind Exact operation or provider library kind.
+ * @param kind Exact operation library kind.
  * @return No value.
  * @throws Nothing.
  * @note The callback observes whether exact path validation reached the
@@ -42,15 +40,6 @@ using NativeLoadHook = void (*)(LibraryKind kind) noexcept;
 using NativeCloseHook = void (*)(LibraryKind kind) noexcept;
 
 /**
- * @brief Callback invoked after registry-owned provider schemas retire.
- * @param count Exact number of retired copied schemas.
- * @return No value.
- * @throws Nothing.
- * @note Provider leases remain alive while the callback runs.
- */
-using ProviderSchemasRetiredHook = void (*)(std::size_t count) noexcept;
-
-/**
  * @brief Private deterministic callbacks for native-library lifecycle tests.
  *
  * @note This structure is private to the noninstalled test-kernel variant and
@@ -64,8 +53,6 @@ struct LibraryTestHooks final {
   NativeLoadHook native_load = nullptr;
   /** @brief Optional native close-call observer. */
   NativeCloseHook native_close = nullptr;
-  /** @brief Optional copied-provider-schema retirement observer. */
-  ProviderSchemasRetiredHook provider_schemas_retired = nullptr;
 };
 
 /**
@@ -104,14 +91,5 @@ void notify_native_load(LibraryKind kind) noexcept;
  * @note The observer counts close calls, not operating-system return codes.
  */
 void notify_native_close(LibraryKind kind) noexcept;
-
-/**
- * @brief Notifies the installed observer after copied provider schemas retire.
- * @param count Exact number of registry-owned schemas cleared by destruction.
- * @return No value.
- * @throws Nothing.
- * @note Provider leases remain alive until after this callback returns.
- */
-void notify_provider_schemas_retired(std::size_t count) noexcept;
 
 }  // namespace ps::plugin_testing

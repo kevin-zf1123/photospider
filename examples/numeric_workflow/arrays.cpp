@@ -38,684 +38,6 @@ ps::Value scalar(ps::ElementType type, std::uint64_t bits) {
                               {0, {static_cast<std::int64_t>(buffer.size())}},
                               std::move(buffer).freeze()));
 }
-ps::SchemaTemplate payload_schema() {
-  ps::SchemaTemplate schema;
-  schema.id = "manual.payload";
-  ps::ResultTensorSpec tensor;
-  tensor.key = "samples";
-  tensor.descriptor = {ps::ElementType::Float64, {2}};
-  tensor.atomic_trailing_axes = 1;
-  schema.tensors.push_back(std::move(tensor));
-  return schema;
-}
-struct PayloadProbe {
-  bool borrow, ready = false;
-  unsigned* calls;
-  explicit PayloadProbe(bool reference, unsigned* counter = nullptr)
-      : borrow(reference), calls(counter) {}
-  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
-    if (calls)
-      ++*calls;
-    using Answer = ps::Result<ps::ResultProgramPoll>;
-    if (borrow && !ready) {
-      ready = true;
-      ps::ResultProgramNeed need;
-      need.tensors.push_back({0, 0, take(ps::Footprint::all({2})), 5});
-      return Answer(std::move(need));
-    }
-    auto builder = take(ps::ResultBuilder::start(
-        phase.resources, *phase.query.output.result_schema,
-        phase.query.semantic_key, {},
-        phase.association ? std::vector<uint64_t>(phase.association->begin(),
-                                                  phase.association->end())
-                          : std::vector<uint64_t>{}));
-    require(builder
-                .bind_descriptor_relation(
-                    take(ps::ResultRelation::cartesian(phase.resources, 1, {})))
-                .ok(),
-            "payload descriptor relation");
-    auto relation = take(ps::ResultRelation::cartesian(
-        phase.resources, 2,
-        borrow
-            ? ps::ResultSupport{0, 5, 0, 2, ps::ResultSupportTarget::Tensor, 0}
-            : ps::ResultSupport{}));
-    ps::Status status;
-    if (borrow) {
-      auto window =
-          take(phase.tensors->at({0, 0}).acquire(ps::Region::whole({2})));
-      ps::ResultTensorViewTransform transform;
-      transform.source_axes = {{0, 0, 1, 1}};
-      status = builder.publish_tensor_view(0, ps::Region::whole({2}), window,
-                                           transform, std::move(relation),
-                                           {true, true, true, true});
-    } else {
-      auto allocation = phase.resources.allocator().allocate(16);
-      if (!allocation.ok())
-        return Answer(allocation.status());
-      auto bytes = allocation.take_value();
-      std::memset(bytes.data(), 0, bytes.size());
-      status = builder.publish_tensor(
-          0, ps::Region::whole({2}), {0, {8}}, std::move(bytes).freeze(),
-          std::move(relation), {true, true, true, true});
-    }
-    if (!status.ok())
-      return Answer(status);
-    return Answer(ps::ResultPublication{take(builder.seal()), true});
-  }
-};
-ps::Result<ps::ResultProgramPoll> foreign_payload(
-    const ps::ResultProgramPhase& phase) {
-  ps::ResourceBudget other;
-  auto allocator = other.allocator();
-  ps::ResultProgramPhase foreign{
-      phase.query, phase.results,      phase.io,     allocator,
-      other,       phase.consume_work, phase.failure};
-  PayloadProbe probe(false);
-  return probe.poll(foreign);
-}
-struct PayloadJointProbe {
-  ps::Result<ps::ResourceVector<ps::ResultJointOutcome>> poll(
-      const ps::ResultJointPhase& phase) {
-    ps::ResourceVector<ps::ResultJointOutcome> outcomes;
-    for (const auto* member : phase.members) {
-      PayloadProbe probe(false);
-      outcomes.push_back(
-          {take(ps::result_atom_key(member->query)), probe.poll(*member)});
-    }
-    return ps::Result<ps::ResourceVector<ps::ResultJointOutcome>>(
-        std::move(outcomes));
-  }
-};
-struct PrefixPayloadProbe {
-  bool reuse;
-  unsigned round = 0;
-  std::optional<ps::ResultBuilder> builder;
-  std::shared_ptr<const ps::CpuStorage> storage;
-  explicit PrefixPayloadProbe(bool shared) : reuse(shared) {}
-  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
-    if (!builder) {
-      builder = take(ps::ResultBuilder::start(phase.resources,
-                                              *phase.query.output.result_schema,
-                                              phase.query.semantic_key));
-      require(builder
-                  ->bind_descriptor_relation(take(
-                      ps::ResultRelation::cartesian(phase.resources, 1, {})))
-                  .ok(),
-              "prefix descriptor");
-    }
-    if (!reuse || !storage) {
-      auto bytes = take(phase.resources.allocator().allocate(8));
-      std::memset(bytes.data(), 0, bytes.size());
-      storage = std::move(bytes).freeze();
-    }
-    require(builder
-                ->publish_tensor(
-                    0, ps::Region({{round, 1}}), {0, {8}, {round}}, storage,
-                    take(ps::ResultRelation::cartesian(phase.resources, 2, {})),
-                    {true, true, true, true})
-                .ok(),
-            "prefix payload");
-    ++round;
-    auto result = round == 2 ? take(builder->seal()) : builder->reference();
-    return ps::Result<ps::ResultProgramPoll>(
-        ps::ResultPublication{std::move(result), round == 2});
-  }
-};
-ps::OperationDefinition payload_probe(bool borrow, unsigned* calls = nullptr) {
-  ps::OperationDefinition definition;
-  definition.key = "manual.output_payload";
-  auto& traits = definition.traits;
-  traits.input_count = borrow ? 1 : 0;
-  traits.input_schema.resize(traits.input_count);
-  for (auto& input : traits.input_schema) {
-    input.kind = ps::OperationPortKind::Result;
-    input.result_schema_id = "manual.payload";
-    input.result_schema_version = 1;
-    input.tensor_key = "samples";
-  }
-  traits.workspace_bytes = 8;
-  auto& output = traits.outputs[0];
-  output.output_schema.kind = ps::OperationPortKind::Result;
-  output.output_schema.result_schema_id = "manual.payload";
-  output.output_schema.result_schema_version = 1;
-  output.output_schema.tensor_key = "samples";
-  output.result_schema = payload_schema();
-  output.region_rule = ps::OperationRegionRule::Dependency;
-  output.continuation_bytes = sizeof(PayloadProbe);
-  output.maximum_dependency_stages = 2;
-  output.maximum_output_payload_bytes = borrow ? 0 : 8;
-  definition.start_result = [borrow, calls](const auto&,
-                                            const auto& allocator) {
-    return ps::ResultContinuation::make<PayloadProbe>(allocator, borrow, calls);
-  };
-  if (!borrow) {
-    output.failure_delivery = ps::FailureDelivery::PerAtomOutcome;
-    traits.outputs.push_back(output);
-    traits.outputs.back().key = "other";
-    traits.joint_contract = 2;
-    traits.joint_continuation_bytes = sizeof(PayloadJointProbe);
-    definition.start_result_joint = [](const auto&, const auto& allocator) {
-      return ps::ResultJointContinuation::make<PayloadJointProbe>(allocator);
-    };
-  }
-  return definition;
-}
-struct MetadataControl {
-  std::optional<ps::ResourceBudget> root;
-  ps::ResourceKind kind = ps::ResourceKind::Metadata;
-  std::uint64_t limit = 131072;
-  bool prior_protocol = false;
-};
-struct MetadataProbe {
-  std::shared_ptr<MetadataControl> control;
-  ps::ResourceLease fill;
-  explicit MetadataProbe(std::shared_ptr<MetadataControl> shared)
-      : control(std::move(shared)) {}
-  void fill_limit() {
-    const auto live = control->root->statistics().live[control->kind];
-    require(live < control->limit, "metadata probe must reach callback");
-    ps::ResourceCapacity amount;
-    if (control->kind == ps::ResourceKind::Metadata) {
-      const auto bytes =
-          control->limit - live - ps::ResourceBudget::lease_metadata_bytes();
-      amount = ps::ResourceCapacity::host(bytes, bytes);
-    } else {
-      amount[control->kind] = control->limit - live;
-    }
-    fill = take(control->root->reserve(amount));
-  }
-  ps::Result<ps::ResultProgramPoll> poll(const ps::ResultProgramPhase& phase) {
-    if (control->prior_protocol) {
-      double ignored = 0;
-      static_cast<void>(phase.read_tensor(999, 0, {0}, &ignored, 8));
-      try {
-        ps::ResourceVector<std::uint8_t> metadata;
-        metadata.resize(control->limit + 1);
-      } catch (const std::bad_alloc&) {
-      }
-      return ps::Result<ps::ResultProgramPoll>(
-          ps::Status{ps::ErrorCode::OperationFailed, "later callback failure"});
-    }
-    PayloadProbe probe(false);
-    auto result = probe.poll(phase);
-    fill_limit();
-    return result;
-  }
-  ps::Result<ps::ResourceVector<ps::ResultJointOutcome>> poll(
-      const ps::ResultJointPhase& phase) {
-    if (control->prior_protocol) {
-      double ignored = 0;
-      static_cast<void>(
-          phase.members.front()->read_tensor(999, 0, {0}, &ignored, 8));
-      try {
-        ps::ResourceVector<std::uint8_t> metadata;
-        metadata.resize(control->limit + 1);
-      } catch (const std::bad_alloc&) {
-      }
-      return ps::Result<ps::ResourceVector<ps::ResultJointOutcome>>(
-          ps::Status{ps::ErrorCode::OperationFailed, "later callback failure"});
-    }
-    PayloadJointProbe probe;
-    auto result = probe.poll(phase);
-    fill_limit();
-    return result;
-  }
-};
-void worker_metadata_limits(bool joint, ps::ResourceKind kind,
-                            bool prior_protocol = false) {
-  auto control = std::make_shared<MetadataControl>();
-  control->kind = kind;
-  control->prior_protocol = prior_protocol;
-  control->limit = kind == ps::ResourceKind::Metadata ? 131072 : 128;
-  auto definition = payload_probe(false);
-  definition.traits.workspace_bytes = 0;
-  for (auto& output : definition.traits.outputs) {
-    output.maximum_output_payload_bytes = 16;
-    output.continuation_bytes = sizeof(MetadataProbe);
-  }
-  definition.traits.joint_continuation_bytes = sizeof(MetadataProbe);
-  definition.start_result = [control](const auto&, const auto& allocator) {
-    return ps::ResultContinuation::make<MetadataProbe>(allocator, control);
-  };
-  definition.start_result_joint = [control](const auto&,
-                                            const auto& allocator) {
-    return ps::ResultJointContinuation::make<MetadataProbe>(allocator, control);
-  };
-  auto registry = std::make_shared<ps::OperationRegistry>();
-  require(registry->register_operation(std::move(definition)).ok(),
-          "register metadata probe");
-  require(registry->freeze().ok(), "freeze metadata probe");
-  ps::WorkflowDocument document;
-  document.nodes = {{1, "manual.output_payload", {}, {}}};
-  document.outputs = {{"a", 1, "value"}, {"b", 1, "other"}};
-  ps::GraphContext graph(document);
-  auto compiled = take(ps::Compiler(registry).compile(graph));
-  {
-    ps::ExecutionContextConfig config;
-    config.cpu_workers = 1;
-    config.managed_resources = ps::ResourceLimits{};
-    config.managed_resources->capacity[kind] = control->limit;
-    ps::ExecutionContext execution(registry, config);
-    control->root = take(execution.resource_budget());
-    ps::ExecutionOptions options;
-    options.enable_joint = joint;
-    auto result =
-        execution.execute_atoms(compiled.plan, {},
-                                {{"a", take(ps::Footprint::all({2}))},
-                                 {"b", take(ps::Footprint::all({2}))}},
-                                {}, options);
-    if (prior_protocol) {
-      require(
-          !result.ok() &&
-              result.status().detail.origin == ps::FailureOrigin::Protocol &&
-              result.status().reason == ps::FailureReason::UnauthorizedRead,
-          "prior protocol failure must survive later metadata exhaustion");
-    } else if (result.ok()) {
-      require(result.value().atoms.size() == 2, "metadata failure atoms");
-      for (const auto& atom : result.value().atoms)
-        require(!atom.outcome.ok() && atom.outcome.status().code ==
-                                          ps::ErrorCode::ResourceExhausted,
-                "worker bookkeeping must respect managed resource limits");
-    } else {
-      require(result.status().code == ps::ErrorCode::ResourceExhausted,
-              "metadata failure status");
-    }
-    if (!prior_protocol)
-      require(control->root->statistics().peak[kind] == control->limit,
-              "probe reached selected resource limit");
-  }
-  require(control->root->statistics().live[kind] == 0,
-          "worker bookkeeping and probe lease must retire");
-  std::cout << "managed bookkeeping limit joint=" << joint
-            << " kind=" << static_cast<unsigned>(kind) << " passed\n";
-}
-void output_payload_bounds() {
-  unsigned calls = 0;
-  auto registry = std::make_shared<ps::OperationRegistry>();
-  const auto registration =
-      registry->register_operation(payload_probe(false, &calls));
-  require(registration.ok(), registration.message.c_str());
-  require(registry->freeze().ok(), "freeze payload probe");
-  ps::ResourceBudget root;
-  {
-    ps::ResourceAllocationScope scope(root);
-    ps::ResultProgramMetadata metadata;
-    metadata.output.result_schema =
-        std::make_shared<const ps::SchemaTemplate>(payload_schema());
-    const std::map<std::string, ps::ParameterValue> parameters;
-    ps::ResultProgramQuery request(metadata, parameters);
-    request.tensor_outputs = take(ps::Footprint::all({2}));
-    request.semantic_key = "payload-probe";
-    request.snapshot_identity = "payload-inputs";
-    auto session = take(registry->start_result("manual.output_payload", request,
-                                               root.allocator()));
-
-    ps::ResultObjectInputs no_results;
-    ps::ResourceVector<ps::ResultIoReply> no_io;
-    auto allocator = root.allocator();
-    auto failure =
-        std::make_shared<std::atomic<ps::ErrorCode>>(ps::ErrorCode::Ok);
-    ps::ResultProgramPhase phase{
-        request, no_results,
-        no_io,   allocator,
-        root,    [root](auto work) { return root.consume({work}); },
-        failure};
-    auto prior = take(registry->start_result("manual.output_payload", request,
-                                             root.allocator()));
-    auto stopped_phase = phase;
-    stopped_phase.failure = std::make_shared<std::atomic<ps::ErrorCode>>(
-        ps::ErrorCode::InvalidArgument);
-    const auto before = calls;
-    require(prior.poll(stopped_phase).status().code ==
-                    ps::ErrorCode::InvalidArgument &&
-                calls == before,
-            "preexisting direct protocol failure prevents bound callback");
-    const auto status = session.poll(phase).status();
-    require(status.code == ps::ErrorCode::ResourceExhausted &&
-                status.reason == ps::FailureReason::CapacityLimit,
-            "workspace cannot expand the declared Result output payload bound");
-    require(
-        session.poll(phase).status().reason == ps::FailureReason::CapacityLimit,
-        "Result output bound failure remains sticky");
-    auto second = request;
-    second.output_index = 1;
-    auto joint = take(registry->start_result_joint("manual.output_payload",
-                                                   {request, second}, root));
-    auto joint_failure =
-        std::make_shared<std::atomic<ps::ErrorCode>>(ps::ErrorCode::Ok);
-    ps::ResultProgramPhase first{
-        request,      no_results,
-        no_io,        allocator,
-        root,         [root](auto work) { return root.consume({work}); },
-        joint_failure};
-    ps::ResultProgramPhase other{second,       no_results, no_io,
-                                 allocator,    root,       first.consume_work,
-                                 joint_failure};
-    ps::ResourceVector<const ps::ResultProgramPhase*> members{&first, &other};
-    auto events = take(joint.poll({members, allocator, first.consume_work}));
-    require(events.size() == 2, "Result joint payload event count");
-    for (const auto& event : events)
-      require(
-          !event.outcome.ok() &&
-              event.outcome.status().reason ==
-                  ps::FailureReason::CapacityLimit &&
-              event.outcome.status().detail.scope == ps::FailureScope::Atom &&
-              event.outcome.status().detail.atom == event.key,
-          "joint enforces each Result member's output payload bound");
-  }
-  for (auto live : root.statistics().live.values)
-    require(live == 0, "direct Result payload failures release resources");
-  ps::ResourceLimits guard_limits;
-  guard_limits.capacity[ps::ResourceKind::Metadata] = 65536;
-  ps::ResourceBudget guard_root(guard_limits);
-  {
-    ps::ResourceAllocationScope scope(guard_root);
-    ps::ResultProgramMetadata metadata;
-    metadata.output.result_schema =
-        std::make_shared<const ps::SchemaTemplate>(payload_schema());
-    const std::map<std::string, ps::ParameterValue> parameters;
-    ps::ResultProgramQuery query(metadata, parameters);
-    query.tensor_outputs = take(ps::Footprint::all({2}));
-    query.semantic_key = "payload.guard";
-    auto state = take(registry->start_result("manual.output_payload", query,
-                                             guard_root.allocator()));
-    const auto live = guard_root.statistics().live[ps::ResourceKind::Metadata];
-    auto occupied = take(guard_root.reserve(ps::ResourceCapacity::host(
-        65536 - live - ps::ResourceBudget::lease_metadata_bytes(),
-        65536 - live - ps::ResourceBudget::lease_metadata_bytes())));
-
-    ps::ResultObjectInputs no_results;
-    ps::ResourceVector<ps::ResultIoReply> no_io;
-    auto allocator = guard_root.allocator();
-    ps::ResultProgramPhase phase{
-        query,
-        no_results,
-        no_io,
-        allocator,
-        guard_root,
-        [guard_root](auto work) { return guard_root.consume({work}); },
-        std::make_shared<std::atomic<ps::ErrorCode>>(ps::ErrorCode::Ok)};
-    const auto before = calls;
-    require(
-        state.poll(phase).status().code == ps::ErrorCode::ResourceExhausted &&
-            calls == before,
-        "Root accounts bound guard before entering producer callback");
-  }
-  for (auto live : guard_root.statistics().live.values)
-    require(live == 0, "bound guard admission failure releases Root resources");
-  auto foreign_registry = std::make_shared<ps::OperationRegistry>();
-  auto foreign_definition = payload_probe(false);
-  foreign_definition.start_result = [](const auto&, const auto&) {
-    return ps::ResultContinuation::stateless<foreign_payload>();
-  };
-  require(
-      foreign_registry->register_operation(std::move(foreign_definition)).ok(),
-      "foreign payload probe");
-  {
-    ps::ResourceBudget normal_root;
-    ps::ResourceAllocationScope scope(normal_root);
-    ps::ResultProgramMetadata metadata;
-    metadata.output.result_schema =
-        std::make_shared<const ps::SchemaTemplate>(payload_schema());
-    const std::map<std::string, ps::ParameterValue> parameters;
-    ps::ResultProgramQuery query(metadata, parameters);
-    query.tensor_outputs = take(ps::Footprint::all({2}));
-    query.semantic_key = "foreign.payload";
-    auto state = take(foreign_registry->start_result(
-        "manual.output_payload", query, normal_root.allocator()));
-
-    ps::ResultObjectInputs no_results;
-    ps::ResourceVector<ps::ResultIoReply> no_io;
-    auto allocator = normal_root.allocator();
-    ps::ResultProgramPhase phase{
-        query,
-        no_results,
-        no_io,
-        allocator,
-        normal_root,
-        [normal_root](auto work) { return normal_root.consume({work}); },
-        std::make_shared<std::atomic<ps::ErrorCode>>(ps::ErrorCode::Ok)};
-    auto failed = state.poll(phase).status();
-    require(failed.code == ps::ErrorCode::InvalidArgument &&
-                failed.detail.origin == ps::FailureOrigin::Protocol,
-            "foreign Root cannot bypass direct output payload bound");
-  }
-  ps::WorkflowDocument document;
-  document.nodes = {{1, "manual.output_payload", {}, {}}};
-  document.outputs = {{"a", 1, "value"}, {"b", 1, "other"}};
-  ps::GraphContext graph(document);
-  auto compiled = take(ps::Compiler(registry).compile(graph));
-  ps::ExecutionContext context(registry);
-  for (bool grouping : {false, true}) {
-    ps::ExecutionOptions options;
-    options.enable_joint = grouping;
-    auto result =
-        take(context.execute_atoms(compiled.plan, {},
-                                   {{"a", take(ps::Footprint::all({2}))},
-                                    {"b", take(ps::Footprint::all({2}))}},
-                                   {}, options));
-    require(result.atoms.size() == 2,
-            "workflow payload failures are per-member");
-    for (const auto& atom : result.atoms)
-      require(!atom.outcome.ok() && atom.outcome.status().reason ==
-                                        ps::FailureReason::CapacityLimit,
-              "workflow rejects excessive new output backing");
-  }
-  for (bool reuse : {false, true}) {
-    auto prefix_definition = payload_probe(false);
-    auto prefix_schema = payload_schema();
-    prefix_schema.publication = ps::PublishPolicy::IndependentChunks;
-    prefix_schema.tensors[0].atomic_trailing_axes = 0;
-    prefix_definition.traits.outputs.resize(1);
-    prefix_definition.traits.outputs[0].result_schema = prefix_schema;
-    prefix_definition.traits.outputs[0].failure_delivery =
-        ps::FailureDelivery::RequestFailureOnly;
-    prefix_definition.traits.outputs[0].continuation_bytes =
-        sizeof(PrefixPayloadProbe);
-    prefix_definition.traits.joint_contract = 0;
-    prefix_definition.traits.joint_continuation_bytes = 0;
-    prefix_definition.start_result_joint = {};
-    prefix_definition.start_result = [reuse](const auto&,
-                                             const auto& allocator) {
-      return ps::ResultContinuation::make<PrefixPayloadProbe>(allocator, reuse);
-    };
-    ps::OperationRegistry prefix_registry;
-    auto admitted =
-        prefix_registry.register_operation(std::move(prefix_definition));
-    require(admitted.ok(), admitted.message.c_str());
-    ps::ResourceBudget prefix_root;
-    {
-      ps::ResourceAllocationScope scope(prefix_root);
-      ps::ResultProgramMetadata metadata;
-      metadata.output.result_schema =
-          std::make_shared<const ps::SchemaTemplate>(prefix_schema);
-      const std::map<std::string, ps::ParameterValue> parameters;
-      ps::ResultProgramQuery query(metadata, parameters);
-      query.tensor_outputs = take(ps::Footprint::all({2}));
-      query.semantic_key = "prefix-payload";
-      auto state = take(prefix_registry.start_result(
-          "manual.output_payload", query, prefix_root.allocator()));
-
-      ps::ResultObjectInputs no_results;
-      ps::ResourceVector<ps::ResultIoReply> no_io;
-      auto allocator = prefix_root.allocator();
-      ps::ResultProgramPhase phase{
-          query,
-          no_results,
-          no_io,
-          allocator,
-          prefix_root,
-          [prefix_root](auto work) { return prefix_root.consume({work}); },
-          std::make_shared<std::atomic<ps::ErrorCode>>(ps::ErrorCode::Ok)};
-      auto first = take(state.poll(phase));
-      require(!std::get<ps::ResultPublication>(first).complete,
-              "first eight-byte prefix fits output bound");
-      auto captured =
-          take(std::get<ps::ResultPublication>(first).result.capture());
-      auto second = state.poll(phase);
-      require(reuse ? second.ok()
-                    : !second.ok() && second.status().reason ==
-                                          ps::FailureReason::CapacityLimit,
-              "prefix cap counts cumulative unique physical allocations");
-      require(
-          take(captured.descriptor(false)).tensor_coverage(0) ==
-              take(ps::Footprint::from_regions({2}, {ps::Region({{0, 1}})})),
-          "captured prefix coverage remains immutable");
-    }
-    require(prefix_root.statistics().live[ps::ResourceKind::Payload] == 0,
-            "prefix owner release retires output payload");
-  }
-  auto mixed = std::make_shared<ps::OperationRegistry>();
-  auto mixed_definition = payload_probe(false);
-  mixed_definition.traits.outputs[1].maximum_output_payload_bytes = 16;
-  require(mixed->register_operation(std::move(mixed_definition)).ok(),
-          "mixed output bounds");
-  require(mixed->freeze().ok(), "freeze mixed output bounds");
-  ps::GraphContext mixed_graph(document);
-  auto mixed_plan = take(ps::Compiler(mixed).compile(mixed_graph)).plan;
-  ps::ExecutionContext mixed_context(mixed);
-  for (bool grouping : {false, true}) {
-    ps::ExecutionOptions options;
-    options.enable_joint = grouping;
-    auto result =
-        take(mixed_context.execute_atoms(mixed_plan, {},
-                                         {{"a", take(ps::Footprint::all({2}))},
-                                          {"b", take(ps::Footprint::all({2}))}},
-                                         {}, options));
-    require(result.atoms.size() == 2 && !result.atoms[0].outcome.ok() &&
-                result.atoms[0].outcome.status().reason ==
-                    ps::FailureReason::CapacityLimit &&
-                result.atoms[1].outcome.ok(),
-            "one member's output bound failure preserves legal sibling");
-  }
-  auto cancellation_registry = std::make_shared<ps::OperationRegistry>();
-  bool returned = false;
-  struct CancellingJoint {
-    bool* returned;
-    explicit CancellingJoint(bool* flag) : returned(flag) {}
-    ps::Result<ps::ResourceVector<ps::ResultJointOutcome>> poll(
-        const ps::ResultJointPhase& phase) {
-      PayloadJointProbe probe;
-      auto result = probe.poll(phase);
-      *returned = true;
-      return result;
-    }
-  };
-  auto cancelling_definition = payload_probe(false);
-  for (auto& output : cancelling_definition.traits.outputs)
-    output.maximum_output_payload_bytes = 16;
-  cancelling_definition.traits.joint_continuation_bytes =
-      sizeof(CancellingJoint);
-  cancelling_definition.start_result_joint =
-      [&returned](const auto&, const auto& allocator) {
-        return ps::ResultJointContinuation::make<CancellingJoint>(allocator,
-                                                                  &returned);
-      };
-  require(cancellation_registry
-              ->register_operation(std::move(cancelling_definition))
-              .ok(),
-          "cancel cap fixture");
-  {
-    ps::ResourceBudget cancellation_root;
-    ps::ResourceAllocationScope scope(cancellation_root);
-    ps::ResultProgramMetadata metadata;
-    metadata.output.result_schema =
-        std::make_shared<const ps::SchemaTemplate>(payload_schema());
-    const std::map<std::string, ps::ParameterValue> parameters;
-    ps::CancellationSource stop;
-    ps::ResultProgramQuery first_query(metadata, parameters);
-    first_query.semantic_key = "payload.cancel.first";
-    first_query.snapshot_identity = "payload.cancel.inputs";
-    first_query.tensor_outputs = take(ps::Footprint::all({2}));
-    first_query.cancellation = stop.token();
-    auto second_query = first_query;
-    second_query.output_index = 1;
-    second_query.semantic_key = "payload.cancel.other";
-    second_query.cancellation = {};
-    auto state = take(cancellation_registry->start_result_joint(
-        "manual.output_payload", {first_query, second_query},
-        cancellation_root));
-
-    ps::ResultObjectInputs no_results;
-    ps::ResourceVector<ps::ResultIoReply> no_io;
-    auto allocator = cancellation_root.allocator();
-    auto work = [cancellation_root](auto amount) {
-      return cancellation_root.consume({amount});
-    };
-    ps::ResultProgramPhase first{
-        first_query,
-        no_results,
-        no_io,
-        allocator,
-        cancellation_root,
-        [&](auto amount) {
-          if (returned)
-            stop.cancel();
-          return work(amount);
-        },
-        std::make_shared<std::atomic<ps::ErrorCode>>(ps::ErrorCode::Ok)};
-    ps::ResultProgramPhase second{
-        second_query,
-        no_results,
-        no_io,
-        allocator,
-        cancellation_root,
-        work,
-        std::make_shared<std::atomic<ps::ErrorCode>>(ps::ErrorCode::Ok)};
-    ps::ResourceVector<const ps::ResultProgramPhase*> members{&first, &second};
-    auto events = take(state.poll({members, allocator, work}));
-    require(events.size() == 2 && !events[0].outcome.ok() &&
-                events[0].outcome.status().code == ps::ErrorCode::Cancelled &&
-                events[1].outcome.ok(),
-            "cancellation during payload validation preserves healthy peer");
-  }
-  auto borrowing = std::make_shared<ps::OperationRegistry>();
-  require(borrowing->register_operation(payload_probe(true)).ok(),
-          "register borrowed Result probe");
-  require(borrowing->freeze().ok(), "freeze borrowed Result probe");
-  ps::ExecutionContext borrowed_context(borrowing);
-  auto resources = take(borrowed_context.resource_budget());
-  auto builder = take(
-      ps::ResultBuilder::start(resources, payload_schema(), "payload.source"));
-  require(builder
-              .bind_descriptor_relation(
-                  take(ps::ResultRelation::cartesian(resources, 1, {})))
-              .ok(),
-          "borrowed source descriptor");
-  auto input_bytes = take(resources.allocator().allocate(16));
-  std::memset(input_bytes.data(), 0, input_bytes.size());
-  require(
-      builder
-          .publish_tensor(0, ps::Region::whole({2}), {0, {8}},
-                          std::move(input_bytes).freeze(),
-                          take(ps::ResultRelation::cartesian(resources, 2, {})),
-                          {true, true, true, true})
-          .ok(),
-      "borrowed source payload");
-  auto input = take(builder.seal());
-  auto source = take(input.acquire_tensor(take(input.descriptor()), 0,
-                                          ps::Region::whole({2})));
-  ps::WorkflowInputDeclaration declaration;
-  declaration.id = 1;
-  declaration.name = "input";
-  declaration.result_schema =
-      std::make_shared<const ps::SchemaTemplate>(input.schema());
-  document.inputs = {declaration};
-  document.nodes[0].inputs = {ps::WorkflowInputReference{1}};
-  document.outputs.resize(1);
-  ps::GraphContext borrowed_graph(document);
-  auto plan = take(ps::Compiler(borrowing).compile(borrowed_graph)).plan;
-  auto result = take(borrowed_context.execute(plan, {{{"input", input}}}));
-  auto output = result.results.at("a");
-  auto window = take(output.acquire_tensor(take(output.descriptor()), 0,
-                                           ps::Region::whole({2})));
-  require(
-      source.storage_owner_token() == window.storage_owner_token() &&
-          resources.statistics().live[ps::ResourceKind::Payload] == 16,
-      "zero new-payload bound permits a Need-authorized borrowed Result view");
-  std::cout << "Result output payload: direct/joint/workflow bounds and "
-               "borrowed view passed\n";
-}
 struct ArrayWorkflow {
   std::shared_ptr<ps::OperationRegistry> registry;
   std::unique_ptr<ps::ExecutionContext> context;
@@ -796,7 +118,7 @@ void constant(const std::string& profile, const std::string& shape,
     const auto& tensor =
         compiled.plan.steps().back().output_result_schema->tensors[0];
     auto result = take(workflow.context->execute_fragments(
-        frozen, {{"values", take(ps::Footprint::all(tensor.sample_shape()))}}));
+        frozen, {{"values", ps::TileRequest{true, {}}}}));
     auto ordinary =
         take(workflow.context->execute(compiled.plan, {{{"input", input}}}));
     for (const auto& output :
@@ -952,8 +274,7 @@ void cancel_dense_array(const std::string& profile, bool constant,
   const auto before = workflow.root.statistics();
   const auto status =
       workflow.context
-          ->execute_fragments(frozen,
-                              {{"values", take(ps::Footprint::all({count}))}},
+          ->execute_fragments(frozen, {{"values", ps::TileRequest{true, {}}}},
                               cancellation.token())
           .status();
   const auto after = workflow.root.statistics();
@@ -1131,12 +452,13 @@ void staged_array_support(const std::string& profile) {
   auto frozen = take(workflow.context->freeze(plan.plan));
   const auto before = calls;
   auto empty = take(workflow.context->execute_fragments(
-      frozen, {{"values", take(ps::Footprint::none({3, 2}))}}));
+      frozen, {{"values", ps::TileRequest{}}}));
   require(calls == before &&
               take(empty.results.at("values").descriptor())
                   .tensor_coverage(0)
                   .empty() &&
-              take(empty.dependencies.source_support()).empty(),
+              !take(empty.dependencies.tile_record(
+                  {plan.plan.outputs().at("values"), 0, 0})),
           "Empty Result broadcast never executes source or reads payload");
   document.nodes[1].parameters["layout"] = std::string("dense");
   ps::GraphContext dense_graph(document);
@@ -1205,18 +527,30 @@ void broadcast_cache() {
   ps::ExecutionBindings bindings{{{"input", input}}};
   auto frozen = take(workflow.context->freeze(compiled.plan, bindings));
   auto demand = take(workflow.context->open_demand(compiled.plan, bindings));
-  const ps::DemandQuery query{
-      {"values", take(ps::Footprint::from_regions(
-                     {2, 3}, {ps::Region({{0, 2}, {0, 1}})}))}};
+  const ps::DemandQuery query{{"values", ps::TileRequest{true, {}}}};
+  const auto check_values = [](const ps::ResultRef& result,
+                               const std::vector<std::uint64_t>& expected) {
+    require(take(result.descriptor()).tensor_coverage(0) ==
+                take(ps::Footprint::all({2, 3})),
+            "broadcast cache retains complete Whole coverage");
+    for (std::uint64_t row = 0; row < 2; ++row)
+      for (std::uint64_t column = 0; column < 3; ++column)
+        require(array_bits(result, {row, column}) == expected[column],
+                "broadcast cache complete matrix oracle");
+  };
   auto cold = take(demand.request(query));
+  check_values(cold.results.at("values"), {10, 20, 30});
   auto repeated = take(demand.request(query));
-  require(repeated.results.at("values").object_id() ==
-              cold.results.at("values").object_id(),
-          "same frozen Result demand reuses completed producer identity");
+  check_values(repeated.results.at("values"), {10, 20, 30});
+  require(repeated.diagnostics.cache_hits > 0 &&
+              numeric_result_fixture::bytes(repeated.results.at("values")) ==
+                  numeric_result_fixture::bytes(cold.results.at("values")),
+          "repeated demand reuses bounded completed cache with identical bits");
   auto equivalent = workflow.source(vector_value({10, 20, 30}));
   auto warm_handle = take(
       workflow.context->open_demand(compiled.plan, {{{"input", equivalent}}}));
   auto warm = take(warm_handle.request(query));
+  check_values(warm.results.at("values"), {10, 20, 30});
   require(warm.diagnostics.cache_hits > 0 &&
               warm.results.at("values").association() ==
                   ps::ResourceVector<std::uint64_t>{equivalent.object_id()},
@@ -1224,21 +558,20 @@ void broadcast_cache() {
   auto changed = workflow.source(vector_value({10, 99, 30}));
   bindings.inputs[0].result = changed;
   require(demand.replace_bindings(bindings).ok(),
-          "replace unobserved Result broadcast sample");
+          "replace second Result broadcast sample");
   auto unchanged = take(demand.request(query));
+  check_values(unchanged.results.at("values"), {10, 99, 30});
   require(unchanged.diagnostics.cache_hits == 0 &&
               array_bits(unchanged.results.at("values"), {1, 0}) == 10,
           "Whole Result broadcast invalidates on any active source edit");
   auto updated_input = workflow.source(vector_value({99, 99, 30}));
   bindings.inputs[0].result = updated_input;
   require(demand.replace_bindings(bindings).ok(),
-          "replace observed Result broadcast sample");
+          "replace first Result broadcast sample");
   auto updated = take(demand.request(query));
-  require(array_bits(updated.results.at("values"), {1, 0}) == 99 &&
-              array_bits(
-                  take(workflow.context->execute(frozen)).results.at("values"),
-                  {1, 0}) == 10,
-          "Result rebinding updates demand and preserves old frozen input");
+  check_values(updated.results.at("values"), {99, 99, 30});
+  check_values(take(workflow.context->execute(frozen)).results.at("values"),
+               {10, 20, 30});
   std::cout << "Result broadcast cache: warm hit, Whole edit invalidation, "
                "immutable frozen input passed\n";
 }
@@ -1417,21 +750,24 @@ void array_owner_and_payload_cache() {
   ps::ExecutionBindings bindings{{{"input", input}}};
   auto frozen = take(workflow.context->freeze(plan.plan, bindings));
   auto demand = take(workflow.context->open_demand(plan.plan, bindings));
-  const ps::DemandQuery query{{"values", take(ps::Footprint::all({2, 3}))}};
+  const ps::DemandQuery query{{"values", ps::TileRequest{true, {}}}};
   auto cold = take(demand.request(query));
-  require(take(demand.request(query)).results.at("values").object_id() ==
-              cold.results.at("values").object_id(),
-          "same frozen Result demand reuses constant producer");
+  require(take(demand.request(query)).diagnostics.cache_hits > 0,
+          "repeated constant demand reuses bounded completed cache");
   auto equivalent = workflow.source(scalar(ps::ElementType::Float64, bits));
   auto warm_handle =
       take(workflow.context->open_demand(plan.plan, {{{"input", equivalent}}}));
   require(take(warm_handle.request(query)).diagnostics.cache_hits > 0,
           "fresh equivalent NaN Result source reuses warm constant cache");
-  require(take(take(cold.dependencies.potential_dirty(
-                        "input", take(ps::Footprint::all({1}))))
-                   .at("values")
-                   .element_count()) == 6,
-          "scalar dirty covers complete Result constant");
+  const ps::TileUnit unit{plan.plan.outputs().at("values"), 0, 0};
+  auto dirty = take(cold.dependencies.dirty_units(
+      {{ps::PlanWorkflowInput{0}, 0,
+        take(ps::TileSet::from_indices(workflow.root, {0})), false}}));
+  require(dirty.size() == 1 && dirty[0] == unit &&
+              take(take(cold.results.at("values").descriptor())
+                       .tensor_coverage(0)
+                       .element_count()) == 6,
+          "scalar dirty reaches the complete Whole Result constant unit");
   const auto replacement = UINT64_C(0xfff8000000005678);
   bindings.inputs[0].result =
       workflow.source(scalar(ps::ElementType::Float64, replacement));
@@ -1481,7 +817,7 @@ struct StructuredLast {
     if (!ready) {
       ready = true;
       ps::ResultProgramNeed need;
-      need.tensors.push_back({0, 0, take(ps::Footprint::all(shape)), 13});
+      need.tiles.push_back({0, true, false, {}});
       return Answer(std::move(need));
     }
     std::vector<std::uint64_t> last;
@@ -1534,7 +870,7 @@ ps::OperationDefinition structured_last() {
   output.output_schema.result_schema_id = schema.id;
   output.output_schema.result_schema_version = schema.version;
   output.result_schema = std::move(schema);
-  output.region_rule = ps::OperationRegionRule::Dependency;
+  output.region_rule = ps::OperationRegionRule::Whole;
   output.continuation_bytes = sizeof(StructuredLast);
   output.maximum_dependency_stages = 2;
   operation.start_result = [](const auto&, const auto& allocator) {
@@ -1643,8 +979,8 @@ void broadcast_examples(const std::string& profile, bool large) {
   ps::ExecutionBindings bindings{{{"input", input}}};
   auto frozen = take(workflow.context->freeze(compiled.plan, bindings));
   const auto all = take(ps::Footprint::all(shape));
-  auto result =
-      take(workflow.context->execute_fragments(frozen, {{"values", all}}));
+  auto result = take(workflow.context->execute_fragments(
+      frozen, {{"values", ps::TileRequest{true, {}}}}));
   const auto& view = result.results.at("values");
   auto original = take(input.acquire_tensor(take(input.descriptor()), 0,
                                             ps::Region::whole({3})));
@@ -1665,13 +1001,22 @@ void broadcast_examples(const std::string& profile, bool large) {
   for (auto extent : shape)
     last.push_back(extent - 1);
   require(array_bits(view, last) == 30, "broadcast Result last sample");
-  const auto support = take(result.dependencies.source_support());
-  require(support.at("input") == take(ps::Footprint::all({3})),
-          "broadcast full support deduplicates to three samples");
-  auto dirty = take(result.dependencies.potential_dirty(
-      "input", take(ps::Footprint::from_regions({3}, {ps::Region({{1, 1}})}))));
-  require(take(dirty.at("values").element_count()) == take(all.element_count()),
-          "Whole Result broadcast dirty covers all output observations");
+  const ps::TileUnit unit{compiled.plan.outputs().at("values"), 0, 0};
+  const auto record = take(result.dependencies.tile_record(unit));
+  require(record && record->inputs.size() == 1 && record->inputs[0].whole &&
+              record->inputs[0].tiles.empty() &&
+              std::holds_alternative<ps::PlanWorkflowInput>(
+                  record->inputs[0].producer) &&
+              std::get<ps::PlanWorkflowInput>(record->inputs[0].producer)
+                      .declaration_index == 0 &&
+              record->inputs[0].producer_output == 0,
+          "broadcast records complete input Whole Need");
+  auto dirty = take(result.dependencies.dirty_units(
+      {{ps::PlanWorkflowInput{0}, 0,
+        take(ps::TileSet::from_indices(workflow.root, {0})), false}}));
+  require(dirty.size() == 1 && dirty[0] == unit &&
+              take(view.descriptor()).tensor_coverage(0) == all,
+          "Whole Result broadcast dirty reaches its complete output unit");
   auto ordinary = take(workflow.context->execute(compiled.plan, bindings));
   auto ordinary_window = take(ordinary.results.at("values").acquire_tensor(
       take(ordinary.results.at("values").descriptor()), 0,
@@ -1680,14 +1025,13 @@ void broadcast_examples(const std::string& profile, bool large) {
       ordinary_window.storage_owner_token() == original.storage_owner_token(),
       "ordinary Result broadcast preserves borrowed view");
   if (!large) {
-    const auto sparse = take(ps::Footprint::from_regions(
-        shape, {ps::Region({{0, 1}, {0, 1}, {0, 1}}),
-                ps::Region({{1, 1}, {2, 1}, {3, 1}})}));
+    const ps::TileRequest sparse{
+        false, take(ps::TileSet::from_indices(workflow.root, {0}))};
     auto selected =
-        take(workflow.context->execute_fragments(frozen, {{"values", sparse}}));
-    require(take(selected.dependencies.source_support()).at("input") ==
-                take(ps::Footprint::all({3})),
-            "Whole Result sparse demand retains complete input support");
+        workflow.context->execute_fragments(frozen, {{"values", sparse}});
+    require(!selected.ok() &&
+                selected.status().code == ps::ErrorCode::InvalidArgument,
+            "nonspatial Result rejects explicit tile requests");
     document.nodes[0].parameters["layout"] = std::string("dense");
     ps::GraphContext dense_graph(document);
     auto dense_plan =
@@ -1768,29 +1112,13 @@ int main(int argc, char** argv) {
     result_array_examples();
     return 0;
 #endif
-#if defined(PS_RESULT_PAYLOAD_TEST)
-    output_payload_bounds();
-    worker_metadata_limits(false, ps::ResourceKind::Metadata, true);
-    worker_metadata_limits(true, ps::ResourceKind::Metadata, true);
-    for (auto kind : {ps::ResourceKind::Metadata, ps::ResourceKind::Entries}) {
-      worker_metadata_limits(false, kind);
-      worker_metadata_limits(true, kind);
-    }
-    return 0;
-#endif
+
     const std::string profile = argc > 1 ? argv[1] : "_strict";
     dense_and_schema();
     structured_views();
     broadcast_cache();
     array_owner_and_payload_cache();
     array_profile_examples(profile);
-    output_payload_bounds();
-    worker_metadata_limits(false, ps::ResourceKind::Metadata, true);
-    worker_metadata_limits(true, ps::ResourceKind::Metadata, true);
-    for (auto kind : {ps::ResourceKind::Metadata, ps::ResourceKind::Entries}) {
-      worker_metadata_limits(false, kind);
-      worker_metadata_limits(true, kind);
-    }
     return 0;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

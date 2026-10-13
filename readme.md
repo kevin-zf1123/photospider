@@ -30,7 +30,7 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-CPU exact execution is the default. `ExecutionMode::NativeGpu` grants native placement to operations whose traits declare a GPU implementation; `ExecutionContextConfig::gpu_enabled` enables the context's configured Metal or Vulkan backend. The mode selects placement, while each operation/profile defines its numerical behavior, and traits govern CPU fallback. Apple builds use Metal/Foundation privately; set `PHOTOSPIDER_ENABLE_METAL=OFF` for the CPU configuration. See [Compiler and Execution](docs/kernel-architecture/Compiler-and-Execution.md) for the current execution contracts. The public image Result path is demonstrated by [the unified Result workflow](examples/unified_result_workflow/README.md).
+CPU exact execution is the default. `ExecutionMode::NativeGpu` grants native placement to operations whose traits declare a GPU implementation; `ExecutionContextConfig::gpu_enabled` enables the context's configured Metal or Vulkan backend. The mode selects placement, while each operation/profile defines its numerical behavior, and traits govern CPU fallback. Apple builds use Metal/Foundation privately; set `PHOTOSPIDER_ENABLE_METAL=OFF` for the CPU configuration. See [Compiler and Execution](docs/kernel-architecture/Compiler-and-Execution.md) for the current execution contracts.
 
 ## Install and consume
 

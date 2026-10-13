@@ -17,8 +17,5 @@ struct ResultRef::Impl : data_internal::ResultPublicationState {
 struct ResultRef::Capture {
   ResourceLease lease;
   ResultDescriptor descriptor;
-  std::array<ResultRelation, 16> fields, tensors;
-  ResultRelation basis;
-  data_internal::ResultEvidenceOwner dependencies;
 };
 }  // namespace ps

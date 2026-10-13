@@ -27,13 +27,9 @@ This specification defines the intended mathematics and interface contract only;
 
 Suffix letters denote distinct mathematical/interface objects, not quality tiers that a backend may choose arbitrarily. A primitive may propose strict and accelerated profiles; a helper only orchestrates explicit stages.
 
-## Shared Mathematics, Units, and Profiles
-
-
 ### Exact Operator
 Observation y is a signed numerical field; nonfinite arithmetic follows NUM. The Float64 PSF is nonnegative with exact sum>0; it may exceed the image size and is folded periodically. Specify the anchor. Normalize the PSF by its exact sum. A is the resulting finite periodic convolution matrix, and H its exact DFT frequency response (do not first RN it into a spectral tensor). The DFT/IFFT, complex products, and denominator in the restoration formula form one E mathematical expression, with one final RN_t per pixel. An explicitly composed rounded S chain of FRQ nodes is not this member’s strict profile and may be used as a separate experimental workflow.
 If a frequency denominator is exactly zero, apply the explicitly supplied `singular=zero|error` policy. The zero policy sets that frequency estimate to complex +0, an explicit minimum-energy fill for missing frequencies; it does not claim to recover information. Reject negative lambda/nsr. Self-conjugate frequencies ensure a real result. Do not clip the output or apply automatic gamma/tone mapping. The initial profile does not accept reflected PSF boundaries; a nonperiodic inverse problem requires a separate key and matched A/AT definitions.
-
 
 ## Shared Execution and Numeric Obligations
 

@@ -13,22 +13,6 @@
 #include "execution/structured_cache_state.hpp"
 
 namespace ps::execution_internal {
-struct StructuredInputBundle final {
-  StructuredInputBundle(std::size_t producer,
-                        std::shared_ptr<const DependencyBundle> bundle,
-                        std::uint32_t input_port = UINT32_MAX,
-                        std::uint64_t object = 0, std::uint64_t revision = 0)
-      : first(producer),
-        second(std::move(bundle)),
-        port(input_port),
-        object_id(object),
-        revision(revision) {}
-  std::size_t first;
-  std::shared_ptr<const DependencyBundle> second;
-  std::uint32_t port;
-  std::uint64_t object_id, revision;
-};
-
 // One synchronous borrow. Input owners remain on the actor; a replay attempt
 // owns a snapshot and restores these references on an optional miss. The host
 // retires callbacks before handing this view to the cache component.
@@ -37,13 +21,10 @@ struct StructuredCacheActorView final {
   StructuredActorCache& cache;
   ResultTensorInputs& tensors;
   ResultObjectInputs& results;
-  ResultNeedHistory& history;
+  ResultDescriptorInputs& descriptors;
+  TileRecord& tile_record;
   ResultInputFacts& input_facts;
-  ResultRelation& input_obligations;
-  ResourceVector<StructuredInputBundle>& input_bundles;
-  ResourceVector<ResultIoReply>& io;
   const ResultRef& published;
-  const std::optional<QualityReport>& quality;
   const bool& fallback_taint;
   bool& busy;
 };
@@ -56,6 +37,7 @@ struct StructuredCacheContext final {
   const FootprintLimits& limits;
   const ResourceVector<bool>& eligible;
   ResultCache* table;
+  const TileRecords& records;
   std::uint64_t epoch, maximum_window;
   std::uint64_t& visited_records;
 };
@@ -72,9 +54,9 @@ class StructuredCacheWorkServices {
 class StructuredCacheReplayHost : public StructuredCacheWorkServices {
  public:
   virtual Status supply(const ResultProgramNeed&) = 0;
-  virtual bool detaching() const = 0;
   virtual Result<bool> adopt(const StructuredCacheManifest&,
-                             const ResourceVector<std::uint64_t>&) = 0;
+                             const ResourceVector<std::uint64_t>&,
+                             const ReboundTileCache&) = 0;
 };
 
 // Owns this Run's optional quota/checkpoint scopes, manifest construction and
@@ -100,7 +82,7 @@ class StructuredResultCache final {
                                         std::uint64_t maximum_window,
                                         StructuredCacheWorkServices&);
   Result<ResourceString> source_digest(const StructuredCacheContext&,
-                                       const ResourceVector<SourceObservation>&,
+                                       const ResourceVector<TileCacheSource>&,
                                        StructuredCacheWorkServices&);
   void record_need(std::size_t, StructuredCacheActorView,
                    const StructuredCacheContext&, const ResultProgramNeed&,
@@ -115,9 +97,6 @@ class StructuredResultCache final {
  private:
   static std::string completed_key(std::size_t, const ResultProgramQuery&,
                                    const StructuredCacheContext&);
-  Result<ResourceVector<SourceObservation>> source_proof(
-      std::size_t, const ResultRef&, const StructuredCacheContext&,
-      StructuredCacheWorkServices&);
   ResourceBudget resources_;
   StructuredCacheState quota_;
 };

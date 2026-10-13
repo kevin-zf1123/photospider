@@ -58,7 +58,7 @@ Layer schema 描述在 Result schema 校验处终止，不能进入发布。纯 
 
 `SchemaTemplate::validate` 对六个 Result schema ID 和 `photospider.layer` facet 返回 `TypeMismatch`。`layer_schema` 可以为纯值契约构造描述，但该描述无法通过 Result 校验边界。`validate_layer_result` 的可选 work hook 增加独立 work 上限；Root work 和 I/O 也会计费。
 
-纯 helper 行为由 `test_layer` 和安装包 consumer `installed_layer_values` 覆盖。这些检查针对算术 API，不涉及 Layer operation、图像 workflow 或 GPU 路径。
+纯 helper 行为由 `test_layer` 覆盖。这些检查针对算术 API，不涉及 Layer operation、图像 workflow 或 GPU 路径。
 
 ## 5. 限制与非目标
 

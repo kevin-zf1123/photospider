@@ -34,14 +34,6 @@ class DependencyTemplateDigest final {
     if (charge(size))
       hash_.bytes(value, size);
   }
-  void metadata(const ValueDescriptor& descriptor,
-                const std::vector<ValueFacet>& facets) {
-    integer(static_cast<std::uint32_t>(descriptor.element_type));
-    integer(descriptor.shape.size());
-    for (auto extent : descriptor.shape)
-      integer(extent);
-    contract_internal::append_facets(this, facets);
-  }
   void disable() { valid_ = false; }
   std::string finish() { return valid_ ? hash_.finish() : std::string{}; }
 
@@ -81,6 +73,7 @@ inline std::vector<std::string> dependency_cache_templates(
     const auto& step = plan.steps()[index];
     DependencyTemplateDigest hash(work);
     hash.text("photospider.dependency-static.v1");
+    hash.integer(plan.tile_extent());
     hash.integer(static_cast<std::uint32_t>(plan.execution_mode()));
     hash.integer(static_cast<std::uint32_t>(step.backend));
     if (step.backend == Backend::Gpu)
@@ -88,7 +81,6 @@ inline std::vector<std::string> dependency_cache_templates(
     hash.text(step.operation);
     hash.integer(step.output_index);
     contract_internal::append_traits(&hash, step.traits);
-    hash.metadata(step.output_descriptor, step.output_facets);
     hash.integer(step.parameters.size());
     for (const auto& parameter : step.parameters) {
       hash.text(parameter.first);

@@ -77,13 +77,20 @@ Result<ExecutionResult> run(const ResultRef& source, Params params, bool encode,
                             std::uint64_t tile_extent = 128) {
   auto doc = transfer_fixture::document(source, key(encode, suffix), params);
   PlanningOptions options;
-  options.tile_height = options.tile_width = tile_extent;
-  if (roi)
-    options.output_regions = {{"result", *roi}};
+  options.tile_extent = tile_extent;
   GraphContext graph(doc);
   auto plan = Compiler(registry()).compile(graph, options, source.resources());
   if (!plan.ok())
     return Result<ExecutionResult>(plan.status());
+  if (roi) {
+    auto selected = workflow_example::select_tiles(
+        take(executor().resource_budget()), plan.value().plan, "result", *roi);
+    if (!selected.ok())
+      return Result<ExecutionResult>(selected.status());
+    auto stages = plan.take_value();
+    stages.plan = selected.take_value();
+    plan = Result<CompiledWorkflow>(std::move(stages));
+  }
   ExecutionOptions execute;
   execute.dependencies.maximum_work = UINT64_MAX;
   execute.maximum_dependency_work = UINT64_MAX;
@@ -404,15 +411,22 @@ void selection_and_layout() {
   words[7] = snan;
   auto source = make_value(ElementType::Float64, {2, 4}, pack(words), desc);
   Params decode = {{"group", std::string("color")}};
-  auto red = take(run(source, decode, false, Region({{0, 2}, {0, 1}})));
-  require(read_double(red.results.at("result"), {0, 0}) > 90,
-          "R-only ignores invalid G");
-  auto alpha = take(run(source, decode, false, Region({{0, 2}, {3, 1}})));
-  require(read_bits(alpha.results.at("result"), {0, 3}) == nz &&
-              read_bits(alpha.results.at("result"), {1, 3}) == snan,
-          "alpha exact bits no validation");
-  require(!run(source, decode, false).ok(),
-          "requested nonfinite G fails semantic");
+  require(
+      !run(source, decode, false, Region({{0, 2}, {0, 1}})).ok(),
+      "Whole request validates transformed G outside the frontend rectangle");
+  require(!run(source, decode, false, Region({{0, 2}, {3, 1}})).ok(),
+          "Whole alpha rectangle still computes the transformed colors");
+  auto valid_words = words;
+  std::memcpy(&valid_words[1], &x, 8);
+  std::memcpy(&valid_words[5], &x, 8);
+  auto valid_source =
+      make_value(ElementType::Float64, {2, 4}, pack(valid_words), desc);
+  auto alpha = take(run(valid_source, decode, false));
+  require(
+      read_double(alpha.results.at("result"), {0, 0}) > 90 &&
+          read_bits(alpha.results.at("result"), {0, 3}) == nz &&
+          read_bits(alpha.results.at("result"), {1, 3}) == snan,
+      "Whole transform preserves alpha exact bits without alpha validation");
   Params p = raw("power_gamma");
   p["gamma"] = 2.;
   p["components"] = std::string("0");
@@ -481,8 +495,8 @@ Result<ExecutionResult> planar_run(const channel_fixture::Source& image,
                                    Params params, bool encode,
                                    const Region& roi,
                                    const std::string& suffix = "_strict") {
-  auto source = channel_fixture::publish(take(executor().resource_budget()),
-                                         transfer_fixture::source(image, roi));
+  auto source =
+      channel_fixture::publish(take(executor().resource_budget()), image);
   return run(source, std::move(params), encode, roi, suffix, image.tile_width);
 }
 void planar_cases() {
@@ -504,6 +518,16 @@ void planar_cases() {
       take(transfer_fixture::publish(
           image, roi, bytes.data(),
           bytes.size()));  // No G/B/alpha pages exist.
+      require(!planar_run(image, {{"group", std::string("color")}}, false, roi)
+                   .ok(),
+              "incomplete RGB tile cannot satisfy a requested output tile");
+      auto complete =
+          type == ElementType::Float32
+              ? pack<float>(std::vector<float>(extent * extent * 4, .5f))
+              : pack<double>(std::vector<double>(extent * extent * 4, .5));
+      image.coverage.clear();
+      take(transfer_fixture::publish(image, Region::whole(vd.shape),
+                                     complete.data(), complete.size()));
       auto r = take(
           planar_run(image, {{"group", std::string("color")}}, false, roi));
       std::vector<std::uint8_t> observed(9 * width);
@@ -518,12 +542,13 @@ void planar_cases() {
       for (const auto& t : r.diagnostics.operation_timings) {
         evaluated += t.numeric.evaluated_values;
       }
-      require(evaluated == 9, "planar diagnostics count requested R only");
-      require(!transfer_fixture::read(r.results.at("result"),
-                                      Region({{0, 1}, {0, 1}, {1, 1}}),
-                                      observed.data(), width)
-                   .ok(),
-              "no accidental peer publication");
+      require(evaluated == extent * extent * 3,
+              "complete tiles evaluate all RGB channels");
+      require(transfer_fixture::read(r.results.at("result"),
+                                     Region({{0, 1}, {0, 1}, {1, 1}}),
+                                     observed.data(), width)
+                  .ok(),
+              "complete tile includes all peer channels");
       // Alpha-only input with no color backing must not require peer windows.
       Region alpha({{tile - 1, 3}, {tile - 1, 3}, {3, 1}});
       std::fill(bytes.begin(), bytes.end(), 0xff);
@@ -537,7 +562,8 @@ void planar_cases() {
       for (const auto& t : r.diagnostics.operation_timings) {
         evaluated += t.numeric.evaluated_values;
       }
-      require(evaluated == 0, "alpha-only avoids all transfer evaluation");
+      require(evaluated == extent * extent * 3,
+              "alpha rectangle still requests complete RGB tiles");
     }
   }
 }
@@ -786,8 +812,8 @@ void semantic_need_roles() {
     auto hooks = std::make_shared<transfer_fixture::Hooks>();
     unsigned roles = 0;
     hooks->need = [&](const ResultProgramNeed& need) {
-      require(need.tensors.size() == 1, "one source capability");
-      roles = need.tensors[0].roles;
+      require(need.tiles.size() == 1, "one source capability");
+      roles = need.tiles[0].roles;
     };
     const auto query =
         take(Footprint::from_regions({1, 4}, {Region({{0, 1}, {channel, 1}})}));
