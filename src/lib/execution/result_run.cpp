@@ -23,6 +23,293 @@
 #include "execution/execution_test_hooks.hpp"
 #endif
 namespace ps::execution_internal {
+namespace {
+using StructuredTask = std::function<Status(const StructuredServices&)>;
+using NativeInput = Result<std::pair<Value, std::uint64_t>>;
+
+// Borrows the queued callback's captures only for its synchronous work call.
+struct StageContext {
+  ThreadPool* pool;
+  const std::shared_ptr<gpu_internal::Device>& native_device;
+  const std::shared_ptr<ResourceBudget>& resources;
+  const std::function<bool()>& current;
+  const std::shared_ptr<NativeRunUploads>& uploads;
+  ResultCache* dependency_cache;
+  std::uint64_t cache_epoch;
+};
+
+struct UploadLookup {
+  std::string view_key;
+  std::shared_ptr<const CpuStorage> physical;
+  std::string content_key;
+};
+
+Status find_run_upload(const StageContext& context, const Value& source,
+                       const std::function<Status(std::uint64_t)>& cache_work,
+                       UploadLookup* lookup) {
+  if (!cache_work)
+    return Status::success();
+  auto issued = cache_work(32 + 5 * source.region().rank() +
+                           context.uploads->lookup_work());
+  if (!issued.ok())
+    return issued.code == ErrorCode::ResourceExhausted ? Status::success()
+                                                       : issued;
+  lookup->view_key = upload_view_key(source);
+  lookup->physical = context.uploads->find(lookup->view_key, source.storage());
+  return Status::success();
+}
+
+Status find_cached_upload(
+    const StageContext& context, const Value& source, std::uint64_t bytes,
+    const std::function<Status(std::uint64_t)>& cache_work,
+    const std::function<ErrorCode()>& stop, UploadLookup* lookup) {
+  if (lookup->physical || !context.dependency_cache || !cache_work ||
+      lookup->view_key.empty())
+    return Status::success();
+  const auto count = source.region().element_count();
+  const auto per_sample = 1 + source.region().rank();
+  if (!count.ok())
+    return count.status();
+  if (!core_internal::can_multiply_add(count.value(), per_sample, bytes))
+    return Status::success();
+  const auto device_identity = context.native_device->identity();
+  const auto framing = 32 + device_identity.size() + 3 * source.region().rank();
+  const auto sample_work = bytes + count.value() * per_sample;
+  auto issued = core_internal::can_add(sample_work, framing)
+                    ? cache_work(sample_work + framing)
+                    : Status{ErrorCode::ResourceExhausted, {}};
+  if (!issued.ok())
+    return issued.code == ErrorCode::ResourceExhausted ? Status::success()
+                                                       : issued;
+  auto key = upload_content_key(source, device_identity, stop);
+  if (!key.ok())
+    return key.status();
+  lookup->content_key = key.take_value();
+  auto retained =
+      context.dependency_cache->get(lookup->content_key, context.cache_epoch);
+  if (retained.valid() && context.native_device->owns(*retained.storage()))
+    lookup->physical = retained.storage();
+  return Status::success();
+}
+
+Result<Value> copy_native_input(const StageContext& context,
+                                const Value& source, std::uint64_t bytes,
+                                const BufferAllocator& allocator,
+                                const std::function<ErrorCode()>& stop,
+                                const std::string& content_key) {
+  auto capacity = context.native_device->allocation_capacity(bytes);
+  if (!capacity.ok())
+    return Result<Value>(capacity.status());
+  if (capacity.value() < bytes)
+    return Result<Value>(
+        Status{ErrorCode::OperationFailed, "native capacity is too small"});
+  auto count = source.region().element_count();
+  const auto per_sample = 1 + source.region().rank();
+  if (!count.ok())
+    return Result<Value>(count.status());
+  if (!core_internal::can_multiply_add(count.value(), per_sample, bytes))
+    return Result<Value>(Status{ErrorCode::ResourceExhausted, {}});
+  auto issued =
+      context.resources->consume({bytes + count.value() * per_sample});
+  if (!issued.ok())
+    return Result<Value>(issued);
+  if (stop() != ErrorCode::Ok)
+    return Result<Value>(Status{stop(), {}});
+  auto copied = transfer_value(source, allocator, true, stop);
+  if (!copied.ok())
+    return copied;
+  if (!content_key.empty() && stop() == ErrorCode::Ok)
+    context.dependency_cache->put(content_key, copied.value(),
+                                  context.cache_epoch, true);
+  return copied;
+}
+
+NativeInput upload_native_input(
+    const StageContext& context, const CancellationToken& token,
+    const Value& source, const std::function<Status(std::uint64_t)>& cache_work,
+    const BufferAllocator& allocator, std::uint64_t* upload_hits) {
+  const std::function<ErrorCode()> stop = [&] {
+    return token.cancelled()                       ? ErrorCode::Cancelled
+           : context.current && !context.current() ? ErrorCode::Stale
+                                                   : ErrorCode::Ok;
+  };
+  if (stop() != ErrorCode::Ok)
+    return NativeInput(Status{stop(), {}});
+  if (context.native_device->owns(*source.storage()))
+    return NativeInput(std::make_pair(source, std::uint64_t{0}));
+  auto bytes = region_bytes(source.descriptor(), source.region());
+  if (!bytes.ok())
+    return NativeInput(bytes.status());
+  UploadLookup lookup;
+  auto status = find_run_upload(context, source, cache_work, &lookup);
+  if (!status.ok())
+    return NativeInput(status);
+  status = find_cached_upload(context, source, bytes.value(), cache_work, stop,
+                              &lookup);
+  if (!status.ok())
+    return NativeInput(status);
+  std::uint64_t copied_bytes = 0;
+  if (lookup.physical && context.native_device->owns(*lookup.physical)) {
+    ++*upload_hits;
+  } else {
+    auto copied = copy_native_input(context, source, bytes.value(), allocator,
+                                    stop, lookup.content_key);
+    if (!copied.ok())
+      return NativeInput(copied.status());
+    lookup.physical = copied.value().storage();
+    copied_bytes = bytes.value();
+  }
+  if (stop() != ErrorCode::Ok)
+    return NativeInput(Status{stop(), {}});
+  auto rebound = uploaded_view(source, lookup.physical);
+  if (!rebound.ok())
+    return NativeInput(rebound.status());
+  if (!lookup.view_key.empty())
+    context.uploads->put(lookup.view_key, source.storage(), lookup.physical);
+  return NativeInput(std::make_pair(rebound.take_value(), copied_bytes));
+}
+
+Status configure_native_services(
+    const StageContext& context, Backend backend,
+    const CancellationToken& token, StructuredServices* services,
+    std::optional<gpu_internal::Invocation>* native,
+    std::uint64_t* upload_hits) {
+  if (backend != Backend::Gpu)
+    return Status::success();
+  if (!context.native_device || !context.native_device->available()) {
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+    if (context.native_device)
+#endif
+      return Status{ErrorCode::BackendUnavailable,
+                    "native GPU Result device became unavailable"};
+  }
+  // Scheduler fixtures borrow a GPU queue label without native buffers/services
+  // or any claimed device dispatch work. Recheck availability before setup.
+  if (!context.native_device || !context.native_device->available())
+    return Status::success();
+  services->allocator = context.native_device->allocator(services->allocator);
+  native->emplace(context.native_device, token, services->allocator);
+  services->gpu = native->value().service();
+  services->gpu_status = [native] { return native->value().status(); };
+  services->gpu_dispatches = [native] {
+    return native->value().statistics().dispatches;
+  };
+  // The pointees and borrowed references live in run_queued_stage, not here.
+  services->native_input =
+      [&context, &token, services, upload_hits](
+          const Value& source,
+          const std::function<Status(std::uint64_t)>& work) {
+        return upload_native_input(context, token, source, work,
+                                   services->allocator, upload_hits);
+      };
+  services->observe = [native, upload_hits](auto& diagnostics) {
+    const auto& stats = native->value().statistics();
+    diagnostics.native_dispatch_count += stats.dispatches;
+    diagnostics.native_submission_count += stats.submissions;
+    diagnostics.native_compute_us += stats.device_us;
+    diagnostics.native_constant_bytes += stats.constant_bytes;
+    diagnostics.native_upload_hits += *upload_hits;
+  };
+  return Status::success();
+}
+
+Result<int> run_queued_stage(const StageContext& context, Backend backend,
+                             bool whole, bool native_gpu_available,
+                             const CancellationToken& token,
+                             const StructuredTask& task) {
+  if (token.cancelled())
+    return Result<int>(Status{ErrorCode::Cancelled, {}});
+  if (context.current && !context.current())
+    return Result<int>(Status{ErrorCode::Stale, {}});
+  StructuredServices services;
+  services.native_storage = [native_device =
+                                 context.native_device](const auto& storage) {
+    return native_device && native_device->owns(storage);
+  };
+  services.native_gpu_available = native_gpu_available;
+  services.allocator = context.resources->allocator();
+  std::optional<gpu_internal::Invocation> native;
+  std::uint64_t upload_hits = 0;
+  auto configured = configure_native_services(context, backend, token,
+                                              &services, &native, &upload_hits);
+  if (!configured.ok())
+    return Result<int>(configured);
+  CpuRangeScope ranges(context.pool->ranges(), token, context.resources.get(),
+                       context.current);
+  if (backend == Backend::Cpu && whole)
+    services.cpu_parallel = ranges.service();
+  auto status = task(services);
+  if (!ranges.status().ok())
+    status = ranges.status();
+  if (native && !native->status().ok())
+    status = native->status();
+  if (!status.ok())
+    return Result<int>(status);
+  return Result<int>(1);
+}
+
+Result<StructuredSubmission> run_inline_tiles(
+    ThreadPool* pool, ThreadPool* gpu_pool,
+    const std::shared_ptr<gpu_internal::Device>& native_device,
+    const std::shared_ptr<ResourceBudget>& resources,
+    const std::function<bool()>& current, std::uint32_t maximum_parallelism,
+    const CancellationToken& token, const StructuredTask& task) {
+  auto issued = resources->consume({0, 1});
+  if (!issued.ok())
+    return Result<StructuredSubmission>(issued);
+  CpuTileScope scope(
+      pool->ranges(), token, resources.get(),
+      maximum_parallelism ? maximum_parallelism : pool->ranges().workers(),
+      current);
+  StructuredServices services;
+  services.native_gpu_available = gpu_lane_available(gpu_pool, native_device);
+  services.native_storage = [native_device](const auto& storage) {
+    return native_device && native_device->owns(storage);
+  };
+  services.cpu_tiles = scope.service();
+  services.allocator = resources->allocator();
+  services.observe = [&](auto& diagnostics) {
+    diagnostics.cpu_stage_count += scope.stages();
+    diagnostics.cpu_tile_callback_count += scope.tiles();
+  };
+  auto status = task(services);
+  return Result<StructuredSubmission>(
+      StructuredSubmission{{},
+                           {},
+                           scope.status().ok() ? status : scope.status()});
+}
+
+Result<StructuredSubmission> submit_queued_stage(
+    ThreadPool* pool, ThreadPool* gpu_pool,
+    const std::shared_ptr<gpu_internal::Device>& native_device,
+    const std::shared_ptr<data_internal::MemoryBudget>& budget,
+    const std::shared_ptr<ResourceBudget>& resources,
+    WaitingAdmission* admission, const std::function<bool()>& current,
+    const std::shared_ptr<NativeRunUploads>& uploads,
+    ResultCache* dependency_cache, std::uint64_t cache_epoch, Backend backend,
+    bool whole, CancellationToken token, StructuredTask task) {
+  auto submitted = submit_result_stage(
+      backend == Backend::Gpu ? gpu_pool : pool, admission,
+      [pool, native_device, budget, resources, current, backend, whole, uploads,
+       dependency_cache, cache_epoch,
+       native_gpu_available = gpu_lane_available(gpu_pool, native_device),
+       token = std::move(token), task = std::move(task)] {
+        const StageContext context{pool,       native_device, resources,
+                                   current,    uploads,       dependency_cache,
+                                   cache_epoch};
+        return run_queued_stage(context, backend, whole, native_gpu_available,
+                                token, task);
+      },
+      resources.get());
+  if (!submitted.ok())
+    return Result<StructuredSubmission>(submitted.status());
+  auto completion = submitted.take_value();
+  auto future = completion->future.share();
+  return Result<StructuredSubmission>(
+      StructuredSubmission{std::move(completion), std::move(future), {}});
+}
+}  // namespace
+
 Result<ExecutionResult> run_result_plan(
     ThreadPool* pool, ThreadPool* gpu_pool,
     const std::shared_ptr<gpu_internal::Device>& native_device,
@@ -92,9 +379,7 @@ Result<ExecutionResult> run_result_plan(
   if (!budget->resources())
     return fail(Status{ErrorCode::InvalidArgument,
                        "structured execution requires managed_resources"});
-  const auto stage_root = budget->resources()
-                              ? budget->resources()
-                              : std::make_shared<ResourceBudget>();
+  const auto stage_root = budget->resources();
   std::shared_ptr<execution_internal::NativeRunUploads> uploads;
   if (native_device && native_device->available() &&
       std::any_of(
@@ -117,8 +402,7 @@ Result<ExecutionResult> run_result_plan(
           Backend backend, bool whole, bool tiles, CancellationToken token,
           std::function<Status(const execution_internal::StructuredServices&)>
               task) -> Result<execution_internal::StructuredSubmission> {
-        using Submission = execution_internal::StructuredSubmission;
-        using Answer = Result<Submission>;
+        using Answer = Result<StructuredSubmission>;
         if (backend == Backend::Gpu &&
             !gpu_lane_available(gpu_pool, native_device)) {
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
@@ -128,208 +412,13 @@ Result<ExecutionResult> run_result_plan(
           return Answer(Status{ErrorCode::BackendUnavailable,
                                "native GPU Result lane is unavailable"});
         }
-        if (tiles) {
-          auto issued = stage_root->consume({0, 1});
-          if (!issued.ok())
-            return Answer(issued);
-          execution_internal::CpuTileScope scope(
-              pool->ranges(), token, stage_root.get(),
-              maximum_parallelism ? maximum_parallelism
-                                  : pool->ranges().workers(),
-              current);
-          execution_internal::StructuredServices services;
-          services.native_gpu_available =
-              gpu_lane_available(gpu_pool, native_device);
-          services.native_storage = [native_device](const auto& storage) {
-            return native_device && native_device->owns(storage);
-          };
-          services.cpu_tiles = scope.service();
-          services.allocator = stage_root->allocator();
-          services.observe = [&](auto& d) {
-            d.cpu_stage_count += scope.stages();
-            d.cpu_tile_callback_count += scope.tiles();
-          };
-          auto status = task(services);
-          return Answer(
-              Submission{{},
-                         {},
-                         scope.status().ok() ? status : scope.status()});
-        }
-        auto submitted = execution_internal::submit_result_stage(
-            backend == Backend::Gpu ? gpu_pool : pool, admission,
-            [pool, native_device, budget, stage_root, current, backend, whole,
-             uploads, dependency_cache, cache_epoch,
-             native_gpu_available = gpu_lane_available(gpu_pool, native_device),
-             token = std::move(token), task = std::move(task)] {
-              if (token.cancelled())
-                return Result<int>(Status{ErrorCode::Cancelled, {}});
-              if (current && !current())
-                return Result<int>(Status{ErrorCode::Stale, {}});
-              execution_internal::StructuredServices services;
-              services.native_storage = [native_device](const auto& storage) {
-                return native_device && native_device->owns(storage);
-              };
-              services.native_gpu_available = native_gpu_available;
-              services.allocator = stage_root->allocator();
-              std::optional<gpu_internal::Invocation> native;
-              std::uint64_t upload_hits = 0;
-              if (backend == Backend::Gpu &&
-                  (!native_device || !native_device->available())) {
-#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
-                if (native_device)
-#endif
-                  return Result<int>(
-                      Status{ErrorCode::BackendUnavailable,
-                             "native GPU Result device became unavailable"});
-              }
-              // Scheduler fixtures borrow a GPU queue label without native
-              // buffers/services or any claimed device dispatch work.
-              if (backend == Backend::Gpu && native_device &&
-                  native_device->available()) {
-                services.allocator =
-                    native_device->allocator(services.allocator);
-                native.emplace(native_device, token, services.allocator);
-                services.gpu = native->service();
-                services.gpu_status = [&] { return native->status(); };
-                services.gpu_dispatches = [&] {
-                  return native->statistics().dispatches;
-                };
-                services.native_input =
-                    [&](const Value& source,
-                        const std::function<Status(std::uint64_t)>& cache_work)
-                    -> Result<std::pair<Value, std::uint64_t>> {
-                  using Answer = Result<std::pair<Value, std::uint64_t>>;
-                  const auto stop = [&] {
-                    return token.cancelled()       ? ErrorCode::Cancelled
-                           : current && !current() ? ErrorCode::Stale
-                                                   : ErrorCode::Ok;
-                  };
-                  if (stop() != ErrorCode::Ok)
-                    return Answer(Status{stop(), {}});
-                  if (native_device->owns(*source.storage()))
-                    return Answer(std::make_pair(source, std::uint64_t{0}));
-                  auto bytes =
-                      region_bytes(source.descriptor(), source.region());
-                  if (!bytes.ok())
-                    return Answer(bytes.status());
-                  std::string view_key;
-                  std::shared_ptr<const CpuStorage> physical;
-                  if (cache_work) {
-                    auto issued = cache_work(32 + 5 * source.region().rank() +
-                                             uploads->lookup_work());
-                    if (!issued.ok() &&
-                        issued.code != ErrorCode::ResourceExhausted)
-                      return Answer(issued);
-                    if (issued.ok()) {
-                      view_key = upload_view_key(source);
-                      physical = uploads->find(view_key, source.storage());
-                    }
-                  }
-                  std::string content_key;
-                  if (!physical && dependency_cache && cache_work &&
-                      !view_key.empty()) {
-                    const auto count = source.region().element_count();
-                    const auto per_sample = 1 + source.region().rank();
-                    if (!count.ok())
-                      return Answer(count.status());
-                    if (core_internal::can_multiply_add(
-                            count.value(), per_sample, bytes.value())) {
-                      const auto device_identity = native_device->identity();
-                      const auto framing = 32 + device_identity.size() +
-                                           3 * source.region().rank();
-                      const auto sample_work =
-                          bytes.value() + count.value() * per_sample;
-                      auto issued =
-                          core_internal::can_add(sample_work, framing)
-                              ? cache_work(sample_work + framing)
-                              : Status{ErrorCode::ResourceExhausted, {}};
-                      if (!issued.ok() &&
-                          issued.code != ErrorCode::ResourceExhausted)
-                        return Answer(issued);
-                      if (issued.ok()) {
-                        auto key =
-                            upload_content_key(source, device_identity, stop);
-                        if (!key.ok())
-                          return Answer(key.status());
-                        content_key = key.take_value();
-                        auto retained =
-                            dependency_cache->get(content_key, cache_epoch);
-                        if (retained.valid() &&
-                            native_device->owns(*retained.storage()))
-                          physical = retained.storage();
-                      }
-                    }
-                  }
-                  std::uint64_t copied_bytes = 0;
-                  if (physical && native_device->owns(*physical)) {
-                    ++upload_hits;
-                  } else {
-                    auto capacity =
-                        native_device->allocation_capacity(bytes.value());
-                    if (!capacity.ok())
-                      return Answer(capacity.status());
-                    if (capacity.value() < bytes.value())
-                      return Answer(Status{ErrorCode::OperationFailed,
-                                           "native capacity is too small"});
-                    auto count = source.region().element_count();
-                    const auto per_sample = 1 + source.region().rank();
-                    if (!count.ok())
-                      return Answer(count.status());
-                    if (!core_internal::can_multiply_add(
-                            count.value(), per_sample, bytes.value()))
-                      return Answer(Status{ErrorCode::ResourceExhausted, {}});
-                    auto issued = stage_root->consume(
-                        {bytes.value() + count.value() * per_sample});
-                    if (!issued.ok())
-                      return Answer(issued);
-                    if (stop() != ErrorCode::Ok)
-                      return Answer(Status{stop(), {}});
-                    auto copied =
-                        transfer_value(source, services.allocator, true, stop);
-                    if (!copied.ok())
-                      return Answer(copied.status());
-                    physical = copied.value().storage();
-                    copied_bytes = bytes.value();
-                    if (!content_key.empty() && stop() == ErrorCode::Ok)
-                      dependency_cache->put(content_key, copied.value(),
-                                            cache_epoch, true);
-                  }
-                  if (stop() != ErrorCode::Ok)
-                    return Answer(Status{stop(), {}});
-                  auto rebound = uploaded_view(source, physical);
-                  if (!rebound.ok())
-                    return Answer(rebound.status());
-                  if (!view_key.empty())
-                    uploads->put(view_key, source.storage(), physical);
-                  return Answer(
-                      std::make_pair(rebound.take_value(), copied_bytes));
-                };
-                services.observe = [&](auto& d) {
-                  const auto& stats = native->statistics();
-                  d.native_dispatch_count += stats.dispatches;
-                  d.native_submission_count += stats.submissions;
-                  d.native_compute_us += stats.device_us;
-                  d.native_constant_bytes += stats.constant_bytes;
-                  d.native_upload_hits += upload_hits;
-                };
-              }
-              execution_internal::CpuRangeScope ranges(
-                  pool->ranges(), token, stage_root.get(), current);
-              if (backend == Backend::Cpu && whole)
-                services.cpu_parallel = ranges.service();
-              auto status = task(services);
-              if (!ranges.status().ok())
-                status = ranges.status();
-              if (native && !native->status().ok())
-                status = native->status();
-              return status.ok() ? Result<int>(1) : Result<int>(status);
-            },
-            stage_root.get());
-        if (!submitted.ok())
-          return Answer(submitted.status());
-        auto completion = submitted.take_value();
-        auto future = completion->future.share();
-        return Answer(Submission{std::move(completion), std::move(future), {}});
+        if (tiles)
+          return run_inline_tiles(pool, gpu_pool, native_device, stage_root,
+                                  current, maximum_parallelism, token, task);
+        return submit_queued_stage(pool, gpu_pool, native_device, budget,
+                                   stage_root, admission, current, uploads,
+                                   dependency_cache, cache_epoch, backend,
+                                   whole, std::move(token), std::move(task));
       },
       requested, snapshot_identity, result_checkpoints, dependency_cache,
       plan_owner,
