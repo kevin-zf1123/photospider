@@ -215,26 +215,26 @@ class StructuredExecution final {
     const auto observer_failure = subscription_.status();
     if (!observer_failure.ok())
       return Result<ExecutionResult>(observer_failure);
-    if (result.ok()) {
-      diagnostics_.execute_us = static_cast<std::uint64_t>(
-          std::chrono::duration_cast<std::chrono::microseconds>(
-              std::chrono::steady_clock::now() - started)
-              .count());
-      diagnostics_.managed_resources = resources_.statistics();
-      auto completed = result.take_value();
-      completed.diagnostics = std::move(diagnostics_);
+    if (!result.ok())
+      return result;
+    diagnostics_.execute_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started)
+            .count());
+    diagnostics_.managed_resources = resources_.statistics();
+    auto completed = result.take_value();
+    completed.diagnostics = std::move(diagnostics_);
 #if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
-      execution_testing::notify_final_result_ready();
+    execution_testing::notify_final_result_ready();
 #endif
-      // Draining callbacks and retiring their captures can outlive run_body's
-      // stop check. Recheck after complete assembly before publishing success.
-      const auto stopped = active_stop();
-      if (stopped != ErrorCode::Ok)
-        return Result<ExecutionResult>(Status{stopped, {}});
-      return Result<ExecutionResult>(std::move(completed));
-    }
-    return result;
+    // Draining callbacks and retiring their captures can outlive run_body's
+    // stop check. Recheck after complete assembly before publishing success.
+    const auto stopped = active_stop();
+    if (stopped != ErrorCode::Ok)
+      return Result<ExecutionResult>(Status{stopped, {}});
+    return Result<ExecutionResult>(std::move(completed));
   }
+
   bool empty_planned_request(const std::string& name) const {
     const auto& request = plan_.output_requests().at(name);
     return !request.whole && request.tiles.empty();
@@ -273,300 +273,31 @@ class StructuredExecution final {
   }
   Result<ExecutionResult> run_body(const DemandQuery* requested) {
     using Answer = Result<ExecutionResult>;
-    if (!options_.maximum_result_window_bytes ||
-        options_.maximum_result_window_bytes > INT64_MAX)
-      return Answer(protocol_failure("invalid structured I/O window"));
-    auto traversal = consume(plan_.steps().size() + 1);
-    if (!traversal.ok())
-      return Answer(traversal);
-
-    auto live = initialize_liveness(requested);
-    if (!live.ok())
-      return Answer(live);
-    actor_aliases_.resize(plan_.steps().size());
-    open_units_.resize(plan_.steps().size());
-    for (std::size_t i = 0; i < plan_.steps().size(); ++i)
-      step_actors_.emplace_back(
-          ResourceAllocator<std::weak_ptr<Actor>>(resources_));
-    pure_closure_.resize(plan_.steps().size());
-    for (std::size_t i = 0; i < plan_.steps().size(); ++i) {
-      const auto& step = plan_.steps()[i];
-      const auto& included = step.traits.outputs[0].input_indices;
-      auto purity_work = consume(
-          1 + step.inputs.size() * (1 + (included ? included->size() : 0)));
-      if (!purity_work.ok())
-        return Answer(purity_work);
-      pure_closure_[i] =
-          step.traits.deterministic && step.traits.side_effect_free;
-      for (std::uint32_t port = 0; port < step.inputs.size(); ++port) {
-        if (included && std::find(included->begin(), included->end(), port) ==
-                            included->end())
-          continue;
-        if (const auto* producer =
-                std::get_if<PlanStepInput>(&step.inputs[port]))
-          pure_closure_[i] =
-              pure_closure_[i] && pure_closure_[producer->step_index];
-      }
-    }
-    checkpoint_shareable_.resize(plan_.steps().size());
-    result_cacheable_.resize(plan_.steps().size());
-    for (std::size_t i = 0; i < plan_.steps().size(); ++i) {
-      const auto& step = plan_.steps()[i];
-      const auto& included = step.traits.outputs[0].input_indices;
-      auto purity_work = checkpoint_cache_work(
-          1 + step.inputs.size() * (1 + (included ? included->size() : 0)));
-      if (!purity_work.ok()) {
-        if (purity_work.code != ErrorCode::ResourceExhausted)
-          return Answer(purity_work);
-        std::fill(checkpoint_shareable_.begin(), checkpoint_shareable_.end(),
-                  false);
-        break;
-      }
-      checkpoint_shareable_[i] =
-          step.traits.deterministic && step.traits.side_effect_free;
-      result_cacheable_[i] = checkpoint_shareable_[i] && step.traits.cacheable;
-      for (std::uint32_t port = 0; port < step.inputs.size(); ++port) {
-        if (included && std::find(included->begin(), included->end(), port) ==
-                            included->end())
-          continue;
-        if (const auto* producer =
-                std::get_if<PlanStepInput>(&step.inputs[port])) {
-          checkpoint_shareable_[i] =
-              checkpoint_shareable_[i] &&
-              checkpoint_shareable_[producer->step_index];
-          result_cacheable_[i] =
-              result_cacheable_[i] && result_cacheable_[producer->step_index];
-        }
-      }
-    }
-    subscription_.initialize(plan_.steps().size());
-    diagnostics_.operation_timings = decltype(diagnostics_.operation_timings)(
-        ResourceAllocator<OperationTiming>(resources_));
-    diagnostics_.operation_timings.reserve(plan_.steps().size());
-    if (templates_.size() != plan_.steps().size() ||
-        std::any_of(templates_.begin(), templates_.end(),
-                    [](const auto& key) { return key.empty(); }))
-      return Answer(Status{ErrorCode::ResourceExhausted,
-                           "structured identity work exhausted"});
-    auto snapshot_work = consume(snapshot_input_.size() + 48);
-    if (!snapshot_work.ok())
-      return Answer(snapshot_work);
-    if (!snapshot_input_.empty())
-      snapshot_.assign(snapshot_input_.data(), snapshot_input_.size());
-    if (snapshot_.empty()) {
-      static std::atomic<std::uint64_t> sequence{1};
-      auto id = sequence.load();
-      do {
-        if (id == UINT64_MAX)
-          return Answer(Status{ErrorCode::ResourceExhausted, {}});
-      } while (!sequence.compare_exchange_weak(id, id + 1));
-      char digits[24];
-      auto converted = std::to_chars(digits, digits + sizeof(digits), id);
-      snapshot_ = "structured-run-";
-      snapshot_.append(digits,
-                       static_cast<std::size_t>(converted.ptr - digits));
-    }
-    tile_records_ = std::allocate_shared<TileRecords>(
-        ResourceAllocator<TileRecords>(resources_), resources_);
-    if (requested) {
-      auto key =
-          demand_key(*requested, plan_,
-                     options_.dependencies.sets.maximum_boxes, resources_);
-      if (!key.ok())
-        return Answer(key.status());
-    }
-    diagnostics_.plan_digest =
-        ResourceString(plan_.digest().value.data(), plan_.digest().value.size(),
-                       ResourceAllocator<char>(resources_));
-    auto effects = run_effect_roots(requested);
-    if (!effects.ok())
-      return Answer(effects);
-    for (const auto& named : plan_.outputs()) {
-      if (requested && !requested->count(named.first))
-        continue;
-      const auto index = named.second;
-      const auto& step = plan_.steps()[index];
-      const auto& selected = requested
-                                 ? requested->at(named.first)
-                                 : plan_.output_requests().at(named.first);
-      auto normalized = selected.resolve(step.tile_grid, step.tiled);
-      if (!normalized.ok())
-        return Answer(normalized.status());
-      const auto& request = normalized.value();
-      const auto count = unit_count(step, request);
-      auto charged = consume(count);
-      if (!charged.ok())
-        return Answer(charged);
-      for (std::uint64_t i = 0; i < count; ++i) {
-        const auto tile = unit_index(step, request, i);
-        auto created = actor(index, tile, true);
-        if (!created.ok())
-          return Answer(created.status());
-        if (!created.value()->named_root) {
-          created.value()->named_root = true;
-          requested_roots_.push_back(created.take_value());
-        }
-      }
-    }
-    liveness_ready_ = true;
-    for (const auto& weak : actors_) {
-      if (auto current = weak.lock(); current && current->complete) {
-        auto closed = complete_liveness(*current);
-        if (!closed.ok())
-          return Answer(closed);
-      }
-    }
+    auto status = initialize_execution_state(requested);
+    if (!status.ok())
+      return Answer(status);
+    status = initialize_pure_closure();
+    if (!status.ok())
+      return Answer(status);
+    status = initialize_cache_eligibility();
+    if (!status.ok())
+      return Answer(status);
+    status = initialize_run_identity(requested);
+    if (!status.ok())
+      return Answer(status);
+    status = run_effect_roots(requested);
+    if (!status.ok())
+      return Answer(status);
+    status = collect_requested_roots(requested);
+    if (!status.ok())
+      return Answer(status);
     ExecutionResult result;
-    result.results = make_resource_map<ResultRef>(resources_);
-    for (const auto& named : plan_.outputs()) {
-      if (requested && !requested->count(named.first))
-        continue;
-      auto status = consume(1);
-      if (!status.ok())
-        return Answer(status);
-      const auto& step = plan_.steps()[named.second];
-      if (step.output_result_schema) {
-        const bool empty_request =
-            requested ? (!requested->at(named.first).whole &&
-                         requested->at(named.first).tiles.empty())
-                      : empty_planned_request(named.first);
-        auto object =
-            empty_request
-                ? empty_named_output(named.second)
-                : result_object(named.second,
-                                requested
-                                    ? requested->at(named.first)
-                                    : plan_.output_requests().at(named.first));
-        if (!object.ok())
-          return Answer(object.status());
-        result.results.emplace(named.first, object.take_value());
-        continue;
-      }
-      return Answer(
-          protocol_failure("operation output requires Result schema"));
-    }
-    bool hash_outputs = !subscription_.has_callback() &&
-                        options_.maximum_result_digest_samples != 0;
-    auto digest_samples = options_.maximum_result_digest_samples;
-    auto digest_work = remaining_.load(std::memory_order_relaxed);
-    if (hash_outputs) {
-      for (const auto& named : result.results) {
-        auto facts = named.second.descriptor();
-        if (!facts.ok())
-          return Answer(facts.status());
-        const auto& schema = named.second.schema();
-        for (std::uint32_t slot = 0; slot < schema.fields.size(); ++slot) {
-          auto width = schema.row_bytes(slot);
-          if (!width.ok())
-            return Answer(width.status());
-          const auto rows = facts.value().rows(slot);
-          const auto elements =
-              width.value() /
-              Value::element_size(schema.fields[slot].element_type);
-          if (width.value() > options_.maximum_result_window_bytes ||
-              !core_internal::can_multiply(elements, rows, digest_samples) ||
-              rows > digest_work) {
-            hash_outputs = false;
-            break;
-          }
-          digest_samples -= rows * elements;
-          digest_work -= rows;
-        }
-        if (!hash_outputs)
-          break;
-        for (std::uint32_t slot = 0; slot < schema.tensors.size(); ++slot) {
-          auto count = facts.value().tensor_coverage(slot).element_count();
-          if (!count.ok() || count.value() > digest_samples ||
-              count.value() > digest_work) {
-            hash_outputs = false;
-            break;
-          }
-          digest_samples -= count.value();
-          digest_work -= count.value();
-        }
-        if (!hash_outputs)
-          break;
-      }
-    }
-    if (hash_outputs) {
-      content_internal::Sha256 digest;
-      digest.text("photospider.result-content.v1");
-      for (const auto& named : result.results) {
-        digest.text(named.first);
-        const auto& object = named.second;
-        auto schema = object.schema().managed_canonical(resources_);
-        if (!schema.ok())
-          return Answer(schema.status());
-        digest.text(schema.value());
-        auto facts = object.descriptor();
-        if (!facts.ok())
-          return Answer(facts.status());
-        for (std::uint32_t slot = 0; slot < object.schema().fields.size();
-             ++slot) {
-          auto width = object.schema().row_bytes(slot);
-          if (!width.ok())
-            return Answer(width.status());
-          if (width.value() > options_.maximum_result_window_bytes)
-            return Answer(Status{ErrorCode::ResourceExhausted,
-                                 "digest field exceeds read window"});
-          const auto rows = facts.value().rows(slot);
-          digest.integer(rows);
-          for (std::uint64_t row = 0; row < rows; ++row) {
-            auto active = consume(1);
-            if (!active.ok())
-              return Answer(active);
-            auto plan = object.prepare_read(facts.value(), slot, row, 1);
-            if (!plan.ok())
-              return Answer(plan.status());
-            auto bytes = plan.value().load(width.value(), active_token());
-            if (!bytes.ok())
-              return Answer(bytes.status());
-            digest.bytes(bytes.value()->bytes().data(), width.value());
-          }
-        }
-        for (std::uint32_t slot = 0; slot < object.schema().tensors.size();
-             ++slot) {
-          const auto& coverage = facts.value().tensor_coverage(slot);
-          digest.integer(coverage.boxes().size());
-          for (const auto& box : coverage.boxes())
-            for (const auto& axis : box.dimensions()) {
-              digest.integer(axis.offset);
-              digest.integer(axis.extent);
-            }
-          const auto width = Value::element_size(
-              object.schema().tensors[slot].descriptor.element_type);
-          for (const auto& box : coverage.boxes()) {
-            auto window =
-                object.acquire_tensor(facts.value(), slot, box, active_token());
-            if (!window.ok())
-              return Answer(window.status());
-            auto part =
-                Footprint::from_regions(coverage.shape(), {box}, set_limits());
-            if (!part.ok())
-              return Answer(part.status());
-            auto scanned = part.value().visit(
-                [&](const auto& coordinate) {
-                  auto active = consume(1);
-                  if (!active.ok())
-                    return active;
-                  auto run = window.value().row_run(coordinate);
-                  if (!run.ok())
-                    return run.status();
-                  digest.bytes(run.value().data, width);
-                  return Status::success();
-                },
-                remaining_, active_token());
-            if (!scanned.ok())
-              return Answer(scanned);
-          }
-        }
-      }
-      auto active = consume(0);
-      if (!active.ok())
-        return Answer(active);
-      diagnostics_.result_digest =
-          ResourceString(digest.finish(), ResourceAllocator<char>(resources_));
-    }
+    status = collect_named_outputs(requested, result);
+    if (!status.ok())
+      return Answer(status);
+    status = record_result_digest(result);
+    if (!status.ok())
+      return Answer(status);
     auto final_status = consume(0);
     if (!final_status.ok())
       return Answer(final_status);
@@ -1122,6 +853,312 @@ class StructuredExecution final {
     limits.cancellation = active_token();
     limits.consume_work = [&](std::uint64_t count) { return consume(count); };
     return limits;
+  }
+  Status initialize_execution_state(const DemandQuery* requested) {
+    if (!options_.maximum_result_window_bytes ||
+        options_.maximum_result_window_bytes > INT64_MAX)
+      return protocol_failure("invalid structured I/O window");
+    auto traversal = consume(plan_.steps().size() + 1);
+    if (!traversal.ok())
+      return traversal;
+
+    auto live = initialize_liveness(requested);
+    if (!live.ok())
+      return live;
+    actor_aliases_.resize(plan_.steps().size());
+    open_units_.resize(plan_.steps().size());
+    for (std::size_t i = 0; i < plan_.steps().size(); ++i)
+      step_actors_.emplace_back(
+          ResourceAllocator<std::weak_ptr<Actor>>(resources_));
+    return Status::success();
+  }
+  Status initialize_pure_closure() {
+    pure_closure_.resize(plan_.steps().size());
+    for (std::size_t i = 0; i < plan_.steps().size(); ++i) {
+      const auto& step = plan_.steps()[i];
+      const auto& included = step.traits.outputs[0].input_indices;
+      auto purity_work = consume(
+          1 + step.inputs.size() * (1 + (included ? included->size() : 0)));
+      if (!purity_work.ok())
+        return purity_work;
+      pure_closure_[i] =
+          step.traits.deterministic && step.traits.side_effect_free;
+      for (std::uint32_t port = 0; port < step.inputs.size(); ++port) {
+        if (included && std::find(included->begin(), included->end(), port) ==
+                            included->end())
+          continue;
+        if (const auto* producer =
+                std::get_if<PlanStepInput>(&step.inputs[port]))
+          pure_closure_[i] =
+              pure_closure_[i] && pure_closure_[producer->step_index];
+      }
+    }
+    return Status::success();
+  }
+  Status initialize_cache_eligibility() {
+    checkpoint_shareable_.resize(plan_.steps().size());
+    result_cacheable_.resize(plan_.steps().size());
+    for (std::size_t i = 0; i < plan_.steps().size(); ++i) {
+      const auto& step = plan_.steps()[i];
+      const auto& included = step.traits.outputs[0].input_indices;
+      auto purity_work = checkpoint_cache_work(
+          1 + step.inputs.size() * (1 + (included ? included->size() : 0)));
+      if (!purity_work.ok()) {
+        if (purity_work.code != ErrorCode::ResourceExhausted)
+          return purity_work;
+        std::fill(checkpoint_shareable_.begin(), checkpoint_shareable_.end(),
+                  false);
+        break;
+      }
+      checkpoint_shareable_[i] =
+          step.traits.deterministic && step.traits.side_effect_free;
+      result_cacheable_[i] = checkpoint_shareable_[i] && step.traits.cacheable;
+      for (std::uint32_t port = 0; port < step.inputs.size(); ++port) {
+        if (included && std::find(included->begin(), included->end(), port) ==
+                            included->end())
+          continue;
+        if (const auto* producer =
+                std::get_if<PlanStepInput>(&step.inputs[port])) {
+          checkpoint_shareable_[i] =
+              checkpoint_shareable_[i] &&
+              checkpoint_shareable_[producer->step_index];
+          result_cacheable_[i] =
+              result_cacheable_[i] && result_cacheable_[producer->step_index];
+        }
+      }
+    }
+    return Status::success();
+  }
+  Status initialize_run_identity(const DemandQuery* requested) {
+    subscription_.initialize(plan_.steps().size());
+    diagnostics_.operation_timings = decltype(diagnostics_.operation_timings)(
+        ResourceAllocator<OperationTiming>(resources_));
+    diagnostics_.operation_timings.reserve(plan_.steps().size());
+    if (templates_.size() != plan_.steps().size() ||
+        std::any_of(templates_.begin(), templates_.end(),
+                    [](const auto& key) { return key.empty(); }))
+      return Status{ErrorCode::ResourceExhausted,
+                    "structured identity work exhausted"};
+    auto snapshot_work = consume(snapshot_input_.size() + 48);
+    if (!snapshot_work.ok())
+      return snapshot_work;
+    if (!snapshot_input_.empty())
+      snapshot_.assign(snapshot_input_.data(), snapshot_input_.size());
+    if (snapshot_.empty()) {
+      static std::atomic<std::uint64_t> sequence{1};
+      auto id = sequence.load();
+      do {
+        if (id == UINT64_MAX)
+          return Status{ErrorCode::ResourceExhausted, {}};
+      } while (!sequence.compare_exchange_weak(id, id + 1));
+      char digits[24];
+      auto converted = std::to_chars(digits, digits + sizeof(digits), id);
+      snapshot_ = "structured-run-";
+      snapshot_.append(digits,
+                       static_cast<std::size_t>(converted.ptr - digits));
+    }
+    tile_records_ = std::allocate_shared<TileRecords>(
+        ResourceAllocator<TileRecords>(resources_), resources_);
+    if (requested) {
+      auto key =
+          demand_key(*requested, plan_,
+                     options_.dependencies.sets.maximum_boxes, resources_);
+      if (!key.ok())
+        return key.status();
+    }
+    diagnostics_.plan_digest =
+        ResourceString(plan_.digest().value.data(), plan_.digest().value.size(),
+                       ResourceAllocator<char>(resources_));
+    return Status::success();
+  }
+  Status collect_requested_roots(const DemandQuery* requested) {
+    for (const auto& named : plan_.outputs()) {
+      if (requested && !requested->count(named.first))
+        continue;
+      const auto index = named.second;
+      const auto& step = plan_.steps()[index];
+      const auto& selected = requested
+                                 ? requested->at(named.first)
+                                 : plan_.output_requests().at(named.first);
+      auto normalized = selected.resolve(step.tile_grid, step.tiled);
+      if (!normalized.ok())
+        return normalized.status();
+      const auto& request = normalized.value();
+      const auto count = unit_count(step, request);
+      auto charged = consume(count);
+      if (!charged.ok())
+        return charged;
+      for (std::uint64_t i = 0; i < count; ++i) {
+        const auto tile = unit_index(step, request, i);
+        auto created = actor(index, tile, true);
+        if (!created.ok())
+          return created.status();
+        if (created.value()->named_root)
+          continue;
+        created.value()->named_root = true;
+        requested_roots_.push_back(created.take_value());
+      }
+    }
+    liveness_ready_ = true;
+    for (const auto& weak : actors_) {
+      auto current = weak.lock();
+      if (!current || !current->complete)
+        continue;
+      auto closed = complete_liveness(*current);
+      if (!closed.ok())
+        return closed;
+    }
+    return Status::success();
+  }
+  Status collect_named_outputs(const DemandQuery* requested,
+                               ExecutionResult& result) {
+    result.results = make_resource_map<ResultRef>(resources_);
+    for (const auto& named : plan_.outputs()) {
+      if (requested && !requested->count(named.first))
+        continue;
+      auto status = consume(1);
+      if (!status.ok())
+        return status;
+      const auto& step = plan_.steps()[named.second];
+      if (!step.output_result_schema)
+        return protocol_failure("operation output requires Result schema");
+      const bool empty_request =
+          requested ? (!requested->at(named.first).whole &&
+                       requested->at(named.first).tiles.empty())
+                    : empty_planned_request(named.first);
+      auto object =
+          empty_request
+              ? empty_named_output(named.second)
+              : result_object(named.second,
+                              requested
+                                  ? requested->at(named.first)
+                                  : plan_.output_requests().at(named.first));
+      if (!object.ok())
+        return object.status();
+      result.results.emplace(named.first, object.take_value());
+    }
+    return Status::success();
+  }
+  Result<bool> admit_result_digest(const ExecutionResult& result) {
+    if (subscription_.has_callback() || !options_.maximum_result_digest_samples)
+      return Result<bool>(false);
+    auto digest_samples = options_.maximum_result_digest_samples;
+    auto digest_work = remaining_.load(std::memory_order_relaxed);
+    for (const auto& named : result.results) {
+      auto facts = named.second.descriptor();
+      if (!facts.ok())
+        return Result<bool>(facts.status());
+      const auto& schema = named.second.schema();
+      for (std::uint32_t slot = 0; slot < schema.fields.size(); ++slot) {
+        auto width = schema.row_bytes(slot);
+        if (!width.ok())
+          return Result<bool>(width.status());
+        const auto rows = facts.value().rows(slot);
+        const auto elements =
+            width.value() /
+            Value::element_size(schema.fields[slot].element_type);
+        if (width.value() > options_.maximum_result_window_bytes ||
+            !core_internal::can_multiply(elements, rows, digest_samples) ||
+            rows > digest_work)
+          return Result<bool>(false);
+        digest_samples -= rows * elements;
+        digest_work -= rows;
+      }
+      for (std::uint32_t slot = 0; slot < schema.tensors.size(); ++slot) {
+        auto count = facts.value().tensor_coverage(slot).element_count();
+        if (!count.ok() || count.value() > digest_samples ||
+            count.value() > digest_work)
+          return Result<bool>(false);
+        digest_samples -= count.value();
+        digest_work -= count.value();
+      }
+    }
+    return Result<bool>(true);
+  }
+  Status record_result_digest(const ExecutionResult& result) {
+    auto admitted = admit_result_digest(result);
+    if (!admitted.ok())
+      return admitted.status();
+    if (!admitted.value())
+      return Status::success();
+    content_internal::Sha256 digest;
+    digest.text("photospider.result-content.v1");
+    for (const auto& named : result.results) {
+      digest.text(named.first);
+      const auto& object = named.second;
+      auto schema = object.schema().managed_canonical(resources_);
+      if (!schema.ok())
+        return schema.status();
+      digest.text(schema.value());
+      auto facts = object.descriptor();
+      if (!facts.ok())
+        return facts.status();
+      for (std::uint32_t slot = 0; slot < object.schema().fields.size();
+           ++slot) {
+        auto width = object.schema().row_bytes(slot);
+        if (!width.ok())
+          return width.status();
+        if (width.value() > options_.maximum_result_window_bytes)
+          return Status{ErrorCode::ResourceExhausted,
+                        "digest field exceeds read window"};
+        const auto rows = facts.value().rows(slot);
+        digest.integer(rows);
+        for (std::uint64_t row = 0; row < rows; ++row) {
+          auto active = consume(1);
+          if (!active.ok())
+            return active;
+          auto plan = object.prepare_read(facts.value(), slot, row, 1);
+          if (!plan.ok())
+            return plan.status();
+          auto bytes = plan.value().load(width.value(), active_token());
+          if (!bytes.ok())
+            return bytes.status();
+          digest.bytes(bytes.value()->bytes().data(), width.value());
+        }
+      }
+      for (std::uint32_t slot = 0; slot < object.schema().tensors.size();
+           ++slot) {
+        const auto& coverage = facts.value().tensor_coverage(slot);
+        digest.integer(coverage.boxes().size());
+        for (const auto& box : coverage.boxes())
+          for (const auto& axis : box.dimensions()) {
+            digest.integer(axis.offset);
+            digest.integer(axis.extent);
+          }
+        const auto width = Value::element_size(
+            object.schema().tensors[slot].descriptor.element_type);
+        for (const auto& box : coverage.boxes()) {
+          auto window =
+              object.acquire_tensor(facts.value(), slot, box, active_token());
+          if (!window.ok())
+            return window.status();
+          auto part =
+              Footprint::from_regions(coverage.shape(), {box}, set_limits());
+          if (!part.ok())
+            return part.status();
+          auto scanned = part.value().visit(
+              [&](const auto& coordinate) {
+                auto active = consume(1);
+                if (!active.ok())
+                  return active;
+                auto run = window.value().row_run(coordinate);
+                if (!run.ok())
+                  return run.status();
+                digest.bytes(run.value().data, width);
+                return Status::success();
+              },
+              remaining_, active_token());
+          if (!scanned.ok())
+            return scanned;
+        }
+      }
+    }
+    auto active = consume(0);
+    if (!active.ok())
+      return active;
+    diagnostics_.result_digest =
+        ResourceString(digest.finish(), ResourceAllocator<char>(resources_));
+    return Status::success();
   }
   Status initialize_liveness(const DemandQuery* requested) {
     const auto count = plan_.steps().size();
@@ -1718,6 +1755,179 @@ class StructuredExecution final {
       cache_state_.disable();
     return Result<std::string>(std::move(key));
   }
+  struct BlockCacheProbe {
+    std::string key;
+    ResourceLease key_lease;
+    Value cached;
+  };
+  Status probe_block_cache(std::size_t index, Actor& actor,
+                           const ResultProgramPhase& phase, std::uint32_t kind,
+                           std::uint64_t begin, std::uint64_t end,
+                           std::uint64_t mode, const ResultRef& incoming,
+                           BlockCacheProbe& probe) {
+    Status status;
+    // Object fields remain mandatory coordinator access. Optional
+    // content hashing never loads them or starts production inside a callback.
+    if (!(blocks_ && checkpoint_shareable_[index] && !actor.fallback.taint &&
+          plan_.steps()[index].traits.cacheable && cache_state_.remaining() &&
+          actor.results.empty() && actor.descriptors.empty() &&
+          incoming.resources().size() == 0))
+      return Status::success();
+    ResourceAllocationScope optional_scope(resources_);
+    try {
+      // Only the block-state namespace is shared. Actor, checkpoint and
+      // completed-result identities remain selected-output contracts.
+      const bool shared =
+          plan_.steps()[index].traits.share_blocks_across_outputs;
+      std::string common;
+      if (shared) {
+        auto identity = shared_block_contract(index, phase);
+        if (!identity.ok())
+          return identity.status();
+        common = identity.take_value();
+      }
+      const auto& contract = shared ? common : templates_[index];
+      std::uint64_t cost = 1 + contract.size();
+      const auto add = [&](std::uint64_t n) {
+        return core_internal::checked_add(cost, n, &cost);
+      };
+      const auto set_cost = [&](const Footprint& samples,
+                                std::uint64_t lookup = 0) {
+        status = checkpoint_cache_work(1 + samples.shape().size() +
+                                       samples.boxes().size());
+        if (!status.ok())
+          return false;
+        auto count = samples.element_count();
+        std::uint64_t scale = 0;
+        return count.ok() &&
+               core_internal::checked_add(lookup, 9 + samples.shape().size(),
+                                          &scale) &&
+               core_internal::can_multiply(count.value(), scale) &&
+               add(count.value() * scale) &&
+               add(1 + samples.shape().size() +
+                   samples.boxes().size() * (1 + 2 * samples.shape().size()));
+      };
+      const auto schema_cost = [&](const SchemaTemplate& schema) {
+        status = checkpoint_cache_work(
+            1 + schema.fields.size() + schema.tensors.size() +
+            schema.domain.size() + schema.metadata.size());
+        if (!status.ok())
+          return false;
+        for (const auto& tensor : schema.tensors) {
+          status = checkpoint_cache_work(tensor.layout.groups.size() +
+                                         tensor.facets.size());
+          if (!status.ok())
+            return false;
+        }
+        return add(schema.canonical_size());
+      };
+      auto incoming_facts = incoming.descriptor();
+      status = checkpoint_cache_work(1 + actor.tensors.size());
+      bool admitted = !contract.empty() && status.ok() && incoming_facts.ok() &&
+                      schema_cost(incoming.schema()) &&
+                      set_cost(incoming_facts.value().tensor_coverage(0));
+      for (const auto& tensor : actor.tensors) {
+        admitted = admitted && tensor.second.payload_authorized_ &&
+                   tensor.second.result_.resources().size() == 0 &&
+                   schema_cost(tensor.second.result_.schema()) &&
+                   set_cost(tensor.second.coverage());
+      }
+      if (!admitted)
+        return Status::success();
+      status = checkpoint_cache_work(cost);
+      if (!status.ok())
+        return status.code == ErrorCode::ResourceExhausted ? Status::success()
+                                                           : status;
+      content_internal::Sha256 hash;
+      hash.text("photospider.result-block.v1");
+      hash.text(contract);
+      hash.integer(kind);
+      hash.integer(begin);
+      hash.integer(end);
+      hash.integer(mode);
+      auto schema = incoming.schema().managed_canonical(resources_);
+      if (!schema.ok()) {
+        status = schema.status();
+      } else {
+        hash.text(schema.value());
+        status = append_block_samples(
+            &hash, incoming_facts.value().tensor_coverage(0),
+            incoming.schema().tensors[0].descriptor.element_type,
+            [&](const auto& at, void* bytes, std::size_t width) {
+              return incoming.read_tensor(incoming_facts.value(), 0, at, bytes,
+                                          width, active_token());
+            },
+            phase.consume_work, active_token());
+      }
+      hash.integer(actor.tensors.size());
+      for (const auto& tensor : actor.tensors) {
+        if (!status.ok())
+          break;
+        hash.integer(tensor.first.first);
+        hash.integer(tensor.first.second);
+        auto schema =
+            tensor.second.result_.schema().managed_canonical(resources_);
+        if (!schema.ok()) {
+          status = schema.status();
+          break;
+        }
+        hash.text(schema.value());
+        status = append_block_samples(
+            &hash, tensor.second.coverage(),
+            tensor.second.spec().descriptor.element_type,
+            [&](const auto& at, void* bytes, std::size_t width) {
+              return tensor.second.read_granted(at, bytes, width,
+                                                active_token());
+            },
+            phase.consume_work, active_token());
+      }
+      if (status.ok()) {
+        auto capacity = legacy_capacity(resources_, 256);
+        if (!capacity.ok()) {
+          status = capacity.status();
+        } else {
+          probe.key_lease = capacity.take_value();
+          probe.key = "result-block/" + hash.finish();
+          probe.cached = blocks_->get(probe.key, block_epoch_);
+        }
+        if (probe.cached.valid())
+          ++diagnostics_.block_cache_hits;
+        else
+          ++diagnostics_.block_cache_misses;
+      }
+      if (!status.ok() && status.code != ErrorCode::ResourceExhausted)
+        return status;
+    } catch (const std::bad_alloc&) {
+      probe.key.clear();
+    }
+    return Status::success();
+  }
+  Status retain_block_cache(const BlockCacheProbe& probe,
+                            const ResultRef& result,
+                            const ResultProgramPhase& phase,
+                            bool native_computed) {
+    if (probe.key.empty() || !native_computed || result.resources().size())
+      return Status::success();
+    ResourceAllocationScope optional_scope(resources_);
+    try {
+      auto count = result.schema().tensors[0].sample_count();
+      if (!count.ok() || !core_internal::can_multiply(count.value(), 9))
+        return Status::success();
+      auto status = checkpoint_cache_work(count.value() * 9);
+      if (!status.ok())
+        return status.code == ErrorCode::ResourceExhausted ? Status::success()
+                                                           : status;
+      auto packed = pack_block_state(result, phase);
+      if (!packed.ok())
+        return packed.status().code == ErrorCode::ResourceExhausted
+                   ? Status::success()
+                   : packed.status();
+      blocks_->put(probe.key, packed.value(), block_epoch_,
+                   phase.query.backend == Backend::Gpu);
+    } catch (const std::bad_alloc&) {
+    }
+    return Status::success();
+  }
   Result<ResultRef> evaluate_block(
       std::size_t index, Actor& actor, const ResultProgramPhase& phase,
       std::uint32_t kind, std::uint64_t begin, std::uint64_t end,
@@ -1736,152 +1946,22 @@ class StructuredExecution final {
     status = result_block_state(incoming, resources_);
     if (!status.ok())
       return Answer(status);
-    std::string key;
-    ResourceLease key_lease;
-    Value cached;
-    // Object fields remain mandatory coordinator access. Optional
-    // content hashing never loads them or starts production inside a callback.
-    if (blocks_ && checkpoint_shareable_[index] && !actor.fallback.taint &&
-        plan_.steps()[index].traits.cacheable && cache_state_.remaining() &&
-        actor.results.empty() && actor.descriptors.empty() &&
-        incoming.resources().size() == 0) {
-      ResourceAllocationScope optional_scope(resources_);
-      try {
-        // Only the block-state namespace is shared. Actor, checkpoint and
-        // completed-result identities remain selected-output contracts.
-        const bool shared =
-            plan_.steps()[index].traits.share_blocks_across_outputs;
-        std::string common;
-        if (shared) {
-          auto identity = shared_block_contract(index, phase);
-          if (!identity.ok())
-            return Answer(identity.status());
-          common = identity.take_value();
-        }
-        const auto& contract = shared ? common : templates_[index];
-        std::uint64_t cost = 1 + contract.size();
-        const auto add = [&](std::uint64_t n) {
-          return core_internal::checked_add(cost, n, &cost);
-        };
-        const auto set_cost = [&](const Footprint& samples,
-                                  std::uint64_t lookup = 0) {
-          status = checkpoint_cache_work(1 + samples.shape().size() +
-                                         samples.boxes().size());
-          if (!status.ok())
-            return false;
-          auto count = samples.element_count();
-          std::uint64_t scale = 0;
-          return count.ok() &&
-                 core_internal::checked_add(lookup, 9 + samples.shape().size(),
-                                            &scale) &&
-                 core_internal::can_multiply(count.value(), scale) &&
-                 add(count.value() * scale) &&
-                 add(1 + samples.shape().size() +
-                     samples.boxes().size() * (1 + 2 * samples.shape().size()));
-        };
-        const auto schema_cost = [&](const SchemaTemplate& schema) {
-          status = checkpoint_cache_work(
-              1 + schema.fields.size() + schema.tensors.size() +
-              schema.domain.size() + schema.metadata.size());
-          if (!status.ok())
-            return false;
-          for (const auto& tensor : schema.tensors) {
-            status = checkpoint_cache_work(tensor.layout.groups.size() +
-                                           tensor.facets.size());
-            if (!status.ok())
-              return false;
-          }
-          return add(schema.canonical_size());
-        };
-        auto incoming_facts = incoming.descriptor();
-        status = checkpoint_cache_work(1 + actor.tensors.size());
-        bool admitted = !contract.empty() && status.ok() &&
-                        incoming_facts.ok() && schema_cost(incoming.schema()) &&
-                        set_cost(incoming_facts.value().tensor_coverage(0));
-        for (const auto& tensor : actor.tensors) {
-          admitted = admitted && tensor.second.payload_authorized_ &&
-                     tensor.second.result_.resources().size() == 0 &&
-                     schema_cost(tensor.second.result_.schema()) &&
-                     set_cost(tensor.second.coverage());
-        }
-        if (admitted) {
-          status = checkpoint_cache_work(cost);
-          if (status.ok()) {
-            content_internal::Sha256 hash;
-            hash.text("photospider.result-block.v1");
-            hash.text(contract);
-            hash.integer(kind);
-            hash.integer(begin);
-            hash.integer(end);
-            hash.integer(mode);
-            auto schema = incoming.schema().managed_canonical(resources_);
-            if (!schema.ok()) {
-              status = schema.status();
-            } else {
-              hash.text(schema.value());
-              status = append_block_samples(
-                  &hash, incoming_facts.value().tensor_coverage(0),
-                  incoming.schema().tensors[0].descriptor.element_type,
-                  [&](const auto& at, void* bytes, std::size_t width) {
-                    return incoming.read_tensor(incoming_facts.value(), 0, at,
-                                                bytes, width, active_token());
-                  },
-                  phase.consume_work, active_token());
-            }
-            hash.integer(actor.tensors.size());
-            for (const auto& tensor : actor.tensors) {
-              if (!status.ok())
-                break;
-              hash.integer(tensor.first.first);
-              hash.integer(tensor.first.second);
-              auto schema =
-                  tensor.second.result_.schema().managed_canonical(resources_);
-              if (!schema.ok()) {
-                status = schema.status();
-                break;
-              }
-              hash.text(schema.value());
-              status = append_block_samples(
-                  &hash, tensor.second.coverage(),
-                  tensor.second.spec().descriptor.element_type,
-                  [&](const auto& at, void* bytes, std::size_t width) {
-                    return tensor.second.read_granted(at, bytes, width,
-                                                      active_token());
-                  },
-                  phase.consume_work, active_token());
-            }
-            if (status.ok()) {
-              auto capacity = legacy_capacity(resources_, 256);
-              if (!capacity.ok()) {
-                status = capacity.status();
-              } else {
-                key_lease = capacity.take_value();
-                key = "result-block/" + hash.finish();
-                cached = blocks_->get(key, block_epoch_);
-              }
-              if (cached.valid())
-                ++diagnostics_.block_cache_hits;
-              else
-                ++diagnostics_.block_cache_misses;
-            }
-          }
-          if (!status.ok() && status.code != ErrorCode::ResourceExhausted)
-            return Answer(status);
-        }
-      } catch (const std::bad_alloc&) {
-        key.clear();
-      }
-    }
-    if (cached.valid()) {
+    BlockCacheProbe probe;
+    status = probe_block_cache(index, actor, phase, kind, begin, end, mode,
+                               incoming, probe);
+    if (!status.ok())
+      return Answer(status);
+    if (probe.cached.valid()) {
       if (actor.query.backend == Backend::Gpu)
         actor.native_block_reuse = true;
       const auto& spec = incoming.schema().tensors[0];
-      if (cached.descriptor().element_type != spec.descriptor.element_type ||
-          cached.descriptor().shape != spec.sample_shape())
+      if (probe.cached.descriptor().element_type !=
+              spec.descriptor.element_type ||
+          probe.cached.descriptor().shape != spec.sample_shape())
         return Answer(protocol_failure("cached Result block state mismatch"));
       // The copy contains no old source owners, associations or witness. The
       // current actor retains its current successful Needs independently.
-      return unpack_block_state(cached, incoming.schema(), phase);
+      return unpack_block_state(probe.cached, incoming.schema(), phase);
     }
     status = checkpoint_allowed(index, actor);
     if (!status.ok())
@@ -1907,27 +1987,9 @@ class StructuredExecution final {
         actor.query.backend != Backend::Gpu ||
         (active_services() && active_services()->gpu_dispatches &&
          active_services()->gpu_dispatches() > native_before);
-    if (!key.empty() && native_computed &&
-        result.value().resources().size() == 0) {
-      ResourceAllocationScope optional_scope(resources_);
-      try {
-        auto count = result.value().schema().tensors[0].sample_count();
-        if (count.ok() && core_internal::can_multiply(count.value(), 9)) {
-          status = checkpoint_cache_work(count.value() * 9);
-          if (status.ok()) {
-            auto packed = pack_block_state(result.value(), phase);
-            if (packed.ok())
-              blocks_->put(key, packed.value(), block_epoch_,
-                           phase.query.backend == Backend::Gpu);
-            else if (packed.status().code != ErrorCode::ResourceExhausted)
-              return Answer(packed.status());
-          } else if (status.code != ErrorCode::ResourceExhausted) {
-            return Answer(status);
-          }
-        }
-      } catch (const std::bad_alloc&) {
-      }
-    }
+    status = retain_block_cache(probe, result.value(), phase, native_computed);
+    if (!status.ok())
+      return Answer(status);
     return result;
   }
   bool satisfied(const Actor& actor) const {
@@ -2182,8 +2244,6 @@ class StructuredExecution final {
     }
     auto ready = result_object(std::get<PlanStepInput>(input).step_index,
                                selected, consumer);
-    if (!ready.ok())
-      return ready;
     return ready;
   }
   Result<std::optional<ResultRef>> need_object_input(
@@ -2283,24 +2343,26 @@ class StructuredExecution final {
   }
   void note_cached_input_backend(Actor& actor, const PlanInput& input,
                                  const ResultRef* object = nullptr) {
-    if (const auto* producer = std::get_if<PlanStepInput>(&input)) {
-      auto source = actor_aliases_[producer->step_index];
-      if (object) {
-        source.reset();
-        for (const auto& weak : actors_)
-          if (auto candidate = weak.lock();
-              candidate && candidate->published.valid() &&
-              candidate->published.object_id() == object->object_id()) {
-            source = candidate;
-            break;
-          }
-      }
-      if (source && (source->fallback.taint ||
-                     source->query.backend !=
-                         plan_.steps()[producer->step_index].backend))
-        actor.fallback.taint = true;
+    const auto* producer = std::get_if<PlanStepInput>(&input);
+    if (!producer)
+      return;
+    auto source = actor_aliases_[producer->step_index];
+    if (object) {
+      source.reset();
+      for (const auto& weak : actors_)
+        if (auto candidate = weak.lock();
+            candidate && candidate->published.valid() &&
+            candidate->published.object_id() == object->object_id()) {
+          source = candidate;
+          break;
+        }
     }
+    if (source &&
+        (source->fallback.taint ||
+         source->query.backend != plan_.steps()[producer->step_index].backend))
+      actor.fallback.taint = true;
   }
+
   struct CacheWork final : StructuredCacheWorkServices {
     explicit CacheWork(StructuredExecution& owner) : owner(owner) {}
     Status charge(std::uint64_t n) override {
@@ -2609,207 +2671,230 @@ class StructuredExecution final {
       ++progress_;
     return status;
   }
-  Status supply_one_need_step(std::size_t index, Actor& actor,
-                              const StructuredNeedGrants& need,
-                              NeedCursor& cursor, bool replay) {
+  Status supply_object_need(std::size_t index, Actor& actor,
+                            const StructuredObjectGrant& input,
+                            NeedCursor& cursor, bool replay) {
     const auto& step = plan_.steps()[index];
     const auto fail = [&](Status status) {
       return replay ? status : retire(actor, status);
     };
-    const auto results_end = need.objects.size();
-    if (cursor.next < results_end) {
-      const auto& input = need.objects[cursor.next];
-      auto observed = need_object_input(actor, cursor, step.inputs[input.input],
-                                        {true, {}}, replay);
-      if (!observed.ok())
-        return fail(observed.status());
-      if (!observed.value())
-        return Status::success();
-      auto ready = Result<ResultRef>(std::move(*observed.value()));
-      note_cached_input_backend(actor, step.inputs[input.input],
-                                &ready.value());
-      auto facts = ready.value().descriptor(false);
-      if (!facts.ok())
-        return fail(facts.status());
-      const auto& constraint = step.traits.input_schema[input.input];
-      const bool descriptor_only = input.descriptor_only;
-      if (!descriptor_only && constraint.scalar_bounds) {
-        auto checked = input_internal::validate_port_tensor(
-            constraint, ready.value(), facts.value(),
-            actor.query.inputs[input.input],
-            std::holds_alternative<PlanWorkflowInput>(step.inputs[input.input])
-                ? ErrorCode::InvalidArgument
-                : ErrorCode::OperationFailed,
-            active_token(), [&] { return active_stop(); });
-        if (!checked.ok())
-          return fail(input_failure(step.inputs[input.input], checked));
-      }
-      if (descriptor_only) {
-        actor.descriptors[input.input] = facts.value();
-        // The field-object path is not eligible for optional block or completed
-        // payload reuse until its semantic descriptor is part of those keys.
-        actor.cache.disabled = true;
-        actor.cache.replay.clear();
-      }
-      auto& revision =
-          actor.input_facts[{input.input, ready.value().object_id()}];
-      revision = std::max(revision, facts.value().revision());
-      if (!descriptor_only)
-        actor.results[input.input] = ready.take_value();
-      ++cursor.next;
+    auto observed = need_object_input(actor, cursor, step.inputs[input.input],
+                                      {true, {}}, replay);
+    if (!observed.ok())
+      return fail(observed.status());
+    if (!observed.value())
       return Status::success();
-    }
-    const auto tensors_end = results_end + need.tiles.size();
-    if (cursor.next < tensors_end) {
-      const auto& input = need.tiles[cursor.next - results_end];
-      if (!cursor.tensor_samples) {
-        auto closed = actor.query.inputs[input.input]
-                          .result_schema->tensors[input.slot]
-                          .close_samples(input.samples, set_limits());
-        if (!closed.ok())
-          return fail(closed.status());
-        if (input.descriptor_only) {
-          auto empty = Footprint::none(closed.value().shape(), set_limits());
-          if (!empty.ok())
-            return fail(empty.status());
-          closed = std::move(empty);
-        }
-        cursor.tensor_samples = closed.take_value();
-      }
-      const auto& closed = *cursor.tensor_samples;
-      const auto existing = actor.tensors.find({input.input, input.slot});
-      ResultTensorInput capability;
-      if (existing != actor.tensors.end()) {
-        capability = existing->second;
-      } else {
-        if (!cursor.tensor_supply_samples) {
-          auto charged = consume(need.tiles.size());
-          if (!charged.ok())
-            return fail(charged);
-          cursor.tensor_supply_samples = closed;
-          cursor.tensor_request = input.producer_request;
-          cursor.tensor_payload = !input.descriptor_only;
-          for (const auto& other : need.tiles) {
-            if (&other == &input || other.input != input.input ||
-                other.slot != input.slot || other.descriptor_only)
-              continue;
-            cursor.tensor_payload = true;
-            if (other.producer_request.whole) {
-              cursor.tensor_request = {true, {}};
-            } else if (!cursor.tensor_request.whole) {
-              auto united = cursor.tensor_request.tiles.unite(
-                  other.producer_request.tiles, resources_);
-              if (!united.ok())
-                return fail(united.status());
-              cursor.tensor_request.tiles = united.take_value();
-            }
-            auto part = actor.query.inputs[input.input]
-                            .result_schema->tensors[input.slot]
-                            .close_samples(other.samples, set_limits());
-            if (!part.ok())
-              return fail(part.status());
-            auto joined =
-                cursor.tensor_supply_samples->unite(part.value(), set_limits());
-            if (!joined.ok())
-              return fail(joined.status());
-            cursor.tensor_supply_samples = joined.take_value();
-          }
-        }
-        if (!cursor.tensor_payload) {
-          capability.static_schema_ =
-              actor.query.inputs[input.input].result_schema;
-          capability.slot_ = input.slot;
-          capability.samples_ = *cursor.tensor_supply_samples;
-          capability.resources_ = resources_;
-        } else {
-          auto observed =
-              need_tensor_input(actor, cursor, step.inputs[input.input],
-                                *cursor.tensor_supply_samples,
-                                cursor.tensor_request, input.slot, replay);
-          if (!observed.ok())
-            return fail(observed.status());
-          if (!observed.value())
-            return Status::success();
-          capability = std::move(*observed.value());
-          capability.payload_authorized_ = true;
-        }
-      }
-      capability.failure_ = actor.failure;
-      capability.observer_ = actor.service_failure;
-      const auto& constraint = step.traits.input_schema[input.input];
-      const auto validate = [&](const ResultRef& result,
-                                const ResultDescriptor& descriptor,
-                                const Footprint& granted) -> Status {
-        note_cached_input_backend(actor, step.inputs[input.input], &result);
-        auto selected = closed.intersect(granted, set_limits());
-        if (!selected.ok())
-          return selected.status();
-        if (!input.descriptor_only && constraint.scalar_bounds &&
-            !selected.value().empty()) {
-          auto slot = input_internal::resolve_tensor_member(
-              constraint, actor.query.inputs[input.input]);
-          if (!slot.ok())
-            return input_failure(step.inputs[input.input], slot.status());
-          auto checked =
-              slot.value() != input.slot
-                  ? Status::success()
-                  : input_internal::validate_port_tensor(
-                        constraint, result, descriptor,
-                        actor.query.inputs[input.input],
-                        std::holds_alternative<PlanWorkflowInput>(
-                            step.inputs[input.input])
-                            ? ErrorCode::InvalidArgument
-                            : ErrorCode::OperationFailed,
-                        active_token(), [&] { return active_stop(); });
-          if (!checked.ok())
-            return input_failure(step.inputs[input.input], checked);
-        }
-        if (!input.descriptor_only) {
-          auto checked = input_internal::validate_tensor_samples(
-              result, descriptor, input.slot, selected.value(), resources_,
-              std::holds_alternative<PlanWorkflowInput>(
-                  step.inputs[input.input])
-                  ? ErrorCode::InvalidArgument
-                  : ErrorCode::OperationFailed,
-              active_token(), [&] { return active_stop(); },
-              [&](uint64_t n) { return operation_work(n); });
-          if (!checked.ok())
-            return input_failure(step.inputs[input.input], checked);
-        }
-        auto& revision = actor.input_facts[{input.input, result.object_id()}];
-        revision = std::max(revision, descriptor.revision());
-        return Status::success();
-      };
-      auto outside = closed.subtract(capability.samples_, set_limits());
-      if (!outside.ok())
-        return fail(outside.status());
-      if (!outside.value().empty())
-        return fail(
-            protocol_failure("tensor Need is outside supplied coverage"));
-      auto checked = capability.static_schema_
-                         ? Status::success()
-                         : validate(capability.result_, capability.descriptor_,
-                                    capability.samples_);
+    auto ready = Result<ResultRef>(std::move(*observed.value()));
+    note_cached_input_backend(actor, step.inputs[input.input], &ready.value());
+    auto facts = ready.value().descriptor(false);
+    if (!facts.ok())
+      return fail(facts.status());
+    const auto& constraint = step.traits.input_schema[input.input];
+    const bool descriptor_only = input.descriptor_only;
+    if (!descriptor_only && constraint.scalar_bounds) {
+      auto checked = input_internal::validate_port_tensor(
+          constraint, ready.value(), facts.value(),
+          actor.query.inputs[input.input],
+          std::holds_alternative<PlanWorkflowInput>(step.inputs[input.input])
+              ? ErrorCode::InvalidArgument
+              : ErrorCode::OperationFailed,
+          active_token(), [&] { return active_stop(); });
       if (!checked.ok())
-        return fail(checked);
-      if (!replay && existing == actor.tensors.end() && !step.tiled &&
-          step.traits.outputs[0].preserve_output_views) {
-        auto prepared = capability.prepare_whole_view(
-            step.traits.outputs[0].requires_input_views, active_token(),
-            [&](uint64_t n) { return consume(n); });
+        return fail(input_failure(step.inputs[input.input], checked));
+    }
+    if (descriptor_only) {
+      actor.descriptors[input.input] = facts.value();
+      // The field-object path is not eligible for optional block or completed
+      // payload reuse until its semantic descriptor is part of those keys.
+      actor.cache.disabled = true;
+      actor.cache.replay.clear();
+    }
+    auto& revision =
+        actor.input_facts[{input.input, ready.value().object_id()}];
+    revision = std::max(revision, facts.value().revision());
+    if (!descriptor_only)
+      actor.results[input.input] = ready.take_value();
+    ++cursor.next;
+    return Status::success();
+  }
+  Status prepare_tensor_supply(Actor& actor, const StructuredNeedGrants& need,
+                               const StructuredTensorGrant& input,
+                               const Footprint& closed, NeedCursor& cursor) {
+    auto charged = consume(need.tiles.size());
+    if (!charged.ok())
+      return charged;
+    cursor.tensor_supply_samples = closed;
+    cursor.tensor_request = input.producer_request;
+    cursor.tensor_payload = !input.descriptor_only;
+    for (const auto& other : need.tiles) {
+      if (&other == &input || other.input != input.input ||
+          other.slot != input.slot || other.descriptor_only)
+        continue;
+      cursor.tensor_payload = true;
+      if (other.producer_request.whole) {
+        cursor.tensor_request = {true, {}};
+      } else if (!cursor.tensor_request.whole) {
+        auto united = cursor.tensor_request.tiles.unite(
+            other.producer_request.tiles, resources_);
+        if (!united.ok())
+          return united.status();
+        cursor.tensor_request.tiles = united.take_value();
+      }
+      auto part = actor.query.inputs[input.input]
+                      .result_schema->tensors[input.slot]
+                      .close_samples(other.samples, set_limits());
+      if (!part.ok())
+        return part.status();
+      auto joined =
+          cursor.tensor_supply_samples->unite(part.value(), set_limits());
+      if (!joined.ok())
+        return joined.status();
+      cursor.tensor_supply_samples = joined.take_value();
+    }
+    return Status::success();
+  }
+  Status validate_tensor_supply(Actor& actor, const PlanStep& step,
+                                const StructuredTensorGrant& input,
+                                const Footprint& closed,
+                                const ResultTensorInput& capability) {
+    const auto& constraint = step.traits.input_schema[input.input];
+    const auto& result = capability.result_;
+    const auto& descriptor = capability.descriptor_;
+    const auto& granted = capability.samples_;
+    note_cached_input_backend(actor, step.inputs[input.input], &result);
+    auto selected = closed.intersect(granted, set_limits());
+    if (!selected.ok())
+      return selected.status();
+    if (!input.descriptor_only && constraint.scalar_bounds &&
+        !selected.value().empty()) {
+      auto slot = input_internal::resolve_tensor_member(
+          constraint, actor.query.inputs[input.input]);
+      if (!slot.ok())
+        return input_failure(step.inputs[input.input], slot.status());
+      auto checked = slot.value() != input.slot
+                         ? Status::success()
+                         : input_internal::validate_port_tensor(
+                               constraint, result, descriptor,
+                               actor.query.inputs[input.input],
+                               std::holds_alternative<PlanWorkflowInput>(
+                                   step.inputs[input.input])
+                                   ? ErrorCode::InvalidArgument
+                                   : ErrorCode::OperationFailed,
+                               active_token(), [&] { return active_stop(); });
+      if (!checked.ok())
+        return input_failure(step.inputs[input.input], checked);
+    }
+    if (!input.descriptor_only) {
+      auto checked = input_internal::validate_tensor_samples(
+          result, descriptor, input.slot, selected.value(), resources_,
+          std::holds_alternative<PlanWorkflowInput>(step.inputs[input.input])
+              ? ErrorCode::InvalidArgument
+              : ErrorCode::OperationFailed,
+          active_token(), [&] { return active_stop(); },
+          [&](uint64_t n) { return operation_work(n); });
+      if (!checked.ok())
+        return input_failure(step.inputs[input.input], checked);
+    }
+    auto& revision = actor.input_facts[{input.input, result.object_id()}];
+    revision = std::max(revision, descriptor.revision());
+    return Status::success();
+  }
+  Status supply_tensor_need(std::size_t index, Actor& actor,
+                            const StructuredNeedGrants& need,
+                            const StructuredTensorGrant& input,
+                            NeedCursor& cursor, bool replay) {
+    const auto& step = plan_.steps()[index];
+    const auto fail = [&](Status status) {
+      return replay ? status : retire(actor, status);
+    };
+    if (!cursor.tensor_samples) {
+      auto closed = actor.query.inputs[input.input]
+                        .result_schema->tensors[input.slot]
+                        .close_samples(input.samples, set_limits());
+      if (!closed.ok())
+        return fail(closed.status());
+      if (input.descriptor_only) {
+        auto empty = Footprint::none(closed.value().shape(), set_limits());
+        if (!empty.ok())
+          return fail(empty.status());
+        closed = std::move(empty);
+      }
+      cursor.tensor_samples = closed.take_value();
+    }
+    const auto& closed = *cursor.tensor_samples;
+    const auto existing = actor.tensors.find({input.input, input.slot});
+    ResultTensorInput capability;
+    if (existing != actor.tensors.end()) {
+      capability = existing->second;
+    } else {
+      if (!cursor.tensor_supply_samples) {
+        auto prepared =
+            prepare_tensor_supply(actor, need, input, closed, cursor);
         if (!prepared.ok())
           return fail(prepared);
       }
-      if (existing == actor.tensors.end())
-        actor.tensors.emplace(std::make_pair(input.input, input.slot),
-                              std::move(capability));
-      cursor.tensor_samples.reset();
-      cursor.tensor_supply_samples.reset();
-      cursor.tensor_payload = false;
-      ++cursor.next;
-      return Status::success();
+      if (!cursor.tensor_payload) {
+        capability.static_schema_ =
+            actor.query.inputs[input.input].result_schema;
+        capability.slot_ = input.slot;
+        capability.samples_ = *cursor.tensor_supply_samples;
+        capability.resources_ = resources_;
+      } else {
+        auto observed =
+            need_tensor_input(actor, cursor, step.inputs[input.input],
+                              *cursor.tensor_supply_samples,
+                              cursor.tensor_request, input.slot, replay);
+        if (!observed.ok())
+          return fail(observed.status());
+        if (!observed.value())
+          return Status::success();
+        capability = std::move(*observed.value());
+        capability.payload_authorized_ = true;
+      }
     }
+    capability.failure_ = actor.failure;
+    capability.observer_ = actor.service_failure;
+    auto outside = closed.subtract(capability.samples_, set_limits());
+    if (!outside.ok())
+      return fail(outside.status());
+    if (!outside.value().empty())
+      return fail(protocol_failure("tensor Need is outside supplied coverage"));
+    auto checked =
+        capability.static_schema_
+            ? Status::success()
+            : validate_tensor_supply(actor, step, input, closed, capability);
+    if (!checked.ok())
+      return fail(checked);
+    if (!replay && existing == actor.tensors.end() && !step.tiled &&
+        step.traits.outputs[0].preserve_output_views) {
+      auto prepared = capability.prepare_whole_view(
+          step.traits.outputs[0].requires_input_views, active_token(),
+          [&](uint64_t n) { return consume(n); });
+      if (!prepared.ok())
+        return fail(prepared);
+    }
+    if (existing == actor.tensors.end())
+      actor.tensors.emplace(std::make_pair(input.input, input.slot),
+                            std::move(capability));
+    cursor.tensor_samples.reset();
+    cursor.tensor_supply_samples.reset();
+    cursor.tensor_payload = false;
+    ++cursor.next;
     return Status::success();
+  }
+  Status supply_one_need_step(std::size_t index, Actor& actor,
+                              const StructuredNeedGrants& need,
+                              NeedCursor& cursor, bool replay) {
+    const auto results_end = need.objects.size();
+    if (cursor.next < results_end)
+      return supply_object_need(index, actor, need.objects[cursor.next], cursor,
+                                replay);
+    const auto tensors_end = results_end + need.tiles.size();
+    if (cursor.next >= tensors_end)
+      return Status::success();
+    return supply_tensor_need(index, actor, need,
+                              need.tiles[cursor.next - results_end], cursor,
+                              replay);
   }
   Status replay_need(std::size_t index, Actor& actor,
                      const ResultProgramNeed& need) {
@@ -2979,45 +3064,70 @@ class StructuredExecution final {
                                     published.complete, from_cache, true)
                : retire(actor, captured.status());
   }
-  Status poll_actor_phase(
-      std::size_t index, const std::shared_ptr<Actor>& current,
-      const std::function<Result<ResultProgramPoll>(const ResultProgramPhase&)>&
-          poll) {
-    const auto* services = active_services();
-    const auto optional = work_mode();
-    CallbackContext member_context(this, current.get(), services, optional);
-    auto& actor = *current;
-    const auto& step = plan_.steps()[index];
-    auto& stage = std::get<PollPhase>(actor.phase);
-    auto& sticky = stage.sticky;
-    auto& numeric = stage.numeric;
-    auto& polled = stage.result;
-    ResourceAllocationScope metadata_scope(resources_, &sticky);
-    auto limit = step.traits.workspace_bytes;
-    if (step.traits.workspace_input_multiplier) {
-      const auto add_input = [&](const Footprint& samples, ElementType type) {
-        auto count = samples.element_count();
-        const auto factor =
-            Value::element_size(type) *
-            static_cast<std::uint64_t>(step.traits.workspace_input_multiplier);
-        if (!count.ok() ||
-            !core_internal::can_multiply_add(count.value(), factor, limit))
-          return false;
-        limit += count.value() * factor;
-        return true;
-      };
-      for (const auto& input : actor.tensors)
-        if (!add_input(input.second.coverage(),
-                       input.second.spec().descriptor.element_type))
-          return Status{ErrorCode::ResourceExhausted, {}};
+  // One synchronous poll's borrowed services and Root-managed scratch state.
+  // The phase and its callbacks are destroyed before this stack object; no
+  // callback may retain an invocation or phase pointer after poll retirement.
+  struct PollInvocation final {
+    StructuredExecution& owner;
+    std::size_t index;
+    Actor& actor;
+    const PlanStep& step;
+    PollPhase& stage;
+    ErrorCode& sticky;
+    NumericDiagnostics& numeric;
+    Result<ResultProgramPoll>& polled;
+    const StructuredServices* services;
+    bool optional;
+    ResourceBudget& resources_;
+    const ExecutionOptions& options_;
+    CancellationToken token;
+    bool in_block = false, in_discovery = false;
+    ResourceVector<std::uint64_t> association;
+    ResourceVector<std::shared_ptr<const ResultDiscoveryReceipt>> discovered;
+    std::uint64_t discovered_count = 0;
+    PollInvocation(StructuredExecution& execution, std::size_t step_index,
+                   Actor& current, const StructuredServices* supplied,
+                   bool replay)
+        : owner(execution),
+          index(step_index),
+          actor(current),
+          step(execution.plan_.steps()[index]),
+          stage(std::get<PollPhase>(actor.phase)),
+          sticky(stage.sticky),
+          numeric(stage.numeric),
+          polled(stage.result),
+          services(supplied),
+          optional(replay),
+          resources_(execution.resources_),
+          options_(execution.options_),
+          token(execution.active_token()),
+          association(ResourceAllocator<std::uint64_t>(resources_)),
+          discovered(
+              ResourceAllocator<std::shared_ptr<const ResultDiscoveryReceipt>>(
+                  resources_)) {}
+    Result<std::uint64_t> workspace_limit() {
+      auto limit = step.traits.workspace_bytes;
+      if (step.traits.workspace_input_multiplier) {
+        const auto add_input = [&](const Footprint& samples, ElementType type) {
+          auto count = samples.element_count();
+          const auto factor = Value::element_size(type) *
+                              static_cast<std::uint64_t>(
+                                  step.traits.workspace_input_multiplier);
+          if (!count.ok() ||
+              !core_internal::can_multiply_add(count.value(), factor, limit))
+            return false;
+          limit += count.value() * factor;
+          return true;
+        };
+        for (const auto& input : actor.tensors)
+          if (!add_input(input.second.coverage(),
+                         input.second.spec().descriptor.element_type))
+            return Result<std::uint64_t>(
+                Status{ErrorCode::ResourceExhausted, {}});
+      }
+      return Result<std::uint64_t>(limit);
     }
-    auto allocator =
-        (active_services() ? active_services()->allocator
-                           : resources_.allocator())
-            .limited(limit, [full = actor.service_failure](ErrorCode code) {
-              full->record(Status{code, {}});
-            });
-    auto observe_failure = [&actor, &sticky](const Status& failed) {
+    void observe_failure(const Status& failed) {
       if (sticky != ErrorCode::Ok)
         actor.service_failure->record(
             sticky == ErrorCode::InvalidArgument
@@ -3029,12 +3139,10 @@ class StructuredExecution final {
       auto first = actor.service_failure->record(failed);
       auto expected = ErrorCode::Ok;
       actor.failure->compare_exchange_strong(expected, first.code);
-    };
-    const auto token = active_token();
-    bool in_block = false, in_discovery = false;
-    auto work = [&, token](std::uint64_t count) {
+    }
+    Status work(std::uint64_t count) {
       const auto previous = sticky;
-      const auto stopped = execution_stop(token);
+      const auto stopped = owner.execution_stop(token);
       auto result = Status{stopped, {}};
       if (result.ok() && in_discovery) {
         auto available =
@@ -3050,7 +3158,7 @@ class StructuredExecution final {
         } while (!actor.discovery_work_remaining.compare_exchange_weak(
             available, available - count, std::memory_order_relaxed));
         if (result.ok())
-          result = admit_run_work(count);
+          result = owner.admit_run_work(count);
       }
       if (result.ok()) {
         result = resources_.consume({count});
@@ -3064,63 +3172,36 @@ class StructuredExecution final {
         observe_failure(result);
       }
       return result;
-    };
-#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
-    bool in_poll = false;
-    std::uint64_t phase_work_ordinal = 0;
-    const auto poll_thread = std::this_thread::get_id();
-    auto phase_work = [&](std::uint64_t count) {
-      if (std::this_thread::get_id() != poll_thread || !in_poll || !count)
-        return work(count);
-      execution_testing::PhaseWorkPoint point{
-          step.operation, actor.query.backend,  &actor,
-          actor.polls,    ++phase_work_ordinal, count};
-      execution_testing::notify_phase_work_started(point);
-      auto status = work(count);
-      execution_testing::notify_phase_work_finished(point, status.code);
-      return status;
-    };
-#else
-    auto& phase_work = work;
-#endif
-    ResultProgramPhase phase{actor.query,    actor.results, allocator,
-                             resources_,     phase_work,    actor.failure,
-                             observe_failure};
-    ResourceVector<std::uint64_t> association{
-        ResourceAllocator<std::uint64_t>(resources_)};
-    auto facts_work = work(actor.input_facts.size());
-    if (!facts_work.ok())
-      return facts_work;
-    association.reserve(actor.input_facts.size());
-    for (const auto& input : actor.input_facts)
-      association.push_back(input.first.second);
-    phase.report_numeric = [&](const NumericDiagnostics& report) {
+    }
+    Status initialize_association() {
+      auto facts_work = work(actor.input_facts.size());
+      if (!facts_work.ok())
+        return facts_work;
+      association.reserve(actor.input_facts.size());
+      for (const auto& input : actor.input_facts)
+        association.push_back(input.first.second);
+      return Status::success();
+    }
+    Status report_numeric(const NumericDiagnostics& report) {
       auto status = work(1);
       if (status.ok())
         status = merge_numeric_diagnostics(&numeric, report);
       if (!status.ok())
         observe_failure(status);
       return status;
-    };
-    phase.failure_latch = actor.service_failure;
-    phase.association = &association;
-    phase.tensors = &actor.tensors;
-    phase.descriptors = &actor.descriptors;
-    ResourceVector<std::shared_ptr<const ResultDiscoveryReceipt>> discovered{
-        ResourceAllocator<std::shared_ptr<const ResultDiscoveryReceipt>>(
-            resources_)};
-    std::uint64_t discovered_count = 0;
-    phase.checkpoint_before = [&](std::uint32_t kind, std::uint64_t before) {
+    }
+    Result<std::optional<ResultCheckpoint>> borrow_checkpoint(
+        std::uint32_t kind, std::uint64_t before) {
       using Answer = Result<std::optional<ResultCheckpoint>>;
       try {
-        CallbackContext scope(this, current.get(), services, optional);
+        CallbackContext scope(&owner, &actor, services, optional);
         if (in_discovery) {
           auto failed = protocol_failure("checkpoint inside GPU discovery");
           observe_failure(failed);
           return Answer(failed);
         }
         actor.fallback.retry_safe = false;
-        auto found = checkpoint_before(index, actor, kind, before);
+        auto found = owner.checkpoint_before(index, actor, kind, before);
         if (found.ok() && found.value()) {
           auto charged = work(actor.input_facts.size());
           if (!charged.ok()) {
@@ -3146,19 +3227,20 @@ class StructuredExecution final {
         observe_failure(failed);
         return Answer(failed);
       }
-    };
-    phase.checkpoint_publish = [&](std::uint32_t kind, std::uint64_t sequence,
-                                   const ResultRef& state) {
+    }
+    Status publish_checkpoint(std::uint32_t kind, std::uint64_t sequence,
+                              const ResultRef& state) {
       Status published;
       try {
-        CallbackContext scope(this, current.get(), services, optional);
+        CallbackContext scope(&owner, &actor, services, optional);
         if (in_discovery) {
           auto failed = protocol_failure("checkpoint inside GPU discovery");
           observe_failure(failed);
           return failed;
         }
         actor.fallback.retry_safe = false;
-        published = checkpoint_publish(index, actor, kind, sequence, state);
+        published =
+            owner.checkpoint_publish(index, actor, kind, sequence, state);
       } catch (const std::bad_alloc&) {
         published = Status{ErrorCode::ResourceExhausted, {}};
       } catch (...) {
@@ -3167,14 +3249,14 @@ class StructuredExecution final {
       if (!published.ok())
         observe_failure(published);
       return published;
-    };
-    phase.block = [&](std::uint32_t kind, std::uint64_t begin,
-                      std::uint64_t end, std::uint64_t mode,
-                      const ResultRef& incoming,
-                      const std::function<Result<ResultRef>()>& compute) {
+    }
+    Result<ResultRef> block(const ResultProgramPhase& phase, std::uint32_t kind,
+                            std::uint64_t begin, std::uint64_t end,
+                            std::uint64_t mode, const ResultRef& incoming,
+                            const std::function<Result<ResultRef>()>& compute) {
       using Answer = Result<ResultRef>;
       try {
-        CallbackContext context(this, current.get(), services, optional);
+        CallbackContext context(&owner, &actor, services, optional);
         if (in_discovery || in_block) {
           auto failed =
               protocol_failure("nested Result pure block or GPU discovery");
@@ -3187,8 +3269,8 @@ class StructuredExecution final {
         } scope{in_block};
         in_block = true;
         actor.fallback.retry_safe = false;
-        auto result = evaluate_block(index, actor, phase, kind, begin, end,
-                                     mode, incoming, compute);
+        auto result = owner.evaluate_block(index, actor, phase, kind, begin,
+                                           end, mode, incoming, compute);
         if (!result.ok())
           observe_failure(result.status());
         return result;
@@ -3201,6 +3283,228 @@ class StructuredExecution final {
         observe_failure(failed);
         return Answer(failed);
       }
+    }
+    Result<std::shared_ptr<const ResultDiscoveryReceipt>> discover(
+        const ResultProgramPhase& phase, std::uint32_t capacity,
+        std::uint32_t candidates,
+        const std::function<Status(const ResultGpuRequestTable&)>& compute) {
+      using Answer = Result<std::shared_ptr<const ResultDiscoveryReceipt>>;
+      auto result = [&]() -> Answer {
+        try {
+          if (in_block || in_discovery || !phase.gpu)
+            return Answer(
+                protocol_failure("invalid Result GPU discovery scope"));
+          struct Scope {
+            bool& value;
+            ~Scope() { value = false; }
+          } scope{in_discovery};
+          in_discovery = true;
+          actor.fallback.retry_safe = false;
+          const auto before = owner.active_services()->gpu_dispatches();
+          auto needs = ResultNativeScope::discover(
+              phase.query, capacity, candidates, compute,
+              [&](std::uint64_t n) { return work(n); });
+          if (!needs.ok())
+            return Answer(needs.status());
+          if (owner.active_services()->gpu_dispatches() == before)
+            return Answer(
+                Status{ErrorCode::OperationFailed,
+                       "Result GPU discovery submitted no native work"});
+          const auto maximum = std::min<std::uint64_t>(
+              65536, options_.dependencies.sets.maximum_boxes);
+          if (!core_internal::can_add(discovered_count, needs.value().size(),
+                                      maximum))
+            return Answer(Status{ErrorCode::ResourceExhausted,
+                                 "GPU discovery need limit"});
+          auto receipt = std::allocate_shared<ResultDiscoveryReceipt>(
+              ResourceAllocator<ResultDiscoveryReceipt>(resources_));
+          receipt->tiles = needs.take_value();
+          discovered_count += receipt->tiles.size();
+          discovered.push_back(receipt);
+          return Answer(std::move(receipt));
+        } catch (const std::bad_alloc&) {
+          return Answer(Status{ErrorCode::ResourceExhausted, {}});
+        } catch (...) {
+          return Answer(Status{ErrorCode::OperationFailed, {}});
+        }
+      }();
+      if (!result.ok())
+        observe_failure(result.status());
+      return result;
+    }
+    Status append_discoveries(ResultProgramNeed& need) {
+      auto charged = work(discovered_count + need.tiles.size());
+      const auto maximum = std::min<std::uint64_t>(
+          65536, options_.dependencies.sets.maximum_boxes);
+      if (charged.ok() &&
+          !core_internal::can_add(need.tiles.size(), discovered_count, maximum))
+        charged = {ErrorCode::ResourceExhausted,
+                   "GPU discovery attachment limit"};
+      if (!charged.ok())
+        return charged;
+      for (const auto& receipt : discovered)
+        for (const auto& tensor : receipt->tiles)
+          need.tiles.push_back(tensor);
+      return Status::success();
+    }
+    void attach_discoveries() {
+      if (!polled.ok() || !discovered_count)
+        return;
+      auto response = polled.take_value();
+      auto* need = std::get_if<ResultProgramNeed>(&response);
+      if (!need) {
+        observe_failure(protocol_failure(
+            "GPU discovery requires supply before completion"));
+      } else {
+        auto charged = append_discoveries(*need);
+        if (!charged.ok())
+          observe_failure(charged);
+      }
+      polled = Result<ResultProgramPoll>(std::move(response));
+    }
+    void check_native_status() {
+      if (!owner.active_services() || !owner.active_services()->gpu_status)
+        return;
+      auto native_status = owner.active_services()->gpu_status();
+      if (native_status.code == ErrorCode::InvalidArgument) {
+        native_status.reason = FailureReason::UnauthorizedRead;
+        native_status.detail.origin = FailureOrigin::Protocol;
+        native_status.detail.scope = FailureScope::Group;
+      }
+      if (!native_status.ok())
+        observe_failure(native_status);
+    }
+    void record_native_dispatches() {
+      if (actor.query.backend != Backend::Gpu || !owner.active_services() ||
+          !owner.active_services()->gpu_dispatches)
+        return;
+      const auto count = owner.active_services()->gpu_dispatches();
+      stage.native_dispatches = count;
+      if (!core_internal::can_add(count, actor.native_dispatches))
+        observe_failure(Status{ErrorCode::ResourceExhausted,
+                               "native dispatch counter overflow"});
+      else
+        actor.native_dispatches += count;
+    }
+    void check_native_publication() {
+      bool require_native_dispatch = true;
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+      // A constructed scheduler fixture can supply a logical GPU lane without
+      // native services. An actual device callback always keeps its GPU table.
+      require_native_dispatch = !owner.active_services() ||
+                                owner.active_services()->gpu ||
+                                !owner.active_services()->native_gpu_available;
+#endif
+      if (!(polled.ok() && actor.query.backend == Backend::Gpu &&
+            require_native_dispatch && !actor.native_dispatches &&
+            !actor.native_block_reuse &&
+            step.traits.outputs[0].data_movement !=
+                DataMovementKind::BitwiseMapped))
+        return;
+      const auto* publication = std::get_if<ResultPublication>(&polled.value());
+      if (!publication)
+        return;
+      auto facts = publication->result.descriptor(false);
+      if (!facts.ok()) {
+        observe_failure(facts.status());
+        return;
+      }
+      bool nonempty = false;
+      for (std::uint32_t i = 0; i < facts.value().tensor_count(); ++i)
+        nonempty |= !facts.value().tensor_coverage(i).empty();
+      for (std::uint32_t i = 0; i < facts.value().field_count(); ++i)
+        nonempty |= facts.value().rows(i) != 0;
+      if (nonempty)
+        observe_failure(
+            Status{ErrorCode::OperationFailed,
+                   "GPU Result publication performed no native dispatch"});
+    }
+    Status finish() {
+      if (sticky != ErrorCode::Ok) {
+        auto expected = ErrorCode::Ok;
+        actor.failure->compare_exchange_strong(expected, sticky);
+      }
+      auto failure = actor.service_failure->snapshot();
+      if (!failure.ok())
+        return failure;
+      const auto code = actor.failure->load();
+      if (code == ErrorCode::InvalidArgument)
+        return Status{code,
+                      {},
+                      FailureReason::UnauthorizedRead,
+                      {FailureOrigin::Protocol, FailureScope::Group}};
+      return Status{code, {}};
+    }
+  };
+  Status poll_actor_phase(
+      std::size_t index, const std::shared_ptr<Actor>& current,
+      const std::function<Result<ResultProgramPoll>(const ResultProgramPhase&)>&
+          poll) {
+    const auto* services = active_services();
+    const auto optional = work_mode();
+    CallbackContext member_context(this, current.get(), services, optional);
+    auto& actor = *current;
+    auto& stage = std::get<PollPhase>(actor.phase);
+    ResourceAllocationScope metadata_scope(resources_, &stage.sticky);
+    PollInvocation invocation(*this, index, actor, services, optional);
+    auto limit = invocation.workspace_limit();
+    if (!limit.ok())
+      return limit.status();
+    auto allocator =
+        (active_services() ? active_services()->allocator
+                           : resources_.allocator())
+            .limited(limit.value(),
+                     [full = actor.service_failure](ErrorCode code) {
+                       full->record(Status{code, {}});
+                     });
+    auto observe_failure = [&](const Status& failed) {
+      invocation.observe_failure(failed);
+    };
+    auto work = [&](std::uint64_t count) { return invocation.work(count); };
+#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
+    const auto& step = plan_.steps()[index];
+    bool in_poll = false;
+    std::uint64_t phase_work_ordinal = 0;
+    const auto poll_thread = std::this_thread::get_id();
+    auto phase_work = [&](std::uint64_t count) {
+      if (std::this_thread::get_id() != poll_thread || !in_poll || !count)
+        return work(count);
+      execution_testing::PhaseWorkPoint point{
+          step.operation, actor.query.backend,  &actor,
+          actor.polls,    ++phase_work_ordinal, count};
+      execution_testing::notify_phase_work_started(point);
+      auto status = work(count);
+      execution_testing::notify_phase_work_finished(point, status.code);
+      return status;
+    };
+#else
+    auto& phase_work = work;
+#endif
+    ResultProgramPhase phase{actor.query,    actor.results, allocator,
+                             resources_,     phase_work,    actor.failure,
+                             observe_failure};
+    auto facts_work = invocation.initialize_association();
+    if (!facts_work.ok())
+      return facts_work;
+    phase.report_numeric = [&](const NumericDiagnostics& report) {
+      return invocation.report_numeric(report);
+    };
+    phase.failure_latch = actor.service_failure;
+    phase.association = &invocation.association;
+    phase.tensors = &actor.tensors;
+    phase.descriptors = &actor.descriptors;
+    phase.checkpoint_before = [&](std::uint32_t kind, std::uint64_t before) {
+      return invocation.borrow_checkpoint(kind, before);
+    };
+    phase.checkpoint_publish = [&](std::uint32_t kind, std::uint64_t sequence,
+                                   const ResultRef& state) {
+      return invocation.publish_checkpoint(kind, sequence, state);
+    };
+    phase.block = [&](std::uint32_t kind, std::uint64_t begin,
+                      std::uint64_t end, std::uint64_t mode,
+                      const ResultRef& incoming,
+                      const std::function<Result<ResultRef>()>& compute) {
+      return invocation.block(phase, kind, begin, end, mode, incoming, compute);
     };
     phase.discover =
         [&, entry_thread = std::this_thread::get_id(), failure = actor.failure,
@@ -3220,47 +3524,7 @@ class StructuredExecution final {
             failure->compare_exchange_strong(expected, recorded.code);
             return Answer(std::move(failed));
           }
-          auto result = [&]() -> Answer {
-            try {
-              if (in_block || in_discovery || !phase.gpu)
-                return Answer(
-                    protocol_failure("invalid Result GPU discovery scope"));
-              struct Scope {
-                bool& value;
-                ~Scope() { value = false; }
-              } scope{in_discovery};
-              in_discovery = true;
-              actor.fallback.retry_safe = false;
-              const auto before = active_services()->gpu_dispatches();
-              auto needs = ResultNativeScope::discover(
-                  phase.query, capacity, candidates, compute, work);
-              if (!needs.ok())
-                return Answer(needs.status());
-              if (active_services()->gpu_dispatches() == before)
-                return Answer(
-                    Status{ErrorCode::OperationFailed,
-                           "Result GPU discovery submitted no native work"});
-              const auto maximum = std::min<std::uint64_t>(
-                  65536, options_.dependencies.sets.maximum_boxes);
-              if (!core_internal::can_add(discovered_count,
-                                          needs.value().size(), maximum))
-                return Answer(Status{ErrorCode::ResourceExhausted,
-                                     "GPU discovery need limit"});
-              auto receipt = std::allocate_shared<ResultDiscoveryReceipt>(
-                  ResourceAllocator<ResultDiscoveryReceipt>(resources_));
-              receipt->tiles = needs.take_value();
-              discovered_count += receipt->tiles.size();
-              discovered.push_back(receipt);
-              return Answer(std::move(receipt));
-            } catch (const std::bad_alloc&) {
-              return Answer(Status{ErrorCode::ResourceExhausted, {}});
-            } catch (...) {
-              return Answer(Status{ErrorCode::OperationFailed, {}});
-            }
-          }();
-          if (!result.ok())
-            observe_failure(result.status());
-          return result;
+          return invocation.discover(phase, capacity, candidates, compute);
         };
     if (active_services()) {
       phase.cpu_parallel = active_services()->cpu_parallel;
@@ -3279,100 +3543,53 @@ class StructuredExecution final {
     {
       PollObservationScope observation{in_poll};
       in_poll = true;
-      polled = poll(phase);
+      stage.result = poll(phase);
     }
 #else
-    polled = poll(phase);
+    stage.result = poll(phase);
 #endif
-    if (polled.ok() && discovered_count) {
-      auto response = polled.take_value();
-      auto* need = std::get_if<ResultProgramNeed>(&response);
-      if (!need) {
-        observe_failure(protocol_failure(
-            "GPU discovery requires supply before completion"));
-      } else {
-        auto charged = work(discovered_count + need->tiles.size());
-        const auto maximum = std::min<std::uint64_t>(
-            65536, options_.dependencies.sets.maximum_boxes);
-        if (charged.ok() && !core_internal::can_add(need->tiles.size(),
-                                                    discovered_count, maximum))
-          charged = {ErrorCode::ResourceExhausted,
-                     "GPU discovery attachment limit"};
-        if (!charged.ok()) {
-          observe_failure(charged);
-        } else {
-          for (const auto& receipt : discovered)
-            for (const auto& tensor : receipt->tiles)
-              need->tiles.push_back(tensor);
-        }
-      }
-      polled = Result<ResultProgramPoll>(std::move(response));
+    invocation.attach_discoveries();
+    invocation.check_native_status();
+    invocation.record_native_dispatches();
+    invocation.check_native_publication();
+    return invocation.finish();
+  }
+  Status advance_actor_need(std::size_t index, Actor& actor) {
+    if (!actor.busy) {
+      actor.busy = true;
+      actor.driver = std::this_thread::get_id();
     }
-    if (active_services() && active_services()->gpu_status) {
-      auto native_status = active_services()->gpu_status();
-      if (native_status.code == ErrorCode::InvalidArgument) {
-        native_status.reason = FailureReason::UnauthorizedRead;
-        native_status.detail.origin = FailureOrigin::Protocol;
-        native_status.detail.scope = FailureScope::Group;
-      }
-      if (!native_status.ok())
-        observe_failure(native_status);
+    Status supplied;
+    try {
+      supplied = actor.advance_need(
+          [&](const auto& request, auto& cursor) {
+            return supply_need_step(index, actor, request, cursor);
+          },
+          [&](const auto& request) {
+            retain_cache_need(index, actor, request);
+          });
+    } catch (const std::bad_alloc&) {
+      return retire(actor, Status{ErrorCode::ResourceExhausted, {}});
+    } catch (...) {
+      return retire(actor, Status{ErrorCode::OperationFailed, {}});
     }
-    if (actor.query.backend == Backend::Gpu && active_services() &&
-        active_services()->gpu_dispatches) {
-      const auto count = active_services()->gpu_dispatches();
-      stage.native_dispatches = count;
-      if (!core_internal::can_add(count, actor.native_dispatches))
-        observe_failure(Status{ErrorCode::ResourceExhausted,
-                               "native dispatch counter overflow"});
-      else
-        actor.native_dispatches += count;
-    }
-    bool require_native_dispatch = true;
-#if defined(PHOTOSPIDER_ENABLE_EXECUTION_TEST_HOOKS)
-    // A constructed scheduler fixture can supply a logical GPU lane without
-    // native services. An actual device callback always keeps its GPU table.
-    require_native_dispatch = !active_services() || active_services()->gpu ||
-                              !active_services()->native_gpu_available;
-#endif
-    if (polled.ok() && actor.query.backend == Backend::Gpu &&
-        require_native_dispatch && !actor.native_dispatches &&
-        !actor.native_block_reuse &&
-        step.traits.outputs[0].data_movement !=
-            DataMovementKind::BitwiseMapped) {
-      if (const auto* publication =
-              std::get_if<ResultPublication>(&polled.value())) {
-        auto facts = publication->result.descriptor(false);
-        if (!facts.ok()) {
-          observe_failure(facts.status());
-        } else {
-          bool nonempty = false;
-          for (std::uint32_t i = 0; i < facts.value().tensor_count(); ++i)
-            nonempty |= !facts.value().tensor_coverage(i).empty();
-          for (std::uint32_t i = 0; i < facts.value().field_count(); ++i)
-            nonempty |= facts.value().rows(i) != 0;
-          if (nonempty)
-            observe_failure(
-                Status{ErrorCode::OperationFailed,
-                       "GPU Result publication performed no native dispatch"});
-        }
-      }
-    }
-
-    if (sticky != ErrorCode::Ok) {
-      auto expected = ErrorCode::Ok;
-      actor.failure->compare_exchange_strong(expected, sticky);
-    }
-    auto failure = actor.service_failure->snapshot();
-    if (!failure.ok())
-      return failure;
-    const auto code = actor.failure->load();
-    if (code == ErrorCode::InvalidArgument)
-      return Status{code,
-                    {},
-                    FailureReason::UnauthorizedRead,
-                    {FailureOrigin::Protocol, FailureScope::Group}};
-    return Status{code, {}};
+    return supplied;
+  }
+  Status submit_actor_poll(std::size_t index,
+                           const std::shared_ptr<Actor>& current) {
+    auto& actor = *current;
+    const auto& step = plan_.steps()[index];
+    actor.busy = true;
+    actor.driver = std::this_thread::get_id();
+    return submit_actor(
+        current,
+        [this, index, current] {
+          return poll_actor_phase(index, current,
+                                  [&](const ResultProgramPhase& phase) {
+                                    return current->continuation.poll(phase);
+                                  });
+        },
+        actor.query.backend, !step.tiled, step.traits.cpu_staged_tiles);
   }
   Status advance(std::size_t index, Actor& actor) {
     if (actor.driving)
@@ -3385,7 +3602,6 @@ class StructuredExecution final {
       bool& active;
       ~Driving() { active = false; }
     } driving{actor.driving};
-    const auto& step = plan_.steps()[index];
     auto current = actor.self.lock();
     if (!current)
       return protocol_failure("structured Actor owner is absent");
@@ -3429,31 +3645,11 @@ class StructuredExecution final {
       auto started = actor.take_start(std::move(dispatched));
       return complete_start(index, current, std::move(started));
     }
-    if (std::holds_alternative<NeedPhase>(actor.phase)) {
-      if (!actor.busy) {
-        actor.busy = true;
-        actor.driver = std::this_thread::get_id();
-      }
-      Status supplied;
-      try {
-        supplied = actor.advance_need(
-            [&](const auto& request, auto& cursor) {
-              return supply_need_step(index, actor, request, cursor);
-            },
-            [&](const auto& request) {
-              retain_cache_need(index, actor, request);
-            });
-      } catch (const std::bad_alloc&) {
-        return retire(actor, Status{ErrorCode::ResourceExhausted, {}});
-      } catch (...) {
-        return retire(actor, Status{ErrorCode::OperationFailed, {}});
-      }
-      if (!supplied.ok())
-        return supplied;
-      return Status::success();
-    }
+    if (std::holds_alternative<NeedPhase>(actor.phase))
+      return advance_actor_need(index, actor);
     Status status;
     if (!actor.pending) {
+      const auto& step = plan_.steps()[index];
       auto charged = consume(1);
       if (!charged.ok())
         return retire(actor, charged);
@@ -3463,17 +3659,7 @@ class StructuredExecution final {
           actor.failure->load(), "structured stage limit");
       if (!admitted.ok())
         return retire(actor, admitted);
-      actor.busy = true;
-      actor.driver = std::this_thread::get_id();
-      status = submit_actor(
-          current,
-          [this, index, current] {
-            return poll_actor_phase(index, current,
-                                    [&](const ResultProgramPhase& phase) {
-                                      return current->continuation.poll(phase);
-                                    });
-          },
-          actor.query.backend, !step.tiled, step.traits.cpu_staged_tiles);
+      status = submit_actor_poll(index, current);
     }
     if (status.ok() && actor.queued)
       return Status::success();

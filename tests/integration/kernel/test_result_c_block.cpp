@@ -50,7 +50,7 @@ ExecutionBindings binding(const ResourceBudget& root,
   auto metadata = schema();
   return {{{"source", result_input_fixture::source(root, value, &metadata)}}};
 }
-int workflow(unsigned mode, bool cache) {
+int workflow(unsigned mode, bool cache, bool exhaust_cache_work = false) {
   Module module;
   PS_CHECK(module.handle);
   ResourceBudget root;
@@ -88,12 +88,16 @@ int workflow(unsigned mode, bool cache) {
     TileRequest point{false, take(TileSet::from_indices(root, {5}))};
     DemandQuery query{{"value", point}};
     const auto before = module.counts();
+    ExecutionOptions options;
+    if (exhaust_cache_work)
+      options.maximum_dependency_cache_work = 1;
+    const bool reuse = cache && !exhaust_cache_work;
     if (mode == 0) {
-      auto initial = demand.request(query);
+      auto initial = demand.request(query, {}, options);
       if (!initial.ok())
         std::cerr << "C block: " << initial.status().message << '\n';
       PS_CHECK(initial.ok());
-      auto other = take(demand.request({{"control", point}}));
+      auto other = take(demand.request({{"control", point}}, {}, options));
       double control_value = 0;
       PS_CHECK(result_input_fixture::read(other.results.at("control"), {0, 5},
                                           &control_value, 8)
@@ -110,12 +114,12 @@ int workflow(unsigned mode, bool cache) {
       PS_CHECK(std::get<PlanWorkflowInput>(control_record->inputs[0].producer)
                    .declaration_index == 0);
       PS_CHECK(control_record->inputs[0].producer_output == 0);
-      PS_CHECK(module.counts()[2] - before[2] == (cache ? 6 : 12));
+      PS_CHECK(module.counts()[2] - before[2] == (reuse ? 6 : 12));
       numbers[0] = 1;
       auto replacement = take(demand.replace_bindings(binding(root, numbers)));
       PS_CHECK(replacement.potential_dirty.at("value") == point.tiles);
       PS_CHECK(replacement.potential_dirty.at("control") == point.tiles);
-      auto changed = take(demand.request(query));
+      auto changed = take(demand.request(query, {}, options));
       volatile double expected = 0;
       for (const auto number : numbers)
         expected = expected + number;
@@ -135,10 +139,10 @@ int workflow(unsigned mode, bool cache) {
       PS_CHECK(std::get<PlanWorkflowInput>(value_record->inputs[0].producer)
                    .declaration_index == 0);
       PS_CHECK(value_record->inputs[0].producer_output == 0);
-      PS_CHECK(module.counts()[2] - before[2] == (cache ? 12 : 18));
+      PS_CHECK(module.counts()[2] - before[2] == (reuse ? 12 : 18));
     } else {
       for (unsigned repeat = 0; repeat < 2; ++repeat) {
-        auto failed = demand.request(query);
+        auto failed = demand.request(query, {}, options);
         auto expected = mode <= 8    ? ErrorCode::InvalidArgument
                         : mode == 10 ? ErrorCode::ResourceExhausted
                                      : ErrorCode::OperationFailed;
@@ -163,6 +167,7 @@ int workflow(unsigned mode, bool cache) {
 int main() try {
   PS_CHECK(workflow(0, true) == 0);
   PS_CHECK(workflow(0, false) == 0);
+  PS_CHECK(workflow(0, true, true) == 0);
   for (unsigned mode = 7; mode <= 11; ++mode)
     PS_CHECK(workflow(mode, true) == 0);
   return 0;
