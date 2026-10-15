@@ -2,11 +2,11 @@
 
 - 状态：Proposed
 - 英文权威文档：[ADR 0022](../0022-freeze-operation-c-abi-v3.md)
-- 相关：[ADR 0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md)、[ADR 0014](0014-compiler-document-and-plan-versions-are-independent.zh.md)、[ADR 0015](0015-breaking-product-boundary-scope-reset.zh.md)、[ADR 0016](0016-workflow-inputs-and-execution-bindings.zh.md)
+- 相关：[ADR 0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.zh.md)、[ADR 0014](0014-compiler-document-and-plan-versions-are-independent.zh.md)、[ADR 0015](0015-breaking-product-boundary-scope-reset.zh.md)、[ADR 0016](0016-workflow-inputs-and-execution-bindings.zh.md)、[ADR 0023](0023-track-dependencies-between-fixed-tiles.zh.md)
 
 ## 1. 核心摘要（TL;DR）
 
-内置算子通过未冻结的 C++ 注册接口注册，外部模块使用 Result operation C ABI 2，后者只接受精确相等的结构体大小。ABI 2 已能静态解析元数据并传播宿主代管的资源，但缺少持久的准备状态、准备阶段推导的额外 workspace、通用不可变资源句柄以及 C++ 声明式推导规则。Photospider 将冻结一套带版本的 C ABI，即 v3，作为宿主与所有算子模块之间唯一的二进制契约；header-only 的 C++ SDK 编译进每个模块，内置算子与外部模块走同一条导入路径。结构体按稳定前缀协商，服务表各自带版本，冻结范围只覆盖保留的内置算子实际需要的能力。
+Package 0.34.0 中，内置算子通过未冻结的 C++ registry 注册，外部模块使用 Result operation C ABI 4（OperationTraits 26），后者只接受精确相等的结构体大小。ABI 4 已能静态解析元数据、按显式身份选择不可变资源、通过 tile Need 请求输入，并注册校验器与诊断；但 C 算子没有持久的准备状态，没有准备阶段推导的输入投影或 workspace，没有稳定前缀协商，也没有通过基础入口 `get_service` 查询和协商服务表的机制。CPU parallel、CPU tile 和 native GPU 服务已经具有独立的 ABI 版本。Photospider 将冻结一套带版本的 C ABI，作为宿主与所有算子模块之间唯一的二进制契约；header-only 的 C++ SDK 编译进每个模块，内置算子与外部模块走同一条导入路径，结构体按稳定前缀协商，服务表各自带版本，冻结范围只覆盖保留的内置算子实际需要的能力。
 
 ## 2. 架构心智模型（Mental Model & Intuition）
 
@@ -14,10 +14,10 @@
    built-in ops library            external module (.so/.dylib)
    (static or shared)              (dynamically loaded)
           |                                  |
-   module-specific getter            exported v3 entry point
+   module-specific getter            exported frozen-ABI entry point
    (unique symbol or fn pointer)             |
           \                                  /
-           +---------- v3 module table -----+
+           +------- frozen module table ----+
                            |
              host import: whole-table validation
              (prefix sizes, required capabilities,
@@ -30,7 +30,7 @@
                  |
    compiler: pure prepare callbacks (metadata + static parameters only)
                  |
-   executor: start/poll callbacks with borrowed v3 service tables
+   executor: start/poll callbacks with borrowed versioned service tables
                  |
    host validates publication, tile records, budgets, cancellation
 ```
@@ -41,40 +41,43 @@
 
 ## 3. 契约规约与接口（Formal Contracts & APIs）
 
-具体的 v3 头文件属于后续设计。下面的形态只说明协商规则，字段和类型名称仅作示意。
+冻结 ABI 的具体头文件属于后续设计，其版本号在冻结时确定。下面的形态只说明协商规则；它是目标，不是任何现有头文件中的声明，字段和类型名称仅作示意。当前精确大小的 ABI 4 声明位于 `photospider/plugin/result_operation_plugin_api.h`，说明见[插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)。
 
 ```c
-/* Illustrative shape; the v3 header defines the final names. */
-typedef struct ps_op_module_v3 {
+/* Illustrative target shape; not declared in any current header. */
+typedef struct ps_op_module {
   uint32_t struct_size;   /* bytes the module filled; host reads min(size, sizeof) */
-  uint32_t abi_major;     /* 3; a different major is rejected */
+  uint32_t abi_major;     /* major of the frozen ABI; a different major is rejected */
   uint32_t abi_minor;     /* informational; capability checks decide acceptance */
   uint32_t operation_count;
   uint32_t operation_stride;          /* extensible record array */
-  const struct ps_op_operation_v3 *operations;
-  void (*destroy)(const struct ps_op_module_v3 *);
-} ps_op_module_v3;
+  const struct ps_op_operation *operations;
+  void (*destroy)(const struct ps_op_module *);
+} ps_op_module;
 
-typedef struct ps_op_service_query_v3 {
+typedef struct ps_op_service_query {
   uint32_t struct_size;
   /* Returns a separately versioned service table, or NULL if unsupported.
      Called outside per-sample loops; the table lives for the stated scope. */
   const void *(*get_service)(const void *host, const char *service_id,
                              uint32_t major, uint32_t minimum_minor);
-} ps_op_service_query_v3;
+} ps_op_service_query;
 ```
 
 ### D1. 唯一冻结的二进制契约
 
 带版本的 C ABI 是算子模块唯一冻结的二进制契约。C++ SDK 是源码层面的支持，编译在模块一侧。每个句柄的分配与销毁责任都明确规定；只要模块的代码或表仍可能运行，宿主就保持该模块的所有者存活。调用 `Compiler`、`ExecutionContext` 等 C++ API 的应用另有独立的兼容政策；本决定不冻结内核的 C++ ABI。
 
-### D2. v3 提供的能力
+模块侧的 header-only SDK 尚不存在。`Photospider::operation_sdk` 针对当前头文件提供 C++ helper，`Photospider::ops_sdk` 是提供颜色描述、codec、LUT 契约和数值诊断的算子领域库；两者都不是本决定要求的模块侧 ABI SDK。
 
-1. **推导。** 纯准备回调返回已解析的输出契约，其中包括由静态参数推导的输入投影（本次计算实际需要哪些输入），以及准备阶段推导的额外执行 workspace 上界。SDK 提供 shape、dtype、halo 和 spatial factor 的常用规则。现有的 `OperationShapeRule`、`OperationDtypeRule`、`OperationSemanticRule` 等枚举不照搬进 C ABI。准备只依赖输入元数据和静态参数，不读取运行时样本，不执行上游节点，也不做文件 I/O。
-2. **schema 时机。** 准备阶段可以根据输入元数据确定具体 schema，包括受约束的 schema 继承。结构在执行前固定。运行时可以确定已声明的动态行数、覆盖和完成状态。读取样本后新增字段或更换 dtype 不在 v3 范围内。
-3. **内存与状态。** 宿主提供跨 poll 保留的存储。静态准备状态、一次执行的可变状态和已发布的不可变数据是三种不同的生命周期。执行工作区经宿主资源准入计费。准备存储与执行预算之间的现有边界保持不变。
-4. **依赖。** Need 指定一个输入端口，以及生产者网格中的一组 tile 编号、完整生产者或仅其语义 descriptor 三者之一，见 [ADR 0023](0023-track-dependencies-between-fixed-tiles.zh.md)。coordinator 记录被请求的单元；发布时不携带依赖 relation。样本坐标到 tile 编号的换算属于模块侧的 SDK 工作。
-5. **资源。** 通用的不可变资源句柄先覆盖现有资源用途；模型与引擎政策按 D8。宿主可以在内部代管 `semantic_key`、association 等事实，不必公开 C++ query 的每个字段。
+### D2. 冻结接口提供的能力
+
+1. **推导。** 纯准备回调返回已解析的输出契约，其中包括由静态参数推导的输入投影（本次计算实际需要哪些输入），以及准备阶段推导的额外执行 workspace 上界。SDK 提供 shape、dtype、halo 和 spatial factor 的常用规则；这些规则词汇留在 SDK 中，不照搬进 C ABI。准备只依赖输入元数据和静态参数，不读取运行时样本，不执行上游节点，也不做文件 I/O。在 package 0.34.0 中，C++ `OperationPreparation` 已能返回推导的投影和 `additional_workspace_bytes`；ABI 4 的 `resolve_metadata` 回调只返回输出 schema 和资源身份。
+2. **schema 时机。** 准备阶段可以根据输入元数据确定具体 schema，包括受约束的 schema 继承。结构在执行前固定。运行时可以确定已声明的动态行数、覆盖和完成状态。读取样本后新增字段或更换 dtype 不在冻结 ABI 范围内。
+3. **内存与状态。** 宿主提供跨 poll 保留的存储。静态准备状态、一次执行的可变状态和已发布的不可变数据是三种不同的生命周期。执行工作区经宿主资源准入计费。准备存储与执行预算之间的现有边界保持不变。在 package 0.34.0 中，C++ 算子把静态准备状态保存在 `PreparedOperation::state()` 中；C 算子有每次执行的 continuation 状态（`state_bytes`），没有静态准备状态。
+4. **依赖。** Need 指定一个输入端口，以及生产者网格中的一组 tile 编号、完整生产者或仅其 descriptor（schema、已捕获的 field 行数等结构事实，不含 payload）三者之一，见 [ADR 0023](0023-track-dependencies-between-fixed-tiles.zh.md)。coordinator 记录被请求的单元；发布时不携带依赖 relation。样本坐标到 tile 编号的换算属于模块侧的 SDK 工作。ABI 4 已通过 `need_tiles` 实现这一模型。
+5. **资源。** 不可变资源按显式身份（字节长度与 SHA-256）从提供给编译的 `ResourceSet` 中选择，回调只收到所选资源的借用视图；不存在隐式查找。ABI 4 已通过元数据 sink 的 `set_resources` 提供这一能力；冻结 ABI 保留它，模型与引擎政策按 D8。宿主可以在内部代管 `semantic_key`、association 等事实，不必公开 C++ query 的每个字段。
+6. **校验与诊断。** 端口绑定显式校验器，算子声明有界诊断报告，回调附加不透明的领域失败码。ABI 4 已提供这些能力；冻结 ABI 保留它们。
 
 回调错误继续采用结构化错误和 sticky failure，取消、stale 工作和发布规则继续适用。CPU/GPU 车道、窗口、视图、block 和 checkpoint 保持当前行为。纯工具代码和算法代码属于 SDK 或算子辅助库，迁移不把它们移入内核。
 
@@ -85,12 +88,12 @@ typedef struct ps_op_service_query_v3 {
 3. 一个小型基础入口返回各自独立带版本的服务表。表指针在文档规定的范围内保持有效。服务查询发生在逐样本循环之外。改变现有 exact-sized 服务契约需要新的服务版本。
 4. 未知的必需内容被拒绝。未知的可选内容只有在契约明确允许时才被忽略。宿主不猜测未知的 dtype、必需的 schema 语义、访问权或发布模式。接口支持与实际设备或资源可用性分别检查。
 5. 改变已有布局、函数签名、语义、所有权或线程规则时，升级对应的主版本。小版本不是唯一的能力判据。算子行为版本与 ABI 版本分开管理。
-6. 从 v2 到 v3 需要重新编译模块，不增加 v2 兼容层。宿主对提交的模块表整体校验、整体加入，不静默跳过不支持的部分。失败清理、模块生命周期和错误定位保持不变。
+6. 从 Result operation C ABI 4 迁到冻结 ABI 需要重新编译模块，不增加 ABI 4 兼容层。宿主对提交的模块表整体校验、整体加入，不静默跳过不支持的部分。失败清理、模块生命周期和错误定位保持不变。
 7. reserved 字段不是主要的扩展机制。语义身份由规范的字段编码计算，不对原始 C 结构字节、padding、指针或物理 stride 求 hash。语义相同的缺失字段与显式默认值产生相同的身份。
 
 ### D4. 内置与外部算子共用一条导入路径
 
-内置算子作为独立库交付，可以静态链接。外部模块通常动态加载。两者取得模块表的方式不同，之后共用导入、校验、注册和执行。静态模块提供名称唯一的 getter 或函数指针；宿主不要求所有静态模块导出同一个会冲突的符号名。
+内置算子作为独立库交付，可以静态链接。外部模块通常动态加载。两者取得模块表的方式不同，之后共用导入、校验、注册和执行。静态模块提供名称唯一的 getter 或函数指针；宿主不要求所有静态模块导出同一个会冲突的符号名。在 package 0.34.0 中，内置算子仍通过 `OperationRegistry::register_operation` 注册，只有外部模块使用 ABI 4 getter。
 
 ### D5. 只有 Result 端口
 
@@ -117,45 +120,49 @@ typedef struct ps_op_service_query_v3 {
 
 ### D9. 图像表示
 
-规范图像遵循已确认的 [FMT 公共契约](../../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)：Result 中带元数据的通用 tensor，颜色为 straight，alpha 是同一 tensor 中的独立 plane，存储强制 planar。算子内部可以使用 premultiplied 工作值，发布规范图像前恢复为 straight。
+规范图像遵循已确认的 [FMT 公共契约](../../built-in_ops/02-format-color/op_specs/FMT_common_contract.md)，包括其解释政策 C13。图像是 Result 中的通用 tensor，其 schema 只携带结构：dtype、shape、batch 轴、空间轴索引、`atomic_trailing_axes`、物理布局和结构性通道组。颜色模型、通道角色、alpha、transfer、primaries 与 white 以及采样，都是每个消费它们的算子的显式静态参数；它们不附着在数据上，不从输入传播到输出，也不在连线上匹配。在这一结构内，颜色为 straight，alpha 是同一 tensor 中的独立 plane，存储强制 planar。算子内部可以使用 premultiplied 工作值，发布规范图像前恢复为 straight。
 
 1. 通用图像接口平等承载 Float32 和 Float64，不隐式收窄。每个算子或后端声明自己的支持集，不支持时明确失败。整数编码继续受现有 FMT 和显式 encoding 规则管理。
-2. 逻辑轴角色和合法排列沿用现有 tensor 与 spatial 模型。HWC 和 CHW 都不是强制的。`height_axis`、`width_axis` 和 `channel_axis` 指定 cell 的逻辑维度，不授予任意物理布局许可。角色数量与合法性、元数据与实际结构的一致性都要校验。
-3. channel 轴上的颜色组和 alpha 索引在同一 tensor 内指定通道和 alpha 的位置。alpha 不必位于末尾，无 alpha 的图像合法。元数据结构完整并不意味着算子要读取全部颜色组或 alpha 样本。
-4. FMT-04 的 premultiplied 边界 payload 仍是通用 Result payload。它不是规范图像，普通图像消费者拒绝它。内核仍然可以承载一般的 premultiplied 数值数据。
-5. 规范图像在物理上确实满足 planar 存储，并与负 stride 或零 stride 的通用 affine 视图共存。raw tensor 保留其合法布局。布局变化通过构造合法视图或物化完成；只凭 spatial 标志、元数据或 HWC shape 不能宣称物理 planar。
-6. 现有的 image 与 ColorArray 消费者、schema、key 和公式显式迁移到 tensor 元数据、straight 和 planar 目标，不保留旧新双接口。纯 ABI 桥接保持行为对等；有意落实新图像契约的变化单独列出、单独验收。
+2. 逻辑轴角色和合法排列沿用现有 tensor 与 spatial 模型。HWC 和 CHW 都不是强制的。`height_axis`、`width_axis` 和 `channel_axis` 指定 cell 的逻辑维度，不授予任意物理布局许可。内核校验角色数量、角色合法性，以及已声明结构与实际存储的一致性。它不从通道数或通道组推断 RGB、alpha 或颜色模型。
+3. 算子的显式描述在同一 tensor 的 channel 轴上指定颜色分量和 alpha 的位置。alpha 不必位于末尾，无 alpha 的图像合法。完整的描述并不意味着算子要读取全部颜色分量或 alpha 样本。
+4. FMT-04 的 premultiplied 边界 payload 仍是通用 Result payload。它不是规范图像，也没有任何数据标签把它与规范图像区分开。要求 straight 颜色的算子通过其显式描述参数和算子 SDK 绑定到其端口的校验器确立合法性，而不是依靠内核自动拒绝。内核仍然可以承载一般的 premultiplied 数值数据。
+5. 规范图像在物理上确实满足 planar 存储，并与负 stride 或零 stride 的通用 affine 视图共存。raw tensor 保留其合法布局。布局变化通过构造合法视图或物化完成；只凭 spatial 标志、描述参数或 HWC shape 不能宣称物理 planar。
+6. 现有的 image 与 ColorArray 消费者、schema、key 和公式显式迁移到显式参数、straight 和 planar 目标，不保留旧新双接口。纯 ABI 桥接保持行为对等；有意落实新图像契约的变化单独列出、单独验收。
 
 ### D10. Region 容器
 
-C ABI 与内核 `Region`、`Footprint` 容器的布局相互分离。v3 不冻结 C++ 容器布局，容器优化依据以后的测量处理。
+C ABI 与内核 `Region`、`Footprint` 容器的布局相互分离。冻结 ABI 不冻结 C++ 容器布局，容器优化依据以后的测量处理。
 
 ### D11. 算子专用的元数据规则
 
-现有的 `data_movement` 字段和 `OperationSemanticRule` 枚举不以当前形式冻结。算子专用的推导移入各模块的 prepare 回调和 SDK helper，kernel 校验解析后的契约。v3 不定义声明式内核能力格式，也不为其预留扩展位置。
+现有表中的算子专用声明，例如 ABI 4 的 `data_movement` 字段，不以当前形式冻结。算子专用的推导移入各模块的 prepare 回调和 SDK helper，kernel 校验解析后的契约。冻结 ABI 不定义声明式内核能力格式，也不为其预留扩展位置。
 
 ### 验收
 
-- **行为对等。** 代表性迁移覆盖：identity 与通道提取/组装（schema、布局、视图、所有权）；表达式、Bezier 与序列算子（静态输入集合缩减）；LUT3D bake（field 结果、受 gate 控制的 Need）；STMap（两阶段 tile Need、tile 记录、内存）；block 与 checkpoint（依赖恢复）；独立安装的 PixelOE（Whole 执行、native GPU）。代表集通过之后，01-numeric、02-format-color、STMap 与 PixelOE 中保留的全部算子都要完成迁移。
-- **兼容性。** 用独立旧头文件编译的 fixture 覆盖旧模块/新宿主、新模块/旧宿主、必需与可选能力、多元素数组 stride、短输出缓冲、未知扩展、失败清理和模块生命周期。仅用当前头文件伪造较小的 `struct_size` 不够。
+Package 0.34.0 尚未完成冻结 ABI 的整体验收。下列条件保留已经交付的能力，并规定验收冻结 ABI 实现仍需满足的要求。
+
+- **行为对等。** 代表性迁移覆盖：identity 与通道提取/组装（schema、布局、视图、所有权）；表达式、Bezier 与序列算子（静态输入集合缩减）；LUT3D bake（field 结果、受 gate 控制的 Need）；STMap（两阶段 tile Need、tile 记录、内存）；block 与 checkpoint（依赖恢复）；独立安装的 PixelOE（Whole 执行、native GPU）。代表集通过之后，01-numeric、02-format-color、STMap 与 PixelOE 中保留的全部算子都要完成迁移。目前保留的 01-numeric、02-format-color 和 STMap 算子通过 C++ registry 在 CPU 上交付；独立安装的 PixelOE 消费者和 native GPU 覆盖仍然延期。
+- **兼容性。** 用独立旧头文件编译的 fixture 覆盖旧模块/新宿主、新模块/旧宿主、必需与可选能力、多元素数组 stride、短输出缓冲、未知扩展、失败清理和模块生命周期。仅用当前头文件伪造较小的 `struct_size` 不够。这些 fixture 需要已冻结的头文件，因此尚不存在。
+- **外部消费者。** 独立构建并安装的消费者（例如 PixelOE）加载冻结 ABI。该验证只在内核开发完成后进行；在此之前不运行任何安装消费测试。
 - **图像。** Float32/Float64、HWC/CHW 逻辑排列、非末尾 alpha、无 alpha、多组、hidden RGB、边界 payload 的拒绝与转换、planar 物理访问、ROI 与通道依赖、合法视图与物化、有意的契约变化，以及 native 后端的支持边界。
 - **外部引擎。** 包装器语义、冻结制品与独立直连引擎运行的对照、任务层面的效果；另外验证所有权、并发、取消、错误、资源和缓存身份。mock 或离线 oracle 不能替代真实的推理、解码或质量验证。
 
 ## 4. 负面清单与边界（Non-Goals & Explicit Boundaries）
 
-- v3 是契约决定。Package 0.33.0 仍实现 [Plugin ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md) 所述的 Result operation C ABI 2 和未冻结的 C++ `OperationDefinition` 注册路径。
+- 冻结 ABI 是契约决定。Package 0.34.0 实现只接受精确结构体大小的 Result operation C ABI 4，以及[插件 ABI](../../kernel-architecture/zh/Plugin-ABI.zh.md)所述的未冻结 C++ `OperationDefinition` 注册路径。ABI 4 不是冻结 ABI。
 - 本决定不冻结应用使用的内核 C++ API。
-- 不提供 v2 兼容层、shim 或双注册路径。
+- 不提供 ABI 4 兼容层、shim 或双注册路径。
 - 不新增元素类型：Float16、Int32、UInt32、UInt64 和原生 complex 不进入管线。
 - 内核不提供原生 Sequence 或 RationalTime 类型、按时间取帧服务、帧率或缺帧政策、播放、seek、重放或隐式的跨调用时间状态。
 - 不提供内置推理框架、自动许可判定或制品审批产品。许可记录与资源身份、执行身份分开。
 - 不提供沙箱、签名校验、隔离 worker 或强制终止；模块仍是可信的进程内代码。
 - 本文不定义声明式内核能力格式或扩展位置、flat-box 或 bitmap Region 容器，也不作性能承诺。
-- 规范图像的 straight 与 planar 不重新作为待定的产品选项；当前 Float32 HWC premultiplied 图像路径不是目标契约。
+- 内核不在 Result 数据上附着颜色、alpha、transfer 或采样描述，也不传播这类描述。
+- 规范图像的 straight 与 planar 不重新作为待定的产品选项。
 
 ## 5. 后果与代价（Consequences）
 
-每个模块，无论内置还是外部，都必须针对 v3 头文件重新编译；v2 模块在加载时被拒绝。内置算子不再使用 C++ 注册接口和内核私有头文件，它们需要的辅助代码迁入 SDK 或算子辅助库。宿主承担为每个可缺失字段维护缺省语义、并在发布前整体校验模块表的成本。
+每个模块，无论内置还是外部，都必须针对冻结 ABI 头文件重新编译；ABI 4 模块在加载时被拒绝。内置算子不再使用 C++ 注册接口和内核私有头文件，它们需要的辅助代码迁入 SDK 或算子辅助库。宿主承担为每个可缺失字段维护缺省语义、并在发布前整体校验模块表的成本。
 
 前缀协商让结构体可以增长而不拒绝旧模块，但只有带规定缺省语义的追加才是小版本变更。改变已有字段的语义、所有权或线程规则都是主版本变更；模块要求宿主不理解的内容时，宿主拒绝该模块。模块要求的服务或设备能力缺失时，宿主拒绝它或报告不受支持，不以猜测的行为运行。
 

@@ -2,11 +2,11 @@
 
 - Status: Proposed
 - Reader mirror: [Chinese](zh/0022-freeze-operation-c-abi-v3.zh.md)
-- Related: [ADR 0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md), [ADR 0014](0014-compiler-document-and-plan-versions-are-independent.md), [ADR 0015](0015-breaking-product-boundary-scope-reset.md), [ADR 0016](0016-workflow-inputs-and-execution-bindings.md)
+- Related: [ADR 0012](0012-operation-plugins-use-a-separately-versioned-pure-c-abi.md), [ADR 0014](0014-compiler-document-and-plan-versions-are-independent.md), [ADR 0015](0015-breaking-product-boundary-scope-reset.md), [ADR 0016](0016-workflow-inputs-and-execution-bindings.md), [ADR 0023](0023-track-dependencies-between-fixed-tiles.md)
 
 ## 1. Core summary (TL;DR)
 
-Built-in operations register through an unfrozen C++ registration interface, while external modules use Result operation C ABI 2, which accepts only exact structure sizes. ABI 2 already resolves metadata statically and propagates host-managed resources, but it lacks persistent preparation state, preparation-derived extra workspace, a generic immutable resource handle and the C++ declarative inference rules. Photospider will freeze one versioned C ABI, v3, as the only binary contract between the host and every operation module; a header-only C++ SDK compiles into each module, and built-in operations use the same import path as external modules. Structures negotiate by stable prefix, services are separately versioned tables, and the frozen surface covers only what the retained built-in operations need.
+Package 0.34.0 registers built-in operations through an unfrozen C++ registry, while external modules use Result operation C ABI 4 (OperationTraits 26), which accepts only exact structure sizes. ABI 4 already resolves metadata statically, selects immutable resources by explicit identity, requests inputs through tile Needs, and registers validators and diagnostics, but a C operation has no persistent preparation state, no preparation-derived input projection or workspace, no stable-prefix negotiation and no base-entry-point `get_service` mechanism for querying and negotiating service tables. CPU parallel, CPU tile and native GPU services already have independent ABI versions. Photospider will freeze one versioned C ABI as the only binary contract between the host and every operation module; a header-only C++ SDK compiles into each module, built-in operations use the same import path as external modules, structures negotiate by stable prefix, services are separately versioned tables, and the frozen surface covers only what the retained built-in operations need.
 
 ## 2. Mental model and intuition
 
@@ -14,10 +14,10 @@ Built-in operations register through an unfrozen C++ registration interface, whi
    built-in ops library            external module (.so/.dylib)
    (static or shared)              (dynamically loaded)
           |                                  |
-   module-specific getter            exported v3 entry point
+   module-specific getter            exported frozen-ABI entry point
    (unique symbol or fn pointer)             |
           \                                  /
-           +---------- v3 module table -----+
+           +------- frozen module table ----+
                            |
              host import: whole-table validation
              (prefix sizes, required capabilities,
@@ -30,7 +30,7 @@ Built-in operations register through an unfrozen C++ registration interface, whi
                  |
    compiler: pure prepare callbacks (metadata + static parameters only)
                  |
-   executor: start/poll callbacks with borrowed v3 service tables
+   executor: start/poll callbacks with borrowed versioned service tables
                  |
    host validates publication, tile records, budgets, cancellation
 ```
@@ -41,40 +41,43 @@ Inside a module, C++ is allowed. STL objects, exceptions and unstable kernel C++
 
 ## 3. Formal contracts and APIs
 
-The concrete v3 header is a later design step. The shape below shows the negotiation rules; field and type names are illustrative.
+The concrete header of the frozen ABI is a later design step, and its version number is assigned when it is frozen. The shape below shows only the negotiation rules; it is a target, not a declaration in any current header, and its field and type names are illustrative. The current exact-size ABI 4 declarations are in `photospider/plugin/result_operation_plugin_api.h` and are described in [Plugin ABI](../kernel-architecture/Plugin-ABI.md).
 
 ```c
-/* Illustrative shape; the v3 header defines the final names. */
-typedef struct ps_op_module_v3 {
+/* Illustrative target shape; not declared in any current header. */
+typedef struct ps_op_module {
   uint32_t struct_size;   /* bytes the module filled; host reads min(size, sizeof) */
-  uint32_t abi_major;     /* 3; a different major is rejected */
+  uint32_t abi_major;     /* major of the frozen ABI; a different major is rejected */
   uint32_t abi_minor;     /* informational; capability checks decide acceptance */
   uint32_t operation_count;
   uint32_t operation_stride;          /* extensible record array */
-  const struct ps_op_operation_v3 *operations;
-  void (*destroy)(const struct ps_op_module_v3 *);
-} ps_op_module_v3;
+  const struct ps_op_operation *operations;
+  void (*destroy)(const struct ps_op_module *);
+} ps_op_module;
 
-typedef struct ps_op_service_query_v3 {
+typedef struct ps_op_service_query {
   uint32_t struct_size;
   /* Returns a separately versioned service table, or NULL if unsupported.
      Called outside per-sample loops; the table lives for the stated scope. */
   const void *(*get_service)(const void *host, const char *service_id,
                              uint32_t major, uint32_t minimum_minor);
-} ps_op_service_query_v3;
+} ps_op_service_query;
 ```
 
 ### D1. One frozen binary contract
 
 The versioned C ABI is the only frozen binary contract for operation modules. The C++ SDK is source-level support and compiles on the module side. Allocation and destruction responsibility is explicit for every handle, and the host keeps a module's owner alive while any of its code or tables may still run. The compatibility policy for applications that call `Compiler`, `ExecutionContext` and other C++ APIs is managed separately; this decision does not freeze the kernel C++ ABI.
 
-### D2. Capabilities the v3 surface provides
+The module-side header-only SDK does not exist yet. `Photospider::operation_sdk` provides C++ helpers against the current headers, and `Photospider::ops_sdk` is an operations-domain library for color descriptions, codecs, LUT contracts and numeric diagnostics; neither is the module-side ABI SDK this decision requires.
 
-1. **Inference.** A pure prepare callback returns a resolved output contract, including the input projection derived from static parameters (which inputs the computation actually needs) and an upper bound on additional execution workspace derived during preparation. The SDK supplies common rules for shape, dtype, halo and spatial factor. The current `OperationShapeRule`, `OperationDtypeRule`, `OperationSemanticRule` and similar enums are not copied into the C ABI. Preparation depends only on input metadata and static parameters; it does not read runtime samples, execute upstream nodes or perform file I/O.
-2. **Schema timing.** Preparation may derive a concrete schema from input metadata, including constrained schema inheritance. The structure is fixed before execution. At run time an operation may determine declared dynamic row counts, coverage and completion. Adding fields or changing dtype after reading samples is outside v3.
-3. **Memory and state.** The host provides storage that persists across polls. Three lifetimes are distinct: static preparation state, mutable state for one execution, and published immutable data. Execution workspace is charged through host resource admission. The existing boundary between preparation storage and execution budgets stays as it is.
-4. **Dependencies.** A Need names an input port and either a set of tile indices in the producer's grid, the complete producer, or only its semantic descriptor, as defined by [ADR 0023](0023-track-dependencies-between-fixed-tiles.md). The coordinator records the requested units; publication carries no dependency relation. Converting sample coordinates to tile indices is SDK work on the module side.
-5. **Resources.** A generic immutable resource handle covers current resource uses first; model and engine policy follows D8. The host may manage facts such as `semantic_key` and association internally rather than exposing every field of the C++ query.
+### D2. Capabilities the frozen surface provides
+
+1. **Inference.** A pure prepare callback returns a resolved output contract, including the input projection derived from static parameters (which inputs the computation actually needs) and an upper bound on additional execution workspace derived during preparation. The SDK supplies common rules for shape, dtype, halo and spatial factor; these rule vocabularies stay in the SDK and are not copied into the C ABI. Preparation depends only on input metadata and static parameters; it does not read runtime samples, execute upstream nodes or perform file I/O. In package 0.34.0, the C++ `OperationPreparation` already returns a derived projection and `additional_workspace_bytes`; the ABI 4 `resolve_metadata` callback returns output schemas and resource identities only.
+2. **Schema timing.** Preparation may derive a concrete schema from input metadata, including constrained schema inheritance. The structure is fixed before execution. At run time an operation may determine declared dynamic row counts, coverage and completion. Adding fields or changing dtype after reading samples is outside the frozen ABI.
+3. **Memory and state.** The host provides storage that persists across polls. Three lifetimes are distinct: static preparation state, mutable state for one execution, and published immutable data. Execution workspace is charged through host resource admission. The existing boundary between preparation storage and execution budgets stays as it is. In package 0.34.0, C++ operations keep static preparation state in `PreparedOperation::state()`; a C operation has per-execution continuation state (`state_bytes`) and no static preparation state.
+4. **Dependencies.** A Need names an input port and either a set of tile indices in the producer's grid, the complete producer, or only its descriptor (structural facts such as schema and captured field row counts, without payload), as defined by [ADR 0023](0023-track-dependencies-between-fixed-tiles.md). The coordinator records the requested units; publication carries no dependency relation. Converting sample coordinates to tile indices is SDK work on the module side. ABI 4 already implements this model through `need_tiles`.
+5. **Resources.** An immutable resource is selected by explicit identity (byte length and SHA-256) from the `ResourceSet` supplied to compilation, and callbacks receive borrowed views of exactly the selected resources; there is no ambient lookup. ABI 4 already provides this through the metadata sink's `set_resources`; the frozen ABI keeps it, and model and engine policy follows D8. The host may manage facts such as `semantic_key` and association internally rather than exposing every field of the C++ query.
+6. **Validation and diagnostics.** Ports bind explicit validators, operations declare bounded diagnostic reports, and callbacks attach opaque domain failure codes. ABI 4 already provides these; the frozen ABI keeps them.
 
 Callback errors remain structured with sticky failure, and cancellation, stale-work and publication rules continue to apply. CPU/GPU lanes, windows, views, blocks and checkpoints keep their current behavior. Pure utility and algorithm code belongs in the SDK or operation helper libraries; migration does not move it into the kernel.
 
@@ -85,12 +88,12 @@ Callback errors remain structured with sticky failure, and cancellation, stale-w
 3. A small base entry point returns independently versioned service tables. A table pointer stays valid for its documented scope. Service lookup happens outside per-sample loops. Changing an existing exact-sized service contract requires a new service version.
 4. Unknown required content is rejected. Unknown optional content is ignored only where the contract explicitly allows it. The host never guesses an unknown dtype, required schema semantic, access right or publication mode. Interface support and actual device or resource availability are checked separately.
 5. Changing an existing layout, signature, meaning, ownership or threading rule raises the corresponding major version. The minor version is not the sole capability test. Operation behavior versions are managed separately from ABI versions.
-6. Moving from v2 to v3 requires rebuilding modules; no v2 compatibility layer is added. The host validates a submitted module table as a whole and admits it as a whole; it never skips unsupported parts silently. Failure cleanup, module lifetime and error location reporting are preserved.
+6. Moving from Result operation C ABI 4 to the frozen ABI requires rebuilding modules; no ABI 4 compatibility layer is added. The host validates a submitted module table as a whole and admits it as a whole; it never skips unsupported parts silently. Failure cleanup, module lifetime and error location reporting are preserved.
 7. Reserved fields are not the primary extension mechanism. Semantic identity is computed from canonical field encodings, never from raw C structure bytes, padding, pointers or physical strides. An absent field and an explicit default with the same meaning produce the same identity.
 
 ### D4. One import path for built-in and external operations
 
-Built-in operations ship as an independent library that may be linked statically. External modules are usually loaded dynamically. The two obtain their module table differently and then share import, validation, registration and execution. A static module exposes a uniquely named getter or a function pointer; the host does not require all static modules to export one identically named symbol.
+Built-in operations ship as an independent library that may be linked statically. External modules are usually loaded dynamically. The two obtain their module table differently and then share import, validation, registration and execution. A static module exposes a uniquely named getter or a function pointer; the host does not require all static modules to export one identically named symbol. In package 0.34.0, built-in operations still register through `OperationRegistry::register_operation`, and only external modules use the ABI 4 getter.
 
 ### D5. Result ports only
 
@@ -117,45 +120,49 @@ The host application owns time representation, exact time comparison, frame sele
 
 ### D9. Image representation
 
-Canonical images follow the accepted [FMT common contract](../built-in_ops/02-format-color/op_specs/FMT_common_contract.md): a generic tensor in a Result with metadata, straight color, alpha as an independent plane in the same tensor, and mandatory planar storage. Operations may use premultiplied working values internally and restore straight values before publishing a canonical image.
+Canonical images follow the accepted [FMT common contract](../built-in_ops/02-format-color/op_specs/FMT_common_contract.md), including its interpretation policy C13. An image is a generic tensor in a Result whose schema carries structure only: dtype, shape, batch axes, spatial axis indices, `atomic_trailing_axes`, physical layout and structural channel groups. Color model, channel roles, alpha, transfer, primaries and white, and sampling are explicit static parameters of each operation that consumes them; they are not attached to data, not propagated from inputs to outputs and not matched on connections. Within that structure, color is straight, alpha is an independent plane in the same tensor, and storage is mandatory planar. Operations may use premultiplied working values internally and restore straight values before publishing a canonical image.
 
 1. The generic image interface carries Float32 and Float64 equally without implicit narrowing. Each operation or backend declares its supported set and fails explicitly otherwise. Integer encodings stay under the existing FMT and explicit-encoding rules.
-2. Logical axis roles and legal permutations follow the existing tensor and spatial model. Neither HWC nor CHW is mandatory. `height_axis`, `width_axis` and `channel_axis` name logical cell dimensions; they do not grant arbitrary physical layouts. Role count and legality, and agreement between metadata and actual structure, are validated.
-3. Color groups and alpha indices on the channel axis place channels and alpha inside one tensor. Alpha need not be last, and images without alpha are valid. Structural completeness of metadata does not make an operation read every color group or alpha sample.
-4. The FMT-04 premultiplied boundary payload remains a generic Result payload. It is not a canonical image, and ordinary image consumers reject it. The kernel may still carry general premultiplied numeric data.
-5. A canonical image actually satisfies planar storage, alongside generic affine views with negative or zero strides. Raw tensors keep their legal layouts. A layout change constructs a legal view or materializes; a spatial flag, metadata or an HWC shape alone never claims physical planar storage.
-6. Existing image and ColorArray consumers, schemas, keys and formulas migrate explicitly to the tensor-metadata, straight and planar target, without old-and-new dual interfaces. A pure ABI bridge preserves behavior; deliberate changes that adopt the new image contract are listed separately and validated on their own.
+2. Logical axis roles and legal permutations follow the existing tensor and spatial model. Neither HWC nor CHW is mandatory. `height_axis`, `width_axis` and `channel_axis` name logical cell dimensions; they do not grant arbitrary physical layouts. The kernel validates role count, role legality and agreement between the declared structure and the actual storage. It does not infer RGB, alpha or a color model from the channel count or from channel groups.
+3. An operation's explicit description places color components and alpha on the channel axis of one tensor. Alpha need not be last, and images without alpha are valid. A complete description does not make an operation read every color component or alpha sample.
+4. The FMT-04 premultiplied boundary payload remains a generic Result payload. It is not a canonical image, and no data label distinguishes it from one. Operations that require straight color establish legality through their explicit description parameters and the validators that the operations SDK binds to their ports, not through automatic kernel rejection. The kernel may still carry general premultiplied numeric data.
+5. A canonical image actually satisfies planar storage, alongside generic affine views with negative or zero strides. Raw tensors keep their legal layouts. A layout change constructs a legal view or materializes; a spatial flag, a description parameter or an HWC shape alone never claims physical planar storage.
+6. Existing image and ColorArray consumers, schemas, keys and formulas migrate explicitly to the explicit-parameter, straight and planar target, without old-and-new dual interfaces. A pure ABI bridge preserves behavior; deliberate changes that adopt the new image contract are listed separately and validated on their own.
 
 ### D10. Region containers
 
-The C ABI and the kernel's `Region` and `Footprint` containers have separate layouts. v3 does not freeze the C++ container layout, and container optimizations follow later measurement.
+The C ABI and the kernel's `Region` and `Footprint` containers have separate layouts. The frozen ABI does not freeze the C++ container layout, and container optimizations follow later measurement.
 
 ### D11. Operation-specific metadata rules
 
-The current `data_movement` field and `OperationSemanticRule` enum are not frozen in their present form. Operation-specific inference moves into each module's prepare callback and SDK helpers, and the kernel validates the resolved contract. v3 defines no declared kernel capability format and reserves no extension slot for one.
+Operation-specific declarations in the current tables, such as the ABI 4 `data_movement` field, are not frozen in their present form. Operation-specific inference moves into each module's prepare callback and SDK helpers, and the kernel validates the resolved contract. The frozen ABI defines no declared kernel capability format and reserves no extension slot for one.
 
 ### Acceptance
 
-- **Behavior parity.** Representative migrations cover identity and channel extraction/assembly (schema, layout, views, ownership); expression, Bezier and sequence operations (static input-set reduction); LUT3D bake (field results, gated Needs); STMap (two-stage tile Needs, tile records, memory); block and checkpoint (dependency restoration); and an independently installed PixelOE (Whole execution, native GPU). After the representative set, every retained operation in 01-numeric, 02-format-color, STMap and PixelOE migrates.
-- **Compatibility.** Fixtures compiled against separate older headers exercise old-module/new-host, new-module/old-host, required and optional capabilities, multi-element array stride, short output buffers, unknown extensions, failure cleanup and module lifetime. A small `struct_size` forged with the current header is insufficient.
+Package 0.34.0 has not completed acceptance of the frozen ABI as a whole. The criteria below retain the capabilities already delivered and define the remaining requirements for accepting a frozen ABI implementation.
+
+- **Behavior parity.** Representative migrations cover identity and channel extraction/assembly (schema, layout, views, ownership); expression, Bezier and sequence operations (static input-set reduction); LUT3D bake (field results, gated Needs); STMap (two-stage tile Needs, tile records, memory); block and checkpoint (dependency restoration); and an independently installed PixelOE (Whole execution, native GPU). After the representative set, every retained operation in 01-numeric, 02-format-color, STMap and PixelOE migrates. Today the retained 01-numeric, 02-format-color and STMap operations are delivered on CPU through the C++ registry; the independently installed PixelOE consumer and native GPU coverage remain deferred.
+- **Compatibility.** Fixtures compiled against separate older headers exercise old-module/new-host, new-module/old-host, required and optional capabilities, multi-element array stride, short output buffers, unknown extensions, failure cleanup and module lifetime. A small `struct_size` forged with the current header is insufficient. These fixtures require a frozen header and therefore do not exist yet.
+- **External consumer.** An independently built and installed consumer, such as PixelOE, loads the frozen ABI. This validation runs only after kernel development completes; no installed-consumer test runs before that stage.
 - **Images.** Float32/Float64, HWC/CHW logical orders, non-final alpha, no alpha, multiple groups, hidden RGB, boundary-payload rejection and conversion, planar physical access, ROI and channel dependencies, legal views and materialization, deliberate contract changes and native backend support limits.
 - **External engines.** Wrapper semantics, comparison of the frozen artifact with an independent direct engine run, and task-level effect; plus ownership, concurrency, cancellation, errors, resources and cache identity. Mocks or offline oracles do not replace real inference, decoding or quality validation.
 
 ## 4. Non-goals and explicit boundaries
 
-- v3 is a contract decision. Package 0.33.0 still implements Result operation C ABI 2 and the unfrozen C++ `OperationDefinition` registration path described in [Plugin ABI](../kernel-architecture/Plugin-ABI.md).
+- The frozen ABI is a contract decision. Package 0.34.0 implements Result operation C ABI 4, which accepts only exact structure sizes, and the unfrozen C++ `OperationDefinition` registration path described in [Plugin ABI](../kernel-architecture/Plugin-ABI.md). ABI 4 is not the frozen ABI.
 - The kernel C++ API used by applications is not frozen by this decision.
-- No v2 compatibility layer, shim or dual registration path is provided.
+- No ABI 4 compatibility layer, shim or dual registration path is provided.
 - No new element types: Float16, Int32, UInt32, UInt64 and native complex stay outside the pipeline.
 - No native Sequence or RationalTime type, time-indexed frame service, frame-rate or missing-frame policy, playback, seek, replay or implicit cross-call time state in the kernel.
 - No built-in inference framework, automatic license judgment or artifact approval product. License records stay separate from resource and execution identity.
 - No sandbox, signature check, isolated worker or forced termination; modules remain trusted in-process code.
 - No declared kernel capability format or extension slot, flat-box or bitmap Region container, or performance promise is defined here.
-- Canonical straight and planar images are not reopened as an open product choice, and the current Float32 HWC premultiplied image path is not the target contract.
+- No color, alpha, transfer or sampling description is attached to Result data or propagated by the kernel.
+- Canonical straight and planar images are not reopened as an open product choice.
 
 ## 5. Consequences
 
-Every module, built-in or external, must be rebuilt against the v3 header; a v2 module is rejected at load. Built-in operations stop using the C++ registration interface and kernel-private headers, so helpers they need move into the SDK or operation helper libraries. The host keeps the cost of maintaining defaults for every absent field and of validating whole module tables before publication.
+Every module, built-in or external, must be rebuilt against the frozen ABI header; an ABI 4 module is rejected at load. Built-in operations stop using the C++ registration interface and kernel-private headers, so helpers they need move into the SDK or operation helper libraries. The host keeps the cost of maintaining defaults for every absent field and of validating whole module tables before publication.
 
 Prefix negotiation lets a structure grow without rejecting older modules, but only additions with defined defaults are minor changes. Any change to an existing field's meaning, ownership or threading rule is a major version, and the host rejects a module that requires content it does not understand. A module that requires a missing service or device capability is rejected or reported as unsupported rather than run with guessed behavior.
 
